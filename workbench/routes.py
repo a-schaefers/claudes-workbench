@@ -597,8 +597,9 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
     (effective_via): the GPU, its pin or the router's pick (router.choose as before roles), or
     the role's API model by its exact id. No fallback in either direction: a GPU role with no
     GPU model never tries its stored API model, and an API role that can't run never the GPU.
-    Either API path meets meter.refusal (no price, or today at the cap, #1019) first: the
-    `--model` one before the dialog, the role's (agreed to in `wb route`'s) before it starts."""
+    Either API path meets meter.refusal (no price, or today at the cap, #1019, or within one
+    request at its worst of it, #1150) first: the `--model` one before the dialog, the role's
+    (agreed to in `wb route`'s) before it starts."""
     from . import meter, models, router  # they import more than routes needs at its import
     try:
         doc = read()

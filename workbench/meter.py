@@ -31,6 +31,7 @@ quota, not dollars: its rows have `usd: null` and `plan`, and never count agains
 
 from __future__ import annotations
 
+import math
 import os
 import threading
 import time
@@ -42,6 +43,9 @@ CHECKIN_SHARE = 0.5      # past this share of the day cap, one check-in a day, a
 PLAN_PROVIDERS = ("opencode-go",)   # a plan's quota, not dollars (and m.cloud: Ollama cloud)
 EPS = 1e-9               # less than this between two figures is the same figure
 STOP = keyhole.SPEND_REFUSED   # the keyhole's answer to OpenCode (a 400, which it doesn't retry) says it
+# today under the cap, but not by the next request at its worst, which the keyhole's room refuses:
+# "the cap is reached" there had Claude resume into the same stop, a wake for nothing (#1150)
+NEAR = "too near the day's API spend cap for its next request"
 NO_PRICE = "OpenCode's catalog gives no price for it, so the day cap can't be kept"
 # routes.json without day_usd: #1014 refuses an API role without one, so only a hand-edited file
 # gets here, and an API task then spends nothing rather than without a limit
@@ -315,11 +319,35 @@ def _plan_name(m) -> str:
 
 # What wb start says and refuses (routes.resolve, #1016, calls these on the role's model)
 
+def request_floor(m) -> float | None:
+    """The least the next request can cost at its worst, as the keyhole's room reckons it: the
+    model's pinned output (options.max_tokens, else limit.output, else models.API_OUTPUT), which
+    OpenCode asks for in full while the window has room, at the dearest tier's output price.
+    None unpriced. Its input is left out: only the body tells it, and leaving it out keeps this
+    a floor, so a start it refuses is one whose first request room would refuse too (#1150,
+    2026-11-24: today within one worst request of the cap passed wb start, feedback, next and
+    resume, and the round stopped at its first request, nothing sent)."""
+    if not (p := price(m)):
+        return None
+    cfg = getattr(m, "config", None) or {}
+    opts = cfg.get("options") if isinstance(cfg.get("options"), dict) else {}
+    lim = cfg.get("limit") if isinstance(cfg.get("limit"), dict) else {}
+    out = _n(opts.get("max_tokens")) or _n(lim.get("output")) or models.API_OUTPUT
+    return out * max(p[-1]["output"], p[-1]["reasoning"]) / 1e6
+
+
+def _enough(t: float, worst: float) -> float:
+    """The least cap that lets today's spend ``t`` make one request of ``worst``: up to the cent."""
+    return math.ceil(round((t + worst) * 100, 6)) / 100
+
+
 def refusal(m, role: str | None = None, advice: bool = True) -> str | None:
     """Why an API model can't start now, or None: no price (and not a plan), or today's spend
-    at the cap. ``role`` names the line's subject ("trivial"), else the model. ``advice``: the
-    cap line's "Ask the user: …"; the busy opt-in's note goes without, its role being on the GPU
-    already and its start only waiting for it (wave 2's merge). No cap at all (NO_CAP, or
+    at the cap, or so near it that one request at its worst (request_floor) would pass it: the
+    room refused that request at once, after the checkout, setup and base check (#1150).
+    ``role`` names the line's subject ("trivial"), else the model. ``advice``: the cap line's
+    "Ask the user: …"; the busy opt-in's note goes without, its role being on the GPU already
+    and its start only waiting for it (wave 2's merge). No cap at all (NO_CAP, or
     UNREADABLE) is refused too: a `--model` start without one passed the dialog and wb start,
     then the guard stopped it in round 1, after the checkout, setup and base check (#1089,
     2026-11-23)."""
@@ -334,6 +362,11 @@ def refusal(m, role: str | None = None, advice: bool = True) -> str | None:
         return (f"{who}: API spend today is {money(t, today()['basis'])} of the {usd(c)} day cap (it resets at local "
                 f"midnight)" + (f". Ask the user: a higher cap (wb route cap <usd>), the role on the GPU "
                                 f"(wb route {role or '<role>'} gpu), or tomorrow" if advice else ""))
+    if (w := request_floor(m)) and t + w > c:
+        return (f"{who}: API spend today is {money(t, today()['basis'])} of the {usd(c)} day cap, and one "
+                f"request on it can cost up to {usd(w)} (it resets at local midnight)"
+                + (f". Ask the user: a cap of at least {usd(_enough(t, w))} (wb route cap <usd>), the role "
+                   f"on the GPU (wb route {role or '<role>'} gpu), or tomorrow" if advice else ""))
     return None
 
 
@@ -371,11 +404,14 @@ def for_task(task, m=None):
     return _METERS[key]
 
 
-def stop_reason(task) -> str | None:
+def stop_reason(task, ahead: bool = False) -> str | None:
     """Why the task's next request must not go out, or None (a GPU task, a plan): the keyhole
     refused one for want of room (status `api_stop`, guard `spend`), today's spend is at the
-    cap, or there is no cap. drive's `_go_on` asks before every round, run_round's tick within
-    one. A free model's is None too: it spends nothing for the cap to keep."""
+    cap, or there is no cap. drive's `_go_on` asks before every round, with ``ahead``: today
+    within one request at its worst (request_floor) of the cap stops it too, as the round's first
+    request would be refused (#1150). run_round's tick asks within one, without: a request the
+    room let out is never cut for the next one's sake. A free model's is None too: it spends
+    nothing for the cap to keep."""
     mt = for_task(task)
     if mt is None or mt.plan or mt.free:
         return None
@@ -388,11 +424,14 @@ def stop_reason(task) -> str | None:
         return no_cap()
     if (t := today()["usd"]) >= c:
         return f"{STOP}: {money(t, today()['basis'])} of {usd(c)} today"
+    if ahead and (w := request_floor(mt.m)) and t + w > c:
+        return f"{NEAR}: {money(t, today()['basis'])} of {usd(c)} today, and it could cost up to {usd(w)}"
     return None
 
 
-def stop_text(task) -> str:
-    """The `stuck` notice's lead for a spend stop."""
+def stop_text(task, worst: float | None = None) -> str:
+    """The `stuck` notice's lead for a spend stop; ``worst``: the room's refused request at its
+    worst, which the round's stop carries (`_spend_lead`: `api_stop` is consumed by then)."""
     c, t, b = cap(), today()["usd"], today()["basis"]
     if c is None:
         return (f"{task.name} stopped: {no_cap()}. Its work so far is in the worktree; then wb resume "
@@ -402,10 +441,33 @@ def stop_text(task) -> str:
     # A route change is for the next tasks; this one is taken over or discarded.
     n, role = task.name, task.spec.get("role") or "<role>"
     note = f"; {NOTE[b].strip(' ()')}" if t and NOTE[b] else ""
+    if w := _near(task, c, t, worst):  # under the cap: "the cap is reached" had Claude resume into it (#1150)
+        return (f"{n} stopped: {NEAR} (up to {usd(w)}; {money(t, b)} of {usd(c)} today{note}). Its work "
+                f"so far is in the worktree. Ask the user: a cap of at least {usd(_enough(t, w))} (wb route "
+                f"cap <usd>) or tomorrow, then wb resume {n}; or the role on the GPU (wb route {role} gpu) "
+                f"for the next tasks, with wb takeover {n} or wb discard {n} for this one (resume keeps "
+                f"its API model).")
     return (f"{n} stopped: {STOP} ({money(t, b)} of {usd(c)} today{note}). Its work so far is in the "
             f"worktree. Ask the user: a higher cap (wb route cap <usd>) or tomorrow, then wb resume "
             f"{n}; or the role on the GPU (wb route {role} gpu) for the next tasks, with wb takeover "
             f"{n} or wb discard {n} for this one (resume keeps its API model).")
+
+
+def _near(task, c: float, t: float, worst: float | None = None) -> float | None:
+    """The next request's worst when today ``t`` is under the cap ``c`` but not by that much: the
+    room's own figure (``worst``, else status `api_stop` `worst`), else request_floor's; None
+    otherwise."""
+    if t >= c or (mt := for_task(task)) is None or not mt.prices:
+        return None
+    # The round's stop consumes `api_stop` (`_ProviderWait.stop`) before the notice is written:
+    # read from status alone, the room's worst was never seen, request_floor (no input) fell
+    # short of the cap, and the notice said "the cap is reached" with a cap too low (#1150,
+    # 2026-11-24). The round carries it instead.
+    stop = task.status.get("api_stop")
+    if not _num(worst):
+        worst = stop.get("worst") if isinstance(stop, dict) and _num(stop.get("worst")) else None
+    w = worst if worst is not None else request_floor(mt.m)
+    return w if w and t + w > c else None
 
 
 class Meter:
@@ -580,7 +642,8 @@ class Meter:
         t = today()["usd"]
         left = c - t - worst
         if left < 0 and not self.task.status.get("api_stop"):
-            self.task.set_status(api_stop={"guard": "spend", "text": (
-                f"{STOP}: {money(t, today()['basis'])} of {usd(c)} today, and its next request could cost up to "
-                f"{usd(worst)}")})
+            # NEAR while today is under the cap (#1150); `worst` for stop_text's "at least" cap
+            self.task.set_status(api_stop={"guard": "spend", "worst": round(worst, 10), "text": (
+                f"{STOP if t >= c else NEAR}: {money(t, today()['basis'])} of {usd(c)} today, and its next "
+                f"request could cost up to {usd(worst)}")})
         return left
