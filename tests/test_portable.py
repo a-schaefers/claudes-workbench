@@ -2651,6 +2651,52 @@ class Remote(unittest.TestCase):
             self.assertEqual(code, 0, out)                                # the same provider
             self.assertEqual(list(json.loads(cfg_path.read_text())["provider"]), ["lmstudio"])
 
+    def test_a_runner_waiting_on_a_server_after_a_reboot_leases_and_loads_it_at_windows_new_address(self):
+        # #1167 (2026-11-24): _drive dropped what _wait_up returned, so lease_for and _load kept
+        # the old Model, the server read down at Windows' old address, and _load waited DOWN_WAIT:
+        # the issue's 20-minute --force runner
+        before = self.lmstudio_at("127.0.0.2")
+        port = before.server_address[1]
+        self.config({}, {"lmstudio": {"local": True}})
+        old, new = f"http://127.0.0.2:{port}/v1", f"http://127.0.0.3:{port}/v1"
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.2"):
+            code, out = self.wb("model", "add", "lmstudio/qwen-coder", "--url", old, "--context", "32768")
+        self.assertEqual(code, 0, out)
+        before.shutdown()
+        before.server_close()
+        self.servers.remove(before)
+
+        class Leased(Exception):
+            pass
+        leased, passes = [], []
+
+        def lease_for(m, *a, **k):  # the model the runner takes the GPU and loads for
+            leased.append(m)
+            raise Leased
+
+        def up(secs):  # LM Studio comes up at Windows' new address while the runner waits
+            passes.append(secs)
+            self.assertLess(len(passes), 4, "still waiting on Windows' old address")
+            if not self.servers:
+                self.lmstudio_at("127.0.0.3", port)
+        task = mock.Mock(status={"round": 2})  # round 2: no outline to add
+        task.spec = {}
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.3"), \
+                redirect_stderr(io.StringIO()):
+            m = models.discover()["lmstudio/qwen-coder"]  # wb start's, before the server is up
+            self.assertEqual(m.base_url, old)
+            with mock.patch.object(runner.time, "sleep", up), \
+                    mock.patch.object(runner.gitops, "repo_of", return_value=Path(os.environ["WB_OPENCODE_CONFIG"]).parent), \
+                    mock.patch.object(runner, "checkout", return_value=True), \
+                    mock.patch.object(runner, "_prepare", return_value=True), \
+                    mock.patch.object(runner, "needs_base_check", return_value=False), \
+                    mock.patch.object(runner, "opencode_moved", return_value=False), \
+                    mock.patch.object(runner.models, "lease_for", lease_for), \
+                    self.assertRaises(Leased):
+                runner._drive(task, m, lambda msg: None)
+        self.assertTrue(passes)                                     # it waited for the server
+        self.assertEqual([(x.id, x.base_url) for x in leased], [("lmstudio/qwen-coder", new)])
+
     def test_a_server_gone_from_an_old_windows_address_is_told_the_new_one_not_to_start_it(self):
         # #1167 (2026-11-24): a server provider at an address that was Windows' before a reboot,
         # added by hand (or before wb followed it), said "start its server" at the old address
