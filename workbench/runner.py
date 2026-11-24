@@ -3386,6 +3386,8 @@ NO_MODULE = re.compile(r"(?P<py>\S*python[\w.]*): (No module named (?P<m>[\w.]+)
 TOOL_DIRS = (".venv/bin", "venv/bin", "node_modules/.bin", "vendor/bin")
 # bash's and zsh's line for a path that isn't there (dash's and ksh's is NOT_FOUND's)
 NO_SUCH = re.compile(r"no such file or directory: (?P<z>.+)$|(?P<n>[^:]+): No such file or directory$")
+# dash's line for a file `.` can't read (it exits 2; bash says NO_SUCH's, exit 1, zsh NO_SUCH's z)
+NO_SOURCE = re.compile(r"\.: cannot open (?P<p>[^:]+)(?::.*)?$")
 # A task runner's own lines after its recipe's output, each runner's in one entry, its group (if
 # any) the recipe's exit: GNU make's `make: *** [Makefile:2: test] Error 127` (it exits 2), a
 # sub-make's `Leaving directory`, -k's `Target … not remade`; just's `error: Recipe `test` failed
@@ -3436,7 +3438,8 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     `<name>: command not found`, so the check-in and the base's line compared with a round's
     read the same under bash, zsh, dash or ksh (#1152; nightly run 45362198509, 2026-11-24), a
     name with a `/` never, but for one in TOOL_DIRS, which says `<path>: not in the worktree (…)`
-    (#1206); or Python's no-module line for `-m` at exit 1 (#1181). A tool the
+    (#1206), as does a file sourced from one at exit 1 or 2 (`source .venv/bin/activate`, #1258);
+    or Python's no-module line for `-m` at exit 1 (#1181). A tool the
     agent's environment lacks (one outside the agent's PATH, which python_env and agent_path
     trim), which no edit in a round can give it; else None. A module of ``task``'s own code
     (own_module) is none: the step may make it; nor is a console script of its own
@@ -3454,27 +3457,32 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     code = int(inner) if inner else code
     if wrapped and not inner and lines and NOT_FOUND.search(lines[-1]):
         code = 127  # pnpm exits 1 and names no code: the shell's not-found line is its 127 (#1243)
-    if code not in (1, 127):
+    if code not in (1, 2, 127):
         return None
     line = lines[-1].strip() if lines else ""
+    name = None
     if code == 127:
         name = missing_name(line) or ((m := MAKE_EXEC.fullmatch(line)) and m["n"].strip())
         if name and "/" not in name:
             # one the step's reinstall puts in the worktree's venv, first on the agent's PATH (#1244)
             return None if task and context.own_venv(task) and own_command(task, name) \
                 else f"{name}: command not found"
-        # a path: a script the step may make, but not a tool an install puts there (#1206)
-        path = name or ((m := NO_SUCH.search(line)) and (m["z"] or m["n"]).strip())
-        if path and (top := next((t for t in TOOL_DIRS if f"/{t}/" in f"/{path}"), None)):
-            s = f"/{path}"
-            where, tool = s[1:s.find(f"/{top}/") + 1 + len(top)], path.rsplit("/", 1)[-1]
-            # an install dir the setup made in the worktree: never "never checked out", and a
-            # console script the step adds to it is the step's own (#1244, bar round 5, 2026-11-24)
-            if task and not os.path.isabs(path) and (task.workdir / where).is_dir():
-                return None if own_command(task, tool) else \
-                    f"{path}: not in the worktree ({where}/ is there, without {tool})"
-            return f"{path}: not in the worktree ({top.split('/')[0]}/ is an install's, never checked out)"
-        return None
+    # a path: a script the step may make, but not a tool an install puts there (#1206); nor, at
+    # exit 1 or 2, a file the shell sourced from one: `source .venv/bin/activate && pytest` with
+    # no .venv in the worktree exits 1 under bash (dash's `.: cannot open`, 2), and round 1 and
+    # both auto-fix rounds ran on correct code, each told the bug was the change's (#1258, bar
+    # round 6, 2026-11-24)
+    path = name or ((m := NO_SUCH.search(line)) and (m["z"] or m["n"]).strip()) \
+        or ((m := NO_SOURCE.search(line)) and m["p"].strip())
+    if path and (top := next((t for t in TOOL_DIRS if f"/{t}/" in f"/{path}"), None)):
+        s = f"/{path}"
+        where, tool = s[1:s.find(f"/{top}/") + 1 + len(top)], path.rsplit("/", 1)[-1]
+        # an install dir the setup made in the worktree: never "never checked out", and a
+        # console script the step adds to it is the step's own (#1244, bar round 5, 2026-11-24)
+        if task and not os.path.isabs(path) and (task.workdir / where).is_dir():
+            return None if own_command(task, tool) else \
+                f"{path}: not in the worktree ({where}/ is there, without {tool})"
+        return f"{path}: not in the worktree ({top.split('/')[0]}/ is an install's, never checked out)"
     if code == 1 and (m := NO_MODULE.fullmatch(line)):
         return None if task and own_module(task, m["m"] or m["d"], m["py"]) else line
     return None

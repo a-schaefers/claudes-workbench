@@ -1140,6 +1140,47 @@ class Lifecycle(Base):
         self.assertEqual(runner.missing_name(line), "venv/bin/pytest")
         self.assertIn(runner.missing_name(line), runner.command_words("cd api && venv/bin/pytest -q"))
 
+    @unittest.skipUnless(shutil.which("bash"), "no bash")
+    def test_sourcing_the_checkouts_ignored_venv_checks_in_at_once_and_skips_auto_fix(self):
+        # #1258 (bar round 6 of 2.0): `source .venv/bin/activate && …` with no .venv in the
+        # worktree exits 1, not 127, so #1206's check never read it: no check-in, and round 1 and
+        # both auto-fix rounds ran on correct code, each told the bug was in the change
+        os.environ["SHELL"] = shutil.which("bash")  # the tests' shell (test_shell): dash has no `source`
+        (self.repo / ".gitignore").write_text(".venv/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
+        self.start("t-src", "ok", "--test", f"source .venv/bin/activate && {TEST_CMD}",
+                   "--auto-fix", "2", "--no-self-review")
+        st = wait_phase("t-src", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (1, 1))
+        task = store.Task("t-src")
+        self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        checkins = [r["text"] for r in store.notices() if r["task"] == "t-src" and r["kind"] == "checkin"]
+        self.assertEqual(len(checkins), 1)
+        self.assertIn("can't run in the agent's environment: .venv/bin/activate: not in the worktree "
+                      "(.venv/ is an install's, never checked out) (exit 1 on the base)", checkins[0])
+        summary = (task.round_dir(1) / "summary.md").read_text()
+        self.assertTrue(summary.startswith("auto-fix skipped: the acceptance command can't run in "
+                                           "the agent's environment: .venv/bin/activate: "), summary)
+
+    def test_a_file_sourced_from_an_install_dir_is_a_missing_tool_in_every_shell(self):
+        # #1258: bash's and zsh's line at exit 1, dash's `.: cannot open` at exit 2, and under a
+        # make recipe; a file the step makes, or one outside an install dir, still goes back
+        said = lambda tail, code=1: runner.missing_command({"exit": code, "tail": tail})  # noqa: E731
+        gone = ".venv/bin/activate: not in the worktree (.venv/ is an install's, never checked out)"
+        self.assertEqual(said("/usr/bin/bash: line 1: .venv/bin/activate: No such file or directory"), gone)
+        self.assertEqual(said("zsh:source:1: no such file or directory: .venv/bin/activate"), gone)
+        self.assertEqual(said("/bin/sh: 1: .: cannot open .venv/bin/activate: No such file", 2), gone)
+        self.assertEqual(said("/bin/sh: 1: .: cannot open .venv/bin/activate: No such file\n"
+                              "make: *** [Makefile:2: test] Error 2", 2), gone)
+        self.assertEqual(said("venv/bin/activate: No such file or directory\nmake: *** [test] Error 1", 2),
+                         "venv/bin/activate: not in the worktree (venv/ is an install's, never checked out)")
+        for tail, code in (("bash: line 1: env.sh: No such file or directory", 1),
+                           ("/bin/sh: 1: .: cannot open ./setup-env.sh: No such file", 2),
+                           ("cat: answer.txt: No such file or directory", 1),
+                           ("bash: line 1: .venv/bin/activate: No such file or directory", 3)):
+            self.assertIsNone(said(tail, code), tail)
+
     def test_a_console_script_the_step_adds_to_the_setups_venv_goes_back_to_the_agent(self):
         # #1244 (bar round 5 of 2.0): a console script the step adds, which the agent's reinstall
         # puts in the setup's worktree .venv, was a tool the agent lacks: a check-in before round
