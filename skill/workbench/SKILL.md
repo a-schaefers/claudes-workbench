@@ -355,7 +355,7 @@ In a monorepo, `--repo` inside a package with its own committed CLAUDE.md (`pack
 runs the agent, the setup and the tests in that package; the diff stays the whole repo's.
 The worktree holds only committed files. When the acceptance command needs what the user
 installed (node_modules, a .venv, a build), add `--setup '<install command>'` (a .venv always: a copy still runs the original) (or `--copy <ignored
-path>`; `--sibling <path>` for a `../<name>` or `../../<path>` the project uses, by that same path): `wb start` names the ignored
+path>`, from a package as the note names it; `--sibling <path>` for a `../<name>` or `../../<path>` the project uses, by that same path): `wb start` names the ignored
 directories it lacks, and a failing setup fails the task before any round (so does a checkout
 that fails: the runner makes the worktree, so `wb start` returns at once on any repo). A setup gets 30
 minutes; a first build that needs longer (a big Rust or C++ project, torch over a slow link) takes

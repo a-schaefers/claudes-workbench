@@ -4250,6 +4250,41 @@ class WorktreeSetup(Base):
         self.assertIn("ignored .venv/, dist/, ../../web/node_modules/:", line)  # from the package
         wait_phase("t-pkg", {"review"})
 
+    def test_copy_from_a_package_copies_the_path_the_start_note_named_from_the_package(self):
+        # #1158 (bar round 1, 2026-11-24): the note named the package's node_modules/ from the
+        # package, but --copy read it from the repo's root: the root's node_modules came in, the
+        # package's stayed missing, and the note's ../../node_modules/ was refused
+        self.ignore("node_modules/")
+        app = self.repo / "packages" / "app"
+        (self.repo / "node_modules" / ".pnpm" / "store").mkdir(parents=True)
+        (app / "node_modules" / "lodash").mkdir(parents=True)
+        (app / "node_modules" / "lodash" / "index.js").write_text("lodash\n")
+        (app / "CLAUDE.md").write_text("# app\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "a package"], check=True)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        start = lambda name, *x: run_wb("start", name, "--spec", str(self.spec), "--repo", str(app),  # noqa
+                                        "--model", "mimo", "--no-base-check", *x)
+        line = next(x for x in start("t-note").splitlines() if "only committed files" in x)
+        self.assertIn("../../node_modules/, node_modules/", line)
+        wait_phase("t-note", {"review"})
+        out = start("t-pkgcopy", "--copy", "node_modules", "--test", "test -f node_modules/lodash/index.js")
+        self.assertIn("copies packages/app/node_modules", out)        # named from the repo's root
+        st = wait_phase("t-pkgcopy", {"review"})
+        wt = store.Task("t-pkgcopy").worktree
+        self.assertEqual(store.Task("t-pkgcopy").spec["copy"], ["packages/app/node_modules"])
+        self.assertTrue((wt / "packages/app/node_modules/lodash/index.js").is_file())
+        self.assertFalse((wt / "node_modules").exists())               # not the root's
+        self.assertIs(st["tests"]["ok"], True)
+        out = start("t-rootcopy", "--copy", "../../node_modules/")       # the note's own name
+        self.assertIn("copies node_modules", out)
+        wait_phase("t-rootcopy", {"review"})
+        self.assertTrue((store.Task("t-rootcopy").worktree / "node_modules/.pnpm/store").is_dir())
+        # a path only the root has is still read from the root, as before
+        self.assertEqual(cli._copy_path(self.repo, "packages/app/node_modules", "packages/app"),
+                         "packages/app/node_modules")
+        self.assertEqual(cli._copy_path(self.repo, "../../../x", "packages/app"), "../x")
+
     def test_a_repo_on_a_windows_drive_gets_a_note(self):
         # #201's finding 30: git is much slower on WSL's /mnt/c, and wb checks the worktree every step
         with mock.patch.object(context, "on_windows", return_value=True):

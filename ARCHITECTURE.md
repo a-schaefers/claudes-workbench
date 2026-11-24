@@ -1096,7 +1096,11 @@ everywhere). In order:
   -cRp`), replacing what is there, so start refuses a path with anything tracked under it (#244);
   it must be ignored in the task's worktree too, checked by the runner (#322, #529). Never a
   virtualenv (`runner.venv_in`, a `pyvenv.cfg` in the path or one level inside: it ran the developer's environment outside the lane, #260); the
-  refusal says recreate it with `--setup`.
+  refusal says recreate it with `--setup`. From a package (`subdir`), a `--copy` path is read from the package, as
+  the start note names the ignored directories (`node_modules`, `../../node_modules`), and only a path the package
+  lacks and the root has from the root; task.json `copy`, the start line and the API standing check hold it
+  repo-relative (`cli._copy_path`; it copied the root's node_modules for the package's, #1158). commands.json's
+  `copy` stays repo-relative.
 - For an API task, a standing `copy` or `siblings` entry of commands.json's `repos` that this
   command line doesn't name too is refused, exit 3 (`cli._standing_refusal`, its line
   `cli._standing_gap`, `privacy.standing_refusal`; #1021): `commands.json "repos" copies local.cfg into every task, and
