@@ -1333,6 +1333,13 @@ CARGO_MADE = ("registry/", "git/", ".package-cache", ".package-cache-mutate", ".
 # needs a first `nimble refresh` from Claude.
 NIMBLE_MADE = ("pkgs2/", "pkgcache/", "buildtemp/", "packages_temp.json", "nimbledata2.json")
 MADE_TEXT = {"nimbledata2.json": '{"version": 1, "reverseDeps": {}}\n'}
+# What the common tools make in a cache home split around an active venv (poetry's, from
+# `poetry shell` or direnv), made first so the split grants them: Landlock can only allow, so a
+# split home refuses every new entry, and uv's, Go's and pre-commit's first run failed (#825)
+CACHE_MADE = ("uv", "pip", "go-build", "pre-commit")
+# and what Hugging Face's libraries make at their home's top (huggingface_hub's and datasets'
+# constants: HF_HUB_CACHE, HF_XET_CACHE, HF_ASSETS_CACHE, HF_DATASETS_CACHE, HF_MODULES_CACHE)
+HF_MADE = ("hub/", "xet/", "assets/", "datasets/", "modules/")
 # and what a tool makes at the top of its home when a secret inside splits it (SECRETS): with
 # Maven's master password in ~/.m2, a first build couldn't make repository/ there, nor the
 # wrapper (./mvnw, its base ~/.m2) its wrapper/ (#992, 2026-11-22)
@@ -1344,13 +1351,15 @@ SPLIT_MADE = {".m2": ("repository/", "wrapper/"),
               # restore couldn't make packages/)
               ".gradle": ("caches/", "daemon/", "native/", "wrapper/", "jdks/", "notifications/",
                           ".tmp/", "build-scan-data/"),
-              ".hex": ("packages/",), ".nuget": ("packages/",)}
+              ".hex": ("packages/",), ".nuget": ("packages/",),
+              # and ~/.cache, split around Hugging Face's token (#1092): its common tools' and
+              # Hugging Face's caches; another tool's first new entry there is refused, the
+              # report naming its grant
+              ".cache": (*(f"{n}/" for n in CACHE_MADE), *(f"huggingface/{n}" for n in HF_MADE)),
+              ".cache/huggingface": HF_MADE}
 # and the same homes where the user moved them (API_HIDDEN_VARS hides the file inside those too)
-SPLIT_MADE_VARS = {"GRADLE_USER_HOME": ".gradle", "HEX_HOME": ".hex"}
-# and what the common tools make in a cache home split around an active venv (poetry's, from
-# `poetry shell` or direnv), made first so the split grants them: Landlock can only allow, so a
-# split home refuses every new entry, and uv's, Go's and pre-commit's first run failed (#825)
-CACHE_MADE = ("uv", "pip", "go-build", "pre-commit")
+SPLIT_MADE_VARS = {"GRADLE_USER_HOME": ".gradle", "HEX_HOME": ".hex", "XDG_CACHE_HOME": ".cache",
+                   "HF_HOME": ".cache/huggingface"}
 # The device nodes builds use, not /dev: the user's terminals, input devices (/dev/uinput) and
 # security keys were open to the agent (the 2026-11-16 audit). /dev/shm stays, a trade-off:
 # multiprocessing's semaphores, Chromium and many test runners need it, and Landlock can't tell
@@ -2074,7 +2083,10 @@ SECRETS = (".ssh", ".gnupg", ".password-store", ".netrc", ".git-credentials", ".
            # (`semgrep login`'s token; under XDG_CONFIG_HOME's .semgrep when that is set) and
            # Rush's cloud build cache credentials (`rush update-cloud-credentials`)
            ".config/configstore/firebase-tools.json", ".semgrep/settings.yml",
-           ".config/.semgrep/settings.yml", ".rush-user/credentials.json")
+           ".config/.semgrep/settings.yml", ".rush-user/credentials.json",
+           # #1092 (2026-11-23): Ollama's account key, which signs its ollama.com requests:
+           # the server uses it, outside the lane, and the agent's `ollama` talks to the server
+           ".ollama/id_ed25519")
 # The sockets inside a secret that a grant may still reach, to connect only (unix_paths): Docker
 # Desktop's, under ~/.docker beside the registry logins in config.json, so `wb allow --path` was
 # refused and only turning the lane off let a Testcontainers suite run (#441, the audit of 1.8)
@@ -2104,6 +2116,10 @@ SECRET_VARS = ("GNUPGHOME", "PASSWORD_STORE_DIR", "GH_CONFIG_DIR", "DOCKER_CONFI
 # Library/Application Support on macOS), Hex's home and its MIX_XDG config, pip's user config
 # (pip's configuration.py: the XDG one and the legacy ~/.pip), Bundler's global config
 # (Settings#global_config_file) and bun's global bunfig (bunfig's get_home_config_path).
+# And Hugging Face's login (#1092, 2026-11-23: huggingface_hub's constants.py, HF_HOME's `token`
+# and `stored_tokens`): SECRET_ENV drops HF_TOKEN, but the library reads the same token from the
+# file by itself, and `cat` sent it to the provider; on the GPU it stays readable for a test that
+# downloads a gated model (a test's login() or logout() can rewrite it, as any file in ~/.cache).
 API_HIDDEN = (".npmrc", ".yarnrc.yml", ".m2/settings.xml", ".gradle/gradle.properties",
               ".nuget/NuGet/NuGet.Config", ".config/NuGet/NuGet.Config", ".nuget/config",
               ".config/NuGet/config", ".config/pypoetry/auth.toml",
@@ -2111,7 +2127,10 @@ API_HIDDEN = (".npmrc", ".yarnrc.yml", ".m2/settings.xml", ".gradle/gradle.prope
               ".composer/auth.json", ".config/dart/pub-tokens.json",
               "Library/Application Support/dart/pub-tokens.json", ".hex/hex.config",
               ".config/hex/hex.config", ".config/pip/pip.conf", ".pip/pip.conf", ".bundle/config",
-              ".bunfig.toml")
+              ".bunfig.toml", ".cache/huggingface/token", ".cache/huggingface/stored_tokens")
+# the ones that are a token and nothing else, by name or by the variable that moves it, which
+# holds_credential's key and value matcher can't see: one there holds one unless empty (#1092)
+API_HIDDEN_BARE = ("token", "HF_TOKEN_PATH")
 # where the user moved them: (variable, the file inside, or "" for a file named by the variable,
 # and its tool, or None for API_HIDDEN_TOOL's by the file's name); bun reads
 # $XDG_CONFIG_HOME/.bunfig.toml in place of ~/.bunfig.toml
@@ -2120,13 +2139,19 @@ API_HIDDEN_VARS = (("NPM_CONFIG_USERCONFIG", "", "npm"), ("npm_config_userconfig
                    ("COMPOSER_HOME", "auth.json", None), ("HEX_HOME", "hex.config", None),
                    ("PIP_CONFIG_FILE", "", "pip"), ("BUNDLE_CONFIG", "", "Bundler"),
                    ("BUNDLE_USER_CONFIG", "", "Bundler"), ("BUNDLE_USER_HOME", "config", "Bundler"),
-                   ("XDG_CONFIG_HOME", ".bunfig.toml", None))
+                   ("XDG_CONFIG_HOME", ".bunfig.toml", None),
+                   # Hugging Face's home: HF_HOME, else XDG_CACHE_HOME's huggingface (#1092)
+                   ("HF_HOME", "token", "Hugging Face"), ("HF_HOME", "stored_tokens", "Hugging Face"),
+                   ("HF_TOKEN_PATH", "", "Hugging Face"), ("HF_STORED_TOKENS_PATH", "", "Hugging Face"),
+                   ("XDG_CACHE_HOME", "huggingface/token", "Hugging Face"),
+                   ("XDG_CACHE_HOME", "huggingface/stored_tokens", "Hugging Face"))
 # which tool reads each, by its name, or its folder's and its name (~/.bundle/config)
 API_HIDDEN_TOOL = {".npmrc": "npm", ".yarnrc.yml": "Yarn", "settings.xml": "Maven",
                    "gradle.properties": "Gradle", "NuGet.Config": "dotnet", "config": "dotnet",
                    "auth.toml": "poetry",
                    "auth.json": "Composer", "pub-tokens.json": "dart pub get", "hex.config": "Hex",
-                   "pip.conf": "pip", ".bundle/config": "Bundler", ".bunfig.toml": "bun"}
+                   "pip.conf": "pip", ".bundle/config": "Bundler", ".bunfig.toml": "bun",
+                   "huggingface/token": "Hugging Face", "huggingface/stored_tokens": "Hugging Face"}
 # and the tools that stop on every run while theirs is there but unreadable, so in an API lane
 # they don't run at all (#1021's review, 2026-11-23, each from its source): Yarn Berry
 # (Configuration.findFolderRcFile rethrows all but ENOENT), Maven (DefaultSettingsBuilder:
@@ -2141,6 +2166,9 @@ API_HIDDEN_TOOL = {".npmrc": "npm", ".yarnrc.yml": "Yarn", "settings.xml": "Mave
 # token: a private registry's install.
 API_HIDDEN_STOPS = frozenset({"Yarn", "Maven", "Gradle", "dotnet", "poetry", "Composer", "dart pub get",
                               "Bundler"})
+# and what fails for a tool that installs nothing (#1092): huggingface_hub takes a token file it
+# can't read as no token, so only a gated or private model's download fails
+API_HIDDEN_FAILS = {"Hugging Face": "Hugging Face's gated and private models don't download"}
 # Of the home directory's own entries, the dotfiles (tools' configs, caches, toolchains) stay
 # readable, and these (R's and Perl's user libraries); the user's documents and other projects
 # don't, beyond the task's repo, workbench itself, the programs on PATH and what Claude allowed.
@@ -2508,17 +2536,26 @@ def api_hidden_paths() -> set[str]:
 def _api_hidden_tools() -> dict[str, str]:
     """api_hidden_paths, each with the tool that reads it (API_HIDDEN_TOOL)."""
     home = Path.home()
-    paths = [(home / h, None) for h in API_HIDDEN]
+    paths = [(home / h, None, None) for h in API_HIDDEN]
     if os.environ.get("XDG_CONFIG_HOME"):
-        paths += [(Path(os.environ["XDG_CONFIG_HOME"]) / h[len(".config/"):], None)
+        paths += [(Path(os.environ["XDG_CONFIG_HOME"]) / h[len(".config/"):], None, None)
                   for h in API_HIDDEN if h.startswith(".config/")]
     for var, inside, tool in API_HIDDEN_VARS:
         if (v := os.environ.get(var)) and os.path.isabs(os.path.expanduser(v)):
-            paths.append((Path(v).expanduser() / inside, tool))
+            paths.append((Path(v).expanduser() / inside, tool, var))
     whole = {"/", os.path.realpath(home)}
     return {r: tool or API_HIDDEN_TOOL.get(f"{p.parent.name}/{p.name}") or API_HIDDEN_TOOL.get(p.name, "npm")
-            for p, tool in paths
-            if (r := os.path.realpath(p)) not in whole and privacy.holds_credential(r)}
+            for p, tool, var in paths
+            if (r := os.path.realpath(p)) not in whole and (privacy.holds_credential(r) or (
+                (p.name in API_HIDDEN_BARE or var in API_HIDDEN_BARE) and _filled(r)))}
+
+
+def _filled(real: str) -> bool:
+    """Whether the file ``real`` is there and not empty: a token file alone (API_HIDDEN_BARE)."""
+    try:
+        return os.path.isfile(real) and os.path.getsize(real) > 0
+    except OSError:
+        return True
 
 
 def api_hidden(task: store.Task) -> set[str]:
@@ -2528,8 +2565,8 @@ def api_hidden(task: store.Task) -> set[str]:
 
 def api_hidden_note() -> str:
     """wb start's note for an API task when a file API_HIDDEN names holds a credential, else '': the files,
-    then the tools that don't run in its lane (API_HIDDEN_STOPS) and those whose private-registry
-    installs fail."""
+    then the tools that don't run in its lane (API_HIDDEN_STOPS), those whose private-registry
+    installs fail and what else fails (API_HIDDEN_FAILS: Hugging Face's gated models, #1092)."""
     home = os.path.realpath(Path.home())
     tools = _api_hidden_tools()
     there = sorted(tools)  # each there and holding a credential (a file, or NuGet's config/)
@@ -2539,12 +2576,13 @@ def api_hidden_note() -> str:
     more = f" and {len(there) - 4} more" if len(there) > 4 else ""
     used = list(dict.fromkeys(tools[p] for p in there))
     stop = [t for t in used if t in API_HIDDEN_STOPS]
-    fail = [t for t in used if t not in API_HIDDEN_STOPS]
+    fail = [t for t in used if t not in API_HIDDEN_STOPS and t not in API_HIDDEN_FAILS]
 
     def both(xs):
         return xs[0] if len(xs) == 1 else f"{', '.join(xs[:-1])} and {xs[-1]}"
     said = ([f"{both(stop)} stop{'s' if len(stop) == 1 else ''} on every run"] if stop else []) + \
-        ([f"{both(fail)} installs from a private registry fail"] if fail else [])
+        ([f"{both(fail)} installs from a private registry fail"] if fail else []) + \
+        [API_HIDDEN_FAILS[t] for t in used if t in API_HIDDEN_FAILS]
     held = "it holds a credential" if len(there) == 1 else "each holds a credential"
     return (f"an API task can't read {names}{more} ({held}, which would reach the provider): "
             f"in its lane {', and '.join(said)}")

@@ -1402,7 +1402,7 @@ deliberately hostile process.
 - *Reads.* Everything but credentials and the user's records: `context.SECRETS` under `$HOME`
   (`.ssh`, `.gnupg`, `.netrc`, `.git-credentials`, `.config/gh`, keyrings, the cloud CLIs'
   (`.aws`, `.config/gcloud`, `.kube`, `.docker`…), `.android/adbkey`, registry and deploy logins
-  (#992, #999), OpenCode's `service.json` (its service runs outside the lane), OpenCode's data and
+  (#992, #999), Ollama's account key (`.ollama/id_ed25519`, which its server signs with, #1092), OpenCode's `service.json` (its service runs outside the lane), OpenCode's data and
   state homes whole (`.local/share/opencode`, `.local/state/opencode`: the database and its
   `-wal`/`-shm`, a release channel's, the legacy `auth.json`, `snapshot/`, `tool-output/`,
   `worktree/`, `repos/`, `prompt-history.jsonl`; and a user's own `OPENCODE_DB`, #1010: no file there
@@ -1417,7 +1417,8 @@ deliberately hostile process.
   Readable on purpose (an unreadable one ends the install): the files a build reads its
   repositories and logins from (`.npmrc`, `.yarnrc.yml`, `.m2/settings.xml`,
   `.gradle/gradle.properties`, `NuGet.Config`, poetry's `auth.toml`, composer's `auth.json`, pub's
-  `pub-tokens.json`, `.hex/hex.config`, `pip.conf`, `.bundle/config`, `.bunfig.toml`; an API task's
+  `pub-tokens.json`, `.hex/hex.config`, `pip.conf`, `.bundle/config`, `.bunfig.toml`; and Hugging
+  Face's `token`, for a test that downloads a gated model; an API task's
   lane hides each that holds a credential: *API lanes hide the token files that hold a credential*,
   below). Where a tool stops on a hidden file the agent gets its own
   (*Its environment*); Vercel's and the Firebase CLI don't run in the lane (Firebase's emulators do
@@ -1470,11 +1471,16 @@ deliberately hostile process.
   Support/pypoetry`), composer's `auth.json` (`.config/composer`, `.composer`), pub's
   `pub-tokens.json` (`.config/dart`, macOS `Library/Application Support/dart`), Hex's `hex.config`
   (`.hex`, `MIX_XDG`'s `.config/hex`), pip's `pip.conf` (`.config/pip`, the legacy `.pip`),
-  Bundler's `.bundle/config`, bun's `.bunfig.toml`; under `XDG_CONFIG_HOME` when set, and where
+  Bundler's `.bundle/config`, bun's `.bunfig.toml`, Hugging Face's login (`.cache/huggingface/token`
+  and `stored_tokens`, #1092: `SECRET_ENV` drops `HF_TOKEN`, but huggingface_hub reads the file by
+  itself; the `token` file is the token alone, so it holds one when not empty, `API_HIDDEN_BARE`,
+  and with it unreadable only a gated or private model's download fails, `API_HIDDEN_FAILS`; on the
+  GPU a test's `login()` or `logout()` can still rewrite it, as any file in `~/.cache`); under `XDG_CONFIG_HOME` when set, and where
   `API_HIDDEN_VARS` (each with its file inside and its tool) move them (`NPM_CONFIG_USERCONFIG`,
   `GRADLE_USER_HOME`, `POETRY_CONFIG_DIR`, `COMPOSER_HOME`, `HEX_HOME`, `PIP_CONFIG_FILE`,
-  `BUNDLE_CONFIG`, `BUNDLE_USER_CONFIG`, `BUNDLE_USER_HOME`, and `XDG_CONFIG_HOME` for bun's
-  `.bunfig.toml`). The trade is more than private installs: with its file there but unreadable,
+  `BUNDLE_CONFIG`, `BUNDLE_USER_CONFIG`, `BUNDLE_USER_HOME`, `XDG_CONFIG_HOME` for bun's
+  `.bunfig.toml`, and `HF_HOME`, `HF_TOKEN_PATH`, `HF_STORED_TOKENS_PATH`, `XDG_CACHE_HOME` for
+  Hugging Face's). The trade is more than private installs: with its file there but unreadable,
   Yarn Berry, Maven, Gradle, NuGet (every dotnet restore, build and test), poetry, composer,
   `dart pub get` and Bundler (`Settings#load_config`: EACCES is a `PermissionError`) stop on every
   run (`API_HIDDEN_STOPS`, each from its source, 2026-11-23), so in an API lane they don't run at
@@ -1488,8 +1494,10 @@ deliberately hostile process.
   one). The writable homes `.m2`, `.gradle`, `.hex` and `.nuget` are split around a hidden one,
   what each makes at its top made first (`SPLIT_MADE`: Gradle's `caches/`, `daemon/`, `native/`,
   `wrapper/`, `jdks/`, `notifications/`, `.tmp/`, `build-scan-data/`; Hex's `packages/`; NuGet's
-  `packages/`, since dotnet writes `NuGet.Config` on first use), and the same where
-  `GRADLE_USER_HOME` and `HEX_HOME` move them (`SPLIT_MADE_VARS`); with no credential there the
+  `packages/`, since dotnet writes `NuGet.Config` on first use; `~/.cache` around Hugging Face's
+  token: `CACHE_MADE`'s and `HF_MADE`'s `hub/`, `xet/`, `assets/`, `datasets/`, `modules/`, another
+  tool's first new entry there refused and named with its grant, #1092), and the same where
+  `GRADLE_USER_HOME`, `HEX_HOME`, `XDG_CACHE_HOME` and `HF_HOME` move them (`SPLIT_MADE_VARS`); with no credential there the
   home is granted whole, as on the GPU. The agent's environment
   already drops the matching variables (`SECRET_ENV`).
 - *The kernel's side* (`lane.py`, Landlock, no root): the runner starts OpenCode as `python -I
@@ -6174,7 +6182,8 @@ doc needs its own `!/` line).
   ProbeWhereItHelps.
 - **`context.API_HIDDEN`** and `SECRETS`' comment on what stays readable (the `.npmrc` trade) change together; a file
   added to either side → the API lane test in `Privacy` and #992's in `Lane`, `API_HIDDEN_TOOL` (its tool) and, when
-  that tool stops on an unreadable one, `API_HIDDEN_STOPS`; a new file's credential syntax →
+  that tool stops on an unreadable one, `API_HIDDEN_STOPS` (or `API_HIDDEN_FAILS`, what fails for one that installs
+  nothing); a file that is a token alone → `API_HIDDEN_BARE`; a new file's credential syntax →
   `privacy.holds_credential`'s matcher and `Privacy.WITH_AND_WITHOUT` (a file with one and without); a hidden file in a writable tool home → `SPLIT_MADE`, and
   `SPLIT_MADE_VARS` when a variable moves that home. **`privacy.OPENROUTER_SLUGS`** follows OpenRouter's provider list
   (`/api/v1/providers`: a display name that doesn't fold to its slug). **The where-line** (`privacy.where`'s `line`, `PRIVACY_PAGES`) is the start's where-note (`cli._api_notes`); the

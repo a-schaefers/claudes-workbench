@@ -31143,6 +31143,51 @@ class Privacy(_KeyholeTest):
             self.assertIn("in its lane Gradle and dotnet stop on every run, and Hex installs from a "
                           "private registry fail", context.api_hidden_note())
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_the_hugging_face_token_is_out_of_an_api_lane_and_its_cache_stays_writable(self):
+        # #1092 (2026-11-23): SECRET_ENV dropped HF_TOKEN, but `cat ~/.cache/huggingface/token`
+        # sent the same token to the provider; Ollama's account key was readable in every lane
+        home = Lane.fake_home(self)
+        for v in ("HF_HOME", "HF_TOKEN_PATH", "HF_STORED_TOKENS_PATH"):
+            os.environ.pop(v, None)
+        hf = home / ".cache" / "huggingface"
+        (hf / "hub").mkdir(parents=True)
+        (hf / "token").write_text("hf_FAKEFAKEFAKE")                # a bare token: no key to match
+        (hf / "stored_tokens").write_text("[default]\nhf_token = hf_FAKEFAKEFAKE\n")
+        (home / ".cache" / "app").mkdir()
+        (home / ".ollama").mkdir()
+        (home / ".ollama" / "id_ed25519").write_text("OLLAMAKEY")
+        (home / ".ollama" / "id_ed25519.pub").write_text("ssh-ed25519 AAAA")
+        script = ("import os, sys\nfor f in sys.argv[1:5]:\n    try:\n        open(f).read(); print('read')\n"
+                  "    except PermissionError:\n        print('refused')\n"
+                  "for d in sys.argv[5:]:\n    os.makedirs(d, exist_ok=True)\n"
+                  "    open(os.path.join(d, 'x'), 'w').write('x'); print('wrote')\n")
+        files = [hf / "token", hf / "stored_tokens", home / ".ollama" / "id_ed25519",
+                 home / ".ollama" / "id_ed25519.pub"]
+        dirs = [hf / "hub" / "models--x", hf / "xet", home / ".cache" / "pip", home / ".cache" / "app"]
+        for via, want in (("api", ["refused", "refused", "refused", "read"]),
+                          ("gpu", ["read", "read", "refused", "read"])):
+            task = self.bare(f"t-hf-{via}", via)
+            out = subprocess.run(lane.wrap(context.writable(task),
+                                           [sys.executable, "-c", script, *map(str, files + dirs)],
+                                           context.readable(task)),
+                                 capture_output=True, text=True, timeout=20)
+            self.assertEqual(out.stdout.split(), want + ["wrote"] * len(dirs), (via, out.stderr))
+        self.assertIn("Hugging Face's gated and private models don't download", context.api_hidden_note())
+        (hf / "token").write_text("")                               # logged out: nothing to hide
+        (hf / "stored_tokens").unlink()
+        self.assertEqual(context.api_hidden_paths(), set())
+        # and where HF_HOME moves it, the home split around it with what the libraries make there
+        moved = home / "hf-home"
+        moved.mkdir()
+        (moved / "token").write_text("hf_FAKEFAKEFAKE")
+        os.environ["HF_HOME"] = str(moved)
+        api = context.writable(self.bare("t-hf-moved", "api"))
+        self.assertIn(os.path.realpath(moved / "token"), context.api_hidden_paths())
+        self.assertNotIn(str(moved), api)
+        self.assertIn(str(moved / "hub"), api)
+
     def test_the_start_says_which_token_files_an_api_lane_hides_and_a_gpu_start_doesnt(self):
         home = Path(self.tmp.name) / "home"
         home.mkdir()
