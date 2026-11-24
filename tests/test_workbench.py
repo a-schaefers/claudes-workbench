@@ -2011,7 +2011,7 @@ class Lifecycle(Base):
             with self.assertRaises(SystemExit), redirect_stderr(err), \
                     mock.patch("sys.stdin", io.StringIO("Step two.")):
                 run_wb(*cmd)
-            self.assertIn("not committed: git ignores files the agent wrote (lib/util.py)", err.getvalue())
+            self.assertIn("not committed: git ignores files written in the worktree (lib/util.py)", err.getvalue())
             self.assertEqual(self.branch("delegate/t-ign"), t.spec["base"])   # nothing committed
         self.assertIn("accepted t-ign", run_wb("accept", "t-ign", "-m", "feat: one", "--include"))
         tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "--name-only", "delegate/t-ign"],
@@ -2037,9 +2037,71 @@ class Lifecycle(Base):
         err = io.StringIO()
         with self.assertRaises(SystemExit), redirect_stderr(err):
             run_wb("accept", "t-patch", "-m", "feat: one")
-        self.assertIn("not committed: git ignores files the agent wrote (lib/helper.py)", err.getvalue())
+        self.assertIn("not committed: git ignores files written in the worktree (lib/helper.py)", err.getvalue())
         self.assertEqual(self.branch("delegate/t-patch"), t.spec["base"])     # nothing committed
         self.assertTrue((t.worktree / "lib" / "helper.py").is_file())         # and the work kept
+
+    def ignore_lib(self):
+        (self.repo / ".gitignore").write_text("lib/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore lib"], check=True)
+
+    def test_a_file_claude_writes_under_an_ignored_path_after_a_takeover_is_never_dropped_at_accept(self):
+        # #1179 (the 2.0 bar loop, 2026-11-24): after wb takeover Claude wrote lib/helper.py, under
+        # Python.gitignore's lib/, and a main.py importing it; only the agent's events were read,
+        # so accept --merge landed main.py alone and deleted the module with the worktree
+        self.ignore_lib()
+        self.start("t-hand", "ok", "--test", TEST_CMD)
+        wait_phase("t-hand", {"review"})
+        t = store.Task("t-hand")
+        run_wb("takeover", "t-hand")
+        (t.worktree / "lib").mkdir()
+        (t.worktree / "lib" / "helper.py").write_text("def answer():\n    return 42\n")
+        (t.worktree / "main.py").write_text("from lib.helper import answer\nprint(answer())\n")
+        # what Claude's test run leaves there is no one's work: bytecode, pytest's cache, a log
+        (t.worktree / "lib" / "__pycache__").mkdir()
+        (t.worktree / "lib" / "__pycache__" / "helper.cpython-311.pyc").write_bytes(b"\xa7\r\r\n\0\0")
+        (t.worktree / ".pytest_cache").mkdir()
+        (t.worktree / ".pytest_cache" / ".gitignore").write_text("# Created by pytest automatically.\n*\n")
+        (t.worktree / ".pytest_cache" / "README.md").write_text("# pytest cache directory #\n")
+        (t.worktree / "lib" / "run.log").write_text("ran\n")
+        self.assertEqual(runner.hand_wrote(t), ["lib/helper.py"])
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-hand", "-m", "feat: one", "--merge")
+        self.assertIn("not committed: git ignores files written in the worktree (lib/helper.py)",
+                      err.getvalue())
+        self.assertEqual(self.branch("delegate/t-hand"), t.spec["base"])     # nothing committed
+        self.assertTrue((t.worktree / "lib" / "helper.py").is_file())        # and the work kept
+        self.assertIn("accepted t-hand", run_wb("accept", "t-hand", "-m", "feat: one", "--merge", "--include"))
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "--name-only", "main"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertIn("lib/helper.py", tree)
+        self.assertIn("main.py", tree)
+        self.assertNotIn("lib/__pycache__/helper.cpython-311.pyc", tree)
+        self.assertNotIn("lib/run.log", tree)
+
+    def test_a_file_claude_writes_under_an_ignored_path_in_a_review_fix_is_still_named_after_the_next_round(self):
+        # #1179: the agent's next round writes there too, which isn't Claude's, so what Claude
+        # wrote at review is kept when a runner starts, and named at accept once it is back
+        self.ignore_lib()
+        self.start("t-fix", "ok", "--test", TEST_CMD)
+        wait_phase("t-fix", {"review"})
+        t = store.Task("t-fix")
+        self.assertTrue(t.status.get("hands_off_at"))
+        (t.worktree / "lib").mkdir()
+        (t.worktree / "lib" / "fix.py").write_text("FIX = 1\n")
+        (t.worktree / "app.py").write_text("from lib.fix import FIX\n")
+        run_wb("feedback", "t-fix", "--text", "1. Keep it.")
+        wait_phase("t-fix", {"review"})
+        self.assertEqual(t.status.get("hand_wrote"), ["lib/fix.py"])
+        self.assertEqual(runner.hand_wrote(t), ["lib/fix.py"])
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-fix", "-m", "feat: one")
+        self.assertIn("not committed: git ignores files written in the worktree (lib/fix.py)",
+                      err.getvalue())
+        self.assertEqual(self.branch("delegate/t-fix"), t.spec["base"])
 
     def test_diff_of_a_merged_task_hints_a_command_that_still_works(self):
         # #477 (the audit of 1.8): the hint named delegate/<task>, which the merge had deleted,

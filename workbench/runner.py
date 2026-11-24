@@ -2654,6 +2654,35 @@ def agent_wrote(task: store.Task) -> list[str]:
     return sorted(out)
 
 
+def hand_wrote(task: store.Task) -> list[str]:
+    """The ignored files written by hand in the worktree while no runner ran (gitops.hand_written):
+    Claude's after a takeover or in a review fix, which the agent's events never show (#1179,
+    2026-11-24). Kept in status `hand_wrote` by each runner that starts, and since the agent last
+    stopped (`hands_off_at`)."""
+    out = set(task.status.get("hand_wrote") or [])
+    if since := task.status.get("hands_off_at"):
+        out |= set(gitops.hand_written(task.worktree, since))
+    return sorted(out)
+
+
+def hands_off(task: store.Task) -> None:
+    """The agent has stopped: from now the worktree's ignored files are Claude's to write, unless
+    already so (a stop of a runner that had ended keeps the earlier time, #1179)."""
+    task.set_status_if(lambda st: not st.get("hands_off_at"), hands_off_at=store.now())
+
+
+def _hands_on(task: store.Task) -> None:
+    """Before the agent's rounds: what was written by hand since it last stopped, kept in
+    `hand_wrote`, as the agent's own writes from now on aren't Claude's (#1179)."""
+    if not task.status.get("hands_off_at"):
+        return
+    try:
+        wrote = hand_wrote(task)
+    except (gitops.GitError, OSError):
+        wrote = task.status.get("hand_wrote") or []
+    task.set_status(hand_wrote=wrote, hands_off_at=None)
+
+
 def ignored_writes(task: store.Task) -> list[str]:
     """The files the agent wrote that git ignores, so no diff or commit holds them; [] when git
     can't say."""
@@ -4209,6 +4238,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
         return _repo_gone(task)
     if not checkout(task):  # the worktree itself, out of wb start's foreground (#529)
         return
+    _hands_on(task)  # Claude's ignored files from the review, before the agent writes (#1179)
     if not _prepare(task):  # the project as the user has it, before the base check (#201)
         return
     if _down(m):  # before the lease: a server that is down holds no GPU from other tasks
@@ -4416,6 +4446,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                     return
                 continue
             task.set_status(phase="review", tests=tests,
+                            hands_off_at=store.now(),  # Claude's to edit from now (#1179)
                             last="tests passed: Claude reviews next" if tests and tests["ok"]
                             else f"{skip.split(':')[0]}: Claude reviews next" if skip
                             else "Claude reviews next")
@@ -4813,6 +4844,7 @@ def main():
         finally:
             try:
                 task.set_status(pid=None, stopping=None)
+                hands_off(task)  # the agent is stopped: what is written next is Claude's (#1179)
             except OSError as e:
                 if not store.disk_full(e):
                     raise
