@@ -4018,7 +4018,8 @@ takes the dialog's yes.
 **Followed by `wb start`** (#1016, *A task, start to finish*): every start resolves a role
 (`--role`, else from `--size`), and a role on the GPU with a pinned `gpu` runs that model, the
 router's ranking, exploring and `_cheaper` not applying (`the <role> role's GPU model (wb route)`;
-a pin no longer found exits 3, never the router's other pick).
+the pin matched by its exact id in `discover()`, as `wb route`'s listing finds it; a pin no
+longer found exits 3, never the router's other pick nor a model its id is a fragment of, #1214).
 
 **`wb route`** (`cli.cmd_route`): shows each role (`GPU (the router picks)`, `GPU <id> (pinned)`,
 `API <id> (<provider>) · thinking off`, `API kept: <id>`, `set by you|Claude MM-DD`: on API from
@@ -4044,7 +4045,7 @@ The changes (each one exit 3 with one line when refused, writing nothing):
   model yet: wb route <role> <provider/model>`.
 - `wb route <role> <provider/model>` sets the API model and goes to API; `--api <id>` sets it and
   leaves the selector; `--gpu <id|auto>` sets the GPU model (a fragment will do, as `--model`
-  takes one: `models.resolve`; an API id refused); `--thinking on|off`; `--day-usd N`.
+  takes one: `models.resolve`; its exact id is what is stored; an API id refused); `--thinking on|off`; `--day-usd N`.
 - `wb route all gpu|api|both` sets the Agents switch (`use`), no role's own selector; `api` with no
   role holding an API model: `no role has an API model yet`; a role with none then can't start, and
   the line says so. `wb route all --thinking on|off` sets every role's thinking.
@@ -6866,7 +6867,8 @@ its slot let go, refuses its resume and an API `--model` start, and `_go_on` sto
 (#1213). **Roles at start** (`RoleResolution`, #1016): the no-fallback
 matrix (an unset role on the router's pick, an API role on its model with task.json's keys, no key
 and no GPU model each exit 3 with no task directory and never the other side, Agents on API with a
-role that has none, an unreadable routes.json, `--role`/`--size` each from the other, a GPU pin),
+role that has none, an unreadable routes.json, `--role`/`--size` each from the other, a GPU pin,
+and one gone from the config whose id is a fragment of another's: exit 3, #1214),
 the start line, `wb status`'s via column, `wb watch --json`'s `routed`, the chat's snapshot, and a
 model gone from the catalog (feedback, next, resume, the runner) and a catalog that can't be read
 (never said as gone). With `spawn=False` the runner is
