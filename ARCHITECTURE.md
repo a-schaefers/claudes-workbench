@@ -1835,7 +1835,15 @@ all, the 2026-11-23 review). The protocol comes from the catalog's provider pack
 Anthropic's and `anthropic-compatible` take `x-api-key` (and keep `anthropic-version`); alibaba,
 cerebras, cloudflare-workers-ai, deepinfra, deepseek, digitalocean, fireworks, groq, meta, minimax,
 mistral, moonshot, openai, openai-compatible(-responses), openrouter, togetherai, venice, xai, zai
-and zai-coding-plan take `Authorization: Bearer`. Any other package (Google's `x-goog-api-key` and
+and zai-coding-plan take `Authorization: Bearer`. A config provider's V1 npm `@ai-sdk/<name>` (the
+form OpenCode's docs give a custom provider: `@ai-sdk/openai-compatible`, `@ai-sdk/anthropic`) reads
+as `<name>` (`AI_SDK_PREFIX`, as `PACKAGE_PREFIX`): OpenCode 2.3.2 runs it as its own
+`@opencode/ai/providers/<name>` where it has one (openai-compatible, anthropic, openai, deepinfra,
+…), and read as its scope, `@ai-sdk`, every such provider was refused (#1137); an unknown
+`@ai-sdk/foo` (OpenCode's `aisdk:@ai-sdk/foo`, an npm package it loads) still reads as none. A raw
+`@ai-sdk/deepseek` reads as bearer although OpenCode loads that one from npm too (its
+`aisdk:@ai-sdk/deepseek`); it posts Bearer to the base plus `/chat/completions` as well, not
+checked on real OpenCode. Any other package (Google's `x-goog-api-key` and
 `/models/<id>:streamGenerateContent`, Azure's `api-key`, Cohere's native `/chat`, gateways with
 their own paths or headers, none at all) can't run: `start` raises "needs a key wb can hold
 outside the lane: <provider> takes its key in a way the keyhole doesn't speak" rather than a 401
@@ -1851,8 +1859,8 @@ runner). The base mirrors the upstream's path on 127.0.0.1, because a package bu
 the base alone (`new URL(trim(baseURL) + path)`, DeepInfra first appending `/openai` unless the base
 ends in it), so OpenCode posts to the path it would have posted upstream and the keyhole sends that
 path and its query to the upstream's host: DeepInfra `…/v1/openai/chat/completions`, Anthropic
-`…/v1/messages?beta=true` (*API models through OpenCode*; checked on real OpenCode in
-`RealOpenCodeAPI`). A package that rewrites its base by the host (Azure) would not map.
+`…/v1/messages?beta=true`, a custom provider on `@ai-sdk/anthropic` `…/v1/messages` (*API models
+through OpenCode*; checked on real OpenCode in `RealOpenCodeAPI`). A package that rewrites its base by the host (Azure) would not map.
 A request passes, in order, each refusal a JSON error body: the path (a POST to exactly the base
 plus one of `MODEL_PATHS`, `chat/completions`, `responses`, `messages`, `messages/count_tokens`,
 no segment between, since OpenCode never posts one and `…/threads/<id>/messages` carried the key
@@ -6410,12 +6418,13 @@ request's path, headers and body and answers OpenAI or Anthropic SSE, an error s
 echoing the key, chunks spaced in time, a served model and an OpenRouter provider. `fake_auth`
 stands in for `opencode auth export|list` (`FAKE_AUTH`). `RealOpenCodeAPI` runs real OpenCode
 (scratch homes, `OPENCODE_DISABLE_MODELS_FETCH=1`, an environment without the user's keys) on the
-built-in `deepinfra` and `anthropic` providers through the keyhole: one request upstream with the
+built-in `deepinfra` and `anthropic` providers, and custom ones on V1 npm `@ai-sdk/openai-compatible`
+and `@ai-sdk/anthropic` (#1137), through the keyhole: one request upstream with the
 canary, OpenCode's own with only the token, at the path OpenCode would have used upstream. The
 2026-11-23 reviews' findings each have a `Keyhole` test: bodies other JSON parsers route elsewhere,
 a key with a newline, bad queries and chunk sizes (`raw_request`, for what http.client won't send),
 an error body cut across the key, errors inside a 200 stream (`_Upstream`'s "raw" mode), packages
-the keyhole can't speak, DeepInfra's appended `/openai`, a key written as a header, a key in a
+the keyhole can't speak, `@ai-sdk/<name>` npm names (#1137), DeepInfra's appended `/openai`, a key written as a header, a key in a
 model's own entry or the V2 form (#1015's review). Its
 `test_the_tasks_own_catalog_*` (#1015) takes real `api model.list` entries through `hosted()`,
 `catalog_doc` and the runner's overlay: real OpenCode reads them back field for field (the `limit` capped), and a model
@@ -6523,7 +6532,7 @@ doc needs its own `!/` line).
   route dialog's text is `routes.change`'s line, which the mod reads from `wb route … --dry-run --json` (#1014's), never words of its own. **The local_only edit guard**
   (`localOnlyRefusal` in register.tsx) and commands.json's `repos` shape change together.
 - **The keyhole's paths** (`keyhole.MODEL_PATHS`, the base mirroring the upstream's path in `layer_options`,
-  `mirror_path`) and **its packages** (`keyhole.PACKAGES`) → what OpenCode posts for each package and how it sends the
+  `mirror_path`) and **its packages** (`keyhole.PACKAGES`, `AI_SDK_PREFIX`'s npm names) → what OpenCode posts for each package and how it sends the
   key (*API models through OpenCode*; packages/ai/src/providers): re-check with `RealOpenCodeAPI` and the source on
   each OpenCode bump. `keyhole.redact` → any new place an upstream error is shown.
 - **The keyhole overlay** (`runner.keyhole_overlay`) → `write_config_layer`'s provider merge and `rules_env`'s
