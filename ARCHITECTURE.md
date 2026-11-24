@@ -1224,7 +1224,8 @@ once on the base in a scratch checkout (`verify.on_base`, a `--shared` clone,
 change), a warning plus an immediate `checkin` when `--test-timeout` cut it or the shell didn't find
 its command (`missing_command`: exit 127, the tail's last line `NOT_FOUND`'s, bash's or zsh's
 `command not found`, dash's `: not found`; not `No such file or directory`, a script the step may
-make; the warning ends `GIVE_TOOL`, #1152), a note past 120 s
+make, nor a name with a `/`, which dash says `not found` for; worded by wb, `<name>: command not
+found`, the same in every shell, nightly run 45362198509; the warning ends `GIVE_TOOL`, #1152), a note past 120 s
 (#496), not checked when the checkout failed or was `"filtered"`, else exit and tail. A passing base
 is a note, not a check-in (that cost a restart in one task of two, 2026-11-17). `--no-base-check`
 (task.json `no_base_check`) skips it.
@@ -4839,7 +4840,8 @@ The verdict: `proven` (the base fails on an assertion, the candidate passes), `b
 `candidate-fails`, or `inconclusive` (a timeout, overrun, failed setup, left-out files, or a base
 failure that isn't proof). Proof is positive only: `--expect TEXT` in the base's output, else an
 `ASSERTION` line or `FAILED_TEST` header (#730), unless first a `SETUP` error (#326) or a `MISSING`
-file the candidate adds (#500). Never proof: `MISSING_API` (an API the candidate adds), or pytest
+file the candidate adds (#500). Never proof: `MISSING_API` (an API the candidate adds; a command
+not found in bash's words or dash's), or pytest
 whose first `E` line (`PYTEST_E`) isn't `PYTEST_PROOF` (#729); a bare "expected" matched
 `SyntaxError: expected ':'` (#193). `assertion` is the line shown (pytest's first `E` line, else
 the first assertion line, never a `>` line, else the header). Runs are kept in

@@ -488,20 +488,42 @@ class Lifecycle(Base):
         self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
         checkins = [r["text"] for r in store.notices() if r["task"] == "t-nf" and r["kind"] == "checkin"]
         self.assertEqual(len(checkins), 1)
-        self.assertIn("warning: the acceptance command can't run in the agent's environment: ", checkins[0])
-        self.assertIn("nosuch-tool-1152: command not found (exit 127 on the base)", checkins[0])
+        # wb's words, not the shell's: dash's `/bin/sh: 1: nosuch-tool-1152: not found` failed the
+        # bash-worded check here in WSL's Debian (nightly run 45362198509, 2026-11-24)
+        self.assertIn("warning: the acceptance command can't run in the agent's environment: "
+                      "nosuch-tool-1152: command not found (exit 127 on the base)", checkins[0])
         summary = (task.round_dir(1) / "summary.md").read_text()
         self.assertTrue(summary.startswith("auto-fix skipped: the acceptance command can't run in "
                                            "the agent's environment: "), summary)
         self.assertIn("(exit 127, as on the base); no round can fix that", summary)
         self.assertEqual(st["last"], "the acceptance command can't run in the agent's environment: "
                                      "Claude reviews next")
-        # a script the step was to make (No such file or directory) still goes back to the agent
+        # a script the step was to make (No such file or directory; dash: not found) still goes back
         self.start("t-nf2", "ok", "--test", "./made-by-the-step.sh", "--auto-fix", "1",
                    "--no-self-review")
         st = wait_phase("t-nf2", {"review"})
         self.assertEqual((st["base_check"]["exit"], st["round"]), (127, 2))
         self.assertFalse([r for r in store.notices() if r["task"] == "t-nf2" and r["kind"] == "checkin"])
+
+    def test_a_command_not_found_reads_the_same_in_every_shell_and_a_path_is_never_a_missing_tool(self):
+        # nightly run 45362198509 (2026-11-24): under WSL's Debian $SHELL is /bin/sh, dash, which
+        # says `/bin/sh: 1: x: not found`, so the check-in read differently from bash's; and dash
+        # says `./made-by-the-step.sh: not found` for a script the step makes, where bash and zsh
+        # say No such file or directory, so that --test checked in at once as a tool the agent lacks
+        said = lambda last, code=127: runner.missing_command({"exit": code, "tail": f"x\n{last}\n"})  # noqa: E731
+        for last in ("bash: line 1: nosuch-tool-1152: command not found",
+                     "/bin/sh: line 1: nosuch-tool-1152: command not found",   # bash as sh
+                     "zsh:1: command not found: nosuch-tool-1152",
+                     "/bin/sh: 1: nosuch-tool-1152: not found",                # dash
+                     "sh: nosuch-tool-1152: not found"):                       # ksh, busybox
+            self.assertEqual(said(last), "nosuch-tool-1152: command not found", last)
+        self.assertEqual(said("./run.sh: line 3: pytest: command not found"), "pytest: command not found")
+        for last in ("/bin/sh: 1: ./made-by-the-step.sh: not found",           # dash
+                     "bash: line 1: ./made-by-the-step.sh: No such file or directory",
+                     "zsh:1: no such file or directory: ./made-by-the-step.sh",
+                     "/bin/sh: 1: /opt/tool/bin/check: not found"):
+            self.assertIsNone(said(last), last)
+        self.assertIsNone(said("/bin/sh: 1: nosuch-tool-1152: not found", code=1))  # 127 or nothing
 
     def test_what_the_base_check_writes_never_reaches_the_agents_worktree(self):
         # #192 (the 2026-11-19 audit): the base check ran in the task's worktree, and a stamp it
@@ -17155,6 +17177,7 @@ class Verify(Base):
             self.assertTrue(verify.assertion(out), runner_name)
         # the same runners when what failed is missing, not wrong: still no proof
         for out in ("1..1\nnot ok 1 slugifies\n# test/slug.bats: line 3: slugify: command not found\n",
+                    "FAIL slugifies\ntest/slug.sh: 3: slugify: not found\nexit 1\n",   # dash's (2026-11-24)
                     "1) SlugTest::testSlug\nError: Call to undefined function slugify()\n\nERRORS!\n",
                     "1) SlugTest::testSlug\nError: Call to undefined method Slug::slugify()\n"):
             self.assertEqual(verify.verdict(1, out, 0), "inconclusive", out)

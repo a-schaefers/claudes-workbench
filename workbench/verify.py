@@ -73,8 +73,10 @@ MISSING_API = re.compile(r"has no attribute '|\bis not a (function|constructor)\
                          r"|takes (from )?\d+ (to \d+ )?positional arguments? but"
                          r"|missing \d+ required (positional|keyword-only) argument"
                          r"|\bundefined method\b|\buninitialized constant\b"
-                         # a script the candidate adds (bats), PHP's function (#730)
-                         r"|\bcommand not found\b|\bCall to undefined function\b")
+                         # a script the candidate adds (bats), PHP's function (#730); dash's
+                         # `<script>: 3: slugify: not found` too, not only bash's wording
+                         # (nightly run 45362198509, 2026-11-24)
+                         r"|\bcommand not found\b|\bCall to undefined function\b|(?m::\s+not found$)")
 # pytest's own lines: `E   ` says what went wrong (the first one, what went wrong first); `>` quotes
 # the source line it went wrong on, which is no evidence of anything (#729)
 PYTEST_E = re.compile(r"^E\s{2,}(\S.*)$", re.M)
