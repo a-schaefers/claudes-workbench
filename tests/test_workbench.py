@@ -5684,6 +5684,62 @@ class Context(Base):
         self.assertEqual((st["phase"], st["round"], st["round_for"]), ("stuck", 3, "fresh"))
         self.assertIn("tool calls without changing a file", st["last"])
 
+    def test_a_self_review_nudged_mid_check_that_restores_the_green_tree_and_reads_on_goes_to_review(self):
+        # #1207 (bar loop round 3, 2026-11-24): the runner's think nudge started a round with
+        # round_for `steer`, and #1168/#1188's finish was for `self_review` and `fresh` only, so
+        # the self-review carried on past the nudge was stopped as stuck on a green change (90
+        # reads: its copy back is a change, so the guard counts again from it)
+        os.environ.update(FAKE_SELF_STALL="1", FAKE_READS="90")
+        self.start("t-srn", "selfreads", "--test", TEST_CMD, "--self-review", "--think-timeout", "3",
+                   "--silence-timeout", "120")
+        st = wait_phase("t-srn", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"], st["round_for"], st["nudges"]),
+                         ("review", 3, "steer", 1), st.get("last"))
+        self.assertTrue(st["tests"]["ok"])
+        self.assertNotIn("no_edit", st.get("guards") or {})
+        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-srn"]
+        self.assertEqual([r["kind"] for r in rows], ["checkin", "review"])
+        self.assertIn("the tree its tests passed on; stopped as its finish", rows[-1]["text"])
+
+    def test_a_self_review_interrupted_by_claudes_note_that_reads_on_on_its_green_tree_goes_to_review(self):
+        # #1207: `wb steer --now` mid-self-review, the same round_for `steer` as the nudge's
+        os.environ.update(FAKE_SELF_STALL="1", FAKE_READS="90")
+        self.start("t-srs", "selfreads", "--test", TEST_CMD, "--self-review")
+        t = store.Task("t-srs")
+        deadline = time.time() + 30
+        while not (t.status.get("round") == 2 and (t.worktree / "answer.txt").is_file()
+                   and (t.worktree / "answer.txt").read_text() == "41\n"):
+            self.assertLess(time.time(), deadline, "the self-review never began its check")
+            time.sleep(POLL)
+        self.assertIn("interrupting", run_wb("steer", "t-srs", "--now", "--text", "Check the edge case."))
+        st = wait_phase("t-srs", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"], st["round_for"]), ("review", 3, "steer"), st.get("last"))
+        self.assertTrue(st["tests"]["ok"])
+        self.assertNotIn("no_edit", st.get("guards") or {})
+
+    def test_only_a_round_that_carries_a_self_review_on_keeps_its_green_tree(self):
+        # #1207: the key goes on through a handover or a steer round from a self-review, and is
+        # dropped by one from any other round, so a note in a feedback round after a self-review
+        # is never held to that self-review's tree
+        t = store.Task("t-srk")
+        t.dir.mkdir(parents=True)
+        store.write_json(t.dir / "task.json", {"name": "t-srk", "created_at": store.now()})
+        for r in (1, 2, 3, 4):
+            t.round_dir(r).mkdir(parents=True)
+            t.round_dir(r).joinpath("prompt.md").write_text("Write the answer.")
+        t.set_status(step_round=1, round=2, round_for="self_review", self_review_tree="green", window=32768)
+        store.append_jsonl(t.dir / "steer.jsonl", {"ts": store.now(), "text": "Use v2.", "now": True})
+        runner._steer_round(t, 2, True)
+        self.assertEqual((t.status["round_for"], runner.green_tree(t, "began")), ("steer", "green"))
+        runner._full_round(t, 3, {"full": 25000, "texts": []})
+        self.assertEqual((t.status["round_for"], runner.green_tree(t, "began")), ("fresh", "green"))
+        t.set_status(round=5, round_for="feedback")
+        self.assertIsNone(runner.green_tree(t, "began"))
+        store.append_jsonl(t.dir / "steer.jsonl", {"ts": store.now(), "text": "Use v3.", "now": True})
+        runner._steer_round(t, 5, True)
+        self.assertEqual((t.status["round_for"], t.status["self_review_tree"]), ("steer", None))
+        self.assertIsNone(runner.green_tree(t, "began"))
+
     def test_without_self_review_claude_is_woken_after_the_first_clean_round(self):
         self.start("t-nsr", "ok", "--test", TEST_CMD)
         self.assertEqual(wait_phase("t-nsr", {"review"})["round"], 1)

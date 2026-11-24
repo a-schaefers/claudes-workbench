@@ -1588,18 +1588,35 @@ def no_edit_limit(window, *, api: bool) -> int:
     return min(NO_EDIT_MAX, NO_EDIT_PER_32K * max(1, w // 32768))
 
 
+# The rounds that carry a self-review on, as status round_for: the self-review's own, the fresh
+# session taking a full one over (#1188), and a steer round, the runner's think nudge or Claude's
+# note, mid-round or after (#1207). Each keeps the self-review's green tree only when the round
+# before was one of these too (carried_tree), so any other round's handover or note drops it.
+SELF_REVIEW_ROUNDS = ("self_review", "fresh", "steer")
+
+
+def carried_tree(task: store.Task) -> str | None:
+    """Status `self_review_tree` for the next round when it carries on this one (a handover, a
+    steer round), None when this round is no part of a self-review: what _full_round and
+    _steer_round write, so the key outlives only the rounds that carry a self-review on."""
+    st = task.status
+    return st.get("self_review_tree") if st.get("round_for") in SELF_REVIEW_ROUNDS else None
+
+
 def green_tree(task: store.Task, began: str) -> str | None:
     """The tree (gitops.mark) the self-review this round is part of began on, the one the last
     round's tests passed on (status `self_review_tree`), or None when the round is no part of a
-    self-review (round_for `self_review`, or `fresh` for the session carrying one on past a full
-    window). The fresh one began on the tree as the full session left it, maybe a check still
-    commented out, so its own start is no test; held to none, its explore stop was a stuck
-    notice on a green change, the step counted against it (#1188, 2026-11-24). A task queued
-    before the key: the round's own start, as #1168 had it."""
+    self-review (SELF_REVIEW_ROUNDS: round_for `self_review`, `fresh` for the session carrying
+    one on past a full window, `steer` for the round a nudge or a note started in one). Those
+    began on the tree as the round before left it, maybe a check still commented out, so their
+    own start is no test; held to none, the explore stop of a fresh one was a stuck notice on a
+    green change, the step counted against it (#1188, 2026-11-24), and a nudged or steered one's
+    still was (#1207, 2026-11-24). A task queued before the key: the round's own start, as #1168
+    had it."""
     st = task.status
     if st.get("round_for") == "self_review":
         return st.get("self_review_tree", began)
-    return st.get("self_review_tree") if st.get("round_for") == "fresh" else None
+    return carried_tree(task)
 
 
 def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
@@ -4796,10 +4813,8 @@ def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
         asked=ASKED.format("\n\n".join(asks)) if asks else "",
         last="> " + last.replace("\n", "\n> ") if last else "(none)")
         + (f"\n\n{folded_notes(task, n + 1, notes)}" if notes else ""))
-    st = task.status  # a self-review carried on keeps its green tree; any other round drops it (#1188)
     task.set_status(round=n + 1, context="full", full_pct=pct, round_for="fresh",
-                    self_review_tree=st.get("self_review_tree")
-                    if st.get("round_for") in ("self_review", "fresh") else None,
+                    self_review_tree=carried_tree(task),  # a self-review's goes on (#1188)
                     full_compacted=True if rnd.get("compacted") else None,  # #774: fresh_reason
                     full_compact_failed=True if failed else None,  # #969: and its reason
                     handovers=task.status.get("handovers", 0) + 1,
@@ -4852,7 +4867,7 @@ def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:
         if theirs := [r for r in notes if r.get("by") != "workbench"]:  # ... Claude's notes are
             folded_notes(task, n + 1, theirs)
     task.set_status(round=n + 1, steer_taken=task.status.get("steer_taken", 0) + len(notes),
-                    round_for="steer")
+                    round_for="steer", self_review_tree=carried_tree(task))  # #1207, as a handover
 
 
 # What a task's children load from the clone afresh each round, beside this runner's code loaded
