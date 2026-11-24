@@ -23199,6 +23199,22 @@ class WebChat(Base):
         self.assertEqual((reply["from"], reply["text"]), ("claude", "Step 2 is in review."))
         self.assertIn("Claude: Step 2 is in review.", run_wb("chat", "log"))
 
+    def test_a_reply_names_the_claude_code_session_that_wrote_it_so_the_users_answer_goes_back_to_it(self):
+        # #1096 (2026-11-23): one session listens for all, and the user's answer to session B's
+        # report reached A; the mod hands an answer to the session that wrote the row before it
+        from workbench import models
+        me = os.getpid()
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "sess-b", "CLAUDE_PID": str(me)}):
+            run_wb("chat", "reply", "--text", "fix-b is ready for review: accept it?")
+        env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_PID")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            run_wb("chat", "reply", "--text", "from a terminal")
+        b, plain = [r for r in store.read_jsonl(self.chat.chat_dir() / "messages.jsonl")[0] if r["from"] == "claude"]
+        self.assertEqual({k: b.get(k) for k in ("session", "claude_pid", "claude_start", "claude_machine")},
+                         {"session": "sess-b", "claude_pid": me, "claude_start": models._started(me),
+                          "claude_machine": store.machine() or None})
+        self.assertFalse({"session", "claude_pid"} & set(plain))          # no session: the listener's
+
     # ---- other agents (#1042): their own tokens, never the user's authority ----
 
     def _agent(self, name="my-agent"):

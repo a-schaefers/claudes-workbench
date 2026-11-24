@@ -5645,6 +5645,18 @@ def cmd_top(a):
 TOP_EVERY = (0.2, 3600)  # wb top --every's range, in seconds (NaN and inf fail the comparison)
 
 
+def _chat_writer() -> dict:
+    """The Claude Code session writing a `wb chat reply`, as task.json records it (`session`,
+    `claude_pid`, `claude_start`, `claude_machine`): the user's answer to the row is that
+    session's, which its mod takes even while another session listens. With one listener for
+    all, the answer to session B's report reached A, which leaves B's tasks alone (#1096,
+    2026-11-23). Empty outside Claude Code."""
+    out = {"session": os.environ.get("CLAUDE_CODE_SESSION_ID", "")}
+    if (pid := os.environ.get("CLAUDE_PID", "")).isdigit():
+        out.update(claude_pid=int(pid), claude_start=models._started(int(pid)), claude_machine=store.machine())
+    return {k: v for k, v in out.items() if v}
+
+
 def cmd_chat(a):
     """The web chat: the user's side door to Claude while away from the terminal."""
     if a.more and a.action not in ("listen", "ended"):
@@ -5699,7 +5711,7 @@ def cmd_chat(a):
         if not text:
             die("the reply is empty")
         try:  # what it answers (`re`, `to`): --to, else the messages this turn took (#1042)
-            chat.reply(text, a.to)
+            chat.reply(text, a.to, **_chat_writer())
         except ValueError as e:
             die(f"wb chat reply: {e}")
         print("sent to the web chat")

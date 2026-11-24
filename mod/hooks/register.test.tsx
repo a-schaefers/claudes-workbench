@@ -2162,6 +2162,90 @@ test('a web message wb holds open is delivered past the files tails, and one wb 
   expect([named(), claims.filter(c => c === 'm0').length, asked.length]).toEqual([1, 1, 1])  // and not asked again
 })
 
+test('#1096: the user\'s answer to a session\'s row in the web chat goes to that session, listening or not', async ($, on) => {
+  // the audit of 2.0 (2026-11-23): one session listens for all, and the user's answer to session
+  // B's report reached A, which leaves B's tasks alone; B's task waited for its terminal
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  files['/proc/self/stat'] = '1 (x) S 1'                           // /proc: a gone pid reads as gone
+  files['/wb/chat/listener.json'] = JSON.stringify({ session: 'key-a', pid: 777, start: '1' }) // A listens
+  files['/proc/777/stat'] = `777 (wb) S 1 ${'0 '.repeat(17)}1 0 0`
+  files['/proc/778/stat'] = `778 (claude) S 1 ${'0 '.repeat(17)}1 0 0`                        // A's Claude Code
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/b' }))
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  const claims: string[] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'chat' && e.argv[2] === 'claim') claims.push(e.argv[3])
+    return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
+  })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  const row = (r: any) => { files['/wb/chat/messages.jsonl'] = (files['/wb/chat/messages.jsonl'] ?? '') + JSON.stringify(r) + '\n' }
+  const open = (...ms: any[]) => { files['/wb/chat/open.json'] = JSON.stringify({ asks: {}, messages: Object.fromEntries(ms.map(m => [m.id, m])) }) }
+  // this session (sess-new, B) reported its task there; the user answers it
+  row({ id: 'r1', ts: 1_800_000_000, from: 'claude', text: 'fix-b is ready: accept it?', to: ['user'], session: 'sess-new', claude_pid: 999 })
+  const yes = { id: 'm1', ts: 1_800_000_001, from: 'user', text: 'yes, accept it' }
+  row(yes)
+  open(yes)
+  await $.session.start({ cwd: '/home/u/b', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  expect(asked).toEqual(['[web chat] yes, accept it'])            // B took it, though A listens
+  expect(JSON.parse(files['/wb/chat/listener.json']).session).toBe('key-a')  // and A still listens
+  // A's row next, and the answer to it: A's to take, never B's
+  row({ id: 'r2', ts: 1_800_000_010, from: 'claude', text: 'fix-a failed its tests', to: ['user'], session: 'sess-a', claude_pid: 778 })
+  const theirs = { id: 'm2', ts: 1_800_000_011, from: 'user', text: 'try X instead' }
+  row(theirs)
+  open(theirs)
+  await clock.advance(3000)
+  await clock.advance(40_000)
+  expect(claims).not.toContain('m2')
+  expect(asked).toHaveLength(1)
+})
+
+test('#1096: the listener leaves an answer to another live session\'s row to it, and takes it, saying whose, once it isn\'t taken', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  files['/proc/self/stat'] = '1 (x) S 1'                           // /proc: a gone pid reads as gone
+  files['/proc/778/stat'] = `778 (claude) S 1 ${'0 '.repeat(17)}1 0 0`                        // B's Claude Code lives
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/a' }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  const claims: string[] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'chat' && e.argv[2] === 'claim') claims.push(e.argv[3])
+    return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
+  })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  const row = (r: any) => { files['/wb/chat/messages.jsonl'] = (files['/wb/chat/messages.jsonl'] ?? '') + JSON.stringify(r) + '\n' }
+  row({ id: 'r1', ts: 1_800_000_000, from: 'claude', text: 'fix-b is ready: accept it?', to: ['user'], session: 'sess-b', claude_pid: 778 })
+  const m = { id: 'm1', ts: 1_800_000_000, from: 'user', text: 'yes, accept it' }
+  row({ ...m, ts: 1_800_000_001 })
+  files['/wb/chat/open.json'] = JSON.stringify({ asks: {}, messages: { m1: { ...m, ts: 1_800_000_001 } } })
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  expect(JSON.parse(files['/wb/chat/listener.json']).cwd).toBe('/home/u/a')  // this session listens
+  expect([claims, asked]).toEqual([[], []])                                    // B's to take
+  await clock.advance(30_000)                                                  // B never did
+  expect(asked).toHaveLength(1)
+  expect(asked[0]).toMatch(/^\[web chat\] \(This follows another Claude Code session's message in the chat, one that session didn't take: .*\) yes, accept it$/)
+  // a session whose process is gone: taken at once, saying so too
+  delete files['/proc/778/stat']
+  row({ id: 'r2', ts: 1_800_000_040, from: 'claude', text: 'fix-c: which name?', to: ['user'], session: 'sess-c', claude_pid: 780 })
+  files['/wb/chat/open.json'] = JSON.stringify({ asks: {}, messages: { m2: { id: 'm2', ts: 1_800_000_041, from: 'user', text: 'parse_all' } } })
+  await clock.advance(31_000)                                                  // the next poll
+  expect(asked.at(-1)).toContain('another Claude Code session\'s message')
+  expect(asked.at(-1)).toMatch(/parse_all$/)
+})
+
 test('a web message another session claimed first is not submitted here', async ($, on) => {
   // #84: two sessions starting together both took the chat and both submitted the message
   const clock = mock.clock(on, { now: 1_800_000_000_000 })

@@ -76,7 +76,8 @@ paste diffs. While a `web-chat` context block says they are away, also tell them
 something they asked for finishes or needs them. `wb chat log` shows the thread. Sounds for them
 to pick by ear go there with `wb chat listen` (reference/audio.md). The web thread is
 all they see: each reply must stand on its own, and a yes there answers only a question asked
-there, never one asked in the terminal. Nothing hard to undo (downloads, deletes) on an ambiguous OK. They are away
+there, never one asked in the terminal. A message noted as following another session's message is
+that session's: leave its task alone and tell the user to answer at that session's terminal. Nothing hard to undo (downloads, deletes) on an ambiguous OK. They are away
 once they use the chat (open it or write there) after they last used the terminal, so a
 `web-chat` block can come with no message from them; a message they type in the terminal, or a
 prompt they answer there, means they are back. While they're at the terminal, a prompt of yours

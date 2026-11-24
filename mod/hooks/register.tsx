@@ -3534,6 +3534,39 @@ async function chatLink($: any) {
   if (link !== (await read($, chat)).url) await update($, chat, c => ({ ...c, url: link }))
 }
 
+// Claude's rows in the thread's tail, oldest first, for answersTo (#1096)
+const THREAD_TAIL = 64 << 10 // the user's unread message is recent: so is the row it answers
+async function claudeRows($: any, dir: string): Promise<Row[]> {
+  const t = await readTail($, `${dir}/messages.jsonl`, THREAD_TAIL)
+  return (t?.text ?? '').split('\n').flatMap(line => {
+    try {
+      const r = JSON.parse(line)
+      return r && typeof r === 'object' && r.from === 'claude' ? [r as Row] : []
+    } catch {
+      return []
+    }
+  })
+}
+
+// The Claude row a user's web message answers (#1096): Claude's last one to the user before it,
+// when it names the session that wrote it (`wb chat reply` stamps `session`, `claude_pid`,
+// `claude_start`, `claude_machine`, as task.json has them), else null: the listener's, as ever.
+export function answersTo(thread: Row[], m: Row): Row | null {
+  let last: Row | null = null
+  for (const r of thread) {
+    if (r.from !== 'claude' || !(Number(r.ts) < Number(m.ts))) continue
+    if (Array.isArray(r.to) && r.to.length && !r.to.includes('user')) continue // to an agent alone
+    last = r
+  }
+  return last && typeof last.session === 'string' && last.session ? last : null
+}
+// how long the listener leaves a message to the live session it answers before taking it itself
+// (that session out of workbench mode, or its chat off): ten of its polls and more
+const HANDOFF_MS = 30_000
+const ELSEWHERE_NOTE = '(This follows another Claude Code session\'s message in the chat, one that session ' +
+  'didn\'t take: if it is about that session\'s task (`wb status` lists it as open elsewhere), leave the task ' +
+  'to it and tell the user with `wb chat reply` to answer it at that session\'s terminal.) '
+
 async function listen($: any, now: number) {
   const st = await read($, chat)
   if (!st.delegating || !st.web) return
@@ -3558,19 +3591,43 @@ async function listen($: any, now: number) {
     }
   }
   const fresh = async () => now - ((await $.fs.stat(`${dir}/listener.json`).catch(() => undefined))?.mtimeMs ?? 0) < CHAT_STALE_MS
-  if (theirs && (claim.pid ? lives === true || (lives === null && await fresh())
-    : now - Number(claim.ts ?? 0) * 1000 < CHAT_STALE_MS)) return // another session listens
-  if (!(await $.fs.exists(dir))) await runWb($, ['chat', 'log']) // wb makes the directory
-  const body = JSON.stringify({ session: st.key, cwd: mem.cwd, pid: mem.eventsPid,
-    ...(mem.eventsStart ? { start: mem.eventsStart } : {}), ...(mem.machine ? { machine: mem.machine } : {}), busy: mem.busy })
-  if (body !== mem.listenerBody || theirs || claim.session !== st.key) { // only on change: a write is an event
-    mem.listenerBody = body
-    await $.fs.write(`${dir}/listener.json`, body)
+  // another session listens: this one stands by, but for the user's answers to its own rows (#1096)
+  const standby = !!theirs && (claim.pid ? lives === true || (lives === null && await fresh())
+    : now - Number(claim.ts ?? 0) * 1000 < CHAT_STALE_MS)
+  if (!standby) {
+    if (!(await $.fs.exists(dir))) await runWb($, ['chat', 'log']) // wb makes the directory
+    const body = JSON.stringify({ session: st.key, cwd: mem.cwd, pid: mem.eventsPid,
+      ...(mem.eventsStart ? { start: mem.eventsStart } : {}), ...(mem.machine ? { machine: mem.machine } : {}), busy: mem.busy })
+    if (body !== mem.listenerBody || theirs || claim.session !== st.key) { // only on change: a write is an event
+      mem.listenerBody = body
+      await $.fs.write(`${dir}/listener.json`, body)
+    }
   }
+  let thread: Row[] | null = null // Claude's rows, read once a poll, only for a user's message
   for (const m of await unread($, dir)) {
     const id = String(m.id ?? '')
     if ((m.from !== 'user' && !agentOf(m)) || !id || mem.chatSent.has(id) || mem.chatExpired.has(id)) continue
     if ((mem.chatRetry.get(id) ?? 0) > now) continue // its prompt was dropped: again in a minute
+    // Whose it is (#1096): one session listens for all, so with two delegating the user's answer
+    // to session B's report reached A, which the skill tells to leave B's tasks alone, and B's
+    // task waited for the terminal. The page has no reply-to, so it answers Claude's last row to
+    // the user before it, which `wb chat reply` stamps with its session: that session takes it,
+    // listening or not. Its process gone, or no taker within HANDOFF_MS, the listener does,
+    // saying whose it followed.
+    let elsewhereNote = ''
+    if (m.from !== 'user') {
+      if (standby) continue // an agent's message is the listener's
+    } else {
+      thread ??= await claudeRows($, dir)
+      const to = answersTo(thread, m)
+      const ours = !!to && mem.ids.has(String(to.session))
+      if (standby && !ours) continue
+      if (!standby && to && !ours) {
+        await noteClaude($, to, now)
+        if (!mem.deadPids.has(pidKey(to)) && now - Number(m.ts ?? 0) * 1000 < HANDOFF_MS) continue // its session's to take
+        elsewhereNote = ELSEWHERE_NOTE
+      }
+    }
     // Claimed under wb's lock: two sessions starting together both took the chat and both
     // submitted it, each guard knowing only its own sends (#84). Refused: another session's, or
     // too old to spring on Claude, by wb's one threshold, which the page shows too (#536): the mod
@@ -3591,7 +3648,7 @@ async function listen($: any, now: number) {
     const about = !a ? ''
       : a.audio ? `(keeps take ${Number(a.n)} of the shortlist: ${String(a.path ?? a.name ?? '')}) `
       : `(about ${String(a.task)}, step ${Number(a.step)}, screenshots ${Number(a.n)}) `
-    const text = chatPrompt(m, about)
+    const text = chatPrompt(m, elsewhereNote + about)
     // Mid-turn, into the running turn, as a message typed mid-turn would be; else, or if that is
     // refused, as a prompt of its own (which waits for the turn to end).
     if (mem.busy) {
