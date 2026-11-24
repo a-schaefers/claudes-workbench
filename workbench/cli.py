@@ -3069,7 +3069,8 @@ def _route_show(as_json: bool) -> None:
 
 
 # a provider's key as the pane says it (#1023): only a stored one runs (the keyhole holds it)
-KEY_STATES = {"stored": "stored", "oauth": "oauth", "signing": "oauth", "": "none"}
+# a key a task runs with too, as the Settings tab counts one connected (#1077's review, 2026-11-23)
+KEY_STATES = {"stored": "stored", "oauth": "oauth", "signing": "oauth", "ollama": "ollama", "": "none"}
 KEY_HELD = {"oauth": "an OAuth login", "signing": "a cloud login that signs each request",
             "config": "written in OpenCode's config", "ollama": "Ollama's own login", "": "none stored"}
 
@@ -3077,7 +3078,8 @@ KEY_HELD = {"oauth": "an OAuth login", "signing": "a cloud login that signs each
 def _route_pane() -> dict:
     """`wb route --json`'s keys for the pane's Settings tab (#1023): `spend_today` (the day
     ledger's, spend-api.jsonl: {usd, by_provider}) and `providers` ({id: {name, key, why}}, key
-    stored, env, oauth or none, from the cached catalog: never a network probe or OpenCode run)."""
+    stored, ollama (Ollama cloud's login), env, oauth or none, from the cached catalog: never a
+    network probe or OpenCode run)."""
     provs = {}
     for pid, p in (models._read_hosted().get("providers") or {}).items():
         raw = str(p.get("key") or "")

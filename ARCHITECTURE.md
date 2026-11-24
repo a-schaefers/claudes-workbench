@@ -2406,7 +2406,8 @@ user sees.
   `MEDIA_ROWS`, `mediaStops`, keys `media-image|speech|sfx|music`), each only with two or more
   engines of its kind in `wb models --json`'s `media`, every entry its engine's name (`· off this
   GPU` for `gpu` false); a pick runs `wb image|audio --default <name>` with no dialog, and a refusal
-  toasts (*The default engines*). API: with no provider whose key is stored and no role holding an API model, the
+  toasts (*The default engines*). API: with no provider whose key is stored (or Ollama cloud's login,
+key `ollama`, #1077) and no role holding an API model, the
   one line `No API provider connected: /connect in OpenCode adds one; every role runs on the GPU.`
   (`NO_PROVIDER`); else `Connected: <provider> (key stored) · <provider> (<why>)` (`connectedLine`), per
   role `<label> API model` (`apiStops`, `api-<role>`: the role's model, the other roles', those
@@ -3452,8 +3453,9 @@ GPU; wb route all both goes back to each role's own below)`); `--json` the norma
 `gpu_found`, and for the pane (#1023, `cli._route_pane`) `spend_today` (`{usd, by_provider}`, today's
 `step` and `reconcile` rows of the day ledger, spend-api.jsonl; `usd` is `meter.today()`'s, the sum the
 cap is checked against) and `providers` (`{<id>: {name, key,
-why?}}` from the cached catalog: `key` `stored`, `env`, `oauth` or `none`, with the why for any but
-stored; Ollama's, `signed in through Ollama: its cloud models need no key here`, #1077). While busy is `api` the show adds `When the GPU is busy: a role with an API model starts on
+why?}}` from the cached catalog: `key` `stored`, `ollama`, `env`, `oauth` or `none`, with the why for any but
+stored; Ollama's, `ollama` with `signed in through Ollama: its cloud models need no key here`, #1077,
+which the Settings tab counts connected as it does `stored`). While busy is `api` the show adds `When the GPU is busy: a role with an API model starts on
 it (wb route busy wait: queue instead)`.
 The changes (each one exit 3 with one line when refused, writing nothing):
 - `wb route <role> gpu|api` flips the selector; `api` with no API model kept: `<role> has no API

@@ -28332,7 +28332,11 @@ class ApiDiscovery(Base):
         out = io.StringIO()
         with redirect_stdout(out):
             cli.main(["route", "--json"])
-        self.assertNotIn("can't run", json.loads(out.getvalue())["providers"]["ollama"]["why"])
+        prov = json.loads(out.getvalue())["providers"]["ollama"]
+        self.assertNotIn("can't run", prov["why"])
+        # the Settings tab counts `ollama` connected as it does `stored`: with `none` it said only
+        # /connect, no fix for an Ollama-cloud-only user (#1077's review, 2026-11-23)
+        self.assertEqual(prov["key"], "ollama")
 
     def test_a_lan_server_not_opted_in_gets_its_local_true_hint_from_setup_and_route_never_connect(self):
         # #1109: wb setup said nothing of it, and wb route told the user to /connect a key, twice,

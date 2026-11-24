@@ -3052,7 +3052,8 @@ async function roleRows(kit: Row, $: any, view: WbPane, role: PaneRoles) {
       </Box>)
   }
   gpu.push(...mediaRows(kit, $, view, m)) // Images and Audio, after the models (#1047)
-  const stored = Object.values(r.providers ?? {}).some(p => p.key === 'stored')
+  // Ollama cloud's login runs tasks as a stored key does: NO_PROVIDER's /connect was no fix for it (#1077's review, 2026-11-23)
+  const stored = Object.values(r.providers ?? {}).some(p => p.key === 'stored' || p.key === 'ollama')
   const anyApi = roles.some(x => !!x.row.api)
   const api: any[] = []
   if (!stored && !anyApi) api.push(dim('api-none', NO_PROVIDER))
