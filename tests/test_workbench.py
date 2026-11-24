@@ -32196,6 +32196,36 @@ class Routes(Base):
                          "trivial: API model deepseek/deepseek-flash → anthropic/claude-haiku-5-5 (Anthropic), "
                          "used from the next start")
 
+    def test_under_agents_api_a_roles_new_api_model_is_said_as_the_next_starts_and_only_its_move_as_held(self):
+        # #1236 (2026-11-24): `wb route trivial <id>`, the form the skill prescribes, said the
+        # whole change waited for Agents on Both, but the role's next start ran on the new model
+        held = "Agents is API, so the move of trivial to API applies once Agents is Both (wb route all both)"
+        self.path.write_text(json.dumps({"v": 1, "day_usd": 5, "use": "api", "roles": {r: {
+            "via": "gpu", "api": "deepseek/deepseek-flash"} for r in routes.ROLES}}))
+        asked = self.dry("trivial", "deepseek/deepseek-v4-pro")
+        self.assertEqual((asked["change"], asked["gate"]), (
+            "trivial: API model deepseek/deepseek-flash → deepseek/deepseek-v4-pro (DeepSeek), used from the "
+            f"next start · GPU → API deepseek/deepseek-v4-pro; {held}", True))
+        self.assertEqual(self.route("trivial", "deepseek/deepseek-v4-pro")[0], 0)
+        m, _, _, routed = routes.resolve("trivial", "trivial", None)
+        self.assertEqual((m.id, routed["via"]), ("deepseek/deepseek-v4-pro", "api"))   # as the line said
+        # the same model, moved: nothing changes until Both
+        self.assertEqual(self.dry("significant", "api")["change"],
+                         "significant: GPU → API deepseek/deepseek-flash; Agents is API, so the move of significant "
+                         "to API applies once Agents is Both (wb route all both)")
+        # a role already on API given a new model: all of it now, nothing held
+        self.assertEqual(self.dry("trivial", "deepseek/deepseek-flash")["change"],
+                         "trivial: API deepseek/deepseek-v4-pro → API deepseek/deepseek-flash · your code goes to "
+                         "DeepSeek · thinking off · cap $5/day")
+        # several roles in one change: the same, the moves named
+        self.assertEqual(routes.change_pairs(routes.read(), [("significant", "api", "deepseek/deepseek-v4-pro"),
+                                                             ("trivial", "gpu", None)]).line,
+                         "significant: API model deepseek/deepseek-flash → deepseek/deepseek-v4-pro (deepseek), used "
+                         "from the next start · GPU → API deepseek/deepseek-v4-pro · trivial: API "
+                         "deepseek/deepseek-v4-pro → GPU · your code goes to deepseek · thinking off · cap $5/day · "
+                         "Agents is API, so the moves of significant to API, trivial to the GPU apply once Agents is "
+                         "Both (wb route all both)")
+
     def test_thinking_turned_on_while_a_roles_api_side_is_dormant_is_named_by_the_yes_that_sends_it_there(self):
         # #1177 (2026-11-24): thinking on a GPU role (an API model kept, or none yet) needs no
         # dialog, but the later yes to Agents API, busy api or a new API model never said it, so

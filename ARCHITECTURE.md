@@ -4126,8 +4126,15 @@ writing has no API model and can't start; your code goes to DeepSeek (trivial); 
 Both → GPU (every role on the GPU; an API task already started stops before its next round; each role's
 own choice is kept for Both)` (`routes.AGENTS_STOPS`, #1213), `Agents: GPU → Both (each
 role as set: …; your code goes to …)`; it takes the yes going to API, or to Both when that puts a role
-back on its API model (from GPU; from API it sends nothing new), never going to GPU. A role's own change the switch holds over adds `Agents is GPU, so this
-applies once Agents is Both (wb route all both)`. The first role newly on API by any of these with no
+back on its API model (from GPU; from API it sends nothing new), never going to GPU. A role's own change the switch holds over adds a clause (`routes._held`,
+`change` and `change_pairs` alike): Agents on GPU holds all of it, `Agents is GPU, so this applies once
+Agents is Both (wb route all both)`; Agents on API only a role's move between GPU and API, since its
+next start runs on its API model already, so the part is said as if the role kept its side (`API model
+<old> → <new> (<provider>), used from the next start`, thinking, backends), then the move, `GPU → API
+<id>`, and `Agents is API, so the move of trivial to API applies once Agents is Both (wb route all
+both)` (several: `the moves of significant to API, trivial to the GPU apply`); a role already on API
+given a new model has nothing held (#1236, 2026-11-24: the whole change was said to wait for Both, and
+the role's next start ran on the new model). The first role newly on API by any of these with no
 cap: `NO_CAP`.
 **Several roles in one change** (#1024, the first run's one question): `wb route <role> <choice>
 <role> <choice>… [--day-usd N]` (`cli._route_pairs`, the `more` positionals; a choice is `gpu`, `api`

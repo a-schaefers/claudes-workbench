@@ -298,6 +298,13 @@ def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str],
     where it actually goes: with Agents on API, or the busy opt-in on, a role whose own `via` is
     gpu still runs on its API model, and thinking turned on there billed reasoning tokens with no
     dialog (#1149, 2026-11-24)."""
+    if new.get("use") == "api" and old["via"] != row["via"]:
+        # Agents on API holds over only the role's own side (#1016): its API model, thinking and
+        # backends are what its next start runs on, so they are said as if the role kept its side,
+        # and the side as held (_held's `the move of ...`). Said as one held move, a new model
+        # read as waiting for Both while the next start spent on it (#1236, 2026-11-24)
+        clauses, _ = _role_part(r, old, {**row, "via": old["via"]}, cap, who, new)
+        return [*clauses, f"{_side(old)} → {_side(row)}"], True
     clauses, gated = [], False
     on_api = row["via"] == "api"
     after = {**new, "roles": {**new["roles"], r: row}}
@@ -372,6 +379,22 @@ def _agents_part(doc: dict, new: dict, cap, who: Callable[[str], str]) -> tuple[
     return f"Agents: {USE_NAMES[was]} → {USE_NAMES[use]} ({'; '.join(what)})", gated, moved
 
 
+def _held(doc: dict, new: dict, roles: list, chose: bool) -> str:
+    """What the Agents switch holds over of ``roles``' own change, '' for none; ``chose``: the
+    change set a side or an API model. Agents on GPU holds all of it (a role's API side is
+    dormant there); Agents on API only the roles' moves between GPU and API, as their next start
+    runs on their API model already (#1236, 2026-11-24)."""
+    use = new.get("use", "both")
+    if use == "gpu" and roles and chose:
+        return "Agents is GPU, so this applies once Agents is Both (wb route all both)"
+    moved = [r for r in roles if doc["roles"][r]["via"] != new["roles"][r]["via"]] if use == "api" else []
+    if not moved:
+        return ""
+    to = ", ".join(f"{r} to {'API' if new['roles'][r]['via'] == 'api' else 'the GPU'}" for r in moved)
+    return (f"Agents is API, so the move{'s' if len(moved) > 1 else ''} of {to} "
+            f"appl{'y' if len(moved) > 1 else 'ies'} once Agents is Both (wb route all both)")
+
+
 def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None = None,
            api: str | None = None, thinking: str | None = None, day_usd=None,
            who: Callable[[str], str] = lambda mid: mid.split("/", 1)[0], use: str | None = None,
@@ -420,11 +443,8 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
         gated |= g
         changed.append(r)
         new["roles"][r] = row  # its stamps kept: stamp() renews the side this change touched
-    held = new["use"]
-    if changed and role != "all" and held != "both" and (
-            via is not None or held == "gpu" and api is not None):
-        # the role's own choice, which the Agents switch holds over for now: never read as moved
-        parts.append(f"Agents is {USE_NAMES[held]}, so this applies once Agents is Both (wb route all both)")
+    if changed and role != "all" and (held := _held(doc, new, changed, via is not None or api is not None)):
+        parts.append(held)  # the role's own choice, which the Agents switch holds over for now
     agents, g, moved = _agents_part(doc, new, cap, who)
     if agents:
         parts.insert(0, agents)
@@ -504,8 +524,8 @@ def change_pairs(doc: dict, pairs: list, day_usd=None,
             parts.append(f"cap {money(cap)}/day")
     if cap != doc["day_usd"] and (doc["day_usd"] is not None or not sent):
         parts.append(f"day cap {money(doc['day_usd']) if doc['day_usd'] is not None else 'none'} → {money(cap)}/day")
-    if roles and new.get("use", "both") != "both":
-        parts.append(f"Agents is {USE_NAMES[new['use']]}, so this applies once Agents is Both (wb route all both)")
+    if held := _held(doc, new, roles, True):
+        parts.append(held)
     return Change(new, " · ".join(parts), gated, roles)
 
 
