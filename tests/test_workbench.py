@@ -8724,6 +8724,38 @@ class GitGuard(unittest.TestCase):
                 self.assertIn("read-only", shim(*argv, **e).stderr, argv)
             self.assertNotIn("name = x", (repo / ".git" / "config").read_text())
 
+    def test_the_shim_refuses_a_global_config_write_to_the_users_own_gitconfig(self):
+        # #1120 (2026-11-23): without a lane (macOS) `git config --global user.name "Test Bot"`
+        # exited 0 and rewrote the user's ~/.gitconfig; a fixture's temp HOME still writes (#794)
+        from workbench import gitguard
+        with tempfile.TemporaryDirectory() as d:
+            d, repo = Path(os.path.realpath(d)), Path(os.path.realpath(d)) / "repo"
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            home, fixture = d / "home", d / "fixture-home"
+            home.mkdir()
+            fixture.mkdir()
+            (home / ".gitconfig").write_text("[user]\n\tname = Real User\n")
+            env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG")}
+            env.update(HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"))
+            with mock.patch.dict(os.environ, env, clear=True):   # the user's, at install
+                env.update(gitguard.install(d / "bin", repo, ROOT, os.environ["PATH"], repo))
+            shim = lambda *a, **e: subprocess.run([str(d / "bin" / "git"), *a], cwd=repo,  # noqa
+                                                  env={**env, **e}, capture_output=True, text=True)
+            for argv in (("config", "--global", "user.name", "Test Bot"),
+                         ("config", "--global", "--add", "safe.directory", "*"),
+                         ("config", "-f", str(home / ".gitconfig"), "user.name", "Test Bot")):
+                out = shim(*argv)
+                self.assertEqual(out.returncode, 1, argv)
+                self.assertIn("read-only", out.stderr, argv)
+            self.assertEqual((home / ".gitconfig").read_text(), "[user]\n\tname = Real User\n")
+            self.assertFalse((home / ".config" / "git" / "config").exists())
+            out = shim("config", "--global", "user.name")                    # a read
+            self.assertEqual((out.returncode, out.stdout), (0, "Real User\n"), out.stderr)
+            out = shim("config", "--global", "user.name", "t", HOME=str(fixture),
+                       XDG_CONFIG_HOME=str(fixture / ".config"))            # a fixture's own
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("name = t", (fixture / ".gitconfig").read_text())
+
     def test_protected_repositories(self):
         from workbench import gitguard
         with tempfile.TemporaryDirectory() as d:

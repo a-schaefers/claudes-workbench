@@ -150,7 +150,8 @@ def config_files(rest: list[str], opts: list[str]) -> list[str] | None:
     or None when it writes the repository's own config. Decided by the cwd's repository, a
     fixture's `git config --global user.name t` with HOME pointed at its temp directory, run
     from the worktree, was refused, and the base check and every round failed on it (#794, the
-    second 2026-11-21 audit); the lane keeps the real ~/.gitconfig and /etc out of reach."""
+    second 2026-11-21 audit). The user's own (user_configs) main refuses: only the lane kept
+    them out of reach, and without one (macOS) the agent rewrote ~/.gitconfig (#1120)."""
     env, where = os.environ, _where(opts)
     for i, a in enumerate(rest):
         name, eq, value = a.partition("=")
@@ -169,6 +170,19 @@ def config_files(rest: list[str], opts: list[str]) -> list[str] | None:
         value = value if eq else (rest[i + 1] if i + 1 < len(rest) else "")
         return [os.path.join(where, value)]
     return None
+
+
+def user_configs(env=None) -> list[str]:
+    """The user's own global and system git config files, real paths, as the environment at
+    install names them (HOME's .gitconfig, XDG_CONFIG_HOME's git/config, GIT_CONFIG_GLOBAL,
+    GIT_CONFIG_SYSTEM, else /etc/gitconfig): a `git config --global` the shim lets through with
+    HOME at a fixture's temp directory writes elsewhere (#794), one to these never (#1120)."""
+    env = os.environ if env is None else env
+    home = env.get("HOME") or os.path.expanduser("~")
+    xdg = env.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    files = [os.path.join(home, ".gitconfig"), os.path.join(xdg, "git", "config"),
+             env.get("GIT_CONFIG_GLOBAL"), env.get("GIT_CONFIG_SYSTEM") or "/etc/gitconfig"]
+    return sorted({os.path.realpath(f) for f in files if f and os.path.isabs(f)})
 
 
 def _temp_roots(temps=()) -> list[str]:
@@ -326,12 +340,13 @@ with ask_reviewer or in your summary.
 """
 
 
-def main(real: str, task_git: str, args: list[str], temps=(), lanes=(), pins=()) -> int:
+def main(real: str, task_git: str, args: list[str], temps=(), lanes=(), pins=(), owns=()) -> int:
     """``lanes``: the worktree and the lane's tool homes, where a repository other than the
     task's is writable (a test suite's own, a package manager's). ``pins``: the `-c` options
     that make git see the worktree's file system as wb's own calls do (gitops.fs_pins), given
     to a read in the task's repository only: forced on every git, a test suite's scratch repos
-    on other file systems would get them too (#796)."""
+    on other file systems would get them too (#796). ``owns``: the user's own git config files
+    (user_configs, at install), which no `git config` write reaches (#1120)."""
     opts, sub, rest = split(args)
     if reads(sub, rest):
         pre = list(pins) if pins and common_dir(real, opts) == os.path.realpath(task_git) else []
@@ -343,9 +358,12 @@ def main(real: str, task_git: str, args: list[str], temps=(), lanes=(), pins=())
         return code
     if sub == "config" and (files := config_files(rest, opts)) is not None:
         # a file of its own: refused only where it is the task's repository's (#794)
-        # or a `.git` link, whose rewrite would point the worktree at a git dir of its own
+        # or a `.git` link, whose rewrite would point the worktree at a git dir of its own, or
+        # the user's own ~/.gitconfig or /etc/gitconfig: without a lane (macOS) `git config
+        # --global user.name "Test Bot"` rewrote the user's identity (#1120, 2026-11-23)
         if not any(_inside(os.path.realpath(f), [os.path.realpath(task_git)])
-                   or os.path.basename(os.path.realpath(f)) == ".git" for f in files):
+                   or os.path.basename(os.path.realpath(f)) == ".git"
+                   or os.path.realpath(f) in owns for f in files):
             os.execv(real, [real, *args])
         sys.stderr.write(REFUSAL.format(sub=sub))
         return 1
@@ -387,7 +405,7 @@ def install(bin_dir: Path, task_repo: Path, pkg_root: Path, path: str,
             "from workbench.gitguard import main\n"
             f"sys.exit(main({real!r}, {repo_dir!r}, sys.argv[1:], "
             f"{sorted({tempfile.gettempdir(), '/tmp', '/var/tmp'})!r}, "
-            f"{lanes!r}, {list(pins)!r}))\n")
+            f"{lanes!r}, {list(pins)!r}, {user_configs()!r}))\n")
     shim.write_text("#!/bin/sh\n"
                     "# workbench: git is read-only for the agent (see workbench/gitguard.py)\n"
                     f"exec {shlex.quote(sys.executable)} -I -c {shlex.quote(code)} \"$@\"\n")
