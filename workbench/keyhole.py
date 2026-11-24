@@ -198,9 +198,25 @@ def _signs(provider: str, package: str = "") -> bool:
     return any(s in f"{provider} {package}" for s in ("amazon-bedrock", "google-vertex", "bedrock"))
 
 
-def _configured_key(provider: str) -> str | None:
-    """Where the user's OpenCode config gives ``provider`` an apiKey the agent could read: a file,
-    or OPENCODE_CONFIG_CONTENT (the agent's environment). "env:<VAR>" for a `{env:VAR}` key."""
+def _lone_env(prov) -> tuple[str, str]:
+    """(where, VAR) of a provider-level `options.apiKey` that is only `{env:VAR}`, else ("", "").
+    The layer's overlay replaces it with the token and it names no secret, and OpenCode 2.3.2
+    sends a stored /connect key over it (checked, 2026-11-23): with a key stored too it refused,
+    telling the user to /connect again (#1075). Only V1 `options`, as checked: a V2 `settings`
+    one still refuses."""
+    for where in ("options",):
+        opts = prov.get(where) if isinstance(prov, dict) else None
+        raw = opts.get("apiKey") if isinstance(opts, dict) else None
+        if isinstance(raw, str) and (lone := re.fullmatch(r"\s*\{env:([^}]+)\}\s*", raw)):
+            return where, lone.group(1).strip()
+    return "", ""
+
+
+def _configured_key(provider: str) -> tuple[str | None, str]:
+    """(where the user's OpenCode config gives ``provider`` an apiKey the agent could read: a
+    file, or OPENCODE_CONFIG_CONTENT (the agent's environment), "env:<VAR>" for a `{env:VAR}` one
+    elsewhere (a header could replace the token); VAR of a lone provider-level `{env:VAR}` apiKey,
+    which a stored key may stand beside, _lone_env)."""
     from . import models
     try:
         layers = [(str(p), layer) for p, layer in models._layers()]
@@ -211,19 +227,23 @@ def _configured_key(provider: str) -> str | None:
             layers.append((models.CONTENT, json.loads(models._strip_jsonc(raw))))
         except ValueError:
             pass
-    found = None
+    found, env_var = None, ""
     for name, layer in layers:
         layer = layer if isinstance(layer, dict) else {}
         # both forms, V1 `provider` and V2 `providers`, and the whole entry: a model's own
         # options, headers, V2 settings and variants carry a key as well as the provider's, and
         # OpenCode 2.3.2 sends a model's over its provider's (v1/config/migrate.ts migrateModel;
         # the review of #1015, 2026-11-23)
-        for prov in (layer.get(form, {}).get(provider) if isinstance(layer.get(form), dict) else None
-                     for form in ("provider", "providers")):
+        for form in ("provider", "providers"):
+            prov = layer[form].get(provider) if isinstance(layer.get(form), dict) else None
+            where, var = _lone_env(prov) if form == "provider" else ("", "")
+            if where:
+                env_var = var
+                prov = {**prov, where: {k: v for k, v in prov[where].items() if k != "apiKey"}}
             for val in _keys_in(prov):
                 env = re.search(r"\{env:([^}]+)\}", val)
                 found = f"env:{env.group(1)}" if env else name
-    return found
+    return found, env_var
 
 
 def _keys_in(entry) -> list[str]:
@@ -273,13 +293,17 @@ def load_key(provider: str, package: str = "") -> Key:
     a key only in the environment, or one written where the agent can read it."""
     if _signs(provider, package):
         raise KeyholeError(f"{NEEDS}: {provider} signs each request (SigV4 or Vertex)")
-    if where := _configured_key(provider):
+    where, env_var = _configured_key(provider)
+    if where:
         if where.startswith("env:"):
             raise KeyholeError(f"{NEEDS}: {provider}'s key is only in the environment "
                                f"(${where[4:]}), which agents don't get")
         raise KeyholeError(f"{NEEDS}: its key is written in {where}, which agents can read: "
                            "store it with /connect instead")
     r = _opencode("auth", "export", provider)
+    if r.returncode != 0 and env_var:  # no stored key beside it (OpenCode's "not found"): say why
+        raise KeyholeError(f"{NEEDS}: {provider}'s key is only in the environment (${env_var}), "
+                           "which agents don't get")
     if r.returncode != 0:
         raise KeyholeError(f"can't read {provider}'s key: opencode auth export exited "
                            f"{r.returncode}: {_first_line(r.stderr) or 'no message'}")
@@ -303,7 +327,7 @@ def load_key(provider: str, package: str = "") -> Key:
         raise KeyholeError(f"{NEEDS}: {provider} is signed in with OAuth, whose tokens rotate")
     if "external" in kinds:
         raise KeyholeError(f"{NEEDS}: {provider}'s credential comes from an external source")
-    if var := _env_only(provider):
+    if var := env_var or _env_only(provider):
         raise KeyholeError(f"{NEEDS}: {provider}'s key is only in the environment (${var}), "
                            "which agents don't get")
     raise KeyholeError(f"{NEEDS}: OpenCode has no key stored for {provider}")

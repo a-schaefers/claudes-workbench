@@ -26382,6 +26382,27 @@ class Keyhole(_KeyholeTest):
             self.assert_no_canary(str(e.exception))
         self.assertEqual(self.kh_mod.load_key("plain").value, self.CANARY)
 
+    def test_a_stored_key_beside_an_env_apikey_is_the_one_the_keyhole_holds(self):
+        # #1075: a lone `{env:VAR}` options.apiKey, as OpenCode's docs write it, refused before
+        # `auth export` though a key was stored: OpenCode sends the stored one over it, and the
+        # layer's overlay replaces the reference with the token
+        self.fake_auth({"envstored": {"export": [self.key_row("envstored", {"type": "key", "key": self.CANARY})]},
+                        "envonly": {}, "envv2": {"export": [self.key_row("envv2", {"type": "key", "key": self.CANARY})]}})
+        path = Path(os.environ["WB_OPENCODE_CONFIG"])
+        conf = json.loads(path.read_text())
+        conf.setdefault("provider", {}).update({
+            "envstored": {"options": {"apiKey": "{env:ENVSTORED_KEY}"}},
+            "envonly": {"options": {"apiKey": "{env:ENVONLY_KEY}"}}})
+        conf["providers"] = {"envv2": {"settings": {"apiKey": "{env:ENVV2_KEY}"}}}  # not checked: still refused
+        path.write_text(json.dumps(conf))
+        self.assertEqual(self.kh_mod.load_key("envstored").value, self.CANARY)
+        for provider, why in (("envonly", "envonly's key is only in the environment ($ENVONLY_KEY)"),
+                              ("envv2", "envv2's key is only in the environment ($ENVV2_KEY)")):
+            with self.assertRaises(self.kh_mod.KeyholeError) as e:
+                self.kh_mod.load_key(provider)
+            self.assertIn(why, str(e.exception))
+            self.assert_no_canary(str(e.exception))
+
     def test_a_key_in_a_models_own_entry_or_the_v2_form_cant_run(self):
         # the review of #1015 (2026-11-23): only provider.<pid>.options was read, so a model's
         # own options.apiKey or headers (OpenCode 2.3.2 sends a model's over its provider's), a
@@ -28254,6 +28275,30 @@ class ApiDiscovery(Base):
         self.assertIn("(XEnv's is from the environment, XENV_API_KEY)", said["xenv/grok-9"]["why"])
         self.assertIn(f"(literal's is written in {os.environ['WB_OPENCODE_CONFIG']})", said["literal/model-a"]["why"])
         self.assertNotIn("not-a-real-key", json.dumps(said) + (store.home() / "hosted.json").read_text())
+
+    def test_an_env_apikey_beside_a_stored_key_runs_and_a_written_one_says_to_remove_it(self):
+        # #1075: OpenCode's documented `options.apiKey: "{env:ACME_API_KEY}"` beside a key stored
+        # with /connect read as the environment's: "store an API key with /connect", which the
+        # user had done, and wb refused on and on. OpenCode 2.3.2 sends the stored key over it
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"]["acme"] = {"options": {"apiKey": "{env:ACME_API_KEY}"}}
+        cfg["provider"]["xenv"] = {"options": {"apiKey": "{env:XENV_API_KEY}"}}   # no key stored
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        os.environ.pop("ACME_API_KEY", None)
+        found = self.models.hosted(fresh=True)
+        self.assertEqual((found["acme/coder-flash"].key, found["xenv/grok-9"].key), ("stored", "env:XENV_API_KEY"))
+        self.assertEqual(self.models.status(found["acme/coder-flash"])["why"], "API (Acme)")
+        with mock.patch.dict(os.environ, {"ACME_API_KEY": "set-but-not-sent"}):   # stored still wins
+            self.assertEqual(self.models.hosted(fresh=True)["acme/coder-flash"].key, "stored")
+        # a key written in the file: removing it is the fix, not /connect alone
+        self.catalog(DISCOVERY_CATALOG, [*DISCOVERY_AUTH, key_row("literal", "Literal", STORED)])
+        m = self.models.hosted(fresh=True)["literal/model-a"]
+        st = self.models.status(m)
+        self.assertEqual((m.key, st["available"]), ("config", False))
+        self.assertTrue(st["why"].endswith(f"(Literal's is written in {os.environ['WB_OPENCODE_CONFIG']}): remove "
+                                           "its apiKey there, and store the key with /connect"), st["why"])
+        self.assertEqual(self.models.remedy(m, st), f"remove options.apiKey for Literal from "
+                         f"{os.environ['WB_OPENCODE_CONFIG']}, and store the key with /connect in OpenCode")
 
     def test_the_catalog_is_read_once_per_ttl(self):
         self.models.hosted()

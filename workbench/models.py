@@ -1097,8 +1097,12 @@ def _config_key(prov: dict) -> str:
 
 
 def _key_source(pid: str, auth: dict, prov: dict | None) -> str:
-    """Where an API provider's key comes from (Model.key): a config apiKey first (OpenCode's
-    layer wins over a stored one), then what `auth list` says, a stored key before a login or an
+    """Where an API provider's key comes from (Model.key): a config apiKey first (a literal or
+    `{file:}` one is in a file the agent can read), except a lone `{env:NAME}` in `options` beside
+    a stored key, which is "stored" (#1075: OpenCode 2.3.2 sends the stored key over any config
+    apiKey, checked 2026-11-23, the layer replaces the reference with the token, and it names no
+    secret; read as the environment's, it refused and said to /connect again, which changed
+    nothing); then what `auth list` says, a stored key before a login or an
     environment variable; else "". A signing provider is "signing" whatever it holds. A provider's,
     never a model's: a keyless free model's "none" is its own (_api_model), as one provider holds
     free and paid models alike, and the first model seen made every sibling "none" (#1013's
@@ -1107,7 +1111,10 @@ def _key_source(pid: str, auth: dict, prov: dict | None) -> str:
     (runner.SECRET_ENV)."""
     conns = (auth.get(pid) or {}).get("connections") or []
     source = _config_key(prov or {})
-    if not source and any(c.get("type") == "credential" and c.get("method") == "key" for c in conns):
+    stored = any(c.get("type") == "credential" and c.get("method") == "key" for c in conns)
+    if source.startswith("env:") and stored and _config_key({"options": (prov or {}).get("options")}) == source:
+        source = ""  # the keyhole's _lone_env: only V1 options, as checked
+    if not source and stored:
         source = "stored"
     if not source and any(c.get("type") == "credential" for c in conns):
         source = "oauth"
@@ -1613,8 +1620,10 @@ def _api_status(m: Model, down=frozenset()) -> dict:
                 "a cloud login that signs each request" if key == "signing" else
                 f"written in {_key_file(m.provider)}" if key == "config" else
                 f"from the environment, {key[4:]}")
-        return _no(f"can't run: needs a key wb can hold outside the lane ({who}'s is {held}): "
-                   "store an API key with /connect")
+        # a key written in a file: /connect alone changed nothing while the apiKey stayed (#1075)
+        fix = "remove its apiKey there, and store the key with /connect" if key == "config" else \
+            "store an API key with /connect"
+        return _no(f"can't run: needs a key wb can hold outside the lane ({who}'s is {held}): {fix}")
     health = api_health(m.provider)
     if health and health["state"] == "no_credit":
         until = health.get("until")
@@ -1875,6 +1884,8 @@ def remedy(m: Model, state: dict) -> str:
         who = provider_name(m)
         if why.startswith("no key for "):
             return f"run /connect in OpenCode and add an API key for {who}"
+        if why.startswith("can't run: needs a key") and "remove its apiKey there" in why:
+            return f"remove options.apiKey for {who} from {_key_file(m.provider)}, and store the key with /connect in OpenCode"
         if why.startswith("can't run: needs a key"):
             return f"store an API key for {who} with /connect in OpenCode"
         if why.startswith("out of credit"):

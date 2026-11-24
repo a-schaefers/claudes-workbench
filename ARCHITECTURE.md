@@ -1650,7 +1650,10 @@ it, on `127.0.0.1:0` (never `localhost`, which may be `::1` first). It refuses
 an API key with /connect in OpenCode") an OAuth login (its tokens rotate: a copy refreshed would log
 the user out), an external credential, request signing (SigV4, Vertex: a header swap can't work),
 a key only in the environment (`{env:VAR}`, or `auth list` naming a variable: `SECRET_ENV` drops it
-from the agent anyway), and a key written in the user's `opencode.json` or `OPENCODE_CONFIG_CONTENT`
+from the agent anyway; a lone `{env:VAR}` V1 `options.apiKey` beside a stored key is no refusal,
+`_lone_env`: OpenCode 2.3.2 sends the stored key over any config apiKey, checked 2026-11-23, and the
+overlay replaces the reference, so `auth export` is read and only with no key stored does it say
+`$VAR`, #1075; in a header or a V2 `settings` it still refuses), and a key written in the user's `opencode.json` or `OPENCODE_CONFIG_CONTENT`
 anywhere in the provider's entry, V1 `provider.<pid>` or V2 `providers.<pid>` (`_keys_in`: the
 provider's, a model's own, a V2 `settings`, a variant's), as an `apiKey` or as a header (any
 `headers`: a name with `auth`, `key` or `token` in it, or a value shaped like a key or `Bearer …`)
@@ -2706,8 +2709,9 @@ read as a wrong id, Claude hunted for the "right" one).
   `capabilities`, `tool_call` from `capabilities.tools`, `reasoning`, `family`, `status`; values
   unchanged, a field of the wrong shape dropped; never `settings`, where 2.3.2 prints the key it
   holds for a layer or a free model, `settings.apiKey`), `free` (`opencode/*-free`, or every price 0; only marked here). `key`, the source
-  (never the key): a config `apiKey` first (`env:<NAME>` for a lone `{env:NAME}`, else `config`),
-  then auth list's `credential` with `method: "key"` (`stored`), another credential (`oauth`), an
+  (never the key): a config `apiKey` first (`env:<NAME>` for a lone `{env:NAME}`, else `config`;
+  a lone `{env:NAME}` in `options` beside a stored key is `stored`, #1075: OpenCode sends the stored
+  one, and read as `env:` it was told to `/connect` again, which changed nothing), then auth list's `credential` with `method: "key"` (`stored`), another credential (`oauth`), an
   `env` connection (`env:<NAME>`); a signing provider (`SIGNING`: Bedrock, Vertex) is `signing`;
   `ollama`; else `""` (`_key_source`, the provider's); a keyless free model is `none`, its own: a
   provider holds free and paid models alike, and one source per provider made every sibling `none`.
@@ -2759,7 +2763,7 @@ read as a wrong id, Claude hunted for the "right" one).
   |---|---|---|
   | no key (`key == ""`) | `no key for <Provider>: run /connect in OpenCode and add it` | no |
   | a package the keyhole can't carry (`keyhole_refusal`, before the key, #1066) | `can't run: the keyhole doesn't speak <Provider>'s API (<package>), so wb can't hold its key outside the lane: a model of another provider can run` | no |
-  | `oauth`, `env:NAME`, `config`, `signing` | `can't run: needs a key wb can hold outside the lane (<Provider>'s is an OAuth login / from the environment, NAME / written in <file> / a cloud login that signs each request): store an API key with /connect` | no |
+  | `oauth`, `env:NAME`, `config`, `signing` | `can't run: needs a key wb can hold outside the lane (<Provider>'s is an OAuth login / from the environment, NAME / written in <file> / a cloud login that signs each request): store an API key with /connect` (`config`: `remove its apiKey there, and store the key with /connect`, remedy `remove options.apiKey for <Provider> from <file>, …`, #1075: `/connect` alone changed nothing) | no |
   | `no_credit` | `out of credit or quota at <Provider> (<line, redacted>): top it up, or wait for the plan's reset (wb asks again from HH:MM); wb never switches models` | no |
   | `rate_limited` | `rate-limited by <Provider> until HH:MM` | yes |
   | `unreachable` | `can't reach <host> (<reason>)` | yes |
