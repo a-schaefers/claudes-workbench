@@ -5065,9 +5065,10 @@ Claude's last row to the user before it (`answersTo`, from `messages.jsonl`'s la
 `claudeRows`, read once a poll and only for a user's message), which names its session (`session`,
 `claude_pid`, `claude_start`, `claude_machine`: `cli._chat_writer`, as task.json has them). That session
 (in `mem.ids`) takes it, listening or standing by; the listener leaves it to another live session for
-`HANDOFF_MS` 30 s (its process judged by `noteClaude`, `mem.deadPids`), then, or at once when that
-process is gone, takes it itself with `ELSEWHERE_NOTE` after `[web chat] `: it follows another session's
-message; leave that session's task to it and tell the user to answer at its terminal. A row without a
+`HANDOFF_MS` 30 s (its process judged by `noteClaude`, `mem.deadPids`), then takes it itself with
+`ELSEWHERE_NOTE` after `[web chat] `: it follows another session's message; leave that session's task to
+it and tell the user to answer at its terminal. When that process is gone the listener takes it at once
+and plain: its nearby tasks are the listener's own now (`mine`), and its terminal is gone. A row without a
 session (a terminal's reply, an older wb) and an agent's message are the listener's, as before; with
 one listener for all, the answer to session B's report reached A, which the skill tells to leave B's
 tasks alone. An expired message (claim refuses it) isn't tried again this load

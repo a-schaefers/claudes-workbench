@@ -3612,8 +3612,11 @@ async function listen($: any, now: number) {
     // to session B's report reached A, which the skill tells to leave B's tasks alone, and B's
     // task waited for the terminal. The page has no reply-to, so it answers Claude's last row to
     // the user before it, which `wb chat reply` stamps with its session: that session takes it,
-    // listening or not. Its process gone, or no taker within HANDOFF_MS, the listener does,
-    // saying whose it followed.
+    // listening or not. No taker within HANDOFF_MS, the listener does, saying whose it followed;
+    // its process gone, the listener takes it at once and plain: that session's nearby tasks are
+    // this one's now (mine), and its terminal is gone, so the note sent the user to a terminal
+    // that no longer exists, on the first message after any fresh `claude` start (review of
+    // #1096, 2026-11-23).
     let elsewhereNote = ''
     if (m.from !== 'user') {
       if (standby) continue // an agent's message is the listener's
@@ -3624,8 +3627,10 @@ async function listen($: any, now: number) {
       if (standby && !ours) continue
       if (!standby && to && !ours) {
         await noteClaude($, to, now)
-        if (!mem.deadPids.has(pidKey(to)) && now - Number(m.ts ?? 0) * 1000 < HANDOFF_MS) continue // its session's to take
-        elsewhereNote = ELSEWHERE_NOTE
+        if (!mem.deadPids.has(pidKey(to))) {
+          if (now - Number(m.ts ?? 0) * 1000 < HANDOFF_MS) continue // its session's to take
+          elsewhereNote = ELSEWHERE_NOTE
+        }
       }
     }
     // Claimed under wb's lock: two sessions starting together both took the chat and both

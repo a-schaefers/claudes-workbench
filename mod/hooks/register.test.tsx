@@ -2207,7 +2207,7 @@ test('#1096: the user\'s answer to a session\'s row in the web chat goes to that
   expect(asked).toHaveLength(1)
 })
 
-test('#1096: the listener leaves an answer to another live session\'s row to it, and takes it, saying whose, once it isn\'t taken', async ($, on) => {
+test('#1096: the listener leaves an answer to another live session\'s row to it, takes it saying whose once it isn\'t taken, and an ended session\'s at once and plain', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
@@ -2237,13 +2237,13 @@ test('#1096: the listener leaves an answer to another live session\'s row to it,
   await clock.advance(30_000)                                                  // B never did
   expect(asked).toHaveLength(1)
   expect(asked[0]).toMatch(/^\[web chat\] \(This follows another Claude Code session's message in the chat, one that session didn't take: .*\) yes, accept it$/)
-  // a session whose process is gone: taken at once, saying so too
+  // a session whose process is gone: taken at once, and plain (the review of #1096, 2026-11-23:
+  // the note sent the user to a terminal that no longer exists, after any fresh `claude` start)
   delete files['/proc/778/stat']
   row({ id: 'r2', ts: 1_800_000_040, from: 'claude', text: 'fix-c: which name?', to: ['user'], session: 'sess-c', claude_pid: 780 })
   files['/wb/chat/open.json'] = JSON.stringify({ asks: {}, messages: { m2: { id: 'm2', ts: 1_800_000_041, from: 'user', text: 'parse_all' } } })
-  await clock.advance(31_000)                                                  // the next poll
-  expect(asked.at(-1)).toContain('another Claude Code session\'s message')
-  expect(asked.at(-1)).toMatch(/parse_all$/)
+  await clock.advance(31_000)                                                  // the next turn's poll: 23 s after m2, inside HANDOFF_MS
+  expect(asked.at(-1)).toBe('[web chat] parse_all')
 })
 
 test('a web message another session claimed first is not submitted here', async ($, on) => {
