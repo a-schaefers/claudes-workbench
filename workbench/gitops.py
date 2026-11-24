@@ -1700,21 +1700,31 @@ def commit_all(worktree: Path, message: str, include: bool = False, sign: bool =
         git(worktree, *NO_HOOKS, "add", "-f", "--", *(":(literal)" + p for p in ignored))
     if not git(worktree, "diff", "--cached", "--name-only").strip():
         raise GitError("nothing to commit: the agent's worktree has no changes")
-    if not sign:  # --no-sign, at start or now: the task's commits go unsigned (#374)
-        git(worktree, *NO_HOOKS, "-c", "commit.gpgsign=false", "commit", "-q", "-m", message)
-    elif signs(worktree):  # no terminal, a time limit, and git's error said plainly (#374)
+    # --no-sign, at start or now: the task's commits go unsigned (#374)
+    commit(worktree, *NO_HOOKS, "commit", "-q", "-m", message, sign=sign)
+    return git(worktree, "rev-parse", "--short", "HEAD").strip()
+
+
+def commit(repo: Path, *args, sign: bool = True, env=None) -> None:
+    """`git <args>`, a commit in the user's repo: unsigned when not ``sign``, else signed as their
+    git says, with no terminal or display, detached, within COMMIT_SECS, and a failure said with
+    how to unlock (#374, #933), not git's raw error. wb init's commits went through plain git: a
+    key with a passphrase failed wb try at once with "incorrect passphrase supplied", and with a
+    terminal (WSL2) it waited on a prompt until Claude's Bash limit killed it (#1226)."""
+    if not sign:
+        git(repo, "-c", "commit.gpgsign=false", *args, env=env)
+    elif signs(repo):
         try:
-            r = _run(worktree, [*NO_HOOKS, "commit", "-q", "-m", message], NO_TERMINAL,
-                     check=False, timeout=COMMIT_SECS, detach=True)
+            r = _run(repo, args, {**NO_TERMINAL, **(env or {})}, check=False, timeout=COMMIT_SECS,
+                     detach=True)
         except GitError as e:  # no answer: a pinentry waiting on an unattended desktop
-            raise GitError(f"not committed: {_unlock(worktree)} ({e})") from None
+            raise GitError(f"not committed: {_unlock(repo)} ({e})") from None
         if r.returncode:
             said = (r.stderr or r.stdout).decode("utf-8", "replace").strip().splitlines()
-            raise GitError(f"not committed: {_unlock(worktree)} "
+            raise GitError(f"not committed: {_unlock(repo)} "
                            f"(git: {said[0] if said else r.returncode})")
     else:
-        git(worktree, *NO_HOOKS, "commit", "-q", "-m", message)
-    return git(worktree, "rev-parse", "--short", "HEAD").strip()
+        git(repo, *args, env=env)
 
 
 def put_on_branch(repo: Path, branch: str, commit: str, worktree: Path) -> None:

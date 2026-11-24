@@ -18238,6 +18238,34 @@ class Try(Base):
             self.assertIn("no user.name/user.email", err.getvalue())
         self.assertEqual(list(cli.try_dir().glob("*")) if cli.try_dir().exists() else [], [])
 
+    def test_wb_try_starts_an_unsigned_sample_whatever_key_the_users_git_signs_with(self):
+        # #1226 (bar loop round 4): wb init's first commit signed as the user's git said, with no
+        # terminal guard or time limit, so a passphrase SSH key failed wb try at once with git's
+        # raw error, a pinentry nobody answered hung it, and wb try had no --no-sign
+        cfg = Path(self.tmp.name) / "signing.gitconfig"
+        hang = Path(self.tmp.name) / "gpg-that-never-answers"
+        hang.write_text("#!/bin/sh\nexec sleep 20\n")
+        hang.chmod(0o755)
+        signers = [f"[gpg]\n\tprogram = {hang}\n"]
+        if shutil.which("ssh-keygen"):
+            key = Path(self.tmp.name) / "locked"
+            subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "a passphrase", "-f", str(key)],
+                           check=True)
+            signers.append(f"[gpg]\n\tformat = ssh\n[user]\n\tsigningkey = {key}\n")
+        os.environ.update(GIT_CONFIG_GLOBAL=str(cfg), GIT_CONFIG_NOSYSTEM="1", FAKE_SCENARIO="ok")
+        os.environ.pop("SSH_AUTH_SOCK", None)
+        for n, signer in enumerate(signers, 1):
+            cfg.write_text("[user]\n\temail = t@t\n\tname = t\n[commit]\n\tgpgsign = true\n" + signer)
+            t0 = time.monotonic()
+            out = run_wb("try", "--model", "mimo")
+            self.assertLess(time.monotonic() - t0, 15)                      # no prompt waited on
+            self.assertNotIn("needs unlocking", out)
+            self.assertIs(store.Task(f"try-{n}").spec["sign"], False)       # its accept too
+            body = gitops.git(cli.try_dir() / str(n), "cat-file", "commit", "HEAD")
+            self.assertNotIn("gpgsig", body)
+            wait_phase(f"try-{n}", {"review"})
+            run_wb("discard", f"try-{n}")
+
     def test_the_hidden_check_reports_a_sample_its_python_cannot_read(self):
         # #530: it caught only ImportError, so a SyntaxError crashed it with a traceback
         work = Path(self.tmp.name) / "unreadable"
@@ -21942,6 +21970,54 @@ class Projects(Base):
         (d / "AGENTS.md").write_text("# rules\n")
         self.assertIn("nothing to commit: CLAUDE.md is gitignored", run_wb("init", str(d)))
         self.assertEqual(self.git(d, "ls-files"), ".gitignore")
+
+    @unittest.skipUnless(shutil.which("ssh-keygen"), "needs ssh-keygen")
+    def test_init_with_a_key_that_needs_unlocking_says_how_at_once_and_no_sign_commits_unsigned(self):
+        # #1226 (bar loop round 4): wb init committed through plain git, so a passphrase key no
+        # agent held failed with git's raw "incorrect passphrase supplied", and with a terminal
+        # (WSL2) waited on a prompt until Claude's Bash limit killed it
+        key = Path(self.tmp.name) / "locked"
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "a passphrase", "-f", str(key)],
+                       check=True)
+        cfg = Path(self.tmp.name) / "signing.gitconfig"
+        cfg.write_text(f"[user]\n\temail = t@t\n\tname = t\n\tsigningkey = {key}\n"
+                       "[commit]\n\tgpgsign = true\n[gpg]\n\tformat = ssh\n")
+        os.environ.update(GIT_CONFIG_GLOBAL=str(cfg), GIT_CONFIG_NOSYSTEM="1")
+        os.environ.pop("SSH_AUTH_SOCK", None)
+        d = Path(self.tmp.name) / "init-signed"
+        t0 = time.monotonic()
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()) as err:
+            run_wb("init", str(d))
+        self.assertLess(time.monotonic() - t0, 30)
+        self.assertIn("not committed: commits here are signed and the key needs unlocking first: "
+                      "ssh-add", err.getvalue())
+        self.assertIn("or --no-sign", err.getvalue())
+        self.assertIn("initial commit", run_wb("init", str(d), "--no-sign"))
+        self.assertNotIn("gpgsig", self.git(d, "cat-file", "commit", "HEAD"))
+        # the link's commit in a repo with commits: said, and committed by the --no-sign rerun
+        (d / "CLAUDE.md").write_text("# rules\n")
+        self.git(d, "add", "CLAUDE.md"); self.git(d, "-c", "commit.gpgsign=false", "commit", "-qm", "docs")
+        before = self.git(d, "rev-parse", "HEAD")
+        out = run_wb("init", str(d))
+        self.assertIn("AGENTS.md → CLAUDE.md, not committed: commits here are signed", out)
+        self.assertEqual(self.git(d, "rev-parse", "HEAD"), before)
+        self.assertIn("committed", run_wb("init", str(d), "--no-sign"))
+        self.assertEqual(self.git(d, "show", "HEAD:AGENTS.md"), "CLAUDE.md")
+        self.assertNotIn("gpgsig", self.git(d, "cat-file", "commit", "HEAD"))
+        self.assertEqual(self.git(d, "status", "--porcelain"), "")
+        self.assertIn("already set up", run_wb("init", str(d)))
+        # a pinentry nobody answers: refused within COMMIT_SECS, not waited on forever
+        hang = Path(self.tmp.name) / "gpg-that-never-answers"
+        hang.write_text("#!/bin/sh\ncase \"$*\" in *--list-secret-keys*) exit 0;; esac\nexec sleep 20\n")
+        hang.chmod(0o755)
+        cfg.write_text(f"[user]\n\temail = t@t\n\tname = t\n[commit]\n\tgpgsign = true\n"
+                       f"[gpg]\n\tprogram = {hang}\n")
+        t0 = time.monotonic()
+        with mock.patch.object(gitops, "COMMIT_SECS", 2), self.assertRaises(SystemExit), \
+                redirect_stderr(io.StringIO()) as err:
+            run_wb("init", str(Path(self.tmp.name) / "init-hung"))
+        self.assertLess(time.monotonic() - t0, 15)
+        self.assertIn("not committed: commits here are signed", err.getvalue())
 
     def identity(self):
         cfg = Path(self.tmp.name) / "gitconfig"

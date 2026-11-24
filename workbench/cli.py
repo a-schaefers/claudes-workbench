@@ -6007,11 +6007,18 @@ def cmd_init(a):
     if not has_commits:
         gitops.git(d, "add", "-A")  # the agents work from commits: the project as it is now
         n = len(gitops.git(d, "diff", "--cached", "--name-only", "-z").split("\0")) - 1
-        gitops.git(d, "commit", "-q", "--allow-empty", "-m", "Initial commit")
+        try:  # signed as accept's are, or unsigned for wb try: a locked key hung it (#1226)
+            gitops.commit(d, "commit", "-q", "--allow-empty", "-m", "Initial commit",
+                          sign=not a.no_sign)
+        except gitops.GitError as e:  # left staged: wb init again, once unlocked, commits it
+            die(f"{d}: {e}")
         did.append(f"initial commit of the {n} file(s) here (git show --stat to check)" if n
                    else "initial commit")
-    elif any("AGENTS.md" in x for x in did):
-        did.append(_commit_link(d, head, index, moved))
+    elif any("AGENTS.md" in x for x in did) or not local and "AGENTS.md" not in head \
+            and agents.is_symlink() and os.readlink(agents) == "CLAUDE.md":
+        # or the link an earlier run made and couldn't commit: a key that needed unlocking, which
+        # "or --no-sign" sends back here (#1226)
+        did.append(_commit_link(d, head, index, moved, not a.no_sign))
     status = claude_md_status(d)
     print(f"{d}: " + (", ".join(did) if did else "already set up") + f"; {status}"
           + (" (AGENTS.md not linked)" if local else "")
@@ -6033,7 +6040,7 @@ def _md_entries(d: Path, *ls) -> dict:
     return out
 
 
-def _commit_link(d: Path, head: dict, index: dict, moved: bool) -> str:
+def _commit_link(d: Path, head: dict, index: dict, moved: bool, sign: bool = True) -> str:
     """Commit what wb init made in a repo with commits, and nothing of the user's: the AGENTS.md
     link and, when AGENTS.md's file moved to CLAUDE.md, the committed text under its new name.
     `git add -A -- CLAUDE.md AGENTS.md` and a path-limited commit took CLAUDE.md's working copy
@@ -6071,8 +6078,11 @@ def _commit_link(d: Path, head: dict, index: dict, moved: bool) -> str:
         for p, (mode, blob) in changed.items():
             gitops.git(d, "update-index", "--add", "--cacheinfo", f"{mode},{blob},{p}", env=env)
         # no hooks: one with a scratch GIT_INDEX_FILE (lint-staged's stash) could rewrite the tree
-        gitops.git(d, *gitops.NO_HOOKS, "commit", "-q", "-m", "chore: AGENTS.md links to CLAUDE.md",
-                   env=env)
+        try:  # signed as wb accept signs: no prompt to wait on (#1226)
+            gitops.commit(d, *gitops.NO_HOOKS, "commit", "-q", "-m",
+                          "chore: AGENTS.md links to CLAUDE.md", sign=sign, env=env)
+        except gitops.GitError as e:  # the link stays in the working tree, for wb init again
+            return str(e)
     for p, (mode, blob) in changed.items():  # their index matched HEAD here: now the new HEAD
         gitops.git(d, "update-index", "--add", "--cacheinfo", f"{mode},{blob},{p}")
     return "committed"
@@ -6636,8 +6646,11 @@ def cmd_try(a):
     # the Python wb runs on, not PATH's python3: on RHEL 8 that is 3.6, and the untouched base
     # failed its tests (#530)
     py = shlex.quote(sys.executable)
+    # unsigned, its first commit and its accept's: a throwaway sample, and a key that needed
+    # unlocking failed wb try at once, or with a terminal (WSL2) hung it on a prompt (#1226)
     argv = ["start", name, "--spec", str(TRY / "spec.md"), "--repo", str(d), "--size", "trivial",
-            "--trial", "--test", f"{py} -m unittest", *(["--model", a.model] if a.model else [])]
+            "--trial", "--no-sign", "--test", f"{py} -m unittest",
+            *(["--model", a.model] if a.model else [])]
     try:
         # the copy and its init inside: wb init refusing (no git identity, a home that is a
         # git repo) left try/<n> behind, one more at each retry (#530)
@@ -6645,7 +6658,7 @@ def cmd_try(a):
         # wb init refuse the copy as generated files (2026-11-21)
         shutil.copytree(TRY / "project", d, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         with redirect_stdout(io.StringIO()):
-            cmd_init(argparse.Namespace(dir=str(d)))
+            cmd_init(argparse.Namespace(dir=str(d), no_sign=True))
         s = parser().parse_args(argv)
         s.f(s)
     except BaseException:  # refused (the GPU busy, no model): no sample left behind without a task
@@ -7976,7 +7989,10 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_remote)
     s = sub.add_parser("init", help="set a project up: git with an initial commit, "
                                     "AGENTS.md → CLAUDE.md")
-    s.add_argument("dir"); s.set_defaults(f=cmd_init)
+    s.add_argument("dir")
+    s.add_argument("--no-sign", action="store_true",
+                   help="make its commits unsigned, whatever commit.gpgsign says (a key that needs unlocking)")
+    s.set_defaults(f=cmd_init)
     s = sub.add_parser("bench", help="replay accepted tasks on any model, graded by the tests they "
                                      "were accepted with")
     bs = s.add_subparsers(dest="bench_cmd", required=True)
