@@ -244,6 +244,12 @@ def wait_runners(secs: float) -> list[tuple[str, int | None]]:
     return left
 
 
+# Started by a call a test makes and kept for the user's session by design, writing nothing of the
+# test's: rootless podman's pause process (catatonit -P), which a hardware probe's podman call
+# starts on CI's runners with the test's environment (#1225's CI, 2026-11-24, tests.test_gpu)
+SESSION_DAEMONS = ("catatonit",)
+
+
 def writers_left(root: str) -> list[tuple[int, str]]:
     """The live processes, other than this one, whose WB_HOME is under ``root``, as (pid, argv):
     whatever a test spawned that can still write its state, a runner or not. `wb route --json`'s
@@ -266,6 +272,8 @@ def writers_left(root: str) -> list[tuple[int, str]]:
             with open(f"/proc/{pid}/cmdline", "rb") as fh:
                 argv = fh.read().replace(b"\0", b" ").decode(errors="replace").strip()
         except OSError:  # gone, or not ours
+            continue
+        if os.path.basename(argv.split(" ", 1)[0]) in SESSION_DAEMONS:
             continue
         out.append((pid, argv[:120]))
     return out
