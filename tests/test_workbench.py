@@ -5163,6 +5163,39 @@ class Context(Base):
         self.assertIn("branch delegate/t-d1 deleted", run_wb("discard", "t-d1"))
         self.assertEqual(tip("t-d1"), "")
 
+    def test_the_merge_line_for_steps_a_discard_kept_lands_them_on_the_branch_the_task_started_from(self):
+        # #1174 (bar round 2 of 2.0, 2026-11-24): discard's "git -C <repo> merge <branch> lands
+        # them" merged the kept steps into feature-y, switched to while step 2 ran, or onto a
+        # detached HEAD, and in neither commands.json's merge mode nor --no-sign
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout.strip()
+        q, init = shlex.quote(str(self.repo)), g("rev-parse", "main")
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Now also write the question to question.txt.\n")
+        for name, away, start, mode, want in (
+                ("t-sy", ("-c", "feature-y"), ("--no-sign",), "merge", "merge --no-ff --no-gpg-sign"),
+                ("t-sd", ("--detach", "main"), (), "ff", "merge --ff-only")):
+            Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+                "merge": mode}}}))
+            self.start(name, "ok", "--test", TEST_CMD, "--auto-fix", "0", *start)
+            wait_phase(name, {"review"})
+            os.environ["FAKE_SCENARIO"] = "loop"       # step 2 sticks
+            run_wb("next", name, "--spec", str(step2), "-m", "feat: the answer")
+            step1 = g("rev-parse", f"delegate/{name}")
+            wait_phase(name, {"stuck"})
+            os.environ["FAKE_SCENARIO"] = "ok"
+            g("switch", "-q", *away)
+            out = run_wb("discard", name, "--reason", "step 2 stuck")
+            self.assertIn("merge into main with: ", out)
+            line = out.split("merge into main with: ", 1)[1].splitlines()[0]
+            self.assertEqual(line, f"git -C {q} switch main && git -C {q} {want} delegate/{name}")
+            subprocess.run(line, shell=True, check=True, capture_output=True)
+            self.assertTrue(gitops.contains(self.repo, "refs/heads/main", step1), name)
+            if name == "t-sy":
+                self.assertFalse(gitops.contains(self.repo, "refs/heads/feature-y", step1))
+            self.assertIn(f"to drop them: git -C {q} branch -D delegate/{name}", out)
+            g("reset", "-q", "--hard", init)  # the next task's step is new work again
+
 
     def test_a_wb_next_interrupted_after_its_commit_advances_once_when_retried(self):
         # #85 (the 2026-11-18 audit): the step was committed before the next one was recorded,

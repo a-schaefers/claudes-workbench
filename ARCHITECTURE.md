@@ -4606,7 +4606,9 @@ effect's hit came 0.8-1.45 s in (the skill says to trim the lead); ACE-Step peak
   (`cli._merge_line`, `gitops.merge_by_hand`, in the repo's mode: `--merge-as` or commands.json
   `merge`, #471): into `closing`'s `merge_into`, else the task's `base_branch`, else the checkout's
   branch, led by `git -C <repo> switch <branch> &&` when another branch or a detached HEAD is out
-  (it merged into whatever was out, #1154); no branch known on a detached HEAD prints no command. A colocated Jujutsu repo
+  (it merged into whatever was out, #1154); no branch known on a detached HEAD prints no command.
+  `wb discard` prints the same line for the approved steps it keeps (#1174: its plain `git merge`
+  landed them on whatever was out, in no mode or signing of the repo's). A colocated Jujutsu repo
   (`gitops.jj_colocated`) has a detached HEAD: the refusal (`gitops.detached`) and `merge with:`
   give `jj -R <repo> new @- delegate/<task>` (`gitops.jj_merge`, #385). A task from a tag or commit has a null `base_branch` (`cli._merge_into`, #87).
 - **The worktree** (`gitops.create_worktree`): `worktree add -b delegate/<task> <task dir>/worktree
@@ -4630,7 +4632,8 @@ effect's hit came 0.8-1.45 s in (the skill says to trim the lead); ACE-Step peak
 
   `wb discard` records status `tip` and deletes the branch (`delete_branch`, `(was <sha>)`) unless
   `--keep-branch`, the repo moved, or it has commits past the base (kept unless `--drop-steps`,
-  #494). Accept records `tip` and after `--merge` runs `drop_merged_branch` (`branch -d`). Once the
+  #494; it prints accept's `merge into <branch> with:` line for them, `cli._merge_line`, #1174,
+  and `to drop them: git -C <repo> branch -D <branch>`). Accept records `tip` and after `--merge` runs `drop_merged_branch` (`branch -d`). Once the
   branch is gone, `gitops.step_commit`, `cli._landed` and `wb gc` (`_merged_branches`) read `tip`.
 - **One command per task at a time** (`cli.one_at_a_time`): accept, discard, next, feedback, resume,
   takeover and stop hold `locks/<task>.cmd.lock` (`store.task_lock`, outside every lane: an agent's
@@ -5744,7 +5747,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb resume <task> [<task>…]` | several names (start order, failures said, exit 1, #692), `--all` (`last` in `cli.INTERRUPTED` or starting `runner.UPDATED`: `cli._interrupted`, #788; never a guard's stop or a crash; in `store.all_tasks` order, each under its command lock, #544; a worktree problem or an API task whose repo became local-only is said and skipped, the rest go on), `--repo DIR`, `--session ID…`, `--all-sessions`, `--backlog NAME` | Reaps first. Stuck/failed, no live runner; an API task whose repo became local-only exits 3 (`_local_only_since`, #1021). Round n+1 on a fresh session (`runner.RESUME`), undelivered notes as `NOTE_HEAD`. Never ran a round: round 1 again (`_early_notes`); checkout cut short: remade (`_rechecks_out`). |
 | `wb accept <task> -m "…"` | `--include`, `--no-sign`, `--merge`, `--merge-as merge\|ff\|squash` (implies `--merge`; commands.json `repos` `merge` sets the default, without implying it), `--force` (any open phase; stops a live runner), `--spec-gap`, `--take-claude-md` | Reaps; a moved repo refused first (#498). Review only; a closed one only when status `unrecorded` (`_finish_record`, #88). A live task with nothing changed on its first step is refused before its runner stops; a failed commit leaves it `stuck`, not live with no runner. Commits `<m>` + "Delegated to <label> via OpenCode: R round(s), F automatic test-fix, V review round(s)." + `Workbench-Task:` + `OpenCode-Session:` (no AI co-author line); a retry past it (`cli._accept_landed`) measures from `HEAD~1` (#879) and puts `delegate/<task>` on that commit (`gitops.put_on_branch`, refused when the branch holds commits it lacks, #417). Removes the worktree and runtime dir, records `tip`, keeps base..tip in `steps.bundle` (`gitops.bundle_steps`; `refs/workbench/accepted/<task>`, `gitops.keep_accepted`, only if it fails, #799, deleted once a merge lands the tip, else by gc). `--merge`: *Git, commits and projects* (`gitops.merge_lock`; failure: the accept stands, exit 5 `NOT_MERGED`, #247). A retry resumes from status `closing` (#246) while the worktree is gone or clean (`cli._gained_work`); meanwhile (`cli._accepting`) discard, feedback, next, resume and takeover refuse it (#878: discard recorded committed work as discarded); a merge already made is found by ancestry (`gitops.contains`), a squash by `closing`'s `merge_from` (#432). Writes the row, drops the rules (`_closed`), says how far CLAUDE.md is behind and the `claude:` cost. |
 | `wb relocate <task> --repo <dir>` | | Refuses a repo without the base or a linked worktree; refuses a `.git` naming another git dir; repairs the link (`git worktree repair`), rewrites `gitdir.json`, task.json `repo`, `git_common`, `cwd`, `submodules.json` (`gitops.relocate`, #498, #682). |
-| `wb discard <task>` | `--reason "…"`, `--spec-gap`, `--keep-branch`, `--drop-steps` | Stops, records, removes worktree, runtime dir, rules (`_closed`) and branch (`deleted (was <sha>)`, status `tip`, in the repo `gitops.repo_of` finds), not with `--keep-branch`, a moved repo, or committed steps unless `--drop-steps` (#494); a cut-short checkout's only while `branch_made` holds (#416). Closed: refused unless `unrecorded`. |
+| `wb discard <task>` | `--reason "…"`, `--spec-gap`, `--keep-branch`, `--drop-steps` | Stops, records, removes worktree, runtime dir, rules (`_closed`) and branch (`deleted (was <sha>)`, status `tip`, in the repo `gitops.repo_of` finds), not with `--keep-branch`, a moved repo, or committed steps unless `--drop-steps` (#494; then accept's merge line for them, #1174); a cut-short checkout's only while `branch_made` holds (#416). Closed: refused unless `unrecorded`. |
 
 ### Watching
 | Command | Flags | What it does |
