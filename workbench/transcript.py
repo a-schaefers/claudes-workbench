@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 from . import models, store
 from .watch import Watcher
-from .runner import INTERRUPT_HEAD, NOTE_HEAD, api_task, opencode_bin
+from .runner import INTERRUPT_HEAD, NOTE_HEAD, RERUN, api_task, opencode_bin
 
 STYLE = {"claude": "1;38;5;208", "agent": "1;36", "think": "2;3", "tool": "33", "out": "2",
          "ok": "1;32", "bad": "1;31", "sys": "34", "add": "32", "del": "31", "head": "1"}
@@ -219,6 +219,8 @@ def _user_message(text: str, verbose: bool) -> tuple[str, list[tuple[str, str]]]
         head = "Claude → agent · INTERRUPT, high priority"
     elif text.startswith(NOTE_HEAD):
         head = "Claude → agent · note"
+    elif text.startswith(RERUN[:40]):  # runner._run_again (#1235)
+        head = "workbench → agent · the round again, after its provider or server stopped it"
     else:
         head = "Claude → agent · spec"
     body = text = full

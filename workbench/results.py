@@ -253,8 +253,8 @@ def spend_so_far(task: store.Task) -> float | None:
 
 def at_catalog(st: dict) -> float | None:
     """The runner's meter at the prices OpenCode's estimate uses (status `api.at_catalog`: a
-    provider's own row at its catalog figure, #1165), to compare the two; a status from before it,
-    the meter itself; None without a meter."""
+    provider's own row at its catalog figure, #1165, a usage.cost one as booked, #1234), to compare
+    the two; a status from before it, the meter itself; None without a meter."""
     v = st.get("api")
     if isinstance(v, dict) and _num(v.get("at_catalog")):
         return float(v["at_catalog"])
@@ -323,11 +323,18 @@ def api_usage(task: store.Task) -> dict | None:
     prices isn't trusted. None for a GPU task. The order: every session's export, then some
     sessions' plus the meter's remainder, then the meter, then the step events' sum (both floors,
     `metered`), then a free model's 0, then nothing sent's 0. A known cost says its `prices`
-    (meter.basis: the meter's; OpenCode's export is never the provider's own figure, #1135)."""
+    (meter.basis: the meter's; what OpenCode's export adds past the meter is its catalog estimate,
+    #1135)."""
     out = _api_usage(task)
     if out is not None and out.get("cost") is not None and out["source"] not in ("plan", "none"):
         b = live_basis(task.status)
-        out["prices"] = meter.CATALOG if b == meter.PROVIDER and out["source"] in ("opencode", "mixed") else b
+        # only an export that added to the meter makes it the catalog's: one that matched a meter
+        # of OpenRouter's own usage.cost rows (which OpenCode reports as its figure too) closed at
+        # the provider's bill labelled `catalog prices` (#1234, 2026-11-24)
+        live = metered(task.status)
+        added = live is None or out["cost"] > live + meter.STATUS_EPS
+        out["prices"] = meter.CATALOG if (b == meter.PROVIDER and added
+                                          and out["source"] in ("opencode", "mixed")) else b
     return out
 
 
@@ -382,8 +389,9 @@ def _api_usage(task: store.Task) -> dict | None:
         # never below the runner's meter, the ledger the day cap counted: it adds the provider's
         # own usage.cost and answers a steer or stop cut short, which OpenCode doesn't bill, and the
         # row once said $0.30 where the ledger and the round report said $0.50 (wave 2's review).
-        # The export is OpenCode's catalog estimate, so it tops the meter up only past the meter at
-        # the same prices (status `api.at_catalog`: a provider's own row at its catalog figure).
+        # The export is OpenCode's catalog estimate (or a usage's own `cost`, #1234), so it tops the
+        # meter up only past the meter at the same prices (status `api.at_catalog`: a provider's
+        # own row at its catalog figure, a usage.cost one as booked).
         # Against the meter's total it brought DeepInfra's 2x back into `paid`, every time and,
         # once a gate took a meter of provider rows alone, whenever one catalog `reconcile` row (a
         # step_finish ahead of its response's usage) joined them (#1165, 2026-11-24)

@@ -200,11 +200,21 @@ def _run(cwd, args, env=None, check=True, timeout=None, input=None,
     """``detach``: git in a session of its own, with no controlling terminal, for the calls that
     may sign (with NO_TERMINAL): ssh-keygen opens /dev/tty when it can, and on WSL2, where wb has
     one, it prompted there for a passphrase nobody would type, so wb accept waited COMMIT_SECS
-    and wb start SIGN_SECS before refusing (#933). Detached, it fails at once."""
+    and wb start SIGN_SECS before refusing (#933). Detached, it fails at once. And it outlives a
+    SIGKILL of wb, so its output goes to files, not pipes: a signed merge's git whose wb was
+    killed made the commit, then died of SIGPIPE printing it, before removing MERGE_HEAD
+    (#1231)."""
+    argv = ["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args]
+    kw = dict(env=_env(env), timeout=timeout, input=input, start_new_session=detach,
+              stdin=subprocess.DEVNULL if timeout and input is None else None)
     try:
-        r = subprocess.run(["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args], capture_output=True,
-                           env=_env(env), timeout=timeout, input=input, start_new_session=detach,
-                           stdin=subprocess.DEVNULL if timeout and input is None else None)
+        if not detach:
+            r = subprocess.run(argv, capture_output=True, **kw)
+        else:
+            with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+                r = subprocess.run(argv, stdout=out, stderr=err, **kw)
+                out.seek(0), err.seek(0)
+                r.stdout, r.stderr = out.read(), err.read()
     except subprocess.TimeoutExpired:
         raise GitError(f"git {' '.join(args)}: no answer in {timeout}s") from None
     if check and r.returncode:
@@ -1700,21 +1710,31 @@ def commit_all(worktree: Path, message: str, include: bool = False, sign: bool =
         git(worktree, *NO_HOOKS, "add", "-f", "--", *(":(literal)" + p for p in ignored))
     if not git(worktree, "diff", "--cached", "--name-only").strip():
         raise GitError("nothing to commit: the agent's worktree has no changes")
-    if not sign:  # --no-sign, at start or now: the task's commits go unsigned (#374)
-        git(worktree, *NO_HOOKS, "-c", "commit.gpgsign=false", "commit", "-q", "-m", message)
-    elif signs(worktree):  # no terminal, a time limit, and git's error said plainly (#374)
+    # --no-sign, at start or now: the task's commits go unsigned (#374)
+    commit(worktree, *NO_HOOKS, "commit", "-q", "-m", message, sign=sign)
+    return git(worktree, "rev-parse", "--short", "HEAD").strip()
+
+
+def commit(repo: Path, *args, sign: bool = True, env=None) -> None:
+    """`git <args>`, a commit in the user's repo: unsigned when not ``sign``, else signed as their
+    git says, with no terminal or display, detached, within COMMIT_SECS, and a failure said with
+    how to unlock (#374, #933), not git's raw error. wb init's commits went through plain git: a
+    key with a passphrase failed wb try at once with "incorrect passphrase supplied", and with a
+    terminal (WSL2) it waited on a prompt until Claude's Bash limit killed it (#1226)."""
+    if not sign:
+        git(repo, "-c", "commit.gpgsign=false", *args, env=env)
+    elif signs(repo):
         try:
-            r = _run(worktree, [*NO_HOOKS, "commit", "-q", "-m", message], NO_TERMINAL,
-                     check=False, timeout=COMMIT_SECS, detach=True)
+            r = _run(repo, args, {**NO_TERMINAL, **(env or {})}, check=False, timeout=COMMIT_SECS,
+                     detach=True)
         except GitError as e:  # no answer: a pinentry waiting on an unattended desktop
-            raise GitError(f"not committed: {_unlock(worktree)} ({e})") from None
+            raise GitError(f"not committed: {_unlock(repo)} ({e})") from None
         if r.returncode:
             said = (r.stderr or r.stdout).decode("utf-8", "replace").strip().splitlines()
-            raise GitError(f"not committed: {_unlock(worktree)} "
+            raise GitError(f"not committed: {_unlock(repo)} "
                            f"(git: {said[0] if said else r.returncode})")
     else:
-        git(worktree, *NO_HOOKS, "commit", "-q", "-m", message)
-    return git(worktree, "rev-parse", "--short", "HEAD").strip()
+        git(repo, *args, env=env)
 
 
 def put_on_branch(repo: Path, branch: str, commit: str, worktree: Path) -> None:
@@ -2157,6 +2177,29 @@ def _back_out(repo: Path, before: str, source: str | None = None, how: str = "me
     to = before if head == before or not tip or _made_by(repo, head, before, tip, how) else head
     if head != to or git(repo, "status", "--porcelain", "--untracked-files=no", check=False).strip():
         git(repo, "reset", "-q", "--merge", to, check=False)
+
+
+def clear_killed_merge(repo: Path, before: str, tip: str, how: str = "merge") -> None:
+    """What an earlier accept's merge of ``tip`` onto ``before`` left in the user's checkout when
+    it was SIGKILLed, which no handler sees, so merge()'s backout never ran: MERGE_HEAD at the
+    tip, or a staged squash whose SQUASH_MSG names it. A merge whose commit was made (HEAD holds
+    the tip: git committed, then died before removing MERGE_HEAD) is quit, the rest backed out
+    for the retry to merge again. Killed while the signer waited, the retry called wb's own
+    staged merge "uncommitted changes" and closed the task unmerged; with the commit made, it
+    said merged with the checkout still mid-merge, and the user's next commit became a merge
+    (#1231, bar round 4). Anything else, a merge of another tip, is left alone."""
+    if how == "merge" and _merging(repo):
+        if git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).strip() != tip:
+            return
+        if contains(repo, "HEAD", tip):
+            git(repo, "merge", "--quit", check=False)
+        else:
+            _back_out(repo, before, tip, how)
+    elif how == "squash" and git(repo, "rev-parse", "HEAD", check=False).strip() == before:
+        msg = Path(repo, git(repo, "rev-parse", "--git-path", "SQUASH_MSG", check=False).strip())
+        with contextlib.suppress(OSError):
+            if f"\ncommit {tip}\n" in msg.read_text(errors="replace"):
+                _back_out(repo, before, tip, how)
 
 
 def _made_by(repo: Path, head: str, before: str, tip: str, how: str) -> bool:

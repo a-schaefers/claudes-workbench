@@ -274,12 +274,24 @@ def where_note(info: dict, rules: bool, named: list[str], whose: str = "") -> st
     return f"this task sends {what} to {info['name']} ({whose + '; ' if whose else ''}{policy}){extra}"
 
 
-def standing_refusal(kind: str, entry: str, name: str, given: str | None = None) -> str:
+def standing_refusal(kind: str, entry: str, name: str, given: str | None = None,
+                     role: str | None = None, asked: bool = False, advice: bool = True) -> str:
     """_worktree_setup's exit-3 line for a commands.json `copy` or `siblings` entry an API task
     would take along unnamed. `given`: the --copy that names it, from a package its path from
-    there (cli._copy_name, #1158)."""
-    if kind == "copy":
-        return (f'commands.json "repos" copies {entry} into every task, and this one is on API '
-                f"({name}): name it (--copy {given or entry}) to send it, or put the role on the GPU")
-    return (f'commands.json "repos" links {entry} beside every task, and this one is on API '
-            f"({name}): name it (--sibling {entry}) to send it, or put the role on the GPU")
+    there (cli._copy_name, #1158). The other way out is local_only_line's: for a --model start
+    (``asked``) a GPU model, else the role's way off API (routes.off_api). A fixed "or put the
+    role on the GPU" had Claude move a role, which changed nothing under Agents API or for a
+    --model start, and the retry was refused the same way (#1227, 2026-11-24). ``advice``
+    False: the busy opt-in's note, its role on the GPU already (as meter.refusal's)."""
+    from . import routes  # routes imports this module
+    flag = f"--copy {given or entry}" if kind == "copy" else f"--sibling {entry}"
+    did = f"copies {entry} into every task" if kind == "copy" else f"links {entry} beside every task"
+    if not advice:
+        fix = ""
+    elif asked:
+        fix = ", or a GPU model"
+    else:
+        off = routes.off_api(role) or routes.off_api(None)  # a start on API: never None
+        fix = f", or {off[1]} ({off[2]})"
+    return (f'commands.json "repos" {did}, and this one is on API ({name}): '
+            f"name it ({flag}) to send it{fix}")

@@ -46,7 +46,7 @@ it works, explain the why in feedback.
 
 **Commits are the user's.** Delegated work is committed under the user's own git identity with
 no `Co-Authored-By` or other AI credit line; `wb accept` writes only the task's provenance
-trailers. Don't add one yourself. When `wb start` or `wb accept` says the signing key needs
+trailers. Don't add one yourself. When `wb start`, `wb accept` or `wb init` says the signing key needs
 unlocking, ask the user to unlock it (`ssh-add`, or one GPG signature in their terminal); when
 it says the signer asks for a touch or an approval, tell the user before `wb accept`, which waits
 for it; use `--no-sign` only when they say unsigned is fine.
