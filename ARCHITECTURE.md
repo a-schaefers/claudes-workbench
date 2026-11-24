@@ -882,7 +882,8 @@ earliest kept), kept in status `hand_wrote` by the next runner before its rounds
 as the agent's writes from then on aren't Claude's. A test run's leftovers don't count: only a
 text file named like one the commit holds (its suffix, or its name without one), under no
 directory marking itself a cache (a `CACHEDIR.TAG`, or a `.gitignore` of `*` alone), and under
-`BUILD_FILES` such files in its top-level directory.
+`BUILD_FILES` such files in its top-level directory (only those count: a test run's bytecode
+in a big package once pushed a hand-written file out).
 
 **`run_round(task, n)`.** Writes the config layer and environment (*What the agent knows*),
 prepends `skills_note` to the prompt argument (not `prompt.md`), wraps the lane, starts in its own

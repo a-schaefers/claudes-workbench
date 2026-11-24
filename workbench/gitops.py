@@ -1539,7 +1539,7 @@ def hand_written(worktree: Path, since: float) -> list[str]:
     """The files git ignores and doesn't track that changed in the worktree since ``since`` (a
     time.time()) and look written by hand, not by a build or a test run: text, named like a file
     the commit would hold (its suffix, or its whole name when it has none), under no directory
-    that marks itself a cache (_marks_cache), and fewer than BUILD_FILES of them in their
+    that marks itself a cache (_marks_cache), and fewer than BUILD_FILES such files in their
     top-level directory (an install). A module Claude wrote under Python.gitignore's lib/ after a
     takeover was left out of wb accept's commit and deleted with the worktree, with no warning:
     only the agent's edit tools were read (#1179, 2026-11-24). A test run's .pyc, .pytest_cache/
@@ -1561,7 +1561,6 @@ def hand_written(worktree: Path, since: float) -> list[str]:
         return []
     held = git_bytes(worktree, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
     kinds = {_kind(os.fsdecode(p)) for p in held.split(b"\0") if p}
-    tops = Counter(_top(p) for p in changed if "/" in p)
     caches: dict[str, bool] = {}
 
     def in_cache(p: str) -> bool:
@@ -1574,9 +1573,13 @@ def hand_written(worktree: Path, since: float) -> list[str]:
                 return True
         return False
 
-    return sorted(p for p in changed
-                  if _kind(p) in kinds and ("/" not in p or tops[_top(p)] < BUILD_FILES)
-                  and not in_cache(p) and _text(os.path.join(top, p)))
+    # Only the files the other filters keep count toward BUILD_FILES: counted before them, the
+    # .pyc of Claude's first test run (agents run without bytecode) in a 60-module app/ cut
+    # app/lib/helper.py, and accept --merge dropped it without a word (#1179, 2026-11-24).
+    kept = [p for p in changed
+            if _kind(p) in kinds and not in_cache(p) and _text(os.path.join(top, p))]
+    tops = Counter(_top(p) for p in kept if "/" in p)
+    return sorted(p for p in kept if "/" not in p or tops[_top(p)] < BUILD_FILES)
 
 
 def ignored_line(paths: list[str], who: str = "the agent wrote") -> str:

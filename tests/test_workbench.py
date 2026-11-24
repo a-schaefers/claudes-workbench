@@ -2081,6 +2081,36 @@ class Lifecycle(Base):
         self.assertNotIn("lib/__pycache__/helper.cpython-311.pyc", tree)
         self.assertNotIn("lib/run.log", tree)
 
+    def test_the_bytecode_of_claudes_test_run_in_a_big_package_does_not_hide_its_ignored_file(self):
+        # #1179 (review of the fix, 2026-11-24): BUILD_FILES counted every changed ignored file
+        # before the other filters, so with a tracked app/ of 60 modules the .pyc of Claude's
+        # first run after a takeover (agents write none) cut app/lib/helper.py, and
+        # accept --merge landed without it and no word
+        (self.repo / ".gitignore").write_text("lib/\n__pycache__/\n")
+        (self.repo / "app").mkdir()
+        for i in range(60):
+            (self.repo / "app" / f"m{i}.py").write_text(f"N = {i}\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "app"], check=True)
+        self.start("t-big", "ok", "--test", TEST_CMD)
+        wait_phase("t-big", {"review"})
+        t = store.Task("t-big")
+        run_wb("takeover", "t-big")
+        (t.worktree / "app" / "lib").mkdir()
+        (t.worktree / "app" / "lib" / "helper.py").write_text("def answer():\n    return 42\n")
+        (t.worktree / "main.py").write_text("from app.lib.helper import answer\nprint(answer())\n")
+        for d, names in (("app", [f"m{i}" for i in range(60)]), ("app/lib", ["helper"])):
+            (t.worktree / d / "__pycache__").mkdir()
+            for n in names:
+                (t.worktree / d / "__pycache__" / f"{n}.cpython-311.pyc").write_bytes(b"\xa7\r\r\n\0\0")
+        self.assertEqual(runner.hand_wrote(t), ["app/lib/helper.py"])
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-big", "-m", "feat: one", "--merge")
+        self.assertIn("not committed: git ignores files written in the worktree (app/lib/helper.py)",
+                      err.getvalue())
+        self.assertTrue((t.worktree / "app" / "lib" / "helper.py").is_file())
+
     def test_a_file_claude_writes_under_an_ignored_path_in_a_review_fix_is_still_named_after_the_next_round(self):
         # #1179: the agent's next round writes there too, which isn't Claude's, so what Claude
         # wrote at review is kept when a runner starts, and named at accept once it is back
