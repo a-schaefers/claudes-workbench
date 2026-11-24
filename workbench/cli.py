@@ -219,6 +219,18 @@ def _opencode_again(task: store.Task) -> None:
         task.set_status(opencode=f"{have[0]}.{have[1]}")
 
 
+def _credit_turn(task: store.Task) -> None:
+    """A task its API provider stopped (status `infra: provider`), resumed by the user: its
+    provider's `no_credit` mark, if one holds, becomes its turn to ask (models.credit_ask), so a
+    top-up's resume runs at once, not after the mark's 900 s (the review of #1178, 2026-11-24)."""
+    if task.status.get("infra") != "provider" or not runner.api_task(task):
+        return
+    try:
+        models.credit_ask(runner.provider_of(task), task.name)
+    except Exception:  # an unreadable file: its runner's credit_turn reads it as no mark either
+        pass
+
+
 def spawn_runner(task: store.Task) -> int:
     _coding_used(task)  # work handed (back) to the agent: Claude's allowance, if any, is spent
     env = context.detached_env()  # the user's PYTHONPATH kept for the agent (#512)
@@ -1714,6 +1726,7 @@ def cmd_feedback(a):
                     round_for="resume" if resumed else "feedback",
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0)
+    _credit_turn(task)
     spawn_runner(task)
     _ack_all(task, upto=handled)
     if resumed:
@@ -2618,6 +2631,7 @@ def _resume(task: store.Task) -> None:
                     round_for="resume")
     task.event({"ts": store.now(), "round": n + 1, "kind": "resumed",
                 "text": "Claude resumed the task in a fresh session"})
+    _credit_turn(task)
     spawn_runner(task)
     _ack_all(task, upto=handled)  # the stuck or failed notice is handled: wb wait must not hand it out again
     print(f"resumed {name} in a fresh session (round {n + 1})")

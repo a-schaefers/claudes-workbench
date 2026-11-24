@@ -30956,6 +30956,36 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.models.note_api("deepinfra", "rate_limited", "HTTP 429")             # not this wait's
         self.assertIsNone(self.models.credit_turn("deepinfra", "t-b"))
 
+    def test_the_users_resume_after_a_quota_stop_asks_at_once_and_the_tasks_waiting_behind_it_go_on_at_its_ok(self):
+        # the review of #1178 (2026-11-24): a quota stop's remedy says top up, then wb feedback
+        # "carry on", but the resumed runner met the no_credit mark its own 402 had just written
+        # and waited out its 900 s, told to top up again; the user's resume asks at once now, and
+        # the runners waiting behind it go on at its 2xx
+        m = self.local_api_model()
+        self.up.mode, self.up.status, self.up.message = "status", 402, "Insufficient balance"
+        self.start_api("t-paid", "http", spawn=False)
+        self.drive_here("t-paid")
+        task = store.Task("t-paid")
+        self.assertEqual((task.status["phase"], task.status.get("infra")), ("stuck", "provider"), task.status)
+        self.assertEqual(self.models.api_health("deepinfra")["state"], "no_credit")
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")     # lets a hung wait go
+        went = threading.Event()
+        behind = self.models.NoLease(m, "t-behind", say=lambda msg: None)
+        threading.Thread(target=lambda: (behind.load(), went.set()), daemon=True).start()
+        self.assertFalse(went.wait(1))                                # it waits for credit
+        self.up.mode, self.up.status = "ok", 200                      # the user tops up
+        with mock.patch.object(cli, "spawn_runner", lambda t: 0):
+            run_wb("feedback", "t-paid", "--text", "carry on")
+        self.assertEqual(self.models.api_health("deepinfra")["asked_by"], "t-paid")
+        driver = threading.Thread(target=self.drive_here, args=("t-paid",), daemon=True)
+        driver.start()
+        driver.join(60)
+        self.assertFalse(driver.is_alive(), task.status)              # never the mark's 900 s
+        self.assertEqual(task.status["phase"], "review", task.status)
+        self.assertEqual(len(self.up.seen), 2)                        # the 402, then its round
+        self.assertTrue(went.wait(30))                                # at its ok
+        self.assertIsNone(self.models.api_health("deepinfra"))
+
     def test_with_unload_for_tests_an_api_tasks_tests_run_under_this_machines_pool(self):
         from workbench import verify
         used = []

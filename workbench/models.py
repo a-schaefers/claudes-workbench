@@ -1596,9 +1596,12 @@ def credit_turn(pid: str, task: str = "") -> dict | None:
     else None (go on). Past its `until` one runner asks: the mark is held CREDIT_RECHECK_SECS
     more under the lock (`asked_by` its task), so the others wait for that one's answer, a 2xx's
     `ok` or the keyhole's next 402, rather than each sending a round that wakes Claude with its
-    own stop (#1178, 2026-11-24)."""
+    own stop (#1178, 2026-11-24). A mark `asked_by` this task (credit_ask: the user's resume of
+    the task the 402 stopped) is its turn: None."""
+    def waits(row: dict) -> dict | None:
+        return None if row["state"] != "no_credit" or (task and row.get("asked_by") == task) else row
     if (row := api_health(pid)) is not None:
-        return row if row["state"] == "no_credit" else None
+        return waits(row)
     path = api_health_path()
     with store.locked(path.with_name(path.name + ".lock")):
         doc = store.read_json(path, {})
@@ -1606,10 +1609,27 @@ def credit_turn(pid: str, task: str = "") -> dict | None:
         if not isinstance(row, dict) or row.get("state") != "no_credit":
             return None
         if (held := api_health(pid)) is not None:  # another runner asked meanwhile
-            return held
+            return waits(held)
         doc[pid] = {**row, "until": time.time() + CREDIT_RECHECK_SECS, "asked_by": task}
         store.write_json(path, doc)
     return None
+
+
+def credit_ask(pid: str, task: str) -> bool:
+    """The user's resume (wb feedback, wb resume) of ``task``, which its provider stopped: a
+    `no_credit` mark becomes that task's turn to ask (`asked_by` it, held CREDIT_RECHECK_SECS on,
+    so the waiters behind it wait for its answer). The stop's remedy says top up, then resume,
+    and the resumed runner met the mark the 402 had just written and waited out its 900 s, the
+    user's top-up told to top up again (the review of #1178, 2026-11-24). True when it held one."""
+    path = api_health_path()
+    with store.locked(path.with_name(path.name + ".lock")):
+        doc = store.read_json(path, {})
+        row = doc.get(pid) if isinstance(doc, dict) else None
+        if not isinstance(row, dict) or row.get("state") != "no_credit":
+            return False
+        doc[pid] = {**row, "until": time.time() + CREDIT_RECHECK_SECS, "asked_by": task}
+        store.write_json(path, doc)
+    return True
 
 
 def _fresh_key(m: Model) -> tuple[str, str]:
