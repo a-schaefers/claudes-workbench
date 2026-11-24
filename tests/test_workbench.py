@@ -29475,7 +29475,11 @@ class ApiTasks(_ApiTask, _KeyholeTest):
                  ("t-404", 404, "The model `x` does not exist", "refused"),
                  ("t-400", 400, "Invalid 'tools[3].function.parameters': schema not supported", "refused"),
                  ("t-key", 403, "Invalid API key for this project", "auth"),
-                 ("t-ctx", 400, "This model's maximum context length is 131072 tokens", None)]
+                 # OpenCode 2.3.2 types this 400 provider.auth: the key's, with /connect (the review)
+                 ("t-key400", 400, "Incorrect API key provided: xx****yy", "auth"),
+                 ("t-ctx", 400, "This model's maximum context length is 131072 tokens", None),
+                 # payload-too-large, beside context-overflow in 2.3.2: a step that read too much
+                 ("t-413", 413, "Request Entity Too Large", None)]
         for name, code, message, guard in cases:
             with self.subTest(name=name):
                 self.up.mode, self.up.status, self.up.message = "status", code, message
@@ -29505,6 +29509,11 @@ class ApiTasks(_ApiTask, _KeyholeTest):
                                  "message": "keyhole: this task may use only deepinfra/x"}})
         self.assertEqual(wait.stop(time.time()),
                          ("refused", "deepinfra refused the request (HTTP 403): keyhole: this task may use only deepinfra/x"))
+        # a provider.auth that names the key is the key's at any status: Gemini's 400 (the review)
+        wait = runner._ProviderWait(store.Task("t-mod"), 1)
+        wait.on_error({"error": {"type": "provider.auth", "status": 400,
+                                 "message": "API key not valid. Please pass a valid API key."}})
+        self.assertEqual(wait.stop(time.time()), ("auth", "deepinfra refused the API key (HTTP 400)"))
 
     def test_a_proxy_in_the_agents_env_doesnt_catch_the_keyhole(self):
         self.local_api_model()
@@ -30286,6 +30295,12 @@ class RateLimits(Base):
                     self.assertIn("queued", [e["state"] for e in self.events(task, "rate_limited")])
                 if bound:
                     self.assertLess(time.monotonic() - began, 30)        # never the 30 s queue
+        # OpenCode 2.3.2 types the model's own overrun provider.invalid-output too, with no status
+        # and no queue: that stays the step's, never a provider `outage` (the review of #1083)
+        wait = runner._ProviderWait(store.Task("t-cut"), 2)
+        wait.on_error({"error": {"type": "provider.invalid-output",
+                                 "message": "The model exceeded its output limit"}})
+        self.assertIsNone(wait.stop(time.time(), gave_up=True))
 
     def test_a_402_stops_the_round_at_once_with_the_remedy_and_no_revive(self):
         task = self.api_task("t-402", "api", "--silence-timeout", "30")

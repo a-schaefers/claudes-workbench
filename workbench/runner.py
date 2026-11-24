@@ -1262,11 +1262,16 @@ HELD = ("rate_limited", "outage")
 # model gone, a 400/422 schema, a 403 moderation or permission): the agent's, with no remedy, or
 # under 403 "refused the API key" with /connect (#1082, #1084, 2026-11-23)
 PROVIDER_GUARDS = frozenset({*HELD, "quota", "auth", "refused"})  # stops that are the provider's (cause "provider")
-REFUSED_CODES = frozenset({400, 403, 404, 405, 409, 410, 413, 415, 422})
+# no 413: OpenCode 2.3.2 calls it payload-too-large, beside context-overflow, a step that read too
+# much and so the step's (the review of #1082, 2026-11-23)
+REFUSED_CODES = frozenset({400, 403, 404, 405, 409, 410, 415, 422})
 REFUSED_KINDS = frozenset({"provider.content-filter", "provider.invalid-request", "provider.no-route",
                            "provider.unsupported-operation"})
 # a 403 is the key's only when it says so: moderation, a model or region the key may not use and
-# the keyhole's own "this task may use only <model>" are 403s too (#1084)
+# the keyhole's own "this task may use only <model>" are 403s too (#1084). OpenCode's
+# provider.auth with another status is the key's when it says so too: 2.3.2 types a 400
+# "Incorrect API key provided", api_key_invalid and authentication_error that way (the review of
+# #1084, 2026-11-23)
 KEY_WORDS = re.compile(r"(?i)api.?key|token|credential|unauthori[sz]ed|authenticat")
 # a request over the model's window is the step's (too big a read), whoever answered it (#1082)
 CONTEXT_WORDS = re.compile(r"(?i)context.{0,20}(length|window|limit)|too many tokens|too long|"
@@ -1418,14 +1423,17 @@ class _ProviderWait:
         if kind == "provider.quota" or code == 402:
             self.fatal = ("quota", f"{self.provider} says the account is out of credit "
                                    f"(HTTP {code or 402})")
-        elif code == 401 or (kind == "provider.auth" and code is None) or \
-                (code == 403 and KEY_WORDS.search(said)):
+        elif code == 401 or ((kind == "provider.auth" or code == 403) and
+                             (code is None or KEY_WORDS.search(said))):
             self.fatal = ("auth", f"{self.provider} refused the API key (HTTP {code or 401})")
         elif (code in REFUSED_CODES or kind in REFUSED_KINDS or kind == "provider.auth") \
                 and not CONTEXT_WORDS.search(said):
             self.fatal = ("refused", f"{self.provider} refused the request"
                                      + (f" (HTTP {code})" if code else "") + (f": {said}" if said else ""))
-        elif kind == "provider.invalid-output":
+        elif kind == "provider.invalid-output" and (code == 200 or self.queued_since is not None):
+            # only an HTTP answer the provider cut short, or one out of its queue: 2.3.2 types the
+            # model's own overrun ("exceeded its output limit") and bad structured output this way
+            # too, and those are the step's (the review of #1083, 2026-11-23)
             self.cut = said or "its answer ended early"
 
     def answered(self) -> None:

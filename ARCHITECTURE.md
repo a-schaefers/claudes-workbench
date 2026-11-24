@@ -798,17 +798,20 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   OpenCode resends each request the provider closed unanswered, ten times, ~110 minutes on paused
   clocks, #1083), or when OpenCode gives up on it, as an `outage` ("<provider> held the agent's
   requests in its queue for 20 minutes without answering"); OpenCode giving up on answers cut short
-  (`provider.invalid-output`, "stream ended without finish_reason") is an `outage` too ("<provider>
-  cut its answers short (…)"). Status `api_stop` (the keyhole's quota stop, shared with #1019's
+  (`provider.invalid-output` with status 200, "stream ended without finish_reason", or any out of a
+  queue) is an `outage` too ("<provider> cut its answers short (…)"); one with no status and no
+  queue (2.3.2's "The model exceeded its output limit", a bad structured output) is the step's. Status `api_stop` (the keyhole's quota stop, shared with #1019's
   spend stop; consumed by the stop, and read first: the keyhole answers both with a 400) stops it
-  at once, and so does an error: `provider.quota` (402), guard `quota`; a 401, or a 403 (or a
-  `provider.auth` with no status) whose message names the key or token (`KEY_WORDS`), guard
-  `auth`; any other 403, a 400, 404, 405, 409, 410, 413, 415 or 422 (`REFUSED_CODES`), or a
+  at once, and so does an error: `provider.quota` (402), guard `quota`; a 401, or a 403 or a
+  `provider.auth` of any status (2.3.2's 400 "Incorrect API key provided") whose message names the
+  key or token (`KEY_WORDS`; with no status it needn't), guard `auth`; any other 403 or
+  `provider.auth`, a 400, 404, 405, 409, 410, 415 or 422 (`REFUSED_CODES`), or a
   `provider.content-filter`, `invalid-request`, `no-route` or `unsupported-operation`
   (`REFUSED_KINDS`), guard `refused` ("<provider> refused the request (HTTP 404): <its message's
   first line>": a moderation flag, a model gone, a schema rejected, the keyhole's own one-model
   403; every 403 read as a refused key, and the rest failed as the agent's, #1084, #1082), but not
-  one over the window (`CONTEXT_WORDS`: the step's). `drive` runs a `rate_limited`/`outage` round again once (`_provider_revive`:
+  one over the window (`CONTEXT_WORDS`: the step's), nor a 413 (2.3.2's payload-too-large, beside
+  context-overflow: a step that read too much, the step's). `drive` runs a `rate_limited`/`outage` round again once (`_provider_revive`:
   a `load` event "<provider> rate-limited the round: it runs again once the cooldown ends", the
   lease stepped aside, a wait to the provider's `api-health.json` `until`, else `RATE_LIMIT_SECS`,
   at most `RATE_WAIT_S`, a steer note ending it into `_steer_round`, `wb stop` ending the runner),
@@ -2237,7 +2240,7 @@ Notices go to `$WB_HOME/notify.jsonl` (`Task.notify`: `{ts, task, kind, text, ro
 tasks?}`). Kinds: `review` (report and `review_diff`), `stuck`, `failed`, `question` (with `id`),
 `checkin` (periodic, a nudge, a mid-round handover before the last allowed, a base check cut short).
 `cause` (`stuck`/`failed` with a round): `guard`, `agent`, `server` (#657), `provider` (an API provider's
-`rate_limited`/`outage` after its one revive, `quota`, `auth`: #1020), `spend` (the day's API spend
+`rate_limited`/`outage` after its one revive, `quota`, `auth`: #1020; `refused`: #1082, #1084), `spend` (the day's API spend
 cap, #1019: `runner.SPEND`), `updated`
 (`runner._updated`), `opencode` (`runner.opencode_moved`), `signal` (`SIGNAL_STOP`), `died`
 (`reap`), `update` (`wb update --stop`). `tasks` names a batch (restart, shutdown, `wb update

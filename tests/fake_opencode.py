@@ -111,12 +111,14 @@ rows record it as `models_path`, and OPENCODE_CONFIG_CONTENT as `content`.
          provider: <baseURL>/messages?beta=true with `x-api-key`), through urllib, so the
          environment's http_proxy and no_proxy apply as they do to OpenCode's fetch. A 2xx is
          `ok` (it writes 42); another status is OpenCode's error for it, the upstream's message
-         verbatim (`provider.auth` for 401/403, `provider.quota` 402, `provider.rate-limit` 429,
-         else `provider.http`), exit 1; no connection is `provider.transport`, exit 1. FAKE_HTTP_LOG,
-         a file: each request's URL and status (or error) appended.
+         verbatim (`provider.auth` for 401/403 or, as 2.3.2, "Incorrect API key provided",
+         `provider.quota` 402, `provider.rate-limit` 429, else `provider.http`), exit 1; no
+         connection is `provider.transport`, exit 1. FAKE_HTTP_LOG, a file: each request's URL
+         and status (or error) appended.
 """
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -501,7 +503,9 @@ if scenario == "http" and args and args[0] == "run":  # a model request through 
             message = json.loads(text)["error"]["message"]
         except (ValueError, KeyError, TypeError):
             message = text
-        fail({401: "provider.auth", 403: "provider.auth", 402: "provider.quota",
+        # 2.3.2 types a 400 "Incorrect API key provided" provider.auth too (#1084)
+        fail("provider.auth" if re.search(r"(?i)incorrect api key provided", message) else
+             {401: "provider.auth", 403: "provider.auth", 402: "provider.quota",
               429: "provider.rate-limit"}.get(e.code, "provider.http"), message, e.code)
     except (urllib.error.URLError, OSError) as e:
         logged(f"error: {e}")
