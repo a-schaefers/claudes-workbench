@@ -32834,6 +32834,61 @@ class ApiTasks(_ApiTask, _KeyholeTest):
                           for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["kind"] != "review"],
                          [("t-paid", "stuck", "provider")])
 
+    def test_a_402_answered_before_the_runner_reads_its_round_is_still_the_quota_stop_so_a_waiter_waits_again(self):
+        # #1240 (2026-11-24): the meter's begin cleared `api_stop` after OpenCode had started, so
+        # on a loaded machine the keyhole's 402 stop went before the round read it, the round
+        # took the keyhole's 400 alone as `refused`, and a waiter's recheck stopped as stuck
+        # (#1216's test, failing at random on CI). Here the round is read only once OpenCode
+        # has exited: that ordering at its worst, every time
+        self.local_api_model()
+        self.up.mode, self.up.status, self.up.message = "status", 402, "Insufficient balance"
+        self.start_api("t-paid", "http", spawn=False)
+        self.start_api("t-behind", "http", "--queue", spawn=False)
+        real = subprocess.Popen
+
+        def late(cmd, *a, **k):
+            proc = real(cmd, *a, **k)
+            if isinstance(cmd, list) and "--format" in cmd:  # OpenCode's run: over before it is read
+                proc.wait(30)
+            return proc
+        slow = mock.patch.object(runner.subprocess, "Popen", late)
+        slow.start()
+        self.addCleanup(slow.stop)
+        self.drive_here("t-paid")
+        paid = store.Task("t-paid")
+        self.assertEqual((paid.status["phase"], paid.status.get("guards")), ("stuck", {"quota": 1}), paid.status)
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")     # lets a hung wait go
+        task = store.Task("t-behind")
+        path = self.models.api_health_path()
+
+        def recheck_due():                                            # the mark's 900 s run out
+            with store.locked(path.with_name(path.name + ".lock")):
+                doc = store.read_json(path, {})
+                doc["deepinfra"]["until"] = time.time() - 1
+                store.write_json(path, doc)
+
+        def waits(rechecks):
+            deadline = time.time() + 30
+            while not (len(self.up.seen) == 1 + rechecks and task.status.get("phase") == "queued"
+                       and (task.status.get("last") or "").startswith("waiting: deepinfra is out of credit")
+                       and sum("still out of credit" in (e.get("text") or "")
+                               for e in store.read_jsonl(task.dir / "events.jsonl")[0]) == rechecks):
+                self.assertLess(time.time(), deadline, (len(self.up.seen), task.status))
+                self.assertTrue(driver.is_alive(), task.status)
+                time.sleep(POLL)
+        driver = threading.Thread(target=self.drive_here, args=("t-behind",), daemon=True)
+        driver.start()
+        self.addCleanup(driver.join, 60)
+        waits(0)                                                      # in load's wait, not before it
+        recheck_due()
+        waits(1)                                                      # the 402 again: waiting
+        self.up.mode, self.up.status = "ok", 200                      # the user tops up
+        recheck_due()
+        driver.join(60)
+        self.assertFalse(driver.is_alive(), task.status)
+        self.assertEqual(task.status["phase"], "review", task.status)
+        self.assertEqual(len(self.up.seen), 3)                        # the 402, the recheck, its round
+
     def test_a_new_start_past_an_expired_402_mark_that_meets_the_402_stops_with_its_notice(self):
         # the review of #1216 (2026-11-24): NoLease.load took its first credit_recheck as a
         # recheck, so a start past an expired mark, with no `ok` since, that met the 402 went back

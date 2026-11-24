@@ -1675,6 +1675,14 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         (ask_mcp.ask_dir(task) / ask_mcp.LISTED).unlink()  # lost ask tool could fire only there (#481)
     except OSError:
         pass
+    # Both before OpenCode starts: each clears what an old round left in status (the meter an
+    # `api_stop`, the wait the rate-limit keys) and zeroes the round's figures, and after the
+    # spawn they cleared what this round's first request had just written. A 402's stop the
+    # keyhole wrote went, the round read the keyhole's 400 alone as `refused`, and a waiter's
+    # recheck that met the 402 again stopped as stuck rather than wait again, waking Claude
+    # (#1240, 2026-11-24: #1216's test failing at random on CI)
+    provider = _ProviderWait(task, n)  # an API provider's rate limit, outage or queue (#1020)
+    spend = _spend_round(task, n)  # an API task's meter (#1019), else None
     log = open(task.dir / "runner.log", "a")
     proc = subprocess.Popen(cmd, cwd=task.workdir, env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=log, encoding="utf-8",
@@ -1708,7 +1716,6 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     edit_mark = gitops.mark(task.worktree)  # shell edits (sed -i, cat >) count as edits too
     started = time.time()  # the wall clock, for check-ins: they compare with timestamps in files
     clock = _Clock(time.monotonic())
-    provider = _ProviderWait(task, n)  # an API provider's rate limit, outage or queue (#1020)
     prior = float(task.status.get("active_s") or 0)  # earlier rounds' active work
     # what the ETA and the progress checks compare: this step's alone (#815)
     step_prior = prior - float(task.status.get("step_active_s") or 0)
@@ -1740,7 +1747,6 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # from a step at 40K compacted the session with no step near the point (#1086, 2026-11-23)
     pending = 0
     opened: dict = {}  # the questions open this round (ask_mcp.relay)
-    spend = _spend_round(task, n)  # an API task's meter (#1019), else None
     warmed = time.monotonic()  # the model's keep-alive, renewed while the round waits (#864)
     while True:
         try:  # woken by the agent's output or a steer note; the timeout runs the clocks below
