@@ -851,12 +851,22 @@ class Lifecycle(Base):
         self.assertEqual(said(bare), "mycli1244: command not found")
         self.assertEqual(said(path), ".venv/bin/mycli1244: not in the worktree (.venv/ is an "
                                      "install's, never checked out)")
+        # with no worktree venv no `pip install -e .` puts a script the step adds on the agent's
+        # PATH, so the spec or project making it still checks in, as #1152 does (#1244's review)
+        prompt = store.round_prompt(task, 1)
+        original = prompt.read_text()
+        prompt.write_text("Add the `mycli1244` console script.\n")
+        self.assertEqual(said(bare), "mycli1244: command not found")
+        prompt.write_text(original)
+        (task.workdir / "pyproject.toml").write_text('[project]\nname = "x"\n[project.scripts]\n'
+                                                     'mycli1244 = "pkg.cli:main"\n')
+        self.assertEqual(said(bare), "mycli1244: command not found")
+        (task.workdir / "pyproject.toml").unlink()
         subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(task.workdir / ".venv")],
                        check=True)
         self.assertEqual(said(bare), "mycli1244: command not found")  # nothing makes it yet
         self.assertEqual(said(path), ".venv/bin/mycli1244: not in the worktree (.venv/bin/ is "
                                      "there, without mycli1244)")
-        prompt = store.round_prompt(task, 1)
         for spec in ("Add the `mycli1244` console script.\n", "Create a command named mycli1244.\n",
                      'Add [project.scripts] mycli1244 = "pkg.cli:main".\n'):
             prompt.write_text(spec)
