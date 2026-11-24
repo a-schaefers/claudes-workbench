@@ -32372,6 +32372,11 @@ class ApiSpend(Base):
             run_wb("resume", "t-f33")
         self.assertEqual(e.exception.code, 3)
         self.assertIn("day cap", err.getvalue())
+        # nor does the refusal offer the GPU as this task's remedy, the user having just said yes
+        # to it (#1171, 2026-11-24: the same advice again, and the retry refused again)
+        self.assertNotIn("gpu), or tomorrow", err.getvalue())
+        self.assertIn("for the next tasks, with wb takeover t-f33 or wb discard t-f33 for this one",
+                      err.getvalue())
         spawned.assert_not_called()
         task = store.Task("t-f33")
         self.assertEqual((task.spec["via"], task.spec["model"]), ("api", SPEND_M))  # resume never re-routes
@@ -32611,7 +32616,9 @@ class ApiSpend(Base):
                   mock.patch.object(cli, "spawn_runner") as spawned):
                 run_wb(*args)
             self.assertEqual(e.exception.code, 3, args)
-            self.assertIn("a cap of at least", err.getvalue())
+            self.assertIn(f"a cap of at least ${need:.2f} (wb route cap <usd>) or tomorrow, then try again; or "
+                          "the role on the GPU (wb route significant gpu) for the next tasks, with wb takeover t-near "
+                          "or wb discard t-near for this one", err.getvalue())  # this task keeps its model (#1171)
             spawned.assert_not_called()
             self.assertFalse(task.round_dir(rnd + 1).exists(), args)
         self.cap(need)                                           # the cap it named lets one through
@@ -32783,6 +32790,13 @@ class ApiSpend(Base):
             self.assertEqual(e.exception.code, 3, args)
             self.assertIn("API spend today is ≈$6.", err.getvalue())
             self.assertIn("day cap", err.getvalue())
+            # #1171 (2026-11-24): the advice offered the role on the GPU as this task's remedy,
+            # but it keeps its API model: the user said yes and the retry was refused the same way
+            self.assertIn("(it resets at local midnight). Ask the user: a higher cap (wb route cap <usd>) or "
+                          "tomorrow, then try again; or the role on the GPU (wb route significant gpu) for the next "
+                          "tasks, with wb takeover t-cap or wb discard t-cap for this one (it keeps its API "
+                          "model)\n", err.getvalue())
+            self.assertNotIn("gpu), or tomorrow", err.getvalue())
             spawned.assert_not_called()
             got = store.Task("t-cap").status
             self.assertEqual({k: got.get(k) for k in before}, before, args)

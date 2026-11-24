@@ -196,12 +196,13 @@ def _model_still_listed(task: store.Task) -> None:
     wb start's spend refusal (meter.refusal: no price, no day cap (#1089), today at the cap or
     within one request at its worst of it, #1150), the same exit: the round written past it
     stopped at once as a spend `stuck`, a Claude wake for nothing, with a review counted or a
-    step committed for a round that never ran (#1118, 2026-11-23)."""
+    step committed for a round that never ran (#1118, 2026-11-23). Its advice is a running task's:
+    the role on the GPU for the next tasks only, as this one keeps its API model (#1171)."""
     if task.spec.get("via") != "api":
         return
     if (m := models.lookup(task.spec.get("model") or "")) is None:
         die(runner.left_catalog(task), 3)
-    if why := meter.refusal(m, task.spec.get("role")):
+    if why := meter.refusal(m, task.spec.get("role"), task=task):
         die(why, 3)
 
 
