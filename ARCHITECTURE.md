@@ -5505,14 +5505,16 @@ the composer until the server has it (#245). A 4xx but 401 marks it not sent, ex
 `DEAD_MS` 40 s watchdog counts as a failure (jittered backoff 0.5–30 s); an abort cancels the body's
 reader (WebKit keeps the socket); back on screen after `AWAY_MS` 3 s, or from the bfcache silent for
 `STALE_MS` 20 s, or on the worker's `{kind: "push"}`, it dials at once (2026-11-20); a new `build`
-reloads (`reloadOnce`, once a minute). Use counts (`reportActive`, #959): on screen or a
+reloads (`reloadOnce`, once a minute). The thread follows the newest line (`follow`) until a wheel, a finger or a scroll up
+releases it; a scroll that came with the thread's height changing is the layout's (`lastHeight`: images loading
+after a reload had read as the reader going up, and the server's thread was drawn mid-thread, #1223). Use counts (`reportActive`, #959): on screen or a
 `pointerdown`/`keydown`, only while `!document.hidden` and `document.hasFocus()`, at most every
 `ACTIVE_MS` 30 s, never retried on a timer (#959 review). Attachments: chips (`drawTray`) in
 `wb-chat-files`, bytes in IndexedDB (`wb-chat`, `files`) until the message lands; `pump` uploads one
 at a time (XHR; `STALL_MS` 30 s without progress retries the same id); edit restores the files, the
 `about` (`setAbout`, #843) and the words before the box's (#958); thumbnails load near view
 (`whenNear`, #754), and before the server's thread is in only from this browser's bytes: the rest wait
-in `nearLater`, judged again by `nearAgain` where that thread put them (a photo the saved thread showed was fetched, 2026-11-24); `sweepSoon` revokes unused object URLs (#746). The receipt texts, dialog cards
+in `nearLater`, judged again by `nearAgain` where that thread put them (a photo the saved thread showed was fetched, 2026-11-24), and an entry measured before the last `render` (`drawnAt`) is observed afresh, not loaded (one delivered after the server's thread was drawn fetched that photo still, #1223); `sweepSoon` revokes unused object URLs (#746). The receipt texts, dialog cards
 (`makeAsk`), notices (`makeNotice`) and the gear's sections (`#away-when` states the away rule
 above; `drawSaved` shows no currency sign, as `wb savings`, #845, and after it `apiSaved`'s `API
 models: 6 tasks, ≈$1.27 (DeepSeek ≈$0.84, Anthropic ≈$0.43; catalog prices).`, or that alone, #1022, #1135) are in `app.js`. Over plain HTTP
@@ -6885,7 +6887,13 @@ outages, reloads and a SIGSTOP past the 40 s watchdog; cards, plans, settings, i
 shown with its name and its reply through `/api/wait`, that reply named `Claude to <agent>` and
 never counted unread (#1128), its state without the user's, a dialog for it saying so on the
 card and in the push (#1042), a 25-task backlog's strip at most three lines on a phone, the queued counted apart
-(#1097); and `sw.js` in a node `vm` (`swSays`) for a push's text.
+(#1097); and `sw.js` in a node `vm` (`swSays`) for a push's text. Each wait is `until` on its condition
+(20 s by default), never a fixed sleep: a sleep is only a claim that something does not happen or a span the
+page's own clock must pass, as a different check failed on each slow CI runner (#1223). The server's thread is
+held back by the page's own `fetch` while sessionStorage has `e2e-hold` (Playwright's routes stopped holding
+requests once the service worker was registered), and a click on a pair or a take waits until no
+`.bubble.flowing` grows above it. `no script errors` leaves out WebKit's "Fetch API cannot load … due to access
+control checks", its words for a same-origin fetch a reload cut off, which Playwright hands over as a page error.
 `WebChat` runs the agents' client, `skill/agents/claude-workbench/scripts/ask_claude.py`, against its server with a
 listener played in the test (#1042).
 
