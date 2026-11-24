@@ -2954,6 +2954,24 @@ def missing_command(r: dict | None) -> str | None:
     return last[0].strip() if last and NOT_FOUND.search(last[0].strip()) else None
 
 
+def missing_name(line: str) -> str | None:
+    """The command a not-found line names: bash's `bash: line 1: X: command not found`, dash's
+    `sh: 1: X: not found`, zsh's `zsh:1: command not found: X`."""
+    m = re.search(r"command not found: (.+)$|([^:]+): (?:command )?not found$", line)
+    return (m.group(1) or m.group(2)).strip() if m else None
+
+
+def command_words(cmd: str | None) -> set[str]:
+    """The words of shell command ``cmd``, its operators split off (`cd x&&pytest`): what the
+    command itself names, which no round can change (#1172)."""
+    lex = shlex.shlex(cmd or "", posix=True, punctuation_chars=True)
+    lex.whitespace_split = True  # `g++`, `npx:tsc` stay one word
+    try:
+        return set(lex)
+    except ValueError:  # an unbalanced quote: the shell's own error, not a missing tool
+        return set()
+
+
 def base_check_line(r: dict, task: store.Task) -> str:
     """What the acceptance command did on the base, for Claude to judge (the first report)."""
     if r["exit"] == "setup failed":
@@ -3638,9 +3656,9 @@ def not_the_code(task: store.Task, tests) -> str:
     (#496, the audit of 1.90): a run past --test-timeout went back as "the bug is in this change"
     and the agent edited code that may well have been right, nothing naming the limit; a device
     the lane refused (lane_refused, #331) was named only after both auto-fix rounds, and so was a
-    command the agent's environment lacks (missing_command, #1152). The part
-    before the first colon is the cause, for status.last. "" when the failure may be the code's
-    (a dropped proxy may be either: its auto-fix prompt says so, auto_fix_prompt)."""
+    command the agent's environment lacks (missing_command, #1152; one a later step's --test names,
+    #1172). The part before the first colon is the cause, for status.last. "" when the failure
+    may be the code's (a dropped proxy may be either: its auto-fix prompt says so, auto_fix_prompt)."""
     if not tests or tests["ok"]:
         return ""
     if tests["exit"] == "timeout" and not tests.get("hang"):  # a hang is the change's (#779)
@@ -3649,13 +3667,19 @@ def not_the_code(task: store.Task, tests) -> str:
                 "the change; run it in the worktree yourself, or narrow it (wb next --test); "
                 "start a slow suite's task with a larger --test-timeout")
     base = task.status.get("base_check") or {}
-    if (line := missing_command(tests)) and line == missing_command(base) \
-            and base.get("cmd") == task.spec.get("test_cmd"):
+    cmd = task.spec.get("test_cmd")
+    if (line := missing_command(tests)) and base.get("cmd") == cmd and line == missing_command(base):
         # the same command not found as on the base: auto-fix rounds told "the system works; the
         # bug is in this change" each failed the same way, before Claude heard (#1152, 2026-11-24).
         # A command the step makes says something else once made.
         return (f"the acceptance command can't run in the agent's environment: {line} (exit 127, "
                 f"as on the base); {GIVE_TOOL}")
+    if line and base.get("cmd") != cmd and missing_name(line) in command_words(cmd):
+        # no base check ran this command (wb next --test, --no-base-check), and the tool it names
+        # itself isn't on the agent's PATH: both auto-fix rounds went to edits that couldn't help
+        # (#1172, 2026-11-24). Not one a script it runs names: the step may write that script.
+        return (f"the acceptance command can't run in the agent's environment: {line} (exit 127, "
+                f"a tool the command itself names); {GIVE_TOOL}")
     if nodes := tests.get("lane"):
         # the grant that reaches each, as the report names it: the path itself, when it was a
         # file not made yet, sent Claude's `wb allow --path` to make a directory of that name (#670)

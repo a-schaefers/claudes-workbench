@@ -503,6 +503,35 @@ class Lifecycle(Base):
         self.assertEqual((st["base_check"]["exit"], st["round"]), (127, 2))
         self.assertFalse([r for r in store.notices() if r["task"] == "t-nf2" and r["kind"] == "checkin"])
 
+    def test_a_command_not_found_that_a_later_steps_test_names_skips_auto_fix(self):
+        # #1172 (bar round 2 of 2.0): wb next --test runs no base check, so a tool its command
+        # names and the agent's PATH lacks (exit 127) got both auto-fix rounds, each told "the
+        # system works; the bug is in this change"
+        self.start("t-nfn", "ok", "--test", TEST_CMD, "--auto-fix", "2", "--no-self-review")
+        wait_phase("t-nfn", {"review"})
+        task = store.Task("t-nfn")
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Now check the answer.\n")
+        run_wb("next", "t-nfn", "--spec", str(step2), "-m", "feat: the answer",
+               "--test", "nosuch-tool-1172 --check answer.txt")
+        st = wait_phase("t-nfn", {"review"})
+        self.assertEqual((st["steps"], st["round"], st.get("auto_fixes", 0)), (2, 2, 0))
+        self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        summary = (task.round_dir(2) / "summary.md").read_text()
+        self.assertTrue(summary.startswith("auto-fix skipped: the acceptance command can't run in "
+                                           "the agent's environment: "), summary)
+        self.assertIn("nosuch-tool-1172: command not found (exit 127, a tool the command itself "
+                      "names); no round can fix that", summary)
+        self.assertEqual(st["last"], "the acceptance command can't run in the agent's environment: "
+                                     "Claude reviews next")
+        # a tool a script names, which the step may write or change, still goes back to the agent
+        (task.worktree / "check.sh").write_text("nosuch-inner-1172 answer.txt\n")
+        run_wb("next", "t-nfn", "--spec", str(step2), "-m", "test: the check",
+               "--test", "sh check.sh")
+        st = wait_phase("t-nfn", {"review"})
+        self.assertEqual((st["steps"], st["round"], st["auto_fixes"]), (3, 5, 2))
+        self.assertIn("nosuch-inner-1172: ", st["tests"]["tail"])  # bash's or dash's line
+
     def test_what_the_base_check_writes_never_reaches_the_agents_worktree(self):
         # #192 (the 2026-11-19 audit): the base check ran in the task's worktree, and a stamp it
         # wrote made the same failing command pass after the agent's unrelated edit

@@ -353,7 +353,9 @@ at ~36 tokens/s; slower models get longer ones, never shorter (*Budgets and spee
 don't weaken tests, check its own expected values by hand, never blame the compiler: 2026-11-18)
 without waking Claude. `not_the_code` (#496: a timeout, a lane-refused device, `lane_refused`,
 #331; a command not found, `missing_command`, with the same line as the base check's for the same
-command, #1152, its fix `GIVE_TOOL`) gets none: review, status `last` the cause, the report led by `auto-fix skipped: <cause>`
+command, #1152, or, when no base check ran the command (`wb next --test`, `--no-base-check`), a
+tool the command itself names, `missing_name` in `command_words`, not one a script it runs names,
+which the step may write, #1172; its fix `GIVE_TOOL`) gets none: review, status `last` the cause, the report led by `auto-fix skipped: <cause>`
 with the fix (`wb allow --path` of `lane_grant`'s grant, `shlex.quote`d, #670). Except `hang`
 (tests `hang {base, limit}`): a timeout where the base check passed the same command in
 `HANG_SHARE` (a quarter) of the limit or less is the change's, sent back saying so (#779). A
@@ -846,7 +848,8 @@ Feedback, next and resume refuse 1.x (exit 3) and note one outside `OPENCODE_TES
      `stuck`/`failed`, a notice, exit; edits stay.
    - else `run_tests` (a note arriving meanwhile → `_steer_round`), the report to
      `rounds/<n>/summary.md`. Failing with auto-fix left, unless `not_the_code` (a timeout, a lane
-     refusal, a command not found as on the base) → an auto-fix round.
+     refusal, a command not found as on the base, or one the command itself names when no base check
+     ran it) → an auto-fix round.
    - else phase `review`, a `review` notice: the report, `review_diff`, the agent's proposed
      instruction files (*Claude's files*); exit.
 
