@@ -305,6 +305,18 @@ def load_key(provider: str, package: str = "") -> Key:
     rows = [x for x in (rows if isinstance(rows, list) else [rows]) if isinstance(x, dict)
             and x.get("integrationID", provider) == provider and isinstance(x.get("value"), dict)]
     rows.sort(key=lambda x: not x.get("active"))  # the active credential first
+    # An OAuth login the user switched to (`opencode auth switch`) over an older key: the key
+    # was billed, the login OpenCode itself would use ignored (#1110, 2026-11-23)
+    # (a login alone is refused below, as it always was)
+    active = rows[0]["value"].get("type") if rows and rows[0].get("active") and any(
+        r["value"].get("type") == "key" for r in rows) else None
+    if active == "oauth":
+        raise KeyholeError(f"{NEEDS}: {provider}'s active credential is an OAuth login, whose "
+                           "tokens rotate: `opencode auth switch` to its API key, or store one "
+                           "with /connect")
+    if active == "external":
+        raise KeyholeError(f"{NEEDS}: {provider}'s active credential comes from an external "
+                           "source: `opencode auth switch` to its API key, or store one with /connect")
     for row in rows:
         v = row["value"]
         if v.get("type") == "key" and isinstance(v.get("key"), str) and v["key"].strip():

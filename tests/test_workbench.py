@@ -26263,6 +26263,25 @@ class Keyhole(_KeyholeTest):
             "output_tokens": 4, "output_tokens_details": {"thinking_tokens": 0}}),
             {"in": 11, "cache_read": 0, "cache_write": 6303, "out": 4, "reasoning": 0})
 
+    def test_an_old_key_behind_an_active_oauth_login_is_never_used(self):
+        # #1110 (2026-11-23): with an OAuth login active and an older API key kept beside it,
+        # load_key skipped the login and returned the key, billing the credential the user had
+        # switched away from (`opencode auth switch`)
+        oauth = {"type": "oauth", "methodID": "m", "refresh": "r", "access": "a", "expires": 1}
+        self.fake_auth({"anthropic": {"export": [
+                            self.key_row("anthropic", {"type": "key", "key": self.CANARY}, active=False),
+                            self.key_row("anthropic", oauth)]},
+                        "keyfirst": {"export": [                         # the key active: it runs
+                            self.key_row("keyfirst", oauth, active=False),
+                            self.key_row("keyfirst", {"type": "key", "key": self.CANARY})]}})
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:
+            self.kh_mod.load_key("anthropic")
+        self.assertIn("anthropic's active credential is an OAuth login", str(e.exception))
+        self.assertIn("opencode auth switch", str(e.exception))
+        self.assertEqual(runner.keyhole_failure(e.exception), str(e.exception))  # its own remedy
+        self.assert_no_canary(str(e.exception))
+        self.assertEqual(self.kh_mod.load_key("keyfirst").value, self.CANARY)
+
     def test_oauth_and_env_keys_cant_run(self):
         self.fake_auth({"oauthco": {"export": [self.key_row("oauthco", {
                             "type": "oauth", "methodID": "m", "refresh": self.CANARY,
