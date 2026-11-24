@@ -3071,8 +3071,9 @@ def _runs_held(m: models.Model) -> bool:
     """Whether an API model's key is one a task can run with: stored by /connect (the keyhole
     holds it outside the lane), or an Ollama cloud model's, which this machine's Ollama holds and
     no keyhole needs (runner.needs_keyhole). Refused, doctor's "set a role to use it" led nowhere,
-    with a /connect that changes nothing for Ollama (#1077, 2026-11-23)."""
-    return m.key == "stored" or (m.cloud and m.key == "ollama")
+    with a /connect that changes nothing for Ollama (#1077, 2026-11-23). GitHub Copilot's sign-in
+    is held as a key (models.HELD_KEYS, #1191)."""
+    return m.key in models.HELD_KEYS or (m.cloud and m.key == "ollama")
 
 
 def _route_api(mid: str, role: str) -> models.Model:
@@ -3267,7 +3268,8 @@ def _route_show(as_json: bool) -> None:
 
 # a provider's key as the pane says it (#1023): only a stored one runs (the keyhole holds it)
 # a key a task runs with too, as the Settings tab counts one connected (#1077's review, 2026-11-23)
-KEY_STATES = {"stored": "stored", "oauth": "oauth", "signing": "oauth", "ollama": "ollama", "": "none"}
+KEY_STATES = {"stored": "stored", "copilot": "copilot", "oauth": "oauth", "signing": "oauth",
+              "ollama": "ollama", "": "none"}
 KEY_HELD = {"oauth": "an OAuth login", "signing": "a cloud login that signs each request",
             "config": "written in OpenCode's config", "ollama": "Ollama's own login", "": "none stored"}
 
@@ -3310,14 +3312,16 @@ def _route_pane() -> dict:
     stored key, one read in the background, _read_catalog_later)."""
     doc = models._read_hosted()
     ts = doc.get("ts")
-    if not any(p.get("key") == "stored" for p in (doc.get("providers") or {}).values()) \
+    if not any(p.get("key") in models.HELD_KEYS for p in (doc.get("providers") or {}).values()) \
             and not (isinstance(ts, (int, float)) and 0 <= time.time() - ts < PANE_REREAD_SECS):
         _read_catalog_later()
     provs = {}
     for pid, p in (doc.get("providers") or {}).items():
         raw, name, pkg = str(p.get("key") or ""), str(p.get("name") or pid), str(p.get("package") or "")
         key = "env" if raw.startswith("env:") else KEY_STATES.get(raw, "none")
-        held = f"key in {raw[4:]}" if key == "env" else KEY_HELD.get(raw, raw)
+        own = models.signin(pid) if raw == "oauth" else None  # the provider's own cause (#1191)
+        held = f"key in {raw[4:]}" if key == "env" else f"signed in with {own[0]}: {own[1]}" if own else \
+            KEY_HELD.get(raw, raw)
         if key == "stored" and models.unspoken(pid, pkg):
             # a stored key the keyhole can't carry read "Google (key stored)" while wb setup said
             # it can't run and wb models --json left its models out (#1066, 2026-11-23)
@@ -3328,6 +3332,8 @@ def _route_pane() -> dict:
                          # its cloud models run through this machine's Ollama (#1077)
                          {"why": "signed in through Ollama: its cloud models need no key here"}
                          if raw == "ollama" else
+                         # Copilot's sign-in runs as a stored key does (#1191)
+                         {"why": "signed in to Copilot in OpenCode"} if raw == "copilot" else
                          {"why": f"can't run: needs a key wb can hold outside the lane ({held})" if raw
                           else "no key: /connect in OpenCode adds one"})}
     return {"spend_today": _spend_today(), "providers": provs}
@@ -4576,6 +4582,8 @@ def _key_held(key: str) -> str:
     that name is discard's, and a second def of it replaced the first (#1090, 2026-11-23)."""
     if key == "stored":
         return "stored"
+    if key == "copilot":  # held as a key (#1191)
+        return "Copilot sign-in"
     if key == "ollama":
         return "Ollama's login"
     what = ("environment" if key.startswith("env:") else "OAuth login" if key == "oauth" else
@@ -4602,7 +4610,7 @@ def _api_section(gpu: bool) -> tuple[list[str], bool]:
     provs = doc.get("providers") if isinstance(doc.get("providers"), dict) else {}
     keys = {pid: str(p.get("key") or "") for pid, p in sorted(provs.items())
             if isinstance(p, dict) and str(p.get("key") or "") not in ("", "none")}
-    used = bool(on_api) or "stored" in keys.values()
+    used = bool(on_api) or any(k in models.HELD_KEYS for k in keys.values())
     counts: dict = {}
     for m in cat.values():
         n, free = counts.get(m.provider, (0, 0))
@@ -5136,7 +5144,7 @@ def scout_api_lines() -> list[str]:
             key = ms[0].key
             out.append(f"  {pid}: {len(tools)}" + (f", {free} of them free" if free else "")
                        + (f", {unsaid} the catalog doesn't say" if unsaid else "")
-                       + ("" if key in ("stored", "none", "ollama") or any(m.free for m in ms)
+                       + ("" if key in ("stored", "copilot", "none", "ollama") or any(m.free for m in ms)
                           else f" (can't run: {_held_elsewhere(pid, key) if key else 'no key'})"))
     elif err := models.hosted_error():
         out.append(f"connected providers: OpenCode's catalog couldn't be read ({err})")
@@ -6430,7 +6438,9 @@ def _held_elsewhere(pid: str, key: str) -> str:
     """A provider whose key the keyhole can't hold, as wb setup says it (decision 6)."""
     if key.startswith("env:"):
         return f"{pid}'s key is in {key[4:]}"
-    return {"oauth": f"{pid} is signed in with OAuth", "signing": f"{pid} signs with a cloud login",
+    own = models.signin(pid)  # a ChatGPT or OpenCode Console sign-in (#1191)
+    return {"oauth": f"{pid} is signed in with {own[0] if own else 'OAuth'}",
+            "signing": f"{pid} signs with a cloud login",
             "config": f"{pid}'s key is written in {models._key_file(pid)}"}.get(key, f"{pid}'s key is {key}")
 
 
@@ -6461,7 +6471,8 @@ def api_key_lines(keys: dict | None) -> list[str]:
     if not keys:
         return need or [NO_KEY]
     out = []
-    stored = [p for p, k in keys.items() if k["key"] == "stored"]
+    # Copilot's sign-in is held as a key (#1191): `ok` beside the stored ones
+    stored = [p for p, k in keys.items() if k["key"] in models.HELD_KEYS]
     # a stored key on a package the keyhole can't carry read `ok`, and every task failed (#1066)
     odd = models.unspoken_providers(stored)
     if stored := [p for p in stored if p not in odd]:
@@ -6469,13 +6480,19 @@ def api_key_lines(keys: dict | None) -> list[str]:
         said = ("" if doc is None else "; no role uses one yet" if not used else
                 f"; {' and '.join(used)} use{'s' if len(used) == 1 else ''} it" if len(stored) == 1 else
                 "; " + ", ".join(f"{r} uses {uses[r]}" for r in used))
-        out.append(f"ok  API keys: {', '.join(f'{p} (stored via /connect)' for p in stored)}{said}")
-    other = [(p, k["key"]) for p, k in keys.items() if k["key"] != "stored"]
+        how = {p: "signed in to Copilot" if keys[p]["key"] == "copilot" else "stored via /connect"
+               for p in stored}
+        out.append(f"ok  API keys: {', '.join(f'{p} ({how[p]})' for p in stored)}{said}")
+    other = [(p, k["key"]) for p, k in keys.items() if k["key"] not in models.HELD_KEYS]
     # a key written in a config file: /connect alone changed nothing while the apiKey stayed, so
     # the line said "/connect stores a key it can" to a user who had (#1075, 2026-11-23)
     written, other = [p for p, k in other if k == "config"], [x for x in other if x[1] != "config"]
     if other:
-        if len(other) == 1 and other[0][1] == "oauth":
+        if len(other) == 1 and other[0][1] == "oauth" and (own := models.signin(other[0][0])):
+            # the provider's own cause (#1191): ChatGPT's and the OpenCode Console's tokens rotate
+            out.append(f"--  {other[0][0]} is signed in with {own[0]}: {own[1]}, so wb can't hold "
+                       f"it outside the lane; {own[2]}")
+        elif len(other) == 1 and other[0][1] == "oauth":
             out.append(f"--  {other[0][0]} is signed in with OAuth: wb can't hold that outside the lane; an API "
                        "key through /connect works")
         elif len(other) == 1 and other[0][1].startswith("env:"):
@@ -6530,12 +6547,12 @@ def first_run() -> list[str]:
         api_only = all(routes.effective_via(doc, r) == "api" for r in routes.ROLES)
     except routes.RoutesError:
         api_only = False
-    stored = not found and (api_only or any(k["key"] == "stored" for k in (keys or {}).values()))
+    stored = not found and (api_only or any(k["key"] in models.HELD_KEYS for k in (keys or {}).values()))
     # a key stored that the cache doesn't list as stored (none yet, or one read before /connect):
     # the pane's API settings read this cache (#1069); an OpenCode config that doesn't parse
     # stops no checklist (the review of #1067, 2026-11-23: wb setup exited 1 at it)
     cached = models._read_hosted().get("providers") or {}
-    if any(k["key"] == "stored" and (cached.get(pid) or {}).get("key") != "stored"
+    if any(k["key"] in models.HELD_KEYS and (cached.get(pid) or {}).get("key") != k["key"]
            for pid, k in (keys or {}).items()):
         try:
             models.hosted_doc(fresh=True)

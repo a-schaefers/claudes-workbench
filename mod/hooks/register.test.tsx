@@ -6319,6 +6319,21 @@ test('#1077: an Ollama cloud login alone counts as connected: its models are off
   await ui.unmount()
 })
 
+test('#1191: a GitHub Copilot sign-in alone counts as connected: its models are offered, never only /connect', { timeoutMs: 20_000 }, async ($, on) => {
+  const { ui, w, texts, clock } = await settingsTab($, on)
+  w.routes.providers = { 'github-copilot': { name: 'GitHub Copilot', key: 'copilot', why: 'signed in to Copilot in OpenCode' } }
+  delete w.routes.roles.trivial.api
+  w.models.api = [{ id: 'github-copilot/gpt-5.4-nano', name: 'gpt-5.4-nano', provider: 'github-copilot', provider_name: 'GitHub Copilot', window: 400000, price: null as any, free: false }]
+  await clock.advance(11_000)
+  await ui.press({ key: 'tab-tasks' })
+  await ui.press({ key: 'tab-settings' })
+  const all = await texts()
+  expect(all).not.toContain('No API provider connected: /connect in OpenCode adds one; every role runs on the GPU.')
+  expect(all).toContain('Connected: GitHub Copilot (signed in to Copilot in OpenCode)')
+  expect(await ui.find({ key: 'api-trivial' })).toBeDefined()
+  await ui.unmount()
+})
+
 test('#1023: the busy opt-in is in the roles\' summary, so a change of it alone reaches the conversation', () => {
   expect(routesSummary({ busy: 'api' })).toBe('significant GPU (the router picks); trivial GPU (the router picks); ' +
     'writing GPU (the router picks); when the GPU is busy, a role with an API model runs on it')

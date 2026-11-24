@@ -38,6 +38,13 @@ Only packages known to post there with a bearer or `x-api-key` key run (`PACKAGE
 (`x-goog-api-key`, `/models/<id>:streamGenerateContent`), Azure's (`api-key`, and a base rewritten
 by its host), Cohere's native `/chat` and the like can't be served, and `start` says so.
 
+GitHub Copilot (#1191): its sign-in's token (`expires: 0`, never rotating) is held as a key, the
+upstream is the account's own endpoint (copilot_endpoint) with the catalog base's path (`/v1` for
+its Messages route), and every route gets `Authorization: Bearer`. No credential is planted in the
+agent's OpenCode: its Copilot plugin adds Copilot's headers (X-Initiator, Openai-Intent,
+X-Interaction-Type, X-GitHub-Api-Version) by provider, whatever the credential (checked on 2.3.2,
+RealOpenCodeAPI), and without one it never asks GitHub, nor `/models` or Copilot's Auto router.
+
 Standard library only: it runs in the runner.
 """
 from __future__ import annotations
@@ -126,6 +133,16 @@ CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]{1,8}")
 LINE_CAP = 64 << 10     # a chunk-size or trailer line
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 SPEND_REFUSED = "the day's API spend cap is reached"  # meter.STOP too: a refusal OpenCode doesn't retry
+# GitHub Copilot (#1191): its sign-in's token is held as a key (_copilot_key), the upstream is the
+# account's own endpoint (copilot_endpoint), and every Copilot route takes `Authorization: Bearer`
+# (the plugin's applyHeaders sets it on its Messages route too); its plugin in the agent's
+# OpenCode adds the rest of Copilot's headers itself, and no credential of the agent's is needed
+COPILOT = "github-copilot"  # models.COPILOT
+COPILOT_USER_API = "2025-04-01"  # the plugin's userApiVersion
+COPILOT_LOOKUP_S = 5             # the plugin's own timeout for that lookup
+# Copilot's spent premium requests (a 402, or a 403 or 429 saying so): the wording is a guess from
+# Copilot's docs, not seen in a real answer (#1191): no wait helps, as QUOTA's
+COPILOT_QUOTA = re.compile(r"(?i)quota[_ ]exceeded|premium requests?\b|\ballowance\b")
 
 
 class KeyholeError(Exception):
@@ -134,12 +151,14 @@ class KeyholeError(Exception):
 
 class Key:
     """A provider's static API key, held in the runner's memory only. Its repr and str name the
-    provider, never the key."""
-    __slots__ = ("provider", "_value")
+    provider, never the key. ``meta``: what a sign-in's credential says besides its token, never
+    a secret (Copilot's `enterpriseUrl` and `apiEndpoint`, #1191)."""
+    __slots__ = ("provider", "_value", "meta")
 
-    def __init__(self, provider: str, value: str):
+    def __init__(self, provider: str, value: str, meta: dict | None = None):
         self.provider = provider
         self._value = value
+        self.meta = dict(meta or {})
 
     @property
     def value(self) -> str:
@@ -340,6 +359,8 @@ def load_key(provider: str, package: str = "") -> Key:
     rows = [x for x in (rows if isinstance(rows, list) else [rows]) if isinstance(x, dict)
             and x.get("integrationID", provider) == provider and isinstance(x.get("value"), dict)]
     rows.sort(key=lambda x: not x.get("active"))  # the active credential first
+    if provider == COPILOT:
+        return _copilot_key(rows)
     # An OAuth login the user switched to (`opencode auth switch`) over an older key: the key
     # was billed, the login OpenCode itself would use ignored (#1110, 2026-11-23)
     # (a login alone is refused below, as it always was). Any active credential that isn't a
@@ -363,6 +384,9 @@ def load_key(provider: str, package: str = "") -> Key:
             return Key(provider, value)
     kinds = {row["value"].get("type") for row in rows}
     if "oauth" in kinds:
+        from . import models
+        if own := models.signin(provider):  # the provider's own cause (#1191)
+            raise KeyholeError(f"{NEEDS}: {provider} is signed in with {own[0]}: {own[1]}; {own[2]}")
         raise KeyholeError(f"{NEEDS}: {provider} is signed in with OAuth, whose tokens rotate")
     if "external" in kinds:
         raise KeyholeError(f"{NEEDS}: {provider}'s credential comes from an external source")
@@ -370,6 +394,95 @@ def load_key(provider: str, package: str = "") -> Key:
         raise KeyholeError(f"{NEEDS}: {provider}'s key is only in the environment (${var}), "
                            "which agents don't get")
     raise KeyholeError(f"{NEEDS}: OpenCode has no key stored for {provider}")
+
+
+def _copilot_key(rows: list) -> Key:
+    """GitHub Copilot's sign-in as a Key (#1191), from ``rows`` (`auth export`'s, the active one
+    first): the credential OpenCode itself would use, the first. An OAuth one is held only with
+    `expires: 0`, OpenCode 2.3.2's device login (`access` = `refresh` = the GitHub token, which
+    `Credential.expiring` never refreshes): a token that rotates would sign the user's own
+    OpenCode out once a copy of it was refreshed. Its `enterpriseUrl` and `apiEndpoint` go with it
+    (copilot_endpoint)."""
+    if not rows:
+        raise KeyholeError(f"{NEEDS}: OpenCode has no GitHub Copilot sign-in: /connect in OpenCode "
+                           "signs in (GitHub Copilot)")
+    v = rows[0]["value"]
+    if v.get("type") == "key" and isinstance(v.get("key"), str) and v["key"].strip():
+        token = v["key"].strip()
+    elif v.get("type") != "oauth":
+        raise KeyholeError(f"{NEEDS}: {COPILOT}'s credential comes from an external source")
+    elif v.get("expires") != 0:
+        raise KeyholeError(f"{NEEDS}: {COPILOT}'s sign-in expires and rotates its token, which "
+                           "OpenCode 2.3's Copilot login never did: /connect in OpenCode signs in "
+                           "again (GitHub Copilot)")
+    else:
+        token = v.get("access") if isinstance(v.get("access"), str) else ""
+        token = token.strip()
+    if not token:
+        raise KeyholeError(f"{NEEDS}: {COPILOT}'s sign-in holds no token: /connect in OpenCode signs "
+                           "in again (GitHub Copilot)")
+    if not KEY_CHARS.fullmatch(token):
+        raise KeyholeError(f"can't use {COPILOT}'s sign-in: its token holds a character an HTTP "
+                           "header can't carry; /connect in OpenCode signs in again")
+    meta = v.get("metadata") if isinstance(v.get("metadata"), dict) else {}
+    return Key(COPILOT, token, {k: meta[k] for k in ("enterpriseUrl", "apiEndpoint")
+                                if isinstance(meta.get(k), str) and meta[k].strip()})
+
+
+def copilot_user_url(meta: dict) -> str:
+    """Where GitHub says a Copilot account's own API endpoint (`endpoints.api`): the plugin's
+    userURL, on the enterprise's domain for a GitHub Enterprise sign-in."""
+    ent = str(meta.get("enterpriseUrl") or "").strip()
+    domain = re.sub(r"^https?://", "", ent).rstrip("/")
+    return f"https://{f'api.{domain}' if domain else 'api.github.com'}/copilot_internal/user"
+
+
+def _https_root(url) -> str | None:
+    """``url`` as an API root the keyhole may send the token to: https, a host, no user, query or
+    fragment, without its trailing slash; else None."""
+    if not isinstance(url, str) or not url.strip():
+        return None
+    u = urllib.parse.urlsplit(url.strip())
+    if u.scheme != "https" or not u.hostname or "@" in u.netloc or u.query or u.fragment \
+            or not QUERY.fullmatch(url.strip()):
+        return None
+    return url.strip().rstrip("/")
+
+
+def copilot_endpoint(key: Key) -> str | None:
+    """The Copilot account's own API root, as GitHub says it now (`endpoints.api` of
+    copilot_internal/user, asked with the token, outside the lane, the plugin's lookup on each of
+    its refreshes: the endpoint changes with the plan); else the sign-in's stored `apiEndpoint`;
+    else None (the catalog's base serves). Never from a request. An account GitHub says has no
+    Copilot chat is refused, as OpenCode's own login refuses it."""
+    from .webpush import tls
+    req = urllib.request.Request(copilot_user_url(key.meta), headers={
+        "Accept": "application/json", "Authorization": f"Bearer {key.value}",
+        "User-Agent": "workbench-keyhole", "X-GitHub-Api-Version": COPILOT_USER_API})
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=tls()))
+    user = None
+    try:
+        with opener.open(req, timeout=COPILOT_LOOKUP_S) as r:
+            user = json.loads(r.read(1 << 20))
+    except Exception:  # GitHub's hiccup: the stored endpoint, else the catalog's (never its text)
+        pass
+    if isinstance(user, dict) and user.get("chat_enabled") is False:
+        raise KeyholeError(f"{COPILOT}: GitHub says this account has no Copilot chat (an active "
+                           "Copilot plan, or a seat from an organization, gives it)")
+    api = (user.get("endpoints") or {}).get("api") if isinstance(user, dict) and isinstance(
+        user.get("endpoints"), dict) else None
+    return _https_root(api) or _https_root(key.meta.get("apiEndpoint"))
+
+
+def copilot_upstream(base_url: str, root: str | None) -> str:
+    """The keyhole's upstream for a Copilot model: the account's ``root`` with the catalog base's
+    path (`/v1` for a model on Copilot's Anthropic Messages route, none for its OpenAI ones:
+    github-copilot/models.ts routeFor), or the catalog's base as it is without a root or for a
+    path of another shape."""
+    path = urllib.parse.urlsplit(base_url).path.rstrip("/")
+    if not root or path not in ("", "/v1"):
+        return base_url
+    return root + path
 
 
 def _env_only(provider: str) -> str:
@@ -1018,7 +1131,9 @@ def _handler(kh: Keyhole):
             text = kh.redact(text)
             status = resp.status
             kind = ("quota" if status == 402 or (status in (429, 403) and QUOTA.search(text))
-                    or (status in (400, 403, 429) and CREDIT.search(text)) else HOLD_CODES.get(status))
+                    or (status in (400, 403, 429) and CREDIT.search(text))
+                    or (kh.model.provider == COPILOT and status in (403, 429)
+                        and COPILOT_QUOTA.search(text)) else HOLD_CODES.get(status))
             if kind == "quota" or "insufficient_quota" in text:
                 kh.health("no_credit", _first_line(text))
             elif kind == "rate_limited":
@@ -1230,9 +1345,18 @@ def start(task, m, *, log=None, on_usage=None, on_health=None, room=None) -> Key
                            f"speak ({_printable(package) or 'no provider package'})")
     if not m.base_url:
         raise KeyholeError(f"{m.id} has no API base in OpenCode's catalog")
+    copilot = m.provider == COPILOT
+    if copilot and m.name == "auto":  # models.COPILOT_AUTO: its router picks another model
+        raise KeyholeError(f"{NEEDS}: Copilot's Auto model picks another model each session, and "
+                           "a task keeps to one: pick a Copilot model by name")
     key = load_key(m.provider, package)
-    kh = Keyhole(task, m, key, mirror_path(package, m.base_url), protocol, log=log,
+    upstream, via = mirror_path(package, m.base_url), ""
+    if copilot:  # the account's own endpoint, asked once per task; Bearer on every route (#1191)
+        root = copilot_endpoint(key)
+        upstream, protocol = copilot_upstream(m.base_url, root), "bearer"
+        via = f" (the account's endpoint, {urllib.parse.urlsplit(upstream).hostname})" if root else ""
+    kh = Keyhole(task, m, key, upstream, protocol, log=log,
                  on_usage=on_usage, on_health=on_health, room=room,
                  order=task.spec.get("order") if task is not None else None)  # #1021
-    kh.log(f"keyhole: {m.provider} on 127.0.0.1:{kh.port} for {m.id}")
+    kh.log(f"keyhole: {m.provider} on 127.0.0.1:{kh.port} for {m.id}{via}")
     return kh

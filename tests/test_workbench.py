@@ -27567,7 +27567,9 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
             events = [{"type": "response.created", "sequence_number": 0, "response": {
                 "id": "resp_up", "object": "response", "model": s.served, "status": "in_progress",
                 "usage": None}},
-                {"type": "response.output_text.delta", "sequence_number": 1, "delta": "ok"},
+                # with the item's ids, as OpenCode 2.3.2 reads a delta (#1191: "missing item_id")
+                {"type": "response.output_text.delta", "sequence_number": 1, "item_id": "msg_up",
+                 "output_index": 0, "content_index": 0, "delta": "ok"},
                 {"type": "response.completed", "sequence_number": 2, "response": {
                     "id": "resp_up", "object": "response", "model": s.served,
                     "status": "completed", "usage": {"input_tokens": 9, "output_tokens": 4}}}]
@@ -28432,6 +28434,214 @@ class Keyhole(_KeyholeTest):
         self.assertEqual(self.kh_mod.load_key("clean").value, self.CANARY)
 
 
+class _CopilotUser(http.server.BaseHTTPRequestHandler):
+    """GitHub's copilot_internal/user for copilot_endpoint's tests: its server's `answer` (a JSON
+    object, or a status number), each request's headers on `seen`."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        self.server.seen.append({"path": self.path, "headers": dict(self.headers)})
+        answer = self.server.answer
+        body = b"{}" if isinstance(answer, int) else json.dumps(answer).encode()
+        self.send_response(answer if isinstance(answer, int) else 200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class CopilotSignIn(_KeyholeTest):
+    """GitHub Copilot's sign-in held as a key (#1191): OpenCode 2.3.2's device login stores the
+    GitHub token as `access` and `refresh` with `expires: 0`, which never rotates; the keyhole
+    sends it to the account's own endpoint, Bearer on every route, and the meter counts a plan."""
+
+    def copilot_row(self, **value):
+        return self.key_row("github-copilot", {"type": "oauth", "methodID": "device",
+                                               "refresh": self.CANARY, "access": self.CANARY,
+                                               "expires": 0, **value})
+
+    def copilot_model(self, name="claude-haiku-4.5", base="https://api.githubcopilot.com/v1",
+                      package="@opencode/ai/providers/anthropic"):
+        m = self.models.Model(id=f"github-copilot/{name}", provider="github-copilot", name=name,
+                              base_url=base, engine="api", label=name, kind="api", key="copilot")
+        m.package = package
+        return m
+
+    def user_server(self, answer):
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), _CopilotUser)
+        srv.daemon_threads, srv.seen, srv.answer = True, [], answer
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        p = mock.patch.object(self.kh_mod, "copilot_user_url",
+                              return_value=f"http://127.0.0.1:{srv.server_port}/copilot_internal/user")
+        p.start()
+        self.addCleanup(p.stop)
+        return srv
+
+    def test_a_copilot_device_sign_in_is_held_as_a_key_with_its_endpoint_beside_it(self):
+        self.fake_auth({"github-copilot": {"export": [self.copilot_row(metadata={
+            "apiEndpoint": "https://api.business.githubcopilot.com", "other": "x"})]}})
+        key = self.kh_mod.load_key("github-copilot")
+        self.assertEqual(key.value, self.CANARY)
+        self.assertEqual(key.meta, {"apiEndpoint": "https://api.business.githubcopilot.com"})
+        self.assert_no_canary(repr(key), str(key))
+
+    def test_a_copilot_sign_in_that_rotates_or_holds_no_token_is_refused_with_its_own_fix(self):
+        for value, why in (({"expires": 1795522477438}, "expires and rotates its token"),
+                           ({"access": " "}, "holds no token"),
+                           ({"type": "external"}, "comes from an external source")):
+            self.fake_auth({"github-copilot": {"export": [self.copilot_row(**value)]}})
+            with self.assertRaises(self.kh_mod.KeyholeError) as e:
+                self.kh_mod.load_key("github-copilot")
+            self.assertIn(why, str(e.exception))
+            self.assertEqual(runner.keyhole_failure(e.exception), str(e.exception))  # no API key fix
+            self.assert_no_canary(str(e.exception))
+        self.fake_auth({"github-copilot": {"export": []}})
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:
+            self.kh_mod.load_key("github-copilot")
+        self.assertIn("no GitHub Copilot sign-in: /connect in OpenCode signs in", str(e.exception))
+
+    def test_the_active_copilot_credential_is_the_one_held(self):
+        other = self.key_row("github-copilot", {"type": "key", "key": "old-" + self.CANARY}, active=False)
+        self.fake_auth({"github-copilot": {"export": [other, self.copilot_row()]}})
+        self.assertEqual(self.kh_mod.load_key("github-copilot").value, self.CANARY)
+
+    def test_a_chatgpt_or_opencode_console_sign_in_says_its_own_cause(self):
+        oauth = {"type": "oauth", "methodID": "m", "refresh": "r", "access": "a", "expires": 1}
+        self.fake_auth({p: {"export": [self.key_row(p, oauth)]} for p in ("openai", "opencode-go")})
+        for provider, why in (("openai", "openai is signed in with ChatGPT: its tokens rotate, and a "
+                                         "copy wb refreshed would sign your own OpenCode out; an "
+                                         "OpenAI API key through /connect works"),
+                              ("opencode-go", "signed in with the OpenCode Console: its tokens rotate, "
+                                              "and the keyhole doesn't speak its API (SystemOne) yet")):
+            with self.assertRaises(self.kh_mod.KeyholeError) as e:
+                self.kh_mod.load_key(provider)
+            self.assertIn(why, str(e.exception))
+
+    def test_the_endpoint_is_the_accounts_own_as_github_says_it_else_the_stored_one(self):
+        key = self.kh_mod.Key("github-copilot", self.CANARY,
+                              {"apiEndpoint": "https://api.individual.githubcopilot.com"})
+        srv = self.user_server({"chat_enabled": True,
+                                "endpoints": {"api": "https://api.business.githubcopilot.com/"}})
+        self.assertEqual(self.kh_mod.copilot_endpoint(key), "https://api.business.githubcopilot.com")
+        [asked] = srv.seen
+        heads = {k.lower(): v for k, v in asked["headers"].items()}
+        self.assertEqual(heads["authorization"], f"Bearer {self.CANARY}")
+        self.assertEqual(heads["x-github-api-version"], "2025-04-01")
+        # an answer that isn't an https root, or no answer: the sign-in's stored endpoint
+        for answer in ({"endpoints": {"api": "http://evil.example"}},
+                       {"endpoints": {"api": "https://user@evil.example"}}, 401, {"x": 1}):
+            srv.answer = answer
+            self.assertEqual(self.kh_mod.copilot_endpoint(key),
+                             "https://api.individual.githubcopilot.com", answer)
+        self.assertIsNone(self.kh_mod.copilot_endpoint(self.kh_mod.Key("github-copilot", self.CANARY)))
+        srv.answer = {"chat_enabled": False}
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:
+            self.kh_mod.copilot_endpoint(key)
+        self.assertIn("no Copilot chat", str(e.exception))
+        self.assert_no_canary(str(e.exception))
+
+    def test_an_enterprise_sign_in_asks_its_own_domain(self):
+        url = self.kh_mod.copilot_user_url
+        self.assertEqual(url({}), "https://api.github.com/copilot_internal/user")
+        self.assertEqual(url({"enterpriseUrl": "https://company.ghe.com/"}),
+                         "https://api.company.ghe.com/copilot_internal/user")
+
+    def test_the_upstream_is_the_accounts_root_with_the_catalog_routes_path(self):
+        up = self.kh_mod.copilot_upstream
+        root = "https://api.business.githubcopilot.com"
+        self.assertEqual(up("https://api.githubcopilot.com/v1", root), f"{root}/v1")   # Messages
+        self.assertEqual(up("https://api.githubcopilot.com", root), root)               # OpenAI's
+        self.assertEqual(up("https://api.githubcopilot.com/", root), root)
+        self.assertEqual(up("https://api.githubcopilot.com/v1", None), "https://api.githubcopilot.com/v1")
+        self.assertEqual(up("https://x.example/odd/path", root), "https://x.example/odd/path")
+
+    def test_a_copilot_model_posts_bearer_to_the_accounts_endpoint_on_every_route(self):
+        # its Messages route as well: the plugin's applyHeaders sends Bearer there, never x-api-key
+        self.fake_auth({"github-copilot": {"export": [self.copilot_row()]}})
+        root = f"http://127.0.0.1:{self.up.server_port}"
+        with mock.patch.object(self.kh_mod, "copilot_endpoint", return_value=root):
+            kh = self.kh_mod.start(self.task, self.copilot_model(), log=self.lines.append)
+        self.addCleanup(kh.close)
+        self.assertEqual((kh.protocol, kh.base), ("bearer", f"http://127.0.0.1:{kh.port}/v1"))
+        self.assertIn("(the account's endpoint, 127.0.0.1)", self.lines[-1])
+        code, _, body = self.post(kh, "/messages", headers={"Authorization": None,
+                                                           "x-api-key": kh.token})
+        self.assertEqual(code, 200, body)
+        [req] = self.up.seen
+        self.assertEqual(req["path"], "/v1/messages")
+        self.assertEqual(req["headers"]["Authorization"], f"Bearer {self.CANARY}")
+        self.assertNotIn("x-api-key", {k.lower() for k in req["headers"]})
+        self.assertNotIn(kh.token, json.dumps(req))
+
+    def test_the_layer_says_a_copilot_models_package_so_its_plugin_routes_it(self):
+        # the task's catalog holds one model, so OpenCode gives its package to the provider and
+        # none to the model, and the plugin sent a Claude model to /chat/completions (#1191)
+        m = self.copilot_model()
+        kh = self.kh_mod.Keyhole(self.task, m, self.kh_mod.Key("github-copilot", self.CANARY),
+                                 f"http://127.0.0.1:{self.up.server_port}/v1", "bearer",
+                                 log=self.lines.append)
+        self.addCleanup(kh.close)
+        runner.CURRENT["keyhole"] = kh
+        self.addCleanup(runner.CURRENT.clear)
+        over = runner.keyhole_overlay(self.task)
+        entry = over["provider"]["github-copilot"]["models"][m.name]
+        self.assertEqual(entry["provider"], {"api": kh.base, "npm": "@opencode/ai/providers/anthropic"})
+        self.assertEqual(runner.keyhole_v2(over)["github-copilot"]["models"][m.name]["package"],
+                         "@opencode/ai/providers/anthropic")                 # V2's word for it
+        self.assert_no_canary(json.dumps(over))
+
+    def test_copilots_auto_model_is_refused_at_start_and_never_listed_as_runnable(self):
+        m = self.copilot_model("auto", "https://api.githubcopilot.com",
+                               "@opencode/ai/providers/openai-compatible")
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:
+            self.kh_mod.start(self.task, m, log=self.lines.append)
+        self.assertIn("Auto model picks another model each session", str(e.exception))
+        self.assertEqual(self.models.keyhole_refusal(m), self.models.COPILOT_AUTO_WHY)
+
+    def test_spent_premium_requests_stop_the_round_as_no_credit(self):
+        m = self.copilot_model("gpt-5.4-nano", f"http://127.0.0.1:{self.up.server_port}",
+                               "@opencode/ai/providers/openai-compatible-responses")
+        states = []
+        kh = self.kh_mod.Keyhole(self.task, m, self.kh_mod.Key("github-copilot", self.CANARY),
+                                 m.base_url, "bearer", log=self.lines.append,
+                                 on_health=lambda state, why, until: states.append(state))
+        self.addCleanup(kh.close)
+        self.up.mode, self.up.status = "status", 403
+        self.up.message = "You have exceeded your premium request allowance for this month."
+        code, _, body = self.post(kh, "/responses")
+        self.assertEqual(code, 400, body)
+        self.assertIn("out of credit", body)
+        self.assertEqual(states, ["no_credit"])
+        self.assertEqual(self.task.status["api_stop"]["guard"], "quota")
+
+    def test_a_copilot_sign_in_is_its_own_key_source_and_runs(self):
+        conns = [{"type": "credential", "id": "cred_1", "label": "default", "method": "oauth"}]
+        auth = {p: {"connections": conns} for p in ("github-copilot", "openai")}
+        self.assertEqual(self.models._key_source("github-copilot", auth, None), "copilot")
+        self.assertEqual(self.models._key_source("openai", auth, None), "oauth")
+        self.assertTrue(cli._runs_held(self.copilot_model()))
+        self.assertTrue(runner.needs_keyhole(self.copilot_model()))
+
+    def test_copilot_usage_is_a_plan_never_dollars_against_the_day_cap(self):
+        # OpenCode 2.3.2's catalog prices Copilot's models at their API rates ($2/$10 for its
+        # Claude ones): booked as dollars they'd stop tasks at a cap the subscription never spends
+        from workbench import meter
+        m = self.copilot_model()
+        m.config = {"cost": [{"input": 2, "output": 10}], "limit": {"context": 200000, "output": 64000}}
+        self.assertTrue(meter.is_plan(m))
+        self.assertIsNone(meter.refusal(m))                       # no cap asked for
+        mt = meter.Meter(self.task, m)
+        self.assertIsNone(mt.room({"model": m.name}, 4_000_000))  # never refused for spend
+        mt.on_usage({"input_tokens": 1000, "output_tokens": 50})
+        [row] = store.read_jsonl(meter.ledger_path())[0]
+        self.assertEqual((row["usd"], row["plan"]), (None, "github-copilot"))
+        self.assertEqual(row["tok"]["in"], 1000)
+
+
 @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
 class RealOpenCodeAPI(_KeyholeTest):
     """Real OpenCode, no network: a built-in API provider pointed at the keyhole."""
@@ -28555,6 +28765,68 @@ class RealOpenCodeAPI(_KeyholeTest):
             [sent] = asked
             self.assertIn(kh.token, sent[header])                          # OpenCode had the token
             self.assert_no_canary(json.dumps(sent))                        # and never the key
+
+    def test_copilot_models_post_through_the_keyhole_with_the_plugins_headers_and_no_sign_in(self):
+        # #1191: the agent's OpenCode holds no Copilot credential, only the layer's base and
+        # token; its Copilot plugin still adds Copilot's headers (by provider, not by credential),
+        # each route posts under the keyhole's mirrored base (Messages under /v1), the keyhole
+        # sends the sign-in's token as Bearer to the account's endpoint, and the plugin asks
+        # nothing else (no /models, no Auto router, no GitHub lookup: it has no sign-in)
+        from workbench import keyhole
+        tmp = Path(self.tmp.name)
+        keys = {"disabled_providers": ["ollama"],
+                "provider": {"github-copilot": {"options": {"apiKey": "dummy-not-a-key"}}}}
+        (tmp / "copilot-keys.json").write_text(json.dumps(keys))
+        rows = [r for r in self.listed(tmp / "copilot-keys.json", "copilot-list")
+                if r["providerID"] == "github-copilot" and (r.get("capabilities") or {}).get("tools")]
+        routes_ = {"@opencode/ai/providers/anthropic": "/v1/messages",
+                   "@opencode/ai/providers/openai-compatible": "/chat/completions",
+                   "@opencode/ai/providers/openai-compatible-responses": "/responses"}
+        picked = {}
+        for r in rows:
+            picked.setdefault(r.get("package"), r)
+        self.assertEqual(set(routes_) - set(picked), set(), [r.get("package") for r in rows])
+        root = f"http://127.0.0.1:{self.up.server_port}"
+        for package, path in routes_.items():
+            row = picked[package]
+            self.up.seen.clear()
+            m = self.models.Model(id=f"github-copilot/{row['id']}", provider="github-copilot",
+                                  name=row.get("modelID") or row["id"], kind="api", engine="api",
+                                  base_url=row["settings"]["baseURL"], label=row["id"], key="copilot")
+            m.package = package
+            # as hosted() keeps the row, so the task's own catalog (catalog_doc) carries it
+            m.config = {"catalog": True, "api": m.base_url, "package": package, "type": "chat",
+                        "limit": row.get("limit") or {}, "cost": row.get("cost") or [],
+                        "capabilities": row.get("capabilities") or {}, "title": row.get("name")}
+            with mock.patch.object(keyhole, "load_key", return_value=keyhole.Key("github-copilot", self.CANARY)), \
+                    mock.patch.object(keyhole, "copilot_endpoint", return_value=root):
+                kh = keyhole.start(self.task, m, log=self.lines.append)
+            self.addCleanup(kh.close)
+            runner.CURRENT["keyhole"] = kh
+            self.addCleanup(runner.CURRENT.clear)
+            self.assertIsNotNone(runner.write_catalog(self.task))          # the task's own catalog
+            layer = tmp / f"copilot-layer-{len(picked)}-{path.strip('/').replace('/', '-')}.json"
+            over = runner.keyhole_overlay(self.task)                        # as the runner writes it
+            layer.write_text(json.dumps({"disabled_providers": ["ollama"], **over}))
+            env = {**self.scratch_env(layer, f"copilot-{path.strip('/').replace('/', '-')}",
+                                      runner.catalog_path(self.task)),
+                   "OPENCODE_CONFIG_CONTENT": runner.rules_env(json.loads(layer.read_text()), over)[
+                       "OPENCODE_CONFIG_CONTENT"]}
+            r = subprocess.run(["opencode", "run", "--standalone", "--title", "t", "-m", m.id,
+                                "--format", "json", "say ok"], cwd=self.repo, env=env,
+                               capture_output=True, text=True, timeout=180)
+            self.assertEqual(r.returncode, 0, f"{package}: {r.stdout[-2000:]}{r.stderr[-2000:]}")
+            self.assert_no_canary(layer.read_text(), json.dumps(env),
+                                  runner.catalog_path(self.task).read_text())
+            [req] = self.up.seen                                           # that request alone
+            heads = {k.lower(): v for k, v in req["headers"].items()}
+            self.assertEqual((req["method"], req["path"]), ("POST", path), package)
+            self.assertEqual(heads["authorization"], f"Bearer {self.CANARY}", package)
+            self.assertNotIn("x-api-key", heads)
+            self.assertEqual(req["body"]["model"], m.name)
+            for h in ("x-initiator", "openai-intent", "x-github-api-version", "x-interaction-type"):
+                self.assertIn(h, heads, f"{package}: the plugin's {h}")
+            self.assertNotIn(kh.token, json.dumps(req))
 
     def test_a_custom_provider_on_an_ai_sdk_npm_posts_through_the_keyhole(self):
         # #1137 (2026-11-23): the documented form of a custom provider, V1 npm `@ai-sdk/...`,
@@ -36515,6 +36787,23 @@ class FirstRunApi(Base):
         self.keys(key_row("deepseek", "DeepSeek", STORED), key_row("anthropic", "Anthropic", STORED))
         self.assertEqual(self.key_lines(), ["ok  API keys: deepseek (stored via /connect), anthropic (stored via "
                                             "/connect); significant uses deepseek, trivial uses deepseek"])
+
+    def test_a_copilot_sign_in_runs_with_no_setup_and_a_chatgpt_one_says_why_it_cant(self):
+        # #1191: Copilot's sign-in is held as a key, so wb setup, the pane and the role dialog
+        # offer it as they offer a stored key; ChatGPT's rotates, and its line says so
+        self.catalog([*ROUTES_CATALOG, api_entry("github-copilot", "gpt-5.4-nano")],
+                     [key_row("github-copilot", "GitHub Copilot", OAUTH)])
+        runner.models.hosted(fresh=True)
+        self.assertEqual(self.key_lines(), ["ok  API keys: github-copilot (signed in to Copilot); no role "
+                                            "uses one yet"])
+        self.assertEqual(cli._route_pane()["providers"]["github-copilot"],
+                         {"name": "GitHub Copilot", "key": "copilot", "why": "signed in to Copilot in OpenCode"})
+        m = runner.models.lookup("github-copilot/gpt-5.4-nano")
+        self.assertEqual((m.key, runner.models.status(m)["available"]), ("copilot", True))
+        self.keys(key_row("openai", "OpenAI", OAUTH))
+        self.assertEqual(self.key_lines(), ["--  openai is signed in with ChatGPT: its tokens rotate, and a copy wb "
+                                            "refreshed would sign your own OpenCode out, so wb can't hold it outside "
+                                            "the lane; an OpenAI API key through /connect works"])
 
     def test_an_env_key_or_an_oauth_login_is_never_shown_as_usable(self):
         self.keys(key_row("xai", "xAI", {"type": "env", "name": "XAI_API_KEY"}))
