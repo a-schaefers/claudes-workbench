@@ -3072,7 +3072,7 @@ NOT_FOUND = re.compile(r"command not found: (?P<z>.+)$|(?P<n>[^:]+): (?:command 
 # that python_env leaves out) ran round 1 and both auto-fix rounds on correct code, each told the
 # bug was the change's, where `pytest` alone (exit 127) checked in (#1181, 2026-11-24). A dotted
 # module's parent missing says it the second way. `m` (or `d`) is the module `-m` named.
-NO_MODULE = re.compile(r"\S*python[\w.]*: (No module named (?P<m>[\w.]+)|Error while finding module "
+NO_MODULE = re.compile(r"(?P<py>\S*python[\w.]*): (No module named (?P<m>[\w.]+)|Error while finding module "
                        r"specification for '(?P<d>[\w.]+)' \(ModuleNotFoundError: No module named "
                        r"'[\w.]+'\))")
 # Where an install puts its tools (a venv's, npm's, Composer's), at any depth: ignored, so never
@@ -3117,7 +3117,7 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
             return f"{path}: not in the worktree ({top.split('/')[0]}/ is an install's, never checked out)"
         return None
     if r["exit"] == 1 and (m := NO_MODULE.fullmatch(line)):
-        return None if task and own_module(task, m["m"] or m["d"]) else line
+        return None if task and own_module(task, m["m"] or m["d"], m["py"]) else line
     return None
 
 
@@ -3141,7 +3141,7 @@ def _missing_word(line: str) -> str | None:
 PROTOCOL_FOLD = "\n---\nHow to work"
 
 
-def own_module(task: store.Task, module: str) -> bool:
+def own_module(task: store.Task, module: str, python: str = "python3") -> bool:
     """Whether ``module`` (`pkg.newcli`) is the repo's own code, which the step may be making:
     its top-level name a `<top>/` or `<top>.py` where the tests run, in the worktree or at the
     base commit, or the module named in the step's spec (its file, or its dotted name; the spec
@@ -3149,10 +3149,14 @@ def own_module(task: store.Task, module: str) -> bool:
     as a missing tool, `--test 'python3 -m pkg.newcli'` for a step adding pkg/newcli.py checked
     in before round 1 with a false "no round can fix that" (and its pip install advice), and
     skipped the agent's one auto-fix round, where a script the step makes was already left out
-    for saying `No such file or directory` on the base too (#1152) (#1181's review, 2026-11-24)."""
+    for saying `No such file or directory` on the base too (#1152) (#1181's review, 2026-11-24).
+    A src layout's `src/<top>` counts the same, and a top-level name the spec makes (spec_makes)
+    when the user's own environment can't import it either (user_imports; #1209)."""
     top, sub = module.split(".")[0], task.spec.get("subdir", "")
-    names = [top, f"{top}.py"]
-    if (task.workdir / top).is_dir() or (task.workdir / f"{top}.py").is_file():
+    # src/: the src layout a real agent may well pick for a new package (#1209, 2026-11-24)
+    names = [f"{d}{top}{ext}" for d in ("", "src/") for ext in ("", ".py")]
+    if any((task.workdir / d / top).is_dir() or (task.workdir / d / f"{top}.py").is_file()
+           for d in ("", "src")):
         return True
     try:
         if gitops.git(task.worktree, "ls-tree", "--name-only", task.spec["base"], "--",
@@ -3172,9 +3176,56 @@ def own_module(task: store.Task, module: str) -> bool:
     if any(f"/{p}".endswith(f"/{path}.py") or f"/{path}/" in f"/{p}"
            for p in context.spec_paths(spec)):  # pkg/newcli.py, pkg/newcli/__main__.py
         return True
-    # a dotted name in the spec is the module's own; a top-level one (`pytest`) is a tool the
-    # spec may well name
-    return "." in module and re.search(rf"(?<![\w.]){re.escape(module)}(?!\w)", spec) is not None
+    if "." in module:  # a dotted name in the spec is the module's own
+        return re.search(rf"(?<![\w.]){re.escape(module)}(?!\w)", spec) is not None
+    # a top-level one only when the spec makes it, and the user's own environment can't import
+    # it either: counted only dotted, `python3 -m answerpkg` for a spec making answerpkg checked
+    # in before round 1 with a false "no round can fix that", and its auto-fix was skipped; and
+    # counted whenever the spec named it, "with pytest tests" on a machine without pytest ran
+    # round 1 and both auto-fix rounds on correct code again, #1181's incident (#1209, 2026-11-24)
+    return spec_makes(spec, top) and not user_imports(top, python)
+
+
+# Words that say a sentence makes something, for spec_makes.
+MAKING = (r"\b(?:new|make|makes|making|create|creates|creating|add|adds|adding|write|writes|"
+          r"writing|build|builds|building|implement|implements|implementing|scaffold)\b")
+
+
+def spec_makes(spec: str, name: str) -> bool:
+    """Whether the spec presents top-level module ``name`` as one the step makes: its directory
+    as a path (`answerpkg/`, `src/answerpkg/`), or the name as a package or module in a sentence
+    that makes something ("Make a new Python package answerpkg", "add the `slug` module"). Not
+    merely named ("with pytest tests in test_slug.py", "run `python3 -m pytest -q`"), nor beside
+    `-m`, which a spec quoting its acceptance command gives a tool too (#1209, 2026-11-24)."""
+    n = re.escape(name)
+    if re.search(rf"(?<![\w./-])(?:src/)?{n}/", spec):  # not a URL's (github.com/x/pytest/)
+        return True
+    q = r"[`'\"]?"
+    named = re.compile(rf"\b(?:package|module)\s+(?:(?:called|named)\s+)?{q}{n}{q}(?!\w|\.\w)|"
+                       rf"(?<![\w.]){q}{n}{q}\s+(?:package|module)\b", re.I)
+    return any(named.search(s) and re.search(MAKING, s, re.I)
+               for s in re.split(r"(?<=[.!?])\s+|\n", spec))
+
+
+def user_imports(top: str, python: str = "python3") -> bool:
+    """Whether the user's own environment imports top-level module ``top``: ``python`` (the
+    no-module line's interpreter, by name) on the runner's PATH, the user's, with the checkout's
+    venv that python_env keeps from the agent, and the user's PYTHONPATH. False when that can't
+    be told (no such interpreter, a hang)."""
+    exe = shutil.which(os.path.basename(python) or "python3")
+    if not exe:
+        return False
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", context.USER_PYTHONPATH)}
+    if user := os.environ.get(context.USER_PYTHONPATH, os.environ.get("PYTHONPATH", "")):
+        env["PYTHONPATH"] = user
+    # from /, without -c's '' (the cwd) on sys.path: never a module of where the probe runs
+    probe = ("import sys, importlib.util as u; sys.path[:] = [p for p in sys.path if p]; "
+             "sys.exit(u.find_spec(sys.argv[1]) is None)")
+    try:
+        return subprocess.run([exe, "-c", probe, top], cwd="/", env=env, timeout=10,
+                              stdin=subprocess.DEVNULL, capture_output=True).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def missing_name(line: str) -> str | None:

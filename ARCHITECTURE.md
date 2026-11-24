@@ -370,7 +370,7 @@ at ~36 tokens/s; slower models get longer ones, never shorter (*Budgets and spee
 2, counted since the last review round or step) goes back as `auto_fix_prompt` (fix the code,
 don't weaken tests, check its own expected values by hand, never blame the compiler: 2026-11-18)
 without waking Claude. `not_the_code` (#496: a timeout, a lane-refused device, `lane_refused`,
-#331; a command or Python module not found, `missing_command` (not the repo's own, `own_module`: a `<top>/` or `<top>.py` in the worktree, which a `--setup` may generate, or at the base commit, or one whose file or dotted name the spec gives; a bare name the spec gives, `greet`, still counts as a tool, as `pytest` would), with the same line as the base check's (wb's `<name>: command not found` in every shell, or `<path>: not in the worktree (…)` for a tool in an install's `TOOL_DIRS`, #1206; for a Python module the same module, `_missing_key`, as the line starts with the interpreter's path, a `--setup` .venv's in the base check's scratch checkout and in the worktree, #1181's review) for the same
+#331; a command or Python module not found, `missing_command` (not the repo's own, `own_module`: a `<top>/` or `<top>.py`, or `src/<top>`, in the worktree, which a `--setup` may generate, or at the base commit, or one whose file or dotted name the spec gives, or a top-level name the spec makes, `spec_makes` (its `<name>/` path, or a package or module so named in a sentence that makes something: `Make a new Python package answerpkg`), that the user's own environment can't import either, `user_imports`, #1209; one the spec merely names, `with pytest tests`, `python3 -m pytest -q`, still counts as a tool, #1209's review), with the same line as the base check's (wb's `<name>: command not found` in every shell, or `<path>: not in the worktree (…)` for a tool in an install's `TOOL_DIRS`, #1206; for a Python module the same module, `_missing_key`, as the line starts with the interpreter's path, a `--setup` .venv's in the base check's scratch checkout and in the worktree, #1181's review) for the same
 command, #1152, #1181, or, unless a base check passed the same command (when none ran it, `wb next --test`, `--no-base-check`, #1172, or it failed before reaching the tool, an `&&` chain's first command, #1208), a
 tool or `-m` module the command itself names, `_missing_word` in `command_words`, not one a script it runs names,
 which the step may write; its fix `GIVE_TOOL`) gets none: review, status `last` the cause, the report led by `auto-fix skipped: <cause>`
@@ -1328,8 +1328,15 @@ build's output (`target/debug/newbin`), is one, `<path>: not in the worktree (.v
 install's, never checked out)`, `NOT_CHECKED_OUT` for `missing_name`, #1206; or exit 1, the last line `NO_MODULE`'s, Python's `<path>/python3: No module named <m>`
 for `-m` (or its `Error while finding module specification` for a dotted one's parent), not an
 import error inside the tests, nor a module of the repo's own code (`own_module`: its top-level
-name a `<top>/` or `<top>.py` where the tests run, in the worktree or at the base commit, or the
-module's file or dotted name in the spec, the spec alone, before `runner.PROTOCOL_FOLD`, never the
+name a `<top>/` or `<top>.py` where the tests run, or under its `src/`, in the worktree or at the
+base commit, or the module's file or dotted name in the spec, or a top-level name the spec makes
+(`spec_makes`: its `<name>/` or `src/<name>/` path, or the name as a package or module in a
+sentence with a making word, `MAKING`) that the user's own environment can't import either
+(`user_imports`: the line's interpreter by name on the runner's PATH, with the checkout venv
+`python_env` keeps from the agent and the user's PYTHONPATH; `python3 -m answerpkg` for a spec
+making it checked in falsely, #1209; a name the spec merely gives, `with pytest tests`, or beside
+`-m`, is a tool, as any bare name counted ran #1181's incident again on a machine without pytest,
+#1209's review), the spec alone, before `runner.PROTOCOL_FOLD`, never the
 protocol's acceptance line, which names --test's own `-m` and so made every dotted one the repo's:
 `python3 -m pkg.newcli` for a step adding `pkg/newcli.py`), which the step may make, as a script, #1181; the warning ends `GIVE_TOOL`, a
 module's fix the worktree's `.venv`), a note past 120 s
