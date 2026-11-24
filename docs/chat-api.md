@@ -174,6 +174,9 @@ A long poll for Claude's replies after the message `after` (a message's or a rep
 - Errors: 400 for a bad `after`, `timeout` or `until`; `404 {"error": "no such message"}` for an
   id not in the thread's recent part (the last 4 MiB), or, for an agent, not in its view; `503`
   when 16 waits are open already.
+- A wait can be cut: the server restarts itself on an update (a reset connection, or 502 to 504
+  from a proxy in front meanwhile), and `503` passes. Wait again, after a short pause, with the
+  same `after`: nothing was lost (`ask_claude.py` does, until its `--timeout`).
 
 ### `POST /api/send`
 JSON body, `Content-Type: application/json` (else 415 `json only`), at most 32 KB (else 413 `too

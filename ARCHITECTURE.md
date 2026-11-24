@@ -4583,7 +4583,10 @@ client; the server needs no browser.
   the `Hub` until a reply, `done` (with `until=done`), nobody listening (at once: `listener:
   null`) or the timeout; at most `MAX_WAITS` 16 at once (503), each looking every `WAIT_LOOK` 1 s
   whether its client hung up (`Handler._gone`: an aborted wait held its slot to its timeout, and
-  16 of them refused every wait, the #1042 review). It also answers `waiting_on_user`
+  16 of them refused every wait, the #1042 review). `ask_claude.py` asks a wait cut short again (a
+  reset, or 502 to 504 from a proxy, while the server re-execs; 503: `TRANSIENT`), after a pause
+  doubling from `RETRY_FIRST` 1 s to `RETRY_MOST` 15 s, until its deadline, then names `--after`:
+  it ended at once with a bare error and no id (#1107). It also answers `waiting_on_user`
   (`chat.waiting_on_user`: an open ask, or a notice not yet answered, under `ASK_STALE` old), and
   returns when that turns true during the wait (once: true at its start, it holds). `wb chat reply
   --to user` addresses the user's thread whatever the turn took: a consent question during an

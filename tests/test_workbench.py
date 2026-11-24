@@ -23395,6 +23395,54 @@ class WebChat(Base):
         self.assertEqual(r.stdout.strip(), "Done: fix the parser in ~/src/app (notes.txt).")
         self.assertIn("[done: follow up with ask_claude.py --after ", r.stderr)
 
+    def test_ask_claude_asks_a_wait_the_server_cut_again_and_names_after_only_at_the_deadline(self):
+        # #1107: the server re-execs itself on a code change (a `wb update`), and a proxy in front
+        # answers 502 meanwhile; the client ended at once, exit 1, with a bare error and no
+        # `--after` id, so an agent could send its request again and pay for the work twice
+        import importlib.util
+        script = Path(__file__).resolve().parent.parent / "skill/agents/claude-workbench/scripts/ask_claude.py"
+        spec = importlib.util.spec_from_file_location("ask_claude_1107", script)
+        ac = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ac)
+        hits, answers = [], []
+
+        class Stub(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                hits.append(self.path)
+                what = answers.pop(0) if answers else "drop"
+                if what == "drop":                       # the server going away mid-wait
+                    return
+                code, body = (502, {"error": "bad gateway"}) if what == "502" else (200, {
+                    "replies": [{"id": "r1", "text": "Done: pushed."}], "done": True, "listener": {}})
+                data = json.dumps(body).encode()
+                self.send_response(code)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Stub)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        env = {"CLAUDE_WB_URL": f"http://127.0.0.1:{srv.server_address[1]}", "CLAUDE_WB_TOKEN": "wba-x"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(ac, "RETRY_FIRST", 0.05):
+            answers[:] = ["drop", "502", "reply"]
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = ac.follow("m1", "done", time.monotonic() + 20)
+            self.assertEqual((rc, len(hits)), (0, 3), err.getvalue())
+            self.assertEqual(out.getvalue().strip(), "Done: pushed.")
+            hits.clear()                                 # down past the deadline: then --after
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                rc = ac.follow("m1", "done", time.monotonic() + 1)
+        self.assertEqual(rc, 1)
+        self.assertGreater(len(hits), 1)
+        self.assertIn("ask_claude.py --after m1 waits on", err.getvalue())
+
     # ---- the #1042 review ----
 
     def _held_wait(self, path, token):
