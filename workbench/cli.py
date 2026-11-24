@@ -3071,8 +3071,11 @@ def _runs_held(m: models.Model) -> bool:
     """Whether an API model's key is one a task can run with: stored by /connect (the keyhole
     holds it outside the lane), or an Ollama cloud model's, which this machine's Ollama holds and
     no keyhole needs (runner.needs_keyhole). Refused, doctor's "set a role to use it" led nowhere,
-    with a /connect that changes nothing for Ollama (#1077, 2026-11-23)."""
-    return m.key == "stored" or (m.cloud and m.key == "ollama")
+    with a /connect that changes nothing for Ollama (#1077, 2026-11-23). And OpenCode Zen's free
+    models with no key stored (models.keyless_free, #1193): Zen's own `public` goes through the
+    keyhole in place of a key, so a user with no GPU and no key can try wb; another provider's
+    keyless free model has nothing a task could send, and stays refused."""
+    return m.key == "stored" or (m.cloud and m.key == "ollama") or models.keyless_free(m)
 
 
 def _route_api(mid: str, role: str) -> models.Model:
@@ -3133,6 +3136,13 @@ def _prices_of(m, ahead: bool = False) -> str:
 def _who(mid: str) -> str:
     m = models.lookup(mid)
     return models.provider_name(m) if m is not None and m.kind == "api" else mid.split("/", 1)[0]
+
+
+def _free(mid: str) -> bool:
+    """Whether an API id is a free model (meter.is_free): the route line says privacy.FREE_LINE,
+    and a change putting only free models on API asks no day cap (#1193)."""
+    m = models.lookup(mid)
+    return m is not None and m.kind == "api" and meter.is_free(m)
 
 
 def _route_argv(role, target, gpu, api, thinking, day, order=None) -> list[str]:
@@ -3329,6 +3339,9 @@ def _route_pane() -> dict:
                          {"why": "signed in through Ollama: its cloud models need no key here"}
                          if raw == "ollama" else
                          {"why": f"can't run: needs a key wb can hold outside the lane ({held})" if raw
+                          # Zen's free models run keyless (#1193): "/connect adds one" alone read as needed
+                          else "no key: its free models need none; /connect in OpenCode adds one for "
+                               "the rest" if pid == models.ZEN
                           else "no key: /connect in OpenCode adds one"})}
     return {"spend_today": _spend_today(), "providers": provs}
 
@@ -3435,7 +3448,8 @@ def cmd_route(a):
             die("no role has an API model yet: wb route <role> <provider/model>", 3)
         try:
             ch = routes.change(doc, None if what == "cap" else role, via=via, gpu=gpu, api=api,
-                               thinking=a.thinking, day_usd=day, who=_who, use=use, order=order, busy=busy)
+                               thinking=a.thinking, day_usd=day, who=_who, use=use, order=order, busy=busy,
+                               free=_free)
         except routes.RoutesError as e:
             die(str(e), 3)
         # a kept API model a role newly runs on (its own flip, or the Agents switch) must still be
@@ -3495,7 +3509,7 @@ def _route_pairs(a) -> None:
 
     def changed(doc) -> routes.Change:
         try:
-            ch = routes.change_pairs(doc, pairs, day_usd=a.day_usd, who=_who)
+            ch = routes.change_pairs(doc, pairs, day_usd=a.day_usd, who=_who, free=_free)
         except routes.RoutesError as e:
             die(str(e), 3)
         for r, via, mid in pairs:  # a kept API model a role newly runs on must still be one it may run
@@ -4651,8 +4665,9 @@ def _window(n) -> str:
 
 def _api_list(text: str) -> None:
     """wb models --api TEXT: the catalog's ids containing TEXT (any case), sorted, at most
-    API_LIST_MAX, each with its window, its price per 1M tokens and the free-model note. It lists
-    only: a role is set by wb route, with the user's yes (#1026)."""
+    API_LIST_MAX, each with its window, its price per 1M tokens, the free-model note and `no tool
+    calls` for a model the catalog says has none (#1193). It lists only: a role is set by wb
+    route, with the user's yes (#1026)."""
     def match(found: dict) -> list:
         return sorted((m for mid, m in found.items() if text.lower() in mid.lower()), key=lambda m: m.id)
     hits = match(models.hosted())
@@ -4674,8 +4689,10 @@ def _api_list(text: str) -> None:
             + (f", {basis}" if basis else "") if rate and not m.free else ""
         # the catalog's own window, the model's fact (#1017 plans every API task to API_WINDOW)
         own = (m.extra.get("catalog_limit") or m.config.get("limit") or {}).get("context")
+        # a model without tool calls can't be a coder: the first run's free pick reads this (#1193)
         print(f"{m.id}  {_window(own)}{price}"
-              + (f" · free: {FREE_NOTE}" if m.free else ""))
+              + (f" · free: {FREE_NOTE}" if m.free else "")
+              + (" · no tool calls" if m.config.get("tool_call") is False else ""))
     if len(hits) > API_LIST_MAX:
         print(f"and {len(hits) - API_LIST_MAX} more: a longer text narrows it")
 
@@ -4690,6 +4707,9 @@ def _try_api_line(task: store.Task) -> str:
     mid = str(spec.get("model") or "")
     m = models.lookup(mid, cached=True)
     who = models.provider_name(m) if m else str(spec.get("provider") or mid.split("/", 1)[0])
+    if m is not None and meter.is_free(m):  # OpenCode Zen's free tier, the no-key try (#1193)
+        return (f"wb try: the trivial role is API ({mid}, {who}): the sample's code goes there, at $0 "
+                f"({privacy.FREE_LINE})")
     try:
         cap = routes.read().get("day_usd")
     except routes.RoutesError:
@@ -6423,7 +6443,8 @@ NO_SERVER_OPTIONAL = ("--  no model server answers here (optional: an API role c
                       "local model, run /workbench)")
 NO_LOCAL_OPTIONAL = "--  no local model registered (optional: an API role can do the coding; run /workbench)"
 NO_KEY = ("--  no API key connected (optional: /connect in OpenCode adds a provider, then /workbench "
-          "sets the roles)")
+          "sets the roles; or, with no key and no account, /workbench can try it on OpenCode's free "
+          "models, whose provider may keep or train on the code)")  # #1193
 
 
 def _held_elsewhere(pid: str, key: str) -> str:
@@ -6440,8 +6461,9 @@ def api_key_lines(keys: dict | None) -> list[str]:
     outside the lane (an environment variable, OAuth, a cloud login) with the fix, one for each
     key written in a config file (remove it there, #1075), one for a stored key on a package the
     keyhole can't carry (models.unspoken_providers, #1066), and one for each provider a role on API
-    uses with no key at all, required (#1067); else NO_KEY for none; nothing when `auth list`
-    can't be read."""
+    uses with no key at all, required (#1067), but an `ok` one for roles on OpenCode Zen's free
+    models, which need none (models.keyless_free, #1193); else NO_KEY for none; nothing when
+    `auth list` can't be read."""
     if keys is None:
         return []
     try:
@@ -6451,13 +6473,16 @@ def api_key_lines(keys: dict | None) -> list[str]:
     uses = {} if doc is None else {r: doc["roles"][r]["api"].split("/", 1)[0] for r in routes.ROLES
                                    if routes.effective_via(doc, r) == "api" and doc["roles"][r].get("api")}
     # a provider a role on API uses with no key at all: required, not NO_KEY's "optional" (#1067)
-    unkeyed = {}
+    unkeyed, keyless = {}, {}
     for r, p in uses.items():
         if p not in keys:
-            unkeyed.setdefault(p, []).append(r)
+            free = models.keyless_free(models.lookup(doc["roles"][r]["api"], cached=True))
+            (keyless if free else unkeyed).setdefault(p, []).append(r)
     need = [f"--  no API key for {p}, which {' and '.join(rs)} use{'s' if len(rs) == 1 else ''}: "
             "/connect in OpenCode adds it (required: those tasks can't start without it)"
             for p, rs in unkeyed.items()]
+    need += [f"ok  no API key needed for {p}'s free models, which {' and '.join(rs)} "
+             f"use{'s' if len(rs) == 1 else ''} ({privacy.FREE_LINE})" for p, rs in keyless.items()]
     if not keys:
         return need or [NO_KEY]
     out = []

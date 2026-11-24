@@ -27712,6 +27712,58 @@ class Keyhole(_KeyholeTest):
         with self.assertRaises(TypeError):
             __import__("pickle").dumps(kh._key)
 
+    def zen_free(self):
+        """OpenCode Zen's free model with no key stored, as discovery makes it (#1193)."""
+        m = self.model("opencode", "big-pickle-free", "/inference/openai/v1",
+                       "@opencode/ai/providers/openai-compatible")
+        m.kind, m.key, m.free, m.remote = "api", "none", True, True
+        return m
+
+    def test_opencode_zens_keyless_free_model_sends_public_upstream_and_nothing_redacts_it(self):
+        # #1193: OpenCode 2.3.2 serves Zen's free models with the apiKey "public" when no key is
+        # stored; the keyhole sends that, loading nothing (no `auth export`), and since it is no
+        # secret, never scrubs it: replaced in every answer, a model's `public class` read
+        # `[key redacted] class` in the agent's code
+        m = self.zen_free()
+        self.assertTrue(self.models.keyless_free(m))
+        with mock.patch.object(self.kh_mod, "_opencode", side_effect=AssertionError("auth export")):
+            kh = self.kh_mod.start(self.task, m, log=self.lines.append)
+        self.addCleanup(kh.close)
+        self.assertEqual(repr(kh._key), "Key(opencode, api key)")
+        self.assertTrue(kh.base.endswith("/inference/openai/v1"))
+        code = 'public class Main { public static void main(String[] a) {} }'
+        self.up.mode, self.up.status, self.up.ctype = "raw", 200, "text/event-stream"
+        self.up.pieces = [b"data: " + json.dumps({"model": m.name, "choices": [{"index": 0, "delta": {
+            "content": code}}]}).encode() + b"\n\n",
+            b"data: " + json.dumps({"error": {"message": "a public notice"}}).encode() + b"\n\n",
+            b"data: [DONE]\n\n"]
+        status, _, body = self.post(kh, headers={"x-opencode-client": "cli", "x-opencode-session": "ses_1"})
+        self.assertEqual(status, 200, body)
+        [req] = self.up.seen
+        self.assertEqual(req["path"], "/inference/openai/v1/chat/completions")
+        self.assertEqual(req["headers"]["Authorization"], "Bearer public")
+        self.assertNotIn(kh.token, json.dumps(req))
+        # Zen's "Free-tier chat models require OpenCode": its client headers go on
+        self.assertEqual((req["headers"]["x-opencode-client"], req["headers"]["x-opencode-session"]), ("cli", "ses_1"))
+        self.assertIn(json.dumps(code)[1:-1], body)
+        self.assertIn("a public notice", body)
+        self.assertNotIn(self.kh_mod.REDACTED, body)
+        self.up.ctype, self.up.pieces = "application/json", [b'{"model": "big-pickle-free", "x": "pub', b'lic"}']
+        self.assertIn('"pub', self.post(kh, body={"model": m.name})[2])
+        self.assertEqual(self.post(kh, body={"model": m.name})[2], '{"model": "big-pickle-free", "x": "public"}')
+        self.up.mode, self.up.status, self.up.message = "status", 400, "public models only"
+        self.assertIn("public models only", self.post(kh)[2])
+        self.assertEqual(self.kh_mod.redact("public", kh._key), "public")
+        self.assertEqual(self.kh_mod.redact(f"sk {self.CANARY}", self.kh_mod.Key("x", self.CANARY)),
+                         f"sk {self.kh_mod.REDACTED}")                    # a secret still is
+        # another provider's keyless free model is no Zen one: no "public" for it
+        other = self.zen_free()
+        other.provider, other.id = "freeco", "freeco/gratis-1"
+        self.assertFalse(self.models.keyless_free(other))
+        stored = self.zen_free()
+        stored.key = "stored"                                               # Zen with a key: that key
+        self.assertFalse(self.models.keyless_free(stored))
+
     def test_anthropic_gets_x_api_key(self):
         kh = self.keyhole(self.model("anthropic", "claude-haiku-5-5", "/v1",
                                      "@opencode/ai/providers/anthropic"))
@@ -28684,6 +28736,45 @@ class RealOpenCodeAPI(_KeyholeTest):
         for row in rows:
             (row.get("settings") or {}).pop("apiKey", None)        # the layer's dummy, given back
         return rows
+
+    def test_zens_free_model_runs_through_the_keyhole_on_the_tokens_overlay_and_goes_up_with_public(self):
+        # #1193: OpenCode 2.3.2's Zen plugin turns its provider on with apiKey "public" only when it
+        # sees no key; the layer's overlay gives it the keyhole's token instead. Offline, the real
+        # OpenCode must still run the free model, send the token to the keyhole (else a 401
+        # there), and the keyhole Zen's own "public" upstream, OpenCode's client headers kept
+        from workbench import keyhole, models
+        tmp = Path(self.tmp.name)
+        (tmp / "zen-base.json").write_text(json.dumps({"disabled_providers": ["ollama"]}))
+        rows = [r for r in self.listed(tmp / "zen-base.json", "zen-bundled") if r["providerID"] == models.ZEN
+                and (r.get("capabilities") or {}).get("tools")
+                and all(not c.get("input") and not c.get("output") for c in r.get("cost") or [{"input": 1}])]
+        if not rows:
+            self.skipTest("this OpenCode's bundled catalog lists no free Zen model")
+        ApiHarness.catalog(self, rows[:1], [])                              # no key stored for Zen
+        m = models.hosted(fresh=True)[f"{models.ZEN}/{rows[0]['id']}"]
+        self.assertTrue(models.keyless_free(m), m)
+        path = urllib.parse.urlsplit(m.base_url).path
+        m.base_url = f"http://127.0.0.1:{self.up.server_port}{path}"
+        with mock.patch.object(keyhole, "_opencode", side_effect=AssertionError("auth export")):
+            kh = keyhole.start(self.task, m, log=self.lines.append)
+        self.addCleanup(kh.close)
+        runner.CURRENT["keyhole"] = kh
+        self.addCleanup(runner.CURRENT.clear)
+        catalog = runner.write_catalog(self.task)
+        over = runner.keyhole_overlay(self.task)
+        layer = {"disabled_providers": ["ollama"], **over}
+        (tmp / "zen-layer.json").write_text(json.dumps(layer))
+        env = {**self.scratch_env(tmp / "zen-layer.json", "zen-run", catalog),
+               "OPENCODE_CONFIG_CONTENT": runner.rules_env(layer, over)["OPENCODE_CONFIG_CONTENT"]}
+        r = subprocess.run(["opencode", "run", "--standalone", "--title", "t", "-m", m.id, "--format", "json",
+                            "say ok"], cwd=self.repo, env=env, capture_output=True, text=True, timeout=180)
+        self.assertEqual(r.returncode, 0, r.stdout[-2000:] + r.stderr[-2000:])
+        [req] = self.up.seen                                                # past the keyhole's token check
+        heads = {k.lower(): v for k, v in req["headers"].items()}
+        self.assertEqual((req["path"], heads["authorization"]), (f"{path}/chat/completions", "Bearer public"))
+        self.assertEqual(req["body"]["model"], m.name)
+        self.assertIn("x-opencode-client", heads)                           # "Free-tier chat models require OpenCode"
+        self.assertNotIn(kh.token, json.dumps(req))
 
     def test_the_tasks_own_catalog_is_read_as_the_bundled_one_and_carries_a_model_it_lacks(self):
         # #1015: the agent's OpenCode fetches no catalog (#1010), so wb hands it the model in a
@@ -31135,8 +31226,13 @@ class Routes(Base):
         self.assertEqual(code, 3)
         self.assertIn("deepseek/deepseek-flash can't be a role's model: no key for deepseek: run /connect in "
                       "OpenCode and add it", err)
+        # a keyless free model of another provider than OpenCode Zen's has no key a task could send
+        # (#1193 lifted the refusal for Zen's alone: Routes.test_opencode_zens_free_model_…)
+        self.catalog([*ROUTES_CATALOG, api_entry("freeco", "gratis-1", cost=[{"input": 0, "output": 0}])],
+                     [r for r in ROUTES_AUTH if r["id"] != "deepseek"])
+        runner.models.hosted(fresh=True)
         for mid, held in (("oauthco/chat-1", "an OAuth login"), ("xenv/grok-9", "from the environment, XENV_API_KEY"),
-                          ("opencode/big-pickle-free", "none: a free model takes no key")):
+                          ("freeco/gratis-1", "none: a free model takes no key")):
             with self.subTest(mid=mid):
                 code, _, err = self.route("trivial", mid, "--day-usd", "5")
                 self.assertEqual(code, 3)
@@ -31154,6 +31250,41 @@ class Routes(Base):
         self.assertEqual(self.route("trivial", "deepseek/deepseek-flash")[1],
                          f"changed: {DEEPSEEK_LINE}\n")
         self.assertEqual(self.route("cap", "7.5")[1], "changed: day cap $5 → $7.50/day\n")
+
+    def test_opencode_zens_free_model_takes_a_role_with_no_key_and_no_cap_and_the_line_says_it_may_train(self):
+        # #1193: a user with no GPU and no key could not run even wb try, as _runs_held refused
+        # OpenCode Zen's keyless free models ("none: a free model takes no key"); OpenCode serves
+        # them with its own "public" key, so the role takes one, asks no day cap (the guard keeps
+        # none for a free model), and the dialog's line says the provider may train on the code
+        from workbench import privacy
+        free = "opencode/big-pickle-free"
+        self.assertEqual(runner.models.lookup(free).key, "none")          # no key stored for Zen
+        os.environ["CLAUDECODE"] = "1"
+        asked = self.dry("trivial", free)
+        self.assertTrue(asked["gate"])                                     # the user's yes, as any API role
+        self.assertEqual(asked["change"], f"trivial: GPU → API {free} · your code goes to opencode · "
+                                          f"{privacy.FREE_LINE} · thinking off")
+        self.approve(asked["approval"])
+        self.assertEqual(self.route("trivial", free)[0], 0)
+        doc = self.doc()
+        self.assertEqual((doc["roles"]["trivial"]["api"], doc["roles"]["trivial"]["via"], doc["day_usd"]),
+                         (free, "api", None))
+        os.environ.pop("CLAUDECODE")
+        # a priced model later asks the cap then, the free one beside it or not
+        self.assertEqual(self.route("significant", "deepseek/deepseek-flash")[0:3:2], (3, f"wb: {routes.NO_CAP}\n"))
+        # several roles in one question: the free mark once, for the free role, and no cap
+        self.route("trivial", "gpu")
+        pairs = self.dry("trivial", free, "writing", free)["change"]
+        self.assertEqual(pairs.count(privacy.FREE_LINE), 1)
+        self.assertIn(f"{privacy.FREE_LINE} (trivial, writing)", pairs)
+        self.assertNotIn("cap", pairs)
+        self.assertEqual(self.route("trivial", free, "significant", "deepseek/deepseek-flash")[0:3:2],
+                         (3, f"wb: {routes.NO_CAP}\n"))
+        # the busy opt-in with only free API models: no cap either, the free mark said
+        self.route("trivial", "--api", free)
+        busy = self.dry("busy", "api")["change"]
+        self.assertIn(f"{privacy.FREE_LINE} (trivial)", busy)
+        self.assertNotIn("cap", busy)
 
     def test_with_api_runs_off_an_api_start_is_refused_before_any_dialog_and_a_gpu_model_starts_as_before(self):
         # 2026-11-23 review: the dialog asked the user to send their code to Acme for a start
@@ -31627,6 +31758,39 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         p.start()
         self.addCleanup(p.stop)
         return m
+
+    def test_a_task_on_opencode_zens_free_model_runs_through_the_keyhole_on_public_with_no_day_cap(self):
+        # #1193: with no GPU and no key the first run tries wb on Zen's free models; the task goes
+        # through the keyhole (its hold, health record, meter, pin), which sends Zen's own
+        # "public" with no `auth export`, and starts with no day cap, a free model keeping none
+        from workbench import keyhole, meter
+        m = self.model("opencode", "big-pickle-free", "/inference/openai/v1",
+                       "@opencode/ai/providers/openai-compatible")
+        m.kind, m.key, m.free, m.remote = "api", "none", True, True
+        m.config = {"limit": {"context": 200000, "output": 8192}, "cost": [{"input": 0, "output": 0}]}
+        for name in ("resolve", "lookup"):  # discovery never lists a model on this machine's port
+            real = getattr(self.models, name)
+            p = mock.patch.object(self.models, name, lambda w, *a, _real=real, **k: m if w == m.id else _real(w, *a, **k))
+            p.start()
+            self.addCleanup(p.stop)
+        self.assertTrue(runner.needs_keyhole(m))
+        # the trivial role on it, as the free try routes it: no day cap
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "roles": {"trivial": {"via": "api", "api": m.id}}})
+        self.assertIsNone(meter.refusal(m))
+        os.environ["FAKE_SCENARIO"] = "http"
+        with mock.patch.object(keyhole, "_opencode", side_effect=AssertionError("auth export")), \
+                mock.patch.object(cli, "spawn_runner", lambda task: 0):
+            run_wb("start", "t-zen", "--spec", str(self.spec), "--repo", str(self.repo), "--role", "trivial",
+                   "--test", TEST_CMD)
+            log = self.drive_here("t-zen")
+        task = store.Task("t-zen")
+        self.assertEqual((task.spec["via"], task.spec["role"], task.spec["model"]), ("api", "trivial", m.id))
+        self.assertEqual(task.status["phase"], "review", (task.status, log))
+        self.assertIn("keyhole: opencode on 127.0.0.1:", log)
+        [req] = self.up.seen
+        self.assertEqual((req["path"], req["headers"]["Authorization"]),
+                         ("/inference/openai/v1/chat/completions", "Bearer public"))
+        self.assertEqual(req["body"]["model"], "big-pickle-free")
 
     def test_an_api_task_never_says_it_waits_for_the_gpu_while_queued(self):
         # #1112: the base check wrote "waiting for the GPU" for an API task, wb watch printed
@@ -36516,6 +36680,28 @@ class FirstRunApi(Base):
         self.assertEqual(self.key_lines(), ["ok  API keys: deepseek (stored via /connect), anthropic (stored via "
                                             "/connect); significant uses deepseek, trivial uses deepseek"])
 
+    def test_with_no_key_setup_offers_the_free_try_and_a_role_on_zens_free_model_needs_none(self):
+        # #1193: wb setup's first run named only /connect for a user with no key; it names the
+        # free try too, and a role on OpenCode Zen's free model reads `ok`, never "required"
+        from workbench import privacy
+        self.keys()
+        self.assertEqual(self.key_lines(), [cli.NO_KEY])
+        self.assertIn("/workbench can try it on OpenCode's free models, whose provider may keep or train on the code",
+                      cli.NO_KEY)
+        code, _, err = self.wb("route", "trivial", "opencode/big-pickle-free")   # no cap asked
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.key_lines(), [f"ok  no API key needed for opencode's free models, which trivial "
+                                            f"uses ({privacy.FREE_LINE})"])
+        # a priced role whose provider's key went is still required beside it
+        self.keys(key_row("deepseek", "DeepSeek", STORED))
+        self.assertEqual(self.wb("route", "significant", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)
+        self.keys()
+        lines = self.key_lines()
+        self.assertIn("--  no API key for deepseek, which significant uses: /connect in OpenCode adds it (required: "
+                      "those tasks can't start without it)", lines)
+        self.assertIn(f"ok  no API key needed for opencode's free models, which trivial uses ({privacy.FREE_LINE})",
+                      lines)
+
     def test_an_env_key_or_an_oauth_login_is_never_shown_as_usable(self):
         self.keys(key_row("xai", "xAI", {"type": "env", "name": "XAI_API_KEY"}))
         self.assertEqual(self.key_lines(), ["--  xai's key is in XAI_API_KEY: wb can't hold it outside the lane "
@@ -37037,8 +37223,10 @@ class SettingsRoles(Base):
         self.assertEqual(api["deepseek/deepseek-flash"]["provider_name"], "DeepSeek")
         self.assertEqual(api["deepseek/deepseek-flash"]["price"], {"input": 0.2, "output": 0.6})
         self.assertIsInstance(api["deepseek/deepseek-flash"]["window"], int)
-        for kept_out in ("oauthco/chat-1", "xenv/grok-9", "opencode/big-pickle-free"):  # no key wb can hold
+        for kept_out in ("oauthco/chat-1", "xenv/grok-9"):  # no key wb can hold
             self.assertNotIn(kept_out, api)
+        # OpenCode Zen's keyless free model runs with Zen's own "public" (#1193): listed, marked free
+        self.assertTrue(api["opencode/big-pickle-free"]["free"])
         self.assertEqual(doc["used"], ["acme/coder-pro"])
         self.assertTrue(doc["free_line"])
         self.assertEqual(set(doc["optimize"]), {"done_at", "models", "running"})
@@ -37648,6 +37836,28 @@ class ApiCompat(Base):
         skill = (Path(cli.__file__).resolve().parent.parent / "skill/workbench/SKILL.md").read_text()
         first = " ".join(skill[skill.index("  2. **No GPU model"):skill.index("  3. **No GPU model")].split())
         self.assertIn("`wb models --api <provider>` lists that provider's ids", first)
+
+    def test_wb_try_on_zens_free_model_says_it_costs_nothing_and_the_provider_may_train_on_it(self):
+        # #1193: the free try's line said "its cost counts toward today's API spend", and no cap
+        from workbench import privacy
+        task = store.Task("try-9")
+        task.dir.mkdir(parents=True)
+        store.write_json(task.dir / "task.json", {"name": "try-9", "model": "opencode/big-pickle-free", "via": "api",
+                                                 "role": "trivial", "provider": "opencode"})
+        self.models.hosted()
+        self.assertEqual(cli._try_api_line(task),
+                         "wb try: the trivial role is API (opencode/big-pickle-free, opencode): the sample's code "
+                         f"goes there, at $0 ({privacy.FREE_LINE})")
+
+    def test_wb_models_api_marks_a_model_the_catalog_says_has_no_tool_calls(self):
+        # #1193: the first run's free pick needs tool calls, which the listing never said
+        self.catalog([api_entry("opencode", "big-pickle-free", cost=[{"input": 0, "output": 0}]),
+                      api_entry("opencode", "chatty-free", cost=[{"input": 0, "output": 0}],
+                                capabilities={"tools": False})], [])
+        self.models.hosted(fresh=True)
+        out = run_wb("models", "--api", "opencode").splitlines()
+        self.assertEqual(out, [f"opencode/big-pickle-free  200K · free: {cli.FREE_NOTE}",
+                               f"opencode/chatty-free  200K · free: {cli.FREE_NOTE} · no tool calls"])
 
     def test_wb_models_names_an_api_roles_state_and_a_gpu_user_gets_two_lines(self):
         self.catalog([api_entry("opencode", "big-pickle-free", cost=[{"input": 0, "output": 0}])], [])

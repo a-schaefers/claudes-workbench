@@ -4000,8 +4000,11 @@ def _load_failed(task: store.Task, e: Exception, api: bool = False) -> None:
 # provider back at its real endpoint; the agent's NO_PROXY covers 127.0.0.1 (agent_env).
 def needs_keyhole(m: models.Model) -> bool:
     """Whether an API model's requests need the keyhole: not an Ollama cloud model (this
-    machine's Ollama holds that login, and OpenCode sends no key), nor a keyless free one."""
-    return m.kind == "api" and not m.cloud and m.key != "none"
+    machine's Ollama holds that login, and OpenCode sends no key), nor a keyless free one, except
+    OpenCode Zen's (models.keyless_free, #1193): free tiers rate-limit and cap a day's requests,
+    and the keyhole's hold, health record, meter and pin to the task's model are what one needs,
+    its key Zen's own `public` (keyhole.PUBLIC)."""
+    return m.kind == "api" and not m.cloud and (m.key != "none" or models.keyless_free(m))
 
 
 def start_keyhole(task: store.Task, m: models.Model) -> keyhole.Keyhole:

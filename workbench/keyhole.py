@@ -37,6 +37,9 @@ keyhole forwards that path, and its query (`?beta=true` for Anthropic), to the u
 Only packages known to post there with a bearer or `x-api-key` key run (`PACKAGES`): Google's
 (`x-goog-api-key`, `/models/<id>:streamGenerateContent`), Azure's (`api-key`, and a base rewritten
 by its host), Cohere's native `/chat` and the like can't be served, and `start` says so.
+OpenCode Zen's free models with no key stored (models.keyless_free, #1193) go through it too, with
+Zen's own `public` as the key (PUBLIC): no secret, so none is loaded and nothing is redacted for
+it, but the hold, the health record, the meter and the pin to the task's model are the same.
 
 Standard library only: it runs in the runner.
 """
@@ -134,12 +137,15 @@ class KeyholeError(Exception):
 
 class Key:
     """A provider's static API key, held in the runner's memory only. Its repr and str name the
-    provider, never the key."""
-    __slots__ = ("provider", "_value")
+    provider, never the key. ``secret`` False: a value that is no secret (PUBLIC, OpenCode Zen's
+    keyless free tier, #1193), which nothing redacts: "public" replaced in every answer turned a
+    model's `public class` into `[key redacted] class`."""
+    __slots__ = ("provider", "_value", "secret")
 
-    def __init__(self, provider: str, value: str):
+    def __init__(self, provider: str, value: str, secret: bool = True):
         self.provider = provider
         self._value = value
+        self.secret = secret
 
     @property
     def value(self) -> str:
@@ -168,7 +174,7 @@ def redact(text: str, key: str | Key = "") -> str:
     """``text`` with the key, its first 8 and last 4 characters, anything key-shaped (KEYLIKE)
     and any bearer credential replaced with [key redacted]. One pass, so a replacement is never
     matched again."""
-    key = key.value if isinstance(key, Key) else (key or "")
+    key = (key.value if key.secret else "") if isinstance(key, Key) else (key or "")
     parts = [re.escape(key)] if key else []
     if len(key) >= 12:  # shorter, its fragments would be most of it, and match everywhere
         parts += [re.escape(key[:8]), re.escape(key[-4:])]
@@ -308,6 +314,12 @@ def _opencode(*args: str) -> subprocess.CompletedProcess:
 
 def _first_line(text: str) -> str:
     return redact(next((ln.strip() for ln in (text or "").splitlines() if ln.strip()), ""))[:200]
+
+
+# The key OpenCode 2.3.2 itself sends for Zen's free models when none is stored (packages/core/
+# src/plugin/provider/opencode.ts: `apiKey: "public"`, the priced models turned off). A keyless
+# free task's keyhole sends it upstream in place of a key (#1193): nothing to load, nothing secret.
+PUBLIC = "public"
 
 
 def load_key(provider: str, package: str = "") -> Key:
@@ -513,6 +525,11 @@ class Keyhole:
 
     def redact(self, text: str) -> str:
         return redact(text, self._key)
+
+    def secret_bytes(self) -> bytes:
+        """The key as the answers are scrubbed of it: b"" for one that is no secret (PUBLIC), which
+        is never replaced (bytes.replace(b"", …) would put the mark between every byte)."""
+        return self._key.value.encode() if self._key.secret else b""
 
     def saw(self, model, by) -> None:
         """A response named the model that served it (and OpenRouter its provider): status
@@ -1055,7 +1072,7 @@ def _handler(kh: Keyhole):
             self.end_headers()
             sse = "event-stream" in (resp.getheader("Content-Type") or "")
             self.used = {}  # this response's usage, merged: kh.usage once, before its end (#1114)
-            key = kh._key.value.encode()
+            key = kh.secret_bytes()
             hold = bytearray()  # SSE: a partial line; else the last len(key) - 1 bytes
             whole = bytearray()
             started, marked = False, time.monotonic()  # the first data; the queue's last mark
@@ -1090,14 +1107,14 @@ def _handler(kh: Keyhole):
                             kh.answered()
                         if len(whole) < SNIFF_CAP:
                             whole += piece
-                        out = bytes(hold).replace(key, REDACTED.encode())
-                        cut = max(0, len(out) - (len(key) - 1))
+                        out = bytes(hold).replace(key, REDACTED.encode()) if key else bytes(hold)
+                        cut = max(0, len(out) - max(len(key) - 1, 0))
                         send(out[:cut])
                         hold = bytearray(out[cut:])
                 if sse and hold:
                     send(self.data_line(bytes(hold)))
                 elif hold:
-                    send(bytes(hold).replace(key, REDACTED.encode()))
+                    send(bytes(hold).replace(key, REDACTED.encode()) if key else bytes(hold))
                 hold = bytearray()
                 if not sse and whole:
                     try:
@@ -1123,7 +1140,8 @@ def _handler(kh: Keyhole):
             """One SSE line read for the model and usage, and as it goes on: with the key out,
             and through redact when it carries an `error` (a mid-stream error arrives inside a
             200: Anthropic's `event: error`, OpenRouter's `data: {"error": …}`)."""
-            safe = ln.replace(kh._key.value.encode(), REDACTED.encode())
+            key = kh.secret_bytes()
+            safe = ln.replace(key, REDACTED.encode()) if key else ln
             s = ln.strip()
             if not s.startswith(b"data:"):
                 return safe
@@ -1230,7 +1248,9 @@ def start(task, m, *, log=None, on_usage=None, on_health=None, room=None) -> Key
                            f"speak ({_printable(package) or 'no provider package'})")
     if not m.base_url:
         raise KeyholeError(f"{m.id} has no API base in OpenCode's catalog")
-    key = load_key(m.provider, package)
+    from . import models
+    # Zen's free tier with no key stored (#1193): OpenCode's own "public", never `auth export`
+    key = Key(m.provider, PUBLIC, secret=False) if models.keyless_free(m) else load_key(m.provider, package)
     kh = Keyhole(task, m, key, mirror_path(package, m.base_url), protocol, log=log,
                  on_usage=on_usage, on_health=on_health, room=room,
                  order=task.spec.get("order") if task is not None else None)  # #1021

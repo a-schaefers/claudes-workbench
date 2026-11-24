@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import store
-from .privacy import OPENROUTER  # the provider whose roles keep an `order` (#1021)
+from .privacy import FREE_LINE, OPENROUTER  # OPENROUTER: the provider whose roles keep an `order` (#1021)
 
 ROLES = ("significant", "trivial", "writing")
 # how the pane names them (#1023); files and commands keep the role names
@@ -172,6 +172,21 @@ def _thinking_on(roles: list, doc: dict) -> list:
     return [f"thinking on ({', '.join(on)})"] if on else []
 
 
+def _free_part(roles: list, doc: dict, free: Callable[[str], bool]) -> list:
+    """`free: the provider may keep or train on your code (trivial)`, for those of ``roles`` (the
+    ones a change newly sends to an API model) on a free model, as a clause list ([] for none):
+    training on the code is what the user says yes to there (#1193), and the dialog's text is
+    this line."""
+    on = [r for r in roles if free(doc["roles"][r].get("api") or "")]
+    return [f"{FREE_LINE} ({', '.join(on)})"] if on else []
+
+
+def _priced(roles: list, doc: dict, free: Callable[[str], bool]) -> bool:
+    """Whether any of ``roles`` runs on an API model that isn't free (or on none yet): the day
+    cap is asked for (NO_CAP) only then, a free model having nothing for it to keep (#1193)."""
+    return not roles or any(not free(doc["roles"][r].get("api") or "") for r in roles)
+
+
 def busy_routed(doc: dict, role: str, m) -> dict:
     """task.json's routing keys for a start the busy opt-in sent to ``m``, the role's API model:
     as routes.resolve's for a role on API, with `busy` (#1023)."""
@@ -183,21 +198,23 @@ def busy_routed(doc: dict, role: str, m) -> dict:
             **({"order": list(row["order"])} if row.get("order") and m.provider == OPENROUTER else {})}
 
 
-def _busy_part(doc: dict, new: dict, cap) -> tuple[str, bool]:
+def _busy_part(doc: dict, new: dict, cap, free: Callable[[str], bool] = lambda mid: False) -> tuple[str, bool]:
     """The busy row's part of the change line: ('', False) when it is as it was; to api takes the
-    user's yes (it can spend), and a day cap first (NO_CAP); back to wait none."""
+    user's yes (it can spend), and a day cap first (NO_CAP) unless every API model is free; back
+    to wait none."""
     was, now = doc.get("busy", "wait"), new.get("busy", "wait")
     if was == now:
         return "", False
     if now == "wait":
         return "When the GPU is busy: the role's API model → wait (queue, as before)", False
-    if cap is None:
-        raise RoutesError(NO_CAP)
     has = [r for r in ROLES if new["roles"][r].get("api")]
+    if cap is None and _priced(has, new, free):
+        raise RoutesError(NO_CAP)
     what = ([f"a role with an API model ({', '.join(has)}) starts on it while the GPU is busy",
-             *_thinking_on(has, new)]
+             *_thinking_on(has, new), *_free_part(has, new, free)]
             if has else ["no role has an API model yet, so nothing changes until one does"])
-    return f"When the GPU is busy: wait → the role's API model ({'; '.join(what)}; cap {money(cap)}/day)", True
+    capped = f"; cap {money(cap)}/day" if cap is not None else ""
+    return f"When the GPU is busy: wait → the role's API model ({'; '.join(what)}{capped})", True
 
 
 def read() -> dict:
@@ -274,7 +291,7 @@ class Change:
 
 
 def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str],
-               new: dict) -> tuple[list, bool]:
+               new: dict, free: Callable[[str], bool] = lambda mid: False) -> tuple[list, bool]:
     """``r``'s clauses of the change line and whether they take the user's yes. ``new``: the
     document after the change (its `use` and `busy`), so what the role's code does is judged by
     where it actually goes: with Agents on API, or the busy opt-in on, a role whose own `via` is
@@ -289,7 +306,9 @@ def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str],
         gated = True
         clauses.append(f"{_side(old)} → {_side(row)}")
         if on_api:
-            clauses += [f"your code goes to {who(row['api'])}", f"thinking {row['thinking']}"]
+            clauses += [f"your code goes to {who(row['api'])}",
+                        *([FREE_LINE] if free(row["api"]) else []),  # what the yes is to (#1193)
+                        f"thinking {row['thinking']}"]
             if row.get("order"):  # an OpenRouter role's backends (#1021): part of what is agreed to
                 clauses.append(f"backends {', '.join(row['order'])}")
             if cap is not None:
@@ -304,6 +323,8 @@ def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str],
                        + ("used from the next start" if now else "used once it goes to API"))
         if now and old["thinking"] == row["thinking"] == "on":  # else the thinking clause says it
             clauses.append("thinking on")  # turned on with no dialog before it had a model (#1177)
+        if now and free(row["api"]):  # once it goes to API, that change's line says it (#1193)
+            clauses.append(FREE_LINE)
     if old["gpu"] != row["gpu"] and not (moved and not on_api):
         clauses.append(f"GPU model {_gpu_name(old['gpu'])} → {_gpu_name(row['gpu'])}")
     if old["thinking"] != row["thinking"] and not (moved and on_api):
@@ -323,7 +344,8 @@ def _goes_to(roles: list, doc: dict, who: Callable[[str], str]) -> str:
     return "your code goes to " + ", ".join(f"{p} ({', '.join(rs)})" for p, rs in by.items())
 
 
-def _agents_part(doc: dict, new: dict, cap, who: Callable[[str], str]) -> tuple[str, bool, list]:
+def _agents_part(doc: dict, new: dict, cap, who: Callable[[str], str],
+                 free: Callable[[str], bool] = lambda mid: False) -> tuple[str, bool, list]:
     """The Agents switch's part of the change line (#1016): ('', False, []) when `use` is as it
     was; else the clause, whether it takes the user's yes (to API, or to Both when that puts a
     role back on its API model; never to GPU) and the roles whose side it moves."""
@@ -342,7 +364,7 @@ def _agents_part(doc: dict, new: dict, cap, who: Callable[[str], str]) -> tuple[
     else:
         what = ["each role as set: " + ", ".join(f"{r} {_side(new['roles'][r])}" for r in ROLES)]
     if to_api:
-        what += [_goes_to(to_api, new, who), *_thinking_on(to_api, new)]
+        what += [_goes_to(to_api, new, who), *_free_part(to_api, new, free), *_thinking_on(to_api, new)]
         if cap is not None:
             what.append(f"cap {money(cap)}/day")
     # to Both only when it newly puts a role on API (from GPU): from API it sends nothing new
@@ -353,13 +375,15 @@ def _agents_part(doc: dict, new: dict, cap, who: Callable[[str], str]) -> tuple[
 def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None = None,
            api: str | None = None, thinking: str | None = None, day_usd=None,
            who: Callable[[str], str] = lambda mid: mid.split("/", 1)[0], use: str | None = None,
-           order: list[str] | None = None, busy: str | None = None) -> Change:
+           order: list[str] | None = None, busy: str | None = None,
+           free: Callable[[str], bool] = lambda mid: False) -> Change:
     """What a `wb route` does to ``doc``: ``role`` one of ROLES, "all" (``use``, the Agents
     switch, and ``thinking`` only) or None (the cap alone). ``who``: an API id's provider, as the
     user knows it (the catalog's name). Never writes. RoutesError for a change that can't be
     made: `api` with no API model kept, and the first API role with no cap (NO_CAP). ``order``:
     an OpenRouter role's backends (#1021), dropped when the role's API model is another
-    provider's."""
+    provider's. ``free``: whether an API id is a free model (meter.is_free): its role's line says
+    FREE_LINE, and no cap is asked while every model newly on API is free (#1193)."""
     new = copy.deepcopy(doc)
     new.setdefault("use", "both")
     if day_usd is not None:
@@ -391,7 +415,7 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
             raise RoutesError(f"{r} has no API model yet: wb route {r} <provider/model>")
         if via is not None:
             row["via"] = via
-        clauses, g = _role_part(r, old, row, cap, who, new)
+        clauses, g = _role_part(r, old, row, cap, who, new, free)
         if not clauses:
             continue
         parts.append(f"{r}: " + " · ".join(clauses))
@@ -403,18 +427,20 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
             via is not None or held == "gpu" and api is not None):
         # the role's own choice, which the Agents switch holds over for now: never read as moved
         parts.append(f"Agents is {USE_NAMES[held]}, so this applies once Agents is Both (wb route all both)")
-    agents, g, moved = _agents_part(doc, new, cap, who)
+    agents, g, moved = _agents_part(doc, new, cap, who, free)
     if agents:
         parts.insert(0, agents)
         gated |= g
         changed += [r for r in moved if r not in changed]
     # a role newly sent to an API model, by its own change or the switch
-    to_api = any(effective_via(new, r) == "api" and new["roles"][r].get("api")
-                 and (effective_via(doc, r) != "api" or doc["roles"][r].get("api") != new["roles"][r].get("api"))
-                 for r in ROLES)
-    if to_api and cap is None:
+    newly = [r for r in ROLES if effective_via(new, r) == "api" and new["roles"][r].get("api")
+             and (effective_via(doc, r) != "api" or doc["roles"][r].get("api") != new["roles"][r].get("api"))]
+    to_api = bool(newly)
+    # every one on a free model: no cap to ask for, as the guard keeps none for it (#1193); a
+    # priced model set later asks then
+    if to_api and cap is None and _priced(newly, new, free):
         raise RoutesError(NO_CAP)
-    busy_line, g = _busy_part(doc, new, cap)
+    busy_line, g = _busy_part(doc, new, cap, free)
     if busy_line:
         parts.append(busy_line)
         gated |= g
@@ -423,12 +449,12 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
         # code to API while the GPU is busy: the user's yes and a cap, as any role newly on API
         # (2026-11-23 review: `wb route all both` re-enabled it with no dialog, and a role's API
         # model set after `cap off` spent with no cap)
-        if cap is None:
+        if cap is None and _priced(busy_now, new, free):
             raise RoutesError(NO_CAP)
+        said = [_goes_to(busy_now, new, who), *_free_part(busy_now, new, free), *_thinking_on(busy_now, new),
+                *([f"cap {money(cap)}/day"] if cap is not None else [])]
         parts.append(f"when the GPU is busy, {', '.join(busy_now)} {'starts' if len(busy_now) == 1 else 'start'} "
-                     f"on {'its' if len(busy_now) == 1 else 'their'} API model "
-                     f"({'; '.join([_goes_to(busy_now, new, who), *_thinking_on(busy_now, new)])}; "
-                     f"cap {money(cap)}/day)")
+                     f"on {'its' if len(busy_now) == 1 else 'their'} API model ({'; '.join(said)})")
         gated = True
     if cap is None and doc["day_usd"] is not None:  # `wb route cap off` (#1023): never under an API role
         if spends := [r for r in ROLES if effective_via(new, r) == "api"] + (["busy"] if busy_api_any(new) else []):
@@ -447,7 +473,8 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
 
 
 def change_pairs(doc: dict, pairs: list, day_usd=None,
-                 who: Callable[[str], str] = lambda mid: mid.split("/", 1)[0]) -> Change:
+                 who: Callable[[str], str] = lambda mid: mid.split("/", 1)[0],
+                 free: Callable[[str], bool] = lambda mid: False) -> Change:
     """Several roles in one change, one line and one yes (#1024: the first run's question):
     ``pairs`` [(role, via, api)] each as change() takes them, ``day_usd`` the cap for all. All or
     nothing: RoutesError for any pair change() refuses. The line: each role's move, then where
@@ -455,7 +482,7 @@ def change_pairs(doc: dict, pairs: list, day_usd=None,
     significant: GPU → API b · your code goes to DeepSeek · thinking off · cap $5/day`."""
     new, roles, gated = doc, [], False
     for i, (r, via, api) in enumerate(pairs):
-        ch = change(new, r, via=via, api=api, day_usd=day_usd if i == 0 else None, who=who)
+        ch = change(new, r, via=via, api=api, day_usd=day_usd if i == 0 else None, who=who, free=free)
         new, gated = ch.doc, gated or ch.gated
         roles += [x for x in ch.roles if x not in roles]
     cap = new["day_usd"]
@@ -464,17 +491,19 @@ def change_pairs(doc: dict, pairs: list, day_usd=None,
     parts, sent = [], []
     for r in roles:
         old, row = doc["roles"][r], new["roles"][r]
-        clauses, _ = _role_part(r, old, row, cap, who, new)
+        clauses, _ = _role_part(r, old, row, cap, who, new, free)
         if row["via"] == "api" and (old["via"] != "api" or old.get("api") != row.get("api")):
             sent.append(r)  # said once for all below, not per role
-            once = {f"your code goes to {who(row['api'])}", f"thinking {row['thinking']}"}
-            clauses = [c for c in clauses if c not in once and c != f"cap {money(cap)}/day"]
+            once = {f"your code goes to {who(row['api'])}", f"thinking {row['thinking']}", FREE_LINE}
+            # no cap with only free models (#1193): nothing to leave out, and money(None) raised
+            clauses = [c for c in clauses if c not in once and (cap is None or c != f"cap {money(cap)}/day")]
         parts.append(f"{r}: " + " · ".join(clauses))
     if sent:
         by: dict[str, list] = {}
         for r in sent:
             by.setdefault(who(new["roles"][r]["api"]), []).append(r)
         parts.append(f"your code goes to {next(iter(by))}" if len(by) == 1 else _goes_to(sent, new, who))
+        parts += _free_part(sent, new, free)
         think = {new["roles"][r]["thinking"] for r in sent}
         parts.append(f"thinking {think.pop()}" if len(think) == 1 else
                      "thinking " + ", ".join(f"{new['roles'][r]['thinking']} ({r})" for r in sent))

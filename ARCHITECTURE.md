@@ -651,7 +651,7 @@ is never topped up to the catalog's. **Never a false 0:** an OpenCode cost of
 "metered (opencode said 0)"`; an export saying 0 reconciles nothing), and an export that failed
 reconciles nothing. What isn't counted: a response cut before its usage arrived, by either view.
 Without the keyhole's view (a model `runner.needs_keyhole` starts none for: an Ollama cloud
-model, a keyless free one), OpenCode's compaction requests count only as far as its `info.cost` does. A catalog price below a backend's
+model, a keyless free one other than OpenCode Zen's), OpenCode's compaction requests count only as far as its `info.cost` does. A catalog price below a backend's
 (an OpenRouter endpoint priced over its listing, without `usage.cost`) meters under. The day cap's
 room (`Meter.room`) prices a request's worst case at the catalog's (or the user's) prices, whatever
 the provider's own figure later says: it errs high.
@@ -1989,7 +1989,10 @@ the state directory with the project config off, as `models._opencode_json` runs
 `--standalone` it started OpenCode's background service with the runner's environment, or failed
 where another home's service held its port: #1070), stdout read into
 memory, a failure's stderr cut to its first line and redacted, a `Key` whose repr is `Key(<provider>,
-api key)`) and serves a `Keyhole` from a daemon thread of the runner, outside the lane and dying with
+api key)`; for OpenCode Zen's free models with no key stored, `models.keyless_free`, no export at all:
+`Key(opencode, keyhole.PUBLIC, secret=False)`, Zen's own `public`, which OpenCode 2.3.2 itself sends
+for them (`plugin/provider/opencode.ts`), and which nothing redacts, as no secret: replaced in every
+answer, a model's `public class` read `[key redacted] class` (`Keyhole.secret_bytes`, #1193)) and serves a `Keyhole` from a daemon thread of the runner, outside the lane and dying with
 it, on `127.0.0.1:0` (never `localhost`, which may be `::1` first). It refuses
 (`KeyholeError("needs a key wb can hold outside the lane: <why>")`, remedy `keyhole.REMEDY`, "store
 an API key with /connect in OpenCode") an OAuth login (its tokens rotate: a copy refreshed would log
@@ -2032,7 +2035,9 @@ or 404 on every request. Status says it first (`models.keyhole_refusal`, through
 #1066: only `start` checked, so a Gemini model was listed, routed on the user's yes and started,
 then failed every time), so `wb route`, `wb start`, `wb models` and the pane refuse it, `wb models
 --json` leaves it out, `wb setup` names it on a `--` line and `wb route --json`'s `providers` gives it
-key `none` with that why (the Settings tab's Connected line). The upstream is the catalog's API base (`m.base_url`), never anything
+key `none` with that why (the Settings tab's Connected line); a model needing no keyhole (an Ollama
+cloud one, a keyless free one) is never refused there, but Zen's keyless free ones, which go through
+it (#1193), are checked as any. The upstream is the catalog's API base (`m.base_url`), never anything
 from a request, with what the package appends to it already appended (`mirror_path`: DeepInfra's
 `/openai`). OpenCode gets `layer_options(kh)`:
 `baseURL` the keyhole's `base` and `apiKey` its `token` (`secrets.token_urlsafe(32)`, new each
@@ -2105,7 +2110,10 @@ dated snapshot is recorded; #1122). Both are the last seen; the `served` events 
 
 *How the runner uses it* (#1015). `drive` resolves the model and, for an API one that needs a
 key (`runner.needs_keyhole`: not an Ollama cloud model, whose `key` is `ollama`, nor a free
-model whose `key` is `none`), starts it before the first round as `CURRENT["keyhole"]`
+model whose `key` is `none`, except OpenCode Zen's, `models.keyless_free`: provider `opencode`
+(`models.ZEN`), key `none`, free, which goes through the keyhole with Zen's `public` for the
+rate-limit and quota hold, the health record, the meter and the pin to the task's model that a free
+tier's request caps need, #1193; `OPENCODE_DISABLE_FREE_MODELS` is never set), starts it before the first round as `CURRENT["keyhole"]`
 (`start_keyhole`: `on_health` is `models.note_api(provider, state, why, until)`, the model's
 health record; `on_usage` and `room` are the task's meter's, `meter.Meter.hooks`, #1019) and closes it when
 the drive ends. A `KeyholeError` fails the task through `_load_failed` (`<model> can't run:
@@ -2156,7 +2164,7 @@ and 2.3.2, `api model.list` then prints the entry field for field as the user's 
 bundled catalog stays, for a model that isn't the catalog's (a config entry, an Ollama cloud
 model), an alias (its id isn't its provider's), or one with headers or a body of its own or a
 variant's, which the v2 file or a V1 variant can't carry. A model with no keyhole (a keyless free
-one, `key: none`, or an Ollama cloud model) gets no file either: `write_catalog` and
+one other than Zen's, `key: none`, or an Ollama cloud model) gets no file either: `write_catalog` and
 `OPENCODE_MODELS_PATH` go with `keyhole_of(task)`, and the variants with the keyhole overlay, so
 such a model newer than the binary is still "Model unavailable" to the agent.
 
@@ -3581,7 +3589,7 @@ the section is two lines: `none set up, every role on the GPU` and the catalog's
 model, the GPU part is `no local models: <why_none()>` and the section still prints, exit 0, when a
 role is on API or a key is stored; otherwise it dies as before. `--api TEXT` (`_api_list`) lists the
 catalog ids containing TEXT (any case), sorted, at most `API_LIST_MAX` 30, each with the catalog's own window (`catalog_limit`),
-`$in/$out per 1M in/out, catalog prices` (`your prices` once `wb model price` set them, #1135; no basis for a plan or a 0 entry) from its first untiered price and the free note, then `and N more: a longer
+`$in/$out per 1M in/out, catalog prices` (`your prices` once `wb model price` set them, #1135; no basis for a plan or a 0 entry) from its first untiered price, the free note and ` · no tool calls` when the catalog says it has none (`tool_call` false: the first run's free pick, #1193), then `and N more: a longer
 text narrows it`; nothing matching reads the catalog again once when `models.miss_rereads()` (as
 `_hosted_exact`: a just-connected provider, #1076); it lists only, never sets a role. `--set-default` stays GPU (`router.choose` over
 `discover()`): never an API model as OpenCode's default.
@@ -3900,12 +3908,13 @@ as before; one whose API model can't take it now (not in the catalog, no key, it
 full, a repo or task kept local, a standing commands.json `copy`/`siblings` the command line
 doesn't name, `cli._standing_gap`, the day cap reached, said without an API start's advice) does too, after `note: the GPU is busy, and the <role>
 role's API model <id> can't take it: <why>`. A running task never moves, and nothing goes from API to
-the GPU. Turning it to `api` takes the dialog's yes (it can spend) and a day cap (`NO_CAP`); back to
-`wait` none. While it is on, any change that lets a role newly start on an API model while the GPU is
+the GPU. Turning it to `api` takes the dialog's yes (it can spend) and a day cap (`NO_CAP`; none when
+every role's API model is free, #1193); back to `wait` none. While it is on, any change that lets a role newly start on an API model while the GPU is
 busy (an API model set on a GPU role, Agents back from GPU, an OpenRouter role's new backends:
 `routes._busy_newly`, which compares `routes._sent`, the model and its `order`) takes the yes and a
 cap too, adding `when the GPU is busy, <role> starts on its API model (your code goes to …; cap $N/day)`
-(with `; thinking on (<role>)` before the cap when its thinking is on, #1177). `routes.summary` ends `; when the GPU is busy, a role with an API model runs on it` while
+(with `; free: … (<role>)` for a free model, #1193, and `; thinking on (<role>)` before the cap when its
+thinking is on, #1177; no cap part when the cap is none and every such model is free). `routes.summary` ends `; when the GPU is busy, a role with an API model runs on it` while
 it is on.
 
 **Unset is the GPU, exactly as before.** A missing file or role reads as `{via: gpu, gpu: auto,
@@ -3939,7 +3948,8 @@ why?}}` from the cached catalog: `key` `stored`, `ollama`, `env`, `oauth` or `no
 stored; a stored key on a package the keyhole can't carry is `none` with `models.unspoken_why`'s
 line, which status says too: it read `Google (key stored)` while nothing could run on it, #1066;
 Ollama's, `ollama` with `signed in through Ollama: its cloud models need no key here`, #1077,
-which the Settings tab counts connected as it does `stored`). While busy is `api` the show adds `When the GPU is busy: a role with an API model starts on
+which the Settings tab counts connected as it does `stored`; OpenCode Zen's, `opencode` with no key,
+`none` with `no key: its free models need none; /connect in OpenCode adds one for the rest`, #1193). While busy is `api` the show adds `When the GPU is busy: a role with an API model starts on
 it (wb route busy wait: queue instead)`.
 The changes (each one exit 3 with one line when refused, writing nothing):
 - `wb route <role> gpu|api` flips the selector; `api` with no API model kept: `<role> has no API
@@ -3956,25 +3966,33 @@ The changes (each one exit 3 with one line when refused, writing nothing):
 - An API model is taken by its exact id only (`models.lookup`: fragments never match an API id,
   #1013), of kind `api`, with a key a task runs with (`cli._runs_held`: `key == "stored"`, /connect
   saved one, which the keyhole holds outside the lane; or an Ollama cloud model's `ollama`, the
-  login this machine's Ollama holds, which needs no keyhole, #1077), else refused with discovery's why (`cli._route_api`): `not in
+  login this machine's Ollama holds, which needs no keyhole, #1077; or OpenCode Zen's free models
+  with no key stored, `models.keyless_free`, run with Zen's own `public` through the keyhole,
+  #1193: the try with no GPU and no key), else refused with discovery's why (`cli._route_api`): `not in
   OpenCode's catalog: wb models lists the API models`, a GPU id (`… is a GPU model: wb route <role>
   --gpu <id> pins it`), no key (`… can't be a role's model: no key for <p>: run /connect in OpenCode
   and add it`, said once; a configured provider on another host of the LAN, not opted in, gets its
   `local: true` hint instead, of that or of the keyhole's refusal of its `npm` package (#1066), `provider <p>: <host> isn't this machine; …`, #1109: `cli._off_lan`,
   a private, link-local or tailnet address or a bare, `.local`, `.lan`, `.home.arpa`, `.internal`
   or `.ts.net` name, `cli._on_lan`; a public host, a hosted provider added by hand, keeps the
-  /connect line), an OAuth, environment, config or signing key, or a keyless free model
-  (`can't run: needs a key wb can hold outside the lane (…)`). A provider out of credit, rate-limited
+  /connect line), an OAuth, environment, config or signing key, or another provider's keyless free
+  model (`can't run: needs a key wb can hold outside the lane (<p>'s is none: a free model takes no
+  key)`). A provider out of credit, rate-limited
   or unreachable is no refusal (`cli.HEALTH`): that passes. The kept API model of a role flipped to
   API is checked the same way.
 - The first role to go to API with no cap: `routes.NO_CAP`, `no day cap yet: ask the user for one
-  (suggest $5), then add --day-usd 5`.
+  (suggest $5), then add --day-usd 5`; not when every model the change newly puts on API is free
+  (`routes.change`'s `free`, `cli._free`: `meter.is_free`; `routes._priced`, #1193): the spend guard
+  keeps nothing for one, and a priced model set later asks then.
 - No change: `unchanged: <summary>`, nothing written.
 
 **The change line** (`routes.change`, which never writes) is the dialog's text, one part per role
 changed, joined by `; `: `trivial: GPU → API deepseek/deepseek-flash · your code goes to DeepSeek ·
 thinking off · cap $5/day` (the provider's name from the catalog, `models.provider_name`, else its
-id); back to the GPU, `trivial: API <id> → GPU · API kept: <id>`; an API model set while on the GPU,
+id; a free model, `cli._free`, adds `· free: the provider may keep or train on your code`,
+`privacy.FREE_LINE`, after `your code goes to …`, as it does under `used from the next start`: training
+on the code is what the yes is to, #1193; in the Agents, busy and several-role parts it is `free: …
+(<roles>)`, `routes._free_part`); back to the GPU, `trivial: API <id> → GPU · API kept: <id>`; an API model set while on the GPU,
 `API model none → <id> (<provider>), used once it goes to API` (`used from the next start` when Agents
 on API already runs the role there, #1149, then `· thinking on` if it is); `GPU model the router's pick → <id>`;
 `thinking off → on`; and `day cap none → $5/day` (unless a role's part says the new cap). The Agents
@@ -3984,7 +4002,7 @@ Both → GPU (every role on the GPU; each role's own choice is kept for Both)`, 
 role as set: …; your code goes to …)`; it takes the yes going to API, or to Both when that puts a role
 back on its API model (from GPU; from API it sends nothing new), never going to GPU. A role's own change the switch holds over adds `Agents is GPU, so this
 applies once Agents is Both (wb route all both)`. The first role newly on API by any of these with no
-cap: `NO_CAP`.
+cap: `NO_CAP`, unless every such role's model is free (then no `cap $N/day` part either).
 **Several roles in one change** (#1024, the first run's one question): `wb route <role> <choice>
 <role> <choice>… [--day-usd N]` (`cli._route_pairs`, the `more` positionals; a choice is `gpu`, `api`
 or an API id) is one write, one approval (its canonical `argv` holds every pair) and one echo. All or
@@ -4054,15 +4072,18 @@ local-only repo off API models, and lets nothing extra leave unasked. No warning
 
 **Where the code goes** (`privacy.where(m, order)`): `{provider, name, line, policy, free, backends}`, the start's
 where-note's wording (`cli._api_notes`). The route dialog shows `wb route … --dry-run --json`'s `change` line
-(`routes.change`), which names the provider (`your code goes to <name>`) and an OpenRouter role's backends, not the
-policy page or the free mark (those reach the user in the note at the repo's first task to the provider, and in the
-pane's model rows, `free_line`). `name` is OpenCode's provider name (`models.provider_name`;
+(`routes.change`), which names the provider (`your code goes to <name>`), an OpenRouter role's backends and, for a
+free model, the free mark (`FREE_LINE`, #1193: what the user says yes to), not the policy page (that reaches the user in
+the note at the repo's first task to the provider; the free mark there too, and in the pane's model rows, `free_line`). `name` is OpenCode's provider name (`models.provider_name`;
 `ollama.com` for an Ollama cloud model). `policy` is `PRIVACY_PAGES[provider]`, the provider's own data-policy page (URLs
 only, never a claim about the policy; each fetched and its title read 2026-11-23, x.ai's through a headless browser),
 `OLLAMA_PAGE` for a cloud model, else null and the line says `see <name>'s data policy`. The line is `your code goes to
 <name>`, then `via OpenRouter to <backends>, no fallbacks (OpenRouter's account setting decides whether backends may keep
 it)` for OpenRouter, then `free: the provider may keep or train on your code` for a free model (`Model.free`: OpenCode's
-`opencode/*-free`, or every catalog price 0). Free models are never suggested (the skill); `wb doctor` says nothing of
+`opencode/*-free`, or every catalog price 0). Free models are never suggested first (the skill), but as one of the
+three ways of the first run with no GPU model and no key: OpenCode Zen's, keyless (`models.keyless_free`), on the
+trivial role only, then `wb try`, whose sample is workbench's own code (#1193); a repo kept `local_only` stays off
+them as off any API model; `wb doctor` says nothing of
 the ones OpenCode lists (a line on every run for models wb never uses: wave 2's review), the line above says it where one is chosen.
 
 **The where-note.** The first API task of each repo and provider prints `note: this task sends the repo, its spec,
@@ -5934,7 +5955,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 ### Models, skills, lessons, notes
 | Command | Flags | What it does |
 |---|---|---|
-| `wb models` | `--set-default`, `--json`, `--api TEXT` | State, slice, speeds, `bench:`, `size:`, `router.weights_changed`; the ranking, models under `router.EXPLORE_TRIES` marked (*Exploring*); the API section, and `--api TEXT` the catalog ids containing TEXT, at most 30 (*What `wb models` prints*). `--set-default` (a GPU model only): `models.set_default` (refused under `OPENCODE_CONFIG_CONTENT`, #421). `--json` (#1023, the pane's lists, `cli._models_json`, asking no server and rebuilding no catalog): `{gpu: [{id, label, window, sizes, cards}], api: [{id, name, provider, provider_name, window, price {input, output}, prices (catalog\|yours, #1135), free}] (stored keys on a package the keyhole speaks, #1066, and Ollama cloud only, `cli._runs_held`), used (API models tasks ran on), free_line, optimize {done_at, models, running}, media {image\|speech\|sfx\|music: {default, engines: [{name, gpu}]}} (#1047; a file that doesn't parse leaves its kinds out)}`. |
+| `wb models` | `--set-default`, `--json`, `--api TEXT` | State, slice, speeds, `bench:`, `size:`, `router.weights_changed`; the ranking, models under `router.EXPLORE_TRIES` marked (*Exploring*); the API section, and `--api TEXT` the catalog ids containing TEXT, at most 30 (*What `wb models` prints*). `--set-default` (a GPU model only): `models.set_default` (refused under `OPENCODE_CONFIG_CONTENT`, #421). `--json` (#1023, the pane's lists, `cli._models_json`, asking no server and rebuilding no catalog): `{gpu: [{id, label, window, sizes, cards}], api: [{id, name, provider, provider_name, window, price {input, output}, prices (catalog\|yours, #1135), free}] (stored keys on a package the keyhole speaks, #1066, Ollama cloud, and OpenCode Zen's keyless free models, #1193, only: `cli._runs_held`), used (API models tasks ran on), free_line, optimize {done_at, models, running}, media {image\|speech\|sfx\|music: {default, engines: [{name, gpu}]}} (#1047; a file that doesn't parse leaves its kinds out)}`. |
 | `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | *Managing the set*: `--url` via `models.add_server_provider` (an existing provider at the same baseURL left as it is, only marked `wsl_url` when at WSL2's Windows host; one marked `wsl_url` at Windows' old address moved to the new one; one for another baseURL refuses; off this machine needs `local: true`; at WSL2's Windows host marked `wsl_url`, followed after a reboot, #1167); `--start`/`--stop` to models.json; refuses Ollama cloud models (API models) without `local: true` (one under a plain name always), unknown contexts, down servers. |
 | `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | *Optimize*; `start` detached, refused while a task holds the GPU, stopped by a task that wants it; `--bench` then runs `wb bench run`; `apply` adds the measured window as its own entry (`optimize.entry_name`; refused when that name exists). |
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Provider `ollama-<host>` (WSL2's Windows host: `ollama-windows`, followed to its next address, #1159), `local: true`, its tool models added (IPv6 bracketed, #707); exit 1 when it doesn't answer; `--remove` not while `model`/`small_model` is one (#708). |
@@ -5968,7 +5989,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--default NAME`, `--wait` | *Images*; refuses while the GPU is held (`--wait` queues), an engine off this GPU (`"gpu": false`, another host) runs beside tasks; a bare `list`/`ls` prompt is `--list`. `--default NAME` (no prompt) sets images.json's `"default"` (*The default engines*). |
 | `wb audio "<text>"` | `--kind speech\|sfx\|music`, `--n` (3), `--seconds S` (the entry's `seconds`, else `audio.DEFAULT_SECONDS`: 5 sfx, 30 music, 10 otherwise), `--voice NAME` (the entry's first of `voices`), `--ref <clip>…`, `--lyrics FILE\|-`, `--seed`, `--engine`, `--out DIR`, `--no-check`, `--list`, `--default NAME`, `--wait` | *Audio*; `--n` below 1 refused before any lease (exit 2, #592); a clip that isn't audio fails it; GPU as `wb image`; an option the engine lacks is refused. `--default NAME` (no text) sets audio.json's `"default_<its kind>"`; never the listener (*The default engines*). |
 | `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|ask\|notice\|wait\|answer\|token\|ended]` | `listen <clip>… [--text]`, `--port` (`chat/port.json`, else 1337), `--bind`, `--host`, `--text`, `--message <file\|->`, `-n` (10), `ack <id> --by --how`, `claim <id> --by`, `ask --tool --kind permission\|plan\|question --text --detail <json> --session --repo --pid --for <agent> --here` (last line `<id> open\|allow\|expired`, the mod parses it), `wait <id> --timeout` (30) `--json` (allow, deny, expired, or `open`), `answer <id> allow\|deny\|expired --by --note`, `notice --tool --kind --text` (its id, or `skipped: …`), `notice --done <id>` (`answered <id>`; exit 1 for no notice); `claim` exit 1: another session's; `reply --to <id>` (`user`: the user's thread; again for more; else what this turn took: `re`, `to`, #1042), `token add <name>` (prints it once), `token list`, `token revoke <name>`, `ended <id>… --by` (the mod's turn end) | The web chat (*The web chat*); `on` refuses, switch off, when something else answers the port (#690); `off` stops only a server `on` started. |
-| `wb try` | `--model <id>` (a GPU model's fragment will do; an API id never matches one) | A sample trial (#112): `workbench/try/project/` copied to `~/.local/share/workbench/try/<n>` (not the state dir, hidden from the lane, #164), started as `try-<n>` on `workbench/try/spec.md`, `--size trivial --trial` (so the trivial role's model, an API one when the user put it there, #1016), its test `sys.executable` (#530); Claude's hidden check `workbench/try/check.py <worktree>`; a refusal removes the copy (#161). An API `--model`: exit 3, `<id> is an API model: wb try runs on GPU models only`, before the copy (#1014). A sample on the trivial role's API model (task.json `via`/`role`, #1016) adds `wb try: the trivial role is API (<id>, <Provider>): the sample's code goes there, and its cost counts toward today's $<cap> cap` (`_try_api_line`, #1026). |
+| `wb try` | `--model <id>` (a GPU model's fragment will do; an API id never matches one) | A sample trial (#112): `workbench/try/project/` copied to `~/.local/share/workbench/try/<n>` (not the state dir, hidden from the lane, #164), started as `try-<n>` on `workbench/try/spec.md`, `--size trivial --trial` (so the trivial role's model, an API one when the user put it there, #1016), its test `sys.executable` (#530); Claude's hidden check `workbench/try/check.py <worktree>`; a refusal removes the copy (#161). An API `--model`: exit 3, `<id> is an API model: wb try runs on GPU models only`, before the copy (#1014). A sample on the trivial role's API model (task.json `via`/`role`, #1016) adds `wb try: the trivial role is API (<id>, <Provider>): the sample's code goes there, and its cost counts toward today's $<cap> cap` (`_try_api_line`, #1026); on a free model `…: the sample's code goes there, at $0 (free: the provider may keep or train on your code)` (#1193). |
 | `wb init <dir>` | | git, a first commit, AGENTS.md → CLAUDE.md (#931; nothing while `gitops.under_way`). Refuses home or above, inside another repo (but a home repo nests, #684), a repo git refuses (`gitops.NotARepo`), no git identity, likely secrets or uncovered installed directories. |
 | `wb setup` | `--force` (a link pointing elsewhere; never a file) | Links `~/.local/bin/wb` and `skills/workbench`, removes a dead `skills/delegate` link (the mod runs `wb setup` when it finds only that), exit 1 when something is in the way, PATH advice (`cli.path_advice`), the optimize when due, then `first run:` (`cli.first_run`, with the API keys line `cli.api_key_lines`), then `cli.agents_md_note` (below); names no model (*Installing*). |
 | `wb update` | `--check` (`update available: …` or `up to date`; on a marketplace clone with local changes also `patches.CHECK_LINE`, `local changes in the marketplace clone: wb update would refuse (Claude Code re-clones it); wb patch init keeps them`, alone when nothing is new; the mod toasts both; also `cli._mod_behind`), `--if-due` (only with `--check`, #602: `UPDATE_EVERY`, `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`), `--stop` (`_stop_for_update`: `last` `UPDATE_STOP`, one `stuck` notice per `store.owner`, #694) | *Installing*, *Local patches*. A marketplace install first looks for local changes in its clone (`patches.marketplace_refusal`) and, with any, saves them under `rescued/` and refuses before anything else: Claude Code's update re-clones it and would wipe them (#1005). A clone: `git pull --ff-only` (uncommitted tracked changes refused); on branch `local`, after the fetch, each pull request `wb patch send` opened (`patches.json` `sent`) is asked of gh, `gh pr view <n> -R <owner/repo> --json state,mergeCommit`, at most `GH_SECS` each (`patches.settle_sent`; never with `--check`, which the mod runs on a timer): merged, its merge commit (when gh names one) in the fetched upstream (else nothing yet: `PENDING`), its local commit (matched by ident) is left out of the rebase and the row marked `merged`; closed, at the end once (`closed_lines`, `closed_said`, the patch's sha as it is after the rebase) `your pull request #<n> was closed without merging: kept the local patch <subject> (wb patch check <sha> tells whether upstream fixed it another way)`; open, nothing; not asked (gh missing, offline, a timeout, any other answer) `couldn't ask GitHub about pull request #<n> (<why, scrubbed>): kept the local patch`, never a failure. These lines, and `couldn't check the pull requests wb patch send opened: …`, come after the `updated …` or `already up to date` line, never ahead of it: the mod's `/workbench-update` reloads the plugin only on output that starts `updated` (#1005, 2026-11-22); a refusal after the fetch prints them first, and a plugin step that fails after the branch moved first prints the merged and landed lines too (said then or never, #1005). Then, diverged and behind or with a merged pull request's patch to leave out, its patches rebased in a scratch worktree (`patches.rebase_patches`, `check_move`) before any task is stopped and the branch moved after (`move_branch`), the report `updated clone a..b (N commit(s))` (N: upstream's news only), then `your pull request #<n> merged: dropped the local patch <subject>` per merged one, `landed upstream, dropped from local: <subject>` per patch upstream has, then `N local patch(es) on top of upstream (local)`; a conflict refuses naming the patch, ending `(wb patch check <sha> first: if upstream fixed it another way, drop it)`, its stdout first saying each pull request closed unmerged (`closed_lines`, HEAD's shas: nothing moved; `closed_said` set, so the next run doesn't repeat it); any other branch diverged is refused; on `local` (not `--check`) it writes `patches.json`. At the end, on any clone, each merged pull request whose local commit is gone from `local` is forgotten and its `pr/<slug>` retired (`retire_sent`: `pull request #<n> merged, removed pr/<slug>, its worktree and its body file`), then each `pr/<slug>` of `wb patch upstream`'s (`patches.held`: its worktree under `upstream/`, or its body file there) that landed upstream (`_landed_pr`) goes, worktree, branch and body: `landed upstream, removed pr/<slug>, its worktree and its body file` (`retire_landed`; a worktree with changes of its own is kept, and said). Then `claude plugin marketplace update workbench` and `claude plugin update workbench@workbench`, each step at most 300 s. Refuses while a runner lives (`cli._running`, `_whose`); every refusing check, a patch's conflict too, runs before `--stop` stops anything (#775). The fetch (`_fetch_origin`, the upstream's remote `branch.<name>.remote`, #875) never prompts: `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS_REQUIRE=never`, `FETCH_SECS` 60, the user's `GIT_SSH_COMMAND`/`GIT_SSH`/`core.sshCommand` kept, else `BatchMode`. |
@@ -6354,7 +6375,11 @@ user who had, #1075), a `--` line for a stored key on a package the keyhole can'
 (@opencode/ai/providers/google): the keyhole doesn't speak its API, so wb can't run its models;
 another provider's key works`, `models.unspoken_providers`, #1066), for a provider a role on API uses
 with no key at all `--  no API key for deepseek, which trivial uses: /connect in OpenCode adds it
-(required: those tasks can't start without it)` (#1067), else `NO_KEY` for none. With a stored key,
+(required: those tasks can't start without it)` (#1067), but for roles on OpenCode Zen's keyless free
+models `ok  no API key needed for opencode's free models, which trivial uses (free: the provider may keep or
+train on your code)` (#1193), else `NO_KEY` for none, which names the free try too (`or, with no key and
+no account, /workbench can try it on OpenCode's free models, whose provider may keep or train on the
+code`). With a stored key,
 or every role on API, and no local model the GPU lines read as optional
 (`NO_SERVER_OPTIONAL`, `NO_LOCAL_OPTIONAL`). With no local model, a provider discovery passed over
 (`models.skipped_providers`: another host not opted in, disabled) adds its `--  provider <id>: <why>`
@@ -6739,7 +6764,11 @@ stands in for `opencode auth export|list` (`FAKE_AUTH`). `RealOpenCodeAPI` runs 
 (scratch homes, `OPENCODE_DISABLE_MODELS_FETCH=1`, an environment without the user's keys) on the
 built-in `deepinfra` and `anthropic` providers, and custom ones on V1 npm `@ai-sdk/openai-compatible`
 and `@ai-sdk/anthropic` (#1137), through the keyhole: one request upstream with the
-canary, OpenCode's own with only the token, at the path OpenCode would have used upstream. The
+canary, OpenCode's own with only the token, at the path OpenCode would have used upstream; and a
+free `opencode` (Zen) model of the bundled catalog with no key stored (#1193,
+`test_zens_free_model_runs_through_the_keyhole_on_the_tokens_overlay_and_goes_up_with_public`): the
+Zen plugin, which turns the provider on with `public` only when it sees no key, still runs it on the
+overlay's token, and the keyhole sends `Bearer public` with OpenCode's `x-opencode-*` headers. The
 2026-11-23 reviews' findings each have a `Keyhole` test: bodies other JSON parsers route elsewhere,
 a key with a newline, bad queries and chunk sizes (`raw_request`, for what http.client won't send),
 an error body cut across the key, errors inside a 200 stream (`_Upstream`'s "raw" mode), packages
@@ -6853,7 +6882,9 @@ doc needs its own `!/` line).
 - **The keyhole's paths** (`keyhole.MODEL_PATHS`, the base mirroring the upstream's path in `layer_options`,
   `mirror_path`) and **its packages** (`keyhole.PACKAGES`, `AI_SDK_PREFIX`'s npm names) → what OpenCode posts for each package and how it sends the
   key (*API models through OpenCode*; packages/ai/src/providers): re-check with `RealOpenCodeAPI` and the source on
-  each OpenCode bump. `keyhole.redact` → any new place an upstream error is shown.
+  each OpenCode bump. `keyhole.redact` → any new place an upstream error is shown. Zen's keyless `public`
+  (`keyhole.PUBLIC`, #1193) → OpenCode's `plugin/provider/opencode.ts` (its `hasKey` and the `public` it sets):
+  re-check the Zen test above on each OpenCode bump.
 - **The keyhole overlay** (`runner.keyhole_overlay`) → `write_config_layer`'s provider merge and `rules_env`'s
   restatement in `OPENCODE_CONFIG_CONTENT` (`agent_env` passes it): one without the other lets the user's content
   point the provider elsewhere; its V1 `provider.<pid>` must not meet a V2 `providers.<pid>` (*The keyhole*), and
@@ -6920,7 +6951,9 @@ doc needs its own `!/` line).
   catalog read depends on → `_stamp`.
 - **What the keyhole can hold** (`keyhole.load_key`'s refusals: an OAuth login, an external credential, request
   signing, a key only in the environment or written in a config) → `Model.key`'s states, `models.status`'s and
-  `cli._route_api`'s `can't run: needs a key wb can hold outside the lane`, never "available".
+  `cli._route_api`'s `can't run: needs a key wb can hold outside the lane`, never "available". Zen's keyless free
+  tier (#1193) is one predicate, `models.keyless_free`, read by `cli._runs_held`, `runner.needs_keyhole`,
+  `keyhole.start` (`PUBLIC`), `models.keyhole_refusal` and `cli.api_key_lines`: change them together.
 - **An OpenCode fact the API harness copies** (model.list through `serve --stdio`, `auth list`, `-m` ids and variants, `part.cost`,
   the `retry`/`error` shapes, each protocol's path and key header) → `tests/fake_opencode.py`, `tests/capture_llm.py`
   and `ApiHarness`'s `test_real_opencode_*` together (*The tests*); its `max_tokens` cap and compaction point, `ApiSizing`'s.
