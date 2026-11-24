@@ -3521,13 +3521,16 @@ def proposal_diff(task: store.Task) -> str:
     return "".join(parts) + (f"\n\n--take-claude-md is refused: {problem}" if problem else "")
 
 
-def review_diff(task: store.Task) -> str:
+def review_diff(task: store.Task, rnd: int | None = None) -> str:
     """The diff under review, for the review notice, when it is small; else its stat. Claude reads
     it anyway, and each call to fetch it re-reads the whole session: a wake that carries it saves
     the review one to three calls (the 2026-11-17 measurement). After Claude's feedback on the
     same step, only what changed since the last review notice: the wake after a feedback round
     carried the whole 14K-character diff again, which Claude already had (2026-11-18). Records
-    the snapshot it showed (status `reviewed`)."""
+    the snapshot it showed (status `reviewed`), and keeps it as round ``rnd``'s (the status's
+    round by default) beside the step's earlier ones, pinned (status `review_trees`,
+    gitops.REVIEW_REF), for wb rewind: only the last was kept, so a round that made things worse
+    could only be fixed by another round or discarded with the good one before it (#1198)."""
     steps = task.status.get("steps", 1)
     base = "HEAD" if steps > 1 else task.spec["base"]
     last = task.status.get("reviewed") or {}
@@ -3539,8 +3542,13 @@ def review_diff(task: store.Task) -> str:
     props = [str(p.relative_to(task.worktree)) for _, p in proposals(task.worktree)]
     code = (".", *(f":(exclude,literal){p}" for p in props))
     try:
-        tree, left = gitops.snapshot_left(task.worktree)  # bulky new files left out (#431)
-        task.set_status(reviewed={"step": steps, "tree": tree})
+        tree, left, keep = gitops.review_snapshot(task.worktree)  # bulky new files left out (#431)
+        rnd = task.status.get("round", 1) if rnd is None else rnd
+        trees = {k: v for k, v in (task.status.get("review_trees") or {}).items()
+                 if v.get("step") == steps}  # a wb next cut short left the last step's
+        trees[str(rnd)] = {"step": steps, "tree": tree, "left": left, "keep": keep}
+        gitops.keep_review(task.worktree, task.name, rnd, tree)
+        task.set_status(reviewed={"step": steps, "tree": tree}, review_trees=trees)
         left = gitops.left_line(left)
         if since and not gitops.has_tree(task.worktree, since):
             # nothing reaches the last snapshot, and git gc pruned it: the diff against it failed,
@@ -5237,7 +5245,7 @@ def _leased(task: store.Task, m: models.Model, say):
                             last="tests passed: Claude reviews next" if tests and tests["ok"]
                             else f"{skip.split(':')[0]}: Claude reviews next" if skip
                             else "Claude reviews next")
-            task.notify("review", text + review_diff(task), round=n)
+            task.notify("review", text + review_diff(task, n), round=n)
             return
 
 

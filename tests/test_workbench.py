@@ -1405,6 +1405,8 @@ class Lifecycle(Base):
         runner.review_diff(task)
         tree = task.status["reviewed"]["tree"]
         (task.worktree / "fixed.txt").write_text("the fix\n")
+        # its ref pins it since #1198: a tree from before then, or one whose ref went, has none
+        gitops.drop_reviews(self.repo, "t-gc")
         subprocess.run(["git", "-C", str(self.repo), "prune", "--expire=now"], check=True)
         self.assertFalse(gitops.has_tree(task.worktree, tree))
         again = runner.review_diff(task)
@@ -41369,6 +41371,208 @@ class ApiCompat(Base):
             with runner._tests_gpu(task, types.SimpleNamespace(pool=None)):   # an API task's NoLease (#1015)
                 pass
         self.assertEqual(took, [("t", True)] * 2)
+
+
+class Rewind(Base):
+    """wb rewind: a task's files back to an earlier review round's tree in the step (#1198)."""
+    def setUp(self):
+        super().setUp()
+        self.runs_file = Path(self.tmp.name) / "runs.jsonl"
+        os.environ["FAKE_RUNS"] = str(self.runs_file)
+
+    def reviewed(self, task, rnd, write=(), delete=(), tests="0"):
+        """Round ``rnd`` as the runner ends one: its files, its tests.txt, its review notice's tree."""
+        for path, text in dict(write).items():
+            (task.worktree / path).parent.mkdir(parents=True, exist_ok=True)
+            (task.worktree / path).write_bytes(text if isinstance(text, bytes) else text.encode())
+        for path in delete:
+            (task.worktree / path).unlink()
+        task.round_dir(rnd).mkdir(parents=True, exist_ok=True)
+        task.round_dir(rnd).joinpath("tests.txt").write_text(f"$ {TEST_CMD}\nexit: {tests}\nshell: sh\n\n")
+        task.set_status(round=rnd, phase="review")
+        runner.review_diff(task, rnd)
+
+    def refs(self, name):
+        return subprocess.run(["git", "-C", str(self.repo), "for-each-ref", "--format=%(refname)",
+                               f"refs/workbench/review/{name}/"], capture_output=True, text=True,
+                              check=True).stdout.split()
+
+    def refused(self, *argv) -> str:
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            run_wb(*argv)
+        return err.getvalue()
+
+    def test_a_rewind_restores_round_twos_files_after_round_three_broke_one(self):
+        name = "t-rw"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        self.assertEqual(self.refs(name), [f"refs/workbench/review/{name}/1"])  # the runner's own
+        head = subprocess.run(["git", "-C", str(task.worktree), "rev-parse", "HEAD"],
+                              capture_output=True, text=True).stdout
+        self.reviewed(task, 2, {"lib/good.py": "def f():\n    return 2\n"})
+        self.reviewed(task, 3, {"answer.txt": "41\n", "lib/good.py": "def f(:\n", "junk/x.txt": "x\n"},
+                      delete=["README.md"], tests="1")
+        # the trees are pinned: git gc prunes what nothing reaches (#795)
+        subprocess.run(["git", "-C", str(self.repo), "prune", "--expire=now"], check=True)
+        out = run_wb("rewind", name, "2")
+        self.assertIn(f"rewound {name} to round 2's files (step 1); undone:", out)
+        self.assertIn("round 2's tests on these files: passed", out)
+        self.assertEqual((task.worktree / "answer.txt").read_text(), "42\n")
+        self.assertEqual((task.worktree / "lib/good.py").read_text(), "def f():\n    return 2\n")
+        self.assertEqual((task.worktree / "README.md").read_text(), "hello\n")  # a deletion undone
+        self.assertFalse((task.worktree / "junk").exists())                     # a new file gone
+        git = lambda *a: subprocess.run(["git", "-C", str(task.worktree), *a],  # noqa
+                                        capture_output=True, text=True).stdout
+        self.assertEqual(git("rev-parse", "HEAD"), head)                         # nothing committed
+        self.assertEqual(git("diff", "--cached", "--name-only"), "")             # nor staged
+        st = task.status
+        self.assertEqual(st["reviewed"]["tree"], st["review_trees"]["2"]["tree"])  # the next diff's base
+        self.assertEqual((st["rewound_to"], st["context"], st["phase"]), (2, "fresh", "review"))
+        self.assertIn("Claude rewound the files to round 2's", run_wb("log", name))
+        out = run_wb("rewind", name, "3")                                        # and forward again
+        self.assertIn("round 3's tests on these files: failed (exit 1)", out)
+        self.assertEqual((task.worktree / "answer.txt").read_text(), "41\n")
+        self.assertFalse((task.worktree / "README.md").exists())
+        self.assertIn("no review of round 4 in step 1 (its reviewed rounds: 1, 2, 3",
+                      self.refused("rewind", name, "4"))
+
+    def test_a_rewind_from_a_stuck_round_keeps_its_files_for_a_rewind_back(self):
+        name = "t-rws"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        (task.worktree / "half.txt").write_text("half done\n")   # round 2 stopped, never reviewed
+        task.set_status(round=2, phase="stuck")
+        out = run_wb("rewind", name, "1")
+        self.assertIn(f"round 2's files (not reviewed) are kept: wb rewind {name} 2", out)
+        self.assertIn(f"wb accept {name} --force", out)          # not in review: accept says so
+        self.assertFalse((task.worktree / "half.txt").exists())
+        run_wb("rewind", name, "2")
+        self.assertEqual((task.worktree / "half.txt").read_text(), "half done\n")
+
+    def test_a_rewind_leaves_a_file_the_snapshot_left_out_untouched_and_names_it(self):
+        name = "t-rwk"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        big = b"\0" * gitops.BINARY_MAX
+        self.reviewed(task, 2, {"data.bin": big, "notes.txt": "two\n"})
+        self.assertEqual(task.status["review_trees"]["2"]["keep"], ["data.bin"])
+        # round 3 shrinks it: now in the worktree's snapshot, though round 2's tree has no copy
+        self.reviewed(task, 3, {"data.bin": b"small\n", "notes.txt": "three\n"})
+        out = run_wb("rewind", name, "2")
+        self.assertEqual((task.worktree / "notes.txt").read_text(), "two\n")
+        self.assertEqual((task.worktree / "data.bin").read_bytes(), b"small\n")  # never deleted
+        self.assertIn("left as they are, in no review snapshot: data.bin (1 MB)\n", out)
+
+    def test_a_rewind_never_writes_over_a_file_grown_past_the_snapshot_and_says_so_truly(self):
+        # #1198's review: round 2's 10 KB data.bin was written over the 2 MB one no tree held,
+        # while the rewind said it was left as it was, and wb rewind 4 couldn't bring it back
+        name = "t-rwg"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        self.reviewed(task, 2, {"data.bin": b"\1" * 10240, "notes.txt": "two\n"})
+        grown = b"\2" * (2 << 20)
+        (task.worktree / "data.bin").write_bytes(grown)           # round 3, left out of `now`
+        (task.worktree / "notes.txt").write_text("three\n")
+        task.set_status(round=4, phase="stuck")
+        out = run_wb("rewind", name, "2")
+        self.assertEqual((task.worktree / "notes.txt").read_text(), "two\n")
+        self.assertEqual((task.worktree / "data.bin").read_bytes(), grown)   # never written over
+        self.assertIn("left as they are, in no review snapshot: data.bin (2 MB)\n", out)
+        # not in the stat as undone: --stat pads each name to the longest, so `data.bin |` never
+        # matched, and the test passed with the exclusion gone (#1198's review)
+        stat = out.split("undone:\n", 1)[1].split("round 2's tests", 1)[0]
+        self.assertIn("notes.txt", stat)
+        self.assertNotIn("data.bin", stat)
+        self.assertIn(f"round 4's files (not reviewed) are kept: wb rewind {name} 4", out)
+        run_wb("rewind", name, "4")
+        self.assertEqual((task.worktree / "notes.txt").read_text(), "three\n")
+        self.assertEqual((task.worktree / "data.bin").read_bytes(), grown)
+
+    def test_a_file_too_big_for_the_second_snapshot_is_not_named_as_differing_when_the_tree_has_it(self):
+        # #1198's review: round 3's .gitignore, undone, unignored logs/ and pushed the second
+        # snapshot past SNAPSHOT_MAX, which left a.txt out: named as not round 2's, though it was
+        name = "t-rwb"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        with mock.patch.object(gitops, "SNAPSHOT_MAX", 30000):
+            self.reviewed(task, 2, {"a.txt": "a" * 20000})
+            self.reviewed(task, 3, {".gitignore": "logs/\n", "logs/big.log": "b" * 15000})
+            out = run_wb("rewind", name, "2")
+        self.assertEqual((task.worktree / "a.txt").read_text(), "a" * 20000)
+        self.assertFalse((task.worktree / ".gitignore").exists())
+        self.assertFalse((task.worktree / "logs/big.log").exists())   # unignored: deleted
+        self.assertIn("deleted, not in round 2's files (a later .gitignore hid them): logs/big.log", out)
+        self.assertNotIn("not as round 2's files", out)
+
+    def test_a_rewind_deletes_a_file_a_later_rounds_gitignore_hid_so_accept_cant_commit_it(self):
+        # #1198's review: round 2's .gitignore back, round 3's ignored secret.env was a new file
+        # wb accept's `add -A` would commit, though the rewind said only `.gitignore | 1 +`
+        name = "t-rwi"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        self.reviewed(task, 2, {"notes.txt": "two\n"})
+        self.reviewed(task, 3, {".gitignore": "secret.env\nbig.bin\n", "secret.env": "KEY=x\n",
+                                "big.bin": b"\0" * gitops.BINARY_MAX})
+        out = run_wb("rewind", name, "2")
+        self.assertIn("deleted, not in round 2's files (a later .gitignore hid them): secret.env",
+                      out)
+        self.assertIn("not as round 2's files, left as they are: big.bin\n", out)  # too big to hash
+        self.assertFalse((task.worktree / "secret.env").exists())
+        self.assertEqual(gitops.snapshot(task.worktree), task.status["review_trees"]["2"]["tree"])
+        status = subprocess.run(["git", "-C", str(task.worktree), "status", "--porcelain"],
+                                capture_output=True, text=True, check=True).stdout
+        self.assertNotIn("secret.env", status)
+
+    def test_feedback_after_a_rewind_says_so_and_starts_a_fresh_session(self):
+        from workbench import lessons
+        name = "t-rwf"
+        self.start(name, "fix", "--test", TEST_CMD, "--no-base-check", "--auto-fix", "0")
+        wait_phase(name, {"review"})                     # round 1: 41, tests fail
+        run_wb("feedback", name, "--text", "1. The answer is 42.")
+        wait_phase(name, {"review"})                     # round 2: 42, on the same session
+        task = store.Task(name)
+        self.assertEqual((task.worktree / "answer.txt").read_text(), "42\n")
+        run_wb("rewind", name, "1")
+        self.assertEqual((task.worktree / "answer.txt").read_text(), "41\n")
+        out = run_wb("feedback", name, "--text", "1. Write 42 to answer.txt.")
+        self.assertIn("from round 1's files", out)
+        st = wait_phase(name, {"review"})
+        last = [json.loads(x) for x in self.runs_file.read_text().splitlines()][-1]
+        self.assertFalse(last["session"])                                    # a fresh session
+        self.assertIn(cli.REWOUND_LINE.format(1), last["prompt"])
+        self.assertIsNone(st.get("rewound_to"))                              # said once
+        self.assertEqual(lessons.items(lessons.round_feedback(task, 3)[0]), ["Write 42 to answer.txt."])
+        run_wb("rewind", name, "2")
+        run_wb("feedback", name, "--text", "1. Keep it.", "--keep-context")
+        wait_phase(name, {"review"})
+        last = [json.loads(x) for x in self.runs_file.read_text().splitlines()][-1]
+        self.assertTrue(last["session"])                                     # as asked
+
+    def test_the_review_refs_are_gone_after_next_accept_or_discard(self):
+        for name in ("t-rwa", "t-rwd", "t-rwn"):
+            self.start(name, "ok", "--test", TEST_CMD, "--no-base-check", "--queue")
+        for name in ("t-rwa", "t-rwd", "t-rwn"):
+            wait_phase(name, {"review"})
+            self.reviewed(store.Task(name), 2, {"more.txt": "more\n"})
+            self.assertEqual(len(self.refs(name)), 2)
+        run_wb("accept", "t-rwa", "-m", "feat: answer")
+        run_wb("discard", "t-rwd", "--reason", "test")
+        self.assertEqual((self.refs("t-rwa"), self.refs("t-rwd")), ([], []))
+        self.assertIsNone(store.Task("t-rwa").status.get("review_trees"))
+        self.spec.write_text("Step two.\n")
+        run_wb("next", "t-rwn", "--spec", str(self.spec), "-m", "feat: step one")
+        self.assertEqual(self.refs("t-rwn"), [])
+        st = wait_phase("t-rwn", {"review"})
+        self.assertEqual(list(st["review_trees"]), [str(st["round"])])       # step 2's alone
+        self.assertIn("a rewind never goes back past wb next's commit",
+                      self.refused("rewind", "t-rwn", "1"))
 
 
 if __name__ == "__main__":
