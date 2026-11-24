@@ -4494,6 +4494,45 @@ def _beat(path: Path) -> None:
     threading.Thread(target=touch, daemon=True, name="beat").start()
 
 
+# A backlog task that waits on Claude keeps the machine awake this long for Claude's review, its
+# feedback and the morning summary, or until that Claude Code exits (#1105)
+REVIEW_AWAKE_SECS = 1800
+# the waiter keep_awake holds the inhibitor for (argv: Claude Code's pid, the seconds)
+AWAIT_CLAUDE = """import os, sys, time
+pid, until = int(sys.argv[1]), time.monotonic() + float(sys.argv[2])
+while time.monotonic() < until:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        break
+    time.sleep(min(5, max(0.0, until - time.monotonic())))
+"""
+
+
+def awake_for_review(task: store.Task):
+    """A backlog task that stopped waiting on Claude (review, stuck, failed): hold the machine
+    awake for REVIEW_AWAKE_SECS while its Claude Code lives. Every inhibitor was a process wb had
+    detached, so when a batch's last task (or its last parallel ones) reached review none was
+    held, and on Linux and WSL2, where Claude Code holds none of its own, the machine could
+    idle-sleep mid-review, the feedback round and the summary waiting for the user (#1105,
+    2026-11-23). The waiter process, its pid the inhibitor's, or None."""
+    from . import cli  # cli imports this module
+    pid, spec = task.spec.get("claude_pid"), task.spec
+    if not spec.get("backlog") or task.status.get("phase") not in ("review", "stuck", "failed") \
+            or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 \
+            or spec.get("claude_machine") not in (None, store.machine()) \
+            or not models._alive(pid, spec.get("claude_start")) or not cli.awake_how():
+        return None
+    try:
+        waiter = subprocess.Popen([sys.executable, "-c", AWAIT_CLAUDE, str(pid), str(REVIEW_AWAKE_SECS)],
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        return None
+    cli.keep_awake(waiter.pid, f"task {task.name} waits on Claude's review")
+    return waiter
+
+
 def main():
     store.absolute_env()
     gitops.drop_repo_env()  # the caller's repository variables, for the agent too (#798)
@@ -4548,6 +4587,10 @@ def main():
             except OSError as e:
                 if not store.disk_full(e):
                     raise
+            try:
+                awake_for_review(task)
+            except Exception:  # never the runner's exit
+                pass
 
 
 # Thinking per task (#1018). API providers think by default (DeepSeek at effort high), and

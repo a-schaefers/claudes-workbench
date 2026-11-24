@@ -639,6 +639,15 @@ server) holds an inhibitor tied to its pid (`detach(…, awake=<why>)`, `cli.kee
   first task.
 - Elsewhere: nothing; `wb doctor` says so.
 
+**Claude's review of a batch** (#1105): those inhibitors end with their processes, so once a
+`--backlog` batch's last task (or its last parallel ones) reached review none was held, and on
+Linux and WSL2, where Claude Code holds none of its own (on macOS it runs `caffeinate` while a
+turn is busy), the machine could idle-sleep mid-review, the feedback round and the morning summary
+waiting for the user. So a runner whose backlog task ends in review, stuck or failed, its Claude
+Code (task.json `claude_pid`, `claude_start`, `claude_machine`) alive here, starts `AWAIT_CLAUDE`
+and holds `keep_awake` on that waiter (`runner.awake_for_review`, `why` `task <t> waits on
+Claude's review`): it ends `REVIEW_AWAKE_SECS` (1800) later, or when that Claude Code exits.
+
 ## The runner, inside
 
 `workbench/runner.py`, started as `python -X utf8 -m workbench.runner <task>` by `cli.spawn_runner`
