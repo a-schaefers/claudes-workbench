@@ -3146,6 +3146,96 @@ class Lifecycle(Base):
         self.assertIn("answer.txt", tree)
         self.assertFalse([p for p in tree if p.startswith("target/")], tree)
 
+    def claude_ran(self, t, typed, write=None, cwd=None, edits=()):
+        """Claude's Bash call as the mod keeps it (runner.CLAUDE_CALLS): ``typed`` is what Claude
+        typed, ``write(worktree)`` what it did; ``edits``, files its edit tools wrote meanwhile."""
+        at = time.time()
+        if write:
+            write(t.worktree)
+        end = time.time()
+        d = context.rules_dir(t) / runner.CLAUDE_CALLS
+        d.mkdir(parents=True, exist_ok=True)
+        n = len(list(d.iterdir()))
+        (d / f"{int(at * 1000)}-b{n}.json").write_text(json.dumps(
+            {"tool": "Bash", "command": typed, "cwd": str(cwd or t.worktree), "at": at, "end": end}))
+        for i, p in enumerate(edits):
+            (d / f"{int(at * 1000)}-e{n}{i}.json").write_text(json.dumps(
+                {"tool": "Write", "path": str(t.worktree / p), "at": at, "end": end}))
+
+    def test_a_build_claude_runs_that_isnt_the_tasks_is_left_out_once_the_mod_kept_its_call(self):
+        # #1211 (bar round 3 of 2.0, 2026-11-24): `mvn test` that Claude ran beside a --test of
+        # grep wrote reports that wb accept and wb next refused as files written by hand, the
+        # runner's own runs never writing there. The mod keeps Claude's calls in the worktree:
+        # what changed while `mvn test` ran, named by none of Claude's commands, is its output
+        self.maven_repo()
+        self.start("t-other", "ok", "--test", TEST_CMD)
+        wait_phase("t-other", {"review"})
+        t = store.Task("t-other")
+        self.assertFalse(t.status.get("ran_wrote"))
+        subprocess.run(["sh", "-c", self.MVN_TEST], cwd=t.worktree, check=True)  # no row: no mod
+        reports = ["target/classes/application.properties",
+                   "target/surefire-reports/TEST-app.AppTest.xml",
+                   "target/surefire-reports/app.AppTest.txt"]
+        self.assertEqual(runner.hand_wrote(t), reports)        # refused, as before: nothing tells
+        shutil.rmtree(t.worktree / "target")
+        self.claude_ran(t, f"cd {t.worktree} && mvn -q test",
+                        lambda wt: subprocess.run(["sh", "-c", self.MVN_TEST], cwd=wt, check=True))
+        self.assertEqual(runner.hand_wrote(t), [])
+        self.assertEqual(runner.hand_left(t), reports)
+        out = run_wb("accept", "t-other", "-m", "feat: one", "--merge")
+        self.assertIn("accepted t-other", out)
+        self.assertIn(f"which the commit leaves out as build or test output ({', '.join(reports)}): "
+                      "a copy is in ", out)
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "--name-only", "main"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertIn("answer.txt", tree)
+        self.assertFalse([p for p in tree if p.startswith("target/")], tree)
+
+    def test_a_file_claude_writes_by_hand_beside_a_build_it_runs_is_still_refused(self):
+        # #1211 (2026-11-24): telling a build's output from Claude's own files must never drop a
+        # module Claude wrote (#1179): one its edit tools wrote while the build ran, one a command
+        # of its names (a heredoc, $WB_HOME spelled), one in an ignored folder a command names (a
+        # cp into vendor/), and one written while no call of its ran. The cp names vendor/, never
+        # lib/: every row is within CALL_SLACK of the others, so a cp into lib/ kept the heredoc's
+        # files by itself and a break of the name check passed (#1211's review, 2026-11-24)
+        (self.repo / ".gitignore").write_text("lib/\ntarget/\nvendor/\n")
+        (self.repo / "pom.xml").write_text("<project/>\n")
+        (self.repo / "main.py").write_text("from lib import helper\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "lib"], check=True)
+        self.start("t-hand", "ok", "--test", TEST_CMD)
+        wait_phase("t-hand", {"review"})
+        t = store.Task("t-hand")
+        drafts = Path(self.tmp.name) / "drafts"
+        drafts.mkdir()
+        (drafts / "copied.py").write_text("y = 2\n")
+
+        def mvn_and_write(wt):
+            subprocess.run(["sh", "-c", self.MVN_TEST], cwd=wt, check=True)
+            (wt / "lib").mkdir(exist_ok=True)
+            (wt / "lib" / "helper.py").write_text("x = 1\n")             # its Write tool, meanwhile
+        self.claude_ran(t, "mvn -q test", mvn_and_write, edits=["lib/helper.py"])
+        self.claude_ran(t, f"cd {t.worktree} && cat > lib/util.py <<'X'\nz = 3\nX",
+                        lambda wt: (wt / "lib" / "util.py").write_text("z = 3\n"))
+        self.claude_ran(t, f"mkdir -p vendor && cp -r {drafts}/* vendor/",
+                        lambda wt: ((wt / "vendor").mkdir(),
+                                    shutil.copy(drafts / "copied.py", wt / "vendor" / "copied.py")))
+        self.claude_ran(t, 'cd "$WB_HOME/tasks/t-hand/worktree" && cat > lib/spelled.py',
+                        lambda wt: (wt / "lib" / "spelled.py").write_text("t = 4\n"), cwd="/")
+        time.sleep(0.1)
+        (t.worktree / "lib" / "later.py").write_text("w = 5\n")         # while no call of Claude's ran
+        mine = ["lib/helper.py", "lib/later.py", "lib/spelled.py", "lib/util.py", "vendor/copied.py"]
+        self.assertEqual(runner.hand_wrote(t), mine)
+        self.assertIn("target/surefire-reports/TEST-app.AppTest.xml", runner.hand_left(t))
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-hand", "-m", "feat: one")
+        self.assertIn(f"not committed: git ignores files written in the worktree ({', '.join(mine)})",
+                      err.getvalue())
+        # an edit tool's file is Claude's even where the runner's own run wrote (ran_wrote)
+        t.set_status(ran_wrote=["lib", "target", "vendor"])
+        self.assertEqual(runner.hand_wrote(t), ["lib/helper.py"])
+
     def test_diff_of_a_merged_task_hints_a_command_that_still_works(self):
         # #477 (the audit of 1.8): the hint named delegate/<task>, which the merge had deleted,
         # and git said "unknown revision"

@@ -1032,12 +1032,26 @@ check's run counts because a takeover in round 1, or a stuck round, comes before
 in the worktree (#1211's review; with `--no-base-check`, or a command that stops on the base before
 it writes, it is the worktree's runs alone). One kept in
 `hand_wrote` before a run wrote there moves to `hand_left` once one does (`runner._by_hand`), so a
-report from a test the runner hadn't run yet stops refusing; one written by a command the runner
-never runs is still taken for Claude's, so a build Claude runs that isn't the task's (`mvn test`
-beside a `--test` of `grep`, `tsc` beside jest's) is refused until its output goes or `--include`
-(still open in #1211: telling Claude's writes apart needs the mod to record them, a hook on Write
-and Edit; a directory where the same window changed files the filters drop was rejected as the
-sign, as it would send #1179's module under `lib/`, beside Claude's `.csv`, to `hand_left`).
+report from a test the runner hadn't run yet stops refusing. A build Claude runs that isn't the
+task's (`mvn test` beside a `--test` of `grep`, `tsc` beside jest's) wrote where no run of the
+runner's does, and was refused the same way (#1211): the mod keeps each of Claude's own calls in
+a task's worktree (`callRows`, `noteCall`: a Bash command that runs in `tasks/<task>/` or names it,
+as written, through `~`, `$HOME`, `$WB_HOME` or the state's real path, `tasksNamed`; an edit
+tool's file there; anyone's, a subagent's too; not one refused), one file a call in
+`rules/<task>/claude-calls/` (`runner.CLAUDE_CALLS`, outside the lane's writes) with when it
+began and ended. Of what `hand_written` keeps, a file changed while one of those commands ran
+(`at` less `CALL_SLACK` 2 s, for a file system's whole-second times, to `end`) is its output, to
+`hand_left` (`runner._claude_built`), unless one of Claude's commands since `hands_off_at` names
+it (`_rows_name`'s test, on `CALL_NAMES` 5000 words a command: `cat > lib/a.py <<EOF`, `cp a.py lib/`; `~`, `$HOME` and `$WB_HOME`
+spelled out, `_expanded`, and a linked absolute word as its real path), a command that ran then
+names one of its ignored directories (`cp -r drafts/* lib/`), or Claude's edit tools wrote it
+(`_claude_edited`). A file Claude's edit tools wrote is `hand_wrote` whatever else holds: of any
+name, under `ran_wrote` too. A file changed while no command of Claude's ran stays Claude's, and
+without the mod (`wb wait` alone) nothing is told apart: dropping a hand-written file loses the
+work, a false refusal costs a look. Rejected as signs: a directory where the same window changed
+files the filters drop (it would send #1179's module under `lib/`, beside Claude's `.csv`, to
+`hand_left`), and the edit tools' files alone (a module Claude writes with a heredoc
+would go too).
 The rest it finds changed that a person might have written, text outside a cache, under `BUILD_FILES` text files in its group, of any name
 (the one filter waived), is never dropped without a word (`runner.hand_left`, status `hand_left`: a
 `.csv` beside Claude's module under `lib/` went with the worktree, `--include` or not, #1179's
@@ -4976,8 +4990,8 @@ started (the mod stamps `started`); Claude records `wb coding used <task> --did 
 with `wb feedback`. It is the task's alone: the setting never moves. The pane shows it
 (`allowedLine`: `Claude may, once, if <when>: <edit>`). Enforced: `wb takeover` exits 3 without one
 (`_coding_gate`) unless `--user` (the mod's hand-back, which records an allowance per task); the mod denies Edit, MultiEdit, Write and
-NotebookEdit under `$WB_HOME/tasks/<task>/worktree/` without one (`codingRefusal`, the unmatched
-`tool.call` hook), and outside `decide` adds a `claude-coding` block (`CODING_RULES`), a mid-session
+NotebookEdit under `$WB_HOME/tasks/<task>/worktree/` without one (`codingRefusal`, `taskOfPath`, the unmatched
+`tool.call` hook, which also keeps Claude's calls there for `wb accept`, `rules/<task>/claude-calls/`, #1211), and outside `decide` adds a `claude-coding` block (`CODING_RULES`), a mid-session
 change arriving as a row (`sayRules`, #540). Shell edits aren't seen: the block covers them.
 
 **Dynamic workflows** (#1041). Whether Claude may split one request into several tasks that run at once:
@@ -5874,6 +5888,12 @@ session until installed, and so does `local changes in the marketplace clone` (`
 which comes alone when nothing is new upstream (only `update available` was toasted, so the warning reached nobody,
 #1005).
 
+**Claude's calls in a worktree** (`callRows`, `noteCall`, in the same `tool.call` hook, after its gates, #1211):
+each Bash command that runs in or names a task's directory (`tasksNamed`) and each edit tool's file in a worktree
+(`taskOfPath`), from anyone, is written once over, unless refused, to `rules/<task>/claude-calls/` (*Files and
+formats*), for a task with a task.json; `wb accept` and `wb next` tell Claude's own files from its builds' output
+by them (*The runner, inside*, `runner._claude_built`). Facts for wb, not the mod's state: it never reads them.
+
 **The consent gate** (`sendRefusal`, in the `tool.call` hook every call passes, #1005). Nothing goes to workbench
 upstream without the user's yes to that very call, in a dialog: Claude's, a subagent's or another plugin's alike, from
 Bash, Monitor (its `command` runs in the same shell) or a GitHub MCP tool. A rule in the skill is advice Claude may
@@ -6201,7 +6221,9 @@ $WB_HOME (~/.local/state/workbench)
                                  checkout/<path> (an API task's instruction file only the checkout holds: context._checkout_copies, #1091), bin/git (the shim), grants.json (what Claude allowed: {"allow", "paths", "test_tools"}),
                                  shell/<name> (OpenCode's $SHELL, named as the shell it runs: the user's XDG_DATA_HOME, XDG_STATE_HOME, OPENCODE_DB and SHELL back, then that shell: runner.write_shell_shim, #1010),
                                  gitdir.json (the real git dir, the .git's text: {"gitdir", "dotgit"}), submodules.json ([{"path", "src" (the user's checkout), "sha", "index"}]), submodule-<n>.index,
-                                 catalog.json (an API task's own models.dev v2 catalog: runner.write_catalog, models.catalog_doc; OPENCODE_MODELS_PATH, #1015);
+                                 catalog.json (an API task's own models.dev v2 catalog: runner.write_catalog, models.catalog_doc; OPENCODE_MODELS_PATH, #1015),
+                                 claude-calls/<ms>-<tool_use_id>.json (the mod's, one of Claude's own calls in the worktree: {tool, at, end (epoch s),
+                                 command and cwd (Bash), or path (Edit, MultiEdit, Write, NotebookEdit)}: runner.claude_calls, #1211);
                                  removed on close (cli._closed) and by gc for a closed or vanished task
   locks/<task>.runner.lock       the runner's for its life (its pid; touched every BEAT_SECS): one runner a task
   locks/<task>.cmd.lock          one wb command on the task at a time
@@ -6366,11 +6388,11 @@ off), not `wb start`'s.
 | `prepared`, `setup_secs` | the worktree is set up (`_prepare`), so a later runner doesn't again; how long (older tasks: `prepared_paths`, `prepared_marks`, `prepared_bytes`, `runner.prepared_record`) |
 | `checked_out`, `checkout_secs` | `runner.checkout` made the worktree; how long |
 | `hands_off_at` | when the agent last stopped (review, the runner's exit, `cli._stop_runner`, `cli.reap`; an earlier one kept): ignored files changed since are Claude's (`runner.hand_wrote`, #1179); cleared by the next runner once it has kept them |
-| `hand_wrote` | ignored files written while no runner ran, kept by each runner at its start (`runner._hands_on`): `wb accept`/`wb next` refuse them until `--include` (#1179); none under `ran_wrote` |
+| `hand_wrote` | ignored files written while no runner ran, kept by each runner at its start (`runner._hands_on`): `wb accept`/`wb next` refuse them until `--include` (#1179); none under `ran_wrote` nor a build or test command of Claude's wrote (`runner._claude_built`, #1211), but every one Claude's edit tools wrote (`rules/<task>/claude-calls/`) |
 | `agent_from` | when the agent's first round began, after the checkout, setup, `--copy` and base check (set once): ignored files changed since that `gitops.hand_written` keeps, less `test_wrote`, that a shell row's `names` name are the agent's shell's (`runner.shell_wrote`), refused at `wb accept`/`wb next` until `--include` and named in the report; the rest are `shell_left`, noted and left out (#1210) |
 | `test_wrote` | the ignored files the runner's test runs changed (`runner._tests_wrote`, after each in `run_tests`; what `hand_written` keeps and its rest): build or test output, never the agent's shell's (#1210) |
 | `ran_wrote` | where the runner's own setup or `--test` run in the worktree, or its base check in the scratch checkout, wrote a file `gitops.hand_written` would take for Claude's (`gitops.ran_wrote`: its outermost ignored directory, else the file), grown after each run: a file changed there is build or test output (`hand_left`), as Claude's rerun of the acceptance command wrote `mvn test`'s reports there (#1211) |
-| `hand_left` | the other ignored files changed while no runner ran that `gitops.hand_written` took for build or test output but a person might have written (text, outside a cache, under `BUILD_FILES` text files in their group, any suffix: never bytecode nor an install's), kept the same way: `wb accept`/`wb next` name them as left out of the commit (`gitops.left_out_line`; accept keeps a copy in `left-out/`, #1179's review) |
+| `hand_left` | the other ignored files changed while no runner ran that `gitops.hand_written` took for build or test output, or a build or test command of Claude's wrote (`runner._claude_built`), but a person might have written (text, outside a cache, under `BUILD_FILES` text files in their group, any suffix: never bytecode nor an install's), kept the same way: `wb accept`/`wb next` name them as left out of the commit (`gitops.left_out_line`; accept keeps a copy in `left-out/`, #1179's review) |
 | `taken_over` | `wb takeover`: `runner.checkout` then fails a task not checked out rather than recheck it out (#655); cleared by the hand-back once checked out, for the mod's `delegatedWork` (#926) |
 | `branch_made` | the commit `runner.checkout` makes `delegate/<task>` at, recorded before `worktree add` when no such branch exists: the only branch a cut-short cleanup deletes (#416) |
 | `failed_before` | `setup` or `load`: before the agent ran; the row copies it |
@@ -7039,7 +7061,9 @@ doc needs its own `!/` line).
   (*Kept awake*), named in `cli.logout_stops`.
 - **A file in a task's directory** → `context.TASK_FILES`, the names a `--sibling` can't take.
 - **Where a task's worktree is** (`Task.worktree`) → `gitops._record`, `spend._theirs`, `EVENT_SKIP`, the mod's
-  `codingRefusal`.
+  `codingRefusal` and `taskOfPath`, `tasksNamed` (which calls it keeps).
+- **A `claude-calls/` row** (the mod's `callRows`, `noteCall`) → `runner.claude_calls`, `_claude_edited`,
+  `_claude_built` (its keys, seconds not milliseconds, the edit tools' names `CLAUDE_EDIT_TOOLS`), the tests' `claude_ran`.
 - **A prompt's opening words** → `transcript` labels, `round_asks`, `lessons`, the fake OpenCode, the tests quoting them.
 - **Where a round's own prompt is** (`instructions.md` once `_start_fresh` makes prompt.md the handoff) → `store.round_prompt` (`current_task_prompt`, `round_asks`, `lessons`,
   `bench._step_prompt`).

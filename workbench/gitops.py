@@ -1571,14 +1571,19 @@ def _ignored_changed(worktree: Path, since: float):
 
     outside = [p for p in changed if not in_cache(p)]
     kept = [p for p in outside if _kind(p) in kinds and _text(os.path.join(top, p))]
-    dirs = {os.fsdecode(d).rstrip("/") for d in git_bytes(
-        worktree, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory",
-        "-z").split(b"\0") if d.endswith(b"/")}
+    dirs = ignored_dirs(worktree)
 
     def key(p: str) -> str:
         parts = p.split("/")[:-1]
         return next((d for i in range(1, len(parts) + 1) if (d := "/".join(parts[:i])) in dirs), p)
     return top, outside, kept, key
+
+
+def ignored_dirs(worktree: Path) -> set[str]:
+    """The outermost directories git ignores in the worktree (`ls-files --directory`'s), relative."""
+    return {os.fsdecode(d).rstrip("/") for d in git_bytes(
+        worktree, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory",
+        "-z").split(b"\0") if d.endswith(b"/")}
 
 
 def under(p: str, keys) -> bool:

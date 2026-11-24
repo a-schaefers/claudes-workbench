@@ -2066,12 +2066,82 @@ async function localOnlyRefusal($: any, e: Row, path: string): Promise<string> {
     'Only the user lifts a repo\'s local_only (it keeps API models off that repo); tell them, and leave it as it is.'
 }
 
+// The task whose worktree holds the file, else '': tasks/<t>/worktree, or tasks/<t>/tree/…/worktree
+// for a sibling further up (#261)
+export function taskOfPath(path: string, root: string): string {
+  if (!root || !path.startsWith(`${root}/tasks/`)) return ''
+  return /^([^/]+)\/(?:tree\/(?:[^/]+\/)+)?worktree\//.exec(path.slice(root.length + 7))?.[1] ?? ''
+}
+
+// The tasks a shell command runs in (`cwd` inside tasks/<t>/) or names the directory of
+// (tasks/<t>/ under one of `roots`, as written, through `~` or $HOME, or $WB_HOME): which tasks'
+// rows a Bash call of Claude's goes in (callRows, #1211)
+export function tasksNamed(command: string, cwd: string, roots: string[], homes: string[]): string[] {
+  const out = new Set<string>()
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const ways = new Set(['$WB_HOME', '${WB_HOME}'])
+  for (const root of roots.filter(Boolean)) {
+    ways.add(root)
+    for (const home of homes.filter(h => h && inside(root, h) && root !== h)) {
+      const rest = root.slice(home.length)
+      for (const w of [`~${rest}`, `$HOME${rest}`, `\${HOME}${rest}`]) ways.add(w)
+    }
+    if (cwd.startsWith(`${root}/tasks/`)) {
+      const at = /^([a-z0-9][a-z0-9-]*)(?:\/|$)/.exec(cwd.slice(root.length + 7))?.[1]
+      if (at) out.add(at)
+    }
+  }
+  if (!command.includes('/tasks/')) return [...out]
+  for (const w of ways) {
+    for (const m of command.matchAll(new RegExp(`${esc(w)}/tasks/([a-z0-9][a-z0-9-]*)(?=$|[/\\s'"\`;&|)])`, 'g'))) out.add(m[1])
+  }
+  return [...out]
+}
+
+// Claude's own tool call in a task's worktree, kept for wb as one row a call in
+// rules/<task>/claude-calls/ (runner.CLAUDE_CALLS): an edit tool's file there, or a Bash command
+// that runs in a task's directory or names it. wb tells by them what Claude wrote by hand in the
+// worktree from what a build or test command it ran there wrote: `mvn test` beside a --test of
+// grep, tsc beside jest's, wrote reports and dist/ that wb accept and wb next refused as files
+// written by hand (#1211, 2026-11-24). The tasks it is for (with a task.json) and the row
+// without its times; no tasks for any other call.
+async function callRows($: any, e: Row): Promise<{ tasks: string[]; row: Row }> {
+  const none = { tasks: [] as string[], row: {} }
+  if (!mem.root) return none
+  const field = EDIT_TOOLS[e.tool]
+  let tasks: string[] = [], row: Row
+  if (field) {
+    const path = e[field]
+    if (typeof path !== 'string' || !path.includes('/tasks/')) return none
+    const real = await realPath($, mem.root)
+    const t = taskOfPath(path, mem.root) || taskOfPath(path, real)
+    tasks = t ? [t] : []
+    row = { tool: e.tool, path }
+  } else if (e.tool === 'Bash' && typeof e.command === 'string') {
+    const cwd = (await $.session.cwd().catch(() => '')) || mem.cwd
+    if (!e.command.includes('/tasks/') && !cwd.includes('/tasks/')) return none // most calls: no stat
+    const home = (await $.env.get('HOME').catch(() => '')) || ''
+    tasks = tasksNamed(e.command, cwd, [mem.root, await realPath($, mem.root)], [home, mem.home])
+    row = { tool: 'Bash', command: e.command, cwd }
+  } else return none
+  const found: string[] = []
+  for (const t of tasks) if (await $.fs.exists(`${mem.root}/tasks/${t}/task.json`).catch(() => false)) found.push(t)
+  return { tasks: found, row }
+}
+
+// The row callRows made, with when the call began (`at`, ms) and now that it is over, written
+// one file a call: a row in a shared file would be lost to a parallel call's write
+async function noteCall($: any, tasks: string[], row: Row, at: number, id: string) {
+  const end = await $.clock.now()
+  const name = `${Math.round(at)}-${id.replace(/[^A-Za-z0-9_-]/g, '') || Math.random().toString(36).slice(2)}.json`
+  const text = JSON.stringify({ ...row, at: at / 1000, end: end / 1000 })
+  for (const t of tasks) await $.fs.write(`${mem.root}/rules/${t}/claude-calls/${name}`, text).catch(() => {})
+}
+
 // Why Claude may not make this edit now, or '': outside a task's worktree, under "decide", or
 // with the user's yes recorded for that task and not yet handed back (`wb coding allow`).
 async function codingRefusal($: any, path: string): Promise<string> {
-  const task = path.startsWith(`${mem.root}/tasks/`)
-    // tasks/<t>/worktree, or tasks/<t>/tree/…/worktree for a sibling further up (#261)
-    ? /^([^/]+)\/(?:tree\/(?:[^/]+\/)+)?worktree\//.exec(path.slice(mem.root.length + 7))?.[1] : undefined
+  const task = taskOfPath(path, mem.root)
   if (!task) return ''
   const mode = await codingMode($)
   if (mode === 'decide') return ''
@@ -4448,13 +4518,27 @@ export const register: Register = (on, options) => {
     // the dialog (#1014, routeRefusal): anyone's call alike
     const routing = await routeRefusal($, e as Row)
     if (routing) return { deny: routing }
-    if (next.origin.plugin !== 'engine') return next(e)
+    // Claude's own call in a task's worktree is kept for wb once it is over, unless refused
+    // (callRows, #1211): anyone's alike, a subagent's or another plugin's
+    const kept = await callRows($, e as Row)
+    const at = kept.tasks.length ? await $.clock.now() : 0
+    const id = String((e as Row).tool_use_id ?? '')
+    if (next.origin.plugin !== 'engine') {
+      if (!kept.tasks.length) return next(e)
+      const r = await next(e)
+      if (!(r as Row)?.deny) await noteCall($, kept.tasks, kept.row, at, id).catch(() => {})
+      return r
+    }
     // The engine's call settles its permission check, a dialog included, before it resolves: one
     // whose dialog came up at the terminal is over once it does, answered there (#959): the oldest
     // dialog of that tool in that loop (another loop's call of the tool settles none of its)
+    let denied = false
     try {
-      return await next(e)
+      const r = await next(e)
+      denied = !!(r as Row)?.deny
+      return r
     } finally {
+      if (kept.tasks.length && !denied) await noteCall($, kept.tasks, kept.row, at, id).catch(() => {})
       const agent = e.agentId ?? ''
       const d = mem.termDialogs.find(d => d.tool === e.tool && d.agent === agent)
       if (d) await termDialogDone($, d)

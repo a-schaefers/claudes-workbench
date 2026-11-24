@@ -78,7 +78,7 @@ NAMES_MAX = 300   # words a row keeps: a heredoc of a whole module is thousands
 NAME_LEN = 300
 
 
-def shell_names(command: str) -> list[str]:
+def shell_names(command: str, limit: int = NAMES_MAX) -> list[str]:
     """The words of a shell line that may name a file it wrote, paths first (a word with `/`,
     then one with `.`), each once, NAMES_MAX of them; a word after a `cd` (or `pushd`) in the
     line joined to its directory, so `cd lib && cat > util.py` gives lib/util.py, and an
@@ -92,7 +92,8 @@ def shell_names(command: str) -> list[str]:
     word says (`cd "$D"`, `cd -`, a `popd` with no `pushd` in the line) a word is `*/<word>`: the
     file by that path in any directory. Kept as written, `cd "$D" && cat > util.py` named a
     top-level util.py and the lib/util.py it wrote went unnamed, left out as build output: where
-    the directory can't be known, a false name costs a look at accept, a false drop the work."""
+    the directory can't be known, a false name costs a look at accept, a false drop the work.
+    ``limit`` words at most (NAMES_MAX for a row of events.jsonl)."""
     words: dict[str, None] = {}
     cwd: str | None = ""                                   # where the line is, from its start
     pushed: list[str | None] = []                          # the line's pushd stack
@@ -122,7 +123,7 @@ def shell_names(command: str) -> list[str]:
     bare = {w: w[2:] if w.startswith(ANYWHERE) else w for w in words}
     ranked = ([w for w in words if "/" in bare[w]] + [w for w in words if "/" not in bare[w] and "." in bare[w]]
               + [w for w in words if "/" not in bare[w] and "." not in bare[w]])
-    return ranked[:NAMES_MAX]
+    return ranked[:limit]
 
 
 ANYWHERE = "*/"   # a `names` word run where no word says: the path in any directory (no word holds a *)
