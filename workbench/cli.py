@@ -7807,7 +7807,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--to", action="append", metavar="ID", help="reply: the message it answers (again "
                    "for more; `user`: the user's thread; default: those this turn took, the user's alone if any)")
     s.add_argument("--by", help=argparse.SUPPRESS); s.add_argument("-n", type=int, default=10)
-    s.add_argument("--how", choices=["now", "queued"], default="now", help=argparse.SUPPRESS)
+    # into: an agent's message delivered into a running turn it didn't open (#1175, 2026-11-24)
+    s.add_argument("--how", choices=["now", "into", "queued"], default="now", help=argparse.SUPPRESS)
     s.set_defaults(f=cmd_chat)
     s = sub.add_parser("optimize", help="measure this machine for its models when the user asks: "
                        "the largest window each Ollama model keeps all on the GPU (detached; real "

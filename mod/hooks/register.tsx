@@ -3729,7 +3729,11 @@ async function listen($: any, now: number) {
     if (mem.busy) {
       const r = await $.session.send({ to: { sessionId: await $.session.id() }, text: `${text}\n\n${agentOf(m) ? AGENT_NOTE : WEB_NOTE}` })
         .catch(() => ({ isDelivered: false }))
-      if (r.isDelivered) await runWb($, ['chat', 'ack', id, '--by', st.key, '--how', 'now'])
+      // an agent's is `into`, not `now`: it didn't open this turn, so the turn's plain `wb chat
+      // reply` isn't its answer. A wake turn's report to the away user went to the agent alone,
+      // pushed to no phone (#1175, 2026-11-24); AGENT_NOTE says to answer it with `--to <id>`.
+      // The user's stays `now`: a plain reply in an agent's turn is theirs (the #1042 review).
+      if (r.isDelivered) await runWb($, ['chat', 'ack', id, '--by', st.key, '--how', agentOf(m) ? 'into' : 'now'])
       else void sendWeb($, id, text, 'queued', st.key)
       mem.chatOwed.set(id, { at: now, grace: r.isDelivered ? 0 : 1, nudged: false }) // queued: maybe the next turn's
     } else {
