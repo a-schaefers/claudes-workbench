@@ -844,6 +844,87 @@ class Lifecycle(Base):
         self.assertEqual(runner.missing_name(line), "venv/bin/pytest")
         self.assertIn(runner.missing_name(line), runner.command_words("cd api && venv/bin/pytest -q"))
 
+    def test_a_console_script_the_step_adds_to_the_setups_venv_goes_back_to_the_agent(self):
+        # #1244 (bar round 5 of 2.0): a console script the step adds, which the agent's reinstall
+        # puts in the setup's worktree .venv, was a tool the agent lacks: a check-in before round
+        # 1 said "no round can fix that ... or wb discard", and with round 1's tests failing the
+        # same way, the auto-fix round that would have made it was skipped. The --test makes the
+        # script once the answer is right, standing in for `pip install -e .`.
+        (self.repo / ".gitignore").write_text(".venv/\n")
+        for a in (("add", ".gitignore"), ("commit", "-qm", "ignore")):
+            subprocess.run(["git", "-C", str(self.repo), *a], check=True, capture_output=True)
+        self.spec.write_text("Write the answer to answer.txt, and add the answer-check1244 "
+                             "console script.\n")
+        make = ("grep -qx 42 answer.txt && printf '#!/bin/sh\\nexit 0\\n' > .venv/bin/answer-check1244 "
+                "&& chmod +x .venv/bin/answer-check1244; ")
+        self.start("t-cs", "fix", "--setup", "python3 -m venv --without-pip .venv",
+                   "--test", make + "answer-check1244", "--auto-fix", "1", "--no-self-review")
+        st = wait_phase("t-cs", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"], st["tests"]["ok"]), (127, 2, True))
+        self.assertFalse([r for r in store.notices() if r["task"] == "t-cs" and r["kind"] == "checkin"])
+        task = store.Task("t-cs")
+        self.assertNotIn("auto-fix skipped", (task.round_dir(1) / "summary.md").read_text())
+        self.assertNotIn("can't run in the agent's environment", run_wb("report", "t-cs"))
+
+    def test_a_console_script_is_the_steps_own_when_its_project_or_spec_makes_it(self):
+        # #1244: by name with the worktree's venv there, or by its path in the worktree's .venv,
+        # a script the project declares or the spec makes goes back to the agent; one nobody
+        # makes is still a missing tool, its path's .venv never "never checked out"
+        self.spec.write_text("Fix the answer.\n")
+        self.start("t-own-cs", "ok", "--no-base-check", "--no-self-review")
+        wait_phase("t-own-cs", {"review"})
+        task = store.Task("t-own-cs")
+        said = lambda last: runner.missing_command({"exit": 127, "tail": f"x\n{last}\n"}, task)  # noqa: E731
+        bare = "bash: line 1: mycli1244: command not found"
+        path = "bash: line 1: .venv/bin/mycli1244: No such file or directory"
+        self.assertEqual(said(bare), "mycli1244: command not found")
+        self.assertEqual(said(path), ".venv/bin/mycli1244: not in the worktree (.venv/ is an "
+                                     "install's, never checked out)")
+        # with no worktree venv no `pip install -e .` puts a script the step adds on the agent's
+        # PATH, so the spec or project making it still checks in, as #1152 does (#1244's review)
+        prompt = store.round_prompt(task, 1)
+        original = prompt.read_text()
+        prompt.write_text("Add the `mycli1244` console script.\n")
+        self.assertEqual(said(bare), "mycli1244: command not found")
+        prompt.write_text(original)
+        (task.workdir / "pyproject.toml").write_text('[project]\nname = "x"\n[project.scripts]\n'
+                                                     'mycli1244 = "pkg.cli:main"\n')
+        self.assertEqual(said(bare), "mycli1244: command not found")
+        (task.workdir / "pyproject.toml").unlink()
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(task.workdir / ".venv")],
+                       check=True)
+        self.assertEqual(said(bare), "mycli1244: command not found")  # nothing makes it yet
+        self.assertEqual(said(path), ".venv/bin/mycli1244: not in the worktree (.venv/bin/ is "
+                                     "there, without mycli1244)")
+        for spec in ("Add the `mycli1244` console script.\n", "Create a command named mycli1244.\n",
+                     'Add [project.scripts] mycli1244 = "pkg.cli:main".\n'):
+            prompt.write_text(spec)
+            self.assertIsNone(said(bare), spec)
+            self.assertIsNone(said(path), spec)
+        for spec in ("Make `mycli1244 check` pass.\n", "Add a script that runs mycli1244.\n",
+                     "The mycli1244 command prints 42.\n"):
+            prompt.write_text(spec)
+            self.assertEqual(said(bare), "mycli1244: command not found", spec)
+        # a name on the user's own PATH that the agent's lacks is a tool missing from its
+        # environment, not a script the step adds, even when the spec says to make it (#1244's
+        # review, 2026-11-24): without the guard it would go back to the agent every round
+        self.assertTrue(shutil.which("sh"))
+        prompt.write_text("Add the `sh` console script.\n")
+        self.assertEqual(said("bash: line 1: sh: command not found"), "sh: command not found")
+        prompt.write_text("Fix the answer.\n")
+        for name, text in (("pyproject.toml", '[project]\nname = "x"\n[project.scripts]\n'
+                                              'mycli1244 = "pkg.cli:main"\n'),
+                           ("pyproject.toml", '[tool.poetry.scripts]\nmycli1244 = "pkg.cli:main"\n'),
+                           ("setup.cfg", "[options.entry_points]\nconsole_scripts =\n"
+                                         "    mycli1244 = pkg.cli:main\n"),
+                           ("setup.py", "setup(entry_points={'console_scripts': "
+                                        "['mycli1244=pkg.cli:main']})\n")):
+            (task.workdir / name).write_text(text)
+            self.assertIsNone(said(bare), name)
+            (task.workdir / name).unlink()
+        (task.workdir / "pyproject.toml").write_text("[project\n")  # won't parse: nothing declared
+        self.assertEqual(said(bare), "mycli1244: command not found")
+
     def test_a_command_not_found_that_a_later_steps_test_names_skips_auto_fix(self):
         # #1172 (bar round 2 of 2.0): wb next --test runs no base check, so a tool its command
         # names and the agent's PATH lacks (exit 127) got both auto-fix rounds, each told "the
@@ -892,7 +973,9 @@ class Lifecycle(Base):
             self.assertIn(line + "a tool the command itself names); no round can fix that", summary)
         # a base that passed found the tool: a round's not-found is the change's, and goes back
         passed = {"ok": True, "exit": 0, "cmd": "tool-1208"}
-        task = types.SimpleNamespace(status={"base_check": passed}, spec={"test_cmd": "tool-1208"})
+        wt = store.Task(name).worktree  # where a console script of its own would be (#1244)
+        task = types.SimpleNamespace(status={"base_check": passed}, spec={"test_cmd": "tool-1208"},
+                                     worktree=wt, workdir=wt)
         failed = {"ok": False, "exit": 127, "tail": "bash: line 1: tool-1208: command not found"}
         self.assertEqual(runner.not_the_code(task, failed), "")
 
