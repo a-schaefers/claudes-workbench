@@ -3881,8 +3881,11 @@ def cmd_accept(a):
         if into and into != "HEAD" and close.get("merge_from"):
             # an earlier try got into its merge, and a SIGKILL there left it half made: the retry
             # blamed it as uncommitted changes, or said merged with MERGE_HEAD still there
-            # (#1231). No merge lock: while it's there, every other wb merge refuses the checkout
-            gitops.clear_killed_merge(repo, close["merge_from"], tip, close.get("merge_as", "merge"))
+            # (#1231). No merge lock: while it's there, every other wb merge refuses the checkout.
+            # Its signing git first, if it still waits: it landed the merge after this backed
+            # it out, over the unmerged files (#1246)
+            gitops.clear_killed_merge(repo, close["merge_from"], tip, close.get("merge_as", "merge"),
+                                      close.get("merge_git"))
         if into and into != "HEAD" and gitops.contains(repo, f"refs/heads/{into}", tip):
             merged = gitops.git(repo, "rev-parse", "--short", f"refs/heads/{into}").strip()  # made already
         elif into and into != "HEAD" and (merged := gitops.squashed(
@@ -3906,9 +3909,12 @@ def cmd_accept(a):
                     # since the start, the merge brought back what was withdrawn from it (#418)
                     # signed as the task's commit was, and a kill backs the checkout out: SIGTERM
                     # left MERGE_HEAD and the staged merge in the user's checkout (#420)
+                    # its signing git, which outlives a SIGKILL of wb, for a retry to end (#1246)
                     merged = gitops.merge(repo, a.name, into, spec["base"], tip=tip,
                                           how=close.get("merge_as", "merge"),
-                                          sign=close.get("sign", True) and _signed(spec, a))
+                                          sign=close.get("sign", True) and _signed(spec, a),
+                                          started=lambda pid: task.set_status(closing={
+                                              **close, "merge_git": [pid, models._started(pid)]}))
             except gitops.GitError as e:
                 refused = str(e)
                 print(f"wb: not merged: {e}", file=sys.stderr)
