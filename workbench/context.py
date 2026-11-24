@@ -2642,6 +2642,12 @@ def readable(task: store.Task) -> list[str] | None:
     # agent's OpenCode loads it itself (#370, the audit of 1.6)
     if os.environ.get("OPENCODE_CONFIG_DIR"):
         keep.add(os.path.realpath(Path(os.environ["OPENCODE_CONFIG_DIR"]).expanduser()))
+    # and the config home where XDG_CONFIG_HOME moves it, a non-dot directory under the home
+    # (~/conf): its OpenCode config, git's and every tool's were unreadable, and a provider in
+    # the global opencode.json failed every task as an unknown model (#1103, 2026-11-23); its
+    # secrets stay hidden (secret_paths and _api_hidden_tools follow XDG_CONFIG_HOME)
+    if os.path.isabs(xdg := os.environ.get("XDG_CONFIG_HOME") or "") and os.path.realpath(xdg) != home:
+        keep.add(os.path.realpath(xdg))
     # the git directory too, outside the repo when it is a linked worktree: git failed there
     # ("gitfile does not point to a valid repository", the 0.90 review); writable() keeps it out
     keep |= repo_dirs(task)

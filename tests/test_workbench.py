@@ -9162,6 +9162,25 @@ class Lane(Base):
                              capture_output=True, text=True, timeout=20)
         return out.stdout.split() or [out.stderr]
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_a_config_home_outside_the_dotfiles_stays_readable_but_its_secrets_dont(self):
+        # #1103 (2026-11-23): with XDG_CONFIG_HOME=~/conf the agent's OpenCode couldn't read its
+        # global opencode.json, and a provider there failed every task as an unknown model
+        home = self.fake_home()
+        conf = home / "conf"
+        for rel, text in (("opencode/opencode.json", "{}"), ("git/config", "[user]\n"),
+                          ("gh/hosts.yml", "token")):
+            (conf / rel).parent.mkdir(parents=True)
+            (conf / rel).write_text(text)
+        (home / "letters").mkdir()
+        (home / "letters" / "a.txt").write_text("private")
+        os.environ["XDG_CONFIG_HOME"] = str(conf)
+        task = self.bare_task("t-xdgconf", self.repo)
+        self.assertEqual(self.reads_in_lane(task, [conf / "opencode" / "opencode.json", conf / "git" / "config",
+                                                   conf / "gh" / "hosts.yml", home / "letters" / "a.txt"]),
+                         ["read", "read", "refused", "refused"])
+
     @home_outside_the_lane
     def test_toolchain_bins_user_site_and_a_repo_under_gopath_stay_out_of_the_lane(self):
         home = self.fake_home()
