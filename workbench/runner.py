@@ -116,8 +116,12 @@ def opencode_moved(task: store.Task) -> bool:
            f"resume {task.name}" if have < (2, 0) else
            f"{OPENCODE_MOVED} ({was}, now {now}): wb resume {task.name} continues it on {now}"
            + (f". {drift}" if (drift := untested(have)) else ""))
-    task.set_status(phase="stuck", last=msg[:200])
-    task.notify("stuck", f"task {task.name}: {msg}", round=task.status.get("round"), cause="opencode")
+    # status `infra` and the notice's `tasks`, as for an interruption: without them wb feedback
+    # (the wake advised it, "it got stuck") counted a review round, and one real review after it
+    # made the step go badly (#1176, 2026-11-24)
+    task.set_status(phase="stuck", last=msg[:200], infra="opencode")
+    task.notify("stuck", f"task {task.name}: {msg}", round=task.status.get("round"), cause="opencode",
+                tasks=[task.name])
     return True
 
 
@@ -4612,9 +4616,13 @@ def _updated(task: store.Task) -> bool:
     if not (was := CURRENT.get("code")) or code_print() == was:
         return False
     msg = f"{UPDATED}: wb resume {task.name} continues it on the new code"
-    task.set_status(phase="stuck", last=msg)
-    # not the step's: an update mid-step shrank the model's slice (#660)
-    task.notify("stuck", f"task {task.name}: {msg}", round=task.status.get("round"), cause="updated")
+    # not the step's: an update mid-step shrank the model's slice (#660). Status `infra`, so wb
+    # feedback counts no review round, and the notice's `tasks`, so the mod's wake says it was
+    # interrupted and names wb resume: it said "it got stuck" and advised wb feedback, which
+    # counted a round, and one real review after it made the step go badly (#1176, 2026-11-24)
+    task.set_status(phase="stuck", last=msg, infra="updated")
+    task.notify("stuck", f"task {task.name}: {msg}", round=task.status.get("round"), cause="updated",
+                tasks=[task.name])
     return True
 
 

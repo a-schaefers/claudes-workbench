@@ -786,12 +786,16 @@ records `code_print()` (sha256 of `runner.CHILD_CODE`) in `CURRENT["code"]` and 
 module the runner imports late up front (`load_up_front`: `cli`, `results`, `router`, `transcript`,
 `verify`; #1115: an API round's report loaded `results` mid-task, a test walks the late imports); before each round `_updated` compares and on a change sets `stuck`
 ("workbench was updated under this task: wb resume <task> continues it on the new code", `cause`
-`updated`, not held against the step's size, #660); `wb update` refuses while a runner is live
+`updated`, not held against the step's size, #660; status `infra` `updated`, so `wb feedback` counts
+no review round, and the notice's `tasks` `[<task>]`, so the mod wakes it as interrupted with
+`BATCH_NEXT`, `wb resume`: it woke as "got stuck" advising feedback, and one real review after
+that made the step go badly, #1176); `wb update` refuses while a runner is live
 (unless `--stop`), so a manual pull is what this catches. `opencode_moved` (before the lease and
 each later round) compares status `opencode` (`M.m`, set by start and by feedback, next, resume
 through `cli._opencode_again`) with `opencode --version`: changed, `stuck` with `OPENCODE_MOVED` ("OpenCode was changed under this task (2.3, now
 2.5): wb resume <task> continues it on 2.5", an interruption to `wb resume --all`); below 2.0,
-`OPENCODE_GET`; `cause` `opencode` (#866: a 1.x reinstall failed every round as the model's fault).
+`OPENCODE_GET`; `cause` `opencode` (#866: a 1.x reinstall failed every round as the model's fault),
+`infra` `opencode` and `tasks` `[<task>]` as `_updated`'s (#1176).
 Feedback, next and resume refuse 1.x (exit 3) and note one outside `OPENCODE_TESTED`.
 
 **`drive(task)`**, the loop:
@@ -2478,7 +2482,8 @@ keyhole's `setup`, this machine's, #1080), `spend` (the day's API spend
 cap, #1019: `runner.SPEND`), `updated`
 (`runner._updated`), `opencode` (`runner.opencode_moved`), `signal` (`SIGNAL_STOP`), `died`
 (`reap`), `update` (`wb update --stop`). `tasks` names a batch (restart, shutdown, `wb update
---stop`). `wb` itself writes only `reap`'s `failed` and `cli._stop_for_update`'s `stuck`, one per
+--stop`), or the one task `_updated` or `opencode_moved` stopped, so its wake is an interruption's
+(`BATCH_NEXT`, #1176). `wb` itself writes only `reap`'s `failed` and `cli._stop_for_update`'s `stuck`, one per
 owner (#694). The file is out of the agent's lane (2026-11-16 audit: it could forge or wipe wakes).
 Read through `store.notices()`, whole rows only (a `NAME_RE` task, a kind, a numeric ts: one row
 without a task made every acknowledging command raise). A task's
@@ -4020,8 +4025,8 @@ for review, stuck or failed (a permission request gets `REFUSED`); at review sav
 copies the hidden files over the worktree (replacing a planted link, never writing through it: the
 driver is outside the lane) and runs the acceptance command and `--check` in the lane
 (`grade.txt`); then discards task and clone and appends to `bench/runs.jsonl`. Passed is both exiting
-0; stuck or failed is failed, unless status `infra` says the machine failed it: an `error` row,
-graded neither way and replayed next run (#508).
+0; stuck or failed is failed, unless status `infra` says the machine failed it (stuck: `provider`,
+`spend`, `updated`, `opencode`, #1176): an `error` row, graded neither way and replayed next run (#508).
 
 A replay stays out of real work: task.json `bench` silences `Task.notify` and `results.record`, hides
 it from `wb status` (unless `--all` or named) and the mod; `--trial` keeps its lessons out; its
@@ -6044,7 +6049,7 @@ off), not `wb start`'s.
 | `reviewed` | `{step, tree}`: the tree the last review notice showed (`gitops.snapshot`, bulky new files left out); the next shows the diff since (the whole diff once git gc pruned it) |
 | `tests` | `{ok, exit, tail, round, lane?, proxy?, hang?}` (`exit`: code, `timeout`, `output limit`; `lane`: devices refused; `proxy`: variables left out, on a connection failure; `hang`: `{base, limit}`, a timeout where the base check ran it in a quarter of the limit or less) |
 | `base_check` | `{ok, exit, tail, limit, secs, cmd}`, `runner.base_check` in the lane before round 1, with `--test` and no `--no-base-check` (`exit` may be `"timeout"`, `"setup failed"`, `"filtered"`: not the task's bytes) |
-| `infra` | the machine failed it: `setup` (`_prepare`), `model` (`_load_failed`: no load, or the server down past `DOWN_WAIT`), `provider` (an API provider's stop, #1020), `spend` (the day's API spend cap, #1019), `crash`, `disk full` (the crash handler), `runner died` (`cli.reap`); `wb feedback` then counts no review (#1153); cleared at runner start; a replay with it is an `error` row |
+| `infra` | the machine failed it: `setup` (`_prepare`), `model` (`_load_failed`: no load, or the server down past `DOWN_WAIT`), `provider` (an API provider's stop, #1020), `spend` (the day's API spend cap, #1019), `updated` (`runner._updated`), `opencode` (`runner.opencode_moved`, #1176), `crash`, `disk full` (the crash handler), `runner died` (`cli.reap`); `wb feedback` then counts no review (#1153); cleared at runner start; a replay with it is an `error` row |
 | `prepared`, `setup_secs` | the worktree is set up (`_prepare`), so a later runner doesn't again; how long (older tasks: `prepared_paths`, `prepared_marks`, `prepared_bytes`, `runner.prepared_record`) |
 | `checked_out`, `checkout_secs` | `runner.checkout` made the worktree; how long |
 | `taken_over` | `wb takeover`: `runner.checkout` then fails a task not checked out rather than recheck it out (#655); cleared by the hand-back once checked out, for the mod's `delegatedWork` (#926) |
