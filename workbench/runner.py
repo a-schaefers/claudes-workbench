@@ -3416,17 +3416,24 @@ RUNNER_TAIL = re.compile("|".join(RUNNER_LINES))
 MAKE_EXEC = re.compile(r"g?make(?:\[\d+\])?: (?P<n>[^:]+): No such file or directory")
 # A wrapper's own words for a program it couldn't start, at its own exit, not the shell's 127
 # (missing_tool): Poetry's `Command not found: <name>` (exit 1, #1256), uv's `Failed to spawn:
-# `<name>``, cargo's `no such command: `<name>``, bundler's `command not found: <name>` above its
-# hint; and for a path, a file the shell couldn't open, `source .venv/bin/activate` at exit 1 in
-# bash (dash's `.: cannot open <path>`, exit 2, #1258). Each wrapper's wording was a pattern of its
-# own, and each bar round found one more missed (#1206, #1229, #1243, #1256, #1258, #1262): what
-# decides is whether the name the line gives resolves where the tests ran, not the wording.
-TOOL_GONE = re.compile(r"(?i)command not found|no such command|failed to spawn")
+# `<name>``, cargo's `no such command: `<name>`` (exit 101), bundler's `command not found: <name>`
+# above its hint; and for a path, a file the shell couldn't open, `source .venv/bin/activate` at
+# exit 1 in bash (dash's `.: cannot open <path>`, exit 2, #1258). Each wrapper's wording was a
+# pattern of its own, and each bar round found one more missed (#1206, #1229, #1243, #1256, #1258,
+# #1262): what decides is whether the name the line gives resolves where the tests ran, and is
+# where the command puts a program (command_programs), not the wording. cargo's has its colon:
+# Click's and Typer's `Error: No such command 'frobnicate'.` (exit 2) is a subcommand the step may
+# be adding, and checked in as a missing tool (#1262's review, 2026-11-24).
+TOOL_GONE = re.compile(r"(?i)command not found|no such command: |failed to spawn")
 PATH_GONE = re.compile(r"(?i)no such file or directory|cannot open|can't open")
 GONE_WORD = re.compile(r"[^\s:`'\"()\[\],;]+")
-# the tail's last lines (not blank) missing_tool reads up through: a wrapper's hint or cause
-# comes after its line (bundler's `Install missing gem executables`, cargo's two `help:` lines)
+# the tail's last lines (not blank, nor a `help:`/`hint:`/`note:` line) missing_tool reads up
+# through: a wrapper's hint or cause comes after its line (bundler's `Install missing gem
+# executables`). cargo 1.90 prints up to three `help:` lines after its own (`a command with a
+# similar name exists`, `view all installed commands`, `find a package to install`), which, counted,
+# pushed its `no such command` line out of reach (#1262's review, 2026-11-24): skipped, not counted.
 GONE_LINES = 3
+GONE_HINT = re.compile(r"(?i)(?:help|hint|note|tip):")
 # wb's words for a tool not checked out (missing_command), the same in every shell, and its path
 NOT_CHECKED_OUT = re.compile(r"(?P<p>[^:]+): not in the worktree \(")
 # What gives the agent's environment that command, for the check-in and the skipped auto-fix
@@ -3505,17 +3512,19 @@ def missing_tool(lines: list[str], cmd: str | None, task: store.Task | None = No
     """A tool missing at an exit that isn't the shell's 127, read the same for every wrapper
     (`poetry run`, `uv run`, `bundle exec`, `cargo <sub>`, a sourced venv): one of the tail's
     last GONE_LINES lines says it couldn't start or open a name (TOOL_GONE, PATH_GONE), and that
-    name doesn't resolve where the tests run. A bare name: a word of acceptance command ``cmd``
-    (what no round changes) not on the agent's PATH (on_agent_path), where every wrapper looks
-    too (Poetry, uv and pipenv put their venv's `bin` ahead of it), and not a console script of
-    the step's own; never one a runner's recipe names, which the command doesn't (a code the
-    runner names stays its own). A path: one in TOOL_DIRS the worktree hasn't, named by the
+    name doesn't resolve where the tests run. A bare name: a program of acceptance command
+    ``cmd`` (command_programs: what no round changes, where the command puts a program, never an
+    argument such as a subcommand the step adds) not on the agent's PATH (on_agent_path), where
+    every wrapper looks too (Poetry, uv and pipenv put their venv's `bin` ahead of it), and not a
+    console script of the step's own; never one a runner's recipe names, which the command
+    doesn't (a code the runner names stays its own). A path: one in TOOL_DIRS the worktree hasn't, named by the
     command or under a runner (`make test` sourcing `.venv/bin/activate`). wb's own wording, as
     missing_command's. Poetry's `Command not found: pytest` at exit 1 (#1256), `source
     .venv/bin/activate && pytest` at bash's 1 or dash's 2 (#1258) each ran round 1 and every
     auto-fix round on correct code, told the bug was the change's (bar round 6, 2026-11-24)."""
-    words = command_words(cmd)
-    for line in reversed([ln for ln in map(str.strip, lines) if ln][-GONE_LINES:]):
+    words, programs = command_words(cmd), command_programs(cmd)
+    read = [ln for ln in map(str.strip, lines) if ln and not GONE_HINT.match(ln)]
+    for line in reversed(read[-GONE_LINES:]):
         tool, opened = TOOL_GONE.search(line), PATH_GONE.search(line)
         if not (tool or opened):
             continue
@@ -3526,7 +3535,7 @@ def missing_tool(lines: list[str], cmd: str | None, task: store.Task | None = No
                 there = task and not os.path.isabs(w) and (task.workdir / w).exists()
                 if (w in words or wrapped) and not there and (said := _missing_path(w, task)):
                     return said
-            elif tool and w in words and re.match(r"[A-Za-z_]", w) and not on_agent_path(w, task):
+            elif tool and w in programs and re.match(r"[A-Za-z_]", w) and not on_agent_path(w, task):
                 if said := _missing_bare(w, task):
                     return said
     return None
@@ -3746,6 +3755,71 @@ def command_words(cmd: str | None) -> set[str]:
         return set(lex)
     except ValueError:  # an unbalanced quote: the shell's own error, not a missing tool
         return set()
+
+
+# Wrappers whose run verb puts a program next (`poetry run pytest`), and prefixes that do without
+# one (`env X=1 pytest`, `uvx ruff`); cargo's next word is its subcommand, a program (`cargo-<sub>`)
+RUN_VERBS = {"poetry": "run", "uv": "run", "pipenv": "run", "pdm": "run", "hatch": "run",
+             "rye": "run", "pixi": "run", "bundle": "exec", "pnpm": "exec", "npm": "exec",
+             "yarn": "exec", "bun": "x", "cargo": ""}
+PREFIXES = {"env", "exec", "command", "time", "nice", "nohup", "xvfb-run", "uvx", "npx", "bunx",
+            "timeout"}
+SHELL_OPS = {"&&", "||", ";", "|", "&", "(", ")", "|&", ";;", "!", "{", "}"}
+
+
+def command_programs(cmd: str | None) -> set[str]:
+    """The words of shell command ``cmd`` where a program goes: each simple command's first word
+    (past `X=1` assignments and PREFIXES), the word after a wrapper's run verb (RUN_VERBS:
+    `poetry run`, `uv run`, `bundle exec`) and cargo's subcommand. A word right after an option
+    counts too, as the option may take no value (`uv run --with x pytest` gives `x` and `pytest`).
+    Every word missing_tool counted, `python3 cli.py frobnicate` for a step adding Click's
+    `frobnicate` checked in as a missing tool and skipped auto-fix (#1262's review, 2026-11-24)."""
+    lex = shlex.shlex(cmd or "", posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    try:
+        tokens = list(lex)
+    except ValueError:
+        return set()
+    out: set[str] = set()
+    simple: list[list[str]] = [[]]
+    for t in tokens:
+        if t in SHELL_OPS or set(t) <= set("&|;()"):
+            simple.append([])
+        else:
+            simple[-1].append(t)
+    for words in simple:
+        for i, w in enumerate(words):
+            # an assignment, a prefix's option or its number (`env -i`, `nice -n 10`, `timeout 60`)
+            if re.match(r"[A-Za-z_][A-Za-z0-9_]*=|-|\d+(?:\.\d+)?[smhd]?$", w):
+                continue
+            out.add(w)
+            name = w.rsplit("/", 1)[-1]
+            if name in PREFIXES:
+                continue
+            if name in RUN_VERBS:
+                out |= _wrapped_program(words[i + 1:], RUN_VERBS[name])
+            break
+    return out
+
+
+def _wrapped_program(rest: list[str], verb: str) -> set[str]:
+    """The program a wrapper's arguments ``rest`` name after its run ``verb`` (none: cargo's
+    subcommand): the first word not an option, and the one after it too when an option came
+    first, which may have taken that first word as its value (`uv run --with x pytest`)."""
+    if verb:
+        rest = rest[rest.index(verb) + 1:] if verb in rest else []
+    found: list[str] = []
+    optioned = False
+    for r in rest:
+        if r.startswith("+"):  # cargo's toolchain, `+nightly`, which takes no value
+            continue
+        if r.startswith("-"):
+            optioned = optioned or not found
+            continue
+        found.append(r)
+        if not optioned or len(found) == 2:
+            break
+    return set(found)
 
 
 def base_check_line(r: dict, task: store.Task) -> str:
