@@ -2666,7 +2666,9 @@ lists only providers that can authenticate and `/connect` changes no stamp, so a
 provider's ids were unknown for `HOSTED_TTL`). A fragment matching nothing raises `unknown model '<x>'; known: <GPU ids>; API models are
 named by their exact id, as OpenCode lists them (opencode models)` (`EXACT_ONLY`), never listing
 catalog ids (#1013: with 40 or more, `--model flash` could have landed on a paid model nobody
-chose).
+chose). An id with a `/` that isn't the GPU side's, while the catalog read failed (`hosted_error`),
+says so after the id: `unknown model '<id>' (OpenCode's catalog read failed: <error>); …` (#1108:
+read as a wrong id, Claude hunted for the "right" one).
 
 **API models** (`hosted`, `lookup`, #1013). `models.hosted() -> {id: Model}` with `kind == "api"`:
 - *Where from.* `opencode api model.list --standalone` (JSON `{location, data}`: only providers that

@@ -927,10 +927,14 @@ def resolve(wanted: str) -> Model:
         return hits[0]
     if hits:
         raise KeyError(f"{wanted!r} matches {', '.join(m.id for m in hits)}; be more specific")
-    if "/" in wanted and not gpu_side(wanted) and (api := _hosted_exact(wanted)):
+    api_id = "/" in wanted and not gpu_side(wanted)
+    if api_id and (api := _hosted_exact(wanted)):
         return api
     known = ", ".join(models) or f"none ({why_none()})"
-    raise KeyError(f"unknown model {wanted!r}; known: {known}; {EXACT_ONLY}")
+    # a failed catalog read read as a wrong id, and Claude went hunting for the "right" one
+    # instead of fixing OpenCode (#1108, 2026-11-23): the role path said it, --model didn't
+    failed = f" (OpenCode's catalog read failed: {err})" if api_id and (err := hosted_error()) else ""
+    raise KeyError(f"unknown model {wanted!r}{failed}; known: {known}; {EXACT_ONLY}")
 
 
 def lookup(model_id: str, cached: bool = False) -> Model | None:

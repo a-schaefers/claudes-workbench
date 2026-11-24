@@ -28286,6 +28286,18 @@ class ApiDiscovery(Base):
         self.start("t-gpu", "ok")
         self.assertEqual(wait_phase("t-gpu", {"review"})["phase"], "review")
 
+    def test_an_exact_api_id_names_the_failed_catalog_read_not_a_wrong_id(self):
+        # #1108: `wb start --model acme/coder-flash` said only "unknown model" while OpenCode's
+        # catalog read failed, so Claude hunted for the right id instead of fixing OpenCode
+        os.environ["FAKE_CATALOG_FAIL"] = "1"
+        with self.assertRaises(KeyError) as e:
+            self.models.resolve("acme/coder-flash")
+        self.assertIn("unknown model 'acme/coder-flash' (OpenCode's catalog read failed: Error: "
+                      "Unable to connect. Is the computer able to access the url?)", e.exception.args[0])
+        with self.assertRaises(KeyError) as e:                    # a GPU fragment: no catalog said
+            self.models.resolve("nosuchmodel")
+        self.assertNotIn("catalog read failed", e.exception.args[0])
+
     def test_an_ollama_cloud_model_is_an_api_model_even_with_local_true(self):
         from workbench import router
         cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
