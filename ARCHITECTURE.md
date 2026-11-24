@@ -3212,12 +3212,15 @@ read as a wrong id, Claude hunted for the "right" one).
   task's model must be found: `transcript.model_line` (which reads the catalog's variant list too),
   `tuning._rows`, `router.expected`. The pane's two (`model_line`, `expected`) pass `cached=True`:
   hosted.json as it is, never rebuilt, so a 5 s poll never waits on OpenCode. With no hosted.json,
-  or one that lists no provider with a stored key and is older than `cli.PANE_REREAD_SECS` (60 s),
+  or one that lists no provider with a key a task runs with (`models.key_runs`: stored, or an
+  exported `env:VAR` one, #1189) and is older than `cli.PANE_REREAD_SECS` (60 s),
   `wb route --json` (the pane's Settings and Tasks tabs) starts one fresh read in the background
   (`cli._read_catalog_later`, at most one per `CATALOG_TIMEOUT` + 10 s, its mark `hosted.reading` in
   the state dir) and a later poll lists the providers: with keys stored and no cache yet, or a cache
   read before /connect (which changes no stamp), the pane said `NO_PROVIDER` until another command
-  built one (#1069). A cache listing a stored key is never read again for the pane. `wb setup` reads
+  built one (#1069). A cache listing a key that runs is never read again for the pane (counting
+  only a stored one read the catalog about once a minute through an API task whose only key was
+  exported, #1189's review). `wb setup` reads
   it inline (fresh) when a key `auth list` says is stored isn't stored in the cache, a config that
   doesn't parse skipping it. `transcript._server_live` keeps `discover()`: an API model is
   never probed for `/metrics`; `identity` and `weights` say None and 0 for one, and `keep_warm` skips it.

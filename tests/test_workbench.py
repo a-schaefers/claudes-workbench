@@ -37184,6 +37184,25 @@ class SettingsRoles(Base):
         with mock.patch.object(cli.subprocess, "Popen", side_effect=AssertionError("a read with a key")):
             self.wb("route", "--json")
 
+    def test_an_old_cache_listing_an_exported_key_that_runs_is_not_read_again_for_the_pane(self):
+        # #1189's review (2026-11-24): the re-read counted only a stored key, so through an API
+        # task whose only key was exported, every poll past a minute read the catalog again
+        def cache(key):
+            store.write_json(runner.models.hosted_path(), {
+                "v": 1, "ts": time.time() - cli.PANE_REREAD_SECS * 2, "models": {},
+                "providers": {"deepseek": {"name": "DeepSeek", "key": key,
+                                           "package": "@opencode/ai/providers/deepseek"}}})
+        with mock.patch.dict(os.environ, DEEPSEEK_API_KEY="dummy-not-a-key"), \
+                mock.patch.object(cli, "_read_catalog_later") as later:
+            for key in ("stored", "env:DEEPSEEK_API_KEY"):
+                cache(key)
+                cli._route_pane()
+                self.assertFalse(later.called, key)
+            self.assertTrue(cli._route_pane()["providers"]["deepseek"]["runs"])
+            cache("env:NO_SUCH_WB_TEST_VAR")                             # exported nowhere: read again
+            cli._route_pane()
+            self.assertTrue(later.called)
+
     def test_wb_setup_reads_the_catalog_again_when_a_stored_key_isnt_in_the_cache(self):
         # the review of #1069: wb setup read it only when hosted.json was missing
         self.catalog(ROLE_CATALOG, [])

@@ -3282,10 +3282,13 @@ KEY_HELD = {"oauth": "an OAuth login", "signing": "a cloud login that signs each
 
 
 CATALOG_LATER = "hosted.reading"  # in the state dir: when _route_pane last started a catalog read
-# How old a cache listing no stored key may be before the pane reads the catalog again (#1069's
-# review, 2026-11-23): /connect changes no stamp, so a cache written before it kept saying
+# How old a cache listing no key a task runs with may be before the pane reads the catalog again
+# (#1069's review, 2026-11-23): /connect changes no stamp, so a cache written before it kept saying
 # NO_PROVIDER for HOSTED_TTL; the pane reads wb route on a Settings open or a Stats load, and only
-# polls it while an API task works (a key stored, so never this), so a minute costs little
+# polls it while an API task works (a key that runs, so never this), so a minute costs little.
+# A key that runs is a stored one or an exported one (models.key_runs): counting only "stored"
+# read the catalog in the background about once a minute through a whole API task whose only key
+# was exported (#1189's review, 2026-11-24)
 PANE_REREAD_SECS = 60
 
 
@@ -3316,10 +3319,11 @@ def _route_pane() -> dict:
     ledger's, spend-api.jsonl: {usd, prices, by_provider}) and `providers` ({id: {name, key, why}}, key
     stored, ollama (Ollama cloud's login), env, oauth or none, from the cached catalog: never a
     network probe or OpenCode run inline; with no cache, or one past PANE_REREAD_SECS that lists no
-    stored key, one read in the background, _read_catalog_later)."""
+    key a task runs with (models.key_runs), one read in the background, _read_catalog_later)."""
     doc = models._read_hosted()
     ts = doc.get("ts")
-    if not any(p.get("key") == "stored" for p in (doc.get("providers") or {}).values()) \
+    if not any(models.key_runs(pid, str(p.get("key") or ""))
+               for pid, p in (doc.get("providers") or {}).items()) \
             and not (isinstance(ts, (int, float)) and 0 <= time.time() - ts < PANE_REREAD_SECS):
         _read_catalog_later()
     provs = {}
