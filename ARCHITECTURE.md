@@ -2800,6 +2800,7 @@ nothing until a surface attaches.
 
 **Which model, and why** (#1016): `wb start`'s `model:` line (an API task's
 `model: <id> · API (<provider>) · trivial role, set by you 11-20 · thinking off`, `routes.model_line`;
+its thinking `thinking_shown`, what the task does, never only the role's setting, #1237;
 a GPU task's as before), `wb status`'s `via` column, `wb watch`'s `routed:` line (`transcript.routed_text`:
 an API task's `API <id> (<provider>) · <role> role, set by you MM-DD · thinking off` from task.json,
 else task.json `route`, the router's why), the pane's row (`API DeepSeek  deepseek-flash`: the place and the model, tasks.ts's `placeOf`, #1048)
@@ -3407,7 +3408,9 @@ start recomputes it (feedback, next, resume, a handover keep `opencode_model`): 
 changed mid-task applies to the next task, since a change mid-task would drop the cache. The layer
 carries it (*What the agent knows*, *The task's thinking variant*); `transcript.model_line` shows
 `thinking_shown` (`<label> · thinking off · 1024K context`), never reading `wb-off` from the
-user's config; results rows keep `thinking` (the weekly check's evidence for recommending it for
+user's config; the dialog, the start line and task.json's `route` say the same line
+(`routes.thinking_of`, from the model before the task exists), never the role's bare setting: they
+said `thinking off` for a model that thinks on its bare id (#1237); results rows keep `thinking` (the weekly check's evidence for recommending it for
 `significant`, in chat only, never set). `wb-off` is reserved: a user's own variant of that name
 loses to wb's in the layer.
 
@@ -4116,13 +4119,19 @@ The changes (each one exit 3 with one line when refused, writing nothing):
 **The change line** (`routes.change`, which never writes) is the dialog's text, one part per role
 changed, joined by `; `: `trivial: GPU → API deepseek/deepseek-flash · your code goes to DeepSeek ·
 thinking off · cap $5/day` (the provider's name from the catalog, `models.provider_name`, else its
-id); back to the GPU, `trivial: API <id> → GPU · API kept: <id> · its tasks already started keep their
+id; the thinking clause what the model will do with the role's setting, `routes.thinking_of`,
+`runner.thinking_variant`'s line through `cli._thinks`: `thinking as the model's default (it lists no
+lower setting)` for an Anthropic adaptive model with no `none`, which said `thinking off` and thought,
+#1237; `routes.plain_thinks`, the setting, for an id not in the catalog); back to the GPU, `trivial: API <id> → GPU · API kept: <id> · its tasks already started keep their
 model` (under Both: only Agents on GPU stops them, #1213); an API model set while on the GPU,
 `API model none → <id> (<provider>), used once it goes to API` (`used from the next start` when Agents
-on API already runs the role there, #1149, then `· thinking on` if it is); `GPU model the router's pick → <id>`;
-`thinking off → on`; and `day cap none → $5/day` (unless a role's part says the new cap). The Agents
+on API already runs the role there, #1149, then the thinking clause if it thinks, `· thinking on`); `GPU model the router's pick → <id>`;
+`thinking off → on` (`thinking off → on (effort high)` for a model that lists efforts; `thinking on →
+off: thinking as the model's default (…)` for one that can't turn it off, #1237); and `day cap none → $5/day` (unless a role's part says the new cap). The Agents
 switch's part comes first (`routes._agents_part`): `Agents: Both → API (every role on its API model;
-writing has no API model and can't start; your code goes to DeepSeek (trivial); cap $5/day)`, `Agents:
+writing has no API model and can't start; your code goes to DeepSeek (trivial); cap $5/day)` (and a
+role there that will think, `thinking on (trivial)` or `thinking as the model's default (…) (trivial)`,
+`routes._thinking_on`, #1177, #1237), `Agents:
 Both → GPU (every role on the GPU; an API task already started stops before its next round; each role's
 own choice is kept for Both)` (`routes.AGENTS_STOPS`, #1213), `Agents: GPU → Both (each
 role as set: …; your code goes to …)`; it takes the yes going to API, or to Both when that puts a role
@@ -4185,7 +4194,7 @@ for a start that then refused, 2026-11-23). It takes the same gate (`cli.start_g
 last in `cmd_start`, once nothing else refuses the start: taken in `pick_model`, a start that then exited 4 or 1
 used the yes up, and the retry asked again, #1104): under Claude Code it needs `approved({start: {task, model}, change})`, the line
 `start <task> on API <id> (not a role's choice) · your code goes to <provider> · thinking off`
-(`cli.start_line`), else exit 3 with the same wording. A GPU `--model` and `wb
+(`cli.start_line`; its thinking `routes.thinking_of(m, "off")`, what the task will do, #1237), else exit 3 with the same wording. A GPU `--model` and `wb
 model sizes` are as before: router-driven, and Claude says the model in its reply. The bench driver
 inherits `CLAUDECODE`, so a replay on an API model would meet this gate with no dialog; `wb bench
 --model` refuses API models anyway until #1026 decides that path.
@@ -7251,7 +7260,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   command run at the tagged commit (#422), platforms by hand, each run recorded with SHA, OS, filesystem, versions,
   hardware, result, skip reason; a skip is not a gate), a `v<version>` tag (trailing `.0` dropped, `v0.90`), `gh release
   create v<version> --generate-notes` linking the checklist. **`wb setup`'s links** → README's quickstart, *Installing*.
-- **`runner.thinking_variant`** (`THINKING_OFF`, `OFF_VARIANT`, `DEFAULT_EFFORT`, `_no_off_listed`, `_off_form`, the V2 move in `_as_v2`) → `fake_opencode.py`'s variant check (`layer_variants`: V1 and V2, the layer file and the content), `transcript.model_line` (`thinking_shown`), *Thinking off by default*.
+- **`runner.thinking_variant`** (`THINKING_OFF`, `OFF_VARIANT`, `DEFAULT_EFFORT`, `_no_off_listed`, `_off_form`, the V2 move in `_as_v2`) → `fake_opencode.py`'s variant check (`layer_variants`: V1 and V2, the layer file and the content), `transcript.model_line` (`thinking_shown`), `routes.thinking_of` (the dialog's thinking clause, `cli.start_line`, `routes.model_line` and `routed_line`, #1237), *Thinking off by default*.
 - **A model name** → never in code or the skill: OpenCode's config, the router, the weekly check.
 - **A runner guard** (`out["guard"]`: `repeat`, `errors`, `no_edit`, `round`, `silence`, `think`, `handovers`, `spend`) → the mod's `GUARD_WORDS`, *Stats recording*'s list.
 - **The spend stop** (#1019): `meter.request_floor` ↔ `Meter.room`'s worst (#1150: the start's refusal and `_go_on`'s look ahead keep room's margin; its input `runner.first_tokens` ↔ what `run_round` sends: status `live_used`, `handoff_prompt`, `PROMPT_ARG_MAX`, #1173) ↔ `meter.stop_reason` ↔ `runner._go_on` (#1017, before each `continue` in `drive`) ↔ `runner._spend_guard` ↔ the keyhole's `close(reason)` and `room` hook (`Meter.hooks()`, which `runner.start_keyhole` passes to `keyhole.start`) ↔ status `api_stop` (the keyhole's `quota` stop writes it too, #1020; `_ProviderWait.stop` consumes it, keeping its `worst` for `runner._spend_lead` ↔ `meter.stop_text(task, worst)`, #1150, and `Meter.begin` clears it at each round's start, whatever its guard). `events.normalize`'s step `cost` ↔ `tests/fake_opencode.py`'s `part.cost` (`FAKE_STEP_COST`) ↔ `meter.step_tokens`. A `spend` notice's `cause` ↔ the mod's `SPEND_NEXT`; its `guard` `agents` (`runner.AGENTS`) ↔ the mod's `AGENTS_NEXT`, and `routes.AGENTS_GPU`/`AGENTS_STOPS` ↔ the mod's `AGENTS_STOPS` text (#1213). The way off API (#1218): `routes.off_api` ↔ `routes.effective_via` and `busy_api` ↔ its users, `meter._ask`, `meter.stop_text`, `privacy.local_only_line`, `runner.provider_remedy` and `routes.cant_run` under Agents API: a new remedy that offers the GPU asks it.
