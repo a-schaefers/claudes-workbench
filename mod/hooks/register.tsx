@@ -1760,6 +1760,15 @@ async function routesPath($: any): Promise<string> {
 
 const money = (v: number) => Number.isInteger(v) ? `$${v}` : `$${v.toFixed(2)}`
 
+// What a role's thinking does on its API model, as routes.thinking_said says it: the row's `thinks`
+// (wb writes it with every change, from the catalog) for the setting, else the setting. `thinking off`
+// was said for a model that can't turn it off (#1263, 2026-11-24)
+export function thinkingSaid(row: Row): string {
+  const thinking = row.thinking === 'on' ? 'on' : 'off'
+  const t = row.thinks
+  return t && typeof t === 'object' && t.api === row.api && typeof t[thinking] === 'string' ? t[thinking] : `thinking ${thinking}`
+}
+
 // The roles in one line, as routes.summary says it (Couplings: the two read alike)
 export function routesSummary(doc: Row): string {
   const rows = (doc.roles ?? {}) as Record<string, Row>
@@ -1770,7 +1779,7 @@ export function routesSummary(doc: Row): string {
     // an OpenRouter role's backends (routes.json `order`): where its code goes, so a change of them
     // alone is a row too; it reached the conversation as nothing (#1126, 2026-11-23)
     const backends = row.api && Array.isArray(row.order) && row.order.length ? `, backends ${row.order.join(', ')}` : ''
-    if (row.via === 'api') return `${r} API ${row.api}${backends}, thinking ${thinking}`
+    if (row.via === 'api') return `${r} API ${row.api}${backends}, ${thinkingSaid(row)}`
     let text = `${r} GPU ${gpu === 'auto' ? '(the router picks)' : gpu}`
     if (row.api) text += `, API kept: ${row.api}${backends}`
     if (thinking === 'on') text += ', thinking on'
@@ -3073,6 +3082,17 @@ const THINK_STOPS: [string, string, string][] = [
   ['off', 'Off (default)', 'Faster and cheaper; for tasks started after this.'],
   ['on', 'On', 'Better on hard steps, slower and costs more; for tasks started after this.'],
 ]
+// A role's thinking row: THINK_STOPS, each stop its API model can't keep saying what the model does
+// instead (the row's `thinks`, thinkingSaid's): `Off (default)`, `Faster and cheaper` sat on a model
+// that can't turn thinking off, so the user kept it and paid for its reasoning (#1263, 2026-11-24)
+export function thinkStops(row: Row): [string, string, string][] {
+  const said = (v: string) => thinkingSaid({ ...row, thinking: v })
+  const off = said('off'), on = said('on')
+  return [
+    off.startsWith('thinking off') ? THINK_STOPS[0]! : ['off', `Off (default): ${off}`, 'This model can\'t turn thinking off, so it isn\'t cheaper; for tasks started after this.'],
+    on.startsWith('thinking off') ? ['on', `On: ${on}`, 'This model doesn\'t reason, so this changes nothing; for tasks started after this.'] : THINK_STOPS[1]!,
+  ]
+}
 // a size in the roles' words (tasks.ts ROLE_WORDS): `significant only` sat under "Complex coding"
 const SIZE_STOPS: [string, string, string][] = [
   ['all', 'Any size (default)', 'The router may give it any task.'],
@@ -3161,7 +3181,9 @@ export function rolesRead(last: PaneRoles | null, now: number, routesRun: WbRun,
 
 // A pane press on the roles: the change as wb computes it, approved for exactly that when it needs the
 // user's yes (the press is it), then made; wb's refusal (no day cap, an unknown id, a key wb can't hold)
-// in a toast, and the row keeps its old value
+// in a toast, and the row keeps its old value. A change that took the yes says its line in a toast:
+// the press is the yes, so no dialog showed what it agreed to (where the code goes, what the model does
+// with thinking: #1263, 2026-11-24)
 async function paneRoute($: any, args: string[]): Promise<boolean> {
   mem.roles = null
   const dry = await runWb($, ['route', '--dry-run', '--json', ...args], 60_000)
@@ -3173,6 +3195,7 @@ async function paneRoute($: any, args: string[]): Promise<boolean> {
   const { ok, out } = await runWb($, ['route', ...args])
   mem.roles = null
   if (!ok) $.ui.toast(`workbench: ${brief(out)}`)
+  else if (q.gate && q.change) $.ui.toast(`workbench: ${q.change}`)
   return ok
 }
 
@@ -3275,7 +3298,7 @@ async function roleRows(kit: Row, $: any, view: WbPane, role: PaneRoles) {
           }} />)
     }
     for (const { name, label, row } of roles)
-      api.push(settingRow(kit, $, `think-${name}`, `${label} thinking`, THINK_STOPS, row.thinking ?? 'off', view, v => paneRoute($, [name, '--thinking', v])))
+      api.push(settingRow(kit, $, `think-${name}`, `${label} thinking`, thinkStops(row), row.thinking ?? 'off', view, v => paneRoute($, [name, '--thinking', v])))
     api.push(dim('api-spend', spendLine(r)))
   }
   return { top, cap, gpu, api }

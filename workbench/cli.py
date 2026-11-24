@@ -3267,6 +3267,9 @@ def _route_show(as_json: bool) -> None:
         doc = routes.read()
     except routes.RoutesError as e:
         die(routes.unreadable(e), 3)
+    # what each API model does with thinking, from the catalog now (#1263): the pane's rows the
+    # cached one's, as every lookup of theirs (#1023)
+    doc = routes.with_thinks(doc, cached=as_json)
     if as_json:
         out = {**doc, "summary": routes.summary(doc), "roles": {}, **_route_pane()}
         for r in routes.ROLES:
@@ -3290,7 +3293,7 @@ def _route_show(as_json: bool) -> None:
         gone = row.get("api") and models.lookup(row["api"]) is None
         if row["via"] == "api":
             bits = [f"API {row['api']} ({_who(row['api'])})" + (" (not in OpenCode's catalog now)" if gone else ""),
-                    f"thinking {row['thinking']}", *([f"backends {', '.join(row['order'])}"] if row.get("order") else [])]
+                    routes.thinking_said(row), *([f"backends {', '.join(row['order'])}"] if row.get("order") else [])]
         else:
             bits = ["GPU (the router picks)" if row["gpu"] == routes.AUTO else f"GPU {row['gpu']} (pinned)"]
             if row.get("api"):
@@ -3595,7 +3598,8 @@ def _route_apply(a, argv: list[str], changed) -> None:
                 if not ok:
                     die(gate_refusal("a role changes", "wb " + shlex.join(argv)), 3)
                 by = "pane" if ok.get("by") == "pane" else "dialog"
-            new = routes.stamp(ch, by)
+            # each role's `thinks` read again: what the mod says of its thinking (#1263)
+            new = routes.with_thinks(routes.stamp(ch, by))
             held[0].clear()
             held[0].update(new)
     except _Unchanged:
@@ -5129,7 +5133,7 @@ SCOUT_SPEND_DAYS = 7   # and the API spend
 
 def _role_where(doc: dict, r: str) -> str:
     """A role as wb scout says it: `GPU (router)`, `GPU <id> (pinned)` or `API <id>, set by you
-    11-20, thinking off`."""
+    11-20, thinking off` (what the model does with it: routes.thinking_said, #1263)."""
     row = doc["roles"][r]
     if routes.effective_via(doc, r) != "api":
         return "GPU (router)" if row["gpu"] == routes.AUTO else f"GPU {row['gpu']} (pinned)"
@@ -5139,7 +5143,7 @@ def _role_where(doc: dict, r: str) -> str:
     if isinstance(row.get("ts"), (int, float)):
         out += (f", set by {'Claude' if row.get('by') == 'claude' else 'you'} "
                 f"{time.strftime('%m-%d', time.localtime(row['ts']))}")
-    return out + f", thinking {row['thinking']}"
+    return out + f", {routes.thinking_said(row)}"
 
 
 def _api_record(mid: str, since: float) -> str:
@@ -5175,6 +5179,7 @@ def scout_api_lines() -> list[str]:
     if not hosted and not mids:
         return []
     out = ["", "roles" + (f" ({line})" if (line := _agents_line(doc)) else "")]
+    doc = routes.with_thinks(doc)  # hosted.json's, as the rest (#1263)
     out += [f"  {r:<12} {_role_where(doc, r)}" for r in routes.ROLES]
     now = store.now()
     if mids:

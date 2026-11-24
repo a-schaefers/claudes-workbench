@@ -95,8 +95,9 @@ export type WbRoutes = {
   use: 'gpu' | 'api' | 'both'
   busy: 'wait' | 'api'
   day_usd: number | null
+  /** `thinks`: what the role's API model does with each thinking setting (routes.with_thinks, #1263) */
   roles: Record<'significant' | 'trivial' | 'writing', { via: 'gpu' | 'api'; gpu: string; api?: string;
-    thinking: 'off' | 'on'; label: string }>
+    thinking: 'off' | 'on'; label: string; thinks?: { api: string; off: string; on: string } }>
   /** `prices`: the dollars' basis (meter.basis, #1135): catalog (an estimate, ≈), yours (wb model price), provider */
   spend_today: { usd: number; prices?: 'catalog' | 'yours' | 'provider'; by_provider: Record<string, number> }
   providers: Record<string, { name: string; key: 'stored' | 'ollama' | 'env' | 'oauth' | 'none'; why?: string }>
