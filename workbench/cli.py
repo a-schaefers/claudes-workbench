@@ -1714,10 +1714,6 @@ def cmd_feedback(a):
         read_text(a.message, "the feedback")
     if not text.strip():  # before anything is written: an empty one cost a round (the audit)
         die("the feedback is empty")
-    # after the text: the round's first request carries it (#1173)
-    _model_still_listed(task, text, True if a.fresh else False if a.keep_context else None)
-    _spec_gaps(task, a.spec_gap)
-    dropped = _stale_notes(task)
     rerun = " re-run the acceptance command and" if task.spec.get("test_cmd") else ""
     said = (f"{lessons.FEEDBACK_HEAD} Make exactly these changes, then{rerun} finish with a short "
             "summary:\n\n" + text.strip())
@@ -1731,6 +1727,13 @@ def cmd_feedback(a):
     unsent = st.get("phase") != "review" and not runner.reached(task, st.get("round", 1)) \
         and task.round_dir(st.get("round", 1)).joinpath("prompt.md").is_file()
     n = st.get("round", 1) + (0 if unsent else 1)
+    # after the text: the round's first request carries it (#1173), after round n's own prompt
+    # when that runs again: the text alone passed, and the room refused the rerun's first
+    # request at once, a spend wake for nothing (the merge of #1173 and #1180, 2026-11-24)
+    own = store.round_prompt(task, n).read_text() + "\n\n" if unsent else ""
+    _model_still_listed(task, own + said, True if a.fresh else False if a.keep_context else None)
+    _spec_gaps(task, a.spec_gap)
+    dropped = _stale_notes(task)
     if unsent:
         runner.add_to_round(task, n, said)
     else:

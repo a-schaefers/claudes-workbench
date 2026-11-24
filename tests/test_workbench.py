@@ -33562,6 +33562,45 @@ class ApiSpend(Base):
         mt.begin(rnd + 1)
         self.assertGreaterEqual(mt.room({"max_tokens": 32768}, 20_000 * 4 + prompt), 0)
 
+    def test_feedback_on_a_round_never_sent_counts_that_rounds_own_prompt_in_the_look_ahead(self):
+        # the merge of #1173 and #1180 (2026-11-24): wb feedback's look ahead counted only its new
+        # text, but a round that never reached the agent runs again as its own prompt plus that
+        # text (runner.add_to_round): the check passed, and the room refused the first request
+        need = lambda text: float(re.search(r"a cap of at least \$([\d.]+) ", text)[1])  # noqa: E731
+        m = runner.models.lookup(SPEND_TIER)
+        task = self.api_task("t-cap-rerun", SPEND_TIER, "ok")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        task.set_status(live_used={"session": task.status["session"], "used": 20_000})
+        nxt = Path(self.tmp.name) / "big-step.md"
+        nxt.write_text("Step two: take each case.\n" + "- a case of the parser's, one line\n" * 2300)
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("next", "t-cap-rerun", "--spec", str(nxt), "-m", "step one")
+        rnd = task.status["round"]
+        task.set_status(phase="failed", infra="model")          # stopped before it was sent
+        self.assertFalse(runner.reached(task, rnd))
+        before = store.round_prompt(task, rnd).read_text()
+        self.assertGreater(runner.first_tokens(task), runner.first_tokens(task, "carry on") + 19_000)
+        self.cap(5)
+        self.spent(4.6)
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("feedback", "t-cap-rerun", "--text", "carry on")
+        self.assertEqual(e.exception.code, 3)
+        spawned.assert_not_called()
+        self.assertEqual(store.round_prompt(task, rnd).read_text(), before)   # nothing added
+        self.cap(need(err.getvalue()))
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            out = run_wb("feedback", "t-cap-rerun", "--text", "carry on")
+        spawned.assert_called_once()
+        self.assertIn(f"after round {rnd}'s own prompt, which never reached the agent (model)", out)
+        prompt = len(store.round_prompt(task, rnd).read_bytes())
+        self.assertGreater(prompt, 78_000)
+        mt = self.meter.for_task(task, m)
+        mt.begin(rnd)
+        self.assertGreaterEqual(mt.room({"max_tokens": 32768}, 20_000 * 4 + prompt), 0)
+
     def test_feedbacks_text_and_a_resumes_handoff_count_in_the_look_ahead(self):
         # #1173's review (2026-11-24): feedback's first request carries its text on the session's
         # context, a resume's (a fresh session) the handoff with the work so far; either left out,
