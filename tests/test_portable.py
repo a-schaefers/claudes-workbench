@@ -1,6 +1,7 @@
 """Machines other than the one workbench grew up on: other servers, ports, configs, platforms, speeds."""
 import ctypes
 import ctypes.util
+import dataclasses
 import io
 import json
 import os
@@ -23,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run as a scri
 
 from unittest import mock
 
-from workbench import context, images, media, models, results, router, store, watch
+from workbench import context, images, media, models, results, router, runner, store, watch
 from tests.test_workbench import Base, FAKE, TEST_CMD, ThreadingHTTPServer, run_wb, wait_phase  # listens at once (#950)
 
 
@@ -2581,6 +2582,100 @@ class Remote(unittest.TestCase):
         self.assertNotIn("start Ollama at http://127.0.0.6", fix)
         self.assertNotIn("gave Windows a new address", fix)
         self.assertIn("127.0.0.1", fix)
+
+    def lmstudio_at(self, host: str, port: int = 0) -> ThreadingHTTPServer:
+        """An LM Studio-style /v1/models serving qwen-coder on ``host`` (skipped where that
+        loopback address can't be bound)."""
+        srv, _ = serve({"/v1/models": {"object": "list", "data": [
+            {"id": "qwen-coder", "object": "model", "owned_by": "organization_owner"}]}})
+        srv.shutdown()
+        srv.server_close()
+        try:
+            there = ThreadingHTTPServer((host, port), srv.RequestHandlerClass)
+        except OSError:
+            self.skipTest(f"no {host} here")
+        threading.Thread(target=there.serve_forever, daemon=True).start()
+        self.servers.append(there)
+        return there
+
+    def test_a_server_wb_model_add_put_at_windows_address_follows_it_after_a_reboot(self):
+        # #1167 (2026-11-24): #1159 followed only wb remote's Ollama; LM Studio on Windows, added
+        # as wb setup says (wb model add <p>/<m> --url http://<Windows>:1234/v1), read "not
+        # running: start its server" after a reboot moved Windows' address, every wb start exited
+        # 3, and a --force runner waited 20 minutes on the old address
+        before = self.lmstudio_at("127.0.0.2")
+        port = before.server_address[1]
+        self.config({}, {"lmstudio": {"local": True}})
+        cfg_path, models_path = Path(os.environ["WB_OPENCODE_CONFIG"]), Path(os.environ["WB_MODELS"])
+        old, new = f"http://127.0.0.2:{port}/v1", f"http://127.0.0.3:{port}/v1"
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.2"):
+            code, out = self.wb("model", "add", "lmstudio/qwen-coder", "--url", old, "--context", "32768")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(models_path.read_text())["lmstudio"]["wsl_url"], old)
+        before.shutdown()
+        before.server_close()
+        self.servers.remove(before)
+        err = io.StringIO()
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.3"), redirect_stderr(err):
+            # the reboot, its server not up yet: nothing to follow, and the step isn't "start its
+            # server, or give it a start command" at an address Windows no longer has
+            m = models.discover()["lmstudio/qwen-coder"]
+            self.assertEqual(m.base_url, old)
+            st = models.status(m)
+            self.assertTrue(st["why"].startswith("not running, and no start command"), st)
+            fix = models.remedy(m, st)
+            self.assertIn("start its server on Windows: it answers neither at", fix)
+            self.assertNotIn('"start" command', fix)
+            self.assertTrue(models.may_come_up(st))      # a --force or --queue start waits for it
+
+            passes = []
+
+            def up(secs):  # LM Studio comes up at Windows' new address while the runner waits
+                passes.append(secs)
+                self.assertLess(len(passes), 4, "still waiting on Windows' old address")
+                if not self.servers:
+                    self.lmstudio_at("127.0.0.3", port)
+            task = mock.Mock(status={})
+            with mock.patch.object(runner.time, "sleep", up):
+                m = runner._wait_up(task, m)             # read again each pass, not the old address
+            self.assertEqual((m.id, m.base_url), ("lmstudio/qwen-coder", new))
+            self.assertIn(f"Windows' address moved from 127.0.0.2 to 127.0.0.3 (WSL2's NAT): "
+                          f"lmstudio now points at {new}", err.getvalue())
+            self.assertTrue(models.status(m)["available"], models.status(m))
+            models.discover()
+            self.assertEqual(err.getvalue().count("moved"), 1)           # said once, when it moved
+            self.assertEqual(json.loads(cfg_path.read_text())["provider"]["lmstudio"]["options"]["baseURL"], new)
+            self.assertEqual(json.loads(models_path.read_text())["lmstudio"]["wsl_url"], new)
+            self.assertNotIn("remote", json.loads(models_path.read_text())["lmstudio"])  # not wb remote's
+            code, out = self.wb("model", "add", "lmstudio/qwen-coder", "--url", new, "--context", "32768")
+            self.assertEqual(code, 0, out)                                # the same provider
+            self.assertEqual(list(json.loads(cfg_path.read_text())["provider"]), ["lmstudio"])
+
+    def test_a_server_gone_from_an_old_windows_address_is_told_the_new_one_not_to_start_it(self):
+        # #1167 (2026-11-24): a server provider at an address that was Windows' before a reboot,
+        # added by hand (or before wb followed it), said "start its server" at the old address
+        dead = free_port()
+        self.config({"lmstudio": {"models": {"qwen-coder": {}},
+                                  "options": {"baseURL": f"http://127.0.0.4:{dead}/v1"}}},
+                    {"lmstudio": {"local": True, "engine": "server"}})
+        # Windows is another host from WSL (remote), which the loopback address playing it isn't
+        m = dataclasses.replace(models.discover()["lmstudio/qwen-coder"], remote=True)
+        st = models.status(m)
+        with mock.patch.object(models, "windows_host", return_value=None):  # off WSL: as it was
+            self.assertTrue(models.remedy(m, st).startswith("start its server, or give"))
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.5"):
+            fix = models.remedy(m, st)
+        self.assertIn("if 127.0.0.4 was Windows' address", fix)
+        self.assertIn(f"set lmstudio's baseURL to http://127.0.0.5:{dead}/v1", fix)
+        self.assertIn("networkingMode=mirrored", fix)
+        # wb model add --url at that address again, while it is Windows', has wb follow it
+        self.lmstudio_at("127.0.0.4", dead)
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.4"):
+            code, out = self.wb("model", "add", "lmstudio/qwen-coder", "--url",
+                                f"http://127.0.0.4:{dead}/v1", "--context", "32768")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(Path(os.environ["WB_MODELS"]).read_text())["lmstudio"]["wsl_url"],
+                         f"http://127.0.0.4:{dead}/v1")
 
 
 class Optimize(unittest.TestCase):

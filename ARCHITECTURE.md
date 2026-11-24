@@ -294,8 +294,11 @@ Then:
 **Waiting for a server that is down** (`models.may_come_up`): `runner._wait_up` waits before
 taking the lease, pauses doubling up to a minute (`DOWN_PAUSES`) for `DOWN_WAIT`
 (`models.START_TIMEOUT`, 20 min), status `last` "waiting for <id>: …; wb stop gives up"; then
-fails. A load under the lease that fails with the server down waits the same way
-(`runner._load`). A configuration error fails at once.
+fails. Each pass reads the model again (`models.resolve`) and the runner goes on with that one:
+discovery may have followed its server to WSL2's Windows host's new address, and a task queued
+after a reboot, before its server was up, waited 20 minutes on the old one (#1167). A load
+under the lease that fails with the server down waits the same way (`runner._load`). A
+configuration error fails at once.
 
 **3. The runner takes the GPU** (`models.GpuLease`, *Sharing the GPU*): beside others when the
 models fit, else queued first come first served; no guard counts the wait. It unloads other
@@ -2881,7 +2884,18 @@ beside it (new ids) and `wb remote <old> --remove` drops it (#1159's review: it 
 <new>` repointed it). A provider `ollama-<address>` from before stays its own (`wb remote` again at
 that address, while it's Windows', marks it `wsl_host`, its ids kept). #1159: after a reboot every
 `wb start` said to start a running Ollama, and `wb remote <new>` made a second provider whose new
-ids started the router's history over.
+ids started the router's history over. Any other server there (LM Studio, llama.cpp, vLLM, Jan)
+is one `wb model add <p>/<m> --url http://<Windows' address>:PORT/v1` made, marked `wsl_url`
+(its baseURL, never `remote`: `wb remote` would adopt it, `--remove` delete it), and followed
+the same way: `_moved_to` probes `<baseURL>/models` (`_answers`) rather than Ollama's
+`/api/version`, the new baseURL is the old with only the host swapped (`_at_host`), and
+`_repoint` writes it and the mark. Its "not running, and no start command" gets `windows_moved`
+too: marked, "set <p>'s baseURL to <new>" when it answers at Windows' new address (wb couldn't
+rewrite it), else "start its server on Windows: it answers neither at …", under mirrored a
+`wb model add … --url http://127.0.0.1:PORT/v1` of its own; unmarked, "if <host> was Windows'
+address", its baseURL there by hand. `may_come_up` stays true: a waiting runner re-reads the
+model (`runner._wait_up`). #1167: such a server read "start its server" after every reboot, and
+wb setup's and scout's line said `local: true` after the `wb model add` it has to precede.
 
 #### A model on another machine
 Ollama there with `OLLAMA_HOST=0.0.0.0`, reachable only from the client (no login; plain `http://`
@@ -3215,7 +3229,8 @@ provider:
   budget by hand); `local: true`;
 - `same_gpu: true|false`: a `remote` server on this GPU (unset: true for `models.windows_host`);
 - `remote: <root>`: `wb remote` made it (#197); `wsl_host: true`: at WSL2's Windows host, whose
-  address discovery follows (`follow_windows_host`, #1159);
+  address discovery follows (`follow_windows_host`, #1159); `wsl_url: <baseURL>`: `wb model add
+  --url` made it at WSL2's Windows host, followed the same way (#1167);
 - `keep_loaded` (top level): ids or Ollama names never unloaded, stopped or measured by `wb
   optimize` (#254); an id only when it starts with a configured provider, else a whole Ollama name,
   untagged as `:latest` (`models._kept_name`, #461);
@@ -3502,7 +3517,10 @@ no `ollama` provider and Ollama answering at `ollama_root_here()` → `add_ollam
 `{"npm": "@ai-sdk/openai-compatible", "name": "Ollama", "options": {"baseURL": "<root>/v1"}}`.
 `--url` (`add_server_provider`) writes the same for `<provider>`, refusing non-http(s) or off-machine
 without `local: true`; an existing provider is never touched, and a different baseURL refuses
-(#334). `--start`/`--stop` set models.json `start`/`stop`. wb isn't tied to Ollama (2026-11-17);
+(#334). At WSL2's Windows host (`windows_host()`) it marks the provider models.json `wsl_url`
+(the baseURL), which discovery follows (*A server on Windows, from WSL2*, #1167); the same URL
+again adopts a provider made before the mark, and Windows' new address (port and path kept)
+repoints a marked one. `--start`/`--stop` set models.json `start`/`stop`. wb isn't tied to Ollama (2026-11-17);
 Ollama keeps pulls, deletes and sharing.
 
 `wb model retire <id> [--delete]` removes the entry, refusing OpenCode's default `model` or
@@ -5764,7 +5782,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | Command | Flags | What it does |
 |---|---|---|
 | `wb models` | `--set-default`, `--json`, `--api TEXT` | State, slice, speeds, `bench:`, `size:`, `router.weights_changed`; the ranking, models under `router.EXPLORE_TRIES` marked (*Exploring*); the API section, and `--api TEXT` the catalog ids containing TEXT, at most 30 (*What `wb models` prints*). `--set-default` (a GPU model only): `models.set_default` (refused under `OPENCODE_CONFIG_CONTENT`, #421). `--json` (#1023, the pane's lists, `cli._models_json`, asking no server and rebuilding no catalog): `{gpu: [{id, label, window, sizes, cards}], api: [{id, name, provider, provider_name, window, price {input, output}, prices (catalog\|yours, #1135), free}] (stored keys on a package the keyhole speaks, #1066, and Ollama cloud only, `cli._runs_held`), used (API models tasks ran on), free_line, optimize {done_at, models, running}, media {image\|speech\|sfx\|music: {default, engines: [{name, gpu}]}} (#1047; a file that doesn't parse leaves its kinds out)}`. |
-| `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | *Managing the set*: `--url` via `models.add_server_provider` (an existing provider never touched, one for another baseURL refuses; off this machine needs `local: true`); `--start`/`--stop` to models.json; refuses Ollama cloud models (API models) without `local: true` (one under a plain name always), unknown contexts, down servers. |
+| `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | *Managing the set*: `--url` via `models.add_server_provider` (an existing provider never touched, one for another baseURL refuses; off this machine needs `local: true`; at WSL2's Windows host marked `wsl_url`, followed after a reboot, #1167); `--start`/`--stop` to models.json; refuses Ollama cloud models (API models) without `local: true` (one under a plain name always), unknown contexts, down servers. |
 | `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | *Optimize*; `start` detached, refused while a task holds the GPU, stopped by a task that wants it; `--bench` then runs `wb bench run`; `apply` adds the measured window as its own entry (`optimize.entry_name`; refused when that name exists). |
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Provider `ollama-<host>` (WSL2's Windows host: `ollama-windows`, followed to its next address, #1159), `local: true`, its tool models added (IPv6 bracketed, #707); exit 1 when it doesn't answer; `--remove` not while `model`/`small_model` is one (#708). |
 | `wb model retire <id>` | `--delete` | Not OpenCode's `model` or `small_model` (#708); keeps `variant_of`, `replaces` (#723); `--delete` drops Ollama's weights; an API id refused (`cli.API_SIZES`, #1013). |
