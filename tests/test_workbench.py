@@ -2701,7 +2701,9 @@ class Lifecycle(Base):
     def test_a_file_the_agent_writes_with_its_shell_under_an_ignored_path_is_named_and_refused_at_accept(self):
         # #1210 (the 2.0 bar loop, 2026-11-24): the agent wrote lib/util.py with
         # `cat > lib/util.py <<EOF` under Python.gitignore's lib/; only edit rows were read, so the
-        # report had no NOTE and accept --merge landed main.py importing a module it deleted
+        # report had no NOTE and accept --merge landed main.py importing a module it deleted. The
+        # fake's row is `cat > util.py` with `workdir` lib/, as 2.3.2 has the model write it: its
+        # workdir dropped, the file was named nowhere and left out again (#1210's third review)
         self.ignore_lib()
         self.start("t-sh", "shellwrite", "--test", TEST_CMD)
         wait_phase("t-sh", {"review"})
@@ -2825,6 +2827,49 @@ class Lifecycle(Base):
         self.assertTrue(named(["node dist/index.js"], "dist/index.js"))           # reading as writing
         old = {"kind": "tool", "tool": "bash", "brief": "cat > lib/util.py <<X"}  # a row without names
         self.assertTrue(runner._rows_name([old], wt)("lib/util.py"))
+
+    def test_a_shell_row_names_a_file_by_the_workdir_it_ran_in(self):
+        # #1210's third review (2026-11-24): OpenCode 2.3.2's shell tool tells the model to set
+        # `workdir`, not to cd; dropped, `cat > util.py` run in lib/ named nothing, and accept
+        # --merge left lib/util.py out under a main.py importing it
+        wt = Path("/w/t")
+        row = events.normalize({"type": "tool_use", "part": {"tool": "shell", "state": {
+            "status": "completed", "input": {"command": "cat > util.py <<'X'\nx = 1\nX",
+                                             "workdir": "/w/t/lib"}}}}, 1)
+        self.assertEqual(row["workdir"], "/w/t/lib")
+        self.assertTrue(runner._rows_name([row], wt)("lib/util.py"))
+        self.assertFalse(runner._rows_name([row], wt)("util.py"))
+        rel = {**row, "workdir": "lib"}                                       # relative: the workdir's
+        self.assertTrue(runner._rows_name([rel], wt)("lib/util.py"))
+        self.assertTrue(runner._rows_name([rel], wt, "pkgs/a")("pkgs/a/lib/util.py"))
+        away = {**row, "workdir": "/elsewhere/lib"}                           # outside the worktree
+        self.assertFalse(runner._rows_name([away], wt)("lib/util.py"))
+        moved = {**row, "names": events.shell_names("cd sub && cat > x.py")}  # a cd in it, too
+        self.assertTrue(runner._rows_name([moved], wt)("lib/sub/x.py"))
+        no_dir = events.normalize({"type": "tool_use", "part": {"tool": "shell", "state": {
+            "status": "completed", "input": {"command": "ls"}}}}, 1)
+        self.assertNotIn("workdir", no_dir)
+
+    def test_a_cd_in_a_shell_line_ends_with_its_subshell_or_its_popd(self):
+        # #1210's third review (2026-11-24): carried past the `)` or the popd, `(cd lib && make)
+        # && cat > top.py` named lib/top.py, and an ignored top.py the agent wrote was left out
+        wt = Path("/w/t")
+
+        def named(cmd, path):
+            return runner._rows_name([{"kind": "tool", "tool": "bash", "names": events.shell_names(cmd)}],
+                                     wt)(path)
+        self.assertTrue(named("(cd lib && make) && cat > top.py", "top.py"))
+        self.assertIn("top.py", events.shell_names("(cd lib && make) && cat > top.py"))
+        self.assertNotIn("lib/top.py", events.shell_names("pushd lib && make && popd && cat > top.py"))
+        self.assertTrue(named("pushd lib && make && popd && cat > top.py", "top.py"))
+        self.assertTrue(named("pushd lib && cat > util.py && popd", "lib/util.py"))
+        self.assertTrue(named("pushd lib >/dev/null && make && popd >/dev/null && cat > top.py", "top.py"))
+        self.assertTrue(named("cd a && pushd b && popd && cat > x.py", "a/x.py"))
+        self.assertTrue(named("echo $(cd lib && pwd) > top.py", "top.py"))
+        self.assertTrue(named("echo `cd lib && pwd` && cat > top.py", "top.py"))
+        self.assertTrue(named("cd lib && (cd sub && make) && cat > util.py", "lib/util.py"))
+        self.assertTrue(named("popd && cat > x.py", "x.py"))         # no pushd here: as written
+        self.assertTrue(named("cd lib; cat > util.py", "lib/util.py"))  # no subshell: it carries
 
     def test_a_shell_line_names_the_files_it_may_write_paths_first(self):
         # #1210's review (2026-11-24): `npm run build` names none of its dist/, and the agent's
@@ -9494,6 +9539,27 @@ class RealOpenCodeRun(Base):
         self.assertIsInstance(outs[0], str)
         self.assertIn("CANARY-1086", outs[0])
         self.assertGreater(len(outs[0]) // context.CHARS_PER_TOKEN, 1000)
+
+    def test_a_real_shell_tool_use_event_carries_its_workdir_and_the_row_resolves_names_by_it(self):
+        # #1210's third review (2026-11-24): OpenCode 2.3.2's shell tool tells the model to set
+        # `workdir` instead of a cd; events.normalize dropped it, so `cat > util.py` in lib/ was
+        # named nowhere and accept --merge left lib/util.py out under a main.py importing it
+        (self.repo / "lib").mkdir()
+        lib = str(self.repo / "lib")
+        self.serve([{"name": "shell", "arguments": {"command": "printf 'X = 1\\n' > util.py",
+                                                    "workdir": lib, "description": "Write util.py"}}])
+        r = subprocess.run(["opencode", "run", "--standalone", "-m", "cap/cap", "--auto", "--format",
+                            "json", "--", "write lib/util.py"], cwd=self.repo,
+                           env={**os.environ, "PWD": str(self.repo)}, capture_output=True, text=True,
+                           timeout=180)
+        raw = [json.loads(x) for x in r.stdout.splitlines() if x.startswith("{")]
+        uses = [e for e in raw if e.get("type") == "tool_use"]
+        self.assertTrue(uses, r.stdout[-2000:] + r.stderr[-2000:])
+        self.assertEqual(uses[0]["part"]["state"]["input"].get("workdir"), lib)
+        self.assertEqual((self.repo / "lib" / "util.py").read_text(), "X = 1\n")  # it ran there
+        row = events.normalize(uses[0], 1)
+        self.assertEqual(row["workdir"], lib)
+        self.assertTrue(runner._rows_name([row], self.repo)("lib/util.py"))
 
     def test_a_round_runs_in_its_own_opencode_home(self):
         # #1010 (checked on OpenCode 2.3.2, 2026-11-22): OpenCode V2 keeps every /connect

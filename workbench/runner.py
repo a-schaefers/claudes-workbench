@@ -2753,8 +2753,11 @@ def shell_left(task: store.Task) -> list[str]:
 
 def _shell_named(task: store.Task):
     """Whether one of the agent's shell rows names a worktree-relative path: a word of its
-    `names` resolved against the workdir (an absolute one against the worktree; a word after a
-    `cd` in the row already joined to it, events.shell_names) equal to it, or its name a word's
+    `names` resolved against the row's `workdir` (the shell tool's, which OpenCode 2.3.2 tells
+    the model to set instead of a cd: dropped, `cat > util.py` in lib/ named nothing and accept
+    --merge left lib/util.py out under a main.py importing it, #1210's third review), else the
+    task's workdir (an absolute one against the worktree; a word after a `cd` in the row already
+    joined to it, events.shell_names) equal to it, or its name a word's
     last part with the file in a directory the same row names (`mv util.py lib/`, `cp
     src/a.py build/`). Row by row and exact: one set of every row's words, matched by suffix,
     took `grep -n answer pkg/a.py` for a name of setuptools' build/lib/pkg/a.py, and `cat
@@ -2773,7 +2776,9 @@ def _rows_name(rows: list[dict], worktree: Path, subdir: str = ""):
     roots = list(dict.fromkeys(str(r) for r in (worktree, os.path.realpath(worktree))))
     base = os.path.normpath(subdir or ".")
 
-    def inside(w: str) -> str | None:
+    def inside(w: str, workdir: str = "") -> str | None:
+        if workdir and not w.startswith("/"):
+            w = os.path.join(workdir, w)                   # the row's, itself absolute or the task's
         if w.startswith("/"):
             w = os.path.normpath(w)
             rel = next((w[len(r):].lstrip("/") or "." for r in roots
@@ -2788,7 +2793,8 @@ def _rows_name(rows: list[dict], worktree: Path, subdir: str = ""):
         if not isinstance(names, list):
             names = shell_names(str(r.get("brief") or ""))
         words = [str(w) for w in names if w]
-        paths = {p for p in map(inside, words) if p}
+        wd = r.get("workdir") if isinstance(r.get("workdir"), str) else ""
+        paths = {p for p in (inside(w, wd) for w in words) if p}
         named_rows.append((paths, {w.rstrip("/").rsplit("/", 1)[-1] for w in words}))
 
     def named(p: str) -> bool:

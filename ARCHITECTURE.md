@@ -963,7 +963,13 @@ changed since the agent's first round (status `agent_from`, set once, after the 
 by `run_tests` after each: a Maven run's surefire reports are no one's work), that one of the
 agent's shell rows names (`runner._shell_named`, row by row and exact: a word of its `names`,
 `events.shell_names`, which joins a word after a `cd` or `pushd` in the row to its directory,
-resolved against the workdir, an absolute one against the worktree, equal to the path; or the
+until the subshell it ran in ends (`( … )`, `$( … )`, a backquote's) or a `popd` goes back
+(carried past them, `(cd lib && make) && cat > top.py` named lib/top.py; a `popd` with no
+`pushd` in the row leaves the words after it as written), resolved against the row's `workdir`
+(the shell tool's, which OpenCode 2.3.2 tells the model to set instead of a cd: dropped, `cat >
+util.py` run in lib/ named nothing, and `wb accept --merge` left lib/util.py out under a main.py
+importing it, #1210's third review), else the task's workdir, an absolute one against the
+worktree, equal to the path; or the
 file's name a word's last part, the file in a directory the same row names, as `mv util.py lib/`;
 every shell row, a failed one too; an older row without `names`, its brief's words). One set of
 every row's words, matched by suffix, took `grep -n answer pkg/a.py` for a name of `python -m
@@ -6290,9 +6296,9 @@ off), not `wb start`'s.
 | `guard` | `spend` when `runner._go_on` stopped the task before a round (the day cap, or within one worst request of it, #1150), with `infra` `spend` |
 | `updated_at` | every write |
 
-**events.jsonl** rows are `{ts, round, kind, …}`. From OpenCode (`events.normalize`): `tool {tool, brief, ok, error?, path?, paths?, programs?, names?}`
+**events.jsonl** rows are `{ts, round, kind, …}`. From OpenCode (`events.normalize`): `tool {tool, brief, ok, error?, path?, paths?, programs?, names?, workdir?}`
 (`brief`: command, path, pattern, url, query or description, 90 chars; a skill's id; a patch's first
-file; `path` an edit's or a read's whole path; `paths` the files a `patch` wrote, `events.patched`, #1148; a shell row's `programs`, `events.shell_programs`, 8, and `names`, the words that may name a file it wrote, paths first, a word after a `cd` joined to its directory, `events.shell_names`, `NAMES_MAX` 300: `runner.shell_wrote`, #1210), `text {text}` (2000), `step {in,
+file; `path` an edit's or a read's whole path; `paths` the files a `patch` wrote, `events.patched`, #1148; a shell row's `programs`, `events.shell_programs`, 8, `names`, the words that may name a file it wrote, paths first, a word after a `cd` or `pushd` joined to its directory (until the subshell it ran in ends or a `popd`), `events.shell_names`, `NAMES_MAX` 300: `runner.shell_wrote`, #1210, and `workdir`, the shell tool's input as given (absolute, or relative to the task's workdir), which `names` resolve against: OpenCode 2.3.2 tells the model to set it instead of a cd, #1210's third review), `text {text}` (2000), `step {in,
 out, cache, cache_read, cache_write, reasoning?, cost?}` (reasoning apart from `out`; `cache` the read and write summed,
 which the handover check reads; `cost` OpenCode's `part.cost` in USD, only when a number: missing is unknown, never 0, #1022; the meter's step price too, #1019), `error {text}`, `retry {text, attempt}` (OpenCode resent a request). From the runner: `round`, `stopped {text}`, `steer
 {now, by: "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow, compacted}` (`compacted` after a failed compaction too),
@@ -6593,7 +6599,7 @@ else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `path`: `events._brief` reads both). Records `FAKE_PROMPTS`, `FAKE_RUNS` (each run's `session`, `prompt`, `cwd`,
 `pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
 `FAKE_LESSON`, `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
-`ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `shellwrite` (lib/util.py through a `bash` row's `cat > … <<X`, main.py and answer.txt with `write`: #1210), `buildout` (dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names neither, then answer.txt: #1210's review), `pkgbuild` (a `bash` row `grep -n answer pkg/a.py`, then build/lib/pkg/{__init__,a,b}.py behind one `python -m build`, then answer.txt: #1210's second review), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
+`ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `shellwrite` (lib/util.py through a `bash` row's `cat > util.py <<X` with `workdir` lib/, main.py and answer.txt with `write`: #1210, its third review), `buildout` (dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names neither, then answer.txt: #1210's review), `pkgbuild` (a `bash` row `grep -n answer pkg/a.py`, then build/lib/pkg/{__init__,a,b}.py behind one `python -m build`, then answer.txt: #1210's second review), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
 `read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087), `selfreads` (ok, then a self-review that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168), `floor` (`HANDOVER_ROOM`), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
 2.3's `{"type": "error", …, "error": {"type": "compaction.failed", "message": "Compaction produced no summary"}}`;
 `FAKE_COMPACT_MSG`, `FAKE_COMPACT_EXIT`, `FAKE_COMPACT_EDIT`, `FAKE_REFAIL`), `bgwait` (`FAKE_BGWAIT`), `toolhang`,
@@ -6721,7 +6727,7 @@ with it shut out (#994), and the instructions: the user's `~/.config/workbench/A
 `~/.claude/CLAUDE.md` and rules out, in the lane and (OpenCode's own read, `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT`) without
 it (#513, #1061). `run_calls(name, calls, *start_flags)` runs `opencode run --auto` through `agent_env` and
 `lane.wrap`; refusals read `permission.rejected`, `external_directory` or `Permission denied`. `RealOpenCodeRun` is the
-runner on real OpenCode (`wb start --model cap`): argv, `run --format json` events (a `tool_use`'s `state.output`, #1086), `session export`
+runner on real OpenCode (`wb start --model cap`): argv, `run --format json` events (a `tool_use`'s `state.output`, #1086; the shell tool's `workdir` in `state.input`, #1210's third review), `session export`
 (`context_state`), `session list` (`find_session`), `--session`, a real compaction, the task's own OpenCode home
 (no credentials in it, the user's store given no session, its commands seeing the user's `XDG_DATA_HOME`, #1010)
 (CLAUDE.md's *OpenCode quirks* points here). They are the only checks of the quirks, interop and lane: a skip is not a pass.

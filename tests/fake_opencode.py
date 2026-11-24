@@ -4,8 +4,8 @@
   ok     write answer.txt = "42", say so
   patch  as ok, and lib/helper.py too, in one `patch` call (a GPT model's in 2.3.2: no edit or
          write): input `patchText` only, the files in `state.metadata.files[].file` (#1148)
-  shellwrite  lib/util.py with a `bash` row (cat > … <<EOF), then main.py importing it and
-         answer.txt = "42" with write (#1210)
+  shellwrite  lib/util.py with a `bash` row run in lib/ by its `workdir` (cat > util.py <<X),
+         then main.py importing it and answer.txt = "42" with write (#1210, its third review)
   buildout  dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names
          neither, then answer.txt = "42" with write (#1210's review)
   pkgbuild  a `bash` row `grep -n answer pkg/a.py`, then build/lib/pkg/{__init__,a,b}.py behind
@@ -686,8 +686,11 @@ elif scenario == "shellwrite":  # #1210: a module written with the shell, the re
     os.makedirs("lib", exist_ok=True)
     with open(os.path.join("lib", "util.py"), "w") as fh:
         fh.write("def answer():\n    return 42\n")
-    tool("bash", {"command": "mkdir -p lib && cat > lib/util.py <<'X'\ndef answer():\n    return 42\nX",
-                  "description": "Write lib/util.py"}, output="")
+    # in lib/ by the shell tool's `workdir`, not a cd, as OpenCode 2.3.2 tells the model to
+    # (#1210's third review)
+    tool("bash", {"command": "mkdir -p lib", "description": "Make lib"}, output="")
+    tool("bash", {"command": "cat > util.py <<'X'\ndef answer():\n    return 42\nX",
+                  "workdir": os.path.abspath("lib"), "description": "Write lib/util.py"}, output="")
     for name, text in (("main.py", "from lib.util import answer\nprint(answer())\n"), ("answer.txt", "42\n")):
         with open(name, "w") as fh:
             fh.write(text)
