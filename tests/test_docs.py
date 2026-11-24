@@ -157,6 +157,17 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertIn("`wb answer <name> --file <path>`, which sends the file's contents", bullet)
         self.assertIn("Path(a.file).read_text(", (ROOT / "workbench/cli.py").read_text())   # cmd_answer's
 
+    def test_the_backlog_promises_start_order_for_the_gpu_only_not_for_api_slots(self):
+        # #1130 (2026-11-23): driving.md promised start order and sent-back-first, which only
+        # GpuLease's `since` keeps; NoLease's waiters take a free slot in no set order
+        from workbench import models
+        driving = " ".join((ROOT / "skill/workbench/reference/driving.md").read_text().split())
+        self.assertIn(f"an API provider's slot ({models.API_PARALLEL} tasks at once) goes to whichever "
+                      "waiting task looks first, in no set order", driving)
+        self.assertNotIn("since", models.NoLease.__init__.__code__.co_names)   # still no queue order
+        self.assertIn("since", models.GpuLease.__init__.__code__.co_names)
+        self.assertIn("Waiters take a slot in no set order", " ".join(ARCH.split()))
+
     def test_every_web_chat_api_path_is_in_the_api_reference(self):
         # #1042: docs/chat-api.md is the page another agent is handed; a path the server answers
         # that it doesn't name is one nobody can find

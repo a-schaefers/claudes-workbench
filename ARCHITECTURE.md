@@ -299,7 +299,9 @@ else `GpuLease`): it holds one of its provider's slots, `$WB_HOME/api/<provider>
 `flock` on each of `API_PARALLEL` files, the holder's name written in it; the kernel drops the
 lock when the runner dies, SIGKILL too), waiting as `phase: queued`, `last: waiting for an API
 slot: 3 tasks run on <provider>` on a watch of the slot files when all are held, and looking
-again after `models.API_WAIT` (2 s, doubling to 30 s) when no file event comes. The provider is
+again after `models.API_WAIT` (2 s, doubling to 30 s) when no file event comes. Waiters take a slot in
+no set order (no queue, unlike `GpuLease`'s `since`: whichever waiter's `flock` lands first, a task
+sent back included), as reference/driving.md says (#1130). The provider is
 `api_provider(m)`: the model's provider, else its id before the first `/`. `api_slots_free` and
 `api_holders` read the slots for `wb start`'s refusal and the notes; their probe takes a free
 slot `LOCK_SH|LOCK_NB` and lets go, so two probes at once don't read each other as holders (with
@@ -6195,7 +6197,7 @@ doc needs its own `!/` line).
   `SourceCost`, `api.<protocol>`) and the hosted.json fields it reads; re-check
   `RealOpenCodeAPI.test_the_tasks_own_catalog_*` on each OpenCode bump, and the fake's `OPENCODE_MODELS_PATH` listing.
 - **`models.API_PARALLEL`** → `cli._slots_full` and `_slot_note`'s text, `NoLease`'s queued `last`, SKILL.md's
-  dispatch line.
+  dispatch line, reference/driving.md's backlog line.
 - **An API model's window and output** (`models.api_limits`, `API_WINDOW`, `API_OUTPUT`) are the one source for `runner.model_pins`/`api_pins` (the layer), `compaction_buffer`, `router.slice`, status `window` (the steps, `tuning._key`): read them from `m.config` (each round of an API task: status `api_entry`, `runner.pin_api`), never the catalog's `extra["catalog_limit"]` (#1017), which only `wb models --api` shows.
 - **What a handoff costs Claude, measured** → the README's sentence.
 - **Anything a reader looks up** → this file, CLAUDE.md if it names it, the skill if Claude uses it; README only for the
