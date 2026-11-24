@@ -5,6 +5,7 @@ import collections
 import contextlib
 import dataclasses
 import errno
+import fcntl
 import functools
 import re
 import glob
@@ -205,15 +206,146 @@ def lane_device():
     return next((n for n in ("/dev/kvm", "/dev/fuse") if os.access(n, os.R_OK | os.W_OK)), None)
 
 
+RUNNER_LOCK = ".runner.lock"  # store.task_lock(name, "runner")'s suffix
+
+
+def runners_left() -> list[tuple[str, int | None]]:
+    """The runners still alive in this WB_HOME, as (task, pid): a status pid that runs the task's
+    runner (one just spawned, before it takes its lock), or a runner lock someone still holds.
+    The lock is what tells: a runner clears its status pid and then still writes (#1225), and it
+    holds its lock until the process exits; the pid, the holder's in the file, only names it."""
+    out = {t.name: t.status.get("pid") for t in store.all_tasks() if cli.runner_alive(t)}
+    for path in (store.home() / "locks").glob("*" + RUNNER_LOCK):
+        name = path.name[:-len(RUNNER_LOCK)]
+        if name in out:
+            continue
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            held = os.read(fd, 32).decode(errors="replace").strip()
+            out[name] = int(held) if held.isdigit() else None
+        except OSError:  # no locks on this file system: nothing to tell by
+            pass
+        else:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+    return sorted(out.items())
+
+
+def wait_runners(secs: float) -> list[tuple[str, int | None]]:
+    deadline = time.time() + secs
+    while (left := runners_left()) and time.time() < deadline:
+        time.sleep(POLL)
+    return left
+
+
+# Started by a call a test makes and kept for the user's session by design, writing nothing of the
+# test's: rootless podman's pause process (catatonit -P), which a hardware probe's podman call
+# starts on CI's runners with the test's environment (#1225's CI, 2026-11-24, tests.test_gpu)
+SESSION_DAEMONS = ("catatonit",)
+
+
+def writers_left(root: str) -> list[tuple[int, str]]:
+    """The live processes, other than this one, whose WB_HOME is under ``root``, as (pid, argv):
+    whatever a test spawned that can still write its state, a runner or not. `wb route --json`'s
+    catalog read (cli._read_catalog_later) is a detached python of its own, neither a runner nor a
+    thread, and it wrote state/hosted.json ~50 ms after the directory went, making it again
+    (#1225's review, 2026-11-24). Linux only (/proc); elsewhere the came-back check still tells."""
+    want, out = [f"WB_HOME={root}".encode(), f"WB_HOME={root}/".encode()], []
+    try:
+        pids = [int(e) for e in os.listdir("/proc") if e.isdigit()]
+    except OSError:
+        return []
+    for pid in pids:
+        if pid == os.getpid():
+            continue
+        try:
+            with open(f"/proc/{pid}/environ", "rb") as fh:
+                env = fh.read().split(b"\0")  # a zombie's is empty: it writes nothing more
+            if not any(v == want[0] or v.startswith(want[1]) for v in env):
+                continue
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                argv = fh.read().replace(b"\0", b" ").decode(errors="replace").strip()
+        except OSError:  # gone, or not ours
+            continue
+        if os.path.basename(argv.split(" ", 1)[0]) in SESSION_DAEMONS:
+            continue
+        out.append((pid, argv[:120]))
+    return out
+
+
+def wait_writers(root: str, secs: float) -> list[tuple[int, str]]:
+    deadline = time.time() + secs
+    while (left := writers_left(root)) and time.time() < deadline:
+        time.sleep(POLL)
+    return left
+
+
+# The test directories removed lately, as (path, test id, when): one made again after its rmtree
+# is a writer that outlived its test unseen (#1225's review: state/hosted.json, its catalog
+# read's), so the next test's setUp, and the module's end, fail naming it.
+REMOVED: collections.deque = collections.deque(maxlen=64)
+
+
+def came_back() -> list[str]:
+    """The removed test directories that exist again, each removed once more and described."""
+    out = []
+    for path, test, _ in list(REMOVED):
+        if not os.path.lexists(path):
+            continue
+        inside = sorted(str(p.relative_to(path)) for p in Path(path).rglob("*"))
+        out.append(f"{test}'s directory, holding {inside[:8]}")
+        shutil.rmtree(path, ignore_errors=True)
+    if out:
+        REMOVED.clear()
+    return out
+
+
+# Without /proc (macOS) tearDown can't wait for a test's writers (writers_left), so a directory
+# made again there is the known late catalog read, removed and said, never a failure: failing on
+# it made the macOS nightly fail at random on the race #1225 fixes only where it can be waited on
+CAME_BACK_FAILS = os.path.isdir("/proc")
+
+
+def came_back_said(back: list[str]) -> bool:
+    """Whether a came-back list fails the test (Linux) or is only said (no /proc)."""
+    if back and not CAME_BACK_FAILS:
+        print(f"note: made again after its removal (no /proc to wait on it): {'; '.join(back)}",
+              file=sys.stderr)
+    return bool(back) and CAME_BACK_FAILS
+
+
+def tearDownModule():
+    # the last test's writer has only this to tell it: a moment past its removal, then look
+    if REMOVED:
+        time.sleep(max(0.0, REMOVED[-1][2] + 1.0 - time.time()))
+    if came_back_said(back := came_back()):
+        raise AssertionError(f"made again after its removal, by something its test started: {'; '.join(back)}")
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         # `wb start` leaves its runner running on purpose (it outlives the command)
         warnings.simplefilter("ignore", ResourceWarning)
+        if came_back_said(back := came_back()):  # an earlier test's writer, past its removal (#1225)
+            self.fail(f"made again after its removal, by something its test started: {'; '.join(back)}")
+        self.threads_before = set(threading.enumerate())  # tearDown waits for the test's own
         self.tmp = tempfile.TemporaryDirectory()
         # its real path: macOS's temp directory is under /var, a link to /private/var, and wb
         # records repos and directories by their real paths (git's toplevel, getcwd)
         self.tmp.name = os.path.realpath(self.tmp.name)
         tmp = Path(self.tmp.name)
+        # the directory goes last, after the test's own cleanups too: they run after tearDown,
+        # and one ending a GPU lease (DynamicWorkflows' fan-out: its holder process, its
+        # ExitStack) wrote gpu.json and gpu.admit into a directory already removed (#1225's runs)
+        self.still_running: list[str] = []
+        self.left_by_design: list[str] = []  # leaves_behind's
+        self.addCleanup(self.remove_tmp)
         self.env_before = dict(os.environ)
         # and again after every cleanup: a mock.patch.dict a test started (Lane.fake_home) stops
         # after tearDown and put this test's WB_* back, so a later class read its WB_GPU_DIR
@@ -264,25 +396,127 @@ class Base(unittest.TestCase):
         self.spec.write_text("Write the answer to answer.txt.\n")
 
     def tearDown(self):
-        # A runner still writing its last status races the rmtree (CI, 2026-11-17): let it finish.
-        deadline = time.time() + 15
-        while time.time() < deadline and any(cli.runner_alive(t) for t in store.all_tasks()):
-            time.sleep(0.1)
+        # Whatever the test started ends before its directory goes, or tearDown fails naming it
+        # (#1225). A runner still writing its last status raced the rmtree (CI, 2026-11-17), and
+        # waiting on its status pid wasn't enough: a runner clears that, then still writes
+        # (hands_off's status lock and status.json), so `Directory not empty: 'state'` (RepoMoved,
+        # CI, 2026-11-24). runners_left waits on the runner's lock, held until it exits.
+        left = wait_runners(15)
         # A runner a failed test left running (blocked on a question, a hang) held CI's output open
         # until the job was cancelled, 15 minutes after the suite ended (#141): stop it.
         for t in store.all_tasks():
             if cli.runner_alive(t):
                 cli._stop_runner(t)
+        stuck = wait_runners(5) if left else []
+        for name, pid in stuck:  # past its stop: killed, so CI's output closes, and named below
+            if pid and runner.models.runs(pid, "workbench.runner", name):
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(pid, signal.SIGKILL)  # its own session (cli.detach)
+        # A thread the test started and left running writes into the next lines' rmtree: an
+        # AskServer test's answer_soon relayed once more after the answer came back, recreating
+        # tasks/t-ask/status.json (`Directory not empty: 't-ask'`, CI, 2026-11-18).
+        deadline = time.time() + 15
+        threads = [th for th in threading.enumerate()
+                   if th not in self.threads_before and not th.daemon and th is not threading.current_thread()]
+        for th in threads:
+            th.join(max(0.0, deadline - time.time()))
+        self.still_running = [f"runner of {name} (pid {pid})" for name, pid in stuck] + \
+                             [f"thread {th.name}" for th in threads if th.is_alive()]
         for t in store.all_tasks():  # the agents' runtime directories are in /tmp, not the state
             context.drop_runtime_dir(t)
         os.environ.clear()
         os.environ.update(self.env_before)
-        self.tmp.cleanup()
+
+    def remove_tmp(self):
+        """The last cleanup (setUp's first): the test's directory, never an error ignored."""
+        # Any process still carrying this test's WB_HOME, not only a runner: `wb route --json`'s
+        # detached catalog read wrote state/hosted.json just after the rmtree, making the
+        # directory again unseen, or mid-rmtree `Directory not empty: 'state'` (#1225's review).
+        # Up to 15 s, after the test's own cleanups (they may stop one), then killed and named.
+        for pid, argv in writers_left(self.tmp.name):  # a helper the test said outlives a kill
+            if any(argv == what for what in self.left_by_design):
+                with contextlib.suppress(OSError):
+                    os.kill(pid, signal.SIGKILL)
+        procs = wait_writers(self.tmp.name, 15)
+        for pid, _ in procs:
+            with contextlib.suppress(OSError):
+                if os.getpgid(pid) == pid:  # its own session (start_new_session): its children too
+                    os.killpg(pid, signal.SIGKILL)
+                os.kill(pid, signal.SIGKILL)
+        if procs:
+            wait_writers(self.tmp.name, 5)
+        still = self.still_running + [f"process {pid} ({argv})" for pid, argv in procs]
+        try:
+            self.tmp.cleanup()
+        except OSError as e:  # say what was still being written, and what still ran
+            def age(p):
+                with contextlib.suppress(OSError):
+                    return time.time() - p.lstat().st_mtime
+                return 1e9
+            # the newest first: what was written as rmtree ran, the rest what it hadn't reached
+            there = [str(p.relative_to(self.tmp.name)) for p in sorted(Path(self.tmp.name).rglob("*"), key=age)]
+            raise AssertionError(f"something still wrote into the test's directory as it was "
+                                 f"removed: {there[:12]}; still running: {still or 'nothing'}") from e
+        REMOVED.append((self.tmp.name, self.id(), time.time()))  # gone it stays: came_back
+        if still:
+            self.fail(f"still running after the test, past tearDown's wait: {', '.join(still)}")
+
+    def leaves_behind(self, argv: str) -> None:
+        """A helper process this test leaves running by design, its argv exactly: remove_tmp kills
+        it unnamed instead of waiting it out. Only where the test killed what would end it (a
+        signer's sleep orphaned by a SIGKILL of its shell and git): a signing git wb times out or
+        a retry ends goes with its session, signer and all (gitops.end_session), so a fake signer
+        left there is a leak to fix, not to mark (#1225's CI, 2026-11-24)."""
+        self.left_by_design.append(argv)
 
     def start(self, name, scenario, *extra):
         os.environ["FAKE_SCENARIO"] = scenario
         return run_wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo),
                       "--model", "mimo", *extra)
+
+
+class TearDown(Base):
+    def test_a_runner_lock_still_held_is_a_runner_left_though_its_status_pid_is_cleared(self):
+        # #1225: a runner clears its status pid, then still writes (hands_off), and tearDown,
+        # waiting on the status pid alone, removed the directory under those writes (CI, 2026-11-24)
+        lock = store.task_lock("t-tail", "runner")
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        holder = subprocess.Popen([sys.executable, "-c", (
+            "import fcntl, os, sys, time\nfh = open(sys.argv[1], 'a+')\n"
+            "fcntl.flock(fh, fcntl.LOCK_EX)\nfh.truncate(0); fh.write(str(os.getpid())); fh.flush()\n"
+            "print('held', flush=True)\ntime.sleep(60)\n"), str(lock)], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.wait)
+        self.addCleanup(holder.kill)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
+        self.assertEqual(runners_left(), [("t-tail", holder.pid)])
+        holder.kill()
+        holder.wait()
+        self.assertEqual(wait_runners(5), [])  # its lock went with it: nothing left to wait for
+
+    @unittest.skipUnless(os.path.isfile("/proc/self/environ"), "writers_left reads /proc")
+    def test_wb_routes_catalog_read_is_a_writer_left_until_it_has_written_its_cache(self):
+        # #1225's review (2026-11-24): `wb route --json` with no catalog cache starts a detached
+        # read (cli._read_catalog_later), neither a runner nor a thread; it wrote state/hosted.json
+        # ~50 ms after the directory went, making it again, so remove_tmp waits for it too
+        hosted = runner.models.hosted_path()
+        self.assertFalse(hosted.exists())
+        json.loads(run_wb("route", "--json"))
+        self.assertTrue(any("hosted_doc" in argv for _, argv in writers_left(self.tmp.name)))
+        self.assertEqual(wait_writers(self.tmp.name, 20), [])
+        self.assertTrue(hosted.exists())  # it had written when the wait said it was done
+
+    def test_a_test_directory_made_again_after_its_removal_is_named_and_removed(self):
+        # #1225's review: a writer that outlived its test made the directory again unseen
+        gone = Path(self.tmp.name) / "an-earlier-test"
+        with mock.patch.object(sys.modules[__name__], "REMOVED", collections.deque(maxlen=64)) as removed:
+            removed.append((str(gone), "tests.Earlier.test_x", time.time()))
+            self.assertEqual(came_back(), [])  # still gone: nothing to say
+            (gone / "state").mkdir(parents=True)
+            (gone / "state" / "hosted.json").write_text("{}")
+            self.assertEqual(came_back(), ["tests.Earlier.test_x's directory, holding "
+                                           "['state', 'state/hosted.json']"])
+            self.assertFalse(gone.exists())
+            self.assertEqual(list(removed), [])
 
 
 class Lifecycle(Base):
@@ -4354,7 +4588,7 @@ class Lifecycle(Base):
         # #420 (the audit of 1.8, reproduced): the merge and the squash's commit in the user's
         # checkout ran with a terminal and no time limit, and signed after --no-sign
         slow = Path(self.tmp.name) / "slowgpg"
-        slow.write_text("#!/bin/sh\nexec sleep 30\n")  # git is killed; this one lapses
+        slow.write_text("#!/bin/sh\nexec sleep 30\n")  # ended with its git (end_session), not left
         slow.chmod(0o755)
         for how in ("merge", "squash"):
             repo, g = self._merge_case(base={b"a.txt": b"a\n"}, main={b"c.txt": b"c\n"},
@@ -4448,6 +4682,9 @@ class Lifecycle(Base):
         # changes, printed a hand-merge line git refused, and closed the task unmerged (exit 5)
         g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
                                       capture_output=True, text=True).stdout
+        # the signer's sleep outlives its SIGKILLed shell and git, out of the reach of the retry's
+        # end_session (no git left to end): an orphan, left by design (#1225's CI, 2026-11-24)
+        self.leaves_behind("sleep 30")
         for how in ("merge", "squash"):
             name = f"t-k{how[0]}"
             wb, git, signer = self._killed_accept(name, how, 30)
@@ -7646,7 +7883,8 @@ class Steering(Base):
 
     def test_the_runner_touches_its_lock_file_while_it_lives(self):
         # #872: the beat another machine tells a live runner by
-        lock = Path(tempfile.mkdtemp()) / "x.runner.lock"
+        # in the test's own directory: a mkdtemp of its own outlived the suite (#1225's runs)
+        lock = Path(self.tmp.name) / "x.runner.lock"
         lock.write_text("1")
         os.utime(lock, (1, 1))
         with mock.patch.object(runner, "BEAT_SECS", 0.05):
@@ -30781,7 +31019,7 @@ class ProbeOn(Base):
         self.assertNotIn("Outline of", task.round_dir(1).joinpath("prompt.md").read_text())
         self.assertEqual(st["outline"], [])
         hang = Path(self.tmp.name) / "hang-probe"
-        hang.write_text("#!/bin/sh\nsleep 30\n")
+        hang.write_text("#!/bin/sh\nexec sleep 30\n")  # the timeout kills the sleep itself, never orphaned
         hang.chmod(0o755)
         with mock.patch.object(runner, "OUTLINE_TIMEOUT", 0.5):
             began = time.time()
