@@ -105,6 +105,11 @@ HOLD_CODES = {429: "rate_limited", 529: "rate_limited",   # 529: Anthropic's "ov
 QUOTA = re.compile(r"(?i)insufficient[_ ](?:quota|balance|credits?|funds)|exceeded your current "
                    r"quota|out of credits?|credits? (?:are |is )?(?:exhausted|used up)|limit_source"
                    r"|\b(?:5|five)[- ]hour\b|weekly (?:usage )?limit|plan(?:'s)? (?:usage )?limit")
+# A spent balance said in a 400 (Anthropic's invalid_request_error "Your credit balance is too low
+# to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."): the
+# task failed as the agent's, no no_credit, no remedy (#1079, 2026-11-23). Only this wording on a
+# 400, never a bare "billing": an ordinary bad request may mention billing.
+CREDIT = re.compile(r"(?i)credit balance is too low|purchase credits|plans (?:&|and) billing")
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
        "trailers", "transfer-encoding", "upgrade", "proxy-connection"}
 CLIENT_AUTH = {"authorization", "x-api-key", "api-key"}
@@ -273,10 +278,20 @@ _AUTH_HEADER = re.compile(r"(?i)auth|key|token")
 
 
 def _opencode(*args: str) -> subprocess.CompletedProcess:
+    """An OpenCode command run as models._opencode_json runs one: `--standalone`, in the state
+    directory with the project config shut out. Without `--standalone` the first API task started
+    OpenCode's background service with the runner's environment (PYTHONPATH, CLAUDECODE=1), left
+    running for the user's own OpenCode to attach to, and where another home's service held its
+    port the export exited 1 and the task failed at start (#1070, 2026-11-23)."""
     from . import runner
+    from .media import run_group  # its group killed whole on a timeout, as _opencode_json's
+    where = store.home()
+    where.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "PWD": str(where), "OPENCODE_DISABLE_PROJECT_CONFIG": "1"}
     try:
-        return subprocess.run([*runner.opencode_bin(), *args], capture_output=True, text=True,
-                              stdin=subprocess.DEVNULL, timeout=60)
+        return run_group([*runner.opencode_bin(), *args, "--standalone"], 60, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True, cwd=where, env=env,
+                         stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired) as e:
         raise KeyholeError(f"can't run opencode {args[0]} {args[1]}: {type(e).__name__}") from None
 
@@ -315,6 +330,19 @@ def load_key(provider: str, package: str = "") -> Key:
     rows = [x for x in (rows if isinstance(rows, list) else [rows]) if isinstance(x, dict)
             and x.get("integrationID", provider) == provider and isinstance(x.get("value"), dict)]
     rows.sort(key=lambda x: not x.get("active"))  # the active credential first
+    # An OAuth login the user switched to (`opencode auth switch`) over an older key: the key
+    # was billed, the login OpenCode itself would use ignored (#1110, 2026-11-23)
+    # (a login alone is refused below, as it always was). Any active credential that isn't a
+    # key, not only OAuth or external: a type OpenCode adds later (1.x had `wellknown`) would
+    # otherwise bill the inactive key the same way (the review of #1110, 2026-11-23)
+    active = rows[0]["value"].get("type") if rows and rows[0].get("active") and any(
+        r["value"].get("type") == "key" for r in rows) else None
+    if active and active != "key":
+        what = ("comes from an external source" if active == "external" else
+                "is an OAuth login, whose tokens rotate" if active == "oauth" else
+                f"is a {active} credential, not an API key")
+        raise KeyholeError(f"{NEEDS}: {provider}'s active credential {what}: `opencode auth "
+                           "switch` to its API key, or store one with /connect")
     for row in rows:
         v = row["value"]
         if v.get("type") == "key" and isinstance(v.get("key"), str) and v["key"].strip():
@@ -384,7 +412,8 @@ class Keyhole:
     (a Key), ``upstream`` (the catalog's API base: never anything from a request), ``protocol``
     ("bearer" or "anthropic"). It serves at once, from a daemon thread, on 127.0.0.1 (never
     localhost, which may be ::1 first). ``on_usage(usage)`` gets each response's usage, once,
-    before its last byte goes to OpenCode (the meter, #1019); ``on_health(state, why, until)``
+    before its end marker (`[DONE]`, `message_stop`, `response.completed`) or else its last byte
+    goes to OpenCode (the meter, #1019, #1114); ``on_health(state, why, until)``
     each outcome (ok, no_credit, rate_limited, unreachable); ``room(body, size)`` is asked before
     each request is sent on (the meter's spend room: negative is refused); ``log`` the start and
     refusal lines (runner.log: the runner's stdout)."""
@@ -572,6 +601,16 @@ class Keyhole:
             self.task.set_status(api_stop={"guard": "quota", "text": text})
         return text
 
+    def unreachable(self, why: str) -> str:
+        """This machine's setup can't reach the provider (a certificate that doesn't verify, a
+        proxy refusing the tunnel): `api_stop` with guard `setup`, so the round stops at once and
+        isn't revived, and the text OpenCode is answered with. As a 502 it was held, read as the
+        provider's outage for 10 minutes, then run again (#1080, 2026-11-23)."""
+        text = f"this machine can't reach {self.model.provider} ({self._up.hostname}): {why}"
+        if self.task is not None:
+            self.task.set_status(api_stop={"guard": "setup", "text": text})
+        return text
+
     def usage(self, usage) -> None:
         try:
             self.on_usage(usage)
@@ -602,7 +641,11 @@ class Keyhole:
         proxy = None
         if host not in LOOPBACK and not urllib.request.proxy_bypass_environment(host):
             proxy = urllib.request.getproxies_environment().get("https")
-        ctx = ssl.create_default_context()
+        # webpush's context: the default one, plus macOS's own bundle when Python's store is empty
+        # (python.org's Python before Install Certificates.command). The bare default failed every
+        # request there while OpenCode, with Bun's CAs, worked (#1080, 2026-11-23).
+        from .webpush import tls
+        ctx = tls()
         if not proxy:
             return http.client.HTTPSConnection(host, port, timeout=self.timeout, context=ctx)
         p = urllib.parse.urlsplit(proxy if "://" in proxy else f"http://{proxy}")
@@ -669,12 +712,22 @@ def _unreachable_why(kh: Keyhole, e: Exception) -> str:
 
 def _transient(e: Exception) -> bool:
     """A failure that may pass on its own (refused, reset, DNS, TLS, a timeout): held. Not a
-    certificate that doesn't verify, nor a proxy refusing the tunnel: those are the setup's,
-    said at once."""
+    certificate that doesn't verify, nor a proxy refusing the tunnel: those are the setup's, and
+    stop the round at once (_setup_failure, #1080)."""
     if isinstance(e, ssl.SSLCertVerificationError):
         return False
     return isinstance(e, (ConnectionError, socket.gaierror, socket.timeout, TimeoutError,
                           ssl.SSLError, http.client.IncompleteRead))
+
+
+def _setup_failure(e: Exception) -> bool:
+    """A transport failure that is this machine's setup, never passing on its own: a certificate
+    that doesn't verify, or the proxy refusing the tunnel (http.client's "Tunnel connection
+    failed: 403 …", or 407 for its login). Only a 4xx: a proxy's 502, 503 or 504 is the
+    provider's host down or slow behind it, an outage that keeps its old path (the review of
+    #1080, 2026-11-23)."""
+    return isinstance(e, ssl.SSLCertVerificationError) or (
+        isinstance(e, OSError) and str(e).startswith("Tunnel connection failed: 4"))
 
 
 def _short_why(e: Exception) -> str:
@@ -871,6 +924,9 @@ def _handler(kh: Keyhole):
                                 e, http.client.InvalidURL):
                             why = kh.redact(_unreachable_why(kh, e))
                             kh.health("unreachable", why)
+                            if _setup_failure(e):  # the round stops: no wait or retry helps (#1080)
+                                return self.send_json(400, f"keyhole: {kh.unreachable(why)}: "
+                                                           "the round stops")
                             how = (self.hold_on("outage", None, backoff, deadline, _short_why(e))
                                    if _transient(e) else "pass")
                             if how == "again":
@@ -939,7 +995,7 @@ def _handler(kh: Keyhole):
 
         def read_error(self, resp, wait: float | None = None):
             """(status, headers, redacted body, kind) of an upstream error: kind `quota`,
-            `rate_limited`, `outage` or None (HOLD_CODES, QUOTA), and the provider's health: a
+            `rate_limited`, `outage` or None (HOLD_CODES, QUOTA, CREDIT), and the provider's health: a
             rate limit until Retry-After, else ``wait`` (the hold's backoff) when given, else
             RATE_LIMIT_SECS; any 5xx unreachable, held or not."""
             data = resp.read(ERROR_CAP + 1)
@@ -952,7 +1008,7 @@ def _handler(kh: Keyhole):
             text = kh.redact(text)
             status = resp.status
             kind = ("quota" if status == 402 or (status in (429, 403) and QUOTA.search(text))
-                    else HOLD_CODES.get(status))
+                    or (status in (400, 403, 429) and CREDIT.search(text)) else HOLD_CODES.get(status))
             if kind == "quota" or "insufficient_quota" in text:
                 kh.health("no_credit", _first_line(text))
             elif kind == "rate_limited":
@@ -988,7 +1044,7 @@ def _handler(kh: Keyhole):
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
             sse = "event-stream" in (resp.getheader("Content-Type") or "")
-            self.used = {}  # this response's usage, merged: kh.usage once, before its last byte
+            self.used = {}  # this response's usage, merged: kh.usage once, before its end (#1114)
             key = kh._key.value.encode()
             hold = bytearray()  # SSE: a partial line; else the last len(key) - 1 bytes
             whole = bytearray()
@@ -1038,8 +1094,8 @@ def _handler(kh: Keyhole):
                         self.sniff(json.loads(whole))
                     except ValueError:
                         pass
-                # before the last byte: OpenCode prints the step's step_finish only once it has
-                # it, so the meter has booked the response by then (#1019)
+                # usage that came after the end's marker, or with none (a non-SSE body): booked
+                # before the last byte (#1019); with a marker it went at the marker (data_line)
                 self.flush_usage()
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
@@ -1062,6 +1118,12 @@ def _handler(kh: Keyhole):
             if not s.startswith(b"data:"):
                 return safe
             payload = s[5:].strip()
+            if payload == b"[DONE]":
+                # booked before the end's marker goes on: OpenCode prints the step's step_finish
+                # when it reads [DONE], not at the body's last byte, and a provider sending its
+                # last byte late had the response booked twice, OpenCode's row and then ours
+                # (#1114, 2026-11-23; checked on 2.3.2: Anthropic's waits for the last byte)
+                self.flush_usage()
             if not payload or payload == b"[DONE]":
                 return safe
             try:
@@ -1069,6 +1131,8 @@ def _handler(kh: Keyhole):
             except ValueError:
                 return safe
             self.sniff(obj)
+            if isinstance(obj, dict) and obj.get("type") in ("message_stop", "response.completed"):
+                self.flush_usage()  # the end of Anthropic's and the Responses API's stream (#1114)
             if isinstance(obj, dict) and "error" in obj:
                 return kh.redact(ln.decode("utf-8", "surrogateescape")).encode(
                     "utf-8", "surrogateescape")

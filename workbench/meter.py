@@ -171,7 +171,10 @@ def usage_tokens(u: dict) -> dict:
     - Responses: `input_tokens` with `input_tokens_details.cached_tokens`, `output_tokens` with
       `output_tokens_details.reasoning_tokens`;
     - Anthropic: `input_tokens` without the cache, `cache_read_input_tokens` and
-      `cache_creation_input_tokens` beside it.
+      `cache_creation_input_tokens` beside it, `output_tokens` with
+      `output_tokens_details.thinking_tokens`. Told by its cache fields before the Responses
+      API's details: its message_delta now carries `output_tokens_details` too, which read it as
+      the Responses API and booked every cache read and write as 0 (#1081, 2026-11-23).
     A cache read it doesn't name is priced as input: never under."""
     d = lambda k: u.get(k) if isinstance(u.get(k), dict) else {}  # noqa: E731
     if "prompt_tokens" in u or "completion_tokens" in u:
@@ -183,15 +186,18 @@ def usage_tokens(u: dict) -> dict:
         think = min(done, _n(cd.get("reasoning_tokens")))
         return {"in": prompt - read - write, "cache_read": read, "cache_write": write,
                 "out": done - think, "reasoning": think}
-    if "input_tokens_details" in u or "output_tokens_details" in u:
+    anthropic = "cache_read_input_tokens" in u or "cache_creation_input_tokens" in u
+    if not anthropic and ("input_tokens_details" in u or "output_tokens_details" in u):
         inp, outp = _n(u.get("input_tokens")), _n(u.get("output_tokens"))
         read = min(inp, _n(d("input_tokens_details").get("cached_tokens")))
         think = min(outp, _n(d("output_tokens_details").get("reasoning_tokens")))
         return {"in": inp - read, "cache_read": read, "cache_write": 0, "out": outp - think,
                 "reasoning": think}
+    outp = _n(u.get("output_tokens"))
+    think = min(outp, _n(d("output_tokens_details").get("thinking_tokens")))
     return {"in": _n(u.get("input_tokens")), "cache_read": _n(u.get("cache_read_input_tokens")),
             "cache_write": _n(u.get("cache_creation_input_tokens")),
-            "out": _n(u.get("output_tokens")), "reasoning": 0}
+            "out": outp - think, "reasoning": think}
 
 
 def _total(tok: dict) -> int:

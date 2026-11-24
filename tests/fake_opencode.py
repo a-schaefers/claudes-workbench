@@ -54,7 +54,8 @@ keeps it in its database (#1010). `session export` prints one finished step, its
 database it read: FAKE_FILL sets the context it read, FAKE_COMPACTED adds a completed compaction;
 in a home that records sessions, one it doesn't hold is "Session not found" (exit 1). `session
 list` lists the home's recorded sessions. Either fails without `--standalone`, as the real one
-does when another service holds the managed port. `auth export <provider>` prints the rows of
+does when another service holds the managed port, and so does `auth list` or `auth export`
+(#1070). `auth export <provider>` prints the rows of
 FAKE_AUTH_EXPORT (a JSON list, as OpenCode 2.3.2 prints them) for that provider, or `[]`, and
 appends the provider to FAKE_AUTH_LOG when set. `--version` says
 `FAKE_VERSION` (2.3.0). A `run` starts the config's workbench MCP server and lists its tools,
@@ -161,6 +162,10 @@ if args[:1] == ["models"]:
     for e in reachable():
         print(f"{e['providerID']}/{e['id']}")
     sys.exit(0)
+if args[:1] == ["auth"] and "--standalone" not in args:
+    # As real OpenCode does when another home's service holds the managed port: wb's key reads
+    # must neither depend on the background service nor start one with wb's environment (#1070)
+    sys.exit("Managed service port 49374 on 127.0.0.1 is already in use by PID 1")
 if args[:2] == ["auth", "list"]:
     doc = catalog_file()
     rows = doc.get("auth")

@@ -530,12 +530,17 @@ input, and a missing cache price is the input price.
 **Two views, the higher kept.** The keyhole's (`Meter.on_usage`, from the keyhole's thread): each
 upstream response's `usage`, merged into one per response (`keyhole._merged`: Anthropic's
 `message_start` and `message_delta` each carry part; some servers send a running total in every
-chunk) and handed over before the response's last byte, so OpenCode prints that step's
-`step_finish` only after it is booked. `meter.usage_tokens` reads Chat Completions
+chunk) and handed over before the stream's end marker goes on (`[DONE]`, Anthropic's
+`message_stop`, the Responses API's `response.completed`; else before the last byte), so OpenCode
+prints that step's `step_finish` only after it is booked: it prints it on reading `[DONE]`, not at
+the last byte, and a provider sending that byte late had the response booked twice (#1114; on
+2.3.2 its Anthropic path waits for the last byte). `meter.usage_tokens` reads Chat Completions
 (`prompt_tokens` with `prompt_tokens_details.cached_tokens` or DeepSeek's
 `prompt_cache_hit_tokens`, `completion_tokens_details.reasoning_tokens`), the Responses API
 (`input_tokens_details`, `output_tokens_details`) and Anthropic (`cache_read_input_tokens`,
-`cache_creation_input_tokens`). It sees every request the model gets, titles and compaction too
+`cache_creation_input_tokens`, `output_tokens_details.thinking_tokens` as reasoning), told by its
+cache fields first: its `message_delta` carries `output_tokens_details` too, read as the Responses
+API with every cache read and write 0 (#1081). It sees every request the model gets, titles and compaction too
 (which no `step_finish` carries), and a provider's own `usage.cost` (OpenRouter's) wins over the
 catalog (`source: provider`). OpenCode's (`Meter.step`, `step_finish.part.cost`, which
 `events.normalize` keeps as the step row's `cost`): with the keyhole metering, only a `reconcile`
@@ -789,18 +794,19 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   ("<provider> rate-limited the agent's requests for 10 minutes (HTTP 429)") or `outage`
   ("<provider> didn't answer for 10 minutes (HTTP 503)", or the transport's reason); OpenCode
   exiting on such a run sooner (its 10 retries) is the same stop. `queued` never stops a round.
-  A `provider.quota` (402) or `provider.auth` (401/403) error, or status `api_stop` (the keyhole's
+  A `provider.quota` (402), a 400 in `keyhole.CREDIT`'s words (#1079) or `provider.auth` (401/403) error, or status `api_stop` (the keyhole's
   quota stop, shared with #1019's spend stop; consumed by the stop), stops it at once: guard
-  `quota` or `auth`. `drive` runs a `rate_limited`/`outage` round again once (`_provider_revive`:
+  `quota` or `auth` (or the keyhole's `setup`: this machine can't reach the provider, #1080). `drive` runs a `rate_limited`/`outage` round again once (`_provider_revive`:
   a `load` event "<provider> rate-limited the round: it runs again once the cooldown ends", the
   lease stepped aside, a wait to the provider's `api-health.json` `until`, else `RATE_LIMIT_SECS`,
   at most `RATE_WAIT_S`, a steer note ending it into `_steer_round`, `wb stop` ending the runner),
   continuing the session: one revive a round, as a revive re-sends the whole context, which costs
-  money. A second stop, or a quota or key stop, ends it `stuck` with `cause` `provider`, `infra`
+  money. A second stop, or a quota, key or setup stop, ends it `stuck` with `cause` `provider`, `infra`
   `provider` (a bench replay scores `error`), and `provider_remedy` under the STOPPED line (`wb
   feedback <task> --text "carry on"` once the provider allows, and `wb route <role> gpu (the user's
   yes)` when the task has a role; top up or wait for the plan's reset; /connect for a refused
-  key). Its `stopped` event says `by: "provider"`, so it is never a lesson about the agent (the
+  key; for `setup`, "this machine's stop, not the agent's or <provider>'s: mend what the line
+  above says", #1080). Its `stopped` event says `by: "provider"`, so it is never a lesson about the agent (the
   same limit on three tasks of one account read as a recurring one). An `api_stop` whose guard is
   `spend` (#1019's day cap) stops the round the same way but is the user's budget, not the
   provider's: `cause` `spend`, `infra` `spend`, `by: "spend"` (`runner.stopped_by`, `SPEND`), no
@@ -1642,13 +1648,19 @@ directories mapped to the worktree; none left, no `PYTHONPATH`. The carrier neve
 request, and nothing OpenCode can read is hidden from its shell: its environment
 (`/proc/<pid>/environ`), the config layer, `OPENCODE_CONFIG_CONTENT`, and the lane doesn't restrict
 TCP. So the key never enters the lane: `keyhole.start(task, m)` loads it (`load_key`: `opencode auth
-export <provider>` with the runner's environment and the user's own OpenCode home, stdout read into
+export <provider> --standalone` with the runner's environment and the user's own OpenCode home, in
+the state directory with the project config off, as `models._opencode_json` runs one (without
+`--standalone` it started OpenCode's background service with the runner's environment, or failed
+where another home's service held its port: #1070), stdout read into
 memory, a failure's stderr cut to its first line and redacted, a `Key` whose repr is `Key(<provider>,
 api key)`) and serves a `Keyhole` from a daemon thread of the runner, outside the lane and dying with
 it, on `127.0.0.1:0` (never `localhost`, which may be `::1` first). It refuses
 (`KeyholeError("needs a key wb can hold outside the lane: <why>")`, remedy `keyhole.REMEDY`, "store
 an API key with /connect in OpenCode") an OAuth login (its tokens rotate: a copy refreshed would log
-the user out), an external credential, request signing (SigV4, Vertex: a header swap can't work),
+the user out), an external credential, any credential that isn't a key (OAuth, external, or a
+type such as 1.x's `wellknown`) active over an older key kept beside it ("<provider>'s active
+credential is an OAuth login …: `opencode auth switch` to its API key, or store one with
+/connect": the inactive key was billed, #1110), request signing (SigV4, Vertex: a header swap can't work),
 a key only in the environment (`{env:VAR}`, or `auth list` naming a variable: `SECRET_ENV` drops it
 from the agent anyway; a lone `{env:VAR}` V1 `options.apiKey` beside a stored key is no refusal,
 `_lone_env`: OpenCode 2.3.2 sends the stored key over any config apiKey, checked 2026-11-23, and the
@@ -1720,8 +1732,17 @@ and loses twice a key's length, at least 128 characters, from its end, so a key 
 leaves no prefix) and passed through `redact` (the key, its first 8 and last 4 characters,
 `KEYLIKE`: the `sk-`/`sk-ant-`/`sk-or-`/`xai-`/`gsk-`/`dsk-` shapes, `Bearer …`, any run of 32 or
 more key characters, each `[key redacted]`, in one pass): OpenCode prints an upstream body
-verbatim. A transport failure is a 502 `keyhole: can't reach <host>: <reason>` (on macOS a
-certificate failure names Python's Install Certificates command); a request http.client won't send
+verbatim. Its TLS context is `webpush.tls()`'s: the default one, plus `MAC_CAS` when Python's
+store is empty (python.org's Python before Install Certificates: the bare default failed every
+request there, #1080). A transport failure is a 502 `keyhole: can't reach <host>: <reason>`, except
+one that is this machine's setup (`_setup_failure`: a certificate that doesn't verify, on macOS
+naming Python's Install Certificates command; the proxy refusing the tunnel, a 4xx CONNECT reply
+such as 403 or 407, while its 502, 503 or 504 is the provider's host behind it and stays a 502),
+which writes status
+`api_stop {guard: "setup", text: "this machine can't reach <provider> (<host>): <reason>"}`
+(`Keyhole.unreachable`) and answers 400 `keyhole: <that>: the round stops`: the round stops at once,
+cause `provider`, never revived (as a 502 it was held as the provider's outage for 10 minutes and
+run again, #1080); a request http.client won't send
 (`InvalidURL`, a `ValueError`) is a 502 `keyhole: can't send this request on (<type>)`, the type
 only and never `unreachable`. Anything else a handler raises is one line in the log, `keyhole: a
 request failed (<type>)` (`_Server.handle_error`), never socketserver's traceback on stderr. Each outcome goes to
@@ -1742,7 +1763,8 @@ model whose `key` is `none`), starts it before the first round as `CURRENT["keyh
 health record; `on_usage` and `room` are the task's meter's, `meter.Meter.hooks`, #1019) and closes it when
 the drive ends. A `KeyholeError` fails the task through `_load_failed` (`<model> can't run:
 <why>`, a `failed` notice) with `keyhole.REMEDY` appended unless the text already gives the
-remedy (`keyhole_failure`). The layer's provider entry gets `keyhole_overlay(task)`:
+remedy, or is OpenCode failing to run or answer `opencode auth …`, which a key stored again
+doesn't mend (`keyhole_failure`, #1070). The layer's provider entry gets `keyhole_overlay(task)`:
 `provider.<pid>.options` from `layer_options`, and the same base and token as the task model's
 own `provider.api` and `options` (`models.<id>`, with the variants, below) where the model has an
 entry anyway: the task's catalog file, or one in a config file or the user's content, V1 or V2
@@ -1792,12 +1814,14 @@ such a model newer than the binary is still "Model unavailable" to the agent.
 
 **The hold** (#1020). `read_error` sorts an upstream error: 402, or a 429/403 whose body says the
 balance or plan is spent (`QUOTA`: `insufficient_quota`, OpenRouter's `limit_source`, a 5-hour or
-weekly limit), is `quota`; 429 and 529 (Anthropic's overloaded) `rate_limited`; 500, 502, 503, 504
+weekly limit), or a 400, 403 or 429 in Anthropic's out-of-credit words (`CREDIT`: "Your credit
+balance is too low … Plans & Billing … purchase credits", a 400 `invalid_request_error`, read as the
+agent's failure before #1079; never a bare "billing"), is `quota`; 429 and 529 (Anthropic's overloaded) `rate_limited`; 500, 502, 503, 504
 `outage`, and so are Cloudflare's 520-524 in front of a provider, as transient (`HOLD_CODES`; another
 5xx, a 501, a 505, a 525, goes back at once, its health
 still `unreachable`), as are the transient transport failures (`_transient`: refused, reset,
-DNS, TLS, a timeout; not a certificate that doesn't verify nor a proxy refusing the tunnel, said at
-once). `rate_limited` and `outage` are held: the keyhole waits `Retry-After` (seconds or a date),
+DNS, TLS, a timeout; not a certificate that doesn't verify nor a proxy refusing the tunnel, which
+stop the round at once as `setup`, above). `rate_limited` and `outage` are held: the keyhole waits `Retry-After` (seconds or a date),
 else `BACKOFF` 2, 4, 8 … 60 s, and sends again (the provider's cooldown recorded as that
 backoff, not `RATE_LIMIT_SECS`, or its own next pass would wait a minute), one OpenCode request
 for at most `RATE_HOLD_S` (300 s, `hold=` per keyhole); a wait past what is left of it passes the last answer back at once, redacted,
@@ -2223,7 +2247,8 @@ Notices go to `$WB_HOME/notify.jsonl` (`Task.notify`: `{ts, task, kind, text, ro
 tasks?}`). Kinds: `review` (report and `review_diff`), `stuck`, `failed`, `question` (with `id`),
 `checkin` (periodic, a nudge, a mid-round handover before the last allowed, a base check cut short).
 `cause` (`stuck`/`failed` with a round): `guard`, `agent`, `server` (#657), `provider` (an API provider's
-`rate_limited`/`outage` after its one revive, `quota`, `auth`: #1020), `spend` (the day's API spend
+`rate_limited`/`outage` after its one revive, `quota`, `auth`: #1020; the keyhole's `setup`, this
+machine's, #1080), `spend` (the day's API spend
 cap, #1019: `runner.SPEND`), `updated`
 (`runner._updated`), `opencode` (`runner.opencode_moved`), `signal` (`SIGNAL_STOP`), `died`
 (`reap`), `update` (`wb update --stop`). `tasks` names a batch (restart, shutdown, `wb update
@@ -5405,7 +5430,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb patch upstream <commit> --name <slug>` | | A clone; the slug `[a-z0-9][a-z0-9-]*` (`patches.SLUG`); an existing `pr/<slug>` or worktree refused. Fetches the upstream's remote, `worktree add -b pr/<slug> $WB_HOME/upstream/<slug> <local@{u}>`, cherry-picks the commit (a conflict stays there for `git cherry-pick --continue`); a commit with no test file says `it has no test: add one before sending (upstream asks for one, and wb patch check needs it)` (`NO_TEST_SEND`); a `Scope: me` commit is flagged. Writes `patches.json`, its `prepared` row the picked commit's ident. Prints, under `next (none of this has run):`, the tests (and the plugin's two when `mod/` changed), the body file to fill (`upstream/<slug>.md`, a copy of `.github/pull_request_template.md` when it exists), the one `wb patch send <slug> --title "<the commit's subject>" --body-file <it>`, `patches.gh_line`, and that send needs the user's yes; off GitHub, that send works only there. |
 | `wb patch send <slug> --title T --body-file F` | `--draft`, `--anyway` (sends a `Scope: me` commit) | *Sending a patch upstream*. Refuses before any network (`patches._refuse_send`): no `pr/<slug>` in its worktree, a cherry-pick under way, uncommitted changes there, no commits over the target, an empty body or the template unchanged, a `Scope: me` commit without `--anyway`; then a remote off GitHub, gh not `ready` (`gh_line`), a `.github/workflows/` change over https without the token's `workflow` scope. Under Claude Code (`CLAUDECODE=1`) it then refuses unless the mod's dialog approved exactly this send (`patches._approved`, `send-ok.json`), saying the user may run it in a terminal of their own. Then `gh repo fork` (not when the login owns upstream) and which repository the fork is (`_fork_of`), the push to it in gh's protocol, `gh pr create`; prints `pushed …` and `opened <url>` (`opened <url> (already open)` when a pull request for the branch is open already); on both, `patches.json`'s `sent` row records it (`note_sent`), which `wb update` asks gh about. A failed step says what is done already (a rerun goes on from there). No abbreviated flags (`allow_abbrev=False`: the dialog reads `--title` and `--body-file` as written). The mod asks the user first (*The consent gate*). |
 | `wb patch check <commit>` | | *Local patches*. A clone; the commit one of `local@{u}..local` (else `isn't one of local's patches`, exit 1; `no such commit`, exit 1). Its test files (`is_test`) alone, as a diff, `git apply --3way` onto the upstream `wb update` last fetched, in a scratch worktree under `patches/` (removed afterwards, a failure too); then only what the patch added: each `def test_…` its diff adds, as `python -m unittest <module>.<Class>.<method>` (the class read from the file there with `ast`), run by `patches.RUN_TESTS` (a `-c` script, `python -m unittest`'s loader and cwd, telling apart exit 1 a failure or an error, 3 a skip, an expected failure, an unexpected success or no test run, 0 a pass), and `claude plugin test mod` when a `*.test.ts(x)` changed (its exit 0 a pass), with `WB_HOME` inside the scratch directory and `CHECK_SECS` 900 each (the process group killed past it, a failure). One verdict, exit 0, the first that holds: `upstream fails this patch's tests (<subject>): keep it` (any failure); `<subject>'s tests didn't all run here (<why>), so wb patch check can't tell: run them where they can (a skip is not a pass)` (`a test was skipped`, `no test class holds <names>`: an added `def test_…` `_test_ids` placed in no class, `claude isn't on PATH for the mod's tests`; joined by `; `), never a pass: a test skipped without Landlock or claude was called `already passes`, inviting a drop (#1005, 2026-11-22); `<subject> has no test of its own, so wb patch check can't tell: write one (upstream asks for one in a pull request too)` (no test file, or nothing it found to run); `upstream already passes this patch's tests (<subject>): it likely fixed the same thing. Drop it with the user's yes: wb patch drop <sha>`. Before any, `<subject>'s tests don't apply to upstream any more: compare by hand`. It drops nothing. No abbreviated flags. |
-| `wb doctor` | | `ok`/`BAD` set the exit code, `--` informs: opencode (`runner.OPENCODE_TESTED`), git (`gitops.GIT_FLOOR` 2.34), models (an Ollama cloud one: `--  <id> is an Ollama cloud model, an API model now: set a role to use it`, #1013), `limit.context`, the roles (`BAD <path> can't be read (…)`, else `--  roles: <summary> (wb route)` once any is set, #1014), `optimize.advice`, `router.thinking_stall`, the state dir (2 GB, `store.host_drive`), `idle_line` (`IDLE_DAYS` 3), `models.unheld_loaded`, the lane (`lane.gaps`, `context.interop_gap`, `context.home_gap`, `context.listening_daemons`), commands.json, `context.TOOLCHAINS`, `wb` on PATH, `cli.logout_stops`, `cli.awake_line`, `webpush.has_cas`, the mod (`cli._mod_behind`), then `cli.agents_md_note`: `note: agents no longer get your ~/.claude/CLAUDE.md or ~/.claude/rules/: what they should follow in every project goes in ~/.config/workbench/AGENTS.md`, while either of Claude's exists and that file doesn't (#1061; `wb setup` prints it too); then `patches.doctor_lines`: `ok  install: marketplace at P`, `your own clone at P, branch B (wb patch init)` (on `local`, or patches.json's `source`) or `developer clone at P, branch B`; `--  local patches: N (scopes)` (a clone on `local`; a marketplace clone: its local changes and `wb patch init`); `gh: ready as L over P` (`ok`) or `--  gh: <state>: <hint>`, asked only with patches or a `wb patch upstream` branch that hasn't landed upstream (`held`, `_landed_pr`, by the local refs alone); none sets the exit code. Then each experiment. |
+| `wb doctor` | | `ok`/`BAD` set the exit code, `--` informs: opencode (`runner.OPENCODE_TESTED`), git (`gitops.GIT_FLOOR` 2.34), models (an Ollama cloud one: `--  <id> is an Ollama cloud model, an API model now: set a role to use it`, #1013), `limit.context`, the roles (`BAD <path> can't be read (…)`, else `--  roles: <summary> (wb route)` once any is set, #1014), `optimize.advice`, `router.thinking_stall`, the state dir (2 GB, `store.host_drive`), `idle_line` (`IDLE_DAYS` 3), `models.unheld_loaded`, the lane (`lane.gaps`, `context.interop_gap`, `context.home_gap`, `context.listening_daemons`), commands.json, `context.TOOLCHAINS`, `wb` on PATH, `cli.logout_stops`, `cli.awake_line`, `webpush.has_cas` (with push subscriptions or any API role: the keyhole's context is `webpush.tls()`, #1080), the mod (`cli._mod_behind`), then `cli.agents_md_note`: `note: agents no longer get your ~/.claude/CLAUDE.md or ~/.claude/rules/: what they should follow in every project goes in ~/.config/workbench/AGENTS.md`, while either of Claude's exists and that file doesn't (#1061; `wb setup` prints it too); then `patches.doctor_lines`: `ok  install: marketplace at P`, `your own clone at P, branch B (wb patch init)` (on `local`, or patches.json's `source`) or `developer clone at P, branch B`; `--  local patches: N (scopes)` (a clone on `local`; a marketplace clone: its local changes and `wb patch init`); `gh: ready as L over P` (`ok`) or `--  gh: <state>: <hint>`, asked only with patches or a `wb patch upstream` branch that hasn't landed upstream (`held`, `_landed_pr`, by the local refs alone); none sets the exit code. Then each experiment. |
 
 ## Files and formats
 
@@ -5676,7 +5701,7 @@ off), not `wb start`'s.
 | `served` | `{model, by}`: the model an API task's responses named and OpenRouter's provider (or null), from the keyhole when it first appears or changes |
 | `ratelimit_until`, `ratelimit` | the keyhole's hold or queue (#1020): epoch seconds, at least 60 s ahead; `{kind: rate_limited\|outage\|queued, provider, code, since, retry_after, why?}`; cleared at the first data, at each round's start and end |
 | `api` | an API task's spend (#1019, *Spend*): `{usd (the task's ledger total; null for a plan), metered, source (the last row's), tok {in, out, cache_read, cache_write, reasoning}, plan?}`, per ledger row |
-| `api_stop` | `{guard, text}`: stop the round now: the keyhole's `quota` (#1020), or `spend` (`Meter.room` refused a request, #1019); consumed by the runner's stop (`_ProviderWait.stop`, whose `stopped_by` makes `spend` its own cause), and cleared, whatever its guard, as each round begins (`Meter.begin`) |
+| `api_stop` | `{guard, text}`: stop the round now: the keyhole's `quota` (#1020) or `setup` (a certificate or proxy of this machine's, #1080), or `spend` (`Meter.room` refused a request, #1019); consumed by the runner's stop (`_ProviderWait.stop`, whose `stopped_by` makes `spend` its own cause), and cleared, whatever its guard, as each round begins (`Meter.begin`) |
 | `guard` | `spend` when `runner._go_on` stopped the task before a round (the day cap), with `infra` `spend` |
 | `updated_at` | every write |
 
@@ -5959,7 +5984,7 @@ continues; starts the config's MCP server and lists its tools unless `FAKE_NO_MC
 usage, exit 1; with `OPENCODE_DB` set a new session is recorded in that home, `<db>.sessions`), `session export`
 (tokens `FAKE_FILL` or 1200, answer.txt 41 → 42; `FAKE_COMPACTED`; `info.home` the database read; in a home that
 records sessions one it doesn't hold is "Session not found", exit 1), `session list` (the home's recorded ones); session
-commands fail without `--standalone`; `auth export <provider>` prints `FAKE_AUTH_EXPORT`'s rows for it (2.3.2's shape),
+and `auth` commands fail without `--standalone` (#1070); `auth export <provider>` prints `FAKE_AUTH_EXPORT`'s rows for it (2.3.2's shape),
 else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `text`, `step_finish` with tokens). Live tool names are 1.x-style (`bash`, `filePath`; 2.x `shell`,
 `path`: `events._brief` reads both). Records `FAKE_PROMPTS`, `FAKE_RUNS` (each run's `session`, `prompt`, `cwd`,
@@ -6290,7 +6315,7 @@ doc needs its own `!/` line).
 - **The provider's wait** (#1020): `keyhole.RATE_HOLD_S` (300) stays under the layer's header guard (600 s, #1017),
   or OpenCode cuts a held request itself; `runner.PROVIDER_GUARDS` → the `provider` cause and `runner.SPEND` → the
   `spend` cause (`runner.stopped_by`, also status `infra`, the `stopped` event's `by`, `bench.replay`'s `error`), both
-  outside `results.THE_STEP`; `api_stop` is shared with #1019's spend stop (guard `spend`); `HOLD_CODES`/`QUOTA` → `note_api`'s states and
+  outside `results.THE_STEP`; `api_stop` is shared with #1019's spend stop (guard `spend`); `HOLD_CODES`/`QUOTA`/`CREDIT` → `note_api`'s states and
   `_ProviderWait.on_retry`/`on_error`'s reading of OpenCode's `retry` and `error`.
 - **A model server's API fields** (`models.server_facts`, `ollama_served_context`, `weights`) → `test_portable.py`'s
   `Real` tests, *Running your own server*.

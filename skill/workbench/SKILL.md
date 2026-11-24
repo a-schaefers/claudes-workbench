@@ -496,6 +496,11 @@ coding choice is the user's (`wb coding`), never changed by a check.
   (the report says "the provider's stop"): tell the user so, and its remedy (wait, top up, or
   /connect the key again), then `wb feedback <name> --text "carry on"` once it allows. Never
   switch the task's model or role yourself: a route change takes the user's yes.
+  A `setup` stop ("this machine's stop") is neither the agent's nor the provider's: this machine
+  can't reach the provider (a certificate that doesn't verify, or a proxy refusing the tunnel).
+  Tell the user what the STOPPED line names (on macOS Python's Install Certificates command, else
+  the system's CA certificates, `SSL_CERT_FILE` or the proxy), then `wb feedback <name> --text
+  "carry on"` once it's mended; never change the route for it.
   A `spend` stop (cause `spend`: the day's API spend cap is reached) is the user's call, never a
   retry: ask them for a higher cap, the role on the GPU, or tomorrow, as the notice says; resume
   only after they decide. Nothing but the user raises the cap.

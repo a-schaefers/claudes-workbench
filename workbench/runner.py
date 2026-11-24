@@ -1262,7 +1262,9 @@ class _Clock:
 RATE_WAIT_S = 600
 RETRY_PAUSE_S = 60   # an API `retry` line pauses the clocks this long: OpenCode's own backoff
 HELD = ("rate_limited", "outage")
-PROVIDER_GUARDS = frozenset({*HELD, "quota", "auth"})  # stops that are the provider's (cause "provider")
+# stops that are the provider's (cause "provider"); `setup` is this machine's way to it (a
+# certificate, a proxy: the keyhole's api_stop, #1080), never the agent's either, and not revived
+PROVIDER_GUARDS = frozenset({*HELD, "quota", "auth", "setup"})
 # #1019's day spend cap: status `api_stop {guard: "spend"}` or its own stop between rounds. A cause
 # of its own, `spend`, outside results.THE_STEP like `provider`: the user's budget, never held
 # against the model or its slice (the engineer's call, 2026-11-23)
@@ -1368,13 +1370,16 @@ class _ProviderWait:
         self.retry_until = max(now + RETRY_PAUSE_S, later)
 
     def on_error(self, raw: dict) -> None:
-        """An OpenCode `error` line: a 402 (provider.quota) or 401/403 (provider.auth) ends the
-        round at once, the provider's; a rate limit or outage it gave up on, `end` stops."""
+        """An OpenCode `error` line: a 402 (provider.quota), a 400 whose text is a spent balance
+        (keyhole.CREDIT) or a 401/403 (provider.auth) ends the round at once, the provider's; a
+        rate limit or outage it gave up on, `end` stops."""
         if not self.api:
             return
         err = raw.get("error") if isinstance(raw.get("error"), dict) else {}
         kind, code = str(err.get("type") or ""), err.get("status")
-        if kind == "provider.quota" or code == 402:
+        # Anthropic's spent balance is a 400 invalid_request_error (#1079): its wording, keyhole.CREDIT
+        if kind == "provider.quota" or code == 402 or (
+                code == 400 and keyhole.CREDIT.search(str(err.get("message") or ""))):
             self.fatal = ("quota", f"{self.provider} says the account is out of credit "
                                    f"(HTTP {code or 402})")
         elif kind == "provider.auth" or code in (401, 403):
@@ -3620,11 +3625,12 @@ def start_keyhole(task: store.Task, m: models.Model) -> keyhole.Keyhole:
 
 def keyhole_failure(e: Exception) -> str:
     """A KeyholeError's text with its remedy, when one is a key /connect can store (OAuth, a key
-    only in the environment, none stored, one OpenCode can't export) and the text doesn't name one
-    already. A provider that signs requests, or speaks a way the keyhole can't, has none."""
+    only in the environment, none stored) and the text doesn't name one already. A provider that
+    signs requests, or speaks a way the keyhole can't, has none, nor does OpenCode failing to run
+    or answer `auth export`: storing a key again doesn't mend that (#1070, 2026-11-23)."""
     text = str(e)
     if "/connect" in text or "signs each request" in text or "doesn't speak" in text \
-            or "API base" in text:
+            or "API base" in text or "opencode auth " in text:
         return text
     return f"{text}: {keyhole.REMEDY}"
 
@@ -3815,6 +3821,9 @@ def provider_remedy(task: store.Task, guard: str) -> str:
     if guard == "auth":
         return (f"the provider's stop, not the agent's: store {p}'s API key again with /connect "
                 f"in OpenCode; then {resume} resumes it")
+    if guard == "setup":  # #1080: no route change or wait mends this machine's own setup
+        return (f"this machine's stop, not the agent's or {p}'s: mend what the line above says; "
+                f"then {resume} resumes it")
     role = task.spec.get("role")
     return (f"the provider's stop, not the agent's: {resume} resumes it once {p} allows"
             + (f"; or wb route {role} gpu (the user's yes) for the next tasks" if role else ""))

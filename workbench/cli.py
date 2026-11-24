@@ -6564,10 +6564,16 @@ def cmd_doctor(a):
         line(True, said)
     else:
         print(f"--  {said}")
-    if webpush.subscriptions() and not webpush.has_cas():  # every push failed, unsaid (#539)
-        line(False, "web chat notifications: this Python has no CA certificates, so no push reaches "
-             "its service: on macOS run Install Certificates.command (in your Python's Applications "
-             "folder); elsewhere install ca-certificates, or set SSL_CERT_FILE")
+    try:  # an API role's keyhole needs them too (#1080): every request failed, unsaid here
+        api_roles = routes.any_api(routes.read())
+    except routes.RoutesError:
+        api_roles = False
+    needs = [what for what, yes in (("web chat notifications", webpush.subscriptions()),
+                                    ("API roles", api_roles)) if yes]
+    if needs and not webpush.has_cas():  # every push failed, unsaid (#539)
+        line(False, f"{' and '.join(needs)}: this Python has no CA certificates, so no request "
+             "reaches its service: on macOS run Install Certificates.command (in your Python's "
+             "Applications folder); elsewhere install ca-certificates, or set SSL_CERT_FILE")
     found = models.discover()
     line(bool(found), f"{len(found)} local model(s)")
     for pid, why in models.skipped_providers():  # once dropped without a word (the 2026-11-16 audit)

@@ -22468,6 +22468,17 @@ class WebChat(Base):
             with redirect_stdout(buf), contextlib.suppress(SystemExit):
                 cli.main(["doctor"])
         self.assertIn("BAD web chat notifications: this Python has no CA certificates", buf.getvalue())
+        # an API role needs them as much, for its keyhole (#1080, 2026-11-23): said with no push
+        # subscription too
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"roles": {"trivial": {
+            "via": "api", "api": "deepinfra/x"}}, "day_usd": 1}))
+        for sub in list(wp.subscriptions()):
+            wp.unsubscribe(sub["endpoint"])
+        with mock.patch.object(wp, "has_cas", return_value=False):
+            buf = io.StringIO()
+            with redirect_stdout(buf), contextlib.suppress(SystemExit):
+                cli.main(["doctor"])
+        self.assertIn("BAD API roles: this Python has no CA certificates", buf.getvalue())
         self.assertTrue(wp.has_cas())                                        # this machine's has them
 
     def test_a_page_only_on_screen_silences_its_own_devices_push_and_not_the_phones(self):
@@ -25685,13 +25696,32 @@ class _QuietUpstream(ThreadingHTTPServer):
         pass
 
 
+def _tls_upstream(tmp: Path, handler, server=None):
+    """``handler`` served over TLS on 127.0.0.1 with a self-signed certificate for localhost:
+    (server, the certificate's path), for #1080's tests. Skips without openssl."""
+    import ssl
+    if not shutil.which("openssl"):
+        raise unittest.SkipTest("needs openssl")
+    key, cert = tmp / "tls-k.pem", tmp / "tls-c.pem"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+                    "-nodes", "-keyout", key, "-out", cert, "-days", "1", "-subj", "/CN=localhost",
+                    "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"],
+                   check=True, capture_output=True)
+    srv = (server or _QuietUpstream)(("127.0.0.1", 0), handler)
+    srv.daemon_threads = True
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(cert, key)
+    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    return srv, cert
+
+
 class _Upstream(http.server.BaseHTTPRequestHandler):
     """A provider for the keyhole's tests: records each request (method, path, headers, body) on
     its server's `seen` and answers as its server's `mode` says: "ok" (an OpenAI SSE answer,
     or Anthropic's for /messages), "status" (`status`, a body echoing part of the key the way
     OpenAI's 401 does, `retry_after`), "chunks" (`chunks` SSE pieces `gap` s apart; the
     Responses API's events for /responses), "raw" (`status`, `ctype`, then `pieces` sent as they
-    are, one chunk each), with `served` (the response's model) and `by` (OpenRouter's
+    are, one chunk each, the end `tail` s later), with `served` (the response's model) and `by` (OpenRouter's
     provider)."""
     protocol_version = "HTTP/1.1"
 
@@ -25719,6 +25749,7 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(b"%x\r\n%s\r\n" % (len(piece), piece))
                 self.wfile.flush()
                 time.sleep(0.05)
+            time.sleep(getattr(s, "tail", 0))  # the body's last byte late (#1114)
             self.wfile.write(b"0\r\n\r\n")
             return
         if s.mode == "status":
@@ -25848,6 +25879,13 @@ class _KeyholeTest(Base):
         script.write_text(textwrap.dedent("""\
             import json, os, sys
             auth = json.loads(os.environ["FAKE_AUTH"])
+            with open(os.environ["FAKE_AUTH_ARGV"], "a") as f:
+                f.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(),
+                                    "pwd": os.environ.get("PWD"),
+                                    "noproject": os.environ.get("OPENCODE_DISABLE_PROJECT_CONFIG")})
+                        + "\\n")
+            if "--standalone" not in sys.argv:  # as real OpenCode with another home's service (#1070)
+                sys.exit("Managed service port 49374 on 127.0.0.1 is already in use by PID 1")
             if sys.argv[1:3] == ["auth", "export"]:
                 p = auth.get(sys.argv[3], {})
                 if p.get("fail"):
@@ -25860,6 +25898,7 @@ class _KeyholeTest(Base):
             """))
         os.environ["WB_OPENCODE_BIN"] = shlex.join([sys.executable, str(script)])
         os.environ["FAKE_AUTH"] = json.dumps(auth)
+        os.environ["FAKE_AUTH_ARGV"] = str(Path(self.tmp.name) / "fake_auth.argv")
 
     def key_row(self, provider, value, active=True):
         return {"id": "cred_1", "integrationID": provider, "label": "main", "active": active,
@@ -26076,7 +26115,8 @@ class Keyhole(_KeyholeTest):
         self.assertEqual(self.post(kh)[0], 200)
         self.assertEqual(len(self.up.seen), 1)
 
-    def test_wbs_https_proxy_carries_the_upstream_unless_no_proxy_says(self):
+    def _tunnel_proxy(self, status: int) -> list:
+        """An https_proxy that answers every CONNECT with ``status``; the tunnels it was asked for."""
         tunnels = []
 
         class Proxy(http.server.BaseHTTPRequestHandler):
@@ -26085,7 +26125,7 @@ class Keyhole(_KeyholeTest):
 
             def do_CONNECT(self):
                 tunnels.append((self.path, self.headers.get("Proxy-Authorization")))
-                self.send_response(403)
+                self.send_response(status)
                 self.end_headers()
 
         proxy = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
@@ -26093,17 +26133,41 @@ class Keyhole(_KeyholeTest):
         self.addCleanup(proxy.server_close)
         self.addCleanup(proxy.shutdown)
         os.environ["https_proxy"] = f"http://me:p%40ss@127.0.0.1:{proxy.server_port}"
+        return tunnels
+
+    def test_wbs_https_proxy_carries_the_upstream_unless_no_proxy_says(self):
+        tunnels = self._tunnel_proxy(403)
+
         m = self.model()
         m.base_url = "https://api.example.invalid/v1/openai"
         kh = self.keyhole(m, hold=0)  # no address for it: an outage, passed back at once
         code, _, text = self.post(kh)
-        self.assertEqual(code, 502)
-        self.assertIn("keyhole: can't reach api.example.invalid: ", text)
+        # the proxy refusing the tunnel is this machine's setup: the round stops (#1080)
+        self.assertEqual(code, 400)
+        self.assertIn("keyhole: this machine can't reach deepinfra (api.example.invalid): Tunnel "
+                      "connection failed: 403", text)
+        self.assertEqual(self.task.status["api_stop"]["guard"], "setup")
         self.assertEqual(tunnels, [("api.example.invalid:443",
                                     "Basic " + base64.b64encode(b"me:p@ss").decode())])
         os.environ["no_proxy"] = ".example.invalid"
         self.assertEqual(self.post(kh)[0], 502)
         self.assertEqual(len(tunnels), 1)                                # straight to the host
+
+    def test_a_proxys_503_to_the_tunnel_is_the_providers_outage_not_this_machines_setup(self):
+        # the review of #1080 (2026-11-23): http.client raises the same "Tunnel connection
+        # failed" for every non-200 CONNECT reply, so a proxy's 503 (the provider's host down
+        # behind it) stopped the round as this machine's setup, unrevived, with a remedy a user
+        # behind a corporate proxy can't follow
+        tunnels = self._tunnel_proxy(503)
+        m = self.model()
+        m.base_url = "https://api.example.invalid/v1/openai"
+        kh = self.keyhole(m, hold=0)                                     # passed back at once
+        code, _, text = self.post(kh)
+        self.assertEqual(code, 502)                                      # OpenCode retries it
+        self.assertIn("keyhole: can't reach api.example.invalid: Tunnel connection failed: 503",
+                      text)
+        self.assertNotIn("api_stop", self.task.status)
+        self.assertEqual(len(tunnels), 1)
 
     def test_parallel_requests_each_get_their_own_connection(self):
         kh = self.keyhole()
@@ -26138,6 +26202,125 @@ class Keyhole(_KeyholeTest):
         self.assert_no_canary(out.getvalue(), str(e.exception), repr(kh._key),
                               self.all_files(self.task.dir))
         self.assertNotIn(kh.token, out.getvalue())
+
+    def test_the_key_is_read_standalone_in_the_state_directory_never_through_the_service(self):
+        # #1070 (2026-11-23): without --standalone the first API task started OpenCode's
+        # background service with the runner's environment (PYTHONPATH, CLAUDECODE=1), and where
+        # another home's service held the port the export exited 1 and the task failed at start,
+        # told to store a key it had (the fake refuses `auth` without --standalone, as that does)
+        self.fake_auth({"deepinfra": {"export": [self.key_row("deepinfra", {"type": "key",
+                                                                            "key": self.CANARY})]},
+                        "xenv": {"list": [{"type": "env", "name": "XENV_API_KEY"}]}})
+        self.assertEqual(self.kh_mod.load_key("deepinfra").value, self.CANARY)
+        with self.assertRaises(self.kh_mod.KeyholeError):
+            self.kh_mod.load_key("xenv")                                 # auth list too
+        calls = [json.loads(x) for x in Path(os.environ["FAKE_AUTH_ARGV"]).read_text().splitlines()]
+        self.assertEqual([c["argv"] for c in calls],
+                         [["auth", "export", "deepinfra", "--standalone"],
+                          ["auth", "export", "xenv", "--standalone"],
+                          ["auth", "list", "--format", "json", "--standalone"]])
+        home = str(store.home())
+        self.assertTrue(all(c["cwd"] == c["pwd"] == home and c["noproject"] == "1" for c in calls))
+        self.fake_auth({"broken": {"fail": "Error: Database is locked\n"}})
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:
+            self.kh_mod.load_key("broken")
+        said = runner.keyhole_failure(e.exception)
+        self.assertEqual(said, "can't read broken's key: opencode auth export exited 1: "
+                               "Error: Database is locked")              # no /connect remedy
+        self.assertNotIn(self.kh_mod.REMEDY, said)
+
+    def test_a_python_with_no_ca_certificates_reaches_the_provider_through_macos_own_bundle(self):
+        # #1080 (2026-11-23): the keyhole's bare default context had no CAs under python.org's
+        # Python (before Install Certificates), so every request failed while OpenCode worked;
+        # webpush.tls() already added MAC_CAS. One that still doesn't verify stops the round.
+        from workbench import webpush
+        tmp = Path(self.tmp.name)
+        up, cert = _tls_upstream(tmp, _Upstream)
+        up.seen, up.mode, up.status, up.message = [], "ok", 200, ""
+        up.retry_after, up.chunks, up.gap = None, 1, 0
+        up.served, up.by, up.ctype, up.pieces = "served-model", None, "application/json", []
+        threading.Thread(target=up.serve_forever, daemon=True).start()
+        self.addCleanup(up.server_close)
+        self.addCleanup(up.shutdown)
+        (tmp / "no-cas.pem").write_text("")
+        (tmp / "no-cas").mkdir()
+        os.environ.update(SSL_CERT_FILE=str(tmp / "no-cas.pem"), SSL_CERT_DIR=str(tmp / "no-cas"))
+        m = self.model()
+        base = f"https://localhost:{up.server_port}/v1/openai"
+        for bundle, want in ((cert, 200), (tmp / "none.pem", 400)):
+            with mock.patch.object(webpush, "_ctx", []), mock.patch.object(webpush, "MAC_CAS", str(bundle)):
+                kh = self.kh_mod.Keyhole(self.task, m, self.kh_mod.Key(m.provider, self.CANARY), base,
+                                         "bearer", log=self.lines.append)
+                self.addCleanup(kh.close)
+                code, _, text = self.post(kh)
+            self.assertEqual(code, want, text)
+        self.assertEqual(len(up.seen), 1)                                # the first, verified
+        self.assertIn("this machine can't reach deepinfra (localhost): its certificate didn't verify",
+                      text)
+        self.assertIn("the round stops", text)                           # a 400: OpenCode won't retry
+        self.assertEqual(self.task.status["api_stop"]["guard"], "setup")
+
+    def test_anthropics_cache_writes_are_metered_when_its_message_delta_names_thinking_tokens(self):
+        # #1081 (2026-11-23): Anthropic's message_delta now carries output_tokens_details
+        # {thinking_tokens}, which usage_tokens read as the Responses API: a real Haiku step was
+        # booked {"in": 4, "cache_write": 0, "out": 200} against OpenCode's 7226 cache writes
+        from workbench import meter
+        got = []
+        m = self.model("anthropic", "claude-haiku-5-5", "/v1", "@opencode/ai/providers/anthropic")
+        kh = self.keyhole(m, on_usage=got.append)
+        self.up.mode, self.up.status, self.up.ctype = "raw", 200, "text/event-stream"
+        self.up.pieces = [f"event: {ev['type']}\ndata: {json.dumps(ev)}\n\n".encode() for ev in (
+            {"type": "message_start", "message": {"id": "msg_1", "type": "message", "model": m.name,
+                                                  "usage": {"input_tokens": 11, "output_tokens": 1,
+                                                            "cache_creation_input_tokens": 6303,
+                                                            "cache_read_input_tokens": 0}}},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"output_tokens": 40, "output_tokens_details": {"thinking_tokens": 25}}},
+            {"type": "message_stop"})]
+        code, _, _ = self.post(kh, "/messages", headers={"Authorization": None, "x-api-key": kh.token})
+        self.assertEqual(code, 200)
+        self.assertEqual([meter.usage_tokens(u) for u in got],
+                         [{"in": 11, "cache_read": 0, "cache_write": 6303, "out": 15, "reasoning": 25}])
+        self.assertEqual(meter.usage_tokens({                            # the issue's own figures
+            "input_tokens": 11, "cache_creation_input_tokens": 6303, "cache_read_input_tokens": 0,
+            "output_tokens": 4, "output_tokens_details": {"thinking_tokens": 0}}),
+            {"in": 11, "cache_read": 0, "cache_write": 6303, "out": 4, "reasoning": 0})
+
+    def test_an_old_key_behind_an_active_oauth_login_is_never_used(self):
+        # #1110 (2026-11-23): with an OAuth login active and an older API key kept beside it,
+        # load_key skipped the login and returned the key, billing the credential the user had
+        # switched away from (`opencode auth switch`)
+        oauth = {"type": "oauth", "methodID": "m", "refresh": "r", "access": "a", "expires": 1}
+        self.fake_auth({"anthropic": {"export": [
+                            self.key_row("anthropic", {"type": "key", "key": self.CANARY}, active=False),
+                            self.key_row("anthropic", oauth)]},
+                        "keyfirst": {"export": [                         # the key active: it runs
+                            self.key_row("keyfirst", oauth, active=False),
+                            self.key_row("keyfirst", {"type": "key", "key": self.CANARY})]}})
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:
+            self.kh_mod.load_key("anthropic")
+        self.assertIn("anthropic's active credential is an OAuth login", str(e.exception))
+        self.assertIn("opencode auth switch", str(e.exception))
+        self.assertEqual(runner.keyhole_failure(e.exception), str(e.exception))  # its own remedy
+        self.assert_no_canary(str(e.exception))
+        self.assertEqual(self.kh_mod.load_key("keyfirst").value, self.CANARY)
+
+    def test_an_old_key_behind_any_active_credential_that_isnt_a_key_is_never_used(self):
+        # the review of #1110 (2026-11-23): the refusal named only oauth and external, so an
+        # active credential of another type (1.x's `wellknown`, or one OpenCode adds) fell
+        # through to the inactive key and billed it
+        self.fake_auth({p: {"export": [
+            self.key_row(p, {"type": "key", "key": self.CANARY}, active=False),
+            self.key_row(p, {"type": kind, "token": "t"})]}
+            for p, kind in (("wellco", "wellknown"), ("extco", "external"))})
+        for provider, why in (("wellco", "active credential is a wellknown credential, not an "
+                                         "API key"),
+                              ("extco", "active credential comes from an external source")):
+            with self.assertRaises(self.kh_mod.KeyholeError) as e:
+                self.kh_mod.load_key(provider)
+            self.assertIn(why, str(e.exception))
+            self.assertIn("opencode auth switch", str(e.exception))
+            self.assert_no_canary(str(e.exception))
 
     def test_oauth_and_env_keys_cant_run(self):
         self.fake_auth({"oauthco": {"export": [self.key_row("oauthco", {
@@ -26554,6 +26737,77 @@ class RealOpenCodeAPI(_KeyholeTest):
             [sent] = asked
             self.assertIn(kh.token, sent[header])                          # OpenCode had the token
             self.assert_no_canary(json.dumps(sent))                        # and never the key
+
+    def test_reading_a_key_starts_no_background_service(self):
+        # #1070 (2026-11-23): `opencode auth export` without --standalone started `opencode serve
+        # --service` in the runner's environment, left running after the task
+        tmp = Path(self.tmp.name)
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        env = {"PATH": os.environ["PATH"], "HOME": str(tmp / "home"),
+               "OPENCODE_DISABLE_MODELS_FETCH": "1",
+               **{f"XDG_{d.upper()}_HOME": str(tmp / "svc" / d)
+                  for d in ("config", "data", "state", "cache")}}
+        for k in ("OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR",
+                  "WB_OPENCODE_CONFIG", "WB_OPENCODE_BIN", "OPENCODE_DB"):
+            os.environ.pop(k, None)
+        os.environ.update(env)
+
+        def service(*argv):
+            return subprocess.run(["opencode", "service", *argv], env=env, capture_output=True,
+                                  text=True, timeout=60).stdout.strip()
+
+        def ours():  # a service this scratch home started: killed by its pid, never by name
+            out = []
+            for pid in subprocess.run(["pgrep", "-x", "opencode"], capture_output=True,
+                                      text=True).stdout.split():
+                try:
+                    seen = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+                except OSError:
+                    continue
+                if f"HOME={tmp / 'home'}".encode() in seen:
+                    out.append(int(pid))
+            return out
+
+        self.addCleanup(lambda: [os.kill(pid, signal.SIGKILL) for pid in ours()])
+        service("set", "port", str(port))       # not the user's service's port
+        self.assertEqual(service("status"), "stopped")
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:
+            self.kh_mod.load_key("deepseek")                             # none stored here
+        self.assertIn("OpenCode has no key stored for deepseek", str(e.exception))
+        self.assertEqual(service("status"), "stopped")
+        self.assertEqual(ours(), [])
+
+    def test_a_response_is_booked_before_opencode_prints_its_step_finish(self):
+        # #1114 (2026-11-23): OpenCode prints step_finish when it reads [DONE], not at the body's
+        # last byte, and the keyhole booked the usage at that byte: a provider sending its end
+        # late had the response booked twice (OpenCode's step row, then the keyhole's)
+        got = []
+        kh = self.keyhole(self.model(), on_usage=got.append)
+        name = kh.model.name
+        self.up.mode, self.up.status, self.up.ctype, self.up.tail = "raw", 200, "text/event-stream", 1.0
+        self.up.pieces = [f"data: {json.dumps(ev)}\n\n".encode() for ev in (
+            {"model": name, "choices": [{"index": 0, "delta": {"content": "ok"}}]},
+            {"model": name, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+             "usage": {"prompt_tokens": 7, "completion_tokens": 3}})] + [b"data: [DONE]\n\n"]
+        tmp = Path(self.tmp.name)
+        layer = tmp / "layer-race.json"
+        layer.write_text(json.dumps({"provider": {"deepinfra": {"options": self.kh_mod.layer_options(kh)}}}))
+        p = subprocess.Popen(["opencode", "run", "--standalone", "--title", "t", "-m", kh.model.id,
+                              "--format", "json", "say ok"], cwd=self.repo,
+                             env=self.scratch_env(layer, "race"), stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, text=True)
+        self.addCleanup(lambda: p.poll() is None and p.kill())
+        booked = []                                     # what the keyhole had booked at each step_finish
+        for line in p.stdout:
+            with contextlib.suppress(ValueError):
+                if json.loads(line).get("type") == "step_finish":
+                    booked.append(len(got))
+        self.assertEqual(p.wait(timeout=120), 0)
+        self.assertEqual(booked, [1])
+        self.assertEqual(got, [{"prompt_tokens": 7, "completion_tokens": 3}])    # once
+        self.assertEqual(len(self.up.seen), 1)
 
     def scratch_env(self, layer, name, models_path=None):
         """Real OpenCode's environment with nothing of the user's: scratch homes, no catalog
@@ -27693,7 +27947,7 @@ class ApiHarness(Base):
     def test_the_fake_lists_the_catalog_and_its_keys_as_opencode_23_prints_them(self):
         code, rows, _ = self.fake("api", "model.list")
         self.assertEqual((code, rows[0]["data"]), (0, []))           # no catalog: an empty list
-        self.assertEqual(self.fake("auth", "list", "--format", "json")[2].strip(), "[]")
+        self.assertEqual(self.fake("auth", "list", "--format", "json", "--standalone")[2].strip(), "[]")
         self.catalog()
         code, rows, _ = self.fake("api", "model.list", "--standalone")
         self.assertEqual(set(rows[0]), {"location", "data"})
@@ -27702,13 +27956,13 @@ class ApiHarness(Base):
                          [FLASH, "anthropic/claude-haiku-5-5"])
         code, _, _ = self.fake("models", "deepinfra")           # 2.3.2 takes no provider argument
         self.assertEqual(code, 1)
-        auth = json.loads(self.fake("auth", "list", "--format", "json")[2])
+        auth = json.loads(self.fake("auth", "list", "--format", "json", "--standalone")[2])
         self.assertEqual([(a["id"], [c["type"] for c in a["connections"]]) for a in auth],
                          [("deepinfra", ["credential"]), ("anthropic", ["credential"])])
         self.assertEqual(auth[0]["connections"][0]["method"], "key")
         self.catalog(auth=[{"id": "xai", "name": "xAI", "connections": [{"type": "env",
                                                                          "name": "XAI_API_KEY"}]}])
-        self.assertEqual(json.loads(self.fake("auth", "list", "--format", "json")[2])[0]["connections"],
+        self.assertEqual(json.loads(self.fake("auth", "list", "--format", "json", "--standalone")[2])[0]["connections"],
                          [{"type": "env", "name": "XAI_API_KEY"}])  # the test's own rows
 
     def test_a_provider_without_a_key_drops_out_of_every_list_and_its_models_cant_run(self):
@@ -27717,7 +27971,7 @@ class ApiHarness(Base):
         self.assertEqual([e["providerID"] for e in self.fake("api", "model.list")[1][0]["data"]],
                          ["deepinfra"])
         self.assertEqual(self.fake("models")[2].split(), [FLASH])
-        self.assertEqual([a["id"] for a in json.loads(self.fake("auth", "list", "--format", "json")[2])],
+        self.assertEqual([a["id"] for a in json.loads(self.fake("auth", "list", "--format", "json", "--standalone")[2])],
                          ["deepinfra"])
         code, rows, _ = self.fake("run", "--standalone", "-m", "anthropic/claude-haiku-5-5",
                                   "--format", "json", "--", "go")
@@ -30032,11 +30286,11 @@ class RateLimits(Base):
                                                   "role": "significant"})
         return task
 
-    def keyhole(self, task, hold=3):
+    def keyhole(self, task, hold=3, base=None):
         """The keyhole as drive starts it for the task (#1015), its log in runner.log; FAKE_API
-        points the fake's `api` scenario at it."""
+        points the fake's `api` scenario at it. ``base``: another upstream than self.up."""
         m = self.models.Model(id="deepseek/deepseek-flash", provider="deepseek", name="deepseek-flash",
-                              base_url=f"http://127.0.0.1:{self.up.server_port}/v1", engine="api",
+                              base_url=base or f"http://127.0.0.1:{self.up.server_port}/v1", engine="api",
                               label="deepseek-flash", kind="api", key="stored")
         log = task.dir / "runner.log"
         kh = self.kh_mod.Keyhole(task, m, self.kh_mod.Key("deepseek", self.CANARY), m.base_url, "bearer",
@@ -30227,6 +30481,58 @@ class RateLimits(Base):
         runner.drive(fake)
         self.assertEqual((fake.status["phase"], self.notice(fake)["cause"]), ("stuck", "provider"))
         self.assertIn("(HTTP 402)", fake.status["last"])
+
+    def test_anthropics_400_credit_balance_too_low_stops_the_round_as_a_spent_balance(self):
+        # #1079 (2026-11-23): Anthropic answers a spent balance with 400 invalid_request_error,
+        # read as no quota: the task failed as the agent's, with no remedy and no no_credit mark
+        low = ("Your credit balance is too low to access the Anthropic API. Please go to Plans & "
+               "Billing to upgrade or purchase credits.")
+        task = self.api_task("t-400c", "api", "--silence-timeout", "30")
+        self.up.rate_until, self.up.code, self.up.after = float("inf"), 400, None
+        self.up.body = low
+        self.keyhole(task)
+        runner.drive(task)
+        st = task.status
+        self.assertEqual((st["phase"], st["last"], st.get("infra")),
+                         ("stuck", "deepseek says the account is out of credit (HTTP 400)", "provider"))
+        self.assertEqual(len(self.up.seen), 1)
+        n = self.notice(task)
+        self.assertEqual(n["cause"], "provider")
+        self.assertIn("top up your deepseek account, or wait for the plan's reset", n["text"])
+        self.assertEqual(self.models.api_health("deepseek")["state"], "no_credit")
+        # OpenCode's own error line, no keyhole between: the same stop; another 400 isn't one
+        wait = runner._ProviderWait(task, 1)
+        wait.on_error({"error": {"type": "provider.invalid-request", "status": 400, "message": low}})
+        self.assertEqual(wait.fatal[0], "quota")
+        wait = runner._ProviderWait(task, 1)
+        wait.on_error({"error": {"type": "provider.invalid-request", "status": 400,
+                                 "message": "max_tokens: billing tier allows at most 8192"}})
+        self.assertIsNone(wait.fatal)
+
+    def test_a_certificate_that_doesnt_verify_stops_the_round_at_once_as_this_machines(self):
+        # #1080 (2026-11-23): the keyhole's 502 was retried, read as the provider's outage for
+        # RATE_WAIT_S (600 s), run again and stopped again, the notice blaming the provider
+        tmp = Path(self.tmp.name)
+        up, _ = _tls_upstream(tmp, _RateUpstream, ThreadingHTTPServer)  # trusted by nothing here
+        up.seen, up.rate_until, up.code, up.after, up.body, up.keepalive = [], 0.0, 429, None, "", 0
+        threading.Thread(target=up.serve_forever, daemon=True).start()
+        self.addCleanup(up.server_close)
+        self.addCleanup(up.shutdown)
+        task = self.api_task("t-cert", "api", "--silence-timeout", "30")
+        self.keyhole(task, base=f"https://localhost:{up.server_port}/v1")
+        began = time.monotonic()
+        runner.drive(task)
+        self.assertLess(time.monotonic() - began, 30)                   # not RATE_WAIT_S, nor twice
+        st = task.status
+        self.assertEqual((st["phase"], st.get("infra")), ("stuck", "provider"), st["last"])
+        self.assertIn("this machine can't reach deepseek (localhost): its certificate didn't verify",
+                      st["last"])
+        self.assertEqual(up.seen, [])                                    # nothing got through
+        self.assertFalse(self.events(task, "load"))                     # never revived
+        n = self.notice(task)
+        self.assertIn("this machine's stop, not the agent's or deepseek's", n["text"])
+        self.assertNotIn("didn't answer", n["text"])
+        self.assertNotIn("wb route", n["text"])
 
     def test_read_bound_records_nothing_for_a_rate_limited_round(self):
         from workbench import router
