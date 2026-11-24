@@ -4633,8 +4633,9 @@ client; the server needs no browser.
 **Files** (`$WB_HOME/chat/`):
 - `messages.jsonl`: `{id: "<ms>-<6 hex>", ts, from: "user"|"claude"|"notice"|<agent name>, text, cid?, shots?,
   audio?, about?, files?, role?: "agent", re?: [ids], to?: ["user"|<agent name>], claude_pid?}`
-  (`claude_pid`: the Claude Code a `wb chat reply` ran under, its `CLAUDE_PID`, for the owed
-  reply, #1129). A `notice` (`wb chat notice`) has `text: "Claude is waiting on a permission|plan|question in the
+  (`claude_pid`: on every `from: claude` row, the Claude Code its `wb chat reply`, `listen` or
+  `wb shot --chat` ran under, its `CLAUDE_PID`, stamped in `chat.send`, for the owed reply, #1129;
+  none: an older wb's row, or one run outside Claude Code). A `notice` (`wb chat notice`) has `text: "Claude is waiting on a permission|plan|question in the
   terminal"` and adds `tool, what?` (2000 characters): news like Claude's
   (`chat.NEWS`: pushed, `/api/latest`) but not a reply, so the owed reply (#767) reads only `from:
   claude`; `chat.thread` adds `answered` once settled. `files`: `[{id, name, size, type, path}]`.
@@ -5077,8 +5078,9 @@ for everyone, #835). An expired message (claim refuses it) isn't tried again thi
 
 Each message passed on is owed a chat reply (`mem.chatOwed`, `owedAtTurnEnd`, #767: phone
 questions were answered in the terminal only for two releases): a `wb chat reply`/`listen` or `wb
-shot … --chat` in Bash, a `from: claude` row of this Claude Code's (`claude_pid` its own or
-none) or answering it (`re` holds its id), or a typed prompt settles it (any session's row did:
+shot … --chat` in Bash, a `from: claude` row of this Claude Code's (`claude_pid` its own, or
+none: an older wb's row; `chat.send` stamps every one, as another session's screenshot still
+settled it when only `reply` did, the #1129 review) or answering it (`re` holds its id), or a typed prompt settles it (any session's row did:
 another's report kept the follow-up from going, #1129). At the end of the main
 turn that had it (`grace` 1 when it was queued behind a running turn or behind a prompt the mod
 submitted that poll, `mem.submitted`, #837) with no reply, one OWED_NOTE turn is queued (taken back
@@ -6383,7 +6385,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `passed`) → `tuning.acted` and its row field (`peak_share`, `self_review_due`).
 - **`chat.py` or `chat_static/`** → the browser test. **`/api/state`'s asks or messages** → `sw.js`. **A key of
   `chat.snapshot` or `week_saved`** → docs/chat-api.md's `GET /api/state` (`test_docs`: both had gone unlisted, #1127).
-- **listener.json's `parent`** (the mod's `listen`) → `chat.caller_listens`; **a reply's `claude_pid`** (`chat.reply`)
+- **listener.json's `parent`** (the mod's `listen`) → `chat.caller_listens`; **a Claude row's `claude_pid`** (`chat.send`)
   → the mod's `owedAtTurnEnd` (#1129).
 - **A message's `from`** (`user`, `claude`, `notice`, an agent's name with `role: "agent"`) → `chat.NEWS`,
   `chat._inbound`, `chat.AGENT_RESERVED`, `sw.js`, `makeRow`, `metaFor`, `agentMeta`, `reportSeen`, `wb chat log`, the

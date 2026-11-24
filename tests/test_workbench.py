@@ -16870,6 +16870,22 @@ class Shot(Base):
         self.assertEqual(m["shots"]["base"]["rev"], store.Task("t").spec["base"])
         self.assertIn("Reply here to send feedback on it.", m["text"])
 
+    def test_a_pair_sent_to_the_web_chat_names_the_claude_code_that_sent_it(self):
+        # the #1129 review: only `wb chat reply` stamped `claude_pid`, so a screenshot another
+        # delegating session posted while the user was away read, to the mod, as the listener's
+        # own answer and settled its owed reply (#767): the follow-up never went
+        with mock.patch.dict(os.environ, {"CLAUDE_PID": "9100"}):
+            run_wb("shot", "t", "--capture", self.CAPTURE, "--chat")
+        from workbench import chat
+        self.assertEqual(chat.thread()[-1]["claude_pid"], 9100)
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PID"}
+        with mock.patch.dict(os.environ, env, clear=True):       # outside Claude Code: none
+            chat.send("a note", "claude")
+            self.assertNotIn("claude_pid", chat.thread()[-1])
+            with mock.patch.dict(os.environ, {"CLAUDE_PID": "9100"}):
+                chat.send("hi", "user")                               # never on another's row
+        self.assertNotIn("claude_pid", chat.thread()[-1])
+
     def test_a_new_binary_left_out_of_the_candidate_is_said_in_the_report_and_the_chat(self):
         # #836: a new 2 MB photo wasn't in the candidate's checkout, so its picture showed a
         # broken image, and neither the report, shots.json nor the chat's message said why

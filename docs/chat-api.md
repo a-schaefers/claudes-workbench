@@ -281,7 +281,7 @@ A **message** (`messages`, `replies`, `message`):
   another Claude Code session than the listening one, none: it is the user's),
   `to?: ["user" | agent names]` (whose those messages are, or `"user"` for a question to the
   user, `wb chat reply --to user`; absent means the user's), `shots?`, `audio?`, `claude_pid?`
-  (the Claude Code process that wrote it).
+  (the Claude Code process that wrote it, on every Claude row: a reply, a screenshot, a listen).
 
 An **ask** (`asks`, `/api/ask/<id>`): `{id: "ask-…", ts, tool, text, kind:
 "permission"|"plan"|"question", detail?, for?: [agent names], answer: null|"allow"|"deny"|"expired",

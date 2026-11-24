@@ -432,6 +432,13 @@ def send(text: str, frm: str, cid: str | None = None, **extra) -> dict:
                 # retry found the id and said sent, and the listener never had it (#446)
                 _open_update(lambda w: _reopen(w, r))
             return r
+        if frm == "claude" and (pid := os.environ.get("CLAUDE_PID", "")).isdigit():
+            # whose Claude Code wrote it, on every row of Claude's (a reply, `wb shot --chat`, a
+            # listen batch): the mod's owed reply (#767) counts only its own session's rows and
+            # those answering the message, as another session's report settled it (#1129); a
+            # screenshot another session posted still did, stamped in reply() alone (the #1129
+            # review, 2026-11-23)
+            extra.setdefault("claude_pid", int(pid))
         row = {"id": f"{int(time.time() * 1000)}-{secrets.token_hex(3)}", "ts": store.now(),
                "from": frm, "text": text, **({"cid": cid} if cid else {}),
                **{k: v for k, v in extra.items() if v}}
@@ -729,10 +736,7 @@ def reply(text: str, to: list[str] | None = None, **extra) -> dict:
             ids = [i for i in ids if rows[i].get("from") == "user"]
     whose = list(dict.fromkeys(["user"] * bool(to and "user" in to) + [
         "user" if rows[i].get("from") == "user" else str(rows[i].get("from")) for i in ids]))
-    # whose Claude Code wrote it: the mod's owed reply (#767) counts its own session's rows and
-    # those answering the message, as another session's report settled it (#1129)
-    pid = os.environ.get("CLAUDE_PID", "")
-    return send(text, "claude", re=ids, to=whose, **({"claude_pid": int(pid)} if pid.isdigit() else {}), **extra)
+    return send(text, "claude", re=ids, to=whose, **extra)
 
 
 def waiting_on_user() -> bool:
