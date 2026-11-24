@@ -486,7 +486,9 @@ def summary(f: dict) -> list[str]:
 
 def api_week_line(api: dict) -> str:
     """`wb stats`' API line: api this week: 6 task(s), $1.27 (deepseek $0.84, anthropic $0.43),
-    then the tasks with no price and on plan usage, each said apart (never a false $0)."""
+    then the tasks with no price, no figure recorded and on plan usage, each said apart (never a
+    false $0, #1106)."""
+    from . import savings
     from .savings import usd
     plan = api.get("plan") or 0
     priced = {p: v for p, v in api["by_provider"].items() if v["tasks"] > v["unknown"] + v.get("plan", 0)}
@@ -495,5 +497,5 @@ def api_week_line(api: dict) -> str:
             + (f", {usd(api['cost'])} (" + ", ".join(f"{p} {usd(v['cost'])}" for p, v in
                                                       sorted(priced.items(), key=lambda kv: -kv[1]["cost"]))
                + ")" if known else "")
-            + (f", {api['unknown']} with no price" if api["unknown"] else "")
+            + "".join(f", {u}" for u in savings.unknown_parts(api))
             + (f", {plan} on plan usage" if plan else ""))

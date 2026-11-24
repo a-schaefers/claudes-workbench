@@ -30771,6 +30771,21 @@ class ApiSpend(Base):
         self.assertEqual((u["cost"], u["source"]), (None, "unrecorded"))
         row = {"kind": "api", "provider": "meterco", "model": SPEND_M, "api": u}
         self.assertEqual(savings.line(row), "paid: unknown (no figure recorded)")
+        # #1106, the review: the totals still said "1 with no price" and "meterco no price (1)"
+        from workbench import cli, stats
+        bare = {"kind": "api", "provider": "bareco", "model": "bareco/x", "api": {"cost": None, "source": "unknown"}}
+        a = savings.api_totals([{**row, "ts": store.now()}, {**bare, "ts": store.now()}])
+        self.assertEqual((a["unknown"], a["unrecorded"]), (2, 1))
+        self.assertEqual(savings.api_summary(a), "api: 2 task(s) · 1 with no price + 1 with no figure recorded")
+        report = savings.api_report(a, "week")
+        self.assertIn("2 task(s) closed, 1 with no price, 1 with no figure recorded", report)
+        self.assertIn("by provider: bareco no price (1) · meterco no figure (1)", report)
+        self.assertEqual(stats.api_week_line(a),
+                         "api this week: 2 task(s), 1 with no price, 1 with no figure recorded")
+        with mock.patch.object(cli.store, "results", return_value=[{**row, "ts": store.now()}]):
+            scout = "\n".join(cli.scout_api_lines())
+        self.assertIn("; task(s) 1 with no figure recorded", scout)
+        self.assertNotIn("no price", scout)
 
     def test_a_plan_task_whose_model_left_hosted_json_stays_plan_usage(self):
         # #1106: _plan read only the id and hosted.json; the meter had booked it as plan usage

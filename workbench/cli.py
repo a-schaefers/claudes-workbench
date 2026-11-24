@@ -4718,7 +4718,7 @@ def scout_api_lines() -> list[str]:
                    if v["cost"])
     out.append(f"api spend, the last {SCOUT_SPEND_DAYS} days: {savings.usd(t['cost'])} of {cap}"
                + (f" ({by})" if by else "")
-               + (f"; {t['unknown']} task(s) with no price" if t.get("unknown") else ""))
+               + (f"; task(s) {', '.join(u)}" if (u := savings.unknown_parts(t)) else ""))  # #1106
     by_prov: dict[str, list] = {}
     for m in hosted.values():
         by_prov.setdefault(m.provider, []).append(m)

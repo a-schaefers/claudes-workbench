@@ -383,13 +383,14 @@ def spent(since: float = 0) -> dict:
 
 def api_totals(rows: list[dict], since: float = 0) -> dict:
     """The API rows measured after ``since``, trials and discards included (money spent is money
-    spent): tasks, the known dollars (`cost`), how many had no price (`unknown`) or count against
-    a plan (`plan`), the trials among them, Claude's side (`claude`, `self_est`: weighted tokens,
+    spent): tasks, the known dollars (`cost`), how many have no known cost (`unknown`; of them
+    `unrecorded`, a priced model whose figure never came back, #1106) or count against a plan
+    (`plan`), the trials among them, Claude's side (`claude`, `self_est`: weighted tokens,
     side by side, never subtracted from the dollars), and the dollars by provider. Closed tasks
     only, by their close: the money by day is the ledger's (`spent`, #1094)."""
     from .results import row_cost
-    out = {"tasks": 0, "cost": 0.0, "unknown": 0, "plan": 0, "trials": 0, "claude": 0,
-           "self_est": 0, "by_provider": {}}
+    out = {"tasks": 0, "cost": 0.0, "unknown": 0, "unrecorded": 0, "plan": 0, "trials": 0,
+           "claude": 0, "self_est": 0, "by_provider": {}}
     for r in rows:
         if r.get("kind") != "api" or (r.get("ts") or 0) < since:
             continue
@@ -406,6 +407,9 @@ def api_totals(rows: list[dict], since: float = 0) -> dict:
         elif cost is None:
             out["unknown"] += 1
             p["unknown"] += 1
+            if api.get("source") == "unrecorded":
+                out["unrecorded"] += 1
+                p["unrecorded"] = p.get("unrecorded", 0) + 1
         else:
             out["cost"] += cost
             p["cost"] += cost
@@ -450,18 +454,35 @@ def _priced(v: dict) -> bool:
     return v["tasks"] > v["unknown"] + v.get("plan", 0)
 
 
+def unknown_parts(a: dict) -> list[str]:
+    """The tasks with no known cost, by cause: `N with no price` (the catalog has none) and `N
+    with no figure recorded` (a priced model whose figure never came back: it said "no price"
+    for a model the catalog prices, #1106, 2026-11-23)."""
+    late = a.get("unrecorded") or 0
+    return ([f"{a['unknown'] - late} with no price"] if a["unknown"] > late else []) \
+        + ([f"{late} with no figure recorded"] if late else [])
+
+
+def unpriced(v: dict) -> str:
+    """A provider with no known dollars: `plan usage`, `no price`, `no figure` (#1106), or
+    `unknown` when its tasks are both."""
+    if v.get("plan"):
+        return "plan usage"
+    late = v.get("unrecorded") or 0
+    return "no figure" if late and late == v["unknown"] else "unknown" if late else "no price"
+
+
 def _by_provider(a: dict) -> str:
     return ", ".join(f"{p} {usd(v['cost'])}" for p, v in
                      sorted(a["by_provider"].items(), key=lambda kv: -kv[1]["cost"]) if _priced(v))
 
 
 def _money(a: dict) -> str:
-    """The period's dollars, the tasks with no price and on a plan said apart: never `$0.00`
-    for a task whose price is unknown."""
+    """The period's dollars, the tasks with no price, no figure and on a plan said apart: never
+    `$0.00` for a task whose price is unknown."""
     known = a["tasks"] - a["unknown"] - a["plan"]
     parts = [f"{usd(a['cost'])}" + (f" ({by})" if (by := _by_provider(a)) else "")] if known else []
-    if a["unknown"]:
-        parts.append(f"{a['unknown']} with no price")
+    parts += unknown_parts(a)
     if a["plan"]:
         parts.append(f"{a['plan']} on plan usage")
     return " + ".join(parts)
@@ -472,7 +493,7 @@ def _counts(a: dict) -> str:
     providers (its `by provider:` line says them, #1022's review)."""
     known = a["tasks"] - a["unknown"] - a["plan"]
     return ", ".join(([usd(a["cost"])] if known else [])
-                     + ([f"{a['unknown']} with no price"] if a["unknown"] else [])
+                     + unknown_parts(a)
                      + ([f"{a['plan']} on plan usage"] if a["plan"] else []))
 
 
@@ -499,7 +520,7 @@ def api_report(a: dict, period: str, bench: dict | None = None, paid: dict | Non
     provs = sorted(a["by_provider"].items(), key=lambda kv: (-kv[1]["cost"], kv[0]))
     if provs:
         out.append("  by provider: " + " · ".join(
-            f"{p} " + (usd(v["cost"]) if _priced(v) else "plan usage" if v.get("plan") else "no price")
+            f"{p} " + (usd(v["cost"]) if _priced(v) else unpriced(v))
             + f" ({v['tasks']})"
             for p, v in provs))
     if paid["by_day"]:  # the ledger's: what the day cap and the pane count (#1094)

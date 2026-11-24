@@ -453,14 +453,17 @@ row's `diff`.
 them so), and `of` leaves API rows out. An API task's paid tokens are on the other side, which the
 score can't see: it would read "saved 60%" for a task that cost $3. Its money goes beside it,
 never netted against Claude's tokens. `api_totals(rows, since)` sums the API rows, trials and
-discards included (money spent is spent): `{tasks, cost, unknown, plan, trials, claude, self_est,
-by_provider: {p: {tasks, cost, unknown, plan?}}}` (closed tasks only: a row is written at accept or
+discards included (money spent is spent): `{tasks, cost, unknown, unrecorded, plan, trials, claude,
+self_est, by_provider: {p: {tasks, cost, unknown, unrecorded?, plan?}}}` (`unknown`: no known cost;
+`unrecorded`, of them, a priced model whose figure never came back, #1106; closed tasks only: a row is written at accept or
 discard; `claude`/`self_est`
 side by side through `_compare`, of_row's comparison of any kind). Dollars are OpenCode's unit
 (`Money.USD`), printed with `$` (`savings.usd`: `$0.42`, a cent's fraction to two figures written
 out, `$0.0041`, `$0.00004`, never `4e-05`, and 0.009999 as `$0.01`; a free model's `$0`; the mod's
 `usd` and the chat's `apiSaved` follow the same rule); the electricity's cost keeps none (#609, #845). A task with no price counts as `N
-with no price`, never `$0.00`; a plan model's (`opencode-go`, an Ollama cloud model) as `on plan
+with no price`, one of a priced model with no figure as `N with no figure recorded` (`unknown_parts`;
+a provider's `no price`, `no figure` or `unknown` when both, `unpriced`: it said `no price` for a
+model the catalog prices, #1106), never `$0.00`; a plan model's (`opencode-go`, an Ollama cloud model) as `on plan
 usage`. `line(row)` gives an API row `api_line`: `claude: 56K · writing it yourself: ~59K
 (estimate) · paid DeepSeek $0.12 (deepseek/deepseek-flash)` (the name from hosted.json,
 `provider_labels`), `· paid: unknown (no price for this model)` (`unrecorded`: `· paid: unknown
@@ -2148,7 +2151,7 @@ then as an API one (an Ollama `:cloud` id, #1013) gives two lines; each has `kin
 nothing is none, `results.task_cost`, #1106). The trial-free rows
 (`tuning.judged`) give those lines. Plain `wb stats`' headline adds `api this week: 6 task(s), $1.27
 (deepseek $0.84, anthropic $0.43)`, then `N with no price` and `N on plan usage`
-(`stats.api_week_line`). The Stats tab: each period adds `API $1.27 (DeepSeek $0.84 · Anthropic
+(`stats.api_week_line`; `N with no figure recorded` apart, `unknown_parts`). The Stats tab: each period adds `API $1.27 (DeepSeek $0.84 · Anthropic
 $0.43)` (`apiPeriod`, each provider by its name, `providerWord`; `API plan usage` or `API no price`
 with no known dollars, `apiMoney`), and an API model's line (`API DeepSeek deepseek-flash: …`) says
 `paid ~$0.12/task` in place of its write speed. The footer's API-only
@@ -3286,7 +3289,7 @@ engine with no `notes` says "licence: not noted"; `audio.coverage`, #398), and i
 each role's API model's record over `SCOUT_API_DAYS` 30 (`cli._api_record`: tasks, accepted share,
 `~$/task` from `results.task_cost`, #1022's `row_cost` less the nothing-sent rows (#1106), rate-limited rounds from the tasks' `rate_limited` events),
 the spend over `SCOUT_SPEND_DAYS` 7 beside the day cap (#1022's `savings.api_totals`, trials
-included, per provider; its dollars and `~$/task` by `savings.usd`, as `wb savings --api` and the pane say them), and one line per connected provider counting its models with tool calls
+included, per provider, then `; task(s) N with no price, M with no figure recorded`, `unknown_parts`, #1106; its dollars and `~$/task` by `savings.usd`, as `wb savings --api` and the pane say them), and one line per connected provider counting its models with tool calls
 (free ones, those the catalog doesn't say, a key wb can't hold): never each id, as a provider may list
 hundreds. Only hosted.json's catalog: no network beyond it. Claude researches primary
 sources, recommends keep / add / retire and changes nothing without the user's yes; `wb scout --done
@@ -6131,7 +6134,7 @@ providers and none; the GPU lines optional only with a stored key and no local m
 one `wb route` (one line, one approval, all or nothing, the refusal naming the pair, OpenRouter set
 alone, `--order` refused beside pairs, a kept OpenRouter model with no backends refused); the router's `no GPU …` refusal with the API choice only for a stored key (never while Agents is GPU), and `wb start`'s
 exit 3 with it; `wb scout`'s API section (one line per provider at 300 models, a task's mean cost by
-`results.row_cost`, the spend line by `savings.api_totals`) and none with no provider and no API role.
+`results.task_cost`, the spend line by `savings.api_totals`) and none with no provider and no API role.
 
 **The busy-GPU opt-in** (`BusyGpu`, #1023): with `busy` api a start the GPU would make wait runs on the
 role's API model (task.json `busy`, the start line with today's spend, the role's thinking, API's
