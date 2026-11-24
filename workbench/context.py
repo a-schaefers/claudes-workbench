@@ -51,8 +51,9 @@ ASSIGN = "*=*"
 # `cd x && sudo ...` is refused too. Everything else is the agent's, guided by the handbook.
 # The plain wrappers are covered too (`env gh`, `timeout 5 sudo …`). A command built some other
 # way (`bash -c`, an interpreter, `FOO=1 sudo`, `env CI=1 gh`) still gets past these patterns;
-# behind them, the kernel refuses sudo (no_new_privs, lane.py, on any Linux) and, with Landlock,
-# gh finds no login (its config and tokens are out of reach). On macOS only these patterns stand.
+# behind them, the kernel refuses sudo (no_new_privs, lane.py, on any Linux; Seatbelt by its path
+# on macOS) and, with Landlock or Seatbelt, gh finds no login (its config and tokens are out of
+# reach). Without either only these patterns stand.
 _HARD = ("sudo", "doas", "pkexec", "su", "gh")
 # A wrapper's own option shapes, before the hard word: `time -p sudo x` matched only the allow
 # rule `time *` (the 2026-11-16 audit). Never a `*` before the hard word: `*` matches spaces too,
@@ -1298,7 +1299,10 @@ TOOL_HOMES = (".cache", ".cargo", ".rustup", "go/pkg", ".npm", ".bun/install/cac
               # module cache
               ".local/share/godot", ".texlive*/texmf-var", ".dub/packages", ".dub/cache",
               ".xmake/packages", ".xmake/cache", ".zef/store", ".cpanm", ".foundry/cache",
-              ".tflint.d", ".bicep")
+              ".tflint.d", ".bicep",
+              # macOS's ~/.cache (#1194): Go's build cache, pip's, Yarn's, node-gyp's and
+              # Playwright's browsers are there, and Seatbelt would refuse every build's write
+              "Library/Caches")
 # where the user moved them: a toolchain follows its variable, not the default path; GOPATH and
 # BUN_INSTALL name a whole home (GOPATH may hold every project), so only their caches. The second
 # line's were refused where the user moved them, HF_HOME though ENV_KEEP passes it on (#911)
@@ -1713,8 +1717,8 @@ def writable(task: store.Task) -> list[str] | None:
         except OSError as e:
             print(f"workbench: can't make OpenCode's directory {d} ({e.strerror}): "
                   f"its first run fails without it", file=sys.stderr)
-    places = [tempfile.gettempdir(), *TEMP_ROOTS, *DEV_NODES, *gpu_nodes(task), "/proc",
-              *tool_homes(), *(x for x in xdg if x),
+    places = [tempfile.gettempdir(), *TEMP_ROOTS, *darwin_cache(), *DEV_NODES, *gpu_nodes(task),
+              "/proc", *tool_homes(), *(x for x in xdg if x),
               *flutter_caches(),
               *(Path(p).expanduser() for p in extra)]
     whole = {"/", os.path.realpath(home)}  # a GOPATH=~ must not hand over the home directory
@@ -1772,6 +1776,17 @@ def writable(task: store.Task) -> list[str] | None:
         else:  # split around the repo like a secret: a grant of ~/work beside the repo ~/work/api
             kept += _split(str(p), out_of | guard)  # was dropped whole (the 0.90 review)
     return [p for p in _both(kept) if os.path.exists(p) and os.path.realpath(p) not in whole]
+
+
+def darwin_cache() -> list[str]:
+    """macOS's per-user cache directory (DARWIN_USER_CACHE_DIR, `C` beside the temp directory's
+    `T` in /var/folders), where clang's module cache and xcrun's go: Seatbelt would refuse every
+    Swift or Objective-C build's write there (#1194). Nothing elsewhere."""
+    temp = Path(tempfile.gettempdir())
+    cache = temp.parent / "C"
+    if sys.platform != "darwin" or temp.name != "T" or not cache.is_dir():
+        return []
+    return [str(cache)]
 
 
 def _make_first(home: str, names) -> None:
@@ -2145,7 +2160,14 @@ SECRETS = (".ssh", ".gnupg", ".password-store", ".netrc", ".git-credentials", ".
            ".config/.semgrep/settings.yml", ".rush-user/credentials.json",
            # #1092 (2026-11-23): Ollama's account key, which signs its ollama.com requests:
            # the server uses it, outside the lane, and the agent's `ollama` talks to the server
-           ".ollama/id_ed25519")
+           ".ollama/id_ed25519",
+           # #1194 (2026-11-24): macOS's own, readable now that Library is (HOME_READABLE): the
+           # keychains, cookies, mail and messages, and the browsers' and Claude's profiles
+           "Library/Keychains", "Library/Cookies", "Library/Mail", "Library/Messages",
+           "Library/Safari", "Library/Application Support/Google/Chrome",
+           "Library/Application Support/BraveSoftware", "Library/Application Support/Firefox",
+           "Library/Application Support/Microsoft Edge", "Library/Application Support/Vivaldi",
+           "Library/Application Support/com.operasoftware.Opera", "Library/Application Support/Claude")
 # The sockets inside a secret that a grant may still reach, to connect only (unix_paths): Docker
 # Desktop's, under ~/.docker beside the registry logins in config.json, so `wb allow --path` was
 # refused and only turning the lane off let a Testcontainers suite run (#441, the audit of 1.8)
@@ -2231,11 +2253,15 @@ API_HIDDEN_FAILS = {"Hugging Face": "Hugging Face's gated and private models don
 # Of the home directory's own entries, the dotfiles (tools' configs, caches, toolchains) stay
 # readable, and these (R's and Perl's user libraries); the user's documents and other projects
 # don't, beyond the task's repo, workbench itself, the programs on PATH and what Claude allowed.
-HOME_READABLE = ("bin", "go", "R", "perl5")
+# macOS's Library too (#1194): its Application Support and Preferences are what the dotfiles are
+# on Linux, and `pip install --user` puts packages in Library/Python; what of it holds a login is
+# in SECRETS.
+HOME_READABLE = ("bin", "go", "R", "perl5", "Library")
 # Outside the home directory, these hold the user's data, not the system: like the home's own
 # entries, only what is kept (the repo, the lane, a grant) is readable beneath them. /mnt holds
-# the Windows drives on WSL2, /home the other users' homes (the 2026-11-16 audit).
-ONLY_KEPT = ("/dev", "/mnt", "/media", "/run/media", "/run/user", "/home")
+# the Windows drives on WSL2, /home the other users' homes (the 2026-11-16 audit), and /Users
+# theirs on macOS (#1194).
+ONLY_KEPT = ("/dev", "/mnt", "/media", "/run/media", "/run/user", "/home", "/Users")
 # WSL2's Windows drives (DrvFs, /mnt/<letter> unless wsl.conf moved them): a Windows program there
 # runs through interop as a Windows process, as the user, outside Landlock and no-new-privileges.
 # The read lane let the agent start one: python3 running cmd.exe, or the allowed `npm` resolving to
@@ -2456,7 +2482,7 @@ def python_installs(task: store.Task) -> tuple[bool, bool]:
     if own_venv(task):
         return True, False
     kept = [r for r in python_envs() if r not in checkout_envs(task)]
-    return not kept and writable(task) is not None and lane.abi() > 0, bool(kept)
+    return not kept and writable(task) is not None and lane.held(), bool(kept)
 
 
 # mise refuses a config it hasn't been told to trust outside a terminal, and trust is kept per
@@ -2643,11 +2669,11 @@ def api_hidden_note(task: store.Task) -> str:
     """wb start's note for an API task when a file API_HIDDEN names holds a credential, else '': the files,
     then the tools that don't run in its lane (API_HIDDEN_STOPS), those whose private-registry
     installs fail and what else fails (API_HIDDEN_FAILS: Hugging Face's gated models, #1092).
-    '' where ``task`` has no lane to hide them: no Landlock, or the lane off."""
+    '' where ``task`` has no lane to hide them: neither Landlock nor Seatbelt, or the lane off."""
     # Without a lane nothing is hidden: the agent reads the file and Maven runs. On macOS every
     # API start said otherwise, so Claude, as the skill says, told the user the repo won't build
     # on API and that the token couldn't reach the provider (#1156, 2026-11-24)
-    if not lane.abi() or writable(task) is None:
+    if not lane.held() or writable(task) is None:
         return ""
     home = os.path.realpath(Path.home())
     tools = _api_hidden_tools()
@@ -2792,6 +2818,22 @@ def readable(task: store.Task) -> list[str] | None:
     directory, its lane and the programs it runs. None with the lane off. Landlock
     only allows, so this lists the entries beside each excluded one; lane.py adds the lane
     (writable) itself."""
+    walked = _read_walk(task)
+    return None if walked is None else walked[0]
+
+
+def read_rules(task: store.Task) -> list[tuple[str, str]] | None:
+    """The same read lane as Seatbelt's rules (#1194): ("deny" | "allow", real path), each over
+    those before it (the last match wins, as in a Seatbelt profile; ancestors first), everything
+    readable until a rule says otherwise. So a hidden directory is denied
+    and what is kept inside it allowed after, and a directory where little is kept (/dev, the
+    state directory) is one rule, not one per entry. None with the lane off."""
+    walked = _read_walk(task)
+    return None if walked is None else walked[1]
+
+
+def _read_walk(task: store.Task) -> tuple[list[str], list[tuple[str, str]]] | None:
+    """readable and read_rules, from one walk of the file system."""
     lane = writable(task)
     if lane is None:
         return None
@@ -2831,29 +2873,47 @@ def readable(task: store.Task) -> list[str] | None:
     only_kept |= set(windows_drives() or [])
     under = _under
     out: list[str] = []
+    rules: list[tuple[str, str]] = []  # read_rules': what changes the state each place inherits
 
-    def visit(p: str, default: bool) -> None:
+    def say(real: str, p: str, now: bool, was: bool) -> bool:
+        """Note a change of state at `real`; the state its entries inherit."""
+        if real != p:  # reached through a link: a grant by it adds up (Landlock grants the
+            if now:    # target), a refusal by it is nothing (the place is hidden or not on its
+                rules.append(("allow", real))  # own way there)
+            return now or was
+        if now != was:
+            rules.append(("allow" if now else "deny", real))
+        return now
+
+    def visit(p: str, default: bool, was: bool = True) -> None:
         real = os.path.realpath(p)
         if real in hidden or any(under(real, h) for h in hidden):
             if real in inner:
                 out.append(p)
-            elif any(under(i, real) for i in inner):
+                say(real, p, True, was)
+                return
+            now = say(real, real, False, was)  # a secret, or a link into one: by any way there
+            if any(under(i, real) for i in inner):
                 try:
                     names = sorted(os.listdir(p))
                 except OSError:
                     names = []
                 for name in names:
-                    visit(os.path.join(p, name), False)
-            return                                         # a secret, or a link into one
+                    visit(os.path.join(p, name), False, now)
+            return
         inside = real in keep
         holds = [h for h in hidden | keep | only_kept if under(h, real)]
         hides = any(h in hidden or h in only_kept for h in holds)
         if inside and not hides:
             out.append(p)
+            say(real, p, True, was)
             return
         if default and not hides:
             out.append(p)
+            say(real, p, True, was)
         elif holds:                    # go in: something to skip or keep (a repo at ~/.config
+            # the place itself as its entries mostly are: denied where only what is kept is read
+            now = say(real, p, inside or default, was)
             try:                       # keeps the rest of itself, not its secrets)
                 names = sorted(os.listdir(p))
             except OSError:
@@ -2861,14 +2921,46 @@ def readable(task: store.Task) -> list[str] | None:
             for name in names:
                 child = os.path.join(p, name)
                 if inside:
-                    visit(child, True)
+                    visit(child, True, now)
                 elif os.path.realpath(child) in only_kept:
-                    visit(child, False)
+                    visit(child, False, now)
                 else:
                     visit(child, name.startswith(".") or name in HOME_READABLE
-                          if real == home else default)
+                          if real == home else default, now)
+        else:
+            say(real, p, False, was)
     visit("/", True)
-    return out
+    # ancestors first, so each rule is over the wider ones (the last match wins), and an allow
+    # over a deny of the same place: Landlock's rules add up, so a place granted by a link
+    # elsewhere (~/bin to ~/tools/bin) is read whatever its own way there says
+    rules = sorted(dict.fromkeys(rules), key=lambda r: (len(Path(r[1]).parts), r[0] == "allow"))
+    return out, rules
+
+
+def socket_places(task: store.Task) -> list[str]:
+    """Where the agent may connect to a UNIX socket: unix_paths, and with Seatbelt, which can't
+    tell a socket the agent made from the user's (Landlock can), the task's own places too: its
+    worktree, ask/, its OpenCode home and its runtime directory; never a temp directory, where
+    tmux's and the SSH agent's are (#1194)."""
+    places = unix_paths(task)
+    if lane.kind() == "seatbelt":
+        places += [str(task.worktree), str(ask_dir(task)), str(opencode_home(task)),
+                   str(_runtime_path(task))]
+    return places
+
+
+def lane_wrap(task: store.Task):
+    """What runs a command in ``task``'s lane (lane.wrap with its lists, drawn once): Landlock's
+    read lane (readable) or Seatbelt's (read_rules, #1194), whichever this machine has; the
+    command as it is with the lane off."""
+    places = writable(task)
+    if places is None:
+        return lambda cmd: lane.wrap(None, cmd)
+    if lane.kind() == "seatbelt":
+        reads, sockets = read_rules(task), socket_places(task)
+        return lambda cmd: lane.wrap(places, cmd, unix=sockets, reads=reads)
+    readable_, sockets = readable(task), unix_paths(task)
+    return lambda cmd: lane.wrap(places, cmd, readable_, sockets)
 
 
 def read_only(task: store.Task, lane: list[str]) -> list[str]:
@@ -2893,7 +2985,8 @@ def read_only(task: store.Task, lane: list[str]) -> list[str]:
 
 def read_only_rules(task: store.Task) -> list[dict]:
     """The file tools may read `read_only` places but never edit there: the kernel refuses the
-    write too, with Landlock; without it (macOS) these rules are what keep the file tools out."""
+    write too, with Landlock or Seatbelt; without either these rules are what keep the file tools
+    out."""
     lane = writable(task)
     if lane is None:
         return []

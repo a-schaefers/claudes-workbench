@@ -95,6 +95,9 @@ jobs:
           git config --global user.name "workbench CI"
           git config --global user.email "ci@invalid"
       - run: scripts/install-opencode.sh "$OPENCODE_VERSION" "$OPENCODE_SHA256" >> "$GITHUB_PATH"
+      - name: Seatbelt
+        run: |
+          python3 -c 'from workbench import lane; print("lane:", lane.kind() or "none here: the Seatbelt test skips")'
       - run: python3 -X faulthandler -m unittest -v
 
   wsl:

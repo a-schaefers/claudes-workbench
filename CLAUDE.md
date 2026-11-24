@@ -48,8 +48,8 @@ or comment without the user's yes for it.
 
 ## Layout
 `workbench/` is the Python package: standard library only, 3.11+ (CI's floor; developed on 3.14).
-No dependencies, no packaging: it runs from the clone, on Linux, WSL2 and macOS (Landlock only on
-Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
+No dependencies, no packaging: it runs from the clone, on Linux, WSL2 and macOS (Landlock on Linux,
+Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
 - `store.py`: task files, atomic JSON, locked JSONL, `Task`. Every other part talks through them.
 - `cli.py`: `wb` and `PROTOCOL` (the agent's rules; `WRITING_PROTOCOL`, the writing role's, same fold). `runner.py`: the detached per-task driver,
   and OpenCode's environment (`opencode_env`: the task's home, the shell shim).
@@ -57,7 +57,7 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
 - `context.py`: what the agent knows and may do (instructions: the user's are `USER_AGENTS_MD`,
   `~/.config/workbench/AGENTS.md`, never Claude's `~/.claude` files, #1061; denies, the shell allowlist, the
   lane's paths: `writable`, the worktree, `ask/` and the task's `opencode/`, `opencode_home`;
-  `API_HIDDEN`, the token files an API task's lane hides too when they hold a credential; grants). `lane.py`: the Landlock lane. `gitguard.py`: the agent's read-only `git`.
+  `API_HIDDEN`, the token files an API task's lane hides too when they hold a credential; grants). `lane.py`: the Landlock lane, Seatbelt's on macOS. `gitguard.py`: the agent's read-only `git`.
   Neither imports the rest of the package: the lane runs as a file, the shim on every git call.
 - `keyhole.py`: the per-task key proxy, outside the lane: only the task's model, the key swapped
   in, errors redacted (ARCHITECTURE.md, *The keyhole*); `runner.drive` starts it for an API task,

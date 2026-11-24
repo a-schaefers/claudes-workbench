@@ -1,4 +1,5 @@
-"""The agent writes only inside its lane, enforced by the kernel where it can be (Linux Landlock).
+"""The agent writes only inside its lane, enforced by the kernel where it can be: Linux Landlock, or
+macOS Seatbelt (sandbox-exec).
 
 The runner starts OpenCode through this file (`python -I lane.py --write DIR... -- opencode ...`),
 which restricts itself and then execs the command, so OpenCode, its shell and everything that runs
@@ -13,19 +14,29 @@ outside the lane still succeed. A write elsewhere fails with "Permission denied"
 asks Claude for the directory (`wb allow --path`). context.py decides the lane; OpenCode's own
 `external_directory` rule keeps its file tools to it as well.
 
+On macOS (#1194) the same entry point execs `/usr/bin/sandbox-exec` with a profile drawn fresh
+from the same lists (`profile`): writes only beneath `--write`, a UNIX socket only beneath
+`--unix`, signals and process information only within the sandbox, and no sudo, su or login.
+Reads there are the read lane's complement, `--hide` and `--show` in context.read_rules' order
+(ancestors first), the last match winning as Seatbelt's own rules do: Seatbelt can't allow reads
+by a list the way Landlock does without naming the whole of dyld and /System.
+
 No-new-privileges (no sudo, su or other setuid program) is set on every Linux machine, Landlock
-or not. Without Landlock (macOS, an old or locked-down kernel) it otherwise execs the command
-unrestricted and `wb doctor` says so. A kernel that has Landlock but refuses the lane stops the
-command instead: the agent never runs believed to be in a lane it isn't in. Only the standard
-library here: it runs before every round.
+or not. Without either (an old or locked-down kernel, a Mac without sandbox-exec) it otherwise
+execs the command unrestricted and `wb doctor` says so. A kernel that has Landlock but refuses
+the lane, or a sandbox-exec that refuses the profile, stops the command instead: the agent never
+runs believed to be in a lane it isn't in. Only the standard library here: it runs before every
+round.
 """
 from __future__ import annotations
 
 import ctypes
 import os
 import platform
+import shutil
 import signal
 import struct
+import subprocess
 import sys
 
 # syscall numbers, the same on the architectures with the unified table (added after it was);
@@ -41,6 +52,21 @@ MAKE = sum(1 << b for b in range(6, 13))        # char, dir, reg, sock, fifo, bl
 REFER, TRUNCATE = 1 << 13, 1 << 14               # ABI 2 and 3
 RESOLVE_UNIX = 1 << 16                           # ABI 9: connect to a socket made outside
 SCOPE_ABSTRACT_UNIX, SCOPE_SIGNAL = 1, 2         # ABI 6: ruleset_attr.scoped
+# macOS (#1194): ships with every release (deprecated by Apple, still what Codex relies on)
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+# What every process opens there, read and written inside the sandbox as on any Mac: the fd
+# directory (bash's process substitution, /dev/stdout), dyld's DTrace helper, the terminal
+SEATBELT_DEVICES = ("/dev/fd", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/dtracehelper",
+                    "/dev/null", "/dev/zero", "/dev/random", "/dev/urandom", "/dev/tty")
+# and the system's sockets every process may use: name lookups (getaddrinfo asks mDNSResponder
+# there, so without it no model server resolves) and the log
+SEATBELT_SOCKETS = ("/private/var/run/mDNSResponder", "/private/var/run/syslog")
+# Seatbelt's stand-in for no-new-privileges, by path: a setuid-bit rule would refuse /bin/ps,
+# setuid root on macOS, and the tools that run it; and what starts a program outside the
+# sandbox by name (LaunchServices' `open`, launchd's `launchctl`, AppleScript's `osascript`)
+SEATBELT_REFUSED = ("/usr/bin/sudo", "/usr/bin/su", "/usr/bin/login",
+                    "/usr/libexec/security_authtrampoline", "/usr/bin/open", "/bin/launchctl",
+                    "/usr/bin/osascript")
 
 
 def _libc():
@@ -56,6 +82,22 @@ def abi() -> int:
     except (OSError, AttributeError):
         return 0
     return max(v, 0)
+
+
+def kind() -> str | None:
+    """The lane this machine draws: "landlock" (Linux), "seatbelt" (macOS with sandbox-exec),
+    else None."""
+    if abi():
+        return "landlock"
+    if sys.platform == "darwin" and os.access(SANDBOX_EXEC, os.X_OK):
+        return "seatbelt"
+    return None
+
+
+def held() -> bool:
+    """Whether a lane holds the agent here: the question "is there a lane" (doctor, setup,
+    lane_refused, the API note), on either kernel."""
+    return kind() is not None
 
 
 def restrict(writable: list[str], readable: list[str] | None = None,
@@ -129,9 +171,11 @@ def restrict(writable: list[str], readable: list[str] | None = None,
     return version
 
 
-def gaps(version: int) -> list[str]:
-    """What this Landlock version can't confine, for `wb doctor` (the 2026-11-16 audit: ABI 1-2
-    kernels, Debian 12, Ubuntu 22.04, WSL2's 5.15, were reported as a whole lane)."""
+def gaps(version: int | str) -> list[str]:
+    """What this Landlock version, or "seatbelt", can't confine, for `wb doctor` (the 2026-11-16
+    audit: ABI 1-2 kernels, Debian 12, Ubuntu 22.04, WSL2's 5.15, were reported as a whole lane)."""
+    if version == "seatbelt":
+        return list(SEATBELT_GAPS)
     out = []
     if 0 < version < 3:
         out.append("truncating a file outside the lane (truncate(2)) isn't refused before "
@@ -148,16 +192,75 @@ def gaps(version: int) -> list[str]:
     return out
 
 
+SEATBELT_GAPS = (
+    "sandbox-exec is deprecated by Apple: it works on current macOS, and a release may drop it",
+    "a sandbox can't be made inside it: SwiftPM's manifest builds need --disable-sandbox, and "
+    "Chromium and Playwright --no-sandbox",
+    "reads are refused by a list (credentials, workbench's state, your home's own folders, other "
+    "users'), not allowed by one as Landlock does: a credential kept anywhere else is readable",
+    "a UNIX socket in a temp directory can't be connected to, even one the agent's tests made "
+    "(Seatbelt can't tell whose it is: tmux's and the SSH agent's are there): `wb allow --path` "
+    "the directory",
+    "macOS's own services stay reachable over Mach (a program can still ask LaunchServices to "
+    "start an app outside the lane; open, launchctl and osascript are refused by name)",
+    "TCP isn't refused, as on Linux")
+
+
 def wrap(writable: list[str] | None, cmd: list[str],
-         readable: list[str] | None = None, unix: list[str] | None = None) -> list[str]:
-    """The command that runs `cmd` inside the lane; `cmd` itself when there is no lane."""
+         readable: list[str] | None = None, unix: list[str] | None = None,
+         reads: list[tuple[str, str]] | None = None) -> list[str]:
+    """The command that runs `cmd` inside the lane; `cmd` itself when there is no lane.
+    `readable` is Landlock's read lane, `reads` Seatbelt's: ("deny" | "allow", path) in order."""
     if writable is None:
         return cmd
     return [sys.executable, "-I", os.path.abspath(__file__),
             *(a for p in writable for a in ("--write", p)),
             *(["--reads"] if readable is not None else []),
             *(a for p in readable or [] for a in ("--read", p)),
+            *(a for e, p in reads or [] for a in ("--hide" if e == "deny" else "--show", p)),
             *(a for p in unix or [] for a in ("--unix", p)), "--", *cmd]
+
+
+def profile(writable: list[str], reads: list[tuple[str, str]] | None = None,
+            unix: list[str] | None = None) -> tuple[str, list[str]]:
+    """The Seatbelt profile for a lane, and its parameters as sandbox-exec's `-D` arguments:
+    every path is a parameter (`(param "W0")`), so none is quoted into the text. Real paths:
+    Seatbelt matches the resolved path, and /tmp is /private/tmp, /var /private/var.
+    Everything is allowed but what is named: Seatbelt applies the last rule that matches."""
+    params: list[str] = []
+
+    def ref(prefix: str, path: str, real: bool = True) -> str:
+        name = f"{prefix}{len(params)}"
+        params.append(f"-D{name}={os.path.realpath(path) if real else path}")
+        return f'(subpath (param "{name}"))'
+
+    def lines(effect: str, ops: str, refs: list[str]) -> list[str]:
+        return [f"({effect} {ops} {' '.join(refs)})"] if refs else []
+
+    write = [ref("W", p) for p in dict.fromkeys(writable)]
+    text = ["(version 1)", "(allow default)",
+            # writes: the lane alone; file-write* takes in chmod, utimes and xattrs, which
+            # Landlock leaves alone
+            "(deny file-write*)", *lines("allow", "file-write*", write),
+            # a hard link out of the lane would carry a file in, to be read or written there
+            # (Landlock's REFER refuses the same)
+            "(deny file-link)", *lines("allow", "file-link", write)]
+    # reads: as given (read_rules: ancestors first), each over the last; the contents only
+    # (file-read-data: a file's or a listing's), never the metadata, so a stat or realpath
+    # through a hidden directory (the worktree, under workbench's state) works as on Linux
+    text += [f"({effect} file-read-data {ref('R', p)})" for effect, p in reads or []]
+    text += lines("allow", "file-read-data", write)  # the lane is read too, as with Landlock
+    text += lines("allow", "file-read* file-write*", [ref("D", d, False) for d in SEATBELT_DEVICES])
+    # a UNIX socket only beneath `unix` (Landlock ABI 9's rule): the user's agents and tmux
+    # outside the lane stay out of reach
+    text += ["(deny network-outbound (remote unix-socket))",
+             *lines("allow", "network-outbound", [*(ref("U", p) for p in dict.fromkeys(unix or [])),
+                                                  *(ref("S", p, False) for p in SEATBELT_SOCKETS)])]
+    # no signal to, or reading of, a process outside the sandbox (ABI 6's signal scope)
+    text += ["(deny signal)", "(allow signal (target same-sandbox))",
+             "(deny process-info*)", "(allow process-info* (target same-sandbox))"]
+    text += [f"(deny process-exec {' '.join(ref('X', p, False) for p in SEATBELT_REFUSED)})"]
+    return "\n".join(text) + "\n", params
 
 
 def die_with_parent() -> None:
@@ -175,11 +278,43 @@ def die_with_parent() -> None:
         sys.exit(1)
 
 
+def seatbelt(writable: list[str], reads: list[tuple[str, str]], unix: list[str],
+             cmd: list[str]) -> None:
+    """Exec `cmd` under sandbox-exec with the lane's profile; never outside it. The profile is
+    tried first on /usr/bin/true: a refused one (a macOS that dropped a rule) stops the command
+    with lane.py's own message and 126, not sandbox-exec's exit that reads as the agent's."""
+    text, params = profile(writable, reads, unix)
+    base = [SANDBOX_EXEC, "-p", text, *params]
+    try:
+        tried = subprocess.run([*base, "/usr/bin/true"], stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, errors="replace", timeout=60)
+        why = (tried.stderr.strip()[-300:] or f"exit {tried.returncode}") if tried.returncode else ""
+    except (OSError, subprocess.SubprocessError) as e:
+        why = str(e)
+    if why:
+        print(f"workbench lane: macOS refused the lane ({why}); not running {cmd[0]}",
+              file=sys.stderr)
+        sys.exit(126)
+    if not shutil.which(cmd[0]):  # as Landlock's side says it: sandbox-exec's own exit isn't 127
+        print(f"workbench lane: can't run {cmd[0]} (No such file or directory)", file=sys.stderr)
+        sys.exit(127)
+    os.execv(SANDBOX_EXEC, [*base, "--", *cmd])
+
+
 def main(argv: list[str]) -> None:
     die_with_parent()
     sep = argv.index("--")
     pick = lambda flag: [argv[i + 1] for i in range(sep) if argv[i] == flag]  # noqa: E731
     readable = pick("--read") if "--reads" in argv[:sep] else None
+    if kind() == "seatbelt":
+        reads = [("deny" if argv[i] == "--hide" else "allow", argv[i + 1])
+                 for i in range(sep) if argv[i] in ("--hide", "--show")]
+        try:
+            seatbelt(pick("--write"), reads, pick("--unix"), argv[sep + 1:])
+        except OSError as e:
+            print(f"workbench lane: can't run {argv[sep + 1]} ({e.strerror})", file=sys.stderr)
+            sys.exit(126)
+        return  # never Landlock's below: execv doesn't return, but a test's stand-in does
     try:
         restrict(pick("--write"), readable, pick("--unix"))
     except OSError as e:  # Landlock is there but refused the lane: don't run outside it

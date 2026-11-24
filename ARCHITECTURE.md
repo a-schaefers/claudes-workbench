@@ -29,7 +29,7 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
           │ spawns                ▲
        runner (detached, per task)┘ status, events, reports, notices; GPU lease and the model (an API task: no lease, its key in the keyhole)
           ▼
-       lane.py (Landlock) ─▶ opencode run in tasks/<name>/worktree (branch delegate/<name>)
+       lane.py (Landlock, Seatbelt) ─▶ opencode run in tasks/<name>/worktree (branch delegate/<name>)
           │      └─ ask_reviewer (MCP, wb-ask-mcp): writes the question, blocks for the answer
           ▼
        local model server (Ollama, or any OpenAI-compatible server on this machine), or an API task's keyhole ─▶ its provider
@@ -71,7 +71,7 @@ wb-python` against a second hand-over; with none, exit 78 and one line (the chat
 | the runner | `cli.spawn_runner` | `python -X utf8 -m workbench.runner <task>`, cwd and `PYTHONPATH` the repo root (the caller's in `WB_USER_PYTHONPATH`: `context.detached_env`), own session and, where logind kills at logout, own systemd scope (`cli.detach`, `cli.runner_scope`, #351), output to `runner.log` |
 | the ask server | OpenCode, the layer's `mcp.servers.workbench` | `[sys.executable, <root>/bin/wb-ask-mcp]` |
 | the git shim | the agent's shell (`<rules>/bin/git`) | a `/bin/sh` wrapper exec'ing `<python> -I -c` (quoted: a shebang splits at a space) with `sys.path.insert` |
-| the lane | the runner | `python -I lane.py …`, standard library only |
+| the lane | the runner (`context.lane_wrap`) | `python -I lane.py …`, standard library only; on macOS it execs `/usr/bin/sandbox-exec -p <profile> -D… -- …` |
 
 ## Why it's built this way
 
@@ -84,7 +84,8 @@ wb-python` against a second hand-over; with none, exit 78 and one line (the chat
   nothing leaves the worktree until Claude commits it.
 - **A teammate with limits, not a prisoner.** Everyday tools run unasked; the rest is asked for
   and granted (`wb allow`). Git writes, credentials, Claude's files and writes outside the lane
-  are enforced by the kernel where it can (Landlock), and the tests run under the same limits.
+  are enforced by the kernel where it can (Landlock on Linux, Seatbelt on macOS), and the tests run
+  under the same limits.
 - **Learned, not configured**: model per size, slice, speed, handover point, corrected by
   `results.jsonl` on this machine.
 - **Files, not services**: a task survives Claude restarting, a crash, a closed terminal.
@@ -1428,8 +1429,8 @@ An API provider's header wait is 600 s instead (`API_HEADER_S`, *An API task's w
   updating across #1061, and the task's spec assumed the agent saw them. #673's aim (Claude never reviews against a rule the agent never saw)
   is now the skill's: such a rule goes in the spec, and one bearing on code Claude offers to add to
   this file. OpenCode would read `~/.claude/CLAUDE.md` itself, a global instruction beside
-  `~/.config/opencode/AGENTS.md`, which only the lane's `SECRETS` kept out: with no lane (macOS,
-  an old kernel, `"paths": ["*"]`) it reached every agent, so `runner.OPENCODE_ENV` sets
+  `~/.config/opencode/AGENTS.md`, which only the lane's `SECRETS` kept out: with no lane (a Mac
+  before Seatbelt, an old kernel, `"paths": ["*"]`) it reached every agent, so `runner.OPENCODE_ENV` sets
   `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=1` (that file alone; RealOpenCode's
   `test_opencode_without_the_lane_reads_no_claude_md_of_the_users`);
 - the repo's `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md`: the worktree's (committed) copy,
@@ -1629,14 +1630,16 @@ match asks (which `--auto` allows). The rules, in order:
 A refused command comes back as "Permission denied"; the handbook and `ask_reviewer` tell the agent
 to ask with `command` set, raising a PERMISSION question naming the `wb allow`. These patterns are
 a guardrail on the agent's choices, not a sandbox: they match the command as written, so `bash -c`,
-make or an interpreter can run anything. What must hold is held below them, on Linux with Landlock:
-no sudo (no-new-privileges, on any Linux), git read-only (the shim; the git directory is outside
-the lane), no push or `gh` with the user's keys (credentials unreadable and dropped from the
-environment). Without Landlock (macOS, old kernels, other architectures) only the patterns, the
-shim and `SECRET_ENV` remain: `bash -c` can write the repo's `.git` and read `~/.ssh`; on macOS
-nothing refuses sudo.
+make or an interpreter can run anything. What must hold is held below them, on Linux with Landlock
+and on macOS with Seatbelt (#1194): no sudo (no-new-privileges, on any Linux; Seatbelt refuses
+sudo, su and login by path), git read-only (the shim; the git directory is outside the lane), no
+push or `gh` with the user's keys (credentials unreadable and dropped from the environment).
+Without either (old kernels, other architectures, a Mac without `/usr/bin/sandbox-exec`) only the
+patterns, the shim and `SECRET_ENV` remain: `bash -c` can write the repo's `.git` and read
+`~/.ssh`, and on a Mac nothing refuses sudo.
 
-**Paths, a lane** (`context.writable`, `context.readable`, `context.external_rules`, `lane.py`).
+**Paths, a lane** (`context.writable`, `context.readable`, `context.read_rules`, `context.external_rules`,
+`context.lane_wrap`, `lane.py`).
 It keeps an agent's mistakes and its use of the user's credentials in; it is not a jail for a
 deliberately hostile process.
 - *Writes.* The task's worktree, `ask/` and `opencode/` (its OpenCode's own home, below), not
@@ -1714,7 +1717,7 @@ deliberately hostile process.
   line `context.API_HIDDEN_WHY` (the credential by an environment reference, or the GPU), in the
   report, the auto-fix check (`not_the_code`), a setup's failure and a permission request's notice
   (`context.api_hidden_refusal`, `lane_grant(path, task)`): a grant was saved and the paid feedback
-  round refused the same way (#1093). Only a refusal the lane made (#773): none without Landlock, nor one the
+  round refused the same way (#1093). Only a refusal the lane made (#773): none without a lane (`lane.held`: Landlock or Seatbelt), nor one the
   runner shares (`runner_may`: the user's own permissions).
 - *Reads.* Everything but credentials and the user's records: `context.SECRETS` under `$HOME`
   (`.ssh`, `.gnupg`, `.netrc`, `.git-credentials`, `.config/gh`, keyrings, the cloud CLIs'
@@ -1739,13 +1742,15 @@ deliberately hostile process.
   lane hides each that holds a credential: *API lanes hide the token files that hold a credential*,
   below). Where a tool stops on a hidden file the agent gets its own
   (*Its environment*); Vercel's and the Firebase CLI don't run in the lane (Firebase's emulators do
-  with `XDG_CONFIG_HOME=$(mktemp -d)`). Without Landlock (macOS, older kernels) there is no lane,
-  and the user's OpenCode store stays readable to the agent's commands; the task's own home still
+  with `XDG_CONFIG_HOME=$(mktemp -d)`). Without Landlock or Seatbelt (older kernels) there is no
+  lane, and the user's OpenCode store stays readable to the agent's commands; the task's own home still
   keeps the agent's OpenCode off the user's credentials and sessions. A literal `apiKey` in the
   user's global `opencode.json` stays readable too: the agent's OpenCode loads that file itself.
-  Of the home directory's own entries only dotfiles and `HOME_READABLE` (`bin`, `go`, `R`, `perl5`)
-  are readable, and of `ONLY_KEPT` (`/dev`, `/mnt`, `/media`, `/run/media`, `/run/user`, `/home`,
-  WSL's drives) nothing, beyond: OpenCode's global directory (`OPENCODE_CONFIG_DIR`, #370), the
+  On macOS `SECRETS` also holds `Library`'s keychains, cookies, mail, messages, Safari, the
+  browsers' profiles and Claude's desktop app's (#1194).
+  Of the home directory's own entries only dotfiles and `HOME_READABLE` (`bin`, `go`, `R`, `perl5`,
+  macOS's `Library`) are readable, and of `ONLY_KEPT` (`/dev`, `/mnt`, `/media`, `/run/media`,
+  `/run/user`, `/home`, macOS's `/Users`, WSL's drives) nothing, beyond: OpenCode's global directory (`OPENCODE_CONFIG_DIR`, #370), the
   config home where `XDG_CONFIG_HOME` moves it (`~/conf`: OpenCode's global config, git's, every
   tool's; its secrets still out, #1103), the
   task's repo (its secrets still out; an API task's lane reads its git directory alone, `read_repo_dirs`:
@@ -1811,7 +1816,7 @@ deliberately hostile process.
   `API_HIDDEN_TOOL`, by name or by folder and name for `.bundle/config`): `note: an API task can't
   read ~/.m2/settings.xml, ~/.npmrc (each holds a credential, which would reach the provider): in
   its lane Maven stops on every run, and npm installs from a private registry fail` (`it holds` for
-  one). Only where the task has a lane to hide them: without Landlock (macOS, a kernel without it)
+  one). Only where the task has a lane to hide them: without a lane (neither Landlock nor Seatbelt)
   or with the lane off (`"paths": ["*"]`) the agent reads them and the tools run, so there is no
   note (#1156: every macOS API start said Maven stopped). A git URL with a login can't be hidden (git reads `.git/config` and `~/.gitconfig` to
   run), so `wb start` names the files that hold one instead (`context.git_url_note`, #1072): `git
@@ -1852,13 +1857,52 @@ deliberately hostile process.
   reaches*), and metadata (chmod, chown, utimes, xattrs on outside files: only the patterns).
   Fails closed: Landlock present but refusing prints `workbench lane: the kernel refused the lane
   (<error>); not running <cmd>` and exits 126; an exec failure is `workbench lane: can't run <cmd>
-  (<reason>)`, 127 not found, else 126. Without Landlock (macOS, an old kernel, an architecture off
-  `lane.UNIFIED`, whose syscall numbers it knows) it execs unrestricted but for no-new-privileges.
+  (<reason>)`, 127 not found, else 126. Without Landlock (an old kernel, an architecture off
+  `lane.UNIFIED`, whose syscall numbers it knows) it execs unrestricted but for no-new-privileges;
+  macOS has its own (next).
   Older ABIs hold less (`lane.gaps`): before ABI 3 truncation outside isn't refused; ABI 1 fails
   cross-directory moves and links even inside (EXDEV); before 6 signals, before 9 sockets aren't
   scoped. `wb doctor` draws a real lane and tries a write outside it (`ok agents write only in their
   lane (Landlock ABI N)` or `BAD the lane didn't hold a write outside it: …`), with a line per gap
   and one for WSL interop.
+- *macOS's side* (`lane.py`, Seatbelt, #1194). `lane.kind()` is `landlock` (`abi()` > 0),
+  `seatbelt` (darwin with `/usr/bin/sandbox-exec` executable) or None; `lane.held()` is whether
+  either holds, the question doctor, setup, `lane_refused`, `python_installs` and the API note ask.
+  The runner and the test runner reach it through `context.lane_wrap(task)`, which hands lane.py
+  Landlock's lists or Seatbelt's: `--write P…`, `--hide P`/`--show P` in order (`context.read_rules`)
+  and `--unix P…` (`context.socket_places`). lane.py's `main` then builds `lane.profile(writable,
+  reads, unix)` fresh each time, no file and no setup step, tries it on `/usr/bin/true`, and execs
+  `sandbox-exec -p <profile> -DW0=<path>… -- <cmd>`; every path is a `-D` parameter (`(subpath
+  (param "W0"))`, its real path: `/tmp` is `/private/tmp`), so none is quoted into the text. The
+  profile: `(allow default)`; `(deny file-write*)` then the lane allowed (chmod, utimes and xattrs
+  too, which Landlock leaves free); `(deny file-link)` but within the lane (a hard link would carry a
+  file in); reads as the read walk's complement, `(deny file-read-data …)`/`(allow …)` ancestors
+  first, the last match winning (contents and listings only: a stat or realpath through the hidden
+  state directory to the worktree works), then the lane and `lane.SEATBELT_DEVICES` (`/dev/fd`,
+  dyld's `/dev/dtracehelper`, the null and random devices, `/dev/tty`); `(deny network-outbound
+  (remote unix-socket))` but beneath `--unix` and `SEATBELT_SOCKETS` (mDNSResponder, which every
+  name lookup asks, and syslog); signals and `process-info*` only within the sandbox (`target
+  same-sandbox`); `process-exec` refused for `SEATBELT_REFUSED` (sudo, su, login,
+  `security_authtrampoline`, `open`, `launchctl`, `osascript`): a setuid-bit rule would also
+  refuse `/bin/ps`, setuid root on macOS. Reads are a list of refusals because an allowlist would
+  have to name dyld's and `/System`'s whole tree: `read_rules` is the same walk as `readable`,
+  each place's change of state noted (`deny` where only what is kept beneath is read, `allow` for
+  what is kept inside a hidden place), so both lanes read the same files; a place reached through
+  a link is allowed by it (Landlock grants the target) but never denied by it. Sockets: Seatbelt
+  can't tell one the agent made from the user's, so `socket_places` adds only the task's own
+  places (the worktree, `ask/`, its OpenCode home, its runtime directory), never a temp directory
+  (tmux's, the SSH agent's); one refused there is named with its grant like ABI 9's. The write
+  lane gains `Library/Caches` (`TOOL_HOMES`: macOS's `~/.cache`) and the per-user cache beside the
+  temp directory (`context.darwin_cache`, `/var/folders/…/C`: clang's module cache, xcrun's).
+  Fails closed: a profile sandbox-exec refuses prints `workbench lane: macOS refused the lane
+  (<stderr>); not running <cmd>` and exits 126; a command not on PATH is `can't run <cmd>`, 127.
+  Denials are EPERM, "Operation not permitted", which `runner.REFUSAL` reads. `wb doctor`'s probe
+  is the same (`ok  agents write only in their lane (Seatbelt)`), and `lane.gaps("seatbelt")`
+  names what it can't hold: sandbox-exec is deprecated; a sandbox can't be made inside it (SwiftPM
+  needs `--disable-sandbox`, Chromium and Playwright `--no-sandbox`); reads are refused by a list;
+  a socket in a temp directory is refused even if the agent's own; Mach services stay reachable
+  (`open`, `launchctl`, `osascript` refused by name only); TCP is free, as on Linux. Opting out is
+  the same: `"paths": ["*"]` or `--allow-path '*'`.
 - *What TCP reaches* (#993, 2026-11-22). Landlock's TCP rule (ABI 4) allows ports, never an
   address, so it can't keep the agent from instance metadata (`169.254.169.254`, the machine's role
   credentials over plain HTTP) or a local daemon. The environment turns the SDKs' metadata lookups
@@ -1876,7 +1920,7 @@ deliberately hostile process.
   task's `rounds/` (a long prompt is read from there) and the handed skills' directories; with the
   lane off, allow `*` (said outright: the layer's `*_*` MCP rule would match it). The `read_only`
   places also get an `edit` deny (`read_only_rules`), a lane entry inside one its allow back (#521:
-  reads there were refused, and the only remedy made the install writable). This is all that applies without Landlock.
+  reads there were refused, and the only remedy made the install writable). This is all that applies without Landlock or Seatbelt.
 - *Asking for more.* A refused write is "Permission denied"; the agent calls `ask_reviewer` with
   `path`, raising a PERMISSION question naming `wb allow <task> --path <dir>` (read and write;
   `--always` keeps it in `commands.json`; `wb start --allow-path` up front). `_lane_dir` refuses a
@@ -2096,7 +2140,7 @@ request failed (<type>)` (`_Server.handle_error`), never socketserver's tracebac
 <provider> on 127.0.0.1:<port> for <id>`, the refusals and that failure line are all it logs (the runner's stdout,
 runner.log); no request is logged, and no line holds the key or the token. Accepted: the agent's
 shell can reach the keyhole too, holding the token (the layer is readable), and spend on the task's
-model only, while the runner lives. Without Landlock the user's OpenCode store is readable
+model only, while the runner lives. Without a lane (no Landlock, no Seatbelt) the user's OpenCode store is readable
 anyway; API tasks run there all the same, with no warning (the owner's call on #1008 and #1012:
 it just works). Status `served` reaches the results row's `api` (`results.api_usage`): `by` as
 `backend`, and `model` as `served_model` when it isn't the id asked for (`results.served_model`:
@@ -4705,7 +4749,7 @@ effect's hit came 0.8-1.45 s in (the skill says to trim the lead); ACE-Step peak
   `config_files`, the one git writes, so `--global` is `~/.gitconfig` unless only the XDG file
   exists: refused on the user's own `~/.gitconfig`, `$XDG_CONFIG_HOME/git/config`,
   `GIT_CONFIG_GLOBAL` or system file, `user_configs` as the environment named them at install,
-  which only the lane kept out of reach: without one, macOS, `git config --global user.name` rewrote
+  which only the lane kept out of reach: without one (then macOS's), `git config --global user.name` rewrote
   the user's, #1120; a fixture's temp `HOME` still writes, #794, with the user's `XDG_CONFIG_HOME`
   exported too, #1120's review) or any repository outside the temp roots, the worktree and the lane's writable
   dirs; outside any repository it passes, and throwaway repos there pass (test suites, #444;
@@ -6343,7 +6387,7 @@ claude plugin install workbench@workbench
 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/marketplaces/workbench/bin/wb setup
 ```
 then `/workbench`; `wb setup` ends with the `first run:` checklist (`cli.first_run`: OpenCode, a
-model server, a registered model, the API keys, Landlock). Its API keys line (#1024,
+model server, a registered model, the API keys, the lane: `ok  Landlock ABI N`, `ok  Seatbelt` or `--  no lane here`). Its API keys line (#1024,
 `cli.api_key_lines`, from `models.connected()`: `opencode auth list` in wb's environment, never a
 lane, never a secret): `ok  API keys: deepseek (stored via /connect); no role uses one yet` (or
 `trivial and significant use it`), a `--` line for a key wb can't hold (`xai's key is in XAI_API_KEY:
@@ -6521,9 +6565,10 @@ cancelled hour reported nothing, #950). Every suite job sets `WB_TEST_HANG_SECS`
 WSL): `SIGALRM` around each test dumps every thread's stack and fails it with `tests.Hung: <test id> hung past
 WB_TEST_HANG_SECS (N s)`, a `BaseException` (as a `TimeoutError` it was swallowed by `socket.getfqdn`'s `except
 OSError`, 2026-11-22). Job limits 60 min, `check.yml`'s shards 30. Linux jobs install `OPENCODE_VERSION` via
-`scripts/install-opencode.sh` against `OPENCODE_SHA256` (2.x isn't on npm), print the Landlock ABI, and `check.yml`'s
+`scripts/install-opencode.sh` against `OPENCODE_SHA256` (2.x isn't on npm), print the Landlock ABI (the macOS job its lane's kind, `seatbelt`), and `check.yml`'s
 `Git LFS` step installs git-lfs. Credential-hiding tests skip when the home is in a temp root (`home_outside_the_lane`);
-a profile without a git identity gets a scratch one. Credential-read enforcement needs Landlock, the Snap launcher test
+a profile without a git identity gets a scratch one. Credential-read enforcement needs Landlock (Seatbelt's real test,
+`test_seatbelt_holds_the_lane_on_a_real_mac`, runs on the macOS job, #1194), the Snap launcher test
 Linux; the killed-runner test checks kernel cleanup on Linux, cleanup after reaping on both. `chat.yml` runs the browser test (`PLAYWRIGHT_VERSION`) when
 `chat.py`, `webpush.py`, `chat_static/`, the test or itself change; not required. A newer push cancels a branch's run,
 never main's (shields.io shows a cancelled run as failing). Dependabot moves the SHA pins. Not in CI: a real model. The real run, after a change to how OpenCode is invoked or read: a scratch repo from `wb init` with a committed CLAUDE.md, `wb start <t> --trial --size trivial --spec <f> --repo <dir> --test '<cmd>'`, `wb watch <t>`, `wb report <t>`, then `wb discard <t>`; it takes the GPU and writes the real state directory, and `--trial` keeps it out of the router's evidence and the lessons.
@@ -6785,7 +6830,8 @@ one with none, and new backends on a busy role count as newly sent (`routes._bus
 **Conventions for a new test.** Names read as sentences; one class per feature, a one-line docstring; end to end through
 `self.start`/`wait_phase`/`run_wb`, asserting the phrases Claude reads and the state files; real processes and servers
 on port 0 (only `chat.tailscale` and Hardware's probes are mocked); a regression test cites the incident and date; task
-names `t-<slug>`; OpenCode-dependent tests through `run_calls`; kernel ones `@unittest.skipUnless(lane.abi(), …)`;
+names `t-<slug>`; OpenCode-dependent tests through `run_calls`; kernel ones `@unittest.skipUnless(lane.abi(), …)`
+(Seatbelt's `lane.kind() == "seatbelt"`); a test meaning "no lane" mocks `lane.kind` to None, never `lane.abi` to 0 (a Mac has Seatbelt);
 reuse helpers by import or assignment, never by subclassing a class with tests; new classes above `__main__`.
 
 **Not hermetic.** The real HOME (the lane tests' `~/.wb-sec-test-*`, `~/.wb-lane-test-*`,
@@ -6936,7 +6982,8 @@ doc needs its own `!/` line).
   `ts`, `round`, `out`; gpu.json's `waiting`, `since`, `waiting_since`) → `top.py`, the Top tests; `--json` → *wb top*.
 - **A git call on a task's worktree** → `gitops.git` (pinned, no hooks), never `git -C`; parsed output: porcelain or `-z`.
 - **Permissions or the config layer** (`context.py`, `write_config_layer`) → the real-OpenCode tests, unskipped.
-- **The lane** (`context.writable`, `readable`, `SECRETS`, `lane.py`) → the Lane and RealOpenCode tests on Landlock, the
+- **The lane** (`context.writable`, `readable`, `SECRETS`, `lane.py`) → the Lane and RealOpenCode tests on Landlock, Seatbelt's
+  on the nightly macOS job; `readable`'s walk → `read_rules` with it (the Lane tests compare the two); what Seatbelt can't hold → `SEATBELT_GAPS`; the
   protocol's lane line, the handbook. What it leaves writable that runs later outside it (`TOOL_HOMES`, `NOT_WRITABLE`), what WSL's interop
   runs outside it (`windows_drives`, `agent_path`, `interop_gap`) → the lane's *Writes* and *Reads*, `wb doctor`. A secret in a `TOOL_HOMES` entry → `SPLIT_MADE`; one a
   tool opens at every start (helm, k6) → its path in `agent_env`.

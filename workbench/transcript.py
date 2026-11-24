@@ -83,15 +83,14 @@ def stores(task: store.Task | None) -> list[tuple[dict | None, object]]:
     there (state/, log/, the database's -wal) had OpenCode, run by wb outside the lane, write
     through it to any file of the user's (the #1010 review, 2026-11-22). The user's store is
     out of every lane, and read outside it."""
-    from . import context, lane
+    from . import context
     if task is None or not context.opencode_db(task).is_file():
         return [(None, _same)]
     env = {**os.environ, **context.opencode_home_env(task)}
     writable = context.writable(task)
     if writable is None:  # no lane: the agent's commands reach every file of the user's anyway
         return [(env, _same), (None, _same)]
-    readable, unix = context.readable(task), context.unix_paths(task)
-    return [(env, lambda cmd: lane.wrap(writable, cmd, readable, unix)), (None, _same)]
+    return [(env, context.lane_wrap(task)), (None, _same)]
 
 
 def export(session: str, strict: bool = False, task: store.Task | None = None) -> dict | None:
