@@ -1311,25 +1311,38 @@ def catalog_base(package: str, settings: dict) -> str:
     """A catalog model's API base: its `settings.baseURL`, else the one its package builds from
     the settings, as OpenCode 2.3.2 does (#1192): Azure's `https://<resourceName>.openai.azure.com
     /openai` (azure.ts), Bedrock's `https://bedrock-runtime.<region>.amazonaws.com` for Converse
-    and `https://bedrock-mantle.<region>.api.aws/v1` (`/anthropic/v1` for Messages) for Mantle,
-    the region `settings.region`, else AWS_REGION, AWS_DEFAULT_REGION, us-east-1 (bedrock-auth.ts
-    resolveRegion). Not a secret: model.list prints these beside the key, which wb never reads."""
+    and `https://bedrock-mantle.<region>.api.aws/v1` (`/anthropic/v1` for Messages) for Mantle.
+    A listed baseURL's `${AWS_REGION}` is filled as model-resolver.ts `prepareProviderURL` fills
+    it: model.list prints every Mantle row's base as that template, and passed on as it was it was
+    the keyhole's upstream host, so every request failed (#1192's review, 2026-11-24). Any other
+    `${...}` is refused (""): OpenCode fills it from its own environment, which isn't wb's. The
+    region is `settings.region`, else AWS_REGION, AWS_DEFAULT_REGION, us-east-1 (bedrock-auth.ts
+    resolveRegion; plugin/provider/amazon-bedrock.ts sets it so). Not a secret: model.list prints
+    these beside the key, which wb never reads."""
     if base := str(settings.get("baseURL") or ""):
-        return base
+        if "${AWS_REGION}" in base:
+            region = _aws_region(settings)
+            base = base.replace("${AWS_REGION}", region) if region else ""
+        return "" if "${" in base else base
     from . import keyhole  # keyhole imports this module lazily too
     path = keyhole._package_path(package)
     if path.split("/")[0] == "azure":
         res = str(settings.get("resourceName") or "").strip()
         return f"https://{res}.openai.azure.com/openai" if _NAME.fullmatch(res) else ""
     if keyhole._bedrock("", path):
-        region = str(settings.get("region") or os.environ.get("AWS_REGION")
-                     or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1")
-        if not _NAME.fullmatch(region):
+        if not (region := _aws_region(settings)):
             return ""
         if "mantle" not in path:
             return f"https://bedrock-runtime.{region}.amazonaws.com"
         return f"https://bedrock-mantle.{region}.api.aws/{'anthropic/v1' if path.endswith('/messages') else 'v1'}"
     return ""
+
+
+def _aws_region(settings: dict) -> str:
+    """catalog_base's Bedrock region, or "" when it isn't a plain host label."""
+    region = str(settings.get("region") or os.environ.get("AWS_REGION")
+                 or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1")
+    return region if _NAME.fullmatch(region) else ""
 
 
 def _off_machine(pid: str, url: str, extra: dict) -> bool:
@@ -1829,9 +1842,9 @@ def _key_file(pid: str) -> str:
 
 
 def unspoken(pid: str, package: str) -> bool:
-    """Whether the keyhole can't carry a provider's requests (keyhole.protocol_of: Google's
-    x-goog-api-key, Azure's api-key, Cohere's native API, no package at all). A signing provider
-    isn't one: its key source says "signing"."""
+    """Whether the keyhole can't carry a provider's requests (keyhole.protocol_of None: Cohere's
+    native API, Google's Interactions route, no package at all). Vertex's packages are None too,
+    but a signing provider isn't one: its key source says "signing" (#1192)."""
     from . import keyhole  # keyhole imports this module lazily too
     return keyhole.protocol_of(package) is None and not keyhole._signs(pid, package)
 

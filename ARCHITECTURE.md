@@ -2062,7 +2062,8 @@ ends in it), so OpenCode posts to the path it would have posted upstream and the
 path and its query to the upstream's host: DeepInfra `…/v1/openai/chat/completions`, Anthropic
 `…/v1/messages?beta=true`, a custom provider on `@ai-sdk/anthropic` `…/v1/messages` (*API models
 through OpenCode*; checked on real OpenCode in `RealOpenCodeAPI`), Gemini `…/v1beta/models/<id>:streamGenerateContent?alt=sse`,
-Azure's Chat route `…/openai/v1/chat/completions?api-version=v1`, Bedrock Mantle `…/v1/responses` and Converse
+Azure's Chat route `…/openai/v1/chat/completions?api-version=v1`, Bedrock Mantle `…/openai/v1/responses` or `…/v1/responses` (the
+listed base, its `${AWS_REGION}` filled: `catalog_base`) and Converse
 `/model/<id>/converse-stream` (#1192, the same test). An Azure config's own `apiVersion` or
 `useDeploymentBasedUrls` isn't mirrored (the version sent is `v1`; deployment paths are a 404).
 A request passes, in order, each refusal a JSON error body: the path (a POST to exactly the base
@@ -3174,11 +3175,16 @@ read as a wrong id, Claude hunted for the "right" one).
   whether or not `discover()` still does (a renamed or retired model, an old task's id, `wb model
   rename OLD`, a typo): `resolve`, `lookup` and `cli._api_id` ask no catalog for one (it cost two
   OpenCode starts on every `wb watch --json` the pane polls).
-- *The model.* `base_url` the model's catalog base (`catalog_base`: `settings.baseURL`, else what its package
-  builds from the settings, as 2.3.2 does: Azure's `https://<resourceName>.openai.azure.com/openai`, Bedrock
-  Converse's `https://bedrock-runtime.<region>.amazonaws.com`, Mantle's `https://bedrock-mantle.<region>.api.aws/v1`
-  or `/anthropic/v1`, the region `settings.region`, else `AWS_REGION`, `AWS_DEFAULT_REGION`, `us-east-1`; the
-  upstream; an off-machine or Ollama provider's own baseURL), `engine` `api`, `name` the id at the provider (the entry's `modelID`, which
+- *The model.* `base_url` the model's catalog base (`catalog_base`: `settings.baseURL`, its `${AWS_REGION}`
+  filled as 2.3.2's `prepareProviderURL` fills it when it resolves the model (model.list prints every Mantle row's
+  base as `https://bedrock-mantle.${AWS_REGION}.api.aws/openai/v1` or `/v1`: passed on as it was, the keyhole's
+  upstream host was the template and every request failed, #1192's review) and any other `${...}` refused (no
+  base: OpenCode fills it from its own environment); else what its package builds from the settings, as 2.3.2
+  does: Azure's `https://<resourceName>.openai.azure.com/openai`, Bedrock Converse's
+  `https://bedrock-runtime.<region>.amazonaws.com`, Mantle's `https://bedrock-mantle.<region>.api.aws/v1` or
+  `/anthropic/v1` (a Mantle row with no baseURL); the region `settings.region`, else `AWS_REGION`,
+  `AWS_DEFAULT_REGION`, `us-east-1`, a host label or no base; the upstream; an off-machine or Ollama provider's
+  own baseURL), `engine` `api`, `name` the id at the provider (the entry's `modelID`, which
   an alias's differs from, else its `id`), `label` `<Provider name>
   (API)` (the auth list's name, else the id), `remote` true, `package` the model's own catalog package (or the
   config's `npm`; one provider's models post through several, Azure's and Google's, and the first model seen set
@@ -6797,9 +6803,10 @@ the keyhole can't speak, `@ai-sdk/<name>` npm names (#1137), DeepInfra's appende
 model's own entry or the V2 form (#1015's review). #1192's: Gemini's header, path, query, `usageMetadata` booked,
 another model in its path (403) and a `key=` query refused, its per-minute 429 held and its daily one a quota stop;
 Azure's `api-key`, `/v1` and `api-version`; Converse's path model and event-stream usage; a stored Bedrock key and
-Vertex still refused (`Keyhole`); each model's own package and base, Azure's from its resourceName, and the Gemini
+Vertex still refused, a listed Mantle base's `${AWS_REGION}` filled and any other variable refused (`Keyhole`); each model's own package and base, Azure's from its resourceName, and the Gemini
 free-tier line (`Routes`); a Gemini task end to end on the fake (`ApiTasks`); and on real OpenCode, Gemini, Azure's
-Chat route, Mantle's Responses and Converse each posting through the keyhole (`RealOpenCodeAPI`). `_Upstream`
+Chat route, Mantle's Responses and Converse each posting through the keyhole, each on its listed row's base
+through `catalog_base` and `mirror_path` (`RealOpenCodeAPI`). `_Upstream`
 answers Gemini (`gemini_events`), Converse (`es_frame`, `CONVERSE_EVENTS`) and a Responses stream with its whole item
 lifecycle, which 2.3.2's Responses protocols require. Its
 `test_the_tasks_own_catalog_*` (#1015) takes real model.list entries (`models.model_list`, as every real test reads the catalog: `ApiHarness.real_list`) through `hosted()`,

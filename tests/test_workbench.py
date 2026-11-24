@@ -28549,6 +28549,33 @@ class Keyhole(_KeyholeTest):
                                                   {"region": "eu-west-1"}),
                          "https://bedrock-mantle.eu-west-1.api.aws/anthropic/v1")
 
+    def test_a_listed_mantle_base_gets_its_region_as_opencode_fills_it_and_any_other_variable_is_refused(self):
+        # #1192's review (2026-11-24): OpenCode 2.3.2's model.list prints every Mantle row's base
+        # as a template, filled only when it resolves the model (model-resolver.ts
+        # prepareProviderURL); passed on as it was, the keyhole's upstream host was
+        # `bedrock-mantle.${aws_region}.api.aws` and every request a 502 or a 10-minute outage
+        mantle = "@opencode/ai/providers/amazon-bedrock/mantle/responses"
+        row = {"providerID": "amazon-bedrock", "id": "openai.gpt-x", "package": mantle,  # as listed
+               "settings": {"region": "us-east-1",
+                            "baseURL": "https://bedrock-mantle.${AWS_REGION}.api.aws/openai/v1"}}
+        base = self.models.catalog_base(row["package"], row["settings"])
+        self.assertEqual(base, "https://bedrock-mantle.us-east-1.api.aws/openai/v1")
+        self.assertEqual(self.kh_mod.mirror_path(mantle, base), base)
+        template = {"baseURL": "https://bedrock-mantle.${AWS_REGION}.api.aws/v1"}
+        for env, want in (({"AWS_REGION": "eu-west-1", "AWS_DEFAULT_REGION": "ap-south-1"}, "eu-west-1"),
+                          ({"AWS_DEFAULT_REGION": "ap-south-1"}, "ap-south-1"), ({}, "us-east-1")):
+            with mock.patch.dict(os.environ, env), self.subTest(env):
+                for name in {"AWS_REGION", "AWS_DEFAULT_REGION"} - set(env):
+                    os.environ.pop(name, None)
+                self.assertEqual(self.models.catalog_base(mantle, template),
+                                 f"https://bedrock-mantle.{want}.api.aws/v1")
+        for settings in ({**template, "region": "us-east-1.evil.test/x"},   # not a host label
+                         {"baseURL": "https://${HOST}/v1", "region": "us-east-1"},
+                         {"baseURL": "https://bedrock-mantle.${AWS_REGION}.${DOMAIN}/v1"}):
+            self.assertEqual(self.models.catalog_base(mantle, settings), "", settings)
+        plain = "https://gw.example.test/v1"
+        self.assertEqual(self.models.catalog_base(mantle, {"baseURL": plain}), plain)
+
     def test_bedrock_runs_on_a_stored_api_key_and_still_refuses_signing(self):
         self.fake_auth({"amazon-bedrock": {"export": [self.key_row("amazon-bedrock", {
             "type": "key", "key": self.CANARY})]}})
@@ -28819,30 +28846,37 @@ class RealOpenCodeAPI(_KeyholeTest):
             "amazon-bedrock": {"options": {"apiKey": "dummy-not-a-key", "region": "us-east-1"}}}}
         (tmp / "keys-1192.json").write_text(json.dumps(keys))
         rows = self.listed(tmp / "keys-1192.json", "bundled-1192")
-        cases = (("google", "@opencode/ai/providers/google", "/v1beta", None,
-                  "x-goog-api-key", self.CANARY, "/v1beta/models/{name}:streamGenerateContent?alt=sse"),
+        # each case's base is the listed row's, through catalog_base and mirror_path as
+        # keyhole.start takes it: a hand-written Mantle `/v1` hid that model.list prints Mantle's
+        # base as `https://bedrock-mantle.${AWS_REGION}.api.aws/openai/v1` (#1192's review)
+        cases = (("google", "@opencode/ai/providers/google", "generativelanguage.googleapis.com",
+                  "x-goog-api-key", self.CANARY, "/models/{name}:streamGenerateContent?alt=sse"),
                  # Azure through its Chat route: its Responses one builds the same URL and auth
                  # (azure.ts `endpoint`, `auth`), but OpenCode's OpenAI Responses parser ends this
                  # test upstream's stream as incomplete, retrying for 90 s (2026-11-24)
-                 ("azure", "@opencode/ai/providers/azure/chat", "/openai/v1", {"api-version": "v1"},
-                  "api-key", self.CANARY, "/openai/v1/chat/completions?api-version=v1"),
-                 ("amazon-bedrock", "@opencode/ai/providers/amazon-bedrock/mantle/responses", "/v1", None,
-                  "authorization", f"Bearer {self.CANARY}", "/v1/responses"),
-                 ("amazon-bedrock", "@opencode/ai/providers/amazon-bedrock", "", None,
+                 ("azure", "@opencode/ai/providers/azure/chat", "wbtest.openai.azure.com",
+                  "api-key", self.CANARY, "/chat/completions?api-version=v1"),
+                 ("amazon-bedrock", "@opencode/ai/providers/amazon-bedrock/mantle/responses",
+                  "bedrock-mantle.us-east-1.api.aws", "authorization", f"Bearer {self.CANARY}", "/responses"),
+                 ("amazon-bedrock", "@opencode/ai/providers/amazon-bedrock", "bedrock-runtime.us-east-1.amazonaws.com",
                   "authorization", f"Bearer {self.CANARY}", "/model/{quoted}/converse-stream"))
-        for provider, package, path, query, header, want, upstream in cases:
+        for provider, package, host, header, want, upstream in cases:
             row = next((r for r in rows if r["providerID"] == provider and r.get("package") == package), None)
             if row is None:  # a newer OpenCode's catalog without one: said, not passed silently
                 self.fail(f"the bundled catalog lists no {provider} model on {package}")
             name = row["id"]
+            base = self.models.catalog_base(package, row.get("settings") or {})
+            self.assertEqual(urllib.parse.urlsplit(base).hostname, host, (package, base))
+            mirrored = urllib.parse.urlsplit(keyhole.mirror_path(package, base))
             self.up.seen.clear()
-            m = self.model(provider, name, path, package)
+            m = self.model(provider, name, mirrored.path, package)
             kh = keyhole.Keyhole(self.task, m, keyhole.Key(provider, self.CANARY), m.base_url,
-                                 keyhole.protocol_of(package), log=self.lines.append, query=query)
+                                 keyhole.protocol_of(package), log=self.lines.append,
+                                 query=keyhole.upstream_query(package, base) or None)
             self.addCleanup(kh.close)
             with self.subTest(package):
                 self.run_opencode(kh, provider)
-                self.check_1192(req=self.up.seen, header=header, want=want, upstream=upstream.format(
+                self.check_1192(req=self.up.seen, header=header, want=want, upstream=mirrored.path + upstream.format(
                     name=name, quoted=urllib.parse.quote(name, safe="-_.!~*'()")), token=kh.token)
 
     def check_1192(self, req, header, want, upstream, token):
