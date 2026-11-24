@@ -999,8 +999,23 @@ directory marking itself a cache (a `CACHEDIR.TAG`, or a `.gitignore` of `*` alo
 `BUILD_FILES` such files in its ignored directory (the outermost one `git ls-files --directory`
 names), else, one ignored by name, its top-level directory (only those count: a test run's bytecode
 in a big package once pushed a hand-written file out; counted by top-level directory, setuptools'
-in-tree `build/lib` copies did the same, #1179's review). The rest it finds changed that a person
-might have written, text outside a cache, under `BUILD_FILES` text files in its group, of any name
+in-tree `build/lib` copies did the same, #1179's review), and nowhere the runner's own setup (`--setup`,
+`--copy`) or `--test` run in the worktree, or its base check in the scratch checkout (the same
+relative paths), wrote such a file (`gitops.ran_wrote`, after each run: the file's
+outermost ignored directory, else the file; status `ran_wrote`): Claude's rerun of the acceptance
+command at review wrote `mvn test`'s surefire reports, tsc's `dist/*.d.ts` and jest's `coverage/`
+again, and accept refused them as Claude's until `--include` committed them (#1211); the base
+check's run counts because a takeover in round 1, or a stuck round, comes before any `--test` run
+in the worktree (#1211's review; with `--no-base-check`, or a command that stops on the base before
+it writes, it is the worktree's runs alone). One kept in
+`hand_wrote` before a run wrote there moves to `hand_left` once one does (`runner._by_hand`), so a
+report from a test the runner hadn't run yet stops refusing; one written by a command the runner
+never runs is still taken for Claude's, so a build Claude runs that isn't the task's (`mvn test`
+beside a `--test` of `grep`, `tsc` beside jest's) is refused until its output goes or `--include`
+(still open in #1211: telling Claude's writes apart needs the mod to record them, a hook on Write
+and Edit; a directory where the same window changed files the filters drop was rejected as the
+sign, as it would send #1179's module under `lib/`, beside Claude's `.csv`, to `hand_left`).
+The rest it finds changed that a person might have written, text outside a cache, under `BUILD_FILES` text files in its group, of any name
 (the one filter waived), is never dropped without a word (`runner.hand_left`, status `hand_left`: a
 `.csv` beside Claude's module under `lib/` went with the worktree, `--include` or not, #1179's
 review; bytecode and an install's files aren't named: unfiltered, a test run's `.pyc` was named at
@@ -1342,7 +1357,8 @@ bytes (`verify.filter_gap`, `_filter_failed`) exits `"filtered"`, naming `filter
 **The base check** (`_base_check`, `base_check`, before round 1 and the GPU): the acceptance command
 once on the base in a scratch checkout (`verify.on_base`, a `--shared` clone,
 `gitops.scratch_clone`, in the task's lane; in the worktree its writes stayed, #192), at most
-`min(BASE_CHECK_SECS (120 s), --test-timeout)`. Output to `base-tests.txt`; status `base_check`
+`min(BASE_CHECK_SECS (120 s), --test-timeout)`; where its run wrote build or test output joins
+status `ran_wrote` (`verify._run`'s `ran`, `runner._note_ran`; #1211's review: `runner.hand_wrote`). Output to `base-tests.txt`; status `base_check`
 `{ok, exit, tail (8 lines, 1500 characters), limit, secs, cmd}` (`secs` excludes waits, #779).
 `base_check_line`: a note when it passes (Claude checks the diff adds tests that fail without the
 change), a warning plus an immediate `checkin` when `--test-timeout` cut it or the shell didn't find
@@ -6292,9 +6308,10 @@ off), not `wb start`'s.
 | `prepared`, `setup_secs` | the worktree is set up (`_prepare`), so a later runner doesn't again; how long (older tasks: `prepared_paths`, `prepared_marks`, `prepared_bytes`, `runner.prepared_record`) |
 | `checked_out`, `checkout_secs` | `runner.checkout` made the worktree; how long |
 | `hands_off_at` | when the agent last stopped (review, the runner's exit, `cli._stop_runner`, `cli.reap`; an earlier one kept): ignored files changed since are Claude's (`runner.hand_wrote`, #1179); cleared by the next runner once it has kept them |
-| `hand_wrote` | ignored files written while no runner ran, kept by each runner at its start (`runner._hands_on`): `wb accept`/`wb next` refuse them until `--include` (#1179) |
+| `hand_wrote` | ignored files written while no runner ran, kept by each runner at its start (`runner._hands_on`): `wb accept`/`wb next` refuse them until `--include` (#1179); none under `ran_wrote` |
 | `agent_from` | when the agent's first round began, after the checkout, setup, `--copy` and base check (set once): ignored files changed since that `gitops.hand_written` keeps, less `test_wrote`, that a shell row's `names` name are the agent's shell's (`runner.shell_wrote`), refused at `wb accept`/`wb next` until `--include` and named in the report; the rest are `shell_left`, noted and left out (#1210) |
 | `test_wrote` | the ignored files the runner's test runs changed (`runner._tests_wrote`, after each in `run_tests`; what `hand_written` keeps and its rest): build or test output, never the agent's shell's (#1210) |
+| `ran_wrote` | where the runner's own setup or `--test` run in the worktree, or its base check in the scratch checkout, wrote a file `gitops.hand_written` would take for Claude's (`gitops.ran_wrote`: its outermost ignored directory, else the file), grown after each run: a file changed there is build or test output (`hand_left`), as Claude's rerun of the acceptance command wrote `mvn test`'s reports there (#1211) |
 | `hand_left` | the other ignored files changed while no runner ran that `gitops.hand_written` took for build or test output but a person might have written (text, outside a cache, under `BUILD_FILES` text files in their group, any suffix: never bytecode nor an install's), kept the same way: `wb accept`/`wb next` name them as left out of the commit (`gitops.left_out_line`; accept keeps a copy in `left-out/`, #1179's review) |
 | `taken_over` | `wb takeover`: `runner.checkout` then fails a task not checked out rather than recheck it out (#655); cleared by the hand-back once checked out, for the mod's `delegatedWork` (#926) |
 | `branch_made` | the commit `runner.checkout` makes `delegate/<task>` at, recorded before `worktree add` when no such branch exists: the only branch a cut-short cleanup deletes (#416) |

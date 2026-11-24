@@ -2408,6 +2408,7 @@ def run_tests(task: store.Task, n: int):
     began = store.now()
     code, output = run_in_lane(task, cmd, limit)
     _tests_wrote(task, began)
+    _ran_wrote(task, began)
     task.round_dir(n).joinpath("tests.txt").write_text(
         f"$ {cmd}\nexit: {code}\nshell: {test_shell()}\n\n{output}")
     result = {"ok": code == 0, "exit": code, "tail": clip_tail(output, 40), "round": n}
@@ -2756,11 +2757,31 @@ def hand_left(task: store.Task) -> list[str]:
 
 def _by_hand(task: store.Task) -> tuple[list[str], list[str]]:
     wrote, left = set(task.status.get("hand_wrote") or []), set(task.status.get("hand_left") or [])
+    ran = task.status.get("ran_wrote") or []
     if since := task.status.get("hands_off_at"):
         rest: list[str] = []
-        wrote |= set(gitops.hand_written(task.worktree, since, rest))
+        wrote |= set(gitops.hand_written(task.worktree, since, rest, ran))
         left |= set(rest)
-    return sorted(wrote), sorted(left - wrote)
+    # one kept before a run wrote there is the run's too: Claude's first rerun of a test the
+    # runner hadn't run yet stayed in hand_wrote, refusing every accept after (#1211)
+    moved = {p for p in wrote if gitops.under(p, ran)}
+    return sorted(wrote - moved), sorted((left | moved) - (wrote - moved))
+
+
+def _ran_wrote(task: store.Task, since: float) -> None:
+    """After the runner's own setup or test run: where it wrote what hand_written would take for
+    Claude's, kept in status `ran_wrote` (gitops.ran_wrote, #1211)."""
+    try:
+        new = gitops.ran_wrote(task.worktree, since)
+    except (gitops.GitError, OSError):
+        return
+    _note_ran(task, new)
+
+
+def _note_ran(task: store.Task, new) -> None:
+    """``new`` (gitops.ran_wrote's) added to status `ran_wrote`."""
+    if new and not set(new) <= set(had := task.status.get("ran_wrote") or []):
+        task.set_status(ran_wrote=sorted(set(had) | set(new)))
 
 
 def hands_off(task: store.Task) -> None:
@@ -3083,8 +3104,9 @@ def _prepare_now(task: store.Task) -> bool:
     spec = task.spec
     task.set_status(last="setting up the worktree"
                     + (f": {spec['setup']}" if spec.get("setup") else ""))
-    began = time.monotonic()
+    began, at = time.monotonic(), time.time()
     code, output = prepare(task)
+    _ran_wrote(task, at)
     secs = round(time.monotonic() - began, 1)
     task.dir.joinpath("setup.txt").write_text(
         f"$ {spec.get('setup') or ''}\nexit: {code}\nseconds: {secs}\nshell: {test_shell()}\n\n{output}")
@@ -3137,8 +3159,14 @@ def base_check(task: store.Task) -> dict | None:
     limit = min(BASE_CHECK_SECS, int(task.spec.get("test_timeout") or 900))
     from . import verify  # verify imports this module
     timed: list[float] = []  # its scratch checkout and run, not the waits for the GPU or a turn (#779)
+    # where it wrote, as the worktree's paths: a takeover in round 1 (stuck, or before its tests
+    # ran) left ran_wrote empty, and Claude's rerun of `mvn test` there was refused at accept as
+    # files written by hand (#1211's review, 2026-11-24)
+    ran: list[str] = []
     code, output = verify.on_base(task, cmd, limit, say=lambda msg: task.set_status(last=msg),
-                                  turn=lambda: _timed(prep_turn(task, "check"), timed))  # one at a time (#590), apart from setups (#868)
+                                  turn=lambda: _timed(prep_turn(task, "check"), timed),  # one at a time (#590), apart from setups (#868)
+                                  ran=ran)
+    _note_ran(task, sorted(set(ran)))
     task.dir.joinpath("base-tests.txt").write_text(
         f"$ {cmd}\nexit: {code}\nshell: {test_shell()}\n\n{output}")
     return {"ok": code == 0, "exit": code, "tail": clip_tail(output, 8, total=1500), "limit": limit,

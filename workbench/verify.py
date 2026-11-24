@@ -18,6 +18,7 @@ import secrets
 import shlex
 import shutil
 import tempfile
+import time
 from pathlib import Path, PurePosixPath
 
 from . import context, gitops, runner, store
@@ -312,11 +313,12 @@ def gpu(task: store.Task, say=_say):
 
 
 def _run(task: store.Task, checkout, cmd, limit: int, keep=None,
-         setup: bool = False) -> tuple[int | str, str]:
+         setup: bool = False, ran: list | None = None) -> tuple[int | str, str]:
     """``cmd`` in a scratch clone that ``checkout`` sets up, under the task's lane; ``keep(work)``
     takes what the run left before the clone goes. ``cmd`` may be a function of the clone's path,
     for a command that names it. Prepared from the task's worktree, unless ``setup`` (--setup)
-    asks for the setup to run there again."""
+    asks for the setup to run there again. ``ran`` gets where the run itself wrote what
+    gitops.hand_written would take for Claude's (gitops.ran_wrote, paths as the worktree's)."""
     store.home().mkdir(parents=True, exist_ok=True)  # not in /tmp, where the git shim allows writes
     with tempfile.TemporaryDirectory(prefix=store.scratch(".verify-"), dir=store.home()) as scratch:
         # nested as the worktree is, so that a sibling two levels up stays in the scratch (#261)
@@ -344,22 +346,29 @@ def _run(task: store.Task, checkout, cmd, limit: int, keep=None,
         if code != 0:
             why = runner.setup_timed_out(task.spec) if code == "timeout" else code
             return "setup failed", f"[setting up the scratch checkout failed: {why}]\n{said}"
+        began = time.time()
         out = runner.run_in_lane(at, cmd(work) if callable(cmd) else cmd, limit)
+        if ran is not None:
+            try:
+                ran.extend(gitops.ran_wrote(work, began))
+            except (gitops.GitError, OSError):
+                pass  # what the base check found, not where it wrote, is its job
         if keep:
             keep(work)
         return out
 
 
 def on_base(task: store.Task, cmd: str, limit: int, say=_say,
-            turn=contextlib.nullcontext) -> tuple[int | str, str]:
+            turn=contextlib.nullcontext, ran: list | None = None) -> tuple[int | str, str]:
     """``cmd`` on the task's base commit alone, in a scratch checkout under its lane (the runner's
-    base check): nothing it writes reaches the task's worktree. With the GPU alone when the
+    base check): nothing it writes reaches the task's worktree, and ``ran`` gets where it wrote
+    (_run). With the GPU alone when the
     task's tests need it (``gpu``), and then ``turn()`` (the runner's prep slot) around the run
     itself: taken first, the slot was held through the whole wait for the GPU, behind a task's
     round of up to 40 minutes, and every queued task's setup waited too (#679)."""
     with gpu(task, say), turn():
         return _run(task, lambda work: gitops.git(work, "checkout", "-q", "--detach", task.spec["base"]),
-                    cmd, limit)
+                    cmd, limit, ran=ran)
 
 
 def _checkouts(task: store.Task, tree: str, files: list[str], base_rev: str,
