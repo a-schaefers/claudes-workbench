@@ -2528,6 +2528,35 @@ class Lifecycle(Base):
         self.assertFalse(t.worktree.exists())
         self.assertEqual((t.dir / "left-out" / "lib" / "answers.csv").read_text(), "42\n")
 
+    def test_a_test_runs_bytecode_and_an_installs_files_are_not_named_at_accept(self):
+        # #1179's review (2026-11-24): hand_left had no filter: after Claude imported the repo's
+        # module at review (bytecode on), every accept named __pycache__/mod.cpython-311.pyc and
+        # copied it, and an npm install put all its paths in status.json (20,000: 1.6 KB to
+        # 808 KB, rewritten at every set_status and read by the mod)
+        (self.repo / ".gitignore").write_text("__pycache__/\nnode_modules/\n")
+        (self.repo / "mod.py").write_text("N = 42\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "mod"], check=True)
+        self.start("t-pyc", "ok", "--test", TEST_CMD)
+        wait_phase("t-pyc", {"review"})
+        t = store.Task("t-pyc")
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONDONTWRITEBYTECODE"}
+        subprocess.run([sys.executable, "-c", "import mod"], cwd=t.worktree, env=env, check=True)
+        self.assertTrue(list((t.worktree / "__pycache__").glob("mod.*.pyc")))
+        for i in range(gitops.BUILD_FILES * 2):
+            lib = t.worktree / "node_modules" / f"pkg{i}" / "lib"
+            lib.mkdir(parents=True)
+            (lib / "index.js").write_text(f"module.exports = {i};\n")
+        self.assertEqual(runner.hand_left(t), [])
+        before = len((t.dir / "status.json").read_bytes())
+        runner._hands_on(t)
+        self.assertEqual(t.status.get("hand_left"), [])
+        self.assertLess(len((t.dir / "status.json").read_bytes()), before + 200)
+        out = run_wb("accept", "t-pyc", "-m", "feat: one", "--merge")
+        self.assertIn("accepted t-pyc", out)
+        self.assertNotIn("note: git ignores", out)
+        self.assertFalse((t.dir / "left-out").exists())
+
     def test_wb_next_names_an_ignored_file_its_step_commit_leaves_out(self):
         # #1179's review (2026-11-24): wb next's commit dropped what hand_written's filters took
         # for a test run's without a word; it stays in the worktree, and the note says so
@@ -2566,8 +2595,9 @@ class Lifecycle(Base):
             (repo / "services" / "api" / "build" / "lib" / "api" / f"m{i}.py").write_text(f"N = {i}\n")
         left: list[str] = []
         self.assertEqual(gitops.hand_written(repo, t0, left), ["services/api/lib/helper.py"])
-        self.assertEqual(len(left), 60)                              # the build's: named, never committed
-        self.assertTrue(all(p.startswith("services/api/build/lib/api/") for p in left), left)
+        # the build's 60, an install's worth: neither committed nor named, as an npm install's
+        # 20,000 once filled status.json (#1179's review)
+        self.assertEqual(left, [])
 
     def test_a_file_claude_writes_under_an_ignored_path_in_a_review_fix_is_still_named_after_the_next_round(self):
         # #1179: the agent's next round writes there too, which isn't Claude's, so what Claude

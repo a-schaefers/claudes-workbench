@@ -1544,8 +1544,11 @@ def hand_written(worktree: Path, since: float, left: list[str] | None = None) ->
     wrote under Python.gitignore's lib/ after a takeover was left out of wb accept's commit and
     deleted with the worktree, with no warning: only the agent's edit tools were read (#1179,
     2026-11-24). A test run's .pyc, .pytest_cache/ and logs, or an npm install, must not refuse
-    the commit (Claude runs the tests there). ``left`` gets the rest outside a cache, which the
-    commit leaves out: said, never silently dropped (left_out_line, #1179's review)."""
+    the commit (Claude runs the tests there). ``left`` gets the rest that are text outside a
+    cache, fewer than BUILD_FILES such in their group, any suffix: the commit leaves them out,
+    said, never silently dropped (left_out_line, #1179's review). The kind filter alone is
+    waived, for the .csv beside Claude's module: unfiltered, a test run's bytecode was named at
+    every accept, and an npm install's 20,000 paths went into status.json (#1179's review)."""
     top = os.path.abspath(worktree)
     changed = []
     for raw in git_bytes(worktree, "ls-files", "--others", "--ignored", "--exclude-standard",
@@ -1593,7 +1596,13 @@ def hand_written(worktree: Path, since: float, left: list[str] | None = None) ->
     groups = Counter(group(p) for p in kept if "/" in p)
     out = sorted(p for p in kept if "/" not in p or groups[group(p)] < BUILD_FILES)
     if left is not None:
-        left.extend(sorted(set(outside) - set(out)))
+        keep = set(out)
+        text = [p for p in outside if p not in keep and _text(os.path.join(top, p))]
+        # with `groups` (kept's), every text file of the group: under BUILD_FILES, all its kept
+        # ones are in out, so none is counted twice
+        rest = Counter(group(p) for p in text if "/" in p)
+        left.extend(sorted(p for p in text if "/" not in p
+                           or groups[group(p)] + rest[group(p)] < BUILD_FILES))
     return out
 
 

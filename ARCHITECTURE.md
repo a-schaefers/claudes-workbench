@@ -967,9 +967,12 @@ directory marking itself a cache (a `CACHEDIR.TAG`, or a `.gitignore` of `*` alo
 `BUILD_FILES` such files in its ignored directory (the outermost one `git ls-files --directory`
 names), else, one ignored by name, its top-level directory (only those count: a test run's bytecode
 in a big package once pushed a hand-written file out; counted by top-level directory, setuptools'
-in-tree `build/lib` copies did the same, #1179's review). The rest it finds changed, outside a
-cache, is never dropped without a word (`runner.hand_left`, status `hand_left`: a `.csv` beside
-Claude's module under `lib/` went with the worktree, `--include` or not, #1179's review): a
+in-tree `build/lib` copies did the same, #1179's review). The rest it finds changed that a person
+might have written, text outside a cache, under `BUILD_FILES` text files in its group, of any name
+(the one filter waived), is never dropped without a word (`runner.hand_left`, status `hand_left`: a
+`.csv` beside Claude's module under `lib/` went with the worktree, `--include` or not, #1179's
+review; bytecode and an install's files aren't named: unfiltered, a test run's `.pyc` was named at
+every accept, and an npm install put 20,000 paths in status.json, #1179's review): a
 refused commit names them after its line, and `wb next` and `wb accept` say "note: git ignores N
 more files changed since the agent stopped, which the commit leaves out as build or test output
 (…)" (`gitops.left_out_line`, `cli._left_out`): `wb next`'s with `git -C <worktree> add -f <file>`,
@@ -6222,7 +6225,7 @@ off), not `wb start`'s.
 | `checked_out`, `checkout_secs` | `runner.checkout` made the worktree; how long |
 | `hands_off_at` | when the agent last stopped (review, the runner's exit, `cli._stop_runner`, `cli.reap`; an earlier one kept): ignored files changed since are Claude's (`runner.hand_wrote`, #1179); cleared by the next runner once it has kept them |
 | `hand_wrote` | ignored files written while no runner ran, kept by each runner at its start (`runner._hands_on`): `wb accept`/`wb next` refuse them until `--include` (#1179) |
-| `hand_left` | the other ignored files changed while no runner ran, outside a cache, that `gitops.hand_written` took for build or test output, kept the same way: `wb accept`/`wb next` name them as left out of the commit (`gitops.left_out_line`; accept keeps a copy in `left-out/`, #1179's review) |
+| `hand_left` | the other ignored files changed while no runner ran that `gitops.hand_written` took for build or test output but a person might have written (text, outside a cache, under `BUILD_FILES` text files in their group, any suffix: never bytecode nor an install's), kept the same way: `wb accept`/`wb next` name them as left out of the commit (`gitops.left_out_line`; accept keeps a copy in `left-out/`, #1179's review) |
 | `taken_over` | `wb takeover`: `runner.checkout` then fails a task not checked out rather than recheck it out (#655); cleared by the hand-back once checked out, for the mod's `delegatedWork` (#926) |
 | `branch_made` | the commit `runner.checkout` makes `delegate/<task>` at, recorded before `worktree add` when no such branch exists: the only branch a cut-short cleanup deletes (#416) |
 | `failed_before` | `setup` or `load`: before the agent ran; the row copies it |
