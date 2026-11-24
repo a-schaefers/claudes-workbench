@@ -20,6 +20,8 @@
          before writing, its first step at 50%
   floor  reads 48% of its window before its first change, then fills to 76%, then writes "42"
   refill every session changes a file, then fills 76% and works on for an hour
+  explore  FAKE_READS (41) reads of different files, each a small step, then 2 s (the runner
+         sees the last read before the edit) and writes "42" like ok: a one-shot still exploring
   bgwait a command OpenCode moved to the background: `background_wait`, quiet for FAKE_BGWAIT
          seconds (6), then writes "42" like ok
   devserver  writes "42", starts `npm run dev` in the background, ends its turn (reason stop),
@@ -651,6 +653,16 @@ elif scenario == "read":
     emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 900,
                                                       "cache": {"read": 22100}})  # 25000: 76%
     time.sleep(1)
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
+    emit("text", text="Wrote answer.txt = 42.")
+    finish()
+elif scenario == "explore":  # #1087: many small reads before the first edit
+    for i in range(int(os.environ.get("FAKE_READS", 41))):
+        tool("read", {"filePath": os.path.abspath(f"src/f{i}.py")})
+        emit("step_finish", reason="tool-calls", tokens={"input": 1000 + 100 * i, "output": 50})
+    time.sleep(2)
     with open("answer.txt", "w") as fh:
         fh.write("42\n")
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})

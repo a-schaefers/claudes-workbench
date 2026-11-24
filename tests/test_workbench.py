@@ -29380,6 +29380,21 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual(task.status["last"], "deepinfra refused the API key (HTTP 401)")
         self.assert_no_canary(self.all_files(task.dir), json.dumps(task.status))
 
+    def test_an_api_one_shot_still_exploring_past_40_reads_is_not_stopped_but_a_32k_gpu_task_is(self):
+        # #1087: the explore guard stopped at 40 calls without an edit whatever the window, and an
+        # API one-shot (131K) reading a big repo was stuck at 16% of its window. It scales with
+        # the window now (40 per 32K, at most 160); a 32K GPU model's is still 40
+        self.assertEqual([runner.no_edit_limit(w) for w in (None, 8192, 32768, 65536, 131072, 1 << 20)],
+                         [40, 40, 40, 80, 160, 160])
+        self.start_api("t-explore", "explore", spawn=False)
+        self.drive_here("t-explore")
+        st = store.Task("t-explore").status
+        self.assertEqual((st["window"], st["phase"]), (131072, "review"), st.get("last"))
+        self.start("t-explore-gpu", "explore")
+        st = wait_phase("t-explore-gpu", {"stuck"})
+        self.assertEqual(st["window"], 32768)
+        self.assertEqual(st["last"], "40 tool calls without changing a file in the task")
+
     def test_a_request_the_provider_refuses_stops_as_the_providers_with_its_reason_and_no_key_remedy(self):
         # #1084: every 403 read as "refused the API key" with /connect, a moderation flag and the
         # keyhole's own one-model 403 too. #1082: a 404 (a model gone) or a 400 schema rejection

@@ -325,7 +325,7 @@ worktree, `OPENCODE_CONFIG` the layer. Later rounds continue the session until a
 |---|---|---|
 | the same tool call in a row (its input hashed, cut to 400 characters, #497) | 4 | `events.StuckDetector` |
 | failing tool calls in a row | 6 | |
-| calls since the last edit to the task's files (outside the worktree doesn't count: 2026-11-18) | 40 | |
+| calls since the last edit to the task's files (outside the worktree doesn't count: 2026-11-18) | 40 per 32K of the window, at most 160 (`runner.no_edit_limit`, #1087: 40 stopped 131K API one-shots still exploring) | |
 | no output (not while waiting on Claude; a background job gets the test timeout if longer) | 15 min | `--silence-timeout` |
 | one round, waits on Claude excluded | 40 min | `--round-timeout` |
 | mid-round handovers in one review round | more than `HANDOVER_MAX` (5) | `runner.drive` |
@@ -1991,7 +1991,7 @@ guides, release notes, stories, copy) runs under its own rules, not the coding o
 the key `of_role` uses), so quick prose steps never mark coding steps slow; writing rows still
 count toward `fresh_at`, one knob per model and window. The slice is shared (`router.slice`:
 decision 1, writing slices like significant).
-- **Unchanged**: the lane, the shell allowlist, the guards (40 calls without an edit still stops a
+- **Unchanged**: the lane, the shell allowlist, the guards (the calls without an edit, `runner.no_edit_limit`, still stop a
   writer that only reads), `NUDGE`, the ask server, handovers, feedback and resume (plain review
   notes), the lessons (Claude's raw material, never handed to an agent by role), and the savings
   estimate.
@@ -5950,7 +5950,7 @@ else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
 `FAKE_LESSON`, `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
 `ok`, `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
-`read`, `floor` (`HANDOVER_ROOM`), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`), `compactfail` (OpenCode
+`read`, `explore` (`FAKE_READS` small reads, then an edit: #1087), `floor` (`HANDOVER_ROOM`), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`), `compactfail` (OpenCode
 2.3's `{"type": "error", …, "error": {"type": "compaction.failed", "message": "Compaction produced no summary"}}`;
 `FAKE_COMPACT_MSG`, `FAKE_COMPACT_EXIT`, `FAKE_COMPACT_EDIT`, `FAKE_REFAIL`), `bgwait` (`FAKE_BGWAIT`), `toolhang`,
 `retry` (`FAKE_RETRY_EVERY`), `say`, `spend` (#1019: a read and a priced step every `FAKE_STEP_EVERY` s, `FAKE_STEPS` of
