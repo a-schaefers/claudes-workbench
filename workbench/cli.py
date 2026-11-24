@@ -2651,9 +2651,14 @@ def _resume(task: store.Task) -> None:
     if not _rechecks_out(task):
         _need_worktree(task)
     _opencode_again(task)
-    # a fresh session (#1173): round 1's own prompt, else the handoff of RESUME
-    _model_still_listed(task, None if _first_round(st) else runner.RESUME, fresh=True)
     n = st.get("round", 1)
+    # a fresh session (#1173): round 1's own prompt, else the handoff of the round written below,
+    # back to the step's feedback and with Claude's undelivered notes: the bare RESUME left them
+    # out, and the cap named was too low for its first request (#1173's review, 2026-11-24).
+    # The notes peeked, not taken: a refusal here leaves them for the next runner
+    peek = [r for r in runner.pending_steer(task) if r.get("by") != "workbench"]
+    _model_still_listed(task, None if _first_round(st) else _resume_prompt(
+        runner.round_asks(task, n), runner.steer_prompt(peek, False) if peek else ""), fresh=True)
     if _first_round(st):
         # it never ran a round (queued behind the GPU, its model or the base check): round 1
         # again, its prompt as wb start wrote it, not "Claude stopped your last session…"
@@ -2670,9 +2675,8 @@ def _resume(task: store.Task) -> None:
     asks = runner.round_asks(task, n)
     notes = _stale_notes(task)  # resume means carry on: a note never delivered still applies
     task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
-    task.round_dir(n + 1).joinpath("prompt.md").write_text(runner.RESUME.format(
-        asked=runner.ASKED.format("\n\n".join(asks)).rstrip() if asks else "")
-        + (f"\n\n{runner.folded_notes(task, n + 1, notes)}" if notes else ""))
+    task.round_dir(n + 1).joinpath("prompt.md").write_text(_resume_prompt(
+        asks, runner.folded_notes(task, n + 1, notes) if notes else ""))
     handled = store.now()
     gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
     task.set_status(round=n + 1, context="fresh", phase="queued", last="resumed by the reviewer",
@@ -2685,6 +2689,13 @@ def _resume(task: store.Task) -> None:
     print(f"resumed {name} in a fresh session (round {n + 1})")
     _say(gpu)
     _say(lessons.nudge(task))
+
+
+def _resume_prompt(asks: list[str], notes: str) -> str:
+    """wb resume's round: RESUME with the step's instructions (runner.round_asks) and the notes
+    folded in (runner.folded_notes' text), as the day cap's look ahead must count it (#1173)."""
+    return (runner.RESUME.format(asked=runner.ASKED.format("\n\n".join(asks)).rstrip() if asks else "")
+            + (f"\n\n{notes}" if notes else ""))
 
 
 def _lane_dir(raw: str, guard: set[str] = frozenset(), task: store.Task | None = None) -> str:

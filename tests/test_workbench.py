@@ -33705,6 +33705,50 @@ class ApiSpend(Base):
         self.assertGreaterEqual(mt.room({"max_tokens": 32768}, 65_000 + len(sent.encode())), 0)
         self.assertIsNone(task.status.get("api_stop"))
 
+    def test_a_resume_after_large_feedback_counts_that_feedback_and_its_notes_in_the_look_ahead(self):
+        # #1173's review (2026-11-24): wb resume looked ahead with the bare RESUME, but the round
+        # it writes carries the step's review feedback (round_asks) and Claude's undelivered
+        # notes, all in the fresh session's handoff: at the cap it named, the room refused the
+        # first request ("too near"), a spend wake and a second cap dialog
+        need = lambda text: float(re.search(r"a cap of at least \$([\d.]+) ", text)[1])  # noqa: E731
+        m = runner.models.lookup(SPEND_TIER)
+        task = self.api_task("t-cap-rs", SPEND_TIER, "ok")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        text = "1. take each of these cases too:\n" + "- a case of the parser's, one line\n" * 2300
+        self.cap(50)
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", "t-cap-rs", "--text", text)
+        runner.drive(task)
+        task.set_status(phase="stuck")
+        store.append_jsonl(task.dir / "steer.jsonl",                # sent as the round ended
+                           {"ts": store.now(), "text": "Also keep the cases sorted.", "now": False})
+        taken = task.status.get("steer_taken", 0)
+        rnd = task.status["round"]
+        self.assertLess(runner.first_tokens(task, runner.RESUME, fresh=True) * 4, len(text))
+        self.cap(5)
+        self.spent(4.8 - self.meter.today()["usd"])              # today $4.80
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("resume", "t-cap-rs")
+        self.assertEqual(e.exception.code, 3)
+        spawned.assert_not_called()
+        self.assertEqual(task.status.get("steer_taken", 0), taken)  # the note left for the next runner
+        self.cap(need(err.getvalue()))
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb("resume", "t-cap-rs")
+        spawned.assert_called_once()
+        raw = task.round_dir(rnd + 1).joinpath("prompt.md").read_text()
+        self.assertIn("- a case of the parser's, one line", raw)
+        self.assertIn("Also keep the cases sorted.", raw)
+        sent = runner.handoff_prompt(task, "resumed by the reviewer", raw.strip())
+        self.assertGreater(len(sent.encode()), 80_000)
+        mt = self.meter.for_task(task, m)
+        mt.begin(rnd + 1)
+        self.assertGreaterEqual(mt.room({"max_tokens": 32768}, 65_000 + len(sent.encode())), 0)
+        self.assertIsNone(task.status.get("api_stop"))
+
     def test_a_round_the_room_stopped_under_the_cap_says_too_near_with_the_rooms_worst(self):
         # #1150's review (2026-11-24): the round's stop (_ProviderWait.stop) consumed `api_stop` at
         # its tick, before stop_text wrote the notice, so the room's `worst` was never read: with

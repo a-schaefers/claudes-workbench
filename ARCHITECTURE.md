@@ -736,7 +736,9 @@ to the cent). wb start's input is round 1's (`first_tokens(prompt=spec)`, throug
 task's role in the line, before any round is written, a review counted or a step committed
 (`cli._model_still_listed(task, prompt, fresh)`, #1118: the round they wrote stopped at once as a spend `stuck`, a wake
 for nothing; feedback's with its text, `--fresh` or `--keep-context`, next's with the step's spec and the
-protocol, after reading it and before the commit, resume's fresh, #1173); with no cap set too (#1089's refusal). Their advice is a running task's
+protocol, after reading it and before the commit, resume's fresh with the round it writes, `cli._resume_prompt`: the
+step's feedback back to its review (`round_asks`) and Claude's undelivered notes, peeked and not taken, #1173's review: the
+bare RESUME named a cap the room refused at); with no cap set too (#1089's refusal). Their advice is a running task's
 (`meter.refusal(m, role, tokens=…, task=task)`, `meter._ask`): `… (it resets at local midnight). Ask the user: a higher
 cap (wb route cap <usd>) or tomorrow, then try again; or the role on the GPU (wb route <role> gpu) for the next
 tasks, with wb takeover <task> or wb discard <task> for this one (it keeps its API model)` (`a cap of at least
