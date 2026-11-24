@@ -23601,6 +23601,22 @@ class WebChat(Base):
         self.assertEqual((reply["from"], reply["text"]), ("claude", "Step 2 is in review."))
         self.assertIn("Claude: Step 2 is in review.", run_wb("chat", "log"))
 
+    def test_a_reply_names_the_claude_code_session_that_wrote_it_so_the_users_answer_goes_back_to_it(self):
+        # #1096 (2026-11-23): one session listens for all, and the user's answer to session B's
+        # report reached A; the mod hands an answer to the session that wrote the row before it
+        from workbench import models
+        me = os.getpid()
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "sess-b", "CLAUDE_PID": str(me)}):
+            run_wb("chat", "reply", "--text", "fix-b is ready for review: accept it?")
+        env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_PID")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            run_wb("chat", "reply", "--text", "from a terminal")
+        b, plain = [r for r in store.read_jsonl(self.chat.chat_dir() / "messages.jsonl")[0] if r["from"] == "claude"]
+        self.assertEqual({k: b.get(k) for k in ("session", "claude_pid", "claude_start", "claude_machine")},
+                         {"session": "sess-b", "claude_pid": me, "claude_start": models._started(me),
+                          "claude_machine": store.machine() or None})
+        self.assertFalse({"session", "claude_pid"} & set(plain))          # no session: the listener's
+
     # ---- other agents (#1042): their own tokens, never the user's authority ----
 
     def _agent(self, name="my-agent"):
@@ -29467,6 +29483,18 @@ class Routes(Base):
                          "deepseek/deepseek-flash, thinking off; writing GPU (the router picks)")
         self.assertEqual(json.loads(self.route("--json")[1])["roles"]["trivial"]["api_status"]["why"], "API (DeepSeek)")
 
+    def test_an_openrouter_roles_backends_are_in_the_summary_so_a_change_of_them_alone_is_said(self):
+        # #1126 (2026-11-23): routes.summary left `order` out, so a terminal's `wb route <role>
+        # --order …` changed where the code goes and the mod's echo said nothing; the mod's
+        # routesSummary is checked on the same fixture (register.test.tsx, #1126)
+        doc = lambda order: routes.normalize({"v": 1, "day_usd": 5, "roles": {
+            "significant": {"via": "api", "api": "openrouter/x/y", "thinking": "off", "order": order},
+            "trivial": {"via": "gpu", "api": "openrouter/x/z", "order": ["together"]}}})
+        self.assertEqual(routes.summary(doc(["deepinfra", "together"])),
+                         "significant API openrouter/x/y, backends deepinfra, together, thinking off; trivial GPU "
+                         "(the router picks), API kept: openrouter/x/z, backends together; writing GPU (the router picks)")
+        self.assertNotEqual(routes.summary(doc(["deepinfra"])), routes.summary(doc(["together"])))
+
     def test_under_claude_code_a_role_changes_only_on_the_dialogs_approval_used_once(self):
         os.environ["CLAUDECODE"] = "1"
         asked = self.dry("trivial", "deepseek/deepseek-flash", "--day-usd=5")
@@ -31599,8 +31627,35 @@ class ApiSpend(Base):
         self.assertNotIn(notice["cause"], results.THE_STEP)       # the slice isn't shrunk for it
         self.assertTrue(notice["text"].startswith(
             "t-guard stopped: the day's API spend cap is reached ($5.30 of $5 today). Its work so far is "
-            "in the worktree. Ask the user: a higher cap (wb route cap <usd>), the role on the GPU, or "
-            "tomorrow; then wb resume t-guard."))
+            "in the worktree. Ask the user: a higher cap (wb route cap <usd>) or tomorrow, then wb resume "
+            "t-guard; or the role on the GPU (wb route significant gpu) for the next tasks, with wb takeover "
+            "t-guard or wb discard t-guard for this one (resume keeps its API model)."))
+
+    def test_a_spend_stop_resumed_once_its_role_is_on_the_gpu_stops_again_on_its_api_model(self):
+        # #1095 (2026-11-23): the notice and the mod's wake said "the role on the GPU … then wb
+        # resume", but resume keeps the task's model (fixed per task, #1018), so the round stopped
+        # at the cap again at once. This pins what the advice must match: the GPU is for the next
+        # tasks, and this one is taken over or discarded.
+        self.cap(5)
+        self.spent(3.80)
+        task = self.api_task("t-f33", SPEND_M, "spend", FAKE_STEP_IN="100", FAKE_STEPS="50")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "stuck")
+        (first,) = self.notices("t-f33", "stuck")
+        self.assertIn("or the role on the GPU (wb route significant gpu) for the next tasks, with wb takeover "
+                      "t-f33 or wb discard t-f33 for this one", first["text"])
+        self.assertNotIn("GPU, or tomorrow; then wb resume", first["text"])
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 5, "roles": {
+            r: {"via": "gpu"} for r in ("significant", "trivial", "writing")}})  # the user chose the GPU
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("resume", "t-f33")
+        task = store.Task("t-f33")
+        self.assertEqual((task.spec["via"], task.spec["model"]), ("api", SPEND_M))  # resume never re-routes
+        self.meter._METERS.clear()                                                # a new runner process
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "stuck")
+        self.assertIn("spend cap is reached", task.status["last"])
+        self.assertEqual([r["cause"] for r in self.notices("t-f33", "stuck")], ["spend", "spend"])  # again at once
 
     def test_the_cap_is_checked_before_every_round_drive_goes_on_to(self):
         # #1017's _go_on: the in-round guard off, the cap reached in round 1 stops the auto-fix round

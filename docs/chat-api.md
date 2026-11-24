@@ -268,7 +268,9 @@ A **message** (`messages`, `replies`, `message`):
 - On Claude's reply: `re?: [message ids]` (what it answers: `wb chat reply --to`, else the
   messages Claude was given in that turn, the user's alone when the user's are among them),
   `to?: ["user" | agent names]` (whose those messages are, or `"user"` for a question to the
-  user, `wb chat reply --to user`; absent means the user's), `shots?`, `audio?`.
+  user, `wb chat reply --to user`; absent means the user's), `shots?`, `audio?`, and `session?`,
+  `claude_pid?`, `claude_start?`, `claude_machine?` (the Claude Code session that wrote it, so the
+  user's answer goes back to that session: `wb chat reply` writes them).
 
 An **ask** (`asks`, `/api/ask/<id>`): `{id: "ask-…", ts, tool, text, kind:
 "permission"|"plan"|"question", detail?, for?: [agent names], answer: null|"allow"|"deny"|"expired",

@@ -505,8 +505,9 @@ coding choice is the user's (`wb coding`), never changed by a check.
   the system's CA certificates, `SSL_CERT_FILE` or the proxy), then `wb feedback <name> --text
   "carry on"` once it's mended; never change the route for it.
   A `spend` stop (cause `spend`: the day's API spend cap is reached) is the user's call, never a
-  retry: ask them for a higher cap, the role on the GPU, or tomorrow, as the notice says; resume
-  only after they decide. Nothing but the user raises the cap.
+  retry: ask them, as the notice says. A higher cap or tomorrow: `wb resume <name>` once it allows.
+  The role on the GPU is for the next tasks; this one keeps its API model (resume never
+  re-routes), so `wb takeover` or `wb discard` it. Nothing but the user raises the cap.
 
 - **Lessons**: when the `lessons:` line says one was seen in more than one task, or you just
   corrected something the next agent will get wrong too, triage it now (`reference/skills.md`).

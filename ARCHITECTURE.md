@@ -652,10 +652,17 @@ report when it has one (`Round <n>'s report (wb report <task> --round <n>):`: au
 self-review have already moved status `round` on to n + 1, which never ran). Both notices
 have `cause` `spend`, not the step's own (`results.THE_STEP`), so the slice isn't shrunk, and lead
 with `meter.stop_text`: `<task> stopped: the day's API spend cap is reached ($5.02 of $5 today). Its
-work so far is in the worktree. Ask the user: a higher cap (wb route cap <usd>), the role on the
-GPU, or tomorrow; then wb resume <task>.` The mod's `GUARD_WORDS.spend` names it, and its wake for a
-`cause` `spend` notice ends with `SPEND_NEXT` (ask the user, then `wb resume`), not the stuck wake's
-feedback line: feedback would run a round the cap stops again at once.
+work so far is in the worktree. Ask the user: a higher cap (wb route cap <usd>) or tomorrow, then wb
+resume <task>; or the role on the GPU (wb route <role> gpu) for the next tasks, with wb takeover <task>
+or wb discard <task> for this one (resume keeps its API model).` (with no cap: `meter.no_cap()`, then
+`wb resume`; never tomorrow). Each remedy has its own next step: resume never re-routes, so "the role on
+the GPU … then wb resume" resumed into the same stop (#1095). The mod's `GUARD_WORDS.spend` names it,
+and its wake for a `cause` `spend` notice ends with `SPEND_NEXT` (the same choices, asked of the user;
+`Ask the user for a day cap` when routes.json has none, `readRoutes`), not the stuck wake's
+feedback line: feedback would run a round the cap stops again at once. A `cause` `provider` notice (a quota, key, rate-limit
+or outage stop) wakes as `was stopped by its API provider` (`PROVIDER_HEADLINE`, the toast's too) and ends with
+`PROVIDER_NEXT`: pass the notice's remedy on, `wb feedback <task> --text "carry on"` once the user says it is fixed,
+never discard it; it once ended with the stuck wake's "Steer it … or wb discard" (#1124).
 
 **The check-in at half** (`CHECKIN_SHARE` 0.5): a priced row that leaves today at or past half the
 cap, with no `checkin` row today, appends one (under `spend-api.jsonl.checkin.lock`, so tasks in
@@ -4731,7 +4738,9 @@ else `chat/serve.pid`, else 1337; `--port`, #349; the fragment never leaves the 
   macOS `launchctl print`, #756). The mod runs it at session start and every 10 minutes while on.
   `wb doctor`: `cli.chat_gap`.
 - **One listener.** A session listens while workbench mode and the chat are on; with several, the
-  first live claim on `chat/listener.json` (its `wb events` pid and start).
+  first live claim on `chat/listener.json` (its `wb events` pid and start). The user's message
+  answering another session's row is that session's (#1096): `wb chat reply` stamps the session that
+  wrote it, and that session's mod takes it, listening or not.
 - **Claude knows where the user is.** A web message has a typed message's authority, with a note:
   reply there, briefly; a yes there answers only a question asked there; nothing hard to undo on an
   ambiguous OK; while away, report there what finishes or needs them.
@@ -4823,7 +4832,9 @@ client; the server needs no browser.
 
 **Files** (`$WB_HOME/chat/`):
 - `messages.jsonl`: `{id: "<ms>-<6 hex>", ts, from: "user"|"claude"|"notice"|<agent name>, text, cid?, shots?,
-  audio?, about?, files?, role?: "agent", re?: [ids], to?: ["user"|<agent name>]}`. A `notice` (`wb chat notice`) has `text: "Claude is waiting on a permission|plan|question in the
+  audio?, about?, files?, role?: "agent", re?: [ids], to?: ["user"|<agent name>], session?, claude_pid?,
+  claude_start?, claude_machine?}` (the last four on a `wb chat reply` from Claude Code: the session
+  that wrote it, whose mod takes the user's answer to it, #1096). A `notice` (`wb chat notice`) has `text: "Claude is waiting on a permission|plan|question in the
   terminal"` and adds `tool, what?` (2000 characters): news like Claude's
   (`chat.NEWS`: pushed, `/api/latest`) but not a reply, so the owed reply (#767) reads only `from:
   claude`; `chat.thread` adds `answered` once settled. `files`: `[{id, name, size, type, path}]`.
@@ -5244,8 +5255,8 @@ from `/proc/<pid>/stat` or `ps -o lstart=` as wb reads it, UTC then the local zo
 neither can say, alive while listener.json is under 15 s old, #700); without a pid, `ts` within
 15 s; asked only of another's claim, at most every `PID_CHECK_MS` 30 s (#839); another `machine`'s
 always lives (#922; a crashed one there stands until a session on that machine or a quit clears
-it). Otherwise it writes `chat/listener.json` on a change and delivers each
-unreceipted message from `open.json` once `wb chat claim <id> --by <key>` grants it (refused:
+it). Standing by, it still takes the user's messages that answer its own rows (below). Otherwise it
+writes `chat/listener.json` on a change and delivers each unreceipted message from `open.json` once `wb chat claim <id> --by <key>` grants it (refused:
 retried a minute later; two sessions both submitted one, #84): idle → `prompt.submit('[web chat]
 <words>', asUser)`, receipt `now`; busy → `session.send` with WEB_NOTE, else a queued prompt
 (`queued`, acked `now` when that turn ends: `mem.chatQueued`, `readQueued`); `wb chat ack <id> --by
@@ -5254,7 +5265,18 @@ now, by: <key>}`. Away is read by every session (`away()`); a typed prompt write
 (`back`), as does a terminal dialog answered there after that use (`termDialogDone`). Typed is
 `byUser` on the engine's `origin.kind`: `composer`, `bridge`, `sdk`, `auto-continuation`, or an
 `unclassified` or unstamped one not `isMeta` (a /loop, another plugin's or a peer's prompt ended away
-for everyone, #835). An expired message (claim refuses it) isn't tried again this load
+for everyone, #835). **Whose a message is** (#1096; the page has no reply-to): the user's answers
+Claude's last row to the user before it (`answersTo`, from `messages.jsonl`'s last `THREAD_TAIL` 64 KiB,
+`claudeRows`, read once a poll and only for a user's message), which names its session (`session`,
+`claude_pid`, `claude_start`, `claude_machine`: `cli._chat_writer`, as task.json has them). That session
+(in `mem.ids`) takes it, listening or standing by; the listener leaves it to another live session for
+`HANDOFF_MS` 30 s (its process judged by `noteClaude`, `mem.deadPids`), then takes it itself with
+`ELSEWHERE_NOTE` after `[web chat] `: it follows another session's message; leave that session's task to
+it and tell the user to answer at its terminal. When that process is gone the listener takes it at once
+and plain: its nearby tasks are the listener's own now (`mine`), and its terminal is gone. A row without a
+session (a terminal's reply, an older wb) and an agent's message are the listener's, as before; with
+one listener for all, the answer to session B's report reached A, which the skill tells to leave B's
+tasks alone. An expired message (claim refuses it) isn't tried again this load
 (`mem.chatExpired`; one toast, #536). Quitting stops delivery and empties listener.json if held.
 
 Each message passed on is owed a chat reply (`mem.chatOwed`, `owedAtTurnEnd`, #767: phone
@@ -5392,7 +5414,12 @@ atom.
 commands, read as above (`runsIn`: `simpleCommands`, `bash -c` and `eval` inside; `wbArgs`), each `wb route …` and each
 `wb start … --m…` (any abbreviation of `--model`) is a call (`routeCalls`); a show (`wb route`, `--json`) and a dry run
 change nothing. For the one call, the mod runs `wb route --dry-run --json <its args>` (a start's as `--start <wb start's
-args>`, parsed there by wb start's own parser: the task's name and an abbreviated `--model` as wb takes them), 60 s.
+args>`, parsed there by wb start's own parser: the task's name and an abbreviated `--model` as wb takes them), 60 s,
+a start's in the directory it runs in (`routeCalls`' `at`: `cd` and `pushd` followed from the session's, with
+`upstreamAim`'s `cdTarget`; wb start's `--repo` is `.` unless given, and a start after `cd other &&` was judged
+local-only, or not, by the session's repo, #1125). A `cd` the mod can't resolve (a word with `$` or a backquote, none,
+`-`) and a directory that isn't there (`mkdir x && cd x`) leave the session's: a missing one failed the dry run to
+spawn and the call skipped the dialog. A route's runs in the session's (it reads no directory).
 A dry run that exits non-zero (wb refuses the change itself), prints nothing gated (a GPU model pin, a GPU `--model`, the Agents switch to GPU)
 or can't run lets the call through: wb refuses a gated change under Claude Code without the approval anyway. Else, away
 on the web chat it denies at once (`NOT_CHANGED_AWAY`: `workbench: not changed: the user is away: say in the web chat
@@ -5409,7 +5436,8 @@ the name in the code passes. A speed bump, not a wall: a command that builds the
 
 **The roles in the conversation.** `WbSaid.routes` (the `said-3` atom) is the roles' summary as the mod reads
 routes.json (`readRoutes`, `routesSummary`, which says what `routes.summary` says: Couplings) and the cap (`. Day cap
-$N`: in what is compared, so a cap changed alone is a row too; it once wasn't, 2026-11-23), '' while every role is
+$N`: in what is compared, so a cap changed alone is a row too; it once wasn't, 2026-11-23; an OpenRouter role's
+`order` as `, backends a, b` after its API model, for the same reason, #1126), '' while every role is
 the default and no cap is set (nothing to tell), `routes.json can't be read (wb route says why)` for a file wb wouldn't read
 (`routesValid`); read in `wanted` while delegating or with a task open. `unsaid` pushes `[workbench] The roles changed:
 <summary>. <ROUTES_RULE>` whenever it differs from what was said (the first time `ROUTES_NOTE`), so any change, the
@@ -6552,7 +6580,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **task.json's routing keys** (`via`, `role`, `provider`, `provider_name`, #1016) → the mod's row builder (`scan`,
   tasks.ts's `placeOf`) and `chat.open_tasks` with `chat_static/app.js`'s strip; **the `routed` watch kind** → the mod's
   `pageParts` (left out of the history, as `meta`) and `pageShape`; **`routes.routed_line`** → `transcript.routed_text`
-  and `routes.model_line`; **`routes.USES`/`use`** → the mod's `routesValid` and `routesSummary`.
+  and `routes.model_line`; **`routes.USES`/`use`** → the mod's `routesValid` and `routesSummary`; a role's **`order`**
+  (#1021) → `routes.summary`, `routesSummary` (`, backends …`) and `routesValid` (#1126).
 - **A `$.state` atom's type** → its tag (`tasks-10`, `live-1`, `chat-4`, `sessions-1`, `savings-1`, `pane-1`,
   `stats-1`, `top-1`, `said-3`, `splash-1`).
 - **The Tasks page's layout** → `pageParts`, `pageShape` (#963);
@@ -6575,7 +6604,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   table and the round report's `agent tokens` (an API task's) together. `WbTop`'s type is unchanged (the API fields are optional keys of `running` rows): `top-1` stays.
 - **Which session a task is** → the mod's `mine` and `cli._scope`: the same rule, the home-or-`/` exception included;
   `scope()` passes every id.
-- **A notice kind or its text** → the mod's `HEADLINE`, `NEXT`, both still-true rules (`_ack_all`'s, the mod's), `wb wait`.
+- **A notice kind or its text** → the mod's `HEADLINE`, `NEXT` (a `cause` `provider` notice: `PROVIDER_HEADLINE`, `PROVIDER_NEXT`), both still-true rules (`_ack_all`'s, the mod's), `wb wait`.
 - **A task.json or status key** → *Files and formats*; a results key a reader uses → `results.record` and defaults for
   old rows.
 - **The GPU admission rule** (`models.admits`, `can_share`) → the lease, `wb start`'s refusal, `cli._gpu_holders`,
@@ -6599,6 +6628,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **The turn-end record** (`turns.jsonl`: the mod's `chatTurnEnd`, `wb chat ended`) → `chat.taken`, `chat.wait_state`,
   `wb chat reply`'s default `re`; the `[agent <name>] … [message <id>: …]` prompt → `chatPrompt`, `AGENT`, the
   `prompt.submit` guard, the /workbench skill's *Agents on the web chat*.
+- **A Claude row's session** (`cli._chat_writer`: `session`, `claude_pid`, `claude_start`, `claude_machine`, as
+  task.json's) → the mod's `answersTo` and `listen` (whose a user's message is, #1096), `ELSEWHERE_NOTE` ↔ reference/driving.md.
 - **What makes the user away** (`chat/away.json`: `listen`, `back`, `termDialogDone`, `chat.active`) → `awayNow`,
   AWAY_NOTE, `#away-when`, *The web chat*.
 - **When a notice is settled** (`tool.call` `finally`, `turn.complete`, `wb chat notice --done`) → `chat.notice_done`,

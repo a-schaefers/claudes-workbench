@@ -539,9 +539,24 @@ const batchOf = (row: Row): string[] | null =>
   Array.isArray(row.tasks) && row.tasks.length ? row.tasks.map(String) : null
 const RUNNING = new Set(['queued', 'running', 'testing'])
 // A stop at the day's API spend cap (#1019, cause `spend`) is the user's call: feedback would run
-// a round that stops again at once, so the wake asks for their decision, as the notice does.
-const SPEND_NEXT = (n: string) => 'Ask the user: a higher cap (`wb route cap <usd>`), the role on ' +
-  `the GPU, or tomorrow; then \`wb resume ${n}\`. Never retry it with feedback yourself.`
+// a round that stops again at once, so the wake asks for their decision, as the notice does. Each
+// remedy has its own next step: "the role on the GPU … then wb resume" resumed the task on its API
+// model (fixed per task) into the same stop, and with no cap set "tomorrow" changes nothing
+// (#1095, 2026-11-23). `capped`: routes.json has a day cap.
+const SPEND_NEXT = (n: string, capped: boolean) => (capped
+  ? `Ask the user: a higher cap (\`wb route cap <usd>\`) or tomorrow, then \`wb resume ${n}\`; `
+  : `Ask the user for a day cap (\`wb route cap <usd>\`), then \`wb resume ${n}\`; `) +
+  `or the role on the GPU for the next tasks (\`wb route <role> gpu\`, on their yes), with \`wb takeover ${n}\` ` +
+  `or \`wb discard ${n}\` for this one: resume keeps its API model. Never retry it with feedback yourself.`
+// A stop by the task's API provider (cause `provider`: runner.PROVIDER_GUARDS, a rate limit or an
+// outage held 10 minutes, a quota or a refused key) isn't the agent's, yet it woke as "was stopped:
+// it got stuck" ending "Steer it with wb feedback …, or wb discard": a feedback round a quota or
+// key stop fails again at once, or work that is fine thrown away, next to the notice's own remedy
+// (#1124, 2026-11-23). The headline is the toast's too.
+const PROVIDER_HEADLINE = 'was stopped by its API provider'
+const PROVIDER_NEXT = (n: string) => 'Tell the user it is the provider\'s stop and its remedy, as the ' +
+  `notice says; once they say it is fixed (or the rate limit has passed), \`wb feedback ${n} --text ` +
+  '"carry on"`. Never discard it for this, nor change its model or role yourself.'
 
 // A question delivered into a running turn (#542): the engine frames it as another session's
 // message, so one line says whose it is and that it can't wait for the turn to end.
@@ -1397,6 +1412,14 @@ export function originIs(url: string, slug: string): boolean {
 // upstream there is no user's Claude). `named`: the line names the slug; `outAt`: every directory
 // an outward command in it runs in, for the hook to check by real path; `shown`: the outward text
 // when it isn't a command of its own (fed to a shell)
+// A cd or pushd's target word as written (`cd --` and the flags skipped): undefined for none
+// (home), '-' for the last directory. Shared by upstreamAim and routeCalls (#1125).
+function cdTarget(words: string[], i: number): string | undefined {
+  const rest = words.slice(i + 1)
+  const k = rest.indexOf('--')
+  return k >= 0 ? rest[k + 1] : rest.find(w => !/^-[LPe@]+$/.test(w))
+}
+
 export type Aim = { why: '' | 'send' | 'dir' | 'plugin' | 'slug'; at: string; words: string[]; named: boolean; outAt: string[]; shown?: string }
 
 // Whether a command line sends something to workbench upstream, and why. `dirs` are the gated
@@ -1426,9 +1449,7 @@ export function upstreamAim(command: string, cwd: string, home: string, slug: st
     const i = commandAt(words)
     const cmd = wordOf(words[i])
     if (cmd === 'cd' || cmd === 'pushd') {
-      const rest = words.slice(i + 1)
-      const k = rest.indexOf('--')
-      const to = k >= 0 ? rest[k + 1] : rest.find(w => !/^-[LPe@]+$/.test(w))
+      const to = cdTarget(words, i)
       if (to !== '-') here = absolutePath(to ?? (home || '/'), home, here)
       continue
     }
@@ -1662,19 +1683,36 @@ function runsIn(src: string): string[][] {
 // Each wb route and each wb start with a --model (any abbreviation: --m…) in a command line, as
 // the arguments `wb route --dry-run --json` takes for it: a route's own, or `--start` and the
 // start's (parsed there by wb start's own parser). `hidden`: a route or such a start inside text
-// another program runs, which can't be shown
-export function routeCalls(command: string): { calls: string[][]; hidden: boolean } {
+// another program runs, which can't be shown. `at`: the directory each call runs in, `cd` and
+// pushd followed from ``cwd`` as upstreamAim follows them: the dry run ran in the session's
+// directory, so `cd other && wb start … --model <API id>` (--repo defaults to `.`) was judged
+// local-only, or not, by the wrong repo (#1125, 2026-11-23). '' where the mod can't say: without
+// a ``cwd``, and after a cd to a word with `$` or a backquote in it (`cd "$REPO"`), to none (an
+// unquoted `$(…)` leaves none) or to `-`; read as a literal path, it failed the dry run to spawn,
+// so the call skipped the dialog into wb's "is the mod loaded?" (the review of #1125). An
+// absolute one after it is known again.
+export function routeCalls(command: string, cwd = '', home = ''): { calls: string[][]; hidden: boolean; at: string[] } {
   const calls: string[][] = []
+  const at: string[] = []
+  let here = cwd
   let runner = false
   for (const words of runsIn(command)) {
     const i = commandAt(words)
     const cmd = wordOf(words[i])
+    if (cmd === 'cd' || cmd === 'pushd') {
+      const to = cdTarget(words, i)
+      if (!to || to === '-' || /[$`]/.test(to)) here = ''
+      else if (here || to.startsWith('/')) here = absolutePath(to, home, here)
+      continue
+    }
     if (RUNS_CODE.test(cmd)) runner = true
     const wb = wbArgs(cmd, words.slice(i + 1))
     if (wb?.[0] === 'route') calls.push(wb.slice(1))
     else if (wb?.[0] === 'start' && wb.some(w => /^--m/.test(w))) calls.push(['--start', ...wb.slice(1)])
+    else continue
+    at.push(here)
   }
-  return { calls, hidden: !calls.length && runner && ROUTE_TEXT.test(command) }
+  return { calls, hidden: !calls.length && runner && ROUTE_TEXT.test(command), at }
 }
 
 const routesHome = async ($: any) => (await $.env.get('HOME').catch(() => '')) || mem.home
@@ -1696,9 +1734,12 @@ export function routesSummary(doc: Row): string {
     const row = rows[r] ?? {}
     const gpu = typeof row.gpu === 'string' && row.gpu ? row.gpu : 'auto'
     const thinking = row.thinking === 'on' ? 'on' : 'off'
-    if (row.via === 'api') return `${r} API ${row.api}, thinking ${thinking}`
+    // an OpenRouter role's backends (routes.json `order`): where its code goes, so a change of them
+    // alone is a row too; it reached the conversation as nothing (#1126, 2026-11-23)
+    const backends = row.api && Array.isArray(row.order) && row.order.length ? `, backends ${row.order.join(', ')}` : ''
+    if (row.via === 'api') return `${r} API ${row.api}${backends}, thinking ${thinking}`
     let text = `${r} GPU ${gpu === 'auto' ? '(the router picks)' : gpu}`
-    if (row.api) text += `, API kept: ${row.api}`
+    if (row.api) text += `, API kept: ${row.api}${backends}`
     if (thinking === 'on') text += ', thinking on'
     return text
   })
@@ -1720,7 +1761,8 @@ function routesValid(doc: unknown): doc is Row {
   if (!d.roles || typeof d.roles !== 'object' || Array.isArray(d.roles)) return false
   return Object.entries(d.roles as Row).every(([r, row]: [string, any]) => (ROLES as readonly string[]).includes(r) &&
     row && typeof row === 'object' && [undefined, 'gpu', 'api'].includes(row.via) &&
-    [undefined, 'off', 'on'].includes(row.thinking) && (row.via !== 'api' || (typeof row.api === 'string' && !!row.api)))
+    [undefined, 'off', 'on'].includes(row.thinking) && (row.via !== 'api' || (typeof row.api === 'string' && !!row.api)) &&
+    (row.order == null || (Array.isArray(row.order) && row.order.every((b: unknown) => typeof b === 'string' && !!b.trim()))))
 }
 
 // What the conversation is told of the roles: `said`, their summary and the day cap ('. Day cap
@@ -1769,15 +1811,22 @@ async function routeRefusal($: any, e: Row): Promise<string> {
   if (!/\b(?:route|start)\b|route-ok\.json/i.test(command)) return '' // most calls: no parse
   if (command.includes(ROUTE_OK) && (mentions(command, mem.root, await routesHome($)) ||
     /\$\{?WB_HOME\b/.test(command))) return ROUTE_OK_OWN
-  const { calls, hidden } = routeCalls(command)
+  const { calls, hidden, at } = routeCalls(command, (await $.session.cwd().catch(() => '')) || mem.cwd, await routesHome($))
   if (hidden) return ROUTE_OWN
   // a show (`wb route`, `--json`) and a dry run change nothing
-  const live = calls.filter(c => !c.includes('--dry-run') && (c[0] === '--start' || c.some(a => a !== '--json')))
+  const live = calls.flatMap((c, i) => !c.includes('--dry-run') && (c[0] === '--start' || c.some(a => a !== '--json'))
+    ? [{ args: c, cwd: at[i] }] : [])
   if (!live.length) return ''
   if (live.length > 1) return ROUTE_OWN
   let q: Row
   try {
-    const r = await $.process.run([mem.wb, 'route', '--dry-run', '--json', ...live[0]!], { timeoutMs: 60_000 })
+    // a start's in the directory it runs in: wb start's --repo is `.` unless given (#1125). Only a
+    // start's (wb route doesn't read its directory), and only one that exists: a directory the
+    // line makes (`mkdir x && cd x`) failed the dry run to spawn, and the call skipped the
+    // dialog; the session's is the better guess (the review of #1125, 2026-11-23)
+    const { args, cwd } = live[0]!
+    const there = args[0] === '--start' && cwd && await $.fs.exists(cwd).catch(() => false) ? { cwd } : {}
+    const r = await $.process.run([mem.wb, 'route', '--dry-run', '--json', ...args], { timeoutMs: 60_000, ...there })
     if (r.exitCode !== 0) return '' // wb refuses it itself, saying why
     q = JSON.parse(String(r.stdout ?? ''))
   } catch {
@@ -3499,6 +3548,39 @@ async function chatLink($: any) {
   if (link !== (await read($, chat)).url) await update($, chat, c => ({ ...c, url: link }))
 }
 
+// Claude's rows in the thread's tail, oldest first, for answersTo (#1096)
+const THREAD_TAIL = 64 << 10 // the user's unread message is recent: so is the row it answers
+async function claudeRows($: any, dir: string): Promise<Row[]> {
+  const t = await readTail($, `${dir}/messages.jsonl`, THREAD_TAIL)
+  return (t?.text ?? '').split('\n').flatMap(line => {
+    try {
+      const r = JSON.parse(line)
+      return r && typeof r === 'object' && r.from === 'claude' ? [r as Row] : []
+    } catch {
+      return []
+    }
+  })
+}
+
+// The Claude row a user's web message answers (#1096): Claude's last one to the user before it,
+// when it names the session that wrote it (`wb chat reply` stamps `session`, `claude_pid`,
+// `claude_start`, `claude_machine`, as task.json has them), else null: the listener's, as ever.
+export function answersTo(thread: Row[], m: Row): Row | null {
+  let last: Row | null = null
+  for (const r of thread) {
+    if (r.from !== 'claude' || !(Number(r.ts) < Number(m.ts))) continue
+    if (Array.isArray(r.to) && r.to.length && !r.to.includes('user')) continue // to an agent alone
+    last = r
+  }
+  return last && typeof last.session === 'string' && last.session ? last : null
+}
+// how long the listener leaves a message to the live session it answers before taking it itself
+// (that session out of workbench mode, or its chat off): ten of its polls and more
+const HANDOFF_MS = 30_000
+const ELSEWHERE_NOTE = '(This follows another Claude Code session\'s message in the chat, one that session ' +
+  'didn\'t take: if it is about that session\'s task (`wb status` lists it as open elsewhere), leave the task ' +
+  'to it and tell the user with `wb chat reply` to answer it at that session\'s terminal.) '
+
 async function listen($: any, now: number) {
   const st = await read($, chat)
   if (!st.delegating || !st.web) return
@@ -3523,19 +3605,48 @@ async function listen($: any, now: number) {
     }
   }
   const fresh = async () => now - ((await $.fs.stat(`${dir}/listener.json`).catch(() => undefined))?.mtimeMs ?? 0) < CHAT_STALE_MS
-  if (theirs && (claim.pid ? lives === true || (lives === null && await fresh())
-    : now - Number(claim.ts ?? 0) * 1000 < CHAT_STALE_MS)) return // another session listens
-  if (!(await $.fs.exists(dir))) await runWb($, ['chat', 'log']) // wb makes the directory
-  const body = JSON.stringify({ session: st.key, cwd: mem.cwd, pid: mem.eventsPid,
-    ...(mem.eventsStart ? { start: mem.eventsStart } : {}), ...(mem.machine ? { machine: mem.machine } : {}), busy: mem.busy })
-  if (body !== mem.listenerBody || theirs || claim.session !== st.key) { // only on change: a write is an event
-    mem.listenerBody = body
-    await $.fs.write(`${dir}/listener.json`, body)
+  // another session listens: this one stands by, but for the user's answers to its own rows (#1096)
+  const standby = !!theirs && (claim.pid ? lives === true || (lives === null && await fresh())
+    : now - Number(claim.ts ?? 0) * 1000 < CHAT_STALE_MS)
+  if (!standby) {
+    if (!(await $.fs.exists(dir))) await runWb($, ['chat', 'log']) // wb makes the directory
+    const body = JSON.stringify({ session: st.key, cwd: mem.cwd, pid: mem.eventsPid,
+      ...(mem.eventsStart ? { start: mem.eventsStart } : {}), ...(mem.machine ? { machine: mem.machine } : {}), busy: mem.busy })
+    if (body !== mem.listenerBody || theirs || claim.session !== st.key) { // only on change: a write is an event
+      mem.listenerBody = body
+      await $.fs.write(`${dir}/listener.json`, body)
+    }
   }
+  let thread: Row[] | null = null // Claude's rows, read once a poll, only for a user's message
   for (const m of await unread($, dir)) {
     const id = String(m.id ?? '')
     if ((m.from !== 'user' && !agentOf(m)) || !id || mem.chatSent.has(id) || mem.chatExpired.has(id)) continue
     if ((mem.chatRetry.get(id) ?? 0) > now) continue // its prompt was dropped: again in a minute
+    // Whose it is (#1096): one session listens for all, so with two delegating the user's answer
+    // to session B's report reached A, which the skill tells to leave B's tasks alone, and B's
+    // task waited for the terminal. The page has no reply-to, so it answers Claude's last row to
+    // the user before it, which `wb chat reply` stamps with its session: that session takes it,
+    // listening or not. No taker within HANDOFF_MS, the listener does, saying whose it followed;
+    // its process gone, the listener takes it at once and plain: that session's nearby tasks are
+    // this one's now (mine), and its terminal is gone, so the note sent the user to a terminal
+    // that no longer exists, on the first message after any fresh `claude` start (review of
+    // #1096, 2026-11-23).
+    let elsewhereNote = ''
+    if (m.from !== 'user') {
+      if (standby) continue // an agent's message is the listener's
+    } else {
+      thread ??= await claudeRows($, dir)
+      const to = answersTo(thread, m)
+      const ours = !!to && mem.ids.has(String(to.session))
+      if (standby && !ours) continue
+      if (!standby && to && !ours) {
+        await noteClaude($, to, now)
+        if (!mem.deadPids.has(pidKey(to))) {
+          if (now - Number(m.ts ?? 0) * 1000 < HANDOFF_MS) continue // its session's to take
+          elsewhereNote = ELSEWHERE_NOTE
+        }
+      }
+    }
     // Claimed under wb's lock: two sessions starting together both took the chat and both
     // submitted it, each guard knowing only its own sends (#84). Refused: another session's, or
     // too old to spring on Claude, by wb's one threshold, which the page shows too (#536): the mod
@@ -3556,7 +3667,7 @@ async function listen($: any, now: number) {
     const about = !a ? ''
       : a.audio ? `(keeps take ${Number(a.n)} of the shortlist: ${String(a.path ?? a.name ?? '')}) `
       : `(about ${String(a.task)}, step ${Number(a.step)}, screenshots ${Number(a.n)}) `
-    const text = chatPrompt(m, about)
+    const text = chatPrompt(m, elsewhereNote + about)
     // Mid-turn, into the running turn, as a message typed mid-turn would be; else, or if that is
     // refused, as a prompt of its own (which waits for the turn to end).
     if (mem.busy) {
@@ -3758,7 +3869,7 @@ async function deliver($: any, now: number) {
           : status.phase === (row.kind === 'question' ? 'asking' : row.kind)
       const batch = batchOf(row)
       const headline = batch ? (batch.length > 1 ? `and ${batch.length - 1} more were interrupted`
-        : 'was interrupted') : HEADLINE[row.kind] ?? row.kind
+        : 'was interrupted') : row.cause === 'provider' ? PROVIDER_HEADLINE : HEADLINE[row.kind] ?? row.kind
       const key = `${name}:${row.ts}`
       if (current && !mem.toasted.has(key)) {
         mem.toasted.add(key)
@@ -3766,7 +3877,8 @@ async function deliver($: any, now: number) {
       }
       if (!own || !mem.wake) continue // the toast only: the notice stays for its session or wb wait
       // a batch's wake ends with its resume, not the failure's next step (#544)
-      const next = batch ? BATCH_NEXT(batch) : row.cause === 'spend' ? SPEND_NEXT(name)
+      const next = batch ? BATCH_NEXT(batch) : row.cause === 'spend' ? SPEND_NEXT(name, (await readRoutes($)).cap !== null)
+        : row.cause === 'provider' ? PROVIDER_NEXT(name)
         : (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined)
       const who = batch && batch.length > 1 ? `Tasks ${batch.map(n => `\`${n}\``).join(', ')} were interrupted`
         : `Task \`${name}\` ${headline}`
