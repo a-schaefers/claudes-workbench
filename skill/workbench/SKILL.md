@@ -71,11 +71,16 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
   2. **No GPU model, a provider with a stored key** (`ok  API keys: …`): `wb models` lists that
      provider's models. Pick two as the weekly check would: reliable tool calls, a priced model
      (never a free one), a window of 128K or more, the cheaper for trivial, the stronger for
-     significant; check them against the provider's own pages today. Then ask **one** question,
+     significant and writing (prose slices like significant; left on the GPU, the first docs task
+     exits 3); check them against the provider's own pages today. Then ask **one** question,
      filled from what you found: "Use `<trivial id>` for trivial and `<significant id>` for
-     significant? Your code goes to `<provider>`. Day cap $5?" On a yes, the one command `wb route
-     trivial <id> significant <id> --day-usd 5` (their cap if they named one): the dialog shows
-     it, and its Allow is the consent. Another answer: do what they said. A "not changed" (the
+     significant and writing? Your code goes to `<provider>`. Day cap $5?" On a yes, the one
+     command `wb route trivial <id> significant <id> writing <significant id> --day-usd 5` (their
+     cap if they named one): the dialog shows it, and its Allow is the consent. **OpenRouter** (an
+     `openrouter/…` id) serves one id from many backends, and which is the user's choice: the same
+     question asks which (the model's Providers tab on openrouter.ai), and each OpenRouter role is a
+     `wb route <role> <id> --order <name>[,<name>]` of its own, `--day-usd` on the first (in a
+     several-role `wb route` it exits 3); any others still go in one. Another answer: do what they said. A "not changed" (the
      dialog's Don't): say it wasn't set, every role stays on the GPU; ask again only if they bring
      it up. Ask nothing before it: no server install, no `wb scout`.
   3. **No GPU model and no key**: lay out both ways in two lines, a local server

@@ -32431,6 +32431,51 @@ class FirstRunApi(Base):
         self.assertIn("pick them with --order", err)
         self.assertEqual(routes.read()["roles"]["significant"]["via"], "gpu")
 
+    def skills_first_run(self) -> str:
+        """The first-run step 2 of SKILL.md, flattened to one line."""
+        skill = (Path(cli.__file__).resolve().parent.parent / "skill/workbench/SKILL.md").read_text()
+        return " ".join(skill[skill.index("  2. **No GPU model, a provider"):skill.index("  3. **No GPU model")].split())
+
+    def test_the_skills_first_run_command_puts_writing_on_api_so_a_docs_task_starts_there(self):
+        # #1101 (2026-11-23): the first run set trivial and significant only, writing stayed on the
+        # GPU (unset is GPU, no fallback), and an API-only user's first docs task exited 3
+        said = re.search(r"`(wb route trivial <id> significant <id> [^`]*)`", self.skills_first_run()).group(1)
+        argv = said.replace("<significant id>", "deepseek/deepseek-v4-pro").replace(
+            "<id>", "deepseek/deepseek-flash", 1).replace("<id>", "deepseek/deepseek-v4-pro").split()[1:]
+        self.assertIn("writing", argv)
+        code, _, err = self.wb(*argv)
+        self.assertEqual(code, 0, err)
+        with mock.patch.object(cli, "spawn_runner", lambda task: 0), \
+                mock.patch.object(cli.models, "discover", lambda *a, **k: {}):
+            code, out, err = self.wb("start", "t-docs", "--spec", str(self.spec), "--repo", str(self.repo),
+                                     "--role", "writing")
+        self.assertEqual(code, 0, err)
+        spec = store.Task("t-docs").spec
+        self.assertEqual((spec["via"], spec["model"]), ("api", "deepseek/deepseek-v4-pro"))
+
+    def test_the_skills_first_run_sets_an_openrouter_role_alone_with_the_users_backends(self):
+        # #1100 (2026-11-23): the skill's one command for an OpenRouter pick exited 3 twice (pairs
+        # refuse OpenRouter; alone it needs --order) after the user's only yes. The skill now asks
+        # for the backends in the same question and gives each OpenRouter role a route of its own
+        first = self.skills_first_run()
+        self.assertIn("`wb route <role> <id> --order <name>[,<name>]` of its own, `--day-usd` on the first", first)
+        self.assertIn("Providers tab", first)
+        self.catalog([*ROUTES_CATALOG, api_entry("openrouter", "vendor/model-x"), api_entry("openrouter", "vendor/model-y")],
+                     [key_row("openrouter", "OpenRouter", STORED)])
+        runner.models.hosted(fresh=True)
+        code, _, err = self.wb("route", "trivial", "openrouter/vendor/model-x", "significant",
+                               "openrouter/vendor/model-y", "--day-usd", "5")
+        self.assertEqual(code, 3)
+        self.assertIn("an OpenRouter role is set in a wb route of its own", err)   # as the skill says
+        for argv in (("trivial", "openrouter/vendor/model-x", "--order", "baseten", "--day-usd", "5"),
+                     ("significant", "openrouter/vendor/model-y", "--order", "baseten"),
+                     ("writing", "openrouter/vendor/model-y", "--order", "baseten")):
+            code, _, err = self.wb("route", *argv)
+            self.assertEqual(code, 0, (argv, err))
+        doc = routes.read()
+        self.assertEqual({r: (doc["roles"][r]["via"], doc["roles"][r]["order"]) for r in routes.ROLES},
+                         {r: ("api", ["baseten"]) for r in routes.ROLES})
+
     # the router's refusal
 
     def test_the_routers_refusal_says_gpu_and_offers_an_api_role_only_with_a_stored_key(self):
