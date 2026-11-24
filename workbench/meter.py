@@ -341,13 +341,28 @@ def _enough(t: float, worst: float) -> float:
     return math.ceil(round((t + worst) * 100, 6)) / 100
 
 
-def refusal(m, role: str | None = None, advice: bool = True) -> str | None:
+def _ask(role: str | None, more: str, task=None) -> str:
+    """refusal's "Ask the user: …", ``more`` the cap that would do. For a task already running
+    (``task``: wb feedback, next or resume) the role on the GPU is for the next tasks only: the
+    task keeps its API model, so "the role on the GPU" there had the user switch it and the retry
+    refused again with the same line (#1171, 2026-11-24, #1095's mistake in stop_text again)."""
+    r = role or "<role>"
+    if task is None:
+        return f". Ask the user: {more} (wb route cap <usd>), the role on the GPU (wb route {r} gpu), or tomorrow"
+    n = task.name
+    return (f". Ask the user: {more} (wb route cap <usd>) or tomorrow, then try again; or the role on the "
+            f"GPU (wb route {r} gpu) for the next tasks, with wb takeover {n} or wb discard {n} for this "
+            f"one (it keeps its API model)")
+
+
+def refusal(m, role: str | None = None, advice: bool = True, task=None) -> str | None:
     """Why an API model can't start now, or None: no price (and not a plan), or today's spend
     at the cap, or so near it that one request at its worst (request_floor) would pass it: the
     room refused that request at once, after the checkout, setup and base check (#1150).
     ``role`` names the line's subject ("trivial"), else the model. ``advice``: the cap line's
     "Ask the user: …"; the busy opt-in's note goes without, its role being on the GPU already
-    and its start only waiting for it (wave 2's merge). No cap at all (NO_CAP, or
+    and its start only waiting for it (wave 2's merge); ``task``, a task already running, whose
+    advice keeps the GPU for the next tasks (`_ask`, #1171). No cap at all (NO_CAP, or
     UNREADABLE) is refused too: a `--model` start without one passed the dialog and wb start,
     then the guard stopped it in round 1, after the checkout, setup and base check (#1089,
     2026-11-23)."""
@@ -360,13 +375,11 @@ def refusal(m, role: str | None = None, advice: bool = True) -> str | None:
         return f"{who}: {no_cap()}"
     if (c := cap()) is not None and (t := today()["usd"]) >= c:
         return (f"{who}: API spend today is {money(t, today()['basis'])} of the {usd(c)} day cap (it resets at local "
-                f"midnight)" + (f". Ask the user: a higher cap (wb route cap <usd>), the role on the GPU "
-                                f"(wb route {role or '<role>'} gpu), or tomorrow" if advice else ""))
+                f"midnight)" + (_ask(role, "a higher cap", task) if advice else ""))
     if (w := request_floor(m)) and t + w > c:
         return (f"{who}: API spend today is {money(t, today()['basis'])} of the {usd(c)} day cap, and one "
                 f"request on it can cost up to {usd(w)} (it resets at local midnight)"
-                + (f". Ask the user: a cap of at least {usd(_enough(t, w))} (wb route cap <usd>), the role "
-                   f"on the GPU (wb route {role or '<role>'} gpu), or tomorrow" if advice else ""))
+                + (_ask(role, f"a cap of at least {usd(_enough(t, w))}", task) if advice else ""))
     return None
 
 

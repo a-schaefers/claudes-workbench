@@ -516,7 +516,8 @@ coding choice is the user's (`wb coding`), never changed by a check.
   "carry on"` once it's mended; never change the route for it.
   A `spend` stop (cause `spend`: the day's API spend cap is reached, or too near it for the next
   request) is the user's call, never a retry: ask them, as the notice says (it names a cap that
-  would do). A higher cap or tomorrow: `wb resume <name>` once it allows.
+  would do). A higher cap or tomorrow: `wb resume <name>` once it allows. `wb feedback`, `next`
+  or `resume` refused at the cap (exit 3) is the same call.
   The role on the GPU is for the next tasks; this one keeps its API model (resume never
   re-routes), so `wb takeover` or `wb discard` it. Nothing but the user raises the cap.
 

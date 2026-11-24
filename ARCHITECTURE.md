@@ -656,7 +656,7 @@ it under the ledger) is the task's own; its results row's `api` reads it at the 
 (`results.metered`, *What an API task cost*). `wb savings --api`'s spend and by day read the
 ledger too (`savings.spent`, #1094).
 
-**The cap at start** (`meter.refusal(m, role=None, advice=True)`, exit 3; `routes.resolve` on both API paths:
+**The cap at start** (`meter.refusal(m, role=None, advice=True, task=None)`, exit 3; `routes.resolve` on both API paths:
 a `--model` before the dialog, and `cli._route_start`'s dry run too, a role's API model before it starts): an API model that isn't a plan or free is refused with no
 price (`<id>: OpenCode's catalog gives no price for it, so the day cap can't be kept`), with no cap
 at all (`<id>: ` or `trivial role: ` and `meter.no_cap()`: `meter.NO_CAP`, or `meter.UNREADABLE`,
@@ -679,7 +679,12 @@ $5.13 (wb route cap <usd>), the role on the GPU (wb route trivial gpu), or tomor
 to the cent). `wb feedback`, `next` and `resume` on an API task refuse the same way, exit 3 with the
 task's role in the line, before any round is written, a review counted or a step committed
 (`cli._model_still_listed`, #1118: the round they wrote stopped at once as a spend `stuck`, a wake
-for nothing); with no cap set too (#1089's refusal). `meter.tail(m)` is the start line's part, ` · today ≈$0.42 of $5 (catalog prices)`, or a plan's ` · plan
+for nothing); with no cap set too (#1089's refusal). Their advice is a running task's
+(`meter.refusal(m, role, task=task)`, `meter._ask`): `… (it resets at local midnight). Ask the user: a higher
+cap (wb route cap <usd>) or tomorrow, then try again; or the role on the GPU (wb route <role> gpu) for the next
+tasks, with wb takeover <task> or wb discard <task> for this one (it keeps its API model)` (`a cap of at least
+$5.13` within one request of it), as `meter.stop_text` says (#1095): offered as this task's remedy, the role on
+the GPU had the user say yes and the retry refused with the same line (#1171). `meter.tail(m)` is the start line's part, ` · today ≈$0.42 of $5 (catalog prices)`, or a plan's ` · plan
 usage (OpenCode Go): 1.2M tokens today`, which wb start's model line ends with (`cli.cmd_start`).
 
 **The guard `spend`, inside a round** (`runner._spend_guard`, each tick after the stuck checks, an
