@@ -4368,14 +4368,14 @@ def cmd_savings(a):
 
 
 def _api_savings(a, period: str, since: float) -> None:
-    """`wb savings --api`: the period's API money by provider and day, trials in, and the bench's
-    replays (bench.paid_since)."""
+    """`wb savings --api`: the period's closed API tasks by provider, trials in, the day ledger's
+    spend and by day (savings.spent, #1094), and the bench's replays (bench.paid_since)."""
     t = savings.api_totals(store.results(trials=True), since)
-    replays = bench.paid_since(since)
+    replays, paid = bench.paid_since(since), savings.spent(since)
     if a.json:
-        print(json.dumps({"period": period, **t, "bench": replays}))
+        print(json.dumps({"period": period, **t, "bench": replays, "spent": paid}))
     else:
-        print(savings.api_report(t, period, replays))
+        print(savings.api_report(t, period, replays, paid))
 
 
 def cmd_backlog(a):

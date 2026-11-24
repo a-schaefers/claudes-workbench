@@ -360,14 +360,36 @@ def _day(ts: float) -> str:
     return time.strftime("%Y-%m-%d", time.localtime(ts))
 
 
+def spent(since: float = 0) -> dict:
+    """The day ledger's dollars since ``since`` (meter.py's spend-api.jsonl, `step` and
+    `reconcile` rows, as the day cap and the pane read it): open tasks and bench replays in, each
+    on the day it was spent. {usd, today (meter.today's, the pane's), by_day: {YYYY-MM-DD: $},
+    by_provider: {p: $}}. The results rows are written at a close and dated by it, so `wb savings
+    --api` said $3 today and $3 for the week where the ledger said $2 and $5 (#1094, 2026-11-23)."""
+    from . import meter
+    out = {"usd": 0.0, "by_day": {}, "by_provider": {}}
+    for r in store.read_jsonl(meter.ledger_path())[0]:
+        if not (isinstance(r, dict) and r.get("kind") in ("step", "reconcile") and meter._num(r.get("usd"))
+                and meter._num(r.get("ts")) and r["ts"] >= since):
+            continue
+        d, p = str(r.get("day") or _day(r["ts"])), str(r.get("provider") or "?")
+        out["usd"] += r["usd"]
+        out["by_day"][d] = out["by_day"].get(d, 0.0) + r["usd"]
+        out["by_provider"][p] = out["by_provider"].get(p, 0.0) + r["usd"]
+    return {"usd": round(out["usd"], 6), "today": meter.today()["usd"],
+            "by_day": {d: round(v, 6) for d, v in sorted(out["by_day"].items())},
+            "by_provider": {p: round(v, 6) for p, v in out["by_provider"].items()}}
+
+
 def api_totals(rows: list[dict], since: float = 0) -> dict:
     """The API rows measured after ``since``, trials and discards included (money spent is money
     spent): tasks, the known dollars (`cost`), how many had no price (`unknown`) or count against
     a plan (`plan`), the trials among them, Claude's side (`claude`, `self_est`: weighted tokens,
-    side by side, never subtracted from the dollars), and the dollars by provider and local day."""
+    side by side, never subtracted from the dollars), and the dollars by provider. Closed tasks
+    only, by their close: the money by day is the ledger's (`spent`, #1094)."""
     from .results import row_cost
     out = {"tasks": 0, "cost": 0.0, "unknown": 0, "plan": 0, "trials": 0, "claude": 0,
-           "self_est": 0, "by_provider": {}, "by_day": {}}
+           "self_est": 0, "by_provider": {}}
     for r in rows:
         if r.get("kind") != "api" or (r.get("ts") or 0) < since:
             continue
@@ -387,15 +409,12 @@ def api_totals(rows: list[dict], since: float = 0) -> dict:
         else:
             out["cost"] += cost
             p["cost"] += cost
-            day = _day(r.get("ts") or 0)
-            out["by_day"][day] = out["by_day"].get(day, 0.0) + cost
         if (c := _compare(r)) is not None:
             out["claude"] += c["claude"]
             out["self_est"] += c["self_est"]
     out["cost"] = round(out["cost"], 6)
     for p in out["by_provider"].values():
         p["cost"] = round(p["cost"], 6)
-    out["by_day"] = {d: round(v, 6) for d, v in sorted(out["by_day"].items())}
     return out
 
 
@@ -467,22 +486,26 @@ def api_summary(a: dict) -> str | None:
                if a["claude"] else ""))
 
 
-def api_report(a: dict, period: str, bench: dict | None = None) -> str:
-    """`wb savings --api`: the period's API money, by provider and by day, and the bench's replays
-    (their rows are bench/runs.jsonl's, not results')."""
+def api_report(a: dict, period: str, bench: dict | None = None, paid: dict | None = None) -> str:
+    """`wb savings --api`: the period's closed API tasks and their money by provider, what the
+    day ledger says was spent (``paid``, `spent`: open tasks and bench replays in) and by day, and
+    the bench's replays (their rows are bench/runs.jsonl's, not results')."""
     when = {"week": "the last 7 days", "month": "the last 30 days", "all": "all time"}.get(period, period)
-    if not a["tasks"] and not (bench or {}).get("tasks"):
+    paid = paid or {"usd": 0.0, "today": 0.0, "by_day": {}}
+    if not a["tasks"] and not (bench or {}).get("tasks") and not paid["by_day"]:
         return f"api, {when}: no API task"
     trial = f" (incl. {a['trials']} trial{'s' if a['trials'] > 1 else ''})" if a["trials"] else ""
-    out = [f"api, {when}: {a['tasks']} task(s)" + (f", {_counts(a)}" if a["tasks"] else "") + trial]
+    out = [f"api, {when}: {a['tasks']} task(s) closed" + (f", {_counts(a)}" if a["tasks"] else "") + trial]
     provs = sorted(a["by_provider"].items(), key=lambda kv: (-kv[1]["cost"], kv[0]))
     if provs:
         out.append("  by provider: " + " · ".join(
             f"{p} " + (usd(v["cost"]) if _priced(v) else "plan usage" if v.get("plan") else "no price")
             + f" ({v['tasks']})"
             for p, v in provs))
-    if a["by_day"]:
-        out.append("  by day: " + " · ".join(f"{d[5:]} {usd(v)}" for d, v in a["by_day"].items()))
+    if paid["by_day"]:  # the ledger's: what the day cap and the pane count (#1094)
+        out.append(f"  spent: {usd(paid['usd'])}, {usd(paid['today'])} today (the day ledger: open "
+                   "tasks and bench replays in)")
+        out.append("  by day: " + " · ".join(f"{d[5:]} {usd(v)}" for d, v in paid["by_day"].items()))
     if bench and bench.get("tasks"):
         out.append(f"  bench replays: {usd(bench['cost'])} ({bench['tasks']})"
                    + (f" + {bench['unknown']} with no price" if bench.get("unknown") else ""))

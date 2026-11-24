@@ -617,4 +617,5 @@ figure while it runs is `api.usd` in its `status.json`, under `$WB_HOME/tasks/<n
 Call the estimate an estimate. `wb savings` gives the
 week's total and its score out of 100 when the user asks what it's saving; `wb savings --card
 <file>.svg` makes the badge as an image for them to keep or post (made here, nothing sent). The
-score is the GPU's alone; `wb savings --api` gives what API tasks cost, by provider and day.
+score is the GPU's alone; `wb savings --api` gives what API tasks cost: the closed ones by
+provider, and what was spent (open tasks too) by day, as the day cap counts it.

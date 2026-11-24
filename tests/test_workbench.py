@@ -31564,6 +31564,31 @@ class ApiStats(Base):
         store.write_json(t.dir / "status.json", {"phase": "review", "round": 1, **(status or {})})
         return t
 
+    def booked(self, usd_, ts, task="a", provider="deepseek"):
+        """A step row in the day ledger (meter.py's spend-api.jsonl), on ``ts``'s local day."""
+        from workbench import meter
+        store.append_jsonl(meter.ledger_path(), {
+            "ts": ts, "day": meter.day(ts), "kind": "step", "task": task, "round": 1,
+            "provider": provider, "model": f"{provider}/flash", "usd": usd_, "source": "opencode"})
+
+    def test_wb_savings_api_by_day_follows_the_ledger_and_counts_open_tasks(self):
+        # #1094 (2026-11-23): by day and the period's money came from results rows, written at a
+        # close and dated by it: a task spent yesterday and accepted today, and an open one, read
+        # $3 today and $3 for the week where the ledger, the cap's and the pane's, said $2 and $5
+        from workbench import cli, meter
+        now = store.now()
+        self.booked(3.0, now - 86400, task="night", provider="deepinfra")
+        self.booked(2.0, now, task="open-one", provider="deepinfra")
+        self.rows(self.api_row(cost=3.0, ts=now, task="night", provider="deepinfra"))
+        out = run_wb("savings", "--api").splitlines()
+        self.assertEqual(out[0], "api, the last 7 days: 1 task(s) closed, $3.00")
+        self.assertEqual(out[2], "  spent: $5.00, $2.00 today (the day ledger: open tasks and bench replays in)")
+        yesterday, today = meter.day(now - 86400)[5:], meter.day(now)[5:]
+        self.assertEqual(out[3], f"  by day: {yesterday} $3.00 · {today} $2.00")
+        j = json.loads(run_wb("savings", "--api", "--json"))["spent"]
+        self.assertEqual((j["usd"], j["today"], j["by_provider"]), (5.0, 2.0, {"deepinfra": 5.0}))
+        self.assertEqual(j["today"], cli._spend_today()["usd"])            # the pane's figure
+
     def test_an_accepted_api_task_leaves_the_gpu_score_as_the_gpu_task_alone_and_gets_its_own_line(self):
         from workbench import savings
         self.rows(self.gpu_row())
@@ -31603,16 +31628,20 @@ class ApiStats(Base):
                   self.api_row(cost=9.0, ts=now - 20 * 86400))                       # before the week
         store.append_jsonl(bench.runs_file(), {"ts": now, "outcome": "passed", "kind": "api",
                                                "model": "deepseek/flash", "paid": {"cost": 0.3, "source": "opencode"}})
+        for ago, usd_ in ((2, 0.30), (1, 0.54), (0, 0.43), (0, 0.3), (20, 9.0)):   # the ledger's
+            self.booked(usd_, now - ago * 86400)
         out = run_wb("savings", "--api", "--week").splitlines()
         # the providers once, on their own line (#1022's review: the header said them too)
-        self.assertEqual(out[0], "api, the last 7 days: 3 task(s), $1.27 (incl. 1 trial)")
+        self.assertEqual(out[0], "api, the last 7 days: 3 task(s) closed, $1.27 (incl. 1 trial)")
         self.assertEqual(out[1], "  by provider: deepseek $0.84 (2) · anthropic $0.43 (1)")
-        self.assertTrue(out[2].startswith("  by day: "), out)
-        self.assertEqual(out[2].count("$"), 3)
-        self.assertEqual(out[3], "  bench replays: $0.30 (1)")
+        self.assertEqual(out[2], "  spent: $1.57, $0.73 today (the day ledger: open tasks and bench "
+                                 "replays in)")
+        self.assertTrue(out[3].startswith("  by day: "), out)
+        self.assertEqual(out[3].count("$"), 3)
+        self.assertEqual(out[4], "  bench replays: $0.30 (1)")
         j = json.loads(run_wb("savings", "--api", "--week", "--json"))
         self.assertEqual(j["by_provider"]["deepseek"], {"tasks": 2, "cost": 0.84, "unknown": 0})
-        self.assertEqual(round(sum(j["by_day"].values()), 2), 1.27)
+        self.assertEqual(round(sum(j["spent"]["by_day"].values()), 2), 1.57)
         self.assertEqual((j["trials"], j["bench"]["cost"]), (1, 0.3))
         self.assertEqual(json.loads(run_wb("savings", "--json"))["api"]["tasks"], 3)
 
@@ -31906,7 +31935,7 @@ class ApiStats(Base):
         self.assertEqual((week["tasks"], week["plan"]), (1, 1))
         self.assertEqual(stats.api_week_line(week), "api this week: 1 task(s), 1 on plan usage")
         self.assertEqual(run_wb("savings", "--api").splitlines()[:2],
-                         ["api, the last 7 days: 1 task(s), 1 on plan usage",
+                         ["api, the last 7 days: 1 task(s) closed, 1 on plan usage",
                           "  by provider: opencode-go plan usage (1)"])
         self.assertIn("api: 1 task(s) · 1 on plan usage", run_wb("savings"))
         self.assertTrue(savings.line(store.results()[0]).endswith("· plan usage (opencode-go)"))
