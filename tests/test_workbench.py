@@ -14854,6 +14854,31 @@ class Bench(Base):
         self.assertIn("--unload-for-tests", argv)
         self.assertNotIn("--unload-for-tests", argv_of({**case, "unload_for_tests": False}))
 
+    def test_a_replay_from_a_package_copies_both_the_packages_and_the_roots_node_modules(self):
+        # #1158 (bar round 1, 2026-11-24): a case's copies are repo-relative, and wb start reads a
+        # --copy from the package first, so a case from packages/app that copied both
+        # node_modules/ passed `--copy node_modules` and got the package's twice, never the root's
+        from workbench import bench
+        work = Path(self.tmp.name) / "checkout"
+        for d in ("node_modules", "packages/app/node_modules"):
+            (work / d).mkdir(parents=True)
+        case = {"name": "c-pkg", "test_cmd": "true", "subdir": "packages/app",
+                "copy": ["packages/app/node_modules", "node_modules"]}
+        argv = []
+        with mock.patch.object(cli, "parser") as parser:
+            parser.return_value.parse_args.side_effect = lambda a: argv.extend(a) or mock.Mock()
+            bench._start_task(case, "m", "bench-x", work, [], {})
+        copies = [argv[i + 1] for i, x in enumerate(argv) if x == "--copy"]
+        self.assertEqual(copies, ["node_modules", "../../node_modules"])
+        self.assertEqual([cli._copy_path(work, p, "packages/app") for p in copies], case["copy"])
+        # from the repo's top they pass as kept
+        copies = []
+        with mock.patch.object(cli, "parser") as parser:
+            parser.return_value.parse_args.side_effect = lambda a: copies.extend(
+                a[i + 1] for i, x in enumerate(a) if x == "--copy") or mock.Mock()
+            bench._start_task({**case, "subdir": ""}, "m", "bench-x", work, [], {})
+        self.assertEqual(copies, case["copy"])
+
     def test_a_cases_checks_and_every_grade_hold_the_gpu_alone_when_its_tests_need_it(self):
         # #1098 (the 2.0 audit, 2026-11-23): only a replay's own rounds got --unload-for-tests;
         # bench add's base and reference checks, each replay's grade and wb bench self's ran

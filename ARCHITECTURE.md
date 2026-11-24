@@ -3951,7 +3951,10 @@ GPU alone only once nothing holds or waits for it, `bench._grade_alone`, asking 
 (5 s) without queueing: queued, its place was the replay's start, ahead of later real tasks; an older case reads them from
 its task, `bench._kept`, `bench.subdir`; task gone too: `error` rows). A replay runs from the
 package (`--repo <checkout>/<subdir>`: from the root an `answer.txt` passed a check of
-`app/answer.txt`, #425). The step's commit is found by its trailer
+`app/answer.txt`, #425), so its copies are named from there (`bench._start_task`: the case's
+`node_modules` as `../../node_modules`, since wb start reads a `--copy` from the package first,
+`cli._copy_path`, and a case that copied the package's and the root's replayed without the root's,
+#1158). The step's commit is found by its trailer
 (`Workbench-Task: <task> (step N)`, or `Workbench-Task: <task>` for the last) from the recorded tip (`gitops.step_commit`). `wb
 accept` keeps base..tip in `tasks/<task>/steps.bundle` (`gitops.bundle_steps`, `STEPS_BUNDLE`, made
 in a `--shared` scratch clone and named with `--git-dir`, #887), which `bench add` unbundles when
