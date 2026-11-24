@@ -3190,7 +3190,7 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
 
 def _checkout_copies(task: store.Task, files: list[Path]) -> list[Path]:
     """For an API task, each of ``files`` the user's checkout holds and the worktree doesn't
-    (CLAUDE.local.md, a gitignored package CLAUDE.md, an uncommitted edit, an import there) as a
+    (CLAUDE.local.md, a gitignored package CLAUDE.md, one not committed yet, an import there) as a
     copy in rules/<task>/checkout/, which its lane reads: it doesn't read the checkout
     (read_repo_dirs, #1091). A GPU task's as they are. Copies made afresh each call."""
     copies = rules_dir(task) / "checkout"
