@@ -30647,6 +30647,37 @@ class ApiSpend(Base):
         store.write_json(task.dir / "task.json", {**spec, "via": "api"})
         self.assertIsNotNone(self.meter.for_task(task))           # with via api: its meter
 
+    def test_feedback_next_and_resume_on_an_api_task_at_the_day_cap_refuse_before_writing_a_round(self):
+        # #1118 (audit 1 of 2.0): they wrote the round, counted the review or committed the step
+        # and spawned a runner whose guard stopped it at once: a spend `stuck` wake for nothing
+        task = self.api_task("t-cap", SPEND_M, "ok")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        self.cap(5)
+        self.spent(6.0)
+        head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
+        before = {k: task.status.get(k) for k in ("round", "reviews", "steps", "phase")}
+        nxt = Path(self.tmp.name) / "next.md"
+        nxt.write_text("step two\n")
+        for args in (("feedback", "t-cap", "--text", "1. make it 43"),
+                     ("next", "t-cap", "--spec", str(nxt), "-m", "step one"), None):
+            if args is None:                                     # stopped, then resumed
+                task.set_status(phase="stuck")
+                before["phase"] = "stuck"
+                args = ("resume", "t-cap")
+            err = io.StringIO()
+            with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+                  mock.patch.object(cli, "spawn_runner") as spawned):
+                run_wb(*args)
+            self.assertEqual(e.exception.code, 3, args)
+            self.assertIn("API spend today is $6.", err.getvalue())
+            self.assertIn("day cap", err.getvalue())
+            spawned.assert_not_called()
+            got = store.Task("t-cap").status
+            self.assertEqual({k: got.get(k) for k in before}, before, args)
+            self.assertFalse(task.round_dir(before["round"] + 1).exists(), args)
+            self.assertEqual(gitops.git(task.worktree, "rev-parse", "HEAD").strip(), head, args)
+
     def test_the_cap_stops_self_review_and_a_handover_before_they_run(self):
         # the review of #1019: only auto-fix's _go_on was exercised; the in-round guard off, the
         # cap reached in round 1, each next round is stopped by _go_on, the keyhole closed first
