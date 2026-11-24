@@ -5399,7 +5399,8 @@ test('#1014: a role change asks the user with wb\'s own change line; Allow write
 test('#1125: an API --model start\'s dry run runs where the start runs, cd and pushd followed from the session\'s directory', async ($, on) => {
   // the audit of 2.0 (2026-11-23): it ran in the session's directory, so `cd other && wb start …
   // --model <API id>` (--repo defaults to `.`) was judged local-only, or not, by the wrong repo
-  const { clock, bash, w } = await routeProbe($, on)
+  const dirs = ['/b/sub/x', '/home/u/other/x', '/home/u/c/x', '/home/u/project/x']
+  const { clock, bash, w } = await routeProbe($, on, Object.fromEntries(dirs.map(d => [d, ''])))
   const start = 'wb start t --spec s.md --model deepseek/deepseek-flash'
   for (const [line, where] of [
     [start, '/home/u/project'],
@@ -5407,12 +5408,25 @@ test('#1125: an API --model start\'s dry run runs where the start runs, cd and p
     [`cd ../other && ${start}`, '/home/u/other'],
     [`cd /b && pushd sub && ${start}`, '/b/sub'],
     [`cd ~/c && ${start}`, '/home/u/c'],
+    // the review of #1125 (2026-11-23): a cd the mod can't resolve, or to a directory that isn't
+    // there yet, ran the dry run nowhere, and the call skipped the dialog: the session's instead
+    [`cd "$REPO" && ${start}`, '/home/u/project'],
+    [`cd $(git rev-parse --show-toplevel) && ${start}`, '/home/u/project'],
+    [`cd "$X" && cd sub && ${start}`, '/home/u/project'],
+    [`cd "$X" && cd /b && ${start}`, '/b'],
+    [`mkdir new && cd new && ${start}`, '/home/u/project'],
+    [`cd $HOME/x && ${start}`, '/home/u/project'],
   ] as const) {
-    const n = w.dryAt.length
+    const n = w.dryAt.length, k = w.asked.length
     await bash(line)
-    expect([line, w.dryAt.slice(n)]).toEqual([line, [where]])
+    expect([line, w.dryAt.slice(n), w.asked.length - k]).toEqual([line, [where], 1]) // and the dialog asked
   }
+  // a route's dry run runs in the session's directory, wherever the line cds: it reads none
+  const n = w.dryAt.length
+  await bash('cd /b && wb route trivial deepseek/deepseek-flash --day-usd 5')       // /b is there
+  expect(w.dryAt.slice(n)).toEqual(['/home/u/project'])
   expect(routeCalls('cd /b && wb route trivial api', '/a', '/home/u')).toEqual({ calls: [['trivial', 'api']], hidden: false, at: ['/b'] })
+  expect(routeCalls('cd "$R" && wb route trivial api', '/a', '/home/u').at).toEqual([''])
   await clock.advance(1000)
 })
 

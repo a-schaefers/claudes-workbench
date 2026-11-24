@@ -1412,6 +1412,14 @@ export function originIs(url: string, slug: string): boolean {
 // upstream there is no user's Claude). `named`: the line names the slug; `outAt`: every directory
 // an outward command in it runs in, for the hook to check by real path; `shown`: the outward text
 // when it isn't a command of its own (fed to a shell)
+// A cd or pushd's target word as written (`cd --` and the flags skipped): undefined for none
+// (home), '-' for the last directory. Shared by upstreamAim and routeCalls (#1125).
+function cdTarget(words: string[], i: number): string | undefined {
+  const rest = words.slice(i + 1)
+  const k = rest.indexOf('--')
+  return k >= 0 ? rest[k + 1] : rest.find(w => !/^-[LPe@]+$/.test(w))
+}
+
 export type Aim = { why: '' | 'send' | 'dir' | 'plugin' | 'slug'; at: string; words: string[]; named: boolean; outAt: string[]; shown?: string }
 
 // Whether a command line sends something to workbench upstream, and why. `dirs` are the gated
@@ -1441,9 +1449,7 @@ export function upstreamAim(command: string, cwd: string, home: string, slug: st
     const i = commandAt(words)
     const cmd = wordOf(words[i])
     if (cmd === 'cd' || cmd === 'pushd') {
-      const rest = words.slice(i + 1)
-      const k = rest.indexOf('--')
-      const to = k >= 0 ? rest[k + 1] : rest.find(w => !/^-[LPe@]+$/.test(w))
+      const to = cdTarget(words, i)
       if (to !== '-') here = absolutePath(to ?? (home || '/'), home, here)
       continue
     }
@@ -1680,7 +1686,11 @@ function runsIn(src: string): string[][] {
 // another program runs, which can't be shown. `at`: the directory each call runs in, `cd` and
 // pushd followed from ``cwd`` as upstreamAim follows them: the dry run ran in the session's
 // directory, so `cd other && wb start … --model <API id>` (--repo defaults to `.`) was judged
-// local-only, or not, by the wrong repo (#1125, 2026-11-23). '' without a ``cwd``.
+// local-only, or not, by the wrong repo (#1125, 2026-11-23). '' where the mod can't say: without
+// a ``cwd``, and after a cd to a word with `$` or a backquote in it (`cd "$REPO"`), to none (an
+// unquoted `$(…)` leaves none) or to `-`; read as a literal path, it failed the dry run to spawn,
+// so the call skipped the dialog into wb's "is the mod loaded?" (the review of #1125). An
+// absolute one after it is known again.
 export function routeCalls(command: string, cwd = '', home = ''): { calls: string[][]; hidden: boolean; at: string[] } {
   const calls: string[][] = []
   const at: string[] = []
@@ -1689,11 +1699,10 @@ export function routeCalls(command: string, cwd = '', home = ''): { calls: strin
   for (const words of runsIn(command)) {
     const i = commandAt(words)
     const cmd = wordOf(words[i])
-    if ((cmd === 'cd' || cmd === 'pushd') && here) {
-      const rest = words.slice(i + 1)
-      const k = rest.indexOf('--')
-      const to = k >= 0 ? rest[k + 1] : rest.find(w => !/^-[LPe@]+$/.test(w))
-      if (to !== '-') here = absolutePath(to ?? (home || '/'), home, here)
+    if (cmd === 'cd' || cmd === 'pushd') {
+      const to = cdTarget(words, i)
+      if (!to || to === '-' || /[$`]/.test(to)) here = ''
+      else if (here || to.startsWith('/')) here = absolutePath(to, home, here)
       continue
     }
     if (RUNS_CODE.test(cmd)) runner = true
@@ -1811,9 +1820,13 @@ async function routeRefusal($: any, e: Row): Promise<string> {
   if (live.length > 1) return ROUTE_OWN
   let q: Row
   try {
-    // in the directory the call runs in: wb start's --repo is `.` unless given (#1125)
-    const r = await $.process.run([mem.wb, 'route', '--dry-run', '--json', ...live[0]!.args],
-      { timeoutMs: 60_000, ...(live[0]!.cwd ? { cwd: live[0]!.cwd } : {}) })
+    // a start's in the directory it runs in: wb start's --repo is `.` unless given (#1125). Only a
+    // start's (wb route doesn't read its directory), and only one that exists: a directory the
+    // line makes (`mkdir x && cd x`) failed the dry run to spawn, and the call skipped the
+    // dialog; the session's is the better guess (the review of #1125, 2026-11-23)
+    const { args, cwd } = live[0]!
+    const there = args[0] === '--start' && cwd && await $.fs.exists(cwd).catch(() => false) ? { cwd } : {}
+    const r = await $.process.run([mem.wb, 'route', '--dry-run', '--json', ...args], { timeoutMs: 60_000, ...there })
     if (r.exitCode !== 0) return '' // wb refuses it itself, saying why
     q = JSON.parse(String(r.stdout ?? ''))
   } catch {
