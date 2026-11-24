@@ -1535,17 +1535,20 @@ def opencode_env(task: store.Task, run: str = "") -> dict:
             "SHELL": str(write_shell_shim(task))}
 
 
-# The explore guard's calls without an edit, per 32K of the model's window: 40 was set where 40
+# The explore guard's calls without an edit, per 32K of an API model's window: 40 was set where 40
 # reads fill a 32K window, and stopped API one-shots (131K) still exploring at 16% of theirs
-# (#1087, 2026-11-23). A loop that never fills the window still stops, at NO_EDIT_MAX
+# (#1087, 2026-11-23). A loop that never fills the window still stops, at NO_EDIT_MAX. A GPU
+# task's stays 40 whatever its window, as in 1.91.x: the 40 was tuned on local models, the ones
+# that loop on reads (the review of #1087, 2026-11-23)
 NO_EDIT_PER_32K = 40
 NO_EDIT_MAX = 160
 
 
-def no_edit_limit(window) -> int:
-    """events.StuckDetector's `no_edit` for a model of this window (status `window`): 40 for
-    32K or less (or unknown), 40 more for each 32K over it, at most NO_EDIT_MAX."""
-    w = window if isinstance(window, int) and window > 0 else 0
+def no_edit_limit(window, *, api: bool) -> int:
+    """events.StuckDetector's `no_edit` for a model of this window (status `window`): on an API
+    model 40 for 32K or less (or unknown), 40 more for each 32K over it, at most NO_EDIT_MAX; on
+    the GPU (``api`` false) always NO_EDIT_PER_32K."""
+    w = window if api and isinstance(window, int) and window > 0 else 0
     return min(NO_EDIT_MAX, NO_EDIT_PER_32K * max(1, w // 32768))
 
 
@@ -1599,7 +1602,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         power = _Power()
         power.start()
 
-    detector = StuckDetector(**{"no_edit": no_edit_limit(st.get("window")), **spec.get("stuck", {})},
+    detector = StuckDetector(**{"no_edit": no_edit_limit(st.get("window"), api=api_task(task)),
+                                **spec.get("stuck", {})},
                              worktree=task.worktree)
     wall, silence, think = limit(task, "round"), limit(task, "silence"), limit(task, "think")
     # A shell command OpenCode moved to the background (past 2 minutes it does, and the turn
