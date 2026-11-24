@@ -477,6 +477,32 @@ class Lifecycle(Base):
         wait_phase("t-bline", {"review"})
         self.assertNotIn("checkin", [r["kind"] for r in store.notices() if r["task"] == "t-bline"])
 
+    def test_a_command_not_found_on_the_base_checks_in_at_once_and_skips_auto_fix(self):
+        # #1152 (bar round 1 of 2.0): exit 127 `command not found` on the base sent no check-in,
+        # and round 1 and both auto-fix rounds ran, each told the bug was in the change
+        self.start("t-nf", "ok", "--test", "nosuch-tool-1152 check", "--auto-fix", "2",
+                   "--no-self-review")
+        st = wait_phase("t-nf", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (127, 1))
+        task = store.Task("t-nf")
+        self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        checkins = [r["text"] for r in store.notices() if r["task"] == "t-nf" and r["kind"] == "checkin"]
+        self.assertEqual(len(checkins), 1)
+        self.assertIn("warning: the acceptance command can't run in the agent's environment: ", checkins[0])
+        self.assertIn("nosuch-tool-1152: command not found (exit 127 on the base)", checkins[0])
+        summary = (task.round_dir(1) / "summary.md").read_text()
+        self.assertTrue(summary.startswith("auto-fix skipped: the acceptance command can't run in "
+                                           "the agent's environment: "), summary)
+        self.assertIn("(exit 127, as on the base); no round can fix that", summary)
+        self.assertEqual(st["last"], "the acceptance command can't run in the agent's environment: "
+                                     "Claude reviews next")
+        # a script the step was to make (No such file or directory) still goes back to the agent
+        self.start("t-nf2", "ok", "--test", "./made-by-the-step.sh", "--auto-fix", "1",
+                   "--no-self-review")
+        st = wait_phase("t-nf2", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (127, 2))
+        self.assertFalse([r for r in store.notices() if r["task"] == "t-nf2" and r["kind"] == "checkin"])
+
     def test_what_the_base_check_writes_never_reaches_the_agents_worktree(self):
         # #192 (the 2026-11-19 audit): the base check ran in the task's worktree, and a stamp it
         # wrote made the same failing command pass after the agent's unrelated edit
