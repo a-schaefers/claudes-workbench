@@ -556,8 +556,10 @@ doesn't bill; the row is never below the ledger the day cap counted nor the roun
 export is OpenCode's catalog estimate, so it is compared with the meter at the same prices
 (status `api.at_catalog`, `results.at_catalog`: a provider's own row at its catalog figure, its
 `metered`; a status without it, `api.usd`): the cost is the meter plus whatever the export says
-past that (`source: "opencode"` when that is more than 0; with no provider row, the export itself,
-as before). Compared with the meter's total, OpenCode's export at the catalog's ran about 2x
+past that (`source: "opencode"` when that is more than the status figures' 6-place rounding,
+`meter.STATUS_EPS`; with no provider row, the export itself, as before). Compared within
+`meter.EPS` (1e-9), an unrounded export a few 1e-7 past a rounded-down `at_catalog` closed 4 of 10
+real DeepInfra tasks, every row DeepInfra's own, as `catalog prices` (#1220, 2026-11-24). Compared with the meter's total, OpenCode's export at the catalog's ran about 2x
 DeepInfra's bill in every closed task's `paid`, and a gate on a meter of provider rows alone
 (status `api.prices` `provider`) let it back whenever one catalog `reconcile` row joined them: a
 `step_finish` reaching `Meter.step` before the keyhole's thread booked that response's usage, 2 of

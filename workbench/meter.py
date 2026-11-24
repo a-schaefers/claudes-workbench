@@ -46,6 +46,10 @@ from . import keyhole, models, routes, store
 CHECKIN_SHARE = 0.5      # past this share of the day cap, one check-in a day, across all tasks
 PLAN_PROVIDERS = ("opencode-go",)   # a plan's quota, not dollars (and m.cloud: Ollama cloud)
 EPS = 1e-9               # less than this between two figures is the same figure
+# status `api`'s figures are written to 6 places (Meter._book), an export's aren't: closer than
+# this to one is its rounding. Compared within EPS, a DeepInfra export a few 1e-7 past a rounded-down
+# `at_catalog` closed 4 of 10 real tasks of its own rows as `catalog prices` (#1220, 2026-11-24)
+STATUS_EPS = 1e-6
 STOP = keyhole.SPEND_REFUSED   # the keyhole's answer to OpenCode (a 400, which it doesn't retry) says it
 # today under the cap, but not by the next request at its worst, which the keyhole's room refuses:
 # "the cap is reached" there had Claude resume into the same stop, a wake for nothing (#1150)

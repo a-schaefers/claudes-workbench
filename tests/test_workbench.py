@@ -35345,6 +35345,22 @@ class ApiSpendKeyhole(_KeyholeTest):
             got = results.api_usage(self.task)
         self.assertEqual((got["cost"], got["source"]), (1.976, "mixed"))
 
+    def test_an_export_a_rounding_past_the_status_at_catalog_leaves_paid_at_the_providers_own_figure(self):
+        # #1220 (2026-11-24): status api.at_catalog is written to 6 places and the export isn't, so
+        # whenever the rounding went down the export read a few 1e-7 past the meter (EPS is 1e-9):
+        # 4 of 10 real DeepInfra tasks, every row DeepInfra's own, closed as `catalog prices`
+        from workbench import results
+        m, mt = self._deepinfra_meter()
+        mt.on_usage({"prompt_tokens": 1000, "completion_tokens": 2007, "estimated_cost": 0.000688})
+        self.assertEqual(self.task.status["api"]["at_catalog"], 0.001404)    # 0.0014042, rounded down
+        self.task.set_status(session="ses_1")
+        with mock.patch.object(results, "_session_cost", return_value=0.0002 + 0.0012042):  # unrounded
+            got = results.api_usage(self.task)
+        self.assertEqual({k: got[k] for k in ("cost", "source", "prices")},
+                         {"cost": 0.000688, "source": "metered", "prices": "provider"})
+        with mock.patch.object(results, "_session_cost", return_value=0.0014042 + 0.0003):  # one it missed
+            self.assertEqual(results.api_usage(self.task)["cost"], round(0.000688 + 0.0003, 6))
+
     def test_a_later_rounds_new_meter_compares_the_export_with_the_ledger_at_catalog_prices(self):
         # #1165's review: each round after the first runs in a new runner, so a new Meter seeds
         # at_catalog from the ledger; seeded from the rows' usd, every later round's end booked
