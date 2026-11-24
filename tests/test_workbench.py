@@ -876,6 +876,12 @@ class Lifecycle(Base):
                      "The mycli1244 command prints 42.\n"):
             prompt.write_text(spec)
             self.assertEqual(said(bare), "mycli1244: command not found", spec)
+        # a name on the user's own PATH that the agent's lacks is a tool missing from its
+        # environment, not a script the step adds, even when the spec says to make it (#1244's
+        # review, 2026-11-24): without the guard it would go back to the agent every round
+        self.assertTrue(shutil.which("sh"))
+        prompt.write_text("Add the `sh` console script.\n")
+        self.assertEqual(said("bash: line 1: sh: command not found"), "sh: command not found")
         prompt.write_text("Fix the answer.\n")
         for name, text in (("pyproject.toml", '[project]\nname = "x"\n[project.scripts]\n'
                                               'mycli1244 = "pkg.cli:main"\n'),
