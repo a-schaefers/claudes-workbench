@@ -2960,14 +2960,19 @@ KEY_HELD = {"oauth": "an OAuth login", "signing": "a cloud login that signs each
 
 
 CATALOG_LATER = "hosted.reading"  # in the state dir: when _route_pane last started a catalog read
+# How old a cache listing no stored key may be before the pane reads the catalog again (#1069's
+# review, 2026-11-23): /connect changes no stamp, so a cache written before it kept saying
+# NO_PROVIDER for HOSTED_TTL; the pane reads wb route on a Settings open or a Stats load, and only
+# polls it while an API task works (a key stored, so never this), so a minute costs little
+PANE_REREAD_SECS = 60
 
 
 def _read_catalog_later() -> None:
-    """With no hosted.json at all, a catalog read in the background, at most one per
-    CATALOG_TIMEOUT: the pane reads only the cache (never inline: #1013's review), and with keys
-    stored but no cache yet, it said 'No API provider connected' until some other command built
-    one, sending the user to /connect again for nothing (#1069, 2026-11-23). A stale cache stays
-    as it is: any API start, route or wb models refreshes it."""
+    """A catalog read in the background, at most one per CATALOG_TIMEOUT: the pane reads only the
+    cache (never inline: #1013's review), and with keys stored but no cache yet, it said 'No API
+    provider connected' until some other command built one, sending the user to /connect again
+    for nothing (#1069, 2026-11-23). Always a fresh read: /connect changes no stamp, so a cache
+    read before it would otherwise stand for HOSTED_TTL (the review of #1069)."""
     mark = store.home() / CATALOG_LATER
     try:
         if time.time() - mark.stat().st_mtime < models.CATALOG_TIMEOUT + 10:
@@ -2976,7 +2981,8 @@ def _read_catalog_later() -> None:
         pass
     try:
         mark.touch()
-        subprocess.Popen([sys.executable, "-X", "utf8", "-c", "from workbench import models; models.hosted_doc()"],
+        subprocess.Popen([sys.executable, "-X", "utf8", "-c",
+                          "from workbench import models; models.hosted_doc(fresh=True)"],
                          cwd=PKG_ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
     except OSError:  # the next poll tries again once the mark is old
@@ -2987,11 +2993,15 @@ def _route_pane() -> dict:
     """`wb route --json`'s keys for the pane's Settings tab (#1023): `spend_today` (the day
     ledger's, spend-api.jsonl: {usd, by_provider}) and `providers` ({id: {name, key, why}}, key
     stored, env, oauth or none, from the cached catalog: never a network probe or OpenCode run
-    inline; with no cache at all, one read in the background, _read_catalog_later)."""
-    if not models.hosted_path().is_file():
+    inline; with no cache, or one past PANE_REREAD_SECS that lists no stored key, one read in the
+    background, _read_catalog_later)."""
+    doc = models._read_hosted()
+    ts = doc.get("ts")
+    if not any(p.get("key") == "stored" for p in (doc.get("providers") or {}).values()) \
+            and not (isinstance(ts, (int, float)) and 0 <= time.time() - ts < PANE_REREAD_SECS):
         _read_catalog_later()
     provs = {}
-    for pid, p in (models._read_hosted().get("providers") or {}).items():
+    for pid, p in (doc.get("providers") or {}).items():
         raw = str(p.get("key") or "")
         key = "env" if raw.startswith("env:") else KEY_STATES.get(raw, "none")
         held = f"key in {raw[4:]}" if key == "env" else KEY_HELD.get(raw, raw)
@@ -6065,8 +6075,16 @@ def first_run() -> list[str]:
     except routes.RoutesError:
         api_only = False
     stored = not found and (api_only or any(k["key"] == "stored" for k in (keys or {}).values()))
-    if any(k["key"] == "stored" for k in (keys or {}).values()) and not models.hosted_path().is_file():
-        models.hosted_doc()  # a key stored: the pane's API settings read this cache (#1069)
+    # a key stored that the cache doesn't list as stored (none yet, or one read before /connect):
+    # the pane's API settings read this cache (#1069); an OpenCode config that doesn't parse
+    # stops no checklist (the review of #1067, 2026-11-23: wb setup exited 1 at it)
+    cached = models._read_hosted().get("providers") or {}
+    if any(k["key"] == "stored" and (cached.get(pid) or {}).get("key") != "stored"
+           for pid, k in (keys or {}).items()):
+        try:
+            models.hosted_doc(fresh=True)
+        except (RuntimeError, OSError):
+            pass
     if not answering and on_windows:  # WSL2: answering at the Windows host only (#663)
         out.append(f"--  a model server answers on Windows at {on_windows[0]['root']} (usually "
                    f"{on_windows[0]['usually']}): it needs local: true (wb remote "

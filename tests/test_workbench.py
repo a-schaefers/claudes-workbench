@@ -32540,6 +32540,17 @@ class FirstRunApi(Base):
         self.assertIn("--  no API key for deepseek, which significant and trivial and writing use: /connect "
                       "in OpenCode adds it (required: those tasks can't start without it)", lines)
 
+    def test_setup_with_a_stored_key_and_an_opencode_config_that_doesnt_parse_still_prints_its_checklist(self):
+        # the review of #1067 (2026-11-23): wb setup's catalog read for a stored key ran outside
+        # the guard discover() has, so a config wb can't parse stopped it at "opencode.json doesn't
+        # parse", exit 1, with no checklist and no "next: wb doctor"
+        runner.models.hosted_path().unlink(missing_ok=True)
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text("{ not json")
+        lines = cli.first_run()
+        self.assertTrue(lines[0].startswith("ok  "), lines)
+        self.assertIn("ok  API keys: deepseek (stored via /connect); no role uses one yet", lines)
+        self.assertTrue(any("Landlock" in x for x in lines), lines)
+
     # wb route: several roles in one change
 
     def test_several_roles_change_in_one_call_one_line_and_one_approval(self):
@@ -32801,6 +32812,58 @@ class SettingsRoles(Base):
             self.wb("route", "--json")
         cli.first_run()                                              # wb setup reads it, a key stored
         self.assertTrue(hosted.exists())
+
+    def await_read(self, after):
+        """hosted.json once a background read past ``after`` (a ts) has written it."""
+        hosted, deadline = runner.models.hosted_path(), time.time() + 20
+        while time.time() < deadline:
+            doc = store.read_json(hosted, {}) if hosted.exists() else {}
+            if isinstance(doc.get("ts"), (int, float)) and doc["ts"] > after:
+                return doc
+            time.sleep(0.05)
+        self.fail("no background catalog read landed")
+
+    def age(self, secs):
+        """hosted.json and the pane's read mark, made ``secs`` older."""
+        hosted = runner.models.hosted_path()
+        doc = json.loads(hosted.read_text())
+        store.write_json(hosted, {**doc, "ts": doc["ts"] - secs})
+        mark = store.home() / cli.CATALOG_LATER
+        os.utime(mark, (mark.stat().st_mtime - secs,) * 2)
+
+    def test_a_key_connected_after_the_pane_cached_none_is_listed_within_a_minute(self):
+        # the review of #1069 (2026-11-23): a user who opened Settings before /connect had a
+        # hosted.json listing no key, and the pane read it again only when the file was missing,
+        # so it said NO_PROVIDER (/connect in OpenCode adds one) after they had done just that
+        self.catalog(ROLE_CATALOG, [])                               # no key stored yet
+        start = time.time()
+        self.wb("route", "--json")
+        self.await_read(start - 1)
+        shown = json.loads(self.wb("route", "--json")[1])["providers"]
+        self.assertEqual(shown["deepseek"]["key"], "none")
+        self.catalog(ROLE_CATALOG, ROLE_AUTH)                        # /connect: no stamp changes
+        with mock.patch.object(cli.subprocess, "Popen", side_effect=AssertionError("a read per poll")):
+            self.wb("route", "--json")                               # a fresh cache: not read again yet
+        self.age(cli.PANE_REREAD_SECS + 1)
+        before = json.loads(runner.models.hosted_path().read_text())["ts"]
+        self.wb("route", "--json")                                   # past it, listing no key: read again
+        self.await_read(before)
+        shown = json.loads(self.wb("route", "--json")[1])["providers"]
+        self.assertEqual(shown["deepseek"], {"name": "DeepSeek", "key": "stored"})
+        self.age(runner.models.HOSTED_TTL * 10)                      # a key listed: never read for the pane
+        with mock.patch.object(cli.subprocess, "Popen", side_effect=AssertionError("a read with a key")):
+            self.wb("route", "--json")
+
+    def test_wb_setup_reads_the_catalog_again_when_a_stored_key_isnt_in_the_cache(self):
+        # the review of #1069: wb setup read it only when hosted.json was missing
+        self.catalog(ROLE_CATALOG, [])
+        runner.models.hosted(fresh=True)
+        self.catalog(ROLE_CATALOG, ROLE_AUTH)
+        cli.first_run()
+        doc = json.loads(runner.models.hosted_path().read_text())
+        self.assertEqual(doc["providers"]["deepseek"]["key"], "stored")
+        with mock.patch.object(runner.models, "_build_hosted", side_effect=AssertionError("a read with it listed")):
+            cli.first_run()
 
     def test_wb_models_json_lists_gpu_models_with_sizes_and_the_runnable_api_models_asking_no_server(self):
         runner.models.hosted(fresh=True)
