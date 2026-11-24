@@ -32045,6 +32045,20 @@ class ApiSpend(Base):
         self.assertIn("≈$1.19 today (the day ledger: open tasks and bench replays in, catalog prices)",
                       savings.api_report(week, "week", None, savings.spent()))
 
+    def test_prices_all_zero_are_refused_and_a_plan_models_listing_ends_at_its_price(self):
+        # #1135's review (2026-11-23): `--input 0 --output 0` made a priced model meter.is_free, so
+        # the day cap stopped counting it, unsaid; and a plan model's line ended in a bare ", "
+        from workbench import models
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            run_wb("model", "price", SPEND_M, "--input", "0", "--output", "0", "--cache-read", "0")
+        self.assertIn("prices all 0 would make it free, outside the day cap", err.getvalue())
+        self.assertIsNone((models._overrides().get(SPEND_M) or {}).get("cost"))
+        self.assertFalse(self.meter.is_free(models.lookup(SPEND_M)))
+        self.assertIn("your prices", run_wb("model", "price", SPEND_M, "--input", "0", "--output", "0.5"))
+        self.assertEqual(run_wb("models", "--api", "plan-1").splitlines()[0],
+                         f"{SPEND_GO}  1M · $1/$2 per 1M in/out")
+
     def test_the_keyholes_room_refuses_a_request_that_could_pass_the_cap(self):
         self.cap(5)
         self.spent(4.0)

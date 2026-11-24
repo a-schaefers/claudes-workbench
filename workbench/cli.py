@@ -4484,8 +4484,11 @@ def _api_list(text: str) -> None:
         cost = m.config.get("cost")
         rate = next((c for c in cost if isinstance(c, dict) and not c.get("tier")), None) \
             if isinstance(cost, list) else None
-        price = f" · ${rate.get('input') or 0:g}/${rate.get('output') or 0:g} per 1M in/out, " \
-            f"{_prices_of(m)}" if rate and not m.free else ""
+        # whose prices only when there is a basis to say: a plan or a 0 entry has none, and its
+        # line ended in a bare ", " (#1135's review, 2026-11-23)
+        basis = _prices_of(m)
+        price = f" · ${rate.get('input') or 0:g}/${rate.get('output') or 0:g} per 1M in/out" \
+            + (f", {basis}" if basis else "") if rate and not m.free else ""
         # the catalog's own window, the model's fact (#1017 plans every API task to API_WINDOW)
         own = (m.extra.get("catalog_limit") or m.config.get("limit") or {}).get("context")
         print(f"{m.id}  {_window(own)}{price}"
@@ -5397,6 +5400,10 @@ def _model_price(mid: str, inp, out, read, write, clear: bool = False) -> None:
             "per million tokens, as the provider bills them; or --clear")
     if any(v < 0 or v != v for v in (inp, out, read, write) if v is not None):
         die("prices are dollars per million tokens, 0 or more")
+    if not any(v for v in (inp, out, read, write) if v is not None):
+        # every price 0 is meter.is_free: the day cap would stop counting the model, unsaid
+        # (#1135's review, 2026-11-23); a free model is the catalog's to say, never a typo's
+        die(f"{mid}: prices all 0 would make it free, outside the day cap: there is no price to set at 0")
     try:
         m = models.lookup(mid)
     except RuntimeError as e:

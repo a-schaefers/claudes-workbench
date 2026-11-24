@@ -614,8 +614,9 @@ provider bills) writes models.json `cost` (`[{input, output, cache?: {read?, wri
 kept in `extra.catalog_cost`; `models.own_price(m)` says whether), so the meter and the task's
 catalog.json (`models.catalog_doc`, OPENCODE_MODELS_PATH) price alike: OpenCode's own estimate then
 agrees and `reconcile` books no difference back. `--clear` goes back to the catalog's. Refused for an
-id not in the catalog, a plan, a free model, or one `catalog_doc` can't carry (its OpenCode would
-price from elsewhere). The basis (`meter.basis`): `catalog` (shown `≈`), `yours` (`your prices`, no
+id not in the catalog, a plan, a free model, one `catalog_doc` can't carry (its OpenCode would
+price from elsewhere), or prices all 0 (that is `meter.is_free`: the day cap would stop counting it,
+the review's catch). The basis (`meter.basis`): `catalog` (shown `≈`), `yours` (`your prices`, no
 `≈`) or `provider` (OpenRouter's `usage.cost`, plain); a ledger row at the user's prices says
 `prices: "yours"` (`meter.row_basis`: `source: provider` first; none, `catalog`), any catalog one
 makes a sum an estimate, `$0` gets no `≈` (`meter.money`, `savings.money`). Status `api.prices`,
@@ -3334,7 +3335,7 @@ the section is two lines: `none set up, every role on the GPU` and the catalog's
 model, the GPU part is `no local models: <why_none()>` and the section still prints, exit 0, when a
 role is on API or a key is stored; otherwise it dies as before. `--api TEXT` (`_api_list`) lists the
 catalog ids containing TEXT (any case), sorted, at most `API_LIST_MAX` 30, each with the catalog's own window (`catalog_limit`),
-`$in/$out per 1M in/out, catalog prices` (`your prices` once `wb model price` set them, #1135) from its first untiered price and the free note, then `and N more: a longer
+`$in/$out per 1M in/out, catalog prices` (`your prices` once `wb model price` set them, #1135; no basis for a plan or a 0 entry) from its first untiered price and the free note, then `and N more: a longer
 text narrows it`; nothing matching reads the catalog again once when `models.miss_rereads()` (as
 `_hosted_exact`: a just-connected provider, #1076); it lists only, never sets a role. `--set-default` stays GPU (`router.choose` over
 `discover()`): never an API model as OpenCode's default.
@@ -5145,11 +5146,11 @@ imports from the module's own files pass too). The helpers type `$` as `any`, so
 literals: `HOME`, `WB_HOME`, `WB_BIN`, `CLAUDE_CONFIG_DIR`, `WB_SAVINGS`, `WB_COMPACT_AT`.
 
 **State.** Ten `$.state` atoms survive a module reload; one read under an old shape tag is absent,
-so change the tag when its type changes: `tasks` (`tasks-10`, WbTask[]: name, phase, round, model,
+so change the tag when its type changes: `tasks` (`tasks-11`, WbTask[]: name, phase, round, model,
 label, via, role, provider, routed (#1016), tests, last, createdAt, updatedAt, tokens, recent, repo, cwd, subdir, session, claude_pid,
 claude_start, backlog, parked, allowed, and the Tasks view's (#1048, `viewFacts`): group, cards, tools, tokOut, ctxUsed,
 window, freshAt, autoFixes, autoFixMax, roundFor, reviews, steps, activeS, roundStartedAt, typicalMin, typicalN, lateMin,
-spend), `live` (`live-1`, {task, lines: {s, t}[]}), `chat`
+spend, est: the spend at catalog prices, #1135), `live` (`live-1`, {task, lines: {s, t}[]}), `chat`
 (`chat-4`, {key, delegating, url, web}: workbench mode, also kept by session id in `$.store`
 `modes`, #689), `pane` (`pane-1`, {tab, open, focus, minimized}), `sessions` (`sessions-1`,
 string[]: the process's session ids), `savings` (`savings-1`, string: the pane's saving line), `stats` (`stats-1`, {key,
@@ -5647,7 +5648,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Provider `ollama-<host>`, `local: true`, its tool models added (IPv6 bracketed, #707); exit 1 when it doesn't answer; `--remove` not while `model`/`small_model` is one (#708). |
 | `wb model retire <id>` | `--delete` | Not OpenCode's `model` or `small_model` (#708); keeps `variant_of`, `replaces` (#723); `--delete` drops Ollama's weights; an API id refused (`cli.API_SIZES`, #1013). |
 | `wb model rename <old id> <new id>` | | models.json `renamed_from` (#818); refused while the old id is configured, or for an API id. |
-| `wb model price <exact id>` | `--input X`, `--output Y`, `--cache-read Z`, `--cache-write W`, `--clear` | An API model's own prices per M (models.json `cost`, *Estimates or your prices*, #1135): its figures say `your prices`, no `≈`; `--clear` the catalog's again. Needs `--input` and `--output`; refused for an id not in the catalog, a plan, a free model, one `models.catalog_doc` can't carry; another action's flag refused. |
+| `wb model price <exact id>` | `--input X`, `--output Y`, `--cache-read Z`, `--cache-write W`, `--clear` | An API model's own prices per M (models.json `cost`, *Estimates or your prices*, #1135): its figures say `your prices`, no `≈`; `--clear` the catalog's again. Needs `--input` and `--output`; refused for an id not in the catalog, a plan, a free model, one `models.catalog_doc` can't carry, prices all 0 (free, outside the cap); another action's flag refused. |
 | `wb model sizes <id> [trivial] [significant]` | | The sizes it's routed; another action's flag refused (#602); an API id refused: `sizes are for GPU models; API models run by role`. |
 | `wb route [<role> gpu\|api\|<provider/model>] [<role> <choice>…]` (several roles, one change, #1024) / `wb route all gpu\|api\|both` (the Agents switch, `use`) / `wb route cap <usd>\|off` / `wb route busy wait\|api` (#1023) | `--gpu ID\|auto`, `--api ID`, `--thinking on\|off`, `--day-usd N`, `--order NAME[,NAME]` (an OpenRouter role's backends, `privacy.parse_order`; an OpenRouter model set or switched to without them exits 3, `privacy.order_refusal`, #1021), `--json` (show: the roles, `busy`, `summary`, each API model's `api_status`, `spend_today`, `providers`; with `--dry-run`: `{change, gate, approval}`), `--dry-run` (the change line, nothing written, no approval needed), `--start ARGS` (with `--dry-run`: the dialog line for `wb start ARGS` on an API `--model`, the mod's; exit 3 with `API_NOT_YET` while `cli.API_RUNS` is off) | *Roles*. No role: shows them. A change prints `changed: <line>` (`unchanged: <summary>` for none); exit 3 for an API id not in the catalog, a GPU id, one with no key wb can hold, `api` with none kept, the first API role with no cap, and under Claude Code a gated change the mod's dialog didn't approve (`route-ok.json`). A GPU pin needs no dialog. |
 | `wb scout` | `--done [--notes "…"]` (`--notes` alone refused, #602), `--due` (7 days), `--watch "…"`, `--unwatch N` (1-based) | The weekly facts: `cli.gpu_line`, `cli.ollama_line`, `cli.server_lines` (`models.SERVER_COMMANDS`, `models.SERVER_PORTS`, `NEEDS_KEY`, `models.WSL_NAT`, `models.server_key`), `audio.coverage`, `cli.image_server_lines`; the API section (`cli.scout_api_lines`: roles, API records, spend, a count per provider, #1024). |
@@ -6670,7 +6671,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `pageParts` (left out of the history, as `meta`) and `pageShape`; **`routes.routed_line`** → `transcript.routed_text`
   and `routes.model_line`; **`routes.USES`/`use`** → the mod's `routesValid` and `routesSummary`; a role's **`order`**
   (#1021) → `routes.summary`, `routesSummary` (`, backends …`) and `routesValid` (#1126).
-- **A `$.state` atom's type** → its tag (`tasks-10`, `live-1`, `chat-4`, `sessions-1`, `savings-1`, `pane-1`,
+- **A `$.state` atom's type** → its tag (`tasks-11`, `live-1`, `chat-4`, `sessions-1`, `savings-1`, `pane-1`,
   `stats-1`, `top-1`, `said-3`, `splash-1`).
 - **The Tasks page's layout** → `pageParts`, `pageShape` (#963);
 - **The Tasks view** (#1048): the status keys `round_for`, `typical`, `late_min`, `cards`, `api` and task.json `group` →
