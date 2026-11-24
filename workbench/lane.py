@@ -208,13 +208,16 @@ SEATBELT_GAPS = (
 
 def wrap(writable: list[str] | None, cmd: list[str],
          readable: list[str] | None = None, unix: list[str] | None = None,
-         reads: list[tuple[str, str]] | None = None) -> list[str]:
+         reads: list[tuple[str, str]] | None = None,
+         deny_write: list[str] | None = None) -> list[str]:
     """The command that runs `cmd` inside the lane; `cmd` itself when there is no lane.
-    `readable` is Landlock's read lane, `reads` Seatbelt's: ("deny" | "allow", path) in order."""
+    `readable` is Landlock's read lane, `reads` Seatbelt's: ("deny" | "allow", path) in order;
+    `deny_write` Seatbelt's places refused inside `writable` (Landlock's lane is split instead)."""
     if writable is None:
         return cmd
     return [sys.executable, "-I", os.path.abspath(__file__),
             *(a for p in writable for a in ("--write", p)),
+            *(a for p in deny_write or [] for a in ("--deny-write", p)),
             *(["--reads"] if readable is not None else []),
             *(a for p in readable or [] for a in ("--read", p)),
             *(a for e, p in reads or [] for a in ("--hide" if e == "deny" else "--show", p)),
@@ -222,7 +225,8 @@ def wrap(writable: list[str] | None, cmd: list[str],
 
 
 def profile(writable: list[str], reads: list[tuple[str, str]] | None = None,
-            unix: list[str] | None = None) -> tuple[str, list[str]]:
+            unix: list[str] | None = None,
+            deny_write: list[str] | None = None) -> tuple[str, list[str]]:
     """The Seatbelt profile for a lane, and its parameters as sandbox-exec's `-D` arguments:
     every path is a parameter (`(param "W0")`), so none is quoted into the text. Real paths:
     Seatbelt matches the resolved path, and /tmp is /private/tmp, /var /private/var.
@@ -238,13 +242,17 @@ def profile(writable: list[str], reads: list[tuple[str, str]] | None = None,
         return [f"({effect} {ops} {' '.join(refs)})"] if refs else []
 
     write = [ref("W", p) for p in dict.fromkeys(writable)]
+    # and what is refused inside the lane, after it (the last match wins), made or not: Apple's
+    # Python bytecode in the whole Library/Caches (#1194's second review)
+    denied = [ref("N", p) for p in dict.fromkeys(deny_write or [])]
     text = ["(version 1)", "(allow default)",
             # writes: the lane alone; file-write* takes in chmod, utimes and xattrs, which
             # Landlock leaves alone
             "(deny file-write*)", *lines("allow", "file-write*", write),
+            *lines("deny", "file-write*", denied),
             # a hard link out of the lane would carry a file in, to be read or written there
             # (Landlock's REFER refuses the same)
-            "(deny file-link)", *lines("allow", "file-link", write)]
+            "(deny file-link)", *lines("allow", "file-link", write), *lines("deny", "file-link", denied)]
     # reads: as given (read_rules: ancestors first), each over the last; the contents only
     # (file-read-data: a file's or a listing's), never the metadata, so a stat or realpath
     # through a hidden directory (the worktree, under workbench's state) works as on Linux
@@ -279,11 +287,11 @@ def die_with_parent() -> None:
 
 
 def seatbelt(writable: list[str], reads: list[tuple[str, str]], unix: list[str],
-             cmd: list[str]) -> None:
+             cmd: list[str], deny_write: list[str] | None = None) -> None:
     """Exec `cmd` under sandbox-exec with the lane's profile; never outside it. The profile is
     tried first on /usr/bin/true: a refused one (a macOS that dropped a rule) stops the command
     with lane.py's own message and 126, not sandbox-exec's exit that reads as the agent's."""
-    text, params = profile(writable, reads, unix)
+    text, params = profile(writable, reads, unix, deny_write)
     base = [SANDBOX_EXEC, "-p", text, *params]
     try:
         tried = subprocess.run([*base, "/usr/bin/true"], stdin=subprocess.DEVNULL,
@@ -310,7 +318,7 @@ def main(argv: list[str]) -> None:
         reads = [("deny" if argv[i] == "--hide" else "allow", argv[i + 1])
                  for i in range(sep) if argv[i] in ("--hide", "--show")]
         try:
-            seatbelt(pick("--write"), reads, pick("--unix"), argv[sep + 1:])
+            seatbelt(pick("--write"), reads, pick("--unix"), argv[sep + 1:], pick("--deny-write"))
         except OSError as e:
             print(f"workbench lane: can't run {argv[sep + 1]} ({e.strerror})", file=sys.stderr)
             sys.exit(126)

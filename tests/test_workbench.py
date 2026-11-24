@@ -11601,7 +11601,9 @@ class Lane(Base):
                  ("Library/Thunderbird/Profiles/p.default/logins.json",
                   ".thunderbird/p.default/logins.json"),
                  ("Library/Application Support/Chromium/Default/Login Data",
-                  ".config/chromium/Default/Login Data")]
+                  ".config/chromium/Default/Login Data"),
+                 ("Library/Application Support/openstack/secure.yaml", ".config/openstack/secure.yaml"),
+                 ("Library/Application Support/openstack/clouds.yaml", ".config/openstack/clouds.yaml")]
 
     @home_outside_the_lane
     def test_on_macos_each_tools_login_is_hidden_where_its_linux_twin_is(self):
@@ -11646,27 +11648,62 @@ class Lane(Base):
         self.assertFalse(self.seatbelt_reads(rules, writable, root / "Backup" / "photos.jpg"))
         self.assertTrue(self.seatbelt_reads(rules, writable, root / "Macintosh HD" / "etc" / "hosts"))
 
+    def seatbelt_writes(self, text, params, path):
+        """Whether the Seatbelt profile ``text`` with ``params`` lets `path` be written: its
+        file-write* rules in order, the last match winning."""
+        values = dict(p[2:].split("=", 1) for p in params)
+        real, ok = os.path.realpath(path), False
+        for line in text.splitlines():
+            if line.startswith(("(allow file-write*", "(deny file-write*")):
+                names = re.findall(r'\(param "([^"]+)"\)', line)
+                if not names or any(real == values[n] or real.startswith(values[n].rstrip("/") + "/")
+                                    for n in names):
+                    ok = line.startswith("(allow")
+        return ok
+
     @home_outside_the_lane
-    def test_apples_python_bytecode_cache_is_split_out_of_library_caches_before_python_makes_it(self):
+    def test_with_seatbelt_apples_python_bytecode_is_denied_inside_a_whole_library_caches(self):
         # #1194's review: Library/Caches was writable whole, and the Command Line Tools'
         # /usr/bin/python3 loads its stdlib's .pyc from Library/Caches/com.apple.python: one the
-        # agent planted ran as the user, outside the lane, at the next python3 anywhere
+        # agent planted ran as the user, outside the lane, at the next python3 anywhere. And its
+        # second review: split around that folder, Library/Caches refused every tool's first
+        # cache folder (golangci-lint's, pipenv's, black's, Homebrew's) but a few made for it.
+        # Seatbelt denies the one place by path instead, made or not
         home = self.fake_home()
         caches = home / "Library" / "Caches"
         (caches / "com.example.app").mkdir(parents=True)
-        task = self.bare_task("t-1194-pyc", self.repo)
-        w = context.writable(task)
         bytecode = caches / "com.apple.python"
-        self.assertTrue(bytecode.is_dir())                             # made first, so split out
-        self.assertFalse([p for p in w if os.path.realpath(p) == os.path.realpath(bytecode)
-                          or context._under(os.path.realpath(bytecode), os.path.realpath(p))
-                          or context._under(os.path.realpath(p), os.path.realpath(bytecode))])
-        for n in ("com.example.app", "go-build", "pip", "Yarn", "node-gyp", "ms-playwright"):
-            self.assertIn(str(caches / n), w)                          # the rest, and the tools' first
+        task = self.bare_task("t-1194-pyc", self.repo)
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            w = context.writable(task)
+            denied = context.write_denied(w)
+            argv = context.lane_wrap(task)(["true"])
+            text, params = lane.profile(w, context.read_rules(task), [], denied)
+            only = context.read_only(task, w)
+            rules = context.read_only_rules(task)
+        self.assertIn(os.path.realpath(caches), map(os.path.realpath, w))   # whole
+        self.assertFalse(bytecode.exists())                                # nothing made for it
+        self.assertEqual(sorted(p.name for p in caches.iterdir()), ["com.example.app"])
+        self.assertEqual(denied, [os.path.realpath(bytecode)])
+        self.assertEqual(argv[argv.index("--deny-write") + 1], os.path.realpath(bytecode))
+        for f in (bytecode, bytecode / "lib" / "os.cpython-39.pyc"):
+            self.assertFalse(self.seatbelt_writes(text, params, f), f)
+        for n in ("com.example.app", "golangci-lint", "pipenv", "prisma-nodejs", "black",
+                  "Homebrew", "pip", "go-build"):
+            self.assertTrue(self.seatbelt_writes(text, params, caches / n / "x"), n)
         self.assertIsNotNone(context.kept_out(str(bytecode / "Library")))   # no grant reaches it
-        self.assertIn(os.path.realpath(bytecode), context.read_only(task, w))  # read, as the toolchains
-        text, params = lane.profile(w, context.read_rules(task), [])
-        self.assertNotIn(f"={os.path.realpath(bytecode)}", " ".join(params))
+        self.assertIn(os.path.realpath(bytecode), only)                    # read, as the toolchains
+        self.assertIn({"action": "edit", "resource": f"{os.path.realpath(bytecode)}/*",
+                       "effect": "deny"}, rules)                           # never the file tools'
+        # Landlock can only allow: there the lane is split around the place once it is made
+        bytecode.mkdir()
+        with mock.patch.object(lane, "kind", lambda: "landlock"):
+            w = context.writable(task)
+            self.assertEqual(context.write_denied(w), [])
+        real = os.path.realpath(bytecode)
+        self.assertFalse([p for p in w if os.path.realpath(p) == real
+                          or context._under(real, os.path.realpath(p))])
+        self.assertIn(str(caches / "com.example.app"), w)
 
     def test_a_read_rule_isnt_drawn_through_a_link_but_a_grant_by_one_is(self):
         # a link's way to a place says nothing of the place (Landlock rules sit on the files):
@@ -11699,11 +11736,14 @@ class Lane(Base):
         work = Path(self.tmp.name) / "lane"
         work.mkdir()
         reads = [("deny", "/Users"), ("allow", str(work))]
-        argv = lane.wrap([str(work)], ["true", "x"], unix=[str(work)], reads=reads)
+        no = str(work / "no")
+        argv = lane.wrap([str(work)], ["true", "x"], unix=[str(work)], reads=reads, deny_write=[no])
         self.assertEqual(argv[:3], [sys.executable, "-I", os.path.abspath(lane.__file__)])
         self.assertEqual(argv[argv.index("--hide") + 1], "/Users")
         self.assertNotIn("--reads", argv)
-        text, params = lane.profile([str(work)], reads, [str(work)])
+        text, params = lane.profile([str(work)], reads, [str(work)], [no])
+        self.assertFalse(self.seatbelt_writes(text, params, work / "no" / "x"))   # #1194
+        self.assertTrue(self.seatbelt_writes(text, params, work / "x"))
         tried, execd, err = [], [], io.StringIO()
 
         def run(code):
@@ -11798,6 +11838,7 @@ class Lane(Base):
         (home / ".ssh" / "id_ed25519").write_text("secret")
         (home / ".config" / "tool").mkdir(parents=True)
         (home / ".config" / "tool" / "conf").write_text("conf")
+        (home / "Library" / "Caches").mkdir(parents=True)
         task = self.bare_task("t-1194-mac", self.repo)
         task.worktree.mkdir()
         d = Path(os.path.realpath(tempfile.mkdtemp(prefix="wb-1194-")))
@@ -11817,6 +11858,9 @@ class Lane(Base):
             home, wt, sock = sys.argv[1:4]
             say("write-outside", lambda: open(os.path.join(home, "planted"), "w").close())
             say("write-worktree", lambda: open(os.path.join(wt, "made"), "w").close())
+            caches = os.path.join(home, "Library", "Caches")
+            say("write-cache", lambda: os.makedirs(os.path.join(caches, "golangci-lint", "x")))
+            say("write-pyc", lambda: os.makedirs(os.path.join(caches, "com.apple.python", "x")))
             say("read-secret", lambda: open(os.path.join(home, ".ssh", "id_ed25519")).read())
             say("read-dotfile", lambda: open(os.path.join(home, ".config", "tool", "conf")).read())
             say("socket-outside", lambda: socket.socket(socket.AF_UNIX).connect(sock))
@@ -11829,7 +11873,8 @@ class Lane(Base):
                              cwd=task.worktree, capture_output=True, text=True, timeout=60)
         said = dict(ln.split(" ", 1) for ln in out.stdout.splitlines())
         no = f"refused {errno.EPERM}"   # Seatbelt's, which REFUSAL reads: not sudo's own failure
-        self.assertEqual(said, {"write-outside": no, "write-worktree": "ok", "read-secret": no,
+        self.assertEqual(said, {"write-outside": no, "write-worktree": "ok", "write-cache": "ok",
+                                "write-pyc": no, "read-secret": no,
                                 "read-dotfile": "ok", "socket-outside": no, "signal-outside": no,
                                 "sudo": no}, out.stderr)
         self.assertFalse((home / "planted").exists())

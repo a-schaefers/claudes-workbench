@@ -1683,7 +1683,8 @@ deliberately hostile process.
   `.rustup/toolchains`, `.nimble/bin`, macOS's `Library/Caches/com.apple.python`, where Apple's
   `/usr/bin/python3` keeps its stdlib's bytecode, `sys.pycache_prefix`, and loads a planted `.pyc`
   at every later python3, #1194's review; and `VAR_NOT_WRITABLE` under the variables), made or not
-  (`not_writable_paths`); the user's active Python environments (`context.python_envs`:
+  (`not_writable_paths`; with Seatbelt denied by path inside a whole home instead of split out,
+  `context.write_denied`, so nothing is made first for it); the user's active Python environments (`context.python_envs`:
   `VIRTUAL_ENV`, `CONDA_PREFIX`, each PATH `bin` beside `pyvenv.cfg` or `conda-meta`, #490). So
   `cargo install`, a new rustup toolchain, a pip install into the user's env are Claude's: no grant
   reaches them (`context.kept_out`, #912).
@@ -1694,9 +1695,7 @@ deliberately hostile process.
   env (#825), `MADE_FIRST` (so the split holds before the tool makes them), `CARGO_MADE` (a fresh
   rustup install refused every build with a dependency, the 0.90 review), `NIMBLE_MADE` with
   `MADE_TEXT` (nimble parses its data file, #911; its first `nimble refresh` is Claude's),
-  `SPLIT_MADE` (`~/.m2`; macOS's `Library/Caches`, split around `com.apple.python` on every Mac:
-  Go's, pip's, Yarn's, node-gyp's, Playwright's, poetry's, deno's, pnpm's, CocoaPods', SwiftPM's,
-  ccache's, Cypress' and Electron's caches). The agent's poetry and pipenv make their venv in the worktree.
+  `SPLIT_MADE` (`~/.m2`). The agent's poetry and pipenv make their venv in the worktree.
   A home kept whole is a documented trade, like `/tmp`: it can hold a program the user's tools run
   later outside the lane (`.dotnet`, `.ghcup`, `.julia`, `~/.cache`'s pre-commit hooks, cargo's
   registry sources, `.tflint.d`'s plugins); splitting would refuse a build's first new entry.
@@ -1754,8 +1753,9 @@ deliberately hostile process.
   browsers' profiles (Chromium's too) and Claude's desktop app's (#1194), and the macOS homes of
   the tools above that keep a login there (#1194's review): sops' age keys, Vercel's, wrangler's,
   Bitwarden CLI's, helm's registry logins, Netlify's, pub's credentials, k6's (`loadimpact/k6`,
-  on Linux too), doctl's and Thunderbird's profiles, under `Library/Application Support` or
-  `Library/Preferences`.
+  on Linux too), doctl's, OpenStack's `clouds.yaml` and `secure.yaml` (openstacksdk reads
+  `Library/Application Support/openstack` before `~/.config/openstack`) and Thunderbird's
+  profiles, under `Library/Application Support` or `Library/Preferences`.
   Of the home directory's own entries only dotfiles and `HOME_READABLE` (`bin`, `go`, `R`, `perl5`,
   macOS's `Library`) are readable, and of `ONLY_KEPT` (`/dev`, `/mnt`, `/media`, `/run/media`,
   `/run/user`, `/home`, macOS's `/Users` and `/Volumes`, its disks and shares, whose `Macintosh
@@ -1879,14 +1879,16 @@ deliberately hostile process.
   `seatbelt` (darwin with `/usr/bin/sandbox-exec` executable) or None; `lane.held()` is whether
   either holds, the question doctor, setup, `lane_refused`, `python_installs` and the API note ask.
   The runner and the test runner reach it through `context.lane_wrap(task)`, which hands lane.py
-  Landlock's lists or Seatbelt's: `--write P…`, `--hide P`/`--show P` in order (`context.read_rules`)
-  and `--unix P…` (`context.socket_places`). lane.py's `main` then builds `lane.profile(writable,
-  reads, unix)` fresh each time, no file and no setup step, tries it on `/usr/bin/true`, and execs
+  Landlock's lists or Seatbelt's: `--write P…`, `--deny-write P…` (`context.write_denied`: the
+  `NOT_WRITABLE` places inside the lane, made or not; Landlock's lane is split around them
+  instead), `--hide P`/`--show P` in order (`context.read_rules`) and `--unix P…`
+  (`context.socket_places`). lane.py's `main` then builds `lane.profile(writable, reads, unix,
+  deny_write)` fresh each time, no file and no setup step, tries it on `/usr/bin/true`, and execs
   `sandbox-exec -p <profile> -DW0=<path>… -- <cmd>`; every path is a `-D` parameter (`(subpath
   (param "W0"))`, its real path: `/tmp` is `/private/tmp`), so none is quoted into the text. The
   profile: `(allow default)`; `(deny file-write*)` then the lane allowed (chmod, utimes and xattrs
-  too, which Landlock leaves free); `(deny file-link)` but within the lane (a hard link would carry a
-  file in); reads as the read walk's complement, `(deny file-read-data …)`/`(allow …)` ancestors
+  too, which Landlock leaves free), then `deny_write` denied after it (`-DN…`); `(deny file-link)`
+  but within the lane (a hard link would carry a file in), `deny_write` again denied; reads as the read walk's complement, `(deny file-read-data …)`/`(allow …)` ancestors
   first, the last match winning (contents and listings only: a stat or realpath through the hidden
   state directory to the worktree works), then the lane and `lane.SEATBELT_DEVICES` (`/dev/fd`,
   dyld's `/dev/dtracehelper`, the null and random devices, `/dev/tty`); `(deny network-outbound
@@ -1902,8 +1904,11 @@ deliberately hostile process.
   can't tell one the agent made from the user's, so `socket_places` adds only the task's own
   places (the worktree, `ask/`, its OpenCode home, its runtime directory), never a temp directory
   (tmux's, the SSH agent's); one refused there is named with its grant like ABI 9's. The write
-  lane gains `Library/Caches` (`TOOL_HOMES`: macOS's `~/.cache`; split around Apple's Python
-  bytecode, `NOT_WRITABLE`, its tools' caches made first, `SPLIT_MADE`) and the per-user cache beside the
+  lane gains `Library/Caches` (`TOOL_HOMES`: macOS's `~/.cache`), whole, so any tool's first cache
+  folder is made (golangci-lint's, pipenv's, Homebrew's), and Apple's Python bytecode in it,
+  `com.apple.python` (`NOT_WRITABLE`), denied by path, made or not (`--deny-write`, #1194's second
+  review: split around it, every tool's first folder there but a listed few was refused; the
+  file tools' `edit` is denied there too, `read_only`), and the per-user cache beside the
   temp directory (`context.darwin_cache`, `/var/folders/…/C`: clang's module cache, xcrun's).
   Fails closed: a profile sandbox-exec refuses prints `workbench lane: macOS refused the lane
   (<stderr>); not running <cmd>` and exits 126; a command not on PATH is `can't run <cmd>`, 127.
@@ -6996,7 +7001,8 @@ doc needs its own `!/` line).
 - **The lane** (`context.writable`, `readable`, `SECRETS`, `lane.py`) → the Lane and RealOpenCode tests on Landlock, Seatbelt's
   on the nightly macOS job; `readable`'s walk → `read_rules` with it (the Lane tests compare the two); what Seatbelt can't hold → `SEATBELT_GAPS`; the
   protocol's lane line, the handbook. What it leaves writable that runs later outside it (`TOOL_HOMES`, `NOT_WRITABLE`), what WSL's interop
-  runs outside it (`windows_drives`, `agent_path`, `interop_gap`) → the lane's *Writes* and *Reads*, `wb doctor`. A secret in a `TOOL_HOMES` entry → `SPLIT_MADE`; one a
+  runs outside it (`windows_drives`, `agent_path`, `interop_gap`) → the lane's *Writes* and *Reads*, `wb doctor`. A `NOT_WRITABLE` place → Landlock's split
+  (`MADE_FIRST` where the tool makes it later) and Seatbelt's `write_denied`, read by `read_only` too. A secret in a `TOOL_HOMES` entry → `SPLIT_MADE`; one a
   tool opens at every start (helm, k6) → its path in `agent_env`.
 - **`wb update`'s flags or output** (`--check --if-due`; `update available…`, `updated …`) → register.tsx's `checkUpdate`
   (toasts only `update available` and `LOCAL_CHANGES`, the opening of `patches.CHECK_LINE`) and `UPDATE` (reloads only

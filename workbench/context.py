@@ -1302,7 +1302,7 @@ TOOL_HOMES = (".cache", ".cargo", ".rustup", "go/pkg", ".npm", ".bun/install/cac
               ".tflint.d", ".bicep",
               # macOS's ~/.cache (#1194): Go's build cache, pip's, Yarn's, node-gyp's and
               # Playwright's browsers are there, and Seatbelt would refuse every build's write;
-              # split around Apple's Python bytecode (NOT_WRITABLE, SPLIT_MADE)
+              # whole, Apple's Python bytecode in it denied by path (NOT_WRITABLE, write_denied)
               "Library/Caches")
 # where the user moved them: a toolchain follows its variable, not the default path; GOPATH and
 # BUN_INSTALL name a whole home (GOPATH may hold every project), so only their caches. The second
@@ -1334,7 +1334,8 @@ NOT_WRITABLE = (".cargo/bin", ".cargo/env", ".dotnet/tools", ".cabal/bin", ".ghc
                 # Tools') keeps its bytecode here (sys.pycache_prefix, its stdlib on a read-only
                 # volume) and loads a .pyc whose recorded mtime and size match the source's, so
                 # one planted in the writable Library/Caches ran as the user, outside the lane,
-                # at the next node-gyp, Xcode build script or shell's python3
+                # at the next node-gyp, Xcode build script or shell's python3. Seatbelt denies
+                # its writes inside the whole Library/Caches (write_denied), made or not
                 "Library/Caches/com.apple.python")
 # and the same places in the homes TOOL_HOME_VARS moved: nimble and cabal install programs into
 # their bin/ (#911)
@@ -1343,7 +1344,7 @@ VAR_NOT_WRITABLE = {"CARGO_HOME": ("bin", "env"), "RUSTUP_HOME": ("toolchains",)
 # a home holding one is made with it first, so the split keeps it out before the tool makes it
 # (else the agent could make it and plant a program there)
 MADE_FIRST = {".rustup": "toolchains", ".nimble": "bin", "RUSTUP_HOME": "toolchains",
-              "NIMBLE_DIR": "bin", "Library/Caches": "com.apple.python"}
+              "NIMBLE_DIR": "bin"}
 # and what cargo makes at the top of its split home, made first so the split grants it: a split
 # home refuses a new entry (the 0.90 review: a fresh rustup's ~/.cargo, only bin/ and env, failed
 # every build with a dependency, and a git dependency failed wherever git/ didn't exist yet)
@@ -1383,14 +1384,7 @@ SPLIT_MADE = {".m2": ("repository/", "wrapper/"),
               # under ".cache" a GPU task made ~/.cache/huggingface/* on machines that never used
               # it (#1092's review, 2026-11-23). Another tool's first new entry is refused, the
               # report naming its grant
-              ".cache": tuple(f"{n}/" for n in CACHE_MADE), ".cache/huggingface": HF_MADE,
-              # and macOS's Library/Caches, split around Python's bytecode on every Mac
-              # (NOT_WRITABLE, #1194's review): the caches its common tools make there (Go's,
-              # pip's, Yarn's, node-gyp's, Playwright's browsers, poetry's, deno's, pnpm's,
-              # CocoaPods', SwiftPM's, ccache's, Cypress', Electron's)
-              "Library/Caches": ("go-build/", "pip/", "Yarn/", "node-gyp/", "ms-playwright/",
-                                 "pypoetry/", "deno/", "pnpm/", "CocoaPods/", "org.swift.swiftpm/",
-                                 "ccache/", "Cypress/", "electron/")}
+              ".cache": tuple(f"{n}/" for n in CACHE_MADE), ".cache/huggingface": HF_MADE}
 # and the same homes where the user moved them, (variable, below it, SPLIT_MADE's key):
 # API_HIDDEN_VARS hides the file inside those too
 SPLIT_MADE_VARS = (("GRADLE_USER_HOME", "", ".gradle"), ("HEX_HOME", "", ".hex"),
@@ -1747,10 +1741,9 @@ def writable(task: store.Task) -> list[str] | None:
         if os.path.isdir(c):  # split around bin/ whenever it exists (MADE_FIRST, below)
             _make_first(c, NIMBLE_MADE)
     hidden = _hidden() | {h for h in api_hidden(task) if os.path.lexists(h)}  # #1021
-    splits = hidden | not_writable(made_only=False)  # Library/Caches' com.apple.python (#1194)
-    for d, names in SPLIT_MADE.items():  # only a home split (a secret, a NOT_WRITABLE place): else whole
+    for d, names in SPLIT_MADE.items():  # only a home a secret splits: else it is granted whole
         c = os.path.realpath(home / d)
-        if os.path.isdir(c) and any(_under(h, c) for h in splits):
+        if os.path.isdir(c) and any(_under(h, c) for h in hidden):
             _make_first(c, names)
     for v, sub, d in SPLIT_MADE_VARS:  # GRADLE_USER_HOME's, HEX_HOME's (#1021's review)
         c = os.environ.get(v) or ""
@@ -1767,7 +1760,8 @@ def writable(task: store.Task) -> list[str] | None:
     # the user's active Python environments too: a venv in a tool home (poetry's, pipenv's,
     # WORKON_HOME) was the agent's to install into (#490)
     envs = set(python_envs())
-    out_of = hidden | envs | not_writable()
+    # Seatbelt denies NOT_WRITABLE's places by path inside the lane (write_denied): no split
+    out_of = hidden | envs | (set() if lane.kind() == "seatbelt" else not_writable())
     cache = os.path.realpath(os.environ.get("XDG_CACHE_HOME") or home / ".cache")
     if any(_under(e, cache) for e in envs):  # (#825)
         for n in CACHE_MADE:
@@ -1791,6 +1785,21 @@ def writable(task: store.Task) -> list[str] | None:
         else:  # split around the repo like a secret: a grant of ~/work beside the repo ~/work/api
             kept += _split(str(p), out_of | guard)  # was dropped whole (the 0.90 review)
     return [p for p in _both(kept) if os.path.exists(p) and os.path.realpath(p) not in whole]
+
+
+def write_denied(places: list[str]) -> list[str]:
+    """With Seatbelt, NOT_WRITABLE's places (made or not, real paths) inside the lane's
+    writable ``places``: its profile denies their writes after the lane's allows, the last match
+    winning, and a path rule holds before the tool makes the place, so nothing is made first.
+    Landlock can only allow, so there writable() splits around them instead, and this is [].
+    #1194's second review (2026-11-24): split around com.apple.python, Library/Caches refused
+    every tool's first cache folder (golangci-lint's, pipenv's, black's, Homebrew's) but the
+    few made for it, and woke Claude for a grant it never needed."""
+    if lane.kind() != "seatbelt":
+        return []
+    real = {os.path.realpath(p) for p in places}
+    return sorted(p for p in not_writable(made_only=False)
+                  if any(p == w or _under(p, w) for w in real))
 
 
 def darwin_cache() -> list[str]:
@@ -2186,14 +2195,16 @@ SECRETS = (".ssh", ".gnupg", ".password-store", ".netrc", ".git-credentials", ".
            # and the macOS homes of the tools above, where each keeps its login there (#1194's
            # review, 2026-11-24): Go's os.UserConfigDir (sops' age keys, doctl, k6, which keeps
            # its token under loadimpact/k6 on Linux too), env-paths' and the CLIs' own (Vercel,
-           # wrangler, Netlify, helm, Bitwarden's, pub's), Thunderbird's and Chromium's profiles
+           # wrangler, Netlify, helm, Bitwarden's, pub's), Thunderbird's and Chromium's profiles,
+           # and OpenStack's clouds.yaml and secure.yaml (openstacksdk's loader reads platformdirs'
+           # user_config_dir before ~/.config/openstack)
            "Library/Application Support/sops", "Library/Application Support/com.vercel.cli",
            "Library/Preferences/.wrangler", "Library/Application Support/Bitwarden CLI",
            "Library/Preferences/helm/registry", "Library/Preferences/netlify",
            "Library/Application Support/dart/pub-credentials.json",
            "Library/Application Support/loadimpact/k6", ".config/loadimpact/k6",
            "Library/Application Support/doctl", "Library/Thunderbird",
-           "Library/Application Support/Chromium")
+           "Library/Application Support/Chromium", "Library/Application Support/openstack")
 # The sockets inside a secret that a grant may still reach, to connect only (unix_paths): Docker
 # Desktop's, under ~/.docker beside the registry logins in config.json, so `wb allow --path` was
 # refused and only turning the lane off let a Testcontainers suite run (#441, the audit of 1.8)
@@ -2986,8 +2997,8 @@ def lane_wrap(task: store.Task):
     if places is None:
         return lambda cmd: lane.wrap(None, cmd)
     if lane.kind() == "seatbelt":
-        reads, sockets = read_rules(task), socket_places(task)
-        return lambda cmd: lane.wrap(places, cmd, unix=sockets, reads=reads)
+        reads, sockets, denied = read_rules(task), socket_places(task), write_denied(places)
+        return lambda cmd: lane.wrap(places, cmd, unix=sockets, reads=reads, deny_write=denied)
     readable_, sockets = readable(task), unix_paths(task)
     return lambda cmd: lane.wrap(places, cmd, readable_, sockets)
 
@@ -2999,7 +3010,7 @@ def read_only(task: store.Task, lane: list[str]) -> list[str]:
     `read` on pandas' frame.py got "Permission denied: external_directory", counting toward the
     six-errors guard, and the only remedy, `wb allow --path`, made the install writable (#521,
     the audit of 1.90). Also the SDKs (sdk_roots). Never one inside a lane entry, whose own
-    rules say what is done there."""
+    rules say what is done there, but Seatbelt's write_denied places (#1194)."""
     hidden = secret_paths() | private_paths()
     split = not_writable_paths()
     places = tool_roots(hidden) | sdk_roots(hidden) | {
@@ -3007,9 +3018,10 @@ def read_only(task: store.Task, lane: list[str]) -> list[str]:
         if os.path.isdir(p) and not any(_under(os.path.realpath(p), h) for h in hidden)}
     real_lane = {os.path.realpath(p) for p in lane}
     # one holding a lane entry stays (a Flutter SDK, its bin/cache in the lane: read_only_rules
-    # lets the entry be edited again); one in a lane entry is the lane's
-    return sorted(p for p in places if p not in real_lane and not any(
-        p == q or _under(p, q) for q in real_lane))
+    # lets the entry be edited again); one in a lane entry is the lane's, but one Seatbelt
+    # denies there (write_denied: com.apple.python in the whole Library/Caches)
+    return sorted({p for p in places if p not in real_lane and not any(
+        p == q or _under(p, q) for q in real_lane)} | set(write_denied(lane)))
 
 
 def read_only_rules(task: store.Task) -> list[dict]:
