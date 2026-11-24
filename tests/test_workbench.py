@@ -31278,6 +31278,32 @@ class Privacy(_KeyholeTest):
 
     @unittest.skipUnless(lane.abi(), "needs Landlock")
     @home_outside_the_lane
+    def test_a_cache_split_by_something_else_makes_no_hugging_face_home(self):
+        # #1092's review (2026-11-23): HISTFILE in ~/.cache splits it on the GPU too, and that
+        # made ~/.cache/huggingface/{hub,xet,...} on machines that never used Hugging Face;
+        # the common tools' caches are still made, so their first run isn't refused
+        home = Lane.fake_home(self)
+        for v in ("HF_HOME", "HF_TOKEN_PATH", "HF_STORED_TOKENS_PATH"):
+            os.environ.pop(v, None)
+        (home / ".cache" / "zsh").mkdir(parents=True)
+        (home / ".cache" / "zsh" / "history").write_text("ls\n")
+        os.environ["HISTFILE"] = str(home / ".cache" / "zsh" / "history")
+        for via in ("gpu", "api"):
+            lane_dirs = context.writable(self.bare(f"t-hist-{via}", via))
+            self.assertNotIn(str(home / ".cache"), lane_dirs, via)    # split around the history
+            self.assertFalse((home / ".cache" / "huggingface").exists(), via)
+            self.assertTrue((home / ".cache" / "uv").is_dir(), via)
+        # and where XDG_CACHE_HOME moves Hugging Face's home, split around its token, its caches
+        cache = home / "xdg-cache"
+        (cache / "huggingface").mkdir(parents=True)
+        (cache / "huggingface" / "token").write_text("hf_FAKEFAKEFAKE")
+        os.environ["XDG_CACHE_HOME"] = str(cache)
+        api = context.writable(self.bare("t-hf-xdg", "api"))
+        self.assertNotIn(str(cache / "huggingface"), api)
+        self.assertIn(str(cache / "huggingface" / "hub"), api)
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
     def test_an_api_lane_reads_the_repos_git_dir_but_not_its_checkouts_ignored_files(self):
         # #1091 (2026-11-23): `cat <checkout>/.env` in an API lane sent the live key it holds to
         # the provider, though wb start refuses to copy it unless it is named

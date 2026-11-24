@@ -1512,9 +1512,11 @@ deliberately hostile process.
   what each makes at its top made first (`SPLIT_MADE`: Gradle's `caches/`, `daemon/`, `native/`,
   `wrapper/`, `jdks/`, `notifications/`, `.tmp/`, `build-scan-data/`; Hex's `packages/`; NuGet's
   `packages/`, since dotnet writes `NuGet.Config` on first use; `~/.cache` around Hugging Face's
-  token: `CACHE_MADE`'s and `HF_MADE`'s `hub/`, `xet/`, `assets/`, `datasets/`, `modules/`, another
-  tool's first new entry there refused and named with its grant, #1092), and the same where
-  `GRADLE_USER_HOME`, `HEX_HOME`, `XDG_CACHE_HOME` and `HF_HOME` move them (`SPLIT_MADE_VARS`); with no credential there the
+  token, or anything hidden there, `HISTFILE` on the GPU too: `CACHE_MADE`'s; Hugging Face's own
+  home, only when split around its token: `HF_MADE`'s `hub/`, `xet/`, `assets/`, `datasets/`,
+  `modules/`; another tool's first new entry there refused and named with its grant, #1092), and
+  the same where `GRADLE_USER_HOME`, `HEX_HOME`, `XDG_CACHE_HOME` (and its `huggingface/`) and
+  `HF_HOME` move them (`SPLIT_MADE_VARS`); with no credential there the
   home is granted whole, as on the GPU. The agent's environment
   already drops the matching variables (`SECRET_ENV`).
 - *The kernel's side* (`lane.py`, Landlock, no root): the runner starts OpenCode as `python -I

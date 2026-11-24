@@ -1352,14 +1352,18 @@ SPLIT_MADE = {".m2": ("repository/", "wrapper/"),
               ".gradle": ("caches/", "daemon/", "native/", "wrapper/", "jdks/", "notifications/",
                           ".tmp/", "build-scan-data/"),
               ".hex": ("packages/",), ".nuget": ("packages/",),
-              # and ~/.cache, split around Hugging Face's token (#1092): its common tools' and
-              # Hugging Face's caches; another tool's first new entry there is refused, the
+              # and ~/.cache, split around Hugging Face's token (#1092) or anything hidden there
+              # (HISTFILE=~/.cache/zsh/history, on the GPU too): its common tools' caches, and in
+              # Hugging Face's home, split only around its own token, its caches. Keyed apart:
+              # under ".cache" a GPU task made ~/.cache/huggingface/* on machines that never used
+              # it (#1092's review, 2026-11-23). Another tool's first new entry is refused, the
               # report naming its grant
-              ".cache": (*(f"{n}/" for n in CACHE_MADE), *(f"huggingface/{n}" for n in HF_MADE)),
-              ".cache/huggingface": HF_MADE}
-# and the same homes where the user moved them (API_HIDDEN_VARS hides the file inside those too)
-SPLIT_MADE_VARS = {"GRADLE_USER_HOME": ".gradle", "HEX_HOME": ".hex", "XDG_CACHE_HOME": ".cache",
-                   "HF_HOME": ".cache/huggingface"}
+              ".cache": tuple(f"{n}/" for n in CACHE_MADE), ".cache/huggingface": HF_MADE}
+# and the same homes where the user moved them, (variable, below it, SPLIT_MADE's key):
+# API_HIDDEN_VARS hides the file inside those too
+SPLIT_MADE_VARS = (("GRADLE_USER_HOME", "", ".gradle"), ("HEX_HOME", "", ".hex"),
+                   ("XDG_CACHE_HOME", "", ".cache"), ("HF_HOME", "", ".cache/huggingface"),
+                   ("XDG_CACHE_HOME", "huggingface", ".cache/huggingface"))
 # The device nodes builds use, not /dev: the user's terminals, input devices (/dev/uinput) and
 # security keys were open to the agent (the 2026-11-16 audit). /dev/shm stays, a trade-off:
 # multiprocessing's semaphores, Chromium and many test runners need it, and Landlock can't tell
@@ -1715,8 +1719,9 @@ def writable(task: store.Task) -> list[str] | None:
         c = os.path.realpath(home / d)
         if os.path.isdir(c) and any(_under(h, c) for h in hidden):
             _make_first(c, names)
-    for v, d in SPLIT_MADE_VARS.items():  # GRADLE_USER_HOME's, HEX_HOME's (#1021's review)
-        c = os.path.realpath(os.environ[v]) if os.path.isabs(os.environ.get(v) or "") else ""
+    for v, sub, d in SPLIT_MADE_VARS:  # GRADLE_USER_HOME's, HEX_HOME's (#1021's review)
+        c = os.environ.get(v) or ""
+        c = os.path.realpath(os.path.join(c, sub)) if os.path.isabs(c) else ""
         if c and os.path.isdir(c) and any(_under(h, c) for h in hidden):
             _make_first(c, SPLIT_MADE[d])
     for k, n in MADE_FIRST.items():  # ~/.rustup's toolchains/, ~/.nimble's bin/ (#911)
