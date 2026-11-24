@@ -564,6 +564,14 @@ const PROVIDER_HEADLINE = 'was stopped by its API provider'
 const PROVIDER_NEXT = (n: string) => 'Tell the user it is the provider\'s stop and its remedy, as the ' +
   `notice says; once they say it is fixed (or the rate limit has passed), \`wb feedback ${n} --text ` +
   '"carry on"`. Never discard it for this, nor change its model or role yourself.'
+// A stop because the task's repo was marked local-only after it started (cause `local_only`:
+// runner._local_only_stop, #1215) isn't the agent's either, yet it woke as "was stopped: it got
+// stuck" ending "Steer it with wb feedback …", which wb refuses (exit 3) while the repo stays
+// local-only: the task's API model is fixed per task (the bar loop, #1232, 2026-11-24)
+const LOCAL_ONLY_HEADLINE = 'was stopped: its repo became local-only'
+const LOCAL_ONLY_NEXT = (n: string) => 'Tell the user its repo is local-only now, so its API model can\'t ' +
+  `go on (only they lift that, never you); then \`wb takeover ${n}\` to finish it yourself or \`wb discard ${n}\`, ` +
+  'as they choose. `wb feedback` and `wb resume` are refused while the repo stays local-only.'
 
 // A question delivered into a running turn (#542): the engine frames it as another session's
 // message, so one line says whose it is and that it can't wait for the turn to end.
@@ -4025,7 +4033,8 @@ async function deliver($: any, now: number) {
           : status.phase === (row.kind === 'question' ? 'asking' : row.kind)
       const batch = batchOf(row)
       const headline = batch ? (batch.length > 1 ? `and ${batch.length - 1} more were interrupted`
-        : 'was interrupted') : row.cause === 'provider' ? PROVIDER_HEADLINE : HEADLINE[row.kind] ?? row.kind
+        : 'was interrupted') : row.cause === 'provider' ? PROVIDER_HEADLINE
+        : row.cause === 'local_only' ? LOCAL_ONLY_HEADLINE : HEADLINE[row.kind] ?? row.kind
       const key = `${name}:${row.ts}`
       if (current && !mem.toasted.has(key)) {
         mem.toasted.add(key)
@@ -4035,6 +4044,7 @@ async function deliver($: any, now: number) {
       // a batch's wake ends with its resume, not the failure's next step (#544)
       const next = batch ? BATCH_NEXT(batch) : row.cause === 'spend' ? (row.guard === 'agents' ? AGENTS_NEXT(name) : SPEND_NEXT(name, (await readRoutes($)).cap !== null))
         : row.cause === 'provider' ? PROVIDER_NEXT(name)
+        : row.cause === 'local_only' ? LOCAL_ONLY_NEXT(name)
         : (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined)
       const who = batch && batch.length > 1 ? `Tasks ${batch.map(n => `\`${n}\``).join(', ')} were interrupted`
         : `Task \`${name}\` ${headline}`

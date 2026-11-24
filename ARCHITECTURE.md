@@ -829,7 +829,11 @@ switch's stop, `AGENTS_NEXT`: Agents back to Both or API, then `wb resume`, or t
 feedback line: feedback would run a round the cap stops again at once. A `cause` `provider` notice (a quota, key, rate-limit
 or outage stop) wakes as `was stopped by its API provider` (`PROVIDER_HEADLINE`, the toast's too) and ends with
 `PROVIDER_NEXT`: pass the notice's remedy on, `wb feedback <task> --text "carry on"` once the user says it is fixed,
-never discard it; it once ended with the stuck wake's "Steer it … or wb discard" (#1124).
+never discard it; it once ended with the stuck wake's "Steer it … or wb discard" (#1124). A `cause` `local_only`
+notice (`runner._local_only_stop`, #1215) wakes as `was stopped: its repo became local-only` (`LOCAL_ONLY_HEADLINE`,
+the toast's too) and ends with `LOCAL_ONLY_NEXT`: tell the user, then `wb takeover` or `wb discard` as they choose,
+since wb feedback and resume are refused while the repo stays local-only and only the user lifts it; it once ended with
+the stuck wake's feedback line, which exit 3 refused (#1232).
 
 **The check-in at half** (`CHECKIN_SHARE` 0.5): a priced row that leaves today at or past half the
 cap, with no `checkin` row today, appends one (under `spend-api.jsonl.checkin.lock`, so tasks in
@@ -4248,7 +4252,7 @@ goes on with the rest, as for a worktree problem. The runner checks the same (`r
 a slot, or in checkout, setup or the base check, sent round 1 to the provider anyway and billed it, and so did the
 rounds the runner starts itself): `stuck` before anything more is sent, status `infra` `local_only` (`runner.LOCAL_ONLY`),
 a `stopped` event `by` it, a `stuck` notice with `cause` `local_only`, `task <t>: round N didn't run, so nothing more went
-to its provider: ` + that line, and the latest round's report, as `_go_on`'s. A round already running finishes. `wb route all api` is global and reads no repo: the check is per start.
+to its provider: ` + that line, and the latest round's report, as `_go_on`'s (the mod wakes Claude with `LOCAL_ONLY_HEADLINE` and `LOCAL_ONLY_NEXT`, #1232). A round already running finishes. `wb route all api` is global and reads no repo: the check is per start.
 Only the user lifts one: the mod's tool.call hook refuses Claude's Edit, MultiEdit or Write of commands.json
 (`$WB_COMMANDS`, else `~/.config/workbench/commands.json`, matched by real path: `/./` or a linked config directory is
 the same file) whose new text drops a `"local_only": true` the old text had, or gives an entry a `local_only` other than
@@ -7217,7 +7221,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   table and the round report's `agent tokens` (an API task's) together. `WbTop`'s type is unchanged (the API fields are optional keys of `running` rows): `top-1` stays.
 - **Which session a task is** → the mod's `mine` and `cli._scope`: the same rule, the home-or-`/` exception included;
   `scope()` passes every id.
-- **A notice kind or its text** → the mod's `HEADLINE`, `NEXT` (a `cause` `provider` notice: `PROVIDER_HEADLINE`, `PROVIDER_NEXT`), both still-true rules (`_ack_all`'s, the mod's), `wb wait`.
+- **A notice kind or its text** → the mod's `HEADLINE`, `NEXT` (a `cause` `provider` notice: `PROVIDER_HEADLINE`, `PROVIDER_NEXT`; `local_only`, `runner.LOCAL_ONLY` ↔ `LOCAL_ONLY_HEADLINE`, `LOCAL_ONLY_NEXT` ↔ `privacy.since_start_line`, #1232), both still-true rules (`_ack_all`'s, the mod's), `wb wait`.
 - **A task.json or status key** → *Files and formats*; a results key a reader uses → `results.record` and defaults for
   old rows.
 - **The GPU admission rule** (`models.admits`, `can_share`) → the lease, `wb start`'s refusal, `cli._gpu_holders`,
