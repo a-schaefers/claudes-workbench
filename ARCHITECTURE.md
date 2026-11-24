@@ -4049,7 +4049,7 @@ the GPU. Turning it to `api` takes the dialog's yes (it can spend) and a day cap
 busy (an API model set on a GPU role, Agents back from GPU, an OpenRouter role's new backends:
 `routes._busy_newly`, which compares `routes._sent`, the model and its `order`) takes the yes and a
 cap too, adding `when the GPU is busy, <role> starts on its API model (your code goes to …; cap $N/day)`
-(with `; thinking on (<role>)` before the cap when its thinking is on, #1177). `routes.summary` ends `; when the GPU is busy, a role with an API model runs on it` while
+(with the role's thinking clause before the cap when it will think: `thinks`' line, `; thinking on (effort high) (<role>)` or `; thinking as the model's default (…) (<role>)`; a model that really turns thinking off stays unsaid, #1177, #1237). `routes.summary` ends `; when the GPU is busy, a role with an API model runs on it` while
 it is on.
 
 **Unset is the GPU, exactly as before.** A missing file or role reads as `{via: gpu, gpu: auto,
@@ -4155,9 +4155,13 @@ model, thinking on a role on API) or the cap; a GPU model pin alone, or thinking
 role with an API model takes the yes too (#1149, 2026-11-24: it came with no dialog, and every API start
 of the role billed reasoning tokens nobody approved). Thinking on a role whose API side is dormant (on
 the GPU, or no API model yet) still needs no yes, so every part that newly sends a role's code to an
-API model names its thinking when on (`routes._thinking_on`: `thinking on (trivial)`, off unsaid): the
+API model names its thinking whenever the model will think, with that model's own line, not the role's
+setting (`routes._thinking_on` over `thinks`, `cli._thinks`: `routes.thinking_of`, runner.thinking_variant's
+line: `thinking on (effort high) (trivial)`, or `thinking as the model's default (it lists no lower
+setting) (trivial)` for a role set off whose model can't turn it off, #1237); a model that really
+turns thinking off stays unsaid: the
 Agents part's `your code goes to …`, the busy part (`When the GPU is busy: wait → the role's API model
-(a role with an API model (trivial) starts on it while the GPU is busy; thinking on (trivial); cap
+(a role with an API model (trivial) starts on it while the GPU is busy; thinking on (effort high) (trivial); cap
 $5/day)`), the busy opt-in's clause and an API model set under Agents API (#1177, 2026-11-24: the yes
 that sent the code never said it, and every task ran on the reasoning variant).
 Applied (`routes.editing`: `store.edit_config`'s lock, a link kept, nothing written when the body
