@@ -5781,7 +5781,11 @@ Every git call in it runs with `gitops.PLAIN` and `NO_HOOKS` (a hook of the user
 2026-11-21), stdin closed, its own session; a fetch or clone never prompts (`_net_env`, `_fetch_origin`'s rule,
 `NET_SECS` 600). It imports everything at the top: `wb patch init`'s `marketplace add` deletes the copy wb runs from.
 
-- **The marketplace clone keeps nothing.** `local_changes` finds HEAD's commits over `@{u}` (with no upstream, what no
+- **The marketplace clone keeps nothing.** It is the copy under either plugins root the mod's
+  `gateConf` counts, `<CLAUDE_CONFIG_DIR or ~/.claude>/plugins/marketplaces/` or
+  `$CLAUDE_CODE_PLUGIN_CACHE_DIR/marketplaces/` (`cli._install_kind`; the second was read as a clone
+  the user owns, so the rescue never ran and the re-clone wiped a local commit, #1099); anything else
+  is a clone. `local_changes` finds HEAD's commits over `@{u}` (with no upstream, what no
   remote has), uncommitted changes (`--untracked-files=all`, never ignored files), stashes, and other local branches'
   commits no remote has (Claude Code's re-clone drops those too). `rescue` saves them under `rescued/<UTC time>/`
   (`DIFF_PLAIN`: the user's diff settings off, so another git applies them; uncommitted.diff from a copy of the index,

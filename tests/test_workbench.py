@@ -18447,6 +18447,28 @@ class LocalPatches(Base):
     def worktrees(self):
         return self.g(self.copy, "worktree", "list", "--porcelain").count("worktree ")
 
+    def test_a_marketplace_clone_under_the_plugin_cache_dir_is_rescued_and_moved_never_read_as_the_users(self):
+        # #1099 (audit 1 of 2.0): with CLAUDE_CODE_PLUGIN_CACHE_DIR set, Claude Code keeps its clone
+        # there; only CLAUDE_CONFIG_DIR/plugins counted, so wb update skipped the #1005 rescue and
+        # Claude Code's re-clone wiped a local commit, and wb patch init said "a clone you own"
+        cache = Path(self.tmp.name) / "pcache"
+        moved = cache / "marketplaces" / "workbench"
+        moved.parent.mkdir(parents=True)
+        self.market.rename(moved)
+        os.environ["CLAUDE_CODE_PLUGIN_CACHE_DIR"] = str(cache)
+        self.addCleanup(os.environ.pop, "CLAUDE_CODE_PLUGIN_CACHE_DIR", None)
+        with mock.patch.object(cli, "PKG_ROOT", moved):
+            self.assertEqual(cli._install_kind(), "marketplace")
+            head = self.commit(moved, "mine.txt", "mine\n", "a local fix")
+            out = self.wb("update")
+            self.assertIn("Claude Code's update re-clones it and would wipe them", out)
+            self.assertTrue(list((store.home() / "rescued").iterdir()))
+            self.assertEqual(self.g(moved, "rev-parse", "HEAD"), head)
+            self.assertFalse(self.calls.exists())                                     # nothing updated
+            self.assertNotIn("a clone you own", self.wb("patch", "init", "--dir", str(Path(self.tmp.name) / "src")))
+            os.environ.pop("CLAUDE_CODE_PLUGIN_CACHE_DIR")
+            self.assertEqual(cli._install_kind(), "clone")                            # without it: as before
+
     def test_a_marketplace_update_refuses_and_rescues_a_local_commit_an_edit_or_an_untracked_file(self):
         # #1005 (2026-11-22): Claude Code re-clones its clone over all three, and wb update said
         # "updated marketplace <patched>..<upstream>", exit 0

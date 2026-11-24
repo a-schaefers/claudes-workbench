@@ -6229,9 +6229,16 @@ def _mod_behind() -> str | None:
 
 def _install_kind() -> str:
     """"marketplace": this copy is Claude Code's own clone, which its update re-clones; "clone":
-    one the user owns (a developer's, or wb patch init's)."""
-    marketplace = context.claude_home() / "plugins" / "marketplaces"
-    return "marketplace" if PKG_ROOT.resolve().is_relative_to(marketplace.resolve()) else "clone"
+    one the user owns (a developer's, or wb patch init's). Under either plugins root the mod's
+    gateConf counts: <CLAUDE_CONFIG_DIR or ~/.claude>/plugins, and CLAUDE_CODE_PLUGIN_CACHE_DIR,
+    where Claude Code keeps the marketplace clone when it is set: read there as the user's own,
+    wb update skipped the rescue and Claude Code's re-clone wiped the local commits (#1099,
+    2026-11-23)."""
+    roots = [context.claude_home() / "plugins"]
+    if cache := os.environ.get("CLAUDE_CODE_PLUGIN_CACHE_DIR"):
+        roots.append(Path(os.path.expanduser(cache)))
+    here = PKG_ROOT.resolve()
+    return "marketplace" if any(here.is_relative_to((r / "marketplaces").resolve()) for r in roots) else "clone"
 
 
 def _running(live, a) -> str:
