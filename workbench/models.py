@@ -948,7 +948,9 @@ def lookup(model_id: str, cached: bool = False) -> Model | None:
         return found
     if cached:
         return _models_of(_read_hosted(), only=model_id).get(model_id)
-    return hosted().get(model_id)
+    # read again once on a miss, as resolve does: plain hosted() kept a just-connected provider's
+    # ids "not in OpenCode's catalog" for wb route and every other lookup (#1076, 2026-11-23)
+    return _hosted_exact(model_id)
 
 
 def gpu_side(model_id: str) -> bool:
@@ -968,11 +970,16 @@ def _hosted_exact(mid: str) -> Model | None:
     unknown for HOSTED_TTL (#1013's review). A failed read stays cached for DOWN_SECS."""
     if found := hosted().get(mid):
         return found
+    return hosted(fresh=True).get(mid) if miss_rereads() else None
+
+
+def miss_rereads() -> bool:
+    """Whether a catalog miss may read OpenCode's catalog again (_hosted_exact, `wb models
+    --api`'s empty match, #1076): the cache is older than AUTH_FRESH_SECS and its read didn't
+    fail (a failed one stays cached for DOWN_SECS)."""
     doc = _read_hosted()
     ts = doc.get("ts")
-    if doc.get("error") or not isinstance(ts, (int, float)) or 0 <= time.time() - ts < AUTH_FRESH_SECS:
-        return None
-    return hosted(fresh=True).get(mid)
+    return not doc.get("error") and isinstance(ts, (int, float)) and not 0 <= time.time() - ts < AUTH_FRESH_SECS
 
 
 # API models (#1013): OpenCode's catalog, read through OpenCode itself and cached in hosted.json

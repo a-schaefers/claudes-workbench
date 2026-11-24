@@ -2661,7 +2661,7 @@ models: "<id> is an Ollama cloud model, an API model now (set a role to use it)â
 side first, as before: exact id, exact model or provider name, or a unique case-insensitive
 substring; then an API model by its exact id only (`hosted()[wanted]`, asked only for a miss with a
 `/` that isn't the GPU side's, `gpu_side`; an exact miss reads the catalog again once, `hosted(fresh=True)`,
-when the cache is older than `AUTH_FRESH_SECS` and its read didn't fail, `_hosted_exact`: the catalog
+when the cache is older than `AUTH_FRESH_SECS` and its read didn't fail (`miss_rereads`), `_hosted_exact`: the catalog
 lists only providers that can authenticate and `/connect` changes no stamp, so a just-connected
 provider's ids were unknown for `HOSTED_TTL`). A fragment matching nothing raises `unknown model '<x>'; known: <GPU ids>; API models are
 named by their exact id, as OpenCode lists them (opencode models)` (`EXACT_ONLY`), never listing
@@ -2732,7 +2732,9 @@ read as a wrong id, Claude hunted for the "right" one).
   (atomic: two rebuilding at once, the last wins). Parsed once per change of the file a process
   (`_HOSTED`). `hosted()` never runs on a GPU path: `resolve` asks only after the GPU side misses,
   `lookup` only for an id `discover()` lacks, both only for one `gpu_side` says isn't the GPU side's.
-- `lookup(model_id, cached=False)`: `discover().get(id)`, else `hosted().get(id)`. Only where an API
+- `lookup(model_id, cached=False)`: `discover().get(id)`, else `_hosted_exact(id)` (a miss reads the
+  catalog again once, as `resolve`'s: `wb route` named a just-connected provider's id "not in
+  OpenCode's catalog" for `HOSTED_TTL`, #1076). Only where an API
   task's model must be found: `transcript.model_line` (which reads the catalog's variant list too),
   `tuning._rows`, `router.expected`. The pane's two (`model_line`, `expected`) pass `cached=True`:
   hosted.json as it is, never rebuilt, so a 5 s poll never waits on OpenCode. `transcript._server_live` keeps `discover()`: an API model is
@@ -3107,7 +3109,8 @@ model, the GPU part is `no local models: <why_none()>` and the section still pri
 role is on API or a key is stored; otherwise it dies as before. `--api TEXT` (`_api_list`) lists the
 catalog ids containing TEXT (any case), sorted, at most `API_LIST_MAX` 30, each with the catalog's own window (`catalog_limit`),
 `$in/$out per 1M in/out` from its first untiered price and the free note, then `and N more: a longer
-text narrows it`; it lists only, never sets a role. `--set-default` stays GPU (`router.choose` over
+text narrows it`; nothing matching reads the catalog again once when `models.miss_rereads()` (as
+`_hosted_exact`: a just-connected provider, #1076); it lists only, never sets a role. `--set-default` stays GPU (`router.choose` over
 `discover()`): never an API model as OpenCode's default.
 
 **The slice** (`router.slice(m)`), one per model whatever the role (writing slices like

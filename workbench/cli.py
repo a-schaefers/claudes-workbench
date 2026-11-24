@@ -4259,8 +4259,11 @@ def _api_list(text: str) -> None:
     """wb models --api TEXT: the catalog's ids containing TEXT (any case), sorted, at most
     API_LIST_MAX, each with its window, its price per 1M tokens and the free-model note. It lists
     only: a role is set by wb route, with the user's yes (#1026)."""
-    hits = sorted((m for mid, m in models.hosted().items() if text.lower() in mid.lower()),
-                  key=lambda m: m.id)
+    def match(found: dict) -> list:
+        return sorted((m for mid, m in found.items() if text.lower() in mid.lower()), key=lambda m: m.id)
+    hits = match(models.hosted())
+    if not hits and models.miss_rereads():  # a just-connected provider: /connect changes no stamp (#1076)
+        hits = match(models.hosted(fresh=True))
     if not hits:
         err = models.hosted_error()
         print(f"no API model in OpenCode's catalog contains {text!r}"

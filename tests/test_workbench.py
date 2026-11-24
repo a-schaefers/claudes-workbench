@@ -28970,6 +28970,29 @@ class Routes(Base):
         self.assertEqual(roles["trivial"]["api_status"]["why"], "not in OpenCode's catalog now")
         self.assertEqual(roles["significant"]["api_status"]["why"], "not in OpenCode's catalog now")
 
+    def test_a_provider_connected_after_the_catalog_was_read_can_be_routed_and_listed(self):
+        # #1076: wb route and wb models --api read plain hosted(), so a provider connected after
+        # any wb command read "not in OpenCode's catalog" for HOSTED_TTL (/connect changes no stamp)
+        path = store.home() / "hosted.json"
+
+        def connect_after_a_read():
+            os.environ["WB_FAKE_API"] = "anthropic=nokey"          # before /connect
+            self.assertNotIn("anthropic/claude-haiku-5-5", runner.models.hosted(fresh=True))
+            doc = json.loads(path.read_text())
+            doc["ts"] -= runner.models.AUTH_FRESH_SECS + 1
+            store.write_json(path, doc)
+            os.environ.pop("WB_FAKE_API")                          # /connect: no stamped file changes
+
+        connect_after_a_read()
+        code, out, err = self.route("trivial", "anthropic/claude-haiku-5-5", "--day-usd", "1")
+        self.assertEqual(code, 0, err)
+        self.assertIn("trivial: GPU → API anthropic/claude-haiku-5-5", out)
+        connect_after_a_read()
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.main(["models", "--api", "haiku"])
+        self.assertIn("anthropic/claude-haiku-5-5", out.getvalue())
+
     def test_a_provider_out_of_credit_rate_limited_or_unreachable_may_still_be_a_roles(self):
         # cli.HEALTH: a run's passing state is no refusal; no key wb can hold is
         for state in ("no_credit", "rate_limited", "unreachable"):
