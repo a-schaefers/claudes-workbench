@@ -3452,7 +3452,8 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     trim), which no edit in a round can give it; else None. A module of ``task``'s own code
     (own_module) is none: the step may make it; nor is a console script of its own
     (own_command), by name with the worktree's venv there, or by its path in a TOOL_DIRS
-    directory the worktree has (#1244). Under a task runner (`make test`, `pnpm test`,
+    directory the worktree has (#1244), nor a program after the command's own install step
+    (installed_programs: `bundle install && bundle exec rubocop`, #1256). Under a task runner (`make test`, `pnpm test`,
     RUNNER_TAIL), the recipe's exit and the line before the runner's own (#1229, #1243). At any
     other exit, a wrapper's own (`poetry run`, a sourced venv), missing_tool: the name its line
     gives, which doesn't resolve where the tests run (#1256, #1258)."""
@@ -3470,17 +3471,18 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     if not isinstance(code, int) or not code:
         return None
     line = lines[-1].strip() if lines else ""
+    cmd = r.get("cmd") or (task.spec.get("test_cmd") if task else None)
     if code == 127:
         name = missing_name(line) or ((m := MAKE_EXEC.fullmatch(line)) and m["n"].strip())
         if name and "/" not in name:
-            return _missing_bare(name, task)
+            # after the command's own install (bundler's `command not found: <name>` is at 127)
+            return None if name in installed_programs(cmd) else _missing_bare(name, task)
         # a path: a script the step may make, but not a tool an install puts there (#1206)
         if path := name or ((m := NO_SUCH.search(line)) and (m["z"] or m["n"]).strip()):
             return _missing_path(path, task)
     if code == 1 and (m := NO_MODULE.fullmatch(line)):
         return None if task and own_module(task, m["m"] or m["d"], m["py"]) else line
-    return missing_tool(lines, r.get("cmd") or (task.spec.get("test_cmd") if task else None),
-                        task, wrapped)
+    return missing_tool(lines, cmd, task, wrapped)
 
 
 def _missing_bare(name: str, task: store.Task | None) -> str | None:
@@ -3517,14 +3519,15 @@ def missing_tool(lines: list[str], cmd: str | None, task: store.Task | None = No
     console script of the step's own (own_command; after a wrapper's run verb with no venv
     yet, as the wrapper looks the project's own scripts up itself), nor any program after a `uv
     run` that syncs (uv_synced_programs: a dependency the step declares is installed before it
-    spawns); never one a runner's recipe names, which the command
+    spawns), or after the command's own install step (installed_programs: `poetry install`, `uv
+    sync`, `bundle install`, `pip install -e .`); never one a runner's recipe names, which the command
     doesn't (a code the runner names stays its own). A path: one in TOOL_DIRS the worktree hasn't, named by the
     command or under a runner (`make test` sourcing `.venv/bin/activate`). wb's own wording, as
     missing_command's. Poetry's `Command not found: pytest` at exit 1 (#1256), `source
     .venv/bin/activate && pytest` at bash's 1 or dash's 2 (#1258) each ran round 1 and every
     auto-fix round on correct code, told the bug was the change's (bar round 6, 2026-11-24)."""
     words, programs, run = command_words(cmd), command_programs(cmd), command_programs(cmd, True)
-    synced = uv_synced_programs(cmd)
+    synced = uv_synced_programs(cmd) | installed_programs(cmd)
     for line in reversed([ln for ln in map(str.strip, lines) if ln][-GONE_LINES:]):
         tool, opened = TOOL_GONE.search(line), PATH_GONE.search(line)
         if not (tool or opened):
@@ -3550,7 +3553,10 @@ def missing_tool(lines: list[str], cmd: str | None, task: store.Task | None = No
                 # to [dependency-groups] dev said uv 0.13.10's `Failed to spawn: ruff` on the base
                 # (exit 2), checked in before round 1 with a false "no round can fix that", and
                 # skipped the auto-fix round when round 1 left the dependency out (#1256's second
-                # review, 2026-11-24): a round can declare it, so the failure is the agent's
+                # review, 2026-11-24): a round can declare it, so the failure is the agent's;
+                # and any program after the command's own install step (installed_programs:
+                # `poetry install && poetry run ruff`, `uv sync && uv run --no-sync ruff`, #1256's
+                # third review)
                 if w in synced:
                     continue
                 if said := _missing_bare(w, task):
@@ -3793,20 +3799,24 @@ def command_programs(cmd: str | None, run_only: bool = False) -> set[str]:
     Every word missing_tool counted, `python3 cli.py frobnicate` for a step adding Click's
     `frobnicate` checked in as a missing tool and skipped auto-fix (#1262's review, 2026-11-24).
     ``run_only``: only the words after a run verb, which the wrapper looks up in the project."""
+    return {p for words in _simple_commands(cmd) for p in _programs_of(words, run_only)}
+
+
+def _programs_of(words: list[str], run_only: bool = False) -> set[str]:
+    """command_programs for one simple command's ``words``."""
     out: set[str] = set()
-    for words in _simple_commands(cmd):
-        for i, w in enumerate(words):
-            # an assignment, a prefix's option or its number (`env -i`, `nice -n 10`, `timeout 60`)
-            if re.match(r"[A-Za-z_][A-Za-z0-9_]*=|-|\d+(?:\.\d+)?[smhd]?$", w):
-                continue
-            name = w.rsplit("/", 1)[-1]
-            if not run_only:
-                out.add(w)
-            if name in PREFIXES:
-                continue
-            if name in RUN_VERBS:
-                out |= _wrapped_program(words[i + 1:], RUN_VERBS[name])
-            break
+    for i, w in enumerate(words):
+        # an assignment, a prefix's option or its number (`env -i`, `nice -n 10`, `timeout 60`)
+        if re.match(r"[A-Za-z_][A-Za-z0-9_]*=|-|\d+(?:\.\d+)?[smhd]?$", w):
+            continue
+        name = w.rsplit("/", 1)[-1]
+        if not run_only:
+            out.add(w)
+        if name in PREFIXES:
+            continue
+        if name in RUN_VERBS:
+            out |= _wrapped_program(words[i + 1:], RUN_VERBS[name])
+        break
     return out
 
 
@@ -3862,6 +3872,71 @@ def uv_synced_programs(cmd: str | None) -> set[str]:
                     out |= programs
             break
     return out
+
+
+# The steps that install the project's dependencies, by program and verb (`poetry install`, `uv
+# sync`, `bundle install`, `npm ci`), and pip's when it installs the project or a requirements
+# file (`pip install -e .[dev]`, `uv pip install -r requirements.txt`, `python3 -m pip install .`):
+# what installed_programs counts a later program of the same command as synced after
+INSTALL_VERBS = {"poetry": {"install", "sync"}, "uv": {"sync"}, "pdm": {"install", "sync"},
+                 "pipenv": {"install", "sync"}, "rye": {"sync"}, "pixi": {"install"},
+                 "bundle": {"install"}, "npm": {"install", "ci", "i"}, "pnpm": {"install", "i"},
+                 "yarn": {"install"}, "bun": {"install", "i"}}
+PIP_PROJECT = re.compile(r"-e|--editable|-r|--requirement|\.")
+PIP_NAME = re.compile(r"pip[\d.]*$")
+PYTHON_NAME = re.compile(r"python[\d.]*$")
+
+
+def installed_programs(cmd: str | None) -> set[str]:
+    """The programs (command_programs' words) of each simple command in ``cmd`` after one that
+    installs the project's dependencies (_installs: `poetry install`, `uv sync`, `bundle install`,
+    `pip install -e .`), never a wrapper's or installer's own name: the lane leaves the network
+    open, so a program a dependency brings is there once the step declares it, and the command's
+    own install installs it. `poetry install && poetry run ruff check .` for a step adding ruff to
+    the dev dependencies said Poetry's `Command not found: ruff` on the base, as did `uv sync && uv
+    run --no-sync ruff` and `bundle install && bundle exec rubocop` (bundler's at 127), and each
+    checked in before round 1 with a false "no round can fix that" and skipped the auto-fix round
+    when round 1 left the dependency out (#1256's third review, 2026-11-24)."""
+    out: set[str] = set()
+    after = False
+    for words in _simple_commands(cmd):
+        if after:
+            out |= _programs_of(words)
+        after = after or _installs(words)
+    own = set(RUN_VERBS) | set(INSTALL_VERBS) | PREFIXES
+    return {w for w in out if not ((n := w.rsplit("/", 1)[-1]) in own or PIP_NAME.match(n)
+                                   or PYTHON_NAME.match(n))}
+
+
+def _installs(words: list[str]) -> bool:
+    """Whether simple command ``words`` installs the project's dependencies (INSTALL_VERBS; pip's
+    with a project or requirements argument, PIP_PROJECT; `uv pip sync`)."""
+    for i, w in enumerate(words):
+        if re.match(r"[A-Za-z_][A-Za-z0-9_]*=|-|\d+(?:\.\d+)?[smhd]?$", w):
+            continue
+        name = w.rsplit("/", 1)[-1]
+        if name in PREFIXES:
+            continue
+        rest = words[i + 1:]
+        if PYTHON_NAME.match(name):  # `python3 -m pip install …`
+            if rest[:2] != ["-m", "pip"]:
+                return False
+            name, rest = "pip", rest[2:]
+        if name == "uv" and rest[:1] == ["pip"]:  # `uv pip install …`, `uv pip sync …`
+            name, rest = "pip", rest[1:]
+        # the verb: the first word not an option, or the second when an option came first,
+        # which may have taken that first word as its value (`poetry -C app install`)
+        first = next((j for j, r in enumerate(rest) if not r.startswith("-")), None)
+        if first is None:
+            return False
+        said = [r for r in rest if not r.startswith("-")][:2 if first else 1]
+        if PIP_NAME.match(name):
+            if "sync" in said:
+                return True
+            return "install" in said and any(PIP_PROJECT.match(r)
+                                             for r in rest[rest.index("install") + 1:])
+        return bool(set(said) & INSTALL_VERBS.get(name, set()))
+    return False
 
 
 def _wrapped_program(rest: list[str], verb: str) -> set[str]:

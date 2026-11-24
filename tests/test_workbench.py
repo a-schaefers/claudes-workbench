@@ -1250,6 +1250,43 @@ class Lifecycle(Base):
         self.assertEqual(runner.uv_synced_programs("uv sync && uv run --with x pytest -q && poetry run y"),
                          {"x", "pytest"})
 
+    def test_a_tool_a_dependency_brings_after_the_commands_own_install_goes_back_to_the_agent(self):
+        # #1256's third review (2026-11-24): the lane leaves the network open, so once a round
+        # declares the dependency the command's own `poetry install`, `uv sync` or `bundle
+        # install` installs it; each wrapper's line on the base checked in before round 1 with a
+        # false "no round can fix that", and skipped the auto-fix round when round 1 left it out
+        self.spec.write_text("Add ruff to the dev dependencies and fix every lint error it reports.\n")
+        self.start("t-ins", "ok", "--no-base-check", "--no-self-review")
+        wait_phase("t-ins", {"review"})
+        task = store.Task("t-ins")
+        self.assertFalse(runner.own_command(task, "nosuch-ruff-1256"))
+        runs = [{"exit": 1, "cmd": "poetry install && poetry run nosuch-ruff-1256 check .",
+                 "tail": "Installing dependencies from lock file\nCommand not found: nosuch-ruff-1256"},
+                {"exit": 2, "cmd": "uv sync && uv run --no-sync nosuch-ruff-1256 check .",
+                 "tail": "Resolved 1 package in 1ms\nerror: Failed to spawn: `nosuch-ruff-1256`\n"
+                         "  Caused by: No such file or directory (os error 2)"},
+                {"exit": 127, "cmd": "bundle install && bundle exec nosuch-ruff-1256",
+                 "tail": "bundler: command not found: nosuch-ruff-1256\n"
+                         "Install missing gem executables with `bundle install`"}]
+        for r in runs:
+            self.assertIsNone(runner.missing_command(r, task), r["cmd"])
+            # without the install step first the tool is the environment's to give
+            alone = dict(r, cmd=r["cmd"].split(" && ", 1)[1])
+            self.assertEqual(runner.missing_command(alone, task), "nosuch-ruff-1256: command not found",
+                             alone["cmd"])
+        # pip's counts when it installs the project or a requirements file; never an install
+        # after the program, nor the installer's or wrapper's own name
+        for cmd, programs in (("pip install -e .[dev] && ruff check .", {"ruff"}),
+                              ("python3 -m pip install -r requirements.txt; pytest", {"pytest"}),
+                              ("uv pip sync requirements.txt && pytest", {"pytest"}),
+                              ("poetry -C app install --no-root && poetry run y", {"y"}),
+                              ("pip install ruff && ruff check .", set()), ("npm run ci && x", set()),
+                              ("x && poetry install", set())):
+            self.assertEqual(runner.installed_programs(cmd), programs, cmd)
+        self.assertEqual(runner.missing_command({"exit": 127, "cmd": "bundle install && bundle exec x",
+                                                 "tail": "bash: bundle: command not found"}, task),
+                         "bundle: command not found")
+
     def test_a_tool_in_the_checkouts_ignored_venv_checks_in_at_once_and_skips_auto_fix(self):
         # #1206 (bar round 3 of 2.0): `--test .venv/bin/python …`, as Claude runs it in the user's
         # checkout, said `No such file or directory` in the worktree, which has no ignored .venv;
