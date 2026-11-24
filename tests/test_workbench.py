@@ -556,15 +556,17 @@ class Lifecycle(Base):
         self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
         checkins = [r["text"] for r in store.notices() if r["task"] == "t-nf" and r["kind"] == "checkin"]
         self.assertEqual(len(checkins), 1)
-        self.assertIn("warning: the acceptance command can't run in the agent's environment: ", checkins[0])
-        self.assertIn("nosuch-tool-1152: command not found (exit 127 on the base)", checkins[0])
+        # wb's words, not the shell's: dash's `/bin/sh: 1: nosuch-tool-1152: not found` failed the
+        # bash-worded check here in WSL's Debian (nightly run 45362198509, 2026-11-24)
+        self.assertIn("warning: the acceptance command can't run in the agent's environment: "
+                      "nosuch-tool-1152: command not found (exit 127 on the base)", checkins[0])
         summary = (task.round_dir(1) / "summary.md").read_text()
         self.assertTrue(summary.startswith("auto-fix skipped: the acceptance command can't run in "
                                            "the agent's environment: "), summary)
         self.assertIn("(exit 127, as on the base); no round can fix that", summary)
         self.assertEqual(st["last"], "the acceptance command can't run in the agent's environment: "
                                      "Claude reviews next")
-        # a script the step was to make (No such file or directory) still goes back to the agent
+        # a script the step was to make (No such file or directory; dash: not found) still goes back
         self.start("t-nf2", "ok", "--test", "./made-by-the-step.sh", "--auto-fix", "1",
                    "--no-self-review")
         st = wait_phase("t-nf2", {"review"})
@@ -658,6 +660,26 @@ class Lifecycle(Base):
                          "/usr/bin/python3: No module named pytest")
         self.assertEqual(runner.missing_command(line("elsewhere.cli"), task),
                          "/usr/bin/python3: No module named elsewhere.cli")
+
+    def test_a_command_not_found_reads_the_same_in_every_shell_and_a_path_is_never_a_missing_tool(self):
+        # nightly run 45362198509 (2026-11-24): under WSL's Debian $SHELL is /bin/sh, dash, which
+        # says `/bin/sh: 1: x: not found`, so the check-in read differently from bash's; and dash
+        # says `./made-by-the-step.sh: not found` for a script the step makes, where bash and zsh
+        # say No such file or directory, so that --test checked in at once as a tool the agent lacks
+        said = lambda last, code=127: runner.missing_command({"exit": code, "tail": f"x\n{last}\n"})  # noqa: E731
+        for last in ("bash: line 1: nosuch-tool-1152: command not found",
+                     "/bin/sh: line 1: nosuch-tool-1152: command not found",   # bash as sh
+                     "zsh:1: command not found: nosuch-tool-1152",
+                     "/bin/sh: 1: nosuch-tool-1152: not found",                # dash
+                     "sh: nosuch-tool-1152: not found"):                       # ksh, busybox
+            self.assertEqual(said(last), "nosuch-tool-1152: command not found", last)
+        self.assertEqual(said("./run.sh: line 3: pytest: command not found"), "pytest: command not found")
+        for last in ("/bin/sh: 1: ./made-by-the-step.sh: not found",           # dash
+                     "bash: line 1: ./made-by-the-step.sh: No such file or directory",
+                     "zsh:1: no such file or directory: ./made-by-the-step.sh",
+                     "/bin/sh: 1: /opt/tool/bin/check: not found"):
+            self.assertIsNone(said(last), last)
+        self.assertIsNone(said("/bin/sh: 1: nosuch-tool-1152: not found", code=1))  # 127 or nothing
 
     def test_what_the_base_check_writes_never_reaches_the_agents_worktree(self):
         # #192 (the 2026-11-19 audit): the base check ran in the task's worktree, and a stamp it
@@ -17524,6 +17546,7 @@ class Verify(Base):
             self.assertTrue(verify.assertion(out), runner_name)
         # the same runners when what failed is missing, not wrong: still no proof
         for out in ("1..1\nnot ok 1 slugifies\n# test/slug.bats: line 3: slugify: command not found\n",
+                    "FAIL slugifies\ntest/slug.sh: 3: slugify: not found\nexit 1\n",   # dash's (2026-11-24)
                     "1) SlugTest::testSlug\nError: Call to undefined function slugify()\n\nERRORS!\n",
                     "1) SlugTest::testSlug\nError: Call to undefined method Slug::slugify()\n"):
             self.assertEqual(verify.verdict(1, out, 0), "inconclusive", out)
@@ -28291,11 +28314,13 @@ class RealOpenCodeAPI(_KeyholeTest):
                    for d in ("config", "data", "state", "cache")}}
 
     def listed(self, layer, name, models_path=None):
-        r = subprocess.run(["opencode", "api", "model.list", "--standalone"], cwd=self.repo,
-                           env=self.scratch_env(layer, name, models_path), capture_output=True,
-                           text=True, timeout=120)
-        self.assertEqual(r.returncode, 0, r.stderr[-2000:])
-        rows = json.loads(r.stdout)["data"]
+        """model.list's rows, read as wb reads them (models.model_list): OpenCode 2.4 answers a
+        server's first read before its plugins load, with no model (2026-11-24)."""
+        from workbench import models
+        doc, why = models.model_list(self.scratch_env(layer, name, models_path), self.repo,
+                                     timeout=120, cmd=["opencode"])
+        self.assertIsNotNone(doc, why)
+        rows = doc["data"]
         for row in rows:
             (row.get("settings") or {}).pop("apiKey", None)        # the layer's dummy, given back
         return rows
@@ -28336,13 +28361,13 @@ class RealOpenCodeAPI(_KeyholeTest):
             return kh, runner.rules_env(layer, over)["OPENCODE_CONFIG_CONTENT"]
         for want in [*picked, new]:
             kh, content = config(found[f"{want['providerID']}/{want['id']}"])
+            from workbench import models
             env = self.scratch_env(tmp / "layer.json", f"file-{len(want['id'])}",
                                    runner.catalog_path(self.task))
-            r = subprocess.run(["opencode", "api", "model.list", "--standalone"], cwd=self.repo,
-                               env={**env, "OPENCODE_CONFIG_CONTENT": content}, capture_output=True,
-                               text=True, timeout=120)
-            self.assertEqual(r.returncode, 0, r.stderr[-2000:])
-            [got] = json.loads(r.stdout)["data"]
+            doc, why = models.model_list({**env, "OPENCODE_CONFIG_CONTENT": content}, self.repo,
+                                         timeout=120, cmd=["opencode"])
+            self.assertIsNotNone(doc, why)
+            [got] = doc["data"]
             self.assertEqual(got["settings"].pop("baseURL"), kh.base)       # the keyhole's
             self.assertEqual(got["settings"].pop("apiKey"), kh.token)
             want = json.loads(json.dumps(want))
@@ -29672,12 +29697,18 @@ class ApiHarness(Base):
         return {**extra, "provider": {p: {"options": {"baseURL": f"http://127.0.0.1:{port}/v1",
                                                       "apiKey": "dummy-key"}} for p in providers}}
 
+    def real_list(self, layer: dict) -> dict:
+        """model.list's document from the real OpenCode with ``layer``, read as wb reads it
+        (models.model_list): `api model.list` on OpenCode 2.4 asks before its plugins load and
+        lists no model (the opencode workflow, 2026-11-23)."""
+        from workbench import models
+        doc, why = models.model_list(self.real_env(layer), self.oc_cwd(), timeout=60, cmd=["opencode"])
+        self.assertIsNotNone(doc, why)
+        return doc
+
     def real_model(self, provider, ok=lambda e: True) -> dict:
         """The spike's model of this provider from this OpenCode's bundled catalog, else another."""
-        out = subprocess.run(["opencode", "api", "model.list", "--standalone"], cwd=self.oc_cwd(),
-                             env=self.real_env(self.layer(1, provider)), capture_output=True,
-                             text=True, timeout=60).stdout
-        listed = [e for e in json.loads(out)["data"] if e["providerID"] == provider
+        listed = [e for e in self.real_list(self.layer(1, provider))["data"] if e["providerID"] == provider
                   and e.get("capabilities", {}).get("tools") and ok(e)]
         self.assertTrue(listed, f"no {provider} model in this OpenCode's catalog")
         return next((e for e in listed if e["id"] == SPIKE_IDS[provider]), listed[0])
@@ -29747,14 +29778,13 @@ class ApiHarness(Base):
         layer = {"provider": {"deepinfra": {"options": {"baseURL": "https://deepinfra.invalid/v1",
                                                         "apiKey": "dummy-key"},  # off this machine
                                             "models": {"wb-alias": {"id": entry["id"]}}}}}
-        out = subprocess.run(["opencode", "api", "model.list", "--standalone"], cwd=self.oc_cwd(),
-                             env=self.real_env(layer), capture_output=True, text=True, timeout=60)
-        listed = {e["id"]: e for e in json.loads(out.stdout)["data"] if e["providerID"] == "deepinfra"}
+        out = self.real_list(layer)
+        listed = {e["id"]: e for e in out["data"] if e["providerID"] == "deepinfra"}
         self.assertEqual((listed["wb-alias"]["modelID"], listed[entry["id"]]["modelID"]), (entry["id"], entry["id"]))
         self.assertEqual(listed["wb-alias"]["settings"]["apiKey"], "dummy-key")
         from workbench import models
-        with mock.patch.object(models, "_opencode_json", lambda *a: (json.loads(out.stdout), "")
-                               if a[:2] == ("api", "model.list") else ([], "")):
+        with mock.patch.object(models, "_list_catalog", lambda: (out, "")), \
+                mock.patch.object(models, "_opencode_json", lambda *a: ([], "")):
             doc = models.hosted_doc(fresh=True)
         self.assertEqual(doc["models"]["deepinfra/wb-alias"]["name"], entry["id"])
         self.assertNotIn("dummy-key", json.dumps(doc))
@@ -29878,7 +29908,7 @@ class ApiDiscovery(Base):
 
     def reads(self) -> int:
         """How many times wb read OpenCode's catalog."""
-        return sum(json.loads(x)[:2] == ["api", "model.list"]
+        return sum(json.loads(x)[:1] == ["serve"]   # models.model_list's server, one per read
                    for x in (self.calls.read_text().splitlines() if self.calls.exists() else []))
 
     def state(self, mid):
@@ -30049,6 +30079,24 @@ class ApiDiscovery(Base):
         path.write_text("{not json")                              # a corrupt cache: rebuilt
         self.assertIn("acme/coder-flash", self.models.hosted())
         self.assertEqual(self.reads(), 4)
+
+    def test_the_catalog_is_read_once_opencodes_plugins_have_loaded_not_from_a_cold_server(self):
+        # the opencode workflow, 2026-11-23: OpenCode 2.4's model.list answers before its plugins
+        # load (anomalyco/opencode #63814), so `api model.list` printed no model on 2.4.1, or the
+        # first few, and wb found no API model at all
+        os.environ["FAKE_COLD"] = "3"
+        found = self.models.hosted(fresh=True)
+        self.assertIn("acme/coder-flash", found)
+        self.assertIn("acme/coder-pro", found)                    # not only the first entry
+        self.assertEqual(self.reads(), 1)
+        self.assertEqual(self.models.hosted_error(), "")
+        # plugins that never load: a failed read, never the partial list
+        os.environ.update(FAKE_COLD="100000", FAKE_SERVE_PID=str(Path(self.tmp.name) / "serve.pid"))
+        where, env = self.models._opencode_env()
+        doc, why = self.models.model_list(env, where, timeout=1)
+        self.assertEqual((doc, why), (None, "opencode model.list took over 1 s"))
+        with self.assertRaises(ProcessLookupError):                         # its server ended
+            os.kill(int(Path(os.environ["FAKE_SERVE_PID"]).read_text()), 0)
 
     def test_a_failed_catalog_read_leaves_gpu_starts_alone(self):
         os.environ["FAKE_CATALOG_FAIL"] = "1"
@@ -31556,6 +31604,11 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.drive_here("t-explore")
         st = store.Task("t-explore").status
         self.assertEqual((st["window"], st["phase"]), (131072, "review"), st.get("last"))
+        # the GPU tasks are stopped at the 40th read, so the fake waits as long as it takes: its
+        # 2 s were too short for a loaded macOS runner, which read the 40th read after the write
+        # and lifted the guard for the edit (as it should, for an edit made through the shell),
+        # so t-explore-gpu64 went to review (nightly run 45362198509, 2026-11-24)
+        os.environ["FAKE_EXPLORE_PAUSE"] = "20"
         self.start("t-explore-gpu", "explore")
         st = wait_phase("t-explore-gpu", {"stuck"})
         self.assertEqual(st["window"], 32768)
@@ -31745,6 +31798,7 @@ class ApiThinking(Base):
     catalog = ApiHarness.catalog
     capture = ApiHarness.capture
     real_env = ApiHarness.real_env
+    real_list = ApiHarness.real_list
     oc_cwd = ApiHarness.oc_cwd
     layer = staticmethod(ApiHarness.layer)
     real_run = ApiHarness.real_run
@@ -32011,9 +32065,7 @@ class ApiThinking(Base):
         layer = lambda: {"provider": {"deepseek": {"options": {  # noqa: E731
             "baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "dummy-key",
             "headerTimeout": False, "chunkTimeout": 960000}}}}
-        listed = subprocess.run(["opencode", "api", "model.list", "--standalone"], cwd=self.oc_cwd(),
-                                env=self.real_env(layer()), capture_output=True, text=True, timeout=60)
-        rows = [e for e in json.loads(listed.stdout)["data"] if e["providerID"] == "deepseek"
+        rows = [e for e in self.real_list(layer())["data"] if e["providerID"] == "deepseek"
                 and e.get("capabilities", {}).get("tools")]
         self.assertTrue(rows, "no DeepSeek model in this OpenCode's catalog")
         entry = rows[0]
@@ -32082,9 +32134,7 @@ class ApiThinking(Base):
         # `thinking`; and 18 of the catalog's 20 Anthropic models list no `none`
         port, out, _ = self.capture("real-anthropic")
         layer = self.layer(port, "anthropic")
-        listed = subprocess.run(["opencode", "api", "model.list", "--standalone"], cwd=self.oc_cwd(),
-                                env=self.real_env(layer), capture_output=True, text=True, timeout=60)
-        rows = [e for e in json.loads(listed.stdout)["data"] if e["providerID"] == "anthropic"
+        rows = [e for e in self.real_list(layer)["data"] if e["providerID"] == "anthropic"
                 and e.get("capabilities", {}).get("tools") and e.get("variants")]
         self.assertTrue(rows, "no Anthropic model with variants in this OpenCode's catalog")
         kinds = lambda e: {((v.get("settings") or {}).get("thinking") or {}).get("type")  # noqa: E731
@@ -32992,9 +33042,9 @@ class ApiSpend(Base):
         self.assertEqual((c["usd"], c["source"]), (0.0123, "provider"))
         mt.step({"cost": 0.1, "tokens": {"input": 100}})       # OpenCode's says less: nothing booked
         self.assertEqual(len(self.rows("t-kh-meter")), 3)
-        mt.step({"cost": 2.0, "tokens": {"input": 100}})       # more than all three: the difference
-        (rec,) = self.rows("t-kh-meter", "reconcile")
-        self.assertAlmostEqual(rec["usd"], 2.1 - (a["usd"] + b["usd"] + c["usd"]), places=9)
+        mt.step({"cost": 3.0, "tokens": {"input": 100}})       # more than all three: the difference,
+        (rec,) = self.rows("t-kh-meter", "reconcile")          # the provider's own row at its catalog figure (#1165)
+        self.assertAlmostEqual(rec["usd"], 3.1 - (a["usd"] + b["usd"] + c["metered"]), places=9)
         mt.step({"cost": 0.5, "tokens": {"input": 100}})       # after a reconcile: only its own
         self.assertEqual([round(r["usd"], 9) for r in self.rows("t-kh-meter", "reconcile")][1:], [0.5])
         self.assertEqual(self.meter.usage_tokens({"input_tokens": 50, "output_tokens": 20,  # Responses
@@ -33668,6 +33718,130 @@ class ApiSpendKeyhole(_KeyholeTest):
         self.post(kh)                                           # a running total in every chunk
         self.assertEqual(usage, [{"prompt_tokens": 9, "completion_tokens": 3}])
 
+    def test_deepinfras_own_estimated_cost_is_booked_and_opencodes_catalog_figure_tops_nothing_up(self):
+        # #1165 (2026-11-24): DeepInfra sends its own cost as usage.estimated_cost, in a last
+        # `choices: []` chunk (checked with one real request that day: 10 in, 2 out, 1.568e-6, its
+        # 0.098/0.294 rate), and the meter read only usage.cost: every DeepInfra row was booked at
+        # the catalog's 0.2/0.6, and OpenCode's step and export figures topped any provider's own
+        # row back up to them, so figures and the day cap ran about 2x the bill
+        from workbench import meter, results
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {}})
+        m = self.model()
+        m.config = {"cost": [{"input": 0.2, "output": 0.6, "cache": {"read": 0.006, "write": 0}}]}
+        mt = meter.Meter(self.task, m)
+        mt.begin(1)
+        kh = self.keyhole(m, on_usage=mt.on_usage)
+        chunk = lambda choices, usage: f'data: {json.dumps({"model": m.name, "choices": choices, "usage": usage})}\n\n'.encode()  # noqa: E731
+        tok = {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000,
+               "prompt_tokens_details": {"cached_tokens": 0}}
+        self.up.mode, self.up.status, self.up.ctype = "raw", 200, "text/event-stream"
+        self.up.pieces = [chunk([{"index": 0, "delta": {"content": "hi"}}], None),
+                          chunk([{"index": 0, "delta": {}, "finish_reason": "stop"}], {**tok, "estimated_cost": None}),
+                          chunk([], {**tok, "estimated_cost": 0.392}), b"data: [DONE]\n\n"]
+        self.assertEqual(self.post(kh)[0], 200)
+        (row,) = store.read_jsonl(meter.ledger_path())[0]
+        self.assertEqual((row["usd"], row["source"], round(row["metered"], 9)), (0.392, "provider", 0.8))
+        mt.step({"cost": 0.8, "tokens": {"input": 1_000_000, "output": 1_000_000}})   # the catalog's
+        mt.end_round({"s1": {"info": {"cost": 0.8}}})
+        rows, _ = store.read_jsonl(meter.ledger_path())
+        self.assertEqual([r["kind"] for r in rows], ["step"])                         # no top-up
+        self.assertEqual((round(mt.total, 9), self.task.status["api"]["prices"]), (0.392, "provider"))
+        self.assertEqual(meter.money(meter.today()["usd"], meter.today()["basis"]), "$0.39")
+        store.write_json(self.task.dir / "task.json", {**self.task.spec, "via": "api", "model": m.id})
+        with mock.patch.object(results, "_session_cost", return_value=0.8):       # the export's figure
+            self.task.set_status(session="ses_1")
+            self.assertEqual({k: results.api_usage(self.task)[k] for k in ("cost", "source", "prices")},
+                             {"cost": 0.392, "source": "metered", "prices": "provider"})
+        mt.on_usage({**tok, "cost": 0.5})          # OpenRouter's usage.cost, under its catalog figure
+        mt.step({"cost": 0.8, "tokens": {"input": 1_000_000, "output": 1_000_000}})
+        self.assertEqual([r["kind"] for r in store.read_jsonl(meter.ledger_path())[0]], ["step"] * 2)
+        mt.step({"cost": 0.3, "tokens": {"input": 1}})   # a response the keyhole never saw: booked
+        self.assertEqual([round(r["usd"], 9) for r in store.read_jsonl(meter.ledger_path())[0]
+                          if r["kind"] == "reconcile"], [0.3])
+
+    def _deepinfra_meter(self):
+        """A DeepInfra model at the catalog's 0.2/0.6 (its bill: 0.098/0.294) and its Meter."""
+        from workbench import meter
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {}})
+        m = self.model()
+        m.kind = "api"
+        m.config = {"cost": [{"input": 0.2, "output": 0.6, "cache": {"read": 0.006, "write": 0}}]}
+        store.write_json(self.task.dir / "task.json", {**self.task.spec, "via": "api", "model": m.id})
+        mt = meter.Meter(self.task, m)
+        mt.begin(1)
+        return m, mt
+
+    MTOK = {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000}   # 0.8 at the catalog's
+    STEP = {"cost": 0.8, "tokens": {"input": 1_000_000, "output": 1_000_000}}
+
+    def test_a_step_finish_ahead_of_its_responses_usage_leaves_paid_at_the_meter_not_the_catalogs_export(self):
+        # #1165's review (2026-11-24): OpenCode's step_finish can reach Meter.step before the
+        # keyhole's thread books that response's usage (2 of 29 DeepInfra tasks in the real ledger:
+        # a reconcile row equal to the next step row). That one catalog row made the meter's basis
+        # catalog, a gate on a meter of provider rows alone let the export through, and paid came
+        # back at the catalog's 2.4 for a ledger of 1.976
+        from workbench import results
+        m, mt = self._deepinfra_meter()
+        mt.step(self.STEP)                                       # ahead of its usage: a reconcile
+        for _ in range(3):
+            mt.on_usage({**self.MTOK, "estimated_cost": 0.392})
+            if _:
+                mt.step(self.STEP)
+        mt.end_round({"s1": {"info": {"cost": 2.4}}})           # the export: every request at 0.8
+        self.assertEqual(round(mt.total, 9), 1.976)
+        self.assertEqual(self.task.status["api"]["at_catalog"], 3.2)
+        self.task.set_status(session="ses_1")
+        with mock.patch.object(results, "_session_cost", return_value=2.4):
+            got = results.api_usage(self.task)
+        self.assertEqual({k: got[k] for k in ("cost", "source", "prices")},
+                         {"cost": 1.976, "source": "metered", "prices": "catalog"})
+        with mock.patch.object(results, "_session_cost", return_value=3.5):   # one the keyhole missed
+            self.assertEqual(results.api_usage(self.task)["cost"], round(1.976 + 0.3, 6))
+        self.task.set_status(sessions=["ses_0"])                 # one of two exported: the same
+        with mock.patch.object(results, "_session_cost", side_effect=[2.4, None]):
+            got = results.api_usage(self.task)
+        self.assertEqual((got["cost"], got["source"]), (1.976, "mixed"))
+
+    def test_a_later_rounds_new_meter_compares_the_export_with_the_ledger_at_catalog_prices(self):
+        # #1165's review: each round after the first runs in a new runner, so a new Meter seeds
+        # at_catalog from the ledger; seeded from the rows' usd, every later round's end booked
+        # the export's catalog figure back on top of DeepInfra's own
+        from workbench import meter
+        m, mt = self._deepinfra_meter()
+        mt.on_usage({**self.MTOK, "estimated_cost": 0.392})
+        again = meter.Meter(self.task, m)                        # round 2's runner
+        again.begin(2)
+        self.assertEqual((again.total, again.at_catalog), (0.392, 0.8))
+        again.end_round({"s1": {"info": {"cost": 0.8}}})
+        self.assertEqual([r["kind"] for r in store.read_jsonl(meter.ledger_path())[0]], ["step"])
+
+    def test_a_providers_estimated_cost_of_0_for_priced_tokens_books_the_metered_figure_never_0(self):
+        # #1165: a 0 from the provider for tokens the catalog prices is no figure (never a false
+        # $0 against the day cap); a usage.cost of 0 beside a real estimated_cost is no figure
+        # either: the catalog's then, as before estimated_cost was read
+        from workbench import meter
+        m, mt = self._deepinfra_meter()
+        mt.on_usage({**self.MTOK, "estimated_cost": 0})
+        mt.on_usage({**self.MTOK, "cost": 0, "estimated_cost": 0.392})
+        self.assertEqual([(r["usd"], r["source"]) for r in store.read_jsonl(meter.ledger_path())[0]],
+                         [(0.8, "keyhole")] * 2)
+
+    def test_the_start_line_and_the_roles_row_say_the_providers_own_figures_once_its_rows_are(self):
+        # #1165's review (2026-11-24): with today all DeepInfra's own rows, wb start's line said
+        # `(catalog prices)` and the roles' row `catalog prices`: model_basis knew only the
+        # catalog's and the user's
+        from workbench import meter
+        m, mt = self._deepinfra_meter()
+        with mock.patch.object(meter.models, "own_price", return_value=None):
+            self.assertEqual(cli._prices_of(m, ahead=True), "catalog prices")   # nothing booked yet
+            mt.on_usage({**self.MTOK, "estimated_cost": 0.392})
+            self.assertEqual(meter.tail(m), " · today $0.39 of $100")
+            self.assertEqual(cli._prices_of(m, ahead=True), "")
+            self.assertEqual(cli._prices_of(m), "catalog prices")        # wb models --api's rate
+            mt.on_usage(dict(self.MTOK))                                  # no figure: the catalog's
+            self.assertEqual(meter.tail(m), " · today ≈$1.19 of $100 (catalog prices)")
+            self.assertEqual(cli._prices_of(m, ahead=True), "catalog prices")
+
     @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
     def test_real_opencode_takes_the_spend_refusal_at_once_without_a_retry(self):
         # the review of #1019: the spike checked 401, 402 and 403 for no retry, never the 400 the
@@ -33829,7 +34003,10 @@ class Privacy(_KeyholeTest):
         typed = self.repo.with_name(self.repo.name.swapcase())       # ext4 keeps the two apart
         self.local_only(key=typed)
         self.role(via="api", api=FLASH)
-        self.assertIsNone(cli.privacy.local_only(self.repo))         # case counts where the FS keeps it
+        # case counts where the FS keeps it; on a real APFS (the macOS runners) the key holds
+        # unpatched: the test assumed ext4 (nightly run 45362198509, 2026-11-24)
+        folds = store.folds_case(self.repo)
+        self.assertEqual(cli.privacy.local_only(self.repo), str(typed) if folds else None)
         with mock.patch.object(store, "folds_case", lambda p: True):  # as on APFS
             self.assertEqual(cli.privacy.local_only(self.repo), str(typed))
             code, err = self.fails("start", "t-lo-case", "--spec", str(self.spec), "--repo", str(self.repo))
@@ -33852,9 +34029,11 @@ class Privacy(_KeyholeTest):
         def as_on_apfs(p):  # the key exists as typed: git finds the repo, its `.git` joined to `p`
             c = common(on_disk(p))
             return typed / c.relative_to(real) if c and Path(p).is_relative_to(typed) else c
+        folds = store.folds_case(wt)                                  # a real APFS: held as is
         with mock.patch.object(context.gitops, "common_dir", as_on_apfs), \
                 mock.patch.object(context.gitops, "toplevel", lambda p: top(on_disk(p))):
-            self.assertIsNone(cli.privacy.local_only(wt))            # case counts where the FS keeps it
+            # case counts where the FS keeps it (nightly run 45362198509, 2026-11-24: not on macOS)
+            self.assertEqual(cli.privacy.local_only(wt), str(typed) if folds else None)
             with mock.patch.object(store, "folds_case", lambda p: True):
                 self.assertEqual(cli.privacy.local_only(wt), str(typed))
 
@@ -34546,15 +34725,18 @@ class Writing(Base):
 
     def test_a_writing_task_with_a_check_runs_it_on_the_base_and_sends_a_failure_back(self):
         from workbench import bench
-        (self.repo / "Makefile").write_text("docs:\n\tgrep -qx 42 answer.txt\n")
-        subprocess.run(["git", "-C", str(self.repo), "add", "Makefile"], check=True)
+        # a script in the repo, not `make docs`: WSL's Debian has no make, and its base check's
+        # `make: not found` (exit 127) rightly skipped the auto-fix this test is about (nightly
+        # run 45362198509, 2026-11-24)
+        (self.repo / "check-docs.sh").write_text("grep -qx 42 answer.txt\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "check-docs.sh"], check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "docs check"], check=True)
-        self.start("t-check", "fix", "--role", "writing", "--test", "make docs")
+        self.start("t-check", "fix", "--role", "writing", "--test", "sh check-docs.sh")
         st = wait_phase("t-check", {"review"})
         task = store.Task("t-check")
         prompt = task.round_dir(1).joinpath("prompt.md").read_text()
-        self.assertTrue(prompt.endswith(self.protocol(task, cli.WRITING_PROTOCOL, "make docs")))
-        self.assertEqual(bench.TEST_LINE.search(prompt).group(1), "make docs")
+        self.assertTrue(prompt.endswith(self.protocol(task, cli.WRITING_PROTOCOL, "sh check-docs.sh")))
+        self.assertEqual(bench.TEST_LINE.search(prompt).group(1), "sh check-docs.sh")
         self.assertIs(st["base_check"]["ok"], False)                     # run on the base
         self.assertEqual((st["round"], st["auto_fixes"]), (2, 1))         # 41 sent back as auto-fix
         self.assertTrue(st["tests"]["ok"])
@@ -35214,13 +35396,15 @@ class ApiStats(Base):
     def test_the_row_never_records_less_than_the_meter_the_day_cap_and_the_round_report_counted(self):
         # wave 2's review: every session exported at $0.30 (OpenCode's estimate) while the keyhole's
         # meter booked $0.50 (the provider's own usage.cost): the ledger and the round report said
-        # $0.50, the results row $0.30
+        # $0.50, the results row $0.30. The catalog prices the same tokens at OpenCode's $0.30, as
+        # OpenCode's estimate is the catalog's (#1165: the export tops up only what the meter, at
+        # catalog prices, didn't see)
         from workbench import meter, models, results
         os.environ["FAKE_COST"] = "0.30"
         t = self.api_task("t-or", {"session": "ses_one"})
         m = models.Model(id="deepseek/deepseek-flash", provider="deepseek", name="deepseek-flash",
                          base_url="http://127.0.0.1:9/v1", engine="api", label="x", kind="api",
-                         config={"cost": [{"input": 0.2, "output": 0.6}]})
+                         config={"cost": [{"input": 290, "output": 1000}]})
         meter.Meter(t, m).on_usage({"prompt_tokens": 1000, "completion_tokens": 10, "cost": 0.50})
         t = store.Task("t-or")
         self.assertEqual((meter.task_total("t-or"), results.spend_so_far(t)), (0.5, 0.5))

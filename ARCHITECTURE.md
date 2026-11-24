@@ -368,7 +368,7 @@ at ~36 tokens/s; slower models get longer ones, never shorter (*Budgets and spee
 2, counted since the last review round or step) goes back as `auto_fix_prompt` (fix the code,
 don't weaken tests, check its own expected values by hand, never blame the compiler: 2026-11-18)
 without waking Claude. `not_the_code` (#496: a timeout, a lane-refused device, `lane_refused`,
-#331; a command or Python module not found, `missing_command` (not the repo's own, `own_module`), with the same line as the base check's for the same
+#331; a command or Python module not found, `missing_command` (not the repo's own, `own_module`), with the same line as the base check's (wb's `<name>: command not found` in every shell) for the same
 command, #1152, #1181, or, when no base check ran the command (`wb next --test`, `--no-base-check`), a
 tool the command itself names, `missing_name` in `command_words`, not one a script it runs names,
 which the step may write, #1172; its fix `GIVE_TOOL`) gets none: review, status `last` the cause, the report led by `auto-fix skipped: <cause>`
@@ -537,16 +537,26 @@ plus `session` (handovers, revives and `wb next` each start one), each exported
 is its `info.cost`, which counts OpenCode's title request that no message carries (real money:
 it wins over its assistant messages' `cost` summed, the fallback; `_session_cost`). Every
 session's sum is `source: "opencode"` when above 0, or 0 for a model the catalog says is free,
-unless the runner's meter counted more: then the meter, `source: "metered"` (it adds the
-provider's own `usage.cost` and the usage of answers a steer or stop cut short, which OpenCode
-doesn't bill; the row is never below the ledger the day cap counted nor the round report);
-OpenCode's 0 for a model the catalog prices (`catalog_price`: hosted.json as it is, `None` with no
+unless the runner's meter counted as much: then the meter, `source: "metered"` (it adds the
+provider's own figure and the usage of answers a steer or stop cut short, which OpenCode
+doesn't bill; the row is never below the ledger the day cap counted nor the round report). The
+export is OpenCode's catalog estimate, so it is compared with the meter at the same prices
+(status `api.at_catalog`, `results.at_catalog`: a provider's own row at its catalog figure, its
+`metered`; a status without it, `api.usd`): the cost is the meter plus whatever the export says
+past that (`source: "opencode"` when that is more than 0; with no provider row, the export itself,
+as before). Compared with the meter's total, OpenCode's export at the catalog's ran about 2x
+DeepInfra's bill in every closed task's `paid`, and a gate on a meter of provider rows alone
+(status `api.prices` `provider`) let it back whenever one catalog `reconcile` row joined them: a
+`step_finish` reaching `Meter.step` before the keyhole's thread booked that response's usage, 2 of
+29 DeepInfra tasks in the real ledger (#1165, 2026-11-24). The `mixed` sum below compares the same
+way. OpenCode's 0 for a model the catalog prices (`catalog_price`: hosted.json as it is, `None` with no
 price, `0.0` when the model is `free` or every price is 0, a tier's `size` not counted, else `1.0`)
 isn't trusted. The meter is the runner's (`metered`: status `api.usd`, #1019's), else the step
 events' summed `cost`: the
 whole task's, a floor (no step carries the title or compaction requests). When some sessions
-exported and some didn't (or had no cost), the exported ones' sum plus the meter's remainder
-(the meter less that sum, never below 0) fills the rest, `source: "mixed"`: dropping the whole sum
+exported and some didn't (or had no cost), the meter plus what the exported ones' sum says past
+the meter at the same prices (`api.at_catalog`; the step events' sum is OpenCode's own, compared as
+it is) fills the rest, `source: "mixed"`: dropping the whole sum
 for one failed export threw away what the others said (the engineer's call, #1022). With no meter
 to fill from, that sum would be a false, low figure, so it isn't used. Then the meter alone, `source:
 "metered"`. Then a free model's 0. Then nothing sent: a task that never ran (`ran`: no session,
@@ -612,27 +622,44 @@ the last byte, and a provider sending that byte late had the response booked twi
 `cache_creation_input_tokens`, `output_tokens_details.thinking_tokens` as reasoning), told by its
 cache fields first: its `message_delta` carries `output_tokens_details` too, read as the Responses
 API with every cache read and write 0 (#1081). It sees every request the model gets, titles and compaction too
-(which no `step_finish` carries), and a provider's own `usage.cost` (OpenRouter's) wins over the
-catalog (`source: provider`). OpenCode's (`Meter.step`, `step_finish.part.cost`, which
+(which no `step_finish` carries), and a provider's own figure wins over the catalog (`source:
+provider`): `usage.cost` (OpenRouter's), else `usage.estimated_cost` (DeepInfra's, in its last,
+`choices: []` chunk, at its own rate; the keyhole's `_merged` keeps it over the finish chunk's
+null), under the same guard (never a 0 for tokens the catalog prices). Read only as `cost`, every
+DeepInfra row was booked at the catalog's, about 2x the bill, and the day cap stopped tasks at about
+half the real spend (#1165, 2026-11-24). OpenCode's (`Meter.step`, `step_finish.part.cost`, which
 `events.normalize` keeps as the step row's `cost`): with the keyhole metering, only a `reconcile`
-row when OpenCode's sum for the round passes the keyhole's and the round's earlier reconciles;
+row when OpenCode's sum for the round passes what the keyhole saw, at the same prices, and the
+round's earlier reconciles (a provider's own row counts at its catalog figure, its `metered`:
+`meter._at_catalog`, `round_kh`; compared with what was booked, OpenCode's catalog estimate topped
+every DeepInfra row, and an OpenRouter one under its catalog price, back up to the catalog's, #1165;
+a `step_finish` that reaches it before the keyhole's thread books that response's usage reconciles
+the whole step at the catalog's, and the usage then books its own row: that response counts twice
+in the ledger, erring high, and `results.api_usage` compares at the same prices so `paid` stays at
+the ledger, #1165's review, 2026-11-24);
 without it (answers with no usage, the suite's fake), each step books its own row, OpenCode's
 cost (`source: opencode`) or the metered one (`metered`). At each round's end (`runner._spend_end`,
 after `measure_speed`) the task's sessions' exported `info.cost` (status `sessions` and `session`,
 each once; `transcript.finished_export` for old ones), which counts the title request, adds one
-`reconcile` row when it is more than the ledger holds for the task. Never less: what the keyhole saw
-is what went out, so the ledger is the higher of the two. **Never a false 0:** an OpenCode cost of
+`reconcile` row when it is more than the ledger holds for the task, a provider's own rows at their
+catalog figure (`Meter.at_catalog`, the same comparison as the steps', #1165). Never less: what the
+keyhole saw is what went out, so the ledger is the higher of the two, and a provider's own figure
+is never topped up to the catalog's. **Never a false 0:** an OpenCode cost of
 0 for tokens whose price isn't 0 is not trusted (the step keeps the metered figure, `source:
 "metered (opencode said 0)"`; an export saying 0 reconciles nothing), and an export that failed
 reconciles nothing. What isn't counted: a response cut before its usage arrived, by either view.
 Without the keyhole's view (a model `runner.needs_keyhole` starts none for: an Ollama cloud
 model, a keyless free one), OpenCode's compaction requests count only as far as its `info.cost` does. A catalog price below a backend's
-(an OpenRouter endpoint priced over its listing, without `usage.cost`) meters under.
+(an OpenRouter endpoint priced over its listing, without `usage.cost`) meters under. The day cap's
+room (`Meter.room`) prices a request's worst case at the catalog's (or the user's) prices, whatever
+the provider's own figure later says: it errs high.
 
 **Estimates or your prices** (#1135, 2026-11-23). The catalog's price can be far off a provider's
 bill: DeepInfra's flash model at $0.20/$0.60 per M where DeepInfra billed $0.098/$0.294, so every
-figure read 2x high (Anthropic's matched). DeepInfra puts no cost in `usage`. So by default nothing
-changes but the labels: every API money figure says it is an estimate, `≈$0.42` and `catalog
+figure read 2x high (Anthropic's matched). DeepInfra does put its own cost in `usage`
+(`estimated_cost`), which wb dropped until #1165 (2026-11-24): its rows are now the provider's own
+(`source: provider`, plain `$`), and only a model with no provider figure reads at the catalog's.
+For those nothing changes by default but the labels: every API money figure says it is an estimate, `≈$0.42` and `catalog
 prices`; nothing to set, nothing asked, and wb never fetches or guesses a price. Opt in: **`wb model
 price <exact id> --input X --output Y [--cache-read Z] [--cache-write W]`** (dollars per M, as the
 provider bills) writes models.json `cost` (`[{input, output, cache?: {read?, write?}}]`,
@@ -646,16 +673,21 @@ agrees and `reconcile` books no difference back. `--clear` goes back to the cata
 id not in the catalog, a plan, a free model, one `catalog_doc` can't carry (its OpenCode would
 price from elsewhere), or prices all 0 (that is `meter.is_free`: the day cap would stop counting it,
 the review's catch). The basis (`meter.basis`): `catalog` (shown `≈`), `yours` (`your prices`, no
-`≈`) or `provider` (OpenRouter's `usage.cost`, plain); a ledger row at the user's prices says
+`≈`) or `provider` (OpenRouter's `usage.cost`, DeepInfra's `usage.estimated_cost`, plain); a ledger row at the user's prices says
 `prices: "yours"` (`meter.row_basis`: `source: provider` first; none, `catalog`), any catalog one
 makes a sum an estimate, `$0` gets no `≈` (`meter.money`, `savings.money`). Status `api.prices`,
 `meter.today()`'s `basis`, results `api.prices`, `bench.paid`'s, api_totals', `spent`'s and the
 roles' JSON `spend_today.prices` carry it to the start line (` · today ≈$0.42 of $5 (catalog
-prices)`: today's rows and the starting model), `wb accept`'s `paid`, the round report, `wb savings`,
+prices)`: today's rows and the starting model's next figures, `meter.next_basis`: the user's prices,
+else its last `step` row's in the ledger, the provider's own when its provider sent one, else the
+catalog's; `meter.model_basis`, which knows only the last two, said `catalog prices` for every
+DeepInfra start once its rows were DeepInfra's own, #1165's review, 2026-11-24), `wb accept`'s `paid`, the round report, `wb savings`,
 `wb stats` (and `paid` `≈$0.12`, with `paid: ≈ is at catalog prices, an estimate` under the table),
 `wb top`, scout, the stop and check-in texts, the pane (`isEst`, `estUsd`, `pricesNote`; a narrow
 Tasks row drops the `≈` before its place) and the chat (`apiSaved`). The roles' listing ends an API
-role's row with `catalog prices` or `your prices` (`cli._prices_of`), `wb models --api` each price,
+role's row with `catalog prices` or `your prices` (`cli._prices_of(m, ahead=True)`: its next
+figures', `meter.next_basis`, nothing when they are the provider's own), `wb models --api` each
+listed price (the catalog's or the user's rate, `meter.model_basis`),
 `wb models --json` gives `prices`. The day cap counts the figure shown: a catalog that runs high
 stops tasks early (the safe side); one that runs low lets real spend pass the cap, which the opt-in
 tightens.
@@ -665,7 +697,7 @@ tightens.
 midnight books its later steps on the new day). `meter.today()` gives `{usd, unpriced_tok,
 plan_tok: {provider: n}, checkin, basis, bases}` from today's rows, read on from the last offset (the file's
 inode and size tell a new or rewritten one), so the 5 s tick never re-reads it whole. Status `api`
-(`{usd, metered, source, tok, prices}`, per row through `Task.set_status`, under the meter's lock: the
+(`{usd, metered, at_catalog, source, tok, prices}`, per row through `Task.set_status`, under the meter's lock: the
 keyhole's thread and the runner's book at once, and a total written after a newer one would leave
 it under the ledger) is the task's own; its results row's `api` reads it at the close
 (`results.metered`, *What an API task cost*). `wb savings --api`'s spend and by day read the
@@ -707,7 +739,7 @@ protocol, after reading it and before the commit, resume's fresh, #1173); with n
 cap (wb route cap <usd>) or tomorrow, then try again; or the role on the GPU (wb route <role> gpu) for the next
 tasks, with wb takeover <task> or wb discard <task> for this one (it keeps its API model)` (`a cap of at least
 $5.17` within one request of it), as `meter.stop_text` says (#1095): offered as this task's remedy, the role on
-the GPU had the user say yes and the retry refused with the same line (#1171). `meter.tail(m)` is the start line's part, ` · today ≈$0.42 of $5 (catalog prices)`, or a plan's ` · plan
+the GPU had the user say yes and the retry refused with the same line (#1171). `meter.tail(m)` is the start line's part, ` · today ≈$0.42 of $5 (catalog prices)` (plain `$0.42 of $5` when today's rows and the model's last are the provider's own, `meter.next_basis`, #1165), or a plan's ` · plan
 usage (OpenCode Go): 1.2M tokens today`, which wb start's model line ends with (`cli.cmd_start`).
 
 **The guard `spend`, inside a round** (`runner._spend_guard`, each tick after the stuck checks, an
@@ -1256,7 +1288,8 @@ once on the base in a scratch checkout (`verify.on_base`, a `--shared` clone,
 change), a warning plus an immediate `checkin` when `--test-timeout` cut it or the shell didn't find
 its command (`missing_command`: exit 127, the tail's last line `NOT_FOUND`'s, bash's or zsh's
 `command not found`, dash's `: not found`; not `No such file or directory`, a script the step may
-make; #1152; or exit 1, the last line `NO_MODULE`'s, Python's `<path>/python3: No module named <m>`
+make, nor a name with a `/`, which dash says `not found` for; worded by wb, `<name>: command not
+found`, the same in every shell, nightly run 45362198509; #1152; or exit 1, the last line `NO_MODULE`'s, Python's `<path>/python3: No module named <m>`
 for `-m` (or its `Error while finding module specification` for a dotted one's parent), not an
 import error inside the tests, nor a module of the repo's own code (`own_module`: its top-level
 name a `<top>/` or `<top>.py` where the tests run, in the worktree or at the base commit, or the
@@ -3044,13 +3077,23 @@ says so after the id: `unknown model '<id>' (OpenCode's catalog read failed: <er
 read as a wrong id, Claude hunted for the "right" one).
 
 **API models** (`hosted`, `lookup`, #1013). `models.hosted() -> {id: Model}` with `kind == "api"`:
-- *Where from.* `opencode api model.list --standalone` (JSON `{location, data}`: only providers that
-  can authenticate, plus OpenCode's free models; the spike's facts, *API models through OpenCode*)
-  and `opencode auth list --format json --standalone` for each provider's key source (it never
-  prints a secret; `auth export` is never run: only the keyhole reads keys, for a task). Both run in
+- *Where from.* OpenCode's model.list (JSON `{location, data}`: only providers that
+  can authenticate, plus OpenCode's free models; the spike's facts, *API models through OpenCode*),
+  read by `models.model_list` from a private `opencode serve --stdio --port 0 --hostname 127.0.0.1`
+  (the server `--standalone` starts; it prints `{"url"}`, takes a password of wb's from
+  `OPENCODE_PASSWORD` as HTTP Basic `opencode:<password>`, and ends when its stdin closes; its group is
+  killed after): `GET /api/plugin` every `PLUGIN_POLL` (25 ms) until it lists a plugin, then `GET
+  /api/model`, both with `location[directory]`, through `_DIRECT` (no proxy; never `_open`'s stored keys), within `CATALOG_TIMEOUT` (past it,
+  `opencode model.list took over 30 s`: never a partial list). Not `opencode api model.list
+  --standalone`: from OpenCode 2.4.0 the server answers model.list with what has loaded so far, and
+  the catalog and every provider are plugins that load after it starts (#63814 upstream), so 2.4.1
+  printed no model, or 14 of 93, and wb saw no API model (the opencode workflow, 2026-11-23);
+  OpenCode's own `models` waits on plugin.list the same way. And `opencode auth list --format json
+  --standalone` for each provider's key source (it never
+  prints a secret, and waits for the plugins itself; `auth export` is never run: only the keyhole reads keys, for a task). Both run in
   the state directory with `OPENCODE_DISABLE_PROJECT_CONFIG=1` (a repo's opencode.json under the
   caller's cwd must not add providers) and `OPENCODE_CONFIG=$WB_OPENCODE_CONFIG` when set
-  (`_opencode_json`). OpenCode's own catalog fetch is left alone. Ids split at the first `/` only
+  (`_opencode_env`). OpenCode's own catalog fetch is left alone. Ids split at the first `/` only
   (`deepinfra/deepseek-ai/DeepSeek-V4.1-Flash-1017`: provider `deepinfra`, name the rest).
 - *Which.* Every catalog model whose provider has no configured entry on this machine (one that
   `_scan` lists and isn't off it: those are `discover()`'s); the models of a configured provider
@@ -3694,7 +3737,8 @@ weren't needed. CI pins 2.3.0: not checked there.
   `kv`, key `models-dev:v2:catalog` (13.7 MB here; key checked, not read), with a bundled snapshot when
   there's neither (`core/src/models-dev.ts`). A failed fetch doesn't slow a start (0.86 s). No file
   under `~/.cache/opencode` (only `bin/`).
-- **Reading it.** `opencode api model.list` prints JSON `{location, data: [...]}`, each entry with
+- **Reading it.** `opencode api model.list` prints JSON `{location, data: [...]}` (on 2.3; 2.4 asks
+  before its plugins load and prints none: `model_list` reads it from a server of its own), each entry with
   `providerID`, `id`, `family`, `package`, `settings.baseURL` and `settings.apiKey` (a layer's or a free model's key: never copied, #1013), `capabilities{tools,
   input, output, temperature}`, `variants[{id, settings | body}]`, `cost[{input, output,
   cache{read, write}, tier?}]` (USD per million tokens; `tier: {type: "context", size}` prices past a
@@ -4908,7 +4952,8 @@ The verdict: `proven` (the base fails on an assertion, the candidate passes), `b
 `candidate-fails`, or `inconclusive` (a timeout, overrun, failed setup, left-out files, or a base
 failure that isn't proof). Proof is positive only: `--expect TEXT` in the base's output, else an
 `ASSERTION` line or `FAILED_TEST` header (#730), unless first a `SETUP` error (#326) or a `MISSING`
-file the candidate adds (#500). Never proof: `MISSING_API` (an API the candidate adds), or pytest
+file the candidate adds (#500). Never proof: `MISSING_API` (an API the candidate adds; a command
+not found in bash's words or dash's), or pytest
 whose first `E` line (`PYTEST_E`) isn't `PYTEST_PROOF` (#729); a bare "expected" matched
 `SyntaxError: expected ':'` (#193). `assertion` is the line shown (pytest's first `E` line, else
 the first assertion line, never a `>` line, else the header). Runs are kept in
@@ -5955,10 +6000,10 @@ $WB_HOME (~/.local/state/workbench)
                                  runner holding it, its task's name inside (models.api_holders); never in gpu.json
   spend-api.jsonl  .lock .checkin.lock  the API ledger (meter.py, #1019; *Spend*), one row each, every row {ts, day (local
                                  %Y-%m-%d)}: step {task, round, provider, model, usd (null: a plan or unpriced), metered,
-                                 source (keyhole|provider|opencode|metered|metered (opencode said 0)), plan?, prices? ("yours":
+                                 source (keyhole|provider (the provider's own usage.cost or estimated_cost, #1165)|opencode|metered|metered (opencode said 0)), plan?, prices? ("yours":
                                  at wb model price's, #1135), tok {in, out,
                                  cache_read, cache_write, reasoning}}; reconcile {task, round, provider, model, usd (OpenCode
-                                 said more), source opencode, prices?}; checkin {task, usd_today, cap}: today's one check-in at half
+                                 said more, compared at its prices: a provider row at its metered, #1165), source opencode, prices?}; checkin {task, usd_today, cap}: today's one check-in at half
   update.json                    wb update's last check
   patches.json                   {source (the clone install), upstream (owner/repo on GitHub, else null)}: patches.note_install, by wb patch init, upstream, send and wb update (not --check) on `local`; the mod's consent gate reads it.
                                  prepared {<slug>: {author, email, date (unix), subject}}: the local commit wb patch upstream picked;
@@ -6192,7 +6237,7 @@ off), not `wb start`'s.
 | `spec_gaps` | `[{round, text}]` from `--spec-gap` |
 | `served` | `{model, by}`: the model an API task's responses named and OpenRouter's provider (or null), from the keyhole when it first appears or changes |
 | `ratelimit_until`, `ratelimit` | the keyhole's hold or queue (#1020): epoch seconds, at least 60 s ahead; `{kind: rate_limited\|outage\|queued, provider, code, since, retry_after, why?}`; cleared at the first data, at each round's start and end |
-| `api` | an API task's spend (#1019, *Spend*): `{usd (the task's ledger total; null for a plan), metered, source (the last row's), tok {in, out, cache_read, cache_write, reasoning}, plan?}`, per ledger row |
+| `api` | an API task's spend (#1019, *Spend*): `{usd (the task's ledger total; null for a plan), metered, at_catalog (that total as OpenCode's estimate prices it, a provider's own row at its `metered`: what `results.api_usage` compares the export with, #1165; none for a plan), source (the last row's), tok {in, out, cache_read, cache_write, reasoning}, prices, plan?}`, per ledger row |
 | `api_stop` | `{guard, text}` (`spend`'s with `worst`, the refused request's at its worst, which the round's stop carries on to `meter.stop_text`, #1150): stop the round now: the keyhole's `quota` (#1020) or `setup` (a certificate or proxy of this machine's, #1080), or `spend` (`Meter.room` refused a request, #1019); consumed by the runner's stop (`_ProviderWait.stop`, whose `stopped_by` makes `spend` its own cause), and cleared, whatever its guard, as each round begins (`Meter.begin`) |
 | `guard` | `spend` when `runner._go_on` stopped the task before a round (the day cap, or within one worst request of it, #1150), with `infra` `spend` |
 | `updated_at` | every write |
@@ -6501,7 +6546,7 @@ else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
 `FAKE_LESSON`, `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
 `ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
-`read`, `explore` (`FAKE_READS` small reads, then an edit: #1087), `selfreads` (ok, then a self-review that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168), `floor` (`HANDOVER_ROOM`), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
+`read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087), `selfreads` (ok, then a self-review that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168), `floor` (`HANDOVER_ROOM`), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
 2.3's `{"type": "error", …, "error": {"type": "compaction.failed", "message": "Compaction produced no summary"}}`;
 `FAKE_COMPACT_MSG`, `FAKE_COMPACT_EXIT`, `FAKE_COMPACT_EDIT`, `FAKE_REFAIL`), `bgwait` (`FAKE_BGWAIT`), `toolhang`,
 `retry` (`FAKE_RETRY_EVERY`), `say`, `stay` (as `ok`, then open and silent: #1160), `spend` (#1019: a read and a priced step every `FAKE_STEP_EVERY` s, `FAKE_STEPS` of
@@ -6509,7 +6554,11 @@ them, then `ok`'s answer). A new fake behaviour is a new scenario.
 
 **API models in the fake** (#1011, from the spike for #1009 on OpenCode 2.3.2; the real-OpenCode checks below hold on
 2.3.0 too). `WB_FAKE_CATALOG` names a JSON file of `api model.list` entries (a list, or `{"data", "auth"}` to give
-`auth list` its own rows; unset, empty). The fake prints `api model.list` as `{location, data}`; `models` as
+`auth list` its own rows; unset, empty). The fake prints `api model.list` as `{location, data}`; `serve --stdio`
+(`models.model_list`'s) prints `{"url"}` and serves `GET /api/plugin` and `GET /api/model` (the same `{location,
+data}`) on 127.0.0.1 behind Basic `opencode:<OPENCODE_PASSWORD>` until its stdin closes; `FAKE_COLD=<n>` plays 2.4's
+cold server (its first n plugin.list reads list none, model.list until then only the first entry), `FAKE_SERVE_PID`
+records its pid; `models` as
 `<provider>/<id>` lines, refusing a provider argument as 2.3.2 does; `auth list --format json` as `[{id, name,
 connections: [{type: "credential", id, label, method: "key"}]}]` per catalog provider. `run -m <provider>/<id>#<variant>`
 splits at the first `/` and the first `#` after it: a catalog provider's unknown model is `{"type": "error", "error":
@@ -6537,8 +6586,8 @@ in `FAKE_HTTP_LOG`; a 2xx plays `ok`, an HTTP error the matching error event wit
 unreachable base `provider.transport`. With `OPENCODE_MODELS_PATH` the fake lists that file's models in place of
 `WB_FAKE_CATALOG`'s (as 2.3.2 does), their variants the config's only. `WB_FAKE_API=<provider>[/<id>]=<state>,…` gives a model (its own entry first; a config model too) or a provider one
 of those states (or `ok`): its runs play that scenario, and a `nokey` provider drops out of `api model.list`, `models`
-and `auth list`, as one OpenCode can't authenticate does. `FAKE_CALLS` (a file) logs each `api`, `models` and `auth`
-call's argv (`ApiDiscovery` counts catalog reads); `FAKE_CATALOG_FAIL` makes `api model.list` and `models` fail (stderr,
+and `auth list`, as one OpenCode can't authenticate does. `FAKE_CALLS` (a file) logs each `api`, `models`, `serve` and `auth`
+call's argv (`ApiDiscovery` counts catalog reads, a `serve` each); `FAKE_CATALOG_FAIL` makes `api model.list`, `models` and `serve` fail (stderr,
 exit 1). Only the fake reads `WB_FAKE_API` and `WB_FAKE_CATALOG`: discovery is driven through it, with no product-side
 fake (`ApiDiscovery`, #1013); `Real`'s fixture (`test_portable.py`) runs it too, so a lookup a test misses never reaches
 the user's own OpenCode. `ApiStats` (#1022) writes an API task's task.json as `wb start --role` will (`via`, `provider`,
@@ -6561,7 +6610,12 @@ naming its role and model (the runners are the test's: the leases taken as a run
 **The spend cap's tests** (#1019): `ApiSpend` writes a task the way `wb start` will (#1016: started on a GPU model with
 `spawn_runner` patched, task.json then naming the API model) and runs `runner.drive` in the test's process, the keyhole `drive`
 starts (#1015) recording each `close` told a reason (`record_closes`); `ApiSpendKeyhole` drives the keyhole's `close(reason)`, `room` and one usage per
-response against `_KeyholeTest`'s upstream, and its `test_real_opencode_*` runs the real OpenCode through a closed
+response against `_KeyholeTest`'s upstream (DeepInfra's own stream shape too, from a real request on
+2026-11-24: `usage: null` until a last `choices: []` chunk with `estimated_cost`, its raw `pieces`
+into a real `Meter`, then OpenCode's catalog figure booking no top-up, #1165; then the review's: a
+`step_finish` ahead of its response's usage leaving `paid` at the meter, a second `Meter` for round
+2 seeded at catalog prices, a provider's 0 for priced tokens booked as metered, and the start line and
+roles' row plain once the rows are the provider's own), and its `test_real_opencode_*` runs the real OpenCode through a closed
 keyhole (the 400, not retried). The room's stop under the cap is driven whole too: the fake's `http` scenario's request
 through the keyhole, refused for its input alone (a model with no output price, `request_floor(m, 0)` 0), and the notice's
 lead says too near with the room's `worst` (#1150's review). The cap a near-cap refusal names lets the round's first
@@ -6662,7 +6716,7 @@ a key with a newline, bad queries and chunk sizes (`raw_request`, for what http.
 an error body cut across the key, errors inside a 200 stream (`_Upstream`'s "raw" mode), packages
 the keyhole can't speak, `@ai-sdk/<name>` npm names (#1137), DeepInfra's appended `/openai`, a key written as a header, a key in a
 model's own entry or the V2 form (#1015's review). Its
-`test_the_tasks_own_catalog_*` (#1015) takes real `api model.list` entries through `hosted()`,
+`test_the_tasks_own_catalog_*` (#1015) takes real model.list entries (`models.model_list`, as every real test reads the catalog: `ApiHarness.real_list`) through `hosted()`,
 `catalog_doc` and the runner's overlay: real OpenCode reads them back field for field (the `limit` capped), and a model
 the binary lacks fails without the file and runs through the keyhole with it.
 
@@ -6838,7 +6892,7 @@ doc needs its own `!/` line).
 - **What the keyhole can hold** (`keyhole.load_key`'s refusals: an OAuth login, an external credential, request
   signing, a key only in the environment or written in a config) → `Model.key`'s states, `models.status`'s and
   `cli._route_api`'s `can't run: needs a key wb can hold outside the lane`, never "available".
-- **An OpenCode fact the API harness copies** (`api model.list`, `auth list`, `-m` ids and variants, `part.cost`,
+- **An OpenCode fact the API harness copies** (model.list through `serve --stdio`, `auth list`, `-m` ids and variants, `part.cost`,
   the `retry`/`error` shapes, each protocol's path and key header) → `tests/fake_opencode.py`, `tests/capture_llm.py`
   and `ApiHarness`'s `test_real_opencode_*` together (*The tests*); its `max_tokens` cap and compaction point, `ApiSizing`'s.
 - **The provider's wait** (#1020): `keyhole.RATE_HOLD_S` (300) stays under the layer's header guard (600 s, #1017),

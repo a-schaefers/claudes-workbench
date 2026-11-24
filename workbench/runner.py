@@ -2993,10 +2993,13 @@ def hang(task: store.Task, limit: int) -> dict | None:
     return None
 
 
-# The shell's own line for a command it can't find on PATH: bash's and zsh's `command not found`,
-# dash's and ksh's `: not found` (exit 127). Not `No such file or directory`, which a script the
-# step creates (`./check.sh`) says on the base too.
-NOT_FOUND = re.compile(r"command not found|: not found$")
+# The shell's own line for a command it can't find on PATH, and the command it names: bash's
+# `<name>: command not found`, zsh's `command not found: <name>`, dash's and ksh's `<name>: not
+# found` (exit 127). Not `No such file or directory`, which a script the step creates
+# (`./check.sh`) says on the base too in bash and zsh; dash says `./check.sh: not found` for it,
+# so a name with a `/` is never a missing tool (nightly run 45362198509, 2026-11-24: under a
+# dash $SHELL a --test the step was to make checked in at once as a tool the agent lacks).
+NOT_FOUND = re.compile(r"command not found: (?P<z>.+)$|(?P<n>[^:]+): (?:command )?not found$")
 # Python's own line for `python -m <module>` it can't import (exit 1): a test runner missing from
 # the agent's Python (`python3 -m pytest` on a system Python without it, or with the user's venv
 # that python_env leaves out) ran round 1 and both auto-fix rounds on correct code, each told the
@@ -3014,16 +3017,20 @@ GIVE_TOOL = ("no round can fix that: put the tool in the worktree (a .venv there
 
 def missing_command(r: dict | None, task: store.Task | None = None) -> str | None:
     """The line saying the command's tool isn't there, when run ``r`` (the base check's, or a
-    round's tests) ended with it: the shell's not-found line at exit 127 (#1152), or Python's
-    no-module line for `-m` at exit 1 (#1181). A tool the agent's environment lacks (one outside
-    the agent's PATH, which python_env and agent_path trim), which no edit in a round can give
-    it; else None. A module of ``task``'s own code (own_module) is none: the step may make it."""
+    round's tests) ended with it: at exit 127 the shell's not-found line, worded by wb as
+    `<name>: command not found`, so the check-in and the base's line compared with a round's
+    read the same under bash, zsh, dash or ksh (#1152; nightly run 45362198509, 2026-11-24), a
+    name with a `/` never; or Python's no-module line for `-m` at exit 1 (#1181). A tool the
+    agent's environment lacks (one outside the agent's PATH, which python_env and agent_path
+    trim), which no edit in a round can give it; else None. A module of ``task``'s own code
+    (own_module) is none: the step may make it."""
     if not r or r.get("exit") not in (1, 127):
         return None
     last = (r.get("tail") or "").strip().splitlines()[-1:]
     line = last[0].strip() if last else ""
-    if r["exit"] == 127 and NOT_FOUND.search(line):
-        return line
+    if r["exit"] == 127:
+        name = missing_name(line)
+        return f"{name}: command not found" if name and "/" not in name else None
     if r["exit"] == 1 and (m := NO_MODULE.fullmatch(line)):
         return None if task and own_module(task, m["m"] or m["d"]) else line
     return None
@@ -3061,10 +3068,11 @@ def own_module(task: store.Task, module: str) -> bool:
 
 
 def missing_name(line: str) -> str | None:
-    """The command a not-found line names: bash's `bash: line 1: X: command not found`, dash's
-    `sh: 1: X: not found`, zsh's `zsh:1: command not found: X`."""
-    m = re.search(r"command not found: (.+)$|([^:]+): (?:command )?not found$", line)
-    return (m.group(1) or m.group(2)).strip() if m else None
+    """The command a not-found line names (NOT_FOUND): bash's `bash: line 1: X: command not
+    found`, dash's `sh: 1: X: not found`, zsh's `zsh:1: command not found: X`, and wb's own
+    `X: command not found` (missing_command's)."""
+    m = NOT_FOUND.search(line)
+    return (m["z"] or m["n"]).strip() if m else None
 
 
 def command_words(cmd: str | None) -> set[str]:

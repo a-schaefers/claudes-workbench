@@ -28,8 +28,10 @@
          FAKE_COMPACT_DONE: it writes "42" and its step at 15% ends its turn (reason stop, #1151)
   floor  reads 48% of its window before its first change, then fills to 76%, then writes "42"
   refill every session changes a file, then fills 76% and works on for an hour
-  explore  FAKE_READS (41) reads of different files, each a small step, then 2 s (the runner
-         sees the last read before the edit) and writes "42" like ok: a one-shot still exploring
+  explore  FAKE_READS (41) reads of different files, each a small step, then FAKE_EXPLORE_PAUSE
+         seconds (2: the runner sees the last read before the edit; a runner slower than that
+         finds the file changed and lifts the guard) and writes "42" like ok: a one-shot still
+         exploring
   selfreads  behaves like ok; a run continuing a session (the self-review) breaks answer.txt
          ("41") and writes it back, then FAKE_READS (45) reads and goes on exploring for an hour:
          the tree as it began (#1168). FAKE_SELF_KEEP: it leaves "43" instead
@@ -96,11 +98,16 @@ WB_FAKE_API sets a model's or a provider's state, `<provider>[/<id>]=<state>,…
 one of the API scenarios above (or `ok`): a run of that model (a config model's too) plays it,
 its own state before its provider's, and a `nokey` provider
 drops out of `api model.list`, `models` and `auth list`, as one OpenCode can't authenticate does.
-`api model.list` prints `{location, data}`; `models` prints `<provider>/<id>` lines and, like
+`api model.list` prints `{location, data}`; `serve --stdio` (how wb reads the catalog: models.model_list)
+prints `{"url": ...}`, a server on 127.0.0.1 asking Basic `opencode:<OPENCODE_PASSWORD>` (401
+otherwise), until its stdin closes: GET /api/plugin `{location, data: [plugins]}`, GET /api/model
+the same `{location, data}`. FAKE_COLD (a number) plays OpenCode 2.4's cold server (2026-11-24): its
+first FAKE_COLD plugin.list reads list no plugin, and model.list until then lists only the
+catalog's first entry; FAKE_SERVE_PID, a file: the server writes its pid there. `models` prints `<provider>/<id>` lines and, like
 2.3.2, takes no provider argument; `auth list --format json` prints `[{id, name, connections:
 [{type: "credential", id, label, method: "key"}]}]` per provider. FAKE_CALLS, a file: each `api`,
-`models` and `auth` call appends its argv (how often wb read the catalog); FAKE_CATALOG_FAIL:
-`api model.list` and `models` print an error on stderr and exit 1. `run -m <provider>/<id>#<variant>`
+`models`, `serve` and `auth` call appends its argv (how often wb read the catalog); FAKE_CATALOG_FAIL:
+`api model.list`, `models` and `serve` print an error on stderr and exit 1. `run -m <provider>/<id>#<variant>`
 splits the provider at the first `/` and the variant at the first `#` after it; a catalog
 provider's unknown model is `nokey`'s error, its unknown variant (the catalog's and the config's
 `provider.<p>.models.<m>.variants`, from OPENCODE_CONFIG and OPENCODE_CONFIG_CONTENT) `Variant
@@ -163,12 +170,62 @@ def reachable() -> list:
             if api_state(e["providerID"], e["id"]) != "nokey"]
 
 
-if os.environ.get("FAKE_CALLS") and args[:1] in (["api"], ["models"], ["auth"]):
+if os.environ.get("FAKE_CALLS") and args[:1] in (["api"], ["models"], ["auth"], ["serve"]):
     with open(os.environ["FAKE_CALLS"], "a") as fh:  # which catalog and key reads wb made (#1013)
         fh.write(json.dumps(args) + "\n")
-if os.environ.get("FAKE_CATALOG_FAIL") and (args[:2] == ["api", "model.list"] or args[:1] == ["models"]):
+if os.environ.get("FAKE_CATALOG_FAIL") and (args[:2] == ["api", "model.list"]
+                                            or args[:1] in (["models"], ["serve"])):
     print("Error: Unable to connect. Is the computer able to access the url?", file=sys.stderr)
     sys.exit(1)
+if args[:2] == ["serve", "--stdio"]:
+    import base64
+    import threading
+    import urllib.parse
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    password = os.environ.get("OPENCODE_PASSWORD") or os.environ.get("OPENCODE_SERVER_PASSWORD") or ""
+    cold = [int(os.environ.get("FAKE_COLD") or 0)]
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            want = "Basic " + base64.b64encode(f"opencode:{password}".encode()).decode()
+            if self.headers.get("Authorization") != want:
+                return self.reply(401, {"_tag": "Unauthorized"})
+            url = urllib.parse.urlsplit(self.path)
+            where = (urllib.parse.parse_qs(url.query).get("location[directory]") or [os.getcwd()])[0]
+            if url.path == "/api/plugin":
+                loaded = cold[0] <= 0
+                cold[0] -= 1
+                return self.reply(200, {"location": {"directory": where},
+                                        "data": [{"id": "fake.models", "state": {"status": "active"}}]
+                                        if loaded else []})
+            if url.path == "/api/model":  # cold: what has loaded so far, as 2.4's model.list answers
+                rows = reachable()
+                return self.reply(200, {"location": {"directory": where},
+                                        "data": rows if cold[0] < 0 or not os.environ.get("FAKE_COLD")
+                                        else rows[:1]})
+            self.reply(404, {"_tag": "NotFound"})
+
+        def reply(self, code, doc):
+            body = json.dumps(doc).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    if os.environ.get("FAKE_SERVE_PID"):
+        with open(os.environ["FAKE_SERVE_PID"], "w") as fh:
+            fh.write(str(os.getpid()))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    print(json.dumps({"url": f"http://127.0.0.1:{server.server_address[1]}"}), flush=True)
+    sys.stdin.read()  # until the client closes it, as `serve --stdio` waits
+    server.shutdown()
+    sys.exit(0)
 if args[:2] == ["api", "model.list"]:  # with or without --standalone, as the real one takes
     print(json.dumps({"location": {"directory": os.getcwd()}, "data": reachable()}))
     sys.exit(0)
@@ -714,7 +771,7 @@ elif scenario == "explore":  # #1087: many small reads before the first edit
     for i in range(int(os.environ.get("FAKE_READS", 41))):
         tool("read", {"filePath": os.path.abspath(f"src/f{i}.py")})
         emit("step_finish", reason="tool-calls", tokens={"input": 1000 + 100 * i, "output": 50})
-    time.sleep(2)
+    time.sleep(float(os.environ.get("FAKE_EXPLORE_PAUSE", 2)))
     with open("answer.txt", "w") as fh:
         fh.write("42\n")
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
