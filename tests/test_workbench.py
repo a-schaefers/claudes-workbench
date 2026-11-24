@@ -30707,6 +30707,37 @@ class Routes(Base):
                          "trivial: API model deepseek/deepseek-flash → anthropic/claude-haiku-5-5 (Anthropic), "
                          "used from the next start")
 
+    def test_thinking_turned_on_while_a_roles_api_side_is_dormant_is_named_by_the_yes_that_sends_it_there(self):
+        # #1177 (2026-11-24): thinking on a GPU role (an API model kept, or none yet) needs no
+        # dialog, but the later yes to Agents API, busy api or a new API model never said it, so
+        # every API task of the role ran on the reasoning variant nobody agreed to
+        self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.route("trivial", "gpu")
+        os.environ["CLAUDECODE"] = "1"
+        self.assertEqual(self.route("trivial", "--thinking", "on")[:2],
+                         (0, "changed: trivial: thinking off → on\n"))
+        for argv in (("all", "api"), ("busy", "api")):
+            with self.subTest(argv=argv):
+                asked = self.dry(*argv)
+                self.assertTrue(asked["gate"])
+                self.assertIn("thinking on (trivial)", asked["change"])
+        self.assertNotIn("thinking", self.dry("all", "gpu")["change"])   # nothing newly on API
+        self.approve(self.dry("all", "api")["approval"])
+        code, out, err = self.route("all", "api")
+        self.assertEqual(code, 0, err)
+        self.assertIn("thinking on (trivial)", self.doc()["roles"]["trivial"]["said"])
+        # no API model yet: under Agents API, and under the busy opt-in, the --api line names it
+        for setup in ({"use": "api"}, {"busy": "api"}):
+            with self.subTest(setup=setup):
+                self.path.write_text(json.dumps({"v": 1, "day_usd": 5, **setup, "roles": {
+                    "writing": {"via": "gpu", "thinking": "off"}}}))
+                self.assertEqual(self.route("writing", "--thinking", "on")[0], 0)
+                asked = self.dry("writing", "--api", "anthropic/claude-haiku-5-5")
+                self.assertTrue(asked["gate"])
+                self.assertIn("thinking on", asked["change"])
+        self.assertIn("when the GPU is busy, writing starts on its API model (your code goes to Anthropic "
+                      "(writing); thinking on (writing); cap $5/day)", asked["change"])
+
     def test_a_kept_api_model_is_checked_again_when_its_role_goes_back_to_api(self):
         # ARCHITECTURE.md, *Roles*: the kept model must still be one the role may run
         self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
