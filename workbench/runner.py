@@ -36,7 +36,7 @@ from . import (ask_mcp, context, gitguard, gitops, hardware, keyhole, lane, less
                skills, stats, store, tuning)
 from . import meter
 from . import privacy
-from .events import EDIT_TOOLS, StuckDetector, compaction_failed, normalize
+from .events import EDIT_TOOLS, StuckDetector, compaction_failed, normalize, written
 from .watch import Watcher
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
@@ -1630,7 +1630,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
 
     detector = StuckDetector(**{"no_edit": no_edit_limit(st.get("window"), api=api_task(task)),
                                 **spec.get("stuck", {})},
-                             worktree=task.worktree)
+                             worktree=task.worktree, workdir=task.workdir)
     wall, silence, think = limit(task, "round"), limit(task, "silence"), limit(task, "think")
     # A shell command OpenCode moved to the background (past 2 minutes it does, and the turn
     # ends waiting on it) prints nothing until it is done: a long test suite counted as thinking,
@@ -2610,14 +2610,18 @@ def venv_in(path: Path) -> Path | None:
 
 def agent_wrote(task: store.Task) -> list[str]:
     """The files the agent wrote with its edit tools, relative to the worktree, from events.jsonl:
-    what an ignored path would hide from the diff and the commit (gitops.ignored_files)."""
+    what an ignored path would hide from the diff and the commit (gitops.ignored_files). A patch
+    row's every file too (`paths`, #1148); a relative path is the workdir's, as OpenCode resolves
+    it against its directory, the package in a monorepo."""
     root = os.path.realpath(task.worktree)
+    base = os.path.realpath(task.workdir)
     out = set()
     for r in store.read_jsonl(task.dir / "events.jsonl")[0]:
-        if r.get("kind") == "tool" and r.get("ok") and r.get("tool") in EDIT_TOOLS and r.get("path"):
-            full = os.path.realpath(os.path.join(root, str(r["path"])))
-            if full.startswith(root + os.sep):
-                out.add(os.path.relpath(full, root))
+        if r.get("kind") == "tool" and r.get("ok") and r.get("tool") in EDIT_TOOLS:
+            for p in written(r):
+                full = os.path.realpath(os.path.join(base, p))
+                if full.startswith(root + os.sep):
+                    out.add(os.path.relpath(full, root))
     return sorted(out)
 
 

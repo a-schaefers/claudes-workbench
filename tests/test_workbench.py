@@ -1938,6 +1938,28 @@ class Lifecycle(Base):
         self.assertIn("lib/util.py", tree)
         self.assertNotIn("build/out.o", tree)
 
+    def test_a_file_a_gpt_agent_patched_under_an_ignored_path_is_named_and_never_dropped_at_accept(self):
+        # #1148 (the 2.0 bar loop, 2026-11-24): OpenCode 2.3.2 gives a GPT model `patch` in place
+        # of edit and write, its input patchText only; its row had no path, so the report had no
+        # NOTE and accept committed answer.txt alone and deleted the worktree with lib/helper.py
+        (self.repo / ".gitignore").write_text("lib/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore lib"], check=True)
+        self.start("t-patch", "patch", "--test", TEST_CMD)
+        wait_phase("t-patch", {"review"})
+        t = store.Task("t-patch")
+        row = next(r for r in store.read_jsonl(t.dir / "events.jsonl")[0] if r.get("tool") == "patch")
+        self.assertEqual(row["paths"], ["lib/helper.py", "answer.txt"])
+        self.assertEqual(row["brief"], "lib/helper.py")
+        self.assertEqual(runner.agent_wrote(t), ["answer.txt", "lib/helper.py"])
+        self.assertIn("NOTE: git ignores files the agent wrote (lib/helper.py)", run_wb("report", "t-patch"))
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-patch", "-m", "feat: one")
+        self.assertIn("not committed: git ignores files the agent wrote (lib/helper.py)", err.getvalue())
+        self.assertEqual(self.branch("delegate/t-patch"), t.spec["base"])     # nothing committed
+        self.assertTrue((t.worktree / "lib" / "helper.py").is_file())         # and the work kept
+
     def test_diff_of_a_merged_task_hints_a_command_that_still_works(self):
         # #477 (the audit of 1.8): the hint named delegate/<task>, which the merge had deleted,
         # and git said "unknown revision"
@@ -25934,6 +25956,36 @@ class Detector(unittest.TestCase):
             "status": "completed", "input": {"filePath": "/a/" + "x" * 120}}}}, 1)
         self.assertEqual(row["path"], "/a/" + "x" * 120)                 # whole, not the brief
 
+
+    def test_a_patch_names_every_file_it_wrote_from_its_metadata_or_its_headers(self):
+        # #1148 (2026-11-24): a GPT model's `patch` (OpenCode 2.3.2) has only patchText, so its
+        # row had no path and the stuck detector and agent_wrote never saw what it wrote
+        text = ("*** Begin Patch\n*** Add File: lib/new.py\n+x = 1\n*** Update File: src/a.py\n@@\n-a\n+b\n"
+                "*** Update File: old.py\n*** Move to: pkg/moved.py\n@@\n-c\n+d\n"
+                "*** Delete File: gone.py\n*** End Patch")
+        ev = lambda state: events.normalize({"type": "tool_use", "part": {"tool": "patch", "state": {  # noqa
+            "status": "completed", "input": {"patchText": text}, **state}}}, 1)
+        self.assertEqual(ev({})["paths"], ["lib/new.py", "src/a.py", "pkg/moved.py"])  # the headers
+        self.assertEqual(ev({})["brief"], "lib/new.py")
+        meta = {"metadata": {"files": [{"file": "/w/lib/new.py", "status": "added"},
+                                       {"file": "gone.py", "status": "deleted"}]}}
+        self.assertEqual(ev(meta)["paths"], ["/w/lib/new.py"])        # OpenCode's own list first
+        self.assertNotIn("paths", ev({"metadata": {"files": []}}))
+        with tempfile.TemporaryDirectory() as wt:
+            os.mkdir(os.path.join(wt, "pkg"))
+            d = events.StuckDetector(no_edit=2, worktree=wt, workdir=os.path.join(wt, "pkg"))
+            row = lambda i, paths: {"kind": "tool", "tool": "patch", "ok": True, "brief": "",  # noqa
+                                    "sig": f"patch:{i}", "paths": paths}
+            self.assertIsNone(d.feed(row(1, ["/tmp/scratch.c"])))
+            self.assertIsNone(d.feed(row(2, ["/tmp/x.c", "../web/a.ts"])))  # the package's ../: the task's
+            self.assertEqual(d.since_edit, 0)
+            self.assertIsNone(d.feed(row(3, ["../../out.c"])))            # outside the worktree
+            self.assertIn("without changing a file", d.feed(row(4, ["/tmp/y.c"])))
+            # agent_wrote: a relative path is the package's, where OpenCode runs (#1148)
+            task = mock.Mock(worktree=Path(wt), workdir=Path(wt) / "pkg", dir=Path(wt) / "t")
+            os.mkdir(task.dir)
+            store.append_jsonl(task.dir / "events.jsonl", row(5, ["lib/h.py", "../top.py", "../../out.c"]))
+            self.assertEqual(runner.agent_wrote(task), ["pkg/lib/h.py", "top.py"])
 
     def test_an_event_without_a_timestamp_is_stamped_when_read_not_at_zero(self):
         # #481: ts 0.0 sorted the row first in wb watch and the check-in digests
