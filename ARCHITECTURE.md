@@ -693,8 +693,8 @@ Feedback, next and resume refuse 1.x (exit 3) and note one outside `OPENCODE_TES
    `run_tests`'s `testing` (left `running`, `wb steer --now` promised an interrupt it couldn't
    keep, #943). `_rejoin` (phase `queued`, "waiting for the GPU") retakes it
    first-come by the task's start; a review end doesn't rejoin. Scratch-checkout checks (base
-   check, `wb verify`, `wb shot`) take no part of the lease; with `--unload-for-tests` each takes
-   the GPU alone (`verify.gpu`, #502). `lease.load()` adds to `status.load_secs` (never overwrites,
+   check, `wb verify`, `wb shot`, `wb bench`'s checks and grades) take no part of the lease; with
+   `--unload-for-tests` each takes the GPU alone (`verify.gpu`, #502, #1098). `lease.load()` adds to `status.load_secs` (never overwrites,
    #567), `limit.context` to `status.window`, and `tuning.tune` sets `status.tuned` once. A load
    error: `failed`.
 3. Each round n: after the first, rejoin and `lease.load()` again (Ollama's keep-alive resets per
@@ -3607,7 +3607,9 @@ non-trial task. It keeps the task's setup and `--setup-timeout`, copies, sibling
 `grants_kept`, `cli._keep_grants`, since the rules go at the close, #250), package (`subdir`) and
 `unload_for_tests`, and passes them to its base check, reference check, each replay and
 `wb bench self` (`bench._inputs`; without the limit a long build stopped at 1800 s and was an `error` every
-run, without the flag GPU tests ran beside the resident model, #735; an older case reads them from
+run, without the flag GPU tests ran beside the resident model, #735; the flag gives a replay's
+rounds `--unload-for-tests`, and the base check, the reference check and every grade, a replay's
+after its runner has let the lease go and `wb bench self`'s, run inside `verify.gpu`, #1098; an older case reads them from
 its task, `bench._kept`, `bench.subdir`; task gone too: `error` rows). A replay runs from the
 package (`--repo <checkout>/<subdir>`: from the root an `answer.txt` passed a check of
 `app/answer.txt`, #425). The step's commit is found by its trailer

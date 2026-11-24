@@ -14438,6 +14438,51 @@ class Bench(Base):
         self.assertIn("--unload-for-tests", argv)
         self.assertNotIn("--unload-for-tests", argv_of({**case, "unload_for_tests": False}))
 
+    def test_a_cases_checks_and_every_grade_hold_the_gpu_alone_when_its_tests_need_it(self):
+        # #1098 (the 2.0 audit, 2026-11-23): only a replay's own rounds got --unload-for-tests;
+        # bench add's base and reference checks, each replay's grade and wb bench self's ran
+        # beside resident models, so an out-of-memory failure refused a good case or read as the
+        # model's. Each runs inside the GPU hold (media.gpu, through verify.gpu), and a case
+        # without the flag waits for no GPU
+        from workbench import bench, media
+        held, calls = [], []
+        real_lane = runner.run_in_lane
+
+        @contextlib.contextmanager
+        def gpu(who, say, wait, *a, **k):
+            held.append(who)
+            yield
+            held.pop()
+
+        def lane(task, cmd, *a, **k):
+            calls.append((task.name, cmd, bool(held)))
+            return real_lane(task, cmd, *a, **k)
+        self.start("t-gpu", "ok", "--test", "sh tests/check.sh", "--unload-for-tests")
+        wait_phase("t-gpu", {"review"})
+        wt = store.Task("t-gpu").worktree
+        (wt / "tests").mkdir()
+        (wt / "tests" / "check.sh").write_text("grep -qx 42 answer.txt\n")
+        run_wb("accept", "t-gpu", "-m", "feat: the answer")
+        self.accepted("t-src")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        self.fake_claude("42")
+        with mock.patch.object(media, "gpu", gpu), mock.patch.object(runner, "run_in_lane", lane):
+            bench.add("t-gpu")                                     # the base, then the reference
+            self.assertEqual(calls, [("t-gpu", "sh tests/check.sh", True)] * 2)
+            calls.clear()
+            row = bench.replay(bench.cases()["t-gpu"], "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
+            self.assertEqual(row["outcome"], "passed", row)
+            self.assertEqual([c[1:] for c in calls], [("sh tests/check.sh", True)])  # its grade
+            calls.clear()
+            self.assertEqual(bench.self_run("t-gpu")["outcome"], "passed")
+            self.assertEqual(calls, [("t-gpu", "sh tests/check.sh", True)])
+            calls.clear()
+            bench.add("t-src")                                     # no flag: no GPU wait
+            row = bench.replay(bench.cases()["t-src"], "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
+            self.assertEqual(row["outcome"], "passed", row)
+            self.assertEqual(bench.self_run("t-src")["outcome"], "passed")
+            self.assertEqual([c[2] for c in calls], [False] * 4)
+
     def test_a_cases_checkouts_read_the_bytes_the_task_read(self):
         # #736 (the 2026-11-21 audit, reproduced by both audits): with the repo's own
         # core.autocrlf the task read CRLF, and bench add's reference check and each replay's

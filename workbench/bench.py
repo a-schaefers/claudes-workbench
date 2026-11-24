@@ -441,8 +441,13 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
             overlay(case, work, tmp)  # as a replay gets them (#346)
             at = _At(name, work)
             _prepared(at, "the base")
-            codes = [runner.run_in_lane(at, c, BASE_CHECK_SECS)[0]
-                     for c in (case["test_cmd"], check) if c]
+            # with the GPU alone for tests that need it, as verify's checks have it: only the
+            # replay's own rounds had --unload-for-tests, so this check, the reference check and
+            # each grade ran beside resident models, an out-of-memory failure read as the case's
+            # or the model's (#1098, 2026-11-23). _At's spec is the task's, which has the flag
+            with verify.gpu(at):
+                codes = [runner.run_in_lane(at, c, BASE_CHECK_SECS)[0]
+                         for c in (case["test_cmd"], check) if c]
         if all(c == 0 for c in codes):
             raise RuntimeError("the hidden checks already pass on the base: a replay that changed "
                                "nothing would pass. Name others (--hidden, --check)")
@@ -472,12 +477,13 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
             overlay(case, work, tmp)
             at = _At(name, work)
             _prepared(at, f"step {step}'s own commit")
-            for c in (case["test_cmd"], check):
-                code = c and runner.run_in_lane(at, c, case["test_timeout"])[0]
-                if c and code != 0:
-                    raise RuntimeError(
-                        f"`{c}` fails on step {step}'s own commit (exit {code}) when run as a "
-                        "replay is graded, in the agent's lane: no replay could pass it")
+            with verify.gpu(at):  # #1098: as the base check
+                for c in (case["test_cmd"], check):
+                    code = c and runner.run_in_lane(at, c, case["test_timeout"])[0]
+                    if c and code != 0:
+                        raise RuntimeError(
+                            f"`{c}` fails on step {step}'s own commit (exit {code}) when run as a "
+                            "replay is graded, in the agent's lane: no replay could pass it")
         store.write_json(tmp / "case.json", case)
         os.replace(tmp, d)
     finally:
@@ -803,11 +809,15 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
         (d / "diff.patch").write_text(gitops.diff(task.worktree, task.spec["base"]))
         overlay(case, task.worktree)
         out, ok = [], True
-        for cmd in (case["test_cmd"], case.get("check_cmd")):
-            if cmd:
-                code, text = runner.run_in_lane(task, cmd, int(case.get("test_timeout") or 900))
-                out.append(f"$ {cmd}\nexit: {code}\n\n{text}")
-                ok = ok and code == 0
+        # the GPU alone for the grade too (#1098): the replay's runner has let its lease go by
+        # review, and a real task could load its model while the grade ran. Its spec has the
+        # flag from --unload-for-tests (_start_task)
+        with verify.gpu(task):
+            for cmd in (case["test_cmd"], case.get("check_cmd")):
+                if cmd:
+                    code, text = runner.run_in_lane(task, cmd, int(case.get("test_timeout") or 900))
+                    out.append(f"$ {cmd}\nexit: {code}\n\n{text}")
+                    ok = ok and code == 0
         (d / "grade.txt").write_text("\n\n".join(out))
         return {**row, "outcome": "passed" if ok else "failed",
                 **({} if ok else {"why": "the hidden checks failed (grade.txt)"})}
@@ -959,12 +969,13 @@ def self_run(case_name: str, turns: int = SELF_TURNS) -> dict:
         (d / "diff.patch").write_text(gitops.diff(work, "HEAD"))
         overlay(case, work)
         out, ok = [], True
-        for cmd in (case["test_cmd"], case.get("check_cmd")):
-            if cmd:
-                code, text = runner.run_in_lane(_At(original.name, work), cmd,
-                                                int(case.get("test_timeout") or 900))
-                out.append(f"$ {cmd}\nexit: {code}\n\n{text}")
-                ok = ok and code == 0
+        at = _At(original.name, work)
+        with verify.gpu(at):  # #1098: as a replay's grade, in the original task's spec
+            for cmd in (case["test_cmd"], case.get("check_cmd")):
+                if cmd:
+                    code, text = runner.run_in_lane(at, cmd, int(case.get("test_timeout") or 900))
+                    out.append(f"$ {cmd}\nexit: {code}\n\n{text}")
+                    ok = ok and code == 0
         (d / "grade.txt").write_text("\n\n".join(out))
         return {**row, "outcome": "passed" if ok else "failed",
                 **({} if ok else {"why": "the hidden checks failed (grade.txt)"})}
