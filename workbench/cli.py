@@ -202,14 +202,26 @@ def _model_still_listed(task: store.Task, prompt: str | None = None, fresh: bool
     round's first (runner.first_tokens of ``prompt`` and ``fresh``): the session's context
     left out, the check passed and the room refused it at once (#1173, 2026-11-24). Its advice
     is a running task's: the role on the GPU for the next tasks only, as this one keeps its API
-    model (#1171)."""
+    model (#1171). And Agents on GPU (#1213), whose stop the runner's would be at once."""
     if task.spec.get("via") != "api":
         return
+    if why := _agents_gpu_now(task):
+        die(why, 3)
     if (m := models.lookup(task.spec.get("model") or "")) is None:
         die(runner.left_catalog(task), 3)
     if why := meter.refusal(m, task.spec.get("role"), task=task,
                             tokens=runner.first_tokens(task, prompt, fresh)):
         die(why, 3)
+
+
+def _agents_gpu_now(task: store.Task) -> str:
+    """Why an API task can't take a round now: the Agents switch on GPU, the user's "nothing
+    spends" (routes.AGENTS_GPU, #1213), the runner's stop before its next round; else ""."""
+    if task.spec.get("via") != "api" or not routes.agents_gpu():
+        return ""
+    n = task.name
+    return (f"{routes.AGENTS_GPU}: {n} runs on its API model {task.spec.get('model')}, so no round of it "
+            f"runs now. {routes.AGENTS_BACK}, then this again; or wb takeover {n} or wb discard {n}")
 
 
 def _opencode_again(task: store.Task) -> None:
@@ -1180,12 +1192,9 @@ def local_only_refusal(repo: Path, sub: str | None, role: str, model: str | None
 
 def _local_only_now(task: store.Task) -> str:
     """For an API task whose repo became local-only after it started, the line wb next, feedback
-    and resume refuse it with (takeover or discard: its model is fixed per task), else ''."""
-    # runner.api_task: a task from before #1016 on an API model has no `via` until its runner
-    # writes one (runner.settle_via), and its first round after the upgrade went too (#1111)
-    if runner.api_task(task) and privacy.local_only(task.spec["repo"], task.spec.get("subdir")):
-        return privacy.since_start_line(task)
-    return ""
+    and resume refuse it with (takeover or discard: its model is fixed per task), else ''. The
+    runner's own check, before the lease and every round, is the same (#1215)."""
+    return runner.local_only_now(task)
 
 
 def _local_only_since(task: store.Task) -> None:
@@ -1877,7 +1886,8 @@ def cmd_next(a):
             with _settle_proposals(task, a.take_claude_md):
                 # a step that changed nothing advances with no commit: it died on "nothing to
                 # commit" and the task stayed on the step (#507, Claude's audit of 1.90)
-                wrote = runner.agent_wrote(task) + runner.hand_wrote(task)  # Claude's too (#1179)
+                # Claude's too (#1179), and the agent's shell's (#1210)
+                wrote = runner.agent_wrote(task) + runner.hand_wrote(task) + runner.shell_wrote(task)
                 left = _left_out(task, wrote, a.include)
                 if gitops.changed(task.worktree) or gitops.ignored_files(task.worktree, wrote):
                     commit = gitops.commit_all(
@@ -2624,7 +2634,7 @@ def cmd_resume(a):
         if not _rechecks_out(t) and (why := _worktree_problem(t)):
             print(why)  # as _resume would say it, without ending the batch
             continue
-        if why := _local_only_now(t):  # its repo became local-only: the rest still go on (#1021)
+        if why := _local_only_now(t) or _agents_gpu_now(t):  # the rest still go on (#1021, #1213)
             print(why)
             continue
         with store.locked(runner.lock_file(t.name, "cmd")):  # as one_at_a_time, task by task
@@ -2702,12 +2712,13 @@ def _resume(task: store.Task) -> None:
 
 
 def _left_out(task: store.Task, wrote: list[str], include: bool) -> list[str]:
-    """The ignored files changed since the agent stopped that a commit of the worktree leaves out
-    (runner.hand_left; with ``include``, less the ignored ones of ``wrote`` it adds); [] when git
-    can't say. A .csv Claude wrote beside its module under lib/ was dropped without a word, and
-    deleted with the worktree (#1179's review, 2026-11-24)."""
+    """The ignored files changed in the worktree that a commit of it leaves out (runner.hand_left,
+    since the agent stopped, and runner.shell_left, since its first round, #1210; with
+    ``include``, less the ignored ones of ``wrote`` it adds); [] when git can't say. A .csv Claude
+    wrote beside its module under lib/ was dropped without a word, and deleted with the worktree
+    (#1179's review, 2026-11-24)."""
     try:
-        left = gitops.ignored_files(task.worktree, runner.hand_left(task))
+        left = gitops.ignored_files(task.worktree, runner.hand_left(task) + runner.shell_left(task))
         return sorted(set(left) - set(gitops.ignored_files(task.worktree, wrote) if include else ()))
     except (gitops.GitError, OSError):
         return []
@@ -3183,6 +3194,10 @@ def _route_start(a) -> None:
         return
     if not API_RUNS:  # exit 3: the mod lets the call through, and wb start refuses it, unasked
         die(f"{m.id} {API_NOT_YET}", 3)
+    # Agents on GPU: wb start's refusal (routes.resolve), here before the dialog, so the user is
+    # never asked to approve a start that then exits 3 (#1213's review, 2026-11-24)
+    if routes.agents_gpu():
+        die(f"{routes.AGENTS_GPU}: {m.id} is an API model. {routes.AGENTS_BACK}, or a GPU model", 3)
     # a local-only spot's refusal in place of a dialog line (#1021): never ask the user to
     # approve a start wb start refuses
     try:
@@ -3782,8 +3797,9 @@ def cmd_accept(a):
             if not commit:
                 head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
                 with _settle_proposals(task, a.take_claude_md):  # kept if the commit fails (#507)
-                    # Claude's ignored files too: a takeover's lib/ module was lost (#1179)
-                    wrote = runner.agent_wrote(task) + runner.hand_wrote(task)
+                    # Claude's ignored files too: a takeover's lib/ module was lost (#1179); and
+                    # the agent's shell's: its `cat > lib/util.py` was (#1210)
+                    wrote = runner.agent_wrote(task) + runner.hand_wrote(task) + runner.shell_wrote(task)
                     left = _left_out(task, wrote, a.include)
                     if (gitops.changed(task.worktree) or head == spec["base"]
                             or gitops.ignored_files(task.worktree, wrote)):

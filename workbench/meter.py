@@ -46,6 +46,10 @@ from . import keyhole, models, routes, store
 CHECKIN_SHARE = 0.5      # past this share of the day cap, one check-in a day, across all tasks
 PLAN_PROVIDERS = ("opencode-go",)   # a plan's quota, not dollars (and m.cloud: Ollama cloud)
 EPS = 1e-9               # less than this between two figures is the same figure
+# status `api`'s figures are written to 6 places (Meter._book), an export's aren't: closer than
+# this to one is its rounding. Compared within EPS, a DeepInfra export a few 1e-7 past a rounded-down
+# `at_catalog` closed 4 of 10 real tasks of its own rows as `catalog prices` (#1220, 2026-11-24)
+STATUS_EPS = 1e-6
 STOP = keyhole.SPEND_REFUSED   # the keyhole's answer to OpenCode (a 400, which it doesn't retry) says it
 # today under the cap, but not by the next request at its worst, which the keyhole's room refuses:
 # "the cap is reached" there had Claude resume into the same stop, a wake for nothing (#1150)
@@ -392,14 +396,15 @@ def _ask(role: str | None, more: str, task=None) -> str:
     """refusal's "Ask the user: …", ``more`` the cap that would do. For a task already running
     (``task``: wb feedback, next or resume) the role on the GPU is for the next tasks only: the
     task keeps its API model, so "the role on the GPU" there had the user switch it and the retry
-    refused again with the same line (#1171, 2026-11-24, #1095's mistake in stop_text again)."""
-    r = role or "<role>"
+    refused again with the same line (#1171, 2026-11-24, #1095's mistake in stop_text again). The
+    way off API is routes.off_api's: `wb route <role> gpu` under Agents API changed nothing (#1218)."""
+    off = routes.off_api(role)
     if task is None:
-        return f". Ask the user: {more} (wb route cap <usd>), the role on the GPU (wb route {r} gpu), or tomorrow"
+        return f". Ask the user: {more} (wb route cap <usd>)" + (f", {off[0]} ({off[2]})," if off else "") + " or tomorrow"
     n = task.name
-    return (f". Ask the user: {more} (wb route cap <usd>) or tomorrow, then try again; or the role on the "
-            f"GPU (wb route {r} gpu) for the next tasks, with wb takeover {n} or wb discard {n} for this "
-            f"one (it keeps its API model)")
+    return (f". Ask the user: {more} (wb route cap <usd>) or tomorrow, then try again; or "
+            + (f"{off[0]} ({off[2]}) for the next tasks, with wb takeover {n} or wb discard {n} for this one"
+               if off else f"wb takeover {n} or wb discard {n}") + " (it keeps its API model)")
 
 
 def refusal(m, role: str | None = None, advice: bool = True, tokens: int = FIRST_TOKENS,
@@ -504,18 +509,19 @@ def stop_text(task, worst: float | None = None, tokens: int = FIRST_TOKENS) -> s
     # "the role on the GPU" went with "then wb resume", but resume keeps the task's API model
     # (fixed per task): the resumed round stopped at the cap again at once (#1095, 2026-11-23).
     # A route change is for the next tasks; this one is taken over or discarded.
-    n, role = task.name, task.spec.get("role") or "<role>"
+    # The way off API is routes.off_api's, from routes.json now: `wb route <role> gpu` under Agents
+    # API, or for a task the busy opt-in sent, changed nothing (#1218, 2026-11-24).
+    n, off = task.name, routes.off_api(task.spec.get("role"))
     note = f"; {NOTE[b].strip(' ()')}" if t and NOTE[b] else ""
+    tail = (f"; or {off[0]} ({off[2]}) for the next tasks, with wb takeover {n} or wb discard {n} for this one"
+            if off else f"; or wb takeover {n} or wb discard {n}") + " (resume keeps its API model)."
     if w := _near(task, c, t, worst, tokens):  # under the cap: "the cap is reached" had Claude resume into it (#1150)
         return (f"{n} stopped: {NEAR} (up to {usd(w)}; {money(t, b)} of {usd(c)} today{note}). Its work "
                 f"so far is in the worktree. Ask the user: a cap of at least {usd(_enough(t, w))} (wb route "
-                f"cap <usd>) or tomorrow, then wb resume {n}; or the role on the GPU (wb route {role} gpu) "
-                f"for the next tasks, with wb takeover {n} or wb discard {n} for this one (resume keeps "
-                f"its API model).")
+                f"cap <usd>) or tomorrow, then wb resume {n}" + tail)
     return (f"{n} stopped: {STOP} ({money(t, b)} of {usd(c)} today{note}). Its work so far is in the "
             f"worktree. Ask the user: a higher cap (wb route cap <usd>) or tomorrow, then wb resume "
-            f"{n}; or the role on the GPU (wb route {role} gpu) for the next tasks, with wb takeover "
-            f"{n} or wb discard {n} for this one (resume keeps its API model).")
+            f"{n}" + tail)
 
 
 def _near(task, c: float, t: float, worst: float | None = None,

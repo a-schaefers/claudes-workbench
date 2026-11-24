@@ -214,13 +214,16 @@ def home_path(p) -> str:
 def local_only_line(where_: str, why: str, role: str | None, model_id: str, asked: bool) -> str:
     """wb start's exit-3 line for an API model in a local-only spot: the repo, why it is
     local-only, the role (or the --model), and the choices. Never a GPU model instead (#1008's
-    decision 2)."""
+    decision 2). The role's way off API is routes.off_api's: `wb route <role> gpu` under Agents
+    API changed nothing, and the retry was refused the same way (#1218, 2026-11-24)."""
+    from . import routes  # routes imports this module
     if asked:
         what = f"the task's model is API ({model_id}, --model)"
         fix = "a GPU model"
     else:
         what = f"the {role} role is on API ({model_id})"
-        fix = f"put {role} on the GPU (wb route {role} gpu, the user's yes)"
+        off = routes.off_api(role) or routes.off_api(None)  # a start on API: never None
+        fix = f"{off[1]} ({off[2]}, the user's yes)"
     lift = ("the user drops --local-only for this task" if why == "--local-only"
             else "the user lifts local_only for this repo")
     return f"{where_} is local-only ({why}): {what}. Choices: {fix}, or {lift}."

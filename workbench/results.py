@@ -391,8 +391,8 @@ def _api_usage(task: store.Task) -> dict | None:
             cat = at_catalog(st)
             extra = sum(said) - cat
             # with no provider row (cat is the meter) this is the export, as ever, unless the meter
-            # counted more
-            if extra > meter.EPS or (extra >= 0 and abs(live - cat) <= meter.EPS):
+            # counted more; both status figures are rounded, the export isn't (STATUS_EPS, #1220)
+            if extra > meter.STATUS_EPS or (extra >= 0 and abs(live - cat) <= meter.STATUS_EPS):
                 return {**out, "cost": round(live + max(0.0, extra), 6), "source": "opencode"}
             return {**out, "cost": round(live, 6), "source": "metered"}
         return {**out, "cost": round(sum(said), 6), "source": "opencode"}

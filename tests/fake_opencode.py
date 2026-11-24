@@ -4,6 +4,12 @@
   ok     write answer.txt = "42", say so
   patch  as ok, and lib/helper.py too, in one `patch` call (a GPT model's in 2.3.2: no edit or
          write): input `patchText` only, the files in `state.metadata.files[].file` (#1148)
+  shellwrite  lib/util.py with a `bash` row run in lib/ by its `workdir` (cat > util.py <<X),
+         then main.py importing it and answer.txt = "42" with write (#1210, its third review)
+  buildout  dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names
+         neither, then answer.txt = "42" with write (#1210's review)
+  pkgbuild  a `bash` row `grep -n answer pkg/a.py`, then build/lib/pkg/{__init__,a,b}.py behind
+         one `python -m build`, then answer.txt = "42" with write (#1210's second review)
   stay   as ok, then stays open for an hour, its output open and silent: the agent's turn over
          (reason stop) and OpenCode not exiting (#1160)
   fix    first round writes "41" (wrong); a continued session (--session) writes "42"
@@ -29,6 +35,8 @@
          FAKE_COMPACT_KEPT: its step after is at 34%, over half the one before: the tail OpenCode
          2.4.1 keeps verbatim beside the summary (#1185)
   floor  reads 48% of its window before its first change, then fills to 76%, then writes "42"
+  think  a step at 40% of a 32K window whose 8192 output is a think OpenCode never sends back,
+         then writes "41", a step whose prompt grew (5.2K), and writes "42" like ok (#1219)
   refill every session changes a file, then fills 76% and works on for an hour
   explore  FAKE_READS (41) reads of different files, each a small step, then FAKE_EXPLORE_PAUSE
          seconds (2: the runner sees the last read before the edit; a runner slower than that
@@ -40,7 +48,9 @@
          as it began (#1168). FAKE_SELF_KEEP: it leaves "43" instead. FAKE_SELF_FILL: the
          self-review's first session breaks it, then fills 76% of a 32K window and works on for
          an hour; the fresh session carrying on plays the rest (#1188), or with FAKE_SELF_KEEP only
-         reads, the check left broken
+         reads, the check left broken. FAKE_SELF_STALL: the self-review's first run breaks it,
+         says a few words and is silent for an hour; the run after a nudge or a note (its prompt
+         the NUDGE or a steer's, "Claude, your reviewer") plays the rest (#1207)
   bgwait a command OpenCode moved to the background: `background_wait`, quiet for FAKE_BGWAIT
          seconds (6), then writes "42" like ok
   devserver  writes "42", starts `npm run dev` in the background, ends its turn (reason stop),
@@ -593,8 +603,10 @@ if scenario == "http" and args and args[0] == "run":  # a model request through 
     scenario = "ok"
 if scenario == "slow":
     scenario = "ok" if "--session" in args else "hang"
-if scenario == "selfreads" and "Before Claude reviews this" not in (args[-1] if args else ""):  # #1168: round 1 is ok's
-    scenario = "ok"
+if scenario == "selfreads" and "Before Claude reviews this" not in (args[-1] if args else "") \
+        and not (os.environ.get("FAKE_SELF_STALL")  # #1207: the nudge's or the note's round
+                 and re.search(r"Claude, your reviewer|Stop planning", args[-1] if args else "")):
+    scenario = "ok"  # #1168: round 1 is ok's
 if (scenario in ("fill", "compact", "donefull") or scenario == "compactfail" and not os.environ.get("FAKE_REFAIL")) \
         and "picking this task up in a fresh session" in args[-1]:
     scenario = "ok"
@@ -685,6 +697,45 @@ elif scenario == "patch":  # #1148: a GPT model's one `patch` call, as OpenCode 
                              {"file": "answer.txt", "status": "added", "additions": 1,
                               "deletions": 0, "patch": "@@ -0,0 +1 @@\n+42"}]})
     emit("text", text="Wrote lib/helper.py and answer.txt = 42.")
+    finish()
+elif scenario == "shellwrite":  # #1210: a module written with the shell, the rest with write
+    os.makedirs("lib", exist_ok=True)
+    with open(os.path.join("lib", "util.py"), "w") as fh:
+        fh.write("def answer():\n    return 42\n")
+    # in lib/ by the shell tool's `workdir`, not a cd, as OpenCode 2.3.2 tells the model to
+    # (#1210's third review)
+    tool("bash", {"command": "mkdir -p lib", "description": "Make lib"}, output="")
+    tool("bash", {"command": "cat > util.py <<'X'\ndef answer():\n    return 42\nX",
+                  "workdir": os.path.abspath("lib"), "description": "Write lib/util.py"}, output="")
+    for name, text in (("main.py", "from lib.util import answer\nprint(answer())\n"), ("answer.txt", "42\n")):
+        with open(name, "w") as fh:
+            fh.write(text)
+        tool("write", {"filePath": os.path.abspath(name), "content": text})
+    emit("text", text="Wrote lib/util.py, main.py and answer.txt = 42.")
+    finish()
+elif scenario == "buildout":  # #1210's review: the agent's own build, its output under dist/
+    os.makedirs("dist", exist_ok=True)
+    for name, text in (("index.js", "exports.answer = () => 42;\n"),
+                       ("index.d.ts", "export declare const answer: () => number;\n")):
+        with open(os.path.join("dist", name), "w") as fh:
+            fh.write(text)
+    tool("bash", {"command": "npm run build", "description": "Build"}, output="> tsc\n")
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42\n"})
+    emit("text", text="Built, and wrote answer.txt = 42.")
+    finish()
+elif scenario == "pkgbuild":  # #1210's second review: a read of pkg/a.py, then build/lib's copy
+    tool("bash", {"command": "grep -n answer pkg/a.py", "description": "Read"}, output="1:# a\n")
+    os.makedirs(os.path.join("build", "lib", "pkg"), exist_ok=True)
+    for m in ("__init__", "a", "b"):
+        with open(os.path.join("build", "lib", "pkg", m + ".py"), "w") as fh:
+            fh.write("# " + m + "\n")
+    tool("bash", {"command": "python -m build", "description": "Build"}, output="ok\n")
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42\n"})
+    emit("text", text="Built, and wrote answer.txt = 42.")
     finish()
 elif scenario == "loop":
     for _ in range(10):
@@ -797,6 +848,13 @@ elif scenario == "selfreads" and os.environ.get("FAKE_SELF_FILL") \
     emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 900, "reasoning": 6000,
                                                       "cache": {"read": 16100}})  # 76%, as fill's
     time.sleep(3600)
+elif scenario == "selfreads" and os.environ.get("FAKE_SELF_STALL") \
+        and "Before Claude reviews this" in args[-1]:  # #1207: it thinks mid-check
+    with open("answer.txt", "w") as fh:
+        fh.write("41\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "41"})
+    emit("text", text="Now the test should fail; let me think about why.")
+    time.sleep(3600)
 elif scenario == "selfreads":  # #1168: a self-review that breaks a check, copies it back, reads
     keep = os.environ.get("FAKE_SELF_KEEP")
     for text in () if keep and os.environ.get("FAKE_SELF_FILL") else ("41", keep and "43" or "42"):
@@ -878,6 +936,22 @@ elif scenario == "compact":  # #774: a tool result past the margin compacted it 
         finish()
     else:
         time.sleep(3600)
+elif scenario == "think":  # #1219: a thinking GPU model's long think, counted in `output`
+    emit("step_finish", reason="tool-calls", tokens={"input": 4914, "output": 78})
+    emit("step_finish", reason="tool-calls", tokens={"input": 291, "output": 8192,
+                                                      "cache": {"read": 4910}})  # 13393: 40%
+    time.sleep(1)  # the runner sees that step before the change
+    with open("answer.txt", "w") as fh:
+        fh.write("41\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "41"})
+    # the think is not sent back: the prompt grew, 5201 to 5237, its history in the cache
+    emit("step_finish", reason="tool-calls", tokens={"input": 40, "output": 177,
+                                                      "cache": {"read": 5197}})
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
+    emit("text", text="Wrote answer.txt = 42.")
+    finish()
 elif scenario == "compactfail":  # #969: as OpenCode 2.3 prints it, then the run ends
     if os.environ.get("FAKE_COMPACT_EDIT"):
         with open("answer.txt", "w") as fh:

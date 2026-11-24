@@ -431,14 +431,27 @@ def boot_id() -> str | None:
 
 
 def folds_case(path) -> bool:
-    """Whether the file system holding ``path`` ignores case: the path with every letter's case
-    swapped is the same directory (APFS and HFS+ as macOS formats them; not ext4). Here, not in
-    cli, since context.repo_entries needs it too (#1157, 2026-11-24)."""
+    """Whether ``path`` is on a file system that ignores case: some component of its real path,
+    with its letters' case swapped, is the same file in the same parent (APFS and HFS+ as macOS
+    formats them, WSL2's drvfs on /mnt/c; not ext4). Here, not in cli, since
+    context.repo_entries needs it too (#1157, 2026-11-24).
+
+    Each component is tried in its own parent, never the whole path swapped: on WSL2 that read
+    /MNT/C/uSERS/…, /MNT isn't on the ext4 root, so a repo on /mnt/c read as case-sensitive and
+    a local_only key in another case than the cwd's sent it to the API model (#1217,
+    2026-11-24). Any component, not only the deepest: drvfs makes a directory WSL creates
+    case-sensitive (`case=dir`) under Windows' own folding ones, such as C:\\Users."""
     p = os.path.realpath(path)
-    try:
-        return p.swapcase() != p and os.path.samefile(p, p.swapcase())
-    except OSError:
-        return False
+    while (head := os.path.dirname(p)) != p:
+        name = os.path.basename(p)
+        if name.swapcase() != name:
+            try:
+                if os.path.samefile(p, os.path.join(head, name.swapcase())):
+                    return True
+            except OSError:
+                pass
+        p = head
+    return False
 
 
 _MACHINE: list = []
