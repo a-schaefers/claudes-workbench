@@ -2801,6 +2801,29 @@ class Lifecycle(Base):
         self.assertIn(report, runner.hand_left(t))
         self.assertIn("accepted t-mvn2", run_wb("accept", "t-mvn2", "-m", "feat: two"))
 
+    def test_claudes_rerun_of_the_acceptance_command_after_a_takeover_before_any_test_run_is_not_taken_for_its_files(self):
+        # #1211's review (2026-11-24): wb takeover in round 1, before the runner had run --test
+        # (a stuck round returns before its tests too), left ran_wrote empty, so Claude's rerun
+        # of `mvn test` was refused at accept as files written by hand. The base check runs the
+        # command on the base before round 1, and `mvn test` writes target/ there, failing or not
+        self.maven_repo()
+        cmd = f"{self.MVN_TEST} && {TEST_CMD}"
+        self.start("t-tk", "hang", "--test", cmd)
+        running("t-tk")
+        t = store.Task("t-tk")
+        self.assertEqual(t.status.get("ran_wrote"), ["target"])   # the base check wrote there
+        self.assertFalse((t.worktree / "target").exists())         # in its scratch checkout
+        run_wb("takeover", "t-tk")
+        (t.worktree / "answer.txt").write_text("42\n")
+        subprocess.run(["sh", "-c", cmd], cwd=t.worktree, check=True)  # Claude's run, as the skill says
+        self.assertEqual(runner.hand_wrote(t), [])
+        self.assertIn("target/surefire-reports/TEST-app.AppTest.xml", runner.hand_left(t))
+        self.assertIn("accepted t-tk", run_wb("accept", "t-tk", "-m", "feat: one", "--merge"))
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "--name-only", "main"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertIn("answer.txt", tree)
+        self.assertFalse([p for p in tree if p.startswith("target/")], tree)
+
     def test_diff_of_a_merged_task_hints_a_command_that_still_works(self):
         # #477 (the audit of 1.8): the hint named delegate/<task>, which the merge had deleted,
         # and git said "unknown revision"
@@ -18180,7 +18203,7 @@ class Verify(Base):
             return cm
         with mock.patch.object(media, "gpu", held("gpu")), \
                 mock.patch.object(runner, "prep_turn", held("turn")), \
-                mock.patch.object(verify, "_run", side_effect=lambda *a: order.append("run") or (1, "x")):
+                mock.patch.object(verify, "_run", side_effect=lambda *a, **k: order.append("run") or (1, "x")):
             runner._base_check(store.Task("t-gpuwait"))
         self.assertEqual(order, ["gpu", "turn", "run", "/turn", "/gpu"])
         self.assertEqual(store.Task("t-gpuwait").status["base_check"]["exit"], 1)

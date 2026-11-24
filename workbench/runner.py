@@ -2721,6 +2721,11 @@ def _ran_wrote(task: store.Task, since: float) -> None:
         new = gitops.ran_wrote(task.worktree, since)
     except (gitops.GitError, OSError):
         return
+    _note_ran(task, new)
+
+
+def _note_ran(task: store.Task, new) -> None:
+    """``new`` (gitops.ran_wrote's) added to status `ran_wrote`."""
     if new and not set(new) <= set(had := task.status.get("ran_wrote") or []):
         task.set_status(ran_wrote=sorted(set(had) | set(new)))
 
@@ -2986,8 +2991,14 @@ def base_check(task: store.Task) -> dict | None:
     limit = min(BASE_CHECK_SECS, int(task.spec.get("test_timeout") or 900))
     from . import verify  # verify imports this module
     timed: list[float] = []  # its scratch checkout and run, not the waits for the GPU or a turn (#779)
+    # where it wrote, as the worktree's paths: a takeover in round 1 (stuck, or before its tests
+    # ran) left ran_wrote empty, and Claude's rerun of `mvn test` there was refused at accept as
+    # files written by hand (#1211's review, 2026-11-24)
+    ran: list[str] = []
     code, output = verify.on_base(task, cmd, limit, say=lambda msg: task.set_status(last=msg),
-                                  turn=lambda: _timed(prep_turn(task, "check"), timed))  # one at a time (#590), apart from setups (#868)
+                                  turn=lambda: _timed(prep_turn(task, "check"), timed),  # one at a time (#590), apart from setups (#868)
+                                  ran=ran)
+    _note_ran(task, sorted(set(ran)))
     task.dir.joinpath("base-tests.txt").write_text(
         f"$ {cmd}\nexit: {code}\nshell: {test_shell()}\n\n{output}")
     return {"ok": code == 0, "exit": code, "tail": clip_tail(output, 8, total=1500), "limit": limit,
