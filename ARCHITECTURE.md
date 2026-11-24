@@ -327,7 +327,10 @@ credit or quota (<why>): top it up, or wait for the plan's reset; wb asks it aga
 gives up)`, on a watch of `$WB_HOME` (an `ok` or the keyhole's next mark wakes it), looking again at
 most every `API_WAIT`'s 30 s; past the mark's `until` one runner asks (the mark held
 `CREDIT_RECHECK_SECS` more under its lock, `asked_by` that task) and the others wait for its
-answer. The tasks queued behind a 402 each sent a round, met the 402 and woke Claude with a stop of
+answer. That runner's round (`models.credit_recheck` says this load made it the one to ask:
+`NoLease.recheck`) that meets the 402 again before any answer (`quota`, not `answered`) goes back
+to waiting in `drive`, the 402's new mark held, with no stop or notice of its own: stopped, each
+waiter in turn woke Claude, 900 s apart, with the same stop (#1216). The tasks queued behind a 402 each sent a round, met the 402 and woke Claude with a stop of
 its own, though wb start refused in that state (#1178). A mark `asked_by` the task is its turn: `wb
 feedback` or `wb resume` of a task its provider stopped (status `infra: provider`, an API task)
 hands it the turn first (`cli._credit_turn`, `models.credit_ask`: `asked_by` it, `until` moved
@@ -1048,7 +1051,9 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   lease stepped aside, a wait to the provider's `api-health.json` `until`, else `RATE_LIMIT_SECS`,
   at most `RATE_WAIT_S`, a steer note ending it into `_steer_round`, `wb stop` ending the runner),
   continuing the session: one revive a round, as a revive re-sends the whole context, which costs
-  money. A second stop, or a quota, key, setup or refused stop, ends it `stuck` with `cause` `provider`, `infra`
+  money. A quota stop of a recheck (`NoLease.recheck`, the round never `answered`) waits as
+  queued again, a `load` event "<provider> is still out of credit: the task waits as queued
+  again" and no notice (#1216). A second stop, or a quota, key, setup or refused stop, ends it `stuck` with `cause` `provider`, `infra`
   `provider` (a bench replay scores `error`), and `provider_remedy` under the STOPPED line (`wb
   feedback <task> --text "carry on"` once the provider allows, a round that counts no review, #1153, and `wb route <role> gpu (the user's
   yes)` when the task has a role; top up or wait for the plan's reset; /connect for a refused
@@ -3218,7 +3223,7 @@ read as a wrong id, Claude hunted for the "right" one).
 - `note_api(pid, state, why="", until=None)` writes `$WB_HOME/api-health.json` under
   `api-health.json.lock`: `no_credit` (402, a 429 saying `insufficient_quota` or a plan limit; for
   `CREDIT_RECHECK_SECS` 900, then the next start, or one runner waiting for credit
-  (`credit_turn`, #1178), asks once (at once for a provider-stopped task the user resumed:
+  (`credit_turn`, #1178; its 402 again waits again, no stop: `credit_recheck`, #1216), asks once (at once for a provider-stopped task the user resumed:
   `credit_ask`), a 402 isn't billed, and the keyhole records it again if it
   still holds: held until an `ok`, it held forever, since wb start refused the
   task that could get one, #1068; a row from before with no `until` expires from its `ts`), `rate_limited` (until `Retry-After`, else `RATE_LIMIT_SECS` 60),
@@ -6020,7 +6025,7 @@ $WB_HOME (~/.local/state/workbench)
                                  unreachable, until (epoch; a null from before #1068 reads as ts + CREDIT_RECHECK_SECS), why (redacted), ts,
                                  asked_by (a no_credit mark past its until that a waiting runner asks again, or one a
                                  provider-stopped task's wb feedback or wb resume asks at once: its task,
-                                 until moved CREDIT_RECHECK_SECS on, models.credit_turn, models.credit_ask, #1178)}}; ok removes it; past until reads as ok; the provider's cooldown every keyhole waits out, and the revive's wait (#1020)
+                                 until moved CREDIT_RECHECK_SECS on, models.credit_turn, models.credit_ask, #1178; the keyhole's next 402 drops it)}}; ok removes it; past until reads as ok; the provider's cooldown every keyhole waits out, and the revive's wait (#1020)
   api/<provider>.<i>.lock        an API provider's task slots (models.NoLease, #1015): API_PARALLEL (3) files, each flocked by the
                                  runner holding it, its task's name inside (models.api_holders); never in gpu.json
   spend-api.jsonl  .lock .checkin.lock  the API ledger (meter.py, #1019; *Spend*), one row each, every row {ts, day (local

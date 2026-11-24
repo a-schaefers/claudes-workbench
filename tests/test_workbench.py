@@ -31826,6 +31826,16 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.models.note_api("deepinfra", "rate_limited", "HTTP 429")             # not this wait's
         self.assertIsNone(self.models.credit_turn("deepinfra", "t-b"))
 
+    def test_only_a_waiter_handed_the_turn_past_the_mark_is_a_recheck_never_the_users_resume(self):
+        # #1216 (2026-11-24): a recheck's 402 waits again with no stop; the user's resume after a
+        # top-up (credit_ask) must still stop on one, or the user is told nothing
+        self.models.note_api("deepinfra", "no_credit", "HTTP 402", until=time.time() - 1)
+        self.assertEqual(self.models.credit_recheck("deepinfra", "t-a"), (None, True))
+        self.assertEqual(self.models.credit_recheck("deepinfra", "t-a"), (None, False))  # its turn held
+        self.assertFalse(self.models.credit_recheck("deepinfra", "t-b")[1])              # waits
+        self.assertTrue(self.models.credit_ask("deepinfra", "t-paid"))
+        self.assertEqual(self.models.credit_recheck("deepinfra", "t-paid"), (None, False))
+
     def test_the_users_resume_after_a_quota_stop_asks_at_once_and_the_tasks_waiting_behind_it_go_on_at_its_ok(self):
         # the review of #1178 (2026-11-24): a quota stop's remedy says top up, then wb feedback
         # "carry on", but the resumed runner met the no_credit mark its own 402 had just written
@@ -31919,6 +31929,55 @@ class ApiTasks(_ApiTask, _KeyholeTest):
             time.sleep(0.05)
         self.assertEqual(sorted(went), [x.task for x in leases])      # at its ok
         self.assertEqual(self.models.api_holders("deepinfra"), sorted(x.task for x in leases))  # theirs again
+
+    def test_a_task_waiting_behind_a_quota_stop_that_asks_again_and_meets_the_402_waits_again_with_no_stop_of_its_own(self):
+        # #1216 (bar loop round 3, 2026-11-24): past the no_credit mark's `until` a waiting runner
+        # asked again (#1178), met the same 402 and stopped with a quota stop of its own, and its
+        # 402's mark made the next waiter's turn 900 s on: a backlog woke Claude once per task, 15
+        # minutes apart, for the one top-up. Two rechecks with no top-up: the first stop alone
+        self.local_api_model()
+        self.up.mode, self.up.status, self.up.message = "status", 402, "Insufficient balance"
+        self.start_api("t-paid", "http", spawn=False)
+        self.start_api("t-behind", "http", "--queue", spawn=False)   # queued before the 402
+        self.drive_here("t-paid")
+        paid = store.Task("t-paid")
+        self.assertEqual((paid.status["phase"], paid.status.get("infra")), ("stuck", "provider"), paid.status)
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")     # lets a hung wait go
+        task = store.Task("t-behind")
+        path = self.models.api_health_path()
+
+        def recheck_due():                                            # the mark's 900 s run out
+            with store.locked(path.with_name(path.name + ".lock")):
+                doc = store.read_json(path, {})
+                doc["deepinfra"]["until"] = time.time() - 1
+                store.write_json(path, doc)
+
+        def waits_again(rechecks):
+            deadline = time.time() + 30
+            while not (len(self.up.seen) == 1 + rechecks and task.status.get("phase") == "queued"
+                       and (task.status.get("last") or "").startswith("waiting: deepinfra is out of credit")
+                       and sum("still out of credit" in (e.get("text") or "")
+                               for e in store.read_jsonl(task.dir / "events.jsonl")[0]) == rechecks):
+                self.assertLess(time.time(), deadline, (len(self.up.seen), task.status))
+                self.assertTrue(driver.is_alive(), task.status)
+                time.sleep(POLL)
+        driver = threading.Thread(target=self.drive_here, args=("t-behind",), daemon=True)
+        driver.start()
+        self.addCleanup(driver.join, 60)
+        waits_again(0)
+        for rechecks in (1, 2):                                       # no top-up: 402 again
+            recheck_due()
+            waits_again(rechecks)
+            self.assertNotIn("asked_by", self.models.api_health("deepinfra"))  # the 402's new mark
+        self.up.mode, self.up.status = "ok", 200                      # the user tops up
+        recheck_due()
+        driver.join(60)
+        self.assertFalse(driver.is_alive(), task.status)
+        self.assertEqual(task.status["phase"], "review", task.status)
+        self.assertEqual(len(self.up.seen), 4)                        # the 402, two rechecks, its round
+        self.assertEqual([(r["task"], r["kind"], r.get("cause"))
+                          for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["kind"] != "review"],
+                         [("t-paid", "stuck", "provider")])
 
     def test_with_unload_for_tests_an_api_tasks_tests_run_under_this_machines_pool(self):
         from workbench import verify

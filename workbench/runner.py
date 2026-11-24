@@ -4548,6 +4548,17 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 if not _go_on(task, n, "the round again"):  # the day cap holds here too (#1019)
                     return
                 continue
+            if rnd["guard"] == "quota" and getattr(lease, "recheck", False) and not rnd["answered"]:
+                # it asked again past the 402's mark for the tasks waiting behind it, and met the
+                # 402 again: the stop Claude was told of already. Stopped, each waiter woke Claude
+                # in turn, 900 s apart, with the same "out of credit" (#1216, 2026-11-24); back to
+                # waiting instead, the new 402's mark held, until a top-up's 2xx or the next turn
+                task.event({"ts": store.now(), "round": n, "kind": "load",
+                            "text": f"{provider_of(task)} is still out of credit: the task waits "
+                                    "as queued again"})
+                if not _go_on(task, n, "the round again"):
+                    return
+                continue
             crashed = not rnd["stuck"] and rnd["exit"] not in (0, None)
             hushed = rnd["guard"] == "silence"  # OpenCode retrying a server that is gone
             if (crashed or hushed) and revived != n and ((down := _down(m)) or _stopped(m)):
