@@ -2750,7 +2750,7 @@ read as a wrong id, Claude hunted for the "right" one).
   |---|---|---|
   | no key (`key == ""`) | `no key for <Provider>: run /connect in OpenCode and add it` | no |
   | `oauth`, `env:NAME`, `config`, `signing` | `can't run: needs a key wb can hold outside the lane (<Provider>'s is an OAuth login / from the environment, NAME / written in <file> / a cloud login that signs each request): store an API key with /connect` | no |
-  | `no_credit` | `out of credit or quota at <Provider> (<line, redacted>): top it up, or wait for the plan's reset; wb never switches models` | no |
+  | `no_credit` | `out of credit or quota at <Provider> (<line, redacted>): top it up, or wait for the plan's reset (wb asks again from HH:MM); wb never switches models` | no |
   | `rate_limited` | `rate-limited by <Provider> until HH:MM` | yes |
   | `unreachable` | `can't reach <host> (<reason>)` | yes |
   | ok | `{"available": True, "resident": True, "why": "API (<Provider>)"}` | |
@@ -2760,8 +2760,10 @@ read as a wrong id, Claude hunted for the "right" one).
   `/connect` isn't told to run it again. `remedy` gives `/connect`, top up, or wait;
   `may_come_up` follows the table (a queued task waits out a rate limit, never a missing key).
 - `note_api(pid, state, why="", until=None)` writes `$WB_HOME/api-health.json` under
-  `api-health.json.lock`: `no_credit` (402, a 429 saying `insufficient_quota` or a plan limit; no
-  `until`: it holds until an `ok`), `rate_limited` (until `Retry-After`, else `RATE_LIMIT_SECS` 60),
+  `api-health.json.lock`: `no_credit` (402, a 429 saying `insufficient_quota` or a plan limit; for
+  `CREDIT_RECHECK_SECS` 900, then the next start asks once, a 402 isn't billed, and the keyhole
+  records it again if it still holds: held until an `ok`, it held forever, since wb start refused the
+  task that could get one, #1068; a row from before with no `until` expires from its `ts`), `rate_limited` (until `Retry-After`, else `RATE_LIMIT_SECS` 60),
   `unreachable` (connect, DNS, TLS, a 5xx: `DOWN_SECS`), `ok` (a 2xx) removes the entry. `why` is
   its first line, key-like strings (bearer tokens, `sk-`-style keys, `api_key=…`, 32+ character
   tokens) replaced by `[redacted]`, at most 200 characters (`_redact`, a simple local one; the
@@ -5415,7 +5417,7 @@ $WB_HOME (~/.local/state/workbench)
                                  never their values): what models.catalog_doc rebuilds the task's catalog from, #1015}}}; fresh HOSTED_TTL 600 s
                                  (an error DOWN_SECS), rebuilt on a changed stamp; never holds a key
   api-health.json  .lock         each API provider's last bad answer (models.note_api): {<pid>: {state: no_credit|rate_limited|
-                                 unreachable, until (epoch or null), why (redacted), ts}}; ok removes it; past until reads as ok; the provider's cooldown every keyhole waits out, and the revive's wait (#1020)
+                                 unreachable, until (epoch; a null from before #1068 reads as ts + CREDIT_RECHECK_SECS), why (redacted), ts}}; ok removes it; past until reads as ok; the provider's cooldown every keyhole waits out, and the revive's wait (#1020)
   api/<provider>.<i>.lock        an API provider's task slots (models.NoLease, #1015): API_PARALLEL (3) files, each flocked by the
                                  runner holding it, its task's name inside (models.api_holders); never in gpu.json
   spend-api.jsonl  .lock .checkin.lock  the API ledger (meter.py, #1019; *Spend*), one row each, every row {ts, day (local

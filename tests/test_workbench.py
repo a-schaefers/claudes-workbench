@@ -28206,10 +28206,11 @@ class ApiDiscovery(Base):
         self.assertEqual(self.state("acme/coder-flash")[0],
                          {"available": True, "resident": True, "why": "API (Acme)"})
         self.models.note_api("acme", "no_credit", "HTTP 402: Insufficient balance")
+        again = time.strftime("%H:%M", time.localtime(self.models.api_health("acme")["until"]))
         st, up, fix = self.state("acme/coder-flash")
         self.assertEqual((st["available"], st["why"], up), (
             False, "out of credit or quota at Acme (HTTP 402: Insufficient balance): top it up, or "
-                   "wait for the plan's reset; wb never switches models", False))
+                   f"wait for the plan's reset (wb asks again from {again}); wb never switches models", False))
         self.assertEqual(fix, "top up your Acme account, or wait for the plan's reset")
         until = time.time() + 600
         self.models.note_api("acme", "rate_limited", "HTTP 429", until=until)
@@ -28343,7 +28344,8 @@ class ApiDiscovery(Base):
         self.assertFalse(st["available"])
         self.assertTrue(st["why"].startswith("out of credit or quota at Acme (402: quota exceeded for key [redacted])"), st)
         row = json.loads((store.home() / "api-health.json").read_text())["acme"]
-        self.assertEqual((row["state"], row["until"], row["why"]), ("no_credit", None, "402: quota exceeded for key [redacted]"))
+        self.assertEqual((row["state"], row["until"], row["why"]),
+                         ("no_credit", row["ts"] + self.models.CREDIT_RECHECK_SECS, "402: quota exceeded for key [redacted]"))
         self.assertNotIn("abcdefghijklmnop", (store.home() / "api-health.json").read_text())
         self.models.note_api("acme", "ok")
         self.assertEqual(json.loads((store.home() / "api-health.json").read_text()), {})
@@ -28992,6 +28994,26 @@ class Routes(Base):
         with redirect_stdout(out):
             cli.main(["models", "--api", "haiku"])
         self.assertIn("anthropic/claude-haiku-5-5", out.getvalue())
+
+    def test_a_role_out_of_credit_runs_again_once_the_recheck_time_has_passed(self):
+        # #1068: no_credit had no `until` and only a 2xx cleared it, which only a running task
+        # gets, and wb start refused that task: after a top-up or the plan's reset the role
+        # still exited 3, forever
+        self.assertEqual(self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        _, state, _, _ = routes.resolve("trivial", "trivial", None)
+        self.assertFalse(state["available"])
+        self.assertIn("out of credit or quota at DeepSeek", state["why"])
+        self.assertIn("(wb asks again from ", state["why"])
+        path = store.home() / "api-health.json"
+        doc = json.loads(path.read_text())
+        self.assertIsInstance(doc["deepseek"]["until"], float)
+        for row in ({**doc["deepseek"], "until": time.time() - 1},     # the re-check time passed
+                    {**doc["deepseek"], "until": None,                 # written before the fix
+                     "ts": time.time() - runner.models.CREDIT_RECHECK_SECS - 1}):
+            store.write_json(path, {"deepseek": row})
+            m, state, _, routed = routes.resolve("trivial", "trivial", None)
+            self.assertEqual((m.id, state["available"], routed["via"]), ("deepseek/deepseek-flash", True, "api"))
 
     def test_a_provider_out_of_credit_rate_limited_or_unreachable_may_still_be_a_roles(self):
         # cli.HEALTH: a run's passing state is no refusal; no key wb can hold is

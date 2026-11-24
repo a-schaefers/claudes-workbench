@@ -990,6 +990,11 @@ OLLAMA_CLOUD = "Ollama cloud (ollama.com)"
 SIGNING = frozenset({"amazon-bedrock", "google-vertex", "google-vertex-anthropic"})
 API_STATES = ("no_credit", "rate_limited", "unreachable")
 RATE_LIMIT_SECS = 60     # a 429 without Retry-After: how long its provider reads rate-limited
+# A 402 or a plan limit with no `until` held forever: only a 2xx cleared it, and wb start refused
+# the task that could get one, so a top-up or the plan's reset never let the role run again
+# (#1068, 2026-11-23). Past this the next start asks once (a 402 isn't billed) and the keyhole
+# records it again if it still holds.
+CREDIT_RECHECK_SECS = 900
 _HOSTED: dict = {}       # the last hosted.json read in this process: {"at": (mtime_ns, size), "doc"}
 _AUTH_FRESH: dict = {}   # state dir -> (monotonic, auth rows): status's no-key check, briefly kept
 AUTH_FRESH_SECS = 5
@@ -1452,7 +1457,7 @@ def _redact(text: str) -> str:
 
 def note_api(pid: str, state: str, why: str = "", until: float | None = None) -> None:
     """Record what a provider's last answer said (api-health.json, under its lock): `no_credit`
-    (402, a quota or plan limit), `rate_limited` (until Retry-After, else RATE_LIMIT_SECS),
+    (402, a quota or plan limit; for CREDIT_RECHECK_SECS), `rate_limited` (until Retry-After, else RATE_LIMIT_SECS),
     `unreachable` (connect, DNS, TLS, a 5xx; for DOWN_SECS), or `ok` (a 2xx), which clears it.
     ``why`` is kept redacted. status() reads it; an entry past its `until` reads as ok."""
     if state not in ("ok", *API_STATES):
@@ -1460,7 +1465,8 @@ def note_api(pid: str, state: str, why: str = "", until: float | None = None) ->
     now = time.time()
     if until is None:
         until = now + RATE_LIMIT_SECS if state == "rate_limited" else \
-            now + DOWN_SECS if state == "unreachable" else None
+            now + DOWN_SECS if state == "unreachable" else \
+            now + CREDIT_RECHECK_SECS if state == "no_credit" else None
     path = api_health_path()
     with store.locked(path.with_name(path.name + ".lock")):
         doc = store.read_json(path, {})
@@ -1481,6 +1487,11 @@ def api_health(pid: str) -> dict | None:
     if not isinstance(row, dict) or row.get("state") not in API_STATES:
         return None
     until = row.get("until")
+    if row["state"] == "no_credit" and not isinstance(until, (int, float)):
+        # written before #1068 with no `until`: it held forever; re-checked from its time
+        ts = row.get("ts")
+        until = ts + CREDIT_RECHECK_SECS if isinstance(ts, (int, float)) else 0
+        row = {**row, "until": until}
     if isinstance(until, (int, float)) and until <= time.time():
         return None
     return row
@@ -1552,8 +1563,11 @@ def _api_status(m: Model, down=frozenset()) -> dict:
                    "store an API key with /connect")
     health = api_health(m.provider)
     if health and health["state"] == "no_credit":
+        until = health.get("until")
+        again = f" (wb asks again from {datetime.fromtimestamp(until).strftime('%H:%M')})" \
+            if isinstance(until, (int, float)) else ""
         return _no(f"out of credit or quota at {who} ({health.get('why') or 'no detail'}): top it "
-                   "up, or wait for the plan's reset; wb never switches models")
+                   f"up, or wait for the plan's reset{again}; wb never switches models")
     if health and health["state"] == "rate_limited":
         until = health.get("until")
         at = datetime.fromtimestamp(until).strftime("%H:%M") if isinstance(until, (int, float)) else "it lifts"
