@@ -548,6 +548,11 @@ const SPEND_NEXT = (n: string, capped: boolean) => (capped
   : `Ask the user for a day cap (\`wb route cap <usd>\`), then \`wb resume ${n}\`; `) +
   `or the role on the GPU for the next tasks (\`wb route <role> gpu\`, on their yes), with \`wb takeover ${n}\` ` +
   `or \`wb discard ${n}\` for this one: resume keeps its API model. Never retry it with feedback yourself.`
+// A stop for the Agents switch on GPU (cause `spend`, guard `agents`, #1213): no cap lets it go on, and
+// resume or feedback is refused until the user sets Agents back
+const AGENTS_NEXT = (n: string) =>
+  `Ask the user: Agents back to Both or API (the workbench pane, or \`wb route all both\` on their yes), ` +
+  `then \`wb resume ${n}\`; or \`wb takeover ${n}\` or \`wb discard ${n}\`. Never retry it with feedback yourself.`
 // A stop by the task's API provider (cause `provider`: runner.PROVIDER_GUARDS, a rate limit or an
 // outage held 10 minutes, a quota or a refused key) isn't the agent's, yet it woke as "was stopped:
 // it got stuck" ending "Steer it with wb feedback …, or wb discard": a feedback round a quota or
@@ -2952,7 +2957,9 @@ const ROLE_LABELS: Record<string, string> = { significant: 'Complex coding', tri
 const OLDER_WB = 'wb is older than the mod: wb update'
 const NO_PROVIDER = 'No API provider connected: /connect in OpenCode adds one; every role runs on the GPU.'
 const AGENTS_STOPS: [string, string, string][] = [
-  ['gpu', 'GPU', 'Every role runs on its GPU model: nothing spends. Each role\'s own choice is kept for Both.'],
+  // tasks already started too: an API task stops before its next round (#1213, 2026-11-24: only
+  // wb start read the switch, and a queued API task spent after 'nothing spends')
+  ['gpu', 'GPU', 'Every role runs on its GPU model: nothing spends, and an API task already started stops before its next round. Each role\'s own choice is kept for Both.'],
   ['api', 'API', 'Every role runs on its API model; a role with none can\'t start.'],
   ['both', 'Both (default)', 'Each role runs where its own row says.'],
 ]
@@ -3948,7 +3955,7 @@ async function deliver($: any, now: number) {
       }
       if (!own || !mem.wake) continue // the toast only: the notice stays for its session or wb wait
       // a batch's wake ends with its resume, not the failure's next step (#544)
-      const next = batch ? BATCH_NEXT(batch) : row.cause === 'spend' ? SPEND_NEXT(name, (await readRoutes($)).cap !== null)
+      const next = batch ? BATCH_NEXT(batch) : row.cause === 'spend' ? (row.guard === 'agents' ? AGENTS_NEXT(name) : SPEND_NEXT(name, (await readRoutes($)).cap !== null))
         : row.cause === 'provider' ? PROVIDER_NEXT(name)
         : (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined)
       const who = batch && batch.length > 1 ? `Tasks ${batch.map(n => `\`${n}\``).join(', ')} were interrupted`

@@ -37,6 +37,14 @@ VIAS = ("gpu", "api")
 # back to Both restores the per-role mix
 USES = ("gpu", "api", "both")
 USE_NAMES = {"gpu": "GPU", "api": "API", "both": "Both"}  # as the dialog and the pane say it
+# Agents on GPU is the user's "nothing spends", for tasks already started too (#1213, 2026-11-24):
+# only wb start read the switch, so an API task queued behind its provider's slots took one after
+# the switch and spent its rounds and auto-fixes. Now no API task begins a round under it: wb
+# start refuses an API --model, wb feedback, next and resume an API task's round, and the runner
+# stops one before its next round (a round already running finishes)
+AGENTS_GPU = "Agents is GPU, so nothing spends"
+AGENTS_STOPS = "an API task already started stops before its next round"  # the change line's clause
+AGENTS_BACK = "Ask the user: Agents back to Both or API (wb route all both)"
 # When the GPU is busy (#1023, the owner's opt-in): routes.json `busy`, missing is "wait" (queue, or
 # exit 4, as before); "api" starts a role that has an API model on it instead, at wb start only (a
 # running task never moves, nor does anything go from API to the GPU). Agents GPU overrides it.
@@ -132,6 +140,16 @@ def effective_via(doc: dict, role: str) -> str:
     `via`. Everything that decides GPU or API for a role asks this, never `via` (#1016)."""
     use = doc.get("use", "both")
     return use if use != "both" else doc["roles"][role]["via"]
+
+
+def agents_gpu() -> bool:
+    """Whether the Agents switch is GPU now, so no API task may begin a round (#1213). False for
+    a routes.json that can't be read: wb start refuses that file, and a task already started
+    goes on rather than stop on a hand edit's typo."""
+    try:
+        return read()["use"] == "gpu"
+    except RoutesError:
+        return False
 
 
 def busy_api(doc: dict, role: str) -> str | None:
@@ -296,6 +314,10 @@ def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str],
                 clauses.append(f"cap {money(cap)}/day")
         elif row.get("api"):
             clauses.append(f"API kept: {row['api']}")
+        if not on_api and new.get("use", "both") == "both":
+            # the role's own move keeps its started tasks where they are, as a thinking change
+            # does; only Agents on GPU stops them (#1213): said, so the move isn't read as a stop
+            clauses.append("its tasks already started keep their model")
     elif old.get("api") != row.get("api"):  # set while on the GPU: used by wb route <role> api
         gated = True
         # under Agents on API the role already runs there: the new model is the next start's
@@ -333,7 +355,7 @@ def _agents_part(doc: dict, new: dict, cap, who: Callable[[str], str]) -> tuple[
     moved = [r for r in ROLES if effective_via(doc, r) != effective_via(new, r)]
     to_api = [r for r in moved if effective_via(new, r) == "api" and new["roles"][r].get("api")]
     if use == "gpu":
-        what = ["every role on the GPU; each role's own choice is kept for Both"]
+        what = [f"every role on the GPU; {AGENTS_STOPS}; each role's own choice is kept for Both"]
     elif use == "api":
         what = ["every role on its API model"]
         if none := [r for r in ROLES if not new["roles"][r].get("api")]:
@@ -628,6 +650,8 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
             raise Refused(str(e).strip('"'), 1) from None
         if m.kind != "api":
             return m, models.status(m), "asked for", {"via": "gpu", "role": role}
+        if doc["use"] == "gpu":  # before the dialog: the runner would stop it at once (#1213)
+            raise Refused(f"{AGENTS_GPU}: {m.id} is an API model. {AGENTS_BACK}, or a GPU model")
         if gate is not None:  # API_RUNS: the dialog's yes is wb start's own, last (#1104)
             gate(m)
         if why := meter.refusal(m, tokens=first):  # before the dialog: never ask for a start that is refused

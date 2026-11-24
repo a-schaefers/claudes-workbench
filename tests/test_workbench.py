@@ -31044,10 +31044,13 @@ class Routes(Base):
         self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
         self.route("significant", "anthropic/claude-haiku-5-5")
         own = {r: self.doc()["roles"][r]["via"] for r in routes.ROLES}
-        self.assertEqual(self.dry("all", "gpu"), {"change": "Agents: Both → GPU (every role on the GPU; each "
-                                                            "role's own choice is kept for Both)", "gate": False})
+        # tasks already started too (#1213): the line says what the runner does
+        self.assertEqual(self.dry("all", "gpu"), {"change": "Agents: Both → GPU (every role on the GPU; an API "
+                                                            "task already started stops before its next round; "
+                                                            "each role's own choice is kept for Both)", "gate": False})
         code, out, _ = self.route("all", "gpu")
-        self.assertEqual((code, out), (0, "changed: Agents: Both → GPU (every role on the GPU; each role's own "
+        self.assertEqual((code, out), (0, "changed: Agents: Both → GPU (every role on the GPU; an API task "
+                                          "already started stops before its next round; each role's own "
                                           "choice is kept for Both)\n"))
         doc = self.doc()
         self.assertEqual(doc["use"], "gpu")
@@ -31108,6 +31111,13 @@ class Routes(Base):
         self.assertEqual(self.route("trivial", "gpu")[1], "changed: trivial: API deepseek/deepseek-flash → GPU · API "
                          "kept: deepseek/deepseek-flash; Agents is GPU, so this applies once Agents is Both (wb route "
                          "all both)\n")
+
+    def test_a_roles_own_move_to_the_gpu_says_its_tasks_already_started_keep_their_model(self):
+        # #1213 (2026-11-24): the line said nothing of the role's open API tasks, which run on;
+        # only Agents on GPU stops them (runner._agents_gpu)
+        self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.assertEqual(self.route("trivial", "gpu")[1], "changed: trivial: API deepseek/deepseek-flash → GPU · API "
+                         "kept: deepseek/deepseek-flash · its tasks already started keep their model\n")
 
     def test_the_agents_switch_to_api_needs_a_cap_and_an_api_model_somewhere(self):
         self.assertEqual(self.route("all", "api")[0:3:2],
@@ -32189,6 +32199,56 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.drive_here("api-health")
         health = self.models.api_health("deepinfra")
         self.assertEqual((health or {}).get("state"), "no_credit", health)
+
+    def test_agents_on_gpu_stops_an_api_task_already_started_before_its_next_round(self):
+        # #1213 (bar loop round 3, 2026-11-24): the pane's Agents GPU said "nothing spends", but
+        # only wb start read the switch: a task queued behind its provider's slots took one after
+        # the switch and ran its rounds on the API model. Now it stops before any round, and no
+        # API round is written until the user sets Agents back
+        self.start_api("t-q", "ok", "--no-base-check", spawn=False)
+        self.assertEqual(store.Task("t-q").spec["via"], "api")
+        doc = store.read_json(Path(os.environ["WB_ROUTES"]))
+        store.write_json(Path(os.environ["WB_ROUTES"]), {**doc, "use": "gpu"})
+        log = self.drive_here("t-q")
+        task = store.Task("t-q")
+        st = task.status
+        self.assertEqual((st["phase"], st["guard"], st["infra"]), ("stuck", "agents", "spend"))
+        ev, _ = store.read_jsonl(task.dir / "events.jsonl")
+        self.assertFalse([e for e in ev if e["kind"] in ("round", "step")], ev)    # no round began
+        self.assertNotIn("agent started", log)
+        self.assertEqual(self.models.api_slots_free("deepinfra"), self.models.API_PARALLEL)  # its slot let go
+        (notice,) = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-q"]
+        self.assertEqual((notice["kind"], notice["cause"], notice["guard"]), ("stuck", "spend", "agents"))
+        self.assertTrue(notice["text"].startswith(
+            f"t-q stopped: Agents is GPU, so nothing spends, and it runs on its API model ({FLASH}). Its "
+            "work so far is in the worktree. Ask the user: Agents back to Both or API (wb route all both), "
+            "then wb resume t-q; or wb takeover t-q or wb discard t-q.\n"
+            "round 1 didn't run: Agents is GPU, so nothing spends."), notice["text"])
+        # wb resume and an API --model start are refused before anything is written or asked
+        for argv in (("resume", "t-q"), ("start", "t-new", "--spec", str(self.spec), "--repo", str(self.repo),
+                                         "--model", FLASH)):
+            with self.subTest(argv=argv[0]):
+                err = io.StringIO()
+                with (mock.patch.object(cli, "spawn_runner") as spawned, redirect_stderr(err),
+                      self.assertRaises(SystemExit) as e):
+                    run_wb(*argv)
+                self.assertEqual(e.exception.code, 3)
+                self.assertIn("Agents is GPU, so nothing spends: ", err.getvalue())
+                self.assertIn("Ask the user: Agents back to Both or API (wb route all both)", err.getvalue())
+                spawned.assert_not_called()
+        self.assertFalse(store.Task("t-new").exists)
+        self.assertEqual(task.status["phase"], "stuck")
+        # between rounds too (drive's _go_on): a task whose round ran before the switch
+        store.write_json(Path(os.environ["WB_ROUTES"]), {**doc, "use": "both"})
+        self.assertTrue(runner._go_on(task, 1, "auto-fix"))
+        store.write_json(Path(os.environ["WB_ROUTES"]), {**doc, "use": "gpu"})
+        self.assertFalse(runner._go_on(task, 1, "auto-fix"))
+        last = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-q"][-1]
+        self.assertIn("auto-fix didn't run: Agents is GPU, so nothing spends.", last["text"])
+        # a GPU task never asks
+        self.assertTrue(cli.routes.agents_gpu())
+        with mock.patch.object(runner.meter, "for_task", lambda *a, **k: None):
+            self.assertTrue(runner._go_on(task, 1, "auto-fix"))
 
 
 # Catalog rows for thinking per task (#1018), shaped as OpenCode 2.3.2's `api model.list` prints

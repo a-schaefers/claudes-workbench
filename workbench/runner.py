@@ -36,6 +36,7 @@ from . import (ask_mcp, context, gitguard, gitops, hardware, keyhole, lane, less
                skills, stats, store, tuning)
 from . import meter
 from . import privacy
+from . import routes  # the Agents switch, before each API round (#1213)
 from .events import EDIT_TOOLS, StuckDetector, compaction_failed, normalize, written
 from .watch import Watcher
 
@@ -1302,6 +1303,7 @@ QUEUE_WAIT_S = 2 * RATE_WAIT_S
 # of its own, `spend`, outside results.THE_STEP like `provider`: the user's budget, never held
 # against the model or its slice (the engineer's call, 2026-11-23)
 SPEND = "spend"
+AGENTS = "agents"  # the guard of a stop for the Agents switch on GPU (_agents_gpu, #1213), infra `spend`
 
 
 def stopped_by(guard: str | None) -> str | None:
@@ -4363,30 +4365,55 @@ def first_tokens(task: store.Task | None = None, prompt: str | None = None,
 
 
 def _go_on(task: store.Task, n: int, what: str) -> bool:
-    """Before each `continue` in drive (#1017, #1019): for an API task, today's spend under the
+    """Before each `continue` in drive (#1017, #1019): for an API task, Agents not on GPU
+    (_agents_gpu, #1213), then today's spend under the
     cap by at least one request at its worst (meter.request_floor, #1150), its input the next
     round's first request's (first_tokens, #1173). Short of that, the task stops before
     ``what`` runs: phase `stuck`, status `guard` `spend`, a `stuck` notice with cause `spend`
     (not the step's own: results.THE_STEP). A GPU task always goes on, for nothing."""
     if meter.for_task(task) is None:
         return True
+    if _agents_gpu(task, n, what):
+        return False
     tokens = first_tokens(task)
     if not (why := meter.stop_reason(task, ahead=True, tokens=tokens)):
         return True
+    _stop_before(task, n, what, why, meter.stop_text(task, tokens=tokens))
+    return False
+
+
+def _agents_gpu(task: store.Task, n: int, what: str) -> bool:
+    """Whether an API task stopped before ``what`` (round n's next, or round n itself) for the
+    Agents switch on GPU, the user's "nothing spends" (routes.AGENTS_GPU, #1213): only wb start
+    read it, so a queued task took its provider slot after the switch and spent. A stop of the
+    user's spending, as the cap's (infra and cause `spend`, never the step's), its guard `agents`:
+    the remedy is the switch, not a cap (the mod's AGENTS_NEXT)."""
+    if meter.for_task(task) is None or not routes.agents_gpu():
+        return False
+    name = task.name
+    _stop_before(task, n, what, routes.AGENTS_GPU, (
+        f"{name} stopped: {routes.AGENTS_GPU}, and it runs on its API model ({task.spec.get('model')}). "
+        f"Its work so far is in the worktree. {routes.AGENTS_BACK}, then wb resume {name}; or wb "
+        f"takeover {name} or wb discard {name}."), guard=AGENTS)
+    return True
+
+
+def _stop_before(task: store.Task, n: int, what: str, why: str, lead: str, guard: str = SPEND) -> None:
+    """An API task's stop before ``what`` ran, for the user's spending (_go_on, _agents_gpu):
+    status and notice `guard` ``guard``."""
     if (kh := CURRENT.get("keyhole")) is not None:
         kh.close(why)
     # infra and `by` as the in-round stop has them (stopped_by, #1020): the user's budget, never
     # the step's, nor a lesson about the agent
-    task.set_status(phase="stuck", last=why[:200], guard="spend", infra=SPEND)
+    task.set_status(phase="stuck", last=why[:200], guard=guard, infra=SPEND)
     task.event({"ts": store.now(), "round": n, "kind": "stopped", "text": f"{why}: {what} didn't run",
                 "by": SPEND})
-    text = f"{meter.stop_text(task, tokens=tokens)}\n{what} didn't run: {why}."
+    text = f"{lead}\n{what} didn't run: {why}."
     # auto-fix and self-review have moved status `round` on to n + 1, which never ran: round n's
     # report goes with the notice, and says where it is (wb report alone said "no report yet")
     if (summary := task.round_dir(n) / "summary.md").exists():
         text += f"\nRound {n}'s report (wb report {task.name} --round {n}):\n{summary.read_text()}"
-    task.notify("stuck", text, round=n, cause="spend")
-    return False
+    task.notify("stuck", text, round=n, cause=SPEND, **({"guard": guard} if guard != SPEND else {}))
 
 
 def drive(task: store.Task) -> None:
@@ -4467,6 +4494,9 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                         fixed_knobs(task, m))  # --self-review / --no-self-review, API's, else learned
         except (KeyError, RuntimeError, OSError) as e:
             return _load_failed(task, e)
+        n = task.status.get("round", 1)
+        if _agents_gpu(task, n, f"round {n}"):  # a queued task's slot came after the switch (#1213)
+            return
         handed = 0  # mid-round handovers in this runner: one review round (HANDOVER_MAX)
         first = True
         revived = None  # the round run again after its server went away under it

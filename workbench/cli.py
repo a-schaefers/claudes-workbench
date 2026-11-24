@@ -202,14 +202,26 @@ def _model_still_listed(task: store.Task, prompt: str | None = None, fresh: bool
     round's first (runner.first_tokens of ``prompt`` and ``fresh``): the session's context
     left out, the check passed and the room refused it at once (#1173, 2026-11-24). Its advice
     is a running task's: the role on the GPU for the next tasks only, as this one keeps its API
-    model (#1171)."""
+    model (#1171). And Agents on GPU (#1213), whose stop the runner's would be at once."""
     if task.spec.get("via") != "api":
         return
+    if why := _agents_gpu_now(task):
+        die(why, 3)
     if (m := models.lookup(task.spec.get("model") or "")) is None:
         die(runner.left_catalog(task), 3)
     if why := meter.refusal(m, task.spec.get("role"), task=task,
                             tokens=runner.first_tokens(task, prompt, fresh)):
         die(why, 3)
+
+
+def _agents_gpu_now(task: store.Task) -> str:
+    """Why an API task can't take a round now: the Agents switch on GPU, the user's "nothing
+    spends" (routes.AGENTS_GPU, #1213), the runner's stop before its next round; else ""."""
+    if task.spec.get("via") != "api" or not routes.agents_gpu():
+        return ""
+    n = task.name
+    return (f"{routes.AGENTS_GPU}: {n} runs on its API model {task.spec.get('model')}, so no round of it "
+            f"runs now. {routes.AGENTS_BACK}, then this again; or wb takeover {n} or wb discard {n}")
 
 
 def _opencode_again(task: store.Task) -> None:
@@ -2624,7 +2636,7 @@ def cmd_resume(a):
         if not _rechecks_out(t) and (why := _worktree_problem(t)):
             print(why)  # as _resume would say it, without ending the batch
             continue
-        if why := _local_only_now(t):  # its repo became local-only: the rest still go on (#1021)
+        if why := _local_only_now(t) or _agents_gpu_now(t):  # the rest still go on (#1021, #1213)
             print(why)
             continue
         with store.locked(runner.lock_file(t.name, "cmd")):  # as one_at_a_time, task by task
