@@ -386,7 +386,8 @@ class Keyhole:
     (a Key), ``upstream`` (the catalog's API base: never anything from a request), ``protocol``
     ("bearer" or "anthropic"). It serves at once, from a daemon thread, on 127.0.0.1 (never
     localhost, which may be ::1 first). ``on_usage(usage)`` gets each response's usage, once,
-    before its last byte goes to OpenCode (the meter, #1019); ``on_health(state, why, until)``
+    before its end marker (`[DONE]`, `message_stop`, `response.completed`) or else its last byte
+    goes to OpenCode (the meter, #1019, #1114); ``on_health(state, why, until)``
     each outcome (ok, no_credit, rate_limited, unreachable); ``room(body, size)`` is asked before
     each request is sent on (the meter's spend room: negative is refused); ``log`` the start and
     refusal lines (runner.log: the runner's stdout)."""
@@ -1015,7 +1016,7 @@ def _handler(kh: Keyhole):
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
             sse = "event-stream" in (resp.getheader("Content-Type") or "")
-            self.used = {}  # this response's usage, merged: kh.usage once, before its last byte
+            self.used = {}  # this response's usage, merged: kh.usage once, before its end (#1114)
             key = kh._key.value.encode()
             hold = bytearray()  # SSE: a partial line; else the last len(key) - 1 bytes
             whole = bytearray()
@@ -1065,8 +1066,8 @@ def _handler(kh: Keyhole):
                         self.sniff(json.loads(whole))
                     except ValueError:
                         pass
-                # before the last byte: OpenCode prints the step's step_finish only once it has
-                # it, so the meter has booked the response by then (#1019)
+                # usage that came after the end's marker, or with none (a non-SSE body): booked
+                # before the last byte (#1019); with a marker it went at the marker (data_line)
                 self.flush_usage()
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
@@ -1089,6 +1090,12 @@ def _handler(kh: Keyhole):
             if not s.startswith(b"data:"):
                 return safe
             payload = s[5:].strip()
+            if payload == b"[DONE]":
+                # booked before the end's marker goes on: OpenCode prints the step's step_finish
+                # when it reads [DONE], not at the body's last byte, and a provider sending its
+                # last byte late had the response booked twice, OpenCode's row and then ours
+                # (#1114, 2026-11-23; checked on 2.3.2: Anthropic's waits for the last byte)
+                self.flush_usage()
             if not payload or payload == b"[DONE]":
                 return safe
             try:
@@ -1096,6 +1103,8 @@ def _handler(kh: Keyhole):
             except ValueError:
                 return safe
             self.sniff(obj)
+            if isinstance(obj, dict) and obj.get("type") in ("message_stop", "response.completed"):
+                self.flush_usage()  # the end of Anthropic's and the Responses API's stream (#1114)
             if isinstance(obj, dict) and "error" in obj:
                 return kh.redact(ln.decode("utf-8", "surrogateescape")).encode(
                     "utf-8", "surrogateescape")

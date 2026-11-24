@@ -25721,7 +25721,7 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
     or Anthropic's for /messages), "status" (`status`, a body echoing part of the key the way
     OpenAI's 401 does, `retry_after`), "chunks" (`chunks` SSE pieces `gap` s apart; the
     Responses API's events for /responses), "raw" (`status`, `ctype`, then `pieces` sent as they
-    are, one chunk each), with `served` (the response's model) and `by` (OpenRouter's
+    are, one chunk each, the end `tail` s later), with `served` (the response's model) and `by` (OpenRouter's
     provider)."""
     protocol_version = "HTTP/1.1"
 
@@ -25749,6 +25749,7 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(b"%x\r\n%s\r\n" % (len(piece), piece))
                 self.wfile.flush()
                 time.sleep(0.05)
+            time.sleep(getattr(s, "tail", 0))  # the body's last byte late (#1114)
             self.wfile.write(b"0\r\n\r\n")
             return
         if s.mode == "status":
@@ -26717,6 +26718,36 @@ class RealOpenCodeAPI(_KeyholeTest):
         self.assertIn("OpenCode has no key stored for deepseek", str(e.exception))
         self.assertEqual(service("status"), "stopped")
         self.assertEqual(ours(), [])
+
+    def test_a_response_is_booked_before_opencode_prints_its_step_finish(self):
+        # #1114 (2026-11-23): OpenCode prints step_finish when it reads [DONE], not at the body's
+        # last byte, and the keyhole booked the usage at that byte: a provider sending its end
+        # late had the response booked twice (OpenCode's step row, then the keyhole's)
+        got = []
+        kh = self.keyhole(self.model(), on_usage=got.append)
+        name = kh.model.name
+        self.up.mode, self.up.status, self.up.ctype, self.up.tail = "raw", 200, "text/event-stream", 1.0
+        self.up.pieces = [f"data: {json.dumps(ev)}\n\n".encode() for ev in (
+            {"model": name, "choices": [{"index": 0, "delta": {"content": "ok"}}]},
+            {"model": name, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+             "usage": {"prompt_tokens": 7, "completion_tokens": 3}})] + [b"data: [DONE]\n\n"]
+        tmp = Path(self.tmp.name)
+        layer = tmp / "layer-race.json"
+        layer.write_text(json.dumps({"provider": {"deepinfra": {"options": self.kh_mod.layer_options(kh)}}}))
+        p = subprocess.Popen(["opencode", "run", "--standalone", "--title", "t", "-m", kh.model.id,
+                              "--format", "json", "say ok"], cwd=self.repo,
+                             env=self.scratch_env(layer, "race"), stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, text=True)
+        self.addCleanup(lambda: p.poll() is None and p.kill())
+        booked = []                                     # what the keyhole had booked at each step_finish
+        for line in p.stdout:
+            with contextlib.suppress(ValueError):
+                if json.loads(line).get("type") == "step_finish":
+                    booked.append(len(got))
+        self.assertEqual(p.wait(timeout=120), 0)
+        self.assertEqual(booked, [1])
+        self.assertEqual(got, [{"prompt_tokens": 7, "completion_tokens": 3}])    # once
+        self.assertEqual(len(self.up.seen), 1)
 
     def scratch_env(self, layer, name, models_path=None):
         """Real OpenCode's environment with nothing of the user's: scratch homes, no catalog

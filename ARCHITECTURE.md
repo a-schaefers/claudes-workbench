@@ -530,8 +530,11 @@ input, and a missing cache price is the input price.
 **Two views, the higher kept.** The keyhole's (`Meter.on_usage`, from the keyhole's thread): each
 upstream response's `usage`, merged into one per response (`keyhole._merged`: Anthropic's
 `message_start` and `message_delta` each carry part; some servers send a running total in every
-chunk) and handed over before the response's last byte, so OpenCode prints that step's
-`step_finish` only after it is booked. `meter.usage_tokens` reads Chat Completions
+chunk) and handed over before the stream's end marker goes on (`[DONE]`, Anthropic's
+`message_stop`, the Responses API's `response.completed`; else before the last byte), so OpenCode
+prints that step's `step_finish` only after it is booked: it prints it on reading `[DONE]`, not at
+the last byte, and a provider sending that byte late had the response booked twice (#1114; on
+2.3.2 its Anthropic path waits for the last byte). `meter.usage_tokens` reads Chat Completions
 (`prompt_tokens` with `prompt_tokens_details.cached_tokens` or DeepSeek's
 `prompt_cache_hit_tokens`, `completion_tokens_details.reasoning_tokens`), the Responses API
 (`input_tokens_details`, `output_tokens_details`) and Anthropic (`cache_read_input_tokens`,
