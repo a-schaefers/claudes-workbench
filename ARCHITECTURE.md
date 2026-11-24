@@ -6414,7 +6414,8 @@ profile and a closed or gone task, never another profile's or one wb didn't make
 commands.json `repos` (`context.repo_conf`): the key nearest the task's spot (the repo, or its package: `subdir`)
 wins, the spot itself else the nearest directory above it, so the root's holds for a package without its own and a
 package's never for the root or another package (#778: matched by git dir alone, every task got the first package
-entry); by real path, else git dir and the path inside the worktree, both in lower case where the file system
+entry); by real path, else git dir and the path inside the worktree (a key on a linked worktree nested under the
+repo, Claude Code's `.claude/worktrees/<name>`, too: #1255's review), both in lower case where the file system
 ignores case (`store.folds_case`: a key typed `~/Code/ClientX` for git's `~/code/clientx` on macOS matched nothing,
 and a local-only repo went to the API model, #1157). It asks each component of the real path in its own parent, its
 letters' case swapped, so WSL2's drvfs (`/mnt/c`, folding under an ext4 root that doesn't) counts too: the whole path

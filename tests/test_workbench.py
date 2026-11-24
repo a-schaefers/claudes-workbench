@@ -36945,6 +36945,25 @@ class Privacy(_KeyholeTest):
         self.local_only(key=self.repo / "secret")
         self.assertEqual(cli.privacy.local_only(wt), str(self.repo / "secret"))
 
+    def test_repo_conf_from_the_main_checkout_reads_an_entry_keyed_on_a_linked_worktree_nested_under_it(self):
+        # #1255's review: the git-dir pass skipped every key under the repo's top, so an entry on
+        # Claude Code's <repo>/.claude/worktrees/<name> lost its setup from the main checkout
+        (self.repo / "pkg").mkdir()
+        (self.repo / "pkg" / "a.py").write_text("x = 1\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "pkg"], check=True)
+        wt = self.repo / ".claude" / "worktrees" / "w"
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "-q", "-b", "w", str(wt)],
+                       check=True)
+        for key, sub in ((wt, None), (wt / "pkg", "pkg")):
+            self.conf.write_text(json.dumps({"repos": {str(key): {"setup": "npm ci"}}}))
+            self.assertEqual(context.repo_conf(self.repo, sub), {"setup": "npm ci"}, key)
+        # and local_only reads it once, from either checkout
+        self.conf.write_text(json.dumps({"repos": {str(wt / "pkg"): {"local_only": True}}}))
+        self.assertEqual(cli.privacy.local_only(self.repo), str(wt / "pkg"))
+        self.conf.write_text(json.dumps({"repos": {str(self.repo / "pkg"): {"local_only": True}}}))
+        self.assertEqual(cli.privacy.local_only(wt), str(self.repo / "pkg"))
+
     def test_a_local_only_key_in_another_letter_case_refuses_an_api_start_where_the_file_system_ignores_case(self):
         # #1157: on macOS's APFS ~/Code/ClientX is ~/code/clientx, but repo_entries compared the
         # real paths as typed, so the key matched nothing and the repo went to the API model

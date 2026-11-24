@@ -1212,7 +1212,11 @@ def repo_entries(repo: str | Path, sub: str | None = None,
     found, rel_spot = [], os.path.relpath(spot, top)
     for k, v in repos.items() if common else ():
         kp = Path(k).expanduser()
-        if within(real(kp), top) or (kc := gitops.common_dir(kp)) is None or real(kc) != real(common):
+        # under the top, only whole mode skips a key (by_path holds it then): a key on a linked
+        # worktree nested there (Claude Code's .claude/worktrees/<name>) is the main checkout's by
+        # git dir, and skipping it always lost its setup (#1255's review, 2026-11-24)
+        if whole and within(real(kp), top) or (kc := gitops.common_dir(kp)) is None \
+                or real(kc) != real(common):
             continue
         try:
             rel = os.path.relpath(real(kp), real(gitops.toplevel(kp)))
