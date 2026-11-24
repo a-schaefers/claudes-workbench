@@ -5111,7 +5111,7 @@ printed once to serve.log (`web chat: a push to <host> failed: <reason>`); `webp
 Python). A test's `chat.push_hint` (`cert`, `clock` for a 403, `unreached`, `refused`) tells the
 page what to say (#539).
 
-A change to `chat.py` or `chat_static/` also needs the browser test (*The tests*).
+A change to `chat.py` or `chat_static/` also gets the browser test, in CI (*The tests*).
 
 ## Stopping everything
 
@@ -6198,6 +6198,10 @@ approve; outside it the user typing it is the yes. CONTRIBUTING.md is the contri
 - The GitHub plugin for Claude Code is not needed for any of it; its tools that write to upstream pass the same gate.
 
 ## The tests
+
+Where they run (owner, 2026-11-23): the whole suite, the mod's tests and the browser test run in CI
+(`check.yml`, `chat.yml`), never locally as a routine check; a change runs only the tests it adds
+or edits, by name, before `scripts/ship.sh` hands the rest to CI (CLAUDE.md, *Commands*).
 
 From the repo root: `python3 -m unittest` (`tests/__init__.py` makes `tests` a package), `tests.test_workbench.Context
 [.test_…]`, `-k handover`; the mod: `claude plugin validate mod && claude plugin test mod`; the chat:
