@@ -1223,6 +1223,33 @@ test('#1124: a stop by the task\'s API provider wakes Claude to pass on its reme
   expect(toasts.join('\n')).toContain('workbench: a was stopped by its API provider')
 })
 
+test('#1232: a stop for a repo marked local-only wakes Claude to takeover or discard, never to steer it with feedback', async ($, on) => {
+  // bar loop round 4 (2026-11-24): cause `local_only` (runner._local_only_stop, #1215) woke as
+  // "was stopped: it got stuck" ending "Steer it with wb feedback …", which wb refuses with exit 3
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'a', 'stuck')
+  notice(files, { ts: ts0, task: 'a', kind: 'stuck', round: 1, cause: 'local_only',
+    text: 'task a: round 1 didn\'t run, so nothing more went to its provider: this repo is local-only now; ' +
+      'the task\'s model is API (deepinfra): wb takeover a or wb discard a' })
+  fakeTasks(on, files, ['a'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken).toHaveLength(1)
+  expect(woken[0]).toContain('[workbench] Task `a` was stopped: its repo became local-only.')
+  expect(woken[0]).toContain('then `wb takeover a` to finish it yourself or `wb discard a`')
+  expect(woken[0]).not.toContain('Steer it')
+  expect(woken[0]).not.toContain('got stuck')
+  expect(woken[0]).not.toContain('wb feedback a')
+  expect(toasts.join('\n')).toContain('workbench: a was stopped: its repo became local-only')
+  expect(toasts.join('\n')).not.toContain('got stuck')
+})
+
 test('two wakes due in one turn both arrive, the second after the first one\'s turn', async ($, on) => {
   // the 2026-11-16 audit: the second report never came, only a rewake a minute later
   const clock = mock.clock(on, { now: 1_800_000_000_000 })

@@ -745,7 +745,8 @@ def _busy_api(role: str, a, repo: Path, sub: str | None, tokens: int | None = No
     if why is None and (kept := privacy.local_only(repo, sub)):  # commands.json's (#1021)
         why = f"{repo.name} is kept local ({kept})"
     if why is None:  # commands.json's standing copy/siblings, unnamed (#1021), as an API start's
-        why = _standing_gap(context.repo_conf(repo, sub), a, models.provider_name(m), repo, sub) or None
+        why = _standing_gap(context.repo_conf(repo, sub), a, models.provider_name(m), repo, sub,
+                            role, advice=False) or None
     if why is None:  # no price, or today at the day cap (#1019), without an API start's advice:
         # the role is on the GPU and this start only waits for it (wave 2's merge)
         why = meter.refusal(m, role, advice=False,  # round 1's input too (#1173)
@@ -1009,7 +1010,8 @@ CACHE_DIRS = ("__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".to
               ".cache", ".idea", ".vscode")
 
 
-def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu", where: str = "") -> dict:
+def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu", where: str = "",
+                    role: str | None = None) -> dict:
     """The task's `setup`, `copy` and `siblings`: commands.json's `repos` entry for the repo,
     with --setup in its place and --copy/--sibling added, each checked (#201, the 2026-11-19
     audit). A copied path must be ignored in the checkout (else it shows in the review diff) and
@@ -1017,7 +1019,7 @@ def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu", whe
     the repo the lane may read."""
     conf = context.repo_conf(repo, sub)  # the package's entry, not the repo's first (#778)
     if via == "api":  # nothing standing goes to a provider unnamed (#1021)
-        _standing_refusal(conf, a, where, repo, sub)
+        _standing_refusal(conf, a, where, repo, sub, role)
     setup = a.setup if a.setup is not None else conf.get("setup") or ""
     copy, sibs = [], []
     for raw, given in [*((x, False) for x in conf.get("copy", [])), *((x, True) for x in a.copy or [])]:
@@ -1109,26 +1111,32 @@ def _copy_path(repo: Path, raw: str, sub: str | None) -> str:
     return p
 
 
-def _standing_refusal(conf: dict, a, where: str, repo: Path, sub: str | None) -> None:
+def _standing_refusal(conf: dict, a, where: str, repo: Path, sub: str | None,
+                      role: str | None = None) -> None:
     """An API task takes commands.json's standing `copy` and `siblings` only when this command
     line names them too: a `.env.local` copied into every worktree, or a `../shared` the lane
     reads, would reach the provider unasked (#1021). Exit 3, the entry and how to name it."""
-    if why := _standing_gap(conf, a, where, repo, sub):
+    if why := _standing_gap(conf, a, where, repo, sub, role):
         die(why, 3)
 
 
-def _standing_gap(conf: dict, a, where: str, repo: Path, sub: str | None) -> str:
+def _standing_gap(conf: dict, a, where: str, repo: Path, sub: str | None,
+                  role: str | None = None, advice: bool = True) -> str:
     """_standing_refusal's line, or '': also the busy opt-in's (#1023), which moves a GPU start to
-    an API model after _worktree_setup checked it as a GPU one (wave 2's merge). A --copy names
-    the path it copies, from a package the package's (_copy_path, #1158)."""
+    an API model after _worktree_setup checked it as a GPU one (wave 2's merge), and the mod's
+    dry run's (_route_start). A --copy names the path it copies, from a package the package's
+    (_copy_path, #1158). Its other way out is the role's, or a GPU model for a --model start
+    (privacy.standing_refusal, #1227)."""
+    asked = bool(getattr(a, "model", None))
     named_copy = {_copy_path(repo, x, sub).rstrip("/") for x in a.copy or []}
     named_sib = {x.strip().rstrip("/").removeprefix("../") for x in a.sibling or []}
     for raw in conf.get("copy", []):
         if (entry := os.path.normpath(raw.strip()).rstrip("/")) not in named_copy:
-            return privacy.standing_refusal("copy", raw, where, _copy_name(repo, entry, sub))
+            return privacy.standing_refusal("copy", raw, where, _copy_name(repo, entry, sub),
+                                            role, asked, advice)
     for raw in conf.get("siblings", []):
         if raw.strip().rstrip("/").removeprefix("../") not in named_sib:
-            return privacy.standing_refusal("siblings", raw, where)
+            return privacy.standing_refusal("siblings", raw, where, None, role, asked, advice)
     return ""
 
 
@@ -1452,7 +1460,7 @@ def cmd_start(a):
         print(f"package: {sub} (its own CLAUDE.md): the agent, the setup and the tests run there")
     if not a.no_sign:  # said now, not after the whole task at wb accept (#374)
         _say(gitops.sign_problem(repo, a.base))
-    setup = _worktree_setup(repo, a, sub, m.kind, models.provider_name(m))
+    setup = _worktree_setup(repo, a, sub, m.kind, models.provider_name(m), role)
     checkout_bytes = _disk_room(repo, a.base, setup)
     # Two projects, one GPU: a task that can't run beside the GPU's holders used to queue in
     # silence behind them, maybe for hours (the 2026-11-16 audit). Say so before any worktree.
@@ -1770,11 +1778,19 @@ def cmd_feedback(a):
         mark.unlink(missing_ok=True)
     reviews = st.get("reviews", 0) + (0 if resumed or unsent else 1)
     handled = store.now()  # everything before the new round; what its runner raises stays news
-    task.set_status(context="fresh" if a.fresh else "keep" if a.keep_context else None)
+    # An unsent round keeps its own `context` unless a flag says otherwise: the runner clears it
+    # only once the round starts, so wb resume's or wb next --fresh's "fresh" (or a handover's
+    # "full") still stands. Cleared here, the "carry on" a failed notice advises ran the resume
+    # in the old stuck session, its RESUME prompt claiming a fresh one, and the day cap priced a
+    # fresh first request for a continued one (#1230, 2026-11-24).
+    if not unsent or a.fresh or a.keep_context:
+        task.set_status(context="fresh" if a.fresh else "keep" if a.keep_context else None)
     gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
     task.set_status(round=n, reviews=reviews, phase="queued",  # the pane: "resumed", not "feedback 0"
                     # an unsent round keeps its own (`next`: the pane's `step 2`)
-                    **({} if unsent else {"round_for": "resume" if resumed else "feedback"}),
+                    # an infra stop's resume carries a self-review on as wb resume's does (#1228)
+                    **({} if unsent else {"round_for": "feedback"} if not resumed else
+                       {"round_for": "resume", "self_review_tree": runner.carried_tree(task)}),
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0)
     _credit_turn(task)
@@ -2684,7 +2700,8 @@ def _resume(task: store.Task) -> None:
         # again, its prompt as wb start wrote it, not "Claude stopped your last session…"
         handled = store.now()
         gpu = _gpu_note(task)
-        task.set_status(phase="queued", last="resumed by the reviewer", round_for="resume")
+        task.set_status(phase="queued", last="resumed by the reviewer", round_for="resume",
+                        self_review_tree=runner.carried_tree(task))  # as below (#1228)
         task.event({"ts": store.now(), "round": 1, "kind": "resumed",
                     "text": "Claude resumed the task: it starts its first round again"})
         spawn_runner(task)
@@ -2699,8 +2716,11 @@ def _resume(task: store.Task) -> None:
         asks, runner.folded_notes(task, n + 1, notes) if notes else ""))
     handled = store.now()
     gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
+    # a self-review stopped from outside (an update before it ran, wb stop, a signal, a reaped
+    # runner) goes on here: without its green tree, the resumed session that read on was stopped
+    # as stuck on a green change, the step counted against it (#1228, 2026-11-24)
     task.set_status(round=n + 1, context="fresh", phase="queued", last="resumed by the reviewer",
-                    round_for="resume")
+                    round_for="resume", self_review_tree=runner.carried_tree(task))
     task.event({"ts": store.now(), "round": n + 1, "kind": "resumed",
                 "text": "Claude resumed the task in a fresh session"})
     _credit_turn(task)
@@ -3146,6 +3166,13 @@ def _who(mid: str) -> str:
     return models.provider_name(m) if m is not None and m.kind == "api" else mid.split("/", 1)[0]
 
 
+def _thinks(mid: str, thinking: str) -> str:
+    """routes.change's ``thinks``: what API model ``mid`` does with that thinking setting, as its
+    task would run it (routes.thinking_of, #1237); the setting itself for one not in the catalog."""
+    m = models.lookup(mid)
+    return routes.thinking_of(m, thinking) if m is not None and m.kind == "api" else routes.plain_thinks(mid, thinking)
+
+
 def _route_argv(role, target, gpu, api, thinking, day, order=None) -> list[str]:
     """The change as one canonical command (after `wb`): what the dialog approved and the gate
     compares, whatever spelling (an abbreviation, `--flag=value`) Claude used."""
@@ -3159,9 +3186,10 @@ def _route_argv(role, target, gpu, api, thinking, day, order=None) -> list[str]:
 
 
 def start_line(name: str, m: models.Model) -> str:
-    """The dialog's line for `wb start --model <API id>` (#1014)."""
+    """The dialog's line for `wb start --model <API id>` (#1014), its thinking what the task will
+    do (routes.thinking_of): `thinking off` was said for a model that can't turn it off (#1237)."""
     return f"start {name} on API {m.id} (not a role's choice) · your code goes to " \
-           f"{models.provider_name(m)} · thinking off"
+           f"{models.provider_name(m)} · {routes.thinking_of(m, 'off')}"
 
 
 def start_gate(name: str, m: models.Model) -> None:
@@ -3212,7 +3240,7 @@ def _route_start(a) -> None:
     except OSError:
         spec_text = ""
     # no price, no cap, or today at the cap (#1019, #1089): wb start's too
-    if why := meter.refusal(m, tokens=runner.first_tokens(prompt=spec_text)):
+    if why := meter.refusal(m, tokens=runner.first_tokens(prompt=spec_text), asked=True):
         die(why, 3)
     # wb start's cheap refusals too, in place of a dialog for a start that then exits 1, 3 or 4
     # (#1104, 2026-11-23): the model can't run, a --base naming no commit, the provider's slots
@@ -3221,6 +3249,11 @@ def _route_start(a) -> None:
         die(_cant_run(m, state), 3)
     if repo is not None and (why := _no_base(repo, ns.base)):
         die(why)
+    # commands.json's standing copy/siblings this start doesn't name: wb start's exit 3, here
+    # before the dialog, which had the user approve a start wb start then refused (#1227)
+    if repo is not None and (why := _standing_gap(context.repo_conf(repo, sub), ns,
+                                                  models.provider_name(m), repo, sub)):
+        die(why, 3)
     if not ns.queue and not _api_slots_free(m, ns.name):
         die(_slots_full(m, ns.name), 4)
     line = start_line(ns.name, m)
@@ -3450,7 +3483,8 @@ def cmd_route(a):
             die("no role has an API model yet: wb route <role> <provider/model>", 3)
         try:
             ch = routes.change(doc, None if what == "cap" else role, via=via, gpu=gpu, api=api,
-                               thinking=a.thinking, day_usd=day, who=_who, use=use, order=order, busy=busy)
+                               thinking=a.thinking, day_usd=day, who=_who, use=use, order=order, busy=busy,
+                               thinks=_thinks)
         except routes.RoutesError as e:
             die(str(e), 3)
         # a kept API model a role newly runs on (its own flip, or the Agents switch) must still be
@@ -3510,7 +3544,7 @@ def _route_pairs(a) -> None:
 
     def changed(doc) -> routes.Change:
         try:
-            ch = routes.change_pairs(doc, pairs, day_usd=a.day_usd, who=_who)
+            ch = routes.change_pairs(doc, pairs, day_usd=a.day_usd, who=_who, thinks=_thinks)
         except routes.RoutesError as e:
             die(str(e), 3)
         for r, via, mid in pairs:  # a kept API model a role newly runs on must still be one it may run
@@ -3844,6 +3878,11 @@ def cmd_accept(a):
     merged, refused = close.get("merged_head"), None
     if close.get("merge") and not merged:
         into = close.get("merge_into")
+        if into and into != "HEAD" and close.get("merge_from"):
+            # an earlier try got into its merge, and a SIGKILL there left it half made: the retry
+            # blamed it as uncommitted changes, or said merged with MERGE_HEAD still there
+            # (#1231). No merge lock: while it's there, every other wb merge refuses the checkout
+            gitops.clear_killed_merge(repo, close["merge_from"], tip, close.get("merge_as", "merge"))
         if into and into != "HEAD" and gitops.contains(repo, f"refs/heads/{into}", tip):
             merged = gitops.git(repo, "rev-parse", "--short", f"refs/heads/{into}").strip()  # made already
         elif into and into != "HEAD" and (merged := gitops.squashed(
@@ -6007,11 +6046,18 @@ def cmd_init(a):
     if not has_commits:
         gitops.git(d, "add", "-A")  # the agents work from commits: the project as it is now
         n = len(gitops.git(d, "diff", "--cached", "--name-only", "-z").split("\0")) - 1
-        gitops.git(d, "commit", "-q", "--allow-empty", "-m", "Initial commit")
+        try:  # signed as accept's are, or unsigned for wb try: a locked key hung it (#1226)
+            gitops.commit(d, "commit", "-q", "--allow-empty", "-m", "Initial commit",
+                          sign=not a.no_sign)
+        except gitops.GitError as e:  # left staged: wb init again, once unlocked, commits it
+            die(f"{d}: {e}")
         did.append(f"initial commit of the {n} file(s) here (git show --stat to check)" if n
                    else "initial commit")
-    elif any("AGENTS.md" in x for x in did):
-        did.append(_commit_link(d, head, index, moved))
+    elif any("AGENTS.md" in x for x in did) or not local and "AGENTS.md" not in head \
+            and agents.is_symlink() and os.readlink(agents) == "CLAUDE.md":
+        # or the link an earlier run made and couldn't commit: a key that needed unlocking, which
+        # "or --no-sign" sends back here (#1226)
+        did.append(_commit_link(d, head, index, moved, not a.no_sign))
     status = claude_md_status(d)
     print(f"{d}: " + (", ".join(did) if did else "already set up") + f"; {status}"
           + (" (AGENTS.md not linked)" if local else "")
@@ -6033,7 +6079,7 @@ def _md_entries(d: Path, *ls) -> dict:
     return out
 
 
-def _commit_link(d: Path, head: dict, index: dict, moved: bool) -> str:
+def _commit_link(d: Path, head: dict, index: dict, moved: bool, sign: bool = True) -> str:
     """Commit what wb init made in a repo with commits, and nothing of the user's: the AGENTS.md
     link and, when AGENTS.md's file moved to CLAUDE.md, the committed text under its new name.
     `git add -A -- CLAUDE.md AGENTS.md` and a path-limited commit took CLAUDE.md's working copy
@@ -6071,8 +6117,11 @@ def _commit_link(d: Path, head: dict, index: dict, moved: bool) -> str:
         for p, (mode, blob) in changed.items():
             gitops.git(d, "update-index", "--add", "--cacheinfo", f"{mode},{blob},{p}", env=env)
         # no hooks: one with a scratch GIT_INDEX_FILE (lint-staged's stash) could rewrite the tree
-        gitops.git(d, *gitops.NO_HOOKS, "commit", "-q", "-m", "chore: AGENTS.md links to CLAUDE.md",
-                   env=env)
+        try:  # signed as wb accept signs: no prompt to wait on (#1226)
+            gitops.commit(d, *gitops.NO_HOOKS, "commit", "-q", "-m",
+                          "chore: AGENTS.md links to CLAUDE.md", sign=sign, env=env)
+        except gitops.GitError as e:  # the link stays in the working tree, for wb init again
+            return str(e)
     for p, (mode, blob) in changed.items():  # their index matched HEAD here: now the new HEAD
         gitops.git(d, "update-index", "--add", "--cacheinfo", f"{mode},{blob},{p}")
     return "committed"
@@ -6636,8 +6685,11 @@ def cmd_try(a):
     # the Python wb runs on, not PATH's python3: on RHEL 8 that is 3.6, and the untouched base
     # failed its tests (#530)
     py = shlex.quote(sys.executable)
+    # unsigned, its first commit and its accept's: a throwaway sample, and a key that needed
+    # unlocking failed wb try at once, or with a terminal (WSL2) hung it on a prompt (#1226)
     argv = ["start", name, "--spec", str(TRY / "spec.md"), "--repo", str(d), "--size", "trivial",
-            "--trial", "--test", f"{py} -m unittest", *(["--model", a.model] if a.model else [])]
+            "--trial", "--no-sign", "--test", f"{py} -m unittest",
+            *(["--model", a.model] if a.model else [])]
     try:
         # the copy and its init inside: wb init refusing (no git identity, a home that is a
         # git repo) left try/<n> behind, one more at each retry (#530)
@@ -6645,7 +6697,7 @@ def cmd_try(a):
         # wb init refuse the copy as generated files (2026-11-21)
         shutil.copytree(TRY / "project", d, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         with redirect_stdout(io.StringIO()):
-            cmd_init(argparse.Namespace(dir=str(d)))
+            cmd_init(argparse.Namespace(dir=str(d), no_sign=True))
         s = parser().parse_args(argv)
         s.f(s)
     except BaseException:  # refused (the GPU busy, no model): no sample left behind without a task
@@ -7976,7 +8028,10 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_remote)
     s = sub.add_parser("init", help="set a project up: git with an initial commit, "
                                     "AGENTS.md → CLAUDE.md")
-    s.add_argument("dir"); s.set_defaults(f=cmd_init)
+    s.add_argument("dir")
+    s.add_argument("--no-sign", action="store_true",
+                   help="make its commits unsigned, whatever commit.gpgsign says (a key that needs unlocking)")
+    s.set_defaults(f=cmd_init)
     s = sub.add_parser("bench", help="replay accepted tasks on any model, graded by the tests they "
                                      "were accepted with")
     bs = s.add_subparsers(dest="bench_cmd", required=True)
