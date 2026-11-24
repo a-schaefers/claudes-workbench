@@ -30221,6 +30221,34 @@ class Routes(Base):
                 self.assertEqual(self.path.read_text(), was)
         self.assertFalse(self.dry("significant", "--thinking", "on")["gate"])   # thinking on the GPU: no yes
 
+    def test_thinking_on_a_gpu_role_that_runs_on_its_api_model_under_agents_api_or_busy_needs_the_dialog(self):
+        # #1149 (2026-11-24): the gate read the role's own via, so with Agents on API (or the busy
+        # opt-in on) a thinking change came with no dialog, and every API start of the role then
+        # billed reasoning tokens the user never approved
+        for setup in ({"use": "api"}, {"busy": "api"}):
+            with self.subTest(setup=setup):
+                self.path.write_text(json.dumps({"v": 1, "day_usd": 5, **setup, "roles": {"trivial": {
+                    "via": "gpu", "api": "deepseek/deepseek-flash", "thinking": "off"}}}))
+                doc = routes.read()
+                self.assertTrue(routes.change(doc, "trivial", thinking="on").gated)
+                self.assertTrue(routes.change(doc, "all", thinking="on").gated)
+                self.assertFalse(routes.change(doc, "significant", thinking="on").gated)  # no API model
+                os.environ["CLAUDECODE"] = "1"
+                asked = self.dry("trivial", "--thinking", "on")
+                self.assertEqual((asked["change"], asked["gate"]), ("trivial: thinking off → on", True))
+                was = self.path.read_text()
+                code, out, err = self.route("trivial", "--thinking", "on")
+                self.assertEqual((code, out), (3, ""))
+                self.assertIn("in Claude Code a role changes only through the workbench mod's dialog", err)
+                self.assertEqual(self.path.read_text(), was)
+                os.environ.pop("CLAUDECODE")
+        # Agents on API: the role already runs there, so a new API model is the next start's
+        self.path.write_text(json.dumps({"v": 1, "day_usd": 5, "use": "api", "roles": {"trivial": {
+            "via": "gpu", "api": "deepseek/deepseek-flash"}}}))
+        self.assertEqual(self.dry("trivial", "--api", "anthropic/claude-haiku-5-5")["change"],
+                         "trivial: API model deepseek/deepseek-flash → anthropic/claude-haiku-5-5 (Anthropic), "
+                         "used from the next start")
+
     def test_a_kept_api_model_is_checked_again_when_its_role_goes_back_to_api(self):
         # ARCHITECTURE.md, *Roles*: the kept model must still be one the role may run
         self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")

@@ -262,9 +262,17 @@ class Change:
     roles: list = field(default_factory=list)  # the roles it changes
 
 
-def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str]) -> tuple[list, bool]:
+def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str],
+               new: dict) -> tuple[list, bool]:
+    """``r``'s clauses of the change line and whether they take the user's yes. ``new``: the
+    document after the change (its `use` and `busy`), so what the role's code does is judged by
+    where it actually goes: with Agents on API, or the busy opt-in on, a role whose own `via` is
+    gpu still runs on its API model, and thinking turned on there billed reasoning tokens with no
+    dialog (#1149, 2026-11-24)."""
     clauses, gated = [], False
     on_api = row["via"] == "api"
+    after = {**new, "roles": {**new["roles"], r: row}}
+    sends = bool(row.get("api")) and (effective_via(after, r) == "api" or bool(busy_api(after, r)))
     moved = old["via"] != row["via"] or (on_api and old.get("api") != row.get("api"))
     if moved:
         gated = True
@@ -279,13 +287,15 @@ def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str]) -> 
             clauses.append(f"API kept: {row['api']}")
     elif old.get("api") != row.get("api"):  # set while on the GPU: used by wb route <role> api
         gated = True
+        # under Agents on API the role already runs there: the new model is the next start's
         clauses.append(f"API model {old.get('api') or 'none'} → {row['api']} ({who(row['api'])}), "
-                       "used once it goes to API")
+                       + ("used from the next start" if effective_via(after, r) == "api" else
+                          "used once it goes to API"))
     if old["gpu"] != row["gpu"] and not (moved and not on_api):
         clauses.append(f"GPU model {_gpu_name(old['gpu'])} → {_gpu_name(row['gpu'])}")
     if old["thinking"] != row["thinking"] and not (moved and on_api):
         clauses.append(f"thinking {old['thinking']} → {row['thinking']}")
-        gated |= on_api
+        gated |= on_api or sends
     if row.get("order") and old.get("order") != row["order"] and not (moved and on_api):
         clauses.append(f"backends {', '.join(old.get('order') or ['none'])} → {', '.join(row['order'])}")
         gated = True  # where the code goes, within OpenRouter (#1021)
@@ -368,7 +378,7 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
             raise RoutesError(f"{r} has no API model yet: wb route {r} <provider/model>")
         if via is not None:
             row["via"] = via
-        clauses, g = _role_part(r, old, row, cap, who)
+        clauses, g = _role_part(r, old, row, cap, who, new)
         if not clauses:
             continue
         parts.append(f"{r}: " + " · ".join(clauses))
@@ -440,7 +450,7 @@ def change_pairs(doc: dict, pairs: list, day_usd=None,
     parts, sent = [], []
     for r in roles:
         old, row = doc["roles"][r], new["roles"][r]
-        clauses, _ = _role_part(r, old, row, cap, who)
+        clauses, _ = _role_part(r, old, row, cap, who, new)
         if row["via"] == "api" and (old["via"] != "api" or old.get("api") != row.get("api")):
             sent.append(r)  # said once for all below, not per role
             once = {f"your code goes to {who(row['api'])}", f"thinking {row['thinking']}"}

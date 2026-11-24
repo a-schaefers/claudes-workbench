@@ -3735,7 +3735,8 @@ The changes (each one exit 3 with one line when refused, writing nothing):
 changed, joined by `; `: `trivial: GPU → API deepseek/deepseek-flash · your code goes to DeepSeek ·
 thinking off · cap $5/day` (the provider's name from the catalog, `models.provider_name`, else its
 id); back to the GPU, `trivial: API <id> → GPU · API kept: <id>`; an API model set while on the GPU,
-`API model none → <id> (<provider>), used once it goes to API`; `GPU model the router's pick → <id>`;
+`API model none → <id> (<provider>), used once it goes to API` (`used from the next start` when Agents
+on API already runs the role there, #1149); `GPU model the router's pick → <id>`;
 `thinking off → on`; and `day cap none → $5/day` (unless a role's part says the new cap). The Agents
 switch's part comes first (`routes._agents_part`): `Agents: Both → API (every role on its API model;
 writing has no API model and can't start; your code goes to DeepSeek (trivial); cap $5/day)`, `Agents:
@@ -3756,6 +3757,10 @@ where the code goes once (`your code goes to DeepSeek`; several providers as `_g
 and the cap once: `trivial: GPU → API <a> · significant: GPU → API <b> · your code goes to DeepSeek ·
 thinking off · cap $5/day`. `cli._route_apply` dry-runs or writes either kind of change. A kept API model a role newly runs on is checked again (`cli._route_api`). `Change.gated`: it touches the API side (a selector, an API
 model, thinking on a role on API) or the cap; a GPU model pin alone, or thinking on a GPU role, isn't.
+"On API" is where the role's code goes, not its own `via` (`routes._role_part` reads the new document:
+`effective_via`, or `busy_api` for the busy opt-in): with Agents on API, or `busy` api, thinking on a
+role with an API model takes the yes too (#1149, 2026-11-24: it came with no dialog, and every API start
+of the role billed reasoning tokens nobody approved).
 Applied (`routes.editing`: `store.edit_config`'s lock, a link kept, nothing written when the body
 raises; the line computed again under the lock) it prints `changed: <line>`, and each changed role
 gets its record (`routes.stamp`, `routes.STAMPS`): a gated change `said` (the line), `by` and `ts`;
@@ -6336,7 +6341,8 @@ fake (`ApiDiscovery`, #1013); `Real`'s fixture (`test_portable.py`) runs it too,
 the user's own OpenCode. `ApiStats` (#1022) writes an API task's task.json as `wb start --role` will (`via`, `provider`,
 `role`) and prices each exported session with `FAKE_COST`. **The roles** (`Routes`, #1014) run on that catalog (`ROUTES_CATALOG`, a `deepseek` provider
 named DeepSeek with a stored key): the document, the change line, the gate's consumed approval (stale, another
-command, another line), every gated kind (a flip, an API model, thinking on API, `--api` on the GPU, the cap), a pin
+command, another line), every gated kind (a flip, an API model, thinking on API, also on a GPU role Agents on API or the busy
+opt-in runs there, `--api` on the GPU, the cap), a pin
 keeping the record of the user's yes, the flips, the refusals (a kept model checked again, one gone from the catalog, a
 provider's passing state), the Agents switch (its line, its gate, `use` alone set), the start refused before any dialog (`API_RUNS` patched off) and its gate, `wb try`'s
 refusal, an unreadable file; `Base` points `WB_ROUTES` at the
