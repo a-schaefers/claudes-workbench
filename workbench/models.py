@@ -4020,11 +4020,21 @@ WSL_PID = "ollama-windows"
 
 def _remote_pid_for(cfg: dict, host: str, root: str | None = None) -> str:
     """The provider wb remote uses for ``host``: remote_pid's, except WSL2's Windows host, which
-    is WSL_PID unless a provider of the old ollama-<address> id is already there (at ``root``, when
-    adding), kept so its models keep their ids (#1159)."""
+    is the provider marked `wsl_host` in models.json when OpenCode's config has one (one at
+    ``root`` first, when adding), else WSL_PID unless a provider of the old ollama-<address> id is
+    already there (at ``root``, when adding), kept so its models keep their ids (#1159)."""
     pid = remote_pid(host)
     if host != (windows_host() or "").lower():
         return pid
+    # an adopted ollama-<old address> keeps its id after discovery repoints it, so at Windows'
+    # next address remote_pid named nothing there: wb remote made a second provider, ollama-windows,
+    # with new model ids, and --remove found nothing to remove (#1159's review, 2026-11-24)
+    marked = [p for p, e in _overrides().items()
+              if isinstance(e, dict) and e.get("wsl_host") and _provider(cfg, p) is not None]
+    if marked:
+        here = f"{root}/v1" if root else None
+        return min(marked, key=lambda p: (_provider_url(_provider(cfg, p)).rstrip("/") != here,
+                                          p != WSL_PID, p))
     prov = _provider(cfg, pid)
     old = prov is not None and (root is None or _provider_url(prov).rstrip("/") == f"{root}/v1")
     return pid if old else WSL_PID
@@ -4090,12 +4100,19 @@ def windows_moved(m: Model) -> str:
     host = (urlparse(m.root).hostname or "").lower()
     if not host or host == win.lower():
         return ""
-    step = (f"wb remote {win} points it at Windows' new address, and networkingMode=mirrored under "
-            "[wsl2] in %UserProfile%\\.wslconfig keeps 127.0.0.1 for good")
+    mirrored = ("networkingMode=mirrored under [wsl2] in %UserProfile%\\.wslconfig keeps 127.0.0.1 "
+                "for good")
     if m.extra.get("wsl_host"):
-        return f"WSL2's NAT gave Windows a new address, {win}: {step}"
+        return (f"WSL2's NAT gave Windows a new address, {win}: wb remote {win} points it at "
+                f"Windows' new address, and {mirrored}")
+    # wb remote <new> doesn't repoint this one: nothing says its address was Windows', so it makes
+    # ollama-windows beside it, and saying "points it at" sent the user round again (#1159's
+    # review, 2026-11-24)
+    drop = (f"wb remote {host} --remove drops this one" if m.extra.get("remote")
+            else f"{m.provider} can go from OpenCode's config")
     return (f"start Ollama at {m.root}; or, if {host} was Windows' address (WSL2's NAT gives it a "
-            f"new one on a reboot), {step}")
+            f"new one on a reboot), wb remote {win} adds Windows' Ollama as {WSL_PID}, which follows "
+            f"its address from now on (its models get new ids), {drop}, and {mirrored}")
 
 
 def remote_host(host: str) -> str:

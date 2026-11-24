@@ -2812,13 +2812,18 @@ new address when the WSL VM restarts, so `wb remote <Windows' address>` writes p
 `models.WSL_PID` (`ollama-windows`, models.json `wsl_host: true`), and `discover()` follows it
 (`follow_windows_host`): a provider wb remote made there, still at its `remote` mark, whose host
 isn't `windows_host()` now has its baseURL (port kept) and mark rewritten through `own_config`,
-one `wb: Windows' address moved …` line on stderr; one it can't rewrite stays, and `remedy`
-(`windows_moved`) names the new address (`wb remote <new>`, or `networkingMode=mirrored`) where it
-said to start Ollama, as it does for any wb remote provider, or remote Ollama, gone from an address
-that isn't Windows' now ("if <host> was Windows' address"). A provider `ollama-<address>` from
-before stays its own (`wb remote` again at that address marks it, its ids kept). #1159: after a
-reboot every `wb start` said to start a running Ollama, and `wb remote <new>` made a second
-provider whose new ids started the router's history over.
+one `wb: Windows' address moved …` line on stderr; one the user repointed (baseURL off its mark)
+stays theirs (#242). At Windows' address `wb remote` and `--remove` take the provider marked
+`wsl_host` whatever its id (`models._remote_pid_for`), and `wb remote <new>` repoints it if
+discovery hasn't yet. One wb can't rewrite stays, and `remedy` (`windows_moved`) names the new
+address where it said to start Ollama: for a `wsl_host` one `wb remote <new>` (it repoints it), or
+`networkingMode=mirrored`; for any other wb remote provider, or remote Ollama, gone from an address
+that isn't Windows' now ("if <host> was Windows' address"), `wb remote <new>` adds `ollama-windows`
+beside it (new ids) and `wb remote <old> --remove` drops it (#1159's review: it said `wb remote
+<new>` repointed it). A provider `ollama-<address>` from before stays its own (`wb remote` again at
+that address, while it's Windows', marks it `wsl_host`, its ids kept). #1159: after a reboot every
+`wb start` said to start a running Ollama, and `wb remote <new>` made a second provider whose new
+ids started the router's history over.
 
 #### A model on another machine
 Ollama there with `OLLAMA_HOST=0.0.0.0`, reachable only from the client (no login; plain `http://`
@@ -3081,8 +3086,8 @@ user's config; results rows keep `thinking` (the weekly check's evidence for rec
 loses to wb's in the layer.
 
 `wb remote HOST` (`models.add_remote`, #114): checks `/api/version`, writes provider `ollama-<host>`
-(`remote_pid`; WSL2's Windows host `ollama-windows`, `wsl_host: true`, repointed rather than
-refused when only the address moved, #1159; `remote_root` brackets IPv6, zone `%25`, read back as discovery reads it, #707)
+(`remote_pid`; WSL2's Windows host `ollama-windows`, `wsl_host: true`, or the provider already
+marked so, repointed rather than refused when only the address moved, #1159; `remote_root` brackets IPv6, zone `%25`, read back as discovery reads it, #707)
 with `local: true` and `remote: <root>`, then adds each `/api/tags` model whose `/api/show`
 has `tools` through `wb model add`'s path (cloud rows left out; a refused one gets a `--` line, the
 rest go on). That id already there for another baseURL is refused, never reused (#197). `--remove`

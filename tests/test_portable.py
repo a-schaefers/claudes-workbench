@@ -2442,7 +2442,11 @@ class Remote(unittest.TestCase):
         with mock.patch.object(models, "windows_host", return_value="127.0.0.5"):
             fix = models.remedy(m, st)
         self.assertIn("if 127.0.0.4 was Windows' address", fix)
-        self.assertIn("wb remote 127.0.0.5", fix)
+        # #1159's review (2026-11-24): wb remote <new> makes ollama-windows beside this one, so the
+        # step says so and how to drop this one, never that it repoints it
+        self.assertIn("wb remote 127.0.0.5 adds Windows' Ollama as ollama-windows", fix)
+        self.assertNotIn("points it at", fix)
+        self.assertIn("wb remote 127.0.0.4 --remove drops this one", fix)
         self.assertIn("networkingMode=mirrored", fix)
         # still at Windows' address, wb remote adopts the old provider: its models keep their ids
         try:
@@ -2460,6 +2464,79 @@ class Remote(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(list(json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())["provider"]), [legacy])
         self.assertTrue(json.loads(Path(os.environ["WB_MODELS"]).read_text())[legacy]["wsl_host"])
+
+    def test_an_adopted_old_windows_provider_stays_the_one_provider_after_windows_moves(self):
+        # #1159's review (2026-11-24): wb remote adopted ollama-127-0-0-4 at Windows' address and
+        # discovery repointed it after a reboot, but wb remote <new address> then made a second
+        # provider, ollama-windows, with new model ids, and --remove found nothing to remove
+        tags = [{"name": "coder:7b"}]
+        shows = {"coder:7b": {"capabilities": ["tools"], "model_info": {}}}
+        try:
+            before, port = fake_remote_ollama(tags, shows, host="127.0.0.4")
+        except OSError:
+            self.skipTest("no 127.0.0.4 here")
+        self.servers.append(before)
+        legacy = models.remote_pid("127.0.0.4")
+        self.config({legacy: {"name": "Ollama on 127.0.0.4", "models": {"coder:7b": {}},
+                              "options": {"baseURL": f"http://127.0.0.4:{port}/v1"}}},
+                    {legacy: {"local": True, "remote": f"http://127.0.0.4:{port}"}})
+        cfg_path = Path(os.environ["WB_OPENCODE_CONFIG"])
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.4"):
+            self.assertEqual(self.wb("remote", "127.0.0.4", "--port", str(port), "--context", "32768")[0], 0)
+        before.shutdown()
+        before.server_close()
+        self.servers.remove(before)
+        try:
+            after = ThreadingHTTPServer(("127.0.0.5", port), before.RequestHandlerClass)
+        except OSError:
+            self.skipTest("no 127.0.0.5 here")
+        threading.Thread(target=after.serve_forever, daemon=True).start()
+        self.servers.append(after)
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.5"), redirect_stderr(io.StringIO()):
+            self.assertIn(f"{legacy}/coder:7b", models.discover())         # followed, its id kept
+            code, out = self.wb("remote", "127.0.0.5", "--port", str(port), "--context", "32768")
+            self.assertEqual(code, 0, out)
+            self.assertEqual(list(json.loads(cfg_path.read_text())["provider"]), [legacy])
+            code, out = self.wb("remote", "127.0.0.5", "--remove")
+            self.assertEqual(code, 0, out)
+            self.assertNotIn(legacy, json.loads(cfg_path.read_text()).get("provider") or {})
+
+    def test_wb_remote_at_windows_new_address_repoints_its_provider_before_discovery_has(self):
+        # #1159's review (2026-11-24): add_remote's own repoint, for a wb remote that runs before
+        # any discover() followed the address, was untested (discovery had always repointed first)
+        try:
+            srv, port = fake_remote_ollama([{"name": "coder:7b"}],
+                                           {"coder:7b": {"capabilities": ["tools"], "model_info": {}}},
+                                           host="127.0.0.3")
+        except OSError:
+            self.skipTest("no 127.0.0.3 here")
+        self.servers.append(srv)
+        self.config({models.WSL_PID: {"name": "Ollama on Windows", "models": {"coder:7b": {}},
+                                      "options": {"baseURL": f"http://127.0.0.2:{port}/v1"}}},
+                    {models.WSL_PID: {"local": True, "wsl_host": True, "remote": f"http://127.0.0.2:{port}"}})
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.3"):
+            pid, root, names = models.add_remote("127.0.0.3", port)
+        self.assertEqual((pid, root, names), (models.WSL_PID, f"http://127.0.0.3:{port}", ["coder:7b"]))
+        prov = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())["provider"]
+        self.assertEqual(list(prov), [models.WSL_PID])
+        self.assertEqual(prov[models.WSL_PID]["options"]["baseURL"], f"http://127.0.0.3:{port}/v1")
+        self.assertEqual(json.loads(Path(os.environ["WB_MODELS"]).read_text())[models.WSL_PID]["remote"],
+                         f"http://127.0.0.3:{port}")
+
+    def test_discovery_leaves_a_windows_provider_the_user_repointed_by_hand_alone(self):
+        # #1159's review (2026-11-24), #242: a provider wb remote made for Windows that the user
+        # pointed at another server is theirs; following Windows' address would undo their change
+        dead = free_port()
+        self.config({models.WSL_PID: {"name": "Ollama on Windows", "models": {"coder:7b": {}},
+                                      "options": {"baseURL": f"http://127.0.0.9:{dead}/v1"}}},
+                    {models.WSL_PID: {"local": True, "wsl_host": True, "remote": f"http://127.0.0.2:{dead}"}})
+        err = io.StringIO()
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.3"), redirect_stderr(err):
+            m = models.discover()[f"{models.WSL_PID}/coder:7b"]
+        self.assertEqual(m.root, f"http://127.0.0.9:{dead}")
+        self.assertNotIn("moved", err.getvalue())
+        self.assertEqual(json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+                         ["provider"][models.WSL_PID]["options"]["baseURL"], f"http://127.0.0.9:{dead}/v1")
 
 
 class Optimize(unittest.TestCase):
