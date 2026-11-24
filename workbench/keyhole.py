@@ -105,6 +105,11 @@ HOLD_CODES = {429: "rate_limited", 529: "rate_limited",   # 529: Anthropic's "ov
 QUOTA = re.compile(r"(?i)insufficient[_ ](?:quota|balance|credits?|funds)|exceeded your current "
                    r"quota|out of credits?|credits? (?:are |is )?(?:exhausted|used up)|limit_source"
                    r"|\b(?:5|five)[- ]hour\b|weekly (?:usage )?limit|plan(?:'s)? (?:usage )?limit")
+# A spent balance said in a 400 (Anthropic's invalid_request_error "Your credit balance is too low
+# to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."): the
+# task failed as the agent's, no no_credit, no remedy (#1079, 2026-11-23). Only this wording on a
+# 400, never a bare "billing": an ordinary bad request may mention billing.
+CREDIT = re.compile(r"(?i)credit balance is too low|purchase credits|plans (?:&|and) billing")
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
        "trailers", "transfer-encoding", "upgrade", "proxy-connection"}
 CLIENT_AUTH = {"authorization", "x-api-key", "api-key"}
@@ -924,7 +929,7 @@ def _handler(kh: Keyhole):
 
         def read_error(self, resp, wait: float | None = None):
             """(status, headers, redacted body, kind) of an upstream error: kind `quota`,
-            `rate_limited`, `outage` or None (HOLD_CODES, QUOTA), and the provider's health: a
+            `rate_limited`, `outage` or None (HOLD_CODES, QUOTA, CREDIT), and the provider's health: a
             rate limit until Retry-After, else ``wait`` (the hold's backoff) when given, else
             RATE_LIMIT_SECS; any 5xx unreachable, held or not."""
             data = resp.read(ERROR_CAP + 1)
@@ -937,7 +942,7 @@ def _handler(kh: Keyhole):
             text = kh.redact(text)
             status = resp.status
             kind = ("quota" if status == 402 or (status in (429, 403) and QUOTA.search(text))
-                    else HOLD_CODES.get(status))
+                    or (status in (400, 403, 429) and CREDIT.search(text)) else HOLD_CODES.get(status))
             if kind == "quota" or "insufficient_quota" in text:
                 kh.health("no_credit", _first_line(text))
             elif kind == "rate_limited":

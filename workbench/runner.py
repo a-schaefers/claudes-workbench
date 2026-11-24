@@ -1362,13 +1362,16 @@ class _ProviderWait:
         self.retry_until = max(now + RETRY_PAUSE_S, later)
 
     def on_error(self, raw: dict) -> None:
-        """An OpenCode `error` line: a 402 (provider.quota) or 401/403 (provider.auth) ends the
-        round at once, the provider's; a rate limit or outage it gave up on, `end` stops."""
+        """An OpenCode `error` line: a 402 (provider.quota), a 400 whose text is a spent balance
+        (keyhole.CREDIT) or a 401/403 (provider.auth) ends the round at once, the provider's; a
+        rate limit or outage it gave up on, `end` stops."""
         if not self.api:
             return
         err = raw.get("error") if isinstance(raw.get("error"), dict) else {}
         kind, code = str(err.get("type") or ""), err.get("status")
-        if kind == "provider.quota" or code == 402:
+        # Anthropic's spent balance is a 400 invalid_request_error (#1079): its wording, keyhole.CREDIT
+        if kind == "provider.quota" or code == 402 or (
+                code == 400 and keyhole.CREDIT.search(str(err.get("message") or ""))):
             self.fatal = ("quota", f"{self.provider} says the account is out of credit "
                                    f"(HTTP {code or 402})")
         elif kind == "provider.auth" or code in (401, 403):

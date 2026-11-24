@@ -30130,6 +30130,33 @@ class RateLimits(Base):
         self.assertEqual((fake.status["phase"], self.notice(fake)["cause"]), ("stuck", "provider"))
         self.assertIn("(HTTP 402)", fake.status["last"])
 
+    def test_anthropics_400_credit_balance_too_low_stops_the_round_as_a_spent_balance(self):
+        # #1079 (2026-11-23): Anthropic answers a spent balance with 400 invalid_request_error,
+        # read as no quota: the task failed as the agent's, with no remedy and no no_credit mark
+        low = ("Your credit balance is too low to access the Anthropic API. Please go to Plans & "
+               "Billing to upgrade or purchase credits.")
+        task = self.api_task("t-400c", "api", "--silence-timeout", "30")
+        self.up.rate_until, self.up.code, self.up.after = float("inf"), 400, None
+        self.up.body = low
+        self.keyhole(task)
+        runner.drive(task)
+        st = task.status
+        self.assertEqual((st["phase"], st["last"], st.get("infra")),
+                         ("stuck", "deepseek says the account is out of credit (HTTP 400)", "provider"))
+        self.assertEqual(len(self.up.seen), 1)
+        n = self.notice(task)
+        self.assertEqual(n["cause"], "provider")
+        self.assertIn("top up your deepseek account, or wait for the plan's reset", n["text"])
+        self.assertEqual(self.models.api_health("deepseek")["state"], "no_credit")
+        # OpenCode's own error line, no keyhole between: the same stop; another 400 isn't one
+        wait = runner._ProviderWait(task, 1)
+        wait.on_error({"error": {"type": "provider.invalid-request", "status": 400, "message": low}})
+        self.assertEqual(wait.fatal[0], "quota")
+        wait = runner._ProviderWait(task, 1)
+        wait.on_error({"error": {"type": "provider.invalid-request", "status": 400,
+                                 "message": "max_tokens: billing tier allows at most 8192"}})
+        self.assertIsNone(wait.fatal)
+
     def test_read_bound_records_nothing_for_a_rate_limited_round(self):
         from workbench import router
         task = self.api_task("t-rb", "ok")

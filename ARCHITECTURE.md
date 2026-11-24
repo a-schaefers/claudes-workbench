@@ -789,7 +789,7 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   ("<provider> rate-limited the agent's requests for 10 minutes (HTTP 429)") or `outage`
   ("<provider> didn't answer for 10 minutes (HTTP 503)", or the transport's reason); OpenCode
   exiting on such a run sooner (its 10 retries) is the same stop. `queued` never stops a round.
-  A `provider.quota` (402) or `provider.auth` (401/403) error, or status `api_stop` (the keyhole's
+  A `provider.quota` (402), a 400 in `keyhole.CREDIT`'s words (#1079) or `provider.auth` (401/403) error, or status `api_stop` (the keyhole's
   quota stop, shared with #1019's spend stop; consumed by the stop), stops it at once: guard
   `quota` or `auth`. `drive` runs a `rate_limited`/`outage` round again once (`_provider_revive`:
   a `load` event "<provider> rate-limited the round: it runs again once the cooldown ends", the
@@ -1788,7 +1788,9 @@ such a model newer than the binary is still "Model unavailable" to the agent.
 
 **The hold** (#1020). `read_error` sorts an upstream error: 402, or a 429/403 whose body says the
 balance or plan is spent (`QUOTA`: `insufficient_quota`, OpenRouter's `limit_source`, a 5-hour or
-weekly limit), is `quota`; 429 and 529 (Anthropic's overloaded) `rate_limited`; 500, 502, 503, 504
+weekly limit), or a 400, 403 or 429 in Anthropic's out-of-credit words (`CREDIT`: "Your credit
+balance is too low … Plans & Billing … purchase credits", a 400 `invalid_request_error`, read as the
+agent's failure before #1079; never a bare "billing"), is `quota`; 429 and 529 (Anthropic's overloaded) `rate_limited`; 500, 502, 503, 504
 `outage`, and so are Cloudflare's 520-524 in front of a provider, as transient (`HOLD_CODES`; another
 5xx, a 501, a 505, a 525, goes back at once, its health
 still `unreachable`), as are the transient transport failures (`_transient`: refused, reset,
@@ -6257,7 +6259,7 @@ doc needs its own `!/` line).
 - **The provider's wait** (#1020): `keyhole.RATE_HOLD_S` (300) stays under the layer's header guard (600 s, #1017),
   or OpenCode cuts a held request itself; `runner.PROVIDER_GUARDS` → the `provider` cause and `runner.SPEND` → the
   `spend` cause (`runner.stopped_by`, also status `infra`, the `stopped` event's `by`, `bench.replay`'s `error`), both
-  outside `results.THE_STEP`; `api_stop` is shared with #1019's spend stop (guard `spend`); `HOLD_CODES`/`QUOTA` → `note_api`'s states and
+  outside `results.THE_STEP`; `api_stop` is shared with #1019's spend stop (guard `spend`); `HOLD_CODES`/`QUOTA`/`CREDIT` → `note_api`'s states and
   `_ProviderWait.on_retry`/`on_error`'s reading of OpenCode's `retry` and `error`.
 - **A model server's API fields** (`models.server_facts`, `ollama_served_context`, `weights`) → `test_portable.py`'s
   `Real` tests, *Running your own server*.
