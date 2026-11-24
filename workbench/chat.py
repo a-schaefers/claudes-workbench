@@ -693,8 +693,25 @@ def taken() -> list[str]:
             and now - r.get("ts", 0) <= MESSAGE_EXPIRE]
 
 
+def caller_listens() -> bool:
+    """Whether this process runs under the listening session's Claude Code: its CLAUDE_PID is the
+    listener's `parent` (the mod's claim, from `wb events`'s hello). Another delegating session,
+    told to report through `wb chat reply` while the user is away, threaded its report onto the
+    listener's in-flight message: sent to that agent alone, pushed to no phone (#1129,
+    2026-11-23). Either unknown (an older mod's claim, a caller outside Claude Code): yes, as
+    before; a claim of another machine's is never this process's."""
+    lst = listener() or {}
+    parent, me = lst.get("parent"), os.environ.get("CLAUDE_PID", "")
+    if not isinstance(parent, int) or isinstance(parent, bool) or not parent or not me.isdigit():
+        return True
+    if isinstance(lst.get("machine"), str) and lst["machine"] and lst["machine"] != store.machine():
+        return False
+    return int(me) == parent
+
+
 def reply(text: str, to: list[str] | None = None, **extra) -> dict:
-    """Claude's reply (`wb chat reply`), with `re` (``to``, else `taken`) and `to` (whose those
+    """Claude's reply (`wb chat reply`), with `re` (``to``, else `taken`, for the listening
+    session's own calls: `caller_listens`; another's goes to the user) and `to` (whose those
     messages are). ValueError for a ``to`` that is no message to Claude in the thread."""
     rows = {r.get("id"): r for r in store.read_jsonl_tail(chat_dir() / "messages.jsonl", THREAD_BYTES)
             if isinstance(r, dict) and _inbound(r)}
@@ -705,14 +722,17 @@ def reply(text: str, to: list[str] | None = None, **extra) -> dict:
         if missing := [i for i in ids if i not in rows]:
             raise ValueError(f"no message {missing[0][:64]} to Claude in the thread")
     else:
-        ids = [i for i in taken() if i in rows]
+        ids = [i for i in taken() if i in rows] if caller_listens() else []
         # a turn that took the user's message answers the user alone: an agent's message delivered
         # into the user's running turn read every plain `wb chat reply` to them (the #1042 review)
         if any(rows[i].get("from") == "user" for i in ids):
             ids = [i for i in ids if rows[i].get("from") == "user"]
     whose = list(dict.fromkeys(["user"] * bool(to and "user" in to) + [
         "user" if rows[i].get("from") == "user" else str(rows[i].get("from")) for i in ids]))
-    return send(text, "claude", re=ids, to=whose, **extra)
+    # whose Claude Code wrote it: the mod's owed reply (#767) counts its own session's rows and
+    # those answering the message, as another session's report settled it (#1129)
+    pid = os.environ.get("CLAUDE_PID", "")
+    return send(text, "claude", re=ids, to=whose, **({"claude_pid": int(pid)} if pid.isdigit() else {}), **extra)
 
 
 def waiting_on_user() -> bool:

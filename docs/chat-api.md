@@ -143,7 +143,7 @@ The whole state the page draws (an agent's token gets its own view: *An agent's 
 - `asks`: Claude Code's dialogs for the user (while they are away, or while Claude works on an
   agent's request): the newest 20 and every open one (*Rows*). A
   settled plan's text is cut at 1,200 characters with `detail.cut` (the whole is `/api/ask/<id>`).
-- `listener`: the listening session `{session, cwd, pid, start, machine?, busy}`, or null.
+- `listener`: the listening session `{session, cwd, pid, start, machine?, parent?, busy}`, or null.
 - `prefs`: `{away: "ask"|"allow"}`.
 - `push`: `{key: the VAPID public key or null, test: the last test push's time or null}`.
 - `savings`: the week's `wb savings` totals and `score`, and `api`: the week's API tasks apart
@@ -276,9 +276,11 @@ A **message** (`messages`, `replies`, `message`):
 - On a message to Claude: `cid?`, `files?: [{id, name, size, type, path}]`, `about?`, and in the
   state `received: {id, ts, by, how: "now"|"queued"} | null`, `expired?`.
 - On Claude's reply: `re?: [message ids]` (what it answers: `wb chat reply --to`, else the
-  messages Claude was given in that turn, the user's alone when the user's are among them),
+  messages Claude was given in that turn, the user's alone when the user's are among them; from
+  another Claude Code session than the listening one, none: it is the user's),
   `to?: ["user" | agent names]` (whose those messages are, or `"user"` for a question to the
-  user, `wb chat reply --to user`; absent means the user's), `shots?`, `audio?`.
+  user, `wb chat reply --to user`; absent means the user's), `shots?`, `audio?`, `claude_pid?`
+  (the Claude Code process that wrote it).
 
 An **ask** (`asks`, `/api/ask/<id>`): `{id: "ask-…", ts, tool, text, kind:
 "permission"|"plan"|"question", detail?, for?: [agent names], answer: null|"allow"|"deny"|"expired",

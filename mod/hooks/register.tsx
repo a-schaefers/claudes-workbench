@@ -3525,8 +3525,12 @@ async function listen($: any, now: number) {
   if (theirs && (claim.pid ? lives === true || (lives === null && await fresh())
     : now - Number(claim.ts ?? 0) * 1000 < CHAT_STALE_MS)) return // another session listens
   if (!(await $.fs.exists(dir))) await runWb($, ['chat', 'log']) // wb makes the directory
+  // parent: this Claude Code process, so `wb chat reply` threads onto this session's messages only
+  // when it runs under it (chat.caller_listens): another session's report went to the agent this
+  // one was answering, pushed to no phone (#1129, 2026-11-23)
   const body = JSON.stringify({ session: st.key, cwd: mem.cwd, pid: mem.eventsPid,
-    ...(mem.eventsStart ? { start: mem.eventsStart } : {}), ...(mem.machine ? { machine: mem.machine } : {}), busy: mem.busy })
+    ...(mem.eventsStart ? { start: mem.eventsStart } : {}), ...(mem.machine ? { machine: mem.machine } : {}),
+    ...(mem.claudePid ? { parent: mem.claudePid } : {}), busy: mem.busy })
   if (body !== mem.listenerBody || theirs || claim.session !== st.key) { // only on change: a write is an event
     mem.listenerBody = body
     await $.fs.write(`${dir}/listener.json`, body)
@@ -3646,10 +3650,16 @@ function owedSettled() {
 async function owedAtTurnEnd($: any) {
   if (!mem.chatOwed.size) return owedSettled()
   const tail = await readTail($, `${mem.root}/chat/messages.jsonl`, NOTIFY_TAIL)
-  const replied = parseLines(tail?.text ?? '').filter(m => m.from === 'claude').map(m => Number(m.ts ?? 0) * 1000)
+  // a reply settles it when it answers the message (`re`) or this Claude Code wrote it (`claude_pid`,
+  // unknown: yes): another session's report, posted meanwhile, read as the answer (#1129)
+  const mine = (m: any) => !mem.claudePid || !Number(m.claude_pid ?? 0) || Number(m.claude_pid) === mem.claudePid
+  const replied = parseLines(tail?.text ?? '').filter(m => m.from === 'claude')
   let nudge = false
   for (const [id, o] of [...mem.chatOwed]) {
-    if (replied.some(ts => ts >= o.at)) { mem.chatOwed.delete(id); continue }
+    if (replied.some(m => Number(m.ts ?? 0) * 1000 >= o.at && (mine(m) || (Array.isArray(m.re) && m.re.includes(id))))) {
+      mem.chatOwed.delete(id)
+      continue
+    }
     if (o.grace > 0) { o.grace--; continue }
     if (!o.nudged) { o.nudged = true; nudge = true; continue }
     mem.chatOwed.delete(id)

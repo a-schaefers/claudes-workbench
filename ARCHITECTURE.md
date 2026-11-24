@@ -4576,7 +4576,10 @@ client; the server needs no browser.
   never counts in the tab's unread (it read as a reply to the user, counted, #1128). The
   skill: a teammate's request, answered with `wb chat reply --to <id>`, the user's consent gates
   untouched.
-- **Send, then wait.** `wb chat reply` writes `re` (`--to`, else `chat.taken`, the user's alone
+- **Send, then wait.** `wb chat reply` writes `re` (`--to`, else `chat.taken` for the listening
+  session's own calls, `chat.caller_listens`: its `CLAUDE_PID` is listener.json's `parent`, either
+  unknown counting as yes; another session's plain reply is the user's: its report went to the
+  agent the listener was answering, pushed to no phone, #1129; the user's alone
   when it holds one of theirs: an agent's message delivered into the user's turn read every plain
   reply to them, the #1042 review; `taken`: the messages whose newest receipt is `now` by the listening session, under `MESSAGE_EXPIRE` old, that no
   `turns.jsonl` row lists: a session that died mid-turn left its agent's message taken, and the
@@ -4627,7 +4630,9 @@ client; the server needs no browser.
 
 **Files** (`$WB_HOME/chat/`):
 - `messages.jsonl`: `{id: "<ms>-<6 hex>", ts, from: "user"|"claude"|"notice"|<agent name>, text, cid?, shots?,
-  audio?, about?, files?, role?: "agent", re?: [ids], to?: ["user"|<agent name>]}`. A `notice` (`wb chat notice`) has `text: "Claude is waiting on a permission|plan|question in the
+  audio?, about?, files?, role?: "agent", re?: [ids], to?: ["user"|<agent name>], claude_pid?}`
+  (`claude_pid`: the Claude Code a `wb chat reply` ran under, its `CLAUDE_PID`, for the owed
+  reply, #1129). A `notice` (`wb chat notice`) has `text: "Claude is waiting on a permission|plan|question in the
   terminal"` and adds `tool, what?` (2000 characters): news like Claude's
   (`chat.NEWS`: pushed, `/api/latest`) but not a reply, so the owed reply (#767) reads only `from:
   claude`; `chat.thread` adds `answered` once settled. `files`: `[{id, name, size, type, path}]`.
@@ -4654,7 +4659,9 @@ client; the server needs no browser.
   server on page use while on (`by: "page"`); `{at: 0}` on a prompt typed in any session, a terminal
   dialog answered there after a later use, or the chat off.
 - `page.json`: `{at}`, the last page use, chat on or not (for `PAGE_RECENT`).
-- `listener.json`: `{session, cwd, pid, start, machine, busy}` (from the `wb events` hello). Counts
+- `listener.json`: `{session, cwd, pid, start, machine, parent, busy}` (from the `wb events` hello;
+  `parent` its parent, the listening Claude Code, which `chat.caller_listens` checks against a
+  `wb chat reply`'s `CLAUDE_PID`, #1129). Counts
   while its pid is this user's and started at `start` (`chat._alive` = `models._alive`: a root
   daemon on a recycled pid answered EPERM, #532), without a pid while its `ts` is under 15 s, and
   always when `machine` is another's (`chat.listener`, #922).
@@ -5053,7 +5060,7 @@ from `/proc/<pid>/stat` or `ps -o lstart=` as wb reads it, UTC then the local zo
 neither can say, alive while listener.json is under 15 s old, #700); without a pid, `ts` within
 15 s; asked only of another's claim, at most every `PID_CHECK_MS` 30 s (#839); another `machine`'s
 always lives (#922; a crashed one there stands until a session on that machine or a quit clears
-it). Otherwise it writes `chat/listener.json` on a change and delivers each
+it). Otherwise it writes `chat/listener.json` on a change (with `parent`, `mem.claudePid`, #1129) and delivers each
 unreceipted message from `open.json` once `wb chat claim <id> --by <key>` grants it (refused:
 retried a minute later; two sessions both submitted one, #84): idle → `prompt.submit('[web chat]
 <words>', asUser)`, receipt `now`; busy → `session.send` with WEB_NOTE, else a queued prompt
@@ -5068,7 +5075,9 @@ for everyone, #835). An expired message (claim refuses it) isn't tried again thi
 
 Each message passed on is owed a chat reply (`mem.chatOwed`, `owedAtTurnEnd`, #767: phone
 questions were answered in the terminal only for two releases): a `wb chat reply`/`listen` or `wb
-shot … --chat` in Bash, a `from: claude` row, or a typed prompt settles it. At the end of the main
+shot … --chat` in Bash, a `from: claude` row of this Claude Code's (`claude_pid` its own or
+none) or answering it (`re` holds its id), or a typed prompt settles it (any session's row did:
+another's report kept the follow-up from going, #1129). At the end of the main
 turn that had it (`grace` 1 when it was queued behind a running turn or behind a prompt the mod
 submitted that poll, `mem.submitted`, #837) with no reply, one OWED_NOTE turn is queued (taken back
 out of `mem.queued`, and skipped by `sendQueued`, once nothing is owed, #837); that turn too
@@ -6372,6 +6381,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `passed`) → `tuning.acted` and its row field (`peak_share`, `self_review_due`).
 - **`chat.py` or `chat_static/`** → the browser test. **`/api/state`'s asks or messages** → `sw.js`. **A key of
   `chat.snapshot` or `week_saved`** → docs/chat-api.md's `GET /api/state` (`test_docs`: both had gone unlisted, #1127).
+- **listener.json's `parent`** (the mod's `listen`) → `chat.caller_listens`; **a reply's `claude_pid`** (`chat.reply`)
+  → the mod's `owedAtTurnEnd` (#1129).
 - **A message's `from`** (`user`, `claude`, `notice`, an agent's name with `role: "agent"`) → `chat.NEWS`,
   `chat._inbound`, `chat.AGENT_RESERVED`, `sw.js`, `makeRow`, `metaFor`, `agentMeta`, `reportSeen`, `wb chat log`, the
   mod's `unread`/`agentOf`/`chatPrompt` and `owedAtTurnEnd` (`claude` only), docs/chat-api.md.

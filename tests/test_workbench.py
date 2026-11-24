@@ -23550,6 +23550,30 @@ class WebChat(Base):
         run_wb("chat", "reply", "--text", "Your task is in review.")
         self.assertNotIn("to", self.chat.thread()[-1])
 
+    def test_another_sessions_plain_reply_goes_to_the_user_never_onto_the_listeners_message(self):
+        # #1129: a second delegating session, told to report through `wb chat reply` while the
+        # user is away, threaded its report onto the message the listener was answering: sent to
+        # that agent alone, pushed to no phone. listener.json's `parent` is the listening Claude Code
+        tok = self._agent()
+        self._listening()
+        lst = self.chat.chat_dir() / "listener.json"
+        store.write_json(lst, {**store.read_json(lst, None), "parent": 9000})
+        mid = self.call("/api/send", {"text": "please summarize"}, token=tok)[1]["message"]["id"]
+        run_wb("chat", "ack", mid, "--by", "s1")                          # the listener took it
+        with mock.patch.dict(os.environ, {"CLAUDE_PID": "9100"}):        # another session
+            run_wb("chat", "reply", "--text", "Task sb1 is ready for review.")
+        r = self.chat.thread()[-1]
+        self.assertEqual((r.get("re"), r.get("to"), r["claude_pid"]), (None, None, 9100))
+        self.assertIn(r["id"], self.chat.news(store.now() + 20))              # the user's, pushed
+        with mock.patch.dict(os.environ, {"CLAUDE_PID": "9000"}):        # the listener's own
+            run_wb("chat", "reply", "--text", "Summary: two tasks.")
+        r = self.chat.thread()[-1]
+        self.assertEqual((r["re"], r["to"], r["claude_pid"]), ([mid], ["my-agent"], 9000))
+        store.write_json(lst, {k: v for k, v in store.read_json(lst, None).items() if k != "parent"})
+        with mock.patch.dict(os.environ, {"CLAUDE_PID": "9100"}):        # an older mod's claim: as before
+            run_wb("chat", "reply", "--text", "Still on it.")
+        self.assertEqual(self.chat.thread()[-1]["re"], [mid])
+
     def test_an_agents_stream_never_pushes_the_users_page_out(self):
         tok, user = self._agent(), self.chat.token()
         self.srv.RequestHandlerClass.streams = threading.BoundedSemaphore(1)
