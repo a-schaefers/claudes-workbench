@@ -3749,7 +3749,8 @@ the GPU. Turning it to `api` takes the dialog's yes (it can spend) and a day cap
 `wait` none. While it is on, any change that lets a role newly start on an API model while the GPU is
 busy (an API model set on a GPU role, Agents back from GPU, an OpenRouter role's new backends:
 `routes._busy_newly`, which compares `routes._sent`, the model and its `order`) takes the yes and a
-cap too, adding `when the GPU is busy, <role> starts on its API model (your code goes to …; cap $N/day)`. `routes.summary` ends `; when the GPU is busy, a role with an API model runs on it` while
+cap too, adding `when the GPU is busy, <role> starts on its API model (your code goes to …; cap $N/day)`
+(with `; thinking on (<role>)` before the cap when its thinking is on, #1177). `routes.summary` ends `; when the GPU is busy, a role with an API model runs on it` while
 it is on.
 
 **Unset is the GPU, exactly as before.** A missing file or role reads as `{via: gpu, gpu: auto,
@@ -3820,7 +3821,7 @@ changed, joined by `; `: `trivial: GPU → API deepseek/deepseek-flash · your c
 thinking off · cap $5/day` (the provider's name from the catalog, `models.provider_name`, else its
 id); back to the GPU, `trivial: API <id> → GPU · API kept: <id>`; an API model set while on the GPU,
 `API model none → <id> (<provider>), used once it goes to API` (`used from the next start` when Agents
-on API already runs the role there, #1149); `GPU model the router's pick → <id>`;
+on API already runs the role there, #1149, then `· thinking on` if it is); `GPU model the router's pick → <id>`;
 `thinking off → on`; and `day cap none → $5/day` (unless a role's part says the new cap). The Agents
 switch's part comes first (`routes._agents_part`): `Agents: Both → API (every role on its API model;
 writing has no API model and can't start; your code goes to DeepSeek (trivial); cap $5/day)`, `Agents:
@@ -3844,7 +3845,13 @@ model, thinking on a role on API) or the cap; a GPU model pin alone, or thinking
 "On API" is where the role's code goes, not its own `via` (`routes._role_part` reads the new document:
 `effective_via`, or `busy_api` for the busy opt-in): with Agents on API, or `busy` api, thinking on a
 role with an API model takes the yes too (#1149, 2026-11-24: it came with no dialog, and every API start
-of the role billed reasoning tokens nobody approved).
+of the role billed reasoning tokens nobody approved). Thinking on a role whose API side is dormant (on
+the GPU, or no API model yet) still needs no yes, so every part that newly sends a role's code to an
+API model names its thinking when on (`routes._thinking_on`: `thinking on (trivial)`, off unsaid): the
+Agents part's `your code goes to …`, the busy part (`When the GPU is busy: wait → the role's API model
+(a role with an API model (trivial) starts on it while the GPU is busy; thinking on (trivial); cap
+$5/day)`), the busy opt-in's clause and an API model set under Agents API (#1177, 2026-11-24: the yes
+that sent the code never said it, and every task ran on the reasoning variant).
 Applied (`routes.editing`: `store.edit_config`'s lock, a link kept, nothing written when the body
 raises; the line computed again under the lock) it prints `changed: <line>`, and each changed role
 gets its record (`routes.stamp`, `routes.STAMPS`): a gated change `said` (the line), `by` and `ts`;

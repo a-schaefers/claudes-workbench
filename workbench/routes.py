@@ -162,6 +162,16 @@ def _sent(doc: dict, role: str, mid: str | None) -> tuple:
     return mid, tuple(order or ())
 
 
+def _thinking_on(roles: list, doc: dict) -> list:
+    """`thinking on (trivial)`, for those of ``roles`` (the ones a change newly sends to an API
+    model) whose thinking is on, as a clause list ([] for none). Thinking can be turned on with no
+    dialog while a role's API side is dormant (on the GPU, or no API model yet): the yes that
+    later sends its code there must name it, or API tasks bill reasoning tokens nobody agreed to
+    (#1177, 2026-11-24). Off, the default, costs nothing and goes unsaid."""
+    on = [r for r in roles if doc["roles"][r]["thinking"] == "on"]
+    return [f"thinking on ({', '.join(on)})"] if on else []
+
+
 def busy_routed(doc: dict, role: str, m) -> dict:
     """task.json's routing keys for a start the busy opt-in sent to ``m``, the role's API model:
     as routes.resolve's for a role on API, with `busy` (#1023)."""
@@ -184,9 +194,10 @@ def _busy_part(doc: dict, new: dict, cap) -> tuple[str, bool]:
     if cap is None:
         raise RoutesError(NO_CAP)
     has = [r for r in ROLES if new["roles"][r].get("api")]
-    what = (f"a role with an API model ({', '.join(has)}) starts on it while the GPU is busy"
-            if has else "no role has an API model yet, so nothing changes until one does")
-    return f"When the GPU is busy: wait → the role's API model ({what}; cap {money(cap)}/day)", True
+    what = ([f"a role with an API model ({', '.join(has)}) starts on it while the GPU is busy",
+             *_thinking_on(has, new)]
+            if has else ["no role has an API model yet, so nothing changes until one does"])
+    return f"When the GPU is busy: wait → the role's API model ({'; '.join(what)}; cap {money(cap)}/day)", True
 
 
 def read() -> dict:
@@ -288,9 +299,11 @@ def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str],
     elif old.get("api") != row.get("api"):  # set while on the GPU: used by wb route <role> api
         gated = True
         # under Agents on API the role already runs there: the new model is the next start's
+        now = effective_via(after, r) == "api"
         clauses.append(f"API model {old.get('api') or 'none'} → {row['api']} ({who(row['api'])}), "
-                       + ("used from the next start" if effective_via(after, r) == "api" else
-                          "used once it goes to API"))
+                       + ("used from the next start" if now else "used once it goes to API"))
+        if now and old["thinking"] == row["thinking"] == "on":  # else the thinking clause says it
+            clauses.append("thinking on")  # turned on with no dialog before it had a model (#1177)
     if old["gpu"] != row["gpu"] and not (moved and not on_api):
         clauses.append(f"GPU model {_gpu_name(old['gpu'])} → {_gpu_name(row['gpu'])}")
     if old["thinking"] != row["thinking"] and not (moved and on_api):
@@ -329,7 +342,7 @@ def _agents_part(doc: dict, new: dict, cap, who: Callable[[str], str]) -> tuple[
     else:
         what = ["each role as set: " + ", ".join(f"{r} {_side(new['roles'][r])}" for r in ROLES)]
     if to_api:
-        what.append(_goes_to(to_api, new, who))
+        what += [_goes_to(to_api, new, who), *_thinking_on(to_api, new)]
         if cap is not None:
             what.append(f"cap {money(cap)}/day")
     # to Both only when it newly puts a role on API (from GPU): from API it sends nothing new
@@ -413,7 +426,8 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
         if cap is None:
             raise RoutesError(NO_CAP)
         parts.append(f"when the GPU is busy, {', '.join(busy_now)} {'starts' if len(busy_now) == 1 else 'start'} "
-                     f"on {'its' if len(busy_now) == 1 else 'their'} API model ({_goes_to(busy_now, new, who)}; "
+                     f"on {'its' if len(busy_now) == 1 else 'their'} API model "
+                     f"({'; '.join([_goes_to(busy_now, new, who), *_thinking_on(busy_now, new)])}; "
                      f"cap {money(cap)}/day)")
         gated = True
     if cap is None and doc["day_usd"] is not None:  # `wb route cap off` (#1023): never under an API role
