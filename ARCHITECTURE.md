@@ -6594,7 +6594,9 @@ user who had, #1075), a `--` line for a stored key on a package the keyhole can'
 (@opencode/ai/providers/google): the keyhole doesn't speak its API, so wb can't run its models;
 another provider's key works`, `models.unspoken_providers`, #1066), for a provider a role on API uses
 with no key at all `--  no API key for deepseek, which trivial uses: /connect in OpenCode adds it
-(required: those tasks can't start without it)` (#1067), else `NO_KEY` for none. With a stored key,
+(required: those tasks can't start without it)` (#1067; never for a role on a model that needs no
+key held, an Ollama cloud or keyless free one, `cli._holds_key`, as `runner.needs_keyhole`: #1242),
+else `NO_KEY` for none. With a stored key,
 or every role on API, and no local model the GPU lines read as optional
 (`NO_SERVER_OPTIONAL`, `NO_LOCAL_OPTIONAL`). With no local model, a provider discovery passed over
 (`models.skipped_providers`: another host not opted in, disabled) adds its `--  provider <id>: <why>`

@@ -6517,14 +6517,28 @@ def _held_elsewhere(pid: str, key: str) -> str:
             "config": f"{pid}'s key is written in {models._key_file(pid)}"}.get(key, f"{pid}'s key is {key}")
 
 
+def _holds_key(mid: str) -> bool:
+    """Whether a role's API model runs on a key wb holds (runner.needs_keyhole): not an Ollama
+    cloud model, whose login this machine's Ollama holds, nor a keyless free one. connected()
+    leaves the GPU side's `ollama` out, so wb setup told a user with every role on an Ollama
+    cloud model that those tasks "can't start" until /connect added a key, which changes nothing
+    for Ollama (#1242, 2026-11-24). A model the catalog can't find, or a read that fails, counts
+    as needing one: its line stays as it was."""
+    try:
+        m = models.lookup(mid)
+    except (RuntimeError, OSError):
+        return True
+    return m is None or runner.needs_keyhole(m)
+
+
 def api_key_lines(keys: dict | None) -> list[str]:
     """wb setup's API keys (#1024), from models.connected(): one `ok` line for the providers with
     a stored key and which roles use them, one `--` line for those whose key wb can't hold
     outside the lane (an environment variable, OAuth, a cloud login) with the fix, one for each
     key written in a config file (remove it there, #1075), one for a stored key on a package the
     keyhole can't carry (models.unspoken_providers, #1066), and one for each provider a role on API
-    uses with no key at all, required (#1067); else NO_KEY for none; nothing when `auth list`
-    can't be read."""
+    uses with no key at all, required (#1067), never for a model that needs none held (_holds_key,
+    #1242); else NO_KEY for none; nothing when `auth list` can't be read."""
     if keys is None:
         return []
     try:
@@ -6532,7 +6546,8 @@ def api_key_lines(keys: dict | None) -> list[str]:
     except routes.RoutesError:
         doc = None
     uses = {} if doc is None else {r: doc["roles"][r]["api"].split("/", 1)[0] for r in routes.ROLES
-                                   if routes.effective_via(doc, r) == "api" and doc["roles"][r].get("api")}
+                                   if routes.effective_via(doc, r) == "api" and doc["roles"][r].get("api")
+                                   and _holds_key(doc["roles"][r]["api"])}
     # a provider a role on API uses with no key at all: required, not NO_KEY's "optional" (#1067)
     unkeyed = {}
     for r, p in uses.items():

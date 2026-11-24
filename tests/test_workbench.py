@@ -31863,6 +31863,31 @@ class ApiDiscovery(Base):
         # /connect, no fix for an Ollama-cloud-only user (#1077's review, 2026-11-23)
         self.assertEqual(prov["key"], "ollama")
 
+    def test_setup_never_asks_a_connect_key_for_roles_on_an_ollama_cloud_or_keyless_free_model(self):
+        # #1242 (2026-11-24): every role on an Ollama cloud model, and wb setup said "no API key
+        # for ollama ... (required: those tasks can't start without it)": connected() leaves the
+        # GPU side's ollama out, yet no key is held for that model, and /connect changes nothing
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"] = {"ollama": {"options": {"baseURL": "http://127.0.0.1:11434/v1"},
+                                      "models": {"gpt-oss:120b-cloud": {"limit": {"context": 131072}}}}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        mid = "ollama/gpt-oss:120b-cloud"
+        with redirect_stdout(io.StringIO()):
+            cli.main(["route", "significant", mid, "trivial", mid, "writing", mid, "--day-usd", "5"])
+        lines = cli.first_run()
+        self.assertFalse([x for x in lines if "no API key for" in x], lines)
+        self.assertTrue([x for x in lines if x.startswith("ok  API keys: ") and x.endswith("; no role uses one yet")],
+                        lines)                                      # the roles use none of those keys
+        self.assertEqual(cli.api_key_lines({}), [cli.NO_KEY])       # no key at all: optional, as before
+        # a keyless free model (key "none") the same; a provider with no key that needs one keeps its line
+        doc = routes.read()
+        doc["roles"]["writing"]["api"] = "opencode/big-pickle-free"
+        doc["roles"]["trivial"]["api"] = "acme/coder-flash"
+        routes.write(doc)
+        self.assertEqual([x for x in cli.api_key_lines({}) if "no API key for" in x],
+                         ["--  no API key for acme, which trivial uses: /connect in OpenCode adds it "
+                          "(required: those tasks can't start without it)"])
+
     def test_a_lan_server_not_opted_in_gets_its_local_true_hint_from_setup_and_route_never_connect(self):
         # #1109: wb setup said nothing of it, and wb route told the user to /connect a key, twice,
         # for their own model server on another machine; only wb doctor gave the fix
