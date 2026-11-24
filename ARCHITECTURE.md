@@ -1129,7 +1129,9 @@ An API provider's header wait is 600 s instead (`API_HEADER_S`, *An API task's w
   `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT=1` (that file alone; RealOpenCode's
   `test_opencode_without_the_lane_reads_no_claude_md_of_the_users`);
 - the repo's `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md`: the worktree's (committed) copy,
-  else the checkout's, so an uncommitted edit to a committed file isn't seen;
+  else the checkout's, so an uncommitted edit to a committed file isn't seen; an API task, whose lane
+  doesn't read the checkout, gets the checkout's as a copy in `rules/<task>/checkout/` (`_checkout_copies`,
+  made afresh each round, labelled by its path in `fixed_prompt`; #1091), as it does the package's and an import's there;
 - in a monorepo package (task.json `subdir`, `cli._package`: the nearest directory below the top,
   from `--repo` up, with a committed `CLAUDE.md`/`.claude/CLAUDE.md` or a gitignored one in the
   checkout, `cli._local_package_md`: `wb start` notes `<package>'s CLAUDE.md is gitignored: the
@@ -1435,7 +1437,8 @@ deliberately hostile process.
   WSL's drives) nothing, beyond: OpenCode's global directory (`OPENCODE_CONFIG_DIR`, #370), the
   config home where `XDG_CONFIG_HOME` moves it (`~/conf`: OpenCode's global config, git's, every
   tool's; its secrets still out, #1103), the
-  task's repo (its secrets still out), its `siblings` and git common directory (read-only),
+  task's repo (its secrets still out; an API task's lane reads its git directory alone, `read_repo_dirs`:
+  a gitignored `.env` in the checkout was one `cat` away, #1091), its `siblings` and git common directory (read-only),
   workbench itself, the lane, the programs the agent runs (`tool_roots`: each PATH directory, its
   prefix under home or under an `ONLY_KEPT` root short of a user's home or a drive, the install a
   home `bin` link points into, the running Python, conda's by `CONDA_VARS`, #827; never `/`, home or
@@ -5472,7 +5475,8 @@ $WB_HOME (~/.local/state/workbench)
                                  turns.jsonl ({ids, ended, by}: the mod's turn ends, wb chat ended; #1042)
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md, AGENTS.md (the user's ~/.config/workbench/AGENTS.md, copied: #1061),
                                  project-rules/<path> (a rule a link takes outside the repo: context.project_rules),
-                                 imports/<n>/<name> (an import from outside the repo: context.import_files), bin/git (the shim), grants.json (what Claude allowed: {"allow", "paths", "test_tools"}),
+                                 imports/<n>/<name> (an import from outside the repo: context.import_files),
+                                 checkout/<path> (an API task's instruction file only the checkout holds: context._checkout_copies, #1091), bin/git (the shim), grants.json (what Claude allowed: {"allow", "paths", "test_tools"}),
                                  shell/<name> (OpenCode's $SHELL, named as the shell it runs: the user's XDG_DATA_HOME, XDG_STATE_HOME, OPENCODE_DB and SHELL back, then that shell: runner.write_shell_shim, #1010),
                                  gitdir.json (the real git dir, the .git's text: {"gitdir", "dotgit"}), submodules.json ([{"path", "src" (the user's checkout), "sha", "index"}]), submodule-<n>.index,
                                  catalog.json (an API task's own models.dev v2 catalog: runner.write_catalog, models.catalog_doc; OPENCODE_MODELS_PATH, #1015);

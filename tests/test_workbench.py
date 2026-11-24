@@ -31243,6 +31243,43 @@ class Privacy(_KeyholeTest):
         self.assertIn(str(moved / "hub"), api)
 
     @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_an_api_lane_reads_the_repos_git_dir_but_not_its_checkouts_ignored_files(self):
+        # #1091 (2026-11-23): `cat <checkout>/.env` in an API lane sent the live key it holds to
+        # the provider, though wb start refuses to copy it unless it is named
+        home = Lane.fake_home(self)
+        repo = home / "proj" / "repo"
+        repo.mkdir(parents=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True,  # noqa: E731
+                                      capture_output=True)
+        g("init", "-q", "-b", "main")
+        (repo / ".gitignore").write_text(".env\nCLAUDE.local.md\n")
+        (repo / "CLAUDE.md").write_text("# repo\n")
+        g("add", ".")
+        g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init")
+        (repo / ".env").write_text("STRIPE_KEY=sk_live_FAKE\n")
+        (repo / "CLAUDE.local.md").write_text("my local notes\n")
+        script = ("import subprocess, sys\ntry:\n    open(sys.argv[1]).read(); print('read')\n"
+                  "except PermissionError:\n    print('refused')\n"
+                  "print(open(sys.argv[2]).read().strip())\n"
+                  "r = subprocess.run(['git', '-C', sys.argv[3], 'log', '--format=%s'], capture_output=True, text=True)\n"
+                  "print(r.stdout.strip() or r.stderr)\n")
+        for via, want in (("api", "refused"), ("gpu", "read")):
+            task = store.Task(f"t-co-{via}")
+            task.dir.mkdir(parents=True)
+            (task.dir / "task.json").write_text(json.dumps({"name": task.name, "repo": str(repo), "via": via}))
+            g("worktree", "add", "-q", "-b", f"delegate/{task.name}", str(task.worktree))
+            files, _ = context.instruction_files(task)
+            local = next(f for f in files if f.name == "CLAUDE.local.md")
+            self.assertEqual(local == repo / "CLAUDE.local.md", via == "gpu", local)
+            out = subprocess.run(lane.wrap(context.writable(task),
+                                           [sys.executable, "-c", script, str(repo / ".env"), str(local),
+                                            str(task.worktree)], context.readable(task)),
+                                 capture_output=True, text=True, timeout=20)
+            self.assertEqual(out.stdout.split("\n")[:3], [want, "my local notes", "init"], (via, out.stderr))
+            self.assertIn(("CLAUDE.local.md", 3), context.fixed_prompt(task)[1])
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
     def test_a_test_refused_on_an_api_hidden_file_names_no_grant(self):
         # #1093 (2026-11-23): the report said `wb allow --path ~/.m2/settings.xml`, wb allow saved
         # it, and the paid feedback round was refused the same way: api_hidden wins over a grant

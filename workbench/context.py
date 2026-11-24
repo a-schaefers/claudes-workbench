@@ -1454,9 +1454,15 @@ def repo_dirs(task: store.Task) -> set[str]:
     2026-11-16 audit: GOPATH=~/src, or ~/go with the repo in ~/go/src). A removed linked
     worktree's: the repository's main worktree and its git dir (gitops.repo_of), not the removed
     path and a `.git` under it (#776)."""
+    checkout, git = _repo_parts(task)
+    return checkout | git
+
+
+def _repo_parts(task: store.Task) -> tuple[set[str], set[str]]:
+    """repo_dirs as (the checkout, the git directory), real paths."""
     repo = task.spec.get("repo")
     if not repo:
-        return set()
+        return set(), set()
     real = gone = os.path.realpath(repo)
     if not os.path.isdir(real):
         real = os.path.realpath(gitops.repo_of(task.spec))
@@ -1465,8 +1471,18 @@ def repo_dirs(task: store.Task) -> set[str]:
             _COMMON[real] = os.path.realpath(os.path.join(real, gitops.git(
                 Path(real), "rev-parse", "--git-common-dir").strip()))
         except (gitops.GitError, OSError):
-            return {gone, real, os.path.join(real, ".git")}
-    return {gone, real, _COMMON[real]}
+            return {gone, real}, {os.path.join(real, ".git")}
+    return {gone, real}, {_COMMON[real]}
+
+
+def read_repo_dirs(task: store.Task) -> set[str]:
+    """What the lane reads of the task's repo (readable): the checkout and its git directory, or
+    for an API task the git directory alone, which the worktree's git needs. Every file an API
+    agent reads goes to the provider, and a gitignored .env in the checkout was one `cat` away,
+    though wb start refuses to copy it unless it is named (#1091, 2026-11-23); the instruction
+    files only the checkout holds go as copies (instruction_files)."""
+    checkout, git = _repo_parts(task)
+    return git if task.spec.get("via") == "api" else checkout | git
 
 
 # What a task's directory holds beside its worktree: a sibling's link (`../<name>` from the
@@ -2717,7 +2733,8 @@ def tool_roots(hidden: set[str]) -> set[str]:
 
 def readable(task: store.Task) -> list[str] | None:
     """What the agent's processes may read: the system, the home directory's dotfiles but
-    SECRETS, the task's repo and its git directory, its lane and the programs it runs. None with the lane off. Landlock
+    SECRETS, the task's repo (an API task's: its git directory alone, read_repo_dirs) and its git
+    directory, its lane and the programs it runs. None with the lane off. Landlock
     only allows, so this lists the entries beside each excluded one; lane.py adds the lane
     (writable) itself."""
     lane = writable(task)
@@ -2725,7 +2742,7 @@ def readable(task: store.Task) -> list[str] | None:
         return None
     home = os.path.realpath(Path.home())
     hidden = secret_paths() | private_paths() | api_hidden(task)  # API_HIDDEN: an API task's (#1021)
-    keep = {os.path.realpath(p) for p in (task.spec.get("repo"), PKG_ROOT, *lane,  # PKG_ROOT:
+    keep = {os.path.realpath(p) for p in (PKG_ROOT, *lane,                     # PKG_ROOT:
                                           *lane_paths(task), *siblings(task))  # the git shim,
             if p}                                                              # the ask server
     keep |= tool_roots(hidden) | sdk_roots(hidden) | search_roots(hidden)
@@ -2741,7 +2758,7 @@ def readable(task: store.Task) -> list[str] | None:
         keep.add(os.path.realpath(xdg))
     # the git directory too, outside the repo when it is a linked worktree: git failed there
     # ("gitfile does not point to a valid repository", the 0.90 review); writable() keeps it out
-    keep |= repo_dirs(task)
+    keep |= read_repo_dirs(task)  # the checkout too, but on an API task (#1091)
     # Inside a hidden directory, only these come out: workbench itself (the marketplace install
     # puts it in ~/.claude/plugins, the 2026-11-16 audit), and of workbench's state the task's own
     # directory (its prompts, the ask server's spec) and its rules (its OpenCode config, its
@@ -2750,7 +2767,7 @@ def readable(task: store.Task) -> list[str] | None:
     # a clone in bench/runs/<run>/<task>/repo, so in every replay the agent's `git status` and
     # `git diff` failed, "gitfile does not point to a valid repository", and the agent spent its
     # round's calls on a git it took for broken (found in the probe pilot, 2026-11-21, #858)
-    own = (PKG_ROOT, task.dir, rules_dir(task), *repo_dirs(task))
+    own = (PKG_ROOT, task.dir, rules_dir(task), *read_repo_dirs(task))
     inner = {r for r in map(os.path.realpath, own) if r not in hidden
              and any(_under(r, h) for h in hidden)}
     only_kept = {os.path.realpath(p) for p in ONLY_KEPT}
@@ -3163,11 +3180,34 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
         if d not in seen:
             seen.add(d)
             files.append(p)
+    files = _checkout_copies(task, files)
     nested = [p for p in _tracked(wt, "*CLAUDE.md", "*AGENTS.md")
               if "/" in p and Path(p).name in ("CLAUDE.md", "AGENTS.md")
               and not p.startswith(".claude/") and Path(p).parent.as_posix() != sub
               and wt / p not in agents]
     return files, nested
+
+
+def _checkout_copies(task: store.Task, files: list[Path]) -> list[Path]:
+    """For an API task, each of ``files`` the user's checkout holds and the worktree doesn't
+    (CLAUDE.local.md, a gitignored package CLAUDE.md, an uncommitted edit, an import there) as a
+    copy in rules/<task>/checkout/, which its lane reads: it doesn't read the checkout
+    (read_repo_dirs, #1091). A GPU task's as they are. Copies made afresh each call."""
+    copies = rules_dir(task) / "checkout"
+    shutil.rmtree(copies, ignore_errors=True)
+    if task.spec.get("via") != "api":
+        return files
+    repo, wt = os.path.realpath(task.spec["repo"]), os.path.realpath(task.worktree)
+    out = []
+    for p in files:
+        real = os.path.realpath(p)
+        if _under(real, repo) and not (real == wt or _under(real, wt)):
+            copy = copies / os.path.relpath(real, repo)
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            copy.write_bytes(Path(real).read_bytes())
+            p = copy
+        out.append(p)
+    return out
 
 
 # Where OpenCode found a project's AGENTS.md, skills and config itself: the directory it runs in
@@ -3264,6 +3304,8 @@ def fixed_prompt(task: store.Task) -> tuple[int, list[tuple[str, int]]]:
             continue
         if p.is_relative_to(rules / "project-rules"):
             named[p] = f".claude/rules/{p.relative_to(rules / 'project-rules')}"
+        elif p.is_relative_to(rules / "checkout"):  # an API task's copy (#1091)
+            named[p] = str(p.relative_to(rules / "checkout"))
         label = named.get(p) or ("the spec" if p.name == "prompt.md" else
                                  str(p.relative_to(wt)) if p.is_relative_to(wt) else p.name)
         parts.append((label, n))
