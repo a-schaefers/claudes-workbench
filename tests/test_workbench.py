@@ -8960,8 +8960,12 @@ class Lane(Base):
     def test_a_home_inside_a_temp_root_is_said_since_the_lane_writes_it_whole(self):
         # the 2026-11-19 audit: with the profile under /tmp, the agent read its credentials
         tmp = os.path.realpath(tempfile.gettempdir())
+        # the line names the outermost temp root: a TMPDIR under /var/tmp is said as /var/tmp
+        # (the #1028 merge's checks ran with one, 2026-11-23)
+        root = next(t for t in sorted({tmp, *map(os.path.realpath, context.TEMP_ROOTS)})
+                    if tmp == t or tmp.startswith(t.rstrip("/") + "/"))
         with mock.patch.object(context.Path, "home", lambda: Path(tmp) / "sandbox-home"):
-            self.assertIn(f"is inside {tmp}, which every agent's lane writes whole", context.home_gap())
+            self.assertIn(f"is inside {root}, which every agent's lane writes whole", context.home_gap())
         with mock.patch.object(context.Path, "home", lambda: Path("/srv/home/u")):
             self.assertEqual(context.home_gap(), "")
 
