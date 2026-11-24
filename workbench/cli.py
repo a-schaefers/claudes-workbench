@@ -1694,29 +1694,46 @@ def cmd_feedback(a):
         die("the feedback is empty")
     _spec_gaps(task, a.spec_gap)
     dropped = _stale_notes(task)
-    n = st.get("round", 1) + 1
-    task.round_dir(n).mkdir(parents=True, exist_ok=True)
     rerun = " re-run the acceptance command and" if task.spec.get("test_cmd") else ""
-    task.round_dir(n).joinpath("prompt.md").write_text(
-        f"{lessons.FEEDBACK_HEAD} Make exactly these changes, then{rerun} finish with a short "
-        "summary:\n\n" + text.strip(), encoding="utf-8")
+    said = (f"{lessons.FEEDBACK_HEAD} Make exactly these changes, then{rerun} finish with a short "
+            "summary:\n\n" + text.strip())
+    # Round n stopped before it reached the agent (its model couldn't load, the GPU server was
+    # down, the API key gone): its prompt, wb next's step or the last review's feedback, was
+    # never sent. Written as round n + 1 from the new text alone, the agent got "carry on" and
+    # never the step, and a paid round and a review were spent on "files changed: (none)"
+    # (#1180, 2026-11-24). So round n runs again, the text after its own prompt, as a note sent
+    # before a round began goes with it (runner._early_notes); and no review is counted, for
+    # nothing the agent did was reviewed.
+    unsent = st.get("phase") != "review" and not runner.reached(task, st.get("round", 1)) \
+        and task.round_dir(st.get("round", 1)).joinpath("prompt.md").is_file()
+    n = st.get("round", 1) + (0 if unsent else 1)
+    if unsent:
+        runner.add_to_round(task, n, said)
+    else:
+        task.round_dir(n).mkdir(parents=True, exist_ok=True)
+        task.round_dir(n).joinpath("prompt.md").write_text(said, encoding="utf-8")
     # a stop that wasn't the step's (status `infra`: an API provider's, the spend cap's, a reaped
     # runner's, a restart's, a model server's): the round it resumes is no review. Counted, the
     # "carry on" the provider's stop notice advises plus one real review read as two, and the
     # step went badly, shrinking the model's slice (#1153, 2026-11-24). drive clears `infra` at
     # each round's start, so a task in review never has it.
     resumed = bool(st.get("infra"))
-    reviews = st.get("reviews", 0) + (0 if resumed else 1)
+    reviews = st.get("reviews", 0) + (0 if resumed or unsent else 1)
     handled = store.now()  # everything before the new round; what its runner raises stays news
     task.set_status(context="fresh" if a.fresh else "keep" if a.keep_context else None)
     gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
     task.set_status(round=n, reviews=reviews, phase="queued",  # the pane: "resumed", not "feedback 0"
-                    round_for="resume" if resumed else "feedback",
+                    # an unsent round keeps its own (`next`: the pane's `step 2`)
+                    **({} if unsent else {"round_for": "resume" if resumed else "feedback"}),
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0)
     spawn_runner(task)
     _ack_all(task, upto=handled)
-    if resumed:
+    if unsent:
+        print(f"feedback sent to {a.name} (round {n}): after round {n}'s own prompt, which never "
+              "reached the agent" + (f" ({st['infra']})" if st.get("infra") else "")
+              + ", so no review round is counted")
+    elif resumed:
         print(f"feedback sent to {a.name} (round {n}): it resumes after a stop that wasn't the "
               f"agent's ({st['infra']}), so no review round is counted")
     else:

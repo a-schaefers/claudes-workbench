@@ -3802,14 +3802,19 @@ def _load_failed(task: store.Task, e: Exception, api: bool = False) -> None:
         return task.notify("failed", str(e))
     from .results import ran  # results imports this module
     never = not ran(task)
+    n = task.status.get("round", 1)
     task.set_status(phase="failed", last=f"model: {e}", infra="model",
                     **({"failed_before": "load"} if never else {}))
-    # the agent never ran: resuming loses nothing, and a discard records nothing of the model
+    # the agent never ran: resuming loses nothing, and a discard records nothing of the model.
+    # It ran, and round n (wb next's step, a review's feedback) never reached it: the notice
+    # named no next step, and the "carry on" sent went without the round's prompt (#1180)
     task.notify("failed", f"task {task.name}: "
                 + (f"{task.spec['model']} can't run: {e}" if api else
                    f"could not load {task.spec['model']}: {e}")
                 + (f"\nthe agent never ran: once the model can, wb resume {task.name} starts it"
-                   if never else ""))
+                   if never else
+                   f"\nround {n} never reached the agent: once the model can run, wb feedback "
+                   f"{task.name} --text \"carry on\" sends its prompt" if not reached(task, n) else ""))
 
 
 # The keyhole (#1012): an API model's key stays in the runner, and OpenCode gets the keyhole's
@@ -4558,17 +4563,32 @@ def _undelivered(task: store.Task) -> str:
             + " | ".join(r["text"].strip().replace("\n", " ")[:200] for r in notes)) if notes else ""
 
 
+def reached(task: store.Task, n: int) -> bool:
+    """Whether round n's prompt went to the agent: drive logs the round's `round` event as it
+    starts it. Not when the runner stopped before (the model's load, the server's wait, the
+    keyhole, the checkout, the spend cap): wb feedback then runs round n again (#1180)."""
+    return any(e.get("kind") == "round" and e.get("round") == n
+               for e in store.read_jsonl(task.dir / "events.jsonl")[0])
+
+
+def add_to_round(task: store.Task, n: int, text: str) -> None:
+    """``text`` after round n's prompt, which has not run, and beside it for round_asks (FOLDED:
+    it skips a carry-on, a resume or a nudge whole, #677)."""
+    folded = task.round_dir(n) / FOLDED
+    folded.write_text((folded.read_text().rstrip() + "\n\n" if folded.is_file() else "") + text + "\n")
+    path = task.round_dir(n).joinpath("prompt.md")
+    for f in (path, path.with_name("instructions.md")):  # a revived fresh round's own too (#780)
+        if f == path or f.is_file():
+            f.write_text(f.read_text().rstrip() + "\n\n" + text)
+
+
 def _early_notes(task: store.Task, n: int) -> None:
     """Notes that came in before the round began (queued for the GPU, its model or the base
     check, or while the model reloaded) go with its prompt, as `wb steer` promises: they once
     waited for the round to end and came as a round of their own (#452)."""
     if not (notes := pending_steer(task)):
         return
-    path = task.round_dir(n).joinpath("prompt.md")
-    text = folded_notes(task, n, notes)
-    for f in (path, path.with_name("instructions.md")):  # a revived fresh round's own too (#780)
-        if f == path or f.is_file():
-            f.write_text(f.read_text().rstrip() + "\n\n" + text)
+    add_to_round(task, n, steer_prompt(notes, False))
     task.set_status(steer_taken=task.status.get("steer_taken", 0) + len(notes))
 
 
