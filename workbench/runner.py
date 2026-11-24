@@ -4537,7 +4537,8 @@ def _repo_gone(task: store.Task) -> None:
     never named wb relocate, which accept's own check does (#776)."""
     text = (f"{task.spec['repo']} moved or was deleted: wb relocate {task.name} --repo <its new "
             "path>, then wb resume")
-    task.set_status(phase="failed", last=text[:200])
+    # `infra`: the repo moved under it, not the step's doing (cli.stopped_outside, #1260)
+    task.set_status(phase="failed", last=text[:200], infra="repo")
     # its cause, so the mod's wake names the notice's relocate, not wb feedback: a runner that
     # fails at once on the moved repo and wakes Claude again (the bar loop, #1247, 2026-11-24)
     task.notify("failed", f"task {task.name}: {text}", cause="repo")
@@ -5664,6 +5665,8 @@ def _updated(task: store.Task) -> bool:
 # (status `stopping`, cli._stop_runner); any other leaves the task stuck, with a notice, so it
 # doesn't sit in a live phase that nothing will ever end (the 2026-11-16 audit).
 SIGNAL_STOP = "the runner was stopped by a signal (a shutdown, a logout or a kill), not by Claude"
+# ... and its status `infra`: not the step's, which wb discard and wb feedback read (cli.stopped_outside)
+SIGNAL_INFRA = "signal"
 # A shutdown or logout signals every runner at once: each raised a stuck notice of its own, and
 # the mod woke Claude once a task (#544). A runner stopped by a signal waits, up to this long
 # after its own signal, while another task of its session still runs, so the others stop too
@@ -5827,7 +5830,7 @@ def main():
             task.event({"ts": store.now(), "round": st.get("round"), "kind": "stopped",
                         "by": "signal", "text": SIGNAL_STOP})
             at = SIGNALLED[0] if SIGNALLED else time.time()
-            task.set_status(phase="stuck", last=SIGNAL_STOP, signalled=at)
+            task.set_status(phase="stuck", last=SIGNAL_STOP, signalled=at, infra=SIGNAL_INFRA)
             _signal_notice(task, at)
     except Exception as e:
         err = traceback.format_exc()

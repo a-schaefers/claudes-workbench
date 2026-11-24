@@ -581,7 +581,9 @@ def _stop_for_update(tasks) -> str:
             _stop_runner(t)
             t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
                      "by": "user", "text": UPDATE_STOP})
-            t.set_status(phase="stuck", last=UPDATE_STOP, pid=None)
+            # `infra`: not the step's, so a discard (the wake offers one) isn't scored as the
+            # model's failed try, nor a wb feedback counted a review (#1260, 2026-11-24)
+            t.set_status(phase="stuck", last=UPDATE_STOP, pid=None, infra=UPDATE)
             stopped.append(t)
     groups: dict = {}
     for t in stopped:
@@ -1758,12 +1760,14 @@ def cmd_feedback(a):
     else:
         task.round_dir(n).mkdir(parents=True, exist_ok=True)
         task.round_dir(n).joinpath("prompt.md").write_text(said, encoding="utf-8")
-    # a stop that wasn't the step's (status `infra`: an API provider's, the spend cap's, a reaped
-    # runner's, a restart's, a model server's): the round it resumes is no review. Counted, the
-    # "carry on" the provider's stop notice advises plus one real review read as two, and the
-    # step went badly, shrinking the model's slice (#1153, 2026-11-24). drive clears `infra` at
-    # each round's start, so a task in review never has it.
-    resumed = bool(st.get("infra"))
+    # a stop that wasn't the step's (stopped_outside: an API provider's, the spend cap's, a reaped
+    # runner's, a restart's, a model server's, an update's, a signal's, wb stop --all's): the
+    # round it resumes is no review. Counted, the "carry on" the provider's stop notice advises
+    # plus one real review read as two, and the step went badly, shrinking the model's slice
+    # (#1153, #1260, 2026-11-24). drive clears `infra` at each round's start, so a task in review
+    # never has it.
+    outside = stopped_outside(st)
+    resumed = bool(outside)
     # ... and no review for round_asks either: it stopped at this round, so a later handover or
     # wb resume carried only "carry on" and dropped the review feedback the stop interrupted
     # (#1169, 2026-11-24). Unlinked otherwise: a feedback that died before its round was counted
@@ -1798,11 +1802,11 @@ def cmd_feedback(a):
     _ack_all(task, upto=handled)
     if unsent:
         print(f"feedback sent to {a.name} (round {n}): after round {n}'s own prompt, which never "
-              "reached the agent" + (f" ({st['infra']})" if st.get("infra") else "")
+              "reached the agent" + (f" ({outside})" if outside else "")
               + ", so no review round is counted")
     elif resumed:
         print(f"feedback sent to {a.name} (round {n}): it resumes after a stop that wasn't the "
-              f"agent's ({st['infra']}), so no review round is counted")
+              f"agent's ({outside}), so no review round is counted")
     else:
         print(f"feedback round {reviews} sent to {a.name} (round {n})"
               + ("  — that is past the usual 3 review rounds" if reviews > 3 else ""))
@@ -2531,7 +2535,8 @@ def stop_everything(tasks=None) -> list[str]:
             _stop_runner(t)
             t.event({"ts": store.now(), "round": t.status.get("round"), "kind": "stopped",
                      "by": "user", "text": "bail out: stopped by the user"})
-            t.set_status(phase="stuck", last="bail out: stopped", pid=None,
+            # `infra`: the user's quit (/workbench-quit), not the step's: as wb update --stop (#1260)
+            t.set_status(phase="stuck", last=BAIL_OUT, pid=None, infra=BAILED,
                          parked=store.now())  # out of the status line and new sessions (#541)
             _ack_all(t)
             stopped.append(f"{t.name} (worktree kept: {t.worktree})")
@@ -2595,6 +2600,10 @@ ALL_SESSIONS = ("every Claude Code session's tasks (from Claude Code's Bash, the
 
 # What `wb update --stop` leaves in status `last` (#694): resumed like a restart's
 UPDATE_STOP = "stopped for a workbench update (wb update --stop), not by Claude"
+# ... and `wb stop --all`'s (the mod's /workbench-quit), which wb resume --all leaves alone
+BAIL_OUT = "bail out: stopped"
+# Their status `infra` (stopped_outside)
+UPDATE, BAILED = "update", "stopped"
 # What `wb resume --all` continues: tasks interrupted from outside, not those stopped for a
 # reason of their own (a guard, a crash, a failed load), which want Claude's look first (#544)
 INTERRUPTED = (RESTARTED, RUNNER_DIED, runner.SIGNAL_STOP, UPDATE_STOP)
@@ -2607,6 +2616,23 @@ def _interrupted(last) -> bool:
     And runner.opencode_moved's, OpenCode changed under it (#866)."""
     return last in INTERRUPTED or isinstance(last, str) and last.startswith(
         (runner.UPDATED + ":", runner.OPENCODE_MOVED + " ("))
+
+
+def stopped_outside(st: dict) -> str | None:
+    """Why a task's last stop wasn't its step's, or None: the one place wb discard (the row's
+    `infra`, tuning.stopped_outside) and wb feedback (no review counted) decide it. Status `infra`,
+    which every stop from outside the step sets (the provider, the cap, a restart, an update, a
+    shutdown's signal, `wb stop --all`, the repo gone) and drive clears as a round starts; else,
+    for a status written before its stop set one, read from `last`. Until #1260 (2026-11-24)
+    `wb update --stop`, `wb stop --all` and a signal set none, and each reader had its own test:
+    the discard their wake offers was scored as the model's failed try, and a wb feedback counted
+    a review. The update that installs this stops its tasks with the old code."""
+    if st.get("infra"):
+        return st["infra"]
+    if st.get("phase") != "stuck":
+        return None
+    return {runner.SIGNAL_STOP: runner.SIGNAL_INFRA, UPDATE_STOP: UPDATE,
+            BAIL_OUT: BAILED}.get(st.get("last"))
 
 
 @one_at_a_time
@@ -4467,12 +4493,10 @@ def cmd_discard(a):
         die(f"{a.name} is already {task.status.get('phase')}")
     if why := _accepting(task):  # its commit exists, perhaps merged: not a discard (#878)
         die(why)
-    # the last stop wasn't the step's (status `infra`, which drive clears as a round starts; a
-    # shutdown's signal sets none): in the row, so the discard the stop notice offers isn't
-    # scored as the model's rejected work (#1245, 2026-11-24). Read before this discard's own stop.
-    st = task.status
-    outside = st.get("infra") or ("signal" if st.get("phase") == "stuck"
-                                  and st.get("last") == runner.SIGNAL_STOP else None)
+    # the last stop wasn't the step's (stopped_outside): in the row, so the discard the stop
+    # notice offers isn't scored as the model's rejected work (#1245, #1260, 2026-11-24). Read
+    # before this discard's own stop.
+    outside = stopped_outside(task.status)
     _stop_runner(task)
     _spec_gaps(task, a.spec_gap)
     repo = gitops.repo_of(spec)  # a removed linked worktree: the repository's main one (#498)
