@@ -1641,6 +1641,38 @@ def green_tree(task: store.Task, began: str) -> str | None:
     return carried_tree(task)
 
 
+def images_dir(task: store.Task) -> Path:
+    """Where --image's copies are (#1199): the task's directory, which the lane reads, never the
+    worktree, so they stay out of the review diff."""
+    return task.dir / "images"
+
+
+# After the prompt, on a round that attaches images: their names, and where the agent's read
+# tool opens them again (context.external_rules lets it there)
+ATTACHED = ("\n\nAttached: {names}, the image{s} Claude gave you (the user's mockup, screenshot or "
+            "error capture). To look again, read {it} in {dir}.")
+
+
+def attachments(task: store.Task, n: int) -> list[Path]:
+    """The images round ``n`` attaches with `run -f` (status `images`, cli._keep_images): every
+    one on a round that starts a session (round 1, a handover, a resume), else only those given
+    for round n. A continued session has the others in its history: sent again, each image
+    would be billed again on every round (seen on the real OpenCode, 2026-11-24, #1199)."""
+    st = task.status
+    rows = [r for r in st.get("images") or () if isinstance(r, dict) and r.get("file")]
+    if st.get("session"):
+        rows = [r for r in rows if r.get("round") == n]
+    return [p for r in rows if (p := images_dir(task) / Path(str(r["file"])).name).is_file()]
+
+
+def attached_line(task: store.Task, files: list[Path]) -> str:
+    """ATTACHED for these files, or "" for none."""
+    if not files:
+        return ""
+    return ATTACHED.format(names=", ".join(p.name for p in files), s="s" * (len(files) > 1),
+                           it="them" if len(files) > 1 else "it", dir=images_dir(task))
+
+
 def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     """One `opencode run`. keep: Claude asked for this session to carry on (wb feedback
     --keep-context), so the round never hands over mid-way."""
@@ -1656,6 +1688,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     else:
         task.set_status(session_mark=next(iter(marks)), session_floor=None)
     floor = task.status.get("session_floor")  # the context the session had read when it began work
+    shown = attachments(task, n)  # before `--`: OpenCode attaches each to the message (#1199)
+    for p in shown:
+        cmd += ["-f", str(p)]
     note = skills_note(task, n)
     if len((note + prompt).encode()) > PROMPT_ARG_MAX:
         prompt = (f"Your instructions for this round are long, so they are in the file "
@@ -1663,7 +1698,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                   f"too big for one read), then do what it says.")
     # After `--`: OpenCode reads a message that starts with '-' (a spec opening with a bullet or
     # front matter) as a flag, prints its usage and exits (the 2026-11-16 audit).
-    cmd += ["--", note + prompt]
+    cmd += ["--", note + prompt + attached_line(task, shown)]
     CURRENT["run"] = run = _issue()
     env = opencode_env(task, run)
     if not task.status.get("opencode_home"):  # its sessions are in the task's home from now on
@@ -4815,7 +4850,7 @@ def _spend_lead(task: store.Task, rnd: dict) -> str:
 
 
 def first_tokens(task: store.Task | None = None, prompt: str | None = None,
-                 fresh: bool | None = None) -> int:
+                 fresh: bool | None = None, images: int = 0) -> int:
     """What the next round's first request carries, in tokens as the keyhole's room counts a
     body (its bytes / 4), for the day cap's look ahead (meter.request_floor). Left out, a day
     within that request's input of the cap passed wb start, feedback, next, resume and _go_on,
@@ -4830,8 +4865,13 @@ def first_tokens(task: store.Task | None = None, prompt: str | None = None,
     True is a later round begun fresh (status `context` "fresh"), which the runner always hands
     over (fresh_reason, _start_fresh), session or not: judged from the status, a resume after a
     round that never made a session counted its bare prompt, under half the first request, and
-    the room refused it at the cap named (#1173's review, 2026-11-24)."""
+    the room refused it at the cap named (#1173's review, 2026-11-24). And each image the
+    session's requests carry at meter.IMAGE_TOKENS, as the room counts it: the task's own
+    (status `images`: a fresh session resends them all, a continued one has them in its history)
+    and ``images`` more, given now (--image); left out, wb start passed a task the room then
+    refused at its first request (#1199's review)."""
     st = task.status if task is not None else {}
+    pictures = sum(1 for r in st.get("images") or () if isinstance(r, dict)) + max(images, 0)
     if prompt is None:
         path = store.round_prompt(task, st.get("round", 1)) if task is not None else None
         prompt = path.read_text() if path is not None and path.is_file() else ""
@@ -4849,7 +4889,7 @@ def first_tokens(task: store.Task | None = None, prompt: str | None = None,
             size = len(handoff_prompt(task, "", prompt).encode())
         except Exception:  # an estimate: never a reason to refuse, so the most argv can carry
             size = PROMPT_ARG_MAX
-    return base + -(-min(size, PROMPT_ARG_MAX) // 4)
+    return base + -(-min(size, PROMPT_ARG_MAX) // 4) + pictures * meter.IMAGE_TOKENS
 
 
 def _go_on(task: store.Task, n: int, what: str) -> bool:

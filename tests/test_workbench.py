@@ -9890,6 +9890,34 @@ class RealOpenCodeRun(Base):
         self.assertEqual(st["phase"], "review", (task.dir / "runner.log").read_text())
         return task, st
 
+    def test_an_image_reaches_the_model_through_run_f_and_once_per_session(self):
+        # #1199: wb passes `-f <copy>` before `--`; OpenCode's client reads it in the lane and
+        # sends it as a data URI. A continued session has it in its history: never sent twice
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        cfg = json.loads(conf.read_text())
+        cfg["provider"]["cap"]["models"]["cap"]["modalities"] = {"input": ["text", "image"], "output": ["text"]}
+        conf.write_text(json.dumps(cfg))
+        png = image_png(3, 2)
+        shot = Path(self.tmp.name) / "shot.png"
+        shot.write_bytes(png)
+        self.serve([WRITE_42])
+        run_wb("start", "t-run", "--spec", str(self.spec), "--repo", str(self.repo),
+               "--model", "cap", "--test", TEST_CMD, "--image", str(shot))
+        st = wait_phase("t-run", {"review", "stuck", "failed"}, timeout=180)
+        task = store.Task("t-run")
+        self.assertEqual(st["phase"], "review", (task.dir / "runner.log").read_text())
+        uri = "data:image/png;base64," + base64.b64encode(png).decode()
+        reqs = [l for l in self.requests.read_text().splitlines() if uri in l]
+        self.assertTrue(reqs)                                      # the model saw it
+        self.assertIn("Attached: 1-shot.png", reqs[0])
+        seen = len(self.requests.read_text().splitlines())
+        run_wb("feedback", "t-run", "--text", "Say done.")
+        st = wait_phase("t-run", {"review", "stuck", "failed"}, timeout=180)
+        self.assertEqual(st["phase"], "review", (task.dir / "runner.log").read_text())
+        later = [l for l in self.requests.read_text().splitlines()[seen:] if '"tools"' in l]
+        self.assertTrue(later)
+        self.assertEqual(later[-1].count(uri), 1)                  # in its history, once
+
     def test_the_runner_reads_the_real_events_the_export_and_the_session(self):
         task, st = self.answered([WRITE_42])
         self.assertTrue(st["tests"]["ok"])                         # the write landed, in the lane
@@ -14776,6 +14804,200 @@ with wave.open(out, 'wb') as w:
     w.writeframes(b''.join(struct.pack('<h', 0 if i / rate < 0.2 or 0.6 < i / rate < 1.8 else
                                        int(9000 * math.sin(i / 3))) for i in range(int(rate * secs))))
 """
+
+
+class ImageInput(Base):
+    """--image (#1199): Claude's chosen image goes to the agent through OpenCode's own `run -f`,
+    only for a model that takes images, once per session."""
+    MIMO = "mimo-v2.6:9b-q8_0"
+
+    def declare(self, inputs):
+        """The test model's OpenCode entry with `modalities.input` (None: no declaration)."""
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        entry = cfg["provider"]["ollama"]["models"][self.MIMO]
+        entry.pop("modalities", None)
+        if inputs is not None:
+            entry["modalities"] = {"input": inputs, "output": ["text"]}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+
+    def picture(self, name, data=None):
+        path = Path(self.tmp.name) / name
+        path.write_bytes(data if data is not None else image_png(4, 3))
+        return path
+
+    def refused(self, *argv) -> str:
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as e, redirect_stderr(err), redirect_stdout(io.StringIO()):
+            cli.main(list(argv))
+        self.assertEqual(e.exception.code, 1)
+        return err.getvalue()
+
+    def runs(self):
+        return [json.loads(l) for l in self.runs_file.read_text().splitlines()]
+
+    def setUp(self):
+        super().setUp()
+        self.runs_file = Path(self.tmp.name) / "runs.jsonl"
+        os.environ["FAKE_RUNS"] = str(self.runs_file)
+
+    def test_an_image_goes_with_the_first_round_and_a_feedback_image_with_its_own_alone(self):
+        self.declare(["text", "image"])
+        shot = self.picture("My Mockup (v2).PNG")
+        out = self.start("t-img", "ok", "--image", str(shot))
+        self.assertIn("images: 1-My-Mockup-v2.png go with the agent's message", out)
+        wait_phase("t-img", {"review"})
+        task = store.Task("t-img")
+        kept = task.dir / "images" / "1-My-Mockup-v2.png"
+        self.assertEqual(kept.read_bytes(), shot.read_bytes())   # a copy, its type's extension
+        first = self.runs()[0]
+        self.assertEqual(first["files"], [{"name": kept.name, "bytes": len(shot.read_bytes())}])
+        self.assertIn(f"Attached: {kept.name}, the image Claude gave you", first["prompt"])
+        self.assertIn(f"read it in {task.dir / 'images'}.", first["prompt"])
+        self.assertNotIn("images", run_wb("diff", "t-img"))       # never in the worktree
+        # a continued session has the image in its history: never sent again
+        run_wb("feedback", "t-img", "--text", "Tidy it.")
+        wait_phase("t-img", {"review"})
+        second = self.runs()[1]
+        self.assertTrue(second["session"])
+        self.assertEqual(second["files"], [])
+        self.assertNotIn("Attached:", second["prompt"])
+        # a feedback's image goes with its round, alone
+        err = self.picture("error.jpg", b"\xff\xd8\xff\xe0" + b"\0" * 64)
+        out = run_wb("feedback", "t-img", "--text", "Fix what this shows.", "--image", str(err))
+        self.assertIn("images: 2-error.jpg go with", out)
+        wait_phase("t-img", {"review"})
+        third = self.runs()[2]
+        self.assertTrue(third["session"])
+        self.assertEqual([f["name"] for f in third["files"]], ["2-error.jpg"])
+        self.assertEqual([(r["file"], r["round"]) for r in task.status["images"]],
+                         [("1-My-Mockup-v2.png", 1), ("2-error.jpg", 3)])
+
+    def test_a_fresh_session_gets_every_image_again(self):
+        self.declare(["text", "image"])
+        self.start("t-fresh", "ok", "--image", str(self.picture("a.png")))
+        wait_phase("t-fresh", {"review"})
+        run_wb("feedback", "t-fresh", "--text", "Again, from the start.", "--fresh",
+               "--image", str(self.picture("b.webp", b"RIFF\0\0\0\0WEBPVP8 " + b"\0" * 32)))
+        wait_phase("t-fresh", {"review"})
+        last = self.runs()[-1]
+        self.assertFalse(last["session"])
+        self.assertEqual([f["name"] for f in last["files"]], ["1-a.png", "2-b.webp"])
+        self.assertIn("Attached: 1-a.png, 2-b.webp, the images Claude gave you", last["prompt"])
+
+    def test_wb_next_sends_its_image_with_the_next_step(self):
+        self.declare(["text", "image"])
+        self.start("t-step", "ok")
+        wait_phase("t-step", {"review"})
+        nxt = Path(self.tmp.name) / "next.md"
+        nxt.write_text("Now match the mockup.\n")
+        out = run_wb("next", "t-step", "--spec", str(nxt), "-m", "feat: answer",
+                     "--image", str(self.picture("mock.gif", b"GIF89a" + b"\0" * 32)))
+        self.assertIn("images: 1-mock.gif go with", out)
+        wait_phase("t-step", {"review"})
+        self.assertEqual(self.runs()[0]["files"], [])
+        self.assertEqual([f["name"] for f in self.runs()[-1]["files"]], ["1-mock.gif"])
+
+    def test_a_text_only_model_is_refused_in_one_line_before_anything_is_written(self):
+        self.declare(["text"])
+        why = self.refused("start", "t-text", "--spec", str(self.spec), "--repo", str(self.repo),
+                           "--model", "mimo", "--image", str(self.picture("m.png")))
+        self.assertIn(f"ollama/{self.MIMO} takes no image input: describe the image in the spec", why)
+        self.assertNotIn("--model", why)                           # never another model
+        self.assertFalse(store.Task("t-text").dir.exists())
+
+    def test_an_undeclared_model_is_asked_of_ollama_and_another_server_is_unknown(self):
+        self.declare(None)
+        shot = str(self.picture("m.png"))
+        argv = ["start", "t-und", "--spec", str(self.spec), "--repo", str(self.repo), "--model", "mimo",
+                "--image", shot]
+        # the fake Ollama's /api/show says tools and thinking, no vision
+        self.assertIn("takes no image input", self.refused(*argv))
+        with mock.patch.object(runner.models, "ollama_show",
+                               return_value={"capabilities": ["tools", "vision"]}) as show:
+            os.environ["FAKE_SCENARIO"] = "ok"
+            self.assertIn("images: 1-m.png", run_wb(*argv))
+        self.assertEqual(show.call_args.args[1], self.MIMO)
+        wait_phase("t-und", {"review"})
+        self.assertIn("doesn't say it takes image input", self.refused(
+            "start", "t-srv", "--spec", str(self.spec), "--repo", str(self.repo), "--model", "strata",
+            "--image", shot))
+
+    def test_a_file_that_is_no_image_too_big_or_too_many_is_refused(self):
+        self.declare(["text", "image"])
+        base = ["start", "t-bad", "--spec", str(self.spec), "--repo", str(self.repo), "--model", "mimo"]
+        self.assertIn("not a PNG, JPEG, GIF or WebP image", self.refused(
+            *base, "--image", str(self.picture("notes.png", b"just text, named .png"))))
+        big = self.picture("big.png")
+        with big.open("r+b") as fh:
+            fh.truncate(cli.IMAGE_BYTES + 1)                       # OpenCode's 10 MiB, plus one
+        self.assertIn("over OpenCode's 10 MiB", self.refused(*base, "--image", str(big)))
+        self.assertIn("no such file", self.refused(*base, "--image", str(Path(self.tmp.name) / "gone.png")))
+        self.assertIn("not a file", self.refused(*base, "--image", self.tmp.name))
+        five = [x for i in range(5) for x in ("--image", str(self.picture(f"{i}.png")))]
+        self.assertIn("at most 4 images", self.refused(*base, *five))
+        # #1199's review (2026-11-24): two at 10 MiB each pass every check above, but their 26.7
+        # MiB of base64 passes OpenCode's 25 MiB, and it drops the older from every request unsaid
+        two = []
+        for name in ("a.png", "b.png"):
+            with (pic := self.picture(name)).open("r+b") as fh:
+                fh.truncate(cli.IMAGE_BYTES)
+            two += ["--image", str(pic)]
+        self.assertIn("20.0 MiB of images on this task, over 8 MiB in all", self.refused(*base, *two))
+        self.assertFalse(store.Task("t-bad").dir.exists())
+
+    def test_a_feedback_image_for_a_text_only_model_is_refused_and_no_round_written(self):
+        self.declare(["text", "image"])
+        self.start("t-later", "ok")
+        wait_phase("t-later", {"review"})
+        self.declare(["text"])
+        self.assertIn("takes no image input", self.refused(
+            "feedback", "t-later", "--text", "See this.", "--image", str(self.picture("m.png"))))
+        self.assertEqual(store.Task("t-later").status["round"], 1)
+        self.assertFalse((store.Task("t-later").dir / "images").exists())
+
+    def test_the_agents_read_tool_may_open_the_images_again(self):
+        self.declare(["text", "image"])
+        self.start("t-read", "ok", "--image", str(self.picture("m.png")))
+        wait_phase("t-read", {"review"})
+        task = store.Task("t-read")
+        if context.writable(task) is None:
+            self.skipTest("the lane is off: external_directory allows everything")
+        allowed = {r["resource"] for r in context.external_rules(task) if r["effect"] == "allow"}
+        self.assertIn(f"{task.dir / 'images'}/*", allowed)
+
+    def test_model_add_writes_what_ollama_says_it_reads_in_each_configs_shape(self):
+        cfg_path = Path(os.environ["WB_OPENCODE_CONFIG"])
+        with mock.patch.object(runner.models, "ollama_show", return_value={
+                "capabilities": ["completion", "tools", "vision"], "context_length": None, "num_ctx": None}):
+            out = run_wb("model", "add", "ollama/eyes:8b", "--context", "32768")
+        self.assertIn("images, 32K context", out)
+        entry = json.loads(cfg_path.read_text())["provider"]["ollama"]["models"]["eyes:8b"]
+        self.assertEqual(entry["modalities"], {"input": ["text", "image"], "output": ["text"]})
+        run_wb("model", "add", "ollama/blind:8b", "--context", "32768")   # the fake: no vision
+        entry = json.loads(cfg_path.read_text())["provider"]["ollama"]["models"]["blind:8b"]
+        self.assertEqual(entry["modalities"]["input"], ["text"])
+        self.assertIs(runner.models.takes_images(runner.models.discover()["ollama/blind:8b"]), False)
+        # a V2 config (`providers`) reads `capabilities.input`, and would drop `modalities` unsaid
+        cfg_path.write_text(json.dumps({"providers": {"ollama": {
+            "settings": {"baseURL": "http://127.0.0.1:11434/v1"},
+            "models": {"eyes:8b": {"capabilities": {"tools": True}}}}}}))
+        with mock.patch.object(runner.models, "ollama_show", return_value={
+                "capabilities": ["tools", "vision"], "context_length": None, "num_ctx": None}):
+            run_wb("model", "add", "ollama/eyes:8b", "--context", "32768")
+        entry = json.loads(cfg_path.read_text())["providers"]["ollama"]["models"]["eyes:8b"]
+        self.assertNotIn("modalities", entry)
+        self.assertEqual(entry["capabilities"], {"tools": True, "input": ["text", "image"], "output": ["text"]})
+        self.assertIs(runner.models.takes_images(runner.models.discover()["ollama/eyes:8b"]), True)
+
+    def test_takes_images_reads_the_catalog_for_an_api_model_and_v2_capabilities(self):
+        api = runner.models.Model(id="p/m", provider="p", name="m", base_url="https://x/v1",
+                                  engine="api", label="m", kind="api",
+                                  config={"capabilities": {"tools": True, "input": ["text", "image"]}})
+        self.assertIs(runner.models.takes_images(api), True)
+        api.config = {"capabilities": {"input": ["text"]}}
+        self.assertIs(runner.models.takes_images(api), False)
+        api.config = {}
+        self.assertIsNone(runner.models.takes_images(api))         # never asks Ollama for an API model
 
 
 class Audio(Base):
@@ -36627,6 +36849,118 @@ class ApiSpend(Base):
             run_wb(*role)                                     # the cap it named: it starts
         spawned.assert_called_once()
         self.assertEqual(store.Task("t-big").spec["role"], "significant")
+
+    def eyes(self):
+        """SPEND_TIER's prices on a model whose catalog entry takes images (#1199's review)."""
+        eyes = "meterco/eyes-1"
+        entry = {**next(e for e in SPEND_CATALOG if e["id"] == SPEND_TIER.split("/")[1]), "id": "eyes-1",
+                 "capabilities": {"tools": True, "input": ["text", "image"]}}
+        Path(os.environ["WB_FAKE_CATALOG"]).write_text(json.dumps([*SPEND_CATALOG, entry]))
+        return eyes, runner.models.lookup(eyes)
+
+    def png(self, name, mib):
+        """A PNG's first bytes, ``mib`` MiB in all (sparse): wb's checks read its head and size."""
+        path = Path(self.tmp.name) / name
+        path.write_bytes(image_png(2, 2))
+        with path.open("r+b") as fh:
+            fh.truncate(int(mib * 2**20))
+        return path
+
+    def test_a_tasks_images_in_all_stay_under_what_opencode_keeps_in_a_request(self):
+        # #1199's review (2026-11-24): OpenCode 2.3.2 sends each image of the session as base64
+        # (4/3) in every request and, past 25 MiB of it, swaps the oldest for "[This image was
+        # removed…]" unsaid (boundImages): two 10 MiB PNGs that passed every check left one
+        eyes, m = self.eyes()
+        b64 = 4 * -(-cli.IMAGE_TOTAL // 3)
+        self.assertLess(b64, cli.OPENCODE_IMAGE_TARGET)                    # kept whole after a cut
+        self.assertLess(2 * b64, cli.OPENCODE_IMAGE_TRIGGER)              # and one re-read
+        self.assertLess(2 * b64, runner.keyhole.BODY_CAP)                 # under the keyhole's 413
+        three = [x for i in range(3) for x in ("--image", str(self.png(f"{i}.png", 3)))]
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err), mock.patch.object(cli, "API_RUNS", True),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("start", "t-many", "--spec", str(self.spec), "--repo", str(self.repo), "--model", eyes,
+                   "--no-base-check", *three)
+        self.assertEqual(e.exception.code, 1)
+        self.assertIn("9.0 MiB of images on this task, over 8 MiB in all (OpenCode drops the oldest", err.getvalue())
+        spawned.assert_not_called()
+        self.assertFalse(store.Task("t-many").dir.exists())
+        # a GPU task's OpenCode drops them too: the same refusal, the model never asked
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            cli._images_room([(self.png("g.png", 9), ".png")] * 3)
+        self.assertIn("27.0 MiB of images on this task, over 8 MiB in all", err.getvalue())
+        # wb feedback counts the task's own images: a fresh session would send them all
+        task = self.api_task("t-own", eyes)
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        runner.images_dir(task).mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(self.png("own.png", 6), runner.images_dir(task) / "1-own.png")
+        task.set_status(images=[{"file": "1-own.png", "round": 1}])
+        rnd = task.status["round"]
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("feedback", "t-own", "--text", "See this.", "--image", str(self.png("more.png", 3)))
+        self.assertEqual(e.exception.code, 1)
+        self.assertIn("9.0 MiB of images on this task with its own, over 8 MiB", err.getvalue())
+        spawned.assert_not_called()
+        self.assertEqual(task.status["round"], rnd)
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb("feedback", "t-own", "--text", "See this.", "--image", str(self.png("less.png", 1)))
+        spawned.assert_called_once()
+
+    def test_an_image_counts_at_a_providers_figure_in_the_room_and_in_wb_starts_look_ahead(self):
+        # #1199's review (2026-11-24): the room read a 10 MiB image's base64 as 3.5M tokens, $10.49
+        # at $3/M, so past a $10 cap every request with it was refused, while wb start, counting
+        # no image, let the task start (#1118's failure again)
+        need = lambda text: float(re.search(r"a cap of at least \$([\d.]+) ", text)[1])  # noqa: E731
+        eyes, m = self.eyes()
+        uri = "data:image/png;base64," + "A" * (4 << 20)
+        body = {"max_tokens": 32768, "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "x" * 60_000}]
+             + [{"type": "image_url", "image_url": {"url": uri}}] * 2},
+            {"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                                                      "data": uri[22:]}}]},
+            {"role": "user", "parts": [{"inlineData": {"mimeType": "image/png", "data": uri[22:]}}]}]}
+        size = len(json.dumps(body))
+        self.assertEqual(self.meter.images_in(body), (4, 2 * len(uri) + 2 * (len(uri) - 22)))
+        self.assertLess(self.meter.body_tokens(body, size), 20_000 + 4 * self.meter.IMAGE_TOKENS)
+        self.assertGreater(size / 4, 4_000_000)                   # what the room counted before
+        # wb start, and the dialog's dry run before it, count each --image at that figure too
+        self.assertEqual(runner.first_tokens(prompt="spec", images=4),
+                         runner.first_tokens(prompt="spec") + 4 * self.meter.IMAGE_TOKENS)
+        four = [x for i in range(4) for x in ("--image", str(self.png(f"{i}.png", 1)))]
+        start = ("start", "t-eyes", "--spec", str(self.spec), "--repo", str(self.repo), "--model", eyes,
+                 "--no-base-check", *four)
+        for args in (("route", "--dry-run", "--json", "--start", *start[1:]), start):
+            self.cap(5)
+            self.spent(4.55)          # one request without its images fits: with four it doesn't
+            self.assertIsNone(self.meter.refusal(m, tokens=runner.first_tokens(prompt=self.spec.read_text())))
+            err = io.StringIO()
+            with (self.assertRaises(SystemExit) as e, redirect_stderr(err), mock.patch.object(cli, "API_RUNS", True),
+                  mock.patch.object(cli, "spawn_runner") as spawned):
+                run_wb(*args)
+            self.assertEqual(e.exception.code, 3, args[0])
+            spawned.assert_not_called()
+            self.assertFalse(store.Task("t-eyes").dir.exists())
+            self.meter.ledger_path().unlink()
+        self.spent(4.55)
+        self.cap(need(err.getvalue()))
+        with mock.patch.object(cli, "API_RUNS", True), mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb(*start)
+        spawned.assert_called_once()
+        task = store.Task("t-eyes")
+        self.assertEqual(len(task.status["images"]), 4)
+        # the room lets its first request through, four images and all, at the cap wb start named
+        self.assertGreaterEqual(self.meter.for_task(task, m).room(body, 65_000 + 4 * len(uri)), 0)
+        self.assertIsNone(task.status.get("api_stop"))
+        # a later round's look ahead counts the task's own images (a fresh session resends them)
+        task.set_status(images=[])
+        with_none = runner.first_tokens(task, "carry on", fresh=True)
+        task.set_status(images=[{"file": f"{i}.png", "round": 1} for i in range(4)])
+        self.assertEqual(runner.first_tokens(task, "carry on", fresh=True) - with_none,
+                         4 * self.meter.IMAGE_TOKENS)
 
     def test_a_large_next_spec_counts_in_wb_nexts_look_ahead_so_the_cap_it_names_lets_the_step_through(self):
         # #1173's review (2026-11-24): with a small next spec only the carried context tipped the
