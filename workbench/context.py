@@ -77,7 +77,16 @@ def _denied(commands) -> tuple[str, ...]:
         tuple(f"{w} {c} *" for w in _WRAPPERS for c in commands)
 
 
-DENIED_SHELL = _denied(_HARD)
+# A recursive rm of the home or the root, whatever was allowed: `rm` is on ALLOWED_COMMANDS, the
+# agent's HOME is the real one and its lane writes the caches under it, so `rm -rf main ~` would
+# have deleted them; an API agent sent just that (task mid1-xl-scout, 2026-11-23, #1146), refused
+# only because the same line ran `wb`. The space before the word keeps `rm -rf build~`, and the
+# word ending there (or a space after it) keeps `rm -rf ~/build` and `rm -rf /tmp/x`. Not `~/*`,
+# `$HOME/*` or `/*`: OpenCode's `*` can't be matched literally, so such a pattern would refuse
+# every rm under home. Nor `bash -c`, `find ~ -delete`, `xargs rm`, `\rm`, `/bin/rm`, an operand
+# before the options (`rm ~ -rf`) or another quoting: the lane stands behind those.
+_HOME_OR_ROOT = ("~", "~/", "$HOME", '"$HOME"', "${HOME}", "$HOME/", "/")
+DENIED_SHELL = _denied(_HARD) + _denied(tuple(f"rm * {w}" for w in _HOME_OR_ROOT))
 # The real git by its path: the binaries themselves, not `*/git`, which (`*` matching anything)
 # also refused `go test ./internal/git` and `ls pkg/git`, whatever Claude allowed (the 2026-11-16
 # audit). A relative path to it still gets by, like `bash -c`: the shim and the repository's git

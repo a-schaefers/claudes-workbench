@@ -1445,7 +1445,14 @@ match asks (which `--auto` allows). The rules, in order:
    being last nothing could lift them (#442). Each shape spans at most three `?` characters, so it
    can't reach over a command's name; a longer value (`timeout 3600 sudo`) or a variable first
    (`FOO=1 sudo`, `env CI=1 gh`) passes like `bash -c`, and the kernel stands behind it. Not
-   `*/git` (refused `go test ./internal/git`), not `time *` (the 2026-11-16 audit).
+   `*/git` (refused `go test ./internal/git`), not `time *` (the 2026-11-16 audit). A recursive
+   rm of the home or the root (`_HOME_OR_ROOT`, #1146: an API agent sent `rm -rf main ~`): `rm *
+   W *` for each of `~`, `~/`, `$HOME`, `"$HOME"`, `${HOME}`, `$HOME/` and `/`, plain and behind
+   the wrappers. The space before the word keeps `rm -rf build~`; the word must end there, so
+   `rm -rf ~/build` and `rm -rf /tmp/x` still run. Gaps, left to the lane: `~/*`, `$HOME/*` and
+   `/*` (OpenCode's `*` can't be matched literally, so a pattern would refuse every rm under
+   home), `bash -c`, `find ~ -delete`, `… | xargs rm`, `\rm`, `/bin/rm`, `rm ~ -rf` and other
+   quotings.
 
 A refused command comes back as "Permission denied"; the handbook and `ask_reviewer` tell the agent
 to ask with `command` set, raising a PERMISSION question naming the `wb allow`. These patterns are

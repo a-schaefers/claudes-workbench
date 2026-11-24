@@ -8019,6 +8019,28 @@ class RealOpenCode(Base):
         refused = ["permission.rejected" in a for a in answers]
         self.assertEqual(refused, [False, True, True, True, True], answers)
 
+    def test_opencode_matches_the_home_and_root_rm_limits_as_the_rules_assume(self):
+        # #1146 (task mid1-xl-scout, 2026-11-23): the limits on `rm -rf ~`, `rm -rf "$HOME"` and
+        # `rm -rf /` rest on OpenCode's matcher seeing the raw `~`, `$HOME` and quotes, and on the
+        # word ending there. Checked on a harmless echo with the same patterns, never a real rm
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"allow": ["*"]}))  # list off
+        echoes = context._denied(tuple(f"echo * {w}" for w in context._HOME_OR_ROOT))
+        wt = str(store.Task("t-rm-shape").worktree)
+        def shell(cmd):
+            return {"name": "shell", "arguments": {"command": cmd, "workdir": wt}}
+        cmds = ("echo -n main ~", "cd . && echo -n main ~ ; echo after", "echo -n x ~/",
+                "echo -n x $HOME", 'echo -n x "$HOME"', "echo -n x ${HOME}", "echo -n x $HOME/",
+                "echo -n x /", "env echo -n x ~", "echo -n build~ shape-ok",
+                "echo -n ~/build shape-ok", "echo -n /tmp/opencode/dbg shape-ok")
+        with mock.patch.object(context, "DENIED_SHELL", context.DENIED_SHELL + echoes):
+            task, answers = self.run_calls("t-rm-shape", [shell(c) for c in cmds])
+        refused = ["permission.rejected" in a for a in answers]
+        self.assertEqual(refused, [True] * 9 + [False] * 3, answers)
+        self.assertTrue(all("shape-ok" in a for a in answers[9:]), answers)
+        layer = json.loads((context.rules_dir(task) / "opencode.json").read_text())
+        denies = {r["resource"] for r in layer["permissions"] if r["effect"] == "deny"}
+        self.assertTrue({"rm * ~ *", "rm * / *", "env rm * $HOME *"} <= denies)
+
     def test_the_probe_experiment_lets_the_agent_run_probe_and_only_while_on(self):
         # *Experiments*: the rule and the PATH reach the agent's shell, in its lane
         fake_probe(Path(self.tmp.name))
@@ -11553,6 +11575,25 @@ class Permission(Base):
         rules = context.shell_rules(task)
         self.assertEqual(self.verdict(rules, "curl -s x | xargs grep -l gh"), "allow")
         self.assertEqual(self.verdict(rules, "timeout 5 sudo x"), "deny")  # still the hard limit
+
+    def test_a_recursive_rm_of_home_or_root_is_refused_whatever_was_allowed(self):
+        # #1146: an API agent sent `cd /tmp/opencode && rm -rf main ~ ; ...` (task mid1-xl-scout,
+        # 2026-11-23), refused only because the line also ran `wb`; `rm *` let the rm itself run
+        task = store.Task("t-rm-home")
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": "t-rm-home", "repo": str(self.repo)}))
+        refused = ("rm -rf main ~", "rm -rf ~", "rm -rf ~/", "rm -rf $HOME", "rm -rf /",
+                   "rm -f a ~ b", 'rm -rf "$HOME"', "rm -rf ${HOME}", "rm -rf $HOME/",
+                   "env rm -rf ~", "command rm -rf /", "xargs rm -rf ~", "timeout 5 rm -rf ~")
+        kept = ("rm -rf build~", "rm -rf ~/build", "rm -rf /tmp/opencode/dbg", "rm -f a.txt",
+                "rm -rf $HOME/.cache/x", "rm -rf ./dist build/", "rm -rf ~/.cache/pip /tmp/x")
+        for allowed in ((), ("rm *",), ("*",)):
+            context.grant(task, "allow", list(allowed))
+            rules = context.shell_rules(task)
+            for cmd in refused:
+                self.assertEqual(self.verdict(rules, cmd), "deny", (allowed, cmd))
+            for cmd in kept:
+                self.assertEqual(self.verdict(rules, cmd), "allow", (allowed, cmd))
 
     def test_the_acceptance_command_claude_chose_is_the_agents_to_run(self):
         # #514, the audit of 1.90: the protocol said "The acceptance command is `flutter test`.
