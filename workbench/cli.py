@@ -3869,6 +3869,11 @@ def cmd_accept(a):
     merged, refused = close.get("merged_head"), None
     if close.get("merge") and not merged:
         into = close.get("merge_into")
+        if into and into != "HEAD" and close.get("merge_from"):
+            # an earlier try got into its merge, and a SIGKILL there left it half made: the retry
+            # blamed it as uncommitted changes, or said merged with MERGE_HEAD still there
+            # (#1231). No merge lock: while it's there, every other wb merge refuses the checkout
+            gitops.clear_killed_merge(repo, close["merge_from"], tip, close.get("merge_as", "merge"))
         if into and into != "HEAD" and gitops.contains(repo, f"refs/heads/{into}", tip):
             merged = gitops.git(repo, "rev-parse", "--short", f"refs/heads/{into}").strip()  # made already
         elif into and into != "HEAD" and (merged := gitops.squashed(

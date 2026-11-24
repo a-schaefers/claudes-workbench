@@ -4287,6 +4287,92 @@ class Lifecycle(Base):
         self.assertNotIn("gpgsig", g("cat-file", "commit", "main"))
         self.assertEqual((self.repo / "answer.txt").read_text().strip(), "42")
 
+    def _killed_accept(self, name: str, how: str, wait: int) -> tuple[subprocess.Popen, int, int]:
+        """wb accept --merge in the background, its signer in the main checkout (the merge's or
+        the squash's commit, not the task's) waiting ``wait`` s: (wb, its git, the signer), once
+        the signer is running."""
+        pidfile = Path(self.tmp.name) / f"{name}.signer"
+        prog = Path(self.tmp.name) / f"{name}-gpg"
+        here = shlex.quote(os.path.realpath(self.repo))  # not wb start's dry run there
+        prog.write_text(f"#!/bin/sh\npayload=$(cat)\nif [ \"$(pwd -P)\" = {here} ] && ! printf '%s' "
+                        f"\"$payload\" | grep -q 'can it sign'; then echo $$ > {shlex.quote(str(pidfile))}; "
+                        f"sleep {wait}; fi\n"
+                        "printf '\\n[GNUPG:] SIG_CREATED D 22 8 00 0 FAKE\\n' >&2\n"
+                        "printf -- '-----BEGIN PGP SIGNATURE-----\\n\\nmade up\\n-----END PGP SIGNATURE-----\\n'\n")
+        prog.chmod(0o755)
+        subprocess.run(["git", "-C", str(self.repo), "config", "commit.gpgsign", "true"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config", "gpg.program", str(prog)], check=True)
+        self.start(name, "ok")
+        wait_phase(name, {"review"})
+        wb = subprocess.Popen([sys.executable, str(ROOT / "bin" / "wb"), "accept", name, "-m",
+                               "feat: answer", "--merge", "--merge-as", how],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: wb.poll() is None and wb.kill())
+        deadline = time.monotonic() + 30
+        while not (pidfile.exists() and pidfile.read_text().strip()):
+            self.assertLess(time.monotonic(), deadline, "the signer never ran")
+            time.sleep(0.05)
+        signer = int(pidfile.read_text())
+        git = int(Path(f"/proc/{signer}/stat").read_text().rsplit(")", 1)[1].split()[1])
+        return wb, git, signer
+
+    @unittest.skipUnless(Path("/proc/self/stat").exists(), "reads parents from /proc")
+    def test_an_accept_merge_sigkilled_with_its_git_while_signing_is_merged_by_the_retry(self):
+        # #1231 (bar round 4): kill -9 of wb and its git while the signer waited left MERGE_HEAD
+        # and the staged merge (a squash: the staged squash); the retry called them uncommitted
+        # changes, printed a hand-merge line git refused, and closed the task unmerged (exit 5)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout
+        for how in ("merge", "squash"):
+            name = f"t-k{how[0]}"
+            wb, git, signer = self._killed_accept(name, how, 30)
+            for pid in (wb.pid, git, signer):
+                os.kill(pid, signal.SIGKILL)
+            wb.wait(timeout=5)
+            deadline = time.monotonic() + 10
+            while Path(f"/proc/{git}").exists() and time.monotonic() < deadline:
+                time.sleep(0.05)  # reaped by init, not by us
+            staged = g("status", "--porcelain", "--untracked-files=no")
+            self.assertIn("answer.txt", staged, how)          # the half-made merge is there
+            out = run_wb("accept", name, "-m", "feat: answer", "--merge", "--no-sign")
+            self.assertIn("merged into main", out, how)
+            self.assertNotEqual(subprocess.run(["git", "-C", str(self.repo), "rev-parse", "-q",
+                                                "--verify", "MERGE_HEAD"]).returncode, 0, how)
+            self.assertEqual(g("status", "--porcelain", "--untracked-files=no"), "", how)
+            self.assertEqual((self.repo / "answer.txt").read_text().strip(), "42", how)
+            tip = store.Task(name).status["tip"]
+            if how == "merge":
+                self.assertEqual(g("rev-parse", "HEAD^2").strip(), tip)
+            else:
+                self.assertEqual(g("log", "-1", "--format=%s %P"), f"feat: answer {g('rev-parse', 'HEAD~1').strip()}\n")
+            g("reset", "-q", "--hard", "HEAD~1")  # the next one from the same base
+
+    @unittest.skipUnless(Path("/proc/self/stat").exists(), "reads parents from /proc")
+    def test_an_accept_merge_sigkilled_alone_leaves_no_merge_under_way_for_the_retry(self):
+        # #1231: with only wb killed, its signing git (a session of its own) made the merge
+        # commit, then died of SIGPIPE printing it before removing MERGE_HEAD; the retry said
+        # merged with the checkout still mid-merge, and the user's next commit became a merge
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout
+        wb, git, _ = self._killed_accept("t-ka", "merge", 2)
+        wb.kill()
+        wb.wait(timeout=5)
+        deadline = time.monotonic() + 20
+        while Path(f"/proc/{git}").exists():  # git finishes the commit by itself
+            self.assertLess(time.monotonic(), deadline, "git never finished")
+            time.sleep(0.05)
+        merging = lambda: subprocess.run(["git", "-C", str(self.repo), "rev-parse", "-q",  # noqa
+                                          "--verify", "MERGE_HEAD"]).returncode == 0
+        self.assertFalse(merging())
+        tip = store.Task("t-ka").status["tip"]
+        self.assertEqual(g("rev-parse", "main^2").strip(), tip)
+        # as a git that died before removing MERGE_HEAD left it: the retry quits the merge
+        Path(self.repo, g("rev-parse", "--git-path", "MERGE_HEAD").strip()).write_text(tip + "\n")
+        self.assertTrue(merging())
+        self.assertIn("merged into main", run_wb("accept", "t-ka", "-m", "feat: answer", "--merge"))
+        self.assertFalse(merging())
+        self.assertEqual(g("rev-parse", "main^2").strip(), tip)
+
     def test_accept_merge_no_sign_merges_unsigned_when_the_key_cannot_sign(self):
         # #420 (Codex's 20 too): --no-sign let the task's commit through, then the merge signed,
         # failed ("gpg failed to sign the data") and exited 5: the task couldn't land
