@@ -152,6 +152,10 @@ run it as a backlog. Each task still gets the same review it would by day.
   started them, and a task you send back goes ahead of the rest; an API provider's slot (3 tasks at
   once) goes to whichever waiting task looks first, in no set order. Their setups and base checks
   run one at a time, in the same order.
+- To run it later (once the user is off the GPU, after a meeting), add `--after HH:MM`: the
+  task waits, queued, until that local time (tomorrow's once today's has passed), its checkout
+  too, and holds nothing meanwhile. Leave this session open to review, or the morning's session
+  in the same project takes the tasks over.
 - Review each wake as usual: accept, feedback, or discard. Accept without `--merge`: nothing
   reaches the user's branches unattended. Leave a hard call for the morning (`wb note`) rather
   than guessing.
@@ -163,6 +167,31 @@ run it as a backlog. Each task still gets the same review it would by day.
   when `wb start` says so, tell the user to set Windows' sleep to Never for the night.
 - When the batch is done, run `wb backlog <name>` and post it with `wb chat reply`: each task's
   outcome and branch, and the batch's saving. That is the morning summary.
+- A batch to run again and again with no session open (weekly maintenance, a nightly backlog):
+  offer `wb schedule add <name> --file <backlog.md> --repo <dir> --at "Sun 02:00"` (the user's
+  yes first: it writes their own systemd timer or launchd agent, and each run spends Claude's
+  turns and, on an API role, money under the day cap). Each fire runs you headless on the file's
+  text as batch `<name>-YYYY-MM-DD` (`-2` after it for a second run that day); `wb schedule list` shows each run's tasks, API dollars and
+  your tokens, `wb schedule run <name>` fires one now, `wb schedule rm <name>` removes it. The
+  backlog file is what you would be told: the issues or the work, the tests, what may wait.
+
+## Headless: a scheduled run
+When your prompt says it is a scheduled workbench run (`claude -p`, from `wb schedule`), nobody
+is at the terminal and nothing wakes you: no mod, no pane, no dialog.
+- You may run `wb` commands and read files; nothing else (no Edit or Write, no git, no gh).
+  Write a spec straight into `wb start <name> --spec - --queue --backlog <batch> … <<'EOF'`
+  (a heredoc), feedback with `wb feedback <name> --text "…"`.
+- Spec the whole backlog first, then drive with `wb wait --backlog <batch> --timeout 100` in a
+  loop (each call under Bash's two minutes; exit 2 is the timeout, or no open task left): review
+  each task it prints as by day. Only your batch's tasks are yours: leave every other one alone.
+- Accept without `--merge` (it is refused here): the user merges in the morning. A hard call, a
+  task that needs the user, a question you can't answer from the backlog:
+  `wb note <name> --text "…"`, and leave it in review rather than guess.
+- What needs the user's yes fails closed with no one to answer: a role change, an API
+  `--model`, a patch send. Don't retry another way; note it for the morning.
+- Your turns are capped: when the tasks are in hand, stop. End with `wb backlog <batch>` and
+  post it with `wb chat reply --to user --text "…"` (it reaches their phone when the web chat
+  is on): each task's outcome and branch, what waits for them.
 
 ## The agent's context and handovers
 Rounds of a task continue one OpenCode session, so the agent keeps what it read.

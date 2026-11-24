@@ -35,6 +35,7 @@ from . import runner
 from . import keyhole
 from . import meter
 from . import privacy
+from . import schedule
 from .runner import PKG_ROOT
 
 PROTOCOL = """
@@ -833,7 +834,8 @@ def _gpu_holders(me: str | None = None, of: models.Model | None = None) -> dict:
         if t.name not in named and t.name != me and m and models.pool(m) == pool \
                 and not (own and store.elsewhere(t.status)) \
                 and t.status.get("phase") in store.ACTIVE and runner_alive(t) \
-                and t.status.get("leased") != t.status.get("pid"):
+                and t.status.get("leased") != t.status.get("pid") \
+                and runner.held_until(t) is None:  # held by --after: nothing until then (#1204)
             held[f"task {t.name}"] = {"model": m.id, "task": t.name}
     return held
 
@@ -911,7 +913,8 @@ def _api_pending(m: models.Model, me: str | None = None) -> list[str]:
                   if t.name != me and t.name not in held and t.spec.get("via") == "api"
                   and (t.spec.get("provider") or (t.spec.get("model") or "").split("/", 1)[0]) == p
                   and t.status.get("phase") in store.ACTIVE and runner_alive(t)
-                  and t.status.get("leased") != t.status.get("pid"))
+                  and t.status.get("leased") != t.status.get("pid")
+                  and runner.held_until(t) is None)  # held by --after (#1204)
 
 
 def _api_slots_free(m: models.Model, me: str | None = None) -> int:
@@ -1552,7 +1555,24 @@ def _images_line(fields: dict, rnd: int) -> str:
     return f"images: {', '.join(names)} go with the agent's message (OpenCode's run -f)" if names else ""
 
 
+def after_time(text: str, now: float | None = None) -> float:
+    """--after HH:MM (#1204): the next such local time, as epoch seconds: today's while it is
+    ahead, else tomorrow's. A time zone's change in between (DST) is mktime's."""
+    m = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", text.strip())
+    if not m:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a time of day as HH:MM (24-hour)")
+    now = time.time() if now is None else now
+    day = time.localtime(now)
+    for ahead in (0, 1):
+        at = time.mktime((day.tm_year, day.tm_mon, day.tm_mday + ahead, int(m[1]), int(m[2]), 0, 0, 0, -1))
+        if at > now:
+            return at
+    raise argparse.ArgumentTypeError(f"{text!r}: no such time ahead")  # never: tomorrow's is
+
+
 def cmd_start(a):
+    if getattr(a, "after", None):  # held until then: the GPU's or a slot's room now says nothing
+        a.queue = True
     if not store.NAME_RE.match(a.name):
         die("a task name is lowercase letters, digits and hyphens, at most 48")
     if a.backlog is not None and not store.NAME_RE.match(a.backlog):
@@ -1661,10 +1681,13 @@ def cmd_start(a):
             _say(fell)  # the start was the role's fallback's: its provider's slots, not the role's
             die(_slots_full(m, a.name), 4)
     else:
-        if not getattr(a, "bench", None):
+        if not getattr(a, "bench", None) and not getattr(a, "after", None):  # not for a later run's sake
             _say(_preempt_bench(m, a.name))
         held, waits = _gpu_wait(m, a.name)
-    if waits and not isinstance(moved := _busy_api(role, a, repo, sub, first), str):  # #1023, the user's opt-in
+    # held by --after, the GPU now says nothing of then: no busy move (#1204)
+    if getattr(a, "after", None):
+        moved = ""
+    elif waits and not isinstance(moved := _busy_api(role, a, repo, sub, first), str):  # #1023, the user's opt-in
         m, state, why, routed = moved
         api, held, waits, slots_full = True, {}, False, False
     elif waits and moved:
@@ -1763,6 +1786,7 @@ def cmd_start(a):
         # the next start counts it as taken until the runner has made it (#676)
         **({"checkout_bytes": checkout_bytes} if checkout_bytes else {}),
         **({"backlog": a.backlog} if a.backlog else {}),  # a batch left to run: wb backlog
+        **({"not_before": round(at)} if (at := getattr(a, "after", None)) else {}),  # runner.hold (#1204)
         **({"group": g} if (g := getattr(a, "group", None)) else {}),  # one request's fan-out (#1048)
         # a replay of the bench driver's (bench.replay): no notices, no results row, not listed
         **({"bench": b} if (b := getattr(a, "bench", None)) else {}),
@@ -1877,6 +1901,8 @@ def cmd_start(a):
               "it stops as rate_limited or outage)")
     if not state["available"] and not held_up:
         print(f"note: queued although {state['why']}")
+    elif getattr(a, "after", None):  # who holds the GPU or the slots now says nothing of then
+        pass
     elif api:  # none of the GPU's notes: it takes no GPU
         if slots_full:
             print(f"note: {_slot_note(m)}")
@@ -1895,6 +1921,10 @@ def cmd_start(a):
         print(f"note: {fit} (ask the user first: it adds to their OpenCode config)")
     if gap := runner.handover_warning(m.config, api=api):  # #595; an API model's own words (#1073)
         print(f"note: {m.id}: {gap}")
+    if at := getattr(a, "after", None):
+        print(f"note: held until {runner.clock(at)} (--after): queued until then, checkout and all; "
+              "the machine is kept awake meanwhile where wb can, and a reboot before then fails it "
+              f"as interrupted (wb resume {a.name} holds it again)")
     print(f"next: wb wait {a.name}   (the workbench mod wakes Claude by itself when loaded)")
 
 
@@ -2487,9 +2517,10 @@ def cmd_wait(a):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch()
     watcher = Watcher(store.home(), *([need(a.name).dir] if a.name else []))
-    if a.name and (a.repo or a.session or a.all_sessions):
-        die("--repo, --session and --all-sessions go with a bare wb wait")
-    where, sessions = (None, None) if a.name else _caller(a)
+    if a.name and (a.repo or a.session or a.all_sessions or getattr(a, "backlog", None)):
+        die("--repo, --session, --all-sessions and --backlog go with a bare wb wait")
+    batch = getattr(a, "backlog", None)  # one batch's tasks alone: a scheduled run's (#1204)
+    where, sessions = (None, None) if a.name or batch else _caller(a)
     while True:
         for t in [need(a.name)] if a.name else store.all_tasks():
             if t.status.get("phase") in LIVE:
@@ -2497,8 +2528,9 @@ def cmd_wait(a):
         rows = store.notices()
         # a bare wait takes only the caller's tasks (_caller): one in another session's terminal
         # acknowledged a notice its owner's mod then never woke for (#696)
-        theirs = set() if a.name or not (where or sessions) else {
-            t.name for t in _scope(store.all_tasks(), where, sessions)[1]}
+        theirs = ({t.name for t in store.all_tasks() if t.spec.get("backlog") != batch} if batch
+                  else set() if a.name or not (where or sessions) else {
+                      t.name for t in _scope(store.all_tasks(), where, sessions)[1]})
         for row in reversed(rows):
             if a.name and row["task"] != a.name or row["task"] in theirs:
                 continue
@@ -2541,7 +2573,8 @@ def cmd_wait(a):
         elif not any(t.status.get("phase") not in store.CLOSED and t.name not in theirs
                      for t in store.all_tasks()):
             die("no open tasks to wait for (wb status --all)"
-                + (" in this session (--all-sessions waits on every session's)" if theirs else ""), 2)
+                + (f" in backlog {batch}" if batch else
+                   " in this session (--all-sessions waits on every session's)" if theirs else ""), 2)
         if deadline and time.time() > deadline:
             die("timed out waiting", 2)
         # woken by the change itself; the minute bound re-checks the runner is alive
@@ -2966,9 +2999,12 @@ def _first_round(st: dict) -> bool:
 def _rechecks_out(task: store.Task) -> bool:
     """A task interrupted from outside before its checkout finished: its runner makes the
     checkout again from nothing (runner.checkout), so it resumes at round 1 (#529, #544). One
-    whose checkout failed still goes through wb discard."""
+    whose checkout failed still goes through wb discard. A `--after` task the user stopped
+    before its checkout too (#1204): held, it had none to fail, and a stopped hold was a task
+    only wb discard could end."""
     st = task.status
-    return _first_round(st) and not runner.checked_out(task) and _interrupted(st.get("last"))
+    held = bool(task.spec.get("not_before")) and st.get("last") == "stopped by the reviewer"
+    return _first_round(st) and not runner.checked_out(task) and (_interrupted(st.get("last")) or held)
 
 
 def _resume(task: store.Task) -> None:
@@ -4153,6 +4189,9 @@ def cmd_shot(a):
 @one_at_a_time
 def cmd_accept(a):
     a.merge = a.merge or bool(a.merge_as)  # --merge-as says how, so it merges (#352)
+    if a.merge and os.environ.get("WB_SCHEDULE"):  # a scheduled run's headless Claude (#1204)
+        die(f"a scheduled run ({os.environ['WB_SCHEDULE']}) never merges: accept without --merge, "
+            "and the user merges the branch when they are back")
     task = need(a.name)
     # a repo kept to linear history says so once, in commands.json `repos` (#352)
     a.merge_as = a.merge_as or (a.merge and context.repo_conf(
@@ -7697,6 +7736,8 @@ def cmd_doctor(a):
             print(f"--  {why}")
     if gap := chat_gap():
         print(f"--  {gap}")
+    for good, said in schedule.doctor_lines():  # wb schedule (#1204)
+        line(good, said)
     # #516: a warning, not BAD: a server or a desktop that never sleeps is fine. Its own name: once
     # it reassigned `ok`, forgetting every BAD above it and failing a healthy WSL2 install (#653)
     awake, said = awake_line()
@@ -8068,6 +8109,9 @@ def parser() -> argparse.ArgumentParser:
                    "local_only")
     s.add_argument("--backlog", metavar="NAME", help="one of a batch left to run (overnight): "
                    "wb backlog NAME reports on the batch")
+    s.add_argument("--after", metavar="HH:MM", type=after_time,
+                   help="hold the task, queued, until this local time (the next one: tomorrow's "
+                   "once today's has passed), its checkout too; implies --queue")
     s.add_argument("--group", metavar="NAME", help="one of the tasks a request fans out to (dynamic "
                    "workflows): the pane draws them under one header")
     s.add_argument("--no-claude-md", action="store_true",
@@ -8225,6 +8269,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--session", action="append", metavar="ID",
                    help="unnamed: only the tasks of Claude Code session ID (repeatable)")
     s.add_argument("--all-sessions", action="store_true", help=ALL_SESSIONS)
+    s.add_argument("--backlog", metavar="NAME", help="unnamed: only that batch's tasks (a scheduled "
+                   "run's), whichever session started them")
     s.set_defaults(f=cmd_wait)
     s = sub.add_parser("watch", help="follow a task live: the conversation between Claude and "
                        "the agent, every tool call and test")
@@ -8610,6 +8656,22 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("name", nargs="?")
     s.add_argument("--json", action="store_true")
     s.set_defaults(f=cmd_backlog)
+    s = sub.add_parser("schedule", help="a backlog Claude runs on a timer with no session open "
+                       "(claude -p): add, list, rm, run now; fire is the timer's")
+    ss = s.add_subparsers(dest="action", required=True)
+    x = ss.add_parser("add", help="write the timer: a systemd user timer, or a launchd agent on macOS")
+    x.add_argument("name")
+    x.add_argument("--file", required=True, help="the backlog: what Claude is to run, as you would tell it")
+    x.add_argument("--repo", default=".", help="the project the backlog's tasks are in")
+    x.add_argument("--at", required=True, help="when: [DAYS] HH:MM ('Sun 02:00', 'Mon..Fri 01:30', "
+                   "'daily 03:00'), or on Linux a systemd OnCalendar")
+    x.add_argument("--max-turns", type=int, help=f"Claude's turns a fire may take (default {schedule.TURNS})")
+    ss.add_parser("list", help="each schedule and its last run (tasks, API dollars, Claude's tokens)")
+    x = ss.add_parser("rm", help="remove a schedule and its timer"); x.add_argument("name")
+    x = ss.add_parser("run", help="fire a schedule now, in the background"); x.add_argument("name")
+    x = ss.add_parser("fire", help="the timer's command: one headless run, one runs.jsonl row")
+    x.add_argument("name")
+    s.set_defaults(f=schedule.cmd)
     s = sub.add_parser("savings", help="what delegating saved Claude: the week, by default")
     g = s.add_mutually_exclusive_group()
     g.add_argument("--week", action="store_true", help="the last 7 days (the default)")

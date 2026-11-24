@@ -5064,6 +5064,48 @@ def _local_only_stop(task: store.Task) -> bool:
     return True
 
 
+# wb start --after (#1204): a task held until its time (task.json `not_before`, epoch seconds)
+# waits here, queued, before anything: its checkout, setup and base check run CPU and maybe the
+# GPU, and the user asked for none of it before then. Not in the GPU's queue: a waiting entry in
+# gpu.json keeps every later task off the GPU (models.admits), so a task held until 02:00 would
+# have held the evening's tasks with it. Looked at again at least this often, so a suspend that
+# jumps the clock past the time starts it within the minute.
+AFTER_POLL = 60.0
+
+
+def held_until(task: store.Task, now: float | None = None) -> float | None:
+    """The time a `wb start --after` task waits for, while it is still ahead, else None. The GPU's
+    and a provider's counts of tasks on their way (cli._gpu_holders, cli._api_pending) leave such
+    a task out: it holds nothing until then."""
+    at = task.spec.get("not_before")
+    if isinstance(at, (int, float)) and not isinstance(at, bool) and at > (time.time() if now is None else now):
+        return float(at)
+    return None
+
+
+def clock(at: float) -> str:
+    """`02:00`, or `Tue 02:00` when ``at`` isn't today: the hold's status line and wb start's."""
+    when = time.localtime(at)
+    return time.strftime("%H:%M" if time.strftime("%Y-%m-%d", when) == time.strftime("%Y-%m-%d")
+                         else "%a %H:%M", when)
+
+
+def hold(task: store.Task) -> None:
+    """Wait, queued, until task.json `not_before` (wb start --after). task.json is read again on
+    every wake, so a later or earlier time written there is taken."""
+    if held_until(task) is None:
+        return
+    was = task.status.get("last")
+    said = None
+    with Watcher(task.dir) as w:
+        while (at := held_until(task)) is not None:
+            if said != at:  # once per time: status.json is in the watched directory
+                said = at
+                task.set_status(phase="queued", last=f"waiting until {clock(at)} (--after)")
+            w.wait(max(0.05, min(at - time.time(), AFTER_POLL)))
+    task.set_status(last=was)
+
+
 def drive(task: store.Task) -> None:
     # infra: why the machine, not the agent, failed the task's last run (wb bench grades none of it).
     # `last` at once, from the config alone (gpu_side): left to after resolve, which may read the
@@ -5074,6 +5116,7 @@ def drive(task: store.Task) -> None:
                     boot=store.boot_id(),  # a later boot reaps it as a restart's (cli.reap)
                     machine=store.machine(), host=store.host(),  # whose pid it is (#849)
                     beat=BEAT_SECS)  # and that its lock file beats (#872)
+    hold(task)  # wb start --after (#1204): before the model, the keyhole and the checkout
     say = lambda msg: task.set_status(last=msg)  # noqa: E731
     CURRENT.pop("model", None)  # an earlier task's, driven in-process (the tests)
     try:
