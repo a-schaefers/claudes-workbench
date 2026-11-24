@@ -4291,7 +4291,7 @@ class Lifecycle(Base):
                        fails_while: Path | None = None) -> tuple[subprocess.Popen, int, int]:
         """wb accept --merge in the background, its signer in the main checkout (the merge's or
         the squash's commit, not the task's) waiting ``wait`` s: (wb, its git, the signer), once
-        the signer is running. ``fails_while``: while that file exists, the signer fails at once
+        the signer is running and closing's merge_git names that git. ``fails_while``: while that file exists, the signer fails at once
         (a retry's signature while the first prompt is still open)."""
         pidfile = Path(self.tmp.name) / f"{name}.signer"
         prog = Path(self.tmp.name) / f"{name}-gpg"
@@ -4317,6 +4317,12 @@ class Lifecycle(Base):
             time.sleep(0.05)
         signer = int(pidfile.read_text())
         git = int(Path(f"/proc/{signer}/stat").read_text().rsplit(")", 1)[1].split()[1])
+        # and its git recorded: `started`'s set_status (an fsync, then a rename) lands only a
+        # few ms before the signer runs, so a kill on the pidfile alone could beat it and leave
+        # the retry no git to end (#1246's review, 2026-11-24: failed once under load)
+        while ((store.Task(name).status.get("closing") or {}).get("merge_git") or [None])[0] != git:
+            self.assertLess(time.monotonic(), deadline, "merge_git never recorded")
+            time.sleep(0.02)
         return wb, git, signer
 
     @unittest.skipUnless(Path("/proc/self/stat").exists(), "reads parents from /proc")
