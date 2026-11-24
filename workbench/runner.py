@@ -27,6 +27,7 @@ import tempfile
 import threading
 import time
 import traceback
+import urllib.parse
 import uuid
 import zlib
 from collections import deque
@@ -610,10 +611,14 @@ OPENCODE_ENV = {"npm_config_yes": "false", "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT"
 # needs a key from the environment names it in commands.json `env`, which passes it through.
 # The 2026-11-16 audit added the second line's names (SMTP_PASS, MYSQL_PWD, SENTRY_DSN, BW_SESSION
 # an unlocked Bitwarden vault, OP_SESSION_<acct> 1Password's) and the value rule (USERINFO: a URL
-# with a password, DATABASE_URL=postgres://u:p@h/db, whatever its name).
+# with a password, DATABASE_URL=postgres://u:p@h/db, whatever its name). And an OpenTelemetry
+# collector's headers (#1205, 2026-11-24): OpenCode exports to OTEL_EXPORTER_OTLP_ENDPOINT
+# whenever it is set, so a user with Claude Code's OTel on had `x-honeycomb-team=…` or
+# `Authorization=Bearer …` in every agent's `env`; a collector that needs one is commands.json's.
 SECRET_ENV = re.compile(r"TOKEN|SECRET|PASSW|CREDENTIAL|API_?KEY|ACCESS_KEY|PRIVATE_KEY|"
                         r"_(PASS|PASSPHRASE|PWD|DSN|JWT|PAT|KEY)$|^(PASS|PASSPHRASE|KEY)$|"
                         r"(^|_)PASS_|WEBHOOK|^BW_SESSION$|^OP_SESSION_|^KRB5CCNAME$|"
+                        r"^OTEL_EXPORTER_OTLP(_(TRACES|LOGS|METRICS))?_HEADERS$|"
                         r"^(ANTHROPIC|CLAUDE|GH|GITHUB|GITLAB|AWS|AZURE|GOOGLE|OPENAI|HF)_|"
                         r"^(SSH_AUTH_SOCK|SSH_AGENT_PID|GPG_AGENT_INFO|DBUS_SESSION_BUS_ADDRESS|"
                         r"DBUS_SYSTEM_BUS_ADDRESS)$", re.I)
@@ -1586,17 +1591,65 @@ def _keep_warm(model_id) -> None:
         pass
 
 
-def opencode_env(task: store.Task, run: str = "") -> dict:
+# OpenCode's OpenTelemetry (#1205, checked on 2.3.2): with OTEL_EXPORTER_OTLP_ENDPOINT set it
+# sends its traces to <endpoint>/v1/traces and its log records to /v1/logs, with
+# OTEL_EXPORTER_OTLP_HEADERS, and merges OTEL_RESOURCE_ATTRIBUTES into their resource; its config
+# key (experimental.openTelemetry) is unsupported, so only the environment switches it. The user's
+# endpoint (Claude Code's OTel, a local collector) is the switch, and wb adds which task, run,
+# round, role and side each process served, so a collector can sort them: untagged, a run of
+# OpenCode's was "opencode" and a random id. Its parser decodes each `key=value` with
+# decodeURIComponent and drops the whole variable on one bad entry, so wb's are encoded and a
+# user's entry it couldn't read is left out rather than losing every tag.
+OTEL_ENTRY = re.compile(r"[^=]+=.*", re.S)
+OTEL_BAD_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
+
+
+def _otel_readable(entry: str) -> bool:
+    """Whether OpenCode's resourceAttributes reads ``entry``: a key before its first `=`, and
+    both sides through decodeURIComponent (a lone `%` or bytes that aren't UTF-8 throw)."""
+    if not OTEL_ENTRY.fullmatch(entry) or OTEL_BAD_ESCAPE.search(entry):
+        return False
+    try:
+        urllib.parse.unquote_to_bytes(entry).decode("utf-8")
+    except ValueError:
+        # both Unicode errors: an escaped byte that isn't UTF-8 fails the decode, a raw one
+        # (os.environ's surrogate, '\udce9') the encode first; that one failed the round (#1205)
+        return False
+    return True
+
+
+def otel_resource(user: str, tags: dict) -> str:
+    """OTEL_RESOURCE_ATTRIBUTES for OpenCode: the user's entries it can read, then ``tags``
+    (empty values left out) percent-encoded, so wb's win a key both name."""
+    kept = [e for e in (user or "").split(",") if e and _otel_readable(e)]
+    ours = [f"{urllib.parse.quote(k, safe='')}={urllib.parse.quote(str(v), safe='')}"
+            for k, v in tags.items() if v not in (None, "")]
+    return ",".join(kept + ours)
+
+
+def otel_env(task: store.Task, env: dict, run: str = "", n: int | None = None) -> dict:
+    """OpenCode's resource attributes for this task's round (otel_resource) when ``env`` names a
+    collector (OTEL_EXPORTER_OTLP_ENDPOINT); {} without one: nothing of wb's turns OTel on."""
+    if not env.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+        return {}
+    tags = {"wb.task": task.name, "wb.run": run, "wb.round": n, "wb.role": task.spec.get("role"),
+            "wb.side": "api" if api_task(task) else "gpu"}
+    return {"OTEL_RESOURCE_ATTRIBUTES": otel_resource(env.get("OTEL_RESOURCE_ATTRIBUTES", ""), tags)}
+
+
+def opencode_env(task: store.Task, run: str = "", n: int | None = None) -> dict:
     """OpenCode's own environment: the agent's (agent_env), OPENCODE_ENV, the task's OpenCode
-    home (context.opencode_home_env, made first: the lane holds only what exists) and the shell
-    shim as its SHELL, so its commands get the user's data directories back (#1010). Not in
-    agent_env: the tests' environment never has OpenCode's."""
+    home (context.opencode_home_env, made first: the lane holds only what exists), the shell
+    shim as its SHELL, so its commands get the user's data directories back (#1010), and with a
+    collector set, the round's OTel tags (otel_env; ``n`` the round). Not in agent_env: the tests'
+    environment never has OpenCode's."""
     context.make_opencode_home(task)
     # an API task's own catalog, with the fetch still off (write_catalog, #1015)
     catalog = {"OPENCODE_MODELS_PATH": str(catalog_path(task))} \
         if keyhole_of(task) and catalog_path(task).is_file() else {}
-    return {**agent_env(task, run), **OPENCODE_ENV, **context.opencode_home_env(task), **catalog,
-            "SHELL": str(write_shell_shim(task))}
+    env = agent_env(task, run)
+    return {**env, **OPENCODE_ENV, **context.opencode_home_env(task), **catalog,
+            **otel_env(task, env, run, n), "SHELL": str(write_shell_shim(task))}
 
 
 # The explore guard's calls without an edit, per 32K of an API model's window: 40 was set where 40
@@ -1774,7 +1827,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # front matter) as a flag, prints its usage and exits (the 2026-11-16 audit).
     cmd += ["--", note + prompt + attached_line(task, shown)]
     CURRENT["run"] = run = _issue()
-    env = opencode_env(task, run)
+    env = opencode_env(task, run, n)
     if not task.status.get("opencode_home"):  # its sessions are in the task's home from now on
         task.set_status(opencode_home=True)
     # writes stay in the agent's lane (lane.py: Landlock, or Seatbelt on macOS, #1194), and
