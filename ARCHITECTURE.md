@@ -5196,8 +5196,9 @@ clears the link and ends away, `back`); while on,
 every 10 minutes `wb chat url` refreshes the link (`chatLink`; only a `…#token=…` URL). Limits: `wb`
 120 s (`wb update` 600 s), `wb watch` and `tail` 30 s, `kill -0` 5 s. `runWb` returns the exit
 status: a failing `wb` is said as a failure (`brief`), never passed on as its answer. A call the
-engine aborted (a plugin reload, a superseding redraw: `isAbort`, `wbThrew`) is `aborted`, with no
-message: not wb failing, so nothing says `could not run wb` (nor `wb status failed`), and a read the pane keeps (the roles,
+engine aborted (a plugin reload, a superseding redraw: `isAbort`, `wbThrew`; a bare `aborted` at the
+message's end, never the engine's timeout, `aborted: still running after …ms`, which is wb hung and
+said as a failure, so `wb stats` still backs off) is `aborted`, with no message: not wb failing, so nothing says `could not run wb` (nor `wb status failed`), and a read the pane keeps (the roles,
 the probe row, the saving, the chat link, the Stats feed) keeps its last value and reads again
 (#1142). Growing files
 are read by `readTail`: whole up to 1 MiB (events 64 KiB), else `tail -c` from a whole line, since

@@ -2638,8 +2638,8 @@ async function compactAtBoundary($: any): Promise<void> {
 // `wb <args>`: ok when it exited 0, and what it said. A failing wb's traceback is not output to
 // pass on as if it were the answer (the 2026-11-16 audit: it reached Claude as "open tasks").
 // `wb update` takes the longest the engine allows: its steps may take 300 s each. `aborted`: the
-// engine cancelled the call (a plugin reload, a redraw superseding the one in flight), which is
-// not wb failing, so it says nothing: "could not run wb route --json: ... aborted" showed on the
+// engine cancelled the call (a plugin reload, a redraw superseding the one in flight; never a
+// timeout, which is wb hung and said as a failure), which is not wb failing, so it says nothing: "could not run wb route --json: ... aborted" showed on the
 // Settings tab after /reload-plugins and stayed ROLES_CACHE_MS, for a command that takes 0.12 s
 // (#1142, 2026-11-23). A caller that keeps what it read keeps its last good value instead.
 export type WbRun = { ok: boolean; out: string; aborted?: boolean }
@@ -2658,9 +2658,12 @@ export const wbThrew = (args: string[], err: unknown): WbRun =>
   isAbort(err) ? { ok: false, out: '', aborted: true } : { ok: false, out: `could not run wb ${args.join(' ')}: ${err}` }
 
 // A `$` call the engine cancelled (its hook's call was): `HooksError: workbench: $.process.run(wb)
-// aborted` (#1142), or a DOM-style AbortError
+// aborted` (#1142), or a DOM-style AbortError. Only a bare "aborted" at the end: the engine words a
+// timeout `... aborted: still running after 15000ms` (Claude Code 2.1.325), and that is wb hung,
+// which must still say so and back off (#553); /\baborted\b/ took it for an abort (#1142's review,
+// 2026-11-23)
 export const isAbort = (err: unknown): boolean =>
-  (err as any)?.name === 'AbortError' || /\baborted\b/i.test(String((err as any)?.message ?? err))
+  (err as any)?.name === 'AbortError' || /\baborted$/.test(String((err as any)?.message ?? err).trim())
 
 // `--session <id>` for each id this process has had, and `--repo <the session's directory>` for
 // tasks without one: a quit or the status block takes this session's tasks only, as `mine` does.

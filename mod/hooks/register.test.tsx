@@ -6191,11 +6191,16 @@ test('#1023: with no provider connected and no API role the API group is one lin
 // for wb failing, and kept. The kit can't make $.process.run abort (a test hook that throws is
 // skipped), so the abort is checked on the functions rolesNow and runWb decide with.
 const ABORTED = new Error('HooksError: workbench: $.process.run(wb) aborted')
-test('#1142: an aborted $.process.run is not wb failing: it says nothing, and isAbort tells it from wb not running', () => {
+test('#1142: an aborted $.process.run is not wb failing: it says nothing, and isAbort tells it from wb not running or timing out', () => {
   expect(wbThrew(['route', '--json'], ABORTED)).toEqual({ ok: false, out: '', aborted: true })
   expect(wbThrew(['route', '--json'], new Error('spawn wb ENOENT'))).toEqual({ ok: false, out: 'could not run wb route --json: Error: spawn wb ENOENT' })
   expect(isAbort(Object.assign(new Error('The operation was cancelled'), { name: 'AbortError' }))).toBe(true)
-  expect(isAbort(new Error('timed out after 15000 ms'))).toBe(false)
+  // the engine's own timeout wording (Claude Code 2.1.325) is wb hung, not an abort: it is said, so
+  // the Stats read backs off (#553) and the roles' read is not redone on every draw (#1142's review)
+  const TIMEDOUT = new Error('HooksError: workbench: $.process.run(wb) aborted: still running after 15000ms')
+  expect(isAbort(TIMEDOUT)).toBe(false)
+  expect(wbThrew(['route', '--json'], TIMEDOUT)).toEqual({ ok: false, out: `could not run wb route --json: ${TIMEDOUT}` })
+  expect(isAbort(String(ABORTED))).toBe(true)
 })
 
 test('#1142: an aborted roles read leaves the last good roles drawn and keeps nothing, so the next draw reads again; with none it draws nothing', () => {
