@@ -273,13 +273,17 @@ def refusal(m, role: str | None = None, advice: bool = True) -> str | None:
     """Why an API model can't start now, or None: no price (and not a plan), or today's spend
     at the cap. ``role`` names the line's subject ("trivial"), else the model. ``advice``: the
     cap line's "Ask the user: …"; the busy opt-in's note goes without, its role being on the GPU
-    already and its start only waiting for it (wave 2's merge). No cap at all is #1014's to
-    refuse (a role) and the guard's to stop (NO_CAP)."""
+    already and its start only waiting for it (wave 2's merge). No cap at all (NO_CAP, or
+    UNREADABLE) is refused too: a `--model` start without one passed the dialog and wb start,
+    then the guard stopped it in round 1, after the checkout, setup and base check (#1089,
+    2026-11-23)."""
     if getattr(m, "kind", "gpu") != "api" or is_plan(m) or is_free(m):
         return None
     who = f"{role} role" if role else m.id
     if price(m) is None:
         return f"{m.id}: {NO_PRICE}"
+    if cap() is None:
+        return f"{who}: {no_cap()}"
     if (c := cap()) is not None and (t := today()["usd"]) >= c:
         return (f"{who}: API spend today is {usd(t)} of the {usd(c)} day cap (it resets at local "
                 f"midnight)" + (f". Ask the user: a higher cap (wb route cap <usd>), the role on the GPU "

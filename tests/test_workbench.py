@@ -28877,6 +28877,7 @@ class Routes(Base):
     def test_once_api_tasks_run_an_api_start_waits_for_the_dialogs_yes_to_exactly_it(self):
         # the gate #1016 turned on (cli.API_RUNS): start_gate and the dry run's line
         self.assertTrue(cli.API_RUNS)
+        store.write_json(self.path, {"v": 1, "day_usd": 5, "roles": {}})  # no cap is refused (#1089)
         os.environ["CLAUDECODE"] = "1"
         m = runner.models.resolve("acme/coder-flash")
         line = "start t-api on API acme/coder-flash (not a role's choice) · your code goes to Acme · thinking off"
@@ -28902,6 +28903,49 @@ class Routes(Base):
         cli.start_gate("t-gpu", runner.models.resolve("mimo"))  # a GPU model: no gate
         os.environ.pop("CLAUDECODE")
         cli.start_gate("t-api", m)                            # a terminal: no gate
+
+    def test_a_start_wb_start_refuses_gets_no_dialog_and_never_uses_the_yes_up(self):
+        # #1104: the gate ran in pick_model, before the slot, base, CLAUDE.md and setup checks: a
+        # start that then exited 4 or 1 had used the user's yes up, and Claude's retry asked again
+        store.write_json(self.path, {"v": 1, "day_usd": 5, "roles": {}})
+        os.environ["CLAUDECODE"] = "1"
+        p = mock.patch.object(cli, "spawn_runner", lambda task: 0)
+        p.start()
+        self.addCleanup(p.stop)
+        m = runner.models.resolve("acme/coder-flash")
+        approval = {"start": {"task": "t-api", "model": m.id}, "change": cli.start_line("t-api", m)}
+        argv = ["t-api", "--spec", str(self.spec), "--repo", str(self.repo), "--model", m.id]
+
+        def start(*extra):
+            out, err, code = io.StringIO(), io.StringIO(), 0
+            with redirect_stdout(out), redirect_stderr(err):
+                try:
+                    cli.main(["start", *argv, *extra])
+                except SystemExit as e:
+                    code = e.code
+            return code, out.getvalue(), err.getvalue()
+        code, out, err = self.route("--dry-run", "--json", "--start", *argv, "--base", "nosuchref")
+        self.assertEqual((code, out), (1, ""))                # its refusal, no dialog line
+        self.assertRegex(err, r"^wb: no commit nosuchref in \S+: a typo, or a ref not fetched yet")
+        self.approve(approval)
+        self.assertEqual(start("--base", "nosuchref")[::2], (1, err))
+        self.assertTrue(self.ok.exists())                     # the yes is still there
+        for patch in (mock.patch.object(runner.models, "api_slots_free", lambda p: 0),
+                      mock.patch.object(runner.models, "api_holders", lambda p: ["a1", "a2", "a3"])):
+            patch.start()
+            self.addCleanup(patch.stop)
+        full = ("wb: 3 tasks already run on acme's API (a1, a2, a3): workbench runs at most 3 at once per "
+                "provider. --queue starts it anyway, to wait for a slot; or do this step yourself\n")
+        self.assertEqual(self.route("--dry-run", "--json", "--start", *argv), (4, "", full))
+        self.assertEqual(start(), (4, "", full))
+        self.assertTrue(self.ok.exists())
+        self.assertFalse(store.Task("t-api").exists)
+        self.assertEqual(self.dry("--start", *argv, "--queue"), {"change": approval["change"], "gate": True,
+                                                                  "approval": approval})
+        code, out, err = start("--queue")                     # the start that runs takes the yes
+        self.assertEqual(code, 0, err)
+        self.assertFalse(self.ok.exists())
+        self.assertEqual(store.Task("t-api").spec["said"], "asked for, approved in the dialog")
 
     def test_wb_try_on_an_api_model_is_refused_plainly_before_any_sample_is_made(self):
         # 2026-11-23 review: it reached start_gate as try-<n>, a name no dialog could show, and
@@ -30565,7 +30609,8 @@ class ApiSpend(Base):
         Path(os.environ["WB_ROUTES"]).unlink()                   # no cap at all: no room, a stop
         self.assertLess(mt.room(body, 400), 0)
         self.assertEqual(self.meter.stop_reason(task), self.meter.NO_CAP)
-        self.assertIsNone(self.meter.refusal(runner.models.lookup(SPEND_M)))  # #1014 refuses a role
+        self.assertEqual(self.meter.refusal(runner.models.lookup(SPEND_M)),  # at start too (#1089)
+                         f"{SPEND_M}: {self.meter.NO_CAP}")
 
     def test_a_context_tier_is_picked_by_input_cache_reads_and_cache_writes_together(self):
         # the review of #1019: the tier was picked by input and cache reads only, and a first turn
@@ -32182,6 +32227,83 @@ class RoleResolution(Base):
         self.assertEqual(cli.status_model({"via": "api", "model": "deepinfra/deepseek-ai/DeepSeek-V4.1-Flash"}),
                          ("api", "deepinfra/…ek-V4.1-Flash"))      # the name's end, where they differ
 
+    def test_a_rate_limit_or_outage_a_task_met_lets_an_api_start_go_on_with_a_note(self):
+        # #1088: one 503 or 429 any task saw (api-health.json) refused every start of the role for
+        # 60 s or until Retry-After, --queue and --force too, telling Claude to ask the user to put
+        # the role on the GPU; the keyhole waits it out inside the round
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        for n, (state, why, said) in enumerate((
+                ("unreachable", "503 Service Unavailable", r"can't reach api\.deepseek\.test \(503 Service Unavailable\)"),
+                ("rate_limited", "429 Too Many Requests", r"rate-limited by DeepSeek until \d\d:\d\d"))):
+            with self.subTest(state=state):
+                runner.models.note_api("deepseek", state, why)
+                for name, argv in ((f"t-role-{n}", ("--role", "trivial")),
+                                   (f"t-asked-{n}", ("--model", "deepseek/deepseek-v4-pro"))):  # a --model alike
+                    code, out, err = self.begin(name, *argv)
+                    self.assertEqual(code, 0, err)
+                    self.assertTrue(store.Task(name).exists)
+                    self.assertRegex(out, rf"\nnote: {said}: the round waits for it \(held 10 min, it stops as "
+                                          r"rate_limited or outage\)\n")
+                    self.assertNotIn("Ask the user", out + err)
+                    self.assertNotIn("queued although", out)
+        runner.models.note_api("deepseek", "no_credit", "402 Payment Required")  # still a refusal
+        code, out, err = self.begin("t-broke", "--role", "trivial")
+        self.assertEqual((code, out), (3, ""))
+        self.assertIn("wb: trivial role: deepseek/deepseek-flash can't run: out of credit or quota at DeepSeek", err)
+        self.assertFalse(store.Task("t-broke").exists)
+
+    def test_an_api_start_with_no_day_cap_is_refused_before_the_dialog_and_before_any_task(self):
+        # #1089: a --model start with no cap passed the dialog and wb start, and the guard stopped
+        # it in round 1, after the checkout, setup and base check, asking for a cap and a resume
+        self.assertFalse(self.routes.exists())
+        argv = ["t-nocap", "--spec", str(self.spec), "--repo", str(self.repo), "--model", "deepseek/deepseek-v4-pro"]
+        line = ("wb: deepseek/deepseek-v4-pro: there is no API day cap (routes.json day_usd): ask the user for one "
+                "(wb route cap <usd>)\n")
+        os.environ["CLAUDECODE"] = "1"
+        self.assertEqual(self.wb("route", "--dry-run", "--json", "--start", *argv), (3, "", line))  # no dialog
+        ok = store.home() / "route-ok.json"
+        m = runner.models.lookup("deepseek/deepseek-v4-pro")
+        store.write_json(ok, {"start": {"task": "t-nocap", "model": m.id}, "change": cli.start_line("t-nocap", m),
+                              "at": time.time()})
+        self.assertEqual(self.wb("start", *argv), (3, "", line))
+        self.assertTrue(ok.exists())                           # refused before the gate: no yes used
+        self.assertFalse(store.Task("t-nocap").dir.exists())
+        os.environ.pop("CLAUDECODE")
+        self.assertEqual(self.wb("start", *argv), (3, "", line))  # a terminal: the same
+        # a role on API whose cap went in a hand edit: refused as the role's, never a task the guard stops
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        doc = json.loads(self.routes.read_text())
+        doc.pop("day_usd")
+        self.routes.write_text(json.dumps(doc))
+        code, out, err = self.begin("t-nocap-role", "--role", "trivial")
+        self.assertEqual((code, out, err), (3, "", "wb: trivial role: there is no API day cap (routes.json day_usd): "
+                                                   "ask the user for one (wb route cap <usd>)\n"))
+        self.assertFalse(store.Task("t-nocap-role").dir.exists())
+
+    def test_api_tasks_on_their_way_to_a_slot_count_toward_the_providers_three(self):
+        # #1116: only runners holding a slot counted, and a runner takes one only after its
+        # checkout, setup and base check: five starts in a row all said they started, and the
+        # fourth and fifth waited as queued with no word to Claude
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        for n in range(3):
+            self.assertEqual(self.begin(f"t-b{n}", "--role", "trivial")[0], 0)
+            store.Task(f"t-b{n}").set_status(pid=4242 + n)    # its runner alive, no `leased` yet
+        with mock.patch.object(cli, "runner_alive", lambda t: t.name.startswith("t-b")):
+            code, out, err = self.begin("t-b3", "--role", "trivial")
+            self.assertEqual((code, out), (4, ""))
+            self.assertEqual(err, "wb: 3 tasks already run on deepseek's API (t-b0, t-b1, t-b2): workbench runs "
+                                  "at most 3 at once per provider. --queue starts it anyway, to wait for a slot; "
+                                  "or do this step yourself\n")
+            self.assertFalse(store.Task("t-b3").exists)
+            code, out, err = self.begin("t-b3", "--role", "trivial", "--queue")
+            self.assertEqual(code, 0, err)
+            self.assertIn("\nnote: 3 tasks run on deepseek's API; this task waits as queued for a slot\n", out)
+            # one reached its lease: its slot's flock counts it from then on (api_holders), never twice
+            store.Task("t-b0").set_status(leased=4242)
+            code, out, err = self.begin("t-b4", "--role", "trivial")
+            self.assertEqual(code, 0, err)
+            self.assertNotIn("waits as queued for a slot", out)
+
     def test_an_api_role_that_cant_run_exits_3_with_one_line_and_never_the_gpu(self):
         self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
         self.no_key_for("deepseek")
@@ -32265,6 +32387,7 @@ class RoleResolution(Base):
         self.assertIn("\nmodel: the significant role's GPU model (wb route)\n", out)
 
     def test_a_model_asked_for_keeps_its_gpu_way_and_an_api_one_says_it_was_asked_for(self):
+        self.set_role("cap", "5")                              # an API start needs one (#1089)
         self.assertEqual(self.begin("t-mimo", "--model", "mimo")[0], 0)
         self.assertEqual(store.Task("t-mimo").spec["via"], "gpu")
         self.assertEqual(self.begin("t-frag", "--model", "flash")[0], 1)    # a fragment: never an API id
@@ -32272,8 +32395,8 @@ class RoleResolution(Base):
         self.assertEqual(code, 0, err)                         # a terminal: no dialog
         sp = store.Task("t-asked").spec
         self.assertEqual((sp["via"], sp["said"], sp["role"]), ("api", "asked for", "significant"))
-        self.assertIn("\nmodel: deepseek/deepseek-v4-pro · API (DeepSeek) · asked for · thinking off · today $0.00, "
-                      "no day cap\n", out)
+        self.assertIn("\nmodel: deepseek/deepseek-v4-pro · API (DeepSeek) · asked for · thinking off · today $0.00 "
+                      "of $5\n", out)
         self.assertIn(" to DeepSeek (asked for; data policy: ", out)  # the first-API note
 
     def test_a_model_that_left_the_catalog_mid_task_is_never_replaced(self):
