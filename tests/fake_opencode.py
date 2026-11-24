@@ -34,9 +34,13 @@
          seconds (2: the runner sees the last read before the edit; a runner slower than that
          finds the file changed and lifts the guard) and writes "42" like ok: a one-shot still
          exploring
-  selfreads  behaves like ok; a run continuing a session (the self-review) breaks answer.txt
-         ("41") and writes it back, then FAKE_READS (45) reads and goes on exploring for an hour:
-         the tree as it began (#1168). FAKE_SELF_KEEP: it leaves "43" instead
+  selfreads  behaves like ok; a run whose prompt is the self-review's (runner.SELF_REVIEW, in
+         a continued session, a fresh one's handoff or a carry-on) breaks answer.txt ("41") and
+         writes it back, then FAKE_READS (45) reads and goes on exploring for an hour: the tree
+         as it began (#1168). FAKE_SELF_KEEP: it leaves "43" instead. FAKE_SELF_FILL: the
+         self-review's first session breaks it, then fills 76% of a 32K window and works on for
+         an hour; the fresh session carrying on plays the rest (#1188), or with FAKE_SELF_KEEP only
+         reads, the check left broken
   bgwait a command OpenCode moved to the background: `background_wait`, quiet for FAKE_BGWAIT
          seconds (6), then writes "42" like ok
   devserver  writes "42", starts `npm run dev` in the background, ends its turn (reason stop),
@@ -589,7 +593,7 @@ if scenario == "http" and args and args[0] == "run":  # a model request through 
     scenario = "ok"
 if scenario == "slow":
     scenario = "ok" if "--session" in args else "hang"
-if scenario == "selfreads" and "--session" not in args:  # #1168: round 1 is ok's
+if scenario == "selfreads" and "Before Claude reviews this" not in (args[-1] if args else ""):  # #1168: round 1 is ok's
     scenario = "ok"
 if (scenario in ("fill", "compact", "donefull") or scenario == "compactfail" and not os.environ.get("FAKE_REFAIL")) \
         and "picking this task up in a fresh session" in args[-1]:
@@ -783,8 +787,19 @@ elif scenario == "explore":  # #1087: many small reads before the first edit
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
     emit("text", text="Wrote answer.txt = 42.")
     finish()
+elif scenario == "selfreads" and os.environ.get("FAKE_SELF_FILL") \
+        and "Your last session filled up" not in args[-1]:  # #1188: it fills mid-check
+    with open("answer.txt", "w") as fh:
+        fh.write("41\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "41"})
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
+                                                      "cache": {"read": 900}})
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 900, "reasoning": 6000,
+                                                      "cache": {"read": 16100}})  # 76%, as fill's
+    time.sleep(3600)
 elif scenario == "selfreads":  # #1168: a self-review that breaks a check, copies it back, reads
-    for text in ("41", os.environ.get("FAKE_SELF_KEEP") and "43" or "42"):
+    keep = os.environ.get("FAKE_SELF_KEEP")
+    for text in () if keep and os.environ.get("FAKE_SELF_FILL") else ("41", keep and "43" or "42"):
         with open("answer.txt", "w") as fh:
             fh.write(text + "\n")
         tool("write", {"filePath": os.path.abspath("answer.txt"), "content": text})

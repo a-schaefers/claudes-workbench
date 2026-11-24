@@ -1609,6 +1609,20 @@ def no_edit_limit(window, *, api: bool) -> int:
     return min(NO_EDIT_MAX, NO_EDIT_PER_32K * max(1, w // 32768))
 
 
+def green_tree(task: store.Task, began: str) -> str | None:
+    """The tree (gitops.mark) the self-review this round is part of began on, the one the last
+    round's tests passed on (status `self_review_tree`), or None when the round is no part of a
+    self-review (round_for `self_review`, or `fresh` for the session carrying one on past a full
+    window). The fresh one began on the tree as the full session left it, maybe a check still
+    commented out, so its own start is no test; held to none, its explore stop was a stuck
+    notice on a green change, the step counted against it (#1188, 2026-11-24). A task queued
+    before the key: the round's own start, as #1168 had it."""
+    st = task.status
+    if st.get("round_for") == "self_review":
+        return st.get("self_review_tree", began)
+    return st.get("self_review_tree") if st.get("round_for") == "fresh" else None
+
+
 def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     """One `opencode run`. keep: Claude asked for this session to carry on (wb feedback
     --keep-context), so the round never hands over mid-way."""
@@ -1864,19 +1878,19 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             if why and detector.since_edit >= detector.no_edit:
                 if (m := gitops.mark(task.worktree)) != edit_mark:  # it edited through the shell
                     edit_mark, detector.since_edit, why = m, 0, None
-                elif m == began and task.status.get("round_for") == "self_review":
+                elif m == green_tree(task, began):
                     # A self-review round is reads and runs by design (break a check, see a test
                     # fail, copy the file back): on a change whose tests passed, the explore
                     # guard stopped it as stuck, so a green task woke Claude as stuck and its
-                    # step was recorded stuck (#1168, 2026-11-24). Its tree as the round began,
-                    # it ends as the agent's finish: the tests, then review. A tree it changed
-                    # is stopped as before.
+                    # step was recorded stuck (#1168, 2026-11-24). On the tree those tests
+                    # passed on, it ends as the agent's finish: the tests, then review. A tree
+                    # it changed is stopped as before.
                     out["settled"], why = why, None
             if why:
                 out["stuck"], out["guard"] = why, detector.guard
         if out.get("settled"):  # #1168: not a guard's stop
             task.event({"ts": store.now(), "round": n, "kind": "settled",
-                        "text": f"self-review: {out['settled']}, the tree as the round began: "
+                        "text": f"self-review: {out['settled']}, the tree its tests passed on: "
                                 "stopped as its finish"})
             _stop(proc)
             break
@@ -3431,7 +3445,7 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     elif rnd.get("lingered"):  # #1160: the runner's stop, not OpenCode's exit code (#83)
         lines.append("OpenCode was still open after the agent's output ended; stopped")
     elif rnd.get("settled"):  # #1168: a self-review that read and left the tree as it was
-        lines.append(f"self-review: {rnd['settled']}, the tree as the round began; stopped as "
+        lines.append(f"self-review: {rnd['settled']}, the tree its tests passed on; stopped as "
                      "its finish")
     elif rnd["exit"] not in (0, None):
         lines.append(f"opencode exited {rnd['exit']}"
@@ -4694,7 +4708,8 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
                 task.round_dir(n + 1).joinpath("prompt.md").write_text(
                     SELF_REVIEW.format(cmd=task.spec["test_cmd"], aside=self_review_aside(task)))
-                task.set_status(round=n + 1, self_reviewed=mark, tests=tests, round_for="self_review")
+                task.set_status(round=n + 1, self_reviewed=mark, tests=tests, round_for="self_review",
+                                self_review_tree=gitops.mark(task.worktree))  # #1188: the green tree
                 task.event({"ts": store.now(), "round": n, "kind": "self_review",
                             "text": "tests pass; the agent reviews its own change first"})
                 if not _go_on(task, n, "self-review"):
@@ -4842,7 +4857,10 @@ def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
         asked=ASKED.format("\n\n".join(asks)) if asks else "",
         last="> " + last.replace("\n", "\n> ") if last else "(none)")
         + (f"\n\n{folded_notes(task, n + 1, notes)}" if notes else ""))
+    st = task.status  # a self-review carried on keeps its green tree; any other round drops it (#1188)
     task.set_status(round=n + 1, context="full", full_pct=pct, round_for="fresh",
+                    self_review_tree=st.get("self_review_tree")
+                    if st.get("round_for") in ("self_review", "fresh") else None,
                     full_compacted=True if rnd.get("compacted") else None,  # #774: fresh_reason
                     full_compact_failed=True if failed else None,  # #969: and its reason
                     handovers=task.status.get("handovers", 0) + 1,
