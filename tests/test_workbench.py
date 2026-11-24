@@ -5743,11 +5743,11 @@ class Steering(Base):
         mine, _ = cli._scope([t(repo=str(root), cwd=str(root))], str(link / "src"))
         self.assertEqual(len(mine), 1)                     # a session in the link
         upper = str(root).upper().replace(str(Path(self.tmp.name)).upper(), self.tmp.name)
-        folds = cli._folds_case(root)                      # macOS's APFS: yes; ext4: no
+        folds = store.folds_case(root)                     # macOS's APFS: yes; ext4: no
         self.assertEqual(folds, (Path(upper).exists()))
         mine, _ = cli._scope([t(repo=upper, cwd=upper)], str(root))
         self.assertEqual(len(mine), 1 if folds else 0)    # case counts only where the FS keeps it
-        with mock.patch.object(cli, "_folds_case", lambda p: True):   # as on APFS
+        with mock.patch.object(store, "folds_case", lambda p: True):   # as on APFS
             mine, _ = cli._scope([t(repo=upper, cwd=upper)], str(root))
         self.assertEqual(len(mine), 1)
 
@@ -32687,6 +32687,41 @@ class Privacy(_KeyholeTest):
         self.conf.write_text(json.dumps({"repos": {str(self.repo / "pkg"): {"local_only": True}}}))
         self.assertTrue(cli.privacy.local_only(self.repo, "pkg"))
         self.assertIsNone(cli.privacy.local_only(self.repo))         # the root isn't
+
+    def test_a_local_only_key_in_another_letter_case_refuses_an_api_start_where_the_file_system_ignores_case(self):
+        # #1157: on macOS's APFS ~/Code/ClientX is ~/code/clientx, but repo_entries compared the
+        # real paths as typed, so the key matched nothing and the repo went to the API model
+        typed = self.repo.with_name(self.repo.name.swapcase())       # ext4 keeps the two apart
+        self.local_only(key=typed)
+        self.role(via="api", api=FLASH)
+        self.assertIsNone(cli.privacy.local_only(self.repo))         # case counts where the FS keeps it
+        with mock.patch.object(store, "folds_case", lambda p: True):  # as on APFS
+            self.assertEqual(cli.privacy.local_only(self.repo), str(typed))
+            code, err = self.fails("start", "t-lo-case", "--spec", str(self.spec), "--repo", str(self.repo))
+        self.assertEqual(code, 3)
+        self.assertIn("is local-only (commands.json \"repos\")", err)
+        self.assertFalse(store.Task("t-lo-case").exists)
+
+    def test_a_local_only_key_in_another_letter_case_holds_for_a_linked_worktree_by_its_git_dir(self):
+        # #1157: the git-dir fallback compared the key's git dir (git's relative `.git`, joined to
+        # the key as typed) with the worktree's (git's own spelling), so it missed on APFS too
+        real = Path(os.path.realpath(self.repo))
+        typed = real.with_name(real.name.swapcase())
+        wt = Path(self.tmp.name) / "linked"
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "-q", "-b", "feat", str(wt)],
+                       check=True)
+        self.local_only(key=typed)
+        common, top = context.gitops.common_dir, context.gitops.toplevel
+        on_disk = lambda p: real / Path(p).relative_to(typed) if Path(p).is_relative_to(typed) else p  # noqa: E731
+
+        def as_on_apfs(p):  # the key exists as typed: git finds the repo, its `.git` joined to `p`
+            c = common(on_disk(p))
+            return typed / c.relative_to(real) if c and Path(p).is_relative_to(typed) else c
+        with mock.patch.object(context.gitops, "common_dir", as_on_apfs), \
+                mock.patch.object(context.gitops, "toplevel", lambda p: top(on_disk(p))):
+            self.assertIsNone(cli.privacy.local_only(wt))            # case counts where the FS keeps it
+            with mock.patch.object(store, "folds_case", lambda p: True):
+                self.assertEqual(cli.privacy.local_only(wt), str(typed))
 
     def test_commands_json_refuses_a_local_only_that_isnt_true_or_false(self):
         self.conf.write_text(json.dumps({"repos": {str(self.repo): {"local_only": "yes"}}}))

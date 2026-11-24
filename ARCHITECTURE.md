@@ -2495,7 +2495,7 @@ session's. One without a `session` goes by
 directory: its `repo` is or is inside the session's directory, or the session's directory is inside
 the task's spot (`repo`/`subdir`, else a `cwd` inside the repo, else the repo: `spotOf`, `_scope`;
 #695), or its `cwd` is or is inside the session's directory; by whole components of real paths,
-case-folded where the file system ignores case (`mem.fold`, `cli._folds_case`; 2026-11-19 audit). A
+case-folded where the file system ignores case (`mem.fold`, `store.folds_case`; 2026-11-19 audit). A
 session in `~` or `/` claims none by directory; a task with neither key is everyone's. Another
 session's notice is at most toasted. `wb status`, a bare `wait`, and `stop`/`takeover`/`resume
 --all` from Claude Code's Bash take the caller's scope (`cli._caller`: `CLAUDE_CODE_SESSION_ID`,
@@ -5860,7 +5860,9 @@ profile and a closed or gone task, never another profile's or one wb didn't make
 commands.json `repos` (`context.repo_conf`): the key nearest the task's spot (the repo, or its package: `subdir`)
 wins, the spot itself else the nearest directory above it, so the root's holds for a package without its own and a
 package's never for the root or another package (#778: matched by git dir alone, every task got the first package
-entry); by real path, else git dir and the path inside the worktree; wb accept reads it the same way. `--setup`,
+entry); by real path, else git dir and the path inside the worktree, both in lower case where the file system
+ignores case (`store.folds_case`: a key typed `~/Code/ClientX` for git's `~/code/clientx` on macOS matched nothing,
+and a local-only repo went to the API model, #1157); wb accept reads it the same way. `--setup`,
 `--setup-timeout` (a positive whole number) replace; `--copy`, `--sibling` add; `merge` is `wb accept --merge`'s way
 (`context.MERGE_AS`; `--merge-as` overrides). `local_only` is read further up: the nearest entry that states it decides
 (`context.repo_entries`, nearest first; `privacy.local_only`), so a package's entry for its setup alone doesn't lift
@@ -6425,8 +6427,9 @@ the answer); limits scaled by patching `RATE_WAIT_S`, `QUEUED_AFTER_S` and the k
 test carries its control (the pause patched off, the queue mark off, the cause as `guard`).
 
 **Privacy's tests** (`Privacy`, sharing `_KeyholeTest`; #1021): an API start made as #1016's will be
-(`pick_model`'s answer patched in, the GPU wait, the bench and the runner left out), local_only at start and since,
-standing copies and siblings, the API lane on Landlock and the split homes (moved ones too), the start's note naming
+(`pick_model`'s answer patched in, the GPU wait, the bench and the runner left out), local_only at start and since
+(a key in another letter case too, where the file system ignores case, #1157), standing copies and siblings, the
+API lane on Landlock and the split homes (moved ones too), the start's note naming
 the tools that stop, OpenRouter's routing through the keyhole to `capture_llm.py` and in the written layer, a backend
 outside the order (its report line, `wb watch`'s entry, the names that don't fold), `wb resume` and `--all` past a
 local-only task, the where-line, `wb doctor` saying nothing of free models.

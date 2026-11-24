@@ -1182,24 +1182,29 @@ def repo_entries(repo: str | Path, sub: str | None = None) -> list[tuple[str, di
     repos = commands_conf().get("repos") or {}
     if not repos:
         return []
-    top = os.path.realpath(repo)
-    spot = os.path.realpath(Path(repo) / sub) if sub else top
+    # real paths, in lower case where the file system ignores case (macOS), as cli._scope's: a
+    # key typed ~/Code/ClientX for git's ~/code/clientx matched neither by path nor by git dir,
+    # and a local-only repo's task went to the API model (#1157, 2026-11-24)
+    fold = store.folds_case(repo)
+    real = lambda p: os.path.realpath(p).lower() if fold else os.path.realpath(p)  # noqa: E731
+    top = real(repo)
+    spot = real(Path(repo) / sub) if sub else top
 
     def within(p: str, d: str) -> bool:
         return d == "." or p == d or p.startswith(d.rstrip(os.sep) + os.sep)
 
     by_path = sorted(((len(kr), k, v) for k, v in repos.items()
-                      if within(kr := os.path.realpath(Path(k).expanduser()), top) and within(spot, kr)),
+                      if within(kr := real(Path(k).expanduser()), top) and within(spot, kr)),
                      key=lambda x: -x[0])
     if by_path:
         return [(k, v) for _, k, v in by_path]
     common, rel_spot, found = gitops.common_dir(repo), os.path.relpath(spot, top), []
     for k, v in repos.items() if common else ():
         kp = Path(k).expanduser()
-        if gitops.common_dir(kp) != common:
+        if (kc := gitops.common_dir(kp)) is None or real(kc) != real(common):
             continue
         try:
-            rel = os.path.relpath(os.path.realpath(kp), os.path.realpath(gitops.toplevel(kp)))
+            rel = os.path.relpath(real(kp), real(gitops.toplevel(kp)))
         except gitops.GitError:
             continue
         rank = 0 if rel == "." else len(rel) + 1

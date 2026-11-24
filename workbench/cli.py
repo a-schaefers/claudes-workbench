@@ -2156,7 +2156,7 @@ def _scope(tasks, where, sessions=None):
     # real paths on both sides, in lower case where the file system ignores case (macOS): a
     # symlinked project, /tmp against /private/tmp, or ~/Repos typed for ~/repos once missed
     # (the 2026-11-19 audit)
-    fold = bool(where) and _folds_case(where)
+    fold = bool(where) and store.folds_case(where)
     real = lambda p: Path(os.path.realpath(p).lower() if fold else os.path.realpath(p))  # noqa: E731
     here = real(where) if where else None
     broad = here in (real(Path.home()), Path("/"))
@@ -2202,16 +2202,6 @@ def _caller(a) -> tuple:
     ids = list(dict.fromkeys([*(store.claude_sessions(pid, start=models._started(int(pid)))
                                 if pid.isdigit() else []), sid]))
     return os.getcwd(), ids
-
-
-def _folds_case(path) -> bool:
-    """Whether the file system holding ``path`` ignores case: the path with every letter's case
-    swapped is the same directory (APFS and HFS+ as macOS formats them; not ext4)."""
-    p = os.path.realpath(path)
-    try:
-        return p.swapcase() != p and os.path.samefile(p, p.swapcase())
-    except OSError:
-        return False
 
 
 def _others_line(others, what):
