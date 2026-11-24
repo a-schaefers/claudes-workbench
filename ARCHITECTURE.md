@@ -1966,7 +1966,7 @@ guides, release notes, stories, copy) runs under its own rules, not the coding o
 - **The record apart**: results rows carry `role`; `router.score`, `rank`, `choose` and
   `expected` count a model's rows of the task's role (`router.of_role`: `role`, else `size`), so
   prose results never move a coding rank or the other way round. Only a writing task asks by its
-  role (`router.record_role`, in `router.choose` from the role `routes.resolve` passes, `progress` and `wb watch`'s clock): #1016 writes a
+  role (`router.record_role`, in `router.choose` from the role `routes.resolve` passes, `progress`, `wb watch`'s clock and the check-in's ETA, #1113): #1016 writes a
   role for every task, and a coding one is ranked and timed on its size's record, as before roles. With none yet, every model starts
   from the prior. `tuning.record` sets each row's speed against its own kind's median (`tuning.work`,
 the key `of_role` uses), so quick prose steps never mark coding steps slow; writing rows still

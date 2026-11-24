@@ -31464,6 +31464,20 @@ class Writing(Base):
         self.assertIn("(typically 12m)", transcript.clock_line(task))
         self.assertIn("(typically 12m)", runner.checkin_text(task, 1, {"texts": []}, since=0, active=0))
 
+    def test_a_check_in_times_a_coding_role_on_its_sizes_record_as_the_pane_does(self):
+        # #1113: checkin_text passed the raw role, so `--role trivial --size significant` was
+        # timed on trivial rows (5m) while the pane and progress checks read significant ones (40m)
+        m = cli.models.resolve("mimo").id
+        self.record(m, "trivial", "accepted", 3, minutes=5.0)
+        self.record(m, "significant", "accepted", 3, minutes=40.0)
+        self.start("t-1113", "ok", "--role", "trivial", "--size", "significant")
+        wait_phase("t-1113", {"review"})
+        task = store.Task("t-1113")
+        task.set_status(phase="running")                                  # an ETA only while it works
+        self.assertIn("(typically 40m)", transcript.clock_line(task))
+        self.assertEqual(runner.typical_now(task)["typical"]["min"], 40.0)
+        self.assertIn("(typically 40m)", runner.checkin_text(task, 1, {"texts": []}, since=0, active=0))
+
     def test_prose_steps_leave_the_coding_rows_speed_reward_alone(self):
         # the review of #1025: tuning.record set each row's speed against the median step of its
         # size, and a writing task is significant: four 4-minute prose steps made 30-minute coding
