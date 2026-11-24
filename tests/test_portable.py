@@ -2265,7 +2265,7 @@ class Remote(unittest.TestCase):
         ctx = {"llama.context_length": 131072}
         srv, port = fake_remote_ollama(
             [{"name": "coder:7b"}, {"name": "embed:1b"}, {"name": "big:cloud", "remote_host": "https://ollama.com"}],
-            {"coder:7b": {"capabilities": ["completion", "tools"], "model_info": ctx},
+            {"coder:7b": {"capabilities": ["completion", "tools", "thinking"], "model_info": ctx},
              "embed:1b": {"capabilities": ["embedding"], "model_info": ctx},
              "big:cloud": {"capabilities": ["tools"], "model_info": ctx}})
         self.servers.append(srv)
@@ -2283,6 +2283,7 @@ class Remote(unittest.TestCase):
         entry = prov["models"]["coder:7b"]
         self.assertEqual(entry["limit"]["context"], 32768)
         self.assertIn("max_tokens", entry["options"])                    # an Ollama entry's output cap
+        self.assertEqual(entry["options"]["reasoningEffort"], "none")    # thinking off, as wb model add (#1187)
         self.assertTrue(json.loads(Path(os.environ["WB_MODELS"]).read_text())[pid]["local"])
         self.assertIn(f"{pid}/coder:7b", models.discover())
         self.assertEqual(self.wb("remote", "127.0.0.1", "--port", str(port), "--context", "32768")[0], 0)

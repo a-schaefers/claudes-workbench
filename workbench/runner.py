@@ -167,6 +167,25 @@ def compaction_buffer(cfg: dict) -> int | None:
     return max(usable + reply - window, 0) + STEP_GROWTH
 
 
+# What OpenCode's compaction keeps verbatim beside its summary (`compaction.keep.tokens`), as a
+# share of usable_input, at least KEEP_MIN. Its own default is 15,000 tokens whatever the window.
+# OpenCode 2.3.2 started that tail only at a user message after the first, so a one-prompt round
+# kept nothing; 2.4.1 starts it at any message, and a 32-40K window came back from a compaction
+# at about 64% (floor, 15K of tail and the summary), next to the compaction point again: of 242
+# compactions in 40K bench rounds, 109 would have compacted again on the next step (#1185, the
+# study for #1134, 2026-11-24). At a tenth of the window it came back at about 41%, none that close.
+KEEP_SHARE = 0.10
+KEEP_MIN = 2048
+
+
+def compaction_keep(cfg: dict) -> int | None:
+    """The tail OpenCode's compaction keeps verbatim, in tokens; None without a window."""
+    lim = cfg.get("limit") or {}
+    if not lim.get("context"):
+        return None
+    return max(KEEP_MIN, int(KEEP_SHARE * usable_input(lim)))
+
+
 def compaction_point(cfg: dict) -> float | None:
     """Where OpenCode's compaction sits, as a share of the window."""
     lim, buf = cfg.get("limit") or {}, compaction_buffer(cfg)
@@ -319,8 +338,10 @@ def write_config_layer(task: store.Task) -> Path:
         # background: OpenCode 2.3.2's summary written ahead (on by default; 2.3.0 ignores the
         # key) is a full-context request on the agent's own server, below the handover point,
         # queued ahead of the agent's next step on a one-slot server and evicting its cache,
-        # then thrown away at the handover (#661)
-        "compaction": {"background": False, **({"auto": True, "buffer": buffer} if buffer else {})},
+        # then thrown away at the handover (#661); keep: the tail sized to the window, not
+        # OpenCode's fixed 15K (#1185)
+        "compaction": {"background": False, **({"auto": True, "buffer": buffer,
+                                                 "keep": {"tokens": compaction_keep(cfg)}} if buffer else {})},
         # with probe on, one tool call's output sized to the window (output_cap)
         **({"tool_output": output_cap(cfg)} if context.experiment(task, "probe") else {}),
         "mcp": {"servers": {**users_servers_off(), "workbench": {  # 2.x shape: mcp.servers.<name>
@@ -1588,6 +1609,20 @@ def no_edit_limit(window, *, api: bool) -> int:
     return min(NO_EDIT_MAX, NO_EDIT_PER_32K * max(1, w // 32768))
 
 
+def green_tree(task: store.Task, began: str) -> str | None:
+    """The tree (gitops.mark) the self-review this round is part of began on, the one the last
+    round's tests passed on (status `self_review_tree`), or None when the round is no part of a
+    self-review (round_for `self_review`, or `fresh` for the session carrying one on past a full
+    window). The fresh one began on the tree as the full session left it, maybe a check still
+    commented out, so its own start is no test; held to none, its explore stop was a stuck
+    notice on a green change, the step counted against it (#1188, 2026-11-24). A task queued
+    before the key: the round's own start, as #1168 had it."""
+    st = task.status
+    if st.get("round_for") == "self_review":
+        return st.get("self_review_tree", began)
+    return st.get("self_review_tree") if st.get("round_for") == "fresh" else None
+
+
 def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     """One `opencode run`. keep: Claude asked for this session to carry on (wb feedback
     --keep-context), so the round never hands over mid-way."""
@@ -1673,8 +1708,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
            "answered": False}
     window = st.get("window")
     fresh_at = tuning.value(task, "fresh_at")
-    # The last step's (session, context): a later step in it carrying under half of one that was
-    # near the handover point is OpenCode's compaction, which `run --format json` doesn't print.
+    # The last step's (session, context, reasoning): a later step in it carrying a step's growth
+    # less than one that was near the handover point is OpenCode's compaction (compacted_between),
+    # which `run --format json` doesn't print.
     # One tool result bigger than the margin before it (a long file, a test log) compacted the
     # session between two steps, and the agent worked on from its summary (#774).
     last_step: tuple = (None, 0)
@@ -1793,7 +1829,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                                             + ("its turn ended there" if turn_over else
                                                "it works on from its own summary")})
                 if used:
-                    last_step, pending = (sid, used), 0
+                    last_step, pending = (sid, used, row.get("reasoning", 0)), 0
                 if floor is None and window:
                     changed = marks != {gitops.mark(task.worktree)}
                     if changed:
@@ -1842,19 +1878,19 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             if why and detector.since_edit >= detector.no_edit:
                 if (m := gitops.mark(task.worktree)) != edit_mark:  # it edited through the shell
                     edit_mark, detector.since_edit, why = m, 0, None
-                elif m == began and task.status.get("round_for") == "self_review":
+                elif m == green_tree(task, began):
                     # A self-review round is reads and runs by design (break a check, see a test
                     # fail, copy the file back): on a change whose tests passed, the explore
                     # guard stopped it as stuck, so a green task woke Claude as stuck and its
-                    # step was recorded stuck (#1168, 2026-11-24). Its tree as the round began,
-                    # it ends as the agent's finish: the tests, then review. A tree it changed
-                    # is stopped as before.
+                    # step was recorded stuck (#1168, 2026-11-24). On the tree those tests
+                    # passed on, it ends as the agent's finish: the tests, then review. A tree
+                    # it changed is stopped as before.
                     out["settled"], why = why, None
             if why:
                 out["stuck"], out["guard"] = why, detector.guard
         if out.get("settled"):  # #1168: not a guard's stop
             task.event({"ts": store.now(), "round": n, "kind": "settled",
-                        "text": f"self-review: {out['settled']}, the tree as the round began: "
+                        "text": f"self-review: {out['settled']}, the tree its tests passed on: "
                                 "stopped as its finish"})
             _stop(proc)
             break
@@ -3340,6 +3376,38 @@ RULES_GONE = ("note: until this round this task's agent read {claude}/CLAUDE.md 
               "for every task, the user puts it in {mine}: tell them")
 
 
+# The agent's final message in the round report: whole up to SUMMARY_MAX characters, else its head
+# and its tail around a marker naming FINAL_MD, the whole text. It was cut head-only at 2,500,
+# which dropped the end, where PROTOCOL puts the assumptions, the rule-to-test list and `Lesson:`:
+# 75 of 409 summaries sat at the cap, and their Lesson lines were lost to lessons.py too (#1186,
+# 2026-11-24). The tail is sized from the uncapped ones: every Lesson line started within 421
+# characters of the end, and 90% of the last assumption lines within 617.
+SUMMARY_MAX, SUMMARY_HEAD, SUMMARY_TAIL = 2500, 1650, 800
+FINAL_MD = "final.md"
+
+
+def final_text(rnd: dict) -> str | None:
+    """The agent's last message in the round, whole; None when it wrote none."""
+    return rnd["texts"][-1].strip() if rnd["texts"] else None
+
+
+def cut_final(final: str, path) -> str:
+    """``final`` as the round report shows it: whole, or head and tail with what was cut and
+    where the whole text is (#1186)."""
+    if len(final) <= SUMMARY_MAX:
+        return final
+    cut = len(final) - SUMMARY_HEAD - SUMMARY_TAIL
+    return f"{final[:SUMMARY_HEAD]}\n[… {cut:,} chars cut: {path}]\n{final[-SUMMARY_TAIL:]}"
+
+
+def write_report(task: store.Task, n: int, rnd: dict, text: str) -> None:
+    """Round n's summary.md, and first the agent's whole final message beside it, FINAL_MD,
+    which the report's cut names and lessons.py reads (#1186)."""
+    if (final := final_text(rnd)) is not None:
+        task.round_dir(n).joinpath(FINAL_MD).write_text(final + "\n")
+    task.round_dir(n).joinpath("summary.md").write_text(text)
+
+
 def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     """The compact report Claude reads; kept short on purpose, the diff is fetched separately."""
     spec, st = task.spec, task.status
@@ -3377,7 +3445,7 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     elif rnd.get("lingered"):  # #1160: the runner's stop, not OpenCode's exit code (#83)
         lines.append("OpenCode was still open after the agent's output ended; stopped")
     elif rnd.get("settled"):  # #1168: a self-review that read and left the tree as it was
-        lines.append(f"self-review: {rnd['settled']}, the tree as the round began; stopped as "
+        lines.append(f"self-review: {rnd['settled']}, the tree its tests passed on; stopped as "
                      "its finish")
     elif rnd["exit"] not in (0, None):
         lines.append(f"opencode exited {rnd['exit']}"
@@ -3423,8 +3491,10 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     lines.append(f"tools: {tools}")
     for err in rnd["errors"][-4:]:
         lines.append(f"tool error: {err[:200]}")
-    final = (rnd["texts"][-1] if rnd["texts"] else "(the agent wrote no final message)").strip()
-    lines += ["", "agent's summary:", final[:2500], ""]
+    final = final_text(rnd)
+    final = ("(the agent wrote no final message)" if final is None
+             else cut_final(final, task.round_dir(n) / FINAL_MD))
+    lines += ["", "agent's summary:", final, ""]
     files = gitops.changed(task.worktree)
     lines += ["files changed:", "\n".join(gitops.brief(files.splitlines(), status=True)) or "(none)"]
     for d, k in gitops.build_dirs(task.worktree, files)[:gitops.CHANGED_SHOWN]:
@@ -4574,7 +4644,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 continue
             if rnd["stuck"] or died(rnd):
                 text = _spend_lead(task, rnd) + summary_text(task, n, rnd, None) + _undelivered(task)
-                task.round_dir(n).joinpath("summary.md").write_text(text)
+                write_report(task, n, rnd, text)
                 phase = "stuck" if rnd["stuck"] else "failed"
                 # its server gone again after the round's one revive: the machine's, not the
                 # step's, so the model's slice isn't shrunk for it (#657)
@@ -4616,7 +4686,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 if not _go_on(task, n, "Claude's note"):
                     return
                 continue
-            task.round_dir(n).joinpath("summary.md").write_text(text)
+            write_report(task, n, rnd, text)
             used = task.status.get("auto_fixes", 0)
             if tests and not tests["ok"] and not skip and used < int(task.spec.get("auto_fix", 0)):
                 task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
@@ -4638,7 +4708,8 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
                 task.round_dir(n + 1).joinpath("prompt.md").write_text(
                     SELF_REVIEW.format(cmd=task.spec["test_cmd"], aside=self_review_aside(task)))
-                task.set_status(round=n + 1, self_reviewed=mark, tests=tests, round_for="self_review")
+                task.set_status(round=n + 1, self_reviewed=mark, tests=tests, round_for="self_review",
+                                self_review_tree=gitops.mark(task.worktree))  # #1188: the green tree
                 task.event({"ts": store.now(), "round": n, "kind": "self_review",
                             "text": "tests pass; the agent reviews its own change first"})
                 if not _go_on(task, n, "self-review"):
@@ -4723,13 +4794,18 @@ HANDOVER_ROOM = 0.25
 
 
 def compacted_between(last: tuple, sid, used: int, point: float, window: int, pending: int = 0) -> bool:
-    """Whether OpenCode compacted the session between the last step (`last`: its session and
-    context) and this one: in the same session, this step carries under half of what the last
-    did, and the last, with the tool output since (``pending``, tokens: OpenCode compacts with
-    it counted in, #1086), was within one step's growth (fresh_ceiling's margin) of the handover
-    point, where only OpenCode's compaction shrinks a context (#774)."""
+    """Whether OpenCode compacted the session between the last step (`last`: its session,
+    context and, if given, reasoning tokens) and this one: in the same session, this step carries
+    less than the last did by more than one step's growth (fresh_ceiling's margin), or than the
+    last step's reasoning if more (the next request needn't send it again), and the last, with the tool
+    output since (``pending``, tokens: OpenCode compacts with it counted in, #1086), was within
+    that margin of the handover point, where only OpenCode's compaction shrinks a context (#774).
+    Under half of the last, the rule until #1185, missed a compaction whose kept tail
+    (compaction_keep) brought the context back above it: 156 of 242 offline at a tenth of the
+    window on OpenCode 2.4.1, 234 at its 15K default (2026-11-24)."""
     margin = max(STEP_GROWTH, tuning.CEILING_MARGIN * window)
-    return bool(sid) and last[0] == sid and 0 < used < last[1] / 2 and last[1] + pending >= point - margin
+    drop = max(margin, last[2] if len(last) > 2 else 0)
+    return bool(sid) and last[0] == sid and 0 < used < last[1] - drop and last[1] + pending >= point - margin
 
 
 def _reading_full(task: store.Task, n: int, used: int, window: int,
@@ -4781,7 +4857,10 @@ def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
         asked=ASKED.format("\n\n".join(asks)) if asks else "",
         last="> " + last.replace("\n", "\n> ") if last else "(none)")
         + (f"\n\n{folded_notes(task, n + 1, notes)}" if notes else ""))
+    st = task.status  # a self-review carried on keeps its green tree; any other round drops it (#1188)
     task.set_status(round=n + 1, context="full", full_pct=pct, round_for="fresh",
+                    self_review_tree=st.get("self_review_tree")
+                    if st.get("round_for") in ("self_review", "fresh") else None,
                     full_compacted=True if rnd.get("compacted") else None,  # #774: fresh_reason
                     full_compact_failed=True if failed else None,  # #969: and its reason
                     handovers=task.status.get("handovers", 0) + 1,

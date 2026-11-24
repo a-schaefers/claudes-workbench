@@ -4797,9 +4797,10 @@ def write_entry(provider: str, name: str, entry: dict | None) -> None:
         entries = mine.setdefault("models", {})
         if entry is None:
             entries.pop(name, None)
-        else:  # keys added by hand (variants, options) stay
+        else:  # keys added by hand (variants, options) stay; an option given as None goes
             old = entries.get(name) or {}
-            entries[name] = {**old, **entry, "options": {**(old.get("options") or {}), **(entry.get("options") or {})}}
+            opts = {**(old.get("options") or {}), **(entry.get("options") or {})}
+            entries[name] = {**old, **entry, "options": {k: v for k, v in opts.items() if v is not None}}
             if not entries[name]["options"]:
                 del entries[name]["options"]
 

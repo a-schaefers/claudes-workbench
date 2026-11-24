@@ -261,7 +261,7 @@ apply <id>`: a bigger window compacts less, a window all on the GPU writes faste
 Thinking is the user's choice per role, off by default: an API task runs with it off, or as low
 as its model allows without thinking more than its default (`wb watch` says which), fixed for the
 whole task. A GPU model
-thinks as its OpenCode entry says. You may recommend thinking on for significant work in chat,
+thinks as its OpenCode entry says (`wb model add` writes a new Ollama one off; `--thinking`, on). You may recommend thinking on for significant work in chat,
 when the records show stuck or extra review rounds it might spare; never set it yourself.
 
 ## 2. Spec (the most valuable thing you write)
@@ -378,7 +378,8 @@ narrow the command; a run past it isn't sent back to the agent (nor one the lane
 device, nor a command or Python module (`python3 -m pytest`, not one of the repo's own, nor one whose file or dotted name the spec gives; a bare name such as `greet` still counts as a tool) not found as on the base, which checks in before round 1, or a command a `wb next --test` command itself names), you're woken with `auto-fix skipped:` and the cause, unless the base check ran the same
 command in a quarter of the limit: then it's the change's hang, and auto-fix gets it.
 Once the tests pass, the agent checks its own change against your review checks in one more
-round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it).
+round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it);
+one that only reads on is stopped as its finish, not stuck (`self-review: … stopped as its finish`).
 On API it's off unless you pass `--self-review` (each round you don't see is paid).
 It returns at once; a detached runner does the work. **Don't poll.** With the workbench mod loaded
 the session is woken by a `[workbench]` prompt when the task needs you (review, question, stuck,

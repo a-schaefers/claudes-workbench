@@ -352,7 +352,7 @@ worktree, `OPENCODE_CONFIG` the layer. Later rounds continue the session until a
 |---|---|---|
 | the same tool call in a row (its input hashed, cut to 400 characters, #497) | 4 | `events.StuckDetector` |
 | failing tool calls in a row | 6 | |
-| calls since the last edit to the task's files (outside the worktree doesn't count: 2026-11-18; a relative path is the workdir's, and a `patch` counts if any file it wrote is the task's, #1148) | 40; an API task's 40 per 32K of the window, at most 160 (`runner.no_edit_limit`, #1087: 40 stopped 131K API one-shots still exploring); a GPU task's stays 40 at any window, as in 1.91.x; in a self-review round with the tree as the round began, the round's finish instead (`settled`, #1168) | |
+| calls since the last edit to the task's files (outside the worktree doesn't count: 2026-11-18; a relative path is the workdir's, and a `patch` counts if any file it wrote is the task's, #1148) | 40; an API task's 40 per 32K of the window, at most 160 (`runner.no_edit_limit`, #1087: 40 stopped 131K API one-shots still exploring); a GPU task's stays 40 at any window, as in 1.91.x; in a self-review round with the tree its tests passed on, the round's finish instead (`settled`, #1168; its fresh session after a full window too, #1188) | |
 | no output (not while waiting on Claude; a background job gets the test timeout if longer) | 15 min | `--silence-timeout` |
 | one round, waits on Claude excluded | 40 min | `--round-timeout` |
 | mid-round handovers in one review round | more than `HANDOVER_MAX` (5) | `runner.drive` |
@@ -388,11 +388,14 @@ it ran at) gets one more round, `runner.SELF_REVIEW` (its file copied aside into
 #1085),
 Claude's own review checks (each rejection proved by breaking its check and seeing a test fail).
 Such a round reads and runs by design: when the calls-without-an-edit guard comes due in it
-(status `round_for` `self_review`) with the tree as the round began, the round ends as the
-agent's finish, not stuck and no guard counted (`settled` recorded, not `died`; a `settled {text}`
-event; the report's `self-review: N tool calls without changing a file in the task, the tree as
-the round began; stopped as its finish`), then the tests and review: a green change woke Claude
-as stuck and its step was recorded stuck (#1168). A tree it changed is stopped as before.
+(status `round_for` `self_review`, or `fresh` for the session carrying it on past a full window,
+#1188) with the tree its tests passed on (status `self_review_tree`, `gitops.mark` as it was
+queued; `runner.green_tree`), the round ends as the agent's finish, not stuck and no guard
+counted (`settled` recorded, not `died`; a `settled {text}` event; the report's `self-review: N
+tool calls without changing a file in the task, the tree its tests passed on; stopped as its
+finish`), then the tests and review: a green change woke Claude as stuck and its step was
+recorded stuck (#1168). A tree it changed is stopped as before, and so is a fresh session's tree
+as the full one left it, a check maybe still commented out (#1188).
 On by default because a feedback round costs a whole wake (2026-11-18); a model it doesn't help
 learns it off.
 
@@ -1097,8 +1100,11 @@ Claude read the diff.
   ends the agent's turn (`step_finish` reason `stop`, `turn_over`): it is done, so the round ends
   as it would and the between-rounds check starts any next round fresh (#1151: a finished agent
   was killed there and a fresh session paid to redo the round). A compaction between steps
-  (`compacted_between`, #774: `run --format json` prints none, so a step under half the last
-  one's, which was within `fresh_ceiling`'s margin with the tool output since counted in, each
+  (`compacted_between`, #774: `run --format json` prints none, so a step in the same session
+  under the last one's by more than that margin, or the last step's reasoning if more (the next
+  request needn't resend it): under half, the rule until #1185, missed most compactions whose kept
+  tail brought the context back over half, 156 of 242 offline on OpenCode 2.4.1; the last
+  step within `fresh_ceiling`'s margin of the handover point with the tool output since counted in, each
   tool row's `part.state.output` at `context.CHARS_PER_TOKEN` a token, as OpenCode compacts with
   it in: parallel reads from a step well under the point went unseen, #1086) hands over given a change and room (the floor,
   or the last step's context when nothing changed before it; status `full_compacted`, reason
@@ -1155,14 +1161,20 @@ folds a text after an unrun round's prompt (and its `instructions.md`) and there
 `_early_notes` and wb feedback's unsent round (#1180).
 
 **OpenCode's own compaction** is a small model's summary that can lose the task. The layer sets
-`compaction: {auto: true, buffer, background: false}`, `buffer = max(usable + reply − window, 0) +
+`compaction: {auto: true, buffer, keep: {tokens}, background: false}`, `buffer = max(usable + reply − window, 0) +
 STEP_GROWTH` (`compaction_buffer`; usable `runner.usable_input`: min of `limit.input` and the
 window, as OpenCode compacts at usable − buffer; never context − output, #675; reply `options.max_tokens`, else `limit.output`;
 `STEP_GROWTH` 4096), so it compacts only past the handover point with room for a full reply.
 `compaction_point` is that share of the window (62.5% on 32K, 4K output, 8K cap); `fresh_ceiling`
 sits `STEP_GROWTH` (or `tuning.CEILING_MARGIN`, if more) before it, the tuner's limit: the runner
 checks at a step's end, OpenCode before the next request with its tool results in (#644). Both
-count reasoning tokens. No `limit.context`: no mid-round handover, `auto`/`buffer` or ceiling.
+count reasoning tokens. `keep.tokens` (`compaction_keep`) is the tail OpenCode keeps verbatim beside its
+summary, restated with the rest of `compaction`: `KEEP_SHARE` 0.10 of usable, at least `KEEP_MIN` 2048 (4096 on 40K, 13107 on 128K). OpenCode's
+default is 15,000 whatever the window; 2.3.2 starts the tail only at a user message after the first
+(a one-prompt round kept none), 2.4.1 at any message, so a 32–40K session came back from a compaction
+at about 64%, next to the point again (109 of 242 40K compactions offline; about 41% at a tenth: #1185,
+2026-11-24; `RealOpenCodeRun`'s `test_a_real_compaction_keeps_*` checks both). No `limit.context`:
+no mid-round handover, `auto`/`buffer`/`keep` or ceiling.
 `background: false` everywhere (`RESTATED` repeats it in `OPENCODE_CONFIG_CONTENT`): 2.3.2's
 precomputed summary queued the agent's step on its own server and evicted its cache (#661;
 `RealOpenCodeRun` checks); 2.3.0 ignores the key. Below `models.MIN_WINDOW` (16K: OpenCode's prompt and tools, PROTOCOL and
@@ -1336,12 +1348,16 @@ is a note, not a check-in (that cost a restart in one task of two, 2026-11-17). 
    a crash with changes, `opencode exited N: the round didn't finish; what it changed so far stays
    in the worktree (see …)`. Stopped by the runner once the agent was done (`left_bg`; `lingered`, #83's too;
    `settled`): `the agent left `<job>` running in the background when its turn ended; stopped`, `OpenCode
-   was still open after the agent's output ended; stopped` (#1160), or `self-review: … the tree as
-   the round began; stopped as its finish` (#1168). `OpenCode resent N request(s) to the model's server: …` (#491).
+   was still open after the agent's output ended; stopped` (#1160), or `self-review: … the tree its
+   tests passed on; stopped as its finish` (#1168). `OpenCode resent N request(s) to the model's server: …` (#491).
 4. `tests: PASS|FAIL (`cmd`, exit N)`, 25 lines on a failure; `base check: …` while on the first
    step with no review round; `auto-fix rounds used: a/b`.
 5. `tools: name×n …`, up to four `tool error:` lines.
-6. `agent's summary:` and the last text (2500 characters).
+6. `agent's summary:` and the last text: whole up to `SUMMARY_MAX` (2,500 characters), else its
+   first `SUMMARY_HEAD` (1,650) and last `SUMMARY_TAIL` (800) around `[… N chars cut: <task>/rounds/<n>/final.md]`
+   (`cut_final`): the end holds the assumptions and `Lesson:` lines; cut head-only, 75 of 409
+   summaries lost them (#1186). `write_report` writes the whole text to `final.md` (`FINAL_MD`)
+   before `summary.md`.
 7. `files changed:` (`git status --porcelain`), NOTEs for files outside the spec, Claude's files
    (`claude_files_changed`: CLAUDE.md, CLAUDE.local.md, AGENTS.md, `.claude/`), `NOTE: edits in
    submodule <path> can't land: …` (`gitops.submodule_edits`, #419), `NOTE: new files in submodule
@@ -1367,14 +1383,14 @@ by prefix; rewording one silently changes those:
 | `Lesson:` lines in the agent's summary | the protocol asks for them | `lessons` |
 | `Review feedback from the senior reviewer` (`lessons.FEEDBACK_HEAD`) | `wb feedback` | `lessons` (feedback items), `round_asks` (stops there, but not at a round marked `resumed`, #1169), `transcript` (label) |
 | `The acceptance tests fail` | the auto-fix round | `transcript` |
-| `Before Claude reviews this` (`SELF_REVIEW`) | the self-review round | `transcript` |
+| `Before Claude reviews this` (`SELF_REVIEW`) | the self-review round | `transcript`, the fake OpenCode (`selfreads`) |
 | `You are picking this task up in a fresh session` | `handoff_prompt` | `transcript`, the fake OpenCode (`fill`, `compact`, `compactfail`) |
 | `Step N of this task is done and committed` | `wb next` | `transcript` |
 | `INTERRUPT_HEAD`, `NOTE_HEAD` | `_steer_round` | `transcript` |
 | `NUDGE` (`without a tool call. Stop planning`) | the think nudge | `transcript` (labelled the workbench's, not Claude's) |
 | `Claude picked these skills`, `Claude handed you more skills`, `Claude took back:` | `skills_note` | `transcript.SKILLS_HEADS` (skips the note to label what follows) |
-| `CARRY_ON`, `RESUME` (first 60 characters) | `_full_round`, `wb resume` | `round_asks` skips them (but their `notes.md`), `lessons.feedback` (none of their copied feedback) |
-| `agent's summary:` | `summary_text` | `lessons` |
+| `CARRY_ON`, `RESUME` (first 60 characters) | `_full_round`, `wb resume` | `round_asks` skips them (but their `notes.md`), `lessons.feedback` (none of their copied feedback), the fake OpenCode (`selfreads`, `FAKE_SELF_FILL`) |
+| `agent's summary:` | `summary_text` | `lessons` (a round with no `final.md`, from before #1186) |
 | `--title "wb: <task>"` | `run_round` | `transcript.find_session` |
 | `Outline of <file> (from probe symbols):` (`context.OUTLINE_HEAD`), `… N more: `+"`probe symbols <file>`"+` (`OUTLINE_MORE`) | `runner.add_outline`, after round 1's protocol (probe on, *Experiments*) | nothing by prefix: being after the protocol, `transcript`'s fold and `bench._spec_of` leave it out of the spec (a replay makes its own) |
 
@@ -3284,7 +3300,8 @@ earlier `reasoning_content` sent back: OpenCode 2.3.2 does (checked), so thinkin
 
 `runner.with_thinking(m, spec)` fixes it in task.json at `wb start` (`opencode_model` `<id>#<variant>`,
 `thinking`, `thinking_shown`, `thinking_off` for `wb-off`), for an API model only: a GPU task thinks
-as its OpenCode entry says, exactly as before, whatever its role's `thinking`. Nothing after the
+as its OpenCode entry says, exactly as before, whatever its role's `thinking` (a new Ollama entry
+`wb model add` writes is off, *Managing the set*, #1187). Nothing after the
 start recomputes it (feedback, next, resume, a handover keep `opencode_model`): a role's thinking
 changed mid-task applies to the next task, since a change mid-task would drop the cache. The layer
 carries it (*What the agent knows*, *The task's thinking variant*); `transcript.model_line` shows
@@ -3636,10 +3653,18 @@ a task, the fullest session under a third of the 128K window, so the slice's gue
 compaction came inside a single step: six shell calls at once, each with pages of compiler errors,
 added 93K tokens, past `fresh_ceiling`'s one-step margin.
 
-**Managing the set.** `wb model add <provider/model> [--pull] [--context N]`: pulls, reads
+**Managing the set.** `wb model add <provider/model> [--pull] [--context N] [--thinking]`: pulls, reads
 `/api/show`, writes `{name, tool_call, reasoning, limit: {context, input: ctx − ctx/8, output:
 ctx/8}}` plus `options.max_tokens` = 2 × output (`ollama_cap`: Ollama ignores
-`max_completion_tokens`; uncapped, a degenerate generation filled the context, 2026-11-16). Context:
+`max_completion_tokens`; uncapped, a degenerate generation filled the context, 2026-11-16). A new
+Ollama entry whose `/api/show` lists `thinking` gets `options.reasoningEffort: "none"`, which
+OpenCode sends as the request's `reasoning_effort` (checked on the real one), and the line says
+`thinking off (--thinking for on)`; `--thinking` writes none, and on a re-add takes back a `none`
+(`write_entry` drops an option given as None). A re-add otherwise keeps the entry's thinking, a
+hand-set effort included; other servers get no effort (they may ignore or reject `none`). Decided
+under the owner's no-more-thinking-tests instruction, not measured (#1187, 2026-11-24): the records
+can't separate thinking from the 64K entry's memory spill, so it rests on the 2026-11-18 stall,
+`thinking_stall`'s advice and API roles' own default (#1018). `wb remote` registers the same way. Context:
 `--context`, else what Ollama serves (`ollama_served_context`: loaded `context_length`, Modelfile
 `num_ctx`, `OLLAMA_CONTEXT_LENGTH`), never a sibling's (#464) or the trained length (only a cap);
 with none, refused (the 2026-11-16 audit: a 256K entry on a stock Ollama cut prompts). Another
@@ -4398,7 +4423,8 @@ own, up to a folded `NOTE_HEAD` note, so wb feedback's text added to a round nev
 `runner.add_to_round`, is never joined to the round's own last item, #1180; a round whose prompt
 isn't a feedback is read only for that added text, from its `notes.md` (`lessons.round_feedback`),
 and a `CARRY_ON` or `RESUME` prompt, which copies the earlier feedback whole, for none of its own:
-read, each item was recorded again under the handover's or resume's round, #1180's review); `agent` (`Lesson: …` lines in `summary.md`, which PROTOCOL asks for;
+read, each item was recorded again under the handover's or resume's round, #1180's review); `agent` (`Lesson: …` lines in the round's `final.md`, the agent's whole last message, or a round from before it
+`summary.md`'s section (#1186), which PROTOCOL asks for;
 skipped for a discarded task, whose open ones close as dropped: dead ends, not a recipe); `stopped`
 ("the guard stopped the agent: …", not a stop with `by`); `question` (each answered ask, `wb allow`
 included); `spec` ("the spec missed: …", from `status.spec_gaps`, for Claude's spec checklist);
@@ -5935,7 +5961,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | Command | Flags | What it does |
 |---|---|---|
 | `wb models` | `--set-default`, `--json`, `--api TEXT` | State, slice, speeds, `bench:`, `size:`, `router.weights_changed`; the ranking, models under `router.EXPLORE_TRIES` marked (*Exploring*); the API section, and `--api TEXT` the catalog ids containing TEXT, at most 30 (*What `wb models` prints*). `--set-default` (a GPU model only): `models.set_default` (refused under `OPENCODE_CONFIG_CONTENT`, #421). `--json` (#1023, the pane's lists, `cli._models_json`, asking no server and rebuilding no catalog): `{gpu: [{id, label, window, sizes, cards}], api: [{id, name, provider, provider_name, window, price {input, output}, prices (catalog\|yours, #1135), free}] (stored keys on a package the keyhole speaks, #1066, and Ollama cloud only, `cli._runs_held`), used (API models tasks ran on), free_line, optimize {done_at, models, running}, media {image\|speech\|sfx\|music: {default, engines: [{name, gpu}]}} (#1047; a file that doesn't parse leaves its kinds out)}`. |
-| `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | *Managing the set*: `--url` via `models.add_server_provider` (an existing provider at the same baseURL left as it is, only marked `wsl_url` when at WSL2's Windows host; one marked `wsl_url` at Windows' old address moved to the new one; one for another baseURL refuses; off this machine needs `local: true`; at WSL2's Windows host marked `wsl_url`, followed after a reboot, #1167); `--start`/`--stop` to models.json; refuses Ollama cloud models (API models) without `local: true` (one under a plain name always), unknown contexts, down servers. |
+| `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD`, `--thinking` (a new Ollama entry that thinks keeps thinking on; default `options.reasoningEffort: "none"`, #1187; refused on another action, #602) | *Managing the set*: `--url` via `models.add_server_provider` (an existing provider at the same baseURL left as it is, only marked `wsl_url` when at WSL2's Windows host; one marked `wsl_url` at Windows' old address moved to the new one; one for another baseURL refuses; off this machine needs `local: true`; at WSL2's Windows host marked `wsl_url`, followed after a reboot, #1167); `--start`/`--stop` to models.json; refuses Ollama cloud models (API models) without `local: true` (one under a plain name always), unknown contexts, down servers. |
 | `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | *Optimize*; `start` detached, refused while a task holds the GPU, stopped by a task that wants it; `--bench` then runs `wb bench run`; `apply` adds the measured window as its own entry (`optimize.entry_name`; refused when that name exists). |
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Provider `ollama-<host>` (WSL2's Windows host: `ollama-windows`, followed to its next address, #1159), `local: true`, its tool models added (IPv6 bracketed, #707); exit 1 when it doesn't answer; `--remove` not while `model`/`small_model` is one (#708). |
 | `wb model retire <id>` | `--delete` | Not OpenCode's `model` or `small_model` (#708); keeps `variant_of`, `replaces` (#723); `--delete` drops Ollama's weights; an API id refused (`cli.API_SIZES`, #1013). |
@@ -6094,6 +6120,7 @@ $WB_HOME (~/.local/state/workbench)
     <name> → ../<name>           a sibling's link beside the worktree (`--sibling`; not one of context.TASK_FILES)
     tree/<parents>/worktree/     the worktree instead, for a sibling more than one level up (task.json `worktree`)
     rounds/<n>/                  prompt.md instructions.md (before a handover rewrote it) summary.md tests.txt
+                                 final.md (the agent's last message whole, which summary.md may cut: runner.write_report, #1186)
                                  notes.md (Claude's notes folded into prompt.md: runner.folded_notes) nudged (prompt.md is the think nudge; round_asks skips it)
                                  resumed (a wb feedback after an infra stop: round_asks walks past it, #1169)
     ask/<id>.json  <id>.answer   questions and permission requests; answers
@@ -6217,6 +6244,7 @@ off), not `wb start`'s.
 | `reviews` | review rounds this step (`wb feedback` +1, none after an `infra` stop, #1153; `wb next` resets) |
 | `auto_fixes`, `auto_fixes_total` | since the last review or step; earlier |
 | `self_reviewed` | `[steps, reviews]` at the last self-review (once per review round) |
+| `self_review_tree` | `gitops.mark` of the tree the last self-review was queued on, its tests green; carried to the `fresh` round that takes a full self-review over, dropped (null) by any other's (`runner._full_round`); the explore guard's finish holds to it (`runner.green_tree`, #1188) |
 | `reviewed` | `{step, tree}`: the tree the last review notice showed (`gitops.snapshot`, bulky new files left out); the next shows the diff since (the whole diff once git gc pruned it) |
 | `tests` | `{ok, exit, tail, round, lane?, proxy?, hang?}` (`exit`: code, `timeout`, `output limit`; `lane`: devices refused; `proxy`: variables left out, on a connection failure; `hang`: `{base, limit}`, a timeout where the base check ran it in a quarter of the limit or less) |
 | `base_check` | `{ok, exit, tail, limit, secs, cmd}`, `runner.base_check` in the lane before round 1, with `--test` and no `--no-base-check` (`exit` may be `"timeout"`, `"setup failed"`, `"filtered"`: not the task's bytes) |
@@ -6276,7 +6304,7 @@ out, cache, cache_read, cache_write, reasoning?, cost?}` (reasoning apart from `
 which the handover check reads; `cost` OpenCode's `part.cost` in USD, only when a number: missing is unknown, never 0, #1022; the meter's step price too, #1019), `error {text}`, `retry {text, attempt}` (OpenCode resent a request). From the runner: `round`, `stopped {text}`, `steer
 {now, by: "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow, compacted}` (`compacted` after a failed compaction too),
 `autofix`, `self_review`, `reading_full`, `full`, `compacted {text}` (mid-round, and it carried on), `load` (a reload before a round), `limits {text}` (stretched),
-`left_bg {text}` (a job left in the background), `lingered {text}` (the turn over, OpenCode still open: stopped, #1160), `settled {text}` (a self-review round at the explore guard, the tree unchanged: stopped as its finish, #1168), `round_end {secs, how, guard?}` (stats recording on), `export` (the
+`left_bg {text}` (a job left in the background), `lingered {text}` (the turn over, OpenCode still open: stopped, #1160), `settled {text}` (a self-review round at the explore guard, on the tree its tests passed on: stopped as its finish, #1168, #1188), `round_end {secs, how, guard?}` (stats recording on), `export` (the
 export failed: judged by `live_used`), `stopped {by: "signal"|"provider"|"spend"}` (`provider`: an API provider's stop, #1020; `spend`: the day's spend cap, #1019; `lessons.gather` skips any with `by`), `gpu {text}` (a load warning), `ask {id}`, `answer {id}`, `served {model, by, text}` (the keyhole: the served model changed; `wb watch` and `wb log` show the text), `rate_limited {provider, code, state, since, secs, text}` (a run of an API provider's waiting ended, or the round stopped: #1020), `backend {by, text}` (the keyhole: OpenRouter served a backend outside the task's `order`, `OpenRouter served <x>, not <order>`; a line in the round's report too, #1021). From
 `wb`: `spec_gap`, `next_step`, `stopped` (bail out), `resumed`, `allow`, `steer {now}`, `captain`, `takeover`, `coding` (the user allowed Claude an edit), `error`
 (`reap`: the runner died without a report).
@@ -6571,9 +6599,9 @@ else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `text`, `step_finish` with tokens). Live tool names are 1.x-style (`bash`, `filePath`; 2.x `shell`,
 `path`: `events._brief` reads both). Records `FAKE_PROMPTS`, `FAKE_RUNS` (each run's `session`, `prompt`, `cwd`,
 `pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
-`FAKE_LESSON`, `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
+`FAKE_LESSON`, `FAKE_PAD` (that many characters before the Lesson line, #1186), `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
 `ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
-`read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087), `selfreads` (ok, then a self-review that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168), `floor` (`HANDOVER_ROOM`), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
+`read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087), `selfreads` (ok, then a self-review, told by its prompt, that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168; `FAKE_SELF_FILL`: its first session breaks it and fills 76%, the fresh one restores it, or with `FAKE_SELF_KEEP` only reads: #1188), `floor` (`HANDOVER_ROOM`), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151; `FAKE_COMPACT_KEPT`: the step after at 34%, over half, a kept tail: #1185), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
 2.3's `{"type": "error", …, "error": {"type": "compaction.failed", "message": "Compaction produced no summary"}}`;
 `FAKE_COMPACT_MSG`, `FAKE_COMPACT_EXIT`, `FAKE_COMPACT_EDIT`, `FAKE_REFAIL`), `bgwait` (`FAKE_BGWAIT`), `toolhang`,
 `retry` (`FAKE_RETRY_EVERY`), `say`, `stay` (as `ok`, then open and silent: #1160), `spend` (#1019: a read and a priced step every `FAKE_STEP_EVERY` s, `FAKE_STEPS` of
@@ -6692,6 +6720,7 @@ block) that long first. `ApiHarness` checks the fake and the server, and on the 
 Bearer`, Anthropic `/v1/messages?beta=true` with `x-api-key` and `anthropic-version`, no GET; the body's `model` is
 the id after the first `/`; a step's cost is the catalog price of its tokens; a layer variant `#wb-off`
 (`reasoningEffort: "none"`) sends `reasoning_effort: "none"`, no variant no field, an unknown one `provider.no-route`;
+the Ollama entry `wb model add` writes (`options.reasoningEffort: "none"`) sends it too, its `--thinking` one no field (#1187);
 a pinned `small_model` keeps the title request on the task's model (unpinned, it goes to the provider's small model);
 a 429 prints `retry` events (`retryAfterMs` only with `Retry-After`), a 401 or 402 one error at once, the body
 verbatim. It takes the spike's models from the bundled catalog, else another of the provider's. The first two cover the MCP shape, skills, denials, compound
@@ -6701,7 +6730,7 @@ with it shut out (#994), and the instructions: the user's `~/.config/workbench/A
 it (#513, #1061). `run_calls(name, calls, *start_flags)` runs `opencode run --auto` through `agent_env` and
 `lane.wrap`; refusals read `permission.rejected`, `external_directory` or `Permission denied`. `RealOpenCodeRun` is the
 runner on real OpenCode (`wb start --model cap`): argv, `run --format json` events (a `tool_use`'s `state.output`, #1086), `session export`
-(`context_state`), `session list` (`find_session`), `--session`, a real compaction, the task's own OpenCode home
+(`context_state`), `session list` (`find_session`), `--session`, a real compaction (and the tail it keeps, `compaction.keep`, #1185), the task's own OpenCode home
 (no credentials in it, the user's store given no session, its commands seeing the user's `XDG_DATA_HOME`, #1010)
 (CLAUDE.md's *OpenCode quirks* points here). They are the only checks of the quirks, interop and lane: a skip is not a pass.
 `ApiThinking`'s `test_real_opencode_*` is one too (#1018): a `wb-off` body variant and the catalog's `none` reach a DeepSeek-shaped server as `thinking: {type: disabled}` in the agent's request, and the npm provider's V1 `wb-off`.

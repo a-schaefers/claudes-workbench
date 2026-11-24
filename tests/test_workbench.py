@@ -5228,6 +5228,28 @@ class Context(Base):
         self.assertTrue(runner.compacted_between(("s", 9900), "s", 4900, 0.5 * 32768, 32768, pending=12000))
         self.assertFalse(runner.compacted_between(("s", 9900), "s", 4900, 0.5 * 32768, 32768))
 
+    def test_a_compaction_whose_kept_tail_leaves_over_half_the_context_still_hands_over(self):
+        # #1185 (2026-11-24): OpenCode 2.4.1 keeps a verbatim tail beside its summary, so a session
+        # came back from a compaction at 41% of a 40K window from 70%, over half, and the rule
+        # "under half of the last step" missed 156 of 242 such compactions offline
+        os.environ["FAKE_COMPACT_KEPT"] = "1"
+        store.home().joinpath("tuning.json").write_text('{"fresh_at": 0.6}')  # not an explored 0.5
+        self.start("t-1185", "compact", "--test", TEST_CMD, "--no-self-review")
+        st = wait_phase("t-1185", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["handovers"]), ("review", 1), st.get("last"))
+        self.assertTrue(self.runs()[1]["prompt"].startswith(
+            "You are picking this task up in a fresh session (OpenCode had to compact the last session"),
+            self.runs()[1]["prompt"][:200])
+        w = 40960
+        self.assertTrue(runner.compacted_between(("s", int(0.70 * w)), "s", int(0.41 * w), 0.6 * w, w))
+        self.assertFalse(runner.compacted_between(("s", int(0.70 * w)), "t", int(0.41 * w), 0.6 * w, w))
+        # a step's growth or less is no compaction, nor the last step's reasoning the next
+        # request leaves out, nor a drop far below the handover point
+        self.assertFalse(runner.compacted_between(("s", 25000), "s", 21000, 0.6 * w, w))
+        self.assertTrue(runner.compacted_between(("s", 25000), "s", 18000, 0.6 * w, w))
+        self.assertFalse(runner.compacted_between(("s", 25000, 8000), "s", 18000, 0.6 * w, w))
+        self.assertFalse(runner.compacted_between(("s", 12000), "s", 4000, 0.6 * w, w))
+
     def test_a_session_compacted_mid_round_with_no_room_for_a_successor_is_said_and_carries_on(self):
         # #774: with its reading near the handover point, a successor would have no room: it
         # carries on, and an event says it was compacted
@@ -5626,8 +5648,8 @@ class Context(Base):
         rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-srr"]
         self.assertEqual([r["kind"] for r in rows], ["review"])
         self.assertIn("tests: PASS", rows[0]["text"])
-        self.assertIn("the tree as the round began; stopped as its finish", rows[0]["text"])
-        self.assertIn("the tree as the round began: stopped as its finish",
+        self.assertIn("the tree its tests passed on; stopped as its finish", rows[0]["text"])
+        self.assertIn("the tree its tests passed on: stopped as its finish",
                       run_wb("watch", "t-srr", "--once", "--no-color"))
 
     def test_a_self_review_that_changed_the_tree_is_still_stopped_by_the_explore_guard(self):
@@ -5640,6 +5662,48 @@ class Context(Base):
         self.start("t-srk", "selfreads", "--test", TEST_CMD, "--self-review")
         st = wait_phase("t-srk", {"review", "stuck", "failed"}, timeout=60)
         self.assertEqual((st["phase"], st["round"]), ("stuck", 2))
+        self.assertIn("tool calls without changing a file", st["last"])
+
+    def test_a_self_review_begun_in_a_fresh_session_that_reads_past_the_explore_guard_goes_to_review(self):
+        # #1188 (2026-11-24): the five recorded trips (bench-big-compaction, big-logout,
+        # big-this-host) each had round 1's session compacted, so the self-review began in a
+        # fresh session, re-read, and was stopped by the explore guard on round 1's green tree
+        os.environ["FAKE_COMPACTED"] = "1"
+        self.start("t-srf", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-srf", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"], st["round_for"]), ("review", 2, "self_review"))
+        self.assertTrue(st["tests"]["ok"])
+        self.assertNotIn("no_edit", st.get("guards") or {})
+        events = store.read_jsonl(store.Task("t-srf").dir / "events.jsonl")[0]
+        self.assertIn(runner.FRESH_SAID + runner.COMPACTED,
+                      [e["text"] for e in events if e.get("kind") == "fresh" and e.get("round") == 2])
+        self.assertEqual([e["kind"] for e in events if e.get("kind") in ("settled", "stopped")], ["settled"])
+
+    def test_a_self_review_handed_to_a_fresh_session_that_restores_the_green_tree_goes_to_review(self):
+        # #1188: the self-review's session filled with a check broken, a fresh one carried on
+        # (status round_for `fresh`), copied the file back and read on: #1168's finish was only
+        # for round_for `self_review`, so the explore guard stopped a green change as stuck. The
+        # tree is held to the one round 1's tests passed on, not the round's start (90 reads:
+        # its copy back is a change, so the guard counts again from it)
+        os.environ.update(FAKE_SELF_FILL="1", FAKE_READS="90")
+        self.start("t-srh", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-srh", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"], st["round_for"], st["handovers"]),
+                         ("review", 3, "fresh", 1), st.get("last"))
+        self.assertTrue(st["tests"]["ok"])
+        self.assertNotIn("no_edit", st.get("guards") or {})
+        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-srh"]
+        self.assertEqual([r["kind"] for r in rows], ["review"])
+        self.assertIn("the tree its tests passed on; stopped as its finish", rows[0]["text"])
+
+    def test_a_self_review_handed_over_with_a_check_still_broken_is_stopped_by_the_explore_guard(self):
+        # #1188's other half: the fresh session's tree is the one the round began with, but a
+        # check is still commented out (the issue's "stop mid-mutation-check"): not the tree the
+        # tests passed on, so it is stopped as before
+        os.environ.update(FAKE_SELF_FILL="1", FAKE_SELF_KEEP="1")
+        self.start("t-srb2", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-srb2", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"], st["round_for"]), ("stuck", 3, "fresh"))
         self.assertIn("tool calls without changing a file", st["last"])
 
     def test_without_self_review_claude_is_woken_after_the_first_clean_round(self):
@@ -9500,6 +9564,39 @@ class RealOpenCodeRun(Base):
             self.assertIn("If your context holds only a summary of it", system)
             self.assertNotIn("Write the answer to answer.txt", json.dumps(  # the spec itself: gone
                 [m for m in r["messages"] if m.get("role") != "system"]))
+
+    def test_a_real_compaction_keeps_a_tail_a_tenth_of_the_window_not_15k(self):
+        # #1185 (2026-11-24): OpenCode keeps the newest 15K tokens verbatim beside its summary
+        # whatever the window. 2.3.2 starts that tail at a user message (so a one-prompt round
+        # kept none); 2.4.1 at any message, and a 32-40K session came back next to the
+        # compaction point. The layer's compaction.keep is a tenth of the window: 3276 here
+        task, st = self.answered([WRITE_42])
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        self.assertEqual(layer["compaction"]["keep"], {"tokens": 3276})
+        env = {**runner.opencode_env(task), "PWD": str(task.worktree)}
+        def turn(text):
+            subprocess.run(lane.wrap(context.writable(task), [
+                "opencode", "run", "--standalone", "-m", "cap/cap", "--format", "json",
+                "--session", st["session"], "--", text]), cwd=task.worktree, env=env,
+                capture_output=True, timeout=180)
+        # about 8.8K tokens each by OpenCode's estimate (4 characters a token): both inside its
+        # default 15K, neither inside 3276
+        older, newer = "OLDER-1185 " * 3200, "NEWER-1185 " * 3200
+        turn(older)                                                # 1 token read: no compaction
+        self.server.kill()
+        self.server.wait()
+        self.serve([], read=31_000)                                # now every request fills 32K
+        turn(newer)
+        before = len(self.requests.read_text().splitlines())
+        turn("Go on.")                                             # OpenCode compacts first
+        self.assertEqual(runner.context_state(task)["compactions"], 1)
+        later = self.requests.read_text().splitlines()[before:]
+        agent = [r for r in later if "<template>" not in r]        # not the summary request
+        self.assertTrue(agent and len(agent) < len(later), [r[:300] for r in later])
+        self.assertNotIn("OLDER-1185", agent[-1])                  # 2.3.2's 15K kept it from there
+        ver = subprocess.run(["opencode", "--version"], capture_output=True, text=True).stdout
+        if tuple(int(n) for n in re.findall(r"\d+", ver)[:2]) >= (2, 4):
+            self.assertNotIn("NEWER-1185", agent[-1])              # 2.4.1's 15K kept it
 
     def test_no_compaction_summary_is_written_ahead_of_the_handover_point(self):
         # #661 (checked on OpenCode 2.3.2): its background compaction forked a full-context
@@ -18863,6 +18960,9 @@ class LoneFlags(Base):
         for argv, says in ((["retire", "ollama/m", "--label", "x"], "go with wb model add"),
                            (["retire", "ollama/m", "--context", "8192"], "go with wb model add"),
                            (["retire", "ollama/m", "--pull"], "go with wb model add"),
+                           # #1187's --thinking: ignored with exit 0 on the other actions
+                           (["retire", "ollama/m", "--thinking"], "go with wb model add"),
+                           (["sizes", "ollama/m", "trivial", "--thinking"], "go with wb model add"),
                            (["sizes", "ollama/m", "--url", "http://127.0.0.1:1/v1"], "go with wb model add"),
                            (["add", "ollama/m", "--delete"], "--delete goes with wb model retire"),
                            (["retire", "ollama/m", "trivial"], "go with wb model sizes")):
@@ -22169,6 +22269,31 @@ class ModelSet(Base):
         self.assertNotIn("new-coder:14b", self.config()["provider"]["ollama"]["models"])
         with self.assertRaises(SystemExit):
             run_wb("model", "add", "cloud/big")                    # not a local provider
+
+    def test_a_new_ollama_entry_that_thinks_is_written_with_thinking_off_unless_thinking_is_asked(self):
+        # #1187 (2026-11-24): entries were written thinking, the 2026-11-18 stall's kind, while
+        # doctor advised reasoningEffort "none". A re-add keeps the entry's own thinking; only
+        # --thinking takes back the "none"; a server other than Ollama is left as it was
+        models_of = lambda p: self.config()["provider"][p]["models"]  # noqa: E731
+        out = run_wb("model", "add", "ollama/thinker:8b", "--context", "32768")
+        self.assertIn("thinking off (--thinking for on)", out)
+        self.assertEqual(models_of("ollama")["thinker:8b"]["options"]["reasoningEffort"], "none")
+        self.assertIn("thinking on", run_wb("model", "add", "ollama/thinker:8b", "--context", "32768",
+                                             "--thinking"))
+        self.assertNotIn("reasoningEffort", models_of("ollama")["thinker:8b"]["options"])
+        run_wb("model", "add", "ollama/thinker:8b", "--context", "65536")  # a re-add: still on
+        self.assertNotIn("reasoningEffort", models_of("ollama")["thinker:8b"]["options"])
+        out = run_wb("model", "add", "ollama/on:8b", "--context", "32768", "--thinking")
+        self.assertIn("thinking on", out)
+        self.assertNotIn("reasoningEffort", models_of("ollama")["on:8b"]["options"])
+        cfg = self.config()
+        cfg["provider"]["ollama"]["models"]["mine:8b"] = {"options": {"reasoningEffort": "low"}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        for extra in ((), ("--thinking",)):                                  # the user's effort stays
+            run_wb("model", "add", "ollama/mine:8b", "--context", "32768", *extra)
+            self.assertEqual(models_of("ollama")["mine:8b"]["options"]["reasoningEffort"], "low")
+        self.assertIn("reasoning", run_wb("model", "add", "strata/coder", "--context", "32768"))
+        self.assertNotIn("options", models_of("strata")["coder"])
 
     def test_add_never_guesses_the_context_ollama_serves(self):
         # the 2026-11-16 audit: with nothing set, the trained 256K was written while a stock
@@ -27283,6 +27408,43 @@ class SkillLearning(Base):
         log = skills._git("log", "-1", "--format=%B")
         self.assertIn(f"Source: {src} skills/good, MIT", log)
 
+    def test_a_long_final_message_is_kept_whole_and_the_report_shows_its_end_and_lessons_come_from_it(self):
+        # #1186: the report cut the message head-only at 2,500 characters, so the Lesson line the
+        # protocol puts last was lost to Claude and to lessons.py alike (75 of 409 summaries)
+        from workbench import lessons, runner
+        os.environ.update(FAKE_LESSON="a long report still ends with its lesson", FAKE_PAD="3000")
+        self.start("t-1186", "fix", "--auto-fix", "0", "--test", TEST_CMD)
+        wait_phase("t-1186", {"review"})
+        task = store.Task("t-1186")
+        final = task.round_dir(1).joinpath("final.md").read_text()
+        self.assertTrue(final.startswith("Wrote answer.txt = 41.\nChecked the answer file."))
+        self.assertTrue(final.endswith("\nLesson: a long report still ends with its lesson\n"))
+        said = (task.round_dir(1).joinpath("summary.md").read_text()
+                .split("agent's summary:\n", 1)[1].split("\n\nfiles changed:", 1)[0])
+        self.assertEqual(said, runner.cut_final(final.strip(), task.round_dir(1) / "final.md"))
+        self.assertTrue(said.startswith("Wrote answer.txt = 41."))
+        self.assertIn(f" chars cut: {task.round_dir(1) / 'final.md'}]\n", said)
+        self.assertTrue(said.endswith("Lesson: a long report still ends with its lesson"))
+        self.assertEqual([x["text"] for x in lessons.gather(task) if x["kind"] == "agent"],
+                         ["a long report still ends with its lesson"])
+        # read from the whole text, not the report: a Lesson line in the part the cut left out
+        task.round_dir(1).joinpath("final.md").write_text("x\n" * 1000 + "Lesson: one in the middle\n"
+                                                          + "y\n" * 1000)
+        self.assertEqual([x["text"] for x in lessons.gather(task) if x["kind"] == "agent"],
+                         ["one in the middle"])
+        task.round_dir(1).joinpath("final.md").unlink()   # a round from before final.md: its report's
+        self.assertEqual([x["text"] for x in lessons.gather(task) if x["kind"] == "agent"],
+                         ["a long report still ends with its lesson"])
+
+    def test_a_final_message_within_the_cap_is_shown_whole_and_a_longer_one_as_its_head_and_tail(self):
+        from workbench import runner  # #1186
+        where = Path("/state/tasks/t/rounds/1/final.md")
+        self.assertEqual(runner.cut_final("w" * 2500, where), "w" * 2500)   # as it was before
+        long = "h" * 2000 + "t" * 1000
+        shown = runner.cut_final(long, where)
+        self.assertEqual(shown, "h" * 1650 + f"\n[… 550 chars cut: {where}]\n" + "t" * 800)
+        self.assertLessEqual(len(shown), 2500 + 80)
+
     def test_a_task_leaves_its_lessons_and_a_repeated_one_stands_out(self):
         os.environ["FAKE_LESSON"] = "the answer file needs a trailing newline, or grep -x misses it"
         out = self.start("t-l1", "fix", "--auto-fix", "0", "--test", TEST_CMD)
@@ -28794,6 +28956,21 @@ class Drift(unittest.TestCase):
             self.assertLess(runner.fresh_ceiling(cfg), runner.compaction_point(cfg))  # #644's margin
         self.assertEqual(runner.compaction_buffer({"limit": {"context": 32768, "output": 16384}}), 20480)
 
+    def test_the_tail_a_compaction_keeps_is_a_tenth_of_the_window_not_opencodes_fixed_15k(self):
+        # #1185 (2026-11-24): OpenCode 2.4.1 keeps up to 15K of the newest messages verbatim
+        # whatever the window, so a 40K session came back from a compaction next to the
+        # compaction point again; 2.3.2 kept none in a one-prompt round
+        self.assertEqual(runner.compaction_keep({"limit": {"context": 40960, "output": 4096}}), 4096)
+        self.assertEqual(runner.compaction_keep({"limit": {"context": 32768, "input": 16384}}),
+                         runner.KEEP_MIN)            # a tenth of the 16K input is 1638
+        self.assertEqual(runner.compaction_keep({"limit": {"context": 131072, "output": 32768}}), 13107)
+        self.assertIsNone(runner.compaction_keep({"limit": {"output": 4096}}))
+        for ctx in (16384, 32768, 40960, 65536, 131072):
+            cfg = {"limit": {"context": ctx, "output": 4096}}
+            # the kept tail and a step's growth alone never put a session back at the point
+            self.assertLess(runner.compaction_keep(cfg) + runner.STEP_GROWTH,
+                            runner.compaction_point(cfg) * ctx, ctx)
+
     def test_outside_spec_names_files_the_spec_never_mentions(self):
         with tempfile.TemporaryDirectory() as d:
             Path(d, "prompt.md").write_text("Write `src/parser.c`, `tests/test_parser.c` "
@@ -30129,6 +30306,26 @@ class ApiHarness(Base):
         self.assertEqual(rows[-1]["error"], {"type": "provider.no-route",
                                              "message": f"Variant unavailable for {model}: nosuch"})
         self.assertEqual(len(out.read_text().splitlines()), before + len(bodies))
+
+    @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+    def test_real_opencode_sends_reasoning_effort_none_for_the_ollama_entry_wb_model_add_writes(self):
+        # #1187 (2026-11-24): wb model add turns an Ollama entry's thinking off with OpenCode's
+        # own model option, which reaches the agent's request as reasoning_effort; --thinking
+        # writes none, so the request has no field
+        def entry_run(*extra):
+            run_wb("model", "add", "ollama/thinker:8b", "--context", "32768", *extra)
+            entry = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())[
+                "provider"]["ollama"]["models"]["thinker:8b"]
+            port, out, _ = self.capture(f"real-gpu{len(extra)}")
+            layer = self.layer(port, "ollama")
+            layer["provider"]["ollama"].update(npm="@ai-sdk/openai-compatible",
+                                               models={"thinker:8b": entry})
+            code, rows = self.real_run("ollama/thinker:8b", layer)
+            self.assertEqual(code, 0, rows)
+            bodies = [json.loads(x) for x in out.read_text().splitlines()]
+            return [b.get("reasoning_effort", "unset") for b in bodies if b.get("tools")]
+        self.assertEqual(entry_run(), ["none"])
+        self.assertEqual(entry_run("--thinking"), ["unset"])
 
     @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
     def test_real_opencode_lists_an_alias_by_its_model_id_and_a_layer_key_in_settings(self):
