@@ -211,8 +211,9 @@ the record left out on fewer than three tasks ("exploring: …"): review it as a
 models` shows the ranking per size. Pass
 `--model <id or fragment>` (a GPU model) only if the user names one, or when the record argues
 against the guess, and say the model you passed in your reply. An API model is the user's choice,
-never yours: never pass `--model <api id>`, never run `wb route` without the user's words in this
-conversation, and never move a role between GPU and API because one can't run (`wb start` exits 3:
+never yours: never pass `--model <api id>` unless the user named that id for this task (the mod's
+dialog then asks them, and a "not changed" means no), never run `wb route` without the user's words
+in this conversation, and never move a role between GPU and API because one can't run (`wb start` exits 3:
 tell the user the choices it printed). Recommend; the user sets it, in the dialog or the pane's
 Settings tab.
 

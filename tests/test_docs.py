@@ -135,6 +135,18 @@ class DocsMatchTheCode(unittest.TestCase):
         choosing = section(skill, "## 1. Pick the role; the user's roles pick the model")
         self.assertIn("never pass `--model <api id>`", " ".join(choosing.split()))
 
+    def test_the_skill_lets_a_user_named_api_model_through_wb_starts_dialog(self):
+        # #1132 (2026-11-23): "never pass `--model <api id>`" read as a ban even on the user's own
+        # `/workbench … --model <id>` (the skill's argument-hint), the start cli.start_gate and the
+        # mod's dialog were built for
+        skill = (ROOT / "skill/workbench/SKILL.md").read_text()
+        self.assertIn("[--model <id>]", skill[:skill.index("\n---", 4)])
+        choosing = " ".join(section(skill, "## 1. Pick the role; the user's roles pick the model").split())
+        self.assertIn("never pass `--model <api id>` unless the user named that id for this task (the mod's "
+                      'dialog then asks them, and a "not changed" means no)', choosing)
+        self.assertTrue(callable(cli.start_gate))
+        self.assertIn("calls.push(['--start'", (ROOT / "mod/hooks/register.tsx").read_text())
+
     def test_every_web_chat_api_path_is_in_the_api_reference(self):
         # #1042: docs/chat-api.md is the page another agent is handed; a path the server answers
         # that it doesn't name is one nobody can find
