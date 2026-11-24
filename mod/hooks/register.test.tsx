@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { absolutePath, agentOf, isAbort, rolesRead, wbThrew, type WbRun, agentsFor, askForArgs, attachedLines, awayNow, chatPrompt, cardName, delegates, hangWords, liveLines, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, sameCall, savedLine, spark, spendLine, apiParts, splashTarget, statsLines, usd, wrapParts, wrapWords } from './register.js'
+import { absolutePath, agentOf, isAbort, rolesRead, wbThrew, type WbRun, agentsFor, askForArgs, attachedLines, awayNow, chatPrompt, cardName, delegates, hangWords, liveLines, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, sameCall, savedLine, spark, spendLine, apiParts, splashTarget, statsLines, taskOfPath, tasksNamed, usd, wrapParts, wrapWords } from './register.js'
 import { pixels } from './apprentice.js'
 import { BAR, frameCells, frameCount, plan, ratio } from './splash.js'
 import { activity, loopLength, tickerCells } from './modeline.js'
@@ -3760,6 +3760,64 @@ test('Claude coding: its own edit in a task\'s worktree waits for the user\'s ye
   // a worktree nested for a sibling two levels up (#261, the audit of 1.2) is the task's too
   expect((await edit('/wb/tasks/fix-it/tree/apps/worktree/power.py')).deny).toContain('"Only when I say"')
   expect((await edit('/wb/tasks/fix-it/tree/shared/lib/power.py')).deny).toBeUndefined()   // a sibling's link
+})
+
+test('the tasks a shell command of Claude\'s runs in or names, by any spelling of the state directory (#1211)', () => {
+  const roots = ['/home/u/.local/state/workbench', '/data/state/workbench']
+  const named = (command: string, cwd = '/home/u/project') => tasksNamed(command, cwd, roots, ['/home/u'])
+  expect(named('cd /home/u/.local/state/workbench/tasks/fix-it/worktree && mvn test')).toEqual(['fix-it'])
+  expect(named('cd ~/.local/state/workbench/tasks/fix-it/worktree && tsc')).toEqual(['fix-it'])
+  expect(named('cd "$HOME/.local/state/workbench/tasks/a-1/worktree" && make')).toEqual(['a-1'])
+  expect(named('cd ${WB_HOME}/tasks/b/worktree; npx jest --coverage')).toEqual(['b'])
+  expect(named('ls /data/state/workbench/tasks/c/worktree')).toEqual(['c'])        // the real path
+  expect(named('mvn test', '/home/u/.local/state/workbench/tasks/fix-it/worktree/sub')).toEqual(['fix-it'])
+  expect(named('mvn test')).toEqual([])                                              // the user's project
+  expect(named('cat /home/u/other/tasks/x/a')).toEqual([])                           // another tasks/ directory
+  expect(named('diff ~/.local/state/workbench/tasks/a/worktree/x ~/.local/state/workbench/tasks/b/worktree/x'))
+    .toEqual(['a', 'b'])
+  expect(taskOfPath('/wb/tasks/fix-it/worktree/lib/a.py', '/wb')).toBe('fix-it')
+  expect(taskOfPath('/wb/tasks/fix-it/tree/apps/worktree/a.py', '/wb')).toBe('fix-it')
+  expect(taskOfPath('/wb/tasks/fix-it/status.json', '/wb')).toBe('')
+  expect(taskOfPath('/home/u/project/a.py', '/wb')).toBe('')
+})
+
+test('Claude\'s own calls in a task\'s worktree are kept for wb, each with when it ran (#1211)', async ($, on) => {
+  // #1211 (2026-11-24): `mvn test` that Claude ran beside a --test of grep wrote reports that wb
+  // accept refused as files written by hand; wb tells them apart by these rows
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const ts = 1_800_000_000
+  const files: Record<string, string> = {
+    '/wb/tasks/fix-it/task.json': JSON.stringify({ name: 'fix-it', model: 'm', created_at: ts }),
+    '/wb/tasks/fix-it/status.json': JSON.stringify({ phase: 'review', round: 1, updated_at: ts }),
+  }
+  fakeTasks(on, files)
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('tool.call', async () => { await clock.sleep(3000); return { result: {}, text: '' } })  // the engine's, 3 s
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const rows = () => Object.keys(files).filter(p => p.startsWith('/wb/rules/fix-it/claude-calls/'))
+    .map(p => JSON.parse(files[p]) as Record<string, any>)
+  const call = async (input: Record<string, any>) => {
+    const done = $.tool.call(input as any) as Promise<any>
+    await clock.advance(3000)
+    return done
+  }
+  const began = clock.now() / 1000
+  await call({ tool: 'Bash', command: 'cd /wb/tasks/fix-it/worktree && mvn -q test', tool_use_id: 'toolu_1' })
+  expect(rows()).toEqual([{ tool: 'Bash', command: 'cd /wb/tasks/fix-it/worktree && mvn -q test',
+    cwd: '/home/u/project', at: began, end: began + 3 }])
+  await call({ tool: 'Bash', command: 'mvn -q test' })                         // the user's project: none
+  await call({ tool: 'Bash', command: 'cat /wb/tasks/gone/worktree/a' })       // no such task: none, no directory
+  expect(rows().length).toBe(1)
+  expect(Object.keys(files).some(p => p.startsWith('/wb/rules/gone'))).toBe(false)
+  await call({ tool: 'Write', file_path: '/wb/tasks/fix-it/worktree/lib/a.py', content: 'x = 1\n' })
+  expect(rows().map(r => r.path ?? r.command)).toContain('/wb/tasks/fix-it/worktree/lib/a.py')
+  // a refused edit wrote nothing: no row
+  files['/wb/coding.json'] = JSON.stringify({ mode: 'only' })
+  const denied = await call({ tool: 'Edit', file_path: '/wb/tasks/fix-it/worktree/lib/b.py', old_string: 'a', new_string: 'b' })
+  expect(denied.deny).toContain('"Only when I say"')
+  expect(rows().map(r => r.path ?? r.command)).not.toContain('/wb/tasks/fix-it/worktree/lib/b.py')
 })
 
 // The upstream gate's world (#1005): the patch clone, the user's project, a developer's own clone

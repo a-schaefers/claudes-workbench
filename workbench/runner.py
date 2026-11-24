@@ -2750,29 +2750,133 @@ def agent_wrote(task: store.Task) -> list[str]:
 def hand_wrote(task: store.Task) -> list[str]:
     """The ignored files written by hand in the worktree while no runner ran (gitops.hand_written):
     Claude's after a takeover or in a review fix, which the agent's events never show (#1179,
-    2026-11-24). Kept in status `hand_wrote` by each runner that starts, and since the agent last
-    stopped (`hands_off_at`)."""
+    2026-11-24), less what a build or test command of Claude's wrote (_claude_built), plus what
+    Claude's edit tools wrote there (the mod's rows, CLAUDE_CALLS, #1211). Kept in status
+    `hand_wrote` by each runner that starts, and since the agent last stopped (`hands_off_at`)."""
     return _by_hand(task)[0]
 
 
 def hand_left(task: store.Task) -> list[str]:
     """The rest of the ignored files changed while no runner ran, outside a cache, that
-    hand_written took for a build's or a test run's: the commit leaves them out, said (#1179's
-    review, 2026-11-24). Kept in status `hand_left` as `hand_wrote` is; only those still there."""
+    hand_written took for a build's or a test run's, or a build or test command of Claude's
+    wrote (_claude_built, #1211): the commit leaves them out, said (#1179's review, 2026-11-24).
+    Kept in status `hand_left` as `hand_wrote` is; only those still there."""
     return [p for p in _by_hand(task)[1] if os.path.isfile(os.path.join(task.worktree, p))]
 
 
 def _by_hand(task: store.Task) -> tuple[list[str], list[str]]:
     wrote, left = set(task.status.get("hand_wrote") or []), set(task.status.get("hand_left") or [])
     ran = task.status.get("ran_wrote") or []
+    calls = claude_calls(task)
+    edited = _claude_edited(task, calls)
     if since := task.status.get("hands_off_at"):
         rest: list[str] = []
-        wrote |= set(gitops.hand_written(task.worktree, since, rest, ran))
-        left |= set(rest)
+        kept = gitops.hand_written(task.worktree, since, rest, ran)
+        built = _claude_built(task, calls, since, kept, edited)
+        wrote |= (set(kept) - built) | set(gitops.ignored_files(task.worktree, edited))
+        left |= set(rest) | built
     # one kept before a run wrote there is the run's too: Claude's first rerun of a test the
-    # runner hadn't run yet stayed in hand_wrote, refusing every accept after (#1211)
-    moved = {p for p in wrote if gitops.under(p, ran)}
+    # runner hadn't run yet stayed in hand_wrote, refusing every accept after (#1211); never
+    # one Claude's own edit tools wrote
+    moved = {p for p in wrote if gitops.under(p, ran) and p not in edited}
     return sorted(wrote - moved), sorted((left | moved) - (wrote - moved))
+
+
+# rules/<task>/claude-calls/<id>.json: the mod's row of each of Claude's own tool calls in the
+# task's worktree (a Bash command that names the task's directory or runs in it, an edit tool's
+# file there), {tool, at, end (epoch seconds), command and cwd, or path} (#1211)
+CLAUDE_CALLS = "claude-calls"
+CLAUDE_EDIT_TOOLS = ("Edit", "MultiEdit", "Write", "NotebookEdit")
+# A file's times may be whole seconds (HFS+, a FAT or 9p mount): what a call wrote can read up to
+# that much before the call began
+CALL_SLACK = 2.0
+CALL_NAMES = 5000  # words of a Claude command read for names: a heredoc of a module is thousands
+
+
+def claude_calls(task: store.Task) -> list[dict]:
+    """The mod's rows of Claude's own tool calls in the worktree (CLAUDE_CALLS); [] without the
+    mod, or before it kept them."""
+    d = context.rules_dir(task) / CLAUDE_CALLS
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        r = store.read_json(d / n) if n.endswith(".json") else None
+        if isinstance(r, dict) and all(isinstance(r.get(k), (int, float)) for k in ("at", "end")):
+            out.append(r)
+    return out
+
+
+def _claude_edited(task: store.Task, calls: list[dict]) -> set[str]:
+    """The worktree's files Claude's edit tools wrote (CLAUDE_CALLS' rows), relative to it: by
+    hand, whatever else changed there."""
+    root = os.path.realpath(task.worktree)
+    out = set()
+    for r in calls:
+        if r.get("tool") in CLAUDE_EDIT_TOOLS and isinstance(p := r.get("path"), str) and p:
+            full = os.path.realpath(os.path.join(str(r.get("cwd") or root), p))
+            if full.startswith(root + os.sep):
+                out.add(os.path.relpath(full, root))
+    return out
+
+
+def _expanded(command: str) -> str:
+    """A Claude command with `~`, $HOME and $WB_HOME spelled out, so that `cd ~/.local/state/…
+    /worktree && cat > lib/a.py` names lib/a.py, not `*/lib/a.py` alone."""
+    end = r"(?=/|$|[\s'\";&|)])"
+    command = re.sub(r"\$(?:\{WB_HOME\}|WB_HOME)" + end, lambda _: str(store.home()), command)
+    command = re.sub(r"\$(?:\{HOME\}|HOME)" + end, lambda _: os.path.expanduser("~"), command)
+    return re.sub(r"(?<![^\s'\"=:;&|(])~" + end, lambda _: os.path.expanduser("~"), command)
+
+
+def _claude_built(task: store.Task, calls: list[dict], since: float, kept: list[str],
+                  edited: set[str]) -> set[str]:
+    """Of hand_written's ``kept``, the files a Bash command of Claude's wrote as a build or a
+    test run does: changed while one ran (its `at` to `end`), named by none of Claude's commands
+    since ``since`` (the file, or its name in a directory the same command names: _rows_name's
+    test, as `cat > lib/a.py <<EOF` or `cp a.py lib/` name it), its ignored directories named by
+    none of the commands that ran then (`cp -r drafts/* lib/`), and not written with Claude's
+    edit tools. `mvn test`, tsc or `jest --coverage` that Claude ran beside a --test of another
+    command wrote reports, dist/*.d.ts and coverage/ that wb accept and wb next refused as files
+    written by hand (#1211, 2026-11-24). A file changed while no command of Claude's ran stays
+    Claude's: without the mod nothing is told apart, and dropping a hand-written file loses work
+    while a false refusal costs a look."""
+    shells = [r for r in calls if r.get("tool") == "Bash" and isinstance(r.get("command"), str)
+              and r["end"] >= since - CALL_SLACK]
+    if not shells or not kept:
+        return set()
+    rows = []
+    roots = tuple(dict.fromkeys(str(x).rstrip("/") + "/" for x in (task.worktree, os.path.realpath(task.worktree))))
+    for r in shells:
+        names = shell_names(_expanded(r["command"]), CALL_NAMES)
+        # an absolute word through a link to the worktree, as its real path
+        names = [os.path.realpath(w) if w.startswith("/") and not (w + "/").startswith(roots) else w
+                 for w in names]
+        cwd = r.get("cwd") if isinstance(r.get("cwd"), str) and r["cwd"].startswith("/") else ""
+        if not cwd:  # run where no row says: a relative word, by that path in any directory
+            names = [w if w.startswith(("/", ANYWHERE)) else ANYWHERE + w for w in names]
+        rows.append({"names": names, "workdir": cwd})
+    named, words = _rows_name(rows, task.worktree), _row_words(rows, task.worktree)
+    dirs = gitops.ignored_dirs(task.worktree)
+    out = set()
+    for p in kept:
+        if p in edited or named(p):
+            continue
+        try:
+            st = os.lstat(os.path.join(task.worktree, p))
+        except OSError:
+            continue
+        t = max(st.st_mtime, st.st_ctime)
+        ran = [w for r, w in zip(shells, words)
+               if r["at"] - CALL_SLACK <= t <= r["end"] + gitops.CLOCK_SLACK]
+        parts = p.split("/")[:-1]
+        ups = [d for i in range(1, len(parts) + 1) if gitops.under(d := "/".join(parts[:i]), dirs)]
+        if ran and not any(d in paths or any(d == a or d.endswith("/" + a) for a in anywhere)
+                           for paths, _, anywhere in ran for d in ups):
+            out.add(p)
+    return out
 
 
 def _ran_wrote(task: store.Task, since: float) -> None:
@@ -2855,6 +2959,20 @@ def _shell_named(task: store.Task):
 
 def _rows_name(rows: list[dict], worktree: Path, subdir: str = ""):
     """_shell_named's test, on its rows: which worktree-relative paths they name."""
+    named_rows = _row_words(rows, worktree, subdir)
+
+    def named(p: str) -> bool:
+        p = os.path.normpath(p)
+        where, name = os.path.split(p)
+        return any(p in paths or (name in names and (where or ".") in paths)
+                   or any(p == a or p.endswith("/" + a) for a in anywhere)
+                   for paths, names, anywhere in named_rows)
+    return named
+
+
+def _row_words(rows: list[dict], worktree: Path, subdir: str = "") -> list[tuple[set, set, set]]:
+    """Each row's (worktree-relative paths its words name, its words' last parts, its `*/<word>`
+    words' paths, events.ANYWHERE), in the rows' order: _rows_name's, and _claude_built's."""
     roots = list(dict.fromkeys(str(r) for r in (worktree, os.path.realpath(worktree))))
     base = os.path.normpath(subdir or ".")
 
@@ -2869,7 +2987,7 @@ def _rows_name(rows: list[dict], worktree: Path, subdir: str = ""):
         rel = os.path.normpath(os.path.join(base, w))
         return None if rel == ".." or rel.startswith("../") else rel
 
-    named_rows: list[tuple[set[str], set[str]]] = []
+    named_rows: list[tuple[set, set, set]] = []
     for r in rows:
         names = r.get("names")
         if not isinstance(names, list):
@@ -2880,14 +2998,7 @@ def _rows_name(rows: list[dict], worktree: Path, subdir: str = ""):
         words = [w for w in words if not w.startswith(ANYWHERE)]
         paths = {p for p in (inside(w, wd) for w in words) if p}
         named_rows.append((paths, {w.rstrip("/").rsplit("/", 1)[-1] for w in words}, anywhere))
-
-    def named(p: str) -> bool:
-        p = os.path.normpath(p)
-        where, name = os.path.split(p)
-        return any(p in paths or (name in names and (where or ".") in paths)
-                   or any(p == a or p.endswith("/" + a) for a in anywhere)
-                   for paths, names, anywhere in named_rows)
-    return named
+    return named_rows
 
 
 def _by_shell(task: store.Task) -> tuple[list[str], list[str]]:
