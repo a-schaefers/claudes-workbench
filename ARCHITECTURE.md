@@ -947,7 +947,7 @@ Feedback, next and resume refuse 1.x (exit 3) and note one outside `OPENCODE_TES
    - interrupted, or a note pending and not stuck → `_steer_round`.
    - non-zero exit or a silence stop while the server is down, whatever the model said first
      (#657) → a `load` event, the wait (*Waiting for a server that is down*), the round again,
-     once a round, same session. A server wb starts (models.json `start`) that stopped
+     once a round, same session (`_run_again`: never its prompt.md twice in one session, #1235). A server wb starts (models.json `start`) that stopped
      (`_stopped`) is restarted by the load (#579). Gone again: `infra` `model`, `cause` `server`.
    - stuck, or `died` (any non-zero exit, whatever it printed, #427; not `lingered`, `left_bg` or `settled`) → the report
      without tests (plus "NOTE: not delivered, the round stopped first: …", `_undelivered`),
@@ -1134,7 +1134,13 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   continuing the session: one revive a round, as a revive re-sends the whole context, which costs
   money. A quota stop of a recheck (`NoLease.recheck`: a turn handed after a wait, the round never `answered`) waits as
   queued again, a `load` event "<provider> is still out of credit: the task waits as queued
-  again" and no notice (#1216). A second stop, or a quota, key, setup or refused stop, ends it `stuck` with `cause` `provider`, `infra`
+  again" and no notice (#1216). Before either runs the round again, and a server's revive
+  (#657), `_run_again`: OpenCode keeps a failed run's message in its session, so prompt.md sent
+  again with `--session` put the spec and protocol there once a try, and a night of 402
+  rechecks billed dozens of copies at the top-up (#1235). A session the try began (`run_round`'s
+  `new_session`) with no answer is dropped (status `session` none: the round begins anew, a
+  handover's through `_start_fresh` again, #780); one holding more gets `RERUN` in prompt.md's
+  place (status `unanswered`); a try that printed no event (`reached` false) sends prompt.md. A second stop, or a quota, key, setup or refused stop, ends it `stuck` with `cause` `provider`, `infra`
   `provider` (a bench replay scores `error`), and `provider_remedy` under the STOPPED line (`wb
   feedback <task> --text "carry on"` once the provider allows, a round that counts no review, #1153, and `routes.off_api`'s command, `wb route <role> gpu (the user's
   yes)` or under Agents API `wb route all gpu`, when the task has a role and its next tasks aren't off API already, #1218; top up or wait for the plan's reset; /connect for a refused
@@ -1487,6 +1493,7 @@ by prefix; rewording one silently changes those:
 | `Step N of this task is done and committed` | `wb next` | `transcript` |
 | `INTERRUPT_HEAD`, `NOTE_HEAD` | `_steer_round` | `transcript`, the fake OpenCode (`FAKE_SELF_STALL`: `Claude, your reviewer`) |
 | `NUDGE` (`without a tool call. Stop planning`) | the think nudge | `transcript` (labelled the workbench's, not Claude's), the fake OpenCode (`FAKE_SELF_STALL`) |
+| `RERUN` (`The round was cut off by the model's provider`) | `run_round`, a round run again (`_run_again`, #1235) | `transcript` (labelled the workbench's) |
 | `Claude picked these skills`, `Claude handed you more skills`, `Claude took back:` | `skills_note` | `transcript.SKILLS_HEADS` (skips the note to label what follows) |
 | `CARRY_ON`, `RESUME` (first 60 characters) | `_full_round`, `wb resume` | `round_asks` skips them (but their `notes.md`), `lessons.feedback` (none of their copied feedback), the fake OpenCode (`selfreads`, `FAKE_SELF_FILL`) |
 | `agent's summary:` | `summary_text` | `lessons` (a round with no `final.md`, from before #1186) |
@@ -2980,7 +2987,7 @@ terminal.
 Drawn in Claude Code's grammar (results under `  ⎿  `). Prompt labels match the prompt's first
 words (`Claude → agent · spec`, `· review feedback`, `· next step`, `· INTERRUPT, high priority`,
 `· note`; `workbench → agent · tests failed, sent back automatically`, `· fresh session: the task,
-the work so far, what's next`); the protocol folds to `(+ the workbench protocol; -v shows it)`.
+the work so far, what's next`, `· the round again, after its provider or server stopped it`); the protocol folds to `(+ the workbench protocol; -v shows it)`.
 `ask_reviewer` calls are left out for their `ask`/`answer` events. Each model call gets `⏱ N tokens
 in (M cached), read in Xs · K out in Ys · R tok/s`. `-v` raises the caps. Under it: `activity`
 (queued: `status.last`, #869, else `Waiting for the GPU…`, an API task's `Starting…`, and its
@@ -6411,6 +6418,7 @@ off), not `wb start`'s.
 | `closing` | `wb accept` after its commit: `{commit, step, merge, merge_into, merge_as, sign, merge_from?, merged_head?}`, with `tip`; `sign` false keeps a retry's merge unsigned; a retry uses that object and destination (`gitops.squashed` from `merge_from`), a recovered refusal still exits 5 (#246, #432); while it stands, discard, feedback, next, resume, takeover refuse (`cli._accepting`) |
 | `grants_kept` | `{allow, paths}` at close, for `context.grants` afterwards (`wb bench add`) |
 | `session`, `sessions`, `session_mark`, `session_floor` | the session; earlier ones; `gitops.mark` at its start; its prompt (input and cache) at its first change |
+| `unanswered` | `{round, session}`: that session holds the round's message already, so its next run sends `runner.RERUN`, not prompt.md (`_run_again`, #1235); the next `run_round` clears it |
 | `claude_rules_gone` | the round whose layer deleted an earlier wb's copy of Claude's global files (`runner.write_config_layer`, #1119): that round's report adds `runner.RULES_GONE` |
 | `opencode_home` | `true` once a round ran in the task's own OpenCode home (`run_round`, #1010); a `session` without it began in the user's store, and the next round starts fresh (`fresh_reason`: `OLD_STORE`, the old session's last words exported from there) |
 | `context` | one-round instruction: `fresh`, `keep`, `full` |
@@ -6864,7 +6872,7 @@ the id after the first `/`; a step's cost is the catalog price of its tokens; a 
 the Ollama entry `wb model add` writes (`options.reasoningEffort: "none"`) sends it too, its `--thinking` one no field (#1187);
 a pinned `small_model` keeps the title request on the task's model (unpinned, it goes to the provider's small model);
 a 429 prints `retry` events (`retryAfterMs` only with `Retry-After`), a 401 or 402 one error at once, the body
-verbatim. It takes the spike's models from the bundled catalog, else another of the provider's. The first two cover the MCP shape, skills, denials, compound
+verbatim; a 402 run's message stays in its session, so a `--session` run of `RERUN` sends it once (#1235). It takes the spike's models from the bundled catalog, else another of the provider's. The first two cover the MCP shape, skills, denials, compound
 shell lines, rule order, git by path, the edit rule, PATH, the lane, `tool_output` (cuts the shell's output, not `read`'s; a project config can't lift it), the project config handed back
 with it shut out (#994), and the instructions: the user's `~/.config/workbench/AGENTS.md` and its imports in, Claude's
 `~/.claude/CLAUDE.md` and rules out, in the lane and (OpenCode's own read, `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT`) without

@@ -5960,6 +5960,41 @@ class Context(Base):
         self.assert_the_next_run_is_handed_to_a_fresh_session(dead)
         self.assertIn("question.txt", self.runs()[-1]["prompt"])
 
+    def test_a_round_run_again_after_its_server_died_goes_on_in_its_session_without_its_prompt_again(self):
+        # #1235 (bar loop round 4, 2026-11-24): a round run again after its server went away sent
+        # prompt.md again with --session, and OpenCode keeps a failed run's message: the session
+        # held the round's instructions twice (a 402 recheck's, once per recheck). A session that
+        # holds them, and round 1's work, is told only to carry them out
+        from workbench import transcript
+        self.start("t-1235", "ok", "--test", TEST_CMD, "--no-self-review")
+        wait_phase("t-1235", {"review"})
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", "t-1235", "--message", str(self.feedback))
+        task = store.Task("t-1235")
+        session = task.status["session"]
+        os.environ["FAKE_EXIT"] = "1"                 # killed after the model's first words
+        before = len(self.runs())
+        gone = lambda m: "FAKE_EXIT" in os.environ and len(self.runs()) > before  # noqa: E731
+        try:                                          # its server gone under the round, then back
+            with mock.patch.object(runner, "_down", side_effect=gone), \
+                    mock.patch.object(runner, "_stopped", return_value=False), \
+                    mock.patch.object(runner, "_wait_up",
+                                      side_effect=lambda t, m: (os.environ.pop("FAKE_EXIT"), m)[1]):
+                runner.drive(task)
+        finally:
+            runner._end_agent(task)
+            task.set_status(pid=None)
+            runner.CURRENT.clear()
+        st = task.status
+        self.assertEqual((st["phase"], st["round"], st["session"]), ("review", 2, session), st)
+        self.assertIsNone(st.get("unanswered"))
+        feedback, again = self.runs()[-2:]
+        self.assertEqual((feedback["session"], again["session"]), (True, True))
+        self.assertIn("Add a trailing comment line.", feedback["prompt"])
+        self.assertEqual(again["prompt"], runner.RERUN)
+        self.assertEqual(transcript._user_message(runner.RERUN, False)[0],
+                         "workbench → agent · the round again, after its provider or server stopped it")
+
     def test_a_fresh_round_run_again_after_its_server_died_is_handed_over_once(self):
         # #780 (the second 2026-11-21 audit): a round that began fresh, revived before its first
         # event, ran _start_fresh again: the handoff went over instructions.md and was wrapped in
@@ -31062,6 +31097,29 @@ class ApiHarness(Base):
                              (kind, int(status), "no: sk-test-0123456789abcdef"))  # verbatim
             self.assertEqual(len(out.read_text().splitlines()), 1)              # no retry
 
+    @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+    def test_real_opencode_keeps_a_402_runs_message_in_its_session_so_a_run_again_sends_only_rerun(self):
+        # #1235 (bar loop round 4, 2026-11-24), what runner._run_again relies on: a run that met
+        # a 402 printed its session's id and kept its message there, so prompt.md sent again with
+        # --session went twice (once a recheck); RERUN in its place, the round's prompt goes once
+        entry = self.real_model("deepinfra")
+        port, out, _ = self.capture("real-rerun", CAPTURE_STATUS="402", CAPTURE_STATUS_TIMES="1")
+        env = self.real_env(self.layer(port, "deepinfra"))
+
+        def run(*argv):
+            p = subprocess.run(["opencode", "run", "--standalone", "-m", f"deepinfra/{entry['id']}",
+                                "--title", "t", "--format", "json", *argv], cwd=self.oc_cwd(),
+                               env=env, capture_output=True, text=True, timeout=90)
+            return p.returncode, [json.loads(x) for x in p.stdout.splitlines() if x.startswith("{")]
+        code, rows = run("--", "MARK-1235: say ok")
+        self.assertEqual((code, rows[-1]["error"]["type"]), (1, "provider.quota"), rows)
+        session = rows[-1]["sessionID"]
+        code, rows = run("--session", session, "--", runner.RERUN)
+        self.assertEqual(code, 0, rows)
+        [sent] = [b for b in map(json.loads, out.read_text().splitlines()[1:]) if b.get("tools")]
+        users = json.dumps([m for m in sent["messages"] if m["role"] == "user"])
+        self.assertEqual((users.count("MARK-1235"), users.count("The round was cut off")), (1, 1), users)
+
 
 
 def api_entry(pid, mid, context=200000, **extra):
@@ -32795,6 +32853,7 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.start_api("t-paid", "http", spawn=False)
         self.start_api("t-behind", "http", "--queue", spawn=False)   # queued before the 402
         self.drive_here("t-paid")
+        os.environ["FAKE_RUNS"] = runs = str(Path(self.tmp.name) / "runs.jsonl")  # t-behind's
         paid = store.Task("t-paid")
         self.assertEqual((paid.status["phase"], paid.status.get("infra")), ("stuck", "provider"), paid.status)
         self.addCleanup(self.models.note_api, "deepinfra", "ok")     # lets a hung wait go
@@ -32833,6 +32892,13 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual([(r["task"], r["kind"], r.get("cause"))
                           for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["kind"] != "review"],
                          [("t-paid", "stuck", "provider")])
+        # #1235 (bar loop round 4, 2026-11-24): each recheck sent prompt.md again with --session,
+        # and OpenCode keeps a failed run's message, so the top-up's request billed one copy of the
+        # spec and protocol per recheck. A session no answer came in is dropped: each try is a
+        # fresh one, with the round's prompt once
+        rows = [json.loads(x) for x in Path(runs).read_text().splitlines()]
+        prompt = task.round_dir(1).joinpath("prompt.md").read_text()
+        self.assertEqual([(r["session"], r["prompt"].endswith(prompt)) for r in rows], [(False, True)] * 3, rows)
 
     def test_a_new_start_past_an_expired_402_mark_that_meets_the_402_stops_with_its_notice(self):
         # the review of #1216 (2026-11-24): NoLease.load took its first credit_recheck as a
@@ -33765,7 +33831,8 @@ class RateLimits(Base):
     def test_a_provider_that_only_rate_limits_is_revived_once_then_stuck_as_the_providers(self):
         from workbench import results
         from workbench import lessons
-        os.environ.update(FAKE_RETRIES="200", FAKE_RETRY_EVERY="0.5")
+        os.environ.update(FAKE_RETRIES="200", FAKE_RETRY_EVERY="0.5",
+                          FAKE_RUNS=str(Path(self.tmp.name) / "runs.jsonl"))
         task = self.api_task("t-only", "ratelimit", "--silence-timeout", "2", "--think-timeout", "2")
         # its role on API, as an API task's is: the advice's way off API is read there (#1218)
         Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"v": 1, "roles": {
@@ -33788,6 +33855,11 @@ class RateLimits(Base):
         self.assertEqual(load["text"], "deepseek rate-limited the round: it runs again once the cooldown ends")
         self.assertEqual(len(self.events(task, "stopped")), 2)      # once, revived, then again
         self.assertEqual(len(self.events(task, "rate_limited")), 2)
+        # #1235: the revive sent prompt.md again into the session its unanswered try began, which
+        # OpenCode keeps that try's message in: dropped, the round begins anew with it once
+        rows = [json.loads(x) for x in Path(os.environ["FAKE_RUNS"]).read_text().splitlines()]
+        prompt = task.round_dir(1).joinpath("prompt.md").read_text()
+        self.assertEqual([(r["session"], r["prompt"].endswith(prompt)) for r in rows], [(False, True)] * 2, rows)
         n = self.notice(task)
         self.assertEqual((n["kind"], n["cause"]), ("stuck", "provider"))
         self.assertNotIn(n["cause"], results.THE_STEP)
