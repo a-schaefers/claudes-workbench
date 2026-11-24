@@ -18530,6 +18530,22 @@ class Try(Base):
             run_wb("try", "--model", "no-such-model")                     # refused: nothing left
         self.assertFalse((cli.try_dir() / "3").exists())          # (#161)
 
+    def test_a_wb_try_refused_for_a_busy_gpu_advises_a_flag_wb_try_accepts(self):
+        # #1251 (bar loop round 5): wb start's busy-GPU refusal says --queue starts it anyway,
+        # but wb try had no --queue, so the retry it advised died on argparse's exit 2
+        with mock.patch.object(cli, "spawn_runner", lambda task: 0), \
+                mock.patch.object(cli, "_gpu_wait", lambda m, me=None: (
+                    {"gpu0": {"task": "other", "model": m.id}}, True)):
+            with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()) as err:
+                run_wb("try", "--model", "mimo")
+            self.assertEqual(e.exception.code, 4)
+            self.assertIn("--queue starts it anyway", err.getvalue())
+            self.assertFalse(list(cli.try_dir().glob("*")))                 # no copy left (#161)
+            out = run_wb("try", "--model", "mimo", "--queue")               # the advice, followed
+        self.assertIn("waits as queued until it's free", out)
+        self.assertIn("hidden check, at review: ", out)
+        self.assertEqual(store.Task("try-1").status["phase"], "queued")
+
     def test_wb_try_refused_by_wb_init_leaves_no_sample_behind(self):
         # #530: with no git identity wb init refused, and try/1, try/2… were left at each retry.
         # useConfigOnly: git makes no identity up from the user and host names, as it does on a
