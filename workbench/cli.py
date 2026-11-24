@@ -3001,12 +3001,14 @@ def _route_gpu(wanted: str, role: str) -> str:
     return m.id
 
 
-def _prices_of(m) -> str:
+def _prices_of(m, ahead: bool = False) -> str:
     """Whose prices an API model's dollars are at (#1135): "your prices" (wb model price), else
-    "catalog prices", an estimate; "" for a plan, a free model or none."""
+    "catalog prices", an estimate; "" for a plan, a free model or none. ``ahead``: its next
+    dollars' (the roles' listing, meter.next_basis), "" too when its last were the provider's own
+    figure (plain, as every provider figure: #1165's review, 2026-11-24); else the listed rate's."""
     if m is None or getattr(m, "kind", "gpu") != "api" or meter.is_plan(m) or meter.is_free(m):
         return ""
-    return meter.NOTE[meter.model_basis(m)].strip(" ()")
+    return meter.NOTE[meter.next_basis(m) if ahead else meter.model_basis(m)].strip(" ()")
 
 
 def _who(mid: str) -> str:
@@ -3130,7 +3132,7 @@ def _route_show(as_json: bool) -> None:
         if made:
             ts, by = max(made, key=lambda x: x[0])
             bits.append(f"set by {'Claude' if by == 'claude' else 'you'} {time.strftime('%m-%d', time.localtime(ts))}")
-        if row["via"] == "api" and not gone and (p := _prices_of(models.lookup(row["api"]))):
+        if row["via"] == "api" and not gone and (p := _prices_of(models.lookup(row["api"]), ahead=True)):
             bits.append(p)  # whose prices its dollars are at: the catalog's, an estimate, or yours (#1135)
         print(f"{r:<{width}}" + " · ".join(bits))
     if doc["day_usd"] is not None:
