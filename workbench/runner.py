@@ -5963,6 +5963,7 @@ SPEAKS_HOST = {"deepseek": "deepseek.com", "openrouter": "openrouter.ai", "anthr
 THINKING_ON = "thinking on"
 THINKING_NOT = "thinking off (the model doesn't reason)"
 THINKING_OFF_LINE = "thinking off"
+# its opening is the mod's thinkStops LOWEST_SAID: still cheaper than On there (Couplings, #1263)
 THINKING_LOWEST = "thinking at its lowest effort (it can't turn off)"
 THINKING_STAYS = "thinking on (it can't turn off)"
 THINKING_DEFAULT = "thinking as the model's default (it lists no lower setting)"

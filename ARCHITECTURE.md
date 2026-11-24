@@ -3000,13 +3000,18 @@ key `ollama`, #1077) and no role holding an API model, the
   tasks ran on, and every runnable one while the list is no longer than `API_MENU` 12, each `<name>
   · <provider> (<window>) · $in/$out per M` with a free model's data-use mark; then `Other model…`,
   which opens the Input `api-<role>-other`, an exact id wb checks; `wb route <role> --api <id>`),
-  `<label> thinking` (`THINK_STOPS`, `think-<role>`: `wb route <role> --thinking on|off`, for tasks
-  started after it), and `Spend today: ≈$0.42 of $5 (DeepSeek $0.28 · Anthropic $0.14; catalog prices)`, without a
+  `<label> thinking` (`thinkStops` over `THINK_STOPS`, `think-<role>`: `wb route <role> --thinking on|off`, for tasks
+  started after it; a stop the role's API model can't keep says what it does instead, from the row's
+  `thinks`: `Off (default): thinking as the model's default (it lists no lower setting)`, `This model
+  can't turn thinking off, so it isn't cheaper; …` (or, at `thinking at its lowest effort`, `This
+  model can't turn thinking off, but its lowest effort is still cheaper than On; …`), or `On: thinking
+  off (the model doesn't reason)`, #1263), and `Spend today: ≈$0.42 of $5 (DeepSeek $0.28 · Anthropic $0.14; catalog prices)`, without a
   cap `Spend today: ≈$0.42 (DeepSeek $0.42; catalog prices) · no day cap` (`spendLine`, `your prices` and no `≈` at the user's, #1135, its dollars by the Stats
   tab's `usd`, each provider by its name from `providers`, the Stats tab's ` · `). A press goes
   through `paneRoute`: `wb route --dry-run --json <args>`, and when it is gated the mod writes its
   `approval` to route-ok.json with `by: pane` (the press is the user's yes; no dialog, no flag
-  Claude could pass), then runs `wb route <args>`; wb's refusal (no day cap, an unknown id, a key wb
+  Claude could pass), then runs `wb route <args>`, and a gated change that applied says its line
+  in a toast (`workbench: <change>`: no dialog showed what the press agreed to, #1263); wb's refusal (no day cap, an unknown id, a key wb
   can't hold) is a toast and the row keeps its value. A wb without `wb route` (or its `--json`)
   leaves the roles, GPU and API rows out for the one line `wb is older than the mod: wb update`
   (`OLDER_WB`); one whose routes.json can't be read, wb's line. Each change reaches the conversation
@@ -3499,7 +3504,8 @@ carries it (*What the agent knows*, *The task's thinking variant*); `transcript.
 `thinking_shown` (`<label> · thinking off · 1024K context`), never reading `wb-off` from the
 user's config; the dialog, the start line and task.json's `route` say the same line
 (`routes.thinking_of`, from the model before the task exists), never the role's bare setting: they
-said `thinking off` for a model that thinks on its bare id (#1237); results rows keep `thinking` (the weekly check's evidence for recommending it for
+said `thinking off` for a model that thinks on its bare id (#1237); so do the roles' own views,
+from the role's `thinks` (`routes.thinking_said`, *Roles*, #1263); results rows keep `thinking` (the weekly check's evidence for recommending it for
 `significant`, in chat only, never set). `wb-off` is reserved: a user's own variant of that name
 loses to wb's in the layer.
 
@@ -3954,7 +3960,8 @@ quantization, context, slice, record), installed but unregistered models, the wa
 (`watch.json`; `--watch TEXT`, `--unwatch N`), flagged skills, waiting lessons, media engines (an
 engine with no `notes` says "licence: not noted"; `audio.coverage`, #398), and its API section
 (`cli.scout_api_lines`, when OpenCode lists an API provider or a role has an API model): the roles
-(`cli._role_where`: `GPU (router)`, `GPU <id> (pinned)`, `API <id>, set by you MM-DD, thinking off`),
+(`cli._role_where`: `GPU (router)`, `GPU <id> (pinned)`, `API <id>, set by you MM-DD, thinking off`, its
+thinking what the model does, `routes.thinking_said`, #1263),
 each role's API model's record over `SCOUT_API_DAYS` 30 (`cli._api_record`: tasks, accepted share,
 `~$/task` from `results.task_cost`, #1022's `row_cost` less the nothing-sent rows (#1106), rate-limited rounds from the tasks' `rate_limited` events),
 the spend over `SCOUT_SPEND_DAYS` 7 beside the day cap (the day ledger's, `savings.spent`, as
@@ -4161,14 +4168,14 @@ the pin matched by its exact id in `discover()`, as `wb route`'s listing finds i
 longer found exits 3, never the router's other pick nor a model its id is a fragment of, #1214).
 
 **`wb route`** (`cli.cmd_route`): shows each role (`GPU (the router picks)`, `GPU <id> (pinned)`,
-`API <id> (<provider>) · thinking off`, `API kept: <id>`, `set by you|Claude MM-DD`: on API from
+`API <id> (<provider>) · thinking off` (what the model does with it: `routes.thinking_said`, *What a role's thinking does*), `API kept: <id>`, `set by you|Claude MM-DD`: on API from
 `by`/`ts`, who sent its code there, which a GPU pin since never replaces; on the GPU the newer of
 `by`/`ts` and `gpu_by`/`gpu_ts`,
 `(not in OpenCode's catalog now)` for an API model the catalog no longer lists; an API row ends `catalog
 prices` or `your prices`, whose prices its dollars are at, `cli._prices_of`, #1135) and the cap,
 under a first line while Agents isn't Both (`cli._agents_line`: `Agents: GPU (every role runs on the
 GPU; wb route all both goes back to each role's own below)`); `--json` the normalized document (its
-`use` and `busy` too) plus `summary`, per role
+`use` and `busy` too) plus `summary`, per role `thinks` (from the cached catalog),
 `label`, `api_status` (`models.status` of its API model from the cached catalog, or not in it) and
 `gpu_found`, and for the pane (#1023, `cli._route_pane`) `spend_today` (`{usd, prices, by_provider}`, today's
 `step` and `reconcile` rows of the day ledger, spend-api.jsonl; `usd` is `meter.today()`'s, the sum the
@@ -4269,7 +4276,22 @@ raises; the line computed again under the lock) it prints `changed: <line>`, and
 gets its record (`routes.stamp`, `routes.STAMPS`): a gated change `said` (the line), `by` and `ts`;
 one that needed no yes only `gpu_by` and `gpu_ts`, so Claude's pin on a role on API leaves the record
 of the user's yes as it was (a pin once rewrote `by` to `claude`, the user's own yes then reading as
-Claude's, 2026-11-23).
+Claude's, 2026-11-23). Every role with an API model in the (cached) catalog gets its `thinks` read
+again (`routes.with_thinks`: `{api, off, on}`, `routes.model_thinks`, `routes.thinking_of` of each
+setting), so a reader with no catalog, the mod, says what the model does; a model the catalog
+doesn't list now (none for `DOWN_SECS` after a failed read) keeps a record said of it and loses
+any other, so an outage neither says `thinking off` again nor writes the record away with an
+unrelated change (#1263's review).
+
+**What a role's thinking does** (#1263, after #1237): every view of a role's thinking says
+`routes.thinking_said(row)`, its `thinks` line for the setting while `thinks.api` is the role's
+`api`, else `thinking <setting>`: the `wb route` listing (`API <id> (<provider>) · thinking as the
+model's default (it lists no lower setting) · …`, its `thinks` read from the catalog then,
+`with_thinks` uncached as its lookups, `--json` the cached one's, each role's `thinks` in it),
+`routes.summary` and the mod's `routesSummary` (`thinkingSaid`, the same rule: Couplings), wb
+scout's roles and the pane's thinking row (`thinkStops`). They said `thinking off` for a model that
+can't turn it off, so a user who set it from the pane, where no dialog shows the change line, kept a
+model that thinks.
 
 **The gate.** Under Claude Code (`CLAUDECODE=1`) a gated change applies only when
 `routes.approved({argv, change})` holds: `$WB_HOME/route-ok.json` (`ROUTE_OK`), written by the mod's
@@ -6416,7 +6438,8 @@ $WB_HOME (~/.local/state/workbench)
                                  {"via": "gpu"|"api", "gpu": "<id>"|"auto", "api": "<exact id>" (kept on the GPU), "thinking": "off"|"on",
                                  "said": the gated change's line, "by": "dialog"|"pane"|"terminal", "ts", "gpu_by": "terminal"|"claude", "gpu_ts"
                                  (a change that needed no yes: routes.stamp), "order": [backend…] (an OpenRouter role's, wb route --order,
-                                 #1021)}}}; a missing role is the GPU's
+                                 #1021), "thinks": {"api": "<id>", "off": "<line>", "on": "<line>"} (what that API model does with each
+                                 thinking setting, routes.with_thinks on every change; said only while "api" is that id, #1263)}}}; a missing role is the GPU's
                                  default; wb route writes it (store.edit_config), the mod reads it (readRoutes); its "day_usd" is the API day
                                  cap the meter keeps (*Spend*, #1019)
 ~/.config/opencode/opencode.json + .jsonc (layered, under $XDG_CONFIG_HOME; then $OPENCODE_CONFIG; $WB_OPENCODE_CONFIG) the models
@@ -7305,7 +7328,10 @@ doc needs its own `!/` line).
   `project_config_instructions`; RealOpenCode's #994 test; *What the project's own config gave, handed back*.
 - **The roles** (#1014): **routes.json's keys** (`routes.normalize`) → the mod's reader (`readRoutes`, `routesValid`,
   `routesPath` with `routes.path`) and the pane's rows (#1023); **`routes.summary`** ↔ the mod's `routesSummary` (the
-  context block and the echo say it; `Routes` and register.test.tsx check one fixture each); **the change line**
+  context block and the echo say it; `Routes` and register.test.tsx check one fixture each), and
+  **`routes.thinking_said`** ↔ the mod's `thinkingSaid` (a role's `thinks`, #1263; `RoleResolution` and
+  register.test.tsx's #1263 test), and `runner.THINKING_LOWEST`'s opening ↔ `thinkStops`' `LOWEST_SAID` (the
+  lowest effort, still cheaper than On); **the change line**
   (`routes.change`, `cli.start_line`) → the mod's dialog, which shows what `wb route --dry-run --json` prints (an API
 start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --model` stays refused), and
   `route-ok.json`'s `approval` (`cli._route_argv`) ↔ `routes.approved`; **a `wb route` or `wb start` flag** →

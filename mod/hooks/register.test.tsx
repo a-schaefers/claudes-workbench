@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { absolutePath, agentOf, isAbort, rolesRead, wbThrew, type WbRun, agentsFor, askForArgs, attachedLines, awayNow, chatPrompt, cardName, delegates, hangWords, liveLines, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, sameCall, savedLine, spark, spendLine, apiParts, splashTarget, statsLines, taskOfPath, tasksNamed, usd, wrapParts, wrapWords } from './register.js'
+import { thinkStops, absolutePath, agentOf, isAbort, rolesRead, wbThrew, type WbRun, agentsFor, askForArgs, attachedLines, awayNow, chatPrompt, cardName, delegates, hangWords, liveLines, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, sameCall, savedLine, spark, spendLine, apiParts, splashTarget, statsLines, taskOfPath, tasksNamed, usd, wrapParts, wrapWords } from './register.js'
 import { pixels } from './apprentice.js'
 import { BAR, frameCells, frameCount, plan, ratio } from './splash.js'
 import { activity, loopLength, tickerCells } from './modeline.js'
@@ -6350,7 +6350,7 @@ test('#1023: a role\'s press writes the one-shot approval for exactly that chang
   expect(w.approvals.map(a => JSON.parse(a))).toEqual([{ argv: ['route', 'trivial', 'api'], change: 'CHANGE trivial api', by: 'pane', at: 1_800_000_001 }])
   expect(ran('wb route trivial api')).toBe(true)
   expect(w.asked).toBe(0)                                                // the press is the yes: no dialog
-  expect(w.toasts).toEqual([])
+  expect(w.toasts).toEqual(['workbench: CHANGE trivial api'])           // what it agreed to (#1263)
   expect(await label('role-trivial')).toBe('▸ Trivial coding: API (DeepSeek Flash)')
   w.unwritable = true                                                   // no approval reaches wb
   await ui.press({ key: 'role-trivial' })
@@ -6413,6 +6413,41 @@ test('#1023: a role\'s API model is a dropdown of the models wb can run, with Ot
   await ui.press({ key: 'api-significant' })
   expect(await options()).toEqual(['  ❯ (none)', `    M 7 · OpenRouter (128K) · $1/$2 per${NB}M`,
     `    M 3 · OpenRouter (128K) · $1/$2 per${NB}M · free: the provider may keep or train on your code`, '    Other model…'])
+  await ui.unmount()
+})
+
+test('#1263: a role\'s thinking row and the roles\' summary say what its API model does with thinking, not only the setting', { timeoutMs: 20_000 }, async ($, on) => {
+  // bar loop round 6 (2026-11-24): set from the pane, whose press is the yes, an adaptive model that
+  // can't turn thinking off read `Off (default)`, `Faster and cheaper`, and the summary Claude gets
+  // `thinking off`; tests.test_workbench.RoleResolution checks routes.summary and wb route the same way
+  const does = "thinking as the model's default (it lists no lower setting)"
+  const thinks = { api: 'anthropic/claude-x', off: does, on: 'thinking on (effort high)' }
+  const row = { via: 'api', api: 'anthropic/claude-x', thinking: 'off', thinks }
+  expect(routesSummary({ roles: { writing: row } })).toBe('significant GPU (the router picks); trivial GPU (the router picks); ' +
+    `writing API anthropic/claude-x, ${does}`)
+  expect(routesSummary({ roles: { writing: { ...row, thinking: 'on' } } })).toContain('writing API anthropic/claude-x, thinking on (effort high)')
+  expect(routesSummary({ roles: { writing: { ...row, api: 'anthropic/other' } } })).toContain(', thinking off')  // another model's record
+  const plain = [['off', 'Off (default)', 'Faster and cheaper; for tasks started after this.'],
+    ['on', 'On', 'Better on hard steps, slower and costs more; for tasks started after this.']]
+  expect(thinkStops({ thinking: 'off' })).toEqual(plain)
+  expect(thinkStops({ api: 'deepseek/x', thinks: { api: 'deepseek/x', off: 'thinking off', on: 'thinking on (effort high)' } })).toEqual(plain)
+  expect(thinkStops(row)[0]).toEqual(['off', `Off (default): ${does}`, 'This model can\'t turn thinking off, so it isn\'t cheaper; for tasks started after this.'])
+  expect(thinkStops(row)[1]).toEqual(plain[1])
+  // #1263's review: a model that can't turn thinking off but runs at a lower effort is still cheaper off
+  const lowest = 'thinking at its lowest effort (it can\'t turn off)'
+  expect(thinkStops({ api: 'x/y', thinking: 'off', thinks: { api: 'x/y', off: lowest, on: 'thinking on (effort high)' } })[0])
+    .toEqual(['off', `Off (default): ${lowest}`, 'This model can\'t turn thinking off, but its lowest effort is still cheaper than On; for tasks started after this.'])
+  expect(thinkStops({ api: 'x/y', thinks: { api: 'x/y', off: 'thinking on (it can\'t turn off)', on: 'thinking on (it can\'t turn off)' } })[0]![2])
+    .toBe('This model can\'t turn thinking off, so it isn\'t cheaper; for tasks started after this.')
+  const not = 'thinking off (the model doesn\'t reason)'
+  expect(thinkStops({ api: 'x/y', thinks: { api: 'x/y', off: not, on: not } }).map(s => s[1])).toEqual(['Off (default)', `On: ${not}`])
+  const { ui, w, label, clock } = await settingsTab($, on)
+  expect(await label('think-writing')).toBe('▸ English writing thinking: Off (default)')
+  w.routes.roles.writing = { ...row, gpu: 'auto', label: 'English writing' }
+  await clock.advance(11_000)                                           // past the roles' cache
+  await ui.press({ key: 'tab-tasks' })
+  await ui.press({ key: 'tab-settings' })
+  expect(await label('think-writing')).toBe(`▸ English writing thinking: Off (default): ${does}`)
   await ui.unmount()
 })
 
