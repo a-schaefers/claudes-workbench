@@ -31661,6 +31661,37 @@ class RateLimits(Base):
                            {**row, "ts": time.time(), "steps": [{**row["steps"][-1], "stuck": True}]})
         self.assertLess(router.slice(m).files, before.files)
 
+    def test_the_carry_on_after_a_providers_stop_is_not_counted_as_a_review_round(self):
+        # the stop notice's own advice, wb feedback "carry on", counted as a review the agent
+        # caused: with one real review the step read as two, went badly and shrank the model's
+        # slice (#1153, 2026-11-24)
+        from workbench import results, router, tuning
+        os.environ.update(FAKE_RETRIES="200", FAKE_RETRY_EVERY="0.5")
+        task = self.api_task("t-carry", "ratelimit", "--silence-timeout", "2")
+        with mock.patch.object(runner, "RATE_WAIT_S", 2):
+            runner.drive(task)
+        self.assertEqual((task.status["phase"], task.status.get("infra"), task.status.get("reviews", 0)),
+                         ("stuck", "provider", 0))
+        routes = Path(self.tmp.name) / "routes.json"   # wb feedback on an API task needs a cap (#1089)
+        routes.write_text(json.dumps({"v": 1, "day_usd": 5, "roles": {}}))
+        os.environ["WB_ROUTES"] = str(routes)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        with mock.patch.object(cli, "spawn_runner"):
+            out = run_wb("feedback", "t-carry", "--text", "carry on")
+        self.assertIn("no review round is counted", out)
+        self.assertEqual((task.status["reviews"], task.status["round_for"]), (0, "resume"))
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review", task.status.get("last"))
+        step = results.step(task, True)
+        self.assertEqual((step["reviews"], tuning.agent_reviews(step)), (0, 0))
+        # one real review after it is one, and the step still went well
+        with mock.patch.object(cli, "spawn_runner"):
+            self.assertIn("feedback round 1 sent", run_wb("feedback", "t-carry", "--text", "rename x"))
+        runner.drive(task)
+        step = results.step(task, True)
+        self.assertEqual(tuning.agent_reviews(step), 1)
+        self.assertEqual(router._went(step), "well")
+
     def test_keep_alives_before_the_first_token_are_the_providers_queue_not_thinking(self):
         # DeepSeek holds a request open with keep-alives up to 10 minutes before inference starts
         task = self.api_task("t-queue", "api", "--think-timeout", "2", "--silence-timeout", "30")

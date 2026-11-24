@@ -1669,17 +1669,28 @@ def cmd_feedback(a):
     task.round_dir(n).joinpath("prompt.md").write_text(
         f"{lessons.FEEDBACK_HEAD} Make exactly these changes, then{rerun} finish with a short "
         "summary:\n\n" + text.strip(), encoding="utf-8")
-    reviews = st.get("reviews", 0) + 1
+    # a stop that wasn't the step's (status `infra`: an API provider's, the spend cap's, a reaped
+    # runner's, a restart's, a model server's): the round it resumes is no review. Counted, the
+    # "carry on" the provider's stop notice advises plus one real review read as two, and the
+    # step went badly, shrinking the model's slice (#1153, 2026-11-24). drive clears `infra` at
+    # each round's start, so a task in review never has it.
+    resumed = bool(st.get("infra"))
+    reviews = st.get("reviews", 0) + (0 if resumed else 1)
     handled = store.now()  # everything before the new round; what its runner raises stays news
     task.set_status(context="fresh" if a.fresh else "keep" if a.keep_context else None)
     gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
-    task.set_status(round=n, reviews=reviews, phase="queued", round_for="feedback",
+    task.set_status(round=n, reviews=reviews, phase="queued",  # the pane: "resumed", not "feedback 0"
+                    round_for="resume" if resumed else "feedback",
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0)
     spawn_runner(task)
     _ack_all(task, upto=handled)
-    print(f"feedback round {reviews} sent to {a.name} (round {n})"
-          + ("  — that is past the usual 3 review rounds" if reviews > 3 else ""))
+    if resumed:
+        print(f"feedback sent to {a.name} (round {n}): it resumes after a stop that wasn't the "
+              f"agent's ({st['infra']}), so no review round is counted")
+    else:
+        print(f"feedback round {reviews} sent to {a.name} (round {n})"
+              + ("  — that is past the usual 3 review rounds" if reviews > 3 else ""))
     _say(gpu)
     _say_dropped(dropped)
     _say(lessons.nudge(task))
