@@ -3933,9 +3933,13 @@ catalog, on another provider, able to run, within the day cap; the GPU one found
   (`no_credit`, `rate_limited` or `unreachable`; a refused key isn't marked there: it reads as no key
   and still exits 3) starts on the fallback instead, after `_busy_api`'s checks too but the slots
   (`--local-only`, commands.json's `local_only` and standing `copy`/`siblings`): the fallback's
-  provider slots all taken, it is still the fallback's start, which `--queue` queues for a slot and
-  which without it exits 4 (`_slots_full`), as any API start (refused there, the 4th `--queue` start
-  of a backlog exited 3, the review of #1196), and says
+  provider slots all taken, a start out of credit is still the fallback's, which `--queue` queues for
+  a slot and which without it exits 4 (`_slots_full`, the fallback line printed first), as any API
+  start (refused there, the 4th `--queue` start of a backlog exited 3, the review of #1196); a held
+  one (`rate_limited`, `unreachable`), which with no fallback runs and waits it out in its round,
+  stays on its own model instead (`note: … can't take it: every one of <provider>'s N slots is
+  taken`, N `API_PARALLEL`, `_fallback_start`'s `held`), where the move made it exit 4 (the second
+  review); a fallback start says
   `<id>: <why>: on the role's fallback, as you set (<fallback>)` (`routes.FALLBACK_LINE`) under its
   model line (`… · trivial role's fallback, set by you MM-DD · …`, `routes.said_part`); task.json gets
   `fallback: true` and `fallback_from` (`routes.fallback_routed`, through `cli._routed_keys`), its
@@ -6855,10 +6859,12 @@ one with none, and new backends on a busy role count as newly sent (`routes._bus
 goes to API; at `wb start` a provider marked out of credit starts the API fallback (task.json `fallback`, the line, the
 where-note, the results row) and a held one the GPU fallback, a fallback that can't take it (out of credit too, the
 cap, a repo kept local, commands.json's standing copy) or none leaves the start as before, a busy-routed start and a
-`--model` never move, and one with its slots full queues with `--queue` and exits 4 without; in the runner a `quota`
+`--model` never move, and one with its slots full queues with `--queue` and exits 4 without (the fallback line said),
+or for a held provider leaves the start on the role's model; in the runner a `quota`
 round (the fake's `WB_FAKE_API`) moves to an API fallback (each keyhole one model, a fresh session that is no
 overflow, the report's line, the fallback's own catalog), a round held again after its revive to the GPU fallback, a
-provider marked out of credit after the start moves before round 1 (no handoff) or between rounds (a fresh session)
+provider marked out of credit after the start moves before round 1 (no handoff), while it waits for its provider
+slot (once it holds one) or between rounds (a fresh session)
 rather than wait, but not on its own turn to ask; none, one already moved (`fallback_pick` never asked), one on the
 role's own provider, one that can't take it, a repo made local-only or a `--local-only` task, and a keyhole that can't
 start (task.json put back) leave the provider's stop. Each guard was deleted in a copy and a test failed.

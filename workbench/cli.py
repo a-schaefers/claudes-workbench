@@ -748,7 +748,7 @@ def _busy_api(role: str, a, repo: Path, sub: str | None, tokens: int | None = No
 
 
 def _fallback_start(role: str, size: str, a, repo: Path, sub: str | None, stack, m: models.Model,
-                    routed: dict, tokens: int | None = None):
+                    routed: dict, tokens: int | None = None, held: bool = False):
     """The role's fallback (#1196) for a start whose role's API model ``m`` its provider holds now
     (api-health.json: out of credit, rate-limited or unreachable), the user's own choice in wb
     route: (m, state, why, routed) as pick_model gives one; "" when it doesn't apply (no fallback,
@@ -757,10 +757,13 @@ def _fallback_start(role: str, size: str, a, repo: Path, sub: str | None, stack,
     waits). The user's explicit exception to "an API role never runs on the GPU" (#1016) and to
     one model a role; at a start, and once in the runner (runner._fallback_move), nowhere else.
     An API fallback meets _busy_api's checks but one: --local-only and commands.json's local_only
-    and standing copy/siblings, the day cap. Its provider's slots all taken, it is still the
-    fallback's start: cmd_start's own slots_full path queues it (--queue) or exits 4, as for any
-    API start. Refused here, the 4th --queue start of a backlog exited 3, "wb never switches
-    models" (the review of #1196, 2026-11-24), where waiting for a slot is what --queue means."""
+    and standing copy/siblings, the day cap. Its provider's slots all taken, a start ``m`` can't
+    take (out of credit) is still the fallback's: cmd_start's own slots_full path queues it
+    (--queue) or exits 4, as for any API start. Refused here, the 4th --queue start of a backlog
+    exited 3, "wb never switches models" (the review of #1196, 2026-11-24), where waiting for a
+    slot is what --queue means. A ``held`` one (rate-limited or unreachable) runs on ``m`` and
+    waits it out in the round, as with no fallback: a full fallback can't take it, so it stays
+    there, where the move made a start that ran before exit 4 (the second review, 2026-11-24)."""
     if a.model or routed.get("via") != "api" or routed.get("busy") \
             or (routed.get("said") or "").startswith("asked for") or models.api_health(m.provider) is None:
         return ""
@@ -774,6 +777,9 @@ def _fallback_start(role: str, size: str, a, repo: Path, sub: str | None, stack,
     if not isinstance(got, tuple) or got[0].kind != "api":
         return got
     fb = got[0]
+    if held and not _api_slots_free(fb, getattr(a, "name", None)):
+        return (f"the {role} role's fallback {fb.id} can't take it: every one of "
+                f"{models.api_provider(fb)}'s {models.API_PARALLEL} slots is taken")
     if gap := _standing_gap(context.repo_conf(repo, sub), a, models.provider_name(fb), repo, sub):
         return f"the {role} role's fallback {fb.id} can't take it: {gap}"
     return got
@@ -1465,7 +1471,7 @@ def cmd_start(a):
     # unreachable starts it there instead, so an overnight --queue backlog drains
     fell = ""
     if not state["available"] and isinstance(moved := _fallback_start(
-            role, size, a, repo, _package(repo, Path(a.repo).resolve(), a.base), stack, m, routed, first), tuple):
+            role, size, a, repo, _package(repo, Path(a.repo).resolve(), a.base), stack, m, routed, first, held_up), tuple):
         fell = f"{m.id}: {state['why']}: {routes.FALLBACK_LINE} ({moved[0].id})"
         m, state, why, routed = moved
         held_up = False
@@ -1500,6 +1506,7 @@ def cmd_start(a):
     if api:
         held, waits = {}, False
         if slots_full and not a.queue:
+            _say(fell)  # the start was the role's fallback's: its provider's slots, not the role's
             die(_slots_full(m, a.name), 4)
     else:
         if not getattr(a, "bench", None):

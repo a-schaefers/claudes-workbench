@@ -37500,11 +37500,27 @@ class Fallbacks(Base):
             self.assertEqual(code, 4, err)
             self.assertIn("tasks already run on anthropic's API", err)
             self.assertNotIn("never switches", err)
+            self.assertIn(f"{routes.FALLBACK_LINE} ({HAIKU})", out)       # why anthropic's slots
             self.assertFalse(store.Task("t-full").exists)
             code, out, err = self.begin("t-q", "--role", "trivial", "--queue")
         self.assertEqual(code, 0, err)
         self.assertEqual((store.Task("t-q").spec["model"], store.Task("t-q").spec["fallback"]), (HAIKU, True))
         self.assertIn(f"{routes.FALLBACK_LINE} ({HAIKU})", out)
+
+    def test_a_held_provider_whose_api_fallback_has_no_free_slot_starts_on_the_roles_own_model(self):
+        # the second review of #1196 (2026-11-24): moved to the full fallback, a start that runs
+        # with no fallback, waiting out the limit in its round, exited 4 on anthropic's slots
+        self.on_api()
+        runner.models.note_api("deepseek", "rate_limited", "HTTP 429", time.time() + 60)
+        with mock.patch.object(cli.models, "api_slots_free", lambda provider: provider != "anthropic"):
+            code, out, err = self.begin("t-held", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        sp = store.Task("t-held").spec
+        self.assertEqual(sp["model"], "deepseek/deepseek-flash")
+        self.assertNotIn("fallback", sp)
+        self.assertIn(f"note: the trivial role's fallback {HAIKU} can't take it: every one of "
+                      "anthropic's", out)
+        self.assertNotIn(routes.FALLBACK_LINE, out)
 
     def test_an_api_fallback_meets_the_cap_a_repo_kept_local_and_commands_jsons_standing_copy(self):
         self.on_api()
@@ -37650,6 +37666,27 @@ class FallbackMoves(Base):
         self.assertFalse(task.round_dir(1).joinpath("prompt.md").read_text().startswith("You are picking"))
         self.assertIn(f"fallback: before round 1 {FB_PRIMARY} couldn't run (meterco is out of credit",
                       task.round_dir(1).joinpath("summary.md").read_text())
+
+    def test_a_task_waiting_for_a_slot_when_its_provider_runs_out_of_credit_moves_once_it_holds_the_slot(self):
+        # the review of #1196 (2026-11-24): a backlog past API_PARALLEL is in NoLease.__enter__
+        # when the running tasks meet the 402, past the check before the slot; without the one in
+        # it each waited ~900 s in NoLease.load
+        self.roles(FB_OTHER)
+        task = self.api_task("t-slotwait", FB_PRIMARY, "ok")
+        real = runner.models.NoLease.__enter__
+
+        def enter(lease):  # the 402 another task met while this one waited for the slot
+            if lease.m.id == FB_PRIMARY:
+                runner.models.note_api("meterco", "no_credit", "HTTP 402", time.time() + 600)
+            return real(lease)
+        with mock.patch.object(runner.models.NoLease, "__enter__", enter):
+            t = threading.Thread(target=runner.drive, args=(task,), daemon=True)
+            t.start()
+            t.join(25)
+        self.assertFalse(t.is_alive(), task.status.get("last"))
+        self.assertEqual(task.spec["model"], FB_OTHER)
+        [ev] = self.events(task, "fallback")
+        self.assertEqual((ev["moved"], ev["to"], ev["round"]), (True, FB_OTHER, 1))
 
     def test_a_provider_marked_out_of_credit_between_rounds_moves_the_next_round_in_a_fresh_session(self):
         self.roles(FB_OTHER)
