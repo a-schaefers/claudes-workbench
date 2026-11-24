@@ -15653,6 +15653,65 @@ class ClaudeSpend(Base):
         ])
         self.assertEqual(spend.usage(t3)["output"], 3 + 5 + 11 + 13 + 400 + 17 + 19 + 23)
 
+    def test_reading_other_files_after_wb_start_ends_the_tasks_charge(self):
+        # #1123 (2026-11-23): only an outside edit ended the charge, so a turn that went on to read
+        # other code after `wb start` charged it all to the task: 5344K on a trivial trial
+        from workbench import spend
+        t = self.task("t-x")
+
+        def reads(mid, at, out, tool="Read", **given):
+            return [{"type": "assistant", "timestamp": at, "cwd": "/r", "message": {
+                "id": mid, "role": "assistant", "usage": {"output_tokens": out},
+                "content": [{"type": "tool_use", "name": tool, "input": given}]}}]
+        self.transcript([
+            _turn("start it, then look into the keyhole", "2026-11-17T10:00:00Z"),
+            *_call("r0", "2026-11-17T10:00:01Z", 3),                        # reading for the spec
+            *_call("st", "2026-11-17T10:00:02Z", 5, "wb start t-x --trial --spec s.md"),
+            *_call("say", "2026-11-17T10:00:03Z", 7),                       # its reply: still t-x's
+            *(row for i in range(20)                                        # other code: nobody's
+              for row in reads(f"o{i}", f"2026-11-17T10:00:{10 + i}Z", 1000, file_path=f"/r/src/m{i}.py")),
+            *reads("g", "2026-11-17T10:00:40Z", 1000, "Grep", pattern="keyhole"),     # the cwd, /r
+            *_call("b", "2026-11-17T10:00:41Z", 1000, "grep -rn usage /r/src"),
+            _turn("[workbench] Task `t-x` is ready for review.", "2026-11-17T10:20:00Z"),
+            *_call("rp", "2026-11-17T10:20:01Z", 11, "wb report t-x"),
+            *reads("w", "2026-11-17T10:20:02Z", 13, file_path=str(t.worktree / "a.py")),  # its own
+            *reads("ctx", "2026-11-17T10:20:03Z", 17, file_path="/r/src/caller.py"),     # for the review
+            *_call("acc", "2026-11-17T10:20:04Z", 19, "wb accept t-x -m 'feat: x'"),
+        ])
+        self.assertEqual(spend.usage(t)["output"], 3 + 5 + 7 + 11 + 13 + 17 + 19)
+
+    def test_reading_other_files_with_bash_after_wb_start_ends_the_tasks_charge(self):
+        # #1123 (2026-11-23, the review of the first fix): only the Read, Grep and Glob tools ended
+        # the charge, so a turn that read with Bash (`sed -n`, `grep`, a probe), as bypass mode
+        # says to, still charged all 21 calls after `wb start` to the task
+        from workbench import spend
+        t = self.task("t-x")
+
+        def sh(mid, at, out, command, cwd="/r"):
+            return [{"type": "assistant", "timestamp": at, "cwd": cwd, "message": {
+                "id": mid, "role": "assistant", "usage": {"output_tokens": out},
+                "content": [{"type": "tool_use", "name": "Bash", "input": {"command": command}}]}}]
+        self.transcript([
+            _turn("start it, then look into the keyhole", "2026-11-17T10:00:00Z"),
+            *sh("r0", "2026-11-17T10:00:01Z", 3, "sed -n 1,40p /r/spec-notes.md"),   # for the spec
+            *_call("st", "2026-11-17T10:00:02Z", 5, "wb start t-x --trial --spec s.md"),
+            *_call("say", "2026-11-17T10:00:03Z", 7),                       # its reply: still t-x's
+            *(row for i in range(20)                                        # other code: nobody's
+              for row in sh(f"o{i}", f"2026-11-17T10:00:{10 + i}Z", 1000, f"sed -n 1,80p /r/src/m{i}.py")),
+            *sh("py", "2026-11-17T10:00:40Z", 1000, "python3 -c 'import json; print(1)'"),
+            _turn("[workbench] Task `t-x` is ready for review.", "2026-11-17T10:20:00Z"),
+            *_call("rp", "2026-11-17T10:20:01Z", 11, "wb report t-x"),
+            *sh("d", "2026-11-17T10:20:02Z", 13, f"git -C {t.worktree} diff HEAD"),   # its own
+            *sh("in", "2026-11-17T10:20:03Z", 17, "python3 -m unittest", cwd=str(t.worktree)),
+            *sh("rd", "2026-11-17T10:20:04Z", 1000, "cat /r/README.md"),     # then other work
+            _turn("accept it", "2026-11-17T10:30:00Z"),
+            *sh("ctx", "2026-11-17T10:30:01Z", 19, "grep -n caller /r/src/caller.py"),  # for the review
+            *_call("acc", "2026-11-17T10:30:02Z", 23, "wb accept t-x -m 'feat: x'"),
+        ])
+        self.assertEqual(spend.usage(t)["output"], 3 + 5 + 7 + 11 + 13 + 17 + 19 + 23)
+        self.assertTrue(spend._shell_theirs("cat ~/.local/state/workbench/tasks/t-x/report.md", "/r", {"t-x"}))
+        self.assertFalse(spend._shell_theirs("cat /s/tasks/t-x-2/report.md", "/r", {"t-x"}))
+
     def test_the_weights_count_writes_reads_and_output_against_input(self):
         from workbench import spend
         self.assertEqual(spend.weighted({"input": 100, "cache_write_5m": 100, "cache_write_1h": 100,
@@ -31811,6 +31870,84 @@ class ApiSpend(Base):
         ev, _ = store.read_jsonl(task.dir / "events.jsonl")
         self.assertFalse([e for e in ev if e.get("round") == 2 and e["kind"] == "step"])
 
+    def test_an_api_task_that_never_sent_a_request_records_0_not_no_price(self):
+        # #1106 (2026-11-23): a bad --setup, or a key the provider refused, on a priced model
+        # closed as "paid: unknown (no price for this model)", and the week as "1 with no price"
+        from workbench import results, savings
+        runner.models.hosted(fresh=True)
+        self.assertEqual(results.catalog_price(SPEND_M), 1.0)
+        setup = self.api_task("t-nosetup", SPEND_M, "ok", "--setup", "false")
+        runner.drive(setup)
+        self.assertFalse(results.ran(setup))
+        refused = self.api_task("t-refused", SPEND_M, "ok", WB_FAKE_API="meterco=auth")
+        runner.drive(refused)
+        self.assertTrue(results.ran(refused))
+        for t in (setup, refused):
+            self.assertEqual(results.api_usage(t)["cost"], 0.0, t.name)
+            self.assertEqual(results.api_usage(t)["source"], "none", t.name)
+            out = run_wb("discard", t.name, "--reason", "test")
+            self.assertNotIn("no price", out, t.name)
+        a = savings.api_totals(store.results(trials=True))
+        self.assertEqual((a["tasks"], a["unknown"], a["cost"]), (2, 0, 0.0))
+        self.assertNotIn("no price", run_wb("savings", "--api"))
+        # #1106, the review: their $0 is spent money in the totals, never a price a task: three
+        # tasks at $0.50 and these two read $0.50 a task, not $0.30 (wb stats, the weekly check)
+        from workbench import cli, stats
+        nothing = store.results(trials=True)
+        self.assertEqual({r["api"]["source"] for r in nothing}, {"none"})
+        paid = [{"kind": "api", "model": SPEND_M, "provider": "meterco", "ts": store.now(),
+                 "outcome": "accepted", "task": f"p{i}", "api": {"cost": 0.5, "source": "meter"}}
+                for i in range(3)]
+        rows = paid + [{**r, "model": SPEND_M, "ts": store.now()} for r in nothing]
+        self.assertEqual(results.paid_cell(rows), "$0.50")                   # not ~$0.30
+        self.assertEqual(results.paid_cell(nothing), "?")
+        self.assertEqual(stats._kind_stats(rows)["paid"], 0.5)
+        self.assertNotIn("paid", stats._kind_stats(nothing))
+        with mock.patch.object(cli.store, "results", return_value=rows):
+            self.assertIn("~$0.50/task", cli._api_record(SPEND_M, 0))
+        self.assertEqual(savings.api_totals(rows)["cost"], 1.5)               # the totals keep them
+        self.assertEqual(savings.api_totals(rows)["tasks"], 5)
+
+    def test_a_priced_model_whose_figure_never_came_back_says_so_not_no_price(self):
+        # #1106: a response named its model (it may have been billed), yet no figure reached the
+        # meter or the steps: unknown, but the model has a price
+        from workbench import results, savings
+        runner.models.hosted(fresh=True)
+        t = self.api_task("t-cut", SPEND_M, "ok")
+        t.set_status(session="ses_x", served={"model": "priced-1", "by": None})
+        with mock.patch("workbench.transcript.export", return_value={}):
+            u = results.api_usage(t)
+        self.assertEqual((u["cost"], u["source"]), (None, "unrecorded"))
+        row = {"kind": "api", "provider": "meterco", "model": SPEND_M, "api": u}
+        self.assertEqual(savings.line(row), "paid: unknown (no figure recorded)")
+        # #1106, the review: the totals still said "1 with no price" and "meterco no price (1)"
+        from workbench import cli, stats
+        bare = {"kind": "api", "provider": "bareco", "model": "bareco/x", "api": {"cost": None, "source": "unknown"}}
+        a = savings.api_totals([{**row, "ts": store.now()}, {**bare, "ts": store.now()}])
+        self.assertEqual((a["unknown"], a["unrecorded"]), (2, 1))
+        self.assertEqual(savings.api_summary(a), "api: 2 task(s) · 1 with no price + 1 with no figure recorded")
+        report = savings.api_report(a, "week")
+        self.assertIn("2 task(s) closed, 1 with no price, 1 with no figure recorded", report)
+        self.assertIn("by provider: bareco no price (1) · meterco no figure (1)", report)
+        self.assertEqual(stats.api_week_line(a),
+                         "api this week: 2 task(s), 1 with no price, 1 with no figure recorded")
+        with mock.patch.object(cli.store, "results", return_value=[{**row, "ts": store.now()}]):
+            scout = "\n".join(cli.scout_api_lines())
+        self.assertIn("; task(s) 1 with no figure recorded", scout)
+        self.assertNotIn("no price", scout)
+
+    def test_a_plan_task_whose_model_left_hosted_json_stays_plan_usage(self):
+        # #1106: _plan read only the id and hosted.json; the meter had booked it as plan usage
+        from workbench import results
+        t = self.api_task("t-gone", "ollama-cloud/left-1", "ok")
+        t.set_status(session="ses_x", api={"usd": None, "metered": 0.0, "source": "opencode",
+                                           "tok": {"in": 5}, "plan": "ollama-cloud"})
+        u = results.api_usage(t)
+        self.assertEqual((u["source"], u["plan"], u["cost"]), ("plan", "ollama-cloud", None))
+        plan = {"kind": "api", "api": {"cost": None, "source": "plan", "plan": "ollama-cloud"}}
+        self.assertEqual(results.paid_cell([plan, plan]), "plan")             # not `?`
+        self.assertEqual(results.paid_cell([plan, {"kind": "api", "api": {"cost": 0.2}}]), "$0.20")
+
 
 class ApiSpendKeyhole(_KeyholeTest):
     """The keyhole's part of the spend cap (#1019): one usage per response, close(reason), room."""
@@ -32874,6 +33011,31 @@ class ApiStats(Base):
         store.write_json(t.dir / "status.json", {"phase": "review", "round": 1, **(status or {})})
         return t
 
+    def booked(self, usd_, ts, task="a", provider="deepseek"):
+        """A step row in the day ledger (meter.py's spend-api.jsonl), on ``ts``'s local day."""
+        from workbench import meter
+        store.append_jsonl(meter.ledger_path(), {
+            "ts": ts, "day": meter.day(ts), "kind": "step", "task": task, "round": 1,
+            "provider": provider, "model": f"{provider}/flash", "usd": usd_, "source": "opencode"})
+
+    def test_wb_savings_api_by_day_follows_the_ledger_and_counts_open_tasks(self):
+        # #1094 (2026-11-23): by day and the period's money came from results rows, written at a
+        # close and dated by it: a task spent yesterday and accepted today, and an open one, read
+        # $3 today and $3 for the week where the ledger, the cap's and the pane's, said $2 and $5
+        from workbench import cli, meter
+        now = store.now()
+        self.booked(3.0, now - 86400, task="night", provider="deepinfra")
+        self.booked(2.0, now, task="open-one", provider="deepinfra")
+        self.rows(self.api_row(cost=3.0, ts=now, task="night", provider="deepinfra"))
+        out = run_wb("savings", "--api").splitlines()
+        self.assertEqual(out[0], "api, the last 7 days: 1 task(s) closed, $3.00")
+        self.assertEqual(out[2], "  spent: $5.00, $2.00 today (the day ledger: open tasks and bench replays in)")
+        yesterday, today = meter.day(now - 86400)[5:], meter.day(now)[5:]
+        self.assertEqual(out[3], f"  by day: {yesterday} $3.00 · {today} $2.00")
+        j = json.loads(run_wb("savings", "--api", "--json"))["spent"]
+        self.assertEqual((j["usd"], j["today"], j["by_provider"]), (5.0, 2.0, {"deepinfra": 5.0}))
+        self.assertEqual(j["today"], cli._spend_today()["usd"])            # the pane's figure
+
     def test_an_accepted_api_task_leaves_the_gpu_score_as_the_gpu_task_alone_and_gets_its_own_line(self):
         from workbench import savings
         self.rows(self.gpu_row())
@@ -32913,16 +33075,20 @@ class ApiStats(Base):
                   self.api_row(cost=9.0, ts=now - 20 * 86400))                       # before the week
         store.append_jsonl(bench.runs_file(), {"ts": now, "outcome": "passed", "kind": "api",
                                                "model": "deepseek/flash", "paid": {"cost": 0.3, "source": "opencode"}})
+        for ago, usd_ in ((2, 0.30), (1, 0.54), (0, 0.43), (0, 0.3), (20, 9.0)):   # the ledger's
+            self.booked(usd_, now - ago * 86400)
         out = run_wb("savings", "--api", "--week").splitlines()
         # the providers once, on their own line (#1022's review: the header said them too)
-        self.assertEqual(out[0], "api, the last 7 days: 3 task(s), $1.27 (incl. 1 trial)")
+        self.assertEqual(out[0], "api, the last 7 days: 3 task(s) closed, $1.27 (incl. 1 trial)")
         self.assertEqual(out[1], "  by provider: deepseek $0.84 (2) · anthropic $0.43 (1)")
-        self.assertTrue(out[2].startswith("  by day: "), out)
-        self.assertEqual(out[2].count("$"), 3)
-        self.assertEqual(out[3], "  bench replays: $0.30 (1)")
+        self.assertEqual(out[2], "  spent: $1.57, $0.73 today (the day ledger: open tasks and bench "
+                                 "replays in)")
+        self.assertTrue(out[3].startswith("  by day: "), out)
+        self.assertEqual(out[3].count("$"), 3)
+        self.assertEqual(out[4], "  bench replays: $0.30 (1)")
         j = json.loads(run_wb("savings", "--api", "--week", "--json"))
         self.assertEqual(j["by_provider"]["deepseek"], {"tasks": 2, "cost": 0.84, "unknown": 0})
-        self.assertEqual(round(sum(j["by_day"].values()), 2), 1.27)
+        self.assertEqual(round(sum(j["spent"]["by_day"].values()), 2), 1.57)
         self.assertEqual((j["trials"], j["bench"]["cost"]), (1, 0.3))
         self.assertEqual(json.loads(run_wb("savings", "--json"))["api"]["tasks"], 3)
 
@@ -32943,6 +33109,36 @@ class ApiStats(Base):
         self.assertEqual(lines["zen/flash"][-2], "~$0.20")
         self.assertTrue(all(len(x) <= 120 for x in out.splitlines() if x.startswith(("model ", "ollama/"))))
         self.assertIn("api this week: 5 task(s), $0.44 (deepseek $0.24, zen $0.20), 2 with no price", out)
+
+    def test_a_served_model_other_than_the_one_asked_reaches_the_results_row(self):
+        # #1122 (2026-11-23): only `served.by` reached the row, so a provider's swap was lost at close
+        from workbench import results
+        t = self.api_task("t-drift", {"served": {"model": "x-0901", "by": "Fireworks"}},
+                          model="prov/x", provider="prov")
+        u = results.api_usage(t)
+        self.assertEqual((u["served_model"], u["backend"]), ("x-0901", "Fireworks"))
+        for same in ("x", "prov/x", "vendor/X"):                     # an echo of the id asked for
+            t.set_status(served={"model": same, "by": None})
+            self.assertNotIn("served_model", results.api_usage(t), same)
+
+    def test_an_api_only_week_and_backlog_name_the_api_line_and_sum_the_batches_dollars(self):
+        # #1121 (2026-11-23): both said "an accepted task needs its Claude usage and its diff" of
+        # tasks that had both, and wb backlog never summed the batch's dollars
+        for name, cost in (("n-1", 0.81), ("n-2", 0.42)):
+            self.api_task(name, {"phase": "accepted"}, backlog="night")
+            self.rows(self.api_row(cost=cost, task=name, provider="deepinfra"))
+        first = run_wb("savings").splitlines()[0]
+        self.assertEqual(first, "the last 7 days: no GPU task to compare (API tasks are below, apart "
+                                "from the score)")
+        out = run_wb("backlog", "night").splitlines()
+        self.assertEqual(out[-2], "the batch: no GPU task to compare (API tasks are below, apart from "
+                                  "the score)")
+        self.assertTrue(out[-1].startswith("api: 2 task(s) · $1.23 (deepinfra $1.23)"), out)
+        j = json.loads(run_wb("backlog", "night", "--json"))
+        self.assertEqual((j["totals"]["tasks"], j["totals"]["api"]["tasks"], j["totals"]["api"]["cost"]),
+                         (0, 2, 1.23))
+        from workbench import savings                     # no task at all: the reason stands
+        self.assertIn("needs its Claude usage", savings.summary(savings.totals([]), "week"))
 
     def test_the_stats_feed_has_the_weeks_api_money_by_provider_and_energy_leaves_api_rows_out(self):
         self.rows(self.gpu_row(gpu_wh=30.0), self.api_row(gpu_wh=500.0),   # a stray reading: not ours
@@ -32989,7 +33185,8 @@ class ApiStats(Base):
         t = self.api_task("t-two", {"sessions": ["ses_first"], "session": "ses_second"})
         self.assertEqual(results.api_usage(t)["cost"], 0.42)       # the handover's session counted too
         os.environ["FAKE_COST"] = "0"                               # OpenCode said 0, no catalog price
-        t = self.api_task("t-zero", {"session": "ses_zero"})
+        # a response came back (it named its model): with none, nothing was sent, $0 (#1106)
+        t = self.api_task("t-zero", {"session": "ses_zero", "served": {"model": "deepseek-flash", "by": None}})
         self.assertEqual(results.api_usage(t), {"cost": None, "source": "unknown",
                                                 "tokens": dict.fromkeys(results.TOKEN_KEYS, 0)})
         t.set_status(api={"usd": 0.05}, served={"model": "x", "by": "baseten"})  # the meter (#1019)
@@ -33185,7 +33382,7 @@ class ApiStats(Base):
         self.assertEqual((week["tasks"], week["plan"]), (1, 1))
         self.assertEqual(stats.api_week_line(week), "api this week: 1 task(s), 1 on plan usage")
         self.assertEqual(run_wb("savings", "--api").splitlines()[:2],
-                         ["api, the last 7 days: 1 task(s), 1 on plan usage",
+                         ["api, the last 7 days: 1 task(s) closed, 1 on plan usage",
                           "  by provider: opencode-go plan usage (1)"])
         self.assertIn("api: 1 task(s) · 1 on plan usage", run_wb("savings"))
         self.assertTrue(savings.line(store.results()[0]).endswith("· plan usage (opencode-go)"))
@@ -33226,9 +33423,10 @@ class ApiStats(Base):
         free = results.api_usage(self.api_task("t-free0", {"session": "ses_f"}, model="opencode/big-pickle-free",
                                                provider="opencode"))
         self.assertEqual((free["cost"], free["source"]), (0.0, "opencode"))   # a true 0
-        priced = results.api_usage(self.api_task("t-priced0", {"session": "ses_p"}, model="acme/coder-flash",
-                                                 provider="acme"))
-        self.assertEqual((priced["cost"], priced["source"]), (None, "unknown"))  # never a false 0
+        priced = results.api_usage(self.api_task("t-priced0", {"session": "ses_p", "served": {"model": "coder-flash"}},
+                                                 model="acme/coder-flash", provider="acme"))
+        # never a false 0; unknown, though not for want of a price (#1106)
+        self.assertEqual((priced["cost"], priced["source"]), (None, "unrecorded"))
 
     def test_a_session_whose_export_fails_is_filled_from_the_meter_beside_the_ones_that_exported(self):
         # #1022's review: one failed export dropped the whole sum, the sessions that exported
@@ -33740,6 +33938,14 @@ class RoleResolution(Base):
             self.assertFalse(task.round_dir(2).exists())
 
 
+def _ledger_step(usd_: float, ts: float, task: str, provider: str = "deepseek") -> None:
+    """A step row in the day ledger (meter.py's spend-api.jsonl), on ``ts``'s local day."""
+    from workbench import meter
+    store.append_jsonl(meter.ledger_path(), {
+        "ts": ts, "day": meter.day(ts), "kind": "step", "task": task, "round": 1, "provider": provider,
+        "model": f"{provider}/deepseek-flash", "usd": usd_, "source": "opencode"})
+
+
 class FirstRunApi(Base):
     """First run and the skill for API roles (#1024): wb setup sees the keys OpenCode holds, a
     stored key makes the GPU optional, one wb route sets several roles under one yes, the
@@ -34028,6 +34234,7 @@ class FirstRunApi(Base):
             store.append_jsonl(store.home() / "results.jsonl", {
                 "ts": now - 3600, "task": f"t-{i}", "outcome": outcome, "model": "deepseek/deepseek-flash",
                 "kind": "api", "role": "trivial", "provider": "deepseek", "api": {"cost": 0.1, "source": "opencode"}})
+            _ledger_step(0.1, now - 3600, f"t-{i}")
         (store.home() / "tasks" / "t-0").mkdir(parents=True)
         store.append_jsonl(store.home() / "tasks" / "t-0" / "events.jsonl",
                            {"ts": now, "round": 1, "kind": "rate_limited", "text": "x"})
@@ -34039,7 +34246,7 @@ class FirstRunApi(Base):
         self.assertEqual(lines[5:7], ["api models in roles (the last 30 days)",
                                       "  deepseek/deepseek-flash  3 task(s) · 66% accepted"
                                       + " · ~$0.10/task · 1 rate-limited round(s)"])
-        # the money over 7 days, beside the cap (savings.api_totals, #1022)
+        # the money over 7 days, beside the cap (the day ledger's, savings.spent, #1094)
         self.assertIn("api spend, the last 7 days: $0.30 of $5/day at most (deepseek $0.30)", lines)
         at = lines.index("connected providers (models with tool calls)")
         self.assertEqual(lines[at + 1:], ["  anthropic: 1 (can't run: anthropic is signed in with OAuth)",
@@ -34060,10 +34267,27 @@ class FirstRunApi(Base):
         store.append_jsonl(store.home() / "results.jsonl", {
             "ts": store.now() - 3600, "task": "t-0", "outcome": "accepted", "model": "deepseek/deepseek-flash",
             "kind": "api", "role": "trivial", "provider": "deepseek", "api": {"cost": 0.004, "source": "opencode"}})
+        _ledger_step(0.004, store.now() - 3600, "t-0")
         lines = cli.scout_api_lines()
         self.assertIn("  deepseek/deepseek-flash  1 task(s) · 100% accepted · ~$0.004/task", lines)
         self.assertIn("api spend, the last 7 days: $0.004 of $5/day at most (deepseek $0.004)", lines)
         self.assertIn("$0.004", run_wb("savings", "--api"))
+
+    def test_scouts_api_spend_is_the_day_ledgers_as_wb_savings_api_says_it(self):
+        # #1094, the review (2026-11-23): wb savings --api took the ledger's figure ($5.00: an open
+        # task's $2 in) while scout's line beside the day cap still summed the closed tasks' $3.00
+        self.catalog(ROUTES_CATALOG[-3:], [key_row("deepseek", "DeepSeek", STORED)])
+        runner.models.hosted(fresh=True)
+        self.assertEqual(self.wb("route", "trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)
+        now = store.now()
+        store.append_jsonl(store.home() / "results.jsonl", {
+            "ts": now - 3600, "task": "closed", "outcome": "accepted", "model": "deepseek/deepseek-flash",
+            "kind": "api", "role": "trivial", "provider": "deepseek", "api": {"cost": 3.0, "source": "opencode"}})
+        _ledger_step(3.0, now - 7200, "closed")
+        _ledger_step(2.0, now - 60, "open-one")
+        self.assertIn("api spend, the last 7 days: $5.00 of $5/day at most (deepseek $5.00)",
+                      cli.scout_api_lines())
+        self.assertIn("  spent: $5.00,", run_wb("savings", "--api"))
 
     def test_scout_has_no_api_section_with_no_provider_and_no_api_role(self):
         cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())

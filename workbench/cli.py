@@ -4551,20 +4551,21 @@ def cmd_savings(a):
         print(json.dumps({"period": period, **t, "score": savings.score(t), "price": savings.price(),
                           "api": savings.api_totals(store.results(trials=True), since)}))
     else:
-        print(savings.summary(t, period))
-        if api := savings.api_summary(savings.api_totals(store.results(trials=True), since)):
+        api_t = savings.api_totals(store.results(trials=True), since)
+        print(savings.summary(t, period, api_t["tasks"]))
+        if api := savings.api_summary(api_t):
             print(api)
 
 
 def _api_savings(a, period: str, since: float) -> None:
-    """`wb savings --api`: the period's API money by provider and day, trials in, and the bench's
-    replays (bench.paid_since)."""
+    """`wb savings --api`: the period's closed API tasks by provider, trials in, the day ledger's
+    spend and by day (savings.spent, #1094), and the bench's replays (bench.paid_since)."""
     t = savings.api_totals(store.results(trials=True), since)
-    replays = bench.paid_since(since)
+    replays, paid = bench.paid_since(since), savings.spent(since)
     if a.json:
-        print(json.dumps({"period": period, **t, "bench": replays}))
+        print(json.dumps({"period": period, **t, "bench": replays, "spent": paid}))
     else:
-        print(savings.api_report(t, period, replays))
+        print(savings.api_report(t, period, replays, paid))
 
 
 def cmd_backlog(a):
@@ -4601,8 +4602,10 @@ def cmd_backlog(a):
                     "branch": t.spec.get("branch") if st.get("phase") == "accepted" else None,
                     "saving": savings.line(row) if row else None})
     batch = savings.totals([r for t in tasks if (r := rows.get(t.name)) and not r.get("trial")])
+    # the batch's API money, trials in as wb savings counts it: never summed (#1121, 2026-11-23)
+    api_t = savings.api_totals([r for t in tasks if (r := rows.get(t.name))])
     if a.json:
-        print(json.dumps({"backlog": a.name, "tasks": out, "totals": batch}))
+        print(json.dumps({"backlog": a.name, "tasks": out, "totals": {**batch, "api": api_t}}))
         return
     phases = {}
     for o in out:
@@ -4612,7 +4615,9 @@ def cmd_backlog(a):
     for o in out:
         tail = " · ".join(x for x in (o["branch"], o["saving"]) if x)
         print(f"{o['task']:22} {o['phase']:9} {o['rounds']:>3} {o['minutes']:>5.0f}m  {tail}".rstrip())
-    print(savings.summary(batch, "the batch"))
+    print(savings.summary(batch, "the batch", api_t["tasks"]))
+    if api := savings.api_summary(api_t):
+        print(api)
 
 
 def cmd_tune(a):
@@ -4860,14 +4865,14 @@ def _role_where(doc: dict, r: str) -> str:
 
 
 def _api_record(mid: str, since: float) -> str:
-    """An API model's real tasks since ``since``: tasks, accepted, paid a task (results.row_cost,
+    """An API model's real tasks since ``since``: tasks, accepted, paid a task (results.task_cost,
     #1019), rounds a provider rate-limited."""
     rows = [r for r in store.results() if r.get("model") == mid and (r.get("ts") or 0) >= since]
     if not rows:
         return "no real tasks yet"
     out = [f"{len(rows)} task(s)", f"{100 * sum(r.get('outcome') == 'accepted' for r in rows) // len(rows)}% accepted"]
-    if paid := [c for r in rows if (c := results.row_cost(r)) is not None]:
-        out.append(f"~{savings.usd(sum(paid) / len(paid))}/task")  # as wb stats' `paid` says it
+    if paid := [c for r in rows if (c := results.task_cost(r)) is not None]:
+        out.append(f"~{savings.usd(sum(paid) / len(paid))}/task")  # as wb stats' `paid` (#1106)
     limited = set()
     for r in rows:
         evs, _ = store.read_jsonl(store.home() / "tasks" / str(r.get("task")) / "events.jsonl")
@@ -4898,14 +4903,18 @@ def scout_api_lines() -> list[str]:
         out.append(f"api models in roles (the last {SCOUT_API_DAYS} days)")
         out += [f"  {mid}  {_api_record(mid, now - SCOUT_API_DAYS * 86400)}" for mid in mids]
     cap = f"{routes.money(doc['day_usd'])}/day at most" if doc["day_usd"] is not None else "no day cap"
-    t = savings.api_totals(store.results(trials=True), now - SCOUT_SPEND_DAYS * 86400)  # #1022
+    # the day ledger's dollars, as wb savings --api's `spent` and the cap beside them count them:
+    # the closed tasks' said $3.00 for a week the ledger said $5.00 (#1094, 2026-11-23); the
+    # tasks with no known cost are the closed rows' (#1022)
+    since = now - SCOUT_SPEND_DAYS * 86400
+    paid, t = savings.spent(since), savings.api_totals(store.results(trials=True), since)
     # savings.usd, as wb savings --api and the pane say the same dollars: :.2f said $0.00 for a
     # task paid a fraction of a cent (wave 2's merge)
-    by = ", ".join(f"{p} {savings.usd(v['cost'])}" for p, v in sorted(t["by_provider"].items(), key=lambda x: -x[1]["cost"])
-                   if v["cost"])
-    out.append(f"api spend, the last {SCOUT_SPEND_DAYS} days: {savings.usd(t['cost'])} of {cap}"
+    by = ", ".join(f"{p} {savings.usd(v)}" for p, v in sorted(paid["by_provider"].items(), key=lambda x: -x[1])
+                   if v)
+    out.append(f"api spend, the last {SCOUT_SPEND_DAYS} days: {savings.usd(paid['usd'])} of {cap}"
                + (f" ({by})" if by else "")
-               + (f"; {t['unknown']} task(s) with no price" if t.get("unknown") else ""))
+               + (f"; task(s) {', '.join(u)}" if (u := savings.unknown_parts(t)) else ""))  # #1106
     by_prov: dict[str, list] = {}
     for m in hosted.values():
         by_prov.setdefault(m.provider, []).append(m)
