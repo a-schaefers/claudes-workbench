@@ -8112,7 +8112,12 @@ class UsersMcpServers(Base):
         log_dir.symlink_to(elsewhere)
         self.assertEqual(runner.mcp_unreached(task, 0), {})
         log_dir.unlink()
-        # a log it can't read (no line for workbench's own server) says nothing
+        # a round whose part of the log has no line for workbench's own server says nothing: the
+        # log is back, round 1's lines before where round 2 reads from, so only the guard keeps a
+        # false "never connected" out (with the log gone it said nothing for its absence alone:
+        # #1202's review, 2026-11-24)
+        shutil.copytree(elsewhere, log_dir)
+        self.assertEqual(set(runner.mcp_unreached(task, 0)), {"docs"})
         os.environ["FAKE_NO_MCP"] = "1"
         run_wb("feedback", "t-dead", "--text", "Again.")
         wait_phase("t-dead", {"review"})
@@ -8154,11 +8159,66 @@ class UsersMcpServers(Base):
             self.servers({"docs": {"type": "local", "command": [
                 str(py / ".venv" / "bin" / "python"), "-m", "schema_mcp"]}})
             self.assertIn(base_dir, context.mcp_roots(task))   # the base interpreter's install too
-            # on an API task never the checkout, which its lane hides (#1091): the bare directory
+            # on an API task never the checkout, which its lane hides (#1091), nor a directory in it
             (py / ".venv" / "bin" / "mcp").write_text("")
             api = types.SimpleNamespace(spec={"mcp": ["docs"], "via": "api", "repo": str(py)})
             self.servers({"docs": {"type": "local", "command": [str(py / ".venv" / "bin" / "mcp")]}})
-            self.assertEqual(context.mcp_roots(api), {str(py / ".venv")})
+            self.assertEqual(context.mcp_roots(api), set())
+
+    def test_on_an_api_task_no_root_is_the_checkout_lies_in_it_or_holds_it(self):
+        # #1202's review (2026-11-24): only the widening to a project was kept off the checkout,
+        # so a server in the repo gave its directory (tools/mcp, with its .env) and the repo named
+        # as an argument gave the whole checkout, which #1091 hides from an API task's provider
+        home = Path(os.path.realpath(self.tmp.name)) / "home"
+        app = home / "repos" / "app"
+        (app / "tools" / "mcp").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(app)], check=True)
+        (app / "package.json").write_text("{}")
+        (app / "tools" / "mcp" / "server.js").write_text("")
+        (app / "tools" / "mcp" / ".env").write_text("DB_PASSWORD=CANARY-VALUE\n")
+        servers = {"schema": ["node", str(app / "tools" / "mcp" / "server.js")],
+                   "fs": ["mcp-fs", str(app)], "up": ["mcp-fs", str(home / "repos")]}
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            self.servers({n: {"type": "local", "command": c} for n, c in servers.items()})
+            gpu = types.SimpleNamespace(spec={"mcp": list(servers), "repo": str(app)})
+            self.assertEqual(context.mcp_roots(gpu), {str(app), str(home / "repos")})  # its own lane reads it
+            for name in servers:
+                api = types.SimpleNamespace(spec={"mcp": [name], "via": "api", "repo": str(app)})
+                self.assertEqual(context.mcp_roots(api), set(), name)
+            notes = context.mcp_checkout_notes(list(servers), [app])
+        self.assertEqual(len(notes), 3, notes)
+        self.assertIn("MCP server 'schema' names", notes[0])
+        self.assertIn("name it relative to the repo: `tools/mcp/server.js`", notes[0])
+        self.assertIn("name it relative to the repo: `.`", notes[1])
+        self.assertIn("which holds the repo", notes[2])
+
+    def test_wb_start_and_doctor_say_a_server_named_in_the_repo_goes_by_a_path_relative_to_it(self):
+        # #1202's review (2026-11-24): an API task's lane hides the checkout, so the server died
+        # at its start; OpenCode starts a local server in the task's worktree, where a path
+        # relative to the repo finds the worktree's copy
+        srv = self.repo / "tools" / "mcp" / "server.js"
+        srv.parent.mkdir(parents=True)
+        srv.write_text("")
+        self.servers({"schema": {"type": "local", "command": ["node", str(srv)]},
+                      "fs": {"type": "local", "command": ["mcp-fs", str(self.repo)]}})
+        self.commands({"mcp": ["schema"], "repos": {str(self.repo): {"mcp": ["fs"]}}})
+        ApiHarness.catalog(self, API_CATALOG)
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {}})
+        os.environ["FAKE_AUTH_EXPORT"] = json.dumps([
+            {"id": "cred_deepinfra", "integrationID": "deepinfra", "label": "main", "active": True,
+             "value": {"type": "key", "key": _ApiTask.CANARY}}])
+        out = _ApiTask.start_api(self, "t-mcp-api", "ok", spawn=False)
+        self.assertIn("note: MCP server 'schema' names", out)
+        self.assertIn("relative to the repo: `tools/mcp/server.js`", out)
+        self.assertIn("note: MCP server 'fs' names", out)
+        with mock.patch.object(cli, "spawn_runner"):   # a GPU task's lane reads the repo
+            self.assertNotIn("MCP server 'schema' names", self.start("t-mcp-gpu", "ok"))
+        buf = io.StringIO()
+        with redirect_stdout(buf), contextlib.suppress(SystemExit):
+            cli.main(["doctor"])
+        out = buf.getvalue()
+        self.assertIn("--  MCP server 'schema' names", out)
+        self.assertIn("--  MCP server 'fs' names", out)
 
     def test_a_server_in_opencodes_1x_shape_is_stubbed_and_can_be_named_too(self):
         from workbench import runner

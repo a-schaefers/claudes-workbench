@@ -3069,9 +3069,12 @@ def mcp_roots(task: store.Task) -> set[str]:
     2026-11-24): `srv/.venv/bin/python -m schema_mcp` resolved to the base interpreter, so
     Python started without its venv, and `node srv/dist/index.js` read dist/ without
     srv/node_modules; each server died at its start in the lane. Never `/` nor the home
-    directory itself."""
+    directory itself, and on an API task never one that is, lies in or holds the checkout."""
     home = os.path.realpath(Path.home())
-    # on an API task never the checkout or a directory holding it, which its lane hides (#1091)
+    # on an API task never the checkout, a directory in it or one holding it, which its lane
+    # hides (#1091): only the widening was kept from it, and a server named in the repo
+    # (`node <repo>/tools/mcp/server.js`) or the repo itself as a server's argument made its
+    # gitignored .env one `cat` away from the provider again (#1202's review, 2026-11-24)
     checkout = _repo_parts(task)[0] if task.spec.get("via") == "api" else set()
     out = set()
     for entry in task_mcp(task).values():
@@ -3086,11 +3089,51 @@ def mcp_roots(task: store.Task) -> set[str]:
                     d = os.path.dirname(p)
                     d = os.path.dirname(d) if os.path.basename(d) == "bin" else d
                     top = mcp_project(d, home)
-                    if top and not any(c == top or _under(c, top) for c in checkout):
+                    if top and not _touches(os.path.realpath(top), checkout):
                         d = top
                 d = os.path.realpath(d)
-                if d not in ("/", home) and not _under(home, d):
+                if d not in ("/", home) and not _under(home, d) and not _touches(d, checkout):
                     out.add(d)
+    return out
+
+
+def _touches(d: str, dirs) -> bool:
+    """Whether ``d`` is one of ``dirs``, lies in one or holds one."""
+    return any(c == d or _under(d, c) or _under(c, d) for c in dirs)
+
+
+def mcp_checkout_notes(names, repos) -> list[str]:
+    """A line for each of the user's servers ``names`` whose command names a path that is, lies
+    in or holds one of ``repos``: an API task's lane hides the checkout (#1091), so mcp_roots
+    leaves it out and the server dies at its start there. OpenCode 2.3.2 starts a local server
+    in the project's directory (its `resolveCwd`: the config's `cwd` from there, else the
+    directory itself), the task's worktree, so a path relative to the repo names the
+    worktree's copy (#1202's review, 2026-11-24)."""
+    home = os.path.realpath(Path.home())
+    tops = {os.path.realpath(os.path.expanduser(str(r))) for r in repos}
+    tops |= {os.path.abspath(os.path.expanduser(str(r))) for r in repos}
+    out = []
+    for name, entry in mcp_servers(list(names))[0].items():
+        for word in entry.get("command") or () if entry.get("type") == "local" else ():
+            w = os.path.expanduser(word)
+            if not os.path.isabs(w):
+                continue
+            # as written and resolved, as mcp_roots reads it: a venv's python in the repo resolves
+            # out of it, but its venv is left out
+            hit = next(((p, t) for p in dict.fromkeys((os.path.abspath(w), os.path.realpath(w)))
+                        if p not in ("/", home) and not _under(home, p)
+                        for t in sorted(tops) if _touches(p, {t})), None)
+            if not hit:
+                continue
+            p, top = hit
+            holds = _under(top, p)
+            out.append(f"note: MCP server {name!r} names {word}, "
+                       + (f"which holds the repo {top}" if holds else f"in the repo {top}")
+                       + ", which an API task's lane hides (#1091), so an API agent won't reach it: "
+                       + ("name what it needs in the repo relative to it" if holds else
+                          f"name it relative to the repo: `{os.path.relpath(p, top)}`")
+                       + " (OpenCode starts a local server in the task's worktree)")
+            break
     return out
 
 

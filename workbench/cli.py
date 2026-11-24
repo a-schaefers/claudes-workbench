@@ -1600,6 +1600,8 @@ def cmd_start(a):
     if mcp:  # each server's tools go into every request: prefill on the GPU (#1202)
         print(f"MCP: {', '.join(mcp)} (commands.json \"mcp\"): each server's tools go into every "
               "request")
+        for note in context.mcp_checkout_notes(mcp, [repo]) if api else ():  # #1202's review
+            print(note)
     if a.test and not a.no_base_check:
         print("base check: the runner runs the acceptance command once on the base first; what "
               "it saw comes with the first report (a check-in at once if --test-timeout cuts it "
@@ -7342,6 +7344,11 @@ def cmd_doctor(a):
     for name, where in _mcp_named().items():  # the user's MCP servers for agents (#1202)
         why = context.mcp_servers([name])[1]
         line(not why, why[0] if why else f"MCP server {name} (commands.json): the agents of {where}")
+        # one named in a repo its tasks run in, which an API task's lane hides (#1202's review)
+        repos = context.commands_conf().get("repos") or {}
+        for note in context.mcp_checkout_notes([name], list(repos) if where == "every task" else
+                                               [r for r in repos if name in (repos[r].get("mcp") or ())]):
+            print(f"--  {note.removeprefix('note: ')}")
     snapped = context.snaps(context.TOOLCHAINS) if context.lane_on() else []
     if snapped and sys.platform.startswith("linux"):
         print(f"--  {', '.join(snapped)}: snaps, which can't run in the agent's lane "
