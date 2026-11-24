@@ -967,7 +967,14 @@ directory marking itself a cache (a `CACHEDIR.TAG`, or a `.gitignore` of `*` alo
 `BUILD_FILES` such files in its ignored directory (the outermost one `git ls-files --directory`
 names), else, one ignored by name, its top-level directory (only those count: a test run's bytecode
 in a big package once pushed a hand-written file out; counted by top-level directory, setuptools'
-in-tree `build/lib` copies did the same, #1179's review). The rest it finds changed that a person
+in-tree `build/lib` copies did the same, #1179's review), and nowhere the runner's own setup (`--setup`,
+`--copy`) or `--test` run in the worktree wrote such a file (`gitops.ran_wrote`, after each run: the file's
+outermost ignored directory, else the file; status `ran_wrote`): Claude's rerun of the acceptance
+command at review wrote `mvn test`'s surefire reports, tsc's `dist/*.d.ts` and jest's `coverage/`
+again, and accept refused them as Claude's until `--include` committed them (#1211). One kept in
+`hand_wrote` before a run wrote there moves to `hand_left` once one does (`runner._by_hand`), so a
+report from a test the runner hadn't run yet stops refusing; one written by a command the runner
+never runs is still taken for Claude's. The rest it finds changed that a person
 might have written, text outside a cache, under `BUILD_FILES` text files in its group, of any name
 (the one filter waived), is never dropped without a word (`runner.hand_left`, status `hand_left`: a
 `.csv` beside Claude's module under `lib/` went with the worktree, `--include` or not, #1179's
@@ -6224,7 +6231,8 @@ off), not `wb start`'s.
 | `prepared`, `setup_secs` | the worktree is set up (`_prepare`), so a later runner doesn't again; how long (older tasks: `prepared_paths`, `prepared_marks`, `prepared_bytes`, `runner.prepared_record`) |
 | `checked_out`, `checkout_secs` | `runner.checkout` made the worktree; how long |
 | `hands_off_at` | when the agent last stopped (review, the runner's exit, `cli._stop_runner`, `cli.reap`; an earlier one kept): ignored files changed since are Claude's (`runner.hand_wrote`, #1179); cleared by the next runner once it has kept them |
-| `hand_wrote` | ignored files written while no runner ran, kept by each runner at its start (`runner._hands_on`): `wb accept`/`wb next` refuse them until `--include` (#1179) |
+| `hand_wrote` | ignored files written while no runner ran, kept by each runner at its start (`runner._hands_on`): `wb accept`/`wb next` refuse them until `--include` (#1179); none under `ran_wrote` |
+| `ran_wrote` | where the runner's own setup or `--test` run in the worktree wrote a file `gitops.hand_written` would take for Claude's (`gitops.ran_wrote`: its outermost ignored directory, else the file), grown after each run: a file changed there is build or test output (`hand_left`), as Claude's rerun of the acceptance command wrote `mvn test`'s reports there (#1211) |
 | `hand_left` | the other ignored files changed while no runner ran that `gitops.hand_written` took for build or test output but a person might have written (text, outside a cache, under `BUILD_FILES` text files in their group, any suffix: never bytecode nor an install's), kept the same way: `wb accept`/`wb next` name them as left out of the commit (`gitops.left_out_line`; accept keeps a copy in `left-out/`, #1179's review) |
 | `taken_over` | `wb takeover`: `runner.checkout` then fails a task not checked out rather than recheck it out (#655); cleared by the hand-back once checked out, for the mod's `delegatedWork` (#926) |
 | `branch_made` | the commit `runner.checkout` makes `delegate/<task>` at, recorded before `worktree add` when no such branch exists: the only branch a cut-short cleanup deletes (#416) |

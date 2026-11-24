@@ -2352,7 +2352,9 @@ def run_tests(task: store.Task, n: int):
         return None
     task.set_status(phase="testing", last=f"tests: {cmd}")
     limit = int(task.spec.get("test_timeout") or 900)
+    began = time.time()
     code, output = run_in_lane(task, cmd, limit)
+    _ran_wrote(task, began)
     task.round_dir(n).joinpath("tests.txt").write_text(
         f"$ {cmd}\nexit: {code}\nshell: {test_shell()}\n\n{output}")
     result = {"ok": code == 0, "exit": code, "tail": clip_tail(output, 40), "round": n}
@@ -2701,11 +2703,26 @@ def hand_left(task: store.Task) -> list[str]:
 
 def _by_hand(task: store.Task) -> tuple[list[str], list[str]]:
     wrote, left = set(task.status.get("hand_wrote") or []), set(task.status.get("hand_left") or [])
+    ran = task.status.get("ran_wrote") or []
     if since := task.status.get("hands_off_at"):
         rest: list[str] = []
-        wrote |= set(gitops.hand_written(task.worktree, since, rest))
+        wrote |= set(gitops.hand_written(task.worktree, since, rest, ran))
         left |= set(rest)
-    return sorted(wrote), sorted(left - wrote)
+    # one kept before a run wrote there is the run's too: Claude's first rerun of a test the
+    # runner hadn't run yet stayed in hand_wrote, refusing every accept after (#1211)
+    moved = {p for p in wrote if gitops.under(p, ran)}
+    return sorted(wrote - moved), sorted((left | moved) - (wrote - moved))
+
+
+def _ran_wrote(task: store.Task, since: float) -> None:
+    """After the runner's own setup or test run: where it wrote what hand_written would take for
+    Claude's, kept in status `ran_wrote` (gitops.ran_wrote, #1211)."""
+    try:
+        new = gitops.ran_wrote(task.worktree, since)
+    except (gitops.GitError, OSError):
+        return
+    if new and not set(new) <= set(had := task.status.get("ran_wrote") or []):
+        task.set_status(ran_wrote=sorted(set(had) | set(new)))
 
 
 def hands_off(task: store.Task) -> None:
@@ -2914,8 +2931,9 @@ def _prepare_now(task: store.Task) -> bool:
     spec = task.spec
     task.set_status(last="setting up the worktree"
                     + (f": {spec['setup']}" if spec.get("setup") else ""))
-    began = time.monotonic()
+    began, at = time.monotonic(), time.time()
     code, output = prepare(task)
+    _ran_wrote(task, at)
     secs = round(time.monotonic() - began, 1)
     task.dir.joinpath("setup.txt").write_text(
         f"$ {spec.get('setup') or ''}\nexit: {code}\nseconds: {secs}\nshell: {test_shell()}\n\n{output}")

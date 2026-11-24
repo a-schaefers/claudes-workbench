@@ -2603,6 +2603,43 @@ class Lifecycle(Base):
         # 20,000 once filled status.json (#1179's review)
         self.assertEqual(left, [])
 
+    def test_a_tsc_build_and_jest_coverage_a_run_wrote_are_not_taken_for_claudes_when_rerun(self):
+        # #1211 (bar round 3 of 2.0, 2026-11-24): Claude's rerun of the acceptance command wrote
+        # tsc's dist/index.d.ts and jest's coverage-final.json and lcov-report/*.js again, named
+        # like the repo's files and few, so wb accept refused them as written by hand
+        repo = Path(self.tmp.name) / "ts"
+        (repo / "src").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / ".gitignore").write_text("dist/\ncoverage/\nvendor/\n")
+        for name, text in (("package.json", "{}\n"), ("tsconfig.json", "{}\n"),
+                           ("jest.config.js", "module.exports = {};\n"),
+                           ("src/index.ts", "export const answer = 42;\n")):
+            (repo / name).write_text(text)
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit",
+                        "-qm", "ts"], check=True)
+        out = ["dist/index.js", "dist/index.d.ts", "dist/index.js.map", "coverage/coverage-final.json",
+               "coverage/lcov.info", *(f"coverage/lcov-report/{n}" for n in (
+                   "index.html", "base.css", "prettify.js", "sorter.js", "block-navigation.js"))]
+
+        def build():  # `tsc && jest --coverage`
+            for p in out:
+                (repo / p).parent.mkdir(parents=True, exist_ok=True)
+                (repo / p).write_text(f"// {p}\n")
+            (repo / "coverage" / "lcov-report" / "favicon.png").write_bytes(b"\x89PNG\r\n\x1a\n\0")
+        t0 = time.time()
+        build()                                                  # the runner's run
+        ran = gitops.ran_wrote(repo, t0)
+        self.assertEqual(ran, ["coverage", "dist"])
+        t1 = time.time()
+        (repo / "vendor").mkdir()
+        (repo / "vendor" / "shim.ts").write_text("export {};\n")  # Claude's own, under another path
+        build()                                                  # Claude's rerun
+        self.assertIn("dist/index.d.ts", gitops.hand_written(repo, t1))   # what #1211 refused
+        left: list[str] = []
+        self.assertEqual(gitops.hand_written(repo, t1, left, ran), ["vendor/shim.ts"])
+        self.assertEqual(left, sorted(out))
+
     def test_a_file_claude_writes_under_an_ignored_path_in_a_review_fix_is_still_named_after_the_next_round(self):
         # #1179: the agent's next round writes there too, which isn't Claude's, so what Claude
         # wrote at review is kept when a runner starts, and named at accept once it is back
@@ -2697,6 +2734,72 @@ class Lifecycle(Base):
         (t.worktree / "lib" / "helper.py").write_text("def answer():\n    return 42\n")
         (t.worktree / "main.py").write_text("from lib.helper import answer\nprint(answer())\n")
         self.assertEqual(runner.hand_wrote(t), ["lib/helper.py"])
+
+    def maven_repo(self):
+        (self.repo / ".gitignore").write_text("target/\n")
+        (self.repo / "pom.xml").write_text("<project/>\n")
+        (self.repo / "src" / "main" / "resources").mkdir(parents=True)
+        (self.repo / "src" / "main" / "resources" / "application.properties").write_text("k=v\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "maven"], check=True)
+
+    # what `mvn test` leaves in target/: text named like the repo's files, and a binary .class
+    MVN_TEST = ("mkdir -p target/surefire-reports target/classes/app"
+                " && printf '<testsuite/>\\n' > target/surefire-reports/TEST-app.AppTest.xml"
+                " && echo 'Tests run: 1' > target/surefire-reports/app.AppTest.txt"
+                " && echo k=v > target/classes/application.properties"
+                " && printf '\\312\\376\\272\\276\\0' > target/classes/app/App.class")
+
+    def test_claudes_rerun_of_the_acceptance_command_is_not_taken_for_files_it_wrote(self):
+        # #1211 (bar round 3 of 2.0, 2026-11-24): Claude reran `mvn test` in the worktree at
+        # review, as the skill says, and wb accept refused its surefire reports and
+        # target/classes/application.properties as files written by hand, until --include
+        # committed them into the user's branch
+        self.maven_repo()
+        cmd = f"{TEST_CMD} && {self.MVN_TEST}"
+        self.start("t-mvn", "ok", "--test", cmd)
+        wait_phase("t-mvn", {"review"})
+        t = store.Task("t-mvn")
+        self.assertEqual(t.status.get("ran_wrote"), ["target"])   # the runner's own run wrote there
+        subprocess.run(["sh", "-c", cmd], cwd=t.worktree, check=True)  # Claude's rerun
+        reports = ["target/classes/application.properties",
+                   "target/surefire-reports/TEST-app.AppTest.xml",
+                   "target/surefire-reports/app.AppTest.txt"]
+        self.assertEqual(runner.hand_wrote(t), [])
+        self.assertEqual(runner.hand_left(t), reports)
+        out = run_wb("accept", "t-mvn", "-m", "feat: one", "--merge")
+        self.assertIn("accepted t-mvn", out)
+        self.assertIn(f"which the commit leaves out as build or test output ({', '.join(reports)}): "
+                      "a copy is in ", out)
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "--name-only", "main"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertIn("answer.txt", tree)
+        self.assertFalse([p for p in tree if p.startswith("target/")], tree)
+
+    def test_a_report_kept_as_claudes_before_the_runner_ran_its_test_is_the_runs_once_a_run_writes_it(self):
+        # #1211 (bar round 3 of 2.0, 2026-11-24): hand_wrote only grew, so a surefire report from
+        # Claude's run of a test the runner hadn't run yet was refused at every accept, even
+        # after Claude deleted target/, once the runner's own run of it wrote the report again
+        self.maven_repo()
+        self.start("t-mvn2", "ok", "--test", TEST_CMD)
+        wait_phase("t-mvn2", {"review"})
+        t = store.Task("t-mvn2")
+        report = "target/surefire-reports/TEST-app.AppTest.xml"
+        subprocess.run(["sh", "-c", self.MVN_TEST], cwd=t.worktree, check=True)
+        run_wb("feedback", "t-mvn2", "--text", "1. Keep it.")
+        wait_phase("t-mvn2", {"review"})
+        self.assertIn(report, t.status.get("hand_wrote"))  # no run of the runner's wrote it: Claude's
+        shutil.rmtree(t.worktree / "target")
+        nxt = Path(self.tmp.name) / "step2.md"
+        nxt.write_text("Step two: run the Maven tests too.\n")
+        run_wb("next", "t-mvn2", "--spec", str(nxt), "-m", "feat: one",
+               "--test", f"{TEST_CMD} && {self.MVN_TEST}")
+        st = wait_phase("t-mvn2", {"review"})
+        self.assertEqual(st["steps"], 2)
+        self.assertEqual(st.get("ran_wrote"), ["target"])
+        self.assertNotIn(report, runner.hand_wrote(t))
+        self.assertIn(report, runner.hand_left(t))
+        self.assertIn("accepted t-mvn2", run_wb("accept", "t-mvn2", "-m", "feat: two"))
 
     def test_diff_of_a_merged_task_hints_a_command_that_still_works(self):
         # #477 (the audit of 1.8): the hint named delegate/<task>, which the merge had deleted,
