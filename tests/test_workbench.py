@@ -32236,6 +32236,14 @@ class ApiTasks(_ApiTask, _KeyholeTest):
                 self.assertIn("Agents is GPU, so nothing spends: ", err.getvalue())
                 self.assertIn("Ask the user: Agents back to Both or API (wb route all both)", err.getvalue())
                 spawned.assert_not_called()
+                if argv[0] == "start":  # the mod's dry run refuses it too, so no dialog asks for it
+                    err = io.StringIO()
+                    with (mock.patch.dict(os.environ, {"CLAUDECODE": "1"}), redirect_stderr(err),
+                          redirect_stdout(io.StringIO()) as out, self.assertRaises(SystemExit) as e):
+                        run_wb("route", "--dry-run", "--json", "--start", *argv[1:])
+                    self.assertEqual((e.exception.code, out.getvalue()), (3, ""))
+                    self.assertIn(f"Agents is GPU, so nothing spends: {FLASH} is an API model. Ask the user: "
+                                  "Agents back to Both or API (wb route all both), or a GPU model", err.getvalue())
         self.assertFalse(store.Task("t-new").exists)
         self.assertEqual(task.status["phase"], "stuck")
         # between rounds too (drive's _go_on): a task whose round ran before the switch

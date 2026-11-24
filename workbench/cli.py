@@ -3195,6 +3195,10 @@ def _route_start(a) -> None:
         return
     if not API_RUNS:  # exit 3: the mod lets the call through, and wb start refuses it, unasked
         die(f"{m.id} {API_NOT_YET}", 3)
+    # Agents on GPU: wb start's refusal (routes.resolve), here before the dialog, so the user is
+    # never asked to approve a start that then exits 3 (#1213's review, 2026-11-24)
+    if routes.agents_gpu():
+        die(f"{routes.AGENTS_GPU}: {m.id} is an API model. {routes.AGENTS_BACK}, or a GPU model", 3)
     # a local-only spot's refusal in place of a dialog line (#1021): never ask the user to
     # approve a start wb start refuses
     try:

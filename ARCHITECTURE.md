@@ -3892,7 +3892,7 @@ Both restores the per-role mix. With Agents on API a role with no API model can'
 With Agents on GPU nothing spends, tasks already started included (#1213, 2026-11-24: only `wb start`
 read the switch, and an API task queued behind its provider's slots took one after it and ran on).
 `routes.agents_gpu()` (False for a routes.json that can't be read) is asked by: `wb start` with an API
-`--model` (exit 3 before any dialog, `routes.AGENTS_GPU`: `Agents is GPU, so nothing spends: <id> is an
+`--model` (exit 3 before any dialog: `cli._route_start`'s dry run gives the same line, so the mod never asks; `routes.AGENTS_GPU`: `Agents is GPU, so nothing spends: <id> is an
 API model. Ask the user: Agents back to Both or API (wb route all both), or a GPU model`); `wb feedback`,
 `next` and `resume` of an API task (exit 3, `cli._agents_gpu_now` in `_model_still_listed`; `wb resume
 --all` prints it and goes on); and the runner, which stops an API task before its first round (after
@@ -4105,7 +4105,7 @@ lifts local_only for this repo.` (with `--local-only`: `… or the user drops --
 asks before `wb start` runs, from `wb route --dry-run --start <its args>` (`cli._route_start`), which parses the start's
 `--repo` (else the command's cwd) and `--local-only`, and exits 3 with `cli.local_only_refusal`'s line in
 place of a dialog line, so the user is never asked to approve a start that would be refused; so it does for
-`meter.refusal`, a model that can't run (`cli._cant_run`, a rate limit or outage passing), a `--base` naming no
+Agents on GPU (`routes.agents_gpu()`, exit 3, wb start's own line, #1213), `meter.refusal`, a model that can't run (`cli._cant_run`, a rate limit or outage passing), a `--base` naming no
 commit (`cli._no_base`, exit 1) and, without `--queue`, the provider's slots full (`cli._slots_full`, exit 4) (#1104). A linked worktree of a local-only repo is that repo
 (the git-dir match). `wb next`, `wb feedback` and `wb resume` on an API task whose repo became local-only since it started
 exit 3 (`cli._local_only_since`, `_local_only_now`, by `runner.api_task`: a task with no `via` by its model's kind, #1111): `this repo is local-only now; the task's model is API (<provider>):
