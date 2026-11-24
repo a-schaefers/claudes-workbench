@@ -234,7 +234,11 @@ class Base(unittest.TestCase):
                           # the roles (#1014): the test's own, never the user's routes.json
                           WB_ROUTES=str(tmp / "routes.json"),
                           # the GPU lease in the test's own state, never a machine's shared one (#393)
-                          WB_GPU_DIR=str(tmp / "state"))
+                          WB_GPU_DIR=str(tmp / "state"),
+                          # the user's file for agents (#1102, 2026-11-23): theirs went into the
+                          # tests' prompts, and in an agent's lane, which hides it, every test
+                          # that started a task failed on its read
+                          WB_AGENTS_MD=str(tmp / "wb-config" / "AGENTS.md"))
         (tmp / "opencode.json").write_text(json.dumps(OPENCODE_CONFIG))
         runner.models._AUTH.clear()  # OpenCode's stored keys, per process (models.auth_key)
         runner.models._STORED.clear()
@@ -719,12 +723,29 @@ class Lifecycle(Base):
         store.write_json(Path(self.tmp.name) / "x.json", {"left_out": ["donn\udce9es"]})
         self.assertEqual(store.read_json(Path(self.tmp.name) / "x.json"), {"left_out": ["donn\udce9es"]})
 
+    def test_the_suite_reads_its_own_agents_md_never_the_users(self):
+        # #1102 (2026-11-23): Base left the user's ~/.config/workbench/AGENTS.md in reach, so it
+        # went into the tests' prompts, and in an agent's lane (which hides it, as this chmod
+        # does) every test that started a task failed with a PermissionError on its read
+        home = Path(tempfile.mkdtemp(dir=self.tmp.name, prefix="home-"))
+        os.environ["HOME"] = str(home)
+        users = home / ".config" / "workbench" / "AGENTS.md"
+        users.parent.mkdir(parents=True)
+        users.write_text("the user's own rules\n")
+        users.chmod(0)
+        self.assertEqual(context.user_agents_md(), Path(self.tmp.name) / "wb-config" / "AGENTS.md")
+        self.start("t-1102", "ok")
+        st = wait_phase("t-1102", {"review", "stuck", "failed"})
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertFalse((context.rules_dir(store.Task("t-1102")) / "AGENTS.md").exists())
+
     def test_a_users_agents_md_that_isnt_utf8_starts_the_task_all_the_same(self):
         # #784: ~/.claude/CLAUDE.md edited from Windows (a CP1252 apostrophe, 0x92) failed every
         # wb start with a traceback after the task was written, and every round's config layer;
         # the user's file for agents is ~/.config/workbench/AGENTS.md now (#1061)
         home = Path(tempfile.mkdtemp(dir=self.tmp.name, prefix="home-"))
         os.environ["HOME"] = str(home)
+        os.environ.pop("WB_AGENTS_MD", None)  # its default place, under this HOME (#1102)
         (home / ".config" / "workbench").mkdir(parents=True)
         (home / ".config" / "workbench" / "AGENTS.md").write_bytes(b"Don\x92t guess.\n")
         self.start("t-784b", "ok")
@@ -7124,6 +7145,7 @@ class AgentContext(Base):
         from workbench import context, runner
         tmp = Path(self.tmp.name)
         os.environ["HOME"] = str(tmp / "home")
+        os.environ.pop("WB_AGENTS_MD", None)  # its default place, under this HOME (#1102)
         synced = tmp / "home" / ".claude" / "skills" / "synced" / "bucket" / "docx"
         synced.mkdir(parents=True)
         (synced / "SKILL.md").write_text("---\nname: docx\n---\n")
@@ -7174,6 +7196,7 @@ class AgentContext(Base):
         # ~/.config/workbench/AGENTS.md, in the user CLAUDE.md's old place, its imports followed
         home = Path(self.tmp.name) / "home"
         os.environ["HOME"] = str(home)
+        os.environ.pop("WB_AGENTS_MD", None)  # its default place, under this HOME (#1102)
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
         claude, config = home / ".claude", home / ".config" / "workbench"
         for d in (claude / "rules" / "lang", config, home / ".ssh"):
@@ -7654,6 +7677,7 @@ class RealOpenCode(Base):
         home = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-imports-test-"))  # outside a temp root
         self.addCleanup(shutil.rmtree, home, True)
         os.environ["HOME"] = str(home)
+        os.environ.pop("WB_AGENTS_MD", None)  # its default place, under this HOME (#1102)
         for v in ("CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"):
             os.environ.pop(v, None)
         claude, config = home / ".claude", home / ".config" / "workbench"   # both hidden from the lane
@@ -17872,6 +17896,7 @@ class Setup(Base):
                           FAKE_VERSION="opencode v2.3.0",
                           PATH=os.pathsep.join([str(home / ".local/bin"), os.environ["PATH"]]))
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        os.environ.pop("WB_AGENTS_MD", None)  # its default place, under this HOME (#1102)
         note = ("note: agents no longer get your ~/.claude/CLAUDE.md or ~/.claude/rules/: what they "
                 "should follow in every project goes in ~/.config/workbench/AGENTS.md\n")
         said = lambda: [note in self.setup(cmd=c)[1] for c in ("setup", "doctor")]  # noqa: E731
@@ -30786,10 +30811,7 @@ class Privacy(_KeyholeTest):
         os.environ["WB_ROUTES"] = str(self.routes)
         self.claude = Path(self.tmp.name) / "claude-home"   # no ~/.claude files unless a test says
         os.environ["CLAUDE_CONFIG_DIR"] = str(self.claude)
-        self.agents_md = Path(self.tmp.name) / "wb-config" / "AGENTS.md"   # never the user's own
-        patcher = mock.patch.object(context, "user_agents_md", lambda: self.agents_md)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        self.agents_md = Path(os.environ["WB_AGENTS_MD"])                  # never the user's own (Base)
 
     def api_model(self, mid=FLASH, label="DeepInfra (API)", free=False):
         pid, name = mid.split("/", 1)

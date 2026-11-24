@@ -1114,7 +1114,7 @@ An API provider's header wait is 600 s instead (`API_HEADER_S`, *An API task's w
   (about 1.3K tokens). A writing task (task.json `role: writing`) gets `agent/WRITING.md` there
   instead, under the same name (`context.handbook_for`, *The writing role*);
 - the user's own file for agents, `~/.config/workbench/AGENTS.md` (`context.USER_AGENTS_MD`,
-  `user_agents_md`), when it exists: copied to `rules/<task>/AGENTS.md` (the lane can't read the
+  `user_agents_md`; `$WB_AGENTS_MD` moves it, which `Base` points at the test's own, #1102), when it exists: copied to `rules/<task>/AGENTS.md` (the lane can't read the
   config directory), as bytes (#784), its imports followed, counted in `fixed_prompt` as
   `~/.config/workbench/AGENTS.md`, its copy removed once the file is. Never Claude's
   `~/.claude/CLAUDE.md` (`$CLAUDE_CONFIG_DIR`), its imports or `~/.claude/rules/**`, GPU or API:
@@ -5510,6 +5510,7 @@ $WB_HOME (~/.local/state/workbench)
   chat-token ($WB_CHAT_TOKEN)    mode 600
   chat-agents.json               beside chat-token, mode 600: {"agents": {"<name>": {"sha256", "ts"}}} (wb chat token; *Other agents*, #1042)
   savings.json ($WB_SAVINGS)     {"kwh_price": N} (wb savings --price; off removes it; other keys kept)
+  AGENTS.md ($WB_AGENTS_MD)      the user's own file for agents, every project's (*What the agent knows*, #1061); wb only reads it
   routes.json ($WB_ROUTES)       the roles (*Roles*, #1014): {"v": 1, "use": "gpu"|"api"|"both" (the Agents switch, #1016; missing: both),
                                  "busy": "wait"|"api" (when the GPU is busy, #1023; missing: wait), "day_usd": N|null, "roles": {"significant"|"trivial"|"writing":
                                  {"via": "gpu"|"api", "gpu": "<id>"|"auto", "api": "<exact id>" (kept on the GPU), "thinking": "off"|"on",
@@ -5537,7 +5538,7 @@ unnamed (*Setting the worktree up*).
 
 **Store primitives** (`workbench/store.py`). `home()` is `$WB_HOME`, else `~/.local/state/workbench`. `PATH_VARS`
 (`WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_AUDIO`, `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`,
-`WB_OPENCODE_CONFIG`, `WB_SAVINGS`, `WB_GPU_DIR`, `WB_SOURCE`, `WB_ROUTES`, and the user's `OPENCODE_CONFIG`, `CLAUDE_CONFIG_DIR`,
+`WB_OPENCODE_CONFIG`, `WB_SAVINGS`, `WB_GPU_DIR`, `WB_SOURCE`, `WB_ROUTES`, `WB_AGENTS_MD`, and the user's `OPENCODE_CONFIG`, `CLAUDE_CONFIG_DIR`,
 `OPENCODE_CONFIG_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`) take `~` and relative paths: `absolute_env()`, first in
 `cli.main` and the runner, makes them absolute against wb's cwd (not resolved), so every child sees one place (a
 relative one had wb and the runner, which runs from the package dir, disagree: the 2026-11-16 audit, #328, #650); the
@@ -5918,6 +5919,8 @@ on macOS runners (#950); not patched suite-wide, so `WebChat` still catches chat
 **The fixture** (`Base`): `WB_HOME=<tmp>/state`, `WB_OPENCODE_BIN` (the fake, `shlex`-split), `WB_FAKE_MODELS=1`,
 `WB_OPENCODE_CONFIG` (`ollama` on 127.0.0.1:11434 with `mimo-v2.6:9b-q8_0`, 32K, and `qwen3.8-27b` with no
 `limit.context`; `strata` on :8080; a remote `cloud` discovery drops, `hosted()`'s as an API model), `WB_MODELS`, `WB_SKILLS`, `WB_COMMANDS`,
+`WB_AGENTS_MD` (`<tmp>/wb-config/AGENTS.md`, not there: the user's own went into the tests' prompts, and in an agent's lane,
+which hides it, every test that started a task failed on its read, #1102; a test of its default place pops it),
 `store.config_lock_dir` patched into the temp state; a repo on `main` with a committed CLAUDE.md and its own identity;
 the spec "Write the answer to answer.txt.", the test `grep -qx 42 answer.txt`. `self.start(name, scenario, *extra)` sets
 `FAKE_SCENARIO`, runs `wb start … --model mimo`. tearDown kills nothing: a test stops its own `hang`/`slow` tasks. Helpers: `run_wb` (in-process, returns stdout;
@@ -6127,7 +6130,7 @@ on port 0 (only `chat.tailscale` and Hardware's probes are mocked); a regression
 names `t-<slug>`; OpenCode-dependent tests through `run_calls`; kernel ones `@unittest.skipUnless(lane.abi(), …)`;
 reuse helpers by import or assignment, never by subclassing a class with tests; new classes above `__main__`.
 
-**Not hermetic.** The real HOME (`~/.config/workbench/AGENTS.md`; the lane tests' `~/.wb-sec-test-*`, `~/.wb-lane-test-*`,
+**Not hermetic.** The real HOME (the lane tests' `~/.wb-sec-test-*`, `~/.wb-lane-test-*`,
 `~/.wb-sock-*`; `/tmp/wb-run-*`), OpenCode's own session storage, 127.0.0.1:11434, real hardware. Never the real state
 directory, gpu.lock or a model: safe beside running tasks.
 

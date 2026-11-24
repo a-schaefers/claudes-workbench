@@ -82,8 +82,8 @@ PATH_VARS = ("WB_HOME", "WB_MODELS", "WB_SKILLS", "WB_IMAGES", "WB_AUDIO", "WB_C
              "CLAUDE_CONFIG_DIR", "WB_GPU_DIR",
              # wb patch init's clone (#1005)
              "WB_SOURCE",
-             # the roles (#1014)
-             "WB_ROUTES",
+             # the roles (#1014), the user's file for agents (#1102)
+             "WB_ROUTES", "WB_AGENTS_MD",
              # where OpenCode's global config (and, XDG_DATA_HOME, its sessions) are: relative,
              # wb start found the model and the runner, which runs elsewhere, didn't (#650)
              "OPENCODE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME")

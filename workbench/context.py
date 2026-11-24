@@ -2856,8 +2856,10 @@ USER_AGENTS_MD = Path(".config") / "workbench" / "AGENTS.md"
 
 
 def user_agents_md() -> Path:
-    """The user's file for agents: ~/.config/workbench/AGENTS.md (USER_AGENTS_MD)."""
-    return Path.home() / USER_AGENTS_MD
+    """The user's file for agents: $WB_AGENTS_MD, else ~/.config/workbench/AGENTS.md
+    (USER_AGENTS_MD). The variable is the tests' own file: the user's went into their prompts,
+    and in an agent's lane, which hides it, every test that started a task failed (#1102)."""
+    return Path(os.environ.get("WB_AGENTS_MD") or Path.home() / USER_AGENTS_MD)
 
 
 def _digest(path: Path) -> str:
