@@ -3346,6 +3346,19 @@ NO_MODULE = re.compile(r"(?P<py>\S*python[\w.]*): (No module named (?P<m>[\w.]+)
 TOOL_DIRS = (".venv/bin", "venv/bin", "node_modules/.bin", "vendor/bin")
 # bash's and zsh's line for a path that isn't there (dash's and ksh's is NOT_FOUND's)
 NO_SUCH = re.compile(r"no such file or directory: (?P<z>.+)$|(?P<n>[^:]+): No such file or directory$")
+# A task runner's own lines after its recipe's output: GNU make's `make: *** [Makefile:2: test]
+# Error 127` (it exits 2), a sub-make's `Leaving directory`, -k's `Target … not remade`, and
+# just's `error: Recipe `test` failed on line 2 with exit code 127`. Read as the last line, they
+# hid the shell's not-found line under `make test`, and round 1 and both auto-fix rounds ran on
+# correct code, each told the bug was the change's, where `npm test` checked in (#1229, bar
+# round 4, 2026-11-24). `make` or `just` is the recipe's exit, the first one up a sub-make's,
+# not its parent's Error 2.
+RUNNER_TAIL = re.compile(r"g?make(?:\[\d+\])?: (?:\*\*\* .*?(?: Error (?P<make>\d+))?|Leaving directory .*"
+                         r"|Target .* not remade because of errors\.)"
+                         r"|error: Recipe `[^`]*` failed (?:on line \d+ )?with exit code (?P<just>\d+)")
+# make's own line for a recipe it runs without a shell (no shell syntax in it) that execvp can't
+# find: a name without a `/` is one not on PATH, the shell's `command not found` (#1229)
+MAKE_EXEC = re.compile(r"g?make(?:\[\d+\])?: (?P<n>[^:]+): No such file or directory")
 # wb's words for a tool not checked out (missing_command), the same in every shell, and its path
 NOT_CHECKED_OUT = re.compile(r"(?P<p>[^:]+): not in the worktree \(")
 # What gives the agent's environment that command, for the check-in and the skipped auto-fix
@@ -3364,13 +3377,20 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     (#1206); or Python's no-module line for `-m` at exit 1 (#1181). A tool the
     agent's environment lacks (one outside the agent's PATH, which python_env and agent_path
     trim), which no edit in a round can give it; else None. A module of ``task``'s own code
-    (own_module) is none: the step may make it."""
-    if not r or r.get("exit") not in (1, 127):
+    (own_module) is none: the step may make it. Under a task runner (`make test`, RUNNER_TAIL),
+    the recipe's exit and the line before the runner's own (#1229)."""
+    if not r:
         return None
-    last = (r.get("tail") or "").strip().splitlines()[-1:]
-    line = last[0].strip() if last else ""
-    if r["exit"] == 127:
-        name = missing_name(line)
+    code, lines, inner = r.get("exit"), (r.get("tail") or "").strip().splitlines(), None
+    while isinstance(code, int) and code and lines and (m := RUNNER_TAIL.fullmatch(lines[-1].strip())):
+        inner = m["make"] or m["just"] or inner
+        lines.pop()
+    code = int(inner) if inner else code
+    if code not in (1, 127):
+        return None
+    line = lines[-1].strip() if lines else ""
+    if code == 127:
+        name = missing_name(line) or ((m := MAKE_EXEC.fullmatch(line)) and m["n"].strip())
         if name and "/" not in name:
             return f"{name}: command not found"
         # a path: a script the step may make, but not a tool an install puts there (#1206)
@@ -3378,7 +3398,7 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
         if path and (top := next((t for t in TOOL_DIRS if f"/{t}/" in f"/{path}"), None)):
             return f"{path}: not in the worktree ({top.split('/')[0]}/ is an install's, never checked out)"
         return None
-    if r["exit"] == 1 and (m := NO_MODULE.fullmatch(line)):
+    if code == 1 and (m := NO_MODULE.fullmatch(line)):
         return None if task and own_module(task, m["m"] or m["d"], m["py"]) else line
     return None
 

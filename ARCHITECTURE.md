@@ -1425,7 +1425,7 @@ making it checked in falsely, #1209; a name the spec merely gives, `with pytest 
 `-m`, is a tool, as any bare name counted ran #1181's incident again on a machine without pytest,
 #1209's review), the spec alone, before `runner.PROTOCOL_FOLD`, never the
 protocol's acceptance line, which names --test's own `-m` and so made every dotted one the repo's:
-`python3 -m pkg.newcli` for a step adding `pkg/newcli.py`), which the step may make, as a script, #1181; the warning ends `GIVE_TOOL`, a
+`python3 -m pkg.newcli` for a step adding `pkg/newcli.py`), which the step may make, as a script, #1181; under a task runner, `make test`, the line before the runner's own, `RUNNER_TAIL` (GNU make's `make: *** [Makefile:2: test] Error <n>`, exit 2, a sub-make's `Leaving directory`, `-k`'s `Target … not remade`, just's `Recipe … failed … with exit code <n>`), at the recipe's exit, the first one up, a sub-make's, and make's own `make: <name>: No such file or directory` for a recipe it runs without a shell, `MAKE_EXEC`, a name not on PATH, #1229; the warning ends `GIVE_TOOL`, a
 module's fix the worktree's `.venv`), a note past 120 s
 (#496), not checked when the checkout failed or was `"filtered"`, else exit and tail. A passing base
 is a note, not a check-in (that cost a restart in one task of two, 2026-11-17). `--no-base-check`
