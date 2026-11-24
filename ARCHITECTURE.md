@@ -1012,7 +1012,12 @@ new files out, named ("left out of the review snapshot, too big to store each ro
 top-level directories with most new files while over `NEW_FILES_MAX`, then the biggest while the
 rest pass `SNAPSHOT_MAX` 32 MiB; the next review shows them again), built with `add -u` plus kept files by name: `add -A` filled the user's
 object store each round (#431). `wb
-verify` takes the tree accept would land (`landing=True`, #642).
+verify` takes the tree accept would land (`landing=True`, #642). The snapshot and both diffs, and
+`wb diff`, hold the ignored files `--include` commits too (`runner.ignored_to_commit`: of
+`runner.accept_writes`, the agent's edit tools', its shell's and Claude's, what git ignores; added
+`add -f` in the scratch index, `force=` on `gitops.diff`, `snapshot_left` and `with_new_files`):
+without them an agent's feedback-round change to its `lib/util.py` read "the diff since your last
+review: (no changes)" and `--include` committed code Claude never saw (#1259).
 
 Reports and check-ins list 40 changed paths (`gitops.CHANGED_SHOWN`), the rest counted by
 top-level directory (a review notice's stat: 40 paths, then Git's total); a new top-level directory of 50+ untracked files is flagged (`BUILD_FILES`).
@@ -1022,8 +1027,9 @@ NUL in the first 8000 bytes; LFS-filtered files pass; nothing hashed before it p
 and index kept). A file the agent wrote with its edit tools (`runner.agent_wrote`: a row's `path`,
 or every file of a `patch` row's `paths`, #1148; a relative one is the workdir's, as OpenCode
 resolves it) under an ignored
-path (`gitops.ignored_files`) is in no diff or commit (a module under `lib/` was lost, audit round
-2 of 1.91): the report says "NOTE: git ignores files the agent wrote (…)" (`gitops.ignored_line`)
+path (`gitops.ignored_files`) is in no commit (a module under `lib/` was lost, audit round
+2 of 1.91): the report says "NOTE: git ignores files the agent wrote (…): the diff shows them, but a
+commit leaves them out" (`gitops.ignored_line`; the review diff holds them, above, #1259)
 and `commit_all` refuses until `--include` (`add -f`), saying "git ignores files written in the
 worktree (…)". Nor did the agent's shell's count (`mkdir -p lib && cat > lib/util.py <<EOF`, a
 `mv` there): no edit row shows them, and `wb accept --merge` landed a `main.py` importing a module
@@ -4978,7 +4984,7 @@ effect's hit came 0.8-1.45 s in (the skill says to trim the lead); ACE-Step peak
 - **The agent never commits.** `wb diff` shows its work against the base, or the last `wb next` step
   (`--all`: the branch), new files through intent-to-add in a scratch index copied from the
   worktree's (`gitops.with_new_files`: its index and locks untouched, skip-worktree entries not
-  deletions). `gitops.add_all` reruns `add -A` with `--sparse` only after a sparse refusal (an older
+  deletions), and the ignored files `--include` commits through `add -f` (`force=`, #1259). `gitops.add_all` reruns `add -A` with `--sparse` only after a sparse refusal (an older
   git has neither, #493). A git error in the diffstat costs only that line (`(no diffstat: …)`).
 - **Nested repositories** (`gitops.nested_repos`) are left out of the diff, noted (`NOTE: <dir>: a
   git repository of its own, …`, `gitops.nested_line`) and refused by name by `commit_all`, so accept
@@ -6205,7 +6211,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb watch [<task>]` | `-v`, `--once`, `--no-color`, `--json` (hidden, the pane's), `--last N` (hidden) | `transcript.follow`; default the latest open task, never a bench replay (#555). The header's `routed:` line, and with `--json` a `routed` row after `meta` (`transcript.routed_text`, #1016). |
 | `wb log <task>` | `-n N` (0 all), `-f`, `-v` | The events, one line per `transcript.EVENT_KINDS` kind (#861); `-n` counts printed lines, `step` rows dropped first (#861); `-f` follows until it needs Claude, reaping, flushing (#90, #545). |
 | `wb report <task>` | `--round N` | summary.md. |
-| `wb diff <task> [paths…]` | `--stat`, `--all` | Against the base or the last step (`--all`: the branch); worktree gone: the git command up to `tip` (#477). |
+| `wb diff <task> [paths…]` | `--stat`, `--all` | Against the base or the last step (`--all`: the branch), with the ignored files `--include` commits (`runner.ignored_to_commit`, #1259); worktree gone: the git command up to `tip` (#477). |
 | `wb top` | `--json`, `--every S` (0.2 to 3600; stats.json `every`, else 2) | GPUs, tasks, models, the lease queue. Never a model call, load or export. |
 | `wb adopt <task>` | `--session ID…` (required), `--pid PID` (`CLAUDE_PID`, else wb's parent) | The mod's (#687): a task whose Claude Code process is gone becomes the claimer's (`session`, `claude_pid`, `claude_start`, `claude_machine`); exit 1 while it lives or ran elsewhere (#922). |
 | `wb ack <task> <ts>` | `--if TS` (roll back an undelivered wake: `cli.release_ack`) | The mod's, before a wake (`cli.claim_ack`); exit 3 when taken first (#786). |
@@ -6873,7 +6879,7 @@ else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `path`: `events._brief` reads both). Records `FAKE_PROMPTS`, `FAKE_RUNS` (each run's `session`, `prompt`, `cwd`,
 `pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
 `FAKE_LESSON`, `FAKE_PAD` (that many characters before the Lesson line, #1186), `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
-`ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `shellwrite` (lib/util.py through a `bash` row's `cat > util.py <<X` with `workdir` lib/, main.py and answer.txt with `write`: #1210, its third review), `buildout` (dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names neither, then answer.txt: #1210's review), `pkgbuild` (a `bash` row `grep -n answer pkg/a.py`, then build/lib/pkg/{__init__,a,b}.py behind one `python -m build`, then answer.txt: #1210's second review), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
+`ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `shellwrite` (lib/util.py through a `bash` row's `cat > util.py <<X` with `workdir` lib/, main.py and answer.txt with `write`: #1210, its third review; a continued session adds a line to lib/util.py: #1259), `buildout` (dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names neither, then answer.txt: #1210's review), `pkgbuild` (a `bash` row `grep -n answer pkg/a.py`, then build/lib/pkg/{__init__,a,b}.py behind one `python -m build`, then answer.txt: #1210's second review), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
 `read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087), `selfreads` (ok, then a self-review, told by its prompt, that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168; `FAKE_SELF_RERUN`: those calls rerun the acceptance command, `FAKE_SELF_MISS`: the reads fail, #1250; `FAKE_SELF_FILL`: its first session breaks it and fills 76%, the fresh one restores it, or with `FAKE_SELF_KEEP` only reads: #1188; `FAKE_SELF_STALL`: it breaks it and goes silent, the run after a nudge or a note restores it: #1207), `floor` (`HANDOVER_ROOM`), `think` (a long think in a step's output, then a prompt that grew: no compaction, #1219), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151; `FAKE_COMPACT_KEPT`: the step after at 34%, over half, a kept tail: #1185), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
 2.3's `{"type": "error", …, "error": {"type": "compaction.failed", "message": "Compaction produced no summary"}}`;
 `FAKE_COMPACT_MSG`, `FAKE_COMPACT_EXIT`, `FAKE_COMPACT_EDIT`, `FAKE_REFAIL`), `bgwait` (`FAKE_BGWAIT`), `toolhang`,
