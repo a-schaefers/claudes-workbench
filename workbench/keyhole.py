@@ -697,9 +697,11 @@ def _transient(e: Exception) -> bool:
 def _setup_failure(e: Exception) -> bool:
     """A transport failure that is this machine's setup, never passing on its own: a certificate
     that doesn't verify, or the proxy refusing the tunnel (http.client's "Tunnel connection
-    failed: 403 …")."""
+    failed: 403 …", or 407 for its login). Only a 4xx: a proxy's 502, 503 or 504 is the
+    provider's host down or slow behind it, an outage that keeps its old path (the review of
+    #1080, 2026-11-23)."""
     return isinstance(e, ssl.SSLCertVerificationError) or (
-        isinstance(e, OSError) and str(e).startswith("Tunnel connection failed"))
+        isinstance(e, OSError) and str(e).startswith("Tunnel connection failed: 4"))
 
 
 def _short_why(e: Exception) -> str:

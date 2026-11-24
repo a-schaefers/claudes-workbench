@@ -801,11 +801,12 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   lease stepped aside, a wait to the provider's `api-health.json` `until`, else `RATE_LIMIT_SECS`,
   at most `RATE_WAIT_S`, a steer note ending it into `_steer_round`, `wb stop` ending the runner),
   continuing the session: one revive a round, as a revive re-sends the whole context, which costs
-  money. A second stop, or a quota or key stop, ends it `stuck` with `cause` `provider`, `infra`
+  money. A second stop, or a quota, key or setup stop, ends it `stuck` with `cause` `provider`, `infra`
   `provider` (a bench replay scores `error`), and `provider_remedy` under the STOPPED line (`wb
   feedback <task> --text "carry on"` once the provider allows, and `wb route <role> gpu (the user's
   yes)` when the task has a role; top up or wait for the plan's reset; /connect for a refused
-  key). Its `stopped` event says `by: "provider"`, so it is never a lesson about the agent (the
+  key; for `setup`, "this machine's stop, not the agent's or <provider>'s: mend what the line
+  above says", #1080). Its `stopped` event says `by: "provider"`, so it is never a lesson about the agent (the
   same limit on three tasks of one account read as a recurring one). An `api_stop` whose guard is
   `spend` (#1019's day cap) stops the round the same way but is the user's budget, not the
   provider's: `cause` `spend`, `infra` `spend`, `by: "spend"` (`runner.stopped_by`, `SPEND`), no
@@ -1726,7 +1727,9 @@ verbatim. Its TLS context is `webpush.tls()`'s: the default one, plus `MAC_CAS` 
 store is empty (python.org's Python before Install Certificates: the bare default failed every
 request there, #1080). A transport failure is a 502 `keyhole: can't reach <host>: <reason>`, except
 one that is this machine's setup (`_setup_failure`: a certificate that doesn't verify, on macOS
-naming Python's Install Certificates command; the proxy refusing the tunnel), which writes status
+naming Python's Install Certificates command; the proxy refusing the tunnel, a 4xx CONNECT reply
+such as 403 or 407, while its 502, 503 or 504 is the provider's host behind it and stays a 502),
+which writes status
 `api_stop {guard: "setup", text: "this machine can't reach <provider> (<host>): <reason>"}`
 (`Keyhole.unreachable`) and answers 400 `keyhole: <that>: the round stops`: the round stops at once,
 cause `provider`, never revived (as a 502 it was held as the provider's outage for 10 minutes and
@@ -2232,7 +2235,8 @@ Notices go to `$WB_HOME/notify.jsonl` (`Task.notify`: `{ts, task, kind, text, ro
 tasks?}`). Kinds: `review` (report and `review_diff`), `stuck`, `failed`, `question` (with `id`),
 `checkin` (periodic, a nudge, a mid-round handover before the last allowed, a base check cut short).
 `cause` (`stuck`/`failed` with a round): `guard`, `agent`, `server` (#657), `provider` (an API provider's
-`rate_limited`/`outage` after its one revive, `quota`, `auth`: #1020), `spend` (the day's API spend
+`rate_limited`/`outage` after its one revive, `quota`, `auth`: #1020; the keyhole's `setup`, this
+machine's, #1080), `spend` (the day's API spend
 cap, #1019: `runner.SPEND`), `updated`
 (`runner._updated`), `opencode` (`runner.opencode_moved`), `signal` (`SIGNAL_STOP`), `died`
 (`reap`), `update` (`wb update --stop`). `tasks` names a batch (restart, shutdown, `wb update

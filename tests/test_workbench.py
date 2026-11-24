@@ -26115,7 +26115,8 @@ class Keyhole(_KeyholeTest):
         self.assertEqual(self.post(kh)[0], 200)
         self.assertEqual(len(self.up.seen), 1)
 
-    def test_wbs_https_proxy_carries_the_upstream_unless_no_proxy_says(self):
+    def _tunnel_proxy(self, status: int) -> list:
+        """An https_proxy that answers every CONNECT with ``status``; the tunnels it was asked for."""
         tunnels = []
 
         class Proxy(http.server.BaseHTTPRequestHandler):
@@ -26124,7 +26125,7 @@ class Keyhole(_KeyholeTest):
 
             def do_CONNECT(self):
                 tunnels.append((self.path, self.headers.get("Proxy-Authorization")))
-                self.send_response(403)
+                self.send_response(status)
                 self.end_headers()
 
         proxy = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
@@ -26132,6 +26133,11 @@ class Keyhole(_KeyholeTest):
         self.addCleanup(proxy.server_close)
         self.addCleanup(proxy.shutdown)
         os.environ["https_proxy"] = f"http://me:p%40ss@127.0.0.1:{proxy.server_port}"
+        return tunnels
+
+    def test_wbs_https_proxy_carries_the_upstream_unless_no_proxy_says(self):
+        tunnels = self._tunnel_proxy(403)
+
         m = self.model()
         m.base_url = "https://api.example.invalid/v1/openai"
         kh = self.keyhole(m, hold=0)  # no address for it: an outage, passed back at once
@@ -26146,6 +26152,22 @@ class Keyhole(_KeyholeTest):
         os.environ["no_proxy"] = ".example.invalid"
         self.assertEqual(self.post(kh)[0], 502)
         self.assertEqual(len(tunnels), 1)                                # straight to the host
+
+    def test_a_proxys_503_to_the_tunnel_is_the_providers_outage_not_this_machines_setup(self):
+        # the review of #1080 (2026-11-23): http.client raises the same "Tunnel connection
+        # failed" for every non-200 CONNECT reply, so a proxy's 503 (the provider's host down
+        # behind it) stopped the round as this machine's setup, unrevived, with a remedy a user
+        # behind a corporate proxy can't follow
+        tunnels = self._tunnel_proxy(503)
+        m = self.model()
+        m.base_url = "https://api.example.invalid/v1/openai"
+        kh = self.keyhole(m, hold=0)                                     # passed back at once
+        code, _, text = self.post(kh)
+        self.assertEqual(code, 502)                                      # OpenCode retries it
+        self.assertIn("keyhole: can't reach api.example.invalid: Tunnel connection failed: 503",
+                      text)
+        self.assertNotIn("api_stop", self.task.status)
+        self.assertEqual(len(tunnels), 1)
 
     def test_parallel_requests_each_get_their_own_connection(self):
         kh = self.keyhole()
