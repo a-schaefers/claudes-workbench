@@ -1154,6 +1154,29 @@ test('#1095: a spend stop\'s wake under a cap never pairs the role on the GPU wi
   expect(woken[0]).not.toMatch(/GPU[^.;]*then `wb resume/)
 })
 
+test('#1213: a stop for Agents on GPU wakes Claude to ask for the switch back, never a cap', async ($, on) => {
+  // bar loop round 3 (2026-11-24): Agents on GPU now stops an API task already started, a
+  // `spend` stop whose remedy is the switch: SPEND_NEXT's "a higher cap" lets nothing go on
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  files['/home/u/.config/workbench/routes.json'] = JSON.stringify({ v: 1, use: 'gpu', day_usd: 5, roles: {} })
+  task(files, 'a', 'stuck')
+  notice(files, { ts: ts0, task: 'a', kind: 'stuck', round: 1, cause: 'spend', guard: 'agents',
+    text: 'a stopped: Agents is GPU, so nothing spends, and it runs on its API model (deepseek/deepseek-flash).' })
+  fakeTasks(on, files, ['a'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken).toHaveLength(1)
+  expect(woken[0]).toContain('Ask the user: Agents back to Both or API (the workbench pane, or `wb route all both` ' +
+    'on their yes), then `wb resume a`; or `wb takeover a` or `wb discard a`.')
+  expect(woken[0]).not.toContain('higher cap')
+  expect(woken[0]).not.toContain('wb feedback')
+})
+
 test('#1124: a stop by the task\'s API provider wakes Claude to pass on its remedy, never to steer or discard it', async ($, on) => {
   // the audit of 2.0 (2026-11-23): cause `provider` woke as "was stopped: it got stuck" ending
   // "Steer it with wb feedback …, or wb discard", against the notice's own "top up, then carry on"
