@@ -806,7 +806,9 @@ else `models.API_OUTPUT`, at the output price). Negative: refused the same way, 
 at the cap, else `meter.NEAR` (`too near the day's API spend cap for its next request: ≈$4.80 of $5
 today, and its next request could cost up to $0.33`, #1150). Parallel tasks overshoot by at most
 one worst request each. `Meter.begin(n)` clears an old `api_stop`, whatever its guard, as each
-round starts (a resumed task begins clean). **Between
+round starts (a resumed task begins clean), before OpenCode is spawned, as `_ProviderWait` clears the
+rate-limit keys: after it, a fast first request's 402 stop was cleared too, its 400 read as `refused`,
+and a waiter's recheck stopped `stuck` (#1240). **Between
 rounds** (`runner._go_on(task, n, what)`, #1017's helper, before each `continue` in `drive`: the
 handover, Claude's notes, the revive, auto-fix, self-review; Agents on GPU first, `runner._agents_gpu`,
 *Roles*, #1213): at the cap, or within one
