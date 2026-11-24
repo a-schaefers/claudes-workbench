@@ -3778,8 +3778,8 @@ test('Claude\'s edit of commands.json never drops a repo\'s local_only; other ed
   expect(w.deny).toContain('~/src/client')
   expect((await $.tool.call({ tool: 'Write', file_path: conf, content: files[conf].replace('"make *"', '"go *"') } as any) as any).deny).toBeUndefined()
   expect((await edit('"local_only": true', '"local_only": false', '/home/u/other.json')).deny).toBeUndefined()  // another file
-  // a nearer entry saying false lifts the root's (the nearest that states it decides): refused,
-  // as is a false written where none was (#1021's review)
+  // a false written where none was: refused (#1021's review), though since #1255 it lifts no
+  // other entry's true
   const nearer = await edit('"repos": {', '"repos": {\n  "~/src/client/pkg": {"local_only": false},')
   expect(nearer.deny).toContain('sets "local_only" to something other than true for ~/src/client/pkg')
   expect((await edit('"setup": "npm ci"', '"setup": "npm ci", "local_only": false')).deny).toContain('~/src/app')

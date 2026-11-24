@@ -192,15 +192,16 @@ def _json_holds(node, secret: bool) -> bool:
 # local_only (commands.json `repos.<path>.local_only`, wb start --local-only)
 
 def local_only(repo, sub: str | None = None) -> str | None:
-    """The commands.json key that marks this spot local-only, or None. The nearest entry that
-    says `local_only` decides (context.repo_entries: the spot, else the nearest directory above
-    it, by real path, else by git dir), so a monorepo package can be local-only alone, or opt
-    out with `false` under a local-only root; an entry for its setup alone doesn't lift the
-    root's (the nearest-key rule for `setup` would have)."""
+    """The commands.json key that keeps this repo's tasks off API models, or None: any entry at
+    or under the repo's top that says `local_only: true` (context.repo_entries ``whole``: by
+    real path and by git dir), the spot's nearest first. A task's checkout holds the whole repo,
+    whichever directory it starts in, so a package marked alone once went to the API model with
+    every task started at the root, or in it when it had no CLAUDE.md of its own (#1255, the bar
+    loop, 2026-11-24); a `false` lifts no other entry's `true` for the same reason."""
     from . import context
-    for key, v in context.repo_entries(repo, sub):
-        if "local_only" in v:
-            return key if v["local_only"] is True else None
+    for key, v in context.repo_entries(repo, sub, whole=True):
+        if v.get("local_only") is True:
+            return key
     return None
 
 

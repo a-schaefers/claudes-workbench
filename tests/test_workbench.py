@@ -36898,17 +36898,87 @@ class Privacy(_KeyholeTest):
         self.conf.write_text("{}")
         self.assertEqual(cli.local_only_refusal(self.repo, None, "significant", FLASH), "")
 
-    def test_local_only_follows_the_nearest_entry_that_says_it_and_a_package_alone_may_be_one(self):
+    def test_local_only_anywhere_in_a_repo_holds_for_its_every_spot_and_a_false_lifts_no_true(self):
+        # #1255: a task's checkout holds the whole repo, so a package's mark is the root's too,
+        # and a package's `false` under a local-only root lifts nothing (it once did: the
+        # nearest entry decided, and the root's code went with the package's task)
         (self.repo / "pkg").mkdir()
+        (self.repo / "app").mkdir()
         self.conf.write_text(json.dumps({"repos": {str(self.repo): {"local_only": True},
                                                    str(self.repo / "pkg"): {"setup": "true"}}}))
         self.assertTrue(cli.privacy.local_only(self.repo, "pkg"))    # a setup entry lifts nothing
         self.conf.write_text(json.dumps({"repos": {str(self.repo): {"local_only": True},
                                                    str(self.repo / "pkg"): {"local_only": False}}}))
-        self.assertIsNone(cli.privacy.local_only(self.repo, "pkg"))  # said so, nearest
+        self.assertEqual(cli.privacy.local_only(self.repo, "pkg"), str(self.repo))
+        self.conf.write_text(json.dumps({"repos": {str(self.repo / "pkg"): {"local_only": True},
+                                                   str(self.repo / "app"): {"local_only": False}}}))
+        for sub in ("pkg", None, "app"):                             # the package, the root, a sibling
+            self.assertEqual(cli.privacy.local_only(self.repo, sub), str(self.repo / "pkg"), sub)
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"local_only": False}}}))
+        self.assertIsNone(cli.privacy.local_only(self.repo))
+
+    def test_a_directory_marked_local_only_alone_refuses_an_api_start_from_the_root_a_sibling_and_itself(self):
+        # #1255 (the bar loop, 2026-11-24): only the spot and the entries above it were asked, so
+        # a start at a monorepo's root, or in the marked directory when it had no CLAUDE.md of its
+        # own, went to the API model with the marked directory's code in its checkout
+        for d in ("secret", "app"):
+            (self.repo / d).mkdir()
+            (self.repo / d / "main.py").write_text("x = 1\n")
+        (self.repo / "app" / "CLAUDE.md").write_text("# app\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "packages"], check=True)
+        self.local_only(key=self.repo / "secret")
+        self.role(via="api", api=FLASH)
+        for name, at in (("t-root", self.repo), ("t-app", self.repo / "app"),
+                         ("t-secret", self.repo / "secret")):
+            code, err = self.fails("start", name, "--spec", str(self.spec), "--repo", str(at))
+            self.assertEqual(code, 3, name)
+            self.assertIn(f'{cli.privacy.home_path(self.repo / "secret")} is local-only '
+                          '(commands.json "repos"): the significant role is on API', err)
+            self.assertFalse(store.Task(name).exists)
+        # the mod's dry run for a start (#1014's) and a busy GPU's API start (#1023) ask the same
+        self.assertTrue(cli.local_only_refusal(self.repo, None, "significant", None))
+
+    def test_a_repo_of_its_own_nested_in_a_local_only_marks_nothing_for_the_repo_around_it(self):
+        # #1255's review: the whole repo's entries are what its checkout holds, and a nested
+        # repo's files are in no checkout of the repo around it
+        inner = self.repo / "vendor" / "inner"
+        inner.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(inner)], check=True)
+        self.local_only(key=inner)
+        self.assertIsNone(cli.privacy.local_only(self.repo))
+        self.assertEqual(cli.privacy.local_only(inner), str(inner))
+
+    def test_a_directory_marked_local_only_holds_for_a_linked_worktree_of_its_repo(self):
+        # #1255: by git dir too, so a start in another checkout of the repo is refused alike
+        (self.repo / "secret").mkdir()
+        (self.repo / "secret" / "a.py").write_text("x = 1\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "secret"], check=True)
+        wt = Path(self.tmp.name) / "linked"
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "-q", "-b", "feat", str(wt)],
+                       check=True)
+        self.local_only(key=self.repo / "secret")
+        self.assertEqual(cli.privacy.local_only(wt), str(self.repo / "secret"))
+
+    def test_repo_conf_from_the_main_checkout_reads_an_entry_keyed_on_a_linked_worktree_nested_under_it(self):
+        # #1255's review: the git-dir pass skipped every key under the repo's top, so an entry on
+        # Claude Code's <repo>/.claude/worktrees/<name> lost its setup from the main checkout
+        (self.repo / "pkg").mkdir()
+        (self.repo / "pkg" / "a.py").write_text("x = 1\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "pkg"], check=True)
+        wt = self.repo / ".claude" / "worktrees" / "w"
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "-q", "-b", "w", str(wt)],
+                       check=True)
+        for key, sub in ((wt, None), (wt / "pkg", "pkg")):
+            self.conf.write_text(json.dumps({"repos": {str(key): {"setup": "npm ci"}}}))
+            self.assertEqual(context.repo_conf(self.repo, sub), {"setup": "npm ci"}, key)
+        # and local_only reads it once, from either checkout
+        self.conf.write_text(json.dumps({"repos": {str(wt / "pkg"): {"local_only": True}}}))
+        self.assertEqual(cli.privacy.local_only(self.repo), str(wt / "pkg"))
         self.conf.write_text(json.dumps({"repos": {str(self.repo / "pkg"): {"local_only": True}}}))
-        self.assertTrue(cli.privacy.local_only(self.repo, "pkg"))
-        self.assertIsNone(cli.privacy.local_only(self.repo))         # the root isn't
+        self.assertEqual(cli.privacy.local_only(wt), str(self.repo / "pkg"))
 
     def test_a_local_only_key_in_another_letter_case_refuses_an_api_start_where_the_file_system_ignores_case(self):
         # #1157: on macOS's APFS ~/Code/ClientX is ~/code/clientx, but repo_entries compared the

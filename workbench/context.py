@@ -1175,10 +1175,15 @@ def repo_conf(repo: str | Path, sub: str | None = None) -> dict:
     return next((v for _, v in repo_entries(repo, sub)), {})
 
 
-def repo_entries(repo: str | Path, sub: str | None = None) -> list[tuple[str, dict]]:
+def repo_entries(repo: str | Path, sub: str | None = None,
+                 whole: bool = False) -> list[tuple[str, dict]]:
     """Every commands.json `repos` entry for the task's spot, nearest first, as (key, entry):
-    repo_conf's rule, whose first is the one that applies. privacy.local_only reads further up
-    for a `local_only` the nearest doesn't state (#1021)."""
+    repo_conf's rule, whose first is the one that applies (the spot, else the nearest directory
+    above it, by real path, else by git dir with the path inside the worktree). ``whole``: every
+    entry for what a task's checkout holds, at or under the repo's top by path or by git dir (a
+    repo of its own nested under the top left out), the spot's first: privacy.local_only reads
+    them all, since a directory marked alone once went to the API model with every task started
+    outside it (#1255, 2026-11-24)."""
     repos = commands_conf().get("repos") or {}
     if not repos:
         return []
@@ -1189,28 +1194,42 @@ def repo_entries(repo: str | Path, sub: str | None = None) -> list[tuple[str, di
     real = lambda p: os.path.realpath(p).lower() if fold else os.path.realpath(p)  # noqa: E731
     top = real(repo)
     spot = real(Path(repo) / sub) if sub else top
+    common = gitops.common_dir(repo)
 
     def within(p: str, d: str) -> bool:
         return d == "." or p == d or p.startswith(d.rstrip(os.sep) + os.sep)
 
-    by_path = sorted(((len(kr), k, v) for k, v in repos.items()
-                      if within(kr := real(Path(k).expanduser()), top) and within(spot, kr)),
-                     key=lambda x: -x[0])
-    if by_path:
-        return [(k, v) for _, k, v in by_path]
-    common, rel_spot, found = gitops.common_dir(repo), os.path.relpath(spot, top), []
+    def ours(kp: Path) -> bool:  # a key under the top that isn't a repo of its own nested there
+        kc = gitops.common_dir(kp)
+        return kc is None or common is None or real(kc) == real(common)
+
+    # (far from the spot, nearest first, key, entry): by path, then by git dir
+    by_path = sorted((not near, -len(kr), k, v) for k, v in repos.items()
+                     if within(kr := real(Path(k).expanduser()), top)
+                     and ((near := within(spot, kr)) or whole and ours(Path(k).expanduser())))
+    if not whole and by_path:
+        return [(k, v) for *_, k, v in by_path]
+    found, rel_spot = [], os.path.relpath(spot, top)
     for k, v in repos.items() if common else ():
         kp = Path(k).expanduser()
-        if (kc := gitops.common_dir(kp)) is None or real(kc) != real(common):
+        # under the top, only whole mode skips a key (by_path holds it then): a key on a linked
+        # worktree nested there (Claude Code's .claude/worktrees/<name>) is the main checkout's by
+        # git dir, and skipping it always lost its setup (#1255's review, 2026-11-24)
+        if whole and within(real(kp), top) or (kc := gitops.common_dir(kp)) is None \
+                or real(kc) != real(common):
             continue
         try:
             rel = os.path.relpath(real(kp), real(gitops.toplevel(kp)))
         except gitops.GitError:
             continue
-        rank = 0 if rel == "." else len(rel) + 1
-        if within(rel_spot, rel):
-            found.append((rank, k, v))
-    return [(k, v) for _, k, v in sorted(found, key=lambda x: -x[0])]
+        if (near := within(rel_spot, rel)) or whole:
+            found.append((not near, 0 if rel == "." else -(len(rel) + 1), k, v))
+    found.sort(key=lambda x: x[:2])
+    if not whole:
+        return [(k, v) for *_, k, v in found]
+    # the spot's own first (by path, then by git dir), then the rest the same
+    return [(k, v) for far in (False, True) for rows in (by_path, found)
+            for f, _, k, v in rows if f is far]
 
 
 def shell_rules(task: store.Task) -> list[dict]:

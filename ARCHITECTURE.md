@@ -4317,8 +4317,9 @@ task was on API, and every closed task's directory stays, archived. Task.json's
 `order` (the role's, `cli._routed_keys`), the one the keyhole routes by, gives the backends. The token files the lane hides (each that holds a credential) are a note on
 every API start (*What the agent knows*, `API_HIDDEN`), and so is a git URL with a login in it (`context.git_url_note`, #1072).
 
-**local_only.** commands.json `repos.<path>.local_only: true` (a bool, else `commands_conf` refuses it), read by the
-nearest entry that states it (*Files and formats*), or `wb start --local-only` (task.json `local_only`) for one task.
+**local_only.** commands.json `repos.<path>.local_only: true` (a bool, else `commands_conf` refuses it), on the repo or
+any directory in it, for the whole repo (*Files and formats*, #1255: the marked directory is in every task's checkout;
+the exit-3 line names it), or `wb start --local-only` (task.json `local_only`) for one task.
 `wb start` refuses an API model there before any model is picked (`cli._local_only_check`, its line from
 `cli.local_only_refusal`: a `--model` resolving to `kind: api`, else the role's side as it runs, `routes.effective_via`
 over `routes.read()`), so before `pick_model`'s `--model` gate, exit 3, never the GPU instead: `wb: ~/src/client is local-only (commands.json "repos"): the trivial role is
@@ -4343,7 +4344,7 @@ to its provider: ` + that line, and the latest round's report, as `_go_on`'s (th
 Only the user lifts one: the mod's tool.call hook refuses Claude's Edit, MultiEdit or Write of commands.json
 (`$WB_COMMANDS`, else `~/.config/workbench/commands.json`, matched by real path: `/./` or a linked config directory is
 the same file) whose new text drops a `"local_only": true` the old text had, or gives an entry a `local_only` other than
-`true` it didn't have (a package's `false` lifts the root's: the nearest that states it decides) (`localOnlyRefusal`,
+`true` it didn't have (a package's `false` lifted the root's while the nearest entry decided; since #1255 it lifts nothing, and the guard stays) (`localOnlyRefusal`,
 `localOnlyMarks`; a text that doesn't parse counts the marks), with `workbench: not changed: this edit drops
 "local_only": true for <repo> in commands.json. Only the user lifts …` (or `sets "local_only" to something other than
 true for <repo> …`). A shell's write isn't seen there, as with routes.json.
@@ -6389,7 +6390,7 @@ $WB_HOME (~/.local/state/workbench)
                                  top-level strings "default" (images), "default_speech|sfx|music" (audio): the default engines (#1047)
   commands.json ($WB_COMMANDS)   {"allow": [patterns], "paths": [dirs], "env": [names]} (lists of strings, or refused: context.commands_conf),
                                  "repos": {"<repo path>": {"setup", "setup_timeout", "copy", "siblings", "merge": "merge|ff|squash",
-                                 "local_only": true|false (API models never get it; a bool or refused, #1021)}}
+                                 "local_only": true|false (API models never get it, nor its repo's other tasks, #1255; a bool or refused, #1021)}}
   chat.json ($WB_CHAT_CONFIG)    {"bind": [...], "hosts": [...], "upload_mb": 25, "upload_message_mb": 50}
   chat-token ($WB_CHAT_TOKEN)    mode 600
   chat-agents.json               beside chat-token, mode 600: {"agents": {"<name>": {"sha256", "ts"}}} (wb chat token; *Other agents*, #1042)
@@ -6414,16 +6415,20 @@ profile and a closed or gone task, never another profile's or one wb didn't make
 commands.json `repos` (`context.repo_conf`): the key nearest the task's spot (the repo, or its package: `subdir`)
 wins, the spot itself else the nearest directory above it, so the root's holds for a package without its own and a
 package's never for the root or another package (#778: matched by git dir alone, every task got the first package
-entry); by real path, else git dir and the path inside the worktree, both in lower case where the file system
+entry); by real path, else git dir and the path inside the worktree (a key on a linked worktree nested under the
+repo, Claude Code's `.claude/worktrees/<name>`, too: #1255's review), both in lower case where the file system
 ignores case (`store.folds_case`: a key typed `~/Code/ClientX` for git's `~/code/clientx` on macOS matched nothing,
 and a local-only repo went to the API model, #1157). It asks each component of the real path in its own parent, its
 letters' case swapped, so WSL2's drvfs (`/mnt/c`, folding under an ext4 root that doesn't) counts too: the whole path
 swapped, `/MNT/C/uSERS/…`, isn't there, and a key in another case than the cwd's missed (#1217). wb accept reads it
 the same way. `--setup`,
 `--setup-timeout` (a positive whole number) replace; `--copy`, `--sibling` add; `merge` is `wb accept --merge`'s way
-(`context.MERGE_AS`; `--merge-as` overrides). `local_only` is read further up: the nearest entry that states it decides
-(`context.repo_entries`, nearest first; `privacy.local_only`), so a package's entry for its setup alone doesn't lift
-the root's, and a package can say `false` (or `true` alone); an API task never takes standing `copy`/`siblings`
+(`context.MERGE_AS`; `--merge-as` overrides). `local_only` is read for the whole repo, not the spot: any entry at or
+under the repo's top that says `true` holds for every task of it (`context.repo_entries` `whole`: by real path and
+by git dir, a repo of its own nested under the top left out; `privacy.local_only`, the spot's nearest named first),
+since a task's checkout holds the whole repo: a package marked alone went to the API model with every task started at
+the root, or in the package when it had no CLAUDE.md of its own (#1255). A `false` lifts no other entry's `true`, and an
+entry for its setup alone lifts nothing; an API task never takes standing `copy`/`siblings`
 unnamed (*Setting the worktree up*).
 
 **Store primitives** (`workbench/store.py`). `home()` is `$WB_HOME`, else `~/.local/state/workbench`. `PATH_VARS`
