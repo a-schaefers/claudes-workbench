@@ -18183,7 +18183,10 @@ class Verify(Base):
         self.assertIn("base: exit 1: AssertionError: 250000 != 250", rep)
         self.assertIn("/verify/1/{base,candidate}.txt", rep)               # each run's output
         from workbench import chat                    # the web chat's task sheet says the same (#1201)
-        self.assertIn("\n".join(chat.task_summary(store.Task("t"))["verify"]), rep)
+        checks = chat.task_summary(store.Task("t"))["verify"]
+        self.assertTrue(checks)                       # an empty list joins to "", in any string
+        self.assertIn("proven: it fails on the base", "\n".join(checks))
+        self.assertIn("\n".join(checks), rep)
         (self.wt / "calc.py").write_text("def kw(watts):\n    return watts / 1000.0\n")
         self.assertIn("stale: the worktree has changed since", run_wb("report", "t"))
         out = run_wb("accept", "t", "-m", "kW from W")
