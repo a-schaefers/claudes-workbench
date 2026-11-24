@@ -63,6 +63,27 @@ def _simple_commands(command: str) -> list[str]:
     return parts
 
 
+# The words of a shell line that may name a file: split at whitespace, quotes and the shell's
+# and a script's punctuation, so `cat > lib/util.py`, `--out=dist/x` and a heredoc's
+# open('lib/util.py') each give the path. Kept in a shell row's `names` (runner.shell_wrote).
+_NAME_SPLIT = re.compile(r"[\s'\"`;&|<>(){}\[\]$=,:*?!\\]+")
+NAMES_MAX = 300   # words a row keeps: a heredoc of a whole module is thousands
+NAME_LEN = 300
+
+
+def shell_names(command: str) -> list[str]:
+    """The words of a shell line that may name a file it wrote, paths first (a word with `/`,
+    then one with `.`), each once, NAMES_MAX of them. Build output under an ignored dist/ was
+    taken for the agent's work and refused at accept, though `npm run build` names none of it,
+    while `cat > lib/util.py <<EOF` names its file (#1210's review, 2026-11-24)."""
+    words = dict.fromkeys(w for w in _NAME_SPLIT.split(command or "")
+                          if w and len(w) <= NAME_LEN and not w.startswith("-")
+                          and re.search(r"[A-Za-z0-9]", w))
+    ranked = ([w for w in words if "/" in w] + [w for w in words if "/" not in w and "." in w]
+              + [w for w in words if "/" not in w and "." not in w])
+    return ranked[:NAMES_MAX]
+
+
 def shell_programs(command: str) -> list[str]:
     """The program each simple command in a shell line runs, in order, its path and the
     variable assignments before it dropped: `cd x && FOO=1 probe symbols a.py | head` is
@@ -161,6 +182,8 @@ def normalize(raw: dict, round_no: int):
                 row["whole"] = True  # the whole file: the runner counts a long one (#857)
         elif tool in ("shell", "bash") and isinstance(inp.get("command"), str):
             row["programs"] = list(dict.fromkeys(shell_programs(inp["command"])))[:8]
+            # the words that may name a file it wrote: no edit row shows the shell's (#1210)
+            row["names"] = shell_names(inp["command"])
         # The signature is what "the same call again" means to the stuck detector: the whole
         # input. Cut to its first 400 characters, `content` sorting before `filePath`, four new
         # files opening with one licence header were "the same call 4 times" (#497).

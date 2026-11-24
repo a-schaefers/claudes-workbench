@@ -2746,6 +2746,53 @@ class Lifecycle(Base):
         self.assertIn("accepted t-mvn", out)
         self.assertNotIn("note: git ignores", out)
 
+    def test_build_output_no_shell_row_names_is_left_out_at_accept_while_a_module_one_writes_is_refused(self):
+        # #1210's review (2026-11-24): every ignored file changed since the agent's first round
+        # counted as its shell's, so the dist/ of its own `npm run build` was named in the NOTE
+        # as "files the agent wrote" and refused at accept; --include put build output on main
+        (self.repo / ".gitignore").write_text("dist/\nlib/\n")
+        (self.repo / "src").mkdir()
+        (self.repo / "src" / "index.ts").write_text("export const answer = () => 42;\n")
+        (self.repo / "jest.config.js").write_text("module.exports = {};\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ts"], check=True)
+        self.start("t-b", "buildout", "--test", TEST_CMD)
+        wait_phase("t-b", {"review"})
+        t = store.Task("t-b")
+        self.assertEqual(runner.shell_wrote(t), [])
+        self.assertEqual(runner.shell_left(t), ["dist/index.d.ts", "dist/index.js"])
+        self.assertNotIn("git ignores files the agent wrote", run_wb("report", "t-b"))
+        out = run_wb("accept", "t-b", "-m", "feat: one", "--merge")
+        self.assertIn("accepted t-b", out)
+        self.assertIn("merged into main", out)
+        self.assertIn("leaves out as build or test output (dist/index.d.ts, dist/index.js): a copy is in", out)
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "--name-only", "main"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertNotIn("dist/index.js", tree)
+        self.assertTrue((t.dir / "left-out" / "dist" / "index.js").is_file())
+        # a module a shell row names is still the agent's: refused until --include
+        self.start("t-sh", "shellwrite", "--test", TEST_CMD)
+        wait_phase("t-sh", {"review"})
+        t = store.Task("t-sh")
+        self.assertEqual(runner.shell_wrote(t), ["lib/util.py"])
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-sh", "-m", "feat: one", "--merge")
+        self.assertIn("not committed: git ignores files written in the worktree (lib/util.py)", err.getvalue())
+
+    def test_a_shell_line_names_the_files_it_may_write_paths_first(self):
+        # #1210's review (2026-11-24): `npm run build` names none of its dist/, and the agent's
+        # redirect, mv or heredoc'd script names the module it wrote
+        self.assertEqual(events.shell_names("npm run build"), ["npm", "run", "build"])
+        self.assertEqual(events.shell_names("mkdir -p lib && cat > lib/util.py <<'X'\nx = 1\nX")[0],
+                         "lib/util.py")
+        self.assertEqual(events.shell_names("python - <<EOF\nopen('lib/util.py', 'w')\nEOF")[0],
+                         "lib/util.py")
+        self.assertEqual(events.shell_names("mv util.py lib/util.py; tsc --outDir=build/lib")[:3],
+                         ["lib/util.py", "build/lib", "util.py"])
+        self.assertLessEqual(len(events.shell_names(" ".join(f"w{i}" for i in range(5000)))),
+                             events.NAMES_MAX)
+
     def test_diff_of_a_merged_task_hints_a_command_that_still_works(self):
         # #477 (the audit of 1.8): the hint named delegate/<task>, which the merge had deleted,
         # and git said "unknown revision"

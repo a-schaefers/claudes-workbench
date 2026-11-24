@@ -6,6 +6,8 @@
          write): input `patchText` only, the files in `state.metadata.files[].file` (#1148)
   shellwrite  lib/util.py with a `bash` row (cat > … <<EOF), then main.py importing it and
          answer.txt = "42" with write (#1210)
+  buildout  dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names
+         neither, then answer.txt = "42" with write (#1210's review)
   stay   as ok, then stays open for an hour, its output open and silent: the agent's turn over
          (reason stop) and OpenCode not exiting (#1160)
   fix    first round writes "41" (wrong); a continued session (--session) writes "42"
@@ -689,6 +691,18 @@ elif scenario == "shellwrite":  # #1210: a module written with the shell, the re
             fh.write(text)
         tool("write", {"filePath": os.path.abspath(name), "content": text})
     emit("text", text="Wrote lib/util.py, main.py and answer.txt = 42.")
+    finish()
+elif scenario == "buildout":  # #1210's review: the agent's own build, its output under dist/
+    os.makedirs("dist", exist_ok=True)
+    for name, text in (("index.js", "exports.answer = () => 42;\n"),
+                       ("index.d.ts", "export declare const answer: () => number;\n")):
+        with open(os.path.join("dist", name), "w") as fh:
+            fh.write(text)
+    tool("bash", {"command": "npm run build", "description": "Build"}, output="> tsc\n")
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42\n"})
+    emit("text", text="Built, and wrote answer.txt = 42.")
     finish()
 elif scenario == "loop":
     for _ in range(10):

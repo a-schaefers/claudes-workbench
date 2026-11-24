@@ -960,9 +960,16 @@ worktree (…)". Nor did the agent's shell's count (`mkdir -p lib && cat > lib/u
 it deleted (#1210). So `runner.shell_wrote` counts too: what `gitops.hand_written` (below) finds
 changed since the agent's first round (status `agent_from`, set once, after the checkout, setup,
 `--copy` and base check), less what the runner's own test runs changed (status `test_wrote`, kept
-by `run_tests` after each: a Maven run's surefire reports are no one's work, and the agent's own
-runs write what the runner's next one writes again); the report's NOTE names it, less status
-`hand_wrote`, and its rest (`runner.shell_left`) joins `hand_left`'s. Nor did Claude's files
+by `run_tests` after each: a Maven run's surefire reports are no one's work), that one of the
+agent's shell rows names (`runner._shell_named`: a word of its `names`, `events.shell_names`,
+equal to the path, ending in it or it in the word, or a word without `/` its file name; every
+shell row, a failed one too; an older row without `names`, its brief's words). Unnamed, it was all
+of them, and the `dist/` of the agent's own `npm run build` (tsc's, `python -m build`'s
+`build/lib`, an `mvn test` wider than `--test`) was "files the agent wrote", refused at every
+accept, and `--include` put build output on main (#1210's review); naming reads as writing, so a
+`node dist/index.js` names that file. The report's NOTE names `shell_wrote`, less status
+`hand_wrote`; the rest (`runner.shell_left`: the unnamed and `hand_written`'s rest, less
+`test_wrote`, the edit rows' and `hand_wrote`) joins `hand_left`'s note and `left-out/` copy. Nor did Claude's files
 count, which no event shows: a module written under `lib/` after `wb takeover` was lost (#1179).
 So a file written while no runner runs counts too (`runner.hand_wrote`): one
 `gitops.hand_written` finds changed (mtime or ctime) since the agent stopped (status
@@ -6232,7 +6239,7 @@ off), not `wb start`'s.
 | `checked_out`, `checkout_secs` | `runner.checkout` made the worktree; how long |
 | `hands_off_at` | when the agent last stopped (review, the runner's exit, `cli._stop_runner`, `cli.reap`; an earlier one kept): ignored files changed since are Claude's (`runner.hand_wrote`, #1179); cleared by the next runner once it has kept them |
 | `hand_wrote` | ignored files written while no runner ran, kept by each runner at its start (`runner._hands_on`): `wb accept`/`wb next` refuse them until `--include` (#1179) |
-| `agent_from` | when the agent's first round began, after the checkout, setup, `--copy` and base check (set once): ignored files changed since that `gitops.hand_written` keeps, less `test_wrote`, are the agent's shell's (`runner.shell_wrote`, `shell_left`), refused at `wb accept`/`wb next` until `--include` and named in the report (#1210) |
+| `agent_from` | when the agent's first round began, after the checkout, setup, `--copy` and base check (set once): ignored files changed since that `gitops.hand_written` keeps, less `test_wrote`, that a shell row's `names` name are the agent's shell's (`runner.shell_wrote`), refused at `wb accept`/`wb next` until `--include` and named in the report; the rest are `shell_left`, noted and left out (#1210) |
 | `test_wrote` | the ignored files the runner's test runs changed (`runner._tests_wrote`, after each in `run_tests`; what `hand_written` keeps and its rest): build or test output, never the agent's shell's (#1210) |
 | `hand_left` | the other ignored files changed while no runner ran that `gitops.hand_written` took for build or test output but a person might have written (text, outside a cache, under `BUILD_FILES` text files in their group, any suffix: never bytecode nor an install's), kept the same way: `wb accept`/`wb next` name them as left out of the commit (`gitops.left_out_line`; accept keeps a copy in `left-out/`, #1179's review) |
 | `taken_over` | `wb takeover`: `runner.checkout` then fails a task not checked out rather than recheck it out (#655); cleared by the hand-back once checked out, for the mod's `delegatedWork` (#926) |
@@ -6278,9 +6285,9 @@ off), not `wb start`'s.
 | `guard` | `spend` when `runner._go_on` stopped the task before a round (the day cap, or within one worst request of it, #1150), with `infra` `spend` |
 | `updated_at` | every write |
 
-**events.jsonl** rows are `{ts, round, kind, …}`. From OpenCode (`events.normalize`): `tool {tool, brief, ok, error?, path?, paths?}`
+**events.jsonl** rows are `{ts, round, kind, …}`. From OpenCode (`events.normalize`): `tool {tool, brief, ok, error?, path?, paths?, programs?, names?}`
 (`brief`: command, path, pattern, url, query or description, 90 chars; a skill's id; a patch's first
-file; `path` an edit's or a read's whole path; `paths` the files a `patch` wrote, `events.patched`, #1148), `text {text}` (2000), `step {in,
+file; `path` an edit's or a read's whole path; `paths` the files a `patch` wrote, `events.patched`, #1148; a shell row's `programs`, `events.shell_programs`, 8, and `names`, the words that may name a file it wrote, paths first, `events.shell_names`, `NAMES_MAX` 300: `runner.shell_wrote`, #1210), `text {text}` (2000), `step {in,
 out, cache, cache_read, cache_write, reasoning?, cost?}` (reasoning apart from `out`; `cache` the read and write summed,
 which the handover check reads; `cost` OpenCode's `part.cost` in USD, only when a number: missing is unknown, never 0, #1022; the meter's step price too, #1019), `error {text}`, `retry {text, attempt}` (OpenCode resent a request). From the runner: `round`, `stopped {text}`, `steer
 {now, by: "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow, compacted}` (`compacted` after a failed compaction too),
@@ -6581,7 +6588,7 @@ else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `path`: `events._brief` reads both). Records `FAKE_PROMPTS`, `FAKE_RUNS` (each run's `session`, `prompt`, `cwd`,
 `pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
 `FAKE_LESSON`, `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
-`ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `shellwrite` (lib/util.py through a `bash` row's `cat > … <<X`, main.py and answer.txt with `write`: #1210), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
+`ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `shellwrite` (lib/util.py through a `bash` row's `cat > … <<X`, main.py and answer.txt with `write`: #1210), `buildout` (dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names neither, then answer.txt: #1210's review), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
 `read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087), `selfreads` (ok, then a self-review that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168), `floor` (`HANDOVER_ROOM`), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
 2.3's `{"type": "error", …, "error": {"type": "compaction.failed", "message": "Compaction produced no summary"}}`;
 `FAKE_COMPACT_MSG`, `FAKE_COMPACT_EXIT`, `FAKE_COMPACT_EDIT`, `FAKE_REFAIL`), `bgwait` (`FAKE_BGWAIT`), `toolhang`,

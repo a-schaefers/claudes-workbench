@@ -36,7 +36,7 @@ from . import (ask_mcp, context, gitguard, gitops, hardware, keyhole, lane, less
                skills, stats, store, tuning)
 from . import meter
 from . import privacy
-from .events import EDIT_TOOLS, StuckDetector, compaction_failed, normalize, written
+from .events import EDIT_TOOLS, StuckDetector, compaction_failed, normalize, shell_names, written
 from .watch import Watcher
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
@@ -2731,28 +2731,61 @@ def _hands_on(task: store.Task) -> None:
 def shell_wrote(task: store.Task) -> list[str]:
     """The ignored files changed in the worktree since the agent's first round (status
     `agent_from`) that look written by hand (gitops.hand_written), less what the runner's test
-    runs wrote (status `test_wrote`): the agent's shell's, which no edit row shows. An agent's
+    runs wrote (status `test_wrote`), and that one of the agent's shell rows names (its path, or
+    its name alone: _shell_named): the agent's shell's, which no edit row shows. An agent's
     `mkdir -p lib && cat > lib/util.py <<EOF` under Python.gitignore's lib/ was in no diff (the
     review's "all of it"), no NOTE and no commit: wb accept --merge exited 0, main imported a
-    module that was deleted with the worktree (#1210, 2026-11-24). Claude's writes since are in
-    it too, as they are in hand_wrote."""
+    module that was deleted with the worktree (#1210, 2026-11-24). Named, not all of them: the
+    dist/index.js of the agent's own `npm run build` (or tsc's, `python -m build`'s build/lib, an
+    `mvn test` wider than --test) was taken for its work, named in the NOTE and refused at every
+    accept, and --include put build output on main (#1210's review, 2026-11-24)."""
     return _by_shell(task)[0]
 
 
 def shell_left(task: store.Task) -> list[str]:
     """The rest of the ignored files changed since the agent's first round that hand_written
-    took for a build's or a test run's, less the runner's test runs': the commit leaves them out,
-    said, as hand_left's (#1210)."""
+    keeps, or took for a build's or a test run's, less the runner's test runs', the agent's edit
+    rows' and Claude's (hand_wrote): build output no shell row names among them. The commit
+    leaves them out, said, and wb accept copies them to left-out/, as hand_left's (#1210's
+    review)."""
     return _by_shell(task)[1]
+
+
+def _shell_named(task: store.Task):
+    """Whether one of the agent's shell rows names a worktree-relative path: a word equal to it,
+    one ending in it (absolute), one it ends in (relative to the workdir: a monorepo's package),
+    or, a word without `/`, its name (`cd lib && cat > util.py`, `mv util.py lib/`). Every shell
+    row, a failed one too: `cat > lib/util.py <<EOF && pytest` that fails still wrote the module,
+    and dropping it is the loss #1210 was. A row from before `names` was kept: its brief's words.
+    Reading as writing: `node dist/index.js` after the build names it too, and refuses it."""
+    words: set[str] = set()
+    for r in store.read_jsonl(task.dir / "events.jsonl")[0]:
+        if r.get("kind") == "tool" and r.get("tool") in ("shell", "bash"):
+            names = r.get("names")
+            if not isinstance(names, list):
+                names = shell_names(str(r.get("brief") or ""))
+            words.update(os.path.normpath(str(w)).lstrip("/") if "/" in str(w) else str(w)
+                         for w in names if w)
+    bare = {w for w in words if "/" not in w}
+    paths = [w for w in words if "/" in w]
+
+    def named(p: str) -> bool:
+        return (p.rsplit("/", 1)[-1] in bare
+                or any(w == p or w.endswith("/" + p) or p.endswith("/" + w) for w in paths))
+    return named
 
 
 def _by_shell(task: store.Task) -> tuple[list[str], list[str]]:
     if not (since := task.status.get("agent_from")):
         return [], []
     rest: list[str] = []
-    wrote = gitops.hand_written(task.worktree, since, rest)
-    tests = set(task.status.get("test_wrote") or [])
-    return [p for p in wrote if p not in tests], [p for p in rest if p not in tests]
+    kept = gitops.hand_written(task.worktree, since, rest)
+    not_shell = set(task.status.get("test_wrote") or [])
+    kept = [p for p in kept if p not in not_shell]
+    named = _shell_named(task) if kept else (lambda p: False)
+    wrote = [p for p in kept if named(p)]
+    not_shell |= set(wrote) | set(agent_wrote(task)) | set(hand_wrote(task))
+    return wrote, sorted({p for p in kept + rest if p not in not_shell})
 
 
 def _tests_wrote(task: store.Task, began: float) -> None:
