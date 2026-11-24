@@ -1123,8 +1123,8 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   again" and no notice (#1216). A second stop, or a quota, key, setup or refused stop, ends it `stuck` with `cause` `provider`, `infra`
   `provider` (a bench replay scores `error`), and `provider_remedy` under the STOPPED line (`wb
   feedback <task> --text "carry on"` once the provider allows, a round that counts no review, #1153, and `routes.off_api`'s command, `wb route <role> gpu (the user's
-  yes)` or under Agents API `wb route all gpu`, when the task has a role and its next tasks aren't off API already, #1218; top up or wait for the plan's reset; /connect for a refused
-  key; for `setup`, "this machine's stop, not the agent's or <provider>'s: mend what the line
+  yes)` or under Agents API `wb route all gpu`, when the task has a role and its next tasks aren't off API already, #1218; top up or wait for the plan's reset; for a refused key, store it
+  again (`` `opencode auth login <provider>` in a terminal, or the variable it came from ``, #1189); for `setup`, "this machine's stop, not the agent's or <provider>'s: mend what the line
   above says", #1080; for `refused`, `wb feedback` once what the provider said is fixed, and on a
   404 `wb takeover` or `wb discard` if it no longer serves the model, which wb never switches). Its `stopped` event says `by: "provider"`, so it is never a lesson about the agent (the
   same limit on three tasks of one account read as a recurring one). An `api_stop` whose guard is
@@ -2090,29 +2090,57 @@ the state directory with the project config off, as `models._opencode_json` runs
 `--standalone` it started OpenCode's background service with the runner's environment, or failed
 where another home's service held its port: #1070), stdout read into
 memory, a failure's stderr cut to its first line and redacted, a `Key` whose repr is `Key(<provider>,
-api key)`) and serves a `Keyhole` from a daemon thread of the runner, outside the lane and dying with
-it, on `127.0.0.1:0` (never `localhost`, which may be `::1` first). It refuses
-(`KeyholeError("needs a key wb can hold outside the lane: <why>")`, remedy `keyhole.REMEDY`, "store
-an API key with /connect in OpenCode") an OAuth login (its tokens rotate: a copy refreshed would log
+api key)`; `Key.source` is `""` for a stored key, `$VAR` for one from the environment) and serves a
+`Keyhole` from a daemon thread of the runner, outside the lane and dying with
+it, on `127.0.0.1:0` (never `localhost`, which may be `::1` first). Its start line in runner.log ends
+`(key from $VAR)` for an environment key: the name, never the value.
+
+**A key from the environment (#1189).** With no key stored (`auth export` prints none, or exits
+non-zero beside a lone `{env:VAR}`), `load_key` reads the variable OpenCode itself names for the
+provider: a lone provider-level V1 `options.apiKey` `{env:VAR}` (`_lone_env`), else `auth list`'s
+`env` connection (`_env_only`); wb never guesses a name. The order is OpenCode's: a stored key first
+(`models._key_source`; a lone `{env:VAR}` beside a stored key reads the stored one, #1075: OpenCode
+2.3.2 sends it over any config apiKey, checked 2026-11-23, and the overlay replaces the reference).
+`_from_env` takes `os.environ[VAR].strip()` from the runner's own environment, which is wb start's
+(`context.detached_env`, through `cli.spawn_runner`): every exported key was already in the runner,
+the agent's environment drops it (`runner.agent_env`, `SECRET_ENV`), and Landlock's ptrace rule
+keeps `/proc/<runner>/environ` from the lane though `/proc` is readable, so this moves the key
+nowhere new; it never reaches argv, the layer, `catalog.json` or a log, and `redact` still applies.
+`env_refusal(provider, VAR)` refuses ("needs a key wb can hold outside the lane: …"), each naming the
+variable, never the value, and its own fix: unset or blank where wb start ran ("$VAR isn't set where
+wb start ran: export it, or store the key with `opencode auth login <provider>`"); passed to agents
+by commands.json `env` ("$VAR is passed to agents (commands.json env): remove it there"); a name the
+agent's environment keeps (`runner.env_kept`: not `SECRET_ENV`-shaped, "agents get $VAR too … rename
+it, or store the key with …"); a character a header can't carry (`KEY_CHARS`). A `{env:VAR}` in a
+header or a V2 `settings` still refuses ("<provider>'s key is read from $VAR in a header or V2
+`settings`, which the keyhole can't stand in for: give it as provider.<p>.options.apiKey …"): the
+agent's OpenCode expands it itself and sends that over the token. `env_source(provider, VAR)` is
+that refusal or `env_refusal`'s: what `models.env_why` asks, so status, wb setup, wb models, wb scout,
+the router and the pane say what the runner would (`models.key_runs`: "stored", or "env:VAR" with no
+`env_why`).
+
+It refuses (`KeyholeError("needs a key wb can hold outside the lane: <why>")`, remedy
+`keyhole.remedy(provider)`, "store an API key with `opencode auth login <provider>` in a terminal (or
+/connect in OpenCode)", the provider's id filled in by `runner.keyhole_failure(e, provider)`, which
+adds it unless the text names a fix already) an OAuth login (its tokens rotate: a copy refreshed would log
 the user out), an external credential, any credential that isn't a key (OAuth, external, or a
 type such as 1.x's `wellknown`) active over an older key kept beside it ("<provider>'s active
 credential is an OAuth login …: `opencode auth switch` to its API key, or store one with
-/connect": the inactive key was billed, #1110), request signing (SigV4, Vertex: a header swap can't work),
-a key only in the environment (`{env:VAR}`, or `auth list` naming a variable: `SECRET_ENV` drops it
-from the agent anyway; a lone `{env:VAR}` V1 `options.apiKey` beside a stored key is no refusal,
-`_lone_env`: OpenCode 2.3.2 sends the stored key over any config apiKey, checked 2026-11-23, and the
-overlay replaces the reference, so `auth export` is read and only with no key stored does it say
-`$VAR`, #1075; in a header or a V2 `settings` it still refuses), and a key written in the user's `opencode.json` or `OPENCODE_CONFIG_CONTENT`
+`opencode auth login <provider>`": the inactive key was billed, #1110), request signing (SigV4, Vertex: a header swap can't work),
+an environment key `env_refusal` refuses (above), and a key written in the user's `opencode.json` or `OPENCODE_CONFIG_CONTENT`
 anywhere in the provider's entry, V1 `provider.<pid>` or V2 `providers.<pid>` (`_keys_in`: the
 provider's, a model's own, a V2 `settings`, a variant's), as an `apiKey` or as a header (any
 `headers`: a name with `auth`, `key` or `token` in it, or a value shaped like a key or `Bearer …`)
-("its key is written in <file>, which agents can read: remove it there, and store the key with /connect":
-/connect alone changed nothing while the written key stayed, #1075). A model's
+("its key is written in <file>, which agents can read: remove it there, and store the key with
+`opencode auth login <provider>`": /connect alone changed nothing while the written key stayed, #1075). A model's
 own key counts because OpenCode 2.3.2 sends a model's settings over its provider's (the review of
 #1015: one in the content went unseen, in the agent's environment). A stored key is trimmed (a paste's newline: OpenCode trims only on
 `/connect`) and must then be printable ASCII (`KEY_CHARS`), else "can't use <provider>'s stored key:
-it holds a character an HTTP header can't carry" (http.client's refusal quoted the header, key and
-all, the 2026-11-23 review). The protocol comes from the catalog's provider package (`protocol_of`,
+it holds a character an HTTP header can't carry; store it again with `opencode auth login
+<provider>`" (http.client's refusal quoted the header, key and all, the 2026-11-23 review).
+`opencode auth login <provider>` (`keyhole.LOGIN`, `keyhole.login`) is OpenCode 2.3.2's one terminal
+command for a key, in place of /connect in its TUI; its key prompt needs a terminal (`secret` →
+`requireInteractive`), so it can't run from Claude's Bash or `!`: wb names it and the user runs it. The protocol comes from the catalog's provider package (`protocol_of`,
 `PACKAGES`: OpenCode 2.3.2's packages whose model routes post the base plus a `MODEL_PATHS` path):
 Anthropic's and `anthropic-compatible` take `x-api-key` (and keep `anthropic-version`); alibaba,
 cerebras, cloudflare-workers-ai, deepinfra, deepseek, digitalocean, fireworks, groq, meta, minimax,
@@ -2210,9 +2238,9 @@ model whose `key` is `none`), starts it before the first round as `CURRENT["keyh
 (`start_keyhole`: `on_health` is `models.note_api(provider, state, why, until)`, the model's
 health record; `on_usage` and `room` are the task's meter's, `meter.Meter.hooks`, #1019) and closes it when
 the drive ends. A `KeyholeError` fails the task through `_load_failed` (`<model> can't run:
-<why>`, a `failed` notice) with `keyhole.REMEDY` appended unless the text already gives the
-remedy, or is OpenCode failing to run or answer `opencode auth …`, which a key stored again
-doesn't mend (`keyhole_failure`, #1070). The layer's provider entry gets `keyhole_overlay(task)`:
+<why>`, a `failed` notice) with `keyhole.remedy(<provider>)` appended unless the text already gives the
+remedy (an environment key's refusal names its own, #1189), or is OpenCode failing to run or answer
+`opencode auth …`, which a key stored again doesn't mend (`keyhole_failure(e, provider)`, #1070). The layer's provider entry gets `keyhole_overlay(task)`:
 `provider.<pid>.options` from `layer_options`, and the same base and token as the task model's
 own `provider.api` and `options` (`models.<id>`, with the variants, below) where the model has an
 entry anyway: the task's catalog file, or one in a config file or the user's content, V1 or V2
@@ -3287,12 +3315,15 @@ read as a wrong id, Claude hunted for the "right" one).
   task's model must be found: `transcript.model_line` (which reads the catalog's variant list too),
   `tuning._rows`, `router.expected`. The pane's two (`model_line`, `expected`) pass `cached=True`:
   hosted.json as it is, never rebuilt, so a 5 s poll never waits on OpenCode. With no hosted.json,
-  or one that lists no provider with a stored key and is older than `cli.PANE_REREAD_SECS` (60 s),
+  or one that lists no provider with a key a task runs with (`models.key_runs`: stored, or an
+  exported `env:VAR` one, #1189) and is older than `cli.PANE_REREAD_SECS` (60 s),
   `wb route --json` (the pane's Settings and Tasks tabs) starts one fresh read in the background
   (`cli._read_catalog_later`, at most one per `CATALOG_TIMEOUT` + 10 s, its mark `hosted.reading` in
   the state dir) and a later poll lists the providers: with keys stored and no cache yet, or a cache
   read before /connect (which changes no stamp), the pane said `NO_PROVIDER` until another command
-  built one (#1069). A cache listing a stored key is never read again for the pane. `wb setup` reads
+  built one (#1069). A cache listing a key that runs is never read again for the pane (counting
+  only a stored one read the catalog about once a minute through an API task whose only key was
+  exported, #1189's review). `wb setup` reads
   it inline (fresh) when a key `auth list` says is stored isn't stored in the cache, a config that
   doesn't parse skipping it. `transcript._server_live` keeps `discover()`: an API model is
   never probed for `/metrics`; `identity` and `weights` say None and 0 for one, and `keep_warm` skips it.
@@ -3305,9 +3336,11 @@ read as a wrong id, Claude hunted for the "right" one).
 
   | State | `why` | `may_come_up` |
   |---|---|---|
-  | no key (`key == ""`) | `no key for <Provider>: run /connect in OpenCode and add it` | no |
+  | no key (`key == ""`) | `no key for <Provider>: run `` `opencode auth login <provider>` `` in a terminal and add it` (its own fix: `remedy` gives none, #1189) | no |
   | a package the keyhole can't carry (`keyhole_refusal`, before the key, #1066) | `can't run: the keyhole doesn't speak <Provider>'s API (<package>), so wb can't hold its key outside the lane: a model of another provider can run` | no |
-  | `oauth`, `env:NAME`, `config`, `signing` | `can't run: needs a key wb can hold outside the lane (<Provider>'s is an OAuth login / from the environment, NAME / written in <file> / a cloud login that signs each request): store an API key with /connect` (`config`: `remove its apiKey there, and store the key with /connect`, remedy `remove options.apiKey for <Provider> from <file>, …`, #1075: `/connect` alone changed nothing) | no |
+  | `env:NAME` the keyhole can't read (`models.env_why`, `keyhole.env_source`, #1189: unset here, passed to agents, a name agents keep, a header or V2 one) | `can't run: needs a key wb can hold outside the lane: <its refusal, with its fix>` (`remedy` gives none) | no |
+  | `env:NAME` it can (set in this process's environment, which the runner wb start spawns inherits, and dropped from the agent's) | runs as a stored key does: on to `api-health.json` | |
+  | `oauth`, `config`, `signing` | `can't run: needs a key wb can hold outside the lane (<Provider>'s is an OAuth login / written in <file> / a cloud login that signs each request): store an API key with /connect` (`config`: `remove its apiKey there, and store the key with /connect`, remedy `remove options.apiKey for <Provider> from <file>, …`, #1075: `/connect` alone changed nothing) | no |
   | `no_credit` | `out of credit or quota at <Provider> (<line, redacted>): top it up, or wait for the plan's reset (wb asks again from HH:MM); wb never switches models` | no |
   | `rate_limited` | `rate-limited by <Provider> until HH:MM` | yes |
   | `unreachable` | `can't reach <host> (<reason>)` | yes |
@@ -3652,7 +3685,8 @@ tasks (…: limited by wb model sizes; …)").
 **The refusal names the GPU, and the API choice** (#1024): with no model to pick, `choose` returns
 `no GPU model can run: <id>: <why>…`, `no GPU model takes <size> tasks …` or `no GPU models: <why
 none>` (they said "local", which read on an API-ok setup as "nothing can run"). When a provider has a
-key wb can hold (`models.connected()`, a fresh `auth list`), `router.api_choice(role)` appends `; or
+key wb can hold (`models.connected()`, a fresh `auth list`; stored, or an environment key the keyhole
+reads, `models.key_runs`, #1189), `router.api_choice(role)` appends `; or
 put <role> on an API model you connected (the user's yes): wb route <role> <id>, wb models lists
 them` (`choose(…, role=)`, from `routes.resolve`; the size's name otherwise): the one line of choices
 `wb start` exits 3 with; none while Agents is GPU (`use`), where a role's API model wouldn't apply.
@@ -3676,9 +3710,9 @@ API role its id, `ready` or status's `why` (or `not in OpenCode's catalog now`),
 under it the model's `slice:` (`router.slice`, as `wb start` prints it: plan mode sizes a step to it
 before any start, #1131); a
 routes.json that can't be read is one line, `roles: routes.json can't be read: wb route sets them
-again`; then `keys:` one per provider with a key source (`stored`, `Ollama's login`, or
-`environment` / `OAuth login` / `in a config file` / `cloud signing`: `can't run, needs a key wb can
-hold outside the lane`); `catalog:` one count per provider, never the ids (OpenRouter alone lists
+again`; then `keys:` one per provider with a key source (`stored`, `Ollama's login`, `key from
+$VAR` (#1189; `: can't run: <models.env_why>` when the keyhole can't read it), or `OAuth login` / `in a
+config file` / `cloud signing`: `can't run, needs a key wb can hold outside the lane`); `catalog:` one count per provider, never the ids (OpenRouter alone lists
 300+), a provider's free models noted `free: the provider may keep or train on your code`
 (`FREE_NOTE`, #1021's words). With no role on API (or kept), no key and a routes.json that parses,
 the section is two lines: `none set up, every role on the GPU` and the catalog's counts. With no GPU
@@ -4063,8 +4097,9 @@ GPU; wb route all both goes back to each role's own below)`); `--json` the norma
 `gpu_found`, and for the pane (#1023, `cli._route_pane`) `spend_today` (`{usd, prices, by_provider}`, today's
 `step` and `reconcile` rows of the day ledger, spend-api.jsonl; `usd` is `meter.today()`'s, the sum the
 cap is checked against) and `providers` (`{<id>: {name, key,
-why?}}` from the cached catalog: `key` `stored`, `ollama`, `env`, `oauth` or `none`, with the why for any but
-stored; a stored key on a package the keyhole can't carry is `none` with `models.unspoken_why`'s
+why?, runs?}}` from the cached catalog: `key` `stored`, `ollama`, `env`, `oauth` or `none`, with the why for any but
+stored; an `env` key the keyhole can read (`models.env_why` empty, #1189) has why `key from $VAR` and
+`runs: true`, which the Settings tab counts connected as it does `stored`, one it can't `can't run: <env_why>`; a stored key on a package the keyhole can't carry is `none` with `models.unspoken_why`'s
 line, which status says too: it read `Google (key stored)` while nothing could run on it, #1066;
 Ollama's, `ollama` with `signed in through Ollama: its cloud models need no key here`, #1077,
 which the Settings tab counts connected as it does `stored`). While busy is `api` the show adds `When the GPU is busy: a role with an API model starts on
@@ -4082,12 +4117,13 @@ The changes (each one exit 3 with one line when refused, writing nothing):
   on API or the busy opt-in could send one there (`the day cap stays while <roles> can spend on API`).
 - `wb route busy wait|api` sets the busy opt-in (*When the GPU is busy*).
 - An API model is taken by its exact id only (`models.lookup`: fragments never match an API id,
-  #1013), of kind `api`, with a key a task runs with (`cli._runs_held`: `key == "stored"`, /connect
-  saved one, which the keyhole holds outside the lane; or an Ollama cloud model's `ollama`, the
+  #1013), of kind `api`, with a key a task runs with (`cli._runs_held`: `models.key_runs`, `key ==
+  "stored"`, /connect saved one, which the keyhole holds outside the lane, or `env:VAR` the keyhole
+  reads from the runner's environment, #1189; or an Ollama cloud model's `ollama`, the
   login this machine's Ollama holds, which needs no keyhole, #1077), else refused with discovery's why (`cli._route_api`): `not in
   OpenCode's catalog: wb models lists the API models`, a GPU id (`… is a GPU model: wb route <role>
-  --gpu <id> pins it`), no key (`… can't be a role's model: no key for <p>: run /connect in OpenCode
-  and add it`, said once; a configured provider on another host of the LAN, not opted in, gets its
+  --gpu <id> pins it`), no key (`… can't be a role's model: no key for <p>: run `` `opencode auth
+  login <p>` `` in a terminal and add it`, said once; a configured provider on another host of the LAN, not opted in, gets its
   `local: true` hint instead, of that or of the keyhole's refusal of its `npm` package (#1066), `provider <p>: <host> isn't this machine; …`, #1109: `cli._off_lan`,
   a private, link-local or tailnet address or a bare, `.local`, `.lan`, `.home.arpa`, `.internal`
   or `.ts.net` name, `cli._on_lan`; a public host, a hosted provider added by hand, keeps the
@@ -6071,7 +6107,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 ### Models, skills, lessons, notes
 | Command | Flags | What it does |
 |---|---|---|
-| `wb models` | `--set-default`, `--json`, `--api TEXT` | State, slice, speeds, `bench:`, `size:`, `router.weights_changed`; the ranking, models under `router.EXPLORE_TRIES` marked (*Exploring*); the API section, and `--api TEXT` the catalog ids containing TEXT, at most 30 (*What `wb models` prints*). `--set-default` (a GPU model only): `models.set_default` (refused under `OPENCODE_CONFIG_CONTENT`, #421). `--json` (#1023, the pane's lists, `cli._models_json`, asking no server and rebuilding no catalog): `{gpu: [{id, label, window, sizes, cards}], api: [{id, name, provider, provider_name, window, price {input, output}, prices (catalog\|yours, #1135), free}] (stored keys on a package the keyhole speaks, #1066, and Ollama cloud only, `cli._runs_held`), used (API models tasks ran on), free_line, optimize {done_at, models, running}, media {image\|speech\|sfx\|music: {default, engines: [{name, gpu}]}} (#1047; a file that doesn't parse leaves its kinds out)}`. |
+| `wb models` | `--set-default`, `--json`, `--api TEXT` | State, slice, speeds, `bench:`, `size:`, `router.weights_changed`; the ranking, models under `router.EXPLORE_TRIES` marked (*Exploring*); the API section, and `--api TEXT` the catalog ids containing TEXT, at most 30 (*What `wb models` prints*). `--set-default` (a GPU model only): `models.set_default` (refused under `OPENCODE_CONFIG_CONTENT`, #421). `--json` (#1023, the pane's lists, `cli._models_json`, asking no server and rebuilding no catalog): `{gpu: [{id, label, window, sizes, cards}], api: [{id, name, provider, provider_name, window, price {input, output}, prices (catalog\|yours, #1135), free}] (stored keys, or environment keys the keyhole reads (#1189), on a package the keyhole speaks, #1066, and Ollama cloud only, `cli._runs_held`), used (API models tasks ran on), free_line, optimize {done_at, models, running}, media {image\|speech\|sfx\|music: {default, engines: [{name, gpu}]}} (#1047; a file that doesn't parse leaves its kinds out)}`. |
 | `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD`, `--thinking` (a new Ollama entry that thinks keeps thinking on; default `options.reasoningEffort: "none"`, #1187; refused on another action, #602) | *Managing the set*: `--url` via `models.add_server_provider` (an existing provider at the same baseURL left as it is, only marked `wsl_url` when at WSL2's Windows host; one marked `wsl_url` at Windows' old address moved to the new one; one for another baseURL refuses; off this machine needs `local: true`; at WSL2's Windows host marked `wsl_url`, followed after a reboot, #1167); `--start`/`--stop` to models.json; refuses Ollama cloud models (API models) without `local: true` (one under a plain name always), unknown contexts, down servers. |
 | `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | *Optimize*; `start` detached, refused while a task holds the GPU, stopped by a task that wants it; `--bench` then runs `wb bench run`; `apply` adds the measured window as its own entry (`optimize.entry_name`; refused when that name exists). |
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Provider `ollama-<host>` (WSL2's Windows host: `ollama-windows`, followed to its next address, #1159), `local: true`, its tool models added (IPv6 bracketed, #707); exit 1 when it doesn't answer; `--remove` not while `model`/`small_model` is one (#708). |
@@ -6491,17 +6527,20 @@ then `/workbench`; `wb setup` ends with the `first run:` checklist (`cli.first_r
 model server, a registered model, the API keys, Landlock). Its API keys line (#1024,
 `cli.api_key_lines`, from `models.connected()`: `opencode auth list` in wb's environment, never a
 lane, never a secret): `ok  API keys: deepseek (stored via /connect); no role uses one yet` (or
-`trivial and significant use it`), a `--` line for a key wb can't hold (`xai's key is in XAI_API_KEY:
-wb can't hold it outside the lane yet; /connect stores one it can`, `anthropic is signed in with
-OAuth: …`), one for each key written in a config file (`literal's key is written in <file>: remove its
+`trivial and significant use it`; a key the keyhole reads from the environment, `models.key_runs`, is
+`deepseek (key from $DEEPSEEK_API_KEY)` on the same line, #1189), a `--` line for an environment key it
+can't read (`xai's key is in $XAI_API_KEY, which wb can't use: <models.env_why>`, its fix in it), a
+`--` line for a key wb can't hold (`anthropic is signed in with OAuth: …`), one for each key written in a config file (`literal's key is written in <file>: remove its
 apiKey there, and store the key with /connect`, as status says it: "/connect stores a key it can" told a
 user who had, #1075), a `--` line for a stored key on a package the keyhole can't carry (`google
 (@opencode/ai/providers/google): the keyhole doesn't speak its API, so wb can't run its models;
 another provider's key works`, `models.unspoken_providers`, #1066), for a provider a role on API uses
-with no key at all `--  no API key for deepseek, which trivial uses: /connect in OpenCode adds it
-(required: those tasks can't start without it)` (#1067), else `NO_KEY` for none. With a stored key,
+with no key at all `--  no API key for deepseek, which trivial uses: `` `opencode auth login deepseek` ``
+in a terminal adds it (required: those tasks can't start without it)` (#1067; OpenCode's one terminal
+command, #1189), else `NO_KEY` for none. With a stored key,
 or every role on API, and no local model the GPU lines read as optional
-(`NO_SERVER_OPTIONAL`, `NO_LOCAL_OPTIONAL`). With no local model, a provider discovery passed over
+(`NO_SERVER_OPTIONAL`, `NO_LOCAL_OPTIONAL`; an environment key the keyhole reads counts as stored, as
+it does for the router's API choice, `router.api_choice`). With no local model, a provider discovery passed over
 (`models.skipped_providers`: another host not opted in, disabled) adds its `--  provider <id>: <why>`
 line, the `local: true` hint as doctor gives it (#1109), and for a public host (not `cli._on_lan`:
 a hosted provider added by hand may be one) `cli.CONNECT_TOO` after it, `a hosted provider's key:
@@ -6715,7 +6754,7 @@ and `auth` commands fail without `--standalone` (#1070); `auth export <provider>
 else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `text`, `step_finish` with tokens). Live tool names are 1.x-style (`bash`, `filePath`; 2.x `shell`,
 `path`: `events._brief` reads both). Records `FAKE_PROMPTS`, `FAKE_RUNS` (each run's `session`, `prompt`, `cwd`,
-`pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
+`pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), `env_names` (every variable's name, never a value: #1189), and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
 `FAKE_LESSON`, `FAKE_PAD` (that many characters before the Lesson line, #1186), `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
 `ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `shellwrite` (lib/util.py through a `bash` row's `cat > util.py <<X` with `workdir` lib/, main.py and answer.txt with `write`: #1210, its third review), `buildout` (dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names neither, then answer.txt: #1210's review), `pkgbuild` (a `bash` row `grep -n answer pkg/a.py`, then build/lib/pkg/{__init__,a,b}.py behind one `python -m build`, then answer.txt: #1210's second review), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
 `read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087), `selfreads` (ok, then a self-review, told by its prompt, that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168; `FAKE_SELF_FILL`: its first session breaks it and fills 76%, the fresh one restores it, or with `FAKE_SELF_KEEP` only reads: #1188; `FAKE_SELF_STALL`: it breaks it and goes silent, the run after a nudge or a note restores it: #1207), `floor` (`HANDOVER_ROOM`), `think` (a long think in a step's output, then a prompt that grew: no compaction, #1219), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151; `FAKE_COMPACT_KEPT`: the step after at 34%, over half, a kept tail: #1185), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
@@ -6758,7 +6797,10 @@ in `FAKE_HTTP_LOG`; a 2xx plays `ok`, an HTTP error the matching error event wit
 unreachable base `provider.transport`. With `OPENCODE_MODELS_PATH` the fake lists that file's models in place of
 `WB_FAKE_CATALOG`'s (as 2.3.2 does), their variants the config's only. `WB_FAKE_API=<provider>[/<id>]=<state>,…` gives a model (its own entry first; a config model too) or a provider one
 of those states (or `ok`): its runs play that scenario, and a `nokey` provider drops out of `api model.list`, `models`
-and `auth list`, as one OpenCode can't authenticate does. `FAKE_CALLS` (a file) logs each `api`, `models`, `serve` and `auth`
+and `auth list`, as one OpenCode can't authenticate does. An `env` provider (#1189) holds its key only in
+`<PROVIDER>_API_KEY` (the fake's `env_var`): `auth list` gives it one `{type: "env", name}` connection while that
+variable is set and drops it otherwise, as 2.3.2 does (checked 2026-11-24 in a scratch home), and `auth export`
+prints none of its rows. `FAKE_CALLS` (a file) logs each `api`, `models`, `serve` and `auth`
 call's argv (`ApiDiscovery` counts catalog reads, a `serve` each); `FAKE_CATALOG_FAIL` makes `api model.list`, `models` and `serve` fail (stderr,
 exit 1). Only the fake reads `WB_FAKE_API` and `WB_FAKE_CATALOG`: discovery is driven through it, with no product-side
 fake (`ApiDiscovery`, #1013); `Real`'s fixture (`test_portable.py`) runs it too, so a lookup a test misses never reaches
@@ -6892,7 +6934,15 @@ canary, OpenCode's own with only the token, at the path OpenCode would have used
 a key with a newline, bad queries and chunk sizes (`raw_request`, for what http.client won't send),
 an error body cut across the key, errors inside a 200 stream (`_Upstream`'s "raw" mode), packages
 the keyhole can't speak, `@ai-sdk/<name>` npm names (#1137), DeepInfra's appended `/openai`, a key written as a header, a key in a
-model's own entry or the V2 form (#1015's review). Its
+model's own entry or the V2 form (#1015's review). An environment key (#1189) has two: one read from the runner's own
+environment when none is stored (`auth list`'s variable, a lone `{env:VAR}`, a stored key first, the start line naming
+the variable), and each refusal (unset, blank, passed through by commands.json, a name agents keep, a character a
+header can't carry); `RealOpenCodeAPI`'s `test_real_opencode_names_the_variable_the_keyhole_reads_a_key_from` reads
+real `auth list`'s `env` connection in a scratch home (no request sent), and `ApiTasks`'s
+`test_a_key_exported_where_wb_start_ran_reaches_only_the_keyhole_never_the_agent` runs a task end to end on the
+fake's `env` state: refused at start while unset, then the key upstream only from the keyhole, never in the agent's
+environment (`FAKE_RUNS`' `env_names`), its layer, its files or runner.log, and refused when commands.json passes it
+through. Its
 `test_the_tasks_own_catalog_*` (#1015) takes real model.list entries (`models.model_list`, as every real test reads the catalog: `ApiHarness.real_list`) through `hosted()`,
 `catalog_doc` and the runner's overlay: real OpenCode reads them back field for field (the `limit` capped), and a model
 the binary lacks fails without the file and runs through the keyhole with it.
@@ -7070,8 +7120,12 @@ doc needs its own `!/` line).
   `may_come_up` (*API models*). A `hosted.json` key → `_build_hosted`, `_api_model`, *Files and formats*; what a
   catalog read depends on → `_stamp`.
 - **What the keyhole can hold** (`keyhole.load_key`'s refusals: an OAuth login, an external credential, request
-  signing, a key only in the environment or written in a config) → `Model.key`'s states, `models.status`'s and
-  `cli._route_api`'s `can't run: needs a key wb can hold outside the lane`, never "available".
+  signing, an environment key `keyhole.env_refusal` refuses, or a key written in a config) → `Model.key`'s states,
+  `models.status`'s and `cli._route_api`'s `can't run: needs a key wb can hold outside the lane`, never "available".
+  An environment key's rule (#1189) is one function, `keyhole.env_source`, which `models.env_why` and
+  `models.key_runs` ask for status, wb setup, wb models, wb scout, `router.api_choice`, `cli._runs_held` and the
+  pane's `providers` (`runs`, which the mod's Settings tab counts connected): a change to it changes them all; and
+  `runner.env_kept` (what the agent's environment keeps) is what it checks against.
 - **An OpenCode fact the API harness copies** (model.list through `serve --stdio`, `auth list`, `-m` ids and variants, `part.cost`,
   the `retry`/`error` shapes, each protocol's path and key header) → `tests/fake_opencode.py`, `tests/capture_llm.py`
   and `ApiHarness`'s `test_real_opencode_*` together (*The tests*); its `max_tokens` cap and compaction point, `ApiSizing`'s.

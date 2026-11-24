@@ -6431,6 +6431,28 @@ test('#1077: an Ollama cloud login alone counts as connected: its models are off
   await ui.unmount()
 })
 
+test('#1189: a key the keyhole reads from the environment counts as connected; one that can\'t run does not', { timeoutMs: 20_000 }, async ($, on) => {
+  const { ui, w, texts, clock } = await settingsTab($, on)
+  w.routes.providers = { deepseek: { name: 'DeepSeek', key: 'env', why: 'key from $DEEPSEEK_API_KEY', runs: true } }
+  delete w.routes.roles.trivial.api
+  w.models.api = [{ id: 'deepseek/deepseek-flash', name: 'DeepSeek Flash', provider: 'deepseek', provider_name: 'DeepSeek', window: 131072, price: null as any, free: false }]
+  await clock.advance(11_000)
+  await ui.press({ key: 'tab-tasks' })
+  await ui.press({ key: 'tab-settings' })
+  let all = await texts()
+  expect(all).not.toContain('No API provider connected: /connect in OpenCode adds one; every role runs on the GPU.')
+  expect(all).toContain('Connected: DeepSeek (key from $DEEPSEEK_API_KEY)')
+  expect(await ui.find({ key: 'api-trivial' })).toBeDefined()
+  w.routes.providers = { deepseek: { name: 'DeepSeek', key: 'env', why: "can't run: $DEEPSEEK_API_KEY is passed to agents (commands.json env): remove it there" } }
+  w.models.api = []
+  await clock.advance(11_000)
+  await ui.press({ key: 'tab-tasks' })
+  await ui.press({ key: 'tab-settings' })
+  all = await texts()
+  expect(all).toContain('No API provider connected: /connect in OpenCode adds one; every role runs on the GPU.')
+  await ui.unmount()
+})
+
 test('#1023: the busy opt-in is in the roles\' summary, so a change of it alone reaches the conversation', () => {
   expect(routesSummary({ busy: 'api' })).toBe('significant GPU (the router picks); trivial GPU (the router picks); ' +
     'writing GPU (the router picks); when the GPU is busy, a role with an API model runs on it')

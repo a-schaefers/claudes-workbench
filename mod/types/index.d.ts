@@ -99,7 +99,8 @@ export type WbRoutes = {
     thinking: 'off' | 'on'; label: string }>
   /** `prices`: the dollars' basis (meter.basis, #1135): catalog (an estimate, ≈), yours (wb model price), provider */
   spend_today: { usd: number; prices?: 'catalog' | 'yours' | 'provider'; by_provider: Record<string, number> }
-  providers: Record<string, { name: string; key: 'stored' | 'ollama' | 'env' | 'oauth' | 'none'; why?: string }>
+  // runs: a key in the environment the keyhole reads (#1189), which runs tasks as a stored one does
+  providers: Record<string, { name: string; key: 'stored' | 'ollama' | 'env' | 'oauth' | 'none'; why?: string; runs?: boolean }>
 }
 
 /** `wb models --json` (#1023): the GPU models (cards: the numbers its Ollama sees, null unknown),

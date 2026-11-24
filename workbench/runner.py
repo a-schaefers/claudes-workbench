@@ -4334,16 +4334,18 @@ def start_keyhole(task: store.Task, m: models.Model) -> keyhole.Keyhole:
                          **(mt.hooks() if mt is not None else {}))
 
 
-def keyhole_failure(e: Exception) -> str:
-    """A KeyholeError's text with its remedy, when one is a key /connect can store (OAuth, a key
-    only in the environment, none stored) and the text doesn't name one already. A provider that
-    signs requests, or speaks a way the keyhole can't, has none, nor does OpenCode failing to run
-    or answer `auth export`: storing a key again doesn't mend that (#1070, 2026-11-23)."""
+def keyhole_failure(e: Exception, provider: str = "") -> str:
+    """A KeyholeError's text with its remedy, when one is a key `opencode auth login` can store
+    (OAuth, none stored) and the text doesn't name one already (keyhole.remedy, the provider's id
+    filled in: #1189). A provider that signs requests, or speaks a way the keyhole can't, has none,
+    nor does OpenCode failing to run or answer `auth export` (storing a key again doesn't mend
+    that, #1070, 2026-11-23), nor an environment variable passed to agents (removing it there
+    does, #1189)."""
     text = str(e)
     if "/connect" in text or "signs each request" in text or "doesn't speak" in text \
-            or "API base" in text or "opencode auth " in text:
+            or "API base" in text or "opencode auth " in text or "remove it there" in text:
         return text
-    return f"{text}: {keyhole.REMEDY}"
+    return f"{text}: {keyhole.remedy(provider)}"
 
 
 def keyhole_of(task: store.Task) -> keyhole.Keyhole | None:
@@ -4547,8 +4549,11 @@ def provider_remedy(task: store.Task, guard: str, said: str = "") -> str:
         return (f"the provider's stop, not the agent's: top up your {p} account, or wait for the "
                 f"plan's reset; then {resume} resumes it")
     if guard == "auth":
-        return (f"the provider's stop, not the agent's: store {p}'s API key again with /connect "
-                f"in OpenCode; then {resume} resumes it")
+        # a key from the environment is the user's to export again; a stored one, OpenCode's
+        # terminal command (#1189)
+        return (f"the provider's stop, not the agent's: store {p}'s API key again (`"
+                f"{keyhole.login(p)}` in a terminal, or the variable it came from); then {resume} "
+                "resumes it")
     if guard == "setup":  # #1080: no route change or wait mends this machine's own setup
         return (f"this machine's stop, not the agent's or {p}'s: mend what the line above says; "
                 f"then {resume} resumes it")
@@ -4807,7 +4812,7 @@ def drive(task: store.Task) -> None:
         try:
             CURRENT["keyhole"] = start_keyhole(task, m)
         except keyhole.KeyholeError as e:
-            return _load_failed(task, RuntimeError(keyhole_failure(e)), api=True)
+            return _load_failed(task, RuntimeError(keyhole_failure(e, m.provider)), api=True)
         write_catalog(task)
     try:
         _drive(task, m, say)

@@ -416,7 +416,7 @@ def api_choice(role: str) -> str:
         keys = models.connected() or {}
     except (RuntimeError, OSError):
         keys = {}
-    if not any(k["key"] == "stored" for k in keys.values()):
+    if not any(models.key_runs(pid, k["key"]) for pid, k in keys.items()):  # an env key too (#1189)
         return ""
     return (f"; or put {role} on an API model you connected (the user's yes): wb route {role} <id>, "
             "wb models --api <text> lists them")

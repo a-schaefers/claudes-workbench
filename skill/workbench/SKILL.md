@@ -85,8 +85,10 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
      routes, `wb route` shows what is set) and that their tasks need a GPU model; ask again only if
      they bring it up. Ask nothing before it: no server install, no `wb scout`.
   3. **No GPU model and no key**: lay out both ways in two lines, a local server
-     (reference/models.md, which names no server for them) or `/connect` in OpenCode for an API
-     provider; let the user pick, and install nothing unasked. A server: `wb scout`, recommend
+     (reference/models.md, which names no server for them) or an API provider's key: one they
+     export in their shell (the variable OpenCode names) works as it is, else `opencode auth login
+     <provider>` in their own terminal (it asks for the key there: never from your Bash or `!`)
+     or `/connect` in OpenCode; let the user pick, and install nothing unasked. A server: `wb scout`, recommend
      what fits the machine, `wb model add <provider/model> [--pull]`.
   4. **A GPU model already** (keys or not): as before; mention once, in a line, that a provider
      they connected could take a role if they want. Never push it.
@@ -225,7 +227,7 @@ change, run it as a command of its own (`wb route trivial <exact provider/model 
 all gpu|api|both`, `wb route <role> --gpu <id|auto>`): the mod shows them the change in a dialog, and a
 "not changed" means they said no, so say it wasn't changed and don't ask again. The first API role
 needs a day cap: ask them for one (suggest $5), then add `--day-usd N`. Exit 3 names the fix (a
-key to add with /connect, an exact id). The user's **Agents** switch (`wb route all
+key to add with `opencode auth login <provider>` in their terminal or to export, an exact id). The user's **Agents** switch (`wb route all
 gpu|api|both`) puts every role on one side, or Both: each role as set. A role that can't run
 (no key, no GPU model, Agents on API with no API model for it) exits 3 with one line of choices:
 there is no fallback, so ask the user and never retry with another `--role` or `--model` to dodge it.
@@ -505,7 +507,7 @@ coding choice is the user's (`wb coding`), never changed by a check.
   the branch, and the report says how to accept them instead. A failed round's edits so far stay in the worktree (`wb resume` carries on). A setup or load failure before the agent ran: fix it, then `wb resume <name>`; one later ("round N never reached the agent"): fix it, then `wb feedback <name> --text "carry on"`, which sends round N's prompt first.
   A `rate_limited`, `outage`, `quota`, `auth` or `refused` stop is the API provider's, not the
   agent's (the report says "the provider's stop"): tell the user so, and its remedy (wait, top
-  up, or /connect the key again), then `wb feedback <name> --text "carry on"` once it allows (no review round counted);
+  up, or store the key again: `opencode auth login <provider>` in their terminal, or export it again), then `wb feedback <name> --text "carry on"` once it allows (no review round counted);
   the tasks queued behind a `quota` stop wait as queued, with no stop of their own, and go on once credit is back (resumed, the stopped task asks the provider at once, and its 2xx lets them go). A
   `refused` one (the provider turned the request down: a moderation flag, a schema, a model gone)
   quotes what it said: fix that, then `wb feedback`; on an HTTP 404 the model is gone, so `wb
