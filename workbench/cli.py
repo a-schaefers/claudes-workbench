@@ -1774,7 +1774,9 @@ def cmd_feedback(a):
     gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
     task.set_status(round=n, reviews=reviews, phase="queued",  # the pane: "resumed", not "feedback 0"
                     # an unsent round keeps its own (`next`: the pane's `step 2`)
-                    **({} if unsent else {"round_for": "resume" if resumed else "feedback"}),
+                    # an infra stop's resume carries a self-review on as wb resume's does (#1228)
+                    **({} if unsent else {"round_for": "feedback"} if not resumed else
+                       {"round_for": "resume", "self_review_tree": runner.carried_tree(task)}),
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0)
     _credit_turn(task)
@@ -2684,7 +2686,8 @@ def _resume(task: store.Task) -> None:
         # again, its prompt as wb start wrote it, not "Claude stopped your last session…"
         handled = store.now()
         gpu = _gpu_note(task)
-        task.set_status(phase="queued", last="resumed by the reviewer", round_for="resume")
+        task.set_status(phase="queued", last="resumed by the reviewer", round_for="resume",
+                        self_review_tree=runner.carried_tree(task))  # as below (#1228)
         task.event({"ts": store.now(), "round": 1, "kind": "resumed",
                     "text": "Claude resumed the task: it starts its first round again"})
         spawn_runner(task)
@@ -2699,8 +2702,11 @@ def _resume(task: store.Task) -> None:
         asks, runner.folded_notes(task, n + 1, notes) if notes else ""))
     handled = store.now()
     gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
+    # a self-review stopped from outside (an update before it ran, wb stop, a signal, a reaped
+    # runner) goes on here: without its green tree, the resumed session that read on was stopped
+    # as stuck on a green change, the step counted against it (#1228, 2026-11-24)
     task.set_status(round=n + 1, context="fresh", phase="queued", last="resumed by the reviewer",
-                    round_for="resume")
+                    round_for="resume", self_review_tree=runner.carried_tree(task))
     task.event({"ts": store.now(), "round": n + 1, "kind": "resumed",
                 "text": "Claude resumed the task in a fresh session"})
     _credit_turn(task)
