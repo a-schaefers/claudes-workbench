@@ -32449,6 +32449,45 @@ class FirstRunApi(Base):
         self.assertRegex(lines[2], r"^ok  \d+ local model\(s\) registered$")
         self.assertIn("ok  a model server answers", lines)
 
+    def test_doctor_passes_a_healthy_api_only_setup_and_fails_an_api_role_that_cant_run(self):
+        # #1067 (audit 1 of 2.0): with every role on API and no GPU model doctor said BAD 0 local
+        # model(s) and BAD for the missing OpenCode config, exit 1, the same with the key gone;
+        # it never asked whether a role's API model could run
+        none = Path(self.tmp.name) / "no-opencode.json"
+        os.environ["WB_OPENCODE_CONFIG"] = str(none)
+
+        def doctor():
+            with mock.patch.object(cli.models, "discover", return_value={}):
+                code, out, _ = self.wb("doctor")
+            return code, out
+        code, out = doctor()                                         # roles unset: all GPU, as before
+        self.assertIn("BAD 0 local model(s)", out)
+        self.assertEqual(code, 1)
+        self.assertEqual(self.wb("route", "significant", "deepseek/deepseek-flash", "trivial",
+                                 "deepseek/deepseek-flash", "writing", "deepseek/deepseek-flash",
+                                 "--day-usd", "5")[0], 0)
+        code, out = doctor()
+        # the rest of doctor reads this machine's install (wb on PATH, the skill link): only the
+        # lines on the models, the config and the roles are this test's
+        bad = [x for x in out.splitlines() if x.startswith("BAD")]
+        self.assertFalse([x for x in bad if "model" in x or "OpenCode config" in x or "role" in x], out)
+        self.assertIn("--  0 local model(s): every role runs on API", out)
+        self.assertIn(f"--  OpenCode config {none} (none: every role runs on API", out)
+        for role in ("significant", "trivial", "writing"):
+            self.assertIn(f"ok  {role} role: deepseek/deepseek-flash ready", out)
+        self.assertIn("ok  API keys: deepseek (stored via /connect); significant and trivial and writing use it", out)
+        self.keys()                                                  # the key gone
+        code, out = doctor()
+        self.assertEqual(code, 1)
+        self.assertIn("BAD trivial role: deepseek/deepseek-flash can't run: no key for ", out)
+        self.assertIn("/connect", out)
+        with mock.patch.object(cli.models, "discover", return_value={}):
+            lines = cli.first_run()                                  # wb setup: the key is required
+        self.assertIn(cli.NO_LOCAL_OPTIONAL, lines)
+        self.assertNotIn(cli.NO_KEY, lines)
+        self.assertIn("--  no API key for deepseek, which significant and trivial and writing use: /connect "
+                      "in OpenCode adds it (required: those tasks can't start without it)", lines)
+
     # wb route: several roles in one change
 
     def test_several_roles_change_in_one_call_one_line_and_one_approval(self):

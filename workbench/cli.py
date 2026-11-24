@@ -5961,19 +5961,28 @@ def api_key_lines(keys: dict | None) -> list[str]:
     """wb setup's API keys (#1024), from models.connected(): one `ok` line for the providers with
     a stored key and which roles use them, one `--` line for those whose key wb can't hold
     outside the lane (an environment variable, OAuth, a cloud login, a config file) with the
-    fix; NO_KEY for none; nothing when `auth list` can't be read."""
+    fix; one for each provider a role on API uses with no key at all, required (#1067); else
+    NO_KEY for none; nothing when `auth list` can't be read."""
     if keys is None:
         return []
+    try:
+        doc = routes.read()
+    except routes.RoutesError:
+        doc = None
+    uses = {} if doc is None else {r: doc["roles"][r]["api"].split("/", 1)[0] for r in routes.ROLES
+                                   if routes.effective_via(doc, r) == "api" and doc["roles"][r].get("api")}
+    # a provider a role on API uses with no key at all: required, not NO_KEY's "optional" (#1067)
+    unkeyed = {}
+    for r, p in uses.items():
+        if p not in keys:
+            unkeyed.setdefault(p, []).append(r)
+    need = [f"--  no API key for {p}, which {' and '.join(rs)} use{'s' if len(rs) == 1 else ''}: "
+            "/connect in OpenCode adds it (required: those tasks can't start without it)"
+            for p, rs in unkeyed.items()]
     if not keys:
-        return [NO_KEY]
+        return need or [NO_KEY]
     out = []
     if stored := [p for p, k in keys.items() if k["key"] == "stored"]:
-        try:
-            doc = routes.read()
-        except routes.RoutesError:
-            doc = None
-        uses = {} if doc is None else {r: doc["roles"][r]["api"].split("/", 1)[0] for r in routes.ROLES
-                                       if routes.effective_via(doc, r) == "api" and doc["roles"][r].get("api")}
         used = [r for r, p in uses.items() if p in stored]
         said = ("" if doc is None else "; no role uses one yet" if not used else
                 f"; {' and '.join(used)} use{'s' if len(used) == 1 else ''} it" if len(stored) == 1 else
@@ -5989,7 +5998,7 @@ def api_key_lines(keys: dict | None) -> list[str]:
         else:
             out.append(f"--  {', '.join(_held_elsewhere(p, k) for p, k in other)}: wb can't hold "
                        f"{'that' if len(other) == 1 else 'those'} outside the lane; /connect stores a key it can")
-    return out
+    return out + need
 
 
 def first_run() -> list[str]:
@@ -6023,7 +6032,12 @@ def first_run() -> list[str]:
             on_windows = [x for x in here if x.get("windows")]
             answering = len(here) > len(on_windows)
     keys = models.connected() if good else None  # an API key makes a local model optional (#1024)
-    stored = not found and any(k["key"] == "stored" for k in (keys or {}).values())
+    try:  # and so does every role on API, key or not: the key line then says it is required (#1067)
+        doc = routes.read()
+        api_only = all(routes.effective_via(doc, r) == "api" for r in routes.ROLES)
+    except routes.RoutesError:
+        api_only = False
+    stored = not found and (api_only or any(k["key"] == "stored" for k in (keys or {}).values()))
     if not answering and on_windows:  # WSL2: answering at the Windows host only (#663)
         out.append(f"--  a model server answers on Windows at {on_windows[0]['root']} (usually "
                    f"{on_windows[0]['usually']}): it needs local: true (wb remote "
@@ -6471,6 +6485,28 @@ def idle_line() -> str | None:
             "or failed one, wb report <name> shows where one stands, wb discard <name> drops one")
 
 
+def _api_role_lines(doc: dict) -> list[tuple[bool, str]]:
+    """wb doctor's line for each role on API: `<role> role: <id> ready`, or wb start's own refusal
+    for it (routes.resolve and _role_cant_run: no key, a key wb can't hold, gone from the
+    catalog, out of credit, no price, the day cap). Doctor never asked, so it said the same
+    whether the API roles could run or not (#1067, 2026-11-23). No request to a provider: the
+    catalog as wb start reads it, the key's source and api-health.json (models.status)."""
+    out = []
+    for role in routes.ROLES:
+        if routes.effective_via(doc, role) != "api":
+            continue
+        try:
+            m, state, _, routed = routes.resolve(role, routes.role_and_size(role, None)[1], None)
+        except routes.Refused as e:
+            out.append((False, str(e)))
+            continue
+        if state["available"]:
+            out.append((True, f"{role} role: {m.id} ready"))
+        else:
+            out.append((False, _role_cant_run(m, state, routed) or f"{role} role: {m.id} can't run: {state['why']}"))
+    return out
+
+
 def cmd_doctor(a):
     ok = True
 
@@ -6501,11 +6537,22 @@ def cmd_doctor(a):
         if good and not old and (drift := runner.untested(runner.opencode_version())):
             print(f"--  {drift}")
     files = models.opencode_config_files()
+    try:  # the roles (#1014), read once here: with none on the GPU, no local model is needed
+        roles_doc = routes.read()
+    except routes.RoutesError:
+        roles_doc = None  # said BAD with the roles below
+    # every role on API: the GPU's lines inform, as wb setup's first run says them; a healthy
+    # API-only setup read BAD twice and exit 1, the same verdict as one whose key was gone (#1067)
+    on_gpu = roles_doc is None or any(routes.effective_via(roles_doc, r) == "gpu" for r in routes.ROLES)
     try:
         models.read_config()
-        line(bool(files), "OpenCode config " + (" + ".join(map(str, files)) or
-                                                f"{models.opencode_config_path()} (none)")
-             + (" (OpenCode layers them; wb won't rewrite either)" if len(files) > 1 else ""))
+        if files or on_gpu:
+            line(bool(files), "OpenCode config " + (" + ".join(map(str, files)) or
+                                                    f"{models.opencode_config_path()} (none)")
+                 + (" (OpenCode layers them; wb won't rewrite either)" if len(files) > 1 else ""))
+        else:
+            print(f"--  OpenCode config {models.opencode_config_path()} (none: every role runs on API, "
+                  "which needs none)")
     except RuntimeError as e:  # "<file> doesn't parse (…)"
         line(False, str(e))
         sys.exit(1)  # nothing below can read the models
@@ -6552,7 +6599,10 @@ def cmd_doctor(a):
              "its service: on macOS run Install Certificates.command (in your Python's Applications "
              "folder); elsewhere install ca-certificates, or set SSL_CERT_FILE")
     found = models.discover()
-    line(bool(found), f"{len(found)} local model(s)")
+    if found or on_gpu:
+        line(bool(found), f"{len(found)} local model(s)")
+    else:
+        print("--  0 local model(s): every role runs on API")
     for pid, why in models.skipped_providers():  # once dropped without a word (the 2026-11-16 audit)
         print(f"--  provider {pid}: {why}")
     provs = models.providers()
@@ -6641,6 +6691,12 @@ def cmd_doctor(a):
             print(f"--  roles: {routes.summary(doc)} (wb route)")
     except routes.RoutesError as e:
         line(False, routes.unreadable(e))
+    else:
+        for good, said in _api_role_lines(doc):  # whether each API role can start now (#1067)
+            line(good, said)
+        if (keys := models.connected()) and any(routes.effective_via(doc, r) == "api" for r in routes.ROLES):
+            for said in api_key_lines(keys):
+                print(said)
     try:  # every wb command makes it: a fresh home has no ~/.local/state yet (the 2026-11-16 audit)
         store.home().mkdir(parents=True, exist_ok=True)
         why = "" if os.access(store.home(), os.W_OK | os.X_OK) else "not writable"
