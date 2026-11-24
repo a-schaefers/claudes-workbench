@@ -3513,13 +3513,14 @@ def missing_tool(lines: list[str], cmd: str | None, task: store.Task | None = No
     ``cmd`` (command_programs: what no round changes, where the command puts a program, never an
     argument such as a subcommand the step adds) not on the agent's PATH (on_agent_path), where
     every wrapper looks too (Poetry, uv and pipenv put their venv's `bin` ahead of it), and not a
-    console script of the step's own; never one a runner's recipe names, which the command
+    console script of the step's own (own_command; after a wrapper's run verb with no venv
+    yet, as the wrapper looks the project's own scripts up itself); never one a runner's recipe names, which the command
     doesn't (a code the runner names stays its own). A path: one in TOOL_DIRS the worktree hasn't, named by the
     command or under a runner (`make test` sourcing `.venv/bin/activate`). wb's own wording, as
     missing_command's. Poetry's `Command not found: pytest` at exit 1 (#1256), `source
     .venv/bin/activate && pytest` at bash's 1 or dash's 2 (#1258) each ran round 1 and every
     auto-fix round on correct code, told the bug was the change's (bar round 6, 2026-11-24)."""
-    words, programs = command_words(cmd), command_programs(cmd)
+    words, programs, run = command_words(cmd), command_programs(cmd), command_programs(cmd, True)
     for line in reversed([ln for ln in map(str.strip, lines) if ln][-GONE_LINES:]):
         tool, opened = TOOL_GONE.search(line), PATH_GONE.search(line)
         if not (tool or opened):
@@ -3532,6 +3533,14 @@ def missing_tool(lines: list[str], cmd: str | None, task: store.Task | None = No
                 if (w in words or wrapped) and not there and (said := _missing_path(w, task)):
                     return said
             elif tool and w in programs and re.match(r"[A-Za-z_]", w) and not on_agent_path(w, task):
+                # a wrapper's program the project declares or the spec makes is the step's own,
+                # venv or not: Poetry's `poetry run` reads [tool.poetry.scripts] before PATH and
+                # `uv run` installs [project.scripts] as it syncs, so a step adding `mycli` said
+                # Poetry's `Command not found: mycli` on the base (no venv yet), checked in with a
+                # false "no round can fix that", and skipped the auto-fix round when round 1 left
+                # it out (#1256's review, 2026-11-24)
+                if w in run and task and own_command(task, w):
+                    continue
                 if said := _missing_bare(w, task):
                     return said
     return None
@@ -3764,13 +3773,14 @@ PREFIXES = {"env", "exec", "command", "time", "nice", "nohup", "xvfb-run", "uvx"
 SHELL_OPS = {"&&", "||", ";", "|", "&", "(", ")", "|&", ";;", "!", "{", "}"}
 
 
-def command_programs(cmd: str | None) -> set[str]:
+def command_programs(cmd: str | None, run_only: bool = False) -> set[str]:
     """The words of shell command ``cmd`` where a program goes: each simple command's first word
     (past `X=1` assignments and PREFIXES), the word after a wrapper's run verb (RUN_VERBS:
     `poetry run`, `uv run`, `bundle exec`), never cargo's subcommand. A word right after an option
     counts too, as the option may take no value (`uv run --with x pytest` gives `x` and `pytest`).
     Every word missing_tool counted, `python3 cli.py frobnicate` for a step adding Click's
-    `frobnicate` checked in as a missing tool and skipped auto-fix (#1262's review, 2026-11-24)."""
+    `frobnicate` checked in as a missing tool and skipped auto-fix (#1262's review, 2026-11-24).
+    ``run_only``: only the words after a run verb, which the wrapper looks up in the project."""
     lex = shlex.shlex(cmd or "", posix=True, punctuation_chars=True)
     lex.whitespace_split = True
     try:
@@ -3789,8 +3799,9 @@ def command_programs(cmd: str | None) -> set[str]:
             # an assignment, a prefix's option or its number (`env -i`, `nice -n 10`, `timeout 60`)
             if re.match(r"[A-Za-z_][A-Za-z0-9_]*=|-|\d+(?:\.\d+)?[smhd]?$", w):
                 continue
-            out.add(w)
             name = w.rsplit("/", 1)[-1]
+            if not run_only:
+                out.add(w)
             if name in PREFIXES:
                 continue
             if name in RUN_VERBS:

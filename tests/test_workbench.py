@@ -1155,6 +1155,70 @@ class Lifecycle(Base):
         self.assertIsNone(said("Command not found: nosuch-tool-1256", 1, "poetry run pytest nosuch-tool-1256"))
         self.assertEqual(runner.command_programs("FOO=1 timeout 60 uv run --with x pytest -q && cd a"),
                          {"timeout", "uv", "x", "pytest", "cd"})
+        self.assertEqual(runner.command_programs("FOO=1 timeout 60 uv run --with x pytest -q && cd a",
+                                                 run_only=True), {"x", "pytest"})
+
+    def test_a_console_script_the_step_adds_under_poetry_run_goes_back_to_the_agent(self):
+        # #1256's review (2026-11-24): Poetry 2.5.2's `poetry run` reads [tool.poetry.scripts]
+        # before PATH, so a step adding `mycli` there needs no install; on the base, with no venv
+        # in the worktree yet, its `Command not found: mycli` at exit 1 checked in with a false "no
+        # round can fix that", and when round 1 left the script out its auto-fix round was skipped.
+        # Poetry's base lines, verbatim. The fake poetry runs a script the pyproject declares.
+        self.spec.write_text("Write the answer to answer.txt, and add the `mycli1256` console "
+                             "script to [tool.poetry.scripts].\n")
+        bin_dir = Path(self.tmp.name) / "fakebin"
+        bin_dir.mkdir()
+        (bin_dir / "poetry").write_text(
+            '#!/bin/sh\n[ "$1" = run ] || exit 2\n'
+            'echo "Creating virtualenv pkg in $PWD/.venv"\n'
+            'grep -q "^$2 = " pyproject.toml 2>/dev/null && exit 0\n'
+            'echo "Command not found: $2"\nexit 1\n')
+        (bin_dir / "poetry").chmod(0o755)
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{os.environ['PATH']}"
+        self.start("t-pos", "ok", "--test", "poetry run mycli1256", "--auto-fix", "1",
+                   "--no-self-review")
+        st = wait_phase("t-pos", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"], st.get("auto_fixes", 0)), (1, 2, 1))
+        self.assertFalse([r for r in store.notices() if r["task"] == "t-pos" and r["kind"] == "checkin"])
+        task = store.Task("t-pos")
+        self.assertNotIn("auto-fix skipped", (task.round_dir(1) / "summary.md").read_text())
+        said = lambda: runner.missing_command({"exit": 1, "cmd": "poetry run mycli1256", "tail": (  # noqa: E731
+            f"Creating virtualenv pkg in {task.workdir}/.venv\nCommand not found: mycli1256")}, task)
+        self.assertFalse(context.own_venv(task))
+        self.assertIsNone(said())
+        # a tool nobody makes is still one the agent lacks, under Poetry as #1256 found
+        prompt = store.round_prompt(task, 1)
+        prompt.write_text("Write the answer to answer.txt.\n")
+        self.assertEqual(said(), "mycli1256: command not found")
+        # the round added it: Poetry would have run it, and the project declares it
+        (task.workdir / "pyproject.toml").write_text('[tool.poetry.scripts]\nmycli1256 = "pkg.cli:main"\n')
+        self.assertIsNone(said())
+
+    def test_a_console_script_the_step_adds_under_uv_run_goes_back_to_the_agent(self):
+        # #1256's review (2026-11-24): `uv run` syncs the project, installing the
+        # [project.scripts] entry the step adds, so uv's `Failed to spawn` for it on the base (no
+        # venv yet) is no missing tool, nor when the round left the script out
+        self.spec.write_text("Fix the answer.\n")
+        self.start("t-uvs", "ok", "--no-base-check", "--no-self-review")
+        wait_phase("t-uvs", {"review"})
+        task = store.Task("t-uvs")
+        said = lambda: runner.missing_command({"exit": 2, "cmd": "uv run --frozen mycli1256 check", "tail": (  # noqa: E731
+            "error: Failed to spawn: `mycli1256`\n  Caused by: No such file or directory (os error 2)")}, task)
+        self.assertFalse(context.own_venv(task))
+        self.assertEqual(said(), "mycli1256: command not found")
+        prompt = store.round_prompt(task, 1)
+        for spec in ('Add [project.scripts] mycli1256 = "pkg.cli:main".\n',
+                     "Add the `mycli1256` console script.\n"):
+            prompt.write_text(spec)
+            self.assertIsNone(said(), spec)
+        prompt.write_text("Fix the answer.\n")
+        (task.workdir / "pyproject.toml").write_text('[project]\nname = "x"\n[project.scripts]\n'
+                                                     'mycli1256 = "pkg.cli:main"\n')
+        self.assertIsNone(said())
+        # by its bare name, not after a run verb, a script needs the worktree's venv still (#1244)
+        self.assertEqual(runner.missing_command({"exit": 1, "cmd": "mycli1256 check",
+                                                 "tail": "Command not found: mycli1256"}, task),
+                         "mycli1256: command not found")
 
     def test_a_tool_in_the_checkouts_ignored_venv_checks_in_at_once_and_skips_auto_fix(self):
         # #1206 (bar round 3 of 2.0): `--test .venv/bin/python …`, as Claude runs it in the user's
