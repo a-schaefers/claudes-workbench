@@ -88,22 +88,31 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
      dialog's Don't): say which roles it left on the GPU (after an earlier Allow in the OpenRouter
      routes, `wb route` shows what is set) and that their tasks need a GPU model; ask again only if
      they bring it up. Ask nothing before it: no server install, no `wb scout`.
-  3. **No GPU model and no key**: lay out the three ways in three lines, a local server
-     (reference/models.md, which names no server for them), an API provider's key (one they
-     export in their shell, the variable OpenCode names, works as it is, else `opencode auth login
-     <provider>` in their own terminal, which asks for the key there: never from your Bash or `!`,
-     or `/connect` in OpenCode), or try it now on OpenCode's free models, no account (their
-     provider may keep or train on the code); let the user pick, and install nothing unasked. A
-     server: `wb scout`, recommend what fits the machine, `wb model add <provider/model> [--pull]`.
-     The free try: `wb models --api opencode`, pick one marked `free`, not `no tool calls`, with a
-     window of 128K or more, preferring one Zen's page (opencode.ai/docs/zen, checked today) says
-     keeps no data (the free line-up changes: never from memory); route **trivial only**, `wb
-     route trivial <id>` (the dialog shows the free line; no cap is asked), then `wb try` (its
-     sample is workbench's own code, so none of theirs goes out). Real work then needs a GPU or a key.
+  3. **No GPU model and no key**: run `wb scout` first, silently. Then ask **one** question
+     with three ways: a local server, an API provider's key (one they export in their shell, the
+     variable OpenCode names, works as it is, else `opencode auth login <provider>` in their own
+     terminal, which asks for the key there: never from your Bash or `!`, or `/connect` in
+     OpenCode), or try it now on OpenCode's free models, no account (their provider may keep or
+     train on the code). Under the local side, the servers that fit this OS and GPU in a line each
+     (reference/models.md, *A local server in one yes*; none steered to), each filled in for this
+     machine: the model you picked for `wb scout`'s VRAM (its weights plus a window of 32K or more
+     inside VRAM; researched, never guessed), its download size, and the steps. Their one answer
+     ("Ollama, yes") covers all of them: the server's own install (a line needing sudo is theirs
+     to run: reference/models.md gives it), then `wb model add <provider/model> --pull` in the
+     background (on a Mac, Ollama's pull and a `num_ctx` model first, as it says: a `launchctl
+     setenv` is lost at reboot), which on Ollama also starts measuring the window; then `wb
+     doctor` and `wb try`. Install nothing unasked. The free try: `wb models --api opencode`, pick
+     one marked `free`, not `no tool calls`, with a window of 128K or more, preferring one Zen's
+     page (opencode.ai/docs/zen, checked today) says keeps no data (the free line-up changes:
+     never from memory); route **trivial only**, `wb route trivial <id>` (the dialog shows the
+     free line; no cap is asked), then `wb try` (its sample is workbench's own code, so none of
+     theirs goes out). Real work then needs a GPU or a key.
   4. **A GPU model already** (keys or not): as before; mention once, in a line, that a provider
      they connected could take a role if they want. Never push it.
-  5. Ollama models only: `wb optimize estimate`, then `wb optimize start` (a minute or two,
-     detached): each model's window, measured on this GPU; `wb optimize report` once done.
+  5. Ollama models only: `wb model add` and `wb setup` start the measurement themselves when
+     due (a `--  measuring the GPU …` line); for models already there, `wb optimize estimate`,
+     then `wb optimize start` (a minute or two, detached): each model's window, measured on this
+     GPU; `wb optimize report` once done.
   6. `wb try` proves it on a tiny sample (with trivial on API, it goes to that provider): review
      it as any task and run the hidden check it printed. Then `wb accept` it (the sample is a
      scratch repo of its own) and show the user the result and the line accept prints. Then ask
