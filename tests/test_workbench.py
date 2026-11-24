@@ -35063,8 +35063,9 @@ class ApiSpend(Base):
         mt.step({"cost": 0.1, "tokens": {"input": 100}})       # OpenCode's says less: nothing booked
         self.assertEqual(len(self.rows("t-kh-meter")), 3)
         mt.step({"cost": 3.0, "tokens": {"input": 100}})       # more than all three: the difference,
-        (rec,) = self.rows("t-kh-meter", "reconcile")          # the provider's own row at its catalog figure (#1165)
-        self.assertAlmostEqual(rec["usd"], 3.1 - (a["usd"] + b["usd"] + c["metered"]), places=9)
+        (rec,) = self.rows("t-kh-meter", "reconcile")          # a usage.cost row as booked: OpenCode
+        # reports that same figure (#1234, 2026-11-24); an estimated_cost one at its catalog's (#1165)
+        self.assertAlmostEqual(rec["usd"], 3.1 - (a["usd"] + b["usd"] + c["usd"]), places=9)
         mt.step({"cost": 0.5, "tokens": {"input": 100}})       # after a reconcile: only its own
         self.assertEqual([round(r["usd"], 9) for r in self.rows("t-kh-meter", "reconcile")][1:], [0.5])
         self.assertEqual(self.meter.usage_tokens({"input_tokens": 50, "output_tokens": 20,  # Responses
