@@ -68,8 +68,8 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
   order, each install or download on the user's yes. Once a role runs (on the GPU or on API),
   `/workbench` goes straight to work: this never runs again on its own.
   1. `wb setup`: its `first run:` lines say what is missing, and which API keys OpenCode holds.
-  2. **No GPU model, a provider with a stored key** (`ok  API keys: …`): `wb models` lists that
-     provider's models. Pick two as the weekly check would: reliable tool calls, a priced model
+  2. **No GPU model, a provider with a stored key** (`ok  API keys: …`): `wb models --api
+     <provider>` lists that provider's ids, each with its window and price. Pick two as the weekly check would: reliable tool calls, a priced model
      (never a free one), a window of 128K or more, the cheaper for trivial, the stronger for
      significant and writing (prose slices like significant; left on the GPU, the first docs task
      exits 3); check them against the provider's own pages today. Then ask **one** question,

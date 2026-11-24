@@ -4238,6 +4238,8 @@ def _api_section(gpu: bool) -> tuple[list[str], bool]:
                 state = ("no API model set" if not mid else "not in OpenCode's catalog now" if not st
                          else "ready" if st["available"] else st["why"])
                 lines.append(f"  {role:12} {mid or 'api'}  {state} · thinking {r.get('thinking') or 'off'}{when}")
+                if m:  # what plan mode sizes a step to, before any wb start prints it (#1131, 2026-11-23)
+                    lines.append(f"  {'':12} slice: {router.slice(m).line()}")
             else:
                 pick = r.get("gpu") or "auto"
                 lines.append(f"  {role:12} gpu " + (

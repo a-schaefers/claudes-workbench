@@ -32482,7 +32482,7 @@ class FirstRunApi(Base):
         from workbench import router
         down = {"available": False, "resident": False, "why": "the server is down"}
         choice = ("; or put trivial on an API model you connected (the user's yes): wb route trivial <id>, "
-                  "wb models lists them")
+                  "wb models --api <text> lists them")
         with mock.patch.object(router.models, "status", lambda *a, **k: dict(down)):
             top, why = router.choose("trivial")
             self.assertIsNone(top)
@@ -33244,6 +33244,21 @@ class ApiCompat(Base):
         code, err = self.fails("models")
         self.assertEqual(code, 1)
         self.assertIn("no local models: ", err)
+
+    def test_wb_models_gives_each_api_roles_model_its_slice_as_wb_start_will(self):
+        # #1131 (2026-11-23): the skill sizes each planned step to the slice `wb models` gives, but
+        # an API model's came only from wb start, after the task was running
+        self.no_gpu()
+        self.routes(trivial={"via": "api", "api": "acme/coder-flash"}, significant={"via": "api", "api": "gone/x"})
+        out = run_wb("models")
+        want = self.models.hosted()["acme/coder-flash"]
+        role = out.index("  trivial      acme/coder-flash  ready")
+        self.assertEqual(out[role:].splitlines()[1], f"  {'':12} slice: {cli.router.slice(want).line()}")
+        self.assertIn("a guess from its 128K window", out[role:].splitlines()[1])
+        self.assertEqual(out.count("slice: "), 1)                   # none for a model not in the catalog
+        skill = (Path(cli.__file__).resolve().parent.parent / "skill/workbench/SKILL.md").read_text()
+        first = " ".join(skill[skill.index("  2. **No GPU model"):skill.index("  3. **No GPU model")].split())
+        self.assertIn("`wb models --api <provider>` lists that provider's ids", first)
 
     def test_wb_models_names_an_api_roles_state_and_a_gpu_user_gets_two_lines(self):
         self.catalog([api_entry("opencode", "big-pickle-free", cost=[{"input": 0, "output": 0}])], [])

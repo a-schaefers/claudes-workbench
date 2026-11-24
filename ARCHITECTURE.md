@@ -3093,7 +3093,9 @@ did before API models (#1026's review: 4 s on a slow read, every `HOSTED_TTL`), 
 yet says `catalog: not read yet (wb models --api <text> reads it)`. Each role (`significant`,
 `trivial`, `writing`, from `routes.read`, where each runs by `routes.effective_via`): `gpu (the router's pick above)` or its pinned GPU id, `· API kept: <id>` when one is stored; an
 API role its id, `ready` or status's `why` (or `not in OpenCode's catalog now`), `· thinking off|on`,
-`· set by you MM-DD` (`_set_on`: none for a `ts` that isn't a time, a hand-edited 1e20 or NaN); a
+`· set by you MM-DD` (`_set_on`: none for a `ts` that isn't a time, a hand-edited 1e20 or NaN), and
+under it the model's `slice:` (`router.slice`, as `wb start` prints it: plan mode sizes a step to it
+before any start, #1131); a
 routes.json that can't be read is one line, `roles: routes.json can't be read: wb route sets them
 again`; then `keys:` one per provider with a key source (`stored`, `Ollama's login`, or
 `environment` / `OAuth login` / `in a config file` / `cloud signing`: `can't run, needs a key wb can
