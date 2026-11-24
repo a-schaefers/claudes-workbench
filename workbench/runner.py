@@ -3011,7 +3011,8 @@ def hang(task: store.Task, limit: int) -> dict | None:
 # found` (exit 127). Not `No such file or directory`, which a script the step creates
 # (`./check.sh`) says on the base too in bash and zsh; dash says `./check.sh: not found` for it,
 # so a name with a `/` is never a missing tool (nightly run 45362198509, 2026-11-24: under a
-# dash $SHELL a --test the step was to make checked in at once as a tool the agent lacks).
+# dash $SHELL a --test the step was to make checked in at once as a tool the agent lacks), but
+# one in an install's TOOL_DIRS (#1206).
 NOT_FOUND = re.compile(r"command not found: (?P<z>.+)$|(?P<n>[^:]+): (?:command )?not found$")
 # Python's own line for `python -m <module>` it can't import (exit 1): a test runner missing from
 # the agent's Python (`python3 -m pytest` on a system Python without it, or with the user's venv
@@ -3021,6 +3022,17 @@ NOT_FOUND = re.compile(r"command not found: (?P<z>.+)$|(?P<n>[^:]+): (?:command 
 NO_MODULE = re.compile(r"\S*python[\w.]*: (No module named (?P<m>[\w.]+)|Error while finding module "
                        r"specification for '(?P<d>[\w.]+)' \(ModuleNotFoundError: No module named "
                        r"'[\w.]+'\))")
+# Where an install puts its tools (a venv's, npm's, Composer's), at any depth: ignored, so never
+# in a task's worktree (cli._missing_dirs says so at start), and never what a step makes, unlike
+# a build's output (`cargo build && target/debug/newbin`) or a script (`./check.sh`). A --test of
+# `.venv/bin/pytest` or `node_modules/.bin/jest`, as Claude runs it in the user's checkout, said
+# `No such file or directory` there, read as a script the step makes, and ran round 1 and both
+# auto-fix rounds on correct code, each told the bug was the change's (#1206, 2026-11-24).
+TOOL_DIRS = (".venv/bin", "venv/bin", "node_modules/.bin", "vendor/bin")
+# bash's and zsh's line for a path that isn't there (dash's and ksh's is NOT_FOUND's)
+NO_SUCH = re.compile(r"no such file or directory: (?P<z>.+)$|(?P<n>[^:]+): No such file or directory$")
+# wb's words for a tool not checked out (missing_command), the same in every shell, and its path
+NOT_CHECKED_OUT = re.compile(r"(?P<p>[^:]+): not in the worktree \(")
 # What gives the agent's environment that command, for the check-in and the skipped auto-fix
 GIVE_TOOL = ("no round can fix that: put the tool in the worktree (a .venv there comes first on "
              "the agent's PATH; a Python module: python3 -m venv .venv && .venv/bin/pip install "
@@ -3033,7 +3045,8 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     round's tests) ended with it: at exit 127 the shell's not-found line, worded by wb as
     `<name>: command not found`, so the check-in and the base's line compared with a round's
     read the same under bash, zsh, dash or ksh (#1152; nightly run 45362198509, 2026-11-24), a
-    name with a `/` never; or Python's no-module line for `-m` at exit 1 (#1181). A tool the
+    name with a `/` never, but for one in TOOL_DIRS, which says `<path>: not in the worktree (…)`
+    (#1206); or Python's no-module line for `-m` at exit 1 (#1181). A tool the
     agent's environment lacks (one outside the agent's PATH, which python_env and agent_path
     trim), which no edit in a round can give it; else None. A module of ``task``'s own code
     (own_module) is none: the step may make it."""
@@ -3043,7 +3056,13 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     line = last[0].strip() if last else ""
     if r["exit"] == 127:
         name = missing_name(line)
-        return f"{name}: command not found" if name and "/" not in name else None
+        if name and "/" not in name:
+            return f"{name}: command not found"
+        # a path: a script the step may make, but not a tool an install puts there (#1206)
+        path = name or ((m := NO_SUCH.search(line)) and (m["z"] or m["n"]).strip())
+        if path and (top := next((t for t in TOOL_DIRS if f"/{t}/" in f"/{path}"), None)):
+            return f"{path}: not in the worktree ({top.split('/')[0]}/ is an install's, never checked out)"
+        return None
     if r["exit"] == 1 and (m := NO_MODULE.fullmatch(line)):
         return None if task and own_module(task, m["m"] or m["d"]) else line
     return None
@@ -3101,7 +3120,9 @@ def own_module(task: store.Task, module: str) -> bool:
 def missing_name(line: str) -> str | None:
     """The command a not-found line names (NOT_FOUND): bash's `bash: line 1: X: command not
     found`, dash's `sh: 1: X: not found`, zsh's `zsh:1: command not found: X`, and wb's own
-    `X: command not found` (missing_command's)."""
+    `X: command not found` and `X: not in the worktree (…)` (missing_command's)."""
+    if m := NOT_CHECKED_OUT.match(line):
+        return m["p"]
     m = NOT_FOUND.search(line)
     return (m["z"] or m["n"]).strip() if m else None
 

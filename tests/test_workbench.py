@@ -674,6 +674,46 @@ class Lifecycle(Base):
         self.assertEqual((st["base_check"]["exit"], st["round"]), (127, 2))
         self.assertFalse([r for r in store.notices() if r["task"] == "t-nf2" and r["kind"] == "checkin"])
 
+    def test_a_tool_in_the_checkouts_ignored_venv_checks_in_at_once_and_skips_auto_fix(self):
+        # #1206 (bar round 3 of 2.0): `--test .venv/bin/python …`, as Claude runs it in the user's
+        # checkout, said `No such file or directory` in the worktree, which has no ignored .venv;
+        # read as a script the step makes, it ran round 1 and both auto-fix rounds on correct code
+        (self.repo / ".gitignore").write_text(".venv/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
+        (self.repo / ".venv" / "bin").mkdir(parents=True)
+        (self.repo / ".venv" / "bin" / "python").symlink_to(sys.executable)
+        cmd = ".venv/bin/python -c \"assert open('answer.txt').read().strip() == '42'\""
+        self.start("t-vv", "ok", "--test", cmd, "--auto-fix", "2", "--no-self-review")
+        st = wait_phase("t-vv", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (127, 1))
+        task = store.Task("t-vv")
+        self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        checkins = [r["text"] for r in store.notices() if r["task"] == "t-vv" and r["kind"] == "checkin"]
+        self.assertEqual(len(checkins), 1)
+        self.assertIn("can't run in the agent's environment: .venv/bin/python: not in the worktree "
+                      "(.venv/ is an install's, never checked out) (exit 127 on the base)", checkins[0])
+        summary = (task.round_dir(1) / "summary.md").read_text()
+        self.assertTrue(summary.startswith("auto-fix skipped: the acceptance command can't run in "
+                                           "the agent's environment: .venv/bin/python: "), summary)
+
+    def test_a_tool_path_in_an_install_dir_is_a_missing_tool_in_every_shell_and_a_build_output_is_not(self):
+        # #1206: the shells' lines for a path, a venv's or npm's tool among them, at any depth;
+        # a build's output or a script the step makes still goes back to the agent
+        said = lambda last: runner.missing_command({"exit": 127, "tail": f"x\n{last}\n"})  # noqa: E731
+        for shell in ("bash: line 1: {}: No such file or directory", "zsh:1: no such file or directory: {}",
+                      "/bin/sh: 1: {}: not found", "ksh: {}: not found"):
+            self.assertEqual(said(shell.format(".venv/bin/pytest")),
+                             ".venv/bin/pytest: not in the worktree (.venv/ is an install's, never checked out)")
+            self.assertEqual(said(shell.format("web/node_modules/.bin/jest")), "web/node_modules/.bin/jest: "
+                             "not in the worktree (node_modules/ is an install's, never checked out)")
+            for path in ("target/debug/newbin", "./check.sh", "bin/venv/check", "venv/check.sh"):
+                self.assertIsNone(said(shell.format(path)), (shell, path))
+        # wb's own line names the path, so a later step's --test that names it skips auto-fix (#1172)
+        line = said("bash: line 1: venv/bin/pytest: No such file or directory")
+        self.assertEqual(runner.missing_name(line), "venv/bin/pytest")
+        self.assertIn(runner.missing_name(line), runner.command_words("cd api && venv/bin/pytest -q"))
+
     def test_a_command_not_found_that_a_later_steps_test_names_skips_auto_fix(self):
         # #1172 (bar round 2 of 2.0): wb next --test runs no base check, so a tool its command
         # names and the agent's PATH lacks (exit 127) got both auto-fix rounds, each told "the
