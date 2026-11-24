@@ -30819,7 +30819,9 @@ class ApiThinking(Base):
         self.assertEqual((code, rows[-1]["type"]), (0, "step_finish"), rows)   # the variant resolves
         # the role's thinking changed mid-task: the task keeps what it started with (the cache)
         routes = Path(self.tmp.name) / "routes.json"
-        routes.write_text(json.dumps({"v": 1, "roles": {r: {"via": "api", "api": "deepseek/deepseek-flash",
+        # with a day cap: wb feedback refuses an API task without one (#1089's meter.refusal,
+        # which #1118 asks before a round; the two met in the #1028 merge, 2026-11-23)
+        routes.write_text(json.dumps({"v": 1, "day_usd": 5, "roles": {r: {"via": "api", "api": "deepseek/deepseek-flash",
                                                             "thinking": "on"} for r in ("significant", "trivial")}}))
         os.environ["WB_ROUTES"] = str(routes)
         runner.checkout(task)
