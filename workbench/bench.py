@@ -22,7 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -811,13 +811,18 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
         out, ok = [], True
         # the GPU alone for the grade too (#1098): the replay's runner has let its lease go by
         # review, and a real task could load its model while the grade ran. Its spec has the
-        # flag from --unload-for-tests (_start_task)
-        with verify.gpu(task):
+        # flag from --unload-for-tests (_start_task). A real task that comes meanwhile stops it
+        # (cli._preempt_bench), so each command first reads whether it did: a preempt that
+        # killed the grade was recorded as the model's failure (the review of #1098, 2026-11-23)
+        with ExitStack() as alone:
+            _grade_alone(task, alone, lambda msg: print(msg, file=log, flush=True))
             for cmd in (case["test_cmd"], case.get("check_cmd")):
-                if cmd:
+                if cmd and task.status.get("last") != PREEMPTED:
                     code, text = runner.run_in_lane(task, cmd, int(case.get("test_timeout") or 900))
                     out.append(f"$ {cmd}\nexit: {code}\n\n{text}")
                     ok = ok and code == 0
+        if task.status.get("last") == PREEMPTED:  # the GPU let go above: the driver replays it
+            return {**row, "outcome": "preempted"}
         (d / "grade.txt").write_text("\n\n".join(out))
         return {**row, "outcome": "passed" if ok else "failed",
                 **({} if ok else {"why": "the hidden checks failed (grade.txt)"})}
@@ -832,6 +837,25 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
                 except SystemExit:
                     pass
         shutil.rmtree(d / "tree" if work.parent != d else work, ignore_errors=True)
+
+
+GRADE_POLL = 5.0  # seconds between a flagged grade's tries for a GPU nothing holds or waits for
+
+
+def _grade_alone(task: store.Task, stack: ExitStack, say) -> None:
+    """The GPU alone for a replay's grade, for a case with --unload-for-tests (#1098), held in
+    ``stack``: taken only once nothing holds or waits for it, and not at all once a real task
+    preempted the replay. Queued (verify.gpu's wait), the grade's place was the replay's
+    created_at, ahead of every real task started after it, which then waited behind a bench
+    (the review of #1098, 2026-11-23). Held, the entry is the replay's, which a real task stops."""
+    if not task.spec.get("unload_for_tests"):
+        return
+    while task.status.get("last") != PREEMPTED:
+        try:
+            stack.enter_context(media.gpu(task.name, say, wait=False))
+            return
+        except RuntimeError:  # held or waited for: real work first
+            time.sleep(GRADE_POLL)
 
 
 def paid(task: store.Task) -> dict:

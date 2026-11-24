@@ -14483,6 +14483,88 @@ class Bench(Base):
             self.assertEqual(bench.self_run("t-src")["outcome"], "passed")
             self.assertEqual([c[2] for c in calls], [False] * 4)
 
+    def _flagged_case(self, name: str) -> dict:
+        """A bench case whose task ran with --unload-for-tests and a hidden check (#1098)."""
+        from workbench import bench
+        self.start(name, "ok", "--test", "sh tests/check.sh", "--unload-for-tests")
+        wait_phase(name, {"review"})
+        wt = store.Task(name).worktree
+        (wt / "tests").mkdir()
+        (wt / "tests" / "check.sh").write_text("grep -qx 42 answer.txt\n")
+        run_wb("accept", name, "-m", "feat: the answer")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        bench.add(name)
+        return bench.cases()[name]
+
+    def test_a_real_task_that_comes_during_a_flagged_grade_stops_it_and_finds_the_gpu_free(self):
+        # the review of #1098 (2026-11-23): the grade held the GPU as the replay, so a real task's
+        # preempt killed it, the row read `failed` (the model's), and the driver's hold stayed:
+        # the real task was refused (exit 4) or queued behind the bench. Now the grade lets go,
+        # the row is `preempted` (replayed later), and the real task finds the GPU free
+        from workbench import bench, media, models
+
+        @contextlib.contextmanager
+        def gpu(who, say, wait, *a, **k):  # the lease alone, without unloading anything
+            with models.GpuLease(None, who, say, wait=wait):
+                yield
+        real_lane, slow, grading = runner.run_in_lane, threading.Event(), threading.Event()
+
+        def lane(task, cmd, *a, **k):
+            if slow.is_set():  # the grade: long enough to be preempted in
+                grading.set()
+                return real_lane(task, f"touch .graded && exec sleep 60; {cmd}", *a, **k)
+            return real_lane(task, cmd, *a, **k)
+        with mock.patch.object(media, "gpu", gpu), mock.patch.object(runner, "run_in_lane", lane):
+            case = self._flagged_case("t-gpu")
+            mid = "ollama/mimo-v2.6:9b-q8_0"
+            m = models.discover()[mid]
+            rows, real = [], {}
+            orig_wait = bench._wait
+
+            def waited(task):
+                out = orig_wait(task)
+                real["task"] = task
+                slow.set()
+                return out
+            with mock.patch.object(bench, "_wait", waited):
+                t = threading.Thread(target=lambda: rows.append(
+                    bench.replay(case, mid, 1, "r1", "", [])))
+                t.start()
+                try:
+                    self.assertTrue(grading.wait(120))
+                    wt = real["task"].worktree
+                    deadline = time.time() + 60
+                    while not (wt / ".graded").exists() and time.time() < deadline:
+                        time.sleep(0.05)
+                    self.assertTrue(cli._gpu_wait(m, "real")[1])      # the grade holds the GPU
+                    began = time.time()
+                    self.assertIn("stopped the bench's replay", cli._preempt_bench(m, "real"))
+                    self.assertFalse(cli._gpu_wait(m, "real")[1])     # and has let it go
+                    self.assertLess(time.time() - began, 20)
+                finally:
+                    t.join(120)
+        self.assertEqual(rows[0]["outcome"], "preempted", rows[0])
+
+    def test_a_flagged_grade_waits_for_a_free_gpu_without_queueing_ahead_of_real_tasks(self):
+        # the review of #1098 (2026-11-23): queued, the grade's place was the replay's created_at,
+        # ahead of every real task started after it. It now asks without queueing (wait=False:
+        # no gpu.json entry while it waits) and tries again until the GPU is free
+        from workbench import bench, media
+        asks = []
+
+        @contextlib.contextmanager
+        def gpu(who, say, wait, *a, **k):
+            asks.append(wait)
+            if store.Task(who).spec.get("bench") and len(asks) < 3:
+                raise RuntimeError("the GPU is busy")  # a real task holds it twice
+            yield
+        with mock.patch.object(media, "gpu", gpu), mock.patch.object(bench, "GRADE_POLL", 0.01):
+            case = self._flagged_case("t-gpu")
+            asks.clear()
+            row = bench.replay(case, "ollama/mimo-v2.6:9b-q8_0", 1, "r1", "", [])
+        self.assertEqual(row["outcome"], "passed", row)
+        self.assertEqual(asks, [False] * 3)
+
     def test_a_cases_checkouts_read_the_bytes_the_task_read(self):
         # #736 (the 2026-11-21 audit, reproduced by both audits): with the repo's own
         # core.autocrlf the task read CRLF, and bench add's reference check and each replay's

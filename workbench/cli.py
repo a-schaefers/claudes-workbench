@@ -762,8 +762,18 @@ def _preempt_bench(m: models.Model, me: str | None = None) -> str:
         with store.locked(runner.lock_file(name, "cmd")):
             if t.status.get("phase") in store.CLOSED:
                 continue
+            # said before the stop too: a replay's grade runs in the bench's driver, with no
+            # runner, and reads it once the sweep ends its command, to let the GPU go rather
+            # than run its next one (the review of #1098, 2026-11-23)
+            t.set_status(last=bench.PREEMPTED)
             _stop_runner(t)
             t.set_status(phase="stuck", last=bench.PREEMPTED, pid=None)
+    if names:  # and the grade's hold, the driver's (who lives on), gone before the caller reads
+        # the GPU's holders: the real task was refused (exit 4) the room it had just made
+        deadline, pool = time.time() + BENCH_EXIT, models.pool(m)
+        while time.time() < deadline and any(h.get("task") in names
+                                             for h in models.holders(pool=pool).values()):
+            time.sleep(0.1)
     out = [f"the bench's replay ({', '.join(names)})"] if names else []
     if waits and any(h.get("task") == optimize.HOLDER for h in held.values()) and (pid := optimize.stop()):
         out.append("wb optimize (what it measured is kept)")  # real work first, here too
@@ -774,6 +784,7 @@ def _preempt_bench(m: models.Model, me: str | None = None) -> str:
 
 
 OPTIMIZE_EXIT = 30  # seconds a stopped wb optimize gets to let go of the GPU (it stops between requests)
+BENCH_EXIT = 30  # seconds a preempted replay's grade gets to let go of the GPU (#1098)
 
 
 def _fixed_line(task: store.Task, m: models.Model) -> str:
