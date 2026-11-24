@@ -91,8 +91,10 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
      `wb scout`'s VRAM (its weights plus a window of 32K or more inside VRAM; researched, never
      guessed), its download size, and the steps. Their one answer ("Ollama, yes") covers all
      of them: the server's own install (a line needing sudo is theirs to run: reference/models.md
-     gives it), then `wb model add <provider/model> --pull` in the background, which on Ollama
-     also starts measuring the window; then `wb doctor` and `wb try`. Install nothing unasked.
+     gives it), then `wb model add <provider/model> --pull` in the background (on a Mac, Ollama's
+     pull and a `num_ctx` model first, as it says: a `launchctl setenv` is lost at reboot), which
+     on Ollama also starts measuring the window; then `wb doctor` and `wb try`. Install nothing
+     unasked.
   4. **A GPU model already** (keys or not): as before; mention once, in a line, that a provider
      they connected could take a role if they want. Never push it.
   5. Ollama models only: `wb model add` and `wb setup` start the measurement themselves when

@@ -2963,8 +2963,9 @@ turns on the GPU. No provider yet: `wb model add <provider>/<model> --url <baseU
 N` when it doesn't say its window).
 - Window: at least 16K (`models.MIN_WINDOW`; the README says so, `tests/test_docs.py` checks),
   32K recommended; OpenCode's own prompt is about 10K. Ollama: `OLLAMA_CONTEXT_LENGTH` (its small
-  default cuts prompts silently). llama.cpp: `-c`, split across `--parallel N` slots unless
-  `--kv-unified`; one agent uses one slot. LM Studio: the length at load (`lms load <model>
+  default cuts prompts silently), or a model's `num_ctx` (read first; on macOS the one that lasts
+  past a reboot, as `launchctl setenv` doesn't). llama.cpp: `-c`, split across `--parallel N`
+  slots unless `--kv-unified`; one agent uses one slot. LM Studio: the length at load (`lms load <model>
   --context-length 32768`), loaded before registering. vLLM: `--max-model-len`. Too big for the
   card spills to RAM at about half speed (`wb optimize` measures Ollama's).
 - Tool calls: vLLM needs `--enable-auto-tool-choice --tool-call-parser <parser>`; llama.cpp may
@@ -6368,8 +6369,12 @@ a hosted provider added by hand may be one) `cli.CONNECT_TOO` after it, `a hoste
 run is one question too (#1195): after `wb scout`, each server that fits the OS and GPU in a line,
 filled in with the model Claude picked for its VRAM, the download and the steps (none steered to);
 one yes runs the server's official install (reference/models.md holds those lines, never code: a
-sudo one is the user's to run, with Claude Code's `!` prefix or in a terminal, and Ollama's sets
-`OLLAMA_CONTEXT_LENGTH`, which `wb model add` needs to read a window), then `wb model add … --pull`,
+sudo one is the user's to run, with Claude Code's `!` prefix or in a terminal, and Ollama's gives
+the model a window `wb model add` can read and that lasts: on Linux the service's
+`OLLAMA_CONTEXT_LENGTH` in a systemd drop-in; on macOS a model with `num_ctx`, made through
+Ollama's `/api/create` as `wb optimize apply` makes one, since a `launchctl setenv` is lost at
+logout or reboot and Ollama's default window then fails every task at `short_window`), then
+`wb model add … --pull` (on macOS Ollama's own pull, then `wb model add` of the `num_ctx` model),
 which on Ollama starts the optimize when due, then `wb doctor` and `wb try`. The plugin install copies only `mod/` into the plugin
 cache; `marketplace add` keeps a full clone (`installLocation` in `known_marketplaces.json`, or under
 `CLAUDE_CODE_PLUGIN_CACHE_DIR`), from which `wb setup` links `wb` and the skill. `wb update` (`/workbench-update` also

@@ -2030,6 +2030,17 @@ class Real(unittest.TestCase):
             self.assertIsNone(models.ollama_served_context("http://192.168.7.7:11434", "m"))
         show.assert_not_called()
 
+    def test_a_models_num_ctx_is_its_served_window_when_the_environment_lost_its_setting(self):
+        # #1195's review (2026-11-24): a Mac's launchctl setenv is gone after a reboot, so the
+        # skill puts the window in a num_ctx model instead; it must win over an empty or smaller
+        # OLLAMA_CONTEXT_LENGTH, as Ollama itself reads it
+        from workbench import hardware
+        for env in ("", "4096"):
+            with mock.patch.object(models, "_get", return_value={"models": []}), \
+                    mock.patch.object(models, "ollama_show", return_value={"num_ctx": 32768}), \
+                    mock.patch.object(hardware, "ollama_env", return_value={"OLLAMA_CONTEXT_LENGTH": env}):
+                self.assertEqual(models.ollama_served_context("http://127.0.0.1:11434", "m:8b-32k"), 32768)
+
     def test_a_model_that_cant_load_gets_its_next_step_and_never_empties_the_gpu(self):
         # the 2026-11-16 audit: wb start said only why, offered --force for an unpulled model,
         # and the forced task unloaded the GPU before its load failed

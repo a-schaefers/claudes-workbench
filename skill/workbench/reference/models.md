@@ -18,9 +18,17 @@ below, verified today), its download size, and what the yes runs. Each server is
 own official way, run as the user would run it, never wrapped in wb code (its URLs change, so they
 live here, not in code). Ollama serves its own small default window unless its service sets
 `OLLAMA_CONTEXT_LENGTH`, and `wb model add` refuses a window it can't read, so the install sets
-it: `<N>` is the window you picked (32768 or more).
-- Ollama on macOS (no sudo): `brew install ollama && launchctl setenv OLLAMA_CONTEXT_LENGTH <N> &&
-  brew services start ollama`; or its app, with the same `launchctl setenv` before it is opened.
+one that lasts: `<N>` is the window you picked (32768 or more), `<K>` that over 1024.
+- Ollama on macOS (no sudo): `brew install ollama && brew services start ollama`, or its app.
+  Never `launchctl setenv OLLAMA_CONTEXT_LENGTH`: it is gone at the next logout or reboot, Ollama
+  then serves its own default (4K under 24 GB) and the runner fails every task before a round
+  (`short_window`). The window goes in the model instead, Ollama's own way for its OpenAI API: a
+  `num_ctx`, which Ollama and `wb model add` both read before the environment (`wb optimize
+  apply` makes its models so). In the background, `ollama pull <family>:<tag> && curl -fsS http://127.0.0.1:11434/api/create
+  -d '{"model":"<family>:<tag>-<K>k","from":"<family>:<tag>","parameters":{"num_ctx":<N>},
+  "stream":false}' && wb model add ollama/<family>:<tag>-<K>k` (no download twice: the new name
+  shares the weights). A Mac whose tasks fail `short_window` after a reboot lost a
+  `launchctl setenv`: make that model the same way and `wb model add` it.
 - Ollama on Linux and WSL2 (WSL2 needs systemd on): its install.sh needs sudo, and your Bash has
   no terminal for the password, so the user runs this one line, with Claude Code's `!` prefix or in
   a terminal of their own if sudo can't ask there: `curl -fsSL https://ollama.com/install.sh | sh
@@ -28,8 +36,9 @@ it: `<N>` is the window you picked (32768 or more).
   '[Service]\nEnvironment="OLLAMA_CONTEXT_LENGTH=<N>"\n' | sudo tee
   /etc/systemd/system/ollama.service.d/context.conf >/dev/null && sudo systemctl daemon-reload &&
   sudo systemctl restart ollama`. That is the only step that stays theirs.
-- Then, on Ollama, `wb model add ollama/<model> --pull` in the background: it writes the provider,
-  downloads, reads the served window, and starts `wb optimize` when due (no separate yes).
+- Then, on Ollama on Linux, `wb model add ollama/<model> --pull` in the background: it writes the
+  provider, downloads, reads the served window, and starts `wb optimize` when due (no separate
+  yes); on macOS the `wb model add` above does the same after Ollama's own pull.
 - LM Studio: its app (`lms get` downloads), then `wb model add <p>/<m> --url … --context N`.
   llama-server or vLLM: their own packages, then `wb model add <p>/<m> --url … --context N
   --start "…" --stop "…"`, as below.
@@ -86,7 +95,8 @@ its size: a model that fits entirely in VRAM (or the GPU's share of unified memo
 one that spills into RAM, and on a big card the best is a larger model, a longer context, or both.
 The window sets the slice of every task (`slice:` in the report), so where the VRAM has room past
 the weights, raise the context the server serves (llama-server `-c`, LM Studio's context length,
-vLLM `--max-model-len`, Ollama's `OLLAMA_CONTEXT_LENGTH`), then `wb model add … --context N`;
+vLLM `--max-model-len`, Ollama's `OLLAMA_CONTEXT_LENGTH`, on macOS a `num_ctx` model as
+above), then `wb model add … --context N`;
 `wb model add` reads the window from the server (Ollama, llama-server, LM Studio once the model
 is loaded, vLLM) and refuses when it can't say: then `--context N`, the window it was started
 with; ask the user if you don't know it. `wb doctor` flags an entry whose
