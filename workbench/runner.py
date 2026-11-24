@@ -1516,7 +1516,7 @@ class _ProviderWait:
         if not self.api:
             return
         if not out["stuck"] and out["exit"] not in (0, None) and not (
-                out.get("lingered") or out.get("interrupted") or out.get("full")):
+                out.get("lingered") or out.get("settled") or out.get("interrupted") or out.get("full")):
             self.st = self.task.status
             if why := self.stop(now, gave_up=True):
                 out["guard"], out["stuck"] = why
@@ -1591,7 +1591,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     prompt = task.round_dir(n).joinpath("prompt.md").read_text()
     cmd = opencode_bin() + ["run", "--standalone", "-m", spec["opencode_model"], "--auto",
                             "--format", "json", "--title", f"wb: {task.name}"]
-    marks = {gitops.mark(task.worktree)}  # the tree as the round and the session began
+    began = gitops.mark(task.worktree)  # the tree as the round began
+    marks = {began}  # and as the session began
     if st.get("session"):
         cmd += ["--session", st["session"]]
         marks.add(st.get("session_mark"))
@@ -1837,8 +1838,22 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             if why and detector.since_edit >= detector.no_edit:
                 if (m := gitops.mark(task.worktree)) != edit_mark:  # it edited through the shell
                     edit_mark, detector.since_edit, why = m, 0, None
+                elif m == began and task.status.get("round_for") == "self_review":
+                    # A self-review round is reads and runs by design (break a check, see a test
+                    # fail, copy the file back): on a change whose tests passed, the explore
+                    # guard stopped it as stuck, so a green task woke Claude as stuck and its
+                    # step was recorded stuck (#1168, 2026-11-24). Its tree as the round began,
+                    # it ends as the agent's finish: the tests, then review. A tree it changed
+                    # is stopped as before.
+                    out["settled"], why = why, None
             if why:
                 out["stuck"], out["guard"] = why, detector.guard
+        if out.get("settled"):  # #1168: not a guard's stop
+            task.event({"ts": store.now(), "round": n, "kind": "settled",
+                        "text": f"self-review: {out['settled']}, the tree as the round began: "
+                                "stopped as its finish"})
+            _stop(proc)
+            break
         quiet = clock.quiet(mono)
         hush = wait_hush if waiting_bg else silence
         # The agent's turn is over (its last step's reason `stop`) and OpenCode is still open:
@@ -3213,6 +3228,9 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
                      + " running in the background when its turn ended; stopped")
     elif rnd.get("lingered"):  # #1160: the runner's stop, not OpenCode's exit code (#83)
         lines.append("OpenCode was still open after the agent's output ended; stopped")
+    elif rnd.get("settled"):  # #1168: a self-review that read and left the tree as it was
+        lines.append(f"self-review: {rnd['settled']}, the tree as the round began; stopped as "
+                     "its finish")
     elif rnd["exit"] not in (0, None):
         lines.append(f"opencode exited {rnd['exit']}"
                      + (": the round didn't finish; what it changed so far stays in the worktree"
@@ -3741,7 +3759,8 @@ def died(rnd: dict) -> bool:
     kill, a provider error), not the runner's stop of a shutdown that hung (#83). Such a round
     failed whatever it printed: one that said "I will inspect the files" and exited 7 went on to
     the tests, and to review as "tests passed" (#427, the audit of 1.8)."""
-    return rnd.get("exit") not in (0, None) and not rnd.get("lingered") and not rnd.get("left_bg")
+    return rnd.get("exit") not in (0, None) and not rnd.get("lingered") and not rnd.get("left_bg") \
+        and not rnd.get("settled")  # #1168: the runner's stop of a self-review that only read
 
 
 def _round_end(task: store.Task, n: int, rnd: dict, began: float) -> None:
