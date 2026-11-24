@@ -3793,7 +3793,6 @@ def cmd_accept(a):
               f"{note}: keep it current (update and commit it if this change alters what it says)")
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
           (f", merged into {close['merge_into']} as {merged}" if merged else
-           f"\nmerge with: {gitops.jj_merge(repo, spec['branch'])}" if gitops.jj_colocated(repo) else
            "\n" + _merge_line(repo, spec, close, a)))
     _say(savings.line(row) or spend.line(row.get("claude")))
     _say(checked)
@@ -3823,10 +3822,14 @@ NOT_MERGED = 5  # wb accept --merge's exit status when the accept stands and the
 
 
 def _merge_line(repo: Path, spec: dict, close: dict, a) -> str:
-    """wb accept's line for merging by hand: into the branch --merge chose, else the one the task
+    """The line for merging the task's branch by hand, wb accept's and (``close`` empty) wb
+    discard's for the steps it kept: into the branch --merge chose, else the one the task
     started from, else the checkout's, switching there first. It merged into whatever was out,
     so after "has feature-x out, not main" it landed on feature-x, or on a detached HEAD the next
-    checkout dropped (#1154, 2026-11-24). No branch known on a detached HEAD: no line to run."""
+    checkout dropped (#1154, 2026-11-24; discard's plain `git merge` the same, and in no mode
+    or signing of the repo's, #1174). No branch known on a detached HEAD: no line to run."""
+    if gitops.jj_colocated(repo):  # jj keeps git's HEAD detached: jj merges it (#385)
+        return f"merge with: {gitops.jj_merge(repo, spec['branch'])}"
     into = close.get("merge_into") if close.get("merge") else _merge_into(spec, repo)
     if into in (None, "HEAD"):
         into = gitops.current_branch(repo)
@@ -4334,10 +4337,12 @@ def cmd_discard(a):
         # deleted with the step that stuck, they were reachable from no ref (#494, the audit)
         past = gitops.git(repo, "rev-list", "--count", f"{spec['base']}..{tip}", check=False).strip()
         if past.isdigit() and int(past) and not a.drop_steps:
-            git_c = f"git -C {shlex.quote(str(repo))}"
+            # the merge line accept prints (#1174, 2026-11-24): a plain `git merge` here merged
+            # into whatever the checkout had out since, feature-y and not main, or a detached HEAD
             said = (f"; branch {branch} kept: its {past} commit(s) past the base are approved "
-                    f"steps. {git_c} merge {branch} lands them; {git_c} branch -D {branch} "
-                    "drops them (wb discard --drop-steps deletes it at once)")
+                    f"steps\n{_merge_line(repo, spec, {}, a)}\nto drop them: git -C "
+                    f"{shlex.quote(str(repo))} branch -D {branch} (wb discard --drop-steps "
+                    "deletes it at once)")
         elif gitops.delete_branch(repo, a.name, at=tip):
             said = f"; branch {branch} deleted (was {tip[:8]})"
         else:
