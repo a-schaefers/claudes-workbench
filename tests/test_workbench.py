@@ -737,16 +737,17 @@ class Lifecycle(Base):
 
     def test_feedback_on_a_round_stopped_before_it_began_with_no_infra_counts_no_review(self):
         # the merge of #1180 and #1153 (2026-11-24): a round can stop before it starts with
-        # `infra` unset (a signal while queued for the GPU, a failed checkout, the repo gone),
-        # and its "carry on" must count no review the agent never had
+        # `infra` unset (Claude's own wb stop while queued for the GPU, a failed checkout), and
+        # its "carry on" must count no review the agent never had. A signal's stop and the repo
+        # gone set `infra` since #1260.
         name = "t-rsig"
         self.start(name, "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
         wait_phase(name, {"review"})
         task = store.Task(name)
         with mock.patch.object(cli, "spawn_runner"):
             run_wb("feedback", name, "--text", "1. Rename x to answer.")
-        task.set_status(phase="stuck", last=runner.SIGNAL_STOP)  # stopped while queued
-        self.assertIsNone(task.status.get("infra"))
+        task.set_status(phase="stuck", last="stopped by the reviewer")  # stopped while queued
+        self.assertIsNone(cli.stopped_outside(task.status))
         self.assertFalse(runner.reached(task, 2))
         reviews = task.status["reviews"]
         with mock.patch.object(cli, "spawn_runner"):
@@ -754,6 +755,61 @@ class Lifecycle(Base):
         self.assertIn("feedback sent to t-rsig (round 2): after round 2's own prompt, which never "
                       "reached the agent, so no review round is counted", out)
         self.assertEqual((task.status["round"], task.status["reviews"]), (2, reviews))
+
+    def test_a_discard_after_wb_update_stop_wb_stop_all_or_a_moved_repo_never_counts_against_its_model(self):
+        # #1260 (2026-11-24): #1245's fix read only `infra` and a signal's `last`, and these stops
+        # set no `infra`, so the discard the wake of wb update --stop (or /workbench-quit's wb
+        # stop --all) offers was scored as the model's failed try: "0% accepted" in wb stats, and
+        # the router ranked the other model first
+        from workbench import tuning
+        for name, stop, how in (("t-upd", lambda t: cli._stop_for_update([t]), ("stuck", "update")),
+                                ("t-quit", lambda t: cli.stop_everything([t]), ("stuck", "stopped")),
+                                ("t-gone", runner._repo_gone, ("failed", "repo"))):
+            with self.subTest(stop=how):
+                self.start(name, "ok")
+                wait_phase(name, {"review"})
+                task = store.Task(name)
+                stop(task)
+                self.assertEqual((task.status["phase"], task.status.get("infra")), how)
+                run_wb("discard", name)
+                (row,) = [r for r in store.results() if r["task"] == name]
+                self.assertEqual((row["outcome"], row["ran"], row.get("infra")), ("discarded", True, how[1]))
+                self.assertFalse(tuning.judged(row))
+
+    def test_feedback_after_wb_update_stop_or_wb_stop_all_counts_no_review_round(self):
+        # #1260 (2026-11-24): `resumed` read only `infra`, which neither stop set: the "carry on"
+        # printed "feedback round 1 sent" and counted a review, where after a provider's stop the
+        # same command counts none. The "-old" ones set the status the old code's stop wrote
+        # (no `infra`, the stop read from `last`): the wb update --stop that installs #1260 runs
+        # the old code, so it is the first stop users meet, and without it here a cmd_feedback
+        # reading `infra` alone again passed every test (#1260's review, 2026-11-24)
+        def old(last):
+            return lambda t: t.set_status(phase="stuck", last=last, infra=None)
+        for name, stop, why in (("t-updfb", lambda t: cli._stop_for_update([t]), "update"),
+                                ("t-quitfb", lambda t: cli.stop_everything([t]), "stopped"),
+                                ("t-updfb-old", old(cli.UPDATE_STOP), "update"),
+                                ("t-quitfb-old", old(cli.BAIL_OUT), "stopped")):
+            with self.subTest(stop=why, task=name):
+                self.start(name, "ok")
+                wait_phase(name, {"review"})
+                task = store.Task(name)
+                stop(task)
+                with mock.patch.object(cli, "spawn_runner"):
+                    out = run_wb("feedback", name, "--text", "carry on")
+                self.assertIn(f"feedback sent to {name} (round 2): it resumes after a stop that wasn't "
+                              f"the agent's ({why}), so no review round is counted", out)
+                self.assertEqual((task.status.get("reviews", 0), task.status["round_for"]), (0, "resume"))
+
+    def test_a_stop_from_outside_the_step_is_read_from_a_status_its_stop_wrote_without_infra(self):
+        # #1260 (2026-11-24): the wb update --stop that installs the fix stops its tasks with the
+        # old code, which set no `infra`; Claude's own wb stop stays the step's
+        f = cli.stopped_outside
+        self.assertEqual(f({"phase": "stuck", "last": cli.UPDATE_STOP}), "update")
+        self.assertEqual(f({"phase": "stuck", "last": cli.BAIL_OUT}), "stopped")
+        self.assertEqual(f({"phase": "stuck", "last": runner.SIGNAL_STOP}), "signal")
+        self.assertEqual(f({"phase": "stuck", "last": "x", "infra": "provider"}), "provider")
+        self.assertIsNone(f({"phase": "stuck", "last": "stopped by the reviewer"}))
+        self.assertIsNone(f({"phase": "review", "last": cli.UPDATE_STOP}))
 
     def test_feedback_is_gathered_once_unchanged_after_a_handover_or_a_resume_that_carries_it(self):
         # #1180's review (2026-11-24): lessons.feedback read any FEEDBACK_HEAD paragraph, and a
@@ -2896,6 +2952,7 @@ class Lifecycle(Base):
         os.kill(st["pid"], signal.SIGTERM)
         st = wait_phase("t-term", {"stuck"})
         self.assertEqual(st["last"], runner.SIGNAL_STOP)
+        self.assertEqual(st.get("infra"), "signal")  # not the step's: wb discard, wb feedback (#1260)
         self.assertIn("[stuck] t-term", run_wb("wait", "t-term", "--timeout", "2"))
         os.environ["FAKE_SCENARIO"] = "ok"
         run_wb("resume", "t-term")
@@ -17912,8 +17969,9 @@ class Bench(Base):
         self.assertIsNone(bench.model_line(model))                        # no case failed
         self.assertIn("t-src on ollama/mimo-v2.6:9b-q8_0: broke off: setup", run_wb("bench", "report"))
         # #1176: an update or an OpenCode change under the replay leaves it stuck with `infra`,
-        # the machine's too: graded as the model's failure, never replayed again
-        for cause in ("updated", "opencode"):
+        # the machine's too: graded as the model's failure, never replayed again; and wb update
+        # --stop's, a signal's or wb stop --all's (#1260)
+        for cause in ("updated", "opencode", "update", "signal", "stopped"):
             with self.subTest(cause=cause), mock.patch.object(
                     bench, "_wait", return_value=({"phase": "stuck", "infra": cause, "last": "x"}, 0)):
                 self.assertEqual(bench.replay(case, model, 1, f"r-{cause}", "", [])["outcome"], "error")
@@ -35683,7 +35741,7 @@ class ApiSpend(Base):
         self.assertEqual(router.score(m, "significant", state=up, role="significant").tries, 0)
         self.assertIn("(1 discard after a stop that wasn't the agent's left out)", results.table())
         self.assertNotIn("spec_gaps", stats.feed()["periods"].get("all", {}))  # nor the spec's
-        # a shutdown's signal sets no `infra`: the discard reads the stop it left (#1245)
+        # a shutdown's signal set no `infra` before #1260: the discard reads the stop it left (#1245)
         other = self.api_task("t-sig", SPEND_M, "ok")
         other.set_status(phase="stuck", last=runner.SIGNAL_STOP)
         run_wb("discard", "t-sig")
