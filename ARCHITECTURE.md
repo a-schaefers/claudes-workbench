@@ -352,7 +352,9 @@ tests goes first and that result is dropped.
 
 Self-review (the `self_review` knob, *Self-tuning*; `--self-review`/`--no-self-review`, task.json
 `self_review`): the first pass in a review round (status `self_reviewed`, the `[steps, reviews]`
-it ran at) gets one more round, `runner.SELF_REVIEW`,
+it ran at) gets one more round, `runner.SELF_REVIEW` (its file copied aside into the task's own
+`aside/` in its runtime dir, `runner.self_review_aside`: `/tmp/f.c` was one name for every task,
+#1085),
 Claude's own review checks (each rejection proved by breaking its check and seeing a test fail).
 On by default because a feedback round costs a whole wake (2026-11-18); a model it doesn't help
 learns it off.
@@ -5513,7 +5515,8 @@ $WB_HOME (~/.local/state/workbench)
                                  default; wb route writes it (store.edit_config), the mod reads it (readRoutes); its "day_usd" is the API day
                                  cap the meter keeps (*Spend*, #1019)
 ~/.config/opencode/opencode.json + .jsonc (layered, under $XDG_CONFIG_HOME; then $OPENCODE_CONFIG; $WB_OPENCODE_CONFIG) the models
-/tmp/wb-run-<uid>-<hash>/        the agent's XDG_RUNTIME_DIR (lane on; context.runtime_dir), 0700, .wb-owner {home, task} (RUNTIME_OWNER)
+/tmp/wb-run-<uid>-<hash>/        the agent's XDG_RUNTIME_DIR (lane on; context.runtime_dir), 0700, .wb-owner {home, task} (RUNTIME_OWNER);
+                                 aside/: where the self-review copies a file aside (runner.self_review_aside, #1085)
 ```
 
 The runtime dir is kept while the task is open and removed by wb accept and discard (`drop_runtime_dir`); one another

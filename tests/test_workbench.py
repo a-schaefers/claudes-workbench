@@ -4676,6 +4676,27 @@ class Context(Base):
         st = wait_phase("t-sr", {"review"})
         self.assertEqual(len(self.runs()), 4)                      # feedback, then its own review
 
+    def test_a_self_review_copies_files_aside_in_its_own_tasks_directory_never_a_shared_tmp_name(self):
+        # #1085: SELF_REVIEW said `cp f.c /tmp/f.c`, one name for every task, and agents did it
+        # (/tmp/cli.py.bak, /tmp/textutil.py.bak): two tasks self-reviewing a same-named file at
+        # once could copy back each other's. Each now has its own, in its lane, gone at discard
+        asides = []
+        for name in ("t-sra", "t-srb"):
+            self.start(name, "ok", "--test", TEST_CMD, "--self-review")
+            wait_phase(name, {"review"})
+            t = store.Task(name)
+            prompt = t.round_dir(2).joinpath("prompt.md").read_text()
+            self.assertNotIn("/tmp/f.c", prompt)
+            aside = runner.self_review_aside(t)
+            self.assertIn(f"`cp f.c {aside}/f.c`", prompt)
+            self.assertTrue(aside.is_dir())
+            self.assertTrue(any(os.path.realpath(aside).startswith(os.path.realpath(w) + os.sep)
+                                for w in context.writable(t)))
+            asides.append(aside)
+        self.assertNotEqual(*asides)
+        run_wb("discard", "t-sra")
+        self.assertFalse(asides[0].exists())
+
     def test_without_self_review_claude_is_woken_after_the_first_clean_round(self):
         self.start("t-nsr", "ok", "--test", TEST_CMD)
         self.assertEqual(wait_phase("t-nsr", {"review"})["round"], 1)

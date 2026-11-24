@@ -1296,6 +1296,15 @@ def settle_via(task: store.Task, api: bool) -> None:
     store.write_json(task.dir / "task.json", spec)
 
 
+def self_review_aside(task: store.Task) -> Path:
+    """Where SELF_REVIEW has the agent copy a file aside: `aside/` in its runtime directory
+    (context.runtime_dir: the task's own, 0700, writable in its lane, removed at accept and
+    discard), never a name in /tmp another task shares (#1085)."""
+    d = context.runtime_dir(task) / "aside"
+    d.mkdir(exist_ok=True)
+    return d
+
+
 def provider_of(task: store.Task) -> str:
     """The task's provider id: task.json `provider` (#1016), else its model id before the first /."""
     return str(task.spec.get("provider") or (task.spec.get("model") or "").partition("/")[0])
@@ -3392,12 +3401,16 @@ def _fresh_said(task: store.Task, n: int) -> str | None:
 # next task's agent "restored" a check by retyping it and rebuilt the loop wrong, then spent
 # its round debugging its own restore (2026-11-18): it copies the file back instead. One
 # automatic round, before Claude is woken, costs local time only.
+# {aside}: self_review_aside, the task's own: `cp f.c /tmp/f.c` sent every task's backup to one
+# shared name, and two tasks self-reviewing a cli.py at once could copy back each other's (#1085,
+# 2026-11-23); /tmp held 27 such backups, never removed
 SELF_REVIEW = (
     "Before Claude reviews this, review your own change as a strict senior reviewer would: `git "
     "diff`, and `git status` for new files. Check each point, and fix what fails:\n"
     "1. Every rule in the task (each must, only, at most, rejects, limit and error message) has a "
     "test that fails if that rule alone breaks. A rule without one: write the test. Check each "
-    "rejection and limit by doing it, one at a time: copy the file aside (`cp f.c /tmp/f.c`), "
+    "rejection and limit by doing it, one at a time: copy the file aside (`cp f.c {aside}/f.c`, "
+    "this task's own directory: never a bare /tmp name, which another task may use too), "
     "comment out its check, run the acceptance command, see a test fail, then copy the file back "
     "(never retype it), and run the command again to see it pass. No test failed: the "
     "test's input breaks another rule too; make it valid in every other way. Each test the task "
@@ -4189,7 +4202,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                     and task.status.get("self_reviewed") != mark:
                 task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
                 task.round_dir(n + 1).joinpath("prompt.md").write_text(
-                    SELF_REVIEW.format(cmd=task.spec["test_cmd"]))
+                    SELF_REVIEW.format(cmd=task.spec["test_cmd"], aside=self_review_aside(task)))
                 task.set_status(round=n + 1, self_reviewed=mark, tests=tests, round_for="self_review")
                 task.event({"ts": store.now(), "round": n, "kind": "self_review",
                             "text": "tests pass; the agent reviews its own change first"})
