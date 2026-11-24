@@ -712,7 +712,7 @@ def _busy_api(role: str, a, repo: Path, sub: str | None):
     if why is None and (kept := privacy.local_only(repo, sub)):  # commands.json's (#1021)
         why = f"{repo.name} is kept local ({kept})"
     if why is None:  # commands.json's standing copy/siblings, unnamed (#1021), as an API start's
-        why = _standing_gap(context.repo_conf(repo, sub), a, models.provider_name(m)) or None
+        why = _standing_gap(context.repo_conf(repo, sub), a, models.provider_name(m), repo, sub) or None
     if why is None:  # no price, or today at the day cap (#1019), without an API start's advice:
         # the role is on the GPU and this start only waits for it (wave 2's merge)
         why = meter.refusal(m, role, advice=False)
@@ -983,11 +983,12 @@ def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu", whe
     the repo the lane may read."""
     conf = context.repo_conf(repo, sub)  # the package's entry, not the repo's first (#778)
     if via == "api":  # nothing standing goes to a provider unnamed (#1021)
-        _standing_refusal(conf, a, where)
+        _standing_refusal(conf, a, where, repo, sub)
     setup = a.setup if a.setup is not None else conf.get("setup") or ""
     copy, sibs = [], []
-    for raw in [*conf.get("copy", []), *(a.copy or [])]:
-        p = os.path.normpath(raw.strip()).rstrip("/")
+    for raw, given in [*((x, False) for x in conf.get("copy", [])), *((x, True) for x in a.copy or [])]:
+        # commands.json's paths stay the repo's; a --copy from a package is read from it (#1158)
+        p = (_copy_path(repo, raw, sub) if given else os.path.normpath(raw.strip())).rstrip("/")
         if os.path.isabs(p) or p == ".." or p.startswith("../") or p in (".", ""):
             die(f"--copy {raw}: a path inside the repo, ignored there (e.g. node_modules)")
         parts = p.split("/")
@@ -1057,26 +1058,55 @@ def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu", whe
                               ("setup_timeout", limit if setup else None)) if v}
 
 
-def _standing_refusal(conf: dict, a, where: str) -> None:
+def _copy_path(repo: Path, raw: str, sub: str | None) -> str:
+    """A --copy path as the repo-relative path it names. From a package (`sub`), read from the
+    package, where wb start's note names the ignored directories from and the setup runs: from
+    packages/app, `--copy node_modules` copied the root's node_modules/, the package's stayed
+    missing and every round ran against a worktree that couldn't pass, and the note's
+    `../../node_modules` was refused (#1158, 2026-11-24). A path only the root has is still the
+    root's (`packages/app/node_modules`, as given before); `.` and a path outside stay refused."""
+    p = os.path.normpath(raw.strip())
+    if not sub or os.path.isabs(p) or p == ".":
+        return p
+    there = os.path.normpath(f"{sub.strip('/')}/{p}")
+    if os.path.lexists(repo / there) or p == ".." or p.startswith("../") \
+            or not os.path.lexists(repo / p):
+        return there
+    return p
+
+
+def _standing_refusal(conf: dict, a, where: str, repo: Path, sub: str | None) -> None:
     """An API task takes commands.json's standing `copy` and `siblings` only when this command
     line names them too: a `.env.local` copied into every worktree, or a `../shared` the lane
     reads, would reach the provider unasked (#1021). Exit 3, the entry and how to name it."""
-    if why := _standing_gap(conf, a, where):
+    if why := _standing_gap(conf, a, where, repo, sub):
         die(why, 3)
 
 
-def _standing_gap(conf: dict, a, where: str) -> str:
+def _standing_gap(conf: dict, a, where: str, repo: Path, sub: str | None) -> str:
     """_standing_refusal's line, or '': also the busy opt-in's (#1023), which moves a GPU start to
-    an API model after _worktree_setup checked it as a GPU one (wave 2's merge)."""
-    named_copy = {os.path.normpath(x.strip()).rstrip("/") for x in a.copy or []}
+    an API model after _worktree_setup checked it as a GPU one (wave 2's merge). A --copy names
+    the path it copies, from a package the package's (_copy_path, #1158)."""
+    named_copy = {_copy_path(repo, x, sub).rstrip("/") for x in a.copy or []}
     named_sib = {x.strip().rstrip("/").removeprefix("../") for x in a.sibling or []}
     for raw in conf.get("copy", []):
-        if os.path.normpath(raw.strip()).rstrip("/") not in named_copy:
-            return privacy.standing_refusal("copy", raw, where)
+        if (entry := os.path.normpath(raw.strip()).rstrip("/")) not in named_copy:
+            return privacy.standing_refusal("copy", raw, where, _copy_name(repo, entry, sub))
     for raw in conf.get("siblings", []):
         if raw.strip().rstrip("/").removeprefix("../") not in named_sib:
             return privacy.standing_refusal("siblings", raw, where)
     return ""
+
+
+def _copy_name(repo: Path, entry: str, sub: str | None) -> str:
+    """How to type commands.json's repo-relative `copy` entry as a --copy from the package `sub`,
+    so that _copy_path reads it back as the entry: from packages/app the refusal advised
+    `--copy node_modules`, read as the package's, and refused the same start again and again
+    (#1158's review, 2026-11-24). The entry as written when it already reads back, else the path
+    from the package (`../../node_modules`)."""
+    if not sub or _copy_path(repo, entry, sub).rstrip("/") == entry:
+        return entry
+    return os.path.relpath(entry, sub.strip("/"))
 
 
 def _role(a) -> str:
@@ -7306,7 +7336,7 @@ def parser() -> argparse.ArgumentParser:
                    "(default 1800, or commands.json \"repos\" \"setup_timeout\")")
     s.add_argument("--copy", action="append", metavar="PATH",
                    help="copy this ignored path from your checkout into the worktree (repeatable; "
-                   "never a secret)")
+                   "from a package, read from the package; never a secret)")
     s.add_argument("--sibling", action="append", metavar="PATH",
                    help="let the agent read a directory around the repo at the same relative "
                    "path: NAME or ../NAME beside it, ../../shared/lib further up (repeatable)")

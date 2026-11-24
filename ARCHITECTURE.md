@@ -1125,12 +1125,19 @@ everywhere). In order:
   -cRp`), replacing what is there, so start refuses a path with anything tracked under it (#244);
   it must be ignored in the task's worktree too, checked by the runner (#322, #529). Never a
   virtualenv (`runner.venv_in`, a `pyvenv.cfg` in the path or one level inside: it ran the developer's environment outside the lane, #260); the
-  refusal says recreate it with `--setup`.
+  refusal says recreate it with `--setup`. From a package (`subdir`), a `--copy` path is read from the package, as
+  the start note names the ignored directories (`node_modules`, `../../node_modules`), and only a path the package
+  lacks and the root has from the root; task.json `copy`, the start line and the API standing check hold it
+  repo-relative (`cli._copy_path`; it copied the root's node_modules for the package's, #1158). commands.json's
+  `copy` stays repo-relative.
 - For an API task, a standing `copy` or `siblings` entry of commands.json's `repos` that this
   command line doesn't name too is refused, exit 3 (`cli._standing_refusal`, its line
   `cli._standing_gap`, `privacy.standing_refusal`; #1021): `commands.json "repos" copies local.cfg into every task, and
   this one is on API (DeepInfra): name it (--copy local.cfg) to send it, or put the role on the
-  GPU`; a sibling alike (`links ../shared beside every task`). A copied file and a sibling the lane
+  GPU`; a sibling alike (`links ../shared beside every task`). From a package the advice is the
+  `--copy` that reads back as the entry (`cli._copy_name`): `--copy ../../node_modules` for the root's
+  `node_modules` when the package has its own, as `--copy node_modules` names the package's and
+  never consents to the root's (#1158's review: the refusal advised it and refused it again). A copied file and a sibling the lane
   reads reach the provider, so the user names each once. Named ones are kept, and the start's
   where-note lists them. `setup` and GPU tasks are unchanged.
 - `setup` (`--setup`), as the tests run, for `setup_limit(spec)`: task.json `setup_timeout`
