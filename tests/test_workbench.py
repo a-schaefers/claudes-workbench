@@ -11698,6 +11698,40 @@ class Lane(Base):
             self.assertTrue(self.seatbelt_writes(text, params, f), f)
 
     @home_outside_the_lane
+    def test_cargos_own_config_is_out_of_the_lane_on_both_kernels_made_or_not(self):
+        # #1194's fourth review (2026-11-24): with Seatbelt ~/.cargo was whole but bin/ and env,
+        # so the agent could make ~/.cargo/config.toml, whose build.rustc-wrapper or target
+        # linker cargo ran as the user at their next build, outside the lane; Landlock's split
+        # refused a new one but granted one already there. And a ~/.cargo holding only the
+        # user's config.toml is split around it with cargo's own entries made first
+        home = self.fake_home()
+        for d in (".cargo/bin", ".cargo/registry"):
+            (home / d).mkdir(parents=True)
+        (home / ".cargo" / "env").write_text("export PATH")
+        moved = home / "moved-cargo"                   # CARGO_HOME, outside the temp roots
+        moved.mkdir()
+        (moved / "config.toml").write_text("[build]\n")    # the user's own, and nothing else
+        os.environ["CARGO_HOME"] = str(moved)
+        task = self.bare_task("t-1194-cargo-config", self.repo)
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            w = context.writable(task)
+            text, params = lane.profile(w, context.read_rules(task), [], context.write_denied(w))
+        for f in (home / ".cargo/config.toml", home / ".cargo/config", moved / "config.toml",
+                  moved / "config"):
+            self.assertFalse(self.seatbelt_writes(text, params, f), f)
+        for f in (home / ".cargo/registry/x", home / ".cargo/git", moved / "registry"):
+            self.assertTrue(self.seatbelt_writes(text, params, f), f)
+        (home / ".cargo" / "config.toml").write_text("[build]\n")   # already there
+        with mock.patch.object(lane, "kind", lambda: "landlock"):
+            w = context.writable(task)
+        for f in (home / ".cargo/config.toml", home / ".cargo/config", moved / "config.toml",
+                  moved / "config"):
+            self.assertFalse([q for q in w if q == str(f) or str(f).startswith(q + "/")], f)
+            self.assertIsNotNone(context.kept_out(str(f)), f)       # no grant reaches it
+        self.assertIn(str(home / ".cargo/registry"), w)
+        self.assertIn(str(moved / "registry"), w)                   # made first, then granted
+
+    @home_outside_the_lane
     def test_with_seatbelt_apples_python_bytecode_is_denied_inside_a_whole_library_caches(self):
         # #1194's review: Library/Caches was writable whole, and the Command Line Tools'
         # /usr/bin/python3 loads its stdlib's .pyc from Library/Caches/com.apple.python: one the

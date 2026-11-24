@@ -1330,6 +1330,12 @@ VAR_CACHES = {"GOPATH": "pkg", "BUN_INSTALL": "install/cache"}
 # install` or a toolchain a rust-toolchain.toml names that isn't installed yet is Claude's to do
 NOT_WRITABLE = (".cargo/bin", ".cargo/env", ".dotnet/tools", ".cabal/bin", ".ghcup/bin",
                 ".rustup/toolchains", ".nimble/bin",
+                # #1194's fourth review (2026-11-24): cargo's own config, which it runs from at
+                # the user's next build (build.rustc-wrapper, build.rustc, a target's linker or
+                # runner), outside the lane. Seatbelt keeps ~/.cargo whole, so the agent could
+                # make it; Landlock's split refused a new one but granted one already there.
+                # Cargo never writes it (`cargo login` writes credentials.toml)
+                ".cargo/config.toml", ".cargo/config",
                 # #1194's review (2026-11-24): Apple's /usr/bin/python3 (the Command Line
                 # Tools') keeps its bytecode here (sys.pycache_prefix, its stdlib on a read-only
                 # volume) and loads a .pyc whose recorded mtime and size match the source's, so
@@ -1339,8 +1345,8 @@ NOT_WRITABLE = (".cargo/bin", ".cargo/env", ".dotnet/tools", ".cabal/bin", ".ghc
                 "Library/Caches/com.apple.python")
 # and the same places in the homes TOOL_HOME_VARS moved: nimble and cabal install programs into
 # their bin/ (#911)
-VAR_NOT_WRITABLE = {"CARGO_HOME": ("bin", "env"), "RUSTUP_HOME": ("toolchains",),
-                    "NIMBLE_DIR": ("bin",), "CABAL_DIR": ("bin",)}
+VAR_NOT_WRITABLE = {"CARGO_HOME": ("bin", "env", "config.toml", "config"),
+                    "RUSTUP_HOME": ("toolchains",), "NIMBLE_DIR": ("bin",), "CABAL_DIR": ("bin",)}
 # a home holding one is made with it first, so the split keeps it out before the tool makes it
 # (else the agent could make it and plant a program there)
 MADE_FIRST = {".rustup": "toolchains", ".nimble": "bin", "RUSTUP_HOME": "toolchains",
@@ -1734,7 +1740,10 @@ def writable(task: store.Task) -> list[str] | None:
     guard = repo_dirs(task)  # a repo kept in /tmp is the user's choice: the temp dirs stay
     cargo = os.environ.get("CARGO_HOME")
     for c in {os.path.realpath(c) for c in (home / ".cargo", cargo) if c}:
-        if os.path.isdir(c) and any(os.path.lexists(os.path.join(c, n)) for n in ("bin", "env")):
+        # split whenever one of its NOT_WRITABLE places is there: a ~/.cargo with only the
+        # user's config.toml (a distro's cargo) refused registry/ at the first build else
+        if os.path.isdir(c) and any(os.path.lexists(os.path.join(c, n))
+                                    for n in VAR_NOT_WRITABLE["CARGO_HOME"]):
             _make_first(c, CARGO_MADE)
     nimble = os.environ.get("NIMBLE_DIR")
     for c in {os.path.realpath(c) for c in (home / ".nimble", nimble) if c and os.path.isabs(c)}:

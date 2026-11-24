@@ -1680,7 +1680,11 @@ deliberately hostile process.
   by their shell, and the toolchains those run: `~/.local/lib` (user site-packages, whose `.pth`
   every python runs); `.local/share/uv` (uv's tools and Pythons; its cache is `~/.cache/uv`);
   `NOT_WRITABLE` (`.cargo/bin`, `.cargo/env`, `.dotnet/tools`, `.cabal/bin`, `.ghcup/bin`,
-  `.rustup/toolchains`, `.nimble/bin`, macOS's `Library/Caches/com.apple.python`, where Apple's
+  `.rustup/toolchains`, `.nimble/bin`, cargo's own config, `.cargo/config.toml` and
+  `.cargo/config`, whose `build.rustc-wrapper`, `build.rustc` or a target's `linker`/`runner`
+  cargo runs at the user's next build, never written by cargo itself (`cargo login` writes
+  `credentials.toml`, hidden), #1194's fourth review: Seatbelt's whole `~/.cargo` let the agent
+  make one, Landlock's split granted one already there; macOS's `Library/Caches/com.apple.python`, where Apple's
   `/usr/bin/python3` keeps its stdlib's bytecode, `sys.pycache_prefix`, and loads a planted `.pyc`
   at every later python3, #1194's review; and `VAR_NOT_WRITABLE` under the variables), made or not
   (`not_writable_paths`; with Seatbelt denied by path inside a whole home instead of split out,
@@ -1693,7 +1697,8 @@ deliberately hostile process.
   entries one by one and refuses every new top-level one. So what the tool makes there is made
   first, never replacing an entry (`_make_first`): `CACHE_MADE` in a cache home holding an active
   env (#825), `MADE_FIRST` (so the split holds before the tool makes them), `CARGO_MADE` (a fresh
-  rustup install refused every build with a dependency, the 0.90 review), `NIMBLE_MADE` with
+  rustup install refused every build with a dependency, the 0.90 review; made whenever one of
+  `VAR_NOT_WRITABLE`'s cargo places is there, a lone `config.toml` too), `NIMBLE_MADE` with
   `MADE_TEXT` (nimble parses its data file, #911; its first `nimble refresh` is Claude's),
   `SPLIT_MADE` (`~/.m2`). The agent's poetry and pipenv make their venv in the worktree.
   A home kept whole is a documented trade, like `/tmp`: it can hold a program the user's tools run
