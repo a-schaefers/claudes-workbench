@@ -2,6 +2,8 @@
 """Stands in for `opencode run --format json` in tests. FAKE_SCENARIO picks the behaviour:
 
   ok     write answer.txt = "42", say so
+  patch  as ok, and lib/helper.py too, in one `patch` call (a GPT model's in 2.3.2: no edit or
+         write): input `patchText` only, the files in `state.metadata.files[].file` (#1148)
   fix    first round writes "41" (wrong); a continued session (--session) writes "42"
   loop   run the same failing command over and over (the stuck detector should stop it)
   hang   print one event, then go silent (the silence timeout should stop it)
@@ -393,12 +395,14 @@ def api_request() -> None:
     fail("provider.rate-limit", "too many retries", 429)
 
 
-def tool(name, inp, status="completed", error=None, output=None):
+def tool(name, inp, status="completed", error=None, output=None, metadata=None):
     state = {"status": status, "input": inp}
     if error:
         state["error"] = error
     if output is not None:  # `part.state.output`, the result as the model gets it (2.3.2)
         state["output"] = output
+    if metadata is not None:  # `part.state.metadata`: a patch's `files` (2.3.2, #1148)
+        state["metadata"] = metadata
     emit("tool_use", tool=name, state=state)
 
 
@@ -587,6 +591,21 @@ if scenario in ("ok", "fix"):
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": value})
     emit("text", text=f"Wrote answer.txt = {value}."
          + (f"\nLesson: {os.environ['FAKE_LESSON']}" if os.environ.get("FAKE_LESSON") else ""))
+    finish()
+elif scenario == "patch":  # #1148: a GPT model's one `patch` call, as OpenCode 2.3.2 prints it
+    os.makedirs("lib", exist_ok=True)
+    with open(os.path.join("lib", "helper.py"), "w") as fh:
+        fh.write("ANSWER = 42\n")
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("patch", {"patchText": "*** Begin Patch\n*** Add File: lib/helper.py\n+ANSWER = 42\n"
+                                "*** Add File: answer.txt\n+42\n*** End Patch"},
+         output="Success. Updated the following files:\nA lib/helper.py\nA answer.txt",
+         metadata={"files": [{"file": "lib/helper.py", "status": "added", "additions": 1,
+                              "deletions": 0, "patch": "@@ -0,0 +1 @@\n+ANSWER = 42"},
+                             {"file": "answer.txt", "status": "added", "additions": 1,
+                              "deletions": 0, "patch": "@@ -0,0 +1 @@\n+42"}]})
+    emit("text", text="Wrote lib/helper.py and answer.txt = 42.")
     finish()
 elif scenario == "loop":
     for _ in range(10):

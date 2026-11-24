@@ -334,7 +334,7 @@ worktree, `OPENCODE_CONFIG` the layer. Later rounds continue the session until a
 |---|---|---|
 | the same tool call in a row (its input hashed, cut to 400 characters, #497) | 4 | `events.StuckDetector` |
 | failing tool calls in a row | 6 | |
-| calls since the last edit to the task's files (outside the worktree doesn't count: 2026-11-18) | 40; an API task's 40 per 32K of the window, at most 160 (`runner.no_edit_limit`, #1087: 40 stopped 131K API one-shots still exploring); a GPU task's stays 40 at any window, as in 1.91.x | |
+| calls since the last edit to the task's files (outside the worktree doesn't count: 2026-11-18; a relative path is the workdir's, and a `patch` counts if any file it wrote is the task's, #1148) | 40; an API task's 40 per 32K of the window, at most 160 (`runner.no_edit_limit`, #1087: 40 stopped 131K API one-shots still exploring); a GPU task's stays 40 at any window, as in 1.91.x | |
 | no output (not while waiting on Claude; a background job gets the test timeout if longer) | 15 min | `--silence-timeout` |
 | one round, waits on Claude excluded | 40 min | `--round-timeout` |
 | mid-round handovers in one review round | more than `HANDOVER_MAX` (5) | `runner.drive` |
@@ -842,7 +842,9 @@ top-level directory (a review notice's stat: 40 paths, then Git's total); a new 
 `wb accept`/`wb next` refuse more than `NEW_FILES_MAX` (300) new files or a new binary of
 `BINARY_MAX` (1 MiB) until `--include` (`gitops._bulk`: sizes, `diff`/`filter` attributes, else a
 NUL in the first 8000 bytes; LFS-filtered files pass; nothing hashed before it passes, #431; files
-and index kept). A file the agent wrote with its edit tools (`runner.agent_wrote`) under an ignored
+and index kept). A file the agent wrote with its edit tools (`runner.agent_wrote`: a row's `path`,
+or every file of a `patch` row's `paths`, #1148; a relative one is the workdir's, as OpenCode
+resolves it) under an ignored
 path (`gitops.ignored_files`) is in no diff or commit (a module under `lib/` was lost, audit round
 2 of 1.91): the report says "NOTE: git ignores files the agent wrote (…)" (`gitops.ignored_line`)
 and `commit_all` refuses until `--include` (`add -f`). What tests or shell commands wrote there
@@ -3605,6 +3607,13 @@ weren't needed. CI pins 2.3.0: not checked there.
   `{"type":"error","error":{"type":"provider.rate-limit",…}}` and exit 1: 86 s and 13 requests here.
   401 and 403 give `provider.auth`, and 402 `provider.quota`: no retry, exit 1 at once. The upstream
   body comes through verbatim (a key-like string in a 401 body reached stdout).
+- **GPT models patch** (#1148, checked 2026-11-24 in the 2.3.2 binary). For a model whose id has
+  `gpt-` (not `oss`, not `gpt-4`) OpenCode deletes `edit` and `write` and keeps `patch`, every other
+  model the reverse. `patch`'s only input is `patchText` (`*** Add File:`, `*** Update File:` with
+  an optional `*** Move to:`, `*** Delete File:`); a completed one's `state.metadata.files[]` has
+  `{file, status: added|modified|deleted, patch, …}`, `file` relative to OpenCode's directory (the
+  workdir) or absolute outside the project. `events.patched` takes the files from there, else from
+  the headers, a deleted one never; `runner.agent_wrote` and the stuck detector read them.
 - **Reasoning is silent.** While the model streamed `reasoning_content` for 6 s, `run --format json`
   printed `step_start` (0.8 s) and then nothing until `text` (6.8 s). With `--thinking`, one
   `reasoning` line with the whole block arrives, but only when it ends. The silence and think clocks
@@ -5990,8 +5999,9 @@ off), not `wb start`'s.
 | `guard` | `spend` when `runner._go_on` stopped the task before a round (the day cap), with `infra` `spend` |
 | `updated_at` | every write |
 
-**events.jsonl** rows are `{ts, round, kind, …}`. From OpenCode (`events.normalize`): `tool {tool, brief, ok, error?}`
-(`brief`: command, path, pattern, url, query or description, 90 chars; a skill's id), `text {text}` (2000), `step {in,
+**events.jsonl** rows are `{ts, round, kind, …}`. From OpenCode (`events.normalize`): `tool {tool, brief, ok, error?, path?, paths?}`
+(`brief`: command, path, pattern, url, query or description, 90 chars; a skill's id; a patch's first
+file; `path` an edit's or a read's whole path; `paths` the files a `patch` wrote, `events.patched`, #1148), `text {text}` (2000), `step {in,
 out, cache, cache_read, cache_write, reasoning?, cost?}` (reasoning apart from `out`; `cache` the read and write summed,
 which the handover check reads; `cost` OpenCode's `part.cost` in USD, only when a number: missing is unknown, never 0, #1022; the meter's step price too, #1019), `error {text}`, `retry {text, attempt}` (OpenCode resent a request). From the runner: `round`, `stopped {text}`, `steer
 {now, by: "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow, compacted}` (`compacted` after a failed compaction too),
@@ -6292,7 +6302,7 @@ else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `path`: `events._brief` reads both). Records `FAKE_PROMPTS`, `FAKE_RUNS` (each run's `session`, `prompt`, `cwd`,
 `pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
 `FAKE_LESSON`, `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
-`ok`, `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
+`ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
 `read`, `explore` (`FAKE_READS` small reads, then an edit: #1087), `floor` (`HANDOVER_ROOM`), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`), `compactfail` (OpenCode
 2.3's `{"type": "error", …, "error": {"type": "compaction.failed", "message": "Compaction produced no summary"}}`;
 `FAKE_COMPACT_MSG`, `FAKE_COMPACT_EXIT`, `FAKE_COMPACT_EDIT`, `FAKE_REFAIL`), `bgwait` (`FAKE_BGWAIT`), `toolhang`,

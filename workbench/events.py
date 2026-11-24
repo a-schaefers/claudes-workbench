@@ -93,6 +93,43 @@ def _obj(v) -> dict:
     return v if isinstance(v, dict) else {}
 
 
+def patched(state: dict) -> list[str]:
+    """The files a `patch` call wrote: added, updated, or moved to (a file it deleted isn't
+    written). OpenCode 2.3.2 gives a GPT model (an id with `gpt-`, not `oss` or `gpt-4`) `patch`
+    in place of edit and write, its only input `patchText`: a module one wrote under an ignored
+    lib/ had no path in its row, so neither the report's NOTE nor accept's refusal saw it, and
+    the commit left it out and the worktree took it (#1148, 2026-11-24). Paths as OpenCode gives
+    them: `state.metadata.files[].file`, relative to its directory (the task's workdir) or
+    absolute; without the metadata, from patchText's headers."""
+    files = _obj(state.get("metadata")).get("files")
+    if isinstance(files, list):
+        out = [str(f["file"]) for f in files
+               if isinstance(f, dict) and f.get("file") and f.get("status") != "deleted"]
+        return list(dict.fromkeys(out))
+    text = _obj(state.get("input")).get("patchText")
+    lines = text.splitlines() if isinstance(text, str) else []
+    out = []
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if line.startswith("*** Add File: "):
+            out.append(line[14:].strip())
+        elif line.startswith("*** Update File: "):
+            j = i + 1
+            while j < len(lines) and lines[j].strip() == "*** End of File":
+                j += 1
+            nxt = lines[j].strip() if j < len(lines) else ""
+            out.append(nxt[13:].strip() if nxt.startswith("*** Move to: ") else line[17:].strip())
+    return list(dict.fromkeys(p for p in out if p))
+
+
+def written(row: dict) -> list[str]:
+    """The paths an edit row wrote: its `path`, or a patch's `paths` (#1148)."""
+    if row.get("path"):
+        return [str(row["path"])]
+    paths = row.get("paths")
+    return [str(p) for p in paths] if isinstance(paths, list) else []
+
+
 def normalize(raw: dict, round_no: int):
     """One OpenCode event as a compact row, or None for events nobody needs to see. A line of
     the wrong shape (a plugin's console.log on OpenCode's stdout) is skipped, not a crash of the
@@ -115,6 +152,9 @@ def normalize(raw: dict, round_no: int):
         inp = state.get("input") if isinstance(state.get("input"), dict) else {}
         if tool in EDIT_TOOLS and (inp.get("filePath") or inp.get("path")):
             row["path"] = str(inp.get("filePath") or inp.get("path"))  # whole: brief is cut at 90
+        elif tool in ("patch", "apply_patch") and (paths := patched(state)):
+            row["paths"] = paths
+            row["brief"] = row["brief"] or _brief(tool, {"path": paths[0]})
         elif tool == "read" and (inp.get("filePath") or inp.get("path")):
             row["path"] = str(inp.get("filePath") or inp.get("path"))
             if not inp.get("offset") and not inp.get("limit"):
@@ -183,9 +223,11 @@ class StuckDetector:
     limits are the runner's (it owns the clock); this looks only at the stream of tool calls.
     """
 
-    def __init__(self, repeat=4, error_streak=6, no_edit=40, worktree=None):
+    def __init__(self, repeat=4, error_streak=6, no_edit=40, worktree=None, workdir=None):
         self.repeat, self.error_streak, self.no_edit = repeat, error_streak, no_edit
         self.worktree = os.path.realpath(worktree) if worktree else None
+        # a relative path is OpenCode's directory's, the package in a monorepo (#1148)
+        self.workdir = os.path.realpath(workdir) if workdir else self.worktree
         self.recent = deque(maxlen=repeat)
         self.errors = 0
         self.since_edit = 0
@@ -196,7 +238,8 @@ class StuckDetector:
             return None
         self.recent.append(row["sig"])
         self.errors = 0 if row["ok"] else self.errors + 1
-        changed = row["tool"] in EDIT_TOOLS and row["ok"] and self._ours(row.get("path"))
+        changed = row["tool"] in EDIT_TOOLS and row["ok"] and any(
+            self._ours(p) for p in written(row) or [None])
         self.since_edit = 0 if changed else self.since_edit + 1
         # .guard names the one that fired, for the Stats tab's "what stops agents" (#404)
         if len(self.recent) == self.repeat and len(set(self.recent)) == 1:
@@ -216,5 +259,5 @@ class StuckDetector:
         resetting the count, while its own change still failed its test (2026-11-18)."""
         if not (self.worktree and path):
             return True
-        full = os.path.realpath(os.path.join(self.worktree, path))
+        full = os.path.realpath(os.path.join(self.workdir, path))
         return full == self.worktree or full.startswith(self.worktree + os.sep)
