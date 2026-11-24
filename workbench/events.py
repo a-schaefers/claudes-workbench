@@ -88,8 +88,11 @@ def shell_names(command: str) -> list[str]:
     (#1210's review, 2026-11-24). A cd ends with the subshell it ran in (`( … )`, `$( … )`, a
     backquote's) and a `popd` goes back to where its `pushd` was: carried past them, `(cd lib
     && make) && cat > top.py` named lib/top.py, not the ignored top.py it wrote, which accept
-    then left out as build output (#1210's third review, 2026-11-24). A `popd` with no `pushd`
-    in the line, to where no word says: the words after it as written."""
+    then left out as build output (#1210's third review, 2026-11-24). After a move to where no
+    word says (`cd "$D"`, `cd -`, a `popd` with no `pushd` in the line) a word is `*/<word>`: the
+    file by that path in any directory. Kept as written, `cd "$D" && cat > util.py` named a
+    top-level util.py and the lib/util.py it wrote went unnamed, left out as build output: where
+    the directory can't be known, a false name costs a look at accept, a false drop the work."""
     words: dict[str, None] = {}
     cwd: str | None = ""                                   # where the line is, from its start
     pushed: list[str | None] = []                          # the line's pushd stack
@@ -116,15 +119,27 @@ def shell_names(command: str) -> list[str]:
                 in_backquote = False
             if outer:
                 cwd, pushed = outer.pop()
-    ranked = ([w for w in words if "/" in w] + [w for w in words if "/" not in w and "." in w]
-              + [w for w in words if "/" not in w and "." not in w])
+    bare = {w: w[2:] if w.startswith(ANYWHERE) else w for w in words}
+    ranked = ([w for w in words if "/" in bare[w]] + [w for w in words if "/" not in bare[w] and "." in bare[w]]
+              + [w for w in words if "/" not in bare[w] and "." not in bare[w]])
     return ranked[:NAMES_MAX]
+
+
+ANYWHERE = "*/"   # a `names` word run where no word says: the path in any directory (no word holds a *)
 
 
 def _joined(cwd: str | None, word: str) -> str:
     """A word of a simple command run in `cwd` (relative to the line's start; None after a `cd`
-    to where no word says: `cd $D`, `cd -`), as a path from the line's start."""
-    if not cwd or word.startswith("/"):
+    to where no word says: `cd $D`, `cd -`), as a path from the line's start: under None,
+    `*/<word>` (its `..`s dropped), which runner._rows_name matches in any directory."""
+    if word.startswith("/"):
+        return word
+    if cwd is None:
+        rest = os.path.normpath(word)
+        while rest == ".." or rest.startswith("../"):
+            rest = rest[3:]
+        return ANYWHERE + rest if rest and rest != "." else word
+    if not cwd:
         return word
     return os.path.normpath(os.path.join(cwd, word))
 

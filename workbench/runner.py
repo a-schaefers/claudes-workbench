@@ -36,7 +36,7 @@ from . import (ask_mcp, context, gitguard, gitops, hardware, keyhole, lane, less
                skills, stats, store, tuning)
 from . import meter
 from . import privacy
-from .events import EDIT_TOOLS, StuckDetector, compaction_failed, normalize, shell_names, written
+from .events import ANYWHERE, EDIT_TOOLS, StuckDetector, compaction_failed, normalize, shell_names, written
 from .watch import Watcher
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
@@ -2757,7 +2757,8 @@ def _shell_named(task: store.Task):
     the model to set instead of a cd: dropped, `cat > util.py` in lib/ named nothing and accept
     --merge left lib/util.py out under a main.py importing it, #1210's third review), else the
     task's workdir (an absolute one against the worktree; a word after a `cd` in the row already
-    joined to it, events.shell_names) equal to it, or its name a word's
+    joined to it, events.shell_names; one after a cd to where no word says, `*/<word>`, ending
+    it in any directory: naming over dropping) equal to it, or its name a word's
     last part with the file in a directory the same row names (`mv util.py lib/`, `cp
     src/a.py build/`). Row by row and exact: one set of every row's words, matched by suffix,
     took `grep -n answer pkg/a.py` for a name of setuptools' build/lib/pkg/a.py, and `cat
@@ -2794,14 +2795,17 @@ def _rows_name(rows: list[dict], worktree: Path, subdir: str = ""):
             names = shell_names(str(r.get("brief") or ""))
         words = [str(w) for w in names if w]
         wd = r.get("workdir") if isinstance(r.get("workdir"), str) else ""
+        anywhere = {w[len(ANYWHERE):] for w in words if w.startswith(ANYWHERE)}
+        words = [w for w in words if not w.startswith(ANYWHERE)]
         paths = {p for p in (inside(w, wd) for w in words) if p}
-        named_rows.append((paths, {w.rstrip("/").rsplit("/", 1)[-1] for w in words}))
+        named_rows.append((paths, {w.rstrip("/").rsplit("/", 1)[-1] for w in words}, anywhere))
 
     def named(p: str) -> bool:
         p = os.path.normpath(p)
         where, name = os.path.split(p)
         return any(p in paths or (name in names and (where or ".") in paths)
-                   for paths, names in named_rows)
+                   or any(p == a or p.endswith("/" + a) for a in anywhere)
+                   for paths, names, anywhere in named_rows)
     return named
 
 

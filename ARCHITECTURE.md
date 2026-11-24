@@ -965,7 +965,10 @@ agent's shell rows names (`runner._shell_named`, row by row and exact: a word of
 `events.shell_names`, which joins a word after a `cd` or `pushd` in the row to its directory,
 until the subshell it ran in ends (`( … )`, `$( … )`, a backquote's) or a `popd` goes back
 (carried past them, `(cd lib && make) && cat > top.py` named lib/top.py; a `popd` with no
-`pushd` in the row leaves the words after it as written), resolved against the row's `workdir`
+`pushd` in the row, `cd "$D"` or `cd -`, to where no word says, makes a word after it `*/<word>`,
+the file by that path in any directory: kept as written, `cd "$D" && cat > util.py` named a top-level
+util.py and dropped the lib/util.py it wrote, so where the directory can't be known it names rather
+than drops, a false name costing a look at accept and a false drop the work), resolved against the row's `workdir`
 (the shell tool's, which OpenCode 2.3.2 tells the model to set instead of a cd: dropped, `cat >
 util.py` run in lib/ named nothing, and `wb accept --merge` left lib/util.py out under a main.py
 importing it, #1210's third review), else the task's workdir, an absolute one against the
@@ -6298,7 +6301,7 @@ off), not `wb start`'s.
 
 **events.jsonl** rows are `{ts, round, kind, …}`. From OpenCode (`events.normalize`): `tool {tool, brief, ok, error?, path?, paths?, programs?, names?, workdir?}`
 (`brief`: command, path, pattern, url, query or description, 90 chars; a skill's id; a patch's first
-file; `path` an edit's or a read's whole path; `paths` the files a `patch` wrote, `events.patched`, #1148; a shell row's `programs`, `events.shell_programs`, 8, `names`, the words that may name a file it wrote, paths first, a word after a `cd` or `pushd` joined to its directory (until the subshell it ran in ends or a `popd`), `events.shell_names`, `NAMES_MAX` 300: `runner.shell_wrote`, #1210, and `workdir`, the shell tool's input as given (absolute, or relative to the task's workdir), which `names` resolve against: OpenCode 2.3.2 tells the model to set it instead of a cd, #1210's third review), `text {text}` (2000), `step {in,
+file; `path` an edit's or a read's whole path; `paths` the files a `patch` wrote, `events.patched`, #1148; a shell row's `programs`, `events.shell_programs`, 8, `names`, the words that may name a file it wrote, paths first, a word after a `cd` or `pushd` joined to its directory (until the subshell it ran in ends or a `popd`; after one to where no word says, `*/<word>`, any directory's: `events.ANYWHERE`), `events.shell_names`, `NAMES_MAX` 300: `runner.shell_wrote`, #1210, and `workdir`, the shell tool's input as given (absolute, or relative to the task's workdir), which `names` resolve against: OpenCode 2.3.2 tells the model to set it instead of a cd, #1210's third review), `text {text}` (2000), `step {in,
 out, cache, cache_read, cache_write, reasoning?, cost?}` (reasoning apart from `out`; `cache` the read and write summed,
 which the handover check reads; `cost` OpenCode's `part.cost` in USD, only when a number: missing is unknown, never 0, #1022; the meter's step price too, #1019), `error {text}`, `retry {text, attempt}` (OpenCode resent a request). From the runner: `round`, `stopped {text}`, `steer
 {now, by: "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow, compacted}` (`compacted` after a failed compaction too),

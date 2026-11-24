@@ -2868,8 +2868,17 @@ class Lifecycle(Base):
         self.assertTrue(named("echo $(cd lib && pwd) > top.py", "top.py"))
         self.assertTrue(named("echo `cd lib && pwd` && cat > top.py", "top.py"))
         self.assertTrue(named("cd lib && (cd sub && make) && cat > util.py", "lib/util.py"))
-        self.assertTrue(named("popd && cat > x.py", "x.py"))         # no pushd here: as written
         self.assertTrue(named("cd lib; cat > util.py", "lib/util.py"))  # no subshell: it carries
+        # where no word says (a popd with no pushd in the line, `cd "$D"`, `cd -`): the file by
+        # that name in any directory, as a false name costs a look and a false drop the work
+        self.assertTrue(named("popd && cat > x.py", "x.py"))
+        self.assertTrue(named("popd && cat > x.py", "lib/x.py"))
+        self.assertTrue(named('cd "$D" && cat > util.py', "lib/util.py"))
+        self.assertTrue(named('cd "$D" && cat > sub/util.py', "lib/sub/util.py"))
+        self.assertFalse(named('cd "$D" && cat > sub/util.py', "lib/util.py"))
+        self.assertTrue(named("cd - && cat > ../x.py", "a/x.py"))
+        self.assertTrue(named('(cd "$D" && cat > a.py) && cat > b.py', "lib/a.py"))
+        self.assertFalse(named('(cd "$D" && cat > a.py) && cat > b.py', "lib/b.py"))  # known again
 
     def test_a_shell_line_names_the_files_it_may_write_paths_first(self):
         # #1210's review (2026-11-24): `npm run build` names none of its dist/, and the agent's
@@ -2881,10 +2890,11 @@ class Lifecycle(Base):
                          "lib/util.py")
         self.assertEqual(events.shell_names("mv util.py lib/util.py; tsc --outDir=build/lib")[:3],
                          ["lib/util.py", "build/lib", "util.py"])
-        # a word after a cd is joined to it; after one to where no word says, kept as it is
+        # a word after a cd is joined to it; after one to where no word says, `*/<word>`: any
+        # directory's (#1210's third review)
         self.assertEqual(events.shell_names("cd lib && cat > util.py")[:2], ["lib/cat", "lib/util.py"])
         self.assertIn("../x.py", events.shell_names("cd .. && cat > x.py"))
-        self.assertIn("util.py", events.shell_names('cd "$D" && cat > util.py'))
+        self.assertEqual(events.shell_names('cd "$D" && cat > util.py')[0], "*/util.py")
         self.assertLessEqual(len(events.shell_names(" ".join(f"w{i}" for i in range(5000)))),
                              events.NAMES_MAX)
 
