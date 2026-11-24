@@ -2754,7 +2754,8 @@ session's. One without a `session` goes by
 directory: its `repo` is or is inside the session's directory, or the session's directory is inside
 the task's spot (`repo`/`subdir`, else a `cwd` inside the repo, else the repo: `spotOf`, `_scope`;
 #695), or its `cwd` is or is inside the session's directory; by whole components of real paths,
-case-folded where the file system ignores case (`mem.fold`, `store.folds_case`; 2026-11-19 audit). A
+case-folded where the file system ignores case (`mem.fold`, `store.folds_case`: any component of the path found
+in its parent with its case swapped, WSL2's `/mnt/c` too, #1217; 2026-11-19 audit). A
 session in `~` or `/` claims none by directory; a task with neither key is everyone's. Another
 session's notice is at most toasted. `wb status`, a bare `wait`, and `stop`/`takeover`/`resume
 --all` from Claude Code's Bash take the caller's scope (`cli._caller`: `CLAUDE_CODE_SESSION_ID`,
@@ -6253,7 +6254,10 @@ wins, the spot itself else the nearest directory above it, so the root's holds f
 package's never for the root or another package (#778: matched by git dir alone, every task got the first package
 entry); by real path, else git dir and the path inside the worktree, both in lower case where the file system
 ignores case (`store.folds_case`: a key typed `~/Code/ClientX` for git's `~/code/clientx` on macOS matched nothing,
-and a local-only repo went to the API model, #1157); wb accept reads it the same way. `--setup`,
+and a local-only repo went to the API model, #1157). It asks each component of the real path in its own parent, its
+letters' case swapped, so WSL2's drvfs (`/mnt/c`, folding under an ext4 root that doesn't) counts too: the whole path
+swapped, `/MNT/C/uSERS/…`, isn't there, and a key in another case than the cwd's missed (#1217). wb accept reads it
+the same way. `--setup`,
 `--setup-timeout` (a positive whole number) replace; `--copy`, `--sibling` add; `merge` is `wb accept --merge`'s way
 (`context.MERGE_AS`; `--merge-as` overrides). `local_only` is read further up: the nearest entry that states it decides
 (`context.repo_entries`, nearest first; `privacy.local_only`), so a package's entry for its setup alone doesn't lift
