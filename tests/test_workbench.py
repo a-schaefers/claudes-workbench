@@ -37323,6 +37323,286 @@ class BusyGpu(Base):
         self.assertEqual(routes._busy_newly(doc, doc), [])
 
 
+HAIKU = "anthropic/claude-haiku-5-5"   # ROLE_CATALOG's other provider (API_CATALOG[1])
+# #1196's runner fixtures: the role's API model and a fallback on another priced provider
+FB_PRIMARY, FB_OTHER = SPEND_M, "otherco/coder-1"
+FB_CATALOG = [*SPEND_CATALOG, {**SPEND_CATALOG[0], "id": "coder-1", "providerID": "otherco",
+                               "settings": {"baseURL": "https://api.otherco.example/v1"},
+                               "cost": [{"input": 1, "output": 2, "cache": {"read": 0, "write": 0}}]}]
+
+
+class Fallbacks(Base):
+    """A fallback per role (#1196): routes.json `fallback`, an API id on another provider or
+    `gpu`, set by `wb route <role> fallback <id>|gpu|none` (an API one on the dialog's yes and a
+    cap); a role's API model its provider holds (out of credit, rate-limited, unreachable) starts
+    on it at wb start, and a round stopped as out of credit, or held again after its revive,
+    moves there once, in a fresh session."""
+    catalog = ApiHarness.catalog
+    wb = RoleResolution.wb
+    begin = RoleResolution.begin
+
+    def setUp(self):
+        super().setUp()
+        self.catalog(ROLE_CATALOG, ROLE_AUTH)
+        self.ok = store.home() / "route-ok.json"
+        p = mock.patch.object(cli, "spawn_runner", lambda task: 0)  # the start alone
+        p.start()
+        self.addCleanup(p.stop)
+
+    def set_role(self, *argv):
+        code, _, err = self.wb("route", *argv)
+        self.assertEqual(code, 0, err)
+
+    def on_api(self, fallback=HAIKU):
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.set_role("trivial", "fallback", fallback)
+
+    def test_a_roles_fallback_is_read_checked_and_said_in_the_summary(self):
+        self.assertNotIn("fallback", routes.read()["roles"]["trivial"])   # none by default
+        for bad in ("", "none", 3, ["gpu"]):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(routes.RoutesError, "trivial's fallback is"):
+                    routes.normalize({"roles": {"trivial": {"fallback": bad}}})
+        # register.test.tsx checks routesSummary on the same fixture (Couplings)
+        doc = routes.normalize({"roles": {
+            "trivial": {"via": "api", "api": "deepseek/deepseek-flash", "thinking": "off", "fallback": HAIKU},
+            "significant": {"via": "api", "api": "deepseek/deepseek-v4-pro", "fallback": "gpu"},
+            "writing": {"fallback": "gpu"}}})
+        self.assertEqual(routes.summary(doc), (
+            "significant API deepseek/deepseek-v4-pro, thinking off, fallback GPU; trivial API deepseek/deepseek-flash, "
+            f"thinking off, fallback {HAIKU}; writing GPU (the router picks), fallback GPU"))
+        self.assertEqual(routes.fallback_of(doc, "trivial"), HAIKU)
+        self.assertIsNone(routes.fallback_of({**doc, "use": "api"}, "significant"))  # Agents API: no GPU
+        self.assertEqual(routes.fallback_of({**doc, "use": "api"}, "trivial"), HAIKU)
+
+    def test_an_api_fallback_takes_the_dialogs_yes_and_a_cap_while_gpu_and_none_take_neither(self):
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        os.environ["CLAUDECODE"] = "1"
+        asked = json.loads(self.wb("route", "--dry-run", "--json", "trivial", "fallback", HAIKU)[1])
+        self.assertEqual((asked["gate"], asked["approval"]["argv"]), (True, ["route", "trivial", "fallback", HAIKU]))
+        self.assertEqual(asked["change"], f"trivial: fallback none → {HAIKU}: your code goes to Anthropic when its "
+                                          "API model's provider is down or out of credit · thinking off · cap $5/day")
+        code, _, err = self.wb("route", "trivial", "fallback", HAIKU)    # Claude, no yes: unchanged
+        self.assertEqual(code, 3)
+        self.assertIn("approved none for this change", err)
+        self.assertNotIn("fallback", routes.read()["roles"]["trivial"])
+        store.write_json(self.ok, {**asked["approval"], "at": time.time()})
+        code, out, err = self.wb("route", "trivial", "fallback", HAIKU)
+        self.assertEqual((code, out), (0, f"changed: {asked['change']}\n"), err)
+        row = routes.read()["roles"]["trivial"]
+        self.assertEqual((row["fallback"], row["by"], row["said"]), (HAIKU, "dialog", asked["change"]))
+        self.assertIn(f"fallback {HAIKU} (Anthropic)", self.wb("route")[1])
+        for target, line in (("gpu", f"trivial: fallback {HAIKU} → GPU (the router's pick) when its API model's "
+                                     "provider is down or out of credit"),
+                             ("none", "trivial: fallback GPU (the router's pick) → none")):
+            with self.subTest(target=target):
+                shown = json.loads(self.wb("route", "--dry-run", "--json", "trivial", "fallback", target)[1])
+                self.assertEqual((shown["gate"], shown["change"]), (False, line))
+                code, out, err = self.wb("route", "trivial", "fallback", target)   # no dialog: Claude's own
+                self.assertEqual((code, out), (0, f"changed: {line}\n"), err)
+        self.assertNotIn("fallback", routes.read()["roles"]["trivial"])
+        del os.environ["CLAUDECODE"]
+        self.routes = Path(os.environ["WB_ROUTES"])
+        self.routes.write_text(json.dumps({"roles": {"trivial": {"api": "deepseek/deepseek-flash"}}}))
+        code, _, err = self.wb("route", "trivial", "fallback", HAIKU)   # no cap yet
+        self.assertEqual(code, 3)
+        self.assertIn("no day cap yet", err)
+
+    def test_wb_route_refuses_a_fallback_on_the_roles_provider_its_own_model_or_openrouter(self):
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        for fb, said in (("deepseek/deepseek-v4-pro", "a provider down or out of credit stops both"),
+                         ("deepseek/deepseek-flash", "is the trivial role's own API model"),
+                         ("openrouter/deepseek/deepseek-v4.1-flash", "an OpenRouter model can't be a fallback"),
+                         ("nobody/nothing", "not in OpenCode's catalog")):
+            with self.subTest(fb=fb):
+                code, _, err = self.wb("route", "trivial", "fallback", fb)
+                self.assertEqual(code, 3)
+                self.assertIn(said, err)
+        self.assertNotIn("fallback", routes.read()["roles"]["trivial"])
+        self.set_role("trivial", "fallback", HAIKU)
+        code, _, err = self.wb("route", "trivial", HAIKU)              # the API model onto the fallback
+        self.assertEqual(code, 3)
+        self.assertIn(f"{HAIKU} is the trivial role's own API model", err)
+        self.assertEqual(routes.read()["roles"]["trivial"]["api"], "deepseek/deepseek-flash")
+        self.assertEqual(self.wb("route", "trivial", "fallback")[0], 1)            # no choice
+        self.assertEqual(self.wb("route", "trivial", "fallback", "gpu", "--day-usd", "9")[0], 1)
+
+    def test_a_kept_api_fallback_is_named_when_its_role_goes_to_api(self):
+        self.set_role("trivial", "--api", "deepseek/deepseek-flash", "--day-usd", "5")   # kept on the GPU
+        self.set_role("trivial", "fallback", HAIKU)
+        line = json.loads(self.wb("route", "--dry-run", "--json", "trivial", "api")[1])["change"]
+        self.assertIn(f"fallback {HAIKU} (Anthropic)", line)
+
+    def test_a_provider_out_of_credit_at_start_starts_the_task_on_the_roles_api_fallback(self):
+        from workbench import results
+        self.on_api()
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        code, out, err = self.begin("t-fb", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        sp = store.Task("t-fb").spec
+        self.assertEqual({k: sp.get(k) for k in ("model", "via", "role", "provider", "fallback", "fallback_from")},
+                         {"model": HAIKU, "via": "api", "role": "trivial", "provider": "anthropic",
+                          "fallback": True, "fallback_from": "deepseek/deepseek-flash"})
+        self.assertTrue(out.startswith(f"started t-fb on {HAIKU} (API) · "), out)
+        self.assertIn(f"model: {HAIKU} · API (Anthropic) · trivial role's fallback, set by you ", out)
+        self.assertIn(f"deepseek/deepseek-flash: out of credit or quota at DeepSeek", out)
+        self.assertIn(f"{routes.FALLBACK_LINE} ({HAIKU})\n", out)
+        self.assertIn(routes.FALLBACK_LINE, sp["route"])
+        self.assertIn("to Anthropic (the trivial role's fallback", out)   # the where-note, its provider's
+        self.assertEqual(sp["opencode_model"].split("#")[0], HAIKU)
+        row = results._with_route(store.Task("t-fb"), {})
+        self.assertEqual((row["fallback"], row["fallback_from"], row["provider"]),
+                         (True, "deepseek/deepseek-flash", "anthropic"))
+
+    def test_a_held_provider_at_start_starts_the_task_on_the_roles_gpu_fallback(self):
+        self.on_api("gpu")
+        runner.models.note_api("deepseek", "rate_limited", "HTTP 429", time.time() + 60)
+        code, out, err = self.begin("t-fbgpu", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        sp = store.Task("t-fbgpu").spec
+        self.assertEqual((sp["via"], sp["fallback"], sp["fallback_from"]), ("gpu", True, "deepseek/deepseek-flash"))
+        self.assertIn(sp["model"], runner.models.discover())
+        self.assertNotIn("provider", sp)
+        self.assertIn(f" · {routes.FALLBACK_LINE}\n", out)                 # the router's line, then it
+        self.assertNotIn("the round waits for it", out)
+        self.assertEqual(sp["auto_fix"], cli.AUTO_FIX["gpu"])
+
+    def test_with_no_fallback_or_one_that_cant_take_it_the_start_is_as_before(self):
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        code, _, err = self.begin("t-none", "--role", "trivial")
+        self.assertEqual(code, 3)                                         # no fallback: exit 3, as before
+        self.assertIn("trivial role: deepseek/deepseek-flash can't run: ", err)
+        self.set_role("trivial", "fallback", HAIKU)
+        runner.models.note_api("anthropic", "no_credit", "HTTP 402: Insufficient balance")
+        code, out, err = self.begin("t-both", "--role", "trivial")
+        self.assertEqual(code, 3)
+        self.assertIn(f"note: the trivial role's fallback {HAIKU} can't run: out of credit", out)
+        runner.models.note_api("anthropic", "ok")
+        runner.models.note_api("deepseek", "ok")
+        code, out, err = self.begin("t-fine", "--role", "trivial")      # its own model, while it runs
+        self.assertEqual(code, 0, err)
+        self.assertEqual(store.Task("t-fine").spec["model"], "deepseek/deepseek-flash")
+        self.assertNotIn("fallback", store.Task("t-fine").spec)
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        gpu = next(iter(runner.models.discover()))
+        code, _, _ = self.begin("t-asked", "--role", "trivial", "--model", "deepseek/deepseek-flash")
+        self.assertEqual(code, 3)                                         # a --model never moves
+        self.assertNotIn(gpu, [t.spec.get("model") for t in store.all_tasks() if t.name == "t-asked"])
+
+    def test_an_api_fallback_meets_the_slots_the_cap_and_a_repo_kept_local(self):
+        self.on_api()
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        with mock.patch.object(cli.models, "api_slots_free", lambda provider: False):
+            code, out, _ = self.begin("t-slots", "--role", "trivial")
+        self.assertEqual(code, 3)
+        self.assertIn(f"note: the trivial role's fallback {HAIKU} can't take it: every one of anthropic's", out)
+        with mock.patch.object(cli.privacy, "local_only", lambda repo, sub: str(repo)):
+            got = cli._fallback_start("trivial", "trivial", BusyGpu.asked(), self.repo, None, [],
+                                      runner.models.lookup("deepseek/deepseek-flash"),
+                                      {"via": "api", "role": "trivial"})
+        self.assertEqual(got, f"the trivial role's fallback {HAIKU} is an API model, and {self.repo.name} is kept "
+                              f"local ({self.repo})")
+        with mock.patch.object(cli.meter, "refusal", lambda m, role=None, advice=True, tokens=None: "at the cap"):
+            got = cli._fallback_start("trivial", "trivial", BusyGpu.asked(), self.repo, None, [],
+                                      runner.models.lookup("deepseek/deepseek-flash"),
+                                      {"via": "api", "role": "trivial"})
+        self.assertEqual(got, f"the trivial role's fallback {HAIKU} can't take it: at the cap")
+
+
+class FallbackMoves(Base):
+    """The runner's move to the role's fallback (#1196): a round its provider stops as out of
+    credit, or holds again after its one revive, runs again on the fallback the user set, once,
+    in a fresh session, the keyhole serving the fallback alone; with none, or one that can't take
+    it, the stop stands as before."""
+    api_task = ApiSpend.api_task
+    events = RateLimits.events
+
+    def setUp(self):
+        super().setUp()
+        from workbench import meter
+        path = Path(self.tmp.name) / "catalog.json"
+        path.write_text(json.dumps(FB_CATALOG))
+        os.environ["WB_FAKE_CATALOG"] = str(path)
+        os.environ["FAKE_AUTH_EXPORT"] = json.dumps([
+            {"id": f"cred_{p}", "integrationID": p, "label": "main", "active": True,
+             "value": {"type": "key", "key": "sk-fallback-test"}} for p in ("meterco", "otherco")])
+        meter._METERS.clear()
+        self.addCleanup(meter._METERS.clear)
+        self.addCleanup(runner.CURRENT.pop, "keyhole", None)
+
+    def roles(self, fallback, **row):
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {"significant": {
+            "via": "api", "api": FB_PRIMARY, "thinking": "off", "fallback": fallback, "ts": time.time(), **row}}})
+
+    def test_a_round_out_of_credit_moves_once_to_the_roles_api_fallback_in_a_fresh_session(self):
+        self.roles(FB_OTHER)
+        served = []
+        real = runner.start_keyhole
+        with mock.patch.object(runner, "start_keyhole",
+                               lambda task, m: served.append(m.id) or real(task, m)):
+            task = self.api_task("t-move", FB_PRIMARY, "ok", WB_FAKE_API="meterco=quota")
+            runner.drive(task)
+        st, sp = task.status, task.spec
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertEqual(served, [FB_PRIMARY, FB_OTHER])                 # one model a keyhole, each
+        self.assertEqual({k: sp.get(k) for k in ("model", "via", "provider", "fallback", "fallback_from")},
+                         {"model": FB_OTHER, "via": "api", "provider": "otherco", "fallback": True,
+                          "fallback_from": FB_PRIMARY})
+        [ev] = self.events(task, "fallback")
+        self.assertEqual((ev["moved"], ev["from"], ev["to"], ev["round"]), (True, FB_PRIMARY, FB_OTHER, 1))
+        [fresh] = self.events(task, "fresh")
+        self.assertFalse(fresh["overflow"])                              # no handover the window caused
+        self.assertTrue(task.round_dir(1).joinpath("prompt.md").read_text().startswith(
+            f"You are picking this task up in a fresh session ({runner.FALLBACK_SAID}"))
+        self.assertEqual(st["fallback_moved"]["to"], FB_OTHER)
+        self.assertIn(f"the task moved to the significant role's fallback {FB_OTHER}",
+                      task.round_dir(1).joinpath("summary.md").read_text())
+        self.assertEqual(json.loads(runner.catalog_path(task).read_text()).keys(), {"otherco"})
+
+    def test_with_no_fallback_the_stop_stands_and_a_moved_task_never_moves_again(self):
+        self.roles(None)
+        task = self.api_task("t-stays", FB_PRIMARY, "ok", WB_FAKE_API="meterco=quota")
+        runner.drive(task)
+        self.assertEqual((task.status["phase"], task.status.get("infra")), ("stuck", "provider"))
+        self.assertEqual(task.spec["model"], FB_PRIMARY)
+        self.assertFalse(self.events(task, "fallback"))
+        self.roles(FB_OTHER)                                             # on the fallback already
+        moved = self.api_task("t-moved", FB_OTHER, "ok", WB_FAKE_API="otherco=quota")
+        store.write_json(moved.dir / "task.json", {**moved.spec, "fallback": True, "fallback_from": FB_PRIMARY})
+        runner.drive(moved)
+        self.assertEqual((moved.status["phase"], moved.spec["model"]), ("stuck", FB_OTHER))
+
+    def test_a_fallback_that_cant_take_it_leaves_the_providers_stop_and_says_why(self):
+        self.roles(FB_OTHER)
+        task = self.api_task("t-both", FB_PRIMARY, "ok", WB_FAKE_API="meterco=quota")
+        runner.models.note_api("otherco", "no_credit", "HTTP 402")
+        runner.drive(task)
+        self.assertEqual((task.status["phase"], task.spec["model"]), ("stuck", FB_PRIMARY))
+        [ev] = self.events(task, "fallback")
+        self.assertFalse(ev["moved"])
+        self.assertIn(f"the significant role's fallback {FB_OTHER} can't run: ", ev["text"])
+
+    def test_a_round_held_again_after_its_revive_moves_to_the_roles_gpu_fallback(self):
+        os.environ.update(FAKE_RETRIES="200", FAKE_RETRY_EVERY="0.5")
+        gpu = sorted(runner.models.discover())
+        task = self.api_task("t-held", FB_PRIMARY, "ok", "--silence-timeout", "2", "--think-timeout", "2",
+                             WB_FAKE_API="meterco=ratelimit")
+        other = next(g for g in gpu if g != task.spec["model"])
+        self.roles("gpu", gpu=other)
+        with mock.patch.object(runner, "RATE_WAIT_S", 2), mock.patch.object(runner.models, "RATE_LIMIT_SECS", 1):
+            runner.drive(task)
+        st, sp = task.status, task.spec
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertEqual((sp["model"], sp["via"], sp["fallback"]), (other, "gpu", True))
+        for key in ("provider", "thinking", "said"):
+            self.assertNotIn(key, sp)
+        self.assertEqual(len(self.events(task, "load")), 1)              # revived once, then moved
+        self.assertTrue(self.events(task, "fallback")[0]["moved"])
+        self.assertFalse(runner.catalog_path(task).exists())             # the GPU's: no API catalog
+        self.assertIsNone(st.get("api_entry"))
+
+
 class MediaDefaults(Base):
     """The default image and audio engines (#1047): images.json's "default" and audio.json's
     "default_<kind>" name the engine wb image / wb audio use without --engine, picked in the pane's

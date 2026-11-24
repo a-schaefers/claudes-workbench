@@ -5831,6 +5831,14 @@ test('#1014: the mod\'s summary of the roles reads as routes.summary does', () =
       'API kept: anthropic/claude-haiku-5-5, thinking on')
 })
 
+test('#1196: a role\'s fallback is in the roles\' summary, as routes.summary says it', () => {
+  // tests.test_workbench.Fallbacks checks routes.summary on the same fixture
+  expect(routesSummary({ roles: { trivial: { via: 'api', api: 'deepseek/deepseek-flash', thinking: 'off', fallback: 'anthropic/claude-haiku-5-5' },
+    significant: { via: 'api', api: 'deepseek/deepseek-v4-pro', fallback: 'gpu' }, writing: { fallback: 'gpu' } } }))
+    .toBe('significant API deepseek/deepseek-v4-pro, thinking off, fallback GPU; trivial API deepseek/deepseek-flash, thinking off, ' +
+      'fallback anthropic/claude-haiku-5-5; writing GPU (the router picks), fallback GPU')
+})
+
 test('#1126: an OpenRouter role\'s backends are in the roles\' summary, so a change of them alone reaches the conversation', async ($, on) => {
   // the audit of 2.0 (2026-11-23): `wb route significant --order …` from a terminal changed where
   // the code goes with no row; tests.test_workbench.Routes checks routes.summary on the same fixture

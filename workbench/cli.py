@@ -701,9 +701,11 @@ def _routed_keys(routed: dict) -> dict:
     """task.json's routing keys (#1016), fixed at start as `model` is: `via` and `role` always;
     for API `provider`, `provider_name`, `thinking`, `said` and `said_ts` (when the role has one),
     an OpenRouter role's `order` (#1021), which the keyhole routes every request by, and `busy`
-    when the busy opt-in sent it there (#1023)."""
-    keys = ("via", "role") + (("provider", "provider_name", "thinking", "said", "said_ts", "order", "busy")
-                              if routed.get("via") == "api" else ())
+    when the busy opt-in sent it there (#1023); `fallback` and `fallback_from` (the role's API model
+    it stands in for) on the role's fallback, either side (#1196)."""
+    keys = ("via", "role", "fallback", "fallback_from") + (
+        ("provider", "provider_name", "thinking", "said", "said_ts", "order", "busy")
+        if routed.get("via") == "api" else ())
     return {k: routed[k] for k in keys if routed.get(k) is not None}
 
 
@@ -712,7 +714,8 @@ def _busy_api(role: str, a, repo: Path, sub: str | None, tokens: int | None = No
     model as pick_model gives one, (m, state, why, routed); "" when the opt-in doesn't apply (off,
     Agents GPU, a --model asked for, a role with no API model: it queues or exits 4 as before); a
     line saying why the role's API model can't take it now, which never changes the start either.
-    Only here, at a start: a running task never moves, and nothing goes from API to the GPU."""
+    Only here, at a start: a running task never moves, and nothing goes from API to the GPU, but
+    by the role's fallback, the user's explicit exception (_fallback_start, #1196)."""
     if a.model:
         return ""
     try:
@@ -742,6 +745,38 @@ def _busy_api(role: str, a, repo: Path, sub: str | None, tokens: int | None = No
         return f"the GPU is busy, and the {role} role's API model {mid} can't take it: {why}"
     routed = routes.busy_routed(doc, role, m)
     return m, state, f"{routes.routed_line(m.id, routed)} · {routes.BUSY_LINE}", routed
+
+
+def _fallback_start(role: str, size: str, a, repo: Path, sub: str | None, stack, m: models.Model,
+                    routed: dict, tokens: int | None = None):
+    """The role's fallback (#1196) for a start whose role's API model ``m`` its provider holds now
+    (api-health.json: out of credit, rate-limited or unreachable), the user's own choice in wb
+    route: (m, state, why, routed) as pick_model gives one; "" when it doesn't apply (no fallback,
+    a --model asked for, the provider not marked, a busy start); else the line saying why the
+    fallback can't take it either, which leaves the start as it was (exit 3, or a held start that
+    waits). The user's explicit exception to "an API role never runs on the GPU" (#1016) and to
+    one model a role; at a start, and once in the runner (runner._fallback_move), nowhere else.
+    An API fallback meets _busy_api's checks: a free provider slot, --local-only and
+    commands.json's local_only and standing copy/siblings, the day cap."""
+    if a.model or routed.get("via") != "api" or routed.get("busy") \
+            or (routed.get("said") or "").startswith("asked for") or models.api_health(m.provider) is None:
+        return ""
+    try:
+        doc = routes.read()
+    except routes.RoutesError:
+        return ""
+    local = ("this task is kept local (--local-only)" if a.local_only else
+             f"{repo.name} is kept local ({kept})" if (kept := privacy.local_only(repo, sub)) else "")
+    got = routes.fallback_pick(doc, role, size, stack, getattr(a, "name", None), m, tokens, local)
+    if not isinstance(got, tuple) or got[0].kind != "api":
+        return got
+    fb = got[0]
+    if not _api_slots_free(fb, getattr(a, "name", None)):
+        return (f"the {role} role's fallback {fb.id} can't take it: every one of "
+                f"{models.api_provider(fb)}'s {models.API_PARALLEL} slots is taken")
+    if gap := _standing_gap(context.repo_conf(repo, sub), a, models.provider_name(fb), repo, sub):
+        return f"the {role} role's fallback {fb.id} can't take it: {gap}"
+    return got
 
 
 def _gpu_holders(me: str | None = None, of: models.Model | None = None) -> dict:
@@ -1208,7 +1243,8 @@ def _api_notes(task_name: str, repo: Path, m: models.Model, a, routed: dict) -> 
         named = [f"{c} (--copy)" for c in a.copy or []] + [f"{x} (--sibling)" for x in a.sibling or []]
         rules = context.user_agents_md().is_file()  # Claude's own files go to no agent (#1061)
         whose = ("asked for" if (routed.get("said") or "").startswith("asked for")
-                 else f"the {routed.get('role') or _role(a)} role's model")
+                 else f"the {routed.get('role') or _role(a)} role's "
+                 + ("fallback" if routed.get("fallback") else "model"))  # #1196
         notes.append(privacy.where_note(info, rules, named, whose))
     if gap := context.api_hidden_note(store.Task(task_name)):  # none with no lane (#1156)
         notes.append(gap)
@@ -1425,7 +1461,17 @@ def cmd_start(a):
     # One 503 any task saw blocked every start of the role for 60 s, --queue and --force too, and
     # told Claude to ask the user to put the role on the GPU (#1088, 2026-11-23)
     held_up = m.kind == "api" and not state["available"] and state["why"].startswith(TRANSIENT)
-    # an API role's model: no fallback, and --force (a --model's) never starts it anyway: the task
+    # the role's fallback, the user's own (#1196): a provider out of credit, rate-limited or
+    # unreachable starts it there instead, so an overnight --queue backlog drains
+    fell = ""
+    if not state["available"] and isinstance(moved := _fallback_start(
+            role, size, a, repo, _package(repo, Path(a.repo).resolve(), a.base), stack, m, routed, first), tuple):
+        fell = f"{m.id}: {state['why']}: {routes.FALLBACK_LINE} ({moved[0].id})"
+        m, state, why, routed = moved
+        held_up = False
+    elif not state["available"] and moved:
+        print(f"note: {moved}")
+    # an API role's model: no fallback but the user's (above), and --force (a --model's) never starts it anyway: the task
     # went on to fail in the runner, the user never asked (#1016's review)
     if not state["available"] and not held_up and (line := _role_cant_run(m, state, routed)):
         die(line, 3)
@@ -1637,6 +1683,7 @@ def cmd_start(a):
     print(routes.model_line(m.id, routed) + meter.tail(m) if api else f"model: {why}" if why != "asked for"
           else f"model: {m.id} (asked for)")
     _say(routes.BUSY_LINE if routed.get("busy") else "")
+    _say(fell)  # on the role's fallback (#1196): what held its API model
     for note in _api_notes(a.name, repo, m, a, routed) if api else ():  # #1016, #1021
         print(f"note: {note}")
     print(f"slice: {router.slice(m).line()}")
@@ -3258,6 +3305,10 @@ def _route_show(as_json: bool) -> None:
             bits.append(f"set by {'Claude' if by == 'claude' else 'you'} {time.strftime('%m-%d', time.localtime(ts))}")
         if row["via"] == "api" and not gone and (p := _prices_of(models.lookup(row["api"]), ahead=True)):
             bits.append(p)  # whose prices its dollars are at: the catalog's, an estimate, or yours (#1135)
+        if fb := row.get("fallback"):  # #1196: where its code goes when its provider is down or out of credit
+            bits.append(f"fallback {routes.fallback_name(fb, row['gpu'])}" + (
+                f" ({_who(fb)})" if fb != routes.FALLBACK_GPU else "")
+                + (" (not used while Agents is API)" if routes.fallback_of(doc, r) is None else ""))
         print(f"{r:<{width}}" + " · ".join(bits))
     if doc["day_usd"] is not None:
         print(f"day cap {routes.money(doc['day_usd'])}")
@@ -3373,11 +3424,13 @@ def cmd_route(a):
     if what is None:
         if any(v is not None for v in (target, a.gpu, a.api, a.thinking, a.day_usd, a.order)):
             die("name a role: wb route <role> gpu|api|<provider/model>, wb route all gpu|api|both, wb route cap <usd>, "
-                "or wb route busy wait|api")
+                "wb route busy wait|api, or wb route <role> fallback <provider/model>|gpu|none")
         if a.dry_run:
             print(json.dumps({"change": "", "gate": False}) if a.json else "")
             return
         return _route_show(a.json)
+    if what in routes.ROLES and target == "fallback":
+        return _route_fallback(a)
     if a.more:
         return _route_pairs(a)
     role, via, api, gpu, day, use = None, None, a.api, a.gpu, a.day_usd, None
@@ -3450,6 +3503,28 @@ def cmd_route(a):
     _route_apply(a, argv, changed)
 
 
+def _route_fallback(a) -> None:
+    """`wb route <role> fallback <id>|gpu|none` (#1196): the role's fallback, where a task of the
+    role on its API model goes when that provider is out of credit, rate-limited or unreachable
+    (at wb start, and once mid-task). An API id is checked as a role's model is (_route_api) and
+    takes the dialog's yes and a day cap; gpu (the role's GPU side) and none take neither."""
+    role = a.what
+    if len(a.more) != 1 or a.gpu or a.api or a.thinking or a.order is not None or a.day_usd is not None:
+        die(f"wb route {role} fallback <provider/model>|gpu|none: one choice, in a wb route of its own")
+    fb = a.more[0]
+    if fb not in (routes.FALLBACK_GPU, routes.FALLBACK_OFF):
+        fb = _route_api(fb, role).id
+    argv = ["route", role, "fallback", fb]
+
+    def changed(doc) -> routes.Change:
+        try:
+            return routes.change(doc, role, fallback=fb, who=_who)
+        except routes.RoutesError as e:
+            die(str(e), 3)
+
+    _route_apply(a, argv, changed)
+
+
 def _order_check(doc: dict, new: dict) -> None:
     """An OpenRouter model run without its backends (#1021): exit 3, no dialog, for a role a
     change newly sends there, on its own side or the Agents switch, or by the busy opt-in (#1023:
@@ -3468,9 +3543,10 @@ def _route_pairs(a) -> None:
     change, so the first run's one question is one dialog. A choice is gpu, api or an API model's
     exact id. All or nothing: any pair wb refuses (an id not in the catalog, a key wb can't hold, a
     role named twice) exits 3 naming it, before anything is written."""
-    if a.gpu or a.api or a.thinking or a.order is not None or a.start is not None or a.what in ("all", "cap", "busy"):
+    if a.gpu or a.api or a.thinking or a.order is not None or a.start is not None or a.what in ("all", "cap", "busy") \
+            or "fallback" in a.more:
         die("several roles take a choice each (gpu, api or an API model's exact id) and --day-usd; "
-            "--gpu, --api, --thinking, --order, all, cap and busy go in a wb route of their own")
+            "--gpu, --api, --thinking, --order, all, cap, busy and fallback go in a wb route of their own")
     words = [a.what, a.target, *a.more]
     if len(words) % 2:
         die(f"{words[-1]} has no choice: wb route <role> gpu|api|<provider/model> <role> …")
@@ -7722,10 +7798,12 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("what", nargs="?", metavar="role|all|cap|busy",
                    help="significant, trivial, writing; all (the Agents switch); cap (the day cap); busy "
                    "(when the GPU is busy)")
-    s.add_argument("target", nargs="?", metavar="gpu|api|both|wait|<provider/model>|<usd>",
+    s.add_argument("target", nargs="?", metavar="gpu|api|both|wait|fallback|<provider/model>|<usd>",
                    help="a role: gpu or api flips its selector, an API model's exact id sets it and goes to "
-                   "API; all: gpu, api or both (each role as set); cap: the day cap in dollars; busy: wait "
-                   "(the default) or api (a role with an API model starts on it while the GPU is busy)")
+                   "API, fallback <provider/model>|gpu|none sets where its tasks go when its API model's "
+                   "provider is down or out of credit (#1196); all: gpu, api or both (each role as set); cap: "
+                   "the day cap in dollars; busy: wait (the default) or api (a role with an API model starts "
+                   "on it while the GPU is busy)")
     s.add_argument("more", nargs="*", metavar="<role> <choice>",
                    help="more roles in the same change, one dialog (#1024): wb route trivial <id> "
                    "significant <id> --day-usd 5")

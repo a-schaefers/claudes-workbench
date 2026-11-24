@@ -229,9 +229,13 @@ key to add with /connect, an exact id). The user's **Agents** switch (`wb route 
 gpu|api|both`) puts every role on one side, or Both: each role as set. A role that can't run
 (no key, no GPU model, Agents on API with no API model for it) exits 3 with one line of choices:
 there is no fallback, so ask the user and never retry with another `--role` or `--model` to dodge it.
-The one exception is theirs: with **When the GPU is busy** set to the role's API model (`wb route busy
+The exceptions are theirs: with **When the GPU is busy** set to the role's API model (`wb route busy
 api`), a start that would wait for the GPU runs on the role's API model, and its output says `GPU busy:
-on the role's API model, as you set`. The user can set all of this in the pane's Settings tab
+on the role's API model, as you set`; and a role's **fallback** (`wb route <role> fallback
+<provider/model>|gpu|none`) takes a task whose API model's provider is out of credit, rate-limited or
+down, at the start or once mid-task (`on the role's fallback, as you set`; the report's `fallback:`
+line). Never set a fallback yourself: recommend one (another provider's model, or `gpu`) when a
+provider's stops keep the user's tasks waiting, and run it only when they ask. The user can set all of this in the pane's Settings tab
 (Shared, GPU, API): point them there rather than offering to run `wb route` yourself.
 Which sizes a model takes is set with `wb model sizes <id> trivial|significant`: set it when you
 add a model you judge fit only for small work, and otherwise change it only when the user asks.

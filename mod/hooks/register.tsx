@@ -1738,11 +1738,13 @@ export function routesSummary(doc: Row): string {
     // an OpenRouter role's backends (routes.json `order`): where its code goes, so a change of them
     // alone is a row too; it reached the conversation as nothing (#1126, 2026-11-23)
     const backends = row.api && Array.isArray(row.order) && row.order.length ? `, backends ${row.order.join(', ')}` : ''
-    if (row.via === 'api') return `${r} API ${row.api}${backends}, thinking ${thinking}`
+    // the role's fallback (routes.json `fallback`, #1196): where its code may go too, so a change of it alone is a row
+    const fallback = typeof row.fallback === 'string' && row.fallback ? `, fallback ${row.fallback === 'gpu' ? 'GPU' : row.fallback}` : ''
+    if (row.via === 'api') return `${r} API ${row.api}${backends}, thinking ${thinking}${fallback}`
     let text = `${r} GPU ${gpu === 'auto' ? '(the router picks)' : gpu}`
     if (row.api) text += `, API kept: ${row.api}${backends}`
     if (thinking === 'on') text += ', thinking on'
-    return text
+    return text + fallback
   })
   // the Agents switch (#1016): routes.json `use`, over each role's own while it isn't Both
   const use = doc.use === 'gpu' ? 'GPU' : doc.use === 'api' ? 'API' : ''
@@ -1763,7 +1765,8 @@ function routesValid(doc: unknown): doc is Row {
   return Object.entries(d.roles as Row).every(([r, row]: [string, any]) => (ROLES as readonly string[]).includes(r) &&
     row && typeof row === 'object' && [undefined, 'gpu', 'api'].includes(row.via) &&
     [undefined, 'off', 'on'].includes(row.thinking) && (row.via !== 'api' || (typeof row.api === 'string' && !!row.api)) &&
-    (row.order == null || (Array.isArray(row.order) && row.order.every((b: unknown) => typeof b === 'string' && !!b.trim()))))
+    (row.order == null || (Array.isArray(row.order) && row.order.every((b: unknown) => typeof b === 'string' && !!b.trim()))) &&
+    (row.fallback == null || (typeof row.fallback === 'string' && !!row.fallback.trim() && row.fallback !== 'none')))
 }
 
 // What the conversation is told of the roles: `said`, their summary and the day cap ('. Day cap
@@ -1784,7 +1787,7 @@ async function readRoutes($: any): Promise<Routes> {
   const rows = Object.values((doc.roles ?? {}) as Record<string, Row>)
   const cap = typeof doc.day_usd === 'number' ? doc.day_usd : null
   const plain = cap === null && (doc.use ?? 'both') === 'both' && (doc.busy ?? 'wait') === 'wait' && rows.every(r => (r.via ?? 'gpu') === 'gpu' && (r.gpu ?? 'auto') === 'auto' &&
-    !r.api && (r.thinking ?? 'off') === 'off')
+    !r.api && (r.thinking ?? 'off') === 'off' && !r.fallback)
   return { said: plain ? '' : routesSummary(doc) + (cap !== null ? `. Day cap ${money(cap)}` : ''), api: rows.some(r => !!r.api), cap }
 }
 const DEFAULT_ROUTES = routesSummary({})

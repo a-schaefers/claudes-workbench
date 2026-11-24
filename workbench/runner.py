@@ -3364,6 +3364,10 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     if full:
         lines.append("reading: " + full[-1]["text"])
     lines += backend_lines(task, n)  # #1021
+    if isinstance(mv := st.get("fallback_moved"), dict):  # #1196: whose model finished it, and why
+        lines.append(f"fallback: in round {mv.get('round')} {mv.get('from')} stopped ({mv.get('why')}), so "
+                     f"the task moved to the {spec.get('role')} role's fallback {mv.get('to')} (the user's, wb "
+                     "route), in a fresh session")
     if st.get("claude_rules_gone") == n:  # #1119
         lines.append(RULES_GONE.format(claude=privacy.home_path(context.claude_home()),
                                        mine=privacy.home_path(context.user_agents_md())))
@@ -3716,7 +3720,8 @@ def _start_fresh(task: store.Task, n: int, why: str) -> None:
                     context=None, skills_told=None)  # a new session hears the skills again
     if again and not st.get("session"):  # no session was replaced: the handover is counted once
         return
-    task.event({"ts": store.now(), "round": n, "kind": "fresh", "overflow": why != ASKED_FRESH,
+    task.event({"ts": store.now(), "round": n, "kind": "fresh",
+                "overflow": why != ASKED_FRESH and not why.startswith(FALLBACK_SAID),  # #1196
                 "compacted": why in (COMPACTED, COMPACTION_FAILED),  # results.step (#969)
                 "text": f"{FRESH_SAID}{why}"})
 
@@ -4233,6 +4238,98 @@ def provider_remedy(task: store.Task, guard: str, said: str = "") -> str:
             + (f"; or wb route {role} gpu (the user's yes) for the next tasks" if role else ""))
 
 
+# The role's fallback (#1196): a round its provider stopped as out of credit, or held again after
+# its one revive, moves the task to the fallback the user set in wb route (routes.fallback_pick),
+# once and never back. The keyhole is started again for the fallback, which it serves alone, the
+# catalog written again, task.json moved (every reader of `model`, `via` and `provider` agrees, and
+# results credit the model that finished), and the round runs again in a fresh session: the
+# window, catalog and variants differ, so the session never carries over.
+FALLBACK_STOPS = ("quota", *HELD)
+FALLBACK_SAID = "the task moved to its role's fallback"  # the handoff's why, and never an overflow
+# task.json's keys of the model it ran on, which the fallback's replace or drop
+MODEL_KEYS = ("provider", "provider_name", "thinking", "thinking_shown", "thinking_off", "said", "said_ts",
+              "order", "busy", "weights_id")
+
+
+def _fallback_move(task: store.Task, n: int, rnd: dict) -> models.Model | None:
+    """Round n stopped by its provider (FALLBACK_STOPS): the task moved to its role's fallback,
+    that model returned for drive's next lease, or None (no fallback applies, it can't take the
+    task now, or its keyhole can't start: the stop stands, a `fallback` event saying why). Only a
+    task on its role's own API model (never a --model one, a busy-routed one, or one moved
+    already)."""
+    from types import SimpleNamespace
+
+    from . import router, routes
+    spec = task.spec
+    role = spec.get("role")
+    if spec.get("fallback") or spec.get("via") != "api" or spec.get("busy") or role not in routes.ROLES \
+            or (spec.get("said") or "").startswith("asked for"):
+        return None
+    try:
+        doc = routes.read()
+    except routes.RoutesError:
+        return None
+    if not routes.fallback_of(doc, role):
+        return None
+    repo, sub = Path(spec.get("repo") or "."), spec.get("subdir")
+    local = ("this task is kept local (--local-only)" if spec.get("local_only") else
+             f"{repo.name} is kept local ({kept})" if (kept := privacy.local_only(repo, sub)) else "")
+    primary = SimpleNamespace(id=spec["model"], provider=provider_of(task))
+    try:
+        tokens = first_tokens(task, fresh=True)
+    except Exception:  # an estimate: the fresh session's least
+        tokens = None
+    got = routes.fallback_pick(doc, role, spec.get("size") or "significant", spec.get("stack") or [],
+                               task.name, primary, tokens, local)
+
+    def stays(why: str) -> None:
+        task.event({"ts": store.now(), "round": n, "kind": "fallback", "moved": False,
+                    "text": f"{why}: the provider's stop stands"})
+    if not isinstance(got, tuple):
+        if got:
+            stays(got)
+        return None
+    fm, _, why, routed = got
+    limits = router.budgets(fm, models.identity(fm))
+    given = set(spec.get("timeouts_given") or [])
+    new = with_thinking(fm, {
+        **{k: v for k, v in spec.items() if k not in MODEL_KEYS},
+        "model": fm.id, "model_label": models.task_label(fm), "opencode_model": fm.id, "route": why,
+        **{k: v for k, v in routed.items() if v is not None},
+        **({"weights_id": w} if (w := models.identity(fm)) else {}),
+        # the fallback's own budgets, but those Claude gave (wb start's)
+        **{f"{k}_timeout": limits[k] for k in ("round", "silence", "think") if k not in given}})
+    store.write_json(task.dir / "task.json", new)
+    held = meter._METERS.pop(str(task.dir), None)
+    kh = None
+    if fm.kind == "api" and needs_keyhole(fm):
+        try:
+            kh = start_keyhole(task, fm)  # it serves the fallback alone: never the pair
+        except keyhole.KeyholeError as e:
+            store.write_json(task.dir / "task.json", spec)  # back as it was: the stop stands
+            meter._METERS[str(task.dir)] = held
+            stays(f"the {role} role's fallback {fm.id} can't start: {keyhole_failure(e)}")
+            return None
+    if old := CURRENT.pop("keyhole", None):
+        old.close()
+    if kh is not None:
+        CURRENT["keyhole"] = kh
+    write_catalog(task)  # the fallback's alone, or none on the GPU
+    meter.for_task(task, fm)  # its meter: the ledger is the task's, whatever the model
+    pin_api(task, fm)
+    CURRENT["api"] = fm.kind == "api"
+    CURRENT["remote"] = fm.remote and fm.kind != "api"
+    moved = {"round": n, "from": spec["model"], "to": fm.id, "why": str(rnd.get("stuck") or rnd.get("guard"))}
+    task.event({"ts": store.now(), "round": n, "kind": "fallback", "moved": True, "from": spec["model"],
+                "to": fm.id, "text": f"{spec['model']}: {moved['why']}: moved to the {role} role's fallback "
+                                     f"{fm.id}, in a fresh session (it never moves back)"})
+    task.set_status(fallback_moved=moved, api_stop=None, ratelimit_until=None, ratelimit=None,
+                    remote_gpu=True if CURRENT["remote"] else None,
+                    last=f"{routes.FALLBACK_LINE}: {fm.id}")
+    _start_fresh(task, n, f"{FALLBACK_SAID}, {fm.id}, as {spec['model']}'s provider stopped")
+    return fm
+
+
 def _provider_revive(task: store.Task, n: int, rnd: dict, lease) -> bool:
     """Round n stopped by its provider's rate limit or outage, the first time: wait out the
     provider's cooldown (api-health.json's `until`, else RATE_LIMIT_SECS; at most RATE_WAIT_S),
@@ -4453,6 +4550,15 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
         # before the lease: it needs no GPU, and a probe that hangs (20 s a file) held it from the
         # other tasks, the model already loaded (review, 2026-11-21)
         add_outline(task)
+    # a move to the role's fallback (#1196) runs on under the fallback's own lease
+    while isinstance(m, models.Model):
+        m = _leased(task, m, say)
+
+
+def _leased(task: store.Task, m: models.Model, say):
+    """The task's rounds on ``m`` under its lease, to the task's end; the role's fallback (a
+    models.Model, its keyhole serving and task.json moved to it: _fallback_move) when its provider
+    stopped a round and the task moves on there, under a lease of its own."""
     # beside the running tasks' models when all fit the GPU, else alone once they finish; an API
     # model takes one of its provider's slots instead, and nothing of the GPU (#1015)
     with models.lease_for(m, task.name, say) as lease:
@@ -4548,6 +4654,10 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 if not _go_on(task, n, "the round again"):  # the day cap holds here too (#1019)
                     return
                 continue
+            # held again after its one revive, or out of credit: on to the role's fallback, once,
+            # never back, when the user set one (#1196); else the provider's stop, as before
+            if rnd["guard"] in FALLBACK_STOPS and (fb := _fallback_move(task, n, rnd)) is not None:
+                return fb if _go_on(task, n, "the round on the role's fallback") else None
             crashed = not rnd["stuck"] and rnd["exit"] not in (0, None)
             hushed = rnd["guard"] == "silence"  # OpenCode retrying a server that is gone
             if (crashed or hushed) and revived != n and ((down := _down(m)) or _stopped(m)):
