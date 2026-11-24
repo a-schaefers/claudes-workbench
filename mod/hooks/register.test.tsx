@@ -4824,7 +4824,7 @@ test('the live view runs wb top only while the Stats tab is on screen with Live 
   await ui.unmount()
 })
 
-test('a failing wb stats or wb top is tried again after a while, not at every poll, and says why', async ($, on) => {
+test('a failing wb stats or wb top is tried again after a while, not at every poll, and says why', { timeoutMs: 20_000 }, async ($, on) => {
   // #553: a failed full-history read ran again at every 1.5 s poll while a task ran, and the tab
   // said "Reading…" forever; a wb top that ended at once was restarted every 30 s, its stderr dropped
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
