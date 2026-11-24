@@ -269,6 +269,12 @@ def write_config_layer(task: store.Task) -> Path:
     context and its rules (the user's own OPENCODE_CONFIG_CONTENT permissions, USERS_RULES,
     before them: rules_env), and the ask_reviewer server."""
     path = context.rules_dir(task) / "opencode.json"
+    rules = context.rules_dir(task)
+    if (rules / "CLAUDE.md").is_file() or (rules / "user-rules").is_dir():
+        # an earlier wb's copy of Claude's global files, which context.layer now deletes (#1061):
+        # this round's report says so, as nothing told an updating user or a task already open
+        # that its agent had lost them (#1119, 2026-11-23)
+        task.set_status(claude_rules_gone=task.status.get("round", 1))
     mine = context.layer(task)
     users = models.users_config_content()
     theirs = users.get("permissions")
@@ -2983,6 +2989,13 @@ def _spend_part(task: store.Task) -> str:
     return f" · {usd(v)} so far" if v is not None else " · cost unknown"
 
 
+# The round report's line for a task whose agent had a copy of Claude's global files until this
+# round (status `claude_rules_gone`, write_config_layer; #1119)
+RULES_GONE = ("note: until this round this task's agent read {claude}/CLAUDE.md and {claude}/rules/; "
+              "agents get none of Claude's files now. What it must still follow goes in your feedback; "
+              "for every task, the user puts it in {mine}: tell them")
+
+
 def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     """The compact report Claude reads; kept short on purpose, the diff is fetched separately."""
     spec, st = task.spec, task.status
@@ -3007,6 +3020,9 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     if full:
         lines.append("reading: " + full[-1]["text"])
     lines += backend_lines(task, n)  # #1021
+    if st.get("claude_rules_gone") == n:  # #1119
+        lines.append(RULES_GONE.format(claude=privacy.home_path(context.claude_home()),
+                                       mine=privacy.home_path(context.user_agents_md())))
     if rnd["stuck"]:
         lines.append(f"STOPPED: {rnd['stuck']}")
         if rnd.get("guard") in PROVIDER_GUARDS:

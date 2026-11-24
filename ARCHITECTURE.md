@@ -1124,7 +1124,10 @@ An API provider's header wait is 600 s instead (`API_HEADER_S`, *An API task's w
   written to Claude, they named private tools and paths, and with 2.0 they left the machine with
   every API task (2026-11-23: the owner's, naming a private tool's folder, went to two providers
   with every calibration task; #1061). The copies an earlier wb made (`rules/<task>/CLAUDE.md`,
-  `user-rules/`) are deleted. #673's aim (Claude never reviews against a rule the agent never saw)
+  `user-rules/`) are deleted, and that round's report says so (`runner.RULES_GONE`: `note: until
+  this round this task's agent read ~/.claude/CLAUDE.md and ~/.claude/rules/; …`, status
+  `claude_rules_gone`, #1119): wb update runs the code it replaces, so it can't say it to a user
+  updating across #1061, and the task's spec assumed the agent saw them. #673's aim (Claude never reviews against a rule the agent never saw)
   is now the skill's: such a rule goes in the spec, and one bearing on code Claude offers to add to
   this file. OpenCode would read `~/.claude/CLAUDE.md` itself, a global instruction beside
   `~/.config/opencode/AGENTS.md`, which only the lane's `SECRETS` kept out: with no lane (macOS,
@@ -5626,6 +5629,7 @@ off), not `wb start`'s.
 | `closing` | `wb accept` after its commit: `{commit, step, merge, merge_into, merge_as, sign, merge_from?, merged_head?}`, with `tip`; `sign` false keeps a retry's merge unsigned; a retry uses that object and destination (`gitops.squashed` from `merge_from`), a recovered refusal still exits 5 (#246, #432); while it stands, discard, feedback, next, resume, takeover refuse (`cli._accepting`) |
 | `grants_kept` | `{allow, paths}` at close, for `context.grants` afterwards (`wb bench add`) |
 | `session`, `sessions`, `session_mark`, `session_floor` | the session; earlier ones; `gitops.mark` at its start; context read at its first change |
+| `claude_rules_gone` | the round whose layer deleted an earlier wb's copy of Claude's global files (`runner.write_config_layer`, #1119): that round's report adds `runner.RULES_GONE` |
 | `opencode_home` | `true` once a round ran in the task's own OpenCode home (`run_round`, #1010); a `session` without it began in the user's store, and the next round starts fresh (`fresh_reason`: `OLD_STORE`, the old session's last words exported from there) |
 | `context` | one-round instruction: `fresh`, `keep`, `full` |
 | `full_pct`, `handovers`, `full_compacted`, `full_compact_failed` | fill at the last mid-round handover; count; compacted first, or failed to |

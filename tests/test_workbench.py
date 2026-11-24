@@ -7215,6 +7215,25 @@ class AgentContext(Base):
         self.assertFalse((rules / "AGENTS.md").exists())
         self.assertEqual(files[1:], [self.repo / "CLAUDE.md"])        # the project's alone
 
+    def test_the_round_that_drops_an_earlier_wbs_copy_of_claudes_files_says_so_in_its_report(self):
+        # #1119 (audit 1 of 2.0): an open task updated across #1061 lost ~/.claude/CLAUDE.md at
+        # its next round, and nothing said so: wb update runs the code it replaces
+        self.start("t-gone", "ok")
+        wait_phase("t-gone", {"review"})
+        task = store.Task("t-gone")
+        self.assertNotIn("note: until this round", task.round_dir(1).joinpath("summary.md").read_text())
+        (context.rules_dir(task) / "CLAUDE.md").write_text("use uv\n")   # 1.91's copy
+        for n in (2, 3):
+            run_wb("feedback", "t-gone", "--text", "1. again")
+            wait_phase("t-gone", {"review"})
+            said = task.round_dir(n).joinpath("summary.md").read_text()
+            if n == 2:
+                self.assertIn("note: until this round this task's agent read ", said)
+                self.assertIn("/CLAUDE.md and ", said)
+                self.assertFalse((context.rules_dir(task) / "CLAUDE.md").exists())
+            else:                                                          # said once
+                self.assertNotIn("note: until this round", said)
+
     def test_rules_a_link_brings_into_the_projects_rules_reach_the_agent(self):
         # #828 (the second 2026-11-21 audit): Claude Code documents links in .claude/rules for
         # sharing rules, but rglob followed no directory link, a committed directory link listed
