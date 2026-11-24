@@ -4877,6 +4877,30 @@ class Context(Base):
         self.assertIn("RENAME foo TO bar", now)
         self.assertEqual(now.count("Use v2."), 1)
 
+    def test_the_carry_on_after_an_infra_stop_still_hands_on_the_feedback_it_interrupted(self):
+        # #1169 (the 2.0 bar loop, 2026-11-24): the "carry on" a provider's stop notice advises is
+        # written under FEEDBACK_HEAD, and round_asks stopped there, so a later fresh session,
+        # handover or wb resume was told only "carry on" and reported done without the feedback
+        self.start("t-1169", "ok", "--test", TEST_CMD)
+        wait_phase("t-1169", {"review"})
+        t = store.Task("t-1169")
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", "t-1169", "--text", "1. RENAME foo TO bar in x.py")
+            t.set_status(phase="stuck", infra="provider")      # round 2 stopped by its provider
+            self.assertIn("no review round is counted", run_wb("feedback", "t-1169", "--text", "carry on"))
+        asks = runner.round_asks(t, 3)
+        self.assertEqual(len(asks), 2, asks)
+        self.assertIn("RENAME foo TO bar", asks[0])
+        self.assertTrue(asks[1].endswith("carry on"), asks[1])
+        runner._start_fresh(t, 3, "the last session was 70% full")
+        now = t.round_dir(3).joinpath("prompt.md").read_text().split("## Now")[1]
+        self.assertIn("RENAME foo TO bar", now)
+        self.assertIn("carry on", now)
+        t.set_status(phase="stuck")                               # and stopped again: wb resume
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("resume", "t-1169")
+        self.assertIn("RENAME foo TO bar", t.round_dir(4).joinpath("prompt.md").read_text())
+
     def test_a_step_that_keeps_filling_up_is_stopped_after_a_few_handovers(self):
         # A session that changed a file early and then filled up reading handed over again and
         # again, for hours, with Claude told nothing (the 2026-11-16 audit).
