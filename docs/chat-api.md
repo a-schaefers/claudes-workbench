@@ -4,7 +4,10 @@
 it serves (`workbench/chat_static/`) is one client of it; another agent with a token of its own is
 another. No browser is needed: the server runs headless, and everything below works with curl.
 
-This page is the reference for both. The internals are in ARCHITECTURE.md, *The web chat*.
+This page is the reference for both. The same API, machine-readable, is `docs/chat-api.yaml`
+beside it (OpenAPI 3.1: the `/api/v1/` paths, bearer auth, the one error schema, the
+`Idempotency-Key`), for a tool that builds a client from one; a test keeps its paths exactly the
+routes the server serves. The internals are in ARCHITECTURE.md, *The web chat*.
 
 **Handing it to another agent:** make it a token (`wb chat token add my-agent`) and point it at
 `skill/agents/claude-workbench/` in this repository. That directory is a portable skill (the
@@ -200,20 +203,23 @@ library only, started by the agent's MCP client. It reads the same `CLAUDE_WB_UR
 `CLAUDE_WB_TOKEN` as `ask_claude.py`, from its environment.
 
 It is for the user's own agents on this machine, talking to the user's own Claude Code session.
-It listens on nothing but stdio. It refuses a `CLAUDE_WB_URL` whose host isn't this machine's
+It calls only the `/api/v1/` paths, so it needs a chat from workbench 2.1 or later (an older one
+is said so, nothing sent). It listens on nothing but stdio. It refuses a `CLAUDE_WB_URL` whose host isn't this machine's
 (`localhost`, `127.*`, `::1`): every tool says so, and nothing is sent. It follows no redirect.
 
-- **`ask_claude {text, key?}`**: checks `/api/health` (not listening: refused, nothing sent), sends
-  the request and returns its id at once. `key` (optional, 1 to 64 of `A-Z a-z 0-9 . _ : -`; a new
-  one per call by default) goes as the send's `cid` and its `Idempotency-Key` header, so a retry
-  under the same key lands once. A send cut off by a restart is sent again under it.
+- **`ask_claude {text, key?}`**: checks `/api/v1/health` (not listening: refused, nothing sent),
+  sends the request and returns its id at once. `key` (optional, 1 to 64 of `A-Z a-z 0-9 . _ :
+  -`; a new one per call by default) goes as the send's `cid` and its `Idempotency-Key` header, so
+  a retry under the same key lands once: it answers `replayed: true` and says it was not sent
+  again. A send cut off by a restart is sent again under it. The same key on another request is
+  refused (`idempotency_key_reused`), nothing sent.
 - **`get_reply {id, wait?}`**: Claude's replies to that request and its status:
   - `done`: the turn that took it has ended. A later report can still come (its reply says so);
     `get_reply` shows it then.
   - `still working`.
   - `waiting on the user`: paused on the user's yes, not stuck.
   - `queued`: no session listens yet.
-  - `expired`: unread past 6 hours, never passed on.
+  - `expired`: unread past 6 hours, never passed on (the chat's `410 expired`).
 
   It holds up to `wait` seconds (default 20, at most 300) for the turn to end.
 - **`list_requests {}`**: the agent's 20 newest requests, how far each got, and whether Claude

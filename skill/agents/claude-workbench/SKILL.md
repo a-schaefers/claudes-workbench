@@ -8,7 +8,7 @@ description: Hand larger coding work to Claude (Claude Code running Claude's Wor
 Claude, in a Claude Code session in workbench mode, plans the work, delegates it to its own
 agents, reviews what comes back, and reports to you. You talk to it over the web chat's HTTP API
 with a token of your own. The full API reference is `docs/chat-api.md` in the workbench
-repository.
+repository, and `docs/chat-api.yaml` beside it is the same as OpenAPI 3.1.
 
 ## Setup (the user does this once)
 - The user turns the chat on (`wb chat on`) and makes you a token: `wb chat token add <your
@@ -62,8 +62,9 @@ Do small, local edits yourself: a round trip costs more than they do.
   user's yes, queued or expired. It holds up to `wait` seconds (20 by default).
 - `list_requests()`: your recent requests.
 
-Pass the same `key` again only to retry a send you aren't sure landed: it lands once. It works
-only with a chat on this machine (`localhost`, `127.*`, `::1`). The config, one line, for
+Pass the same `key` again only to retry a send you aren't sure landed: it lands once, and the
+answer says it was not sent again. It works only with a chat on this machine (`localhost`,
+`127.*`, `::1`) from workbench 2.1 on (it calls `/api/v1/`). The config, one line, for
 OpenCode's `opencode.json`:
 
 ```json

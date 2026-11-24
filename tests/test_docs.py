@@ -4,6 +4,8 @@ What a test can see is checked here: every command and flag is in ARCHITECTURE.m
 reference, every module in CLAUDE.md's layout, every environment variable in CLAUDE.md. What it
 can't (a default, a behaviour) is CLAUDE.md's rule: the commit that changes it updates the docs."""
 import argparse
+import ast
+import json
 import re
 import sys
 import unittest
@@ -52,6 +54,74 @@ def section(text: str, heading: str) -> str:
     start = text.index(heading)
     end = text.find("\n## ", start + len(heading))
     return text[start:end if end > 0 else None]
+
+
+# A key, then ": value" or nothing (a block follows): a key is plain or double-quoted, never ":"
+_KEY = re.compile(r'("(?:[^"\\]|\\.)*"|[^\s"\[{#-][^:]*?|-[^\s:][^:]*?):(?: (.*))?')
+
+
+def read_yaml(text: str):
+    """docs/chat-api.yaml as data, without PyYAML (standard library only): the subset its header
+    names, block mappings and lists, one-line scalars, flow lists, {} and folded ">-" blocks. A
+    line outside it fails here rather than reading as something else (#1138)."""
+    lines = [(len(raw) - len(raw.lstrip(" ")), raw.strip()) for raw in text.splitlines()
+             if raw.strip() and not raw.strip().startswith("#")]
+
+    def scalar(v: str):
+        if v.startswith('"'):
+            return json.loads(v)
+        if v.startswith("["):
+            items = re.findall(r'"(?:[^"\\]|\\.)*"|[^,\s][^,]*', v[1:-1])
+            return [scalar(x.strip()) for x in items]
+        if v.startswith(("{", "'", "|", "&", "*", "!")) and v != "{}":
+            raise ValueError(f"outside the subset: {v}")
+        return ({} if v == "{}" else {"true": True, "false": False, "null": None}.get(v, v)
+                if not re.fullmatch(r"-?\d+", v) else int(v))
+
+    def block(i: int, ind: int):
+        if lines[i][1].startswith("- "):
+            out = []
+            while i < len(lines) and lines[i][0] == ind and lines[i][1].startswith("- "):
+                rest = lines[i][1][2:]
+                if _KEY.fullmatch(rest):  # "- key: value": a mapping whose keys sit 2 further in
+                    lines[i] = (ind + 2, rest)
+                    v, i = block(i, ind + 2)
+                else:
+                    v, i = scalar(rest), i + 1
+                out.append(v)
+            return out, i
+        out = {}
+        while i < len(lines) and lines[i][0] == ind:
+            m = _KEY.fullmatch(lines[i][1])
+            if not m:
+                raise ValueError(f"outside the subset: {lines[i][1]}")
+            key, v = json.loads(m[1]) if m[1].startswith('"') else m[1], m[2]
+            if key in out:
+                raise ValueError(f"{key} twice")
+            i += 1
+            if v == ">-":
+                parts = []
+                while i < len(lines) and lines[i][0] > ind:
+                    parts.append(lines[i][1])
+                    i += 1
+                out[key] = " ".join(parts)
+            elif v is None:
+                out[key], i = block(i, lines[i][0])
+            else:
+                out[key] = scalar(v)
+        if i < len(lines) and lines[i][0] > ind:
+            raise ValueError(f"indented out of place: {lines[i][1]}")
+        return out, i
+
+    got, end = block(0, 0)
+    if end != len(lines):
+        raise ValueError(f"left over: {lines[end][1]}")
+    return got
+
+
+def v1(route: str) -> str:
+    """chat.ROUTES's /api/<x> as the OpenAPI file names it: /api/v1/<x>, an id-taking one {id}."""
+    return "/api/v1/" + route[len("/api/"):] + ("{id}" if route.endswith("/") else "")
 
 
 class DocsMatchTheCode(unittest.TestCase):
@@ -176,6 +246,80 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertGreater(len(paths), 10)
         missing = sorted(p for p in paths if p not in doc)
         self.assertEqual(missing, [], "add these to docs/chat-api.md")
+
+    def test_the_openapi_file_describes_exactly_the_routes_chat_py_serves(self):
+        # #1138: docs/chat-api.yaml is what another tool reads the API from; a route chat.py
+        # serves that it lacks (or one it describes that chat.py doesn't) is a broken client.
+        # chat.ROUTES is what is served (a path off it is 404), and each route in it is a branch
+        # of its do_<method>, read from the source
+        from workbench import chat
+        spec = read_yaml((ROOT / "docs/chat-api.yaml").read_text())
+        self.assertTrue(str(spec["openapi"]).startswith("3.1"), spec["openapi"])
+        described = {(m.upper(), p) for p, item in spec["paths"].items() for m in item
+                     if m in ("get", "put", "post", "delete", "patch", "head", "options")}
+        served = {(m, v1(r)) for m, routes in chat.ROUTES.items() for r in routes}
+        self.assertEqual(sorted(described - served), [], "not served by chat.py: drop from chat-api.yaml")
+        self.assertEqual(sorted(served - described), [], "add these to docs/chat-api.yaml")
+        handler = next(n for n in ast.parse((ROOT / "workbench/chat.py").read_text()).body
+                       if isinstance(n, ast.ClassDef) and n.name == "Handler")
+        for fn in (n for n in handler.body if isinstance(n, ast.FunctionDef) and n.name.startswith("do_")):
+            branches = {n.value for n in ast.walk(fn) if isinstance(n, ast.Constant)
+                        and isinstance(n.value, str) and re.fullmatch(r"/api/[a-z]+/?", n.value)}
+            self.assertEqual(sorted(branches), sorted(chat.ROUTES[fn.name[3:]]), fn.name)
+
+    def test_the_openapi_file_is_whole_with_one_error_shape_bearer_auth_and_the_idempotency_key(self):
+        # #1138: every $ref resolves, every refusal is the one Error schema, its codes are
+        # chat.py's, what an agent may not call is marked so, and a send takes the key
+        from workbench import chat
+        spec = read_yaml((ROOT / "docs/chat-api.yaml").read_text())
+
+        def refs(node):
+            if isinstance(node, dict):
+                yield from ([node["$ref"]] if "$ref" in node else [])
+                for v in node.values():
+                    yield from refs(v)
+            elif isinstance(node, list):
+                for v in node:
+                    yield from refs(v)
+
+        def follow(ref):
+            node = spec
+            for part in ref.removeprefix("#/").split("/"):
+                node = node[part]
+            return node
+        for ref in set(refs(spec)):
+            self.assertTrue(ref.startswith("#/components/"), ref)
+            follow(ref)                                                  # a KeyError names a dangling one
+        self.assertEqual(spec["security"], [{"bearer": []}])
+        self.assertEqual(spec["components"]["securitySchemes"]["bearer"]["scheme"], "bearer")
+        error = spec["components"]["schemas"]["Error"]
+        self.assertEqual(error["required"], ["error", "code"])
+        self.assertEqual(sorted(error["properties"]["code"]["enum"]),
+                         sorted(set(chat.ERROR_CODES.values()) | set(chat.ERRORS_SAID)))
+        user_only = set()
+        for path, item in spec["paths"].items():
+            names = {p.get("name") for p in [*item.get("parameters", []), *(
+                o.get("parameters", []) for o in item.values() if isinstance(o, dict))] for p in (
+                    [follow(p["$ref"])] if isinstance(p, dict) and "$ref" in p else p if isinstance(p, list) else [p])}
+            for name in re.findall(r"{(\w+)}", path):
+                self.assertIn(name, names, path)                         # a path's id is declared
+            for method, op in ((m, o) for m, o in item.items() if m != "parameters"):
+                if op.get("x-user-only"):
+                    user_only.add((method.upper(), path))
+                for status, answer in op["responses"].items():
+                    if int(status) >= 400:
+                        answer = follow(answer["$ref"])
+                        self.assertEqual(answer["content"]["application/json"]["schema"],
+                                         {"$ref": "#/components/schemas/Error"}, (path, status))
+        self.assertEqual(sorted(user_only), sorted({("POST", v1(p)) for p in chat.AGENT_DENIED}
+                                                   | {("GET", v1(p)) for p in chat.AGENT_UNREAD}))
+        send = spec["paths"]["/api/v1/send"]["post"]
+        key = follow(send["parameters"][0]["$ref"])
+        self.assertEqual((key["name"], key["in"]), ("Idempotency-Key", "header"))
+        self.assertIn("Idempotent-Replayed", send["responses"]["200"]["headers"])
+        self.assertEqual(sorted(send["responses"]), ["200", "400", "401", "403", "409", "413", "415", "422", "429"])
+        with self.assertRaises(ValueError):                              # off the subset: said, not misread
+            read_yaml("a:\n  b: |\n    c\n")
 
     def test_every_key_of_the_users_chat_state_is_in_the_api_reference(self):
         # #1127 (2026-11-23): snapshot() gained `tasks` (#1016) and week_saved `api` (#1022), and

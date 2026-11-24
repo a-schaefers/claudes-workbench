@@ -24686,6 +24686,51 @@ class AgentMcp(Base):
         (self.chat.chat_dir() / "listener.json").unlink()
         self.assertEqual(rpc.tool("get_reply", id=old["id"], wait=5)["structuredContent"]["status"], "expired")
 
+    def test_the_mcp_server_calls_only_api_v1_lands_a_key_once_and_says_expired_on_the_chats_410(self):
+        # #1138: the MCP server spoke the unversioned /api/ and read nothing of the key's answers:
+        # a replay looked like a new send, the same key on another request was a bare "not sent",
+        # and the chat's 410 for a request unread past 6 hours was a refusal, never "expired"
+        tok = self._agent()
+        self._listening()
+        rpc = self._server(token=tok)
+        rpc("initialize", {"protocolVersion": "2025-06-18"})
+        handler, asked = self.srv.RequestHandlerClass, []
+        for name in ("do_GET", "do_POST", "do_PUT"):
+            real = getattr(handler, name)
+
+            def seen(h, real=real):  # the path as sent, before the handler reads /api/v1/ as /api/
+                asked.append(h.path.split("?")[0])
+                return real(h)
+            mock.patch.object(handler, name, seen).start()
+        self.addCleanup(mock.patch.stopall)
+        first = rpc.tool("ask_claude", text="In ~/src/app: add a --json flag.", key="k-1")
+        self.assertFalse(first["isError"], first)
+        self.assertFalse(first["structuredContent"]["replayed"])
+        again = rpc.tool("ask_claude", text="In ~/src/app: add a --json flag.", key="k-1")
+        rid = first["structuredContent"]["id"]
+        self.assertEqual((again["structuredContent"]["id"], again["structuredContent"]["replayed"]), (rid, True))
+        self.assertIn("not sent again", again["content"][0]["text"])
+        other = rpc.tool("ask_claude", text="something else", key="k-1")
+        self.assertTrue(other["isError"])
+        self.assertIn("key k-1 went with another request", other["content"][0]["text"])
+        self.assertEqual([m["id"] for m in self.chat.thread()], [rid])     # one send in all
+        self.assertEqual(rpc.tool("get_reply", id=rid, wait=0)["structuredContent"]["status"], "still working")
+        self.assertEqual(rpc.tool("list_requests")["structuredContent"]["requests"][0]["id"], rid)
+        now = store.now()
+        began = time.monotonic()
+        with mock.patch.object(store, "now", lambda: now + self.chat.MESSAGE_EXPIRE + 60):
+            r = rpc.tool("get_reply", id=rid, wait=5)
+        self.assertFalse(r["isError"], r)
+        self.assertEqual(r["structuredContent"]["status"], "expired")      # the chat's 410, said as such
+        self.assertLess(time.monotonic() - began, 4)
+        self.assertGreaterEqual(set(asked), {"/api/v1/health", "/api/v1/send", "/api/v1/wait", "/api/v1/state"})
+        self.assertEqual([p for p in asked if not p.startswith("/api/v1/")], [])
+        with mock.patch.object(handler, "_versioned", lambda h: None):   # a chat from before 2.1
+            r = rpc.tool("ask_claude", text="hello")
+        self.assertTrue(r["isError"])
+        self.assertIn("no /api/v1/", r["content"][0]["text"])
+        self.assertEqual(len(self.chat.thread()), 1)                       # nothing sent
+
     def test_get_reply_stays_done_for_a_request_answered_to_the_user_alone_without_polling_the_chat(self):
         # #1138 review: a turn that took the user's message and the agent's replies to the user
         # alone, so the request has no reply; once a later request was answered and its turn

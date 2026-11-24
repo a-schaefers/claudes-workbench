@@ -2080,6 +2080,13 @@ ERROR_CODES = {400: "bad_request", 401: "bad_token", 403: "forbidden", 404: "not
                503: "busy", 507: "disk_full"}
 ERRORS_SAID = ("token_revoked", "not_local", "unknown_host", "agent_forbidden", "bad_idempotency_key")
 API_V1 = "/api/v1/"  # every /api/<x> is also /api/v1/<x>, the same handler (#1138)
+# Every API route, by method (#1138): docs/chat-api.yaml describes exactly these, under /api/v1/,
+# and a test checks it both ways and that each is a branch of its do_<method>; a route ending in
+# "/" takes an id after it. A path off this list is 404 before anything else reads it
+ROUTES = {"GET": ("/api/health", "/api/state", "/api/stream", "/api/wait", "/api/upload/", "/api/file/",
+                  "/api/ask/", "/api/latest", "/api/shot", "/api/audio"),
+          "PUT": ("/api/upload/",),
+          "POST": ("/api/send", "/api/answer", "/api/prefs", "/api/seen", "/api/push", "/api/active")}
 REVOKED = {"error": "this agent token was revoked: ask the user for a new one (wb chat token add)",
            "code": "token_revoked"}
 
@@ -2285,6 +2292,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._versioned()
         path = self.path.split("?")[0]
+        if path.startswith("/api/") and not (path in ROUTES["GET"] or path.startswith(
+                tuple(r for r in ROUTES["GET"] if r.endswith("/")))):  # off ROUTES: none (#1138)
+            return self._json(404, {"error": "not found"})
         if self._agent_unread(path):  # the user's alone (#1042)
             return
         if path == "/manifest.webmanifest":  # with the key, it opens the installed app keyed
@@ -2462,7 +2472,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._allowed():
             return
         self._versioned()
-        if not self.path.startswith("/api/upload/"):
+        if not self.path.startswith(ROUTES["PUT"]):
             return self._json(404, {"error": "not found"})
         if not self._authed():
             return
@@ -2511,7 +2521,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._allowed():
             return
         self._versioned()
-        if self.path not in ("/api/send", "/api/answer", "/api/prefs", "/api/seen", "/api/push", "/api/active"):
+        if self.path not in ROUTES["POST"]:
             return self._json(404, {"error": "not found"})
         if not self._authed():
             return

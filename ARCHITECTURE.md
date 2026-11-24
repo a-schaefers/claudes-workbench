@@ -4824,7 +4824,7 @@ else `chat/serve.pid`, else 1337; `--port`, #349; the fragment never leaves the 
 
 **Other agents** (#1042). The API is documented for other clients in `docs/chat-api.md` (every
 endpoint, the stream, the agent flow with curl; `test_docs` fails on a path in `chat.py` it doesn't
-name), and `skill/agents/claude-workbench/` is a portable skill (agentskills.io: SKILL.md, and
+name) and, machine-readable, in `docs/chat-api.yaml` (OpenAPI 3.1, #1138: below), and `skill/agents/claude-workbench/` is a portable skill (agentskills.io: SKILL.md, and
 `scripts/ask_claude.py`, standard library only) the user points another agent at. The page is one
 client; the server needs no browser.
 - **Tokens.** `wb chat token add <name>` (`chat.agent_add`: `AGENT_NAME` `[a-z0-9-]{1,32}`, not
@@ -4883,7 +4883,16 @@ client; the server needs no browser.
 - **Versioned paths, one error shape, retry safety** (#1138, for 2.1). Every `/api/<x>` is also
   `/api/v1/<x>` (`API_V1`): `Handler._versioned` rewrites the path first in `do_GET`, `do_PUT` and
   `do_POST`, so every check after it (`AGENT_DENIED`, `AGENT_UNREAD`) sees the one name; `/api/`
-  stays for the page and older clients, and `ask_claude.py` keeps it. Every error answer is
+  stays for the page and older clients, and `ask_claude.py` keeps it. `chat.ROUTES` lists every
+  route by method (one ending in `/` takes an id): `do_GET`, `do_PUT` and `do_POST` answer 404 for
+  an `/api/` path off it before anything else reads it, and `docs/chat-api.yaml`, the OpenAPI 3.1
+  description (the `/api/v1/` paths, bearer auth, the `Error` schema and each status's response,
+  the `Idempotency-Key` parameter and `Idempotent-Replayed` header, `x-user-only` on what an agent
+  may not call), describes exactly those: `test_docs` reads it with a parser of the YAML subset it
+  is written in (`read_yaml`: no PyYAML) and fails on a route in one and not the other, a route in
+  `ROUTES` that isn't a branch of its `do_<method>` (or a branch off it), a dangling `$ref`, a
+  refusal not answered with `Error`, `Error`'s `code` enum against `ERROR_CODES` and
+  `ERRORS_SAID`, or `x-user-only` against `AGENT_DENIED` and `AGENT_UNREAD`. Every error answer is
   `{error, code, …}` (`Handler._json` adds `code` from `ERROR_CODES` by status unless the answer
   names its own: `token_revoked`, `not_local`, `unknown_host`, `agent_forbidden`,
   `bad_idempotency_key`, `ERRORS_SAID`); `error` stays the text, as `app.js` and `ask_claude.py`
@@ -4915,12 +4924,17 @@ client; the server needs no browser.
   protocol version, else `PROTOCOL` `2025-06-18`; `ping`; `tools/list`; `tools/call` on a thread
   of its own, so pings go on while one holds) for an agent that speaks MCP rather than running
   `ask_claude.py`. The same config (`CLAUDE_WB_URL`, `CLAUDE_WB_TOKEN` from its environment) and
-  `ask_claude.call`, loaded by path. Three tools, each answering text and `structuredContent`:
+  `ask_claude.call`, loaded by path. It calls only the versioned paths (`API` `/api/v1`, every
+  path below under it): it is new with them in 2.1, and a chat without them (its `/health` 404s)
+  is refused as one to update, nothing sent. Three tools, each answering text and `structuredContent`:
   - `ask_claude {text, key?}`: `GET /api/health` first (not listening: refused, nothing sent, as
     `ask_claude.py`), then `POST /api/send` with `cid` and an `Idempotency-Key` header both the
     key (`key`, `KEY` 1 to 64 of `A-Za-z0-9._:-`, or a new uuid4), sent again under it up to
-    `SEND_TRIES` 3 on a reset or 502 to 504; a 429 is refused naming `retry_after` and the key.
-    Returns `{id, key, listening}` at once.
+    `SEND_TRIES` 3 on a reset or 502 to 504; a 429 is refused naming `retry_after` and the key,
+    and `idempotency_key_reused` (422) as the key having gone with another request, nothing sent.
+    Returns `{id, key, listening, replayed}` at once (`replayed`: the chat's
+    `Idempotent-Replayed`, read through `ask_claude.call`'s `answered`: the key had sent it, and it
+    was not sent again; the text says so).
   - `get_reply {id, wait?}`: `/api/wait?after=<id>&timeout=0`, then held (`wait`, `WAIT_DEFAULT`
     20 s, at most `WAIT_MOST` 300: many clients cut a tool call at 60 s) from the last reply on
     until the turn's end, not the first reply ("On it" came first). The wait answers for the
@@ -4935,7 +4949,9 @@ client; the server needs no browser.
     tenths. Status `done`, `waiting on the user` (`waiting_on_user`), `queued` (`listener:
     null`), `expired` (no reply of its own, its row in `/api/state` says so, listener or not: the
     chat retires it either way; checked before the hold too) or `still working`, each with what
-    to do next (`NEXT`); an id outside the agent's view is refused (404).
+    to do next (`NEXT`); an id outside the agent's view is refused (404). The chat's own `410
+    expired` on the wait is `expired` too: it was a refusal, `the chat answered …`, never the
+    status (#1138, integrating the parts).
   - `list_requests {}`: the newest `LISTED` 20 of its own messages from `/api/state`, each with
     `N replies`, `received`, `queued` or `expired`, and whether Claude listens.
 
@@ -6475,7 +6491,8 @@ exit 2 naming the key, and `--key` sending the same body, upload ids included) a
 message (#1138).
 `AgentMcp` runs the agents' MCP server as a subprocess on stdio against its own
 chat server (`initialize`, `tools/list`, each tool, the loopback refusal, a redirect never followed, a request
-answered to the user alone staying done in a bounded number of waits, an expired one with a listener up), and, with
+answered to the user alone staying done in a bounded number of waits, an expired one with a listener up, every call
+on `/api/v1/` with a key's replay, its 422 and the chat's 410 each said as such, a chat without `/api/v1/` refused), and, with
 `opencode` on PATH, real OpenCode with the docs' config line, `capture_llm.py` making the tool calls (#1138).
 
 **Rate limits** (`RateLimits`, #1020): the runner in-process (`runner.drive`) on a task written as `wb start --role`
@@ -6800,6 +6817,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `chat._inbound`, `chat.AGENT_RESERVED`, `sw.js`, `makeRow`, `metaFor`, `agentMeta`, `reportSeen`, `wb chat log`, the
   mod's `unread`/`agentOf`/`chatPrompt` and `owedAtTurnEnd` (`claude` only), docs/chat-api.md.
 - **The web chat's API** (a path, a field, an error, a limit) → docs/chat-api.md (`test_docs` checks the paths;
+  a route → `chat.ROUTES` and `docs/chat-api.yaml`, which `test_docs` checks against each other and the handlers;
   an error `code`, `chat.ERROR_CODES` or `ERRORS_SAID`, → its *Errors* table, which a test checks),
   `skill/agents/claude-workbench/` (SKILL.md, `ask_claude.py`, `mcp_server.py`); a change that breaks a client → `chat.API_VERSION` and
   the doc's *Versions*. **What an agent token may do** → `chat.AGENT_DENIED`, the doc, the agents' skill. **What an

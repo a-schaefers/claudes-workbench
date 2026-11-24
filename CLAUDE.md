@@ -92,7 +92,7 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   the consent gates on sends to upstream and on the roles; `plugin.json` has no version, so installs track main).
   `bin/`: the launchers. `tests/`: ARCHITECTURE.md's *The tests*. `.github/`, `scripts/`: CI and `ship.sh` (*Shipping to main*).
   `systemd/`, `launchd/`: keep the chat up. `docs/`: images (a replaced one gets a new name, for
-  GitHub's cache), the release checklist and notes, `chat-api.md` (the chat's HTTP API).
+  GitHub's cache), the release checklist and notes, `chat-api.md` (the chat's HTTP API; `chat-api.yaml`, its OpenAPI).
 
 ## How a task runs
 Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change must not break:

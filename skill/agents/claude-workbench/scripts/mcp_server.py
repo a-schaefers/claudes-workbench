@@ -11,7 +11,8 @@ queued, expired); list_requests() lists this agent's requests.
 Environment, as ask_claude.py: CLAUDE_WB_URL (the chat's address, e.g. http://localhost:1337) and
 CLAUDE_WB_TOKEN (this agent's token, from `wb chat token add <name>`). Local only, by design: the
 URL must name this machine (localhost, 127.*, ::1), or every tool refuses and sends nothing; the
-chat refuses an agent token from any other address anyway. Standard library only.
+chat refuses an agent token from any other address anyway. It calls the chat's /api/v1/ paths
+(docs/chat-api.yaml), so it needs workbench 2.1 or later. Standard library only.
 """
 from __future__ import annotations
 
@@ -35,7 +36,10 @@ ask_claude = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ask_claude)
 
 PROTOCOL = "2025-06-18"
-VERSION = "1"  # the agent chat API's version it speaks (`api` in /api/health)
+VERSION = "1"  # the agent chat API's version it speaks (`api` in /api/v1/health)
+# the versioned paths (docs/chat-api.yaml), new with this server in workbench 2.1; ask_claude.py
+# keeps /api/ so it works with an older chat, and a chat without /api/v1/ is said so here (#1138)
+API = "/api/v1"
 WAIT_DEFAULT, WAIT_MOST = 20, 300  # get_reply's hold: many MCP clients cut a tool call at 60 s
 SEND_TRIES = 3  # a send cut by the chat restarting is sent again, under the same key
 KEY = re.compile(r"[A-Za-z0-9._:-]{1,64}")  # a cid's room (1 to 64), in plain characters
@@ -115,11 +119,11 @@ def config() -> None:
                       f"{url[:200]}: agents work only from this machine. Nothing was sent")
 
 
-def call(method: str, path: str, body=None, headers=None, timeout: float = 30):
-    """ask_claude.call, after the config check; Refusal for a refused token."""
+def call(method: str, path: str, body=None, headers=None, timeout: float = 30, answered=None):
+    """ask_claude.call on ``API`` + ``path``, after the config check; Refusal for a refused token."""
     config()
     try:
-        return ask_claude.call(method, path, body, headers, timeout)
+        return ask_claude.call(method, API + path, body, headers, timeout, answered)
     except ask_claude.Refused as e:
         raise Refusal(f"the token was refused: {e}") from None
 
@@ -137,7 +141,10 @@ def ask(text: str, key: str = "") -> dict:
     if key and not KEY.fullmatch(key):
         raise Refusal("key is 1 to 64 of A-Z a-z 0-9 . _ : -")
     key = key or str(uuid.uuid4())
-    code, health = call("GET", "/api/health")
+    code, health = call("GET", "/health")
+    if code == 404:
+        raise Refusal("this chat has no /api/v1/ (workbench before 2.1): the user updates it with "
+                      "`wb update`. Nothing was sent")
     if code != 200:
         raise Refusal(f"the chat answered {_error(health, code)}")
     if not health.get("listening"):
@@ -145,14 +152,21 @@ def ask(text: str, key: str = "") -> dict:
                       "web chat on): nothing was sent. Do it yourself, or try later")
     why = ""
     for n in range(SEND_TRIES):
+        answered: dict = {}
         try:
-            code, got = call("POST", "/api/send", {"text": text, "cid": key},
-                             {"Idempotency-Key": key})
+            code, got = call("POST", "/send", {"text": text, "cid": key},
+                             {"Idempotency-Key": key}, answered=answered)
         except OSError as e:  # reset or refused: the chat restarting (it re-execs on an update)
             code, got = None, {"error": str(e)}
         if code == 200:
+            # the chat's answer to a key it has: the first send's message, nothing sent again,
+            # whether that send was a try of this loop's cut on its way back or a call before
             msg = got.get("message") or {}
-            return {"id": msg.get("id"), "key": key, "listening": got.get("listener") is not None}
+            return {"id": msg.get("id"), "key": key, "listening": got.get("listener") is not None,
+                    "replayed": answered.get("idempotent-replayed") == "true"}
+        if got.get("code") == "idempotency_key_reused":
+            raise Refusal(f"key {key} went with another request in the last 24 hours: nothing was "
+                          "sent. Ask without a key (or a new one) for a new request")
         if code == 429:
             raise Refusal(f"rate-limited: try again in {got.get('retry_after') or 5} s with key "
                           f"{key}, so it is sent once")
@@ -169,9 +183,11 @@ def _wait(after: str, hold: float, until: str = "done") -> dict:
     # a 2-second get_reply at 1
     q = urlencode({"after": after, "timeout": round(hold, 1), "until": until})
     try:
-        code, got = call("GET", f"/api/wait?{q}", timeout=hold + 30)
+        code, got = call("GET", f"/wait?{q}", timeout=hold + 30)
     except OSError as e:
         raise Refusal(f"the chat didn't answer ({e}): call get_reply again in a moment") from None
+    if got.get("code") == "expired":  # unread past 6 hours, no reply: the chat says so at once
+        return {"replies": [], "done": False, "expired": True}
     if code == 404:
         raise Refusal(f"no request {after[:64]} in your conversation (an id from ask_claude, "
                       "within the thread's recent part)")
@@ -182,7 +198,7 @@ def _wait(after: str, hold: float, until: str = "done") -> dict:
 
 def _messages() -> dict:
     """This agent's view of the thread from /api/state, by id ({} when the chat won't say)."""
-    code, got = call("GET", "/api/state")
+    code, got = call("GET", "/state")
     return {m["id"]: m for m in (got.get("messages") or []) if isinstance(m, dict) and m.get("id")} \
         if code == 200 else {}
 
@@ -204,6 +220,8 @@ def reply(rid: str, wait: float = WAIT_DEFAULT) -> dict:
         return any(sent[i] > at for i in ids if i in sent)
 
     def where(got: dict) -> str:
+        if got.get("expired"):
+            return "expired"
         # the wait answers for the agent's whole conversation: its replies can be other requests',
         # and its `done` is for the newest of them (else for this request: a turn that took it
         # has ended). A reply is for the requests its `re` names
@@ -273,7 +291,7 @@ NEXT = {
 
 def requests() -> dict:
     """This agent's recent requests, from its view of the thread: {listening, requests}."""
-    code, got = call("GET", "/api/state")
+    code, got = call("GET", "/state")
     if code != 200:
         raise Refusal(f"the chat answered {_error(got, code)}")
     rows = got.get("messages") or []
@@ -293,6 +311,8 @@ def run_tool(name: str, args: dict) -> tuple[str, dict]:
     if name == "ask_claude":
         got = ask(str(args.get("text", "")), str(args.get("key") or ""))
         where = "Claude is listening" if got["listening"] else "it waits in the queue"
+        if got["replayed"]:
+            where = f"once: key {got['key']} had sent it already, and it was not sent again"
         return (f"request {got['id']}: sent ({where}). Call get_reply with id {got['id']} for "
                 "Claude's answer: it can take minutes.", got)
     if name == "get_reply":

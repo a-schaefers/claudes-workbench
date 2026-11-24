@@ -69,8 +69,9 @@ class Unreachable(RuntimeError):
 KEY = re.compile(r"[!-~]{1,64}")
 
 
-def call(method: str, path: str, body=None, headers=None, timeout: float = 30):
-    """(status, JSON) for one request to the chat; Refused for 401 and 403."""
+def call(method: str, path: str, body=None, headers=None, timeout: float = 30, answered=None):
+    """(status, JSON) for one request to the chat; Refused for 401 and 403. ``answered``, a dict,
+    gets the response's headers (the MCP server reads Idempotent-Replayed from them)."""
     base = os.environ.get("CLAUDE_WB_URL", "").rstrip("/")
     token = os.environ.get("CLAUDE_WB_TOKEN", "")
     if not base or not token:
@@ -81,6 +82,8 @@ def call(method: str, path: str, body=None, headers=None, timeout: float = 30):
     req = urllib.request.Request(base + path, data=body, method=method, headers=h)
     try:
         with _open(req, timeout=timeout) as r:
+            if answered is not None:
+                answered.update({k.lower(): v for k, v in r.headers.items()})
             return r.status, json.loads(r.read() or b"{}")
     except urllib.error.HTTPError as e:
         try:
