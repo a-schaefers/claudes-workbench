@@ -3365,9 +3365,11 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
         lines.append("reading: " + full[-1]["text"])
     lines += backend_lines(task, n)  # #1021
     if isinstance(mv := st.get("fallback_moved"), dict):  # #1196: whose model finished it, and why
-        lines.append(f"fallback: in round {mv.get('round')} {mv.get('from')} stopped ({mv.get('why')}), so "
+        when = (f"before round {mv.get('round')} {mv.get('from')} couldn't run" if mv.get("before")
+                else f"in round {mv.get('round')} {mv.get('from')} stopped")  # _credit_move's, or a round's
+        lines.append(f"fallback: {when} ({mv.get('why')}), so "
                      f"the task moved to the {spec.get('role')} role's fallback {mv.get('to')} (the user's, wb "
-                     "route), in a fresh session")
+                     "route)" + ("" if mv.get("before") and not mv.get("fresh") else ", in a fresh session"))
     if st.get("claude_rules_gone") == n:  # #1119
         lines.append(RULES_GONE.format(claude=privacy.home_path(context.claude_home()),
                                        mine=privacy.home_path(context.user_agents_md())))
@@ -4243,7 +4245,8 @@ def provider_remedy(task: store.Task, guard: str, said: str = "") -> str:
 # once and never back. The keyhole is started again for the fallback, which it serves alone, the
 # catalog written again, task.json moved (every reader of `model`, `via` and `provider` agrees, and
 # results credit the model that finished), and the round runs again in a fresh session: the
-# window, catalog and variants differ, so the session never carries over.
+# window, catalog and variants differ, so the session never carries over. A provider marked out of
+# credit before a round moves it too (_credit_move), never a wait in NoLease.load.
 FALLBACK_STOPS = ("quota", *HELD)
 FALLBACK_SAID = "the task moved to its role's fallback"  # the handoff's why, and never an overflow
 # task.json's keys of the model it ran on, which the fallback's replace or drop
@@ -4251,12 +4254,13 @@ MODEL_KEYS = ("provider", "provider_name", "thinking", "thinking_shown", "thinki
               "order", "busy", "weights_id")
 
 
-def _fallback_move(task: store.Task, n: int, rnd: dict) -> models.Model | None:
-    """Round n stopped by its provider (FALLBACK_STOPS): the task moved to its role's fallback,
-    that model returned for drive's next lease, or None (no fallback applies, it can't take the
-    task now, or its keyhole can't start: the stop stands, a `fallback` event saying why). Only a
-    task on its role's own API model (never a --model one, a busy-routed one, or one moved
-    already)."""
+def _fallback_move(task: store.Task, n: int, rnd: dict, before: bool = False) -> models.Model | None:
+    """Round n stopped by its provider (FALLBACK_STOPS), or, ``before``, about to run while its
+    provider is marked out of credit (_credit_move): the task moved to its role's fallback, that
+    model returned for drive's next lease, or None (no fallback applies, it can't take the task
+    now, or its keyhole can't start: the stop stands, or the round waits for the credit, a
+    `fallback` event saying why). Only a task on its role's own API model (never a --model one,
+    a busy-routed one, or one moved already)."""
     from types import SimpleNamespace
 
     from . import router, routes
@@ -4283,8 +4287,12 @@ def _fallback_move(task: store.Task, n: int, rnd: dict) -> models.Model | None:
                                task.name, primary, tokens, local)
 
     def stays(why: str) -> None:
-        task.event({"ts": store.now(), "round": n, "kind": "fallback", "moved": False,
-                    "text": f"{why}: the provider's stop stands"})
+        text = f"{why}: " + (f"the round waits for {primary.provider}'s credit" if before
+                             else "the provider's stop stands")
+        said = [e for e in store.read_jsonl(task.dir / "events.jsonl")[0] if e.get("kind") == "fallback"]
+        if before and said and (said[-1].get("round"), said[-1].get("text")) == (n, text):
+            return  # _credit_move looks before the slot and again in it: said once
+        task.event({"ts": store.now(), "round": n, "kind": "fallback", "moved": False, "text": text})
     if not isinstance(got, tuple):
         if got:
             stays(got)
@@ -4319,15 +4327,42 @@ def _fallback_move(task: store.Task, n: int, rnd: dict) -> models.Model | None:
     pin_api(task, fm)
     CURRENT["api"] = fm.kind == "api"
     CURRENT["remote"] = fm.remote and fm.kind != "api"
-    moved = {"round": n, "from": spec["model"], "to": fm.id, "why": str(rnd.get("stuck") or rnd.get("guard"))}
+    fresh = not before or bool(task.status.get("session"))  # before round 1 there is no session to leave
+    moved = {"round": n, "from": spec["model"], "to": fm.id, "why": str(rnd.get("stuck") or rnd.get("guard")),
+             **({"before": True, "fresh": fresh} if before else {})}
     task.event({"ts": store.now(), "round": n, "kind": "fallback", "moved": True, "from": spec["model"],
                 "to": fm.id, "text": f"{spec['model']}: {moved['why']}: moved to the {role} role's fallback "
-                                     f"{fm.id}, in a fresh session (it never moves back)"})
+                                     f"{fm.id}{', in a fresh session' if fresh else ''} (it never moves back)"})
     task.set_status(fallback_moved=moved, api_stop=None, ratelimit_until=None, ratelimit=None,
                     remote_gpu=True if CURRENT["remote"] else None,
                     last=f"{routes.FALLBACK_LINE}: {fm.id}")
-    _start_fresh(task, n, f"{FALLBACK_SAID}, {fm.id}, as {spec['model']}'s provider stopped")
+    if fresh:
+        _start_fresh(task, n, f"{FALLBACK_SAID}, {fm.id}, as {spec['model']}'s provider stopped")
     return fm
+
+
+def _credit_move(task: store.Task, m: models.Model):
+    """Before a round (the first too, and before its provider slot): an API task whose provider
+    api-health.json marks out of credit, the mark not this task's turn to ask (models.credit_turn),
+    moves to its role's fallback (_fallback_move) rather than wait in NoLease.load. A --queue
+    backlog queued before the 402 otherwise drained one task each CREDIT_RECHECK_SECS, only the
+    task given the turn sending a round, meeting the 402 and moving (the review of #1196,
+    2026-11-24). None: no move, the round goes on (and waits there, as before); else what _leased
+    returns, the fallback, or False when _go_on stopped the task at the day cap."""
+    if m.kind != "api":
+        return None
+    pid = m.provider or models.api_provider(m)
+    try:
+        row = models.api_health(pid)
+    except Exception:  # an unreadable file: NoLease.load and the keyhole answer instead
+        return None
+    if not row or row.get("state") != "no_credit" or row.get("asked_by") == task.name:
+        return None
+    n = task.status.get("round") or 1
+    rnd = {"guard": "quota", "stuck": f"{pid} is out of credit or quota ({row.get('why') or 'no detail'})"}
+    if (fb := _fallback_move(task, n, rnd, before=True)) is None:
+        return None
+    return fb if _go_on(task, n, "the round on the role's fallback") else False
 
 
 def _provider_revive(task: store.Task, n: int, rnd: dict, lease) -> bool:
@@ -4559,12 +4594,17 @@ def _leased(task: store.Task, m: models.Model, say):
     """The task's rounds on ``m`` under its lease, to the task's end; the role's fallback (a
     models.Model, its keyhole serving and task.json moved to it: _fallback_move) when its provider
     stopped a round and the task moves on there, under a lease of its own."""
+    # its provider out of credit already: on to the role's fallback, never a slot of it (#1196)
+    if (moved := _credit_move(task, m)) is not None:
+        return moved or None
     # beside the running tasks' models when all fit the GPU, else alone once they finish; an API
     # model takes one of its provider's slots instead, and nothing of the GPU (#1015)
     with models.lease_for(m, task.name, say) as lease:
         # this runner reached the lease: from now on gpu.json says whether it holds the GPU, so
         # wb start no longer counts it as a holder while it steps aside for its tests (#805)
         task.set_status(leased=os.getpid(), **cards_now(task, m))  # the pane's `GPU 1` (#1048)
+        if (moved := _credit_move(task, m)) is not None:  # marked while it waited for a slot
+            return moved or None
         try:
             _loaded(task, _load(task, lease, m))
             window = (m.config.get("limit") or {}).get("context")
@@ -4586,6 +4626,8 @@ def _leased(task: store.Task, m: models.Model, say):
                 # default (5 minutes), so after a longer test run the model was unloaded and the
                 # auto-fix round's think budget paid for loading it (the 2026-11-16 audit).
                 # Resident already, this is one look at the server.
+                if (moved := _credit_move(task, m)) is not None:  # #1196: never NoLease.load's wait
+                    return moved or None
                 try:
                     _rejoin(task, lease)
                     if (again := _load(task, lease, m)) > 0:

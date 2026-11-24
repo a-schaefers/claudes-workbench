@@ -334,7 +334,8 @@ feedback` or `wb resume` of a task its provider stopped (status `infra: provider
 hands it the turn first (`cli._credit_turn`, `models.credit_ask`: `asked_by` it, `until` moved
 `CREDIT_RECHECK_SECS` on), so the top-up's "carry on" asks at once and the waiters go on at its `ok`;
 the resumed runner met the mark its own 402 had just written and waited out its 900 s, told to top
-up again (the review of #1178). It never
+up again (the review of #1178). A task its role's fallback can take never waits here: the runner
+moves it first (`runner._credit_move`, *A fallback per role*). It never
 appears in gpu.json, unloads nothing, has no `short_window` check and no server-down
 wait (`runner._down` is False), runs no `_Power` sampler and no keep-warm thread, and its first
 status says `last: starting`, not `waiting for the GPU`, and so does the base check's after it (#1112) (`runner._gpu_side`: from the config
@@ -3926,12 +3927,15 @@ send nothing off the machine, so they take neither. A kept API fallback is named
 goes to API (`fallback <id> (<provider>)`). `routes.fallback_of` is the one that applies: `gpu` is
 none while Agents is API. Claude only recommends one, never sets one (the skill). It applies only to
 a task on its role's own API model (never a `--model` one, nor a busy-routed one, whose GPU is its
-own side), at two points and nowhere else, through `routes.fallback_pick` (the API fallback in the
+own side), at wb start and in the runner (a round's stop, or a mark before a round) and nowhere else, through `routes.fallback_pick` (the API fallback in the
 catalog, on another provider, able to run, within the day cap; the GPU one found and able to run):
 - **At `wb start`** (`cli._fallback_start`): a role's API model whose provider api-health.json marks
   (`no_credit`, `rate_limited` or `unreachable`; a refused key isn't marked there: it reads as no key
-  and still exits 3) starts on the fallback instead, after `_busy_api`'s checks too (a free provider
-  slot, `--local-only`, commands.json's `local_only` and standing `copy`/`siblings`), and says
+  and still exits 3) starts on the fallback instead, after `_busy_api`'s checks too but the slots
+  (`--local-only`, commands.json's `local_only` and standing `copy`/`siblings`): the fallback's
+  provider slots all taken, it is still the fallback's start, which `--queue` queues for a slot and
+  which without it exits 4 (`_slots_full`), as any API start (refused there, the 4th `--queue` start
+  of a backlog exited 3, the review of #1196), and says
   `<id>: <why>: on the role's fallback, as you set (<fallback>)` (`routes.FALLBACK_LINE`) under its
   model line (`… · trivial role's fallback, set by you MM-DD · …`, `routes.said_part`); task.json gets
   `fallback: true` and `fallback_from` (`routes.fallback_routed`, through `cli._routed_keys`), its
@@ -3951,10 +3955,18 @@ catalog, on another provider, able to run, within the day cap; the GPU one found
   (`runner._leased`: a provider slot, or the GPU's, queued for it), after `_go_on`'s day-cap check.
   A fallback that can't take it (or whose keyhole can't start: task.json put back) leaves the
   provider's stop as before, a `fallback {moved: false}` event saying why.
+- **Before a round** (`runner._credit_move`, the first round too, before the provider slot, again
+  once in it, and before each later round): a task whose provider api-health.json marks `no_credit`
+  (not `asked_by` it: a resumed task's turn to ask still asks) moves as above rather than wait in
+  `NoLease.load` (status `fallback_moved` with `before: true`, and `fresh`: false before round 1,
+  which has no session to leave, so its prompt stays the spec's; the report says `fallback: before
+  round N <id> couldn't run (…)`). A `--queue` backlog queued before the 402 otherwise drained one
+  task each `CREDIT_RECHECK_SECS`, only the one given the turn sending a round (the review of #1196).
+  A fallback that can't take it says so once (`… : the round waits for <provider>'s credit`) and the
+  task waits there as before.
 The meter's ledger and the day cap are the task's, whatever the model. results.jsonl rows get
 `fallback: true` and `fallback_from`; `model` is the one that finished, which the router, slices and
-tuning credit, the role's API model keeping its own stats. A task waiting in `NoLease.load` for its
-provider's credit (#1178) waits as before: only a round's stop moves it. `routes.summary` (and the
+tuning credit, the role's API model keeping its own stats. `routes.summary` (and the
 mod's `routesSummary`) end a role's part with `, fallback <id>` or `, fallback GPU`; `wb route` shows
 `fallback <id> (<provider>)` or `fallback GPU (…)` (`(not used while Agents is API)` for one that
 doesn't apply).
@@ -6265,7 +6277,7 @@ off), not `wb start`'s.
 | `cards` | after the lease (`runner.cards_now`): the cards a local GPU model's Ollama sees (`models.card_numbers`), for the pane's `GPU 1`; only on a machine of two or more discrete cards; null when a later runner can't tell, missing otherwise, and when the server or sysfs can't be read (the round runs on) (#1048) |
 | `limits` | `{think?, silence?, round?}`: unflagged limits raised for a model measured slower (`runner.stretch_limits`); null when none |
 | `api_entry` | an API task's capped `{limit, options: {max_tokens}}`, written as `drive` resolves its model (`runner.pin_api`), read every round instead of the catalog (#1017); null or absent on the GPU |
-| `fallback_moved` | `{round, from, to, why}`: the runner moved the task to its role's fallback (`runner._fallback_move`, #1196); each report says it |
+| `fallback_moved` | `{round, from, to, why}`, and `before: true` and `fresh` for a move before the round (`runner._credit_move`): the runner moved the task to its role's fallback (`runner._fallback_move`, #1196); each report says it |
 | `steps`, `step_round`, `step_sizes` | `wb next`: step number, its first round, the closed steps' `results.step` |
 | `step_tests` | `{"<step>": cmd or null}` (`wb start`, `wb next`): what `wb bench add` reads; task.json `test_cmd` is only the latest |
 | `step_base` | `wb next`: HEAD as the step advanced: `wb verify`/`wb shot`'s base (`verify._review_base`; without it the newest earlier step's commit by trailer, else the base, #652) |
@@ -6841,11 +6853,15 @@ one with none, and new backends on a busy role count as newly sent (`routes._bus
 `routes.summary` (register.test.tsx's fixture too); `wb route <role> fallback <API id>` on the dialog's yes and a cap,
 `gpu` and `none` with neither, the role's own provider or model and OpenRouter refused; a kept one named when its role
 goes to API; at `wb start` a provider marked out of credit starts the API fallback (task.json `fallback`, the line, the
-where-note, the results row) and a held one the GPU fallback, a fallback that can't take it (out of credit too, full
-slots, the cap, a repo kept local) or none leaves the start as before, and a `--model` never moves; in the runner a
-`quota` round (the fake's `WB_FAKE_API`) moves to an API fallback (each keyhole one model, a fresh session that is no
-overflow, the report's line, the fallback's own catalog), a round held again after its revive to the GPU fallback, and
-none, one already moved, or one that can't take it leave the provider's stop.
+where-note, the results row) and a held one the GPU fallback, a fallback that can't take it (out of credit too, the
+cap, a repo kept local, commands.json's standing copy) or none leaves the start as before, a busy-routed start and a
+`--model` never move, and one with its slots full queues with `--queue` and exits 4 without; in the runner a `quota`
+round (the fake's `WB_FAKE_API`) moves to an API fallback (each keyhole one model, a fresh session that is no
+overflow, the report's line, the fallback's own catalog), a round held again after its revive to the GPU fallback, a
+provider marked out of credit after the start moves before round 1 (no handoff) or between rounds (a fresh session)
+rather than wait, but not on its own turn to ask; none, one already moved (`fallback_pick` never asked), one on the
+role's own provider, one that can't take it, a repo made local-only or a `--local-only` task, and a keyhole that can't
+start (task.json put back) leave the provider's stop. Each guard was deleted in a copy and a test failed.
 
 **Conventions for a new test.** Names read as sentences; one class per feature, a one-line docstring; end to end through
 `self.start`/`wait_phase`/`run_wb`, asserting the phrases Claude reads and the state files; real processes and servers

@@ -37490,13 +37490,36 @@ class Fallbacks(Base):
         self.assertEqual(code, 3)                                         # a --model never moves
         self.assertNotIn(gpu, [t.spec.get("model") for t in store.all_tasks() if t.name == "t-asked"])
 
-    def test_an_api_fallback_meets_the_slots_the_cap_and_a_repo_kept_local(self):
+    def test_an_api_fallback_with_its_slots_taken_queues_with_queue_and_exits_4_without(self):
+        # the review of #1196 (2026-11-24): refused as "can't take it", the 4th --queue start of a
+        # backlog exited 3 saying wb never switches models
         self.on_api()
         runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
         with mock.patch.object(cli.models, "api_slots_free", lambda provider: False):
-            code, out, _ = self.begin("t-slots", "--role", "trivial")
-        self.assertEqual(code, 3)
-        self.assertIn(f"note: the trivial role's fallback {HAIKU} can't take it: every one of anthropic's", out)
+            code, out, err = self.begin("t-full", "--role", "trivial")
+            self.assertEqual(code, 4, err)
+            self.assertIn("tasks already run on anthropic's API", err)
+            self.assertNotIn("never switches", err)
+            self.assertFalse(store.Task("t-full").exists)
+            code, out, err = self.begin("t-q", "--role", "trivial", "--queue")
+        self.assertEqual(code, 0, err)
+        self.assertEqual((store.Task("t-q").spec["model"], store.Task("t-q").spec["fallback"]), (HAIKU, True))
+        self.assertIn(f"{routes.FALLBACK_LINE} ({HAIKU})", out)
+
+    def test_an_api_fallback_meets_the_cap_a_repo_kept_local_and_commands_jsons_standing_copy(self):
+        self.on_api()
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        with mock.patch.object(cli.context, "repo_conf", lambda repo, sub=None: {"copy": [".env.local"]}):
+            got = cli._fallback_start("trivial", "trivial", BusyGpu.asked(), self.repo, None, [],
+                                      runner.models.lookup("deepseek/deepseek-flash"),
+                                      {"via": "api", "role": "trivial"})
+        self.assertEqual(got, f"the trivial role's fallback {HAIKU} can't take it: commands.json \"repos\" copies "
+                              ".env.local into every task, and this one is on API (Anthropic): name it (--copy "
+                              ".env.local) to send it, or put the role on the GPU")
+        got = cli._fallback_start("trivial", "trivial", BusyGpu.asked(), self.repo, None, [],
+                                  runner.models.lookup("deepseek/deepseek-flash"),
+                                  {"via": "api", "role": "trivial", "busy": True})
+        self.assertEqual(got, "")                                       # a busy-routed start never falls back
         with mock.patch.object(cli.privacy, "local_only", lambda repo, sub: str(repo)):
             got = cli._fallback_start("trivial", "trivial", BusyGpu.asked(), self.repo, None, [],
                                       runner.models.lookup("deepseek/deepseek-flash"),
@@ -37601,6 +37624,111 @@ class FallbackMoves(Base):
         self.assertTrue(self.events(task, "fallback")[0]["moved"])
         self.assertFalse(runner.catalog_path(task).exists())             # the GPU's: no API catalog
         self.assertIsNone(st.get("api_entry"))
+
+    def test_a_task_whose_provider_went_out_of_credit_after_its_start_moves_before_its_round_rather_than_wait(self):
+        # the review of #1196 (2026-11-24): it waited in NoLease.load on credit_turn, so a --queue
+        # backlog queued before the 402 drained one task each CREDIT_RECHECK_SECS
+        self.roles(FB_OTHER)
+        served = []
+        real = runner.start_keyhole
+        task = self.api_task("t-wait", FB_PRIMARY, "ok")
+        runner.models.note_api("meterco", "no_credit", "HTTP 402", time.time() + 600)
+        with mock.patch.object(runner, "start_keyhole", lambda task, m: served.append(m.id) or real(task, m)):
+            t = threading.Thread(target=runner.drive, args=(task,), daemon=True)
+            t.start()
+            t.join(25)
+        self.assertFalse(t.is_alive(), task.status.get("last"))
+        st, sp = task.status, task.spec
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertEqual((sp["model"], sp["provider"], sp["fallback"]), (FB_OTHER, "otherco", True))
+        self.assertEqual(served, [FB_PRIMARY, FB_OTHER])
+        [ev] = self.events(task, "fallback")
+        self.assertEqual((ev["moved"], ev["from"], ev["to"], ev["round"]), (True, FB_PRIMARY, FB_OTHER, 1))
+        self.assertEqual({k: st["fallback_moved"].get(k) for k in ("round", "before", "fresh")},
+                         {"round": 1, "before": True, "fresh": False})
+        self.assertFalse(self.events(task, "fresh"))                     # round 1 had no session to leave
+        self.assertFalse(task.round_dir(1).joinpath("prompt.md").read_text().startswith("You are picking"))
+        self.assertIn(f"fallback: before round 1 {FB_PRIMARY} couldn't run (meterco is out of credit",
+                      task.round_dir(1).joinpath("summary.md").read_text())
+
+    def test_a_provider_marked_out_of_credit_between_rounds_moves_the_next_round_in_a_fresh_session(self):
+        self.roles(FB_OTHER)
+        task = self.api_task("t-between", FB_PRIMARY, "ok", "--test", "false", "--auto-fix", "1")
+        real = runner.run_round
+
+        def then_402(task, n, **kw):
+            try:
+                return real(task, n, **kw)
+            finally:  # another task's 402, while this one's tests run
+                runner.models.note_api("meterco", "no_credit", "HTTP 402", time.time() + 600)
+        with mock.patch.object(runner, "run_round", then_402):
+            t = threading.Thread(target=runner.drive, args=(task,), daemon=True)
+            t.start()
+            t.join(60)
+        self.assertFalse(t.is_alive(), task.status.get("last"))
+        [ev] = self.events(task, "fallback")
+        self.assertEqual((ev["moved"], ev["to"], ev["round"]), (True, FB_OTHER, 2))
+        self.assertEqual(task.status["fallback_moved"]["fresh"], True)
+        self.assertEqual([e["round"] for e in self.events(task, "fresh")], [2])
+        self.assertEqual(task.spec["model"], FB_OTHER)
+
+    def test_before_a_round_a_mark_that_is_this_tasks_turn_or_a_fallback_that_cant_take_it_leaves_the_wait(self):
+        self.roles(FB_OTHER)
+        task = self.api_task("t-turn", FB_PRIMARY, "ok")
+        m = runner.models.resolve(FB_PRIMARY)
+        runner.models.note_api("meterco", "no_credit", "HTTP 402", time.time() + 600)
+        runner.models.credit_ask("meterco", "t-turn")                   # the user's resume: its turn to ask
+        self.assertIsNone(runner._credit_move(task, m))
+        runner.models.note_api("meterco", "no_credit", "HTTP 402", time.time() + 600)
+        runner.models.note_api("otherco", "no_credit", "HTTP 402")
+        self.assertIsNone(runner._credit_move(task, m))
+        self.assertIsNone(runner._credit_move(task, m))                 # before the slot and in it
+        [ev] = self.events(task, "fallback")                            # said once
+        self.assertFalse(ev["moved"])
+        self.assertTrue(ev["text"].endswith("the round waits for meterco's credit"), ev["text"])
+        self.assertEqual(task.spec["model"], FB_PRIMARY)
+
+    def test_a_repo_made_local_only_after_the_start_never_moves_to_an_api_fallback(self):
+        # the review of #1196: deleting _fallback_move's local-only check survived every test
+        self.roles(FB_OTHER)
+        task = self.api_task("t-local", FB_PRIMARY, "ok")
+        with mock.patch.object(runner.privacy, "local_only", lambda repo, sub: str(repo)):
+            self.assertIsNone(runner._fallback_move(task, 1, {"guard": "quota", "stuck": "out of credit"}))
+        [ev] = self.events(task, "fallback")
+        self.assertFalse(ev["moved"])
+        self.assertIn(f"{FB_OTHER} is an API model, and {self.repo.name} is kept local", ev["text"])
+        self.assertEqual(task.spec["model"], FB_PRIMARY)
+        store.write_json(task.dir / "task.json", {**task.spec, "local_only": True})   # --local-only
+        self.assertIsNone(runner._fallback_move(task, 1, {"guard": "quota", "stuck": "out of credit"}))
+        self.assertIn("this task is kept local (--local-only)", self.events(task, "fallback")[-1]["text"])
+
+    def test_a_moved_task_never_moves_again_even_to_another_providers_fallback(self):
+        # the review of #1196: the never-again guard's test passed on the same-provider refusal alone
+        self.roles(HAIKU)
+        task = self.api_task("t-again", FB_OTHER, "ok")
+        store.write_json(task.dir / "task.json", {**task.spec, "fallback": True, "fallback_from": FB_PRIMARY})
+        with mock.patch.object(routes, "fallback_pick", lambda *a, **k: self.fail("a moved task looked for one")):
+            self.assertIsNone(runner._fallback_move(task, 1, {"guard": "quota", "stuck": "out of credit"}))
+        self.assertEqual(task.spec["model"], FB_OTHER)
+
+    def test_a_fallback_on_the_roles_own_provider_is_refused_by_the_pick(self):
+        doc = {"roles": {"significant": {"via": "api", "api": FB_PRIMARY, "gpu": "auto", "thinking": "off",
+                                         "fallback": FB_PRIMARY}}}
+        primary = types.SimpleNamespace(id="meterco/other", provider="meterco")
+        got = routes.fallback_pick(doc, "significant", "significant", [], "t", primary)
+        self.assertEqual(got, f"the significant role's fallback {FB_PRIMARY} is on meterco too")
+
+    def test_a_fallback_whose_keyhole_cant_start_puts_task_json_back(self):
+        self.roles(FB_OTHER)
+        task = self.api_task("t-kh", FB_PRIMARY, "ok")
+        before = task.spec
+
+        def refuse(task, m):
+            raise runner.keyhole.KeyholeError("no key")
+        with mock.patch.object(runner, "start_keyhole", refuse):
+            self.assertIsNone(runner._fallback_move(task, 1, {"guard": "quota", "stuck": "out of credit"}))
+        self.assertEqual(task.spec, before)
+        self.assertIn(f"the significant role's fallback {FB_OTHER} can't start: ", self.events(task, "fallback")[-1]["text"])
 
 
 class MediaDefaults(Base):

@@ -3842,7 +3842,8 @@ def api_provider(m: Model) -> str:
 class NoLease:
     """What an API task holds in place of the GPU lease (#1015): one of its provider's
     API_PARALLEL slots, and nothing of the GPU. The interface drive and _tests_gpu use:
-    load() loads nothing (it waits while the provider is out of credit, its slot let go, #1178), step_aside
+    load() loads nothing (it waits while the provider is out of credit, its slot let go, #1178;
+    runner._credit_move moves a task its role's fallback takes first, #1196), step_aside
     and rejoin do nothing, `aside` False, `pool` None (so
     _tests_gpu takes this machine's pool for --unload-for-tests, where the tests run), `loaded`
     True. Past the limit it waits as queued, looking again after API_WAIT's backoff (a slot let

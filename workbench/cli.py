@@ -756,8 +756,11 @@ def _fallback_start(role: str, size: str, a, repo: Path, sub: str | None, stack,
     fallback can't take it either, which leaves the start as it was (exit 3, or a held start that
     waits). The user's explicit exception to "an API role never runs on the GPU" (#1016) and to
     one model a role; at a start, and once in the runner (runner._fallback_move), nowhere else.
-    An API fallback meets _busy_api's checks: a free provider slot, --local-only and
-    commands.json's local_only and standing copy/siblings, the day cap."""
+    An API fallback meets _busy_api's checks but one: --local-only and commands.json's local_only
+    and standing copy/siblings, the day cap. Its provider's slots all taken, it is still the
+    fallback's start: cmd_start's own slots_full path queues it (--queue) or exits 4, as for any
+    API start. Refused here, the 4th --queue start of a backlog exited 3, "wb never switches
+    models" (the review of #1196, 2026-11-24), where waiting for a slot is what --queue means."""
     if a.model or routed.get("via") != "api" or routed.get("busy") \
             or (routed.get("said") or "").startswith("asked for") or models.api_health(m.provider) is None:
         return ""
@@ -771,9 +774,6 @@ def _fallback_start(role: str, size: str, a, repo: Path, sub: str | None, stack,
     if not isinstance(got, tuple) or got[0].kind != "api":
         return got
     fb = got[0]
-    if not _api_slots_free(fb, getattr(a, "name", None)):
-        return (f"the {role} role's fallback {fb.id} can't take it: every one of "
-                f"{models.api_provider(fb)}'s {models.API_PARALLEL} slots is taken")
     if gap := _standing_gap(context.repo_conf(repo, sub), a, models.provider_name(fb), repo, sub):
         return f"the {role} role's fallback {fb.id} can't take it: {gap}"
     return got
