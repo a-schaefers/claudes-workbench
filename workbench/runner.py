@@ -4389,6 +4389,43 @@ def _go_on(task: store.Task, n: int, what: str) -> bool:
     return False
 
 
+# #1215: a repo marked local-only after its API task started (wb start's where-note invites it on
+# the first one) had wb next, feedback and resume refuse the task, but the runner sent the repo to
+# the provider all the same, and billed it: round 1 after a slot wait or the setup, and every round
+# it starts itself (auto-fix, self-review, a handover, a rerun) (the bar loop, 2026-11-24)
+LOCAL_ONLY = "local_only"
+
+
+def local_only_now(task: store.Task) -> str:
+    """For an API task whose repo is local-only now, the line the runner stops it with and wb
+    next, feedback and resume refuse it with (its model is fixed per task: takeover or discard),
+    else ''. api_task: a task from before #1016 on an API model has no `via` until its runner
+    writes one (settle_via), and its first round after the upgrade went too (#1111)."""
+    if api_task(task) and privacy.local_only(task.spec["repo"], task.spec.get("subdir")):
+        return privacy.since_start_line(task)
+    return ""
+
+
+def _local_only_stop(task: store.Task) -> bool:
+    """Before the lease and before every round (#1215): whether an API task whose repo became
+    local-only was stopped, before anything more went to its provider. Phase `stuck`, status
+    `infra` `local_only` (wb feedback counts no review, nothing is held against the step), a
+    `stuck` notice with that cause and the latest round's report, as _go_on's."""
+    if not (why := local_only_now(task)):
+        return False
+    n = task.status.get("round", 1)
+    task.set_status(phase="stuck", last=why[:200], infra=LOCAL_ONLY)
+    task.event({"ts": store.now(), "round": n, "kind": "stopped",
+                "text": f"{why}: round {n} didn't run", "by": LOCAL_ONLY})
+    text = f"task {task.name}: round {n} didn't run, so nothing more went to its provider: {why}"
+    for r in (n, n - 1):  # an auto-fix or self-review has moved `round` on to one never run
+        if r > 0 and (summary := task.round_dir(r) / "summary.md").is_file():
+            text += f"\nRound {r}'s report (wb report {task.name} --round {r}):\n{summary.read_text()}"
+            break
+    task.notify("stuck", text, round=n, cause=LOCAL_ONLY)
+    return True
+
+
 def drive(task: store.Task) -> None:
     # infra: why the machine, not the agent, failed the task's last run (wb bench grades none of it).
     # `last` at once, from the config alone (gpu_side): left to after resolve, which may read the
@@ -4449,6 +4486,8 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
         _base_check(task)  # on the untouched base, before the agent and the GPU
     if opencode_moved(task):  # before the GPU is taken for a round that can't run (#866)
         return
+    if _local_only_stop(task):  # before a provider's slot is taken for a round that mustn't run
+        return
     if task.status.get("round", 1) == 1:  # before round 1's first OpenCode call (probe on), and
         # before the lease: it needs no GPU, and a probe that hangs (20 s a file) held it from the
         # other tasks, the model already loaded (review, 2026-11-21)
@@ -4474,6 +4513,8 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
             if _updated(task):  # before the round: its lane, shim and ask server would be new
                 return
             if not first and opencode_moved(task):  # reinstalled between rounds (#866)
+                return
+            if _local_only_stop(task):  # marked since the lease's wait or the last round (#1215)
                 return
             if not first:
                 # Again before every round: each request resets Ollama's keep-alive to its own

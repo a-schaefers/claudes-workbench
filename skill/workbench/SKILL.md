@@ -242,8 +242,8 @@ real tasks with `--model` (ones you'd review closely anyway).
 user's `~/.config/workbench/AGENTS.md` to its provider (never their `~/.claude` files). When you propose an API role, say where the code goes
 (the provider, as `wb route --dry-run`'s line names it; its data-policy page comes in the note
 of the repo's first task there). Never remove a `local_only`
-from commands.json (a repo the user keeps off API models: `wb start` exits 3 with the choices;
-ask the user). Never name a free model first (the provider may keep or train on the code), and
+from commands.json (a repo the user keeps off API models: `wb start` exits 3 with the choices,
+and a task already on API stops before its next round: wb takeover or wb discard; ask the user). Never name a free model first (the provider may keep or train on the code), and
 never pick an OpenRouter backend (`--order`) for the user: ask which. An API task's lane hides
 each registry config that holds a credential (a token, password, key; one without stays readable
 and its tool works; with no lane, as on macOS, none is hidden and there's no note); when
