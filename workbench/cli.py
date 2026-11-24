@@ -1089,12 +1089,23 @@ def _standing_gap(conf: dict, a, where: str, repo: Path, sub: str | None) -> str
     named_copy = {_copy_path(repo, x, sub).rstrip("/") for x in a.copy or []}
     named_sib = {x.strip().rstrip("/").removeprefix("../") for x in a.sibling or []}
     for raw in conf.get("copy", []):
-        if os.path.normpath(raw.strip()).rstrip("/") not in named_copy:
-            return privacy.standing_refusal("copy", raw, where)
+        if (entry := os.path.normpath(raw.strip()).rstrip("/")) not in named_copy:
+            return privacy.standing_refusal("copy", raw, where, _copy_name(repo, entry, sub))
     for raw in conf.get("siblings", []):
         if raw.strip().rstrip("/").removeprefix("../") not in named_sib:
             return privacy.standing_refusal("siblings", raw, where)
     return ""
+
+
+def _copy_name(repo: Path, entry: str, sub: str | None) -> str:
+    """How to type commands.json's repo-relative `copy` entry as a --copy from the package `sub`,
+    so that _copy_path reads it back as the entry: from packages/app the refusal advised
+    `--copy node_modules`, read as the package's, and refused the same start again and again
+    (#1158's review, 2026-11-24). The entry as written when it already reads back, else the path
+    from the package (`../../node_modules`)."""
+    if not sub or _copy_path(repo, entry, sub).rstrip("/") == entry:
+        return entry
+    return os.path.relpath(entry, sub.strip("/"))
 
 
 def _role(a) -> str:

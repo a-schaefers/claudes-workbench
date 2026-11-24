@@ -32632,9 +32632,9 @@ class Privacy(_KeyholeTest):
             cli.main(list(argv))
         return cm.exception.code, err.getvalue()
 
-    def start_api(self, name, m=None, *extra):
+    def start_api(self, name, m=None, *extra, repo=None):
         """wb start as #1016 makes an API task: pick_model resolves to the API model; the GPU
-        lease, the bench and the runner (#1015's) are left out."""
+        lease, the bench and the runner (#1015's) are left out. `repo`: a package's, else the repo."""
         m = m or self.api_model()
         state = {"available": True, "resident": True, "why": "ready (API)"}
         routed = {"via": "api", "role": "trivial", "provider": m.provider, "provider_name": m.provider,
@@ -32644,7 +32644,7 @@ class Privacy(_KeyholeTest):
                 mock.patch.object(cli, "_preempt_bench", return_value=""), \
                 mock.patch.object(cli, "spawn_runner"), \
                 mock.patch.object(runner.models, "box_others", return_value=[]):
-            out = run_wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo), *extra)
+            out = run_wb("start", name, "--spec", str(self.spec), "--repo", str(repo or self.repo), *extra)
         store.write_json(store.Task(name).dir / "task.json",       # #1016's keys
                          {**store.Task(name).spec, "via": "api", "provider": m.provider})
         return out
@@ -32797,6 +32797,35 @@ class Privacy(_KeyholeTest):
         self.assertEqual(cm.exception.code, 3)
         self.assertIn("links shared beside every task", err.getvalue())
         self.assertIn("shared (--sibling)", self.start_api("t-sib2", None, "--sibling", "../shared"))
+
+    def test_a_standing_copy_refused_from_a_package_names_the_copy_that_sends_it_and_the_packages_own_doesnt(self):
+        # #1158's review (2026-11-24): from packages/app, a --copy is read from the package, so the
+        # refusal's `--copy node_modules` named the package's node_modules: never the root's entry,
+        # refused again each time; nor may the package's name consent to sending the root's
+        (self.repo / ".gitignore").write_text("node_modules/\n")
+        app = self.repo / "packages" / "app"
+        app.mkdir(parents=True)
+        (app / "CLAUDE.md").write_text("# app\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "a package"], check=True)
+        (self.repo / "node_modules" / "root-only").mkdir(parents=True)
+        (app / "node_modules" / "app-only").mkdir(parents=True)
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"copy": ["node_modules"]}}}))
+        refusal = ('commands.json "repos" copies node_modules into every task, and this one is on API '
+                   "(DeepInfra): name it (--copy ../../node_modules) to send it, or put the role on the GPU")
+        for name, extra in (("t-pk1", ()), ("t-pk2", ("--copy", "node_modules"))):  # the package's
+            with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
+                self.start_api(name, None, *extra, repo=app)
+            self.assertEqual(cm.exception.code, 3)
+            self.assertIn(refusal, err.getvalue())
+        self.start_api("t-pk3", None, "--copy", "../../node_modules", repo=app)  # the advice's
+        self.assertEqual(store.Task("t-pk3").spec["copy"], ["node_modules"])
+        # from the root, or from a package without its own, the entry as written, as before
+        (self.repo / "local.cfg").write_text("db=dev\n")
+        for sub in (None, "packages/app"):
+            self.assertIn("(--copy local.cfg)", cli._standing_gap(
+                {"copy": ["local.cfg"]}, types.SimpleNamespace(copy=None, sibling=None), "DeepInfra",
+                self.repo, sub))
 
     # 11: the where-note
 
