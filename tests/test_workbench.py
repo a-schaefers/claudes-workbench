@@ -1390,10 +1390,10 @@ class Lifecycle(Base):
             self.assertEqual(said(cmd), "nosuch-ruff-1256: command not found", cmd)
         with mock.patch.dict(os.environ, {"UV_NO_SYNC": "1"}):
             self.assertEqual(said("uv run nosuch-ruff-1256"), "nosuch-ruff-1256: command not found")
-        self.assertEqual(runner.uv_synced_programs("uv sync && uv run --with x pytest -q && poetry run y"),
-                         {"x", "pytest"})
+        self.assertTrue(runner.installs_before("uv run --with x pytest -q", "pytest"))
+        self.assertFalse(runner.installs_before("uv run --no-sync pytest -q", "pytest"))
 
-    def test_a_tool_a_dependency_brings_after_the_commands_own_install_goes_back_to_the_agent(self):
+    def test_nothing_is_a_missing_tool_after_the_commands_own_install_step_but_its_installer(self):
         # #1256's third review (2026-11-24): the lane leaves the network open, so once a round
         # declares the dependency the command's own `poetry install`, `uv sync` or `bundle
         # install` installs it; each wrapper's line on the base checked in before round 1 with a
@@ -1417,18 +1417,52 @@ class Lifecycle(Base):
             alone = dict(r, cmd=r["cmd"].split(" && ", 1)[1])
             self.assertEqual(runner.missing_command(alone, task), "nosuch-ruff-1256: command not found",
                              alone["cmd"])
-        # pip's counts when it installs the project or a requirements file; never an install
-        # after the program, nor the installer's or wrapper's own name
-        for cmd, programs in (("pip install -e .[dev] && ruff check .", {"ruff"}),
-                              ("python3 -m pip install -r requirements.txt; pytest", {"pytest"}),
-                              ("uv pip sync requirements.txt && pytest", {"pytest"}),
-                              ("poetry -C app install --no-root && poetry run y", {"y"}),
-                              ("pip install ruff && ruff check .", set()), ("npm run ci && x", set()),
-                              ("x && poetry install", set())):
-            self.assertEqual(runner.installed_programs(cmd), programs, cmd)
-        self.assertEqual(runner.missing_command({"exit": 127, "cmd": "bundle install && bundle exec x",
-                                                 "tail": "bash: bundle: command not found"}, task),
-                         "bundle: command not found")
+        # one rule after an install or sync step (#1256's review, 2026-11-24): no tool, path or
+        # module is missing, whatever line says it, and each line still checks in without the step
+        npm = ("> p@1.0.0 test\n> jest\n\nsh: 1: jest: not found\nnpm error Lifecycle script `test` "
+               "failed with error:\nnpm error code 127\nnpm error path /r\nnpm error command sh -c jest")
+        for cmd, code, tail, alone in (
+                # the shell's own 127 line after an install, by name and under npm's lines
+                ("npm ci && jest", 127, "sh: 1: jest: not found", "jest: command not found"),
+                ("npm ci && npm test", 127, npm, "jest: command not found"),
+                # a TOOL_DIRS path
+                ("poetry install && .venv/bin/pytest", 127,
+                 "bash: line 1: .venv/bin/pytest: No such file or directory",
+                 ".venv/bin/pytest: not in the worktree (.venv/ is an install's, never checked out)"),
+                ("npm ci && node_modules/.bin/jest", 127,
+                 "bash: line 1: node_modules/.bin/jest: No such file or directory",
+                 "node_modules/.bin/jest: not in the worktree (node_modules/ is an install's, never "
+                 "checked out)"),
+                # Python's no-module line
+                ("pip install -e .[dev] && python3 -m pytest", 1,
+                 "/usr/bin/python3: No module named pytest", "/usr/bin/python3: No module named pytest"),
+                ("uv sync && uv run --no-sync python -m pytest", 1,
+                 "/r/.venv/bin/python: No module named pytest", "/r/.venv/bin/python: No module named pytest"),
+                # bare `yarn` and `bundle` install; pip's `--group`
+                ("yarn && yarn test", 127, "sh: 1: jest: not found", "jest: command not found"),
+                ("bundle && bundle exec rspec", 127, "bundler: command not found: rspec\n"
+                 "Install missing gem executables with `bundle install`", "rspec: command not found"),
+                ("pip install --group dev && pytest", 127, "bash: line 1: pytest: command not found",
+                 "pytest: command not found")):
+            r = {"exit": code, "cmd": cmd, "tail": tail}
+            self.assertIsNone(runner.missing_command(r, task), cmd)
+            alone_cmd = cmd.split(" && ", 1)[1]
+            self.assertEqual(runner.missing_command(dict(r, cmd=alone_cmd), task), alone, alone_cmd)
+        # never the install step's own program, which no round gives, nor an install after the
+        # failing part, nor pip's of a named package, nor a run that isn't an install
+        for cmd, code, tail in (("npm ci && npm test", 127, "sh: 1: npm: not found"),
+                                ("python3 -m pip install -e . && pytest", 1,
+                                 "/usr/bin/python3: No module named pip"),
+                                ("bundle install && bundle exec x", 127, "bash: bundle: command not found"),
+                                ("x && poetry install", 127, "bash: x: command not found"),
+                                ("pip install ruff && x", 127, "bash: x: command not found"),
+                                ("pip3 install ruff && x", 127, "bash: x: command not found"),
+                                ("npm run ci && x", 127, "bash: x: command not found")):
+            self.assertIsNotNone(runner.missing_command({"exit": code, "cmd": cmd, "tail": tail}, task), cmd)
+        for cmd in ("python3 -m pip install -r requirements.txt; x", "uv pip sync requirements.txt && x",
+                    "poetry -C app install --no-root && x", "go mod download && x", "cargo fetch && x",
+                    ".venv/bin/pip3 install -e . && x"):
+            self.assertTrue(runner.installs_before(cmd, "x"), cmd)
 
     def test_a_tool_in_the_checkouts_ignored_venv_checks_in_at_once_and_skips_auto_fix(self):
         # #1206 (bar round 3 of 2.0): `--test .venv/bin/python …`, as Claude runs it in the user's
