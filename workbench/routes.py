@@ -586,9 +586,41 @@ def no_api_model(role: str) -> str:
             f"{role} --api <id>) or set Agents to Both or GPU (wb route all both|gpu)")
 
 
+def off_api(role: str | None, doc: dict | None = None) -> tuple[str, str, str] | None:
+    """How the user keeps ``role``'s next starts off API, from routes.json as it is now (``doc``,
+    else read): (noun, verb, command), as `the role on the GPU`, `put the role on the GPU`,
+    `wb route <role> gpu`. With Agents on API that is the Agents switch (Both only when the role's
+    own side is the GPU and no busy opt-in sends it back); a role on the GPU that the busy opt-in
+    sends to API, `wb route busy wait`; None when its next starts are off API already. Every
+    refusal and notice that offers the GPU asks this: `wb route <role> gpu` under Agents API, or for
+    a busy opt-in's task, changed nothing, and the retry was refused with the same line (#1218,
+    2026-11-24). No role, or routes.json unreadable: the role's own command, as before."""
+    r = role or "<role>"
+    plain = ("the role on the GPU", f"put {r} on the GPU", f"wb route {r} gpu")
+    if role is None:
+        return plain
+    if doc is None:
+        try:
+            doc = read()
+        except RoutesError:
+            return plain
+    if role not in doc["roles"]:
+        return plain
+    if effective_via(doc, role) == "api":
+        if doc.get("use") != "api":
+            return plain
+        if doc["roles"][role]["via"] == "gpu" and doc.get("busy") != "api":
+            return "Agents on Both or GPU", "set Agents to Both or GPU", "wb route all both|gpu"
+        return "Agents on GPU", "set Agents to GPU", "wb route all gpu"
+    if busy_api(doc, role):
+        return "waiting for a busy GPU", "have starts wait for a busy GPU", "wb route busy wait"
+    return None
+
+
 def cant_run(role: str, mid: str, why: str, fix: str, doc: dict) -> str:
     """The one line for a role whose API model can't run: never another model (#1016)."""
-    other = ("set Agents to Both or GPU (wb route all both|gpu)" if doc.get("use") == "api"
+    off = off_api(role, doc) or off_api(None)
+    other = (f"{off[1]} ({off[2]})" if doc.get("use") == "api"
              else f"put the role on the GPU (wb route {role} gpu)")
     said = fix and (fix in why or any(w in why for w in ("/connect", "top it up")))  # its own remedy
     return (f"{role} role: {mid} can't run: {why}" + (f" ({fix})" if fix and not said else "")

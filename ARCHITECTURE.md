@@ -158,8 +158,9 @@ Agents switch over the role's own `via`): the GPU, its pin (`gpu`) or the router
 fallback, in either direction**: a GPU role with no GPU model exits 3 with the router's line and
 never tries its stored API model; an API role whose model can't run exits 3 with one line
 (`routes.cant_run`: `trivial role: <id> can't run: <why> (<fix>). Ask the user: fix that, or put
-the role on the GPU (wb route trivial gpu)`, or `… set Agents to Both or GPU (wb route all
-both|gpu)` under Agents API) and never the GPU; Agents on API with a role that has no API model
+the role on the GPU (wb route trivial gpu)`, or under Agents API `routes.off_api`'s `… set Agents to Both or
+GPU (wb route all both|gpu)`, `set Agents to GPU (wb route all gpu)` for a role whose own side is API or
+that the busy opt-in would send back, #1218) and never the GPU; Agents on API with a role that has no API model
 exits 3 too (`routes.no_api_model`). The choice is fixed in task.json (`via`, `role`, an API
 model's `provider`, `thinking`, `said`; a task from before #1016 has none, and reads as GPU until its runner writes
 `via` (and an API model's `provider`) once from the model it resolves, `runner.settle_via`, #1111:
@@ -728,7 +729,15 @@ saying so, never NO_CAP's advice; an unpriced model that started anyway is stopp
 room negative and `stop_reason` the NO_PRICE line): `trivial role: API spend today is ≈$5.03 of the $5 day cap (it resets at local midnight).
 Ask the user: a higher cap (wb route cap <usd>), the role on the GPU (wb route trivial gpu), or
 tomorrow` (the busy opt-in's note, `advice=False`, ends at `midnight)`: its role is on the GPU, the start only
-waits); and within one request at its worst of it (#1150: it passed, and the room refused the first request
+waits). **The way off API** in this advice, the local-only refusal, the spend stop's notice and the provider's
+advice is `routes.off_api(role)`'s, from routes.json as it is now, never a fixed `wb route <role> gpu`: under
+Agents API `Agents on GPU (wb route all gpu)` (`Agents on Both or GPU (wb route all both|gpu)` when the role's
+own side is the GPU and `busy` is wait); for a role on the GPU that the busy opt-in sends to API, `waiting for
+a busy GPU (wb route busy wait)`; for a role off API already (a `--model` task's, or one the user has
+just moved), nothing: a running task's advice is then `… or wb takeover <task> or wb discard <task> (it keeps its
+API model)`. No role, or routes.json unreadable: `wb route <role> gpu`, as before. Under Agents API
+`wb route trivial gpu` changed nothing, the user's yes was spent, and the retry was refused with the same
+line (#1218, 2026-11-24). And within one request at its worst of it (#1150: it passed, and the room refused the first request
 after the checkout, setup and base check, a wake for nothing): `meter.request_floor(m, tokens)`, the
 round's first request at its worst as the room reckons it, at the dearest tier's prices: its input `tokens`
 at the input price and the model's pinned output (`options.max_tokens`, else `limit.output`, else
@@ -753,7 +762,8 @@ step's feedback back to its review (`round_asks`) and Claude's undelivered notes
 bare RESUME named a cap the room refused at); with no cap set too (#1089's refusal). Their advice is a running task's
 (`meter.refusal(m, role, tokens=…, task=task)`, `meter._ask`): `… (it resets at local midnight). Ask the user: a higher
 cap (wb route cap <usd>) or tomorrow, then try again; or the role on the GPU (wb route <role> gpu) for the next
-tasks, with wb takeover <task> or wb discard <task> for this one (it keeps its API model)` (`a cap of at least
+tasks, with wb takeover <task> or wb discard <task> for this one (it keeps its API model)` (the way off API
+`routes.off_api`'s) (`a cap of at least
 $5.17` within one request of it), as `meter.stop_text` says (#1095): offered as this task's remedy, the role on
 the GPU had the user say yes and the retry refused with the same line (#1171). `meter.tail(m)` is the start line's part, ` · today ≈$0.42 of $5 (catalog prices)` (plain `$0.42 of $5` when today's rows and the model's last are the provider's own, `meter.next_basis`, #1165), or a plan's ` · plan
 usage (OpenCode Go): 1.2M tokens today`, which wb start's model line ends with (`cli.cmd_start`).
@@ -793,7 +803,9 @@ have `cause` `spend`, not the step's own (`results.THE_STEP`), so the slice isn'
 with `meter.stop_text`: `<task> stopped: the day's API spend cap is reached (≈$5.02 of $5 today; catalog prices). Its
 work so far is in the worktree. Ask the user: a higher cap (wb route cap <usd>) or tomorrow, then wb
 resume <task>; or the role on the GPU (wb route <role> gpu) for the next tasks, with wb takeover <task>
-or wb discard <task> for this one (resume keeps its API model).` (with no cap: `meter.no_cap()`, then
+or wb discard <task> for this one (resume keeps its API model).` (the way off API `routes.off_api`'s, #1218;
+none left to offer: `… then wb resume <task>; or wb takeover <task> or wb discard <task> (resume keeps its API
+model).`; with no cap: `meter.no_cap()`, then
 `wb resume`; never tomorrow). Under the cap (the room's stop, or `_go_on`'s look ahead) it never says the
 cap is reached, which had Claude resume into the same stop (#1150): `<task> stopped: too near the day's API
 spend cap for its next request (up to $0.33; ≈$4.80 of $5 today; catalog prices). Its work so far is in the
@@ -807,7 +819,8 @@ the notice said the cap was reached with a cap that would not do (#1150's review
 the GPU … then wb resume" resumed into the same stop (#1095); `wb resume` at the cap is now refused
 before any round (`cli._model_still_listed`, #1118). The mod's `GUARD_WORDS.spend` names it,
 and its wake for a `cause` `spend` notice ends with `SPEND_NEXT` (the same choices, asked of the user;
-`Ask the user for a day cap` when routes.json has none, `readRoutes`; with `guard` `agents`, the Agents
+`Ask the user for a day cap` when routes.json has none, `readRoutes`; for the next tasks `the route change the
+notice names, if any`, never its own `wb route <role> gpu`, a no-op under Agents API, #1218; with `guard` `agents`, the Agents
 switch's stop, `AGENTS_NEXT`: Agents back to Both or API, then `wb resume`, or takeover or discard, #1213), not the stuck wake's
 feedback line: feedback would run a round the cap stops again at once. A `cause` `provider` notice (a quota, key, rate-limit
 or outage stop) wakes as `was stopped by its API provider` (`PROVIDER_HEADLINE`, the toast's too) and ends with
@@ -1107,8 +1120,8 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   queued again, a `load` event "<provider> is still out of credit: the task waits as queued
   again" and no notice (#1216). A second stop, or a quota, key, setup or refused stop, ends it `stuck` with `cause` `provider`, `infra`
   `provider` (a bench replay scores `error`), and `provider_remedy` under the STOPPED line (`wb
-  feedback <task> --text "carry on"` once the provider allows, a round that counts no review, #1153, and `wb route <role> gpu (the user's
-  yes)` when the task has a role; top up or wait for the plan's reset; /connect for a refused
+  feedback <task> --text "carry on"` once the provider allows, a round that counts no review, #1153, and `routes.off_api`'s command, `wb route <role> gpu (the user's
+  yes)` or under Agents API `wb route all gpu`, when the task has a role and its next tasks aren't off API already, #1218; top up or wait for the plan's reset; /connect for a refused
   key; for `setup`, "this machine's stop, not the agent's or <provider>'s: mend what the line
   above says", #1080; for `refused`, `wb feedback` once what the provider said is fixed, and on a
   404 `wb takeover` or `wb discard` if it no longer serves the model, which wb never switches). Its `stopped` event says `by: "provider"`, so it is never a lesson about the agent (the
@@ -4192,7 +4205,8 @@ nearest entry that states it (*Files and formats*), or `wb start --local-only` (
 `cli.local_only_refusal`: a `--model` resolving to `kind: api`, else the role's side as it runs, `routes.effective_via`
 over `routes.read()`), so before `pick_model`'s `--model` gate, exit 3, never the GPU instead: `wb: ~/src/client is local-only (commands.json "repos"): the trivial role is
 on API (deepseek/deepseek-flash). Choices: put trivial on the GPU (wb route trivial gpu, the user's yes), or the user
-lifts local_only for this repo.` (with `--local-only`: `… or the user drops --local-only for this task`; for a `--model`:
+lifts local_only for this repo.` (under Agents API `routes.off_api`'s `set Agents to GPU (wb route all gpu, the user's
+yes)`, #1218; with `--local-only`: `… or the user drops --local-only for this task`; for a `--model`:
 `the task's model is API (<id>, --model). Choices: a GPU model, …`). The mod's dialog for `wb start --model` (#1014's)
 asks before `wb start` runs, from `wb route --dry-run --start <its args>` (`cli._route_start`), which parses the start's
 `--repo` (else the command's cwd) and `--local-only`, and exits 3 with `cli.local_only_refusal`'s line in
@@ -7210,4 +7224,4 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **`runner.thinking_variant`** (`THINKING_OFF`, `OFF_VARIANT`, `DEFAULT_EFFORT`, `_no_off_listed`, `_off_form`, the V2 move in `_as_v2`) → `fake_opencode.py`'s variant check (`layer_variants`: V1 and V2, the layer file and the content), `transcript.model_line` (`thinking_shown`), *Thinking off by default*.
 - **A model name** → never in code or the skill: OpenCode's config, the router, the weekly check.
 - **A runner guard** (`out["guard"]`: `repeat`, `errors`, `no_edit`, `round`, `silence`, `think`, `handovers`, `spend`) → the mod's `GUARD_WORDS`, *Stats recording*'s list.
-- **The spend stop** (#1019): `meter.request_floor` ↔ `Meter.room`'s worst (#1150: the start's refusal and `_go_on`'s look ahead keep room's margin; its input `runner.first_tokens` ↔ what `run_round` sends: status `live_used`, `handoff_prompt`, `PROMPT_ARG_MAX`, #1173) ↔ `meter.stop_reason` ↔ `runner._go_on` (#1017, before each `continue` in `drive`) ↔ `runner._spend_guard` ↔ the keyhole's `close(reason)` and `room` hook (`Meter.hooks()`, which `runner.start_keyhole` passes to `keyhole.start`) ↔ status `api_stop` (the keyhole's `quota` stop writes it too, #1020; `_ProviderWait.stop` consumes it, keeping its `worst` for `runner._spend_lead` ↔ `meter.stop_text(task, worst)`, #1150, and `Meter.begin` clears it at each round's start, whatever its guard). `events.normalize`'s step `cost` ↔ `tests/fake_opencode.py`'s `part.cost` (`FAKE_STEP_COST`) ↔ `meter.step_tokens`. A `spend` notice's `cause` ↔ the mod's `SPEND_NEXT`; its `guard` `agents` (`runner.AGENTS`) ↔ the mod's `AGENTS_NEXT`, and `routes.AGENTS_GPU`/`AGENTS_STOPS` ↔ the mod's `AGENTS_STOPS` text (#1213).
+- **The spend stop** (#1019): `meter.request_floor` ↔ `Meter.room`'s worst (#1150: the start's refusal and `_go_on`'s look ahead keep room's margin; its input `runner.first_tokens` ↔ what `run_round` sends: status `live_used`, `handoff_prompt`, `PROMPT_ARG_MAX`, #1173) ↔ `meter.stop_reason` ↔ `runner._go_on` (#1017, before each `continue` in `drive`) ↔ `runner._spend_guard` ↔ the keyhole's `close(reason)` and `room` hook (`Meter.hooks()`, which `runner.start_keyhole` passes to `keyhole.start`) ↔ status `api_stop` (the keyhole's `quota` stop writes it too, #1020; `_ProviderWait.stop` consumes it, keeping its `worst` for `runner._spend_lead` ↔ `meter.stop_text(task, worst)`, #1150, and `Meter.begin` clears it at each round's start, whatever its guard). `events.normalize`'s step `cost` ↔ `tests/fake_opencode.py`'s `part.cost` (`FAKE_STEP_COST`) ↔ `meter.step_tokens`. A `spend` notice's `cause` ↔ the mod's `SPEND_NEXT`; its `guard` `agents` (`runner.AGENTS`) ↔ the mod's `AGENTS_NEXT`, and `routes.AGENTS_GPU`/`AGENTS_STOPS` ↔ the mod's `AGENTS_STOPS` text (#1213). The way off API (#1218): `routes.off_api` ↔ `routes.effective_via` and `busy_api` ↔ its users, `meter._ask`, `meter.stop_text`, `privacy.local_only_line`, `runner.provider_remedy` and `routes.cant_run` under Agents API: a new remedy that offers the GPU asks it.
