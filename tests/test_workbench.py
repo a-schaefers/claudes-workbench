@@ -7001,6 +7001,24 @@ class Context(Base):
         settled = [e for e in store.read_jsonl(t.dir / "events.jsonl")[0] if e.get("kind") == "settled"]
         self.assertEqual(len(settled), 7)
 
+    def test_a_self_review_handed_over_past_the_limit_on_its_green_tree_goes_to_review(self):
+        # #1261's review (2026-11-24): drive's HANDOVER_MAX stop goes through runner.settle, which
+        # only the direct call above reached, so dropping it there left every test passing. Each
+        # session of this self-review breaks the check or restores it and fills its window; the
+        # last, past the limit, on the tree its tests passed on
+        os.environ["FAKE_SELF_REFILL"] = "1"
+        self.start("t-srx", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-srx", {"review", "stuck", "failed"}, timeout=120)
+        self.assertEqual((st["phase"], st["round_for"]), ("review", "fresh"), st.get("last"))
+        self.assertTrue(st["tests"]["ok"])
+        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-srx"]
+        self.assertEqual([r["kind"] for r in rows if r["kind"] != "checkin"], ["review"])
+        self.assertIn(f"self-review: handed over to a fresh session {runner.HANDOVER_MAX} times, "
+                      "the tree its tests passed on; stopped as its finish", rows[-1]["text"])
+        self.assertNotIn("times in this round without finishing", rows[-1]["text"])
+        from workbench import results
+        self.assertFalse(results.step(store.Task("t-srx"), landed=False)["stuck"])
+
     def test_a_self_review_begun_in_a_fresh_session_that_reads_past_the_explore_guard_goes_to_review(self):
         # #1188 (2026-11-24): the five recorded trips (bench-big-compaction, big-logout,
         # big-this-host) each had round 1's session compacted, so the self-review began in a
@@ -34864,6 +34882,28 @@ class RateLimits(Base):
             runner.drive(other)                                     # without the pause
         self.assertEqual(other.status["phase"], "stuck")
         self.assertIn("no first output", other.status["last"])
+
+    def test_an_api_self_review_on_its_green_tree_whose_opencode_exits_on_the_providers_error_goes_to_review(self):
+        # #1261's review (2026-11-24): the provider's stop at OpenCode's exit goes through
+        # runner.settle, which only a direct call reached, so dropping it there left every test
+        # passing. The self-review's run ends on a 429 or an outage, the tree its tests passed on
+        os.environ.update(FAKE_RETRIES="2", FAKE_RETRY_EVERY="0.2")
+        for state, said in (("ratelimit", "deepseek rate-limited the agent's requests for"),
+                            ("down", "deepseek didn't answer for")):
+            os.environ["FAKE_SELF_API"] = state
+            task = self.api_task(f"t-sra-{state}", "selfreads", "--test", TEST_CMD, "--self-review")
+            runner.drive(task)
+            st = task.status
+            self.assertEqual((st["phase"], st["round"], st["round_for"]), ("review", 2, "self_review"),
+                             st.get("last"))
+            self.assertTrue(st["tests"]["ok"])
+            self.assertIsNone(st.get("infra"))
+            self.assertFalse(self.events(task, "stopped"), state)
+            [ev] = self.events(task, "settled")
+            self.assertIn(f"self-review: {said}", ev["text"])
+            n = self.notice(task)
+            self.assertEqual(n["kind"], "review")
+            self.assertIn("tests: PASS", n["text"])
 
     def test_a_held_429_through_the_keyhole_pauses_the_clocks_until_the_first_token(self):
         # the whole run held in the keyhole: OpenCode prints no `retry`, so only status
