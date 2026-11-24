@@ -77,7 +77,16 @@ def _denied(commands) -> tuple[str, ...]:
         tuple(f"{w} {c} *" for w in _WRAPPERS for c in commands)
 
 
-DENIED_SHELL = _denied(_HARD)
+# A recursive rm of the home or the root, whatever was allowed: `rm` is on ALLOWED_COMMANDS, the
+# agent's HOME is the real one and its lane writes the caches under it, so `rm -rf main ~` would
+# have deleted them; an API agent sent just that (task mid1-xl-scout, 2026-11-23, #1146), refused
+# only because the same line ran `wb`. The space before the word keeps `rm -rf build~`, and the
+# word ending there (or a space after it) keeps `rm -rf ~/build` and `rm -rf /tmp/x`. Not `~/*`,
+# `$HOME/*` or `/*`: OpenCode's `*` can't be matched literally, so such a pattern would refuse
+# every rm under home. Nor `bash -c`, `find ~ -delete`, `xargs rm`, `\rm`, `/bin/rm`, an operand
+# before the options (`rm ~ -rf`) or another quoting: the lane stands behind those.
+_HOME_OR_ROOT = ("~", "~/", "$HOME", '"$HOME"', "${HOME}", "$HOME/", "/")
+DENIED_SHELL = _denied(_HARD) + _denied(tuple(f"rm * {w}" for w in _HOME_OR_ROOT))
 # The real git by its path: the binaries themselves, not `*/git`, which (`*` matching anything)
 # also refused `go test ./internal/git` and `ls pkg/git`, whatever Claude allowed (the 2026-11-16
 # audit). A relative path to it still gets by, like `bash -c`: the shim and the repository's git
@@ -1173,24 +1182,29 @@ def repo_entries(repo: str | Path, sub: str | None = None) -> list[tuple[str, di
     repos = commands_conf().get("repos") or {}
     if not repos:
         return []
-    top = os.path.realpath(repo)
-    spot = os.path.realpath(Path(repo) / sub) if sub else top
+    # real paths, in lower case where the file system ignores case (macOS), as cli._scope's: a
+    # key typed ~/Code/ClientX for git's ~/code/clientx matched neither by path nor by git dir,
+    # and a local-only repo's task went to the API model (#1157, 2026-11-24)
+    fold = store.folds_case(repo)
+    real = lambda p: os.path.realpath(p).lower() if fold else os.path.realpath(p)  # noqa: E731
+    top = real(repo)
+    spot = real(Path(repo) / sub) if sub else top
 
     def within(p: str, d: str) -> bool:
         return d == "." or p == d or p.startswith(d.rstrip(os.sep) + os.sep)
 
     by_path = sorted(((len(kr), k, v) for k, v in repos.items()
-                      if within(kr := os.path.realpath(Path(k).expanduser()), top) and within(spot, kr)),
+                      if within(kr := real(Path(k).expanduser()), top) and within(spot, kr)),
                      key=lambda x: -x[0])
     if by_path:
         return [(k, v) for _, k, v in by_path]
     common, rel_spot, found = gitops.common_dir(repo), os.path.relpath(spot, top), []
     for k, v in repos.items() if common else ():
         kp = Path(k).expanduser()
-        if gitops.common_dir(kp) != common:
+        if (kc := gitops.common_dir(kp)) is None or real(kc) != real(common):
             continue
         try:
-            rel = os.path.relpath(os.path.realpath(kp), os.path.realpath(gitops.toplevel(kp)))
+            rel = os.path.relpath(real(kp), real(gitops.toplevel(kp)))
         except gitops.GitError:
             continue
         rank = 0 if rel == "." else len(rel) + 1
@@ -2625,10 +2639,16 @@ def api_hidden_refusal(task: store.Task, raw: str) -> str | None:
     return None
 
 
-def api_hidden_note() -> str:
+def api_hidden_note(task: store.Task) -> str:
     """wb start's note for an API task when a file API_HIDDEN names holds a credential, else '': the files,
     then the tools that don't run in its lane (API_HIDDEN_STOPS), those whose private-registry
-    installs fail and what else fails (API_HIDDEN_FAILS: Hugging Face's gated models, #1092)."""
+    installs fail and what else fails (API_HIDDEN_FAILS: Hugging Face's gated models, #1092).
+    '' where ``task`` has no lane to hide them: no Landlock, or the lane off."""
+    # Without a lane nothing is hidden: the agent reads the file and Maven runs. On macOS every
+    # API start said otherwise, so Claude, as the skill says, told the user the repo won't build
+    # on API and that the token couldn't reach the provider (#1156, 2026-11-24)
+    if not lane.abi() or writable(task) is None:
+        return ""
     home = os.path.realpath(Path.home())
     tools = _api_hidden_tools()
     there = sorted(tools)  # each there and holding a credential (a file, or NuGet's config/)
