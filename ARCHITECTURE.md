@@ -2807,7 +2807,18 @@ run, scout) probes the usual ports at `models.windows_host` (the default gateway
 `/proc/net/route`, else `/etc/resolv.conf`'s nameserver), calls a hit "on Windows", and with
 nothing prints `models.WSL_NAT` (#663: Claude proposed a second server inside WSL). A provider
 there is `remote` but on the same GPU (`models.same_gpu`): this machine's pool, and `free_gpu`
-unloads it (#750: as its own pool it ran beside WSL's tasks on the one card).
+unloads it (#750: as its own pool it ran beside WSL's tasks on the one card). NAT gives Windows a
+new address when the WSL VM restarts, so `wb remote <Windows' address>` writes provider
+`models.WSL_PID` (`ollama-windows`, models.json `wsl_host: true`), and `discover()` follows it
+(`follow_windows_host`): a provider wb remote made there, still at its `remote` mark, whose host
+isn't `windows_host()` now has its baseURL (port kept) and mark rewritten through `own_config`,
+one `wb: Windows' address moved …` line on stderr; one it can't rewrite stays, and `remedy`
+(`windows_moved`) names the new address (`wb remote <new>`, or `networkingMode=mirrored`) where it
+said to start Ollama, as it does for any wb remote provider, or remote Ollama, gone from an address
+that isn't Windows' now ("if <host> was Windows' address"). A provider `ollama-<address>` from
+before stays its own (`wb remote` again at that address marks it, its ids kept). #1159: after a
+reboot every `wb start` said to start a running Ollama, and `wb remote <new>` made a second
+provider whose new ids started the router's history over.
 
 #### A model on another machine
 Ollama there with `OLLAMA_HOST=0.0.0.0`, reachable only from the client (no login; plain `http://`
@@ -3070,7 +3081,8 @@ user's config; results rows keep `thinking` (the weekly check's evidence for rec
 loses to wb's in the layer.
 
 `wb remote HOST` (`models.add_remote`, #114): checks `/api/version`, writes provider `ollama-<host>`
-(`remote_pid`; `remote_root` brackets IPv6, zone `%25`, read back as discovery reads it, #707)
+(`remote_pid`; WSL2's Windows host `ollama-windows`, `wsl_host: true`, repointed rather than
+refused when only the address moved, #1159; `remote_root` brackets IPv6, zone `%25`, read back as discovery reads it, #707)
 with `local: true` and `remote: <root>`, then adds each `/api/tags` model whose `/api/show`
 has `tools` through `wb model add`'s path (cloud rows left out; a refused one gets a `--` line, the
 rest go on). That id already there for another baseURL is refused, never reused (#197). `--remove`
@@ -3139,7 +3151,8 @@ provider:
   `wb accept`'s commit); `engine` (`ollama`/`server`, per provider); `gpu_gb` (top level: the
   budget by hand); `local: true`;
 - `same_gpu: true|false`: a `remote` server on this GPU (unset: true for `models.windows_host`);
-- `remote: <root>`: `wb remote` made it (#197);
+- `remote: <root>`: `wb remote` made it (#197); `wsl_host: true`: at WSL2's Windows host, whose
+  address discovery follows (`follow_windows_host`, #1159);
 - `keep_loaded` (top level): ids or Ollama names never unloaded, stopped or measured by `wb
   optimize` (#254); an id only when it starts with a configured provider, else a whole Ollama name,
   untagged as `:latest` (`models._kept_name`, #461);
@@ -5668,7 +5681,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb models` | `--set-default`, `--json`, `--api TEXT` | State, slice, speeds, `bench:`, `size:`, `router.weights_changed`; the ranking, models under `router.EXPLORE_TRIES` marked (*Exploring*); the API section, and `--api TEXT` the catalog ids containing TEXT, at most 30 (*What `wb models` prints*). `--set-default` (a GPU model only): `models.set_default` (refused under `OPENCODE_CONFIG_CONTENT`, #421). `--json` (#1023, the pane's lists, `cli._models_json`, asking no server and rebuilding no catalog): `{gpu: [{id, label, window, sizes, cards}], api: [{id, name, provider, provider_name, window, price {input, output}, prices (catalog\|yours, #1135), free}] (stored keys on a package the keyhole speaks, #1066, and Ollama cloud only, `cli._runs_held`), used (API models tasks ran on), free_line, optimize {done_at, models, running}, media {image\|speech\|sfx\|music: {default, engines: [{name, gpu}]}} (#1047; a file that doesn't parse leaves its kinds out)}`. |
 | `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | *Managing the set*: `--url` via `models.add_server_provider` (an existing provider never touched, one for another baseURL refuses; off this machine needs `local: true`); `--start`/`--stop` to models.json; refuses Ollama cloud models (API models) without `local: true` (one under a plain name always), unknown contexts, down servers. |
 | `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | *Optimize*; `start` detached, refused while a task holds the GPU, stopped by a task that wants it; `--bench` then runs `wb bench run`; `apply` adds the measured window as its own entry (`optimize.entry_name`; refused when that name exists). |
-| `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Provider `ollama-<host>`, `local: true`, its tool models added (IPv6 bracketed, #707); exit 1 when it doesn't answer; `--remove` not while `model`/`small_model` is one (#708). |
+| `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Provider `ollama-<host>` (WSL2's Windows host: `ollama-windows`, followed to its next address, #1159), `local: true`, its tool models added (IPv6 bracketed, #707); exit 1 when it doesn't answer; `--remove` not while `model`/`small_model` is one (#708). |
 | `wb model retire <id>` | `--delete` | Not OpenCode's `model` or `small_model` (#708); keeps `variant_of`, `replaces` (#723); `--delete` drops Ollama's weights; an API id refused (`cli.API_SIZES`, #1013). |
 | `wb model rename <old id> <new id>` | | models.json `renamed_from` (#818); refused while the old id is configured, or for an API id. |
 | `wb model price <exact id>` | `--input X`, `--output Y`, `--cache-read Z`, `--cache-write W`, `--clear` | An API model's own prices per M (models.json `cost`, *Estimates or your prices*, #1135): its figures say `your prices`, no `≈`; `--clear` the catalog's again. Needs `--input` and `--output`; refused for an id not in the catalog, a plan, a free model, one `models.catalog_doc` can't carry, prices all 0 (free, outside the cap); another action's flag refused. |

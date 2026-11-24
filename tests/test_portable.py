@@ -2379,6 +2379,88 @@ class Remote(unittest.TestCase):
         self.assertIn("--  ollama-127-0-0-1/coder:7b: Ollama would serve coder:7b its own default context", out)
         self.assertEqual(self.wb("remote", "nowhere", "--remove")[0], 1)
 
+    def test_wb_remote_to_wsls_windows_host_follows_its_new_address_after_a_reboot_as_one_provider(self):
+        # #1159 (2026-11-24): on WSL2's NAT, wb remote <Windows' address> wrote ollama-<address>
+        # with it; a reboot moved the address, every wb start said to start an Ollama that was
+        # running, and wb remote <new address> made a second provider, the model ids new
+        tags = [{"name": "coder:7b"}]
+        shows = {"coder:7b": {"capabilities": ["tools"], "model_info": {"llama.context_length": 131072}}}
+        try:  # Windows before and after the reboot, played by other loopback addresses
+            before, port = fake_remote_ollama(tags, shows, host="127.0.0.2")
+        except OSError:
+            self.skipTest("no 127.0.0.2 here")
+        self.servers.append(before)
+        self.config({}, {})
+        cfg_path, models_path = Path(os.environ["WB_OPENCODE_CONFIG"]), Path(os.environ["WB_MODELS"])
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.2"):
+            code, out = self.wb("remote", "127.0.0.2", "--port", str(port), "--context", "32768")
+        self.assertEqual(code, 0, out)
+        self.assertIn("registered ollama-windows/coder:7b", out)
+        self.assertTrue(json.loads(models_path.read_text())["ollama-windows"]["wsl_host"])
+        before.shutdown()
+        before.server_close()
+        self.servers.remove(before)
+        try:
+            after = ThreadingHTTPServer(("127.0.0.3", port), before.RequestHandlerClass)
+        except OSError:
+            self.skipTest("no 127.0.0.3 here")
+        threading.Thread(target=after.serve_forever, daemon=True).start()
+        self.servers.append(after)
+        err = io.StringIO()
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.3"), redirect_stderr(err):
+            m = models.discover()["ollama-windows/coder:7b"]            # the same id: its history kept
+            self.assertEqual(m.root, f"http://127.0.0.3:{port}")
+            self.assertTrue(models.status(m)["available"], models.status(m))
+            self.assertIn("Windows' address moved from 127.0.0.2 to 127.0.0.3", err.getvalue())
+            models.discover()
+            self.assertEqual(err.getvalue().count("moved"), 1)           # said once, when it moved
+            prov = json.loads(cfg_path.read_text())["provider"]
+            self.assertEqual(list(prov), ["ollama-windows"])
+            self.assertEqual(prov["ollama-windows"]["options"]["baseURL"], f"http://127.0.0.3:{port}/v1")
+            self.assertEqual(json.loads(models_path.read_text())["ollama-windows"]["remote"],
+                             f"http://127.0.0.3:{port}")
+            code, out = self.wb("remote", "127.0.0.3", "--port", str(port), "--context", "32768")
+            self.assertEqual(code, 0, out)                               # no second provider
+            self.assertEqual(list(json.loads(cfg_path.read_text())["provider"]), ["ollama-windows"])
+            code, out = self.wb("remote", "127.0.0.3", "--remove")
+            self.assertEqual(code, 0, out)
+            self.assertNotIn("ollama-windows", json.loads(cfg_path.read_text())["provider"])
+
+    def test_a_remote_ollama_gone_from_an_old_windows_address_is_told_the_new_one_not_to_start_ollama(self):
+        # #1159 (2026-11-24): a provider wb remote made before it followed Windows' address said
+        # "start Ollama at <old address>" after a reboot; wb remote again keeps the old id's models
+        dead = free_port()
+        legacy = models.remote_pid("127.0.0.4")
+        self.config({legacy: {"name": "Ollama on 127.0.0.4", "models": {"coder:7b": {}},
+                              "options": {"baseURL": f"http://127.0.0.4:{dead}/v1"}}},
+                    {legacy: {"local": True, "remote": f"http://127.0.0.4:{dead}"}})
+        m = models.discover()[f"{legacy}/coder:7b"]
+        st = models.status(m)
+        self.assertEqual(st["why"], "ollama is not answering")
+        with mock.patch.object(models, "windows_host", return_value=None):  # off WSL: as it was
+            self.assertTrue(models.remedy(m, st).startswith("start Ollama at"))
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.5"):
+            fix = models.remedy(m, st)
+        self.assertIn("if 127.0.0.4 was Windows' address", fix)
+        self.assertIn("wb remote 127.0.0.5", fix)
+        self.assertIn("networkingMode=mirrored", fix)
+        # still at Windows' address, wb remote adopts the old provider: its models keep their ids
+        try:
+            srv, port = fake_remote_ollama([{"name": "coder:7b"}],
+                                           {"coder:7b": {"capabilities": ["tools"], "model_info": {}}},
+                                           host="127.0.0.4")
+        except OSError:
+            self.skipTest("no 127.0.0.4 here")
+        self.servers.append(srv)
+        self.config({legacy: {"name": "Ollama on 127.0.0.4", "models": {"coder:7b": {}},
+                              "options": {"baseURL": f"http://127.0.0.4:{port}/v1"}}},
+                    {legacy: {"local": True, "remote": f"http://127.0.0.4:{port}"}})
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.4"):
+            code, out = self.wb("remote", "127.0.0.4", "--port", str(port), "--context", "32768")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(list(json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())["provider"]), [legacy])
+        self.assertTrue(json.loads(Path(os.environ["WB_MODELS"]).read_text())[legacy]["wsl_host"])
+
 
 class Optimize(unittest.TestCase):
     """wb optimize against an Ollama whose placement depends on the window: 10 GB of weights and
