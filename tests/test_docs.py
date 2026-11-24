@@ -144,6 +144,24 @@ class DocsMatchTheCode(unittest.TestCase):
         missing = sorted(p for p in paths if p not in doc)
         self.assertEqual(missing, [], "add these to docs/chat-api.md")
 
+    def test_every_key_of_the_users_chat_state_is_in_the_api_reference(self):
+        # #1127 (2026-11-23): snapshot() gained `tasks` (#1016) and week_saved `api` (#1022), and
+        # docs/chat-api.md's /api/state list named neither; read from the source, no state needed
+        import ast
+        tree = ast.parse((ROOT / "workbench/chat.py").read_text())
+        keys = {}
+        for fn in (n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("snapshot", "week_saved")):
+            ret = next(n.value for n in ast.walk(fn) if isinstance(n, ast.Return))
+            keys[fn.name] = {k.value for k in ret.keys if isinstance(k, ast.Constant)}
+        self.assertGreater(len(keys["snapshot"]), 8)
+        doc = (ROOT / "docs/chat-api.md").read_text()
+        state = doc.split("### `GET /api/state`", 1)[1].split("\n### ", 1)[0]
+        listed = set(re.findall(r"^- `([a-z_]+)`:", state, re.M))
+        self.assertEqual(sorted(keys["snapshot"] - listed), [], "add these to docs/chat-api.md's /api/state")
+        saving = " ".join(next(b for b in state.split("\n- ") if b.startswith("`savings`")).split())
+        self.assertEqual(sorted(k for k in keys["week_saved"] if f"`{k}`" not in saving), [],
+                         "name these in /api/state's `savings`")
+
     def test_claude_md_stays_under_claude_codes_size_warning(self):
         # Claude Code warns past 40,000 characters, and every session that changes the code
         # loads this file (local agents too, when workbench delegates work on itself)

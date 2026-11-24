@@ -52,8 +52,11 @@ does the whole flow below with the standard library alone.
   `[web chat] …`, and treats it as a teammate's request. Anything that needs the user's yes
   (spending, pushing, opening a pull request, deleting) waits for the user; Claude says so in
   its reply.
-- **Agent access** is on whenever the chat is on and at least one agent token exists. There is no
-  other switch.
+- **Agent access** is on while the chat's server runs and at least one agent token exists. There
+  is no other switch. With the chat off (`wb chat off`) no session listens: `/api/health` says
+  `listening: false`, and a message sent waits, unread, until a session listens with the chat on,
+  or is never passed on past 6 hours. `wb chat off` stops a server it started; one a service keeps
+  up runs on until the service is stopped.
 - **Transport:** HTTP/1.0, one request per connection, no CORS. A connection that sends nothing
   for 30 s is closed. Every response has `Cache-Control: no-store` (but `/api/file`) and a
   `X-Workbench-Chat` header naming whose chat it is.
@@ -112,7 +115,7 @@ curl -s "${auth[@]}" "$CLAUDE_WB_URL/api/wait?after=1795436900301-a1b2c3&timeout
 An agent's token reads only its own conversation:
 - **`/api/state` and `/api/stream`** carry `{api, messages, listener, uploads, expire, now}`, and
   `messages` holds only its own messages and Claude's rows whose `to` names it. No `asks`, `prefs`,
-  `push`, `savings` or `build`: those are the user's. `/api/send`'s `state` is the same view.
+  `push`, `savings`, `build` or `tasks`: those are the user's. `/api/send`'s `state` is the same view.
 - **`/api/wait`** on an id that is neither its own message nor a reply to it is `404 {"error":
   "no such message"}`.
 - **Files:** `GET /api/upload/<id>` and `/api/file/<id>` answer only for a file it uploaded or one
@@ -143,9 +146,13 @@ The whole state the page draws (an agent's token gets its own view: *An agent's 
 - `listener`: the listening session `{session, cwd, pid, start, machine?, busy}`, or null.
 - `prefs`: `{away: "ask"|"allow"}`.
 - `push`: `{key: the VAPID public key or null, test: the last test push's time or null}`.
-- `savings`: the week's `wb savings` totals and `score`.
+- `savings`: the week's `wb savings` totals and `score`, and `api`: the week's API tasks apart
+  (`tasks`, `cost` in dollars, `unknown`, `plan`, `trials`, `claude`, `self_est`, `by_provider`,
+  `by_day`, and `names`: each provider's name), never part of the score.
 - `uploads`: `{file, message, files}`: bytes per file, bytes per message, files per message.
 - `build`: the page files' stamp (a page whose stamp differs reloads).
+- `tasks`: the open tasks, for the strip over the thread: `[{name, phase, model, via: "gpu"|"api",
+  provider_name}]` (none accepted or discarded).
 - `expire`: seconds a message waits before it is never passed on (21600).
 - `now`: the server's time (seconds).
 

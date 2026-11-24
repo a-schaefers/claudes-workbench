@@ -4563,7 +4563,10 @@ client; the server needs no browser.
   both went on reading its replies after a revoke, the #1042 review). An agent gets 403 `agent tokens can't …` on `AGENT_DENIED` (`/api/answer`,
   `/api/prefs`, `/api/push`, `/api/active`, `/api/seen`), and 429 `{error, retry_after}` past
   `AGENT_SENDS_PER_MIN` 30 sends in any 60 s (`chat.RateLimit`, per agent, in the server's memory).
-  No switch of its own: on whenever the chat is and a token exists.
+  No switch of its own: answered while the server runs and a token exists. With the chat off no
+  session listens, so `/api/health` says `listening: false` and a message waits, unread, until one
+  does, or `MESSAGE_EXPIRE` passes (a service keeps the server up through `wb chat off`: "on
+  whenever the chat is", the docs said, #1127).
 - **Marked.** Its message is `{from: <name>, role: "agent"}` (`chat._inbound`: indexed in
   `open.json`, receipted, expired, listed by `pending` as the user's), reaches Claude as `[agent
   <name>] …` (the mod, *The web chat listener*), never makes the user away, shows on the page with
@@ -4601,7 +4604,7 @@ client; the server needs no browser.
   whole state and stream, the user's messages and dialogs included. `Handler._snap` gives it
   `chat.agent_snapshot` (`{api, messages, listener, uploads, expire, now}`, `messages` only the rows
   `chat.in_view` passes: its own, and Claude's whose `to` names it; `chat.thread(keep=…)`) for
-  `/api/state`, `/api/stream` and `/api/send`'s `state`; no asks, prefs, push, savings or build.
+  `/api/state`, `/api/stream` and `/api/send`'s `state`; no asks, prefs, push, savings, build or tasks.
   `/api/wait` on a row not in its view is 404 (`chat.wait_state`). `AGENT_UNREAD` (`/api/latest`,
   `/api/ask/`, `/api/shot`, `/api/audio`) is 403 `agent tokens can't …` (`Handler._agent_unread`,
   before the path's own handler). Its upload keeps `by: <name>` in `.meta.json` (`save_upload(by=)`);
@@ -6357,7 +6360,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   never shown, #846, #861), *Files and formats*; `Watch` checks every `.event({… "kind": …})` literal (#865).
 - **A new tuned knob** → `tuning.KNOBS`, `tuning.value(task, name)`, a ceiling in `drive`; an evidence flag (`fills`,
   `passed`) → `tuning.acted` and its row field (`peak_share`, `self_review_due`).
-- **`chat.py` or `chat_static/`** → the browser test. **`/api/state`'s asks or messages** → `sw.js`.
+- **`chat.py` or `chat_static/`** → the browser test. **`/api/state`'s asks or messages** → `sw.js`. **A key of
+  `chat.snapshot` or `week_saved`** → docs/chat-api.md's `GET /api/state` (`test_docs`: both had gone unlisted, #1127).
 - **A message's `from`** (`user`, `claude`, `notice`, an agent's name with `role: "agent"`) → `chat.NEWS`,
   `chat._inbound`, `chat.AGENT_RESERVED`, `sw.js`, `makeRow`, `metaFor`, `agentMeta`, `reportSeen`, `wb chat log`, the
   mod's `unread`/`agentOf`/`chatPrompt` and `owedAtTurnEnd` (`claude` only), docs/chat-api.md.
