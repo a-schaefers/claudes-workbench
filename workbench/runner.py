@@ -3947,9 +3947,12 @@ def _stopped(m: models.Model) -> bool:
     return bool(st["available"]) and not st["resident"]
 
 
-def _wait_up(task: store.Task, m: models.Model) -> None:
+def _wait_up(task: store.Task, m: models.Model) -> models.Model:
     """Wait, backing off, until the model's server is no longer only down; RuntimeError past
-    DOWN_WAIT. Whatever it is then, the caller's load says."""
+    DOWN_WAIT. Whatever it is then, the caller's load says. The model is read again each pass,
+    and returned as last read: a task queued after a Windows reboot, before its server was up,
+    waited 20 minutes on Windows' old address while discovery followed it to the new one (#1167,
+    2026-11-24)."""
     deadline, pause = time.monotonic() + DOWN_WAIT, DOWN_PAUSES[0]
     said = False
     while (st := models.status(m)) and models.may_come_up(st):
@@ -3966,6 +3969,9 @@ def _wait_up(task: store.Task, m: models.Model) -> None:
             said = True
         time.sleep(min(pause, left))
         pause = min(pause * 2, DOWN_PAUSES[1])
+        with contextlib.suppress(KeyError, RuntimeError, OSError, ValueError):
+            m = models.resolve(m.id)  # gone from the config: the one it had
+    return m
 
 
 def _load(task: store.Task, lease, m: models.Model) -> float:
@@ -4213,7 +4219,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
         return
     if _down(m):  # before the lease: a server that is down holds no GPU from other tasks
         try:
-            _wait_up(task, m)
+            m = _wait_up(task, m)  # at Windows' new address, when discovery followed it (#1167)
         except RuntimeError as e:
             return _load_failed(task, e)
     if needs_base_check(task):

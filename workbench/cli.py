@@ -5025,9 +5025,9 @@ def server_lines(provs: dict) -> list[str]:
         if x.get("windows"):  # WSL2's Windows host, beyond this machine (#663)
             lines.append(f"  {x['root']} answers on Windows (usually {x['usually']}): {listed}"
                          + ("" if known else f"; it needs local: true (wb remote {x['windows']} "
-                            f"for an Ollama; else wb model add <provider>/<model> --url "
-                            f"{x['root']}/v1 --context N, then local: true for its provider in "
-                            f"{models.overrides_path()})"))
+                            f"for an Ollama; else local: true for its provider in "
+                            f"{models.overrides_path()}, then wb model add <provider>/<model> --url "
+                            f"{x['root']}/v1 --context N)"))
             continue
         lines.append(f"  {x['root']} answers (usually {x['usually']}): {listed}" + (
             "" if known else f"; OpenCode has no provider for it (wb model add <provider>/<model> "
@@ -6408,9 +6408,9 @@ def first_run() -> list[str]:
     if not answering and on_windows:  # WSL2: answering at the Windows host only (#663)
         out.append(f"--  a model server answers on Windows at {on_windows[0]['root']} (usually "
                    f"{on_windows[0]['usually']}): it needs local: true (wb remote "
-                   f"{on_windows[0]['windows']} for an Ollama; else wb model add <p>/<m> --url "
-                   f"{on_windows[0]['root']}/v1, then local: true for its provider in "
-                   f"{models.overrides_path()})")
+                   f"{on_windows[0]['windows']} for an Ollama; else local: true for its provider "
+                   f"in {models.overrides_path()}, then wb model add <p>/<m> --url "
+                   f"{on_windows[0]['root']}/v1)")
     else:
         out.append("ok  a model server answers" if answering else NO_SERVER_OPTIONAL if stored else
                    "--  no model server answers here: start yours, or run /workbench and Claude "
