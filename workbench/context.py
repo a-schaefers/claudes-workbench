@@ -1530,7 +1530,7 @@ def _config_includes(checkout: set[str], git: set[str]) -> set[str]:
 # What a task's directory holds beside its worktree: a sibling's link (`../<name>` from the
 # worktree) may not take one of these names. A new file in the task directory goes here too.
 TASK_FILES = ("acked", "ask", "base-tests.txt", "claude-sessions", "context.md", "events.jsonl", "noticed", "prepared.json", "rounds",
-              "runner.log", "setup.txt", "shots", "status.json", "steer.jsonl", "steps.bundle", "task.json",
+              "left-out", "runner.log", "setup.txt", "shots", "status.json", "steer.jsonl", "steps.bundle", "task.json",
               "tree", "verify", "worktree")
 
 

@@ -1717,6 +1717,47 @@ def api_health(pid: str) -> dict | None:
     return row
 
 
+def credit_turn(pid: str, task: str = "") -> dict | None:
+    """For a runner about to send a round: the provider's `no_credit` mark while it holds (wait),
+    else None (go on). Past its `until` one runner asks: the mark is held CREDIT_RECHECK_SECS
+    more under the lock (`asked_by` its task), so the others wait for that one's answer, a 2xx's
+    `ok` or the keyhole's next 402, rather than each sending a round that wakes Claude with its
+    own stop (#1178, 2026-11-24). A mark `asked_by` this task (credit_ask: the user's resume of
+    the task the 402 stopped) is its turn: None."""
+    def waits(row: dict) -> dict | None:
+        return None if row["state"] != "no_credit" or (task and row.get("asked_by") == task) else row
+    if (row := api_health(pid)) is not None:
+        return waits(row)
+    path = api_health_path()
+    with store.locked(path.with_name(path.name + ".lock")):
+        doc = store.read_json(path, {})
+        row = doc.get(pid) if isinstance(doc, dict) else None
+        if not isinstance(row, dict) or row.get("state") != "no_credit":
+            return None
+        if (held := api_health(pid)) is not None:  # another runner asked meanwhile
+            return waits(held)
+        doc[pid] = {**row, "until": time.time() + CREDIT_RECHECK_SECS, "asked_by": task}
+        store.write_json(path, doc)
+    return None
+
+
+def credit_ask(pid: str, task: str) -> bool:
+    """The user's resume (wb feedback, wb resume) of ``task``, which its provider stopped: a
+    `no_credit` mark becomes that task's turn to ask (`asked_by` it, held CREDIT_RECHECK_SECS on,
+    so the waiters behind it wait for its answer). The stop's remedy says top up, then resume,
+    and the resumed runner met the mark the 402 had just written and waited out its 900 s, the
+    user's top-up told to top up again (the review of #1178, 2026-11-24). True when it held one."""
+    path = api_health_path()
+    with store.locked(path.with_name(path.name + ".lock")):
+        doc = store.read_json(path, {})
+        row = doc.get(pid) if isinstance(doc, dict) else None
+        if not isinstance(row, dict) or row.get("state") != "no_credit":
+            return False
+        doc[pid] = {**row, "until": time.time() + CREDIT_RECHECK_SECS, "asked_by": task}
+        store.write_json(path, doc)
+    return True
+
+
 def _fresh_key(m: Model) -> tuple[str, str]:
     """(key source, provider name) as `auth list` gives them now, ignoring the cache (a user who
     just ran /connect must not be told to run it again), written back to hosted.json when the
@@ -2100,6 +2141,8 @@ def remedy(m: Model, state: dict) -> str:
         return f"wb model add {m.id} --pull downloads it"
     if why.startswith(("the server lists", "the server answers but lists no model")):
         return f"load {m.name} in that server, or fix the model's name in OpenCode's config"
+    if why.startswith("not running, and no start command") and (moved := windows_moved(m)):
+        return moved  # LM Studio, llama.cpp, vLLM, Jan on Windows, as Ollama's (#1167)
     if why.startswith("not running, and no start command"):
         return f"start its server, or give {m.id} a \"start\" command there"
     return ""
@@ -3799,7 +3842,8 @@ def api_provider(m: Model) -> str:
 class NoLease:
     """What an API task holds in place of the GPU lease (#1015): one of its provider's
     API_PARALLEL slots, and nothing of the GPU. The interface drive and _tests_gpu use:
-    load() loads nothing, step_aside and rejoin do nothing, `aside` False, `pool` None (so
+    load() loads nothing (it waits while the provider is out of credit, its slot let go, #1178), step_aside
+    and rejoin do nothing, `aside` False, `pool` None (so
     _tests_gpu takes this machine's pool for --unload-for-tests, where the tests run), `loaded`
     True. Past the limit it waits as queued, looking again after API_WAIT's backoff (a slot let
     go touches its file, which wakes it sooner)."""
@@ -3852,6 +3896,43 @@ class NoLease:
         return self
 
     def load(self) -> float:
+        """Loads nothing, but waits as queued while the provider is out of credit (credit_turn),
+        before each round: the tasks queued behind a 402 each took a slot, sent a round, met the
+        402 and woke Claude with a stop of their own, though wb start refused in that state
+        (#1178, 2026-11-24). A top-up's 2xx (`ok`) or the mark's end lets it go on. It lets go
+        of its slot for the wait and takes one again after: held, a backlog of API_PARALLEL
+        waiters left the task whose turn it was (the user's resume) waiting for a slot, and each
+        of them for its 2xx, until the mark's 900 s ran out (the review of #1178, 2026-11-24)."""
+        pid = self.m.provider or api_provider(self.m)
+        try:
+            row = credit_turn(pid, self.task)
+        except Exception:  # an unreadable file: the round's keyhole answers instead
+            return 0.0
+        if row is None:
+            return 0.0
+        held = self.fd is not None
+        self.__exit__(None, None, None)  # the slot, for the task whose turn it is to ask
+        task = store.Task(self.task) if self.task else None
+        said = None
+        with Watcher(api_health_path().parent) as w:  # ok's and the keyhole's writes wake it
+            while row is not None:
+                until = row.get("until") if isinstance(row.get("until"), (int, float)) else time.time()
+                msg = (f"waiting: {pid} is out of credit or quota ({row.get('why') or 'no detail'}): "
+                       f"top it up, or wait for the plan's reset; wb asks it again at "
+                       f"{datetime.fromtimestamp(until).strftime('%H:%M')} (wb stop gives up)")
+                if msg != said:
+                    if task is not None and task.exists:
+                        task.set_status(phase="queued", last=msg)
+                    else:
+                        self.say(msg)
+                    said = msg
+                w.wait(min(max(until - time.time(), 0.1), API_WAIT[1]))
+                try:
+                    row = credit_turn(pid, self.task)
+                except Exception:
+                    row = None
+        if held:  # not on a stop (wb stop's signal): that runner sends nothing more
+            self.__enter__()
         return 0.0
 
     def step_aside(self, unload: bool = False) -> None:
@@ -4126,8 +4207,10 @@ def add_server_provider(pid: str, base: str) -> bool:
     """Give OpenCode a provider ``pid`` for the OpenAI-compatible server at ``base`` (its
     baseURL, usually ending in /v1), whatever runs it: llama.cpp, LM Studio, vLLM, Ollama. Only
     Ollama had a command for it, so every other server meant editing opencode.json by hand. False
-    when the config already has ``pid`` for that same endpoint (a provider the user wrote is never
-    touched); RuntimeError when it has ``pid`` for another one."""
+    when the config already has ``pid`` for that same endpoint, left as it is except that one at
+    WSL2's Windows host gets the `wsl_url` mark (#1167); False too when ``pid`` is marked
+    `wsl_url` at Windows' old address and ``base`` is the same server at its new one, which moves
+    the provider there; RuntimeError when it has ``pid`` for another endpoint."""
     u = urlparse(base)
     if u.scheme not in ("http", "https") or not u.hostname:
         raise RuntimeError(f"--url {base}: give the server's baseURL, e.g. http://127.0.0.1:8080/v1")
@@ -4137,9 +4220,19 @@ def add_server_provider(pid: str, base: str) -> bool:
                            f"\"local\": true in {overrides_path()} first")
     cfg = read_config()
     prov = _provider(cfg, pid)
+    # WSL2's NAT gives Windows a new address on a reboot, and only wb remote's Ollama followed it:
+    # LM Studio, llama.cpp, vLLM or Jan there, added as wb setup and scout say, read "not running:
+    # start its server" for good after one (#1167, 2026-11-24). Marked `wsl_url`, discovery follows
+    win = (u.hostname or "").lower() == (windows_host() or "").lower()
+    mark = _overrides().get(pid) or {}
     if prov is not None:
         have = _provider_url(prov)
         if base.rstrip("/") in (have.rstrip("/"), _expand(have, base=_provider_dirs().get(pid)).rstrip("/")):
+            if win and have.rstrip("/") == base.rstrip("/") and not mark.get("wsl_host"):
+                set_override(pid, "wsl_url", base.rstrip("/"))  # one added before #1167: adopted
+            return False
+        if win and mark.get("wsl_url") == have.rstrip("/") and _at_host(have, u.hostname) == base.rstrip("/"):
+            _repoint(pid, "", url=base.rstrip("/"))  # Windows' new address, before discovery's
             return False
         # the model was registered under the old endpoint and wb said it was added: two servers
         # serving one model name then did plausible work on the wrong machine (#334, the audit of 1.4)
@@ -4148,6 +4241,8 @@ def add_server_provider(pid: str, base: str) -> bool:
                            f"a provider id of its own (wb model add <provider>/<model> --url {base}), "
                            f"or change {pid}'s baseURL in {opencode_config_path()} by hand")
     _add_provider(cfg, pid, pid, base.rstrip("/"))
+    if win:
+        set_override(pid, "wsl_url", base.rstrip("/"))
     return True
 
 
@@ -4190,16 +4285,22 @@ def _remote_pid_for(cfg: dict, host: str, root: str | None = None) -> str:
 def _follows_windows(pid: str, prov: dict) -> bool:
     """Whether provider ``pid`` is one wb remote made for WSL2's Windows host, still pointing
     where it made it: its models.json `wsl_host` and `remote` marks, the baseURL the mark's. One
-    the user repointed is theirs (#242)."""
+    the user repointed is theirs (#242). One wb model add --url made there: its `wsl_url` mark, the
+    baseURL itself (#1167)."""
     mark = _overrides().get(pid) or {}
+    if isinstance(mark.get("wsl_url"), str):
+        return _provider_url(prov).rstrip("/") == mark["wsl_url"]
     return bool(mark.get("wsl_host") and mark.get("remote")) and \
         _provider_url(prov).rstrip("/") == f"{mark['remote']}/v1"
 
 
-def _repoint(pid: str, root: str) -> None:
+def _repoint(pid: str, root: str, url: str = "") -> None:
     """Point provider ``pid`` (one wb remote made) at ``root``/v1 in OpenCode's config, and its
-    `remote` mark with it. Refused as own_config refuses, or while another layer sets it."""
-    change = f'set provider "{pid}"\'s baseURL to "{root}/v1"'
+    `remote` mark with it; or, one wb model add --url made at Windows' address, at ``url``, and
+    its `wsl_url` mark with it (#1167). Refused as own_config refuses, or while another layer
+    sets it."""
+    base = url or f"{root}/v1"
+    change = f'set provider "{pid}"\'s baseURL to "{base}"'
     with own_config(change) as (target, own):
         if where := set_elsewhere(target, "provider", pid):
             raise _not_ours(f"provider {pid}", where, change)
@@ -4209,47 +4310,69 @@ def _repoint(pid: str, root: str) -> None:
         opts = entry.get("options") if "options" in entry or "settings" not in entry else entry["settings"]
         if not isinstance(opts, dict):
             opts = entry["options"] = {}
-        opts["baseURL"] = f"{root}/v1"
-    set_override(pid, "remote", root)
+        opts["baseURL"] = base
+    if url:
+        set_override(pid, "wsl_url", url)
+    else:
+        set_override(pid, "remote", root)
 
 
-def _moved_to(mark: str, root: str) -> bool:
-    """Whether Windows' Ollama left ``mark`` for ``root``: the old root silent, the new answering.
-    Both probed at once, briefly, so a dead provider costs discovery a second, not three."""
+def _answers(base: str) -> bool:
+    """Whether an OpenAI-compatible server answers at baseURL ``base`` (its /models; one that
+    wants a key answers too)."""
+    return _models_at("", 1, url=f"{base}/models") is not None
+
+
+def _moved_to(mark: str, root: str, ollama: bool = True) -> bool:
+    """Whether Windows' Ollama left ``mark`` for ``root``: the old root silent, the new answering;
+    with ``ollama`` False, any OpenAI-compatible server, ``mark`` and ``root`` baseURLs probed on
+    /models (Ollama's /api/version had them all read as never moving, #1167). Both probed at
+    once, briefly, so a dead provider costs discovery a second, not three."""
     from concurrent.futures import ThreadPoolExecutor
+    probe = (lambda r: ollama_answers(r, timeout=1)) if ollama else _answers
     with ThreadPoolExecutor(2) as pool:
-        old, new = pool.map(lambda r: ollama_answers(r, timeout=1), (mark, root))
+        old, new = pool.map(probe, (mark, root))
     return new and not old
+
+
+def _at_host(base: str, host: str) -> str:
+    """baseURL ``base`` at ``host``: its scheme, port and path kept (#1167)."""
+    u = urlparse(base)
+    netloc = (f"[{host}]" if ":" in host else host) + (f":{u.port}" if u.port else "")
+    return u._replace(netloc=netloc).geturl().rstrip("/")
 
 
 def follow_windows_host(extra: dict) -> list[str]:
     """Repoint each provider wb remote made for WSL2's Windows host (models.json `wsl_host`) whose
     address is no longer windows_host()'s, keeping its port, when Ollama has stopped answering at
     the old address and answers at the new one; a line each on stderr, once. Read in discover(),
-    so every command after the reboot finds it there (#1159). One wb can't rewrite (comments,
-    another layer) stays as it is, and remedy() names the new address."""
-    marked = {pid: e["remote"] for pid, e in extra.items()
-              if isinstance(e, dict) and e.get("wsl_host") and isinstance(e.get("remote"), str)}
+    so every command after the reboot finds it there (#1159). So too each one wb model add --url
+    made there (models.json `wsl_url`), any OpenAI-compatible server, its path kept (#1167). One
+    wb can't rewrite (comments, another layer) stays as it is, and remedy() names the new address."""
+    marked = [(pid, e["remote"], True) for pid, e in extra.items()
+              if isinstance(e, dict) and e.get("wsl_host") and isinstance(e.get("remote"), str)]
+    marked += [(pid, e["wsl_url"], False) for pid, e in extra.items()
+               if isinstance(e, dict) and isinstance(e.get("wsl_url"), str)]
     if not marked or not (win := windows_host()):
         return []
     cfg, said = read_config(), []
-    for pid, mark in marked.items():
+    for pid, mark, ollama in marked:
         prov, was = _provider(cfg, pid), urlparse(mark)
         if prov is None or (was.hostname or "").lower() == win.lower() or not _follows_windows(pid, prov):
             continue
         try:
-            root = remote_root(win, was.port or OLLAMA_PORT)
+            root = remote_root(win, was.port or OLLAMA_PORT) if ollama else _at_host(mark, win)
             # windows_host() is only the default gateway: under networkingMode=mirrored (which
             # WSL_NAT and the remedy advise) it is the LAN router, and a VPN inside WSL moves it
             # too. A working provider was rewritten to the router, a false "moved" line said, and
             # every wb start sent the user to start Ollama there (#1159's review, 2026-11-24)
-            if not _moved_to(mark, root):
+            if not _moved_to(mark, root, ollama):
                 continue
-            _repoint(pid, root)
+            _repoint(pid, root) if ollama else _repoint(pid, "", url=root)
         except (RuntimeError, OSError, ValueError):
             continue
         said.append(f"wb: Windows' address moved from {was.hostname} to {win} (WSL2's NAT): "
-                    f"{pid} now points at {root}/v1")
+                    f"{pid} now points at {f'{root}/v1' if ollama else root}")
         print(said[-1], file=sys.stderr, flush=True)
     return said
 
@@ -4257,14 +4380,34 @@ def follow_windows_host(extra: dict) -> list[str]:
 def windows_moved(m: Model) -> str:
     """remedy()'s step for a remote Ollama (or one wb remote made) that doesn't answer at an
     address that isn't WSL2's Windows host now, or "": it may be Windows at its address before a
-    reboot, where "start Ollama" sent the user to one already running (#1159)."""
-    if not (m.remote or m.extra.get("remote")) or m.cloud or not (win := windows_host()):
+    reboot, where "start Ollama" sent the user to one already running (#1159). Any other remote
+    server (LM Studio, llama.cpp, vLLM, Jan), or one wb model add --url made there, the same
+    (#1167): "start its server" sent the user to one running at Windows' new address."""
+    if not (m.remote or m.extra.get("remote") or m.extra.get("wsl_url")) or m.cloud \
+            or not (win := windows_host()):
         return ""
     host = (urlparse(m.root).hostname or "").lower()
     if not host or host == win.lower():
         return ""
     mirrored = ("networkingMode=mirrored under [wsl2] in %UserProfile%\\.wslconfig keeps 127.0.0.1 "
                 "for good")
+    if m.engine != "ollama" or m.extra.get("wsl_url"):
+        new, where = _at_host(m.base_url, win), opencode_config_path()
+        if not m.extra.get("wsl_url"):
+            # one wb model add made before the mark: the hand edit alone left it unmarked, so the
+            # next reboot broke it again; wb model add at the URL it now has marks it (the adopt
+            # branch), which this never said (#1167's review, 2026-11-24)
+            return (f"start its server at {m.root}; or, if {host} was Windows' address (WSL2's NAT "
+                    f"gives it a new one on a reboot), set {m.provider}'s baseURL to {new} in "
+                    f"{where}, then wb model add {m.id} --url {new}, which follows Windows' "
+                    f"address from now on, and {mirrored}")
+        if _answers(new):  # discovery couldn't rewrite it (comments, another layer)
+            return (f"WSL2's NAT gave Windows a new address, {win}: set {m.provider}'s baseURL to "
+                    f"{new} in {where}, and {mirrored}")
+        return (f"start its server on Windows: it answers neither at {m.base_url} nor at {win}, "
+                f"WSL2's default gateway; under networkingMode=mirrored Windows' server is on "
+                f"127.0.0.1 here instead, which wb model add <provider>/{m.name} --url "
+                f"{_at_host(m.base_url, '127.0.0.1')} adds (a provider of its own: new ids)")
     if m.extra.get("wsl_host"):
         port = urlparse(m.root).port or OLLAMA_PORT
         with contextlib.suppress(RuntimeError):
@@ -4442,11 +4585,12 @@ def windows_host() -> str | None:
 NEEDS_KEY = "needs an API key"  # what _models_at says of a server that answered 401
 
 
-def _models_at(root: str, timeout: float) -> list[str] | str | None:
-    """The ids ``root``'s /v1/models lists; NEEDS_KEY when it answered 401 (Jan or LM Studio
-    with an API key set: taken as no answer, it was invisible on its own port, #810); else None."""
+def _models_at(root: str, timeout: float, url: str = "") -> list[str] | str | None:
+    """The ids ``root``'s /v1/models (or ``url``) lists; NEEDS_KEY when it answered 401 (Jan or LM
+    Studio with an API key set: taken as no answer, it was invisible on its own port, #810); else
+    None."""
     try:
-        with _open(f"{root}/v1/models", timeout=timeout) as r:
+        with _open(url or f"{root}/v1/models", timeout=timeout) as r:
             body = json.loads(r.read() or b"{}")
     except urllib.error.HTTPError as e:
         try:

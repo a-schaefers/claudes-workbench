@@ -1502,25 +1502,149 @@ def ignored_files(worktree: Path, paths) -> list[str]:
     return sorted({p for p in out.split("\0") if p})
 
 
-def ignored_line(paths: list[str]) -> str:
-    """What the review and a refused commit say of the files the agent wrote that git ignores."""
-    return (f"git ignores files the agent wrote ({', '.join(brief(paths))}), so the diff leaves them "
+CLOCK_SLACK = 0.05  # a file's times come from the kernel's coarse clock, a tick behind time.time()
+
+
+def _kind(path: str) -> str:
+    """A file's suffix, or its whole name when it has none: what hand_written matches on."""
+    name = path.rsplit("/", 1)[-1]
+    return os.path.splitext(name)[1].lower() or name
+
+
+def _marks_cache(d: str) -> bool:
+    """Whether directory ``d`` says it is a cache: a CACHEDIR.TAG (cargo's target/, pytest's), or
+    a .gitignore whose one rule is `*` (pytest's, mypy's, ruff's, a venv's since Python 3.13)."""
+    if os.path.lexists(os.path.join(d, "CACHEDIR.TAG")):
+        return True
+    try:
+        fd = os.open(os.path.join(d, ".gitignore"), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as f:
+            rules = [x.strip() for x in f.read(4096).splitlines()]
+    except OSError:
+        return False
+    return [x for x in rules if x and not x.startswith(b"#")] == [b"*"]
+
+
+def _text(full: str) -> bool:
+    """No NUL in the first 8000 bytes, git's own test for text."""
+    try:
+        fd = os.open(full, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as f:
+            return b"\0" not in f.read(8000)
+    except OSError:
+        return False
+
+
+def hand_written(worktree: Path, since: float, left: list[str] | None = None) -> list[str]:
+    """The files git ignores and doesn't track that changed in the worktree since ``since`` (a
+    time.time()) and look written by hand, not by a build or a test run: text, named like a file
+    the commit would hold (its suffix, or its whole name when it has none), under no directory
+    that marks itself a cache (_marks_cache), and fewer than BUILD_FILES such files in their
+    ignored directory (an install), else, ignored one by one, their top-level one. A module Claude
+    wrote under Python.gitignore's lib/ after a takeover was left out of wb accept's commit and
+    deleted with the worktree, with no warning: only the agent's edit tools were read (#1179,
+    2026-11-24). A test run's .pyc, .pytest_cache/ and logs, or an npm install, must not refuse
+    the commit (Claude runs the tests there). ``left`` gets the rest that are text outside a
+    cache, fewer than BUILD_FILES such in their group, any suffix: the commit leaves them out,
+    said, never silently dropped (left_out_line, #1179's review). The kind filter alone is
+    waived, for the .csv beside Claude's module: unfiltered, a test run's bytecode was named at
+    every accept, and an npm install's 20,000 paths went into status.json (#1179's review)."""
+    top = os.path.abspath(worktree)
+    changed = []
+    for raw in git_bytes(worktree, "ls-files", "--others", "--ignored", "--exclude-standard",
+                         "-z").split(b"\0"):
+        if not raw:
+            continue
+        p = os.fsdecode(raw)
+        try:
+            st = os.lstat(os.path.join(top, p))
+        except OSError:  # gone mid-scan
+            continue
+        if stat.S_ISREG(st.st_mode) and max(st.st_mtime, st.st_ctime) >= since - CLOCK_SLACK:
+            changed.append(p)
+    if not changed:
+        return []
+    held = git_bytes(worktree, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
+    kinds = {_kind(os.fsdecode(p)) for p in held.split(b"\0") if p}
+    caches: dict[str, bool] = {}
+
+    def in_cache(p: str) -> bool:
+        parts = p.split("/")[:-1]
+        for i in range(1, len(parts) + 1):
+            d = "/".join(parts[:i])
+            if d not in caches:
+                caches[d] = _marks_cache(os.path.join(top, d))
+            if caches[d]:
+                return True
+        return False
+
+    # Only the files the other filters keep count toward BUILD_FILES: counted before them, the
+    # .pyc of Claude's first test run (agents run without bytecode) in a 60-module app/ cut
+    # app/lib/helper.py, and accept --merge dropped it without a word (#1179, 2026-11-24).
+    # Counted by ignored directory: by top-level one, setuptools' in-tree services/api/build/lib
+    # copies of 60 modules cut services/api/lib/helper.py the same way (#1179's review)
+    outside = [p for p in changed if not in_cache(p)]
+    kept = [p for p in outside if _kind(p) in kinds and _text(os.path.join(top, p))]
+    dirs = {os.fsdecode(d).rstrip("/") for d in git_bytes(
+        worktree, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory",
+        "-z").split(b"\0") if d.endswith(b"/")}
+
+    def group(p: str) -> str:
+        parts = p.split("/")[:-1]
+        return next((d for i in range(1, len(parts) + 1) if (d := "/".join(parts[:i])) in dirs),
+                    _top(p))
+    groups = Counter(group(p) for p in kept if "/" in p)
+    out = sorted(p for p in kept if "/" not in p or groups[group(p)] < BUILD_FILES)
+    if left is not None:
+        keep = set(out)
+        text = [p for p in outside if p not in keep and _text(os.path.join(top, p))]
+        # with `groups` (kept's), every text file of the group: under BUILD_FILES, all its kept
+        # ones are in out, so none is counted twice
+        rest = Counter(group(p) for p in text if "/" in p)
+        left.extend(sorted(p for p in text if "/" not in p
+                           or groups[group(p)] + rest[group(p)] < BUILD_FILES))
+    return out
+
+
+def left_out_line(paths: list[str], worktree: Path, kept: Path | None = None, gone: bool = False) -> str:
+    """The note for the ignored files changed since the agent stopped that the commit leaves out,
+    as hand_written took them for a build's or a test run's: a .csv beside Claude's module under
+    lib/ was dropped without a word, --include or not (#1179's review, 2026-11-24). ``kept``: the
+    copy wb accept keeps of them before the worktree goes; ``gone``: too many to copy; else where
+    `git add -f` stages one."""
+    head = (f"note: git ignores {len(paths)} more file{'s' if len(paths) != 1 else ''} changed "
+            f"since the agent stopped, which the commit leaves out as build or test output "
+            f"({', '.join(brief(paths))})")
+    if kept is not None:
+        return f"{head}: a copy is in {kept}"
+    if gone:
+        return f"{head}: too many to keep a copy, they go with the worktree"
+    return f"{head}: git -C {shlex.quote(str(worktree))} add -f <file> has the next commit keep one"
+
+
+def ignored_line(paths: list[str], who: str = "the agent wrote") -> str:
+    """What the review and a refused commit say of the files written in the worktree that git
+    ignores: the agent's in the review, the agent's or Claude's in a refused commit (#1179)."""
+    return (f"git ignores files {who} ({', '.join(brief(paths))}), so the diff leaves them "
             "out and a commit would too, and they'd go with the worktree: read them, then --include "
             "commits them, or have them moved or deleted")
 
 
 def commit_all(worktree: Path, message: str, include: bool = False, sign: bool = True,
-               written=()) -> str:
+               written=(), left=()) -> str:
     """Commit everything in the worktree, without git hooks (NO_HOOKS; also for a task started
     before its git dir was recorded) but signed if the user signs. Refuses a nested repository: committed, it was a gitlink to
     a commit that exists nowhere else. Refuses, unless ``include``, more than NEW_FILES_MAX new
     files or a large new binary: `add -A` committed a build/ the project didn't ignore (#251).
-    Refuses, unless ``include``, which adds them, any of ``written`` (the files the agent wrote)
-    that git ignores: `add -A` left a module under Python.gitignore's lib/ out of the commit, and
-    it was deleted with the worktree while main imported it (audit round 2 of 1.91)."""
+    Refuses, unless ``include``, which adds them, any of ``written`` (the files the agent wrote,
+    and Claude's, #1179) that git ignores: `add -A` left a module under Python.gitignore's lib/
+    out of the commit, and it was deleted with the worktree while main imported it (audit round 2
+    of 1.91). A refusal names ``left`` too (left_out_line: what the commit leaves out, #1179's review)."""
     ignored = ignored_files(worktree, written)
     if ignored and not include:
-        raise GitError("not committed: " + ignored_line(ignored))
+        rest = sorted(set(left) - set(ignored))
+        raise GitError("not committed: " + ignored_line(ignored, "written in the worktree")
+                       + (f"\n{left_out_line(rest, worktree)}" if rest else ""))
     if nested := nested_repos(worktree):
         raise GitError(f"{', '.join(nested)}: a git repository of its own, so not committed: "
                        "remove its .git or gitignore it, then try again")

@@ -116,8 +116,12 @@ def opencode_moved(task: store.Task) -> bool:
            f"resume {task.name}" if have < (2, 0) else
            f"{OPENCODE_MOVED} ({was}, now {now}): wb resume {task.name} continues it on {now}"
            + (f". {drift}" if (drift := untested(have)) else ""))
-    task.set_status(phase="stuck", last=msg[:200])
-    task.notify("stuck", f"task {task.name}: {msg}", round=task.status.get("round"), cause="opencode")
+    # status `infra` and the notice's `tasks`, as for an interruption: without them wb feedback
+    # (the wake advised it, "it got stuck") counted a review round, and one real review after it
+    # made the step go badly (#1176, 2026-11-24)
+    task.set_status(phase="stuck", last=msg[:200], infra="opencode")
+    task.notify("stuck", f"task {task.name}: {msg}", round=task.status.get("round"), cause="opencode",
+                tasks=[task.name])
     return True
 
 
@@ -1516,7 +1520,7 @@ class _ProviderWait:
         if not self.api:
             return
         if not out["stuck"] and out["exit"] not in (0, None) and not (
-                out.get("lingered") or out.get("interrupted") or out.get("full")):
+                out.get("lingered") or out.get("settled") or out.get("interrupted") or out.get("full")):
             self.st = self.task.status
             if why := self.stop(now, gave_up=True):
                 out["guard"], out["stuck"] = why
@@ -1591,7 +1595,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     prompt = task.round_dir(n).joinpath("prompt.md").read_text()
     cmd = opencode_bin() + ["run", "--standalone", "-m", spec["opencode_model"], "--auto",
                             "--format", "json", "--title", f"wb: {task.name}"]
-    marks = {gitops.mark(task.worktree)}  # the tree as the round and the session began
+    began = gitops.mark(task.worktree)  # the tree as the round began
+    marks = {began}  # and as the session began
     if st.get("session"):
         cmd += ["--session", st["session"]]
         marks.add(st.get("session_mark"))
@@ -1837,8 +1842,22 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             if why and detector.since_edit >= detector.no_edit:
                 if (m := gitops.mark(task.worktree)) != edit_mark:  # it edited through the shell
                     edit_mark, detector.since_edit, why = m, 0, None
+                elif m == began and task.status.get("round_for") == "self_review":
+                    # A self-review round is reads and runs by design (break a check, see a test
+                    # fail, copy the file back): on a change whose tests passed, the explore
+                    # guard stopped it as stuck, so a green task woke Claude as stuck and its
+                    # step was recorded stuck (#1168, 2026-11-24). Its tree as the round began,
+                    # it ends as the agent's finish: the tests, then review. A tree it changed
+                    # is stopped as before.
+                    out["settled"], why = why, None
             if why:
                 out["stuck"], out["guard"] = why, detector.guard
+        if out.get("settled"):  # #1168: not a guard's stop
+            task.event({"ts": store.now(), "round": n, "kind": "settled",
+                        "text": f"self-review: {out['settled']}, the tree as the round began: "
+                                "stopped as its finish"})
+            _stop(proc)
+            break
         quiet = clock.quiet(mono)
         hush = wait_hush if waiting_bg else silence
         # The agent's turn is over (its last step's reason `stop`) and OpenCode is still open:
@@ -2093,11 +2112,21 @@ def test_shell() -> str:
     command as `$SHELL -c`, or bash's when SHELL is unset (tests/RealOpenCode checks it). The
     runner used /bin/sh, which is dash on Debian and Ubuntu: `source .venv/bin/activate &&
     pytest` passed for the agent and failed for the runner, and each false failure cost an
-    auto-fix round (#196, the 2026-11-19 audit)."""
+    auto-fix round (#196, the 2026-11-19 audit). Run it with `shell_args`, as OpenCode does."""
     sh = os.environ.get("SHELL") or ""
     if os.path.isabs(sh) and os.access(sh, os.X_OK) and Path(sh).name not in NOT_POSIX:
         return sh
     return shutil.which("bash") or "/bin/sh"
+
+
+def shell_args(shell: str) -> list[str]:
+    """The flags before the command, as OpenCode 2.3.2 picks them by the shell's name (its
+    lowercased basename): zsh's `+o nomatch -c`, else `-c`. With a bare `-c` under zsh an
+    unmatched glob (`pip install -e .[dev]`, a pytest id `test_x[1]`) failed "no matches found"
+    for the setup, the base check and the tests while it passed for the agent: a task failed
+    before round 1, or an auto-fix round was spent on a false FAIL (#1170, 2026-11-24; the
+    #1010 review had fixed only the agent's shim)."""
+    return ["+o", "nomatch", "-c"] if Path(shell).name.lower() == "zsh" else ["-c"]
 
 
 # The variables OpenCode's environment moves into the task's home (context.opencode_home_env),
@@ -2142,7 +2171,8 @@ def run_in_lane(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]
     decoded output (its head and tail when long)."""
     # in the agent's lane, environment and shell: the tests run the agent's code, and must pass
     # or fail as they did when the agent ran them
-    argv = lane.wrap(context.writable(task), [test_shell(), "-c", cmd], context.readable(task),
+    sh = test_shell()
+    argv = lane.wrap(context.writable(task), [sh, *shell_args(sh), cmd], context.readable(task),
                      context.unix_paths(task))
     run = _issue()  # its own mark: sweep ends what it left, and nothing else (#324)
     proc = subprocess.Popen(argv, cwd=task.workdir, stdout=subprocess.PIPE,
@@ -2654,6 +2684,48 @@ def agent_wrote(task: store.Task) -> list[str]:
     return sorted(out)
 
 
+def hand_wrote(task: store.Task) -> list[str]:
+    """The ignored files written by hand in the worktree while no runner ran (gitops.hand_written):
+    Claude's after a takeover or in a review fix, which the agent's events never show (#1179,
+    2026-11-24). Kept in status `hand_wrote` by each runner that starts, and since the agent last
+    stopped (`hands_off_at`)."""
+    return _by_hand(task)[0]
+
+
+def hand_left(task: store.Task) -> list[str]:
+    """The rest of the ignored files changed while no runner ran, outside a cache, that
+    hand_written took for a build's or a test run's: the commit leaves them out, said (#1179's
+    review, 2026-11-24). Kept in status `hand_left` as `hand_wrote` is; only those still there."""
+    return [p for p in _by_hand(task)[1] if os.path.isfile(os.path.join(task.worktree, p))]
+
+
+def _by_hand(task: store.Task) -> tuple[list[str], list[str]]:
+    wrote, left = set(task.status.get("hand_wrote") or []), set(task.status.get("hand_left") or [])
+    if since := task.status.get("hands_off_at"):
+        rest: list[str] = []
+        wrote |= set(gitops.hand_written(task.worktree, since, rest))
+        left |= set(rest)
+    return sorted(wrote), sorted(left - wrote)
+
+
+def hands_off(task: store.Task) -> None:
+    """The agent has stopped: from now the worktree's ignored files are Claude's to write, unless
+    already so (a stop of a runner that had ended keeps the earlier time, #1179)."""
+    task.set_status_if(lambda st: not st.get("hands_off_at"), hands_off_at=store.now())
+
+
+def _hands_on(task: store.Task) -> None:
+    """Before the agent's rounds: what was written by hand since it last stopped, kept in
+    `hand_wrote`, as the agent's own writes from now on aren't Claude's (#1179)."""
+    if not task.status.get("hands_off_at"):
+        return
+    try:
+        wrote, left = _by_hand(task)
+    except (gitops.GitError, OSError):
+        wrote, left = task.status.get("hand_wrote") or [], task.status.get("hand_left") or []
+    task.set_status(hand_wrote=wrote, hand_left=left, hands_off_at=None)
+
+
 def ignored_writes(task: store.Task) -> list[str]:
     """The files the agent wrote that git ignores, so no diff or commit holds them; [] when git
     can't say."""
@@ -2941,24 +3013,108 @@ def hang(task: store.Task, limit: int) -> dict | None:
 # so a name with a `/` is never a missing tool (nightly run 45362198509, 2026-11-24: under a
 # dash $SHELL a --test the step was to make checked in at once as a tool the agent lacks).
 NOT_FOUND = re.compile(r"command not found: (?P<z>.+)$|(?P<n>[^:]+): (?:command )?not found$")
+# Python's own line for `python -m <module>` it can't import (exit 1): a test runner missing from
+# the agent's Python (`python3 -m pytest` on a system Python without it, or with the user's venv
+# that python_env leaves out) ran round 1 and both auto-fix rounds on correct code, each told the
+# bug was the change's, where `pytest` alone (exit 127) checked in (#1181, 2026-11-24). A dotted
+# module's parent missing says it the second way. `m` (or `d`) is the module `-m` named.
+NO_MODULE = re.compile(r"\S*python[\w.]*: (No module named (?P<m>[\w.]+)|Error while finding module "
+                       r"specification for '(?P<d>[\w.]+)' \(ModuleNotFoundError: No module named "
+                       r"'[\w.]+'\))")
 # What gives the agent's environment that command, for the check-in and the skipped auto-fix
 GIVE_TOOL = ("no round can fix that: put the tool in the worktree (a .venv there comes first on "
-             "the agent's PATH), then wb feedback; or wb discard and start again with a --setup "
-             "that installs it, or a --test that names it by its path")
+             "the agent's PATH; a Python module: python3 -m venv .venv && .venv/bin/pip install "
+             "<module>), then wb feedback; or wb discard and start again with a --setup that "
+             "installs it (a module: that .venv), or a --test that names it by its path")
 
 
-def missing_command(r: dict | None) -> str | None:
-    """`<name>: command not found`, when run ``r`` (the base check's, or a round's tests) exited
-    127 with the shell's not-found line last: a tool the agent's environment lacks (one outside
-    the agent's PATH, which python_env and agent_path trim), which no edit in a round can give it
-    (#1152); else None. Worded by wb, not the shell, so the check-in and the base's line compared
-    with a round's read the same under bash, zsh or dash (nightly run 45362198509, 2026-11-24)."""
-    if not r or r.get("exit") != 127:
+def missing_command(r: dict | None, task: store.Task | None = None) -> str | None:
+    """The line saying the command's tool isn't there, when run ``r`` (the base check's, or a
+    round's tests) ended with it: at exit 127 the shell's not-found line, worded by wb as
+    `<name>: command not found`, so the check-in and the base's line compared with a round's
+    read the same under bash, zsh, dash or ksh (#1152; nightly run 45362198509, 2026-11-24), a
+    name with a `/` never; or Python's no-module line for `-m` at exit 1 (#1181). A tool the
+    agent's environment lacks (one outside the agent's PATH, which python_env and agent_path
+    trim), which no edit in a round can give it; else None. A module of ``task``'s own code
+    (own_module) is none: the step may make it."""
+    if not r or r.get("exit") not in (1, 127):
         return None
     last = (r.get("tail") or "").strip().splitlines()[-1:]
-    m = NOT_FOUND.search(last[0].strip()) if last else None
-    name = (m.group("z") or m.group("n")).strip() if m else ""
-    return f"{name}: command not found" if name and "/" not in name else None
+    line = last[0].strip() if last else ""
+    if r["exit"] == 127:
+        name = missing_name(line)
+        return f"{name}: command not found" if name and "/" not in name else None
+    if r["exit"] == 1 and (m := NO_MODULE.fullmatch(line)):
+        return None if task and own_module(task, m["m"] or m["d"]) else line
+    return None
+
+
+def _missing_key(line: str | None) -> str | None:
+    """What a missing_command line says is missing, for the base's and a round's to compare: a
+    Python module's name, as the line starts with the interpreter's path, the base check's in its
+    scratch checkout (a --setup .venv there) and a round's in the worktree, which never matched,
+    and auto-fix ran on correct code (#1181's review, 2026-11-24); else the line itself."""
+    m = NO_MODULE.fullmatch(line or "")
+    return f"module {m['m'] or m['d']}" if m else line
+
+
+# Where a prompt's spec ends and the protocol begins (cli.PROTOCOL, cli.WRITING_PROTOCOL; bench.FOLD).
+PROTOCOL_FOLD = "\n---\nHow to work"
+
+
+def own_module(task: store.Task, module: str) -> bool:
+    """Whether ``module`` (`pkg.newcli`) is the repo's own code, which the step may be making:
+    its top-level name a `<top>/` or `<top>.py` where the tests run, in the worktree or at the
+    base commit, or the module named in the step's spec (its file, or its dotted name; the spec
+    alone, not the protocol after it, whose acceptance line names --test's own). Counted
+    as a missing tool, `--test 'python3 -m pkg.newcli'` for a step adding pkg/newcli.py checked
+    in before round 1 with a false "no round can fix that" (and its pip install advice), and
+    skipped the agent's one auto-fix round, where a script the step makes was already left out
+    for saying `No such file or directory` on the base too (#1152) (#1181's review, 2026-11-24)."""
+    top, sub = module.split(".")[0], task.spec.get("subdir", "")
+    names = [top, f"{top}.py"]
+    if (task.workdir / top).is_dir() or (task.workdir / f"{top}.py").is_file():
+        return True
+    try:
+        if gitops.git(task.worktree, "ls-tree", "--name-only", task.spec["base"], "--",
+                      *(f"{sub}/{n}" if sub else n for n in names)).strip():
+            return True
+    except (gitops.GitError, KeyError, OSError):
+        pass
+    try:
+        spec = current_task_prompt(task)
+    except OSError:
+        return False
+    # the spec alone: the protocol after it names the acceptance command (cli.test_line), so
+    # every dotted `-m` of --test read as the repo's own, and a tool the agent's environment
+    # lacks never checked in nor skipped auto-fix (#1181's second review, 2026-11-24)
+    spec = re.sub(r"The acceptance command is `[^`\n]*`", "", spec.split(PROTOCOL_FOLD, 1)[0])
+    path = module.replace(".", "/")
+    if any(f"/{p}".endswith(f"/{path}.py") or f"/{path}/" in f"/{p}"
+           for p in context.spec_paths(spec)):  # pkg/newcli.py, pkg/newcli/__main__.py
+        return True
+    # a dotted name in the spec is the module's own; a top-level one (`pytest`) is a tool the
+    # spec may well name
+    return "." in module and re.search(rf"(?<![\w.]){re.escape(module)}(?!\w)", spec) is not None
+
+
+def missing_name(line: str) -> str | None:
+    """The command a not-found line names (NOT_FOUND): bash's `bash: line 1: X: command not
+    found`, dash's `sh: 1: X: not found`, zsh's `zsh:1: command not found: X`, and wb's own
+    `X: command not found` (missing_command's)."""
+    m = NOT_FOUND.search(line)
+    return (m["z"] or m["n"]).strip() if m else None
+
+
+def command_words(cmd: str | None) -> set[str]:
+    """The words of shell command ``cmd``, its operators split off (`cd x&&pytest`): what the
+    command itself names, which no round can change (#1172)."""
+    lex = shlex.shlex(cmd or "", posix=True, punctuation_chars=True)
+    lex.whitespace_split = True  # `g++`, `npx:tsc` stay one word
+    try:
+        return set(lex)
+    except ValueError:  # an unbalanced quote: the shell's own error, not a missing tool
+        return set()
 
 
 def base_check_line(r: dict, task: store.Task) -> str:
@@ -2979,9 +3135,9 @@ def base_check_line(r: dict, task: store.Task) -> str:
         return (f"note: the acceptance command ran past {limit}s on the base; not checked"
                 + (f". If it runs that long, a round's run may pass --test-timeout ({full}s) too: "
                    "raise it for a slow suite" if full > limit else ""))
-    if line := missing_command(r):  # every round's tests will fail so too (#1152, 2026-11-24)
+    if line := missing_command(r, task):  # every round's tests will fail so too (#1152, 2026-11-24)
         return (f"warning: the acceptance command can't run in the agent's environment: {line} "
-                f"(exit 127 on the base), so every round's tests will fail the same way; {GIVE_TOOL}")
+                f"(exit {r['exit']} on the base), so every round's tests will fail the same way; {GIVE_TOOL}")
     if r["ok"]:
         # the usual case when the agent writes the step's tests: a warning that said to discard
         # and start again cost a whole restart in one task of two (the 2026-11-17 measurement)
@@ -3146,7 +3302,7 @@ def _base_check(task: store.Task) -> None:
     task.set_status(base_check=r, last="waiting for the GPU" if _gpu_side(task) else "starting")
     # every round's tests will too: a cut-short run, or a command the agent's environment lacks
     # (#1152, 2026-11-24: round 1 and both auto-fix rounds ran first, told the bug was the change's)
-    if r["exit"] == "timeout" and r["limit"] < BASE_CHECK_SECS or missing_command(r):
+    if r["exit"] == "timeout" and r["limit"] < BASE_CHECK_SECS or missing_command(r, task):
         task.notify("checkin", f"task {task.name}: {base_check_line(r, task)}",
                     round=task.status.get("round", 1))
 
@@ -3220,6 +3376,9 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
                      + " running in the background when its turn ended; stopped")
     elif rnd.get("lingered"):  # #1160: the runner's stop, not OpenCode's exit code (#83)
         lines.append("OpenCode was still open after the agent's output ended; stopped")
+    elif rnd.get("settled"):  # #1168: a self-review that read and left the tree as it was
+        lines.append(f"self-review: {rnd['settled']}, the tree as the round began; stopped as "
+                     "its finish")
     elif rnd["exit"] not in (0, None):
         lines.append(f"opencode exited {rnd['exit']}"
                      + (": the round didn't finish; what it changed so far stays in the worktree"
@@ -3645,9 +3804,10 @@ def not_the_code(task: store.Task, tests) -> str:
     (#496, the audit of 1.90): a run past --test-timeout went back as "the bug is in this change"
     and the agent edited code that may well have been right, nothing naming the limit; a device
     the lane refused (lane_refused, #331) was named only after both auto-fix rounds, and so was a
-    command the agent's environment lacks (missing_command, #1152). The part
-    before the first colon is the cause, for status.last. "" when the failure may be the code's
-    (a dropped proxy may be either: its auto-fix prompt says so, auto_fix_prompt)."""
+    command the agent's environment lacks (missing_command, #1152; a Python module, #1181; one a
+    later step's --test names, #1172). The part before the first colon is the cause, for
+    status.last. "" when the failure may be the code's (a dropped proxy may be either: its auto-fix
+    prompt says so, auto_fix_prompt)."""
     if not tests or tests["ok"]:
         return ""
     if tests["exit"] == "timeout" and not tests.get("hang"):  # a hang is the change's (#779)
@@ -3656,13 +3816,21 @@ def not_the_code(task: store.Task, tests) -> str:
                 "the change; run it in the worktree yourself, or narrow it (wb next --test); "
                 "start a slow suite's task with a larger --test-timeout")
     base = task.status.get("base_check") or {}
-    if (line := missing_command(tests)) and line == missing_command(base) \
-            and base.get("cmd") == task.spec.get("test_cmd"):
-        # the same command not found as on the base: auto-fix rounds told "the system works; the
-        # bug is in this change" each failed the same way, before Claude heard (#1152, 2026-11-24).
-        # A command the step makes says something else once made.
+    cmd = task.spec.get("test_cmd")
+    if (line := missing_command(tests, task)) and base.get("cmd") == cmd \
+            and _missing_key(line) == _missing_key(missing_command(base, task)):
+        # the same command (or Python module, #1181) not found as on the base: auto-fix rounds
+        # told "the system works; the bug is in this change" each failed the same way, before
+        # Claude heard (#1152, 2026-11-24). A command the step makes says something else once made.
+        return (f"the acceptance command can't run in the agent's environment: {line} (exit "
+                f"{tests['exit']}, as on the base); {GIVE_TOOL}")
+    if line and base.get("cmd") != cmd and missing_name(line) in command_words(cmd):
+        # no base check ran this command (wb next --test, --no-base-check), and the tool it names
+        # itself isn't on the agent's PATH: both auto-fix rounds went to edits that couldn't help
+        # (#1172, 2026-11-24). Not one a script it runs names: the step may write that script.
+        # (A module line names no command: missing_name is None, never a command word.)
         return (f"the acceptance command can't run in the agent's environment: {line} (exit 127, "
-                f"as on the base); {GIVE_TOOL}")
+                f"a tool the command itself names); {GIVE_TOOL}")
     if nodes := tests.get("lane"):
         # the grant that reaches each, as the report names it: the path itself, when it was a
         # file not made yet, sent Claude's `wb allow --path` to make a directory of that name (#670)
@@ -3748,7 +3916,8 @@ def died(rnd: dict) -> bool:
     kill, a provider error), not the runner's stop of a shutdown that hung (#83). Such a round
     failed whatever it printed: one that said "I will inspect the files" and exited 7 went on to
     the tests, and to review as "tests passed" (#427, the audit of 1.8)."""
-    return rnd.get("exit") not in (0, None) and not rnd.get("lingered") and not rnd.get("left_bg")
+    return rnd.get("exit") not in (0, None) and not rnd.get("lingered") and not rnd.get("left_bg") \
+        and not rnd.get("settled")  # #1168: the runner's stop of a self-review that only read
 
 
 def _round_end(task: store.Task, n: int, rnd: dict, began: float) -> None:
@@ -3809,14 +3978,19 @@ def _load_failed(task: store.Task, e: Exception, api: bool = False) -> None:
         return task.notify("failed", str(e))
     from .results import ran  # results imports this module
     never = not ran(task)
+    n = task.status.get("round", 1)
     task.set_status(phase="failed", last=f"model: {e}", infra="model",
                     **({"failed_before": "load"} if never else {}))
-    # the agent never ran: resuming loses nothing, and a discard records nothing of the model
+    # the agent never ran: resuming loses nothing, and a discard records nothing of the model.
+    # It ran, and round n (wb next's step, a review's feedback) never reached it: the notice
+    # named no next step, and the "carry on" sent went without the round's prompt (#1180)
     task.notify("failed", f"task {task.name}: "
                 + (f"{task.spec['model']} can't run: {e}" if api else
                    f"could not load {task.spec['model']}: {e}")
                 + (f"\nthe agent never ran: once the model can, wb resume {task.name} starts it"
-                   if never else ""))
+                   if never else
+                   f"\nround {n} never reached the agent: once the model can run, wb feedback "
+                   f"{task.name} --text \"carry on\" sends its prompt" if not reached(task, n) else ""))
 
 
 # The keyhole (#1012): an API model's key stays in the runner, and OpenCode gets the keyhole's
@@ -3954,9 +4128,12 @@ def _stopped(m: models.Model) -> bool:
     return bool(st["available"]) and not st["resident"]
 
 
-def _wait_up(task: store.Task, m: models.Model) -> None:
+def _wait_up(task: store.Task, m: models.Model) -> models.Model:
     """Wait, backing off, until the model's server is no longer only down; RuntimeError past
-    DOWN_WAIT. Whatever it is then, the caller's load says."""
+    DOWN_WAIT. Whatever it is then, the caller's load says. The model is read again each pass,
+    and returned as last read: a task queued after a Windows reboot, before its server was up,
+    waited 20 minutes on Windows' old address while discovery followed it to the new one (#1167,
+    2026-11-24)."""
     deadline, pause = time.monotonic() + DOWN_WAIT, DOWN_PAUSES[0]
     said = False
     while (st := models.status(m)) and models.may_come_up(st):
@@ -3973,6 +4150,9 @@ def _wait_up(task: store.Task, m: models.Model) -> None:
             said = True
         time.sleep(min(pause, left))
         pause = min(pause * 2, DOWN_PAUSES[1])
+        with contextlib.suppress(KeyError, RuntimeError, OSError, ValueError):
+            m = models.resolve(m.id)  # gone from the config: the one it had
+    return m
 
 
 def _load(task: store.Task, lease, m: models.Model) -> float:
@@ -4144,13 +4324,54 @@ def _spend_lead(task: store.Task, rnd: dict) -> str:
     return meter.stop_text(task, rnd.get("worst")) + "\n" if rnd.get("guard") == "spend" else ""
 
 
+def first_tokens(task: store.Task | None = None, prompt: str | None = None,
+                 fresh: bool | None = None) -> int:
+    """What the next round's first request carries, in tokens as the keyhole's room counts a
+    body (its bytes / 4), for the day cap's look ahead (meter.request_floor). Left out, a day
+    within that request's input of the cap passed wb start, feedback, next, resume and _go_on,
+    and the room refused the request at once; raised to the cap the refusal named, it was
+    refused again (#1173, 2026-11-24). A continued session carries its context (status
+    `live_used`, its last step's), a fresh one OpenCode's own (meter.FIRST_TOKENS); then the
+    round's prompt (``prompt``, else the round's own: store.round_prompt), in a fresh session
+    after an earlier one inside its handoff (handoff_prompt), never past PROMPT_ARG_MAX, past
+    which it goes as a file the agent reads. ``task`` None: wb start's, round 1's prompt.
+    ``fresh``: as the caller knows it (wb resume's, --fresh), else from the status alone, not
+    fresh_reason's export: a full session carried on counts its context, more than a handoff.
+    True is a later round begun fresh (status `context` "fresh"), which the runner always hands
+    over (fresh_reason, _start_fresh), session or not: judged from the status, a resume after a
+    round that never made a session counted its bare prompt, under half the first request, and
+    the room refused it at the cap named (#1173's review, 2026-11-24)."""
+    st = task.status if task is not None else {}
+    if prompt is None:
+        path = store.round_prompt(task, st.get("round", 1)) if task is not None else None
+        prompt = path.read_text() if path is not None and path.is_file() else ""
+    handoff = fresh is True
+    if fresh is None:
+        fresh = st.get("context") in ("fresh", "full") or not st.get("session") or old_store(st)
+        handoff = fresh and bool(st.get("session") or (st.get("step_round") or 1) < st.get("round", 1))
+    live = st.get("live_used") or {}
+    carried = live.get("used") if st.get("session") and live.get("session") == st.get("session") else 0
+    carried = int(carried) if isinstance(carried, (int, float)) and carried > 0 else 0
+    base = meter.FIRST_TOKENS if fresh else max(carried, meter.FIRST_TOKENS)
+    size = len(prompt.encode())
+    if handoff and task is not None:
+        try:  # what _start_fresh will send: the task, the work so far, then the prompt
+            size = len(handoff_prompt(task, "", prompt).encode())
+        except Exception:  # an estimate: never a reason to refuse, so the most argv can carry
+            size = PROMPT_ARG_MAX
+    return base + -(-min(size, PROMPT_ARG_MAX) // 4)
+
+
 def _go_on(task: store.Task, n: int, what: str) -> bool:
     """Before each `continue` in drive (#1017, #1019): for an API task, today's spend under the
-    cap by at least one request at its worst (meter.request_floor, #1150). Short of that, the
-    task stops before ``what`` runs: phase `stuck`, status `guard` `spend`, a `stuck` notice
-    with cause `spend` (not the step's own: results.THE_STEP). A GPU task always goes on, for
-    nothing."""
-    if meter.for_task(task) is None or not (why := meter.stop_reason(task, ahead=True)):
+    cap by at least one request at its worst (meter.request_floor, #1150), its input the next
+    round's first request's (first_tokens, #1173). Short of that, the task stops before
+    ``what`` runs: phase `stuck`, status `guard` `spend`, a `stuck` notice with cause `spend`
+    (not the step's own: results.THE_STEP). A GPU task always goes on, for nothing."""
+    if meter.for_task(task) is None:
+        return True
+    tokens = first_tokens(task)
+    if not (why := meter.stop_reason(task, ahead=True, tokens=tokens)):
         return True
     if (kh := CURRENT.get("keyhole")) is not None:
         kh.close(why)
@@ -4159,7 +4380,7 @@ def _go_on(task: store.Task, n: int, what: str) -> bool:
     task.set_status(phase="stuck", last=why[:200], guard="spend", infra=SPEND)
     task.event({"ts": store.now(), "round": n, "kind": "stopped", "text": f"{why}: {what} didn't run",
                 "by": SPEND})
-    text = f"{meter.stop_text(task)}\n{what} didn't run: {why}."
+    text = f"{meter.stop_text(task, tokens=tokens)}\n{what} didn't run: {why}."
     # auto-fix and self-review have moved status `round` on to n + 1, which never ran: round n's
     # report goes with the notice, and says where it is (wb report alone said "no report yet")
     if (summary := task.round_dir(n) / "summary.md").exists():
@@ -4216,11 +4437,12 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
         return _repo_gone(task)
     if not checkout(task):  # the worktree itself, out of wb start's foreground (#529)
         return
+    _hands_on(task)  # Claude's ignored files from the review, before the agent writes (#1179)
     if not _prepare(task):  # the project as the user has it, before the base check (#201)
         return
     if _down(m):  # before the lease: a server that is down holds no GPU from other tasks
         try:
-            _wait_up(task, m)
+            m = _wait_up(task, m)  # at Windows' new address, when discovery followed it (#1167)
         except RuntimeError as e:
             return _load_failed(task, e)
     if needs_base_check(task):
@@ -4423,6 +4645,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                     return
                 continue
             task.set_status(phase="review", tests=tests,
+                            hands_off_at=store.now(),  # Claude's to edit from now (#1179)
                             last="tests passed: Claude reviews next" if tests and tests["ok"]
                             else f"{skip.split(':')[0]}: Claude reviews next" if skip
                             else "Claude reviews next")
@@ -4447,6 +4670,12 @@ RESUME = ("Claude stopped your last session and is resuming the task in a fresh 
 NUDGED = "nudged"
 
 
+# A wb feedback round after a stop that wasn't the agent's (status `infra`: the provider's, a
+# reaped runner's): its "carry on" is under FEEDBACK_HEAD but is no review, so round_asks keeps
+# it and walks on to the feedback the stop interrupted (#1169).
+RESUMED = "resumed"
+
+
 # Claude's notes folded into a round's prompt after its opening (a carry-on, a resume, the
 # notes that came before the round began): round_asks skips a carry-on or resume whole, so it
 # reads them from here (#677).
@@ -4467,7 +4696,9 @@ def round_asks(task: store.Task, n: int) -> list[str]:
     feedback: what a fresh session taking over mid-round must still carry out. A handover's own
     carry-on adds nothing (it is skipped). Seen 2026-11-16: two handovers in a feedback round
     each said only "carry on with the task", and the fresh sessions, finding the tests green,
-    reported done with the feedback never made. A resume (wb resume) is skipped the same way."""
+    reported done with the feedback never made. A resume (wb resume) is skipped the same way,
+    and a feedback round after an infra stop (RESUMED) is no stop: its "carry on" once hid the
+    review feedback before it (#1169)."""
     first = task.status.get("step_round") or 1
     out: list[str] = []
     for r in range(n, first, -1):
@@ -4481,7 +4712,7 @@ def round_asks(task: store.Task, n: int) -> list[str]:
                 out.insert(0, kept)
             continue
         out.insert(0, raw)
-        if raw.startswith(lessons.FEEDBACK_HEAD):
+        if raw.startswith(lessons.FEEDBACK_HEAD) and not (task.round_dir(r) / RESUMED).exists():
             break
     return out
 
@@ -4565,17 +4796,32 @@ def _undelivered(task: store.Task) -> str:
             + " | ".join(r["text"].strip().replace("\n", " ")[:200] for r in notes)) if notes else ""
 
 
+def reached(task: store.Task, n: int) -> bool:
+    """Whether round n's prompt went to the agent: drive logs the round's `round` event as it
+    starts it. Not when the runner stopped before (the model's load, the server's wait, the
+    keyhole, the checkout, the spend cap): wb feedback then runs round n again (#1180)."""
+    return any(e.get("kind") == "round" and e.get("round") == n
+               for e in store.read_jsonl(task.dir / "events.jsonl")[0])
+
+
+def add_to_round(task: store.Task, n: int, text: str) -> None:
+    """``text`` after round n's prompt, which has not run, and beside it for round_asks (FOLDED:
+    it skips a carry-on, a resume or a nudge whole, #677)."""
+    folded = task.round_dir(n) / FOLDED
+    folded.write_text((folded.read_text().rstrip() + "\n\n" if folded.is_file() else "") + text + "\n")
+    path = task.round_dir(n).joinpath("prompt.md")
+    for f in (path, path.with_name("instructions.md")):  # a revived fresh round's own too (#780)
+        if f == path or f.is_file():
+            f.write_text(f.read_text().rstrip() + "\n\n" + text)
+
+
 def _early_notes(task: store.Task, n: int) -> None:
     """Notes that came in before the round began (queued for the GPU, its model or the base
     check, or while the model reloaded) go with its prompt, as `wb steer` promises: they once
     waited for the round to end and came as a round of their own (#452)."""
     if not (notes := pending_steer(task)):
         return
-    path = task.round_dir(n).joinpath("prompt.md")
-    text = folded_notes(task, n, notes)
-    for f in (path, path.with_name("instructions.md")):  # a revived fresh round's own too (#780)
-        if f == path or f.is_file():
-            f.write_text(f.read_text().rstrip() + "\n\n" + text)
+    add_to_round(task, n, steer_prompt(notes, False))
     task.set_status(steer_taken=task.status.get("steer_taken", 0) + len(notes))
 
 
@@ -4619,9 +4865,13 @@ def _updated(task: store.Task) -> bool:
     if not (was := CURRENT.get("code")) or code_print() == was:
         return False
     msg = f"{UPDATED}: wb resume {task.name} continues it on the new code"
-    task.set_status(phase="stuck", last=msg)
-    # not the step's: an update mid-step shrank the model's slice (#660)
-    task.notify("stuck", f"task {task.name}: {msg}", round=task.status.get("round"), cause="updated")
+    # not the step's: an update mid-step shrank the model's slice (#660). Status `infra`, so wb
+    # feedback counts no review round, and the notice's `tasks`, so the mod's wake says it was
+    # interrupted and names wb resume: it said "it got stuck" and advised wb feedback, which
+    # counted a round, and one real review after it made the step go badly (#1176, 2026-11-24)
+    task.set_status(phase="stuck", last=msg, infra="updated")
+    task.notify("stuck", f"task {task.name}: {msg}", round=task.status.get("round"), cause="updated",
+                tasks=[task.name])
     return True
 
 
@@ -4820,6 +5070,7 @@ def main():
         finally:
             try:
                 task.set_status(pid=None, stopping=None)
+                hands_off(task)  # the agent is stopped: what is written next is Claude's (#1179)
             except OSError as e:
                 if not store.disk_full(e):
                     raise

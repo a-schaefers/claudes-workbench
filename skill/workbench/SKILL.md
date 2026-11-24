@@ -375,7 +375,7 @@ this machine's GPU even when the model is on a wb remote box; without it they se
 `wb verify` and `wb shot` wait for the GPU alone too.
 A suite slower than 15 minutes: `--test-timeout <secs>` above its time, or
 narrow the command; a run past it isn't sent back to the agent (nor one the lane refused a
-device, nor a command not found as on the base, which checks in before round 1), you're woken with `auto-fix skipped:` and the cause, unless the base check ran the same
+device, nor a command or Python module (`python3 -m pytest`, not one of the repo's own, nor one whose file or dotted name the spec gives; a bare name such as `greet` still counts as a tool) not found as on the base, which checks in before round 1, or a command a `wb next --test` command itself names), you're woken with `auto-fix skipped:` and the cause, unless the base check ran the same
 command in a quarter of the limit: then it's the change's hang, and auto-fix gets it.
 Once the tests pass, the agent checks its own change against your review checks in one more
 round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it).
@@ -408,7 +408,7 @@ heading the wrong way, act on it. Notes are instructions, like feedback: concret
 - `wb takeover <name>`: you finish it in the worktree, uncommitted, then `wb accept` (or hand it
   back with `wb feedback`): for when explaining would cost more than doing.
 - `wb stop <name>`; `wb resume <name>` continues it in a fresh session (also after "the runner
-  died" or "stopped by a signal"). After a restart or a shutdown one notice names every task it
+  died", "stopped by a signal", or workbench or OpenCode changed under it). After a restart or a shutdown one notice names every task it
   interrupted:
   `wb resume <a> <b> …`, as it says.
 - A `PERMISSION` question (a command or a directory): lean to yes for what the task needs (`wb
@@ -501,10 +501,11 @@ coding choice is the user's (`wb coding`), never changed by a check.
   `wb answer <name> --file <path>`, which sends the file's contents.
 - **stuck / failed** — `wb log <name> -n 30` if the report isn't enough; then feedback that unblocks
   it, or discard. Past step 1, discard drops only this step: the steps `wb next` committed stay on
-  the branch, and the report says how to accept them instead. A failed round's edits so far stay in the worktree (`wb resume` carries on). A setup or load failure before the agent ran: fix it, then `wb resume <name>`.
+  the branch, and the report says how to accept them instead. A failed round's edits so far stay in the worktree (`wb resume` carries on). A setup or load failure before the agent ran: fix it, then `wb resume <name>`; one later ("round N never reached the agent"): fix it, then `wb feedback <name> --text "carry on"`, which sends round N's prompt first.
   A `rate_limited`, `outage`, `quota`, `auth` or `refused` stop is the API provider's, not the
   agent's (the report says "the provider's stop"): tell the user so, and its remedy (wait, top
-  up, or /connect the key again), then `wb feedback <name> --text "carry on"` once it allows (no review round counted). A
+  up, or /connect the key again), then `wb feedback <name> --text "carry on"` once it allows (no review round counted);
+  the tasks queued behind a `quota` stop wait as queued, with no stop of their own, and go on once credit is back (resumed, the stopped task asks the provider at once, and its 2xx lets them go). A
   `refused` one (the provider turned the request down: a moderation flag, a schema, a model gone)
   quotes what it said: fix that, then `wb feedback`; on an HTTP 404 the model is gone, so `wb
   takeover` or `wb discard`. Never switch the task's model or role yourself: a route change
@@ -516,7 +517,8 @@ coding choice is the user's (`wb coding`), never changed by a check.
   "carry on"` once it's mended; never change the route for it.
   A `spend` stop (cause `spend`: the day's API spend cap is reached, or too near it for the next
   request) is the user's call, never a retry: ask them, as the notice says (it names a cap that
-  would do). A higher cap or tomorrow: `wb resume <name>` once it allows.
+  would do). A higher cap or tomorrow: `wb resume <name>` once it allows. `wb feedback`, `next`
+  or `resume` refused at the cap (exit 3) is the same call.
   The role on the GPU is for the next tasks; this one keeps its API model (resume never
   re-routes), so `wb takeover` or `wb discard` it. Nothing but the user raises the cap.
 
@@ -552,7 +554,11 @@ still has room (how handovers work: `reference/driving.md`).
 Check a directory flagged as possible build output before you accept a step. Remove or gitignore
 generated files. When the bulk additions or large binaries belong in the commit, pass
 `--include` to `wb next` or `wb accept` after reviewing them. `NOTE: git ignores files the agent
-wrote` names files no diff shows and no commit takes: read them, then `--include` lands them.
+wrote` names files no diff shows and no commit takes: read them, then `--include` lands them. A
+file you write under an ignored path (a takeover, a fix) is refused the same way: `--include`.
+`note: git ignores N more files … leaves out as build or test output` names the rest you changed
+there: `wb next`'s stay in the worktree (`git -C <worktree> add -f <file>` keeps one), `wb
+accept`'s are copied to the task's `left-out/` before the worktree goes.
 When a command says the repo `moved or was deleted`, ask the user where it is now, then
 `wb relocate <name> --repo <dir>`; a removed linked worktree needs nothing (its main one is used).
 

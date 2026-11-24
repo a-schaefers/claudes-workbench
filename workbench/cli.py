@@ -4,6 +4,7 @@ Every command prints a short, plain report: it is read by Claude, whose tokens a
 resource, and by a person at a terminal.
 """
 import argparse
+import contextlib
 import fnmatch
 import functools
 import io
@@ -15,6 +16,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -190,18 +192,23 @@ def _coding_used(task: store.Task) -> None:
             {**x, "used": x.get("used") or (store.now() if _spent(x) else None)} for x in rows]})
 
 
-def _model_still_listed(task: store.Task) -> None:
+def _model_still_listed(task: store.Task, prompt: str | None = None, fresh: bool | None = None) -> None:
     """An API task's model must still be in OpenCode's catalog before feedback, next or resume
     writes a round: exit 3 with runner.left_catalog's line, never another model (#1016). And
     wb start's spend refusal (meter.refusal: no price, no day cap (#1089), today at the cap or
     within one request at its worst of it, #1150), the same exit: the round written past it
     stopped at once as a spend `stuck`, a Claude wake for nothing, with a review counted or a
-    step committed for a round that never ran (#1118, 2026-11-23)."""
+    step committed for a round that never ran (#1118, 2026-11-23). That request's input is the
+    round's first (runner.first_tokens of ``prompt`` and ``fresh``): the session's context
+    left out, the check passed and the room refused it at once (#1173, 2026-11-24). Its advice
+    is a running task's: the role on the GPU for the next tasks only, as this one keeps its API
+    model (#1171)."""
     if task.spec.get("via") != "api":
         return
     if (m := models.lookup(task.spec.get("model") or "")) is None:
         die(runner.left_catalog(task), 3)
-    if why := meter.refusal(m, task.spec.get("role")):
+    if why := meter.refusal(m, task.spec.get("role"), task=task,
+                            tokens=runner.first_tokens(task, prompt, fresh)):
         die(why, 3)
 
 
@@ -217,6 +224,18 @@ def _opencode_again(task: store.Task) -> None:
         if drift := runner.untested(have):
             print(f"note: {drift}")
         task.set_status(opencode=f"{have[0]}.{have[1]}")
+
+
+def _credit_turn(task: store.Task) -> None:
+    """A task its API provider stopped (status `infra: provider`), resumed by the user: its
+    provider's `no_credit` mark, if one holds, becomes its turn to ask (models.credit_ask), so a
+    top-up's resume runs at once, not after the mark's 900 s (the review of #1178, 2026-11-24)."""
+    if task.status.get("infra") != "provider" or not runner.api_task(task):
+        return
+    try:
+        models.credit_ask(runner.provider_of(task), task.name)
+    except Exception:  # an unreadable file: its runner's credit_turn reads it as no mark either
+        pass
 
 
 def spawn_runner(task: store.Task) -> int:
@@ -489,6 +508,7 @@ def reap(task: store.Task, quiet: bool = False) -> bool:
         except (ProcessLookupError, PermissionError):
             pass
     runner.sweep(task)
+    runner.hands_off(task)  # the agent is gone: what is written next is Claude's (#1179)
     ask_mcp.close_all(task)  # and its questions, which nothing will relay (the 0.90 review)
     task.event({"ts": store.now(), "round": st.get("round"), "kind": "error",
                 "text": "the runner was " + RESTARTED if restart else "the runner died without a report"})
@@ -647,19 +667,20 @@ def ago(ts) -> str:
     return f"{s}s" if s < 90 else f"{s // 60}m" if s < 5400 else f"{s // 3600}h"
 
 
-def pick_model(role: str, size: str, wanted: str | None, stack=(), name: str | None = None
-               ) -> tuple[models.Model, dict, str, dict]:
+def pick_model(role: str, size: str, wanted: str | None, stack=(), name: str | None = None,
+               tokens: int | None = None) -> tuple[models.Model, dict, str, dict]:
     """The task's model, its state, why, and how it was routed (task.json's `via`, `role` and an
     API model's keys): routes.resolve (#1016), the one asked for (an API one needs the user's yes in
     the mod's dialog, #1014, which cmd_start takes last: cli.start_gate), else the role's side: the router's choice on the evidence for the
     GPU (the record on this kind of work first: router.score; ``name``: the task's, which decides
     whether it explores, router.explores), or the role's API model. Exit 3 with one line for a
-    role that can't run, never another model."""
+    role that can't run, never another model. ``tokens``: round 1's first request's input, for
+    the day cap's look ahead (runner.first_tokens, #1173)."""
     def gate(m):  # the dialog's yes is cmd_start's, after every refusal (#1104)
         if not API_RUNS:
             die(f"{m.id} {API_NOT_YET}", 3)
     try:
-        return routes.resolve(role, size, wanted, stack, name, gate=gate)
+        return routes.resolve(role, size, wanted, stack, name, gate=gate, tokens=tokens)
     except routes.Refused as e:
         die(str(e), e.code)
 
@@ -686,7 +707,7 @@ def _routed_keys(routed: dict) -> dict:
     return {k: routed[k] for k in keys if routed.get(k) is not None}
 
 
-def _busy_api(role: str, a, repo: Path, sub: str | None):
+def _busy_api(role: str, a, repo: Path, sub: str | None, tokens: int | None = None):
     """When the GPU is busy and the user opted in (routes.json `busy` api, #1023): the role's API
     model as pick_model gives one, (m, state, why, routed); "" when the opt-in doesn't apply (off,
     Agents GPU, a --model asked for, a role with no API model: it queues or exits 4 as before); a
@@ -715,7 +736,8 @@ def _busy_api(role: str, a, repo: Path, sub: str | None):
         why = _standing_gap(context.repo_conf(repo, sub), a, models.provider_name(m), repo, sub) or None
     if why is None:  # no price, or today at the day cap (#1019), without an API start's advice:
         # the role is on the GPU and this start only waits for it (wave 2's merge)
-        why = meter.refusal(m, role, advice=False)
+        why = meter.refusal(m, role, advice=False,  # round 1's input too (#1173)
+                            tokens=meter.FIRST_TOKENS if tokens is None else tokens)
     if why:
         return f"the GPU is busy, and the {role} role's API model {mid} can't take it: {why}"
     routed = routes.busy_routed(doc, role, m)
@@ -1394,7 +1416,10 @@ def cmd_start(a):
     # (that would move the user off their API choice unsaid, #1014)
     role, size = routes.role_and_size(a.role, a.size)
     _local_only_check(a, repo, role, _package(repo, Path(a.repo).resolve(), a.base))  # #1021
-    m, state, why, routed = pick_model(role, size, a.model, stack, a.name)
+    # round 1's first request, input and all, for the day cap's look ahead: without its input a
+    # start within that of the cap passed, then the room refused that request at once (#1173)
+    first = runner.first_tokens(prompt=spec_text)
+    m, state, why, routed = pick_model(role, size, a.model, stack, a.name, tokens=first)
     # a rate limit or outage a task met on this provider (api-health.json) is no refusal: the
     # keyhole waits it out inside the round, which stops as rate_limited or outage if it holds.
     # One 503 any task saw blocked every start of the role for 60 s, --queue and --force too, and
@@ -1434,7 +1459,7 @@ def cmd_start(a):
         if not getattr(a, "bench", None):
             _say(_preempt_bench(m, a.name))
         held, waits = _gpu_wait(m, a.name)
-    if waits and not isinstance(moved := _busy_api(role, a, repo, sub), str):  # #1023, the user's opt-in
+    if waits and not isinstance(moved := _busy_api(role, a, repo, sub, first), str):  # #1023, the user's opt-in
         m, state, why, routed = moved
         api, held, waits, slots_full = True, {}, False, False
     elif waits and moved:
@@ -1687,36 +1712,70 @@ def cmd_feedback(a):
         die(f"{a.name}'s runner is still running")
     _need_worktree(task)
     _opencode_again(task)
-    _model_still_listed(task)
     text = a.text if a.text is not None else \
         read_text(a.message, "the feedback")
     if not text.strip():  # before anything is written: an empty one cost a round (the audit)
         die("the feedback is empty")
+    rerun = " re-run the acceptance command and" if task.spec.get("test_cmd") else ""
+    said = (f"{lessons.FEEDBACK_HEAD} Make exactly these changes, then{rerun} finish with a short "
+            "summary:\n\n" + text.strip())
+    # Round n stopped before it reached the agent (its model couldn't load, the GPU server was
+    # down, the API key gone): its prompt, wb next's step or the last review's feedback, was
+    # never sent. Written as round n + 1 from the new text alone, the agent got "carry on" and
+    # never the step, and a paid round and a review were spent on "files changed: (none)"
+    # (#1180, 2026-11-24). So round n runs again, the text after its own prompt, as a note sent
+    # before a round began goes with it (runner._early_notes); and no review is counted, for
+    # nothing the agent did was reviewed.
+    unsent = st.get("phase") != "review" and not runner.reached(task, st.get("round", 1)) \
+        and task.round_dir(st.get("round", 1)).joinpath("prompt.md").is_file()
+    n = st.get("round", 1) + (0 if unsent else 1)
+    # after the text: the round's first request carries it (#1173), after round n's own prompt
+    # when that runs again: the text alone passed, and the room refused the rerun's first
+    # request at once, a spend wake for nothing (the merge of #1173 and #1180, 2026-11-24)
+    own = store.round_prompt(task, n).read_text() + "\n\n" if unsent else ""
+    _model_still_listed(task, own + said, True if a.fresh else False if a.keep_context else None)
     _spec_gaps(task, a.spec_gap)
     dropped = _stale_notes(task)
-    n = st.get("round", 1) + 1
-    task.round_dir(n).mkdir(parents=True, exist_ok=True)
-    rerun = " re-run the acceptance command and" if task.spec.get("test_cmd") else ""
-    task.round_dir(n).joinpath("prompt.md").write_text(
-        f"{lessons.FEEDBACK_HEAD} Make exactly these changes, then{rerun} finish with a short "
-        "summary:\n\n" + text.strip(), encoding="utf-8")
+    if unsent:
+        runner.add_to_round(task, n, said)
+    else:
+        task.round_dir(n).mkdir(parents=True, exist_ok=True)
+        task.round_dir(n).joinpath("prompt.md").write_text(said, encoding="utf-8")
     # a stop that wasn't the step's (status `infra`: an API provider's, the spend cap's, a reaped
     # runner's, a restart's, a model server's): the round it resumes is no review. Counted, the
     # "carry on" the provider's stop notice advises plus one real review read as two, and the
     # step went badly, shrinking the model's slice (#1153, 2026-11-24). drive clears `infra` at
     # each round's start, so a task in review never has it.
     resumed = bool(st.get("infra"))
-    reviews = st.get("reviews", 0) + (0 if resumed else 1)
+    # ... and no review for round_asks either: it stopped at this round, so a later handover or
+    # wb resume carried only "carry on" and dropped the review feedback the stop interrupted
+    # (#1169, 2026-11-24). Unlinked otherwise: a feedback that died before its round was counted
+    # leaves round n's directory for the next one. An unsent round run again (#1180) keeps its
+    # own mark: its prompt is what it was, the new text only added after it.
+    mark = task.round_dir(n) / runner.RESUMED
+    if unsent:
+        pass
+    elif resumed:
+        mark.touch()
+    else:
+        mark.unlink(missing_ok=True)
+    reviews = st.get("reviews", 0) + (0 if resumed or unsent else 1)
     handled = store.now()  # everything before the new round; what its runner raises stays news
     task.set_status(context="fresh" if a.fresh else "keep" if a.keep_context else None)
     gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
     task.set_status(round=n, reviews=reviews, phase="queued",  # the pane: "resumed", not "feedback 0"
-                    round_for="resume" if resumed else "feedback",
+                    # an unsent round keeps its own (`next`: the pane's `step 2`)
+                    **({} if unsent else {"round_for": "resume" if resumed else "feedback"}),
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0)
+    _credit_turn(task)
     spawn_runner(task)
     _ack_all(task, upto=handled)
-    if resumed:
+    if unsent:
+        print(f"feedback sent to {a.name} (round {n}): after round {n}'s own prompt, which never "
+              "reached the agent" + (f" ({st['infra']})" if st.get("infra") else "")
+              + ", so no review round is counted")
+    elif resumed:
         print(f"feedback sent to {a.name} (round {n}): it resumes after a stop that wasn't the "
               f"agent's ({st['infra']}), so no review round is counted")
     else:
@@ -1801,7 +1860,6 @@ def cmd_next(a):
         die(f"{a.name}'s runner is still running")
     _need_worktree(task)
     _opencode_again(task)
-    _model_still_listed(task)
     step = st.get("steps", 1)
     try:  # read before anything is committed: a bad path must leave the step as it was
         nxt = read_text(a.spec, "the next step's spec")
@@ -1809,6 +1867,9 @@ def cmd_next(a):
         die(f"can't read the next step's spec: {e}")
     if not nxt.strip():
         die("the next step's spec is empty")
+    # after the spec, before the commit: the step's first request carries the session's context
+    # and the spec with the protocol (#1173)
+    _model_still_listed(task, nxt + protocol_for(spec), True if a.fresh else None)
     commit = _step_landed(task, step)
     measured = results.step(task, landed=True, since="HEAD~1" if commit else "HEAD", gaps=a.spec_gap)
     if not commit:
@@ -1816,11 +1877,15 @@ def cmd_next(a):
             with _settle_proposals(task, a.take_claude_md):
                 # a step that changed nothing advances with no commit: it died on "nothing to
                 # commit" and the task stayed on the step (#507, Claude's audit of 1.90)
-                wrote = runner.agent_wrote(task)
+                wrote = runner.agent_wrote(task) + runner.hand_wrote(task)  # Claude's too (#1179)
+                left = _left_out(task, wrote, a.include)
                 if gitops.changed(task.worktree) or gitops.ignored_files(task.worktree, wrote):
                     commit = gitops.commit_all(
                         task.worktree, f"{a.message}\n\nWorkbench-Task: {a.name} (step {step})"
-                        f"\nOpenCode-Session: {st.get('session')}", a.include, _signed(spec, a), wrote)
+                        f"\nOpenCode-Session: {st.get('session')}", a.include, _signed(spec, a), wrote,
+                        left)
+                if left:  # still in the worktree, for a later commit (#1179's review)
+                    print(gitops.left_out_line(left, task.worktree))
         except gitops.GitError as e:
             die(str(e))
     _spec_gaps(task, a.spec_gap)  # after the commit: a retry after a failed one counts them once
@@ -2412,6 +2477,7 @@ def _stop_runner(task):
                     except (ProcessLookupError, PermissionError):
                         pass
     runner.sweep(task)  # whatever the agent left running, the runner dead or alive
+    runner.hands_off(task)  # a runner killed before its own mark: Claude's from now (#1179)
 
 
 LIVE = ("queued", "running", "testing", "asking")
@@ -2591,8 +2657,18 @@ def _resume(task: store.Task) -> None:
     if not _rechecks_out(task):
         _need_worktree(task)
     _opencode_again(task)
-    _model_still_listed(task)
     n = st.get("round", 1)
+    # a fresh session (#1173): round 1's own prompt, else the handoff of the round written below,
+    # back to the step's feedback and with Claude's undelivered notes: the bare RESUME left them
+    # out, and the cap named was too low for its first request (#1173's review, 2026-11-24).
+    # The notes peeked, not taken: a refusal here leaves them for the next runner
+    peek = [r for r in runner.pending_steer(task) if r.get("by") != "workbench"]
+    # round n + 1 begins fresh, in a handoff even when round n never made a session; round 1
+    # again begins as wb start's did, its own prompt alone (#1173's review)
+    first = _first_round(st)
+    _model_still_listed(task, None if first else _resume_prompt(
+        runner.round_asks(task, n), runner.steer_prompt(peek, False) if peek else ""),
+        fresh=None if first else True)
     if _first_round(st):
         # it never ran a round (queued behind the GPU, its model or the base check): round 1
         # again, its prompt as wb start wrote it, not "Claude stopped your last session…"
@@ -2609,20 +2685,63 @@ def _resume(task: store.Task) -> None:
     asks = runner.round_asks(task, n)
     notes = _stale_notes(task)  # resume means carry on: a note never delivered still applies
     task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
-    task.round_dir(n + 1).joinpath("prompt.md").write_text(runner.RESUME.format(
-        asked=runner.ASKED.format("\n\n".join(asks)).rstrip() if asks else "")
-        + (f"\n\n{runner.folded_notes(task, n + 1, notes)}" if notes else ""))
+    task.round_dir(n + 1).joinpath("prompt.md").write_text(_resume_prompt(
+        asks, runner.folded_notes(task, n + 1, notes) if notes else ""))
     handled = store.now()
     gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
     task.set_status(round=n + 1, context="fresh", phase="queued", last="resumed by the reviewer",
                     round_for="resume")
     task.event({"ts": store.now(), "round": n + 1, "kind": "resumed",
                 "text": "Claude resumed the task in a fresh session"})
+    _credit_turn(task)
     spawn_runner(task)
     _ack_all(task, upto=handled)  # the stuck or failed notice is handled: wb wait must not hand it out again
     print(f"resumed {name} in a fresh session (round {n + 1})")
     _say(gpu)
     _say(lessons.nudge(task))
+
+
+def _left_out(task: store.Task, wrote: list[str], include: bool) -> list[str]:
+    """The ignored files changed since the agent stopped that a commit of the worktree leaves out
+    (runner.hand_left; with ``include``, less the ignored ones of ``wrote`` it adds); [] when git
+    can't say. A .csv Claude wrote beside its module under lib/ was dropped without a word, and
+    deleted with the worktree (#1179's review, 2026-11-24)."""
+    try:
+        left = gitops.ignored_files(task.worktree, runner.hand_left(task))
+        return sorted(set(left) - set(gitops.ignored_files(task.worktree, wrote) if include else ()))
+    except (gitops.GitError, OSError):
+        return []
+
+
+LEFT_KEPT_MAX = 64 << 20  # bytes of left-out files wb accept copies before the worktree goes
+
+
+def _keep_left(task: store.Task, left: list[str]) -> str:
+    """wb accept's note for the files the commit leaves out (_left_out), a copy of them kept in
+    the task's `left-out/` first, as the worktree goes next; an install's worth (past
+    NEW_FILES_MAX files or LEFT_KEPT_MAX bytes) isn't copied, and the note says so."""
+    root, dest = Path(task.worktree), task.dir / "left-out"
+    sizes = {}
+    for p in left:
+        with contextlib.suppress(OSError):
+            if stat.S_ISREG((st := os.lstat(root / p)).st_mode):
+                sizes[p] = st.st_size
+    if not sizes:
+        return gitops.left_out_line(left, task.worktree)
+    if len(sizes) > gitops.NEW_FILES_MAX or sum(sizes.values()) > LEFT_KEPT_MAX:
+        return gitops.left_out_line(left, task.worktree, gone=True)
+    for p in sizes:
+        with contextlib.suppress(OSError):
+            (dest / p).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(root / p, dest / p, follow_symlinks=False)
+    return gitops.left_out_line(left, task.worktree, kept=dest)
+
+
+def _resume_prompt(asks: list[str], notes: str) -> str:
+    """wb resume's round: RESUME with the step's instructions (runner.round_asks) and the notes
+    folded in (runner.folded_notes' text), as the day cap's look ahead must count it (#1173)."""
+    return (runner.RESUME.format(asked=runner.ASKED.format("\n\n".join(asks)).rstrip() if asks else "")
+            + (f"\n\n{notes}" if notes else ""))
 
 
 def _lane_dir(raw: str, guard: set[str] = frozenset(), task: store.Task | None = None) -> str:
@@ -3073,7 +3192,12 @@ def _route_start(a) -> None:
         repo = sub = None  # wb start says why
     if repo is not None and (why := local_only_refusal(repo, sub, _role(ns), ns.model, ns.local_only)):
         die(why, 3)
-    if why := meter.refusal(m):  # no price, no cap, or today at the cap (#1019, #1089): wb start's too
+    try:  # round 1's input, as wb start reckons it (#1173): stdin's is read by wb start alone
+        spec_text = "" if ns.spec == "-" else Path(ns.spec).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        spec_text = ""
+    # no price, no cap, or today at the cap (#1019, #1089): wb start's too
+    if why := meter.refusal(m, tokens=runner.first_tokens(prompt=spec_text)):
         die(why, 3)
     # wb start's cheap refusals too, in place of a dialog for a start that then exits 1, 3 or 4
     # (#1104, 2026-11-23): the model can't run, a --base naming no commit, the provider's slots
@@ -3658,13 +3782,18 @@ def cmd_accept(a):
             if not commit:
                 head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
                 with _settle_proposals(task, a.take_claude_md):  # kept if the commit fails (#507)
-                    wrote = runner.agent_wrote(task)
+                    # Claude's ignored files too: a takeover's lib/ module was lost (#1179)
+                    wrote = runner.agent_wrote(task) + runner.hand_wrote(task)
+                    left = _left_out(task, wrote, a.include)
                     if (gitops.changed(task.worktree) or head == spec["base"]
                             or gitops.ignored_files(task.worktree, wrote)):
-                        commit = gitops.commit_all(task.worktree, msg, a.include, _signed(spec, a), wrote)
+                        commit = gitops.commit_all(task.worktree, msg, a.include, _signed(spec, a),
+                                                   wrote, left)
                     else:  # nothing new: the branch's commits past the base are the work (the
                         # steps wb next committed, or Claude's own after a takeover: the audit)
                         commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
+                    if left:  # kept before the worktree goes (#1179's review)
+                        print(_keep_left(task, left))
             # the branch must hold it before the worktree goes: on a detached HEAD the commit was
             # left in no branch at all (#417, the audit of 1.8)
             gitops.put_on_branch(repo, spec["branch"], commit, task.worktree)
@@ -3767,7 +3896,6 @@ def cmd_accept(a):
               f"{note}: keep it current (update and commit it if this change alters what it says)")
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
           (f", merged into {close['merge_into']} as {merged}" if merged else
-           f"\nmerge with: {gitops.jj_merge(repo, spec['branch'])}" if gitops.jj_colocated(repo) else
            "\n" + _merge_line(repo, spec, close, a)))
     _say(savings.line(row) or spend.line(row.get("claude")))
     _say(checked)
@@ -3797,10 +3925,14 @@ NOT_MERGED = 5  # wb accept --merge's exit status when the accept stands and the
 
 
 def _merge_line(repo: Path, spec: dict, close: dict, a) -> str:
-    """wb accept's line for merging by hand: into the branch --merge chose, else the one the task
+    """The line for merging the task's branch by hand, wb accept's and (``close`` empty) wb
+    discard's for the steps it kept: into the branch --merge chose, else the one the task
     started from, else the checkout's, switching there first. It merged into whatever was out,
     so after "has feature-x out, not main" it landed on feature-x, or on a detached HEAD the next
-    checkout dropped (#1154, 2026-11-24). No branch known on a detached HEAD: no line to run."""
+    checkout dropped (#1154, 2026-11-24; discard's plain `git merge` the same, and in no mode
+    or signing of the repo's, #1174). No branch known on a detached HEAD: no line to run."""
+    if gitops.jj_colocated(repo):  # jj keeps git's HEAD detached: jj merges it (#385)
+        return f"merge with: {gitops.jj_merge(repo, spec['branch'])}"
     into = close.get("merge_into") if close.get("merge") else _merge_into(spec, repo)
     if into in (None, "HEAD"):
         into = gitops.current_branch(repo)
@@ -4308,10 +4440,12 @@ def cmd_discard(a):
         # deleted with the step that stuck, they were reachable from no ref (#494, the audit)
         past = gitops.git(repo, "rev-list", "--count", f"{spec['base']}..{tip}", check=False).strip()
         if past.isdigit() and int(past) and not a.drop_steps:
-            git_c = f"git -C {shlex.quote(str(repo))}"
+            # the merge line accept prints (#1174, 2026-11-24): a plain `git merge` here merged
+            # into whatever the checkout had out since, feature-y and not main, or a detached HEAD
             said = (f"; branch {branch} kept: its {past} commit(s) past the base are approved "
-                    f"steps. {git_c} merge {branch} lands them; {git_c} branch -D {branch} "
-                    "drops them (wb discard --drop-steps deletes it at once)")
+                    f"steps\n{_merge_line(repo, spec, {}, a)}\nto drop them: git -C "
+                    f"{shlex.quote(str(repo))} branch -D {branch} (wb discard --drop-steps "
+                    "deletes it at once)")
         elif gitops.delete_branch(repo, a.name, at=tip):
             said = f"; branch {branch} deleted (was {tip[:8]})"
         else:
@@ -5027,9 +5161,9 @@ def server_lines(provs: dict) -> list[str]:
         if x.get("windows"):  # WSL2's Windows host, beyond this machine (#663)
             lines.append(f"  {x['root']} answers on Windows (usually {x['usually']}): {listed}"
                          + ("" if known else f"; it needs local: true (wb remote {x['windows']} "
-                            f"for an Ollama; else wb model add <provider>/<model> --url "
-                            f"{x['root']}/v1 --context N, then local: true for its provider in "
-                            f"{models.overrides_path()})"))
+                            f"for an Ollama; else local: true for its provider in "
+                            f"{models.overrides_path()}, then wb model add <provider>/<model> --url "
+                            f"{x['root']}/v1 --context N)"))
             continue
         lines.append(f"  {x['root']} answers (usually {x['usually']}): {listed}" + (
             "" if known else f"; OpenCode has no provider for it (wb model add <provider>/<model> "
@@ -6410,9 +6544,9 @@ def first_run() -> list[str]:
     if not answering and on_windows:  # WSL2: answering at the Windows host only (#663)
         out.append(f"--  a model server answers on Windows at {on_windows[0]['root']} (usually "
                    f"{on_windows[0]['usually']}): it needs local: true (wb remote "
-                   f"{on_windows[0]['windows']} for an Ollama; else wb model add <p>/<m> --url "
-                   f"{on_windows[0]['root']}/v1, then local: true for its provider in "
-                   f"{models.overrides_path()})")
+                   f"{on_windows[0]['windows']} for an Ollama; else local: true for its provider "
+                   f"in {models.overrides_path()}, then wb model add <p>/<m> --url "
+                   f"{on_windows[0]['root']}/v1)")
     else:
         out.append("ok  a model server answers" if answering else NO_SERVER_OPTIONAL if stored else
                    "--  no model server answers here: start yours, or run /workbench and Claude "
@@ -7776,7 +7910,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--to", action="append", metavar="ID", help="reply: the message it answers (again "
                    "for more; `user`: the user's thread; default: those this turn took, the user's alone if any)")
     s.add_argument("--by", help=argparse.SUPPRESS); s.add_argument("-n", type=int, default=10)
-    s.add_argument("--how", choices=["now", "queued"], default="now", help=argparse.SUPPRESS)
+    # into: an agent's message delivered into a running turn it didn't open (#1175, 2026-11-24)
+    s.add_argument("--how", choices=["now", "into", "queued"], default="now", help=argparse.SUPPRESS)
     s.set_defaults(f=cmd_chat)
     s = sub.add_parser("optimize", help="measure this machine for its models when the user asks: "
                        "the largest window each Ollama model keeps all on the GPU (detached; real "

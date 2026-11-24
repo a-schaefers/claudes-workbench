@@ -32,6 +32,9 @@
          seconds (2: the runner sees the last read before the edit; a runner slower than that
          finds the file changed and lifts the guard) and writes "42" like ok: a one-shot still
          exploring
+  selfreads  behaves like ok; a run continuing a session (the self-review) breaks answer.txt
+         ("41") and writes it back, then FAKE_READS (45) reads and goes on exploring for an hour:
+         the tree as it began (#1168). FAKE_SELF_KEEP: it leaves "43" instead
   bgwait a command OpenCode moved to the background: `background_wait`, quiet for FAKE_BGWAIT
          seconds (6), then writes "42" like ok
   devserver  writes "42", starts `npm run dev` in the background, ends its turn (reason stop),
@@ -584,6 +587,8 @@ if scenario == "http" and args and args[0] == "run":  # a model request through 
     scenario = "ok"
 if scenario == "slow":
     scenario = "ok" if "--session" in args else "hang"
+if scenario == "selfreads" and "--session" not in args:  # #1168: round 1 is ok's
+    scenario = "ok"
 if (scenario in ("fill", "compact", "donefull") or scenario == "compactfail" and not os.environ.get("FAKE_REFAIL")) \
         and "picking this task up in a fresh session" in args[-1]:
     scenario = "ok"
@@ -772,6 +777,15 @@ elif scenario == "explore":  # #1087: many small reads before the first edit
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
     emit("text", text="Wrote answer.txt = 42.")
     finish()
+elif scenario == "selfreads":  # #1168: a self-review that breaks a check, copies it back, reads
+    for text in ("41", os.environ.get("FAKE_SELF_KEEP") and "43" or "42"):
+        with open("answer.txt", "w") as fh:
+            fh.write(text + "\n")
+        tool("write", {"filePath": os.path.abspath("answer.txt"), "content": text})
+    for i in range(int(os.environ.get("FAKE_READS", 45))):
+        tool("read", {"filePath": os.path.abspath(f"src/f{i}.py")})
+        emit("step_finish", reason="tool-calls", tokens={"input": 1000 + 100 * i, "output": 50})
+    time.sleep(3600)
 elif scenario == "probing":  # #857: probe in a compound line, a long file read whole and in part
     with open("long.py", "w") as fh:
         fh.write("x = 1\n" * 400)

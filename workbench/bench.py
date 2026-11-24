@@ -804,9 +804,10 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
                    **paid(task))
         if st.get("last") == PREEMPTED:
             return {**row, "outcome": "preempted"}
-        # the setup, the server, the runner, the disk; or an API provider's or the spend cap's
-        # stop, `stuck` (#1020, #1019)
-        if st.get("infra") and (phase == "failed" or st["infra"] in ("provider", "spend")):
+        # the setup, the server, the runner, the disk; or an API provider's, the spend cap's, an
+        # update's or OpenCode's change's stop, `stuck` (#1020, #1019, #1176)
+        if st.get("infra") and (phase == "failed" or st["infra"] in ("provider", "spend", "updated",
+                                                                        "opencode")):
             # the machine's doing, not the model's: an error, run again next time (#508)
             return {**row, "outcome": "error", "why": f"{st['infra']}: {st.get('last') or ''}"[:200]}
         if phase != "review":

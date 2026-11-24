@@ -351,6 +351,175 @@ class Lifecycle(Base):
         st = store.Task("t-rfirst").status
         self.assertEqual((st["phase"], st["round"], st["round_for"]), ("queued", 1, "resume"))
 
+    def test_feedback_after_a_stop_before_the_round_began_still_sends_that_rounds_prompt(self):
+        # #1180 (the 2.0 bar loop, round 2, 2026-11-24): wb next's step, or a review's feedback,
+        # failed before it reached the agent (the GPU server down); the notice named no next step,
+        # and wb feedback "carry on" wrote round 3 from its text alone: the agent was never told
+        # the step, and a round and a review went on "files changed: (none)"
+        prompts = Path(self.tmp.name) / "prompts.jsonl"
+        os.environ["FAKE_PROMPTS"] = str(prompts)
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Step two: write 43 to second.txt.\n")
+        for name, then, want, step_round, for_ in (
+                ("t-unext", ("next", "--spec", str(step2), "-m", "feat: step one"),
+                 "Step two: write 43 to second.txt.", 2, "next"),
+                ("t-ufb", ("feedback", "--text", "1. Rename x to answer."),
+                 "1. Rename x to answer.", 1, "feedback")):
+            with self.subTest(name=name):
+                self.start(name, "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
+                wait_phase(name, {"review"})
+                task = store.Task(name)
+                with mock.patch.object(cli, "spawn_runner"):
+                    run_wb(then[0], name, *then[1:])
+                with mock.patch.object(runner, "_down", return_value=True), \
+                        mock.patch.object(runner, "_wait_up", side_effect=RuntimeError("the server is down")):
+                    runner.drive(task)
+                st = task.status
+                self.assertEqual((st["phase"], st["infra"], st["round"]), ("failed", "model", 2))
+                note = [r for r in store.notices() if r["task"] == name][-1]
+                self.assertIn(f'round 2 never reached the agent: once the model can run, wb feedback '
+                              f'{name} --text "carry on" sends its prompt', note["text"])
+                reviews = st.get("reviews", 0)
+                with mock.patch.object(cli, "spawn_runner"):
+                    out = run_wb("feedback", name, "--text", "carry on")
+                self.assertIn("after round 2's own prompt, which never reached the agent (model), "
+                              "so no review round is counted", out)
+                st = task.status
+                self.assertEqual((st["round"], st["reviews"], st.get("step_round") or 1, st["round_for"]),
+                                 (2, reviews, step_round, for_))
+                runner.drive(task)
+                self.assertEqual(task.status["phase"], "review", task.status.get("last"))
+                sent = json.loads(prompts.read_text().splitlines()[-1])
+                self.assertIn(want, sent)                          # the round's own, then the new text
+                self.assertIn("carry on", sent)
+                self.assertGreater(sent.index("carry on"), sent.index(want))
+                self.assertEqual(task.status["round"], 2)
+
+    def test_feedback_added_to_a_round_never_sent_is_gathered_as_lessons_apart_from_the_rounds_own(self):
+        # #1180 (its review, 2026-11-24): wb feedback's text after an unsent feedback round's own
+        # prompt was read as part of its body, and "Also write 7 to extra.txt Review feedback from
+        # the senior reviewer. Make exactly these changes, …: carry on" became a lesson of its own
+        from workbench import lessons
+        for name, then, want in (
+                ("t-lcarry", "carry on", ["Also write 7 to extra.txt"]),
+                ("t-lreal", "Keep the number on a line of its own.",
+                 ["Also write 7 to extra.txt", "Keep the number on a line of its own."])):
+            with self.subTest(name=name):
+                self.start(name, "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
+                wait_phase(name, {"review"})
+                task = store.Task(name)
+                with mock.patch.object(cli, "spawn_runner"):
+                    run_wb("feedback", name, "--text", "Also write 7 to extra.txt")
+                with mock.patch.object(runner, "_down", return_value=True), \
+                        mock.patch.object(runner, "_wait_up", side_effect=RuntimeError("the server is down")):
+                    runner.drive(task)
+                with mock.patch.object(cli, "spawn_runner"):
+                    run_wb("feedback", name, "--text", then)
+                runner.add_to_round(task, 2, runner.steer_prompt([{"text": "Mind the tabs."}], False))
+                self.assertEqual(task.status["round"], 2)
+                self.assertEqual([x["text"] for x in lessons.gather(task) if x["kind"] == "feedback"], want)
+
+    def test_feedback_on_a_feedback_round_never_sent_keeps_it_a_review_so_a_handover_carries_no_older_feedback(self):
+        # the merge of #1180 and #1169 (2026-11-24): a round run again keeps its own `resumed`
+        # mark; marked for the stop's `infra`, round_asks walked past its feedback, and a later
+        # handover carried the round before's, reviewed and done
+        name = "t-rmark"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", name, "--text", "1. Round two's change.")
+        runner.drive(task)
+        self.assertEqual((task.status["phase"], task.status["round"]), ("review", 2))
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", name, "--text", "1. Round three's change.")
+        with mock.patch.object(runner, "_down", return_value=True), \
+                mock.patch.object(runner, "_wait_up", side_effect=RuntimeError("the server is down")):
+            runner.drive(task)
+        self.assertEqual((task.status["phase"], task.status["infra"], task.status["round"]), ("failed", "model", 3))
+        self.assertFalse(runner.reached(task, 3))
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", name, "--text", "carry on")
+        self.assertEqual(task.status["round"], 3)
+        self.assertFalse((task.round_dir(3) / runner.RESUMED).exists())
+        asks = "\n".join(runner.round_asks(task, 3))
+        self.assertIn("Round three's change.", asks)
+        self.assertIn("carry on", asks)
+        self.assertNotIn("Round two's change.", asks)
+
+    def test_feedback_on_a_round_stopped_before_it_began_with_no_infra_counts_no_review(self):
+        # the merge of #1180 and #1153 (2026-11-24): a round can stop before it starts with
+        # `infra` unset (a signal while queued for the GPU, a failed checkout, the repo gone),
+        # and its "carry on" must count no review the agent never had
+        name = "t-rsig"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", name, "--text", "1. Rename x to answer.")
+        task.set_status(phase="stuck", last=runner.SIGNAL_STOP)  # stopped while queued
+        self.assertIsNone(task.status.get("infra"))
+        self.assertFalse(runner.reached(task, 2))
+        reviews = task.status["reviews"]
+        with mock.patch.object(cli, "spawn_runner"):
+            out = run_wb("feedback", name, "--text", "carry on")
+        self.assertIn("feedback sent to t-rsig (round 2): after round 2's own prompt, which never "
+                      "reached the agent, so no review round is counted", out)
+        self.assertEqual((task.status["round"], task.status["reviews"]), (2, reviews))
+
+    def test_feedback_is_gathered_once_unchanged_after_a_handover_or_a_resume_that_carries_it(self):
+        # #1180's review (2026-11-24): lessons.feedback read any FEEDBACK_HEAD paragraph, and a
+        # handover's carry-on or a resume copies the earlier feedback whole into "What you were
+        # asked to do": each item was recorded again under the new round, the last one with the
+        # agent's last words before the switch joined on
+        from workbench import lessons
+        fb = "1. Rename x to answer.\n2. Keep the number on its own line."
+        want = [(2, "Rename x to answer."), (2, "Keep the number on its own line.")]
+        for name, how in (("t-lhand", "handover"), ("t-lres", "resume")):
+            with self.subTest(how=how):
+                self.start(name, "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
+                wait_phase(name, {"review"})
+                task = store.Task(name)
+                os.environ["FAKE_SCENARIO"] = "fill" if how == "handover" else "ok"
+                run_wb("feedback", name, "--text", fb)
+                wait_phase(name, {"review"})
+                if how == "resume":
+                    task.set_status(phase="stuck")
+                    with mock.patch.object(cli, "spawn_runner"):
+                        run_wb("resume", name)
+                carried = store.round_prompt(task, 3).read_text()
+                self.assertTrue(carried.startswith((runner.CARRY_ON, runner.RESUME)[how == "resume"][:60]), carried)
+                self.assertIn("Rename x to answer.", carried)       # the feedback, copied whole
+                self.assertEqual([(x["round"], x["text"]) for x in lessons.gather(task)
+                                  if x["kind"] == "feedback"], want)
+        self.assertEqual(lessons.feedback(runner.CARRY_ON.format(
+            asked=runner.ASKED.format(lessons.FEEDBACK_HEAD + " Make exactly these changes:\n\n" + fb),
+            last="> x")), [])
+
+    def test_feedback_added_to_a_resume_round_never_sent_is_gathered_once(self):
+        # #1180's review (2026-11-24): round_feedback reads a round whose prompt isn't a feedback
+        # (a resume's, a handover's) only for what wb feedback added to it (notes.md); no test
+        # read that branch, and without it this review item was never gathered at all
+        from workbench import lessons
+        name = "t-lresunsent"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        task.set_status(phase="stuck")
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("resume", name)
+        self.assertTrue(store.round_prompt(task, 2).read_text().startswith(runner.RESUME[:60]))
+        with mock.patch.object(runner, "_down", return_value=True), \
+                mock.patch.object(runner, "_wait_up", side_effect=RuntimeError("the server is down")):
+            runner.drive(task)
+        self.assertEqual((task.status["phase"], task.status["infra"], task.status["round"]), ("failed", "model", 2))
+        self.assertFalse(runner.reached(task, 2))
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", name, "--text", "1. Use tabs for the indent.")
+        self.assertEqual(task.status["round"], 2)
+        self.assertEqual([(x["round"], x["text"]) for x in lessons.gather(task) if x["kind"] == "feedback"],
+                         [(2, "Use tabs for the indent.")])
+
     def test_a_round_start_records_the_typical_length_and_how_many_tasks_back_it(self):
         # #1048: the pane sets a task's active work against its typical length (`~6m left`) with
         # no read of results.jsonl of its own, and only when enough timed tasks back it
@@ -505,6 +674,180 @@ class Lifecycle(Base):
         self.assertEqual((st["base_check"]["exit"], st["round"]), (127, 2))
         self.assertFalse([r for r in store.notices() if r["task"] == "t-nf2" and r["kind"] == "checkin"])
 
+    def test_a_command_not_found_that_a_later_steps_test_names_skips_auto_fix(self):
+        # #1172 (bar round 2 of 2.0): wb next --test runs no base check, so a tool its command
+        # names and the agent's PATH lacks (exit 127) got both auto-fix rounds, each told "the
+        # system works; the bug is in this change"
+        self.start("t-nfn", "ok", "--test", TEST_CMD, "--auto-fix", "2", "--no-self-review")
+        wait_phase("t-nfn", {"review"})
+        task = store.Task("t-nfn")
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Now check the answer.\n")
+        run_wb("next", "t-nfn", "--spec", str(step2), "-m", "feat: the answer",
+               "--test", "nosuch-tool-1172 --check answer.txt")
+        st = wait_phase("t-nfn", {"review"})
+        self.assertEqual((st["steps"], st["round"], st.get("auto_fixes", 0)), (2, 2, 0))
+        self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        summary = (task.round_dir(2) / "summary.md").read_text()
+        self.assertTrue(summary.startswith("auto-fix skipped: the acceptance command can't run in "
+                                           "the agent's environment: "), summary)
+        self.assertIn("nosuch-tool-1172: command not found (exit 127, a tool the command itself "
+                      "names); no round can fix that", summary)
+        self.assertEqual(st["last"], "the acceptance command can't run in the agent's environment: "
+                                     "Claude reviews next")
+        # a tool a script names, which the step may write or change, still goes back to the agent
+        (task.worktree / "check.sh").write_text("nosuch-inner-1172 answer.txt\n")
+        run_wb("next", "t-nfn", "--spec", str(step2), "-m", "test: the check",
+               "--test", "sh check.sh")
+        st = wait_phase("t-nfn", {"review"})
+        self.assertEqual((st["steps"], st["round"], st["auto_fixes"]), (3, 5, 2))
+        self.assertIn("nosuch-inner-1172: ", st["tests"]["tail"])  # bash's or dash's line
+
+    def test_a_python_module_not_found_on_the_base_checks_in_at_once_and_skips_auto_fix(self):
+        # #1181 (bar round 2 of 2.0): `python3 -m pytest` without pytest printed `No module named
+        # pytest` (exit 1, not #1152's 127), and round 1 and both auto-fix rounds ran on correct code
+        self.start("t-nm", "ok", "--test", "python3 -m nosuch_module_1181 -q", "--auto-fix", "2",
+                   "--no-self-review")
+        st = wait_phase("t-nm", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (1, 1))
+        task = store.Task("t-nm")
+        self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        checkins = [r["text"] for r in store.notices() if r["task"] == "t-nm" and r["kind"] == "checkin"]
+        self.assertEqual(len(checkins), 1)
+        self.assertRegex(checkins[0], r"can't run in the agent's environment: \S*python3: No module "
+                                      r"named nosuch_module_1181 \(exit 1 on the base\)")
+        self.assertIn("a Python module: python3 -m venv .venv && .venv/bin/pip install <module>",
+                      checkins[0])
+        summary = (task.round_dir(1) / "summary.md").read_text()
+        self.assertTrue(summary.startswith("auto-fix skipped: the acceptance command can't run in "
+                                           "the agent's environment: "), summary)
+        self.assertIn("No module named nosuch_module_1181 (exit 1, as on the base)", summary)
+        # an import error inside the tests (a module the step's code lacks) still goes back
+        self.assertIsNone(runner.missing_command(
+            {"exit": 1, "tail": "E   ModuleNotFoundError: No module named 'slug'"}))
+        self.assertIsNone(runner.missing_command({"exit": 2, "tail": "python3: No module named x"}))
+
+    def test_a_module_of_the_repos_own_code_missing_on_the_base_goes_back_to_the_agent(self):
+        # #1181's review (2026-11-24): a module the step itself makes (`python3 -m pkg.newcli`
+        # for a step adding pkg/newcli.py) is missing on the base too, and was taken for a tool
+        # the agent's environment lacks: a false check-in before round 1 advising pip install,
+        # and its auto-fix round skipped. #1152 left a script the step makes out the same way
+        # (`No such file or directory`, the t-nf2 case above).
+        (self.repo / "pkg").mkdir()
+        (self.repo / "pkg" / "__init__.py").write_text("")
+        for a in (("add", "."), ("commit", "-qm", "pkg")):
+            subprocess.run(["git", "-C", str(self.repo), *a], check=True, capture_output=True)
+        self.spec.write_text("Add pkg/newcli.py, runnable as python3 -m pkg.newcli.\n")
+        self.start("t-own", "ok", "--test", "python3 -m pkg.newcli", "--auto-fix", "1",
+                   "--no-self-review")
+        st = wait_phase("t-own", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (1, 2))
+        self.assertIn("No module named pkg.newcli", st["base_check"]["tail"])
+        self.assertFalse([r for r in store.notices() if r["task"] == "t-own" and r["kind"] == "checkin"])
+        task = store.Task("t-own")
+        self.assertIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        self.assertNotIn("auto-fix skipped", (task.round_dir(1) / "summary.md").read_text())
+        # a module that is nowhere in the repo yet, but the spec names it: its file, or its
+        # dotted name; a top-level one the spec names alone (`pytest`) is still a missing tool
+        line = lambda m: {"exit": 1, "tail": f"/usr/bin/python3: No module named {m}"}  # noqa
+        prompt = store.round_prompt(task, 1)
+        # as wb start writes it: the spec, then the protocol, whose acceptance line names --test's
+        # own module, which counts for nothing (#1181's second review)
+        proto = cli.PROTOCOL.format(branch="delegate/t-own", budget=0, experiment_protocol="",
+                                    test_line=cli.test_line("python3 -m elsewhere.cli tests"))
+        self.assertIn("python3 -m elsewhere.cli", proto)
+        prompt.write_text("Add tool1181/__main__.py, and newpkg/cli.py as python3 -m newpkg.cli. "
+                          "Test it with pytest.\n" + proto)
+        self.assertIsNone(runner.missing_command(line("tool1181"), task))
+        self.assertIsNone(runner.missing_command(line("newpkg.cli"), task))
+        prompt.write_text("Wire python3 -m otherpkg.main up. Test it with pytest.\n" + proto)
+        self.assertIsNone(runner.missing_command(line("otherpkg.main"), task))
+        self.assertEqual(runner.missing_command(line("pytest"), task),
+                         "/usr/bin/python3: No module named pytest")
+        self.assertEqual(runner.missing_command(line("elsewhere.cli"), task),
+                         "/usr/bin/python3: No module named elsewhere.cli")
+
+    def test_a_dotted_module_the_agents_environment_lacks_checks_in_though_the_acceptance_line_names_it(self):
+        # #1181's second review (2026-11-24): own_module read the whole round 1 prompt, whose
+        # protocol says `The acceptance command is <test>`, so every dotted -m of --test was the
+        # repo's own: `Error while finding module specification for 'x.y'` never checked in, and
+        # round 1 and both auto-fix rounds ran on correct code, the issue's symptom
+        self.start("t-dot", "ok", "--test", "python3 -m nosuchtool1181.runner tests", "--auto-fix", "2",
+                   "--no-self-review")
+        st = wait_phase("t-dot", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (1, 1))
+        self.assertIn("Error while finding module specification for 'nosuchtool1181.runner'",
+                      st["base_check"]["tail"])
+        task = store.Task("t-dot")
+        self.assertIn("python3 -m nosuchtool1181.runner", store.round_prompt(task, 1).read_text())
+        self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        checkins = [r["text"] for r in store.notices() if r["task"] == "t-dot" and r["kind"] == "checkin"]
+        self.assertEqual(len(checkins), 1)
+        self.assertIn("can't run in the agent's environment", checkins[0])
+        self.assertTrue((task.round_dir(1) / "summary.md").read_text().startswith("auto-fix skipped: "))
+
+    def test_a_module_of_a_package_committed_at_the_base_is_the_repos_own_though_the_spec_names_neither(self):
+        # #1181's second review (2026-11-24): the worktree's and the base commit's package made a
+        # module the repo's own untested, for the spec named the module's file as well; here the
+        # spec names neither the file nor the dotted name, and the acceptance line counts for nothing
+        (self.repo / "pkg").mkdir()
+        (self.repo / "pkg" / "__init__.py").write_text("")
+        for a in (("add", "."), ("commit", "-qm", "pkg")):
+            subprocess.run(["git", "-C", str(self.repo), *a], check=True, capture_output=True)
+        self.spec.write_text("Give the package a command-line entry point that prints 42.\n")
+        self.start("t-pkg", "ok", "--test", "python3 -m pkg.newcli", "--auto-fix", "1",
+                   "--no-self-review")
+        st = wait_phase("t-pkg", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (1, 2))
+        self.assertFalse([r for r in store.notices() if r["task"] == "t-pkg" and r["kind"] == "checkin"])
+        task = store.Task("t-pkg")
+        self.assertIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        line = {"exit": 1, "tail": "/usr/bin/python3: No module named pkg.newcli"}
+        self.assertIsNone(runner.missing_command(line, task))
+        shutil.rmtree(task.worktree / "pkg")                 # gone from the worktree: the base's
+        self.assertIsNone(runner.missing_command(line, task))
+
+    def test_a_python_module_a_setup_venv_lacks_checks_in_once_and_skips_auto_fix(self):
+        # #1181's review (2026-11-24): with a --setup .venv (which GIVE_TOOL itself recommends) the
+        # base check ran its scratch checkout's .venv/bin/python3 and the rounds the worktree's, so
+        # the no-module lines never matched: one check-in, yet round 1 and both auto-fix rounds
+        # ran on correct code, the issue's symptom again
+        self.start("t-venv", "ok", "--setup", "python3 -m venv --without-pip .venv",
+                   "--test", "python3 -m nosuch_module_1181v -q", "--auto-fix", "2", "--no-self-review")
+        st = wait_phase("t-venv", {"review"}, timeout=120)
+        task = store.Task("t-venv")
+        # the interpreter the base check names is the scratch .venv's here, the hosted Python's on
+        # CI (its venv reports the base executable): either way never the worktree's (#1184's CI)
+        self.assertRegex(st["base_check"]["tail"], r"python3?: No module named nosuch_module_1181v")
+        self.assertEqual(runner._missing_key("/var/tmp/x/.venv/bin/python3: No module named nosuch_module_1181v"),
+                         runner._missing_key("/usr/bin/python3: No module named nosuch_module_1181v"))
+        self.assertNotIn(str(task.worktree), st["base_check"]["tail"])  # the scratch checkout's
+        self.assertEqual(st["round"], 1)
+        self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        checkins = [r for r in store.notices() if r["task"] == "t-venv" and r["kind"] == "checkin"]
+        self.assertEqual(len(checkins), 1)
+        summary = (task.round_dir(1) / "summary.md").read_text()
+        self.assertTrue(summary.startswith("auto-fix skipped: the acceptance command can't run in "
+                                           "the agent's environment: "), summary)
+
+    def test_a_package_only_the_worktree_holds_is_the_repos_own_though_the_spec_names_neither(self):
+        # #1181's review (2026-11-24): own_module's worktree check had no test; the base commit's
+        # covered every case tried. A package a --setup generates (gitignored `gen/`) is in the
+        # worktree alone, and without it `python3 -m gen.newsvc` checked in falsely, "no round
+        # can fix that", with pip install advice, and its auto-fix was skipped
+        (self.repo / ".gitignore").write_text("gen/\n")
+        for a in (("add", "."), ("commit", "-qm", "ignore gen")):
+            subprocess.run(["git", "-C", str(self.repo), *a], check=True, capture_output=True)
+        self.spec.write_text("Give the service a command-line entry point that prints 42.\n")
+        self.start("t-gen", "ok", "--no-base-check", "--no-self-review")
+        wait_phase("t-gen", {"review"})
+        task = store.Task("t-gen")
+        line = {"exit": 1, "tail": "/usr/bin/python3: No module named gen.newsvc"}
+        self.assertEqual(runner.missing_command(line, task), line["tail"])   # nowhere yet: a tool
+        (task.worktree / "gen").mkdir()
+        (task.worktree / "gen" / "__init__.py").write_text("")
+        self.assertIsNone(runner.missing_command(line, task))
+
     def test_a_command_not_found_reads_the_same_in_every_shell_and_a_path_is_never_a_missing_tool(self):
         # nightly run 45362198509 (2026-11-24): under WSL's Debian $SHELL is /bin/sh, dash, which
         # says `/bin/sh: 1: x: not found`, so the check-in read differently from bash's; and dash
@@ -556,6 +899,33 @@ class Lifecycle(Base):
         self.assertEqual(runner.test_shell(), shutil.which("bash") or "/bin/sh")
         del os.environ["SHELL"]
         self.assertEqual(runner.test_shell(), shutil.which("bash") or "/bin/sh")
+
+    def test_under_zsh_the_setup_base_check_and_tests_run_with_opencodes_nomatch_off(self):
+        # #1170 (2026-11-24): OpenCode 2.3.2 runs a zsh command as `zsh +o nomatch -c`, the
+        # runner as `zsh -c`, so an unmatched glob (`pip install -e .[dev]`, a pytest id
+        # `test_x[1]`) failed the setup before round 1, or the tests as a false FAIL, while the
+        # agent's own run passed. The stand-in fails any `[` as zsh's NOMATCH does, unless +o
+        zsh = Path(self.tmp.name) / "shells" / "zsh"
+        zsh.parent.mkdir()
+        zsh.write_text('#!/bin/sh\necho "ZSH-ARGS: $1 $2"\n'
+                       'if [ "$1" = "+o" ] && [ "$2" = "nomatch" ]; then shift 2; exec /bin/sh "$@"; fi\n'
+                       'case "$2" in *"["*) echo "zsh: no matches found: [" >&2; exit 1;; esac\n'
+                       'exec /bin/sh "$@"\n')
+        zsh.chmod(0o755)
+        os.environ["SHELL"] = str(zsh)
+        self.assertEqual(runner.shell_args(str(zsh)), ["+o", "nomatch", "-c"])
+        self.assertEqual(runner.shell_args("/bin/bash"), ["-c"])
+        self.start("t-zsh", "ok", "--setup", "echo .[dev]",
+                   "--test", f"{TEST_CMD} && echo tests/test_a.py::test_x[1]", "--auto-fix", "0",
+                   "--no-self-review")
+        st = wait_phase("t-zsh", {"review", "failed"})
+        t = store.Task("t-zsh")
+        self.assertEqual(st["phase"], "review", (t.dir / "setup.txt").read_text())
+        self.assertIn("ZSH-ARGS: +o nomatch", (t.dir / "setup.txt").read_text())
+        self.assertIs(st["base_check"]["ok"], False)              # fails on the base for its grep
+        self.assertNotIn("no matches found", (t.dir / "base-tests.txt").read_text())
+        self.assertIs(st["tests"]["ok"], True)
+        self.assertIn("ZSH-ARGS: +o nomatch", (t.round_dir(1) / "tests.txt").read_text())
 
     def test_unknown_events_never_hold_a_round_past_its_limit(self):
         # #195 (the 2026-11-19 audit): a line that wasn't a known event `continue`d past the
@@ -2033,7 +2403,7 @@ class Lifecycle(Base):
             with self.assertRaises(SystemExit), redirect_stderr(err), \
                     mock.patch("sys.stdin", io.StringIO("Step two.")):
                 run_wb(*cmd)
-            self.assertIn("not committed: git ignores files the agent wrote (lib/util.py)", err.getvalue())
+            self.assertIn("not committed: git ignores files written in the worktree (lib/util.py)", err.getvalue())
             self.assertEqual(self.branch("delegate/t-ign"), t.spec["base"])   # nothing committed
         self.assertIn("accepted t-ign", run_wb("accept", "t-ign", "-m", "feat: one", "--include"))
         tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "--name-only", "delegate/t-ign"],
@@ -2059,9 +2429,274 @@ class Lifecycle(Base):
         err = io.StringIO()
         with self.assertRaises(SystemExit), redirect_stderr(err):
             run_wb("accept", "t-patch", "-m", "feat: one")
-        self.assertIn("not committed: git ignores files the agent wrote (lib/helper.py)", err.getvalue())
+        self.assertIn("not committed: git ignores files written in the worktree (lib/helper.py)", err.getvalue())
         self.assertEqual(self.branch("delegate/t-patch"), t.spec["base"])     # nothing committed
         self.assertTrue((t.worktree / "lib" / "helper.py").is_file())         # and the work kept
+
+    def ignore_lib(self):
+        (self.repo / ".gitignore").write_text("lib/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore lib"], check=True)
+
+    def test_a_file_claude_writes_under_an_ignored_path_after_a_takeover_is_never_dropped_at_accept(self):
+        # #1179 (the 2.0 bar loop, 2026-11-24): after wb takeover Claude wrote lib/helper.py, under
+        # Python.gitignore's lib/, and a main.py importing it; only the agent's events were read,
+        # so accept --merge landed main.py alone and deleted the module with the worktree
+        self.ignore_lib()
+        self.start("t-hand", "ok", "--test", TEST_CMD)
+        wait_phase("t-hand", {"review"})
+        t = store.Task("t-hand")
+        run_wb("takeover", "t-hand")
+        (t.worktree / "lib").mkdir()
+        (t.worktree / "lib" / "helper.py").write_text("def answer():\n    return 42\n")
+        (t.worktree / "main.py").write_text("from lib.helper import answer\nprint(answer())\n")
+        # what Claude's test run leaves there is no one's work: bytecode, pytest's cache, a log
+        (t.worktree / "lib" / "__pycache__").mkdir()
+        (t.worktree / "lib" / "__pycache__" / "helper.cpython-311.pyc").write_bytes(b"\xa7\r\r\n\0\0")
+        (t.worktree / ".pytest_cache").mkdir()
+        (t.worktree / ".pytest_cache" / ".gitignore").write_text("# Created by pytest automatically.\n*\n")
+        (t.worktree / ".pytest_cache" / "README.md").write_text("# pytest cache directory #\n")
+        (t.worktree / "lib" / "run.log").write_text("ran\n")
+        self.assertEqual(runner.hand_wrote(t), ["lib/helper.py"])
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-hand", "-m", "feat: one", "--merge")
+        self.assertIn("not committed: git ignores files written in the worktree (lib/helper.py)",
+                      err.getvalue())
+        self.assertEqual(self.branch("delegate/t-hand"), t.spec["base"])     # nothing committed
+        self.assertTrue((t.worktree / "lib" / "helper.py").is_file())        # and the work kept
+        self.assertIn("accepted t-hand", run_wb("accept", "t-hand", "-m", "feat: one", "--merge", "--include"))
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "--name-only", "main"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertIn("lib/helper.py", tree)
+        self.assertIn("main.py", tree)
+        self.assertNotIn("lib/__pycache__/helper.cpython-311.pyc", tree)
+        self.assertNotIn("lib/run.log", tree)
+
+    def test_the_bytecode_of_claudes_test_run_in_a_big_package_does_not_hide_its_ignored_file(self):
+        # #1179 (review of the fix, 2026-11-24): BUILD_FILES counted every changed ignored file
+        # before the other filters, so with a tracked app/ of 60 modules the .pyc of Claude's
+        # first run after a takeover (agents write none) cut app/lib/helper.py, and
+        # accept --merge landed without it and no word
+        (self.repo / ".gitignore").write_text("lib/\n__pycache__/\n")
+        (self.repo / "app").mkdir()
+        for i in range(60):
+            (self.repo / "app" / f"m{i}.py").write_text(f"N = {i}\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "app"], check=True)
+        self.start("t-big", "ok", "--test", TEST_CMD)
+        wait_phase("t-big", {"review"})
+        t = store.Task("t-big")
+        run_wb("takeover", "t-big")
+        (t.worktree / "app" / "lib").mkdir()
+        (t.worktree / "app" / "lib" / "helper.py").write_text("def answer():\n    return 42\n")
+        (t.worktree / "main.py").write_text("from app.lib.helper import answer\nprint(answer())\n")
+        for d, names in (("app", [f"m{i}" for i in range(60)]), ("app/lib", ["helper"])):
+            (t.worktree / d / "__pycache__").mkdir()
+            for n in names:
+                (t.worktree / d / "__pycache__" / f"{n}.cpython-311.pyc").write_bytes(b"\xa7\r\r\n\0\0")
+        self.assertEqual(runner.hand_wrote(t), ["app/lib/helper.py"])
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-big", "-m", "feat: one", "--merge")
+        self.assertIn("not committed: git ignores files written in the worktree (app/lib/helper.py)",
+                      err.getvalue())
+        self.assertTrue((t.worktree / "app" / "lib" / "helper.py").is_file())
+
+    def test_a_data_file_beside_claudes_module_under_an_ignored_path_is_named_and_kept_at_accept(self):
+        # #1179's review (2026-11-24): hand_written's kind filter took lib/answers.csv, which
+        # Claude's lib/helper.py reads, for a test run's (the repo tracks no .csv): accept --merge
+        # --include landed the module without it, main failed with FileNotFoundError, and the
+        # worktree went with the file, no word said
+        self.ignore_lib()
+        self.start("t-csv", "ok", "--test", TEST_CMD)
+        wait_phase("t-csv", {"review"})
+        t = store.Task("t-csv")
+        run_wb("takeover", "t-csv")
+        (t.worktree / "lib").mkdir()
+        (t.worktree / "lib" / "helper.py").write_text(
+            "from pathlib import Path\ndef answer():\n    return (Path(__file__).parent / 'answers.csv').read_text()\n")
+        (t.worktree / "lib" / "answers.csv").write_text("42\n")
+        (t.worktree / "main.py").write_text("from lib.helper import answer\nprint(answer())\n")
+        self.assertEqual(runner.hand_wrote(t), ["lib/helper.py"])
+        self.assertEqual(runner.hand_left(t), ["lib/answers.csv"])
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-csv", "-m", "feat: one", "--merge")
+        self.assertIn("not committed: git ignores files written in the worktree (lib/helper.py)", err.getvalue())
+        self.assertIn("note: git ignores 1 more file changed since the agent stopped, which the commit "
+                      "leaves out as build or test output (lib/answers.csv): git -C ", err.getvalue())
+        out = run_wb("accept", "t-csv", "-m", "feat: one", "--merge", "--include")
+        self.assertIn("accepted t-csv", out)
+        self.assertIn(f"(lib/answers.csv): a copy is in {t.dir / 'left-out'}", out)
+        self.assertFalse(t.worktree.exists())
+        self.assertEqual((t.dir / "left-out" / "lib" / "answers.csv").read_text(), "42\n")
+
+    def test_a_test_runs_bytecode_and_an_installs_files_are_not_named_at_accept(self):
+        # #1179's review (2026-11-24): hand_left had no filter: after Claude imported the repo's
+        # module at review (bytecode on), every accept named __pycache__/mod.cpython-311.pyc and
+        # copied it, and an npm install put all its paths in status.json (20,000: 1.6 KB to
+        # 808 KB, rewritten at every set_status and read by the mod)
+        (self.repo / ".gitignore").write_text("__pycache__/\nnode_modules/\n")
+        (self.repo / "mod.py").write_text("N = 42\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "mod"], check=True)
+        self.start("t-pyc", "ok", "--test", TEST_CMD)
+        wait_phase("t-pyc", {"review"})
+        t = store.Task("t-pyc")
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONDONTWRITEBYTECODE"}
+        subprocess.run([sys.executable, "-c", "import mod"], cwd=t.worktree, env=env, check=True)
+        self.assertTrue(list((t.worktree / "__pycache__").glob("mod.*.pyc")))
+        for i in range(gitops.BUILD_FILES * 2):
+            lib = t.worktree / "node_modules" / f"pkg{i}" / "lib"
+            lib.mkdir(parents=True)
+            (lib / "index.js").write_text(f"module.exports = {i};\n")
+        self.assertEqual(runner.hand_left(t), [])
+        before = len((t.dir / "status.json").read_bytes())
+        runner._hands_on(t)
+        self.assertEqual(t.status.get("hand_left"), [])
+        self.assertLess(len((t.dir / "status.json").read_bytes()), before + 200)
+        out = run_wb("accept", "t-pyc", "-m", "feat: one", "--merge")
+        self.assertIn("accepted t-pyc", out)
+        self.assertNotIn("note: git ignores", out)
+        self.assertFalse((t.dir / "left-out").exists())
+
+    def test_wb_next_names_an_ignored_file_its_step_commit_leaves_out(self):
+        # #1179's review (2026-11-24): wb next's commit dropped what hand_written's filters took
+        # for a test run's without a word; it stays in the worktree, and the note says so
+        self.ignore_lib()
+        self.start("t-nx-csv", "ok", "--test", TEST_CMD)
+        wait_phase("t-nx-csv", {"review"})
+        t = store.Task("t-nx-csv")
+        (t.worktree / "lib").mkdir()
+        (t.worktree / "lib" / "answers.csv").write_text("42\n")
+        nxt = Path(self.tmp.name) / "step2.md"
+        nxt.write_text("Step two: read the answers.\n")
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            out = run_wb("next", "t-nx-csv", "--spec", str(nxt), "-m", "step1")
+        spawned.assert_called_once()
+        self.assertIn(f"(lib/answers.csv): git -C {t.worktree} add -f <file> has the next commit keep one", out)
+        self.assertTrue((t.worktree / "lib" / "answers.csv").is_file())
+
+    def test_an_in_tree_build_of_a_big_package_does_not_hide_a_module_under_another_ignored_path(self):
+        # #1179's review (2026-11-24): BUILD_FILES counted by top-level directory, so setuptools'
+        # services/api/build/lib copies of 60 tracked modules (pip install ./services/api) cut
+        # services/api/lib/helper.py, and hand_written said nothing of it
+        repo = Path(self.tmp.name) / "svc"
+        (repo / "services" / "api" / "api").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / ".gitignore").write_text("lib/\nbuild/\n__pycache__/\n")
+        for i in range(60):
+            (repo / "services" / "api" / "api" / f"m{i}.py").write_text(f"N = {i}\n")
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", "commit",
+                        "-qm", "api"], check=True)
+        t0 = time.time()
+        (repo / "services" / "api" / "lib").mkdir()
+        (repo / "services" / "api" / "lib" / "helper.py").write_text("def answer():\n    return 42\n")
+        (repo / "services" / "api" / "build" / "lib" / "api").mkdir(parents=True)
+        for i in range(60):
+            (repo / "services" / "api" / "build" / "lib" / "api" / f"m{i}.py").write_text(f"N = {i}\n")
+        left: list[str] = []
+        self.assertEqual(gitops.hand_written(repo, t0, left), ["services/api/lib/helper.py"])
+        # the build's 60, an install's worth: neither committed nor named, as an npm install's
+        # 20,000 once filled status.json (#1179's review)
+        self.assertEqual(left, [])
+
+    def test_a_file_claude_writes_under_an_ignored_path_in_a_review_fix_is_still_named_after_the_next_round(self):
+        # #1179: the agent's next round writes there too, which isn't Claude's, so what Claude
+        # wrote at review is kept when a runner starts, and named at accept once it is back
+        self.ignore_lib()
+        self.start("t-fix", "ok", "--test", TEST_CMD)
+        wait_phase("t-fix", {"review"})
+        t = store.Task("t-fix")
+        self.assertTrue(t.status.get("hands_off_at"))
+        (t.worktree / "lib").mkdir()
+        (t.worktree / "lib" / "fix.py").write_text("FIX = 1\n")
+        (t.worktree / "app.py").write_text("from lib.fix import FIX\n")
+        run_wb("feedback", "t-fix", "--text", "1. Keep it.")
+        wait_phase("t-fix", {"review"})
+        self.assertEqual(t.status.get("hand_wrote"), ["lib/fix.py"])
+        self.assertEqual(runner.hand_wrote(t), ["lib/fix.py"])
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-fix", "-m", "feat: one")
+        self.assertIn("not committed: git ignores files written in the worktree (lib/fix.py)",
+                      err.getvalue())
+        self.assertEqual(self.branch("delegate/t-fix"), t.spec["base"])
+
+    def test_wb_next_refuses_a_file_claude_wrote_under_an_ignored_path_until_include(self):
+        # #1179's review (2026-11-24): wb next commits the step as accept does, so a review fix
+        # Claude wrote under lib/ was dropped from the step's commit unless wb next read it too
+        self.ignore_lib()
+        self.start("t-nx", "ok", "--test", TEST_CMD)
+        wait_phase("t-nx", {"review"})
+        t = store.Task("t-nx")
+        (t.worktree / "lib").mkdir()
+        (t.worktree / "lib" / "fix.py").write_text("FIX = 1\n")
+        (t.worktree / "app.py").write_text("from lib.fix import FIX\n")
+        nxt = Path(self.tmp.name) / "step2.md"
+        nxt.write_text("Step two: print FIX.\n")
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("next", "t-nx", "--spec", str(nxt), "-m", "step1")
+        self.assertEqual(e.exception.code, 1)
+        self.assertIn("not committed: git ignores files written in the worktree (lib/fix.py)", err.getvalue())
+        spawned.assert_not_called()
+        self.assertEqual(self.branch("delegate/t-nx"), t.spec["base"])       # nothing committed
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb("next", "t-nx", "--spec", str(nxt), "-m", "step1", "--include")
+        spawned.assert_called_once()
+        tree = subprocess.run(["git", "-C", str(t.worktree), "ls-tree", "-r", "--name-only", "HEAD"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertIn("lib/fix.py", tree)
+        self.assertIn("app.py", tree)
+
+    def test_a_file_claude_writes_under_an_ignored_path_after_taking_over_a_running_task_is_refused_at_accept(self):
+        # #1179's review (2026-11-24): every takeover test took over at review, whose status
+        # write marks hands_off_at itself; a takeover mid-round relies on the stop's mark
+        # (cli._stop_runner, the runner's exit), and without it the file was lost silently
+        self.ignore_lib()
+        self.start("t-hot", "slow", "--test", TEST_CMD)
+        running("t-hot")
+        t = store.Task("t-hot")
+        deadline = time.time() + 15
+        while not t.status.get("session"):                   # the agent is at work
+            self.assertLess(time.time(), deadline, t.status)
+            time.sleep(POLL)
+        self.assertIsNone(t.status.get("hands_off_at"))       # the agent's now
+        run_wb("takeover", "t-hot")
+        self.assertTrue(t.status.get("hands_off_at"), t.status)
+        (t.worktree / "lib").mkdir()
+        (t.worktree / "lib" / "helper.py").write_text("def answer():\n    return 42\n")
+        (t.worktree / "main.py").write_text("from lib.helper import answer\nprint(answer())\n")
+        self.assertEqual(runner.hand_wrote(t), ["lib/helper.py"])
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-hot", "-m", "feat: one")
+        self.assertIn("not committed: git ignores files written in the worktree (lib/helper.py)",
+                      err.getvalue())
+        self.assertEqual(self.branch("delegate/t-hot"), t.spec["base"])       # nothing committed
+
+    def test_a_file_written_under_an_ignored_path_after_a_reaped_runner_is_claudes(self):
+        # #1179's review (2026-11-24): a runner killed without a word never reaches its own mark,
+        # so the reap marks the agent gone; unmarked, what Claude writes next was never named
+        self.ignore_lib()
+        self.start("t-reap", "hang")
+        st = running("t-reap")
+        t = store.Task("t-reap")
+        self.assertIsNone(t.status.get("hands_off_at"))
+        os.kill(st["pid"], signal.SIGKILL)
+        if sys.platform.startswith("linux"):                 # the kernel takes the agent with it
+            self.assertTrue(wait_gone(st["agent_pid"]))
+        backdate("t-reap")
+        self.assertTrue(cli.reap(t))
+        self.assertTrue(t.status.get("hands_off_at"), t.status)
+        (t.worktree / "lib").mkdir()
+        (t.worktree / "lib" / "helper.py").write_text("def answer():\n    return 42\n")
+        (t.worktree / "main.py").write_text("from lib.helper import answer\nprint(answer())\n")
+        self.assertEqual(runner.hand_wrote(t), ["lib/helper.py"])
 
     def test_diff_of_a_merged_task_hints_a_command_that_still_works(self):
         # #477 (the audit of 1.8): the hint named delegate/<task>, which the merge had deleted,
@@ -4899,6 +5534,33 @@ class Context(Base):
         self.assertIn("RENAME foo TO bar", now)
         self.assertEqual(now.count("Use v2."), 1)
 
+    def test_the_carry_on_after_an_infra_stop_still_hands_on_the_feedback_it_interrupted(self):
+        # #1169 (the 2.0 bar loop, 2026-11-24): the "carry on" a provider's stop notice advises is
+        # written under FEEDBACK_HEAD, and round_asks stopped there, so a later fresh session,
+        # handover or wb resume was told only "carry on" and reported done without the feedback
+        self.start("t-1169", "ok", "--test", TEST_CMD)
+        wait_phase("t-1169", {"review"})
+        t = store.Task("t-1169")
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", "t-1169", "--text", "1. RENAME foo TO bar in x.py")
+            # round 2 reached the agent (drive's `round` event), then its provider stopped it: a
+            # round never sent runs again with the carry-on after its own prompt instead (#1180)
+            t.event({"ts": store.now(), "round": 2, "kind": "round", "text": "started"})
+            t.set_status(phase="stuck", infra="provider")
+            self.assertIn("no review round is counted", run_wb("feedback", "t-1169", "--text", "carry on"))
+        asks = runner.round_asks(t, 3)
+        self.assertEqual(len(asks), 2, asks)
+        self.assertIn("RENAME foo TO bar", asks[0])
+        self.assertTrue(asks[1].endswith("carry on"), asks[1])
+        runner._start_fresh(t, 3, "the last session was 70% full")
+        now = t.round_dir(3).joinpath("prompt.md").read_text().split("## Now")[1]
+        self.assertIn("RENAME foo TO bar", now)
+        self.assertIn("carry on", now)
+        t.set_status(phase="stuck")                               # and stopped again: wb resume
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("resume", "t-1169")
+        self.assertIn("RENAME foo TO bar", t.round_dir(4).joinpath("prompt.md").read_text())
+
     def test_a_step_that_keeps_filling_up_is_stopped_after_a_few_handovers(self):
         # A session that changed a file early and then filled up reading handed over again and
         # again, for hours, with Claude told nothing (the 2026-11-16 audit).
@@ -4951,6 +5613,34 @@ class Context(Base):
         self.assertNotEqual(*asides)
         run_wb("discard", "t-sra")
         self.assertFalse(asides[0].exists())
+
+    def test_a_self_review_that_reads_past_the_explore_guard_and_leaves_the_tree_as_it_was_goes_to_review(self):
+        # #1168 (2026-11-24): a self-review breaks a check, sees a test fail and copies the file
+        # back, then reads on; its 41st call with no edit was the explore guard's stop, so a
+        # change whose tests passed woke Claude as stuck and its step was recorded stuck
+        self.start("t-srr", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-srr", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"], st["round_for"]), ("review", 2, "self_review"))
+        self.assertTrue(st["tests"]["ok"])
+        self.assertNotIn("no_edit", st.get("guards") or {})
+        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-srr"]
+        self.assertEqual([r["kind"] for r in rows], ["review"])
+        self.assertIn("tests: PASS", rows[0]["text"])
+        self.assertIn("the tree as the round began; stopped as its finish", rows[0]["text"])
+        self.assertIn("the tree as the round began: stopped as its finish",
+                      run_wb("watch", "t-srr", "--once", "--no-color"))
+
+    def test_a_self_review_that_changed_the_tree_is_still_stopped_by_the_explore_guard(self):
+        # #1168's finish is for a tree as the round began: one the self-review left changed is
+        # an agent lost mid-edit, stopped as before (90 reads: the first 40 meet its edit's mark,
+        # which the guard takes for a shell edit and counts again from)
+        os.environ.update(FAKE_SELF_KEEP="1", FAKE_READS="90")
+        self.addCleanup(os.environ.pop, "FAKE_SELF_KEEP", None)
+        self.addCleanup(os.environ.pop, "FAKE_READS", None)
+        self.start("t-srk", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-srk", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"]), ("stuck", 2))
+        self.assertIn("tool calls without changing a file", st["last"])
 
     def test_without_self_review_claude_is_woken_after_the_first_clean_round(self):
         self.start("t-nsr", "ok", "--test", TEST_CMD)
@@ -5184,6 +5874,39 @@ class Context(Base):
         wait_phase("t-d1", {"review"})
         self.assertIn("branch delegate/t-d1 deleted", run_wb("discard", "t-d1"))
         self.assertEqual(tip("t-d1"), "")
+
+    def test_the_merge_line_for_steps_a_discard_kept_lands_them_on_the_branch_the_task_started_from(self):
+        # #1174 (bar round 2 of 2.0, 2026-11-24): discard's "git -C <repo> merge <branch> lands
+        # them" merged the kept steps into feature-y, switched to while step 2 ran, or onto a
+        # detached HEAD, and in neither commands.json's merge mode nor --no-sign
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout.strip()
+        q, init = shlex.quote(str(self.repo)), g("rev-parse", "main")
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Now also write the question to question.txt.\n")
+        for name, away, start, mode, want in (
+                ("t-sy", ("-c", "feature-y"), ("--no-sign",), "merge", "merge --no-ff --no-gpg-sign"),
+                ("t-sd", ("--detach", "main"), (), "ff", "merge --ff-only")):
+            Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+                "merge": mode}}}))
+            self.start(name, "ok", "--test", TEST_CMD, "--auto-fix", "0", *start)
+            wait_phase(name, {"review"})
+            os.environ["FAKE_SCENARIO"] = "loop"       # step 2 sticks
+            run_wb("next", name, "--spec", str(step2), "-m", "feat: the answer")
+            step1 = g("rev-parse", f"delegate/{name}")
+            wait_phase(name, {"stuck"})
+            os.environ["FAKE_SCENARIO"] = "ok"
+            g("switch", "-q", *away)
+            out = run_wb("discard", name, "--reason", "step 2 stuck")
+            self.assertIn("merge into main with: ", out)
+            line = out.split("merge into main with: ", 1)[1].splitlines()[0]
+            self.assertEqual(line, f"git -C {q} switch main && git -C {q} {want} delegate/{name}")
+            subprocess.run(line, shell=True, check=True, capture_output=True)
+            self.assertTrue(gitops.contains(self.repo, "refs/heads/main", step1), name)
+            if name == "t-sy":
+                self.assertFalse(gitops.contains(self.repo, "refs/heads/feature-y", step1))
+            self.assertIn(f"to drop them: git -C {q} branch -D delegate/{name}", out)
+            g("reset", "-q", "--hard", init)  # the next task's step is new work again
 
 
     def test_a_wb_next_interrupted_after_its_commit_advances_once_when_retried(self):
@@ -15555,6 +16278,12 @@ class Bench(Base):
         store.append_jsonl(bench.runs_file(), row)
         self.assertIsNone(bench.model_line(model))                        # no case failed
         self.assertIn("t-src on ollama/mimo-v2.6:9b-q8_0: broke off: setup", run_wb("bench", "report"))
+        # #1176: an update or an OpenCode change under the replay leaves it stuck with `infra`,
+        # the machine's too: graded as the model's failure, never replayed again
+        for cause in ("updated", "opencode"):
+            with self.subTest(cause=cause), mock.patch.object(
+                    bench, "_wait", return_value=({"phase": "stuck", "infra": cause, "last": "x"}, 0)):
+                self.assertEqual(bench.replay(case, model, 1, f"r-{cause}", "", [])["outcome"], "error")
         # the load failure and the reaped runner are the machine's too
         runner._load_failed(store.Task(row["task"]), RuntimeError("lan/m can't run: asleep"))
         self.assertEqual(store.Task(row["task"]).status["infra"], "model")
@@ -18739,6 +19468,49 @@ class UpdatedUnderATask(Base):
         self.assertTrue(cli._interrupted(st["last"]))
         self.assertIn("resumed t", run_wb("resume", "--all"))
         self.assertFalse(cli._interrupted("workbench was updated under this tasking"))
+
+    def test_the_carry_on_after_an_update_or_an_opencode_change_is_no_review_round(self):
+        # #1176 (2026-11-24): #1153 left out these two stops. Neither set status `infra`, and the
+        # wake read "it got stuck ... Steer it with wb feedback", which counted a review round:
+        # with one real review after it the step went badly, shrinking the model's slice
+        from workbench import results, router, tuning
+        for cause in ("updated", "opencode"):
+            with self.subTest(cause=cause):
+                name = f"t-{cause}"
+                with mock.patch.object(cli, "spawn_runner"):
+                    self.start(name, "fix", "--test", TEST_CMD, "--auto-fix", "1", "--no-base-check")
+                task = store.Task(name)
+                ran = lambda: task.round_dir(1).joinpath("summary.md").exists()  # noqa: E731
+                # round 1 ran and failed its test; before its auto-fix, a pull or an upgrade
+                with mock.patch.dict(runner.CURRENT, {"code": "before"}), \
+                        mock.patch.object(runner, "code_print",
+                                          lambda: "after" if ran() and cause == "updated" else "before"), \
+                        mock.patch.object(runner, "opencode_version",
+                                          lambda: (2, 5) if ran() and cause == "opencode" else (2, 3)):
+                    runner.drive(task)
+                st = task.status
+                self.assertEqual((st["phase"], st.get("infra"), st["round"]), ("stuck", cause, 2))
+                [n] = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
+                       if r["task"] == name and r["kind"] == "stuck"]
+                # the mod's wake: "was interrupted" and wb resume (batchOf, BATCH_NEXT)
+                self.assertEqual((n["cause"], n.get("tasks")), (cause, [name]))
+                os.environ["FAKE_SCENARIO"] = "ok"
+                with mock.patch.object(cli, "spawn_runner"):
+                    out = run_wb("feedback", name, "--text", "carry on")
+                self.assertIn("no review round is counted", out)
+                # the auto-fix round the stop came before never reached the agent: it runs again
+                # as itself, the carry-on after its prompt (#1180), so round_for stays `fix`
+                self.assertIn(f"({cause})", out)
+                self.assertEqual((task.status["reviews"], task.status["round"], task.status["round_for"]),
+                                 (0, 2, "fix"))
+                runner.drive(task)
+                self.assertEqual(task.status["phase"], "review", task.status.get("last"))
+                with mock.patch.object(cli, "spawn_runner"):
+                    self.assertIn("feedback round 1 sent", run_wb("feedback", name, "--text", "rename x"))
+                runner.drive(task)
+                step = results.step(task, True)
+                self.assertEqual(tuning.agent_reviews(step), 1)
+                self.assertEqual(router._went(step), "well")
 
     def test_an_unchanged_copy_runs_every_round(self):
         self.start("t", "fix", "--test", TEST_CMD, "--no-base-check")
@@ -24461,6 +25233,25 @@ class WebChat(Base):
         with mock.patch.dict(os.environ, {"CLAUDE_PID": "9100"}):        # an older mod's claim: as before
             run_wb("chat", "reply", "--text", "Still on it.")
         self.assertEqual(self.chat.thread()[-1]["re"], [mid])
+
+    def test_an_agents_message_delivered_into_a_wake_turn_leaves_its_plain_report_to_the_user(self):
+        # #1175: acked `now`, an agent's message the mod delivered into a running wake turn took
+        # that turn's plain `wb chat reply`: the report to the away user went to the agent alone,
+        # pushed to no phone, and the agent read it as its answer. The mod acks it `into`
+        tok = self._agent("hermes")
+        self._listening()
+        mid = self.call("/api/send", {"text": "please refactor foo"}, token=tok)[1]["message"]["id"]
+        run_wb("chat", "ack", mid, "--by", "s1", "--how", "into")         # into the running turn
+        run_wb("chat", "reply", "--text", "Task fix-login is accepted and merged: needs nothing from you")
+        r = self.chat.thread()[-1]
+        self.assertEqual((r.get("re"), r.get("to")), (None, None))            # no `to`: the user's
+        self.assertTrue(self.chat._for_user(r))
+        self.assertIn(r["id"], self.chat.news(store.now() + 20))              # pushed to the phone
+        _, w = self.call(f"/api/wait?after={mid}&timeout=0", token=tok)
+        self.assertEqual(w["replies"], [])                                    # never the agent's answer
+        run_wb("chat", "reply", "--to", mid, "--text", "Refactoring foo now.")  # its own, by --to
+        self.assertEqual([x["text"] for x in self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["replies"]],
+                         ["Refactoring foo now."])
 
     def test_an_agents_stream_never_pushes_the_users_page_out(self):
         tok, user = self._agent(), self.chat.token()
@@ -30550,6 +31341,37 @@ class Routes(Base):
                          "trivial: API model deepseek/deepseek-flash → anthropic/claude-haiku-5-5 (Anthropic), "
                          "used from the next start")
 
+    def test_thinking_turned_on_while_a_roles_api_side_is_dormant_is_named_by_the_yes_that_sends_it_there(self):
+        # #1177 (2026-11-24): thinking on a GPU role (an API model kept, or none yet) needs no
+        # dialog, but the later yes to Agents API, busy api or a new API model never said it, so
+        # every API task of the role ran on the reasoning variant nobody agreed to
+        self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.route("trivial", "gpu")
+        os.environ["CLAUDECODE"] = "1"
+        self.assertEqual(self.route("trivial", "--thinking", "on")[:2],
+                         (0, "changed: trivial: thinking off → on\n"))
+        for argv in (("all", "api"), ("busy", "api")):
+            with self.subTest(argv=argv):
+                asked = self.dry(*argv)
+                self.assertTrue(asked["gate"])
+                self.assertIn("thinking on (trivial)", asked["change"])
+        self.assertNotIn("thinking", self.dry("all", "gpu")["change"])   # nothing newly on API
+        self.approve(self.dry("all", "api")["approval"])
+        code, out, err = self.route("all", "api")
+        self.assertEqual(code, 0, err)
+        self.assertIn("thinking on (trivial)", self.doc()["roles"]["trivial"]["said"])
+        # no API model yet: under Agents API, and under the busy opt-in, the --api line names it
+        for setup in ({"use": "api"}, {"busy": "api"}):
+            with self.subTest(setup=setup):
+                self.path.write_text(json.dumps({"v": 1, "day_usd": 5, **setup, "roles": {
+                    "writing": {"via": "gpu", "thinking": "off"}}}))
+                self.assertEqual(self.route("writing", "--thinking", "on")[0], 0)
+                asked = self.dry("writing", "--api", "anthropic/claude-haiku-5-5")
+                self.assertTrue(asked["gate"])
+                self.assertIn("thinking on", asked["change"])
+        self.assertIn("when the GPU is busy, writing starts on its API model (your code goes to Anthropic "
+                      "(writing); thinking on (writing); cap $5/day)", asked["change"])
+
     def test_a_kept_api_model_is_checked_again_when_its_role_goes_back_to_api(self):
         # ARCHITECTURE.md, *Roles*: the kept model must still be one the role may run
         self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
@@ -30950,6 +31772,153 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual(firsts, ["starting"])
         self.assertEqual(seen, [(self.models.API_PARALLEL - 1, ["api-first"])])
         self.assertEqual(self.models.api_slots_free("deepinfra"), self.models.API_PARALLEL)
+
+    def test_an_api_task_waits_as_queued_while_its_provider_is_out_of_credit_and_runs_once_topped_up(self):
+        # #1178: a keyhole's 402 marks the provider no_credit and wb start refuses, but the tasks
+        # already queued took their slots, each sent a round, met the 402 and woke Claude with a
+        # stop of its own; now the runner waits before the round, sends nothing, and goes on at ok
+        self.start_api("api-credit", "ok", spawn=False)
+        self.models.note_api("deepinfra", "no_credit", "HTTP 402: Insufficient balance")
+        rounds = []
+        real = runner.run_round
+
+        def counted(task, n, keep=False):
+            rounds.append(n)
+            return real(task, n, keep)
+        task = store.Task("api-credit")
+        with mock.patch.object(runner, "run_round", counted):
+            driver = threading.Thread(target=self.drive_here, args=("api-credit",), daemon=True)
+            driver.start()
+            self.addCleanup(driver.join, 60)
+            self.addCleanup(self.models.note_api, "deepinfra", "ok")
+            deadline = time.time() + 30
+            while not (task.status.get("last") or "").startswith("waiting: deepinfra is out of credit"):
+                self.assertLess(time.time(), deadline, task.status)
+                self.assertTrue(driver.is_alive(), task.status)
+                time.sleep(POLL)
+            self.assertEqual(task.status["phase"], "queued")
+            self.assertIn("(HTTP 402: Insufficient balance): top it up, or wait for the plan's reset; "
+                          "wb asks it again at ", task.status["last"])
+            self.assertEqual(self.models.api_holders("deepinfra"), [])  # let go for the wait (#1178's review)
+            time.sleep(1)
+            self.assertEqual(rounds, [])
+            self.assertEqual([r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
+                              if r.get("task") == "api-credit"], [])
+            self.models.note_api("deepinfra", "ok")                 # a top-up's 2xx, another task's
+            driver.join(60)
+        self.assertFalse(driver.is_alive())
+        self.assertEqual(rounds, [1])
+        self.assertEqual(task.status["phase"], "review", task.status)
+
+    def test_past_its_recheck_one_runner_asks_the_provider_again_and_the_others_wait_for_its_answer(self):
+        # #1178: at the no_credit mark's `until` every waiting runner went on at once, each to
+        # its own 402 and its own stop; one asks, the mark held for the rest until it answers
+        self.models.note_api("deepinfra", "no_credit", "HTTP 402: Insufficient balance",
+                             until=time.time() - 1)
+        self.assertIsNone(self.models.api_health("deepinfra"))
+        self.assertIsNone(self.models.credit_turn("deepinfra", "t-a"))           # t-a asks
+        row = self.models.credit_turn("deepinfra", "t-b")
+        self.assertEqual((row["state"], row["asked_by"], row["why"]),
+                         ("no_credit", "t-a", "HTTP 402: Insufficient balance"))
+        self.assertGreater(row["until"], time.time() + self.models.CREDIT_RECHECK_SECS - 60)
+        self.models.note_api("deepinfra", "ok")                                   # t-a's 2xx
+        self.assertIsNone(self.models.credit_turn("deepinfra", "t-b"))
+        self.models.note_api("deepinfra", "rate_limited", "HTTP 429")             # not this wait's
+        self.assertIsNone(self.models.credit_turn("deepinfra", "t-b"))
+
+    def test_the_users_resume_after_a_quota_stop_asks_at_once_and_the_tasks_waiting_behind_it_go_on_at_its_ok(self):
+        # the review of #1178 (2026-11-24): a quota stop's remedy says top up, then wb feedback
+        # "carry on", but the resumed runner met the no_credit mark its own 402 had just written
+        # and waited out its 900 s, told to top up again; the user's resume asks at once now, and
+        # the runners waiting behind it go on at its 2xx
+        m = self.local_api_model()
+        self.up.mode, self.up.status, self.up.message = "status", 402, "Insufficient balance"
+        self.start_api("t-paid", "http", spawn=False)
+        self.drive_here("t-paid")
+        task = store.Task("t-paid")
+        self.assertEqual((task.status["phase"], task.status.get("infra")), ("stuck", "provider"), task.status)
+        self.assertEqual(self.models.api_health("deepinfra")["state"], "no_credit")
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")     # lets a hung wait go
+        went = threading.Event()
+        behind = self.models.NoLease(m, "t-behind", say=lambda msg: None)
+        threading.Thread(target=lambda: (behind.load(), went.set()), daemon=True).start()
+        self.assertFalse(went.wait(1))                                # it waits for credit
+        self.up.mode, self.up.status = "ok", 200                      # the user tops up
+        with mock.patch.object(cli, "spawn_runner", lambda t: 0):
+            run_wb("feedback", "t-paid", "--text", "carry on")
+        self.assertEqual(self.models.api_health("deepinfra")["asked_by"], "t-paid")
+        driver = threading.Thread(target=self.drive_here, args=("t-paid",), daemon=True)
+        driver.start()
+        driver.join(60)
+        self.assertFalse(driver.is_alive(), task.status)              # never the mark's 900 s
+        self.assertEqual(task.status["phase"], "review", task.status)
+        self.assertEqual(len(self.up.seen), 2)                        # the 402, then its round
+        self.assertTrue(went.wait(30))                                # at its ok
+        self.assertIsNone(self.models.api_health("deepinfra"))
+
+    def test_wb_resume_after_a_quota_stop_asks_at_once_rather_than_wait_out_the_mark(self):
+        # the review of #1178 (2026-11-24): wb resume's _credit_turn had no test; without it a
+        # quota-stopped task resumed after a top-up met the no_credit mark its own 402 had
+        # written and waited out its 900 s, told to top up again
+        self.local_api_model()
+        self.up.mode, self.up.status, self.up.message = "status", 402, "Insufficient balance"
+        self.start_api("t-paid-rs", "http", spawn=False)
+        self.drive_here("t-paid-rs")
+        task = store.Task("t-paid-rs")
+        self.assertEqual((task.status["phase"], task.status.get("infra")), ("stuck", "provider"), task.status)
+        self.assertEqual(self.models.api_health("deepinfra")["state"], "no_credit")
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")     # lets a hung wait go
+        self.up.mode, self.up.status = "ok", 200                      # the user tops up
+        with mock.patch.object(cli, "spawn_runner", lambda t: 0):
+            out = run_wb("resume", "t-paid-rs")
+        self.assertIn("resumed t-paid-rs in a fresh session", out)
+        self.assertEqual(self.models.api_health("deepinfra")["asked_by"], "t-paid-rs")
+        driver = threading.Thread(target=self.drive_here, args=("t-paid-rs",), daemon=True)
+        driver.start()
+        driver.join(60)
+        self.assertFalse(driver.is_alive(), task.status)              # never the mark's 900 s
+        self.assertEqual(task.status["phase"], "review", task.status)
+        self.assertEqual(len(self.up.seen), 2)                        # the 402, then its round
+        self.assertIsNone(self.models.api_health("deepinfra"))
+
+    def test_waiters_for_credit_holding_every_slot_let_go_of_them_so_the_users_resume_asks_at_once(self):
+        # the review of #1178 (2026-11-24): NoLease.load waited for credit with its slot held, so
+        # with API_PARALLEL tasks queued behind the 402 (the issue's backlog) the resumed task
+        # waited for a slot and each of them for its 2xx, until the mark's 900 s ran out
+        m = self.local_api_model()
+        self.up.mode, self.up.status, self.up.message = "status", 402, "Insufficient balance"
+        self.start_api("t-paid", "http", spawn=False)
+        self.drive_here("t-paid")
+        task = store.Task("t-paid")
+        self.assertEqual((task.status["phase"], task.status.get("infra")), ("stuck", "provider"), task.status)
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")     # lets a hung wait go
+        went, leases = [], []
+        for i in range(self.models.API_PARALLEL):                     # the backlog, each with its slot
+            lease = self.models.NoLease(m, f"t-behind{i}", say=lambda msg: None)
+            lease.__enter__()
+            leases.append(lease)
+            self.addCleanup(lease.__exit__, None, None, None)
+            threading.Thread(target=lambda one=lease: (one.load(), went.append(one.task)), daemon=True).start()
+        deadline = time.time() + 10
+        while self.models.api_holders("deepinfra") and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(self.models.api_holders("deepinfra"), [])   # let go for the wait
+        self.assertEqual(went, [])                                    # still waiting for credit
+        self.up.mode, self.up.status = "ok", 200                      # the user tops up
+        with mock.patch.object(cli, "spawn_runner", lambda t: 0):
+            out = run_wb("feedback", "t-paid", "--text", "carry on")
+        self.assertNotIn("waits as queued for a slot", out)
+        driver = threading.Thread(target=self.drive_here, args=("t-paid",), daemon=True)
+        driver.start()
+        driver.join(60)
+        self.assertFalse(driver.is_alive(), task.status)              # never the mark's 900 s
+        self.assertEqual(task.status["phase"], "review", task.status)
+        self.assertEqual(len(self.up.seen), 2)                        # the 402, then its round
+        deadline = time.time() + 30
+        while len(went) < len(leases) and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(sorted(went), [x.task for x in leases])      # at its ok
+        self.assertEqual(self.models.api_holders("deepinfra"), sorted(x.task for x in leases))  # theirs again
 
     def test_with_unload_for_tests_an_api_tasks_tests_run_under_this_machines_pool(self):
         from workbench import verify
@@ -32422,6 +33391,11 @@ class ApiSpend(Base):
             run_wb("resume", "t-f33")
         self.assertEqual(e.exception.code, 3)
         self.assertIn("day cap", err.getvalue())
+        # nor does the refusal offer the GPU as this task's remedy, the user having just said yes
+        # to it (#1171, 2026-11-24: the same advice again, and the retry refused again)
+        self.assertNotIn("gpu), or tomorrow", err.getvalue())
+        self.assertIn("for the next tasks, with wb takeover t-f33 or wb discard t-f33 for this one",
+                      err.getvalue())
         spawned.assert_not_called()
         task = store.Task("t-f33")
         self.assertEqual((task.spec["via"], task.spec["model"]), ("api", SPEND_M))  # resume never re-routes
@@ -32636,18 +33610,19 @@ class ApiSpend(Base):
         self.cap(5)
         self.spent(4.8)
         m = runner.models.lookup(SPEND_TIER)
-        worst = m.config["options"]["max_tokens"] * 10 / 1e6        # the pinned output, the dearest tier
+        # the pinned output and a fresh session's least input (#1173), at the dearest tier
+        worst = (m.config["options"]["max_tokens"] * 10 + self.meter.FIRST_TOKENS * 2) / 1e6
         self.assertAlmostEqual(self.meter.request_floor(m), worst, places=9)
         need = -(-(self.meter.today()["usd"] + worst) * 100 // 1) / 100  # up to the cent
         line = ("trivial role: API spend today is ≈$4.80 of the $5 day cap, and one request on it can cost "
-                f"up to $0.33 (it resets at local midnight). Ask the user: a cap of at least ${need:.2f} "
+                f"up to $0.36 (it resets at local midnight). Ask the user: a cap of at least ${need:.2f} "
                 "(wb route cap <usd>), the role on the GPU (wb route trivial gpu), or tomorrow")
         self.assertEqual(self.meter.refusal(m, "trivial"), line)
         err = io.StringIO()
         with self.assertRaises(SystemExit) as e, redirect_stderr(err), mock.patch.object(cli, "API_RUNS", True):
             run_wb("start", "t-near2", "--spec", str(self.spec), "--repo", str(self.repo), "--model", SPEND_TIER)
         self.assertEqual(e.exception.code, 3)
-        self.assertIn("and one request on it can cost up to $0.33", err.getvalue())
+        self.assertIn("and one request on it can cost up to $0.36", err.getvalue())
         self.assertFalse(store.Task("t-near2").dir.exists())
         rnd = task.status["round"]
         nxt = Path(self.tmp.name) / "next.md"
@@ -32661,7 +33636,9 @@ class ApiSpend(Base):
                   mock.patch.object(cli, "spawn_runner") as spawned):
                 run_wb(*args)
             self.assertEqual(e.exception.code, 3, args)
-            self.assertIn("a cap of at least", err.getvalue())
+            self.assertIn(f"a cap of at least ${need:.2f} (wb route cap <usd>) or tomorrow, then try again; or "
+                          "the role on the GPU (wb route significant gpu) for the next tasks, with wb takeover t-near "
+                          "or wb discard t-near for this one", err.getvalue())  # this task keeps its model (#1171)
             spawned.assert_not_called()
             self.assertFalse(task.round_dir(rnd + 1).exists(), args)
         self.cap(need)                                           # the cap it named lets one through
@@ -32691,19 +33668,324 @@ class ApiSpend(Base):
         (notice,) = self.notices("t-near-room", "stuck")
         self.assertEqual(notice["cause"], "spend")
         self.assertIn("auto-fix didn't run: too near the day's API spend cap", notice["text"])
-        self.assertIn("a cap of at least $5.13", notice["text"])
-        self.cap(5.13)
+        # the room's 400 bytes above; before round 2, its first request's input too (#1173)
+        need = float(re.search(r"a cap of at least \$([\d.]+) ", notice["text"])[1])
+        self.assertGreaterEqual(need, 5.17)
+        self.cap(need)
         self.assertTrue(runner._go_on(task, 2, "auto-fix"))
+
+    def test_the_cap_a_near_cap_refusal_names_lets_the_rounds_first_request_through(self):
+        # #1173 (2026-11-24): #1150's look ahead (request_floor) left the next request's input out,
+        # so near the cap wb next, drive's _go_on and wb start passed, and the room refused the
+        # round's first request at once; the cap the refusal named was refused again there. The
+        # bodies are the issue's: a carried session's 120K and 80K tokens, round 1's ~16K (65 KB)
+        m = runner.models.lookup(SPEND_TIER)
+        need = lambda text: float(re.search(r"a cap of at least \$([\d.]+) ", text)[1])  # noqa: E731
+        task = self.api_task("t-cap-next", SPEND_TIER, "ok")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        # wb next on a warm session: the step's first request carries the session's 120K tokens
+        task.set_status(live_used={"session": task.status["session"], "used": 120_000})
+        self.cap(5)
+        self.spent(4.6)
+        nxt = Path(self.tmp.name) / "next.md"
+        nxt.write_text("step two\n")
+        rnd = task.status["round"]
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("next", "t-cap-next", "--spec", str(nxt), "-m", "step one")
+        self.assertEqual(e.exception.code, 3)
+        spawned.assert_not_called()
+        self.assertFalse(task.round_dir(rnd + 1).exists())
+        self.cap(need(err.getvalue()))
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb("next", "t-cap-next", "--spec", str(nxt), "-m", "step one")
+        spawned.assert_called_once()
+        prompt = len(task.round_dir(rnd + 1).joinpath("prompt.md").read_bytes())
+        mt = self.meter.for_task(task, m)
+        mt.begin(rnd + 1)
+        self.assertGreaterEqual(mt.room({"max_tokens": 32768}, 480_000 + prompt), 0)
+        self.assertIsNone(task.status.get("api_stop"))
+        # between rounds (_go_on): the carried session's 80K tokens
+        task.set_status(live_used={"session": task.status["session"], "used": 80_000})
+        self.cap(5)
+        self.assertFalse(runner._go_on(task, rnd + 1, "auto-fix"))
+        (notice,) = self.notices("t-cap-next", "stuck")
+        self.cap(need(notice["text"]))
+        self.assertTrue(runner._go_on(task, rnd + 1, "auto-fix"))
+        self.assertGreaterEqual(mt.room({"max_tokens": 32768}, 320_000 + prompt), 0)
+        self.assertIsNone(task.status.get("api_stop"))
+        # wb start: round 1's first request, a fresh session's
+        self.cap(5)
+        self.spent(0.2)                                          # today $4.80
+        first = runner.first_tokens(prompt=self.spec.read_text())
+        self.cap(need(self.meter.refusal(m, "trivial", tokens=first)))
+        self.assertIsNone(self.meter.refusal(m, "trivial", tokens=first))
+        fresh = self.api_task("t-cap-start", SPEND_TIER)
+        self.assertGreaterEqual(self.meter.for_task(fresh, m).room({"max_tokens": 32768}, 65_000), 0)
+        self.assertIsNone(fresh.status.get("api_stop"))
+
+    def test_a_large_spec_counts_in_wb_starts_look_ahead_so_the_cap_it_names_lets_round_1_through(self):
+        # #1173's review (2026-11-24): a fresh session's least (FIRST_TOKENS, 65,536 bytes) covers a
+        # small spec, so only a large one tells whether wb start, and the dialog's dry run before
+        # it, count round 1's prompt: left out, the cap they named was short of what the room asks
+        need = lambda text: float(re.search(r"a cap of at least \$([\d.]+) ", text)[1])  # noqa: E731
+        big = Path(self.tmp.name) / "big-spec.md"
+        big.write_text("Make the parser take every case below.\n" + "- a case of the parser's, one line\n" * 2300)
+        size = len(big.read_bytes())
+        self.assertGreater(size, 78_000)
+        m = runner.models.lookup(SPEND_TIER)
+        self.cap(5)
+        self.spent(4.8)
+        start = ("start", "t-big", "--spec", str(big), "--repo", str(self.repo), "--model", SPEND_TIER,
+                 "--no-base-check")
+        # wb start's main API path: --role, its model from routes.json (routes.resolve)
+        role = ("start", "t-big", "--spec", str(big), "--repo", str(self.repo), "--role", "significant",
+                "--no-base-check")
+
+        def role_cap(usd):
+            store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": usd, "roles": {
+                "significant": {"via": "api", "api": SPEND_TIER}}})
+        # the dialog's dry run (_route_start) first, then wb start itself, by --model and by --role
+        for i, (args, cap) in enumerate(((("route", "--dry-run", "--json", "--start", *start[1:]), self.cap),
+                                         (start, self.cap), (role, role_cap))):
+            cap(5)
+            err = io.StringIO()
+            with (self.assertRaises(SystemExit) as e, redirect_stderr(err), mock.patch.object(cli, "API_RUNS", True),
+                  mock.patch.object(cli, "spawn_runner") as spawned):
+                run_wb(*args)
+            self.assertEqual(e.exception.code, 3, args[0])
+            self.assertIn("a cap of at least", err.getvalue())
+            spawned.assert_not_called()
+            self.assertFalse(store.Task("t-big").dir.exists())
+            cap(need(err.getvalue()))
+            room = self.meter.for_task(self.api_task(f"t-big-{i}", SPEND_TIER), m)
+            self.assertGreaterEqual(room.room({"max_tokens": 32768}, 65_000 + size), 0, args)
+            cap(need(err.getvalue()))   # api_task wrote routes.json's roles again
+        with mock.patch.object(cli, "API_RUNS", True), mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb(*role)                                     # the cap it named: it starts
+        spawned.assert_called_once()
+        self.assertEqual(store.Task("t-big").spec["role"], "significant")
+
+    def test_a_large_next_spec_counts_in_wb_nexts_look_ahead_so_the_cap_it_names_lets_the_step_through(self):
+        # #1173's review (2026-11-24): with a small next spec only the carried context tipped the
+        # look ahead, so wb next passing its step's prompt went untested: left out, wb next passed
+        # at $5 and committed the step, and the round's first request was over the cap
+        need = lambda text: float(re.search(r"a cap of at least \$([\d.]+) ", text)[1])  # noqa: E731
+        m = runner.models.lookup(SPEND_TIER)
+        task = self.api_task("t-cap-big-next", SPEND_TIER, "ok")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        task.set_status(live_used={"session": task.status["session"], "used": 20_000})
+        nxt = Path(self.tmp.name) / "big-next.md"
+        nxt.write_text("Step two: take each case.\n" + "- a case of the parser's, one line\n" * 2300)
+        self.cap(5)
+        self.spent(4.6)
+        rnd = task.status["round"]
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("next", "t-cap-big-next", "--spec", str(nxt), "-m", "step one")
+        self.assertEqual(e.exception.code, 3)
+        spawned.assert_not_called()
+        self.assertFalse(task.round_dir(rnd + 1).exists())
+        self.cap(need(err.getvalue()))
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb("next", "t-cap-big-next", "--spec", str(nxt), "-m", "step one")
+        spawned.assert_called_once()
+        prompt = len(task.round_dir(rnd + 1).joinpath("prompt.md").read_bytes())
+        self.assertGreater(prompt, 78_000)
+        mt = self.meter.for_task(task, m)
+        mt.begin(rnd + 1)
+        self.assertGreaterEqual(mt.room({"max_tokens": 32768}, 20_000 * 4 + prompt), 0)
+
+    def test_feedback_on_a_round_never_sent_counts_that_rounds_own_prompt_in_the_look_ahead(self):
+        # the merge of #1173 and #1180 (2026-11-24): wb feedback's look ahead counted only its new
+        # text, but a round that never reached the agent runs again as its own prompt plus that
+        # text (runner.add_to_round): the check passed, and the room refused the first request
+        need = lambda text: float(re.search(r"a cap of at least \$([\d.]+) ", text)[1])  # noqa: E731
+        m = runner.models.lookup(SPEND_TIER)
+        task = self.api_task("t-cap-rerun", SPEND_TIER, "ok")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        task.set_status(live_used={"session": task.status["session"], "used": 20_000})
+        nxt = Path(self.tmp.name) / "big-step.md"
+        nxt.write_text("Step two: take each case.\n" + "- a case of the parser's, one line\n" * 2300)
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("next", "t-cap-rerun", "--spec", str(nxt), "-m", "step one")
+        rnd = task.status["round"]
+        task.set_status(phase="failed", infra="model")          # stopped before it was sent
+        self.assertFalse(runner.reached(task, rnd))
+        before = store.round_prompt(task, rnd).read_text()
+        self.assertGreater(runner.first_tokens(task), runner.first_tokens(task, "carry on") + 19_000)
+        self.cap(5)
+        self.spent(4.6)
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("feedback", "t-cap-rerun", "--text", "carry on")
+        self.assertEqual(e.exception.code, 3)
+        spawned.assert_not_called()
+        self.assertEqual(store.round_prompt(task, rnd).read_text(), before)   # nothing added
+        self.cap(need(err.getvalue()))
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            out = run_wb("feedback", "t-cap-rerun", "--text", "carry on")
+        spawned.assert_called_once()
+        self.assertIn(f"after round {rnd}'s own prompt, which never reached the agent (model)", out)
+        prompt = len(store.round_prompt(task, rnd).read_bytes())
+        self.assertGreater(prompt, 78_000)
+        mt = self.meter.for_task(task, m)
+        mt.begin(rnd)
+        self.assertGreaterEqual(mt.room({"max_tokens": 32768}, 20_000 * 4 + prompt), 0)
+
+    def test_feedbacks_text_and_a_resumes_handoff_count_in_the_look_ahead(self):
+        # #1173's review (2026-11-24): feedback's first request carries its text on the session's
+        # context, a resume's (a fresh session) the handoff with the work so far; either left out,
+        # the cap the refusal named was short of what the room asks of that request
+        need = lambda text: float(re.search(r"a cap of at least \$([\d.]+) ", text)[1])  # noqa: E731
+        m = runner.models.lookup(SPEND_TIER)
+        task = self.api_task("t-cap-fb", SPEND_TIER, "ok")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        task.set_status(live_used={"session": task.status["session"], "used": 20_000})
+        text = "1. take each of these cases too:\n" + "- a case of the parser's, one line\n" * 2300
+        self.cap(5)
+        self.spent(4.6)
+        rnd = task.status["round"]
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("feedback", "t-cap-fb", "--text", text)
+        self.assertEqual(e.exception.code, 3)
+        spawned.assert_not_called()
+        self.cap(need(err.getvalue()))
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb("feedback", "t-cap-fb", "--text", text)
+        spawned.assert_called_once()
+        prompt = len(task.round_dir(rnd + 1).joinpath("prompt.md").read_bytes())
+        self.assertGreater(prompt, 78_000)
+        mt = self.meter.for_task(task, m)
+        mt.begin(rnd + 1)
+        self.assertGreaterEqual(mt.room({"max_tokens": 32768}, 20_000 * 4 + prompt), 0)
+        self.assertIsNone(task.status.get("api_stop"))
+        # wb resume: a fresh session's handoff, the uncommitted work so far in it
+        task = self.api_task("t-cap-resume", SPEND_TIER, "ok")
+        runner.drive(task)
+        task.set_status(phase="stuck", window=1_000_000)
+        (task.worktree / "cases.txt").write_text("a case of the parser's, one line\n" * 1600)
+        self.assertGreater(len(runner.handoff_prompt(task, "", runner.RESUME)), 50_000)  # the diff is in it
+        rnd = task.status["round"]
+        self.cap(5)
+        self.spent(0.2)                                          # today $4.80
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("resume", "t-cap-resume")
+        self.assertEqual(e.exception.code, 3)
+        spawned.assert_not_called()
+        self.cap(need(err.getvalue()))
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb("resume", "t-cap-resume")
+        spawned.assert_called_once()
+        sent = runner.handoff_prompt(task, "resumed by the reviewer",
+                                     task.round_dir(rnd + 1).joinpath("prompt.md").read_text())
+        mt = self.meter.for_task(task, m)
+        mt.begin(rnd + 1)
+        self.assertGreaterEqual(mt.room({"max_tokens": 32768}, 65_000 + len(sent.encode())), 0)
+        self.assertIsNone(task.status.get("api_stop"))
+
+    def test_a_resume_after_large_feedback_counts_that_feedback_and_its_notes_in_the_look_ahead(self):
+        # #1173's review (2026-11-24): wb resume looked ahead with the bare RESUME, but the round
+        # it writes carries the step's review feedback (round_asks) and Claude's undelivered
+        # notes, all in the fresh session's handoff: at the cap it named, the room refused the
+        # first request ("too near"), a spend wake and a second cap dialog
+        need = lambda text: float(re.search(r"a cap of at least \$([\d.]+) ", text)[1])  # noqa: E731
+        m = runner.models.lookup(SPEND_TIER)
+        task = self.api_task("t-cap-rs", SPEND_TIER, "ok")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        # half the cases in the feedback, half in a note: either left out, the cap named is short
+        text = "1. take each of these cases too:\n" + "- a case of the parser's, one line\n" * 1150
+        note = "Also these cases, kept sorted:\n" + "- a case of the lexer's, one line\n" * 1150
+        self.cap(50)
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", "t-cap-rs", "--text", text)
+        runner.drive(task)
+        task.set_status(phase="stuck")
+        store.append_jsonl(task.dir / "steer.jsonl",                # sent as the round ended
+                           {"ts": store.now(), "text": note, "now": False})
+        taken = task.status.get("steer_taken", 0)
+        rnd = task.status["round"]
+        self.assertLess(runner.first_tokens(task, runner.RESUME, fresh=True) * 4, len(text) + len(note))
+        self.cap(5)
+        self.spent(4.8 - self.meter.today()["usd"])              # today $4.80
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("resume", "t-cap-rs")
+        self.assertEqual(e.exception.code, 3)
+        spawned.assert_not_called()
+        self.assertEqual(task.status.get("steer_taken", 0), taken)  # the note left for the next runner
+        self.cap(need(err.getvalue()))
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb("resume", "t-cap-rs")
+        spawned.assert_called_once()
+        raw = task.round_dir(rnd + 1).joinpath("prompt.md").read_text()
+        self.assertIn("- a case of the parser's, one line", raw)
+        self.assertIn("- a case of the lexer's, one line", raw)
+        sent = runner.handoff_prompt(task, "resumed by the reviewer", raw.strip())
+        self.assertGreater(len(sent.encode()), 80_000)
+        mt = self.meter.for_task(task, m)
+        mt.begin(rnd + 1)
+        self.assertGreaterEqual(mt.room({"max_tokens": 32768}, 65_000 + len(sent.encode())), 0)
+        self.assertIsNone(task.status.get("api_stop"))
+
+    def test_a_resume_after_a_round_that_never_made_a_session_counts_its_handoff_in_the_look_ahead(self):
+        # #1173's review (2026-11-24): first_tokens judged the handoff from the status, a session
+        # or step_round < round, but round 1 crashed before its session began: wb resume counted
+        # the bare prompt (16,435 tokens), while the runner wraps round 2 in the handoff, the
+        # spec in it (36,940): at the cap it named, the room refused the first request
+        need = lambda text: float(re.search(r"a cap of at least \$([\d.]+) ", text)[1])  # noqa: E731
+        m = runner.models.lookup(SPEND_TIER)
+        self.spec.write_text("- a case of the parser's, one line\n" * 2300)
+        task = self.api_task("t-cap-r1", SPEND_TIER, "crash")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "failed")
+        self.assertEqual(task.status["round"], 1)
+        self.assertIsNone(task.status.get("session"))
+        self.assertTrue(task.status.get("round_started_at"))
+        os.environ["FAKE_SCENARIO"] = "ok"
+        self.cap(5)
+        self.spent(4.8 - self.meter.today()["usd"])              # today $4.80
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("resume", "t-cap-r1")
+        self.assertEqual(e.exception.code, 3)
+        spawned.assert_not_called()
+        self.cap(need(err.getvalue()))
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb("resume", "t-cap-r1")
+        spawned.assert_called_once()
+        self.assertEqual(task.status["round"], 2)
+        sent = runner.handoff_prompt(task, "resumed by the reviewer",
+                                     task.round_dir(2).joinpath("prompt.md").read_text())
+        self.assertIn("- a case of the parser's, one line", sent)  # the spec, in the handoff
+        mt = self.meter.for_task(task, m)
+        mt.begin(2)
+        self.assertGreaterEqual(mt.room({"max_tokens": 32768}, 65_000 + len(sent.encode())), 0)
+        self.assertIsNone(task.status.get("api_stop"))
 
     def test_a_round_the_room_stopped_under_the_cap_says_too_near_with_the_rooms_worst(self):
         # #1150's review (2026-11-24): the round's stop (_ProviderWait.stop) consumed `api_stop` at
         # its tick, before stop_text wrote the notice, so the room's `worst` was never read: with
         # request_floor (no input) short of the cap, the notice said "the cap is reached" under it,
-        # and resume ran into the same refusal. Here the floor is 0 (no output price): only the
-        # request's input tips it over
+        # and resume ran into the same refusal. Here the floor without input is 0 (no output
+        # price): only the request's input tips it over
         self.cap(5)
         self.spent(4.8)
-        self.assertEqual(self.meter.request_floor(runner.models.lookup(SPEND_M)), 0)
+        self.assertEqual(self.meter.request_floor(runner.models.lookup(SPEND_M), 0), 0)
         task = self.api_task("t-near-drive", SPEND_M, "http")
         runner.drive(task)
         self.assertEqual(task.status["phase"], "stuck")
@@ -32833,6 +34115,13 @@ class ApiSpend(Base):
             self.assertEqual(e.exception.code, 3, args)
             self.assertIn("API spend today is ≈$6.", err.getvalue())
             self.assertIn("day cap", err.getvalue())
+            # #1171 (2026-11-24): the advice offered the role on the GPU as this task's remedy,
+            # but it keeps its API model: the user said yes and the retry was refused the same way
+            self.assertIn("(it resets at local midnight). Ask the user: a higher cap (wb route cap <usd>) or "
+                          "tomorrow, then try again; or the role on the GPU (wb route significant gpu) for the next "
+                          "tasks, with wb takeover t-cap or wb discard t-cap for this one (it keeps its API "
+                          "model)\n", err.getvalue())
+            self.assertNotIn("gpu), or tomorrow", err.getvalue())
             spawned.assert_not_called()
             got = store.Task("t-cap").status
             self.assertEqual({k: got.get(k) for k in before}, before, args)
@@ -35949,9 +37238,27 @@ class BusyGpu(Base):
             self.assertEqual(cli._busy_api("trivial", asked, self.repo, None),
                              why + f"every one of deepseek's {cli.models.API_PARALLEL} slots is taken")
         with mock.patch.object(cli.meter, "refusal",
-                               lambda m, role, advice=True: f"{role} role: API spend today is $5 of the $5 day cap"):
+                               lambda m, role, advice=True, tokens=None:  # round 1's input (#1173)
+                               f"{role} role: API spend today is $5 of the $5 day cap"):
             self.assertEqual(cli._busy_api("trivial", asked, self.repo, None),
                              why + "trivial role: API spend today is $5 of the $5 day cap")
+        # round 1's input (#1173's review): the start's own, else a fresh session's least
+        seen = []
+        real = cli.meter.refusal
+        with mock.patch.object(cli.meter, "refusal",
+                               lambda m, role, advice=True, tokens=None: seen.append(tokens) or real(
+                                   m, role, advice=advice, tokens=tokens)):
+            self.assertIsInstance(cli._busy_api("trivial", asked, self.repo, None, 40_123), tuple)
+            self.assertIsInstance(cli._busy_api("trivial", asked, self.repo, None), tuple)
+            big = Path(self.tmp.name) / "big-busy.md"
+            big.write_text("Make the parser take every case below.\n" + "- a case of the parser's, one line\n" * 2300)
+            code, out, err = self.wb("start", "t-busy-big", "--spec", str(big), "--repo", str(self.repo),
+                                     "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        first = runner.first_tokens(prompt=big.read_text())
+        self.assertGreater(first, cli.meter.FIRST_TOKENS)
+        self.assertEqual(seen[:2], [40_123, cli.meter.FIRST_TOKENS])
+        self.assertIn(first, seen[2:])                       # the busy start's, its spec in it
         with mock.patch.object(cli.privacy, "local_only", lambda repo, sub: str(repo)):
             self.assertEqual(cli._busy_api("trivial", asked, self.repo, None),
                              why + f"{self.repo.name} is kept local ({self.repo})")
