@@ -82,6 +82,34 @@ def model_basis(m) -> str:
     return YOURS if models.own_price(m) else CATALOG
 
 
+_LAST: dict = {}  # each model's last step row's basis, by the ledger's (path, inode, size, mtime)
+
+
+def next_basis(m) -> str:
+    """What a model's next figures will most likely be, for a line that looks ahead (wb start's
+    today, the roles' listing): the user's prices, else its last step row's in the ledger (the
+    provider's own when its provider sent one), else the catalog's. model_basis alone said
+    `catalog prices` for every DeepInfra start and role once its rows were the provider's own
+    (#1165's review, 2026-11-24)."""
+    if models.own_price(m):
+        return YOURS
+    path = ledger_path()
+    try:
+        st = os.stat(path)
+    except OSError:
+        return CATALOG
+    key = (str(path), st.st_ino, st.st_size, st.st_mtime_ns)
+    if _LAST.get("key") != key:
+        last = {}
+        for r in store.read_jsonl(path)[0]:
+            if isinstance(r, dict) and r.get("kind") == "step" and _num(r.get("usd")) \
+                    and isinstance(r.get("model"), str):
+                last[r["model"]] = PROVIDER if r.get("source") == PROVIDER else CATALOG
+        _LAST.clear()
+        _LAST.update(key=key, last=last)
+    return _LAST["last"].get(getattr(m, "id", None), CATALOG)
+
+
 def money(x: float | None, b: str = CATALOG) -> str:
     """usd(), with `≈` in front of a catalog estimate (#1135); $0 is none."""
     return ("≈" if b == CATALOG and x else "") + usd(x)
@@ -383,14 +411,15 @@ def refusal(m, role: str | None = None, advice: bool = True) -> str | None:
 
 def tail(m) -> str:
     """The start line's spend part: ` · today ≈$0.42 of $5 (catalog prices)` (`$0.42 … (your
-    prices)` when today's rows and this model are all at the user's prices, #1135), or a plan's
+    prices)` when today's rows and this model are all at the user's prices, #1135; plain `$0.42`
+    when they are all the provider's own, the model's last row too: next_basis, #1165), or a plan's
     ` · plan usage (OpenCode Go): 1.2M tokens today`; "" for a GPU model."""
     if getattr(m, "kind", "gpu") != "api":
         return ""
     t = today()
     if is_plan(m):
         return f" · plan usage ({_plan_name(m)}): {_tokens(t['plan_tok'].get(m.provider, 0))} tokens today"
-    c, b = cap(), basis([*t["bases"], model_basis(m)])
+    c, b = cap(), basis([*t["bases"], next_basis(m)])
     return (f" · today {money(t['usd'], b)}" + (f" of {usd(c)}" if c is not None else ", no day cap")
             + NOTE[b])
 
@@ -547,6 +576,10 @@ class Meter:
                 self.tok[k] = self.tok.get(k, 0) + v
             api = {"usd": None if self.plan else round(self.total, 6),
                    "metered": round(self.metered_total, 6), "source": source, "tok": dict(self.tok),
+                   # the total as OpenCode's estimate prices it, which results.api_usage compares
+                   # its export with: against `usd`, a provider's own rows came back at the
+                   # catalog's in `paid` (#1165's review, 2026-11-24)
+                   **({} if self.plan else {"at_catalog": round(self.at_catalog, 6)}),
                    "prices": basis(self.bases or {model_basis(self.m)}),
                    **({"plan": self.m.provider} if self.plan else {})}
             # written under the lock: the keyhole's thread and the runner's book at once, and a

@@ -33007,6 +33007,89 @@ class ApiSpendKeyhole(_KeyholeTest):
         self.assertEqual([round(r["usd"], 9) for r in store.read_jsonl(meter.ledger_path())[0]
                           if r["kind"] == "reconcile"], [0.3])
 
+    def _deepinfra_meter(self):
+        """A DeepInfra model at the catalog's 0.2/0.6 (its bill: 0.098/0.294) and its Meter."""
+        from workbench import meter
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {}})
+        m = self.model()
+        m.kind = "api"
+        m.config = {"cost": [{"input": 0.2, "output": 0.6, "cache": {"read": 0.006, "write": 0}}]}
+        store.write_json(self.task.dir / "task.json", {**self.task.spec, "via": "api", "model": m.id})
+        mt = meter.Meter(self.task, m)
+        mt.begin(1)
+        return m, mt
+
+    MTOK = {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000}   # 0.8 at the catalog's
+    STEP = {"cost": 0.8, "tokens": {"input": 1_000_000, "output": 1_000_000}}
+
+    def test_a_step_finish_ahead_of_its_responses_usage_leaves_paid_at_the_meter_not_the_catalogs_export(self):
+        # #1165's review (2026-11-24): OpenCode's step_finish can reach Meter.step before the
+        # keyhole's thread books that response's usage (2 of 29 DeepInfra tasks in the real ledger:
+        # a reconcile row equal to the next step row). That one catalog row made the meter's basis
+        # catalog, a gate on a meter of provider rows alone let the export through, and paid came
+        # back at the catalog's 2.4 for a ledger of 1.976
+        from workbench import results
+        m, mt = self._deepinfra_meter()
+        mt.step(self.STEP)                                       # ahead of its usage: a reconcile
+        for _ in range(3):
+            mt.on_usage({**self.MTOK, "estimated_cost": 0.392})
+            if _:
+                mt.step(self.STEP)
+        mt.end_round({"s1": {"info": {"cost": 2.4}}})           # the export: every request at 0.8
+        self.assertEqual(round(mt.total, 9), 1.976)
+        self.assertEqual(self.task.status["api"]["at_catalog"], 3.2)
+        self.task.set_status(session="ses_1")
+        with mock.patch.object(results, "_session_cost", return_value=2.4):
+            got = results.api_usage(self.task)
+        self.assertEqual({k: got[k] for k in ("cost", "source", "prices")},
+                         {"cost": 1.976, "source": "metered", "prices": "catalog"})
+        with mock.patch.object(results, "_session_cost", return_value=3.5):   # one the keyhole missed
+            self.assertEqual(results.api_usage(self.task)["cost"], round(1.976 + 0.3, 6))
+        self.task.set_status(sessions=["ses_0"])                 # one of two exported: the same
+        with mock.patch.object(results, "_session_cost", side_effect=[2.4, None]):
+            got = results.api_usage(self.task)
+        self.assertEqual((got["cost"], got["source"]), (1.976, "mixed"))
+
+    def test_a_later_rounds_new_meter_compares_the_export_with_the_ledger_at_catalog_prices(self):
+        # #1165's review: each round after the first runs in a new runner, so a new Meter seeds
+        # at_catalog from the ledger; seeded from the rows' usd, every later round's end booked
+        # the export's catalog figure back on top of DeepInfra's own
+        from workbench import meter
+        m, mt = self._deepinfra_meter()
+        mt.on_usage({**self.MTOK, "estimated_cost": 0.392})
+        again = meter.Meter(self.task, m)                        # round 2's runner
+        again.begin(2)
+        self.assertEqual((again.total, again.at_catalog), (0.392, 0.8))
+        again.end_round({"s1": {"info": {"cost": 0.8}}})
+        self.assertEqual([r["kind"] for r in store.read_jsonl(meter.ledger_path())[0]], ["step"])
+
+    def test_a_providers_estimated_cost_of_0_for_priced_tokens_books_the_metered_figure_never_0(self):
+        # #1165: a 0 from the provider for tokens the catalog prices is no figure (never a false
+        # $0 against the day cap); a usage.cost of 0 beside a real estimated_cost is no figure
+        # either: the catalog's then, as before estimated_cost was read
+        from workbench import meter
+        m, mt = self._deepinfra_meter()
+        mt.on_usage({**self.MTOK, "estimated_cost": 0})
+        mt.on_usage({**self.MTOK, "cost": 0, "estimated_cost": 0.392})
+        self.assertEqual([(r["usd"], r["source"]) for r in store.read_jsonl(meter.ledger_path())[0]],
+                         [(0.8, "keyhole")] * 2)
+
+    def test_the_start_line_and_the_roles_row_say_the_providers_own_figures_once_its_rows_are(self):
+        # #1165's review (2026-11-24): with today all DeepInfra's own rows, wb start's line said
+        # `(catalog prices)` and the roles' row `catalog prices`: model_basis knew only the
+        # catalog's and the user's
+        from workbench import meter
+        m, mt = self._deepinfra_meter()
+        with mock.patch.object(meter.models, "own_price", return_value=None):
+            self.assertEqual(cli._prices_of(m, ahead=True), "catalog prices")   # nothing booked yet
+            mt.on_usage({**self.MTOK, "estimated_cost": 0.392})
+            self.assertEqual(meter.tail(m), " · today $0.39 of $100")
+            self.assertEqual(cli._prices_of(m, ahead=True), "")
+            self.assertEqual(cli._prices_of(m), "catalog prices")        # wb models --api's rate
+            mt.on_usage(dict(self.MTOK))                                  # no figure: the catalog's
+            self.assertEqual(meter.tail(m), " · today ≈$1.19 of $100 (catalog prices)")
+            self.assertEqual(cli._prices_of(m, ahead=True), "catalog prices")
+
     @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
     def test_real_opencode_takes_the_spend_refusal_at_once_without_a_retry(self):
         # the review of #1019: the spike checked 401, 402 and 403 for no retry, never the 400 the

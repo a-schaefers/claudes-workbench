@@ -4,8 +4,6 @@ from statistics import median
 
 from . import context, gitops, meter, skills, spend, stats, store
 
-PROVIDER = meter.PROVIDER  # _api_usage's local `meter` shadows the module there
-
 
 def step(task: store.Task, landed: bool, since: str = "HEAD", gaps=None) -> dict:
     """The step closing now (committed by wb next or accept, or dropped): its size and how it
@@ -253,6 +251,16 @@ def spend_so_far(task: store.Task) -> float | None:
     return live_spend(str(task.spec.get("model") or ""), task.status, step_cost(_step_rows(task)))
 
 
+def at_catalog(st: dict) -> float | None:
+    """The runner's meter at the prices OpenCode's estimate uses (status `api.at_catalog`: a
+    provider's own row at its catalog figure, #1165), to compare the two; a status from before it,
+    the meter itself; None without a meter."""
+    v = st.get("api")
+    if isinstance(v, dict) and _num(v.get("at_catalog")):
+        return float(v["at_catalog"])
+    return metered(st)
+
+
 def live_basis(st: dict) -> str:
     """The basis of a task's dollars so far (meter.basis): the runner's meter's status `api.prices`,
     else the catalog's (#1135)."""
@@ -303,9 +311,10 @@ def api_usage(task: store.Task) -> dict | None:
     next each start one), and `backend`, OpenRouter's served provider (status `served.by`, the
     keyhole's), when known, and `served_model`, the model the response named when it isn't the
     one asked for (`served_model`). `source`: "opencode" (OpenCode's own cost, from every session's
-    export), "mixed" (the sessions that exported, the rest filled from the meter), "metered"
-    (the runner's meter when every row it booked is the provider's own figure, #1165, or when it
-    counted more than every export: the day cap's figure, #1019; else,
+    export, or the meter plus what the export says past it at the same prices: status
+    `api.at_catalog`, a provider's own rows at their catalog figure, #1165), "mixed" (the sessions
+    that exported, the rest filled from the meter), "metered" (the runner's meter when every
+    export at the same prices says no more: the day cap's figure, #1019; else,
     with no full export, the runner's meter or the step events' cost: a floor, both miss
     OpenCode's title and compaction requests), "plan" (a quota: no dollars; the meter's status
     `api.plan` too), "none" (nothing sent or billed: $0), "unknown" (no price anywhere),
@@ -359,11 +368,6 @@ def _api_usage(task: store.Task) -> dict | None:
                                  and booked["plan"] else None)) is not None:
         return {**out, "source": "plan", "plan": plan}
     price = catalog_price(model)
-    # every row the meter booked is the provider's own figure (DeepInfra's estimated_cost,
-    # OpenRouter's cost): that, over OpenCode's export at catalog prices, which ran about 2x
-    # DeepInfra's bill in every closed task's `paid` (#1165, 2026-11-24)
-    if live_basis(st) == PROVIDER and (live := metered(st)) is not None:
-        return {**out, "cost": round(live, 6), "source": "metered"}
     cur = st.get("session")
     sids = list(dict.fromkeys([*(s for s in st.get("sessions") or [] if s), *([cur] if cur else [])]))
     costs = []
@@ -377,25 +381,38 @@ def _api_usage(task: store.Task) -> dict | None:
     if said and len(said) == len(costs) and (sum(said) > 0 or price == 0):
         # never below the runner's meter, the ledger the day cap counted: it adds the provider's
         # own usage.cost and answers a steer or stop cut short, which OpenCode doesn't bill, and the
-        # row once said $0.30 where the ledger and the round report said $0.50 (wave 2's review)
-        if (live := metered(st)) is not None and live > sum(said):
+        # row once said $0.30 where the ledger and the round report said $0.50 (wave 2's review).
+        # The export is OpenCode's catalog estimate, so it tops the meter up only past the meter at
+        # the same prices (status `api.at_catalog`: a provider's own row at its catalog figure).
+        # Against the meter's total it brought DeepInfra's 2x back into `paid`, every time and,
+        # once a gate took a meter of provider rows alone, whenever one catalog `reconcile` row (a
+        # step_finish ahead of its response's usage) joined them (#1165, 2026-11-24)
+        if (live := metered(st)) is not None:
+            cat = at_catalog(st)
+            extra = sum(said) - cat
+            # with no provider row (cat is the meter) this is the export, as ever, unless the meter
+            # counted more
+            if extra > meter.EPS or (extra >= 0 and abs(live - cat) <= meter.EPS):
+                return {**out, "cost": round(live + max(0.0, extra), 6), "source": "opencode"}
             return {**out, "cost": round(live, 6), "source": "metered"}
         return {**out, "cost": round(sum(said), 6), "source": "opencode"}
     # the meter: the runner's, else the step events' cost (OpenCode's per step, but no step
     # carries its title or compaction requests, so a floor like the meter and labelled as one,
     # #1022's review). Both are the whole task's, every session's.
-    meter = metered(st)
-    if meter is None and (live := [e["cost"] for e in steps if _num(e.get("cost"))]) and sum(live) > 0:
-        meter = float(sum(live))
-    if said and len(said) < len(costs) and meter is not None:
+    floor = metered(st)
+    if floor is None and (live := [e["cost"] for e in steps if _num(e.get("cost"))]) and sum(live) > 0:
+        floor = float(sum(live))
+    if said and len(said) < len(costs) and floor is not None:
         # some sessions exported, some didn't (the engineer's call, #1022): the exported ones'
         # own cost, the rest filled from the meter, the part of it those don't account for.
-        # Dropping the whole sum for one failed export threw away the sessions that said theirs
-        total = sum(said) + max(0.0, meter - sum(said))
+        # Dropping the whole sum for one failed export threw away the sessions that said theirs.
+        # Compared at the same prices, as above (the step events' sum is OpenCode's own, #1165)
+        cat = at_catalog(st)
+        total = floor + max(0.0, sum(said) - (floor if cat is None else cat))
         if total > 0:
             return {**out, "cost": round(total, 6), "source": "mixed"}
-    if meter is not None:
-        return {**out, "cost": round(meter, 6), "source": "metered"}
+    if floor is not None:
+        return {**out, "cost": round(floor, 6), "source": "metered"}
     if price == 0:
         return {**out, "cost": 0.0, "source": "opencode"}
     # nothing came back to bill: no session cost above 0, no meter, no token and no response that
