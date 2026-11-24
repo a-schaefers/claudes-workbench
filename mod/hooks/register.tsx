@@ -3220,8 +3220,9 @@ async function roleRows(kit: Row, $: any, view: WbPane, role: PaneRoles) {
   }
   gpu.push(...mediaRows(kit, $, view, m)) // Images and Audio, after the models (#1047)
   // Ollama cloud's login runs tasks as a stored key does: NO_PROVIDER's /connect was no fix for it (#1077's review, 2026-11-23);
-  // so does a key the keyhole reads from the environment (`runs`, #1189)
-  const stored = Object.values(r.providers ?? {}).some(p => p.key === 'stored' || p.key === 'ollama' || p.runs === true)
+  // so does a key the keyhole reads from the environment (`runs`, #1189), and GitHub Copilot's
+  // sign-in, which the keyhole holds as a key (#1191)
+  const stored = Object.values(r.providers ?? {}).some(p => p.key === 'stored' || p.key === 'ollama' || p.key === 'copilot' || p.runs === true)
   const anyApi = roles.some(x => !!x.row.api)
   const api: any[] = []
   if (!stored && !anyApi) api.push(dim('api-none', NO_PROVIDER))

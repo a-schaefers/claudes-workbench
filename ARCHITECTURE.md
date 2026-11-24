@@ -544,7 +544,7 @@ by_provider: {p: $}}`); api_totals, each of its providers, `bench` and `spent` c
 **What an API task cost** (#1022, `results.api_usage`, at its close; `bench.paid` for a replay).
 `kind` is task.json `via` (`results.task_kind`: anything but `"api"` is GPU), `provider` task.json's
 or the id before its first `/`. Plan usage first (`_plan`): a model of `PLAN_PROVIDERS`
-(`opencode-go`, the meter's list, `meter.PLAN_PROVIDERS`) or one the catalog flags `cloud` (an Ollama cloud model, #1013; read through
+(`opencode-go`, `github-copilot`, the meter's list, `meter.PLAN_PROVIDERS`) or one the catalog flags `cloud` (an Ollama cloud model, #1013; read through
 `models.lookup(id, cached=True)`, never the name: any provider's model may end in `-cloud`) is
 `source: "plan"`, `cost: null`, `plan: <provider>`. Else the sessions, every id in status `sessions`
 plus `session` (handovers, revives and `wb next` each start one), each exported
@@ -837,7 +837,8 @@ parallel add one) and raises `checkin`: `API spend today has passed half the day
 (<task> ≈$0.88 so far; catalog prices). Nothing to do unless the user wants to change it.` Once a day across every
 task.
 
-**Plans** (`meter.is_plan`: `opencode-go/*`, an Ollama cloud model): a quota, not dollars. Their
+**Plans** (`meter.is_plan`: `opencode-go/*`, `github-copilot/*` (#1191: premium requests, though
+the catalog prices its models), an Ollama cloud model): a quota, not dollars. Their
 rows have `usd: null`, `plan: "<provider>"` and the tokens; they never count against the cap, never
 stop for `spend`, never reconcile, and `today()["plan_tok"]` sums them. Their quota errors are #1013's
 and #1020's.
@@ -2291,6 +2292,57 @@ one, `key: none`, or an Ollama cloud model) gets no file either: `write_catalog`
 `OPENCODE_MODELS_PATH` go with `keyhole_of(task)`, and the variants with the keyhole overlay, so
 such a model newer than the binary is still "Model unavailable" to the agent.
 
+**GitHub Copilot's sign-in** (#1191). Copilot has no API key: OpenCode 2.3.2's device login
+(`github-copilot.ts`) stores the GitHub token as both `access` and `refresh` with `expires: 0`,
+which `Credential.expiring` never refreshes, so the token never rotates and the keyhole holds it as
+it holds a key. `load_key("github-copilot")` (`_copilot_key`) takes the first `auth export` row,
+the active one, as OpenCode itself does: an OAuth one only with `expires: 0` and a printable
+`access` (else "github-copilot's sign-in expires and rotates its token …" or "… holds no token",
+each with /connect to sign in again, never an API key: `keyhole_failure` adds no remedy to a
+Copilot line), a key as a key, an external one refused; the `Key` carries the sign-in's
+`enterpriseUrl` and `apiEndpoint` (`meta`, never a secret). `start` then asks GitHub once, outside
+the lane, for the account's own endpoint (`copilot_endpoint`: `GET
+https://api.github.com/copilot_internal/user`, or `api.<enterprise domain>` for a GitHub Enterprise
+sign-in, `copilot_user_url`, with the token, `X-GitHub-Api-Version: 2025-04-01`, 5 s, the plugin's
+own lookup; `endpoints.api` when it is an https root, `_https_root`, else the stored `apiEndpoint`,
+else the catalog's base; `chat_enabled: false` refuses: "GitHub says this account has no Copilot
+chat"), and the upstream is that root plus the catalog base's path (`copilot_upstream`: `/v1` for a
+model on Copilot's Anthropic Messages route, none for its OpenAI ones), never from a request; the
+start line adds `(the account's endpoint, <host>)`. Every Copilot route takes `Authorization:
+Bearer` (the plugin's `applyHeaders` sets it on the Messages route too), so the protocol is
+`bearer` whatever the package. The agent's OpenCode gets no Copilot credential, only the layer's
+base and token: its Copilot plugin adds Copilot's headers (`X-Initiator`, `Openai-Intent`,
+`X-Interaction-Type`, `X-GitHub-Api-Version`) by provider, whatever the credential, and with none it
+never asks GitHub, `/models` or the Auto router (`POST /auto`), so the keyhole learns no new path.
+The issue's design planted a fake credential in the task's home (`opencode auth import`) for the
+plugin to engage; checked on 2.3.2 (`RealOpenCodeAPI`), the plugin engages without one, and a
+planted one would send the token to `api.github.com` on each of its refreshes and need replacing on
+every runner (a new token and port). The task's catalog holds one model, so OpenCode gives its
+package to the provider and none to the model (`models-dev.ts` `modelInfo`), and the plugin, which
+routes by the model's own package, sent a Claude model to `/chat/completions`: `keyhole_overlay`
+says a Copilot model's package as V1 `provider.npm` on its entry (`keyhole_v2`: V2 `package`).
+Copilot's Auto model (`github-copilot/auto`, `models.COPILOT_AUTO`) picks another model each
+session, so it is refused at start and in status (`models.COPILOT_AUTO_WHY`). Usage is a plan
+(`meter.PLAN_PROVIDERS`): Copilot counts premium requests, and the catalog's API prices for its
+models (2.3.2 bundles $2/$10 for its Claude and GPT ones) would have booked dollars never paid
+against the day cap. A 403 or 429 whose body says the premium requests are spent
+(`keyhole.COPILOT_QUOTA`: `quota_exceeded`, "premium request", "allowance"; a guess from Copilot's
+docs, not seen in a real answer) is `quota`, as a 402 is. Copilot's terms for a wrapper's
+detached use are the user's to read; wb asks nothing more than OpenCode's own plugin does.
+
+*Other sign-ins stay refused* (#1191). ChatGPT's (`openai`) and the OpenCode Console's (`opencode`,
+`opencode-go`) rotate their refresh tokens, and OpenCode refreshes only inside
+`connection.resolve` under its own lock, which no command exposes (`auth export` reads without
+refreshing): a copy wb refreshed would sign the user's own OpenCode out. ChatGPT also wants zstd
+bodies past about 1 MiB, which the standard library lacks before 3.14, and the Console's models
+speak SystemOne, which isn't in `PACKAGES`. The fix belongs upstream (an `opencode auth token
+<integration>` that resolves under that lock). Meanwhile their lines name the cause
+(`models.signin(pid)`: "openai is signed in with ChatGPT: its tokens rotate, and a copy wb refreshed
+would sign your own OpenCode out …; an OpenAI API key through /connect works"; "… the OpenCode
+Console: its tokens rotate, and the keyhole doesn't speak its API (SystemOne) yet …") in
+`load_key`, status, `wb setup` and the pane; any other provider's OAuth login keeps the generic
+line.
+
 **The hold** (#1020). `read_error` sorts an upstream error: 402, or a 429/403 whose body says the
 balance or plan is spent (`QUOTA`: `insufficient_quota`, OpenRouter's `limit_source`, a 5-hour or
 weekly limit), or a 400, 403 or 429 in Anthropic's out-of-credit words (`CREDIT`: "Your credit
@@ -3276,7 +3328,7 @@ read as a wrong id, Claude hunted for the "right" one).
   holds for a layer or a free model, `settings.apiKey`), `free` (`opencode/*-free`, or every price 0; only marked here). `key`, the source
   (never the key): a config `apiKey` first (`env:<NAME>` for a lone `{env:NAME}`, else `config`;
   a lone `{env:NAME}` in `options` beside a stored key is `stored`, #1075: OpenCode sends the stored
-  one, and read as `env:` it was told to `/connect` again, which changed nothing), then auth list's `credential` with `method: "key"` (`stored`), another credential (`oauth`), an
+  one, and read as `env:` it was told to `/connect` again, which changed nothing), then auth list's `credential` with `method: "key"` (`stored`), GitHub Copilot's other credential (`copilot`, its sign-in held as a key: `HELD_KEYS` is `stored` and `copilot`, #1191), another credential (`oauth`), an
   `env` connection (`env:<NAME>`); a signing provider (`SIGNING`: Bedrock, Vertex) is `signing`;
   `ollama`; else `""` (`_key_source`, the provider's); a keyless free model is `none`, its own: a
   provider holds free and paid models alike, and one source per provider made every sibling `none`.
@@ -3342,6 +3394,8 @@ read as a wrong id, Claude hunted for the "right" one).
   | a package the keyhole can't carry (`keyhole_refusal`, before the key, #1066) | `can't run: the keyhole doesn't speak <Provider>'s API (<package>), so wb can't hold its key outside the lane: a model of another provider can run` | no |
   | `env:NAME` the keyhole can't read (`models.env_why`, `keyhole.env_source`, #1189: unset here, passed to agents, a name agents keep, a header or V2 one) | `can't run: needs a key wb can hold outside the lane: <its refusal, with its fix>` (`remedy` gives none) | no |
   | `env:NAME` it can (set in this process's environment, which the runner wb start spawns inherits, and dropped from the agent's) | runs as a stored key does: on to `api-health.json` | |
+  | Copilot's Auto model (`keyhole_refusal`, #1191) | `COPILOT_AUTO_WHY`: `can't run: Copilot's Auto model picks another model each session, and a task keeps to one: pick a Copilot model by name` | no |
+  | `oauth` of ChatGPT (`openai`) or the OpenCode Console (`opencode`, `opencode-go`) (`signin`, #1191) | `can't run: needs a key wb can hold outside the lane (<Provider> is signed in with ChatGPT: its tokens rotate, and a copy wb refreshed would sign your own OpenCode out): an OpenAI API key through /connect works` (the Console's: `… the OpenCode Console: its tokens rotate, and the keyhole doesn't speak its API (SystemOne) yet): a model of another provider can run`) | no |
   | `oauth`, `config`, `signing` | `can't run: needs a key wb can hold outside the lane (<Provider>'s is an OAuth login / written in <file> / a cloud login that signs each request): store an API key with /connect` (`config`: `remove its apiKey there, and store the key with /connect`, remedy `remove options.apiKey for <Provider> from <file>, …`, #1075: `/connect` alone changed nothing) | no |
   | `no_credit` | `out of credit or quota at <Provider> (<line, redacted>): top it up, or wait for the plan's reset (wb asks again from HH:MM); wb never switches models` | no |
   | `rate_limited` | `rate-limited by <Provider> until HH:MM` | yes |
@@ -3712,7 +3766,7 @@ API role its id, `ready` or status's `why` (or `not in OpenCode's catalog now`),
 under it the model's `slice:` (`router.slice`, as `wb start` prints it: plan mode sizes a step to it
 before any start, #1131); a
 routes.json that can't be read is one line, `roles: routes.json can't be read: wb route sets them
-again`; then `keys:` one per provider with a key source (`stored`, `Ollama's login`, `key from
+again`; then `keys:` one per provider with a key source (`stored`, `Copilot sign-in` (#1191), `Ollama's login`, `key from
 $VAR` (#1189; `: can't run: <models.env_why>` when the keyhole can't read it), or `OAuth login` / `in a
 config file` / `cloud signing`: `can't run, needs a key wb can hold outside the lane`); `catalog:` one count per provider, never the ids (OpenRouter alone lists
 300+), a provider's free models noted `free: the provider may keep or train on your code`
@@ -4099,8 +4153,10 @@ GPU; wb route all both goes back to each role's own below)`); `--json` the norma
 `gpu_found`, and for the pane (#1023, `cli._route_pane`) `spend_today` (`{usd, prices, by_provider}`, today's
 `step` and `reconcile` rows of the day ledger, spend-api.jsonl; `usd` is `meter.today()`'s, the sum the
 cap is checked against) and `providers` (`{<id>: {name, key,
-why?, runs?}}` from the cached catalog: `key` `stored`, `ollama`, `env`, `oauth` or `none`, with the why for any but
-stored; an `env` key the keyhole can read (`models.env_why` empty, #1189) has why `key from $VAR` and
+why?, runs?}}` from the cached catalog: `key` `stored`, `copilot`, `ollama`, `env`, `oauth` or `none`, with the why for any but
+stored (a ChatGPT or OpenCode Console sign-in's says its own cause, `models.signin`; Copilot's,
+`copilot` with `signed in to Copilot in OpenCode`, which the Settings tab counts connected as it
+does `stored`, #1191); an `env` key the keyhole can read (`models.env_why` empty, #1189) has why `key from $VAR` and
 `runs: true`, which the Settings tab counts connected as it does `stored`, one it can't `can't run: <env_why>`; a stored key on a package the keyhole can't carry is `none` with `models.unspoken_why`'s
 line, which status says too: it read `Google (key stored)` while nothing could run on it, #1066;
 Ollama's, `ollama` with `signed in through Ollama: its cloud models need no key here`, #1077,
@@ -4119,9 +4175,10 @@ The changes (each one exit 3 with one line when refused, writing nothing):
   on API or the busy opt-in could send one there (`the day cap stays while <roles> can spend on API`).
 - `wb route busy wait|api` sets the busy opt-in (*When the GPU is busy*).
 - An API model is taken by its exact id only (`models.lookup`: fragments never match an API id,
-  #1013), of kind `api`, with a key a task runs with (`cli._runs_held`: `models.key_runs`, `key ==
-  "stored"`, /connect saved one, which the keyhole holds outside the lane, or `env:VAR` the keyhole
-  reads from the runner's environment, #1189; or an Ollama cloud model's `ollama`, the
+  #1013), of kind `api`, with a key a task runs with (`cli._runs_held`: `models.key_runs`, `key` in
+  `models.HELD_KEYS`, `stored` (/connect saved one) or `copilot` (GitHub Copilot's sign-in, #1191),
+  which the keyhole holds outside the lane, or `env:VAR` the keyhole reads from the runner's
+  environment, #1189; or an Ollama cloud model's `ollama`, the
   login this machine's Ollama holds, which needs no keyhole, #1077), else refused with discovery's why (`cli._route_api`): `not in
   OpenCode's catalog: wb models lists the API models`, a GPU id (`… is a GPU model: wb route <role>
   --gpu <id> pins it`), no key (`… can't be a role's model: no key for <p>: run `` `opencode auth
@@ -6200,7 +6257,7 @@ $WB_HOME (~/.local/state/workbench)
   hosted.reading                 the mtime of the last background catalog read `wb route --json` started (cli._read_catalog_later, #1069)
   hosted.json                    API models (models.hosted, #1013): {v: 1, ts, stamp: {opencode: [[path, size, mtime_ns]…],
                                  configs: [[path, mtime_ns]…], content: crc32}, error ("" or the failed read's first line),
-                                 providers: {<pid>: {name, key (its source: stored|oauth|env:<NAME>|config|signing|ollama|""),
+                                 providers: {<pid>: {name, key (its source: stored|copilot|oauth|env:<NAME>|config|signing|ollama|""),
                                  package, api (its base URL)}}, models: {<id>: {name (at the provider: modelID), limit, cost, variants,
                                  capabilities, reasoning, tool_call, family, status, free, cloud?, and from the catalog (catalog: true)
                                  type, title, released (ms), compatibility, package, api, overlay (bool: headers or a body of its own,
@@ -6559,9 +6616,13 @@ model server, a registered model, the API keys, Landlock). Its API keys line (#1
 `cli.api_key_lines`, from `models.connected()`: `opencode auth list` in wb's environment, never a
 lane, never a secret): `ok  API keys: deepseek (stored via /connect); no role uses one yet` (or
 `trivial and significant use it`; a key the keyhole reads from the environment, `models.key_runs`, is
-`deepseek (key from $DEEPSEEK_API_KEY)` on the same line, #1189), a `--` line for an environment key it
+`deepseek (key from $DEEPSEEK_API_KEY)` on the same line, #1189; GitHub Copilot's sign-in there too,
+`github-copilot (signed in to Copilot)`, #1191: nothing to set up), a `--` line for an environment key it
 can't read (`xai's key is in $XAI_API_KEY, which wb can't use: <models.env_why>`, its fix in it), a
-`--` line for a key wb can't hold (`anthropic is signed in with OAuth: …`), one for each key written in a config file (`literal's key is written in <file>: remove its
+`--` line for a key wb can't hold (`anthropic is signed in with OAuth: …`; ChatGPT's and the OpenCode
+Console's with their own cause, `openai is signed in with ChatGPT: its tokens rotate, and a copy wb
+refreshed would sign your own OpenCode out, so wb can't hold it outside the lane; an OpenAI API key
+through /connect works`), one for each key written in a config file (`literal's key is written in <file>: remove its
 apiKey there, and store the key with /connect`, as status says it: "/connect stores a key it can" told a
 user who had, #1075), a `--` line for a stored key on a package the keyhole can't carry (`google
 (@opencode/ai/providers/google): the keyhole doesn't speak its API, so wb can't run its models;
@@ -6976,7 +7037,17 @@ environment (`FAKE_RUNS`' `env_names`), its layer, its files or runner.log, and 
 through. Its
 `test_the_tasks_own_catalog_*` (#1015) takes real model.list entries (`models.model_list`, as every real test reads the catalog: `ApiHarness.real_list`) through `hosted()`,
 `catalog_doc` and the runner's overlay: real OpenCode reads them back field for field (the `limit` capped), and a model
-the binary lacks fails without the file and runs through the keyhole with it.
+the binary lacks fails without the file and runs through the keyhole with it. `CopilotSignIn`
+(#1191, sharing `_KeyholeTest`; `_CopilotUser` plays GitHub's copilot_internal/user) holds a
+Copilot device sign-in (`expires: 0`) as a key with its metadata, refuses one that rotates or holds
+no token, takes the active one, says ChatGPT's and the OpenCode Console's own cause, asks GitHub
+for the account's endpoint (else the stored one), posts Bearer to it on the Messages route, says
+the model's package in the layer, refuses the Auto model, reads spent premium requests as quota and
+books Copilot as a plan; `RealOpenCodeAPI`'s Copilot test runs real OpenCode on one bundled Copilot
+model per route (Messages under `/v1`, Chat Completions, Responses) through the task's own catalog
+and the runner's overlay, with no Copilot credential: one request upstream at the route's path,
+Bearer with the canary, the plugin's headers present. `_Upstream`'s Responses delta carries its
+`item_id`, `output_index` and `content_index`, which 2.3.2 requires.
 
 **API tasks in the tests** (`ApiTasks` in test_workbench.py, `ApiLease` in test_gpu.py, sharing
 `_ApiTask`, #1015). `_ApiTask.start_api` is `run_wb("start", …, "--model", FLASH)` in process,
@@ -7006,7 +7077,8 @@ toast, and not again once linked; the clone found where the launcher looks, a `w
 `WB_BIN` first; a failing setup's BAD line, a refused reload; a scripted session runs none; the
 firstrun note only on a fresh install with no task given, the mode on or not.
 **The first run for API roles** (`FirstRunApi`, #1024): `wb setup`'s API keys line for a stored key
-(and which roles use it, the Agents switch heeded), an environment key, an OAuth login, several
+(and which roles use it, the Agents switch heeded), an environment key, an OAuth login, a Copilot
+sign-in (`ok`, the pane's `copilot`, status available) and a ChatGPT one (its cause, #1191), several
 providers and none; the GPU lines optional only with a stored key and no local model; several roles in
 one `wb route` (one line, one approval, all or nothing, the refusal naming the pair, OpenRouter set
 alone, `--order` refused beside pairs, a kept OpenRouter model with no backends refused); the skill's
@@ -7160,12 +7232,17 @@ doc needs its own `!/` line).
   `may_come_up` (*API models*). A `hosted.json` key → `_build_hosted`, `_api_model`, *Files and formats*; what a
   catalog read depends on → `_stamp`.
 - **What the keyhole can hold** (`keyhole.load_key`'s refusals: an OAuth login, an external credential, request
-  signing, an environment key `keyhole.env_refusal` refuses, or a key written in a config) → `Model.key`'s states,
-  `models.status`'s and `cli._route_api`'s `can't run: needs a key wb can hold outside the lane`, never "available".
+  signing, an environment key `keyhole.env_refusal` refuses, or a key written in a config; GitHub Copilot's
+  sign-in held, #1191) → `Model.key`'s states (`models.HELD_KEYS`), `models.status`'s and `cli._route_api`'s
+  `can't run: needs a key wb can hold outside the lane`, never "available"; `cli._runs_held`, `api_key_lines`,
+  `KEY_STATES`, the router's and wb setup's checks, and the mod's Settings tab (`copilot` counts connected) together.
   An environment key's rule (#1189) is one function, `keyhole.env_source`, which `models.env_why` and
   `models.key_runs` ask for status, wb setup, wb models, wb scout, `router.api_choice`, `cli._runs_held` and the
   pane's `providers` (`runs`, which the mod's Settings tab counts connected): a change to it changes them all; and
   `runner.env_kept` (what the agent's environment keeps) is what it checks against.
+- **Copilot's plugin** (OpenCode's `github-copilot.ts`: its device login's `expires: 0`, its headers by
+  provider, its routing by the model's own package) → `keyhole._copilot_key`, `copilot_endpoint`'s lookup and
+  `runner.keyhole_overlay`'s `npm`, checked by `RealOpenCodeAPI`'s Copilot test.
 - **An OpenCode fact the API harness copies** (model.list through `serve --stdio`, `auth list`, `-m` ids and variants, `part.cost`,
   the `retry`/`error` shapes, each protocol's path and key header) → `tests/fake_opencode.py`, `tests/capture_llm.py`
   and `ApiHarness`'s `test_real_opencode_*` together (*The tests*); its `max_tokens` cap and compaction point, `ApiSizing`'s.

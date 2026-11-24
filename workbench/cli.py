@@ -3084,7 +3084,8 @@ def _runs_held(m: models.Model, seen: dict | None = None) -> bool:
     holds it outside the lane), or in a variable of this environment the keyhole reads and the
     agent never gets (models.key_runs, #1189), or an Ollama cloud model's, which this machine's
     Ollama holds and no keyhole needs (runner.needs_keyhole). Refused, doctor's "set a role to use
-    it" led nowhere, with a /connect that changes nothing for Ollama (#1077, 2026-11-23).
+    it" led nowhere, with a /connect that changes nothing for Ollama (#1077, 2026-11-23). GitHub
+    Copilot's sign-in is held as a key (models.HELD_KEYS, in key_runs: #1191).
     ``seen``: {provider: answer} kept over a pass through the catalog (one config read each)."""
     if m.cloud and m.key == "ollama":
         return True
@@ -3291,7 +3292,8 @@ def _route_show(as_json: bool) -> None:
 
 # a provider's key as the pane says it (#1023): only a stored one runs (the keyhole holds it)
 # a key a task runs with too, as the Settings tab counts one connected (#1077's review, 2026-11-23)
-KEY_STATES = {"stored": "stored", "oauth": "oauth", "signing": "oauth", "ollama": "ollama", "": "none"}
+KEY_STATES = {"stored": "stored", "copilot": "copilot", "oauth": "oauth", "signing": "oauth",
+              "ollama": "ollama", "": "none"}
 KEY_HELD = {"oauth": "an OAuth login", "signing": "a cloud login that signs each request",
             "config": "written in OpenCode's config", "ollama": "Ollama's own login", "": "none stored"}
 
@@ -3345,7 +3347,9 @@ def _route_pane() -> dict:
     for pid, p in (doc.get("providers") or {}).items():
         raw, name, pkg = str(p.get("key") or ""), str(p.get("name") or pid), str(p.get("package") or "")
         key = "env" if raw.startswith("env:") else KEY_STATES.get(raw, "none")
-        held = f"key in {raw[4:]}" if key == "env" else KEY_HELD.get(raw, raw)
+        own = models.signin(pid) if raw == "oauth" else None  # the provider's own cause (#1191)
+        held = f"key in {raw[4:]}" if key == "env" else f"signed in with {own[0]}: {own[1]}" if own else \
+            KEY_HELD.get(raw, raw)
         # a key the keyhole reads from this environment runs as a stored one (#1189): `runs`
         # tells the pane so, `why` where it comes from, or why it can't
         env_why = models.env_why(pid, raw[4:]) if key == "env" else ""
@@ -3365,6 +3369,8 @@ def _route_pane() -> dict:
                          # its cloud models run through this machine's Ollama (#1077)
                          {"why": "signed in through Ollama: its cloud models need no key here"}
                          if raw == "ollama" else
+                         # Copilot's sign-in runs as a stored key does (#1191)
+                         {"why": "signed in to Copilot in OpenCode"} if raw == "copilot" else
                          {"why": f"can't run: needs a key wb can hold outside the lane ({held})" if raw
                           else "no key: /connect in OpenCode adds one"})}
     return {"spend_today": _spend_today(), "providers": provs}
@@ -4615,6 +4621,8 @@ def _key_held(key: str, pid: str = "") -> str:
     in the environment says its variable, and why it can't run when it can't (#1189)."""
     if key == "stored":
         return "stored"
+    if key == "copilot":  # held as a key (#1191)
+        return "Copilot sign-in"
     if key == "ollama":
         return "Ollama's login"
     if key.startswith("env:"):
@@ -5177,7 +5185,7 @@ def scout_api_lines() -> list[str]:
             key = ms[0].key
             out.append(f"  {pid}: {len(tools)}" + (f", {free} of them free" if free else "")
                        + (f", {unsaid} the catalog doesn't say" if unsaid else "")
-                       + ("" if key in ("stored", "none", "ollama") or any(m.free for m in ms)
+                       + ("" if key in ("stored", "copilot", "none", "ollama") or any(m.free for m in ms)
                           or models.key_runs(pid, key)  # a variable the keyhole reads (#1189)
                           else f" (can't run: {models.env_why(pid, key[4:])})" if key.startswith("env:")
                           else f" (can't run: {_held_elsewhere(pid, key) if key else 'no key'})"))
@@ -6527,7 +6535,9 @@ NO_KEY = ("--  no API key connected (optional: /connect in OpenCode adds a provi
 def _held_elsewhere(pid: str, key: str) -> str:
     """A provider whose key the keyhole can't hold, as wb setup says it (decision 6); one in the
     environment has its own line (api_key_lines, #1189)."""
-    return {"oauth": f"{pid} is signed in with OAuth", "signing": f"{pid} signs with a cloud login",
+    own = models.signin(pid)  # a ChatGPT or OpenCode Console sign-in (#1191)
+    return {"oauth": f"{pid} is signed in with {own[0] if own else 'OAuth'}",
+            "signing": f"{pid} signs with a cloud login",
             "config": f"{pid}'s key is written in {models._key_file(pid)}"}.get(key, f"{pid}'s key is {key}")
 
 
@@ -6559,7 +6569,8 @@ def api_key_lines(keys: dict | None) -> list[str]:
     if not keys:
         return need or [NO_KEY]
     out = []
-    # a key in this environment's variable that the keyhole reads runs as a stored one (#1189)
+    # a key in this environment's variable that the keyhole reads runs as a stored one (#1189);
+    # Copilot's sign-in is held as a key (#1191): `ok` beside the stored ones
     stored = [p for p, k in keys.items() if models.key_runs(p, k["key"])]
     # a stored key on a package the keyhole can't carry read `ok`, and every task failed (#1066)
     odd = models.unspoken_providers(stored)
@@ -6568,8 +6579,8 @@ def api_key_lines(keys: dict | None) -> list[str]:
         said = ("" if doc is None else "; no role uses one yet" if not used else
                 f"; {' and '.join(used)} use{'s' if len(used) == 1 else ''} it" if len(stored) == 1 else
                 "; " + ", ".join(f"{r} uses {uses[r]}" for r in used))
-        held = {p: "stored via /connect" if keys[p]["key"] == "stored" else f"key from ${keys[p]['key'][4:]}"
-                for p in stored}
+        held = {p: "stored via /connect" if keys[p]["key"] == "stored" else "signed in to Copilot"
+                if keys[p]["key"] == "copilot" else f"key from ${keys[p]['key'][4:]}" for p in stored}
         out.append(f"ok  API keys: {', '.join(f'{p} ({held[p]})' for p in stored)}{said}")
     other = [(p, k["key"]) for p, k in keys.items() if p not in stored and p not in odd]
     # a variable the keyhole can't read from (one agents get too, unset, or named where the
@@ -6581,7 +6592,11 @@ def api_key_lines(keys: dict | None) -> list[str]:
     # the line said "/connect stores a key it can" to a user who had (#1075, 2026-11-23)
     written, other = [p for p, k in other if k == "config"], [x for x in other if x[1] != "config"]
     if other:
-        if len(other) == 1 and other[0][1] == "oauth":
+        if len(other) == 1 and other[0][1] == "oauth" and (own := models.signin(other[0][0])):
+            # the provider's own cause (#1191): ChatGPT's and the OpenCode Console's tokens rotate
+            out.append(f"--  {other[0][0]} is signed in with {own[0]}: {own[1]}, so wb can't hold "
+                       f"it outside the lane; {own[2]}")
+        elif len(other) == 1 and other[0][1] == "oauth":
             out.append(f"--  {other[0][0]} is signed in with OAuth: wb can't hold that outside the lane; an API "
                        "key through /connect works")
         else:
@@ -6638,7 +6653,7 @@ def first_run() -> list[str]:
     # the pane's API settings read this cache (#1069); an OpenCode config that doesn't parse
     # stops no checklist (the review of #1067, 2026-11-23: wb setup exited 1 at it)
     cached = models._read_hosted().get("providers") or {}
-    if any(k["key"] == "stored" and (cached.get(pid) or {}).get("key") != "stored"
+    if any(k["key"] in models.HELD_KEYS and (cached.get(pid) or {}).get("key") != k["key"]
            for pid, k in (keys or {}).items()):
         try:
             models.hosted_doc(fresh=True)

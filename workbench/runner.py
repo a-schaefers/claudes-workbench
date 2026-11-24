@@ -4340,10 +4340,12 @@ def keyhole_failure(e: Exception, provider: str = "") -> str:
     filled in: #1189). A provider that signs requests, or speaks a way the keyhole can't, has none,
     nor does OpenCode failing to run or answer `auth export` (storing a key again doesn't mend
     that, #1070, 2026-11-23), nor an environment variable passed to agents (removing it there
-    does, #1189)."""
+    does, #1189), nor an API key for GitHub Copilot, which has none: its lines say their own fix
+    (#1191)."""
     text = str(e)
     if "/connect" in text or "signs each request" in text or "doesn't speak" in text \
-            or "API base" in text or "opencode auth " in text or "remove it there" in text:
+            or "API base" in text or "opencode auth " in text or "remove it there" in text \
+            or "Copilot" in text or keyhole.COPILOT in text:
         return text
     return f"{text}: {keyhole.remedy(provider)}"
 
@@ -4371,9 +4373,15 @@ def keyhole_overlay(task: store.Task) -> dict:
     # user's global file or content sent the token to that base instead (the review of #1015,
     # 2026-11-23). Only where the model has an entry anyway (the file's, or the user's config):
     # an entry of wb's alone makes OpenCode a model its catalog lacks, with none of its limits
-    if own or models.has_model_entry(kh.model.provider, kh.model.name):
-        entry["models"] = {kh.model.name: {"provider": {"api": kh.base}, "options": dict(opts),
-                                           **own}}
+    # A Copilot model's package said too (#1191): the task's catalog holds one model, so OpenCode
+    # 2.3.2 gives its package to the provider and none to the model (models-dev.ts modelInfo),
+    # and the Copilot plugin, which routes by the model's own package, sent a Claude model to
+    # /chat/completions instead of its Messages route (RealOpenCodeAPI). V1 `provider.npm`
+    # sets it on the model (v1/config/migrate.ts migrateModel)
+    copilot = kh.model.provider == keyhole.COPILOT and bool(kh.model.package)
+    if own or copilot or models.has_model_entry(kh.model.provider, kh.model.name):
+        entry["models"] = {kh.model.name: {"provider": {"api": kh.base, **(
+            {"npm": kh.model.package} if copilot else {})}, "options": dict(opts), **own}}
     return {"provider": {kh.model.provider: entry}}
 
 
@@ -4386,7 +4394,9 @@ def keyhole_v2(over: dict) -> dict:
     for pid, entry in (over.get("provider") or {}).items():
         opts = entry.get("options") or {}
         out[pid] = {"settings": dict(opts), "models": {
-            name: {"settings": dict(m.get("options") or opts)}
+            name: {"settings": dict(m.get("options") or opts),
+                   # a Copilot model's package (#1191): V2 says `package`, not `npm`
+                   **({"package": npm} if (npm := (m.get("provider") or {}).get("npm")) else {})}
             for name, m in (entry.get("models") or {}).items()}}
     return out
 

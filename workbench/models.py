@@ -95,7 +95,8 @@ class Model:
     # For an API model base_url is the catalog's settings.baseURL (the upstream), engine "api",
     # name the id at the provider, config the catalog entry (limit, cost, variants, capabilities).
     kind: str = "gpu"
-    # an API model's key source (never the key): "stored" (/connect saved one), "oauth",
+    # an API model's key source (never the key): "stored" (/connect saved one), "copilot"
+    # (GitHub Copilot's sign-in, whose token never rotates: HELD_KEYS, #1191), "oauth",
     # "env:<NAME>", "config" (an apiKey in a config file or OPENCODE_CONFIG_CONTENT), "signing"
     # (SigV4/Vertex), "ollama" (Ollama's own login), "none" (a keyless free model), "" (no key)
     key: str = ""
@@ -1003,6 +1004,29 @@ CATALOG_TIMEOUT = 30     # a read past it fails, cached as one for DOWN_SECS
 OLLAMA_CLOUD = "Ollama cloud (ollama.com)"
 # Providers that sign each request with cloud credentials (SigV4, Vertex): no key wb can hold
 SIGNING = frozenset({"amazon-bedrock", "google-vertex", "google-vertex-anthropic"})
+# GitHub Copilot's sign-in (#1191): OpenCode 2.3.2's device login stores the GitHub token as
+# `access` and `refresh` alike with `expires: 0` (core/src/plugin/provider/github-copilot.ts), a
+# token that never rotates, so the keyhole holds it as it holds a key (Model.key "copilot")
+COPILOT = "github-copilot"
+HELD_KEYS = ("stored", "copilot")  # the key sources a task runs with through the keyhole
+COPILOT_AUTO = "auto"  # the plugin's Auto model (github-copilot/models.ts `auto`)
+COPILOT_AUTO_WHY = ("can't run: Copilot's Auto model picks another model each session, and a task "
+                    "keeps to one: pick a Copilot model by name")
+
+
+def signin(pid: str) -> tuple[str, str, str] | None:
+    """(what, why, fix) of a provider's own OAuth login wb can't hold (#1191), or None for any
+    other (its callers' generic OAuth line): ChatGPT's and the OpenCode Console's rotate their
+    refresh tokens, so a copy wb refreshed would sign the user's own OpenCode out (OpenCode
+    refreshes only inside its own lock, which no command exposes), and the OpenCode Console's
+    models speak SystemOne, which the keyhole doesn't."""
+    if pid == "openai":
+        return ("ChatGPT", "its tokens rotate, and a copy wb refreshed would sign your "
+                "own OpenCode out", "an OpenAI API key through /connect works")
+    if pid in ("opencode", "opencode-go"):
+        return ("the OpenCode Console", "its tokens rotate, and the keyhole doesn't speak "
+                "its API (SystemOne) yet", "a model of another provider can run")
+    return None
 API_STATES = ("no_credit", "rate_limited", "unreachable")
 RATE_LIMIT_SECS = 60     # a 429 without Retry-After: how long its provider reads rate-limited
 # A 402 or a plan limit with no `until` held forever: only a 2xx cleared it, and wb start refused
@@ -1244,6 +1268,10 @@ def _key_source(pid: str, auth: dict, prov: dict | None) -> str:
         source = ""  # the keyhole's _lone_env: only V1 options, as checked
     if not source and stored:
         source = "stored"
+    # Copilot's sign-in: the keyhole holds its never-rotating token as a key (#1191);
+    # keyhole.load_key checks the credential's shape (`expires: 0`) when a task starts
+    if not source and pid == COPILOT and any(c.get("type") == "credential" for c in conns):
+        source = "copilot"
     if not source and any(c.get("type") == "credential" for c in conns):
         source = "oauth"
     if not source and (env := next((c for c in conns if c.get("type") == "env"), None)):
@@ -1262,14 +1290,16 @@ def env_why(pid: str, var: str) -> str:
 
 def key_runs(pid: str, key: str) -> bool:
     """Whether a provider's key source (Model.key, connected()'s `key`) is one a task runs with:
-    a stored key, or an environment variable the keyhole can read and the agent can't (#1189)."""
-    return key == "stored" or (key.startswith("env:") and not env_why(pid, key[4:]))
+    a stored key or Copilot's sign-in (HELD_KEYS, #1191), or an environment variable the keyhole
+    can read and the agent can't (#1189)."""
+    return key in HELD_KEYS or (key.startswith("env:") and not env_why(pid, key[4:]))
 
 
 def connected() -> dict[str, dict] | None:
     """The API providers OpenCode holds a key for, read fresh from `auth list` (never a secret):
-    {provider id: {"name", "key"}}, `key` as Model.key says it (_key_source: "stored" is the only
-    one the keyhole can hold, and "env:<NAME>" when key_runs says so, #1189; "oauth", "config",
+    {provider id: {"name", "key"}}, `key` as Model.key says it (_key_source: "stored" and
+    "copilot", HELD_KEYS, are the ones the keyhole can hold, and "env:<NAME>" when key_runs says
+    so, #1189; "oauth", "config",
     "signing" can't run). Providers
     configured on this machine (the GPU side) are left out. None when `auth list` can't be read
     (OpenCode missing, or its error): wb setup and the router then say nothing of keys (#1024)."""
@@ -1829,7 +1859,10 @@ def keyhole_refusal(m: Model) -> str:
     """Why ``m`` can't run through the keyhole for its package, or "". Only keyhole.start checked
     it, so a Gemini, Azure or Cohere model was listed, offered, approved in the dialog and started,
     then failed every time (#1066, 2026-11-23). A model needing no keyhole (an Ollama cloud one,
-    a keyless free one: runner.needs_keyhole) is never refused here."""
+    a keyless free one: runner.needs_keyhole) is never refused here. Copilot's Auto model is
+    (#1191): its router picks another model each session, which the keyhole can't hold to one."""
+    if m.provider == COPILOT and m.name == COPILOT_AUTO:
+        return COPILOT_AUTO_WHY
     if m.cloud or m.key == "none" or (m.free and not m.key) or not unspoken(m.provider, m.package):
         return ""
     return unspoken_why(provider_name(m), m.package)
@@ -1882,6 +1915,10 @@ def _api_status(m: Model, down=frozenset()) -> dict:
         if why := env_why(m.provider, key[4:]):
             return _no(f"can't run: {keyhole.NEEDS}: {why}")
     elif key == "oauth" or key == "signing" or key == "config":
+        if key == "oauth" and (own := signin(m.provider)):  # the provider's own cause (#1191)
+            what, why, fix = own
+            return _no(f"can't run: needs a key wb can hold outside the lane ({who} is signed in "
+                       f"with {what}: {why}): {fix}")
         held = ("an OAuth login" if key == "oauth" else
                 "a cloud login that signs each request" if key == "signing" else
                 f"written in {_key_file(m.provider)}")

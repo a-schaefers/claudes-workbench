@@ -30,8 +30,8 @@ Every figure is an estimate unless the provider says its own or the user set the
 the catalog's can be about twice a provider's bill (DeepInfra's, #1135, 2026-11-23). `basis`
 says which a figure is: "catalog" (shown `≈$0.42 … (catalog prices)`), "yours" (`$0.42 … (your
 prices)`) or "provider" (the provider's own `usage.cost` or `usage.estimated_cost`: plain). A plan
-(OpenCode Go, an Ollama cloud model) is a quota, not dollars: its rows have `usd: null` and
-`plan`, and never count against the cap."""
+(OpenCode Go, GitHub Copilot, an Ollama cloud model) is a quota, not dollars: its rows have
+`usd: null` and `plan`, and never count against the cap."""
 
 from __future__ import annotations
 
@@ -44,7 +44,11 @@ from pathlib import Path
 from . import keyhole, models, routes, store
 
 CHECKIN_SHARE = 0.5      # past this share of the day cap, one check-in a day, across all tasks
-PLAN_PROVIDERS = ("opencode-go",)   # a plan's quota, not dollars (and m.cloud: Ollama cloud)
+# a plan's quota, not dollars (and m.cloud: Ollama cloud). GitHub Copilot's subscription counts
+# premium requests: its catalog lists the models' API prices all the same (OpenCode 2.3.2's bundled
+# catalog: $2/$10 for its Claude and GPT models), which would book dollars the user never pays
+# against the day cap (#1191)
+PLAN_PROVIDERS = ("opencode-go", "github-copilot")
 EPS = 1e-9               # less than this between two figures is the same figure
 # status `api`'s figures are written to 6 places (Meter._book), an export's aren't: closer than
 # this to one is its rounding. Compared within EPS, a DeepInfra export a few 1e-7 past a rounded-down
@@ -165,7 +169,7 @@ def _num(v) -> bool:
 
 
 def is_plan(m) -> bool:
-    """A plan's quota, not dollars: OpenCode Go, an Ollama cloud model."""
+    """A plan's quota, not dollars: OpenCode Go, GitHub Copilot (#1191), an Ollama cloud model."""
     return bool(getattr(m, "cloud", False)) or m.provider in PLAN_PROVIDERS
 
 
