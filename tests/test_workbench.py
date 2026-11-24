@@ -674,6 +674,57 @@ class Lifecycle(Base):
         self.assertEqual((st["base_check"]["exit"], st["round"]), (127, 2))
         self.assertFalse([r for r in store.notices() if r["task"] == "t-nf2" and r["kind"] == "checkin"])
 
+    @unittest.skipUnless(shutil.which("make"), "no make")
+    def test_a_command_not_found_behind_make_test_checks_in_at_once_and_skips_auto_fix(self):
+        # #1229 (bar round 4 of 2.0): make ends with its own `make: *** [Makefile:2: test] Error
+        # 127` and exits 2, so #1152's check never saw the not-found line: no check-in, and round 1
+        # and both auto-fix rounds ran on correct code, each told the bug was in the change
+        (self.repo / "Makefile").write_text("test:\n\tnosuch-tool-1229 --check answer.txt\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "Makefile"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "make"], check=True)
+        self.start("t-mk", "ok", "--test", "make test", "--auto-fix", "2", "--no-self-review")
+        st = wait_phase("t-mk", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (2, 1))
+        task = store.Task("t-mk")
+        self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        checkins = [r["text"] for r in store.notices() if r["task"] == "t-mk" and r["kind"] == "checkin"]
+        self.assertEqual(len(checkins), 1)
+        self.assertIn("can't run in the agent's environment: nosuch-tool-1229: command not found "
+                      "(exit 2 on the base)", checkins[0])
+        summary = (task.round_dir(1) / "summary.md").read_text()
+        self.assertTrue(summary.startswith("auto-fix skipped: the acceptance command can't run in "
+                                           "the agent's environment: nosuch-tool-1229: "), summary)
+
+    def test_a_task_runners_own_last_lines_are_read_past_to_the_recipes(self):
+        # #1229: make's and just's lines after the recipe's, at the recipe's exit code (a
+        # sub-make's, not its parent's Error 2); make's own line for a recipe it runs without a
+        # shell; a script the step makes, or a failure that isn't a missing tool, still goes back
+        said = lambda tail, code=2: runner.missing_command({"exit": code, "tail": tail})  # noqa: E731
+        err = "make: *** [Makefile:2: test] Error {}"
+        for last in ("make: nosuch-tool-1229: No such file or directory",
+                     "/bin/sh: line 1: nosuch-tool-1229: command not found",
+                     "/bin/sh: 1: nosuch-tool-1229: not found"):
+            self.assertEqual(said(f"x\n{last}\n{err.format(127)}\n"), "nosuch-tool-1229: command not found", last)
+        self.assertEqual(said("make -C sub test\nmake[1]: Entering directory '/r/sub'\n"
+                              "make[1]: nosuch-tool-1229: No such file or directory\n"
+                              "make[1]: *** [Makefile:2: test] Error 127\nmake[1]: Leaving directory "
+                              "'/r/sub'\nmake: *** [Makefile:5: all] Error 2\n"), "nosuch-tool-1229: command not found")
+        self.assertEqual(said(f"make: nosuch-tool-1229: No such file or directory\n{err.format(127)}\n"
+                              "make: Target 'test' not remade because of errors.\n"), "nosuch-tool-1229: command not found")
+        self.assertEqual(said(f"make: .venv/bin/pytest: No such file or directory\n{err.format(127)}"),
+                         ".venv/bin/pytest: not in the worktree (.venv/ is an install's, never checked out)")
+        self.assertEqual(said(f"/usr/bin/python3: No module named nosuch_mod\n{err.format(1)}"),
+                         "/usr/bin/python3: No module named nosuch_mod")
+        self.assertEqual(said("sh: 1: nosuch-tool-1229: not found\nerror: Recipe `test` failed on line 2 "
+                              "with exit code 127", code=127), "nosuch-tool-1229: command not found")
+        for tail in (f"make: ./made-by-the-step.sh: No such file or directory\n{err.format(127)}",
+                     f"cat: answer.txt: No such file or directory\n{err.format(1)}",
+                     f"make: nosuch-tool-1229: No such file or directory\n{err.format(1)}",
+                     "make: *** No rule to make target 'test'.  Stop.",
+                     "python3: No module named x"):
+            self.assertIsNone(said(tail), tail)
+        self.assertIsNone(said(f"/bin/sh: 1: x: not found\n{err.format(127)}", code=0))  # a passing run
+
     def test_a_tool_in_the_checkouts_ignored_venv_checks_in_at_once_and_skips_auto_fix(self):
         # #1206 (bar round 3 of 2.0): `--test .venv/bin/python …`, as Claude runs it in the user's
         # checkout, said `No such file or directory` in the worktree, which has no ignored .venv;
