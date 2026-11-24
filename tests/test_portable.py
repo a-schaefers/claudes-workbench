@@ -2748,6 +2748,51 @@ class Remote(unittest.TestCase):
         self.assertEqual(json.loads(Path(os.environ["WB_MODELS"]).read_text())["lmstudio"]["wsl_url"],
                          f"http://127.0.0.4:{dead}/v1")
 
+    def test_a_server_added_before_the_mark_is_told_the_step_that_has_wb_follow_it_from_then_on(self):
+        # #1167's review (2026-11-24): a provider wb model add made at Windows' address before the
+        # `wsl_url` mark is never followed, and its step said only to set the baseURL by hand:
+        # still unmarked after that edit, the next reboot broke it again. The step names the
+        # wb model add that marks it, and after it the reboot after is followed
+        srv = self.lmstudio_at("127.0.0.2")
+        port = srv.server_address[1]
+        at = {h: f"http://{h}:{port}/v1" for h in ("127.0.0.2", "127.0.0.3", "127.0.0.4")}
+        self.config({"lmstudio": {"npm": "@ai-sdk/openai-compatible", "name": "lmstudio",   # main's
+                                  "options": {"baseURL": at["127.0.0.2"]},
+                                  "models": {"qwen-coder": {"limit": {"context": 32768, "output": 4096}}}}},
+                    {"lmstudio": {"local": True}})
+        cfg_path, models_path = Path(os.environ["WB_OPENCODE_CONFIG"]), Path(os.environ["WB_MODELS"])
+        here = models._this_host  # .2 to .4 play Windows, another host from WSL
+        other = lambda h, dns=True: h not in at and here(h, dns)
+        srv.shutdown()
+        srv.server_close()
+        self.servers.remove(srv)
+        self.lmstudio_at("127.0.0.3", port)                          # the reboot: Windows at .3
+        with mock.patch.object(models, "_this_host", other), \
+                mock.patch.object(models, "windows_host", return_value="127.0.0.3"), \
+                redirect_stderr(io.StringIO()):
+            m = models.discover()["lmstudio/qwen-coder"]
+            self.assertEqual(m.base_url, at["127.0.0.2"])            # unmarked: not followed
+            fix = models.remedy(m, models.status(m))
+            step = f"wb model add lmstudio/qwen-coder --url {at['127.0.0.3']}"
+            self.assertIn(f"set lmstudio's baseURL to {at['127.0.0.3']}", fix)
+            self.assertIn(f"then {step}, which follows Windows' address from now on", fix)
+            cfg = json.loads(cfg_path.read_text())                   # the user does both
+            cfg["provider"]["lmstudio"]["options"]["baseURL"] = at["127.0.0.3"]
+            cfg_path.write_text(json.dumps(cfg))
+            code, out = self.wb(*step.split()[1:], "--context", "32768")
+            self.assertEqual(code, 0, out)
+            self.assertEqual(json.loads(models_path.read_text())["lmstudio"]["wsl_url"], at["127.0.0.3"])
+        gone = self.servers.pop()
+        gone.shutdown()
+        gone.server_close()
+        self.lmstudio_at("127.0.0.4", port)                          # the next reboot: followed
+        with mock.patch.object(models, "_this_host", other), \
+                mock.patch.object(models, "windows_host", return_value="127.0.0.4"), \
+                redirect_stderr(io.StringIO()):
+            m = models.discover()["lmstudio/qwen-coder"]
+            self.assertEqual(m.base_url, at["127.0.0.4"])
+            self.assertTrue(models.status(m)["available"], models.status(m))
+
 
 class Optimize(unittest.TestCase):
     """wb optimize against an Ollama whose placement depends on the window: 10 GB of weights and

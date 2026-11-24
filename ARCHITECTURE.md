@@ -2997,8 +2997,10 @@ the same way: `_moved_to` probes `<baseURL>/models` (`_answers`) rather than Oll
 `_repoint` writes it and the mark. Its "not running, and no start command" gets `windows_moved`
 too: marked, "set <p>'s baseURL to <new>" when it answers at Windows' new address (wb couldn't
 rewrite it), else "start its server on Windows: it answers neither at …", under mirrored a
-`wb model add … --url http://127.0.0.1:PORT/v1` of its own; unmarked, "if <host> was Windows'
-address", its baseURL there by hand. `may_come_up` stays true: a waiting runner re-reads the
+`wb model add … --url http://127.0.0.1:PORT/v1` of its own; unmarked (one `wb model add` made before
+the mark), "if <host> was Windows' address", its baseURL there by hand, then `wb model add <p>/<m>
+--url <new>`, which marks it (the adopt branch) so the next reboot is followed: the hand edit alone
+left it unmarked, broken again by the next reboot (#1167's review). `may_come_up` stays true: a waiting runner re-reads the
 model (`runner._wait_up`). #1167: such a server read "start its server" after every reboot, and
 wb setup's and scout's line said `local: true` after the `wb model add` it has to precede.
 

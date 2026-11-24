@@ -4394,9 +4394,13 @@ def windows_moved(m: Model) -> str:
     if m.engine != "ollama" or m.extra.get("wsl_url"):
         new, where = _at_host(m.base_url, win), opencode_config_path()
         if not m.extra.get("wsl_url"):
+            # one wb model add made before the mark: the hand edit alone left it unmarked, so the
+            # next reboot broke it again; wb model add at the URL it now has marks it (the adopt
+            # branch), which this never said (#1167's review, 2026-11-24)
             return (f"start its server at {m.root}; or, if {host} was Windows' address (WSL2's NAT "
                     f"gives it a new one on a reboot), set {m.provider}'s baseURL to {new} in "
-                    f"{where}, and {mirrored}")
+                    f"{where}, then wb model add {m.id} --url {new}, which follows Windows' "
+                    f"address from now on, and {mirrored}")
         if _answers(new):  # discovery couldn't rewrite it (comments, another layer)
             return (f"WSL2's NAT gave Windows a new address, {win}: set {m.provider}'s baseURL to "
                     f"{new} in {where}, and {mirrored}")
