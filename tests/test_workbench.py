@@ -15674,6 +15674,12 @@ class Bench(Base):
         store.append_jsonl(bench.runs_file(), row)
         self.assertIsNone(bench.model_line(model))                        # no case failed
         self.assertIn("t-src on ollama/mimo-v2.6:9b-q8_0: broke off: setup", run_wb("bench", "report"))
+        # #1176: an update or an OpenCode change under the replay leaves it stuck with `infra`,
+        # the machine's too: graded as the model's failure, never replayed again
+        for cause in ("updated", "opencode"):
+            with self.subTest(cause=cause), mock.patch.object(
+                    bench, "_wait", return_value=({"phase": "stuck", "infra": cause, "last": "x"}, 0)):
+                self.assertEqual(bench.replay(case, model, 1, f"r-{cause}", "", [])["outcome"], "error")
         # the load failure and the reaped runner are the machine's too
         runner._load_failed(store.Task(row["task"]), RuntimeError("lan/m can't run: asleep"))
         self.assertEqual(store.Task(row["task"]).status["infra"], "model")
@@ -18857,6 +18863,45 @@ class UpdatedUnderATask(Base):
         self.assertTrue(cli._interrupted(st["last"]))
         self.assertIn("resumed t", run_wb("resume", "--all"))
         self.assertFalse(cli._interrupted("workbench was updated under this tasking"))
+
+    def test_the_carry_on_after_an_update_or_an_opencode_change_is_no_review_round(self):
+        # #1176 (2026-11-24): #1153 left out these two stops. Neither set status `infra`, and the
+        # wake read "it got stuck ... Steer it with wb feedback", which counted a review round:
+        # with one real review after it the step went badly, shrinking the model's slice
+        from workbench import results, router, tuning
+        for cause in ("updated", "opencode"):
+            with self.subTest(cause=cause):
+                name = f"t-{cause}"
+                with mock.patch.object(cli, "spawn_runner"):
+                    self.start(name, "fix", "--test", TEST_CMD, "--auto-fix", "1", "--no-base-check")
+                task = store.Task(name)
+                ran = lambda: task.round_dir(1).joinpath("summary.md").exists()  # noqa: E731
+                # round 1 ran and failed its test; before its auto-fix, a pull or an upgrade
+                with mock.patch.dict(runner.CURRENT, {"code": "before"}), \
+                        mock.patch.object(runner, "code_print",
+                                          lambda: "after" if ran() and cause == "updated" else "before"), \
+                        mock.patch.object(runner, "opencode_version",
+                                          lambda: (2, 5) if ran() and cause == "opencode" else (2, 3)):
+                    runner.drive(task)
+                st = task.status
+                self.assertEqual((st["phase"], st.get("infra"), st["round"]), ("stuck", cause, 2))
+                [n] = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
+                       if r["task"] == name and r["kind"] == "stuck"]
+                # the mod's wake: "was interrupted" and wb resume (batchOf, BATCH_NEXT)
+                self.assertEqual((n["cause"], n.get("tasks")), (cause, [name]))
+                os.environ["FAKE_SCENARIO"] = "ok"
+                with mock.patch.object(cli, "spawn_runner"):
+                    out = run_wb("feedback", name, "--text", "carry on")
+                self.assertIn("no review round is counted", out)
+                self.assertEqual((task.status["reviews"], task.status["round_for"]), (0, "resume"))
+                runner.drive(task)
+                self.assertEqual(task.status["phase"], "review", task.status.get("last"))
+                with mock.patch.object(cli, "spawn_runner"):
+                    self.assertIn("feedback round 1 sent", run_wb("feedback", name, "--text", "rename x"))
+                runner.drive(task)
+                step = results.step(task, True)
+                self.assertEqual(tuning.agent_reviews(step), 1)
+                self.assertEqual(router._went(step), "well")
 
     def test_an_unchanged_copy_runs_every_round(self):
         self.start("t", "fix", "--test", TEST_CMD, "--no-base-check")

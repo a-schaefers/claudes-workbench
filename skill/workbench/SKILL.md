@@ -408,7 +408,7 @@ heading the wrong way, act on it. Notes are instructions, like feedback: concret
 - `wb takeover <name>`: you finish it in the worktree, uncommitted, then `wb accept` (or hand it
   back with `wb feedback`): for when explaining would cost more than doing.
 - `wb stop <name>`; `wb resume <name>` continues it in a fresh session (also after "the runner
-  died" or "stopped by a signal"). After a restart or a shutdown one notice names every task it
+  died", "stopped by a signal", or workbench or OpenCode changed under it). After a restart or a shutdown one notice names every task it
   interrupted:
   `wb resume <a> <b> …`, as it says.
 - A `PERMISSION` question (a command or a directory): lean to yes for what the task needs (`wb
