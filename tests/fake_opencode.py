@@ -53,7 +53,11 @@
          an hour; the fresh session carrying on plays the rest (#1188), or with FAKE_SELF_KEEP only
          reads, the check left broken. FAKE_SELF_STALL: the self-review's first run breaks it,
          says a few words and is silent for an hour; the run after a nudge or a note (its prompt
-         the NUDGE or a steer's, "Claude, your reviewer") plays the rest (#1207)
+         the NUDGE or a steer's, "Claude, your reviewer") plays the rest (#1207).
+         FAKE_SELF_API (ratelimit or down): the self-review's run plays that API scenario, its
+         tree the green one. FAKE_SELF_REFILL: every session of the self-review breaks answer.txt
+         or restores it, by turns, and fills 76% of a 32K window: the sixth, past HANDOVER_MAX,
+         on the green tree (#1261)
   bgwait a command OpenCode moved to the background: `background_wait`, quiet for FAKE_BGWAIT
          seconds (6), then writes "42" like ok
   devserver  writes "42", starts `npm run dev` in the background, ends its turn (reason stop),
@@ -610,6 +614,8 @@ if scenario == "selfreads" and "Before Claude reviews this" not in (args[-1] if 
         and not (os.environ.get("FAKE_SELF_STALL")  # #1207: the nudge's or the note's round
                  and re.search(r"Claude, your reviewer|Stop planning", args[-1] if args else "")):
     scenario = "ok"  # #1168: round 1 is ok's
+if scenario == "selfreads" and os.environ.get("FAKE_SELF_API") in ("ratelimit", "down"):
+    scenario = os.environ["FAKE_SELF_API"]  # #1261: the self-review's run ends on its provider's error
 if (scenario in ("fill", "compact", "donefull") or scenario == "compactfail" and not os.environ.get("FAKE_REFAIL")) \
         and "picking this task up in a fresh session" in args[-1]:
     scenario = "ok"
@@ -841,6 +847,19 @@ elif scenario == "explore":  # #1087: many small reads before the first edit
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
     emit("text", text="Wrote answer.txt = 42.")
     finish()
+elif scenario == "selfreads" and os.environ.get("FAKE_SELF_REFILL"):  # #1261: past HANDOVER_MAX
+    # every session of it breaks the check or restores it, by turns (a session that changed
+    # nothing reads to its fill, never handed over), so the sixth leaves the green tree
+    with open("answer.txt") as fh:
+        text = "41" if fh.read().strip() == "42" else "42"
+    with open("answer.txt", "w") as fh:
+        fh.write(text + "\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": text})
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
+                                                      "cache": {"read": 900}})  # changed early
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 900, "reasoning": 6000,
+                                                      "cache": {"read": 16100}})  # 76%, as fill's
+    time.sleep(3600)
 elif scenario == "selfreads" and os.environ.get("FAKE_SELF_FILL") \
         and "Your last session filled up" not in args[-1]:  # #1188: it fills mid-check
     with open("answer.txt", "w") as fh:

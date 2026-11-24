@@ -1548,9 +1548,11 @@ class _ProviderWait:
                          "since": run["since"], "secs": secs,
                          "text": f"{what} for {_span(secs)}: the round's clocks were paused"})
 
-    def end(self, out: dict, now: float) -> None:
+    def end(self, out: dict, now: float, settle=None) -> None:
         """After the round: OpenCode that exited on a rate limit, an outage or a quota error is
-        the provider's stop; the wait's event; the status keys cleared; `held` for drive."""
+        the provider's stop, unless ``settle`` (run_round's: a self-review on its green tree,
+        #1261) takes it for the agent's finish; the wait's event; the status keys cleared;
+        `held` for drive."""
         if not self.api:
             return
         if not out["stuck"] and out["exit"] not in (0, None) and not (
@@ -1558,8 +1560,9 @@ class _ProviderWait:
             self.st = self.task.status
             if why := self.stop(now, gave_up=True):
                 out["guard"], out["stuck"] = why
-                self.task.event({"ts": store.now(), "round": self.n, "kind": "stopped", "text": why[1],
-                                 **({"by": by} if (by := stopped_by(why[0])) else {})})
+                if not (settle and settle()):
+                    self.task.event({"ts": store.now(), "round": self.n, "kind": "stopped", "text": why[1],
+                                     **({"by": by} if (by := stopped_by(why[0])) else {})})
         self._ended(now)
         out["held"] = self.held
         if self.worst is not None:
@@ -1655,6 +1658,27 @@ def green_tree(task: store.Task, began: str) -> str | None:
     if st.get("round_for") == "self_review":
         return st.get("self_review_tree", began)
     return carried_tree(task)
+
+
+def settle(task: store.Task, n: int, out: dict, began: str | None, why: str | None = None) -> bool:
+    """A guard's stop of a self-review round (out["stuck"]; or ``why``, the think nudge about
+    to interrupt it) on the tree its tests passed on (green_tree) is the agent's finish, never a
+    stop: out["settled"] takes the reason and the stuck and guard keys go, so the round goes on
+    to the tests, then review. A self-review is reads, runs and thinking by design (break a
+    check, see a test fail, copy the file back), and each guard that met it there woke Claude
+    with a stuck notice and no tests line for a green change, the step recorded stuck: the
+    explore guard (#1168), then the repeat and error guards (#1250), then the think nudge (a
+    needless check-in), silence and the round's wall (#1261, 2026-11-24), each fixed alone. So
+    every stop goes through here: run_round's guards, the provider's (in the round or at
+    OpenCode's exit), the spend cap's in the round, and drive's handover limit. A tree the
+    self-review left changed, or any other round: False, nothing changed, stopped as before."""
+    why = out.get("stuck") or why
+    if not why or gitops.mark(task.worktree) != green_tree(task, began):
+        return False
+    out["settled"], out["stuck"], out["guard"] = why, None, None
+    task.event({"ts": store.now(), "round": n, "kind": "settled",
+                "text": f"self-review: {why}, the tree its tests passed on: stopped as its finish"})
+    return True
 
 
 def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
@@ -1755,7 +1779,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # OpenCode sent again, each with why
     out = {"exit": None, "stuck": None, "texts": [], "tools": {}, "errors": [], "retries": [],
            "tok_in": 0, "tok_out": 0, "interrupted": False, "full": None, "guard": None,
-           "answered": False, "new_session": new_session, "reached": False}
+           "answered": False, "new_session": new_session, "reached": False,
+           "began": began}  # the tree as it began, for drive's settle (#1261)
     window = st.get("window")
     fresh_at = tuning.value(task, "fresh_at")
     # The last step's (session, context, prompt): a later step in it whose prompt is smaller by
@@ -1936,25 +1961,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 m = gitops.mark(task.worktree)
                 if detector.guard == "no_edit" and m != edit_mark:  # a shell edit: an edit, not a repeat
                     edit_mark, detector.since_edit, why = m, 0, None
-                elif m == green_tree(task, began):
-                    # A self-review round is reads and runs by design (break a check, see a test
-                    # fail, copy the file back): on a change whose tests passed, the explore
-                    # guard stopped it as stuck, so a green task woke Claude as stuck and its
-                    # step was recorded stuck (#1168, 2026-11-24). On the tree those tests
-                    # passed on, it ends as the agent's finish: the tests, then review. A tree
-                    # it changed is stopped as before. Any of the detector's guards, not only
-                    # the explore guard: a 9B's self-review that ran the acceptance command
-                    # four times in a row on the green tree met the repeat guard, stuck again
-                    # (#1250, 2026-11-24); a string of failing calls there is no less its finish.
-                    out["settled"], why = why, None
-            if why:
+            if why:  # on a self-review's green tree, settled below with the other guards' (#1168)
                 out["stuck"], out["guard"] = why, detector.guard
-        if out.get("settled"):  # #1168: not a guard's stop
-            task.event({"ts": store.now(), "round": n, "kind": "settled",
-                        "text": f"self-review: {out['settled']}, the tree its tests passed on: "
-                                "stopped as its finish"})
-            _stop(proc)
-            break
         quiet = clock.quiet(mono)
         hush = wait_hush if waiting_bg else silence
         # The agent's turn is over (its last step's reason `stop`) and OpenCode is still open:
@@ -1997,6 +2005,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         # and tell Claude. The nudge starts a new round, and that round stalling again is
         # stopped, whatever it did first: else a model that never answers, or a command that
         # prints nothing for longer than the budget, would be nudged and rerun forever.
+        nudge = False
         if (think and heard and not waiting_bg and not nudged and not out["stuck"] and not asking
                 and quiet > think):
             mins = int(quiet // 60)
@@ -2006,21 +2015,30 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                                 if not out["tools"] and not out["texts"] else
                                 f"{mins} minutes again with no tool call, even after a nudge")
             else:
-                nudged = True
-                text = NUDGE.format(mins=mins)
-                task.set_status(nudged_round=n)
-                store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text,
-                                                             "now": True, "by": "workbench"})
-                task.event({"ts": store.now(), "round": n, "kind": "steer", "now": True,
-                            "by": "workbench", "text": text})
-                nudges = task.status.get("nudges", 0) + 1
-                task.set_status(nudges=nudges)
-                task.notify("checkin", checkin_text(task, n, out, max(started, float(
-                    task.status.get("checkin_at") or 0)), step_prior + clock.ran(mono)) + f"\nthe runner nudged it: {mins} min of "
-                    f"thinking with no tool call (nudge {nudges} this task; budget {int(think)}s)",
-                    round=n)
+                nudge = True
         if not out["stuck"] and spend:
             _spend_guard(task, out)
+        # Any guard's stop, and the nudge, of a self-review on its green tree: its finish (#1261:
+        # the think nudge woke Claude with a check-in, and silence, the wall or the stop after a
+        # nudge set stuck, past #1168/#1250's settle, which was the detector's alone)
+        if (out["stuck"] or nudge) and settle(
+                task, n, out, began, f"no tool call or word for {_span(quiet)}"):
+            _stop(proc)
+            break
+        if nudge:
+            nudged = True
+            text = NUDGE.format(mins=mins)
+            task.set_status(nudged_round=n)
+            store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text,
+                                                         "now": True, "by": "workbench"})
+            task.event({"ts": store.now(), "round": n, "kind": "steer", "now": True,
+                        "by": "workbench", "text": text})
+            nudges = task.status.get("nudges", 0) + 1
+            task.set_status(nudges=nudges)
+            task.notify("checkin", checkin_text(task, n, out, max(started, float(
+                task.status.get("checkin_at") or 0)), step_prior + clock.ran(mono)) + f"\nthe runner nudged it: {mins} min of "
+                f"thinking with no tool call (nudge {nudges} this task; budget {int(think)}s)",
+                round=n)
         if out["stuck"]:
             # by: the provider's or the spend cap's stop is no lesson about the agent
             # (lessons.gather; #1020)
@@ -2073,7 +2091,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         out["exit"] = proc.wait()
         out["lingered"] = True  # our stop's exit, not a crash: the round is what its events say
     log.close()
-    provider.end(out, time.time())
+    provider.end(out, time.time(), lambda: settle(task, n, out, began))
     ask_mcp.close(task, opened)  # its server is gone: closed, so nothing takes them for open
     if task.status.get("asking") or task.status.get("phase") == "asking":  # it ended
         task.set_status(asking=None, phase="running")  # mid-question: nothing reads that answer now
@@ -5323,15 +5341,18 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                     if not _go_on(task, n, "the handover"):
                         return
                     continue
-                rnd["guard"] = "handovers"
-                rnd["stuck"] = (f"handed over to a fresh session {HANDOVER_MAX} times in this "
-                                "round without finishing"
-                                # the last one a failed compaction, named: not a silent failure,
-                                # and the reading, not OpenCode, is what to cut (#969)
-                                + (f" (the last when OpenCode's compaction failed: "
-                                   f"{rnd['compact_failed']})" if rnd.get("compact_failed") else "")
-                                + ": the step is too big for this model's "
-                                "window; split it (wb next) or take it over")
+                # a self-review's, on its green tree, is its finish, as any guard's is (#1261)
+                if not settle(task, n, rnd, rnd.get("began"),
+                              f"handed over to a fresh session {HANDOVER_MAX} times"):
+                    rnd["guard"] = "handovers"
+                    rnd["stuck"] = (f"handed over to a fresh session {HANDOVER_MAX} times in this "
+                                    "round without finishing"
+                                    # the last one a failed compaction, named: not a silent failure,
+                                    # and the reading, not OpenCode, is what to cut (#969)
+                                    + (f" (the last when OpenCode's compaction failed: "
+                                       f"{rnd['compact_failed']})" if rnd.get("compact_failed") else "")
+                                    + ": the step is too big for this model's "
+                                    "window; split it (wb next) or take it over")
             _round_end(task, n, rnd, began)
             if rnd["interrupted"] or (pending_steer(task) and not rnd["stuck"]):
                 _steer_round(task, n, rnd["interrupted"])

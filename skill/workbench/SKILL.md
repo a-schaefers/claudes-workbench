@@ -380,7 +380,8 @@ command in a quarter of the limit: then it's the change's hang, and auto-fix get
 Its own `then wb feedback`, once you've given the tool or the grant, counts no review round.
 Once the tests pass, the agent checks its own change against your review checks in one more
 round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it);
-one that only reads on is stopped as its finish, not stuck (`self-review: … stopped as its finish`).
+one that only reads on, or goes quiet, on the tree its tests passed on is stopped as its finish,
+not stuck and no nudge check-in (`self-review: … stopped as its finish`).
 On API it's off unless you pass `--self-review` (each round you don't see is paid).
 It returns at once; a detached runner does the work. **Don't poll.** With the workbench mod loaded
 the session is woken by a `[workbench]` prompt when the task needs you (review, question, stuck,
