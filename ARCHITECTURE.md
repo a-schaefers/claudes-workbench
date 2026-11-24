@@ -319,7 +319,9 @@ sent back included), as reference/driving.md says (#1130). The provider is
 slot `LOCK_SH|LOCK_NB` and lets go, so two probes at once don't read each other as holders (with
 `LOCK_EX`, a start beside another start's probe saw every slot taken and exited 4, the review of
 #1015), while a holder's `LOCK_EX` still refuses it. Its `load()`, before each round, loads
-nothing but waits, the slot held, while the provider is out of credit (`models.credit_turn`:
+nothing but waits, the slot let go and taken again after (a backlog of `API_PARALLEL` waiters holding
+every slot left the task whose turn it was waiting for one, and each of them for its 2xx, until the
+mark's `until`: the review of #1178), while the provider is out of credit (`models.credit_turn`:
 api-health.json's `no_credit` mark), as `phase: queued`, `last: waiting: <provider> is out of
 credit or quota (<why>): top it up, or wait for the plan's reset; wb asks it again at HH:MM (wb stop
 gives up)`, on a watch of `$WB_HOME` (an `ok` or the keyhole's next mark wakes it), looking again at

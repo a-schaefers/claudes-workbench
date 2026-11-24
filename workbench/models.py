@@ -3842,7 +3842,7 @@ def api_provider(m: Model) -> str:
 class NoLease:
     """What an API task holds in place of the GPU lease (#1015): one of its provider's
     API_PARALLEL slots, and nothing of the GPU. The interface drive and _tests_gpu use:
-    load() loads nothing (it waits while the provider is out of credit, #1178), step_aside
+    load() loads nothing (it waits while the provider is out of credit, its slot let go, #1178), step_aside
     and rejoin do nothing, `aside` False, `pool` None (so
     _tests_gpu takes this machine's pool for --unload-for-tests, where the tests run), `loaded`
     True. Past the limit it waits as queued, looking again after API_WAIT's backoff (a slot let
@@ -3899,7 +3899,10 @@ class NoLease:
         """Loads nothing, but waits as queued while the provider is out of credit (credit_turn),
         before each round: the tasks queued behind a 402 each took a slot, sent a round, met the
         402 and woke Claude with a stop of their own, though wb start refused in that state
-        (#1178, 2026-11-24). A top-up's 2xx (`ok`) or the mark's end lets it go on."""
+        (#1178, 2026-11-24). A top-up's 2xx (`ok`) or the mark's end lets it go on. It lets go
+        of its slot for the wait and takes one again after: held, a backlog of API_PARALLEL
+        waiters left the task whose turn it was (the user's resume) waiting for a slot, and each
+        of them for its 2xx, until the mark's 900 s ran out (the review of #1178, 2026-11-24)."""
         pid = self.m.provider or api_provider(self.m)
         try:
             row = credit_turn(pid, self.task)
@@ -3907,6 +3910,8 @@ class NoLease:
             return 0.0
         if row is None:
             return 0.0
+        held = self.fd is not None
+        self.__exit__(None, None, None)  # the slot, for the task whose turn it is to ask
         task = store.Task(self.task) if self.task else None
         said = None
         with Watcher(api_health_path().parent) as w:  # ok's and the keyhole's writes wake it
@@ -3926,6 +3931,8 @@ class NoLease:
                     row = credit_turn(pid, self.task)
                 except Exception:
                     row = None
+        if held:  # not on a stop (wb stop's signal): that runner sends nothing more
+            self.__enter__()
         return 0.0
 
     def step_aside(self, unload: bool = False) -> None:

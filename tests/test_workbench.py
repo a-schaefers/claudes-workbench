@@ -31413,7 +31413,7 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual(seen, [(self.models.API_PARALLEL - 1, ["api-first"])])
         self.assertEqual(self.models.api_slots_free("deepinfra"), self.models.API_PARALLEL)
 
-    def test_an_api_task_with_its_slot_waits_as_queued_while_its_provider_is_out_of_credit_and_runs_once_topped_up(self):
+    def test_an_api_task_waits_as_queued_while_its_provider_is_out_of_credit_and_runs_once_topped_up(self):
         # #1178: a keyhole's 402 marks the provider no_credit and wb start refuses, but the tasks
         # already queued took their slots, each sent a round, met the 402 and woke Claude with a
         # stop of its own; now the runner waits before the round, sends nothing, and goes on at ok
@@ -31439,7 +31439,7 @@ class ApiTasks(_ApiTask, _KeyholeTest):
             self.assertEqual(task.status["phase"], "queued")
             self.assertIn("(HTTP 402: Insufficient balance): top it up, or wait for the plan's reset; "
                           "wb asks it again at ", task.status["last"])
-            self.assertEqual(self.models.api_holders("deepinfra"), ["api-credit"])
+            self.assertEqual(self.models.api_holders("deepinfra"), [])  # let go for the wait (#1178's review)
             time.sleep(1)
             self.assertEqual(rounds, [])
             self.assertEqual([r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
@@ -31495,6 +31495,45 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual(len(self.up.seen), 2)                        # the 402, then its round
         self.assertTrue(went.wait(30))                                # at its ok
         self.assertIsNone(self.models.api_health("deepinfra"))
+
+    def test_waiters_for_credit_holding_every_slot_let_go_of_them_so_the_users_resume_asks_at_once(self):
+        # the review of #1178 (2026-11-24): NoLease.load waited for credit with its slot held, so
+        # with API_PARALLEL tasks queued behind the 402 (the issue's backlog) the resumed task
+        # waited for a slot and each of them for its 2xx, until the mark's 900 s ran out
+        m = self.local_api_model()
+        self.up.mode, self.up.status, self.up.message = "status", 402, "Insufficient balance"
+        self.start_api("t-paid", "http", spawn=False)
+        self.drive_here("t-paid")
+        task = store.Task("t-paid")
+        self.assertEqual((task.status["phase"], task.status.get("infra")), ("stuck", "provider"), task.status)
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")     # lets a hung wait go
+        went, leases = [], []
+        for i in range(self.models.API_PARALLEL):                     # the backlog, each with its slot
+            lease = self.models.NoLease(m, f"t-behind{i}", say=lambda msg: None)
+            lease.__enter__()
+            leases.append(lease)
+            self.addCleanup(lease.__exit__, None, None, None)
+            threading.Thread(target=lambda one=lease: (one.load(), went.append(one.task)), daemon=True).start()
+        deadline = time.time() + 10
+        while self.models.api_holders("deepinfra") and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(self.models.api_holders("deepinfra"), [])   # let go for the wait
+        self.assertEqual(went, [])                                    # still waiting for credit
+        self.up.mode, self.up.status = "ok", 200                      # the user tops up
+        with mock.patch.object(cli, "spawn_runner", lambda t: 0):
+            out = run_wb("feedback", "t-paid", "--text", "carry on")
+        self.assertNotIn("waits as queued for a slot", out)
+        driver = threading.Thread(target=self.drive_here, args=("t-paid",), daemon=True)
+        driver.start()
+        driver.join(60)
+        self.assertFalse(driver.is_alive(), task.status)              # never the mark's 900 s
+        self.assertEqual(task.status["phase"], "review", task.status)
+        self.assertEqual(len(self.up.seen), 2)                        # the 402, then its round
+        deadline = time.time() + 30
+        while len(went) < len(leases) and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(sorted(went), [x.task for x in leases])      # at its ok
+        self.assertEqual(self.models.api_holders("deepinfra"), sorted(x.task for x in leases))  # theirs again
 
     def test_with_unload_for_tests_an_api_tasks_tests_run_under_this_machines_pool(self):
         from workbench import verify
