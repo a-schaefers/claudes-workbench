@@ -1254,6 +1254,16 @@ def _steer_bell(task: store.Task, proc, q: queue.Queue) -> None:
 PROMPT_ARG_MAX = 100_000
 
 
+# Round n's message sent again in its place when the round runs again after its provider or
+# server stopped it (_run_again): OpenCode keeps a failed run's message in the session, and
+# prompt.md sent again with --session put the spec and protocol there once per try. A waiter's
+# 15-minute rechecks through a night out of credit left dozens of copies, all billed at the
+# top-up's first request and past a 131K window (#1235, 2026-11-24). Its opening: transcript's label.
+RERUN = ("The round was cut off by the model's provider or server, not by you, and goes on here: "
+         "carry out the instructions you were last given above, from where the work stands "
+         "(some of it may be done: look at the files first).")
+
+
 # The round's guards run on the monotonic clock, which a suspend doesn't advance and NTP never
 # steps: on the wall clock a laptop shut for 20 minutes woke to a round stopped for silence (the
 # 2026-11-16 audit). A loop pass far longer than its 5 s wait means the process was frozen (a
@@ -1654,13 +1664,22 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                             "--format", "json", "--title", f"wb: {task.name}"]
     began = gitops.mark(task.worktree)  # the tree as the round began
     marks = {began}  # and as the session began
-    if st.get("session"):
+    new_session = not st.get("session")
+    if not new_session:
         cmd += ["--session", st["session"]]
         marks.add(st.get("session_mark"))
     else:
         task.set_status(session_mark=next(iter(marks)), session_floor=None)
     floor = task.status.get("session_floor")  # the context the session had read when it began work
     note = skills_note(task, n)
+    if (again := st.get("unanswered")) is not None:  # one run's: _run_again sets it for the next
+        task.set_status(unanswered=None)
+        if not new_session and (again.get("round"), again.get("session")) == (n, st["session"]):
+            # the session holds the round's message already (#1235), but not what came after
+            # it: a note _early_notes folded in since (or a skills change, `note`) went nowhere
+            # while counted delivered (the review of #1235, 2026-11-24)
+            since = prompt[int(again.get("at") or len(prompt)):].strip()
+            prompt = RERUN + ("\n\n" + since if since else "")
     if len((note + prompt).encode()) > PROMPT_ARG_MAX:
         prompt = (f"Your instructions for this round are long, so they are in the file "
                   f"{task.round_dir(n) / 'prompt.md'}. Read all of it first (in parts if it is "
@@ -1727,7 +1746,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # OpenCode sent again, each with why
     out = {"exit": None, "stuck": None, "texts": [], "tools": {}, "errors": [], "retries": [],
            "tok_in": 0, "tok_out": 0, "interrupted": False, "full": None, "guard": None,
-           "answered": False}
+           "answered": False, "new_session": new_session, "reached": False}
     window = st.get("window")
     fresh_at = tuning.value(task, "fresh_at")
     # The last step's (session, context, prompt): a later step in it whose prompt is smaller by
@@ -1788,8 +1807,10 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 turn_over = (raw.get("part") or {}).get("reason") == "stop"
             elif raw.get("type") not in ("retry", None):
                 turn_over = False
-            if raw.get("sessionID") and not task.status.get("session"):
-                task.set_status(session=raw["sessionID"])
+            if raw.get("sessionID"):  # OpenCode has the round's message in its session
+                out["reached"] = True
+                if not task.status.get("session"):
+                    task.set_status(session=raw["sessionID"])
             row = normalize(raw, n)
             if row is None:
                 continue
@@ -4719,6 +4740,26 @@ def _provider_revive(task: store.Task, n: int, rnd: dict, lease) -> bool:
     return not pending_steer(task)
 
 
+def _run_again(task: store.Task, n: int, rnd: dict) -> None:
+    """Before round n runs again in drive because its provider or server stopped it (#1020's
+    revive, a server's, a 402 recheck's, #1216): never its prompt.md into a session that holds it
+    already (#1235). A session this run began that nothing answered holds that message alone: it
+    is dropped, and the round begins anew. One that holds more (earlier rounds, work done) is
+    sent RERUN instead (status `unanswered`, for run_round), and after it what prompt.md gained
+    since (a note _early_notes folded in). A run that printed no event (none shows OpenCode had
+    the session) sends prompt.md again, as before."""
+    sid = task.status.get("session")
+    if not sid or not rnd.get("reached"):
+        return
+    if rnd.get("new_session") and not rnd.get("answered"):
+        # a new session hears the skills again, as _start_fresh's: skills_told kept from the
+        # dropped one left the next session without them (the review of #1235, 2026-11-24)
+        task.set_status(session=None, skills_told=None)
+    else:  # `at`: prompt.md as sent (add_to_round strips it before appending), for what follows
+        sent = task.round_dir(n).joinpath("prompt.md").read_text().rstrip()
+        task.set_status(unanswered={"round": n, "session": sid, "at": len(sent)})
+
+
 def _rejoin(task: store.Task, lease) -> None:
     """Back on the GPU before a round, after the tests or a server's wait let it go (#257):
     queued, in its first-come place, when the GPU is someone else's meanwhile."""
@@ -5075,6 +5116,8 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 revived = n
                 if not _provider_revive(task, n, rnd, lease):
                     _steer_round(task, n, False)
+                else:
+                    _run_again(task, n, rnd)
                 if not _go_on(task, n, "the round again"):  # the day cap holds here too (#1019)
                     return
                 continue
@@ -5086,6 +5129,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 task.event({"ts": store.now(), "round": n, "kind": "load",
                             "text": f"{provider_of(task)} is still out of credit: the task waits "
                                     "as queued again"})
+                _run_again(task, n, rnd)
                 if not _go_on(task, n, "the round again"):
                     return
                 continue
@@ -5110,6 +5154,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                         _wait_up(task, m)
                     except RuntimeError as e:
                         return _load_failed(task, e)
+                _run_again(task, n, rnd)
                 if not _go_on(task, n, "the round again"):
                     return
                 continue
