@@ -532,17 +532,21 @@ def spec_gap_line() -> str | None:
 
 def table(only: set | None = None) -> str:
     """`wb stats`' table; ``only``: these models' rows alone (the ones the Stats tab shows)."""
-    from .tuning import judged  # tuning reads results' rows
+    from .tuning import judged, stopped_outside  # tuning reads results' rows
     every = store.results()
     shown = [r for r in every if only is None or r.get("model") in only]
     rows = [r for r in shown if judged(r)]
     # each kind left out counted apart: every row not shown was called a spec-gap discard, so
     # 40 tasks on a retired model read "(41 discards put down to the spec left out)" (#817)
     gaps = sum(1 for r in shown if r.get("outcome") == "discarded" and r.get("spec_gaps"))
-    never = len(shown) - len(rows) - gaps
+    stopped = sum(1 for r in shown if stopped_outside(r) and not r.get("spec_gaps")
+                  and r.get("ran", True))  # one that never ran is counted as that (#1245)
+    never = len(shown) - len(rows) - gaps - stopped
     trials = len(store.results(trials=True)) - len(every)
     left_out = (f"\n({trials} trial run{'s' if trials > 1 else ''} left out)" if trials else "") + \
         (f"\n({gaps} discard{'s' if gaps > 1 else ''} put down to the spec left out)" if gaps else "") + \
+        (f"\n({stopped} discard{'s' if stopped > 1 else ''} after a stop that wasn't the agent's "
+         "left out)" if stopped else "") + \
         (f"\n({never} task{'s' if never > 1 else ''} whose agent never ran left out)" if never else "")
     if not rows:
         return "no finished tasks yet" + left_out

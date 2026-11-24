@@ -4461,6 +4461,12 @@ def cmd_discard(a):
         die(f"{a.name} is already {task.status.get('phase')}")
     if why := _accepting(task):  # its commit exists, perhaps merged: not a discard (#878)
         die(why)
+    # the last stop wasn't the step's (status `infra`, which drive clears as a round starts; a
+    # shutdown's signal sets none): in the row, so the discard the stop notice offers isn't
+    # scored as the model's rejected work (#1245, 2026-11-24). Read before this discard's own stop.
+    st = task.status
+    outside = st.get("infra") or ("signal" if st.get("phase") == "stuck"
+                                  and st.get("last") == runner.SIGNAL_STOP else None)
     _stop_runner(task)
     _spec_gaps(task, a.spec_gap)
     repo = gitops.repo_of(spec)  # a removed linked worktree: the repository's main one (#498)
@@ -4506,11 +4512,12 @@ def cmd_discard(a):
         else:
             said = _held(repo, branch)
     # --drop-steps deleted the approved steps with the branch: no longer kept work (#722)
-    dropped = {"steps_dropped": True} if getattr(a, "drop_steps", False) else {}  # bench's own call lacks it
+    extra = {"steps_dropped": True} if getattr(a, "drop_steps", False) else {}  # bench's own call lacks it
+    extra |= {"infra": outside} if outside else {}
     task.set_status(phase="discarded", last=a.reason or "discarded", pid=None,
                     unrecorded={"outcome": "discarded", "step": measured,
-                                "extra": {"reason": a.reason, **dropped}})
-    row = results.record(task, "discarded", measured, reason=a.reason, **dropped)
+                                "extra": {"reason": a.reason, **extra}})
+    row = results.record(task, "discarded", measured, reason=a.reason, **extra)
     task.set_status(unrecorded=None)
     _ack_all(task)
     _closed(task)

@@ -2631,7 +2631,8 @@ no reader. What the router, tuning, savings and progress read is outside the set
 milestones): every non-trial row. An empty section is left out, never zeros (a new install: `{ts,
 until, settings, tasks: 0}`); `until` is the next local midnight (`_midnight`), when the pane
 re-reads. Keys: `periods` (`week`, `month`, `all`, `savings.PERIODS`: tasks, landed, `accepted_pct`,
-`active_minutes`, `savings` with `score`, `spec_gaps`, `energy` `{wh, cost?}` from every row's
+`active_minutes`, `savings` with `score`, `spec_gaps` (one after a stop that wasn't the step's
+counted too, as `results.table` does, #1245), `energy` `{wh, cost?}` from every row's
 `gpu_wh` that measured them, another machine's GPU and API rows left out, #568, #569; `api`, below), `streak` `{current, best,
 days}` (local days with a task landed; the current run ends today or yesterday, else 0, and an
 ended run is never mentioned), `bests`
@@ -2709,7 +2710,8 @@ far, or one time in five (`EXPLORE`) its neighbour. `reward`, per step: 1 if acc
 (`agent_landed`; a takeover scores 0, #647), divided by one plus agent-caused review rounds a step,
 less `COMPACT_PENALTY` 0.25 if OpenCode compacted, ± up to `SPEED_WEIGHT` 0.15 against the model's
 median active minutes a step of the same kind of work (`tuning.work`: the row's `role`, else its size; #543, #721, #1025). Discards score 0; a `--spec-gap`
-discard counts nowhere (`judged`). `Knob.fills` (`fresh_at`) counts a task only if a session
+discard counts nowhere (`judged`), nor one after a stop that wasn't the step's with no step kept
+(`tuning.stopped_outside`: the row's `infra`, #1245). `Knob.fills` (`fresh_at`) counts a task only if a session
 reached the smallest allowed value (`tuning.acted`, row `peak_share`; older rows count; #721: most
 tasks never fill 40%, and one fast trivial task flipped the pick); `Knob.passed` (`self_review`)
 only if a round's tests passed (`self_review_due`, set whether or not self-review ran; older rows
@@ -3692,13 +3694,14 @@ pool otherwise (`media.boxes`), or none (`"gpu": false`).
 
 **Routing** (`router.rank`, `choose`). Rows: `store.results()` kept by `tuning.judged`, for the
 model, its `lineage` and the role (`router.of_role`: a row's `role`, else its `size`; with no role
-asked, the size's; *The writing role*). `judged` drops `--spec-gap` discards and rows whose agent never
-ran (`ran` false, `failed_before`; older: not accepted, `tok_out` 0; #581).
+asked, the size's; *The writing role*). `judged` drops `--spec-gap` discards, rows whose agent never
+ran (`ran` false, `failed_before`; older: not accepted, `tok_out` 0; #581), and discards after a stop
+that wasn't the step's (`tuning.stopped_outside`: the row's `infra`, unless steps were kept; #1245).
 `router.same_weights`/`weights_now` drop rows on other weights (`weights_id`, `models.identity`:
 Ollama's digest, else a server's bytes) from routing, slice and tuning (#726); `router.same_kind` the rows of the other kind (#1022). Quality = (accepted
 + 1) / (tried + 2), accepted being the agent's share (`tuning.credit`: 1 when `tuning.agent_landed`;
 after `wb takeover` the agent's steps only, #647; a discard keeps its committed steps,
-`landed_steps`, #722); on the repo's stack (`gitops.stack`: up to two languages each ≥ 20% of
+`landed_steps`, #722, over every step but one a stop from outside it ended, `infra`, #1245); on the repo's stack (`gitops.stack`: up to two languages each ≥ 20% of
 tracked source, the package's when it has one, #820) (like_accepted + `LIKE_PRIOR`·overall) /
 (like_tried + `LIKE_PRIOR`), 2. Counts decay (`_weight`: half per `HALF_LIFE_DAYS` 60; `Score.w`);
 `Score.line`'s `tries`/`wins` stay plain (#648).
@@ -6198,7 +6201,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb bench run` | `--model ID…` (default: every GPU model that can run and takes the case's size), `--case NAME…`, `--skill NAME…`, `--label TEXT`, `--repeat N` (1) | A detached driver, one replay at a time behind real tasks, preempted by one; refused while another run runs; trims runs past `RUNS_KEPT` 20 (`bench.prune_runs`), `bench.sweep`s; skips what the label already passed or failed (an `error` runs again); an API `--model` refused (#1013). |
 | `wb backlog [NAME]` | `--json` | A `--backlog` batch, archived included: per task, then `savings.summary`, then the batch's `api:` line when it has API tasks (`api_summary`, trials in, #1121); `--json` `{backlog, tasks, totals}` (`totals.api`: api_totals), unnamed `[{backlog, tasks, open}]`. Unknown: exit 1. |
 | `wb savings` | `--week` \| `--month` \| `--all`, `--json`, `--share`, `--card FILE.svg`, `--price X\|off`, `--api` | `savings.totals`, trials out, then the `api:` line when the period has API tasks; `--json` `{period, tasks, of, claude, self_est, saved, wh, cost, remote, score, price, api}` (the pane reads it); `--api`: the closed API tasks' money by provider, trials in, and the day ledger's spend and by day, open tasks and bench replays in (`savings.spent`, #1094), `--json` api_totals plus `bench` and `spent` (*What a task saved*, #1022); `--price` (positive, finite, else exit 1) writes savings.json `kwh_price` (`off`: `set_price(None)`, #609). |
-| `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set recording\|live on\|off`, `set every 1\|2\|5`, `--json` (*The Stats feed*), `--all` | `set`: stats.json; `wb stats`: `stats.summary`, then results by model, kind and role (a row before roles by size; the model column as wide as the longest id, never cut, the role cut to 11) with columns `tasks`, `accepted`, `rounds`, `autofix`, `reviews`, `min`, `claude`; with an API row shown also `kind`, `role`, `agent tok` and `paid` (mean $ a task over the known costs: `-` GPU, `plan` all plan usage, `?` none known, `~$0.12` some unknown, plan rows and those that sent nothing aside, #1106; `results.paid_cell`), within 120 columns for ids up to 30 (`stats.STATS_MODEL_LINES` 3, #638, #1022); a GPU-only table is as before #1022: `size` (`role` once a writing row shows) and `local tok`; `tune`: the knobs; `trial`: closed tasks' rows marked, lessons dropped (an open task refused: it has no row). |
+| `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set recording\|live on\|off`, `set every 1\|2\|5`, `--json` (*The Stats feed*), `--all` | `set`: stats.json; `wb stats`: `stats.summary`, then results by model, kind and role (a row before roles by size; the model column as wide as the longest id, never cut, the role cut to 11) with columns `tasks`, `accepted`, `rounds`, `autofix`, `reviews`, `min`, `claude`; with an API row shown also `kind`, `role`, `agent tok` and `paid` (mean $ a task over the known costs: `-` GPU, `plan` all plan usage, `?` none known, `~$0.12` some unknown, plan rows and those that sent nothing aside, #1106; `results.paid_cell`), within 120 columns for ids up to 30 (`stats.STATS_MODEL_LINES` 3, #638, #1022); a GPU-only table is as before #1022: `size` (`role` once a writing row shows) and `local tok`; `tune`: the knobs; `trial`: closed tasks' rows marked, lessons dropped (an open task refused: it has no row). Beneath the table, each kind of row it leaves out counted apart: trial runs, discards put down to the spec, discards after a stop that wasn't the agent's, tasks whose agent never ran (`results.table`, #817, #1245). |
 | `wb gc` | `--days N` (`ARCHIVE_DAYS` 30) | `cli.gc`, writing `gc.json`: archives tasks closed N days (`store.archive`); old handled notices to `notify.old.jsonl` (`_rotate_notices`; `_cap_old_notices` at `NOTIFY_OLD_MAX` 8 MiB); rules of gone tasks (`RULES_GRACE` 1 h); `context.drop_stale_runtime_dirs`; `store.SCRATCH_PREFIXES` scratches (named `<prefix><maker's pid>.<start tag>.<machine tag>-` by `store.scratch`; `wb bench add`'s `.<case>.<pid>.tmp`) `SCRATCH_AGE` old whose maker is gone (`_drop_scratches`, `_maker_alive`: a reused pid with another start is gone, #532; `_scratch_homes`, #589; another machine's after `FAR_SCRATCH_AGE`, as its pid isn't in this process table, #876); half-made starts (`_dead_start`, `_drop_start`: worktree unlocked and removed, and the branch only when `starting.json` says this start made it and it still points at `branch_at`, `delete_branch(at=)`, #416, #376); chat uploads (`chat.drop_old_uploads`); landed `delegate/` branches (`_merged_branches`, `gitops.drop_landed_branch`, never one checked out, `gitops.checked_out_in`, nor one moved past the recorded tip, #930; status `branch_gone`, #686; one squash-merged elsewhere holds commits its target lacks and stays); accepted refs (`_released_refs`, `gitops.drop_accepted`, `accepted_ref_gone`: deleted when the tip is in `base_branch`, else moved into `steps.bundle` first; a `steps.bundle` stays as long as its task, #940); archived tasks past `store.SLIM_DAYS` 90 slimmed (`store.slim_archive`, `SLIM_GLOBS`: logs, test outputs, old exports, shot PNGs with shots.json marked `pruned` first, #821; task.json, status, prompts, summaries, events and asks stay: names stay taken, bench add and the lessons read them); `_drop_leftovers` (old `imports/`, dead `claude-sessions/<pid>`). Then (not in `cli.gc`) `bench.sweep` (#511). Accept and discard run it without the branches once per `GC_EVERY`. |
 
 ### Other
@@ -6539,7 +6542,9 @@ began or a token was written),
 `thinking` (an API task's, `off`|`on`, #1018), `tuned`, `explored`, `tuned_max`, `peak_share`, `self_review_due`, `spec_gaps`, `claude` (`spend.usage`: `{turns,
 calls, input, cache_write_5m, cache_write_1h, cache_read, output}`), `gpu_wh`, `remote_gpu`, `active_minutes`
 (status `active_s`), `interventions`, `diff` (accepted: `{files, added, removed, generated?, deleted?}`, `gitops.footprint`),
-`landed_steps` (discarded: the steps `wb next` committed and the discard kept; `steps_dropped` after `--drop-steps`), `backlog`, `trial`, `experiment_use`, `long_reads`,
+`landed_steps` (discarded: the steps `wb next` committed and the discard kept; `steps_dropped` after `--drop-steps`),
+`infra` (discarded after a stop that wasn't the step's: status `infra` at the discard, else `signal` for a
+shutdown's stop, `runner.SIGNAL_STOP`; `tuning.stopped_outside`, #1245), `backlog`, `trial`, `experiment_use`, `long_reads`,
 `kind` (`gpu`|`api`, task.json `via`; a row without it is GPU, an old `:cloud` one too), `role` (task.json `role`, or null),
 `provider` (task.json `provider`, else the model id before its first `/`), and for an API row `api` (`results.api_usage`:
 `{cost (USD or null, never 0 for no price), tokens {in, out, cache_read, cache_write, reasoning}, source (opencode | mixed |
