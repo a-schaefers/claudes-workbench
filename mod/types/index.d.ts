@@ -98,7 +98,7 @@ export type WbRoutes = {
   roles: Record<'significant' | 'trivial' | 'writing', { via: 'gpu' | 'api'; gpu: string; api?: string;
     thinking: 'off' | 'on'; label: string }>
   spend_today: { usd: number; by_provider: Record<string, number> }
-  providers: Record<string, { name: string; key: 'stored' | 'env' | 'oauth' | 'none'; why?: string }>
+  providers: Record<string, { name: string; key: 'stored' | 'ollama' | 'env' | 'oauth' | 'none'; why?: string }>
 }
 
 /** `wb models --json` (#1023): the GPU models (cards: the numbers its Ollama sees, null unknown),
