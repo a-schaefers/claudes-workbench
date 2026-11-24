@@ -4879,6 +4879,8 @@ client; the server needs no browser.
 - **Kept apart.** A `cid` another sender used is 409 (`chat.send`: an agent's send could get the
   user's message back); an agent's stream never makes the oldest give way (503 at once); the mod
   indents an agent's later lines, so none starts as `[web chat]` or `[message …]` (`chatPrompt`).
+  An agent's `about` is 400 `agent messages can't carry about` (what a message answers is the
+  user's to say).
 - **The MCP server** (#1138, for 2.1): `skill/agents/claude-workbench/scripts/mcp_server.py`, a
   stdio MCP server (newline-delimited JSON-RPC, as `ask_mcp.py`: `initialize` with the client's
   protocol version, else `PROTOCOL` `2025-06-18`; `ping`; `tools/list`; `tools/call` on a thread
@@ -4893,11 +4895,18 @@ client; the server needs no browser.
   - `get_reply {id, wait?}`: `/api/wait?after=<id>&timeout=0`, then held (`wait`, `WAIT_DEFAULT`
     20 s, at most `WAIT_MOST` 300: many clients cut a tool call at 60 s) from the last reply on
     until the turn's end, not the first reply ("On it" came first). The wait answers for the
-    agent's whole conversation, so the replies kept are those whose `re` names the id, and when
-    the newest reply is a later request's alone this one is done (the turn that took it ended).
-    Status `done`, `waiting on the user` (`waiting_on_user`), `queued` (`listener: null`),
-    `expired` (its row in `/api/state` says so) or `still working`, each with what to do next
-    (`NEXT`); an id outside the agent's view is refused (404).
+    agent's whole conversation and its `done` for the newest row it is after, so the replies kept
+    are those whose `re` names the id, and it is done when: no reply came after it and a turn that
+    took it ended; its newest reply is the newest and a turn ended after it; or a later reply's
+    turn ended, or a reply names a request sent after it (`/api/state`'s `ts`) and not it (that
+    came from a later turn: the one that took it may have answered the user alone). A reply to an
+    earlier request says nothing of it. With none of its own among the replies the hold is
+    `until=reply` (with `until=done` the later reply's ended turn answered at once, over and over:
+    3,105 waits in 2 s, the review); a wait back with nothing new ends it; `timeout` goes in
+    tenths. Status `done`, `waiting on the user` (`waiting_on_user`), `queued` (`listener:
+    null`), `expired` (no reply of its own, its row in `/api/state` says so, listener or not: the
+    chat retires it either way; checked before the hold too) or `still working`, each with what
+    to do next (`NEXT`); an id outside the agent's view is refused (404).
   - `list_requests {}`: the newest `LISTED` 20 of its own messages from `/api/state`, each with
     `N replies`, `received`, `queued` or `expired`, and whether Claude listens.
 
@@ -4908,8 +4917,6 @@ client; the server needs no browser.
   sends `Authorization` on to wherever a 3xx points. Its config line for OpenCode needs
   `codemode: false`, or OpenCode 2.3 offers MCP tools only behind `execute` (docs/chat-api.md,
   *An MCP server*).
-  An agent's `about` is 400 `agent messages can't carry about` (what a message answers is the
-  user's to say).
 - **An agent's view.** An agent reads only its own conversation: round one let its token read the
   whole state and stream, the user's messages and dialogs included. `Handler._snap` gives it
   `chat.agent_snapshot` (`{api, messages, listener, uploads, expire, now}`, `messages` only the rows
@@ -6428,7 +6435,8 @@ card and in the push (#1042), a 25-task backlog's strip at most three lines on a
 (#1097); and `sw.js` in a node `vm` (`swSays`) for a push's text.
 `WebChat` runs the agents' client, `skill/agents/claude-workbench/scripts/ask_claude.py`, against its server with a
 listener played in the test (#1042). `AgentMcp` runs the agents' MCP server as a subprocess on stdio against its own
-chat server (`initialize`, `tools/list`, each tool, the loopback refusal, a redirect never followed), and, with
+chat server (`initialize`, `tools/list`, each tool, the loopback refusal, a redirect never followed, a request
+answered to the user alone staying done in a bounded number of waits, an expired one with a listener up), and, with
 `opencode` on PATH, real OpenCode with the docs' config line, `capture_llm.py` making the tool calls (#1138).
 
 **Rate limits** (`RateLimits`, #1020): the runner in-process (`runner.drive`) on a task written as `wb start --role`

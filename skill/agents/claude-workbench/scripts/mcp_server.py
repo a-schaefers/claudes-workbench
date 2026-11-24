@@ -164,8 +164,10 @@ def ask(text: str, key: str = "") -> dict:
     raise Refusal(f"the chat didn't answer ({why}): try again with key {key}, so it is sent once")
 
 
-def _wait(after: str, hold: float) -> dict:
-    q = urlencode({"after": after, "timeout": int(hold), "until": "done"})
+def _wait(after: str, hold: float, until: str = "done") -> dict:
+    # tenths, not whole seconds: a wait back empty ends the hold, and one cut to int(1.99) ended
+    # a 2-second get_reply at 1
+    q = urlencode({"after": after, "timeout": round(hold, 1), "until": until})
     try:
         code, got = call("GET", f"/api/wait?{q}", timeout=hold + 30)
     except OSError as e:
@@ -178,10 +180,11 @@ def _wait(after: str, hold: float) -> dict:
     return got
 
 
-def _expired(rid: str) -> bool:
+def _messages() -> dict:
+    """This agent's view of the thread from /api/state, by id ({} when the chat won't say)."""
     code, got = call("GET", "/api/state")
-    return code == 200 and any(m.get("id") == rid and m.get("expired")
-                               for m in got.get("messages") or [])
+    return {m["id"]: m for m in (got.get("messages") or []) if isinstance(m, dict) and m.get("id")} \
+        if code == 200 else {}
 
 
 def reply(rid: str, wait: float = WAIT_DEFAULT) -> dict:
@@ -190,28 +193,64 @@ def reply(rid: str, wait: float = WAIT_DEFAULT) -> dict:
     if not rid or len(rid) > 64:
         raise Refusal("id is a request's id, from ask_claude")
     rows: list = []
+    sent: dict = {}  # the agent's requests' send times, read when a reply names another request
+
+    def later(ids: set) -> bool:
+        """Whether any of ``ids`` is a request of this agent's sent after ``rid``."""
+        if ids - sent.keys():
+            sent.update({i: m.get("ts", 0) for i, m in _messages().items() if m.get("role") == "agent"})
+        # a request past the state's newest 200 is older than every request it lists
+        at = sent.get(rid, float("-inf"))
+        return any(sent[i] > at for i in ids if i in sent)
 
     def where(got: dict) -> str:
-        # the wait answers for the agent's whole conversation: its replies can be another
-        # request's, and `done` is for the newest of them. A reply is for the requests its `re`
-        # names; one to a later request alone means the turn that took this one has ended
-        mine = [r for r in rows if rid in (r.get("re") or [])]
-        newest_mine = not rows or rid in (rows[-1].get("re") or [])
-        if (got.get("done") if newest_mine else mine):
+        # the wait answers for the agent's whole conversation: its replies can be other requests',
+        # and its `done` is for the newest of them (else for this request: a turn that took it
+        # has ended). A reply is for the requests its `re` names
+        n = max((k for k, r in enumerate(rows) if rid in (r.get("re") or [])), default=-1)
+        if n == len(rows) - 1:  # no replies, or the newest is this request's
+            done = got.get("done")
+        else:
+            # a turn ended after a later reply ended after this request's newest one too; and a
+            # reply to a request sent after this one, not naming it, came from a later turn (one
+            # runs at a time), so the turn that took this one has ended, whether or not it replied
+            # here (it can answer the user alone). One to an earlier request says nothing of it
+            done = (n >= 0 and got.get("done")) or later(
+                {i for r in rows[n + 1:] for i in r.get("re") or [] if i != rid})
+        if done:
             return "done"
         if got.get("waiting_on_user"):
             return "waiting on the user"
         return "queued" if got.get("listener") is None else "still working"
 
+    def expired(status: str) -> bool:
+        # the chat retires a request unread past 6 hours whether or not a session listens: one
+        # with a listener up said "still working" for good (the #1138 review)
+        return status in ("still working", "queued") \
+            and not any(rid in (r.get("re") or []) for r in rows) \
+            and bool(_messages().get(rid, {}).get("expired"))
+
     got = _wait(rid, 0)
     rows += got.get("replies") or []
+    status = where(got)
+    if expired(status):  # never taken: no hold for a turn that won't come
+        status = "expired"
     # held to the turn's end, not to the first reply: "On it" comes first, and a get_reply that
     # returned on it would leave the agent polling again at once
     deadline = time.monotonic() + wait
-    while (status := where(got)) == "still working" and (left := deadline - time.monotonic()) >= 1:
-        got = _wait(rows[-1]["id"] if rows else rid, left)
-        rows += got.get("replies") or []
-    if status == "queued" and _expired(rid):
+    while status == "still working" and (left := deadline - time.monotonic()) >= 1:
+        # the wait's `done` is for the newest row it is after. With no reply of this request's
+        # among them, that is another request's reply, whose turn may have ended already: the
+        # wait answered at once, over and over (3,105 waits in 2 s, the #1138 review), so then it
+        # holds for a new reply instead. With one, a turn ended after the newest ends this too
+        ours = not rows or any(rid in (r.get("re") or []) for r in rows)
+        got = _wait(rows[-1]["id"] if rows else rid, left, "done" if ours else "reply")
+        new = got.get("replies") or []
+        rows += new
+        status = where(got)
+        if not new:  # the chat holds a wait until there is news: back with none, it was the last
+            break
+    if expired(status):
         status = "expired"
     mine = [r for r in rows if rid in (r.get("re") or [])]
     return {"id": rid, "status": status,

@@ -24460,12 +24460,65 @@ class AgentMcp(Base):
         r = rpc.tool("get_reply", id=r2, wait=0)["structuredContent"]
         self.assertEqual((r["status"], [x["text"] for x in r["replies"]]), ("still working", ["Adding it."]))
         self.assertIn("no request nope", rpc.tool("get_reply", id="nope", wait=0)["content"][0]["text"])
-        # nobody listening: a request unread past 6 hours is expired, a newer one queued
-        (self.chat.chat_dir() / "listener.json").unlink()
+        # a request unread past 6 hours is expired, listener or not: the chat retires it either
+        # way, and with one up it said "still working" for good, held each time (the #1138 review)
         old = {"id": f"{int(time.time() * 1000) - 1}-abcdef", "ts": store.now() - 7 * 3600,
                "from": "my-agent", "role": "agent", "text": "an old one"}
         store.append_jsonl(self.chat.chat_dir() / "messages.jsonl", old)
+        began = time.monotonic()
         self.assertEqual(rpc.tool("get_reply", id=old["id"], wait=5)["structuredContent"]["status"], "expired")
+        self.assertLess(time.monotonic() - began, 4)                     # no hold for a turn that won't come
+        (self.chat.chat_dir() / "listener.json").unlink()
+        self.assertEqual(rpc.tool("get_reply", id=old["id"], wait=5)["structuredContent"]["status"], "expired")
+
+    def test_get_reply_stays_done_for_a_request_answered_to_the_user_alone_without_polling_the_chat(self):
+        # #1138 review: a turn that took the user's message and the agent's replies to the user
+        # alone, so the request has no reply; once a later request was answered and its turn
+        # ended, get_reply on the first said "still working" for good, and its wait for the later
+        # reply's turn answered at once, over and over: 3,105 GET /api/wait in 2 s
+        tok = self._agent()
+        self._listening()
+        rpc = self._server(token=tok)
+        rpc("initialize", {"protocolVersion": "2025-06-18"})
+        handler = self.srv.RequestHandlerClass
+        waits, held = [], handler._wait
+
+        def counted(h):
+            waits.append(h.path)
+            return held(h)
+        mock.patch.object(handler, "_wait", counted).start()
+        self.addCleanup(mock.patch.stopall)
+        earlier = rpc.tool("ask_claude", text="a request from before")["structuredContent"]["id"]
+        time.sleep(0.01)
+        first = rpc.tool("ask_claude", text="add a --json flag")["structuredContent"]["id"]
+        user = self.chat.send("and the docs please", "user")["id"]
+        for i in (user, first):
+            self.chat.ack(i, "s1")
+        self.assertEqual(self.chat.reply("Both in hand.")["re"], [user])  # the user's alone
+        self.chat.turn_ended([user, first], "s1")
+        self.assertEqual(rpc.tool("get_reply", id=first, wait=0)["structuredContent"]["status"], "done")
+        # an earlier request's reply, its turn ended, says nothing of `first`... nor of a request
+        # sent after it, not taken yet: still working, held for a new reply, not polled
+        time.sleep(0.01)
+        second = rpc.tool("ask_claude", text="and a changelog line")["structuredContent"]["id"]
+        self.chat.reply("About the earlier one: done.", [earlier])
+        self.chat.turn_ended([earlier], "s1")
+        del waits[:]
+        began = time.monotonic()
+        r = rpc.tool("get_reply", id=second, wait=2)["structuredContent"]
+        self.assertEqual((r["status"], r["replies"]), ("still working", []))
+        self.assertGreater(time.monotonic() - began, 1.5)                # held, not answered at once
+        self.assertLessEqual(len(waits), 3, waits)
+        # the later request answered and its turn ended: `first` stays done, in a few waits
+        self.chat.ack(second, "s1")
+        self.chat.reply("Added.", [second])
+        self.chat.turn_ended([second], "s1")
+        del waits[:]
+        for wait in (0, 3):
+            r = rpc.tool("get_reply", id=first, wait=wait)["structuredContent"]
+            self.assertEqual((r["status"], r["replies"]), ("done", []))
+        self.assertLessEqual(len(waits), 4, waits)
+        self.assertEqual(rpc.tool("get_reply", id=second, wait=3)["structuredContent"]["status"], "done")
 
     @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
     def test_real_opencode_calls_the_mcp_servers_tools_end_to_end(self):
