@@ -1116,6 +1116,8 @@ def _api_notes(task_name: str, repo: Path, m: models.Model, a, routed: dict) -> 
         notes.append(privacy.where_note(info, rules, named, whose))
     if gap := context.api_hidden_note():
         notes.append(gap)
+    if gap := context.git_url_note(repo):  # a token in a remote URL (#1072)
+        notes.append(gap)
     return notes
 
 

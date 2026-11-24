@@ -31297,6 +31297,32 @@ class Privacy(_KeyholeTest):
             self.assertNotIn("can't read ~/.npmrc", self.start("t-dn2", "ok"))
             wait_phase("t-dn2", ("review",))
 
+    def test_an_api_start_names_a_remote_url_that_holds_a_token(self):
+        # #1072 (2026-11-23): `git remote -v` in an API lane printed origin's token, or one from
+        # a ~/.gitconfig insteadOf rule; git needs both files, so the start says so instead
+        home = Path(self.tmp.name) / "home"
+        home.mkdir()
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa: E731
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for v in ("XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL"):
+                os.environ.pop(v, None)
+            g("remote", "add", "origin", "ssh://git@gitlab.example.com/team/app.git")
+            g("remote", "set-url", "--push", "origin", "git@gitlab.example.com:team/app.git")
+            self.assertEqual(context.git_url_note(self.repo), "")      # an SSH user is no login
+            g("remote", "add", "mirror", "https://oauth2:glpat-FAKEFAKE1234@gitlab.example.com/team/app.git")
+            out = self.start_api("t-url1")
+            self.assertIn(f"note: an API task can read the login in a git URL in {self.repo}/.git/config "
+                          "(`git remote -v`, which would send it to the provider): keep the token in a "
+                          "credential helper instead", out)
+            self.assertNotIn("glpat-FAKEFAKE1234", out)
+            g("remote", "remove", "mirror")
+            (home / ".gitconfig").write_text('[url "https://glpat-GLOBALFAKE@gitlab.example.com/"]\n'
+                                             "\tinsteadOf = https://gitlab.example.com/\n")
+            self.assertIn("in a git URL in ~/.gitconfig (", context.git_url_note(self.repo))
+            out = self.start("t-url2", "ok")                           # a GPU start: nothing leaves
+            self.assertNotIn("git URL", out)
+            wait_phase("t-url2", ("review",))
+
     # 8, 9: OpenRouter
 
     def test_an_openrouter_id_needs_its_backends_named_and_its_requests_go_to_them_alone(self):

@@ -2605,6 +2605,42 @@ def api_hidden_note() -> str:
             f"in its lane {', and '.join(said)}")
 
 
+# A git URL with a login in it: an http(s) one with any user (a token is often the user alone,
+# https://<token>@host), or any with a password; not ssh://git@host, whose user is no secret
+GIT_URL_LOGIN = re.compile(r"(?i)\bhttps?://[^\s/@]+@|\b[a-z][\w+.-]*://[^\s/@:]*:[^\s/@]+@")
+# the git config keys that hold a URL: remotes' and insteadOf rules' (the URL is in the key)
+GIT_URL_KEYS = r"^(remote\..*\.(push)?url|url\..*\.(push)?insteadof)$"
+
+
+def git_url_note(repo) -> str:
+    """wb start's note for an API task when the repo's git config or the user's holds a URL with
+    a login (GIT_URL_LOGIN), else '': `git remote -v` or `git config -l` in its lane would send
+    it to the provider, and git needs those files to run, so no lane hides them (#1072,
+    2026-11-23: a token in origin's URL, or in a ~/.gitconfig insteadOf rule, came out of
+    `git remote -v`). Names the files, never the URL."""
+    try:
+        out = gitops.git(Path(repo), "config", "--show-origin", "--get-regexp", GIT_URL_KEYS,
+                         check=False)
+        top = gitops.git(Path(repo), "rev-parse", "--show-toplevel").strip() if out else ""
+    except (gitops.GitError, OSError):
+        return ""
+    home = os.path.realpath(Path.home())
+    files = []
+    for line in out.splitlines():
+        where, _, entry = line.partition("\t")
+        if where.startswith("file:") and GIT_URL_LOGIN.search(entry):  # .git/config: the top's
+            f = os.path.realpath(os.path.join(top, where[len("file:"):]))
+            name = "~" + f[len(home):] if f.startswith(home + os.sep) else f
+            if name not in files:
+                files.append(name)
+    if not files:
+        return ""
+    return (f"an API task can read the login in a git URL in {', '.join(files)} (`git remote -v`, "
+            "which would send it to the provider): keep the token in a credential helper instead "
+            "(`git config --global credential.helper store` puts it in ~/.git-credentials, which no "
+            "lane reads)")
+
+
 # where conda, mamba and micromamba say their install is, with or without an env activated
 CONDA_VARS = ("CONDA_EXE", "CONDA_PYTHON_EXE", "MAMBA_EXE", "MAMBA_ROOT_PREFIX")
 

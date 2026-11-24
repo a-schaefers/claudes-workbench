@@ -1495,7 +1495,13 @@ deliberately hostile process.
   `API_HIDDEN_TOOL`, by name or by folder and name for `.bundle/config`): `note: an API task can't
   read ~/.m2/settings.xml, ~/.npmrc (each holds a credential, which would reach the provider): in
   its lane Maven stops on every run, and npm installs from a private registry fail` (`it holds` for
-  one). The writable homes `.m2`, `.gradle`, `.hex` and `.nuget` are split around a hidden one,
+  one). A git URL with a login can't be hidden (git reads `.git/config` and `~/.gitconfig` to
+  run), so `wb start` names the files that hold one instead (`context.git_url_note`, #1072): `git
+  config --show-origin --get-regexp` over `GIT_URL_KEYS` (remotes' `url`/`pushurl`, `url.*.insteadOf`),
+  matched by `GIT_URL_LOGIN` (an http(s) URL with any user, since a token can be the user alone, or
+  any URL with a password; not `ssh://git@`): `note: an API task can read the login in a git URL in
+  <repo>/.git/config (`git remote -v`, which would send it to the provider): keep the token in a
+  credential helper instead (…)`, never the URL. The writable homes `.m2`, `.gradle`, `.hex` and `.nuget` are split around a hidden one,
   what each makes at its top made first (`SPLIT_MADE`: Gradle's `caches/`, `daemon/`, `native/`,
   `wrapper/`, `jdks/`, `notifications/`, `.tmp/`, `build-scan-data/`; Hex's `packages/`; NuGet's
   `packages/`, since dotnet writes `NuGet.Config` on first use; `~/.cache` around Hugging Face's
@@ -3574,7 +3580,7 @@ local.cfg (--copy), ../shared (--sibling)`), and the line's OpenRouter and free 
 (else `wb gc` would bring it back) has that repo and provider; not results.jsonl, whose rows before #1022 don't say a
 task was on API, and every closed task's directory stays, archived. Task.json's
 `order` (the role's, `cli._routed_keys`), the one the keyhole routes by, gives the backends. The token files the lane hides (each that holds a credential) are a note on
-every API start (*What the agent knows*, `API_HIDDEN`).
+every API start (*What the agent knows*, `API_HIDDEN`), and so is a git URL with a login in it (`context.git_url_note`, #1072).
 
 **local_only.** commands.json `repos.<path>.local_only: true` (a bool, else `commands_conf` refuses it), read by the
 nearest entry that states it (*Files and formats*), or `wb start --local-only` (task.json `local_only`) for one task.
