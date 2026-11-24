@@ -4833,7 +4833,7 @@ client; the server needs no browser.
   (`chat.agent_for`, constant time, the file read per request so a revoke is at once) and sets
   `Handler.agent`; an agent token from a peer that isn't loopback (`Handler._from_loopback`: `127.*`, `::1`) is 403 `agent tokens work only from this machine (localhost)` whatever the bind, as agents are this machine's own (owner, 2026-11-23), while the user's token still works from the tailnet or LAN; a held wait or open stream checks again at every wake (`Handler._revoked`:
   both went on reading its replies after a revoke, the #1042 review). An agent gets 403 `agent tokens can't …` on `AGENT_DENIED` (`/api/answer`,
-  `/api/prefs`, `/api/push`, `/api/active`, `/api/seen`), and 429 `{error, retry_after}` past
+  `/api/prefs`, `/api/push`, `/api/active`, `/api/seen`), and 429 `{error, code: rate_limited, retry_after}` past
   `AGENT_SENDS_PER_MIN` 30 sends in any 60 s (`chat.RateLimit`, per agent, in the server's memory).
   No switch of its own: answered while the server runs and a token exists. With the chat off no
   session listens, so `/api/health` says `listening: false` and a message waits, unread, until one
@@ -4874,7 +4874,33 @@ client; the server needs no browser.
   returns when that turns true during the wait (once: true at its start, it holds). `wb chat reply
   --to user` addresses the user's thread whatever the turn took: a consent question during an
   agent's request went to that agent alone, pushed to no phone (the review). `GET /api/health`:
-  `{api, listening}`. `/api/state` carries `api` (`API_VERSION` 1).
+  `{api, listening}`. `/api/state` carries `api` (`API_VERSION` 1). A wait on a message to Claude
+  unread past `MESSAGE_EXPIRE`, with no reply, is 410 `expired` at once (`chat.wait_state`'s
+  `expired`, read through `chat.expired`): it was held to its timeout again and again, and
+  `ask_claude.py` waited out its whole deadline for an answer that could not come (#1138); the
+  client exits 2.
+- **Versioned paths, one error shape, retry safety** (#1138, for 2.1). Every `/api/<x>` is also
+  `/api/v1/<x>` (`API_V1`): `Handler._versioned` rewrites the path first in `do_GET`, `do_PUT` and
+  `do_POST`, so every check after it (`AGENT_DENIED`, `AGENT_UNREAD`) sees the one name; `/api/`
+  stays for the page and older clients, and `ask_claude.py` keeps it. Every error answer is
+  `{error, code, …}` (`Handler._json` adds `code` from `ERROR_CODES` by status unless the answer
+  names its own: `token_revoked`, `not_local`, `unknown_host`, `agent_forbidden`,
+  `bad_idempotency_key`, `ERRORS_SAID`); `error` stays the text, as `app.js` and `ask_claude.py`
+  show it as is. `Handler.send_error` answers http.server's own refusals (501 for another method,
+  a malformed request line) in that shape: they were HTML. A revoked agent token's sha256 moves to
+  `chat-agents.json`'s `revoked` (the newest `REVOKED_KEPT` 200; `chat.token_revoked`), so its
+  next request, held wait included (`REVOKED`), is 401 `token_revoked`, not `bad_token`.
+  `POST /api/send` with an `Idempotency-Key` (`IDEM_KEY`: 1 to 255 printable ASCII, no spaces;
+  else 400 `bad_idempotency_key`) runs under `chat/idempotency.lock` (`Handler._send_once`): the
+  key's record (`chat.idem_key`: the caller's name and the key's sha256) within `IDEM_FOR` (a day)
+  answers with the message it sent (`chat.message`, from anywhere in messages.jsonl) and
+  `Idempotent-Replayed: true`, sending nothing and costing no rate-limit slot (the limit is now
+  counted in `Handler._send_message`, after the body is read); another body under it
+  (`chat.idem_request`, the JSON with sorted keys) is 422 `idempotency_key_reused`; only a sent
+  message is recorded (`chat.idem_record`). An upload needs none: its id is stored once.
+  `ask_claude.py` sends one fresh UUID as both the key and the `cid`, and sends again after a cut
+  (a reset, 502 to 504) for up to `OUTAGE_MOST`: it ended at once, exit 1, and a rerun asked
+  Claude twice.
 - **Kept apart.** A `cid` another sender used is 409 (`chat.send`: an agent's send could get the
   user's message back); an agent's stream never makes the oldest give way (503 at once); the mod
   indents an agent's later lines, so none starts as `[web chat]` or `[message …]` (`chatPrompt`).
@@ -4964,6 +4990,9 @@ client; the server needs no browser.
   last (it marks the upload whole; `by`: the agent that uploaded it, #1042); `uploads.lock`: one
   finishing at a time.
 - `prefs.json`: `{away: "ask"|"allow"}` (else `ask`), read by `chat.ask`.
+- `idempotency.json`: `{<sha256 of caller and Idempotency-Key>: {ts, req: the request's sha256,
+  id: the message sent}}` under `idempotency.lock`: none older than `IDEM_FOR` (a day), the newest
+  `IDEM_KEPT` 1000, ids and hashes only, never a message's text (#1138).
 - `turns.jsonl`: `{ids, ended, by}`: a main turn of the listening session ended, having taken the
   messages `ids` (none: it only wrote to the thread), from `wb chat ended` (the mod's
   `chatTurnEnd`, #1042); read from its last 4 MiB.
@@ -5771,6 +5800,7 @@ $WB_HOME (~/.local/state/workbench)
                                  away.json ({at, by}; 0 once the user types in the terminal) page.json ({at})
                                  audio/<batch>/ (wb chat listen: <n>.<ext>, audio.json; newest 20) uploads/<id>/ (<name> 0600, .meta.json) uploads.lock
                                  turns.jsonl ({ids, ended, by}: the mod's turn ends, wb chat ended; #1042)
+                                 idempotency.json idempotency.lock (POST /api/send's Idempotency-Key: caller and key's sha256 → {ts, req, id}; #1138)
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md, AGENTS.md (the user's ~/.config/workbench/AGENTS.md, copied: #1061),
                                  project-rules/<path> (a rule a link takes outside the repo: context.project_rules),
                                  imports/<n>/<name> (an import from outside the repo: context.import_files),
@@ -5823,7 +5853,8 @@ $WB_HOME (~/.local/state/workbench)
                                  "local_only": true|false (API models never get it; a bool or refused, #1021)}}
   chat.json ($WB_CHAT_CONFIG)    {"bind": [...], "hosts": [...], "upload_mb": 25, "upload_message_mb": 50}
   chat-token ($WB_CHAT_TOKEN)    mode 600
-  chat-agents.json               beside chat-token, mode 600: {"agents": {"<name>": {"sha256", "ts"}}} (wb chat token; *Other agents*, #1042)
+  chat-agents.json               beside chat-token, mode 600: {"agents": {"<name>": {"sha256", "ts"}}, "revoked"?: {"<sha256>": ts}}
+                                 (wb chat token; *Other agents*, #1042; revoked: the newest 200, so a revoked token is told so, #1138)
   savings.json ($WB_SAVINGS)     {"kwh_price": N} (wb savings --price; off removes it; other keys kept)
   AGENTS.md ($WB_AGENTS_MD)      the user's own file for agents, every project's (*What the agent knows*, #1061); wb only reads it
   routes.json ($WB_ROUTES)       the roles (*Roles*, #1014): {"v": 1, "use": "gpu"|"api"|"both" (the Agents switch, #1016; missing: both),
@@ -6397,7 +6428,9 @@ never counted unread (#1128), its state without the user's, a dialog for it sayi
 card and in the push (#1042), a 25-task backlog's strip at most three lines on a phone, the queued counted apart
 (#1097); and `sw.js` in a node `vm` (`swSays`) for a push's text.
 `WebChat` runs the agents' client, `skill/agents/claude-workbench/scripts/ask_claude.py`, against its server with a
-listener played in the test (#1042).
+listener played in the test (#1042), and against a stub that cuts a send (one Idempotency-Key every try) and answers
+a wait `410 expired` (#1138); it checks every `/api/v1/` path against its `/api/` twin, each error `code` against
+docs/chat-api.md's table, and four racers under one key landing one message (#1138).
 
 **Rate limits** (`RateLimits`, #1020): the runner in-process (`runner.drive`) on a task written as `wb start --role`
 writes it (`via: api`, `provider`, `role`), the keyhole started in the test as `drive` will start it (#1015,
@@ -6720,7 +6753,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **A message's `from`** (`user`, `claude`, `notice`, an agent's name with `role: "agent"`) → `chat.NEWS`,
   `chat._inbound`, `chat.AGENT_RESERVED`, `sw.js`, `makeRow`, `metaFor`, `agentMeta`, `reportSeen`, `wb chat log`, the
   mod's `unread`/`agentOf`/`chatPrompt` and `owedAtTurnEnd` (`claude` only), docs/chat-api.md.
-- **The web chat's API** (a path, a field, an error, a limit) → docs/chat-api.md (`test_docs` checks the paths),
+- **The web chat's API** (a path, a field, an error, a limit) → docs/chat-api.md (`test_docs` checks the paths;
+  an error `code`, `chat.ERROR_CODES` or `ERRORS_SAID`, → its *Errors* table, which a test checks),
   `skill/agents/claude-workbench/` (SKILL.md, `ask_claude.py`); a change that breaks a client → `chat.API_VERSION` and
   the doc's *Versions*. **What an agent token may do** → `chat.AGENT_DENIED`, the doc, the agents' skill. **What an
   agent may read** → `chat.in_view`, `chat.agent_snapshot`, `chat.AGENT_UNREAD`, `chat.agent_may_read`, the doc's

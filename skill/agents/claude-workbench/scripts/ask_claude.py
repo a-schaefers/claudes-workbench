@@ -9,8 +9,10 @@ Environment: CLAUDE_WB_URL (the chat's address, e.g. http://localhost:1337) and 
 
 Prints each of Claude's replies to stdout as it comes, and on stderr the ids to follow up with.
 Exit status: 0 when Claude's turn is done, 1 on an error or the timeout (Claude still at work: wait
-again with --after), 2 when Claude isn't listening or the chat stays unreachable, 3 when the token
-is refused. A wait the server cuts (it restarts on an update) is asked again for up to two minutes.
+again with --after), 2 when Claude isn't listening, the message expired unread, or the chat stays
+unreachable, 3 when the token is refused. A send or a wait the server cuts (it restarts on an
+update) is asked again for up to two minutes; a send carries an Idempotency-Key, so it never
+lands twice.
 """
 from __future__ import annotations
 
@@ -85,17 +87,33 @@ def upload(path: Path) -> str:
 
 
 def send(text: str, files: list[str]) -> dict:
-    """POST /api/send, waiting out a rate limit (the same cid: never sent twice)."""
-    body = {"text": text, "cid": str(uuid.uuid4()), **({"files": files} if files else {})}
-    for _ in range(5):
-        code, got = call("POST", "/api/send", body)
+    """POST /api/send, waiting out a rate limit, and sent again when the chat cut it (a reset, 502
+    to 504) for up to OUTAGE_MOST: one Idempotency-Key (and cid) for every try, so a send that
+    landed before the cut is answered with its message, never sent twice (#1138)."""
+    key = str(uuid.uuid4())
+    body = {"text": text, "cid": key, **({"files": files} if files else {})}
+    limited, pause, cut_since = 0, RETRY_FIRST, None
+    while True:
+        try:
+            code, got = call("POST", "/api/send", body, {"Idempotency-Key": key})
+        except OSError as e:  # the connection reset or refused: the server restarting
+            code, got = None, {"error": str(e)}
+        if code is None or code in TRANSIENT:
+            cut_since = cut_since or time.monotonic()
+            if time.monotonic() - cut_since > OUTAGE_MOST:
+                raise RuntimeError(f"the chat is unreachable ({got.get('error') or f'HTTP {code}'})")
+            time.sleep(pause)
+            pause = min(pause * 2, RETRY_MOST)
+            continue
         if code == 429:
+            limited += 1
+            if limited >= 5:
+                raise RuntimeError("still rate-limited after five tries")
             time.sleep(min(60, int(got.get("retry_after") or 5)))
             continue
         if code != 200:
             raise RuntimeError(got.get("error") or f"HTTP {code}")
         return got
-    raise RuntimeError("still rate-limited after five tries")
 
 
 def follow(after: str, until: str, deadline: float) -> int:
@@ -122,6 +140,8 @@ def follow(after: str, until: str, deadline: float) -> int:
             pause = min(pause * 2, RETRY_MOST)
             continue
         pause, cut, cut_since = RETRY_FIRST, None, None
+        if got.get("code") == "expired":  # never passed on: nobody listened for hours (#1138)
+            return _say(f"{got.get('error')}: message {last}", 2)
         if code != 200:
             return _say(got.get("error") or f"HTTP {code}", 1)
         for r in got.get("replies") or []:

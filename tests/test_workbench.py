@@ -22257,7 +22257,7 @@ class WebChat(Base):
         store.write_json(d / "shots.json", {**store.read_json(d / "shots.json"),
                                             "candidate": {"rev": "def", "ok": True, "pruned": True}})
         self.assertEqual(self.call("/api/shot?task=t&n=1&side=candidate", token=tok),
-                         (410, {"error": "expired"}))
+                         (410, {"error": "expired", "code": "expired"}))
         code, r = self.call("/api/send", {"text": "the button moved", "cid": "c1",
                                           "about": {"task": "t", "n": 1, "step": 9}}, tok)
         self.assertEqual(code, 200)
@@ -24128,7 +24128,7 @@ class WebChat(Base):
         tok, user = self._agent(), self.chat.token()
         mine = self.call("/api/send", {"text": "mine", "cid": "c-1"}, token=user)[1]["message"]
         code, r = self.call("/api/send", {"text": "theirs", "cid": "c-1"}, token=tok)
-        self.assertEqual((code, r), (409, {"error": "that cid is another sender's"}))
+        self.assertEqual((code, r), (409, {"error": "that cid is another sender's", "code": "conflict"}))
         self.assertEqual(self.call("/api/send", {"text": "mine", "cid": "c-1"}, token=user)[1]["message"]["id"], mine["id"])
         self.assertEqual([m["text"] for m in self.chat.thread()], ["mine"])
 
@@ -24251,9 +24251,9 @@ class WebChat(Base):
         # what a message answers (a pair of screenshots, a take) is the user's to say
         tok = self._agent()
         code, r = self.call("/api/send", {"text": "keep this one", "about": {"audio": "x", "n": 1}}, token=tok)
-        self.assertEqual((code, r), (400, {"error": "agent messages can't carry about"}))
+        self.assertEqual((code, r), (400, {"error": "agent messages can't carry about", "code": "bad_request"}))
         code, r = self.call("/api/send", {"text": "about step 1", "about": {"task": "t", "n": 1}}, token=tok)
-        self.assertEqual((code, r), (400, {"error": "agent messages can't carry about"}))
+        self.assertEqual((code, r), (400, {"error": "agent messages can't carry about", "code": "bad_request"}))
         self.assertEqual(self.chat.thread(), [])
         code, r = self.call("/api/send", {"text": "about step 1", "about": {"task": "t", "n": 1}}, token=self.chat.token())
         self.assertEqual((code, r["error"]), (400, "no such screenshots"))  # the user's is read as before
@@ -24281,6 +24281,182 @@ class WebChat(Base):
         self.assertEqual(out.split()[1], "allow")                          # away: their setting stands
         with self.assertRaises(ValueError):
             self.chat.ask("Bash", "x", for_=["Not A Name"])
+    # ---- #1138: versioned paths, one error shape, retry safety ----
+
+    def _raw(self, method, path, body=b"", token=None, headers=None):
+        """(status, headers, JSON or bytes) for one request with any method and headers."""
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        h = {"Host": f"localhost:{self.port}", **({"Authorization": f"Bearer {token}"} if token else {}),
+             **(headers or {})}
+        c.request(method, path, body, h)
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+        return r.status, r, (json.loads(data) if r.getheader("Content-Type") == "application/json" else data)
+
+    def _keyed(self, body, key, token):
+        """POST /api/send with an Idempotency-Key: (status, JSON, its Idempotent-Replayed header)."""
+        code, r, got = self._raw("POST", "/api/send", json.dumps(body), token,
+                                 {"Content-Type": "application/json", "Idempotency-Key": key})
+        return code, got, r.getheader("Idempotent-Replayed")
+
+    def test_every_api_path_answers_under_v1_too_with_the_same_handler_and_the_same_denials(self):
+        # #1138: versioned paths for other clients; /api/ stays for the page and old clients
+        tok, user = self._agent(), self.chat.token()
+        self.assertEqual(self.call("/api/v1/health", token=tok), self.call("/api/health", token=tok))
+        code, r = self.call("/api/v1/send", {"text": "hi from v1"}, token=tok)
+        self.assertEqual((code, r["message"]["from"]), (200, "my-agent"))
+        mid = r["message"]["id"]
+        self.assertEqual(self.call(f"/api/v1/wait?after={mid}&timeout=0", token=tok)[1]["replies"], [])
+        self.assertEqual(self.call("/api/v1/state", token=tok)[1]["messages"][-1]["id"], mid)
+        code, _, got = self._raw("PUT", "/api/v1/upload/abcdefgh-1", b"hello", tok,
+                                 {"X-File-Name": "a.txt", "Content-Type": "text/plain"})
+        self.assertEqual((code, got["new"]), (200, True))
+        self.assertEqual(self.call("/api/v1/upload/abcdefgh-1", token=tok)[1]["upload"]["name"], "a.txt")
+        self.assertEqual(self._raw("GET", "/api/v1/file/abcdefgh-1", token=tok)[::2], (200, b"hello"))
+        stream = self._held_wait("/api/v1/stream", tok)
+        got = b""
+        while b"event: state" not in got:
+            got += stream.recv(1 << 20)
+        stream.close()
+        for path, body in (("/api/v1/answer", {"id": "x", "answer": "allow"}), ("/api/v1/prefs", {"away": "allow"}),
+                           ("/api/v1/latest", None), ("/api/v1/ask/x", None), ("/api/v1/shot", None)):
+            code, r = self.call(path, body, token=tok)
+            self.assertEqual((code, r["code"]), (403, "agent_forbidden"), path)  # an agent's denials hold
+        self.assertEqual(self.chat.prefs()["away"], "ask")
+        self.assertEqual(self.call("/api/v1/latest", token=user)[0], 200)
+        self.assertEqual(self.call("/api/v1/health")[0], 401)                   # the token, as ever
+        self.assertEqual(self.call("/api/v1/nope", token=user)[1]["code"], "not_found")
+
+    def test_every_error_answer_is_one_shape_with_a_code_for_each_kind_of_refusal(self):
+        # #1138: "error" stays the plain line the page and ask_claude.py show; "code" is what a
+        # client branches on: a bad token, a revoked one, an agent from another machine, a rate
+        # limit, not found and an expired message each its own
+        tok = self._agent()
+
+        def refused(got, status, code):
+            self.assertEqual((got[0], got[1].get("code")), (status, code), got)
+            self.assertTrue(isinstance(got[1]["error"], str) and got[1]["error"], got)
+        refused(self.call("/api/health"), 401, "bad_token")
+        refused(self.call("/api/health", token="wba-" + "x" * 40), 401, "bad_token")
+        refused(self.call("/api/health", token=tok, host="elsewhere.example"), 403, "unknown_host")
+        refused(self.call("/api/nope", token=tok), 404, "not_found")
+        refused(self.call("/api/wait?after=nope&timeout=0", token=tok), 404, "not_found")
+        refused(self.call("/api/answer", {"id": "x", "answer": "allow"}, token=tok), 403, "agent_forbidden")
+        refused(self.call("/api/wait?after=x&timeout=9999", token=tok), 400, "bad_request")
+        with mock.patch.object(self.chat.Handler, "_from_loopback", lambda self: False):
+            refused(self.call("/api/health", token=tok), 403, "not_local")
+        with mock.patch.object(self.srv.RequestHandlerClass.sends, "per_min", 1):
+            code, r = self.call("/api/send", {"text": "the first"}, token=tok)
+            self.assertEqual(code, 200)
+            got = self.call("/api/send", {"text": "the second"}, token=tok)
+            refused(got, 429, "rate_limited")
+            self.assertTrue(1 <= got[1]["retry_after"] <= 60)
+        mid, now = r["message"]["id"], store.now()
+        self._listening()
+        began = time.monotonic()
+        with mock.patch.object(store, "now", lambda: now + self.chat.MESSAGE_EXPIRE + 60):
+            refused(self.call(f"/api/wait?after={mid}&timeout=4", token=tok), 410, "expired")
+        self.assertLess(time.monotonic() - began, 3)                       # said at once, not held
+        code, r, got = self._raw("DELETE", "/api/state", token=tok)         # http.server's own refusal
+        refused((code, got), 501, "not_implemented")
+        run_wb("chat", "token", "revoke", "my-agent")
+        refused(self.call("/api/health", token=tok), 401, "token_revoked")
+        refused(self.call("/api/send", {"text": "hi"}, token=tok), 401, "token_revoked")
+        self.assertNotIn(tok, self.chat.agents_path().read_text())         # only its hash is kept
+        doc = (ROOT / "docs/chat-api.md").read_text()
+        for c in set(self.chat.ERROR_CODES.values()) | set(self.chat.ERRORS_SAID):
+            self.assertTrue(f"`{c}`" in doc, c)                              # each code documented
+
+    def test_a_send_with_an_idempotency_key_lands_once_a_day_and_its_retry_gets_the_first_message(self):
+        # #1138: an agent whose send was cut can't tell whether it landed; sent again, Claude was
+        # asked twice and did the work twice
+        tok, user = self._agent(), self.chat.token()
+        with mock.patch.object(self.srv.RequestHandlerClass.sends, "per_min", 1):
+            code, first, again = self._keyed({"text": "refactor the parser"}, "k-1", tok)
+            self.assertEqual((code, again), (200, None))
+            code, r, again = self._keyed({"text": "refactor the parser"}, "k-1", tok)  # no 429: nothing sent
+            self.assertEqual((code, again, r["message"]), (200, "true", first["message"]))
+        self.assertEqual([m["text"] for m in self.chat.thread()], ["refactor the parser"])
+        code, r, again = self._keyed({"text": "refactor the parser"}, "k-1", user)   # another caller's key
+        self.assertEqual((code, again, r["message"]["from"]), (200, None, "user"))
+        code, r, _ = self._keyed({"text": "something else"}, "k-1", tok)
+        self.assertEqual((code, r["code"]), (422, "idempotency_key_reused"))        # never a silent drop
+        self.assertEqual(self._keyed({"text": "x"}, "a key", tok)[1]["code"], "bad_idempotency_key")
+        self.assertEqual(len(self.chat.thread()), 2)
+        kept = self.chat.idem_path()
+        self.assertNotIn("refactor", kept.read_text())                          # ids, never the text
+        rows = store.read_json(kept)
+        store.write_json(kept, {k: {**v, "ts": v["ts"] - self.chat.IDEM_FOR - 1} for k, v in rows.items()})
+        code, r, again = self._keyed({"text": "refactor the parser"}, "k-1", tok)    # a day on: sent anew
+        self.assertEqual((code, again), (200, None))
+        self.assertNotEqual(r["message"]["id"], first["message"]["id"])
+        with mock.patch.object(self.chat, "IDEM_KEPT", 3):
+            for i in range(5):
+                self.assertEqual(self._keyed({"text": f"n{i}"}, f"n-{i}", user)[0], 200)
+            self.assertEqual(len(store.read_json(kept)), 3)                      # pruned to the newest
+        self.assertEqual(self._keyed({"text": "n4"}, "n-4", user)[2], "true")
+        got = []
+        racers = [threading.Thread(target=lambda: got.append(self._keyed({"text": "race"}, "r-1", tok)))
+                  for _ in range(4)]
+        for t in racers:
+            t.start()
+        for t in racers:
+            t.join()
+        self.assertEqual([g[0] for g in got], [200] * 4)
+        self.assertEqual(len({g[1]["message"]["id"] for g in got}), 1)          # four racers, one send
+        self.assertEqual([m["text"] for m in self.chat.thread()].count("race"), 1)
+
+    def test_ask_claude_sends_again_after_a_cut_with_one_key_and_exits_2_on_an_expired_message(self):
+        # #1138: a send cut by the chat restarting ended the client with exit 1, and its rerun
+        # asked Claude twice; one Idempotency-Key and cid for every try makes the retry safe
+        import importlib.util
+        script = ROOT / "skill/agents/claude-workbench/scripts/ask_claude.py"
+        spec = importlib.util.spec_from_file_location("ask_claude_1138", script)
+        ac = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ac)
+        posts, answers = [], []
+
+        class Stub(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _answer(self, code, body):
+                data = json.dumps(body).encode()
+                self.send_response(code)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                posts.append((self.headers.get("Idempotency-Key"), body.get("cid")))
+                what = answers.pop(0)
+                if what == "drop":                       # the server going away mid-send
+                    return
+                if what == "502":
+                    return self._answer(502, {"error": "bad gateway"})
+                self._answer(200, {"message": {"id": "m1"}, "listener": {}})
+
+            def do_GET(self):
+                self._answer(410, {"error": "that message expired unread", "code": "expired"})
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Stub)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        env = {"CLAUDE_WB_URL": f"http://127.0.0.1:{srv.server_address[1]}", "CLAUDE_WB_TOKEN": "wba-x"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(ac, "RETRY_FIRST", 0.05):
+            answers[:] = ["drop", "502", "ok"]
+            self.assertEqual(ac.send("refactor the parser", [])["message"]["id"], "m1")
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                rc = ac.follow("m1", "done", time.monotonic() + 20)
+        self.assertEqual(len(posts), 3)
+        self.assertEqual(len(set(posts)), 1)                    # one key and cid, every try
+        self.assertEqual(posts[0][0], posts[0][1])
+        self.assertEqual(rc, 2, err.getvalue())
+        self.assertIn("expired unread: message m1", err.getvalue())
 
 
 FAKE_SMI = """import os, sys, time
@@ -24382,7 +24558,7 @@ class ChatUploads(Base):
         self.assertEqual(self.chat.upload_meta(theirs)["by"], "my-agent")
         self.assertNotIn("by", self.chat.upload_meta(mine))
         code, r = self.put(mine, b"other bytes")                          # the user's id: not answered with it
-        self.assertEqual((code, r), (409, {"error": "that upload id is another sender's"}))
+        self.assertEqual((code, r), (409, {"error": "that upload id is another sender's", "code": "conflict"}))
 
         def get(path, tok):
             c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -24393,8 +24569,8 @@ class ChatUploads(Base):
             return out
         self.assertEqual(get(f"/api/upload/{theirs}", agent)[0], 200)
         self.assertEqual(get(f"/api/file/{theirs}", agent), (200, b"notes"))
-        self.assertEqual(get(f"/api/upload/{mine}", agent), (404, b'{"error": "no such upload"}'))
-        self.assertEqual(get(f"/api/file/{mine}", agent), (404, b'{"error": "no such file"}'))
+        self.assertEqual(get(f"/api/upload/{mine}", agent), (404, b'{"error": "no such upload", "code": "not_found"}'))
+        self.assertEqual(get(f"/api/file/{mine}", agent), (404, b'{"error": "no such file", "code": "not_found"}'))
         self.assertEqual(get(f"/api/file/{mine}", user)[0], 200)            # the user's: everything
         self.assertEqual(get(f"/api/file/{theirs}", user)[0], 200)
         code, r = self.send({"text": "see this", "files": [mine]})       # another's upload: none to it
@@ -24429,7 +24605,8 @@ class ChatUploads(Base):
         self.put(b, b"same photo", name="copy.jpg")                          # picked twice
         self.put(c, b"%PDF-1.7", name="notes.pdf", ctype="application/pdf")
         self.assertEqual(self.send({"text": "look", "cid": "m1", "files": [a, "dddddddd-4"]}),
-                         (400, {"error": "no upload dddddddd-4: it must be uploaded before the message"}))
+                         (400, {"error": "no upload dddddddd-4: it must be uploaded before the message",
+                                "code": "bad_request"}))
         self.assertEqual(self.chat.thread(), [])                             # nothing logged
         code, r = self.send({"text": "", "cid": "m2", "files": [a, b, c]})   # files alone are a message
         self.assertEqual(code, 200)
@@ -24552,6 +24729,7 @@ class ChatUploads(Base):
             with mock.patch.object(self.chat, "save_upload", side_effect=OSError(err, os.strerror(err))):
                 got = self.put("ffffffff-1", b"x")
             self.assertEqual(got, (code, {"error": f"not saved: {os.strerror(err)}",
+                                          "code": "disk_full" if code == 507 else "server_error",
                                           **({"final": True} if final else {})}))
 
     def test_an_expired_message_leaves_the_open_index_once_and_gc_then_drops_its_uploads(self):
