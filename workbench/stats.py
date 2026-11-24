@@ -412,7 +412,9 @@ def feed(now: float | None = None, only: tuple | None = None) -> dict:
         rs = [r for r in rows if (r.get("ts") or 0) >= since]
         t = savings.totals(every, since=since)
         # in the saving (Claude's tokens were spent) but not the task count: said beside it (#569)
-        gaps = sum(1 for r in every if (r.get("ts") or 0) >= since and not tuning.judged(r))
+        # a discard after a stop from outside the step isn't the spec's (#1245): counted nowhere
+        gaps = sum(1 for r in every if (r.get("ts") or 0) >= since and not tuning.judged(r)
+                   and not tuning.stopped_outside(r))
         energy = _energy([r for r in every if (r.get("ts") or 0) >= since], price)
         api = _api_period(savings.api_totals(paid_rows, since))
         if rs or t["tasks"] or gaps or energy or api:

@@ -19832,6 +19832,19 @@ class Stats(Base):
         bests = stats.feed()["bests"]
         self.assertEqual((bests["largest_first_try"]["task"], bests["largest_first_try"]["lines"]), ("t-a", 20))
         self.assertEqual(bests["fastest"]["task"], "t-a")
+    def test_a_discarded_chain_stopped_from_outside_its_step_credits_its_landed_steps_whole(self):
+        # #1245: the step the day cap (or the provider, a restart) ended isn't the agent's to fail;
+        # with none of its steps kept, the discard says nothing of the model
+        from workbench import tuning
+        steps = [{"landed": True}] * 4 + [{"landed": False}]
+        row = {"outcome": "discarded", "steps": steps, "landed_steps": 4, "infra": "spend", "ran": True}
+        self.assertTrue(tuning.judged(row))
+        self.assertEqual(tuning.credit(row), 1.0)
+        self.assertAlmostEqual(tuning.credit({**row, "infra": None}), 0.8)   # the agent's own stop
+        self.assertFalse(tuning.judged({**row, "landed_steps": 0}))
+        self.assertFalse(tuning.judged({"outcome": "discarded", "steps": [{}], "infra": "local_only",
+                                        "ran": True}))
+
 
     def test_a_spec_gap_discard_counts_in_the_saved_milestone_as_in_the_saving(self):
         # #569: the milestone left out the discard's cost, so "100K saved" showed above an
@@ -34971,6 +34984,31 @@ class ApiSpend(Base):
             "in the worktree. Ask the user: a higher cap (wb route cap <usd>) or tomorrow, then wb resume "
             "t-guard; or the role on the GPU (wb route significant gpu) for the next tasks, with wb takeover "
             "t-guard or wb discard t-guard for this one (resume keeps its API model)."))
+
+    def test_a_discard_after_the_spend_cap_stopped_the_task_never_counts_against_its_model(self):
+        # #1245 (2026-11-24): the stop notice offers wb discard, and the discard's row, judged
+        # whole, read "0/1 real tasks accepted" and scored the task's knob values and skills 0
+        # for the user's budget
+        from workbench import models, results, router, stats, tuning
+        self.cap(5, api=("significant",))
+        self.spent(3.80)
+        task = self.api_task("t-cap", SPEND_M, "spend", FAKE_STEP_IN="100", FAKE_STEPS="50")
+        runner.drive(task)
+        self.assertEqual((task.status["phase"], task.status["infra"]), ("stuck", "spend"))
+        run_wb("discard", "t-cap")
+        (row,) = [r for r in store.results() if r["task"] == "t-cap"]
+        self.assertEqual((row["outcome"], row["ran"], row["infra"]), ("discarded", True, "spend"))
+        self.assertFalse(tuning.judged(row))
+        m = models.lookup(SPEND_M)
+        up = {"available": True, "resident": False, "why": ""}
+        self.assertEqual(router.score(m, "significant", state=up, role="significant").tries, 0)
+        self.assertIn("(1 discard after a stop that wasn't the agent's left out)", results.table())
+        self.assertNotIn("spec_gaps", stats.feed()["periods"].get("all", {}))  # nor the spec's
+        # a shutdown's signal sets no `infra`: the discard reads the stop it left (#1245)
+        other = self.api_task("t-sig", SPEND_M, "ok")
+        other.set_status(phase="stuck", last=runner.SIGNAL_STOP)
+        run_wb("discard", "t-sig")
+        self.assertEqual([r["infra"] for r in store.results() if r["task"] == "t-sig"], ["signal"])
 
     def test_a_spend_stop_resumed_once_its_role_is_on_the_gpu_is_refused_at_the_cap_on_its_api_model(self):
         # #1095 (2026-11-23): the notice and the mod's wake said "the role on the GPU … then wb
