@@ -3745,10 +3745,7 @@ def cmd_accept(a):
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
           (f", merged into {close['merge_into']} as {merged}" if merged else
            f"\nmerge with: {gitops.jj_merge(repo, spec['branch'])}" if gitops.jj_colocated(repo) else
-           f"\nmerge with: " + gitops.merge_by_hand(
-               repo, spec["branch"], close.get("merge_as") if close.get("merge") else
-               context.repo_conf(spec["repo"], spec.get("subdir")).get("merge") or "merge",
-               close.get("sign", True) and _signed(spec, a))))
+           "\n" + _merge_line(repo, spec, close, a)))
     _say(savings.line(row) or spend.line(row.get("claude")))
     _say(checked)
     _say(lessons.nudge(task, "accepted"))
@@ -3774,6 +3771,23 @@ def _gained_work(task: store.Task, repo: Path, commit: str) -> bool:
 
 
 NOT_MERGED = 5  # wb accept --merge's exit status when the accept stands and the merge was refused
+
+
+def _merge_line(repo: Path, spec: dict, close: dict, a) -> str:
+    """wb accept's line for merging by hand: into the branch --merge chose, else the one the task
+    started from, else the checkout's, switching there first. It merged into whatever was out,
+    so after "has feature-x out, not main" it landed on feature-x, or on a detached HEAD the next
+    checkout dropped (#1154, 2026-11-24). No branch known on a detached HEAD: no line to run."""
+    into = close.get("merge_into") if close.get("merge") else _merge_into(spec, repo)
+    if into in (None, "HEAD"):
+        into = gitops.current_branch(repo)
+    if not into:
+        return (f"to merge: {repo} has a detached HEAD and the task recorded no branch; check out "
+                f"the branch {spec['branch']} belongs on, then merge it there")
+    return f"merge into {into} with: " + gitops.merge_by_hand(
+        repo, spec["branch"], close.get("merge_as") if close.get("merge") else
+        context.repo_conf(spec["repo"], spec.get("subdir")).get("merge") or "merge",
+        close.get("sign", True) and _signed(spec, a), into)
 
 
 def _merge_into(spec: dict, repo: Path) -> str | None:

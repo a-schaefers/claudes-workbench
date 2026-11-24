@@ -2350,6 +2350,38 @@ class Lifecycle(Base):
         self.assertIn("detached HEAD", err.getvalue())
         self.assertEqual(self.branch("main"), self.branch("feature"))  # neither merged
 
+    def test_the_merge_line_after_a_refusal_lands_the_work_on_the_branch_the_task_started_from(self):
+        # #1154 (bar round 1 of 2.0, 2026-11-24): after "has feature-x out, not main" the printed
+        # "merge with:" line merged into feature-x, and after a detached HEAD onto that HEAD, which
+        # the next checkout dropped; with no branch recorded and HEAD detached, no line to run
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True, text=True).stdout.strip()
+        q, init = shlex.quote(str(self.repo)), g("rev-parse", "main")
+        self.start("t-away", "ok")
+        self.start("t-detached", "ok", "--queue")  # behind t-away on the one GPU
+        for name, away in (("t-away", ("-c", "feature-x")), ("t-detached", ("--detach", "main"))):
+            wait_phase(name, {"review"})
+            g("switch", "-q", *away)
+            with redirect_stderr(io.StringIO()) as err:
+                out = not_merged("accept", name, "-m", "feat: answer", "--merge")
+            self.assertIn("not merged", err.getvalue(), name)
+            line = out.split("merge into main with: ", 1)[1].splitlines()[0]
+            self.assertTrue(line.startswith(f"git -C {q} switch main && "), line)
+            subprocess.run(line, shell=True, check=True, capture_output=True)
+            tip = store.Task(name).status["tip"]
+            g("switch", "-q", "main")
+            self.assertTrue(gitops.contains(self.repo, "refs/heads/main", tip), name)
+            if name == "t-away":
+                self.assertFalse(gitops.contains(self.repo, "refs/heads/feature-x", tip))
+        g("switch", "-q", "--detach", init)  # started detached: no branch recorded
+        self.start("t-nobranch", "ok")
+        wait_phase("t-nobranch", {"review"})
+        self.assertIsNone(store.Task("t-nobranch").spec["base_branch"])
+        with redirect_stderr(io.StringIO()):
+            out = not_merged("accept", "t-nobranch", "-m", "feat: answer", "--merge")
+        self.assertIn("check out the branch delegate/t-nobranch belongs on", out)
+        self.assertNotIn("git -C", out)
+
     def test_a_merge_into_a_branch_that_lost_the_base_is_refused_with_what_would_come_back(self):
         # #418 (the audit of 1.8, reproduced): main reset back past the task's base, then accept
         # --merge into main (its base_branch) brought the withdrawn commit back; only a merge into
@@ -2442,7 +2474,7 @@ class Lifecycle(Base):
         self.assertEqual((self.repo / "settings.ini").read_text(), "PERSONAL\n")
         self.assertEqual(g("rev-parse", "main"), before)          # main untouched
         self.assertEqual(g("show", "delegate/t-ign:settings.ini"), "DEFAULT")  # the work is kept
-        self.assertIn("merge with: git", out)
+        self.assertIn("merge into main with: git", out)
         self.assertFalse(subprocess.run(["git", "-C", str(self.repo), "rev-parse", "-q", "--verify",
                                          "MERGE_HEAD"], capture_output=True).returncode == 0)
 
@@ -3056,7 +3088,7 @@ class Lifecycle(Base):
             "merge": "squash"}}}))
         q = shlex.quote(str(self.repo))
         for name, extra, want in (
-                ("t-h1", (), f"merge with: git -C {q} merge --squash --ff delegate/t-h1 && "
+                ("t-h1", (), f"merge into main with: git -C {q} merge --squash --ff delegate/t-h1 && "
                              f"git -C {q} commit -C delegate/t-h1"),
                 ("t-h2", ("--no-sign",), f"git -C {q} commit --no-gpg-sign -C delegate/t-h2")):
             self.start(name, "ok")
@@ -3066,12 +3098,12 @@ class Lifecycle(Base):
             "merge": "ff"}}}))
         self.start("t-h3", "ok")
         wait_phase("t-h3", {"review"})
-        self.assertIn(f"merge with: git -C {q} merge --ff-only delegate/t-h3",
+        self.assertIn(f"merge into main with: git -C {q} merge --ff-only delegate/t-h3",
                       run_wb("accept", "t-h3", "-m", "feat: h3"))
         Path(os.environ["WB_COMMANDS"]).write_text("{}")
         self.start("t-h4", "ok")
         wait_phase("t-h4", {"review"})
-        self.assertIn(f"merge with: git -C {q} merge --no-ff --no-gpg-sign delegate/t-h4",
+        self.assertIn(f"merge into main with: git -C {q} merge --no-ff --no-gpg-sign delegate/t-h4",
                       run_wb("accept", "t-h4", "-m", "feat: h4", "--no-sign"))
 
     def test_accept_merge_completes_the_merge_or_says_it_did_not(self):

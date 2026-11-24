@@ -4552,8 +4552,11 @@ effect's hit came 0.8-1.45 s in (the skill says to trim the lead); ACE-Step peak
   flock on `workbench-merge.lock` in its git dir, held from `merge_from` through the merge, since
   the command lock is per task and two accepts interleaved, #639; refused past `MERGE_WAIT`,
   `COMMIT_SECS` + 15 s, never forced, since an agent can hold it; a flock the file system refuses
-  is a `GitError`, #892). Without `--merge` it prints `merge with:` (`gitops.merge_by_hand`, in the
-  repo's mode: `--merge-as` or commands.json `merge`, #471). A colocated Jujutsu repo
+  is a `GitError`, #892). Without `--merge`, or with it refused, it prints `merge into <branch> with:`
+  (`cli._merge_line`, `gitops.merge_by_hand`, in the repo's mode: `--merge-as` or commands.json
+  `merge`, #471): into `closing`'s `merge_into`, else the task's `base_branch`, else the checkout's
+  branch, led by `git -C <repo> switch <branch> &&` when another branch or a detached HEAD is out
+  (it merged into whatever was out, #1154); no branch known on a detached HEAD prints no command. A colocated Jujutsu repo
   (`gitops.jj_colocated`) has a detached HEAD: the refusal (`gitops.detached`) and `merge with:`
   give `jj -R <repo> new @- delegate/<task>` (`gitops.jj_merge`, #385). A task from a tag or commit has a null `base_branch` (`cli._merge_into`, #87).
 - **The worktree** (`gitops.create_worktree`): `worktree add -b delegate/<task> <task dir>/worktree
