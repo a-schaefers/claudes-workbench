@@ -33,7 +33,7 @@ from collections import deque
 from pathlib import Path
 
 from . import (ask_mcp, context, gitguard, gitops, hardware, keyhole, lane, lessons, models, progress,
-               skills, stats, store, tuning)
+               routes, skills, stats, store, tuning)
 from . import meter
 from . import privacy
 from .events import EDIT_TOOLS, StuckDetector, compaction_failed, normalize, written
@@ -4210,16 +4210,19 @@ def _tests_gpu(task: store.Task, lease):
 def provider_remedy(task: store.Task, guard: str, said: str = "") -> str:
     """What to do about a stop that is the provider's (#1020): never a model or route switched
     by wb or Claude (the 2.0 rules); `wb route` only with a role, and only with the user's yes.
-    ``said``: the stop's line, whose HTTP 404 may mean the model is gone (#1082)."""
+    ``said``: the stop's line, whose HTTP 404 may mean the model is gone (#1082). The route change
+    is routes.off_api's: `wb route <role> gpu` under Agents API changed nothing (#1218)."""
     p, name = provider_of(task), task.name
     resume = f'wb feedback {name} --text "carry on"'
     role = task.spec.get("role")
+    off = routes.off_api(role) if role else None
+    route = f"; or {off[2]} (the user's yes) for the next tasks" if off else ""
     if guard == "refused":  # the provider's reason is in the STOPPED line: no wait or key fixes it
         gone = (f"; if {p} no longer serves {task.spec.get('model')}, workbench never switches a "
                 f"task's model: wb takeover {name} or wb discard {name}") if "HTTP 404" in said else ""
         return (f"the provider's stop, not the agent's: once what {p} said is fixed, {resume} "
                 f"resumes it" + gone
-                + (f"; or wb route {role} gpu (the user's yes) for the next tasks" if role else ""))
+                + route)
     if guard == "quota":
         return (f"the provider's stop, not the agent's: top up your {p} account, or wait for the "
                 f"plan's reset; then {resume} resumes it")
@@ -4230,7 +4233,7 @@ def provider_remedy(task: store.Task, guard: str, said: str = "") -> str:
         return (f"this machine's stop, not the agent's or {p}'s: mend what the line above says; "
                 f"then {resume} resumes it")
     return (f"the provider's stop, not the agent's: {resume} resumes it once {p} allows"
-            + (f"; or wb route {role} gpu (the user's yes) for the next tasks" if role else ""))
+            + route)
 
 
 def _provider_revive(task: store.Task, n: int, rnd: dict, lease) -> bool:

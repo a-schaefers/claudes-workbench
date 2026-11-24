@@ -1124,7 +1124,7 @@ test('a stop at the day\'s API spend cap wakes Claude to ask the user, never to 
   await clock.advance(3000)
   expect(woken).toHaveLength(1)
   // no routes.json here, so no cap: a cap is what lets it go on, never tomorrow (#1095)
-  expect(woken[0]).toContain('Ask the user for a day cap (`wb route cap <usd>`), then `wb resume a`; or the role on the GPU')
+  expect(woken[0]).toContain('Ask the user for a day cap (`wb route cap <usd>`), then `wb resume a`; or the route change the notice names')
   expect(woken[0]).not.toContain('tomorrow')
   expect(woken[0]).not.toContain('Steer it')
   expect(woken[0]).not.toContain('wb feedback')
@@ -1149,9 +1149,11 @@ test('#1095: a spend stop\'s wake under a cap never pairs the role on the GPU wi
   await clock.advance(3000)
   expect(woken).toHaveLength(1)
   expect(woken[0]).toContain('Ask the user: a higher cap (`wb route cap <usd>`) or tomorrow, then `wb resume a`; ' +
-    'or the role on the GPU for the next tasks (`wb route <role> gpu`, on their yes), with `wb takeover a` or ' +
+    'or the route change the notice names, if any, for the next tasks (on their yes), with `wb takeover a` or ' +
     '`wb discard a` for this one: resume keeps its API model.')
   expect(woken[0]).not.toMatch(/GPU[^.;]*then `wb resume/)
+  // #1218 (2026-11-24): the wake's own `wb route <role> gpu` changed nothing under Agents API
+  expect(woken[0]).not.toContain('wb route <role> gpu')
 })
 
 test('#1124: a stop by the task\'s API provider wakes Claude to pass on its remedy, never to steer or discard it', async ($, on) => {

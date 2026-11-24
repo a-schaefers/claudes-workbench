@@ -32773,6 +32773,9 @@ class RateLimits(Base):
         from workbench import lessons
         os.environ.update(FAKE_RETRIES="200", FAKE_RETRY_EVERY="0.5")
         task = self.api_task("t-only", "ratelimit", "--silence-timeout", "2", "--think-timeout", "2")
+        # its role on API, as an API task's is: the advice's way off API is read there (#1218)
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"v": 1, "roles": {
+            "significant": {"via": "api", "api": task.spec["model"]}}}))
         began = time.monotonic()
         with mock.patch.object(runner, "RATE_WAIT_S", 3):
             runner.drive(task)
@@ -33188,8 +33191,11 @@ class ApiSpend(Base):
         self.addCleanup(meter._METERS.clear)
         self.addCleanup(runner.CURRENT.pop, "keyhole", None)
 
-    def cap(self, usd):
-        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": usd, "roles": {}})
+    def cap(self, usd, api=()):
+        """routes.json's day cap, and ``api`` roles on SPEND_M: an API task's role is on API, and
+        the advice's way off API is read from there (routes.off_api, #1218)."""
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": usd, "roles": {
+            r: {"via": "api", "api": SPEND_M} for r in api}})
 
     def record_closes(self, calls):
         """The task's own keyhole (drive starts it, #1015), each close it is told a reason for
@@ -33341,7 +33347,7 @@ class ApiSpend(Base):
         self.assertEqual(self.meter.tail(runner.models.lookup("ollama/mimo-v2.6:9b-q8_0")), "")
 
     def test_the_spend_guard_stops_the_round_within_a_tick_of_the_crossing_step(self):
-        self.cap(5)
+        self.cap(5, api=("significant",))
         self.spent(3.80)                                         # $1.20 left: the third step crosses
         calls = []
         self.record_closes(calls)
@@ -33372,7 +33378,7 @@ class ApiSpend(Base):
         # resume", but resume keeps the task's model (fixed per task, #1018), so the round stopped
         # at the cap again at once. This pins what the advice must match: the GPU is for the next
         # tasks, and this one is taken over or discarded.
-        self.cap(5)
+        self.cap(5, api=("significant",))
         self.spent(3.80)
         task = self.api_task("t-f33", SPEND_M, "spend", FAKE_STEP_IN="100", FAKE_STEPS="50")
         runner.drive(task)
@@ -33392,10 +33398,12 @@ class ApiSpend(Base):
         self.assertEqual(e.exception.code, 3)
         self.assertIn("day cap", err.getvalue())
         # nor does the refusal offer the GPU as this task's remedy, the user having just said yes
-        # to it (#1171, 2026-11-24: the same advice again, and the retry refused again)
+        # to it (#1171, 2026-11-24: the same advice again, and the retry refused again), nor the
+        # GPU for the next tasks, which are on it now: a yes to a change of nothing (#1218)
         self.assertNotIn("gpu), or tomorrow", err.getvalue())
-        self.assertIn("for the next tasks, with wb takeover t-f33 or wb discard t-f33 for this one",
-                      err.getvalue())
+        self.assertNotIn("wb route significant gpu", err.getvalue())
+        self.assertIn("or tomorrow, then try again; or wb takeover t-f33 or wb discard t-f33 (it keeps its API "
+                      "model)\n", err.getvalue())
         spawned.assert_not_called()
         task = store.Task("t-f33")
         self.assertEqual((task.spec["via"], task.spec["model"]), ("api", SPEND_M))  # resume never re-routes
@@ -33607,7 +33615,7 @@ class ApiSpend(Base):
         task = self.api_task("t-near", SPEND_TIER, "ok")
         runner.drive(task)
         self.assertEqual(task.status["phase"], "review")
-        self.cap(5)
+        self.cap(5, api=("significant", "trivial"))
         self.spent(4.8)
         m = runner.models.lookup(SPEND_TIER)
         # the pinned output and a fresh session's least input (#1173), at the dearest tier
@@ -34096,7 +34104,7 @@ class ApiSpend(Base):
         task = self.api_task("t-cap", SPEND_M, "ok")
         runner.drive(task)
         self.assertEqual(task.status["phase"], "review")
-        self.cap(5)
+        self.cap(5, api=("significant",))
         self.spent(6.0)
         head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
         before = {k: task.status.get(k) for k in ("round", "reviews", "steps", "phase")}
@@ -36369,8 +36377,67 @@ class RoleResolution(Base):
         self.no_key_for("deepseek")
         code, _, err = self.begin("t-nokey", "--role", "trivial")
         self.assertEqual(code, 3)
-        self.assertTrue(err.rstrip().endswith("Ask the user: fix that, or set Agents to Both or GPU (wb route all "
-                                              "both|gpu)"), err)
+        # the trivial role's own side is API: Agents on Both would leave it there (#1218, 2026-11-24)
+        self.assertTrue(err.rstrip().endswith("Ask the user: fix that, or set Agents to GPU (wb route all gpu)"), err)
+
+    def test_under_agents_api_every_refusal_and_notice_names_the_agents_switch_as_the_way_off_api(self):
+        # #1218 (2026-11-24): with Agents on API, wb start's day-cap and local-only refusals, the
+        # spend stop's notice and the provider's advice named `wb route trivial gpu`, which changed
+        # nothing (Agents outranks the role's own side): the user said yes, and the retry was
+        # refused with the same line
+        from workbench import meter
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.set_role("all", "api")
+        code, _, err = self.begin("t-run", "--role", "trivial")         # an API task, under the cap
+        self.assertEqual(code, 0, err)
+        task = store.Task("t-run")
+        store.append_jsonl(meter.ledger_path(), {
+            "ts": time.time(), "day": meter.day(), "kind": "step", "task": "other", "round": 1,
+            "provider": "deepseek", "model": "deepseek/deepseek-flash", "usd": 5.5, "metered": 5.5,
+            "source": "opencode", "tok": {"in": 1, "out": 0, "cache_read": 0, "cache_write": 0, "reasoning": 0}})
+        code, _, cap = self.begin("t-cap", "--role", "trivial")
+        self.assertEqual(code, 3)
+        self.assertTrue(cap.rstrip().endswith("Ask the user: a higher cap (wb route cap <usd>), Agents on GPU (wb "
+                                              "route all gpu), or tomorrow"), cap)
+        code, _, lo = self.begin("t-lo", "--role", "trivial", "--local-only")
+        self.assertEqual(code, 3)
+        self.assertIn("Choices: set Agents to GPU (wb route all gpu, the user's yes), or the user drops "
+                      "--local-only for this task", lo)
+        stop, remedy = meter.stop_text(task), runner.provider_remedy(task, "rate_limited")
+        self.assertIn("then wb resume t-run; or Agents on GPU (wb route all gpu) for the next tasks, with wb "
+                      "takeover t-run or wb discard t-run for this one (resume keeps its API model).", stop)
+        self.assertTrue(remedy.endswith("; or wb route all gpu (the user's yes) for the next tasks"), remedy)
+        for line in (cap, lo, stop, remedy):
+            self.assertNotIn("wb route trivial gpu", line)
+        self.set_role("all", "gpu")                                      # the advice, taken
+        code, _, err = self.begin("t-cap2", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(store.Task("t-cap2").spec["via"], "gpu")
+        # nothing left to switch for the next tasks: the running one is taken over or discarded
+        self.assertTrue(meter.stop_text(task).endswith(
+            "then wb resume t-run; or wb takeover t-run or wb discard t-run (resume keeps its API model)."))
+        self.assertNotIn("wb route", runner.provider_remedy(task, "rate_limited"))
+
+    def test_agents_on_both_is_offered_only_where_it_takes_the_role_off_api_and_a_busy_opt_in_is_waited_out(self):
+        # #1218 (2026-11-24): Both restores the role's own side, so it is offered only for a role
+        # on the GPU of its own that no busy opt-in sends back; a role the busy opt-in sends to
+        # API is on the GPU already, so `wb route <role> gpu` was a no-op there too
+        from workbench import meter
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.assertEqual(self.begin("t-busy", "--role", "trivial")[0], 0)
+        task = store.Task("t-busy")
+        doc = {"v": 1, "use": "api", "day_usd": 5, "roles": {"trivial": {"via": "gpu", "api": "deepseek/deepseek-flash"}}}
+        for busy, want in (("wait", ("Agents on Both or GPU", "set Agents to Both or GPU", "wb route all both|gpu")),
+                           ("api", ("Agents on GPU", "set Agents to GPU", "wb route all gpu"))):
+            self.routes.write_text(json.dumps({**doc, "busy": busy}))
+            self.assertEqual(routes.off_api("trivial"), want, busy)
+        self.routes.write_text(json.dumps({**doc, "use": "both", "busy": "api"}))  # the busy opt-in's task
+        self.assertIn("; or waiting for a busy GPU (wb route busy wait) for the next tasks, with wb takeover "
+                      "t-busy", meter.stop_text(task))
+        self.assertTrue(runner.provider_remedy(task, "outage").endswith(
+            "; or wb route busy wait (the user's yes) for the next tasks"))
+        self.routes.write_text("{")                                      # unreadable: the role's own, as before
+        self.assertEqual(routes.off_api("trivial")[2], "wb route trivial gpu")
 
     def test_an_unreadable_routes_json_stops_the_start(self):
         self.routes.write_text("{")

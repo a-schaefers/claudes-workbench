@@ -542,11 +542,13 @@ const RUNNING = new Set(['queued', 'running', 'testing'])
 // a round that stops again at once, so the wake asks for their decision, as the notice does. Each
 // remedy has its own next step: "the role on the GPU … then wb resume" resumed the task on its API
 // model (fixed per task) into the same stop, and with no cap set "tomorrow" changes nothing
-// (#1095, 2026-11-23). `capped`: routes.json has a day cap.
+// (#1095, 2026-11-23). `capped`: routes.json has a day cap. The way off API is the notice's
+// (meter.stop_text, from routes.json): `wb route <role> gpu` here changed nothing under Agents API
+// or for a task the busy opt-in sent, and the next start was refused the same way (#1218, 2026-11-24).
 const SPEND_NEXT = (n: string, capped: boolean) => (capped
   ? `Ask the user: a higher cap (\`wb route cap <usd>\`) or tomorrow, then \`wb resume ${n}\`; `
   : `Ask the user for a day cap (\`wb route cap <usd>\`), then \`wb resume ${n}\`; `) +
-  `or the role on the GPU for the next tasks (\`wb route <role> gpu\`, on their yes), with \`wb takeover ${n}\` ` +
+  `or the route change the notice names, if any, for the next tasks (on their yes), with \`wb takeover ${n}\` ` +
   `or \`wb discard ${n}\` for this one: resume keeps its API model. Never retry it with feedback yourself.`
 // A stop by the task's API provider (cause `provider`: runner.PROVIDER_GUARDS, a rate limit or an
 // outage held 10 minutes, a quota or a refused key) isn't the agent's, yet it woke as "was stopped:

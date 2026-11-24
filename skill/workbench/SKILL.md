@@ -519,7 +519,7 @@ coding choice is the user's (`wb coding`), never changed by a check.
   request) is the user's call, never a retry: ask them, as the notice says (it names a cap that
   would do). A higher cap or tomorrow: `wb resume <name>` once it allows. `wb feedback`, `next`
   or `resume` refused at the cap (exit 3) is the same call.
-  The role on the GPU is for the next tasks; this one keeps its API model (resume never
+  The notice's route change is for the next tasks; this one keeps its API model (resume never
   re-routes), so `wb takeover` or `wb discard` it. Nothing but the user raises the cap.
 
 - **Lessons**: when the `lessons:` line says one was seen in more than one task, or you just
