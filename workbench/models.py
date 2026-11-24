@@ -1591,6 +1591,47 @@ def api_health(pid: str) -> dict | None:
     return row
 
 
+def credit_turn(pid: str, task: str = "") -> dict | None:
+    """For a runner about to send a round: the provider's `no_credit` mark while it holds (wait),
+    else None (go on). Past its `until` one runner asks: the mark is held CREDIT_RECHECK_SECS
+    more under the lock (`asked_by` its task), so the others wait for that one's answer, a 2xx's
+    `ok` or the keyhole's next 402, rather than each sending a round that wakes Claude with its
+    own stop (#1178, 2026-11-24). A mark `asked_by` this task (credit_ask: the user's resume of
+    the task the 402 stopped) is its turn: None."""
+    def waits(row: dict) -> dict | None:
+        return None if row["state"] != "no_credit" or (task and row.get("asked_by") == task) else row
+    if (row := api_health(pid)) is not None:
+        return waits(row)
+    path = api_health_path()
+    with store.locked(path.with_name(path.name + ".lock")):
+        doc = store.read_json(path, {})
+        row = doc.get(pid) if isinstance(doc, dict) else None
+        if not isinstance(row, dict) or row.get("state") != "no_credit":
+            return None
+        if (held := api_health(pid)) is not None:  # another runner asked meanwhile
+            return waits(held)
+        doc[pid] = {**row, "until": time.time() + CREDIT_RECHECK_SECS, "asked_by": task}
+        store.write_json(path, doc)
+    return None
+
+
+def credit_ask(pid: str, task: str) -> bool:
+    """The user's resume (wb feedback, wb resume) of ``task``, which its provider stopped: a
+    `no_credit` mark becomes that task's turn to ask (`asked_by` it, held CREDIT_RECHECK_SECS on,
+    so the waiters behind it wait for its answer). The stop's remedy says top up, then resume,
+    and the resumed runner met the mark the 402 had just written and waited out its 900 s, the
+    user's top-up told to top up again (the review of #1178, 2026-11-24). True when it held one."""
+    path = api_health_path()
+    with store.locked(path.with_name(path.name + ".lock")):
+        doc = store.read_json(path, {})
+        row = doc.get(pid) if isinstance(doc, dict) else None
+        if not isinstance(row, dict) or row.get("state") != "no_credit":
+            return False
+        doc[pid] = {**row, "until": time.time() + CREDIT_RECHECK_SECS, "asked_by": task}
+        store.write_json(path, doc)
+    return True
+
+
 def _fresh_key(m: Model) -> tuple[str, str]:
     """(key source, provider name) as `auth list` gives them now, ignoring the cache (a user who
     just ran /connect must not be told to run it again), written back to hosted.json when the
@@ -3675,7 +3716,8 @@ def api_provider(m: Model) -> str:
 class NoLease:
     """What an API task holds in place of the GPU lease (#1015): one of its provider's
     API_PARALLEL slots, and nothing of the GPU. The interface drive and _tests_gpu use:
-    load() loads nothing, step_aside and rejoin do nothing, `aside` False, `pool` None (so
+    load() loads nothing (it waits while the provider is out of credit, #1178), step_aside
+    and rejoin do nothing, `aside` False, `pool` None (so
     _tests_gpu takes this machine's pool for --unload-for-tests, where the tests run), `loaded`
     True. Past the limit it waits as queued, looking again after API_WAIT's backoff (a slot let
     go touches its file, which wakes it sooner)."""
@@ -3728,6 +3770,36 @@ class NoLease:
         return self
 
     def load(self) -> float:
+        """Loads nothing, but waits as queued while the provider is out of credit (credit_turn),
+        before each round: the tasks queued behind a 402 each took a slot, sent a round, met the
+        402 and woke Claude with a stop of their own, though wb start refused in that state
+        (#1178, 2026-11-24). A top-up's 2xx (`ok`) or the mark's end lets it go on."""
+        pid = self.m.provider or api_provider(self.m)
+        try:
+            row = credit_turn(pid, self.task)
+        except Exception:  # an unreadable file: the round's keyhole answers instead
+            return 0.0
+        if row is None:
+            return 0.0
+        task = store.Task(self.task) if self.task else None
+        said = None
+        with Watcher(api_health_path().parent) as w:  # ok's and the keyhole's writes wake it
+            while row is not None:
+                until = row.get("until") if isinstance(row.get("until"), (int, float)) else time.time()
+                msg = (f"waiting: {pid} is out of credit or quota ({row.get('why') or 'no detail'}): "
+                       f"top it up, or wait for the plan's reset; wb asks it again at "
+                       f"{datetime.fromtimestamp(until).strftime('%H:%M')} (wb stop gives up)")
+                if msg != said:
+                    if task is not None and task.exists:
+                        task.set_status(phase="queued", last=msg)
+                    else:
+                        self.say(msg)
+                    said = msg
+                w.wait(min(max(until - time.time(), 0.1), API_WAIT[1]))
+                try:
+                    row = credit_turn(pid, self.task)
+                except Exception:
+                    row = None
         return 0.0
 
     def step_aside(self, unload: bool = False) -> None:
