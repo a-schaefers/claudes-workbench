@@ -2040,6 +2040,14 @@ class Handler(BaseHTTPRequestHandler):
             return ""
         return addr.lower().removeprefix("::ffff:").split("%")[0]
 
+    def _from_loopback(self) -> bool:
+        """Whether the request came from this machine: the peer is a loopback address."""
+        try:
+            peer = str(self.client_address[0]).lower().removeprefix("::ffff:").split("%")[0]
+        except (AttributeError, IndexError, TypeError):
+            return False
+        return peer == "::1" or peer.startswith("127.")
+
     def _authed(self) -> str | None:
         """Who calls: "user" for the user's token, "agent <name>" for an agent's (and ``agent``
         set, #1042); else None, answered 401."""
@@ -2049,6 +2057,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.secret and got and hmac.compare_digest(got.encode(), self.secret.encode()):
             return "user"
         if got and (name := agent_for(got)):
+            if not self._from_loopback():
+                # agents are this machine's own (owner, 2026-11-23): an agent token sent from
+                # another machine (a tailnet or LAN peer of a chat bound for the user's phone) is
+                # refused, whatever the bind; the user's own token is unaffected
+                self._json(403, {"error": "agent tokens work only from this machine (localhost)"})
+                return None
             self.agent, self.agent_token = name, got
             return f"agent {name}"
         self._json(401, {"error": "bad or missing token: open the link from `wb chat url`"})
