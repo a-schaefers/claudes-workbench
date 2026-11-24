@@ -7,10 +7,34 @@ updating workbench, or the weekly model check is due.
 - No GPU model, and a provider with a stored key (`wb setup`'s `ok  API keys: …`): the skill's
   one-question first run (two of that provider's models for the three roles, the cap, one
   `wb route … --day-usd`; an OpenRouter role its own, with the user's `--order`).
-- Neither: lay out both ways in a line each, a local server (below) or `/connect` in OpenCode for
-  an API provider, and let the user pick.
-- A local server: do the model check below first: recommend models for this hardware and offer to
-  set them up in OpenCode (ask before any download).
+- Neither: one question, as the skill's first run says: a local server (*A local server in one
+  yes*, below), each option filled in for this machine, or `/connect` in OpenCode for an API
+  provider; the user picks.
+
+**A local server in one yes.** `wb scout` first (GPU, VRAM, RAM, disk, the servers on PATH and
+answering). For each server that fits the OS and GPU, one line: the server, the model you picked
+for this VRAM (weights plus a window of at least 32K inside VRAM, the model check's research
+below, verified today), its download size, and what the yes runs. Each server is installed its
+own official way, run as the user would run it, never wrapped in wb code (its URLs change, so they
+live here, not in code). Ollama serves its own small default window unless its service sets
+`OLLAMA_CONTEXT_LENGTH`, and `wb model add` refuses a window it can't read, so the install sets
+it: `<N>` is the window you picked (32768 or more).
+- Ollama on macOS (no sudo): `brew install ollama && launchctl setenv OLLAMA_CONTEXT_LENGTH <N> &&
+  brew services start ollama`; or its app, with the same `launchctl setenv` before it is opened.
+- Ollama on Linux and WSL2 (WSL2 needs systemd on): its install.sh needs sudo, and your Bash has
+  no terminal for the password, so the user runs this one line, with Claude Code's `!` prefix or in
+  a terminal of their own if sudo can't ask there: `curl -fsSL https://ollama.com/install.sh | sh
+  && sudo mkdir -p /etc/systemd/system/ollama.service.d && printf
+  '[Service]\nEnvironment="OLLAMA_CONTEXT_LENGTH=<N>"\n' | sudo tee
+  /etc/systemd/system/ollama.service.d/context.conf >/dev/null && sudo systemctl daemon-reload &&
+  sudo systemctl restart ollama`. That is the only step that stays theirs.
+- Then, on Ollama, `wb model add ollama/<model> --pull` in the background: it writes the provider,
+  downloads, reads the served window, and starts `wb optimize` when due (no separate yes).
+- LM Studio: its app (`lms get` downloads), then `wb model add <p>/<m> --url … --context N`.
+  llama-server or vLLM: their own packages, then `wb model add <p>/<m> --url … --context N
+  --start "…" --stop "…"`, as below.
+- Then `wb doctor`, then `wb try`.
+
 **Work with the model server the user already runs**, whichever it is: `wb scout` lists the server
 commands on PATH and the servers answering here (one that "wants an API key" needs it in its
 provider's `options.apiKey`: ask the user for it). Never steer them to one they don't use. With

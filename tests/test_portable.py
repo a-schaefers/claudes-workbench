@@ -3237,6 +3237,30 @@ class Optimize(unittest.TestCase):
             self.assertIn("a task you start goes first", out[0])
             self.assertNotIn("--all", detach.call_args[0][0])
 
+    def test_an_ollama_model_add_starts_measuring_its_window_when_due_and_quietly_waits_for_a_task(self):
+        # #1195: pull, register and measure were three yeses on a first run; wb model add now
+        # starts wb optimize itself, as wb setup does, and stays quiet while a task holds the GPU
+        self.ollama(32768)
+        from workbench import cli
+        with mock.patch.object(cli, "detach") as detach, \
+                mock.patch.object(models, "_started", return_value="1"):  # not ps on the fake
+            detach.return_value.pid = os.getpid()
+            with mock.patch.object(models, "holders", lambda *a, **k: {"1": {"task": "t"}}):
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    cli.main(["model", "add", "ollama/m", "--pull", "--context", "32768"])
+                self.assertIn("registered ollama/m", out.getvalue())
+                self.assertNotIn("measuring", out.getvalue())             # busy: the next session
+                detach.assert_not_called()
+            out = io.StringIO()
+            with redirect_stdout(out):
+                cli.main(["model", "add", "ollama/m", "--pull", "--context", "32768"])
+        said = out.getvalue().splitlines()
+        self.assertTrue(said[-3].startswith("registered ollama/m"), said)
+        self.assertIn("--  measuring the GPU for 1 local model(s) (never measured)", said[-2])
+        self.assertTrue(said[-1].startswith("next: wb model sizes ollama/m"), said)
+        self.assertEqual(detach.call_args[0][0][-2:], ["-m", "workbench.optimize"])
+
     def test_a_fit_is_due_again_when_its_models_window_or_weights_change_and_only_that_one(self):
         # #709: the fit was keyed to the GPUs alone: an entry raised from 32K to 64K, or a tag
         # repointed at other weights, kept its old fit and no run was due

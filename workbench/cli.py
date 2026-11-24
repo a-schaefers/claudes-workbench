@@ -5798,8 +5798,18 @@ def cmd_model(a):
         print(f"registered {a.id}: "
               f"{'tools' if entry['tool_call'] else 'NO tool calls, so wb will not route tasks to it'}, "
               f"{'reasoning' if entry['reasoning'] else 'no reasoning'}, "
-              f"{ctx // 1024}K context\nnext: wb model sizes {a.id} … if it should only "
-              "take some task sizes; the router guesses from its size until real tasks show more")
+              f"{ctx // 1024}K context", flush=True)
+        if prov["engine"] == "ollama":
+            # pull, register and measure the window in one command: a first run took a separate
+            # yes for wb optimize start after this one (#1195). Quiet when not due or a task holds
+            # the GPU, as at wb setup
+            try:
+                for line in optimize.start(if_due=True):
+                    print(f"--  {line}")
+            except (RuntimeError, OSError):
+                pass
+        print(f"next: wb model sizes {a.id} … if it should only take some task sizes; the router "
+              "guesses from its size until real tasks show more")
         return
     # retire
     cfg = models.read_config()

@@ -84,14 +84,21 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
      dialog's Don't): say which roles it left on the GPU (after an earlier Allow in the OpenRouter
      routes, `wb route` shows what is set) and that their tasks need a GPU model; ask again only if
      they bring it up. Ask nothing before it: no server install, no `wb scout`.
-  3. **No GPU model and no key**: lay out both ways in two lines, a local server
-     (reference/models.md, which names no server for them) or `/connect` in OpenCode for an API
-     provider; let the user pick, and install nothing unasked. A server: `wb scout`, recommend
-     what fits the machine, `wb model add <provider/model> [--pull]`.
+  3. **No GPU model and no key**: run `wb scout` first, silently. Then ask **one** question:
+     a local server or `/connect` in OpenCode for an API provider, and under the local side the
+     servers that fit this OS and GPU in a line each (reference/models.md, *A local server in one
+     yes*; none steered to), each filled in for this machine: the model you picked for
+     `wb scout`'s VRAM (its weights plus a window of 32K or more inside VRAM; researched, never
+     guessed), its download size, and the steps. Their one answer ("Ollama, yes") covers all
+     of them: the server's own install (a line needing sudo is theirs to run: reference/models.md
+     gives it), then `wb model add <provider/model> --pull` in the background, which on Ollama
+     also starts measuring the window; then `wb doctor` and `wb try`. Install nothing unasked.
   4. **A GPU model already** (keys or not): as before; mention once, in a line, that a provider
      they connected could take a role if they want. Never push it.
-  5. Ollama models only: `wb optimize estimate`, then `wb optimize start` (a minute or two,
-     detached): each model's window, measured on this GPU; `wb optimize report` once done.
+  5. Ollama models only: `wb model add` and `wb setup` start the measurement themselves when
+     due (a `--  measuring the GPU …` line); for models already there, `wb optimize estimate`,
+     then `wb optimize start` (a minute or two, detached): each model's window, measured on this
+     GPU; `wb optimize report` once done.
   6. `wb try` proves it on a tiny sample (with trivial on API, it goes to that provider): review
      it as any task and run the hidden check it printed. Then `wb accept` it (the sample is a
      scratch repo of its own) and show the user the result and the line accept prints. Then ask

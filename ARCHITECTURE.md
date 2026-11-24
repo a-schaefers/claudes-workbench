@@ -3656,7 +3656,10 @@ without `local: true`; an existing provider is left as it is, and a different ba
 (#334), but for the two `wsl_url` cases below. At WSL2's Windows host (`windows_host()`) it marks the provider models.json `wsl_url`
 (the baseURL), which discovery follows (*A server on Windows, from WSL2*, #1167); the same URL
 again adopts a provider made before the mark, and Windows' new address (port and path kept)
-repoints a marked one, before any discovery has moved it, rather than refusing. `--start`/`--stop` set models.json `start`/`stop`. wb isn't tied to Ollama (2026-11-17);
+repoints a marked one, before any discovery has moved it, rather than refusing. `--start`/`--stop` set models.json `start`/`stop`.
+On an Ollama provider, after the `registered …` line, `optimize.start(if_due=True)` (a `--` line
+when it starts, as at `wb setup`; quiet when not due or a task holds the GPU), then the `next:` line
+(#1195). wb isn't tied to Ollama (2026-11-17);
 Ollama keeps pulls, deletes and sharing.
 
 `wb model retire <id> [--delete]` removes the entry, refusing OpenCode's default `model` or
@@ -4225,7 +4228,8 @@ A run takes a minute or two, so it runs unasked only where a short wait is expec
 server's `/api/tags` names and sizes; `changed` compares only servers both know, `remembered` keeps
 a sleeping one); a new model (not one `skipped` before its `retry_after`); a `stale` fit (the entry's
 window or tags `digest` differs from the row's, #709); or the last run was stopped. It is checked at
-the end of `wb setup` and once per Claude Code session after its first quiet turn (the mod's
+the end of `wb setup`, after each Ollama `wb model add` (pull, register and window in one command:
+the first run's separate yes for it, #1195), and once per Claude Code session after its first quiet turn (the mod's
 `measureIfDue`, `quietForJobs`, #541, a toast, no wake), through `wb optimize start --if-due`, which
 measures only the new or stale models (`--all` measures every one). `--bench` and anything heavier
 wait for the user to ask: an unannounced long run could be cut short and alarm people (the user,
@@ -5935,7 +5939,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | Command | Flags | What it does |
 |---|---|---|
 | `wb models` | `--set-default`, `--json`, `--api TEXT` | State, slice, speeds, `bench:`, `size:`, `router.weights_changed`; the ranking, models under `router.EXPLORE_TRIES` marked (*Exploring*); the API section, and `--api TEXT` the catalog ids containing TEXT, at most 30 (*What `wb models` prints*). `--set-default` (a GPU model only): `models.set_default` (refused under `OPENCODE_CONFIG_CONTENT`, #421). `--json` (#1023, the pane's lists, `cli._models_json`, asking no server and rebuilding no catalog): `{gpu: [{id, label, window, sizes, cards}], api: [{id, name, provider, provider_name, window, price {input, output}, prices (catalog\|yours, #1135), free}] (stored keys on a package the keyhole speaks, #1066, and Ollama cloud only, `cli._runs_held`), used (API models tasks ran on), free_line, optimize {done_at, models, running}, media {image\|speech\|sfx\|music: {default, engines: [{name, gpu}]}} (#1047; a file that doesn't parse leaves its kinds out)}`. |
-| `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | *Managing the set*: `--url` via `models.add_server_provider` (an existing provider at the same baseURL left as it is, only marked `wsl_url` when at WSL2's Windows host; one marked `wsl_url` at Windows' old address moved to the new one; one for another baseURL refuses; off this machine needs `local: true`; at WSL2's Windows host marked `wsl_url`, followed after a reboot, #1167); `--start`/`--stop` to models.json; refuses Ollama cloud models (API models) without `local: true` (one under a plain name always), unknown contexts, down servers. |
+| `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | *Managing the set*: `--url` via `models.add_server_provider` (an existing provider at the same baseURL left as it is, only marked `wsl_url` when at WSL2's Windows host; one marked `wsl_url` at Windows' old address moved to the new one; one for another baseURL refuses; off this machine needs `local: true`; at WSL2's Windows host marked `wsl_url`, followed after a reboot, #1167); `--start`/`--stop` to models.json; refuses Ollama cloud models (API models) without `local: true` (one under a plain name always), unknown contexts, down servers. On Ollama, then the optimize when due (`--  measuring the GPU …`, #1195). |
 | `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | *Optimize*; `start` detached, refused while a task holds the GPU, stopped by a task that wants it; `--bench` then runs `wb bench run`; `apply` adds the measured window as its own entry (`optimize.entry_name`; refused when that name exists). |
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Provider `ollama-<host>` (WSL2's Windows host: `ollama-windows`, followed to its next address, #1159), `local: true`, its tool models added (IPv6 bracketed, #707); exit 1 when it doesn't answer; `--remove` not while `model`/`small_model` is one (#708). |
 | `wb model retire <id>` | `--delete` | Not OpenCode's `model` or `small_model` (#708); keeps `variant_of`, `replaces` (#723); `--delete` drops Ollama's weights; an API id refused (`cli.API_SIZES`, #1013). |
@@ -6360,7 +6364,13 @@ or every role on API, and no local model the GPU lines read as optional
 (`models.skipped_providers`: another host not opted in, disabled) adds its `--  provider <id>: <why>`
 line, the `local: true` hint as doctor gives it (#1109), and for a public host (not `cli._on_lan`:
 a hosted provider added by hand may be one) `cli.CONNECT_TOO` after it, `a hosted provider's key:
-/connect in OpenCode adds it`. No GPU is needed for a role on API (*Roles*). The plugin install copies only `mod/` into the plugin
+/connect in OpenCode adds it`. No GPU is needed for a role on API (*Roles*). With neither a key nor a GPU model, the skill's first
+run is one question too (#1195): after `wb scout`, each server that fits the OS and GPU in a line,
+filled in with the model Claude picked for its VRAM, the download and the steps (none steered to);
+one yes runs the server's official install (reference/models.md holds those lines, never code: a
+sudo one is the user's to run, with Claude Code's `!` prefix or in a terminal, and Ollama's sets
+`OLLAMA_CONTEXT_LENGTH`, which `wb model add` needs to read a window), then `wb model add … --pull`,
+which on Ollama starts the optimize when due, then `wb doctor` and `wb try`. The plugin install copies only `mod/` into the plugin
 cache; `marketplace add` keeps a full clone (`installLocation` in `known_marketplaces.json`, or under
 `CLAUDE_CODE_PLUGIN_CACHE_DIR`), from which `wb setup` links `wb` and the skill. `wb update` (`/workbench-update` also
 reloads plugins) runs `claude plugin marketplace update workbench` and `claude plugin update workbench@workbench`; the
