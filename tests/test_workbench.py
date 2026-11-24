@@ -1,6 +1,7 @@
 """End-to-end tests: real git, real runner processes, a fake opencode. Run: python3 -m unittest"""
 import ast
 import base64
+import collections
 import contextlib
 import dataclasses
 import errno
@@ -7248,6 +7249,25 @@ class AgentContext(Base):
         self.assertFalse((rules / "AGENTS.md").exists())
         self.assertEqual(files[1:], [self.repo / "CLAUDE.md"])        # the project's alone
 
+    def test_the_round_that_drops_an_earlier_wbs_copy_of_claudes_files_says_so_in_its_report(self):
+        # #1119 (audit 1 of 2.0): an open task updated across #1061 lost ~/.claude/CLAUDE.md at
+        # its next round, and nothing said so: wb update runs the code it replaces
+        self.start("t-gone", "ok")
+        wait_phase("t-gone", {"review"})
+        task = store.Task("t-gone")
+        self.assertNotIn("note: until this round", task.round_dir(1).joinpath("summary.md").read_text())
+        (context.rules_dir(task) / "CLAUDE.md").write_text("use uv\n")   # 1.91's copy
+        for n in (2, 3):
+            run_wb("feedback", "t-gone", "--text", "1. again")
+            wait_phase("t-gone", {"review"})
+            said = task.round_dir(n).joinpath("summary.md").read_text()
+            if n == 2:
+                self.assertIn("note: until this round this task's agent read ", said)
+                self.assertIn("/CLAUDE.md and ", said)
+                self.assertFalse((context.rules_dir(task) / "CLAUDE.md").exists())
+            else:                                                          # said once
+                self.assertNotIn("note: until this round", said)
+
     def test_rules_a_link_brings_into_the_projects_rules_reach_the_agent(self):
         # #828 (the second 2026-11-21 audit): Claude Code documents links in .claude/rules for
         # sharing rules, but rglob followed no directory link, a committed directory link listed
@@ -13981,6 +14001,28 @@ class Cleanup(Base):
         self.assertNotEqual(self.git("rev-parse", "--verify", "-q", "refs/heads/delegate/t-out").returncode, 0)
         self.assertEqual(self.git("rev-parse", "--verify", "-q", "refs/heads/delegate/t-moved").returncode, 0)
 
+    def test_discard_keeps_a_branch_another_worktree_has_out_and_says_where(self):
+        # #1090 (audit 1 of 2.0): wb models' key helper was a second def _held, replacing
+        # discard's, so a branch discard couldn't delete crashed it with a TypeError mid-way
+        self.start("t-held", "ok")
+        wait_phase("t-held", {"review"})
+        other = Path(self.tmp.name) / "other"
+        self.assertEqual(self.git("worktree", "add", "-f", "-q", str(other),
+                                  "delegate/t-held").returncode, 0)
+        out = run_wb("discard", "t-held", "--reason", "x")
+        self.assertIn(f"kept: it is checked out in {other}", out)
+        self.assertEqual(store.Task("t-held").status["phase"], "discarded")
+        self.assertEqual(self.git("rev-parse", "--verify", "-q",
+                                  "refs/heads/delegate/t-held").returncode, 0)
+
+    def test_no_two_top_level_definitions_in_a_module_share_a_name(self):
+        # #1090: the later def wins at import, silently, and every call to the earlier one breaks
+        for path in sorted((ROOT / "workbench").rglob("*.py")):
+            seen = collections.Counter(
+                n.name for n in ast.parse(path.read_text()).body
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)))
+            self.assertEqual([k for k, v in seen.items() if v > 1], [], path)
+
     def test_old_closed_tasks_are_archived_and_still_found(self):
         # every wb wait wake, wb events minute and wb start read all 101 tasks' files
         for name in ("t-done", "t-open"):
@@ -18501,6 +18543,28 @@ class LocalPatches(Base):
     def worktrees(self):
         return self.g(self.copy, "worktree", "list", "--porcelain").count("worktree ")
 
+    def test_a_marketplace_clone_under_the_plugin_cache_dir_is_rescued_and_moved_never_read_as_the_users(self):
+        # #1099 (audit 1 of 2.0): with CLAUDE_CODE_PLUGIN_CACHE_DIR set, Claude Code keeps its clone
+        # there; only CLAUDE_CONFIG_DIR/plugins counted, so wb update skipped the #1005 rescue and
+        # Claude Code's re-clone wiped a local commit, and wb patch init said "a clone you own"
+        cache = Path(self.tmp.name) / "pcache"
+        moved = cache / "marketplaces" / "workbench"
+        moved.parent.mkdir(parents=True)
+        self.market.rename(moved)
+        os.environ["CLAUDE_CODE_PLUGIN_CACHE_DIR"] = str(cache)
+        self.addCleanup(os.environ.pop, "CLAUDE_CODE_PLUGIN_CACHE_DIR", None)
+        with mock.patch.object(cli, "PKG_ROOT", moved):
+            self.assertEqual(cli._install_kind(), "marketplace")
+            head = self.commit(moved, "mine.txt", "mine\n", "a local fix")
+            out = self.wb("update")
+            self.assertIn("Claude Code's update re-clones it and would wipe them", out)
+            self.assertTrue(list((store.home() / "rescued").iterdir()))
+            self.assertEqual(self.g(moved, "rev-parse", "HEAD"), head)
+            self.assertFalse(self.calls.exists())                                     # nothing updated
+            self.assertNotIn("a clone you own", self.wb("patch", "init", "--dir", str(Path(self.tmp.name) / "src")))
+            os.environ.pop("CLAUDE_CODE_PLUGIN_CACHE_DIR")
+            self.assertEqual(cli._install_kind(), "clone")                            # without it: as before
+
     def test_a_marketplace_update_refuses_and_rescues_a_local_commit_an_edit_or_an_untracked_file(self):
         # #1005 (2026-11-22): Claude Code re-clones its clone over all three, and wb update said
         # "updated marketplace <patched>..<upstream>", exit 0
@@ -21523,6 +21587,68 @@ class KeepAwake(Base):
         self.assertFalse(wait_gone(waiter, 1))                # held while the runner runs
         run_wb("stop", "t-awake")
         self.assertTrue(wait_gone(waiter, 10))                # and let go when it ends
+
+    def test_a_backlog_task_waiting_on_claude_keeps_the_machine_awake_while_its_claude_lives(self):
+        # #1105 (audit 1 of 2.0): every inhibitor was a detached process's, so once a batch's last
+        # task reached review none was held, and Linux or WSL2 could idle-sleep mid-review
+        claude = subprocess.Popen(["sleep", "30"])                    # Claude Code, for the test
+        self.addCleanup(claude.wait)
+        self.addCleanup(claude.kill)
+        held, waiters = [], []
+        for name, backlog in (("t-night", "night"), ("t-day", None)):
+            task = store.Task(name)
+            task.dir.mkdir(parents=True)
+            store.write_json(task.dir / "task.json", {"name": name, "claude_pid": claude.pid,
+                                                      **({"backlog": backlog} if backlog else {})})
+            task.set_status(phase="review")
+            with mock.patch.object(cli, "awake_how", return_value="systemd-inhibit"), \
+                    mock.patch.object(cli, "keep_awake", lambda pid, why: held.append((pid, why)) or True):
+                waiters.append(runner.awake_for_review(task))
+        waiter = waiters[0]
+        self.addCleanup(waiter.wait)
+        self.assertIsNone(waiters[1])                                # a task outside a batch: none
+        self.assertEqual(held, [(waiter.pid, "task t-night waits on Claude's review")])
+        time.sleep(0.5)
+        self.assertIsNone(waiter.poll())                             # held while Claude lives
+        claude.kill()
+        claude.wait()
+        self.assertEqual(waiter.wait(timeout=20), 0)                 # and let go once it exits
+        task = store.Task("t-night")
+        task.set_status(phase="running")                             # its runner's own holds it then
+        with mock.patch.object(cli, "awake_how", return_value="systemd-inhibit"):
+            self.assertIsNone(runner.awake_for_review(task))
+
+    def test_a_backlog_tasks_runner_holds_the_machine_awake_for_its_review_as_it_exits(self):
+        # the review of #1105 (2026-11-23): the test above calls awake_for_review itself, so
+        # dropping the runner's own call on its way out passed every test
+        claude = subprocess.Popen(["sleep", "30"])                    # Claude Code, for the test
+        self.addCleanup(claude.wait)
+        self.addCleanup(claude.kill)
+        self.addCleanup(signal.signal, signal.SIGTERM, signal.getsignal(signal.SIGTERM))
+        task = store.Task("t-batch")
+        task.dir.mkdir(parents=True)
+        store.write_json(task.dir / "task.json", {"name": "t-batch", "claude_pid": claude.pid, "backlog": "night"})
+        task.set_status(phase="running")
+        held = []
+        with mock.patch.object(sys, "argv", ["runner", "t-batch"]), \
+                mock.patch.object(runner, "drive", lambda t: t.set_status(phase="review")), \
+                mock.patch.object(cli, "awake_how", return_value="systemd-inhibit"), \
+                mock.patch.object(cli, "keep_awake", lambda pid, why: held.append((pid, why)) or True):
+            runner.main()
+        self.assertEqual([why for _, why in held], ["task t-batch waits on Claude's review"])
+        waiter = held[0][0]                                          # this process's child: reaped here
+
+        def exited(timeout):
+            end = time.monotonic() + timeout
+            while time.monotonic() < end:
+                if os.waitpid(waiter, os.WNOHANG)[0]:
+                    return True
+                time.sleep(0.05)
+            return False
+        self.assertFalse(exited(0.3))                                # held while Claude lives
+        claude.kill()
+        claude.wait()
+        self.assertTrue(exited(20))                                  # and let go once it exits
 
     def test_where_logind_refuses_a_sleep_lock_an_idle_lock_is_held(self):
         # polkit grants a sleep lock to a local active session only: over SSH, idle alone
@@ -30253,7 +30379,7 @@ class ApiThinking(Base):
         self.assertEqual(json.loads(runner.write_config_layer(task).read_text())["small_model"],
                          "deepseek/deepseek-flash#none")
         out = transcript.model_line(store.Task("t-flash"), {})
-        self.assertEqual(out, "deepseek (API) · thinking off · 128K context")   # task.json's, no variant; #1017's window
+        self.assertEqual(out, "deepseek/deepseek-flash (deepseek, API) · thinking off · 128K context")   # task.json's (#1078), no variant; #1017's window
         from workbench import results
         row = results.record(task, "discarded")
         self.assertEqual(row["thinking"], "off")                  # the weekly check's evidence
@@ -31505,6 +31631,37 @@ class ApiSpend(Base):
         self.meter._METERS.clear()
         store.write_json(task.dir / "task.json", {**spec, "via": "api"})
         self.assertIsNotNone(self.meter.for_task(task))           # with via api: its meter
+
+    def test_feedback_next_and_resume_on_an_api_task_at_the_day_cap_refuse_before_writing_a_round(self):
+        # #1118 (audit 1 of 2.0): they wrote the round, counted the review or committed the step
+        # and spawned a runner whose guard stopped it at once: a spend `stuck` wake for nothing
+        task = self.api_task("t-cap", SPEND_M, "ok")
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        self.cap(5)
+        self.spent(6.0)
+        head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
+        before = {k: task.status.get(k) for k in ("round", "reviews", "steps", "phase")}
+        nxt = Path(self.tmp.name) / "next.md"
+        nxt.write_text("step two\n")
+        for args in (("feedback", "t-cap", "--text", "1. make it 43"),
+                     ("next", "t-cap", "--spec", str(nxt), "-m", "step one"), None):
+            if args is None:                                     # stopped, then resumed
+                task.set_status(phase="stuck")
+                before["phase"] = "stuck"
+                args = ("resume", "t-cap")
+            err = io.StringIO()
+            with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+                  mock.patch.object(cli, "spawn_runner") as spawned):
+                run_wb(*args)
+            self.assertEqual(e.exception.code, 3, args)
+            self.assertIn("API spend today is $6.", err.getvalue())
+            self.assertIn("day cap", err.getvalue())
+            spawned.assert_not_called()
+            got = store.Task("t-cap").status
+            self.assertEqual({k: got.get(k) for k in before}, before, args)
+            self.assertFalse(task.round_dir(before["round"] + 1).exists(), args)
+            self.assertEqual(gitops.git(task.worktree, "rev-parse", "HEAD").strip(), head, args)
 
     def test_the_cap_stops_self_review_and_a_handover_before_they_run(self):
         # the review of #1019: only auto-fix's _go_on was exercised; the in-round guard off, the
@@ -32966,6 +33123,30 @@ class RoleResolution(Base):
         self.assertEqual(code, 0)
         self.assertNotIn("this task sends", out)
 
+    def test_an_api_tasks_report_watch_line_and_commit_name_its_model_not_only_the_provider(self):
+        # #1078 (audit 1 of 2.0): all read "DeepSeek (API)", so two roles on one provider looked
+        # alike, and git history couldn't say which model wrote the code
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.assertEqual(self.begin("t-named", "--role", "trivial")[0], 0)
+        task = store.Task("t-named")
+        label = "deepseek/deepseek-flash (DeepSeek, API)"
+        self.assertEqual(task.spec["model_label"], label)
+        self.assertTrue(transcript.model_line(task, {}).startswith(f"{label} · "))
+        runner.checkout(task)
+        (task.worktree / "a.txt").write_text("a\n")
+        rnd = {"secs": 60, "tok_in": 1, "tok_out": 1, "stuck": None, "tools": {}, "texts": [],
+               "exit": 0, "errors": [], "guard": None, "retries": 0, "left_bg": None}
+        first = runner.summary_text(task, 1, rnd, None).splitlines()[0]
+        self.assertTrue(first.startswith(f"task t-named · {label} · round 1 · "), first)
+        task.set_status(phase="review")
+        run_wb("accept", "t-named", "-m", "feat: a")
+        body = subprocess.run(["git", "-C", str(self.repo), "log", "-1", "--format=%B", "delegate/t-named"],
+                              capture_output=True, text=True, check=True).stdout
+        self.assertIn(f"Delegated to {label} via OpenCode: ", body)
+        from workbench import models
+        m = models.lookup("deepseek/deepseek-flash")
+        self.assertEqual(models.provider_name(m), "DeepSeek")     # still the provider's own
+
     def test_an_openrouter_roles_backends_reach_task_json_and_the_note_names_those_alone(self):
         # wave 2's review: routes.json's `order` never reached task.json, so the keyhole sent no
         # order (any backend) while the start note, built from routes.json, named the chosen ones
@@ -33347,6 +33528,56 @@ class FirstRunApi(Base):
         self.assertRegex(lines[2], r"^ok  \d+ local model\(s\) registered$")
         self.assertIn("ok  a model server answers", lines)
 
+    def test_doctor_passes_a_healthy_api_only_setup_and_fails_an_api_role_that_cant_run(self):
+        # #1067 (audit 1 of 2.0): with every role on API and no GPU model doctor said BAD 0 local
+        # model(s) and BAD for the missing OpenCode config, exit 1, the same with the key gone;
+        # it never asked whether a role's API model could run
+        none = Path(self.tmp.name) / "no-opencode.json"
+        os.environ["WB_OPENCODE_CONFIG"] = str(none)
+
+        def doctor():
+            with mock.patch.object(cli.models, "discover", return_value={}):
+                code, out, _ = self.wb("doctor")
+            return code, out
+        code, out = doctor()                                         # roles unset: all GPU, as before
+        self.assertIn("BAD 0 local model(s)", out)
+        self.assertEqual(code, 1)
+        self.assertEqual(self.wb("route", "significant", "deepseek/deepseek-flash", "trivial",
+                                 "deepseek/deepseek-flash", "writing", "deepseek/deepseek-flash",
+                                 "--day-usd", "5")[0], 0)
+        code, out = doctor()
+        # the rest of doctor reads this machine's install (wb on PATH, the skill link): only the
+        # lines on the models, the config and the roles are this test's
+        bad = [x for x in out.splitlines() if x.startswith("BAD")]
+        self.assertFalse([x for x in bad if "model" in x or "OpenCode config" in x or "role" in x], out)
+        self.assertIn("--  0 local model(s): every role runs on API", out)
+        self.assertIn(f"--  OpenCode config {none} (none: every role runs on API", out)
+        for role in ("significant", "trivial", "writing"):
+            self.assertIn(f"ok  {role} role: deepseek/deepseek-flash ready", out)
+        self.assertIn("ok  API keys: deepseek (stored via /connect); significant and trivial and writing use it", out)
+        self.keys()                                                  # the key gone
+        code, out = doctor()
+        self.assertEqual(code, 1)
+        self.assertIn("BAD trivial role: deepseek/deepseek-flash can't run: no key for ", out)
+        self.assertIn("/connect", out)
+        with mock.patch.object(cli.models, "discover", return_value={}):
+            lines = cli.first_run()                                  # wb setup: the key is required
+        self.assertIn(cli.NO_LOCAL_OPTIONAL, lines)
+        self.assertNotIn(cli.NO_KEY, lines)
+        self.assertIn("--  no API key for deepseek, which significant and trivial and writing use: /connect "
+                      "in OpenCode adds it (required: those tasks can't start without it)", lines)
+
+    def test_setup_with_a_stored_key_and_an_opencode_config_that_doesnt_parse_still_prints_its_checklist(self):
+        # the review of #1067 (2026-11-23): wb setup's catalog read for a stored key ran outside
+        # the guard discover() has, so a config wb can't parse stopped it at "opencode.json doesn't
+        # parse", exit 1, with no checklist and no "next: wb doctor"
+        runner.models.hosted_path().unlink(missing_ok=True)
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text("{ not json")
+        lines = cli.first_run()
+        self.assertTrue(lines[0].startswith("ok  "), lines)
+        self.assertIn("ok  API keys: deepseek (stored via /connect); no role uses one yet", lines)
+        self.assertTrue(any("Landlock" in x for x in lines), lines)
+
     # wb route: several roles in one change
 
     def test_several_roles_change_in_one_call_one_line_and_one_approval(self):
@@ -33588,6 +33819,78 @@ class SettingsRoles(Base):
         self.assertIn("needs a key wb can hold outside the lane (an OAuth login)", p["oauthco"]["why"])
         ledger.unlink()
         self.assertEqual(json.loads(self.wb("route", "--json")[1])["spend_today"], {"usd": 0, "by_provider": {}})
+
+    def test_with_keys_stored_and_no_catalog_read_yet_the_panes_settings_still_list_the_providers(self):
+        # #1069 (audit 1 of 2.0): the pane reads only hosted.json, which only other commands
+        # built, so with keys stored it said "No API provider connected" and offered no API row
+        hosted = runner.models.hosted_path()
+        self.assertFalse(hosted.exists())
+        first = json.loads(self.wb("route", "--json")[1])           # this poll: the cache as it is
+        self.assertEqual(first["providers"], {})
+        deadline = time.time() + 20                                  # read in the background
+        while not hosted.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(hosted.exists())
+        self.assertTrue((store.home() / cli.CATALOG_LATER).exists())
+        shown = json.loads(self.wb("route", "--json")[1])
+        self.assertEqual(shown["providers"]["deepseek"], {"name": "DeepSeek", "key": "stored"})
+        hosted.unlink()                                              # one read at a time
+        with mock.patch.object(cli.subprocess, "Popen", side_effect=AssertionError("a second read")):
+            self.wb("route", "--json")
+        cli.first_run()                                              # wb setup reads it, a key stored
+        self.assertTrue(hosted.exists())
+
+    def await_read(self, after):
+        """hosted.json once a background read past ``after`` (a ts) has written it."""
+        hosted, deadline = runner.models.hosted_path(), time.time() + 20
+        while time.time() < deadline:
+            doc = store.read_json(hosted, {}) if hosted.exists() else {}
+            if isinstance(doc.get("ts"), (int, float)) and doc["ts"] > after:
+                return doc
+            time.sleep(0.05)
+        self.fail("no background catalog read landed")
+
+    def age(self, secs):
+        """hosted.json and the pane's read mark, made ``secs`` older."""
+        hosted = runner.models.hosted_path()
+        doc = json.loads(hosted.read_text())
+        store.write_json(hosted, {**doc, "ts": doc["ts"] - secs})
+        mark = store.home() / cli.CATALOG_LATER
+        os.utime(mark, (mark.stat().st_mtime - secs,) * 2)
+
+    def test_a_key_connected_after_the_pane_cached_none_is_listed_within_a_minute(self):
+        # the review of #1069 (2026-11-23): a user who opened Settings before /connect had a
+        # hosted.json listing no key, and the pane read it again only when the file was missing,
+        # so it said NO_PROVIDER (/connect in OpenCode adds one) after they had done just that
+        self.catalog(ROLE_CATALOG, [])                               # no key stored yet
+        start = time.time()
+        self.wb("route", "--json")
+        self.await_read(start - 1)
+        shown = json.loads(self.wb("route", "--json")[1])["providers"]
+        self.assertEqual(shown["deepseek"]["key"], "none")
+        self.catalog(ROLE_CATALOG, ROLE_AUTH)                        # /connect: no stamp changes
+        with mock.patch.object(cli.subprocess, "Popen", side_effect=AssertionError("a read per poll")):
+            self.wb("route", "--json")                               # a fresh cache: not read again yet
+        self.age(cli.PANE_REREAD_SECS + 1)
+        before = json.loads(runner.models.hosted_path().read_text())["ts"]
+        self.wb("route", "--json")                                   # past it, listing no key: read again
+        self.await_read(before)
+        shown = json.loads(self.wb("route", "--json")[1])["providers"]
+        self.assertEqual(shown["deepseek"], {"name": "DeepSeek", "key": "stored"})
+        self.age(runner.models.HOSTED_TTL * 10)                      # a key listed: never read for the pane
+        with mock.patch.object(cli.subprocess, "Popen", side_effect=AssertionError("a read with a key")):
+            self.wb("route", "--json")
+
+    def test_wb_setup_reads_the_catalog_again_when_a_stored_key_isnt_in_the_cache(self):
+        # the review of #1069: wb setup read it only when hosted.json was missing
+        self.catalog(ROLE_CATALOG, [])
+        runner.models.hosted(fresh=True)
+        self.catalog(ROLE_CATALOG, ROLE_AUTH)
+        cli.first_run()
+        doc = json.loads(runner.models.hosted_path().read_text())
+        self.assertEqual(doc["providers"]["deepseek"]["key"], "stored")
+        with mock.patch.object(runner.models, "_build_hosted", side_effect=AssertionError("a read with it listed")):
+            cli.first_run()
 
     def test_wb_models_json_lists_gpu_models_with_sizes_and_the_runnable_api_models_asking_no_server(self):
         runner.models.hosted(fresh=True)

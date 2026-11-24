@@ -275,6 +275,12 @@ def write_config_layer(task: store.Task) -> Path:
     context and its rules (the user's own OPENCODE_CONFIG_CONTENT permissions, USERS_RULES,
     before them: rules_env), and the ask_reviewer server."""
     path = context.rules_dir(task) / "opencode.json"
+    rules = context.rules_dir(task)
+    if (rules / "CLAUDE.md").is_file() or (rules / "user-rules").is_dir():
+        # an earlier wb's copy of Claude's global files, which context.layer now deletes (#1061):
+        # this round's report says so, as nothing told an updating user or a task already open
+        # that its agent had lost them (#1119, 2026-11-23)
+        task.set_status(claude_rules_gone=task.status.get("round", 1))
     mine = context.layer(task)
     users = models.users_config_content()
     theirs = users.get("permissions")
@@ -3093,6 +3099,13 @@ def _spend_part(task: store.Task) -> str:
     return f" · {usd(v)} so far" if v is not None else " · cost unknown"
 
 
+# The round report's line for a task whose agent had a copy of Claude's global files until this
+# round (status `claude_rules_gone`, write_config_layer; #1119)
+RULES_GONE = ("note: until this round this task's agent read {claude}/CLAUDE.md and {claude}/rules/; "
+              "agents get none of Claude's files now. What it must still follow goes in your feedback; "
+              "for every task, the user puts it in {mine}: tell them")
+
+
 def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     """The compact report Claude reads; kept short on purpose, the diff is fetched separately."""
     spec, st = task.spec, task.status
@@ -3117,6 +3130,9 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     if full:
         lines.append("reading: " + full[-1]["text"])
     lines += backend_lines(task, n)  # #1021
+    if st.get("claude_rules_gone") == n:  # #1119
+        lines.append(RULES_GONE.format(claude=privacy.home_path(context.claude_home()),
+                                       mine=privacy.home_path(context.user_agents_md())))
     if rnd["stuck"]:
         lines.append(f"STOPPED: {rnd['stuck']}")
         if rnd.get("guard") in PROVIDER_GUARDS:
@@ -4613,6 +4629,45 @@ def load_up_front() -> None:
     from . import cli, results, router, transcript, verify  # noqa: F401
 
 
+# A backlog task that waits on Claude keeps the machine awake this long for Claude's review, its
+# feedback and the morning summary, or until that Claude Code exits (#1105)
+REVIEW_AWAKE_SECS = 1800
+# the waiter keep_awake holds the inhibitor for (argv: Claude Code's pid, the seconds)
+AWAIT_CLAUDE = """import os, sys, time
+pid, until = int(sys.argv[1]), time.monotonic() + float(sys.argv[2])
+while time.monotonic() < until:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        break
+    time.sleep(min(5, max(0.0, until - time.monotonic())))
+"""
+
+
+def awake_for_review(task: store.Task):
+    """A backlog task that stopped waiting on Claude (review, stuck, failed): hold the machine
+    awake for REVIEW_AWAKE_SECS while its Claude Code lives. Every inhibitor was a process wb had
+    detached, so when a batch's last task (or its last parallel ones) reached review none was
+    held, and on Linux and WSL2, where Claude Code holds none of its own, the machine could
+    idle-sleep mid-review, the feedback round and the summary waiting for the user (#1105,
+    2026-11-23). The waiter process, its pid the inhibitor's, or None."""
+    from . import cli  # cli imports this module
+    pid, spec = task.spec.get("claude_pid"), task.spec
+    if not spec.get("backlog") or task.status.get("phase") not in ("review", "stuck", "failed") \
+            or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 \
+            or spec.get("claude_machine") not in (None, store.machine()) \
+            or not models._alive(pid, spec.get("claude_start")) or not cli.awake_how():
+        return None
+    try:
+        waiter = subprocess.Popen([sys.executable, "-c", AWAIT_CLAUDE, str(pid), str(REVIEW_AWAKE_SECS)],
+                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        return None
+    cli.keep_awake(waiter.pid, f"task {task.name} waits on Claude's review")
+    return waiter
+
+
 def main():
     store.absolute_env()
     gitops.drop_repo_env()  # the caller's repository variables, for the agent too (#798)
@@ -4667,6 +4722,10 @@ def main():
             except OSError as e:
                 if not store.disk_full(e):
                     raise
+            try:
+                awake_for_review(task)
+            except Exception:  # never the runner's exit
+                pass
 
 
 # Thinking per task (#1018). API providers think by default (DeepSeek at effort high), and

@@ -192,9 +192,16 @@ def _coding_used(task: store.Task) -> None:
 
 def _model_still_listed(task: store.Task) -> None:
     """An API task's model must still be in OpenCode's catalog before feedback, next or resume
-    writes a round: exit 3 with runner.left_catalog's line, never another model (#1016)."""
-    if task.spec.get("via") == "api" and models.lookup(task.spec.get("model") or "") is None:
+    writes a round: exit 3 with runner.left_catalog's line, never another model (#1016). And
+    wb start's spend refusal (meter.refusal: no price, today at the day cap), the same exit: the
+    round written past it stopped at once as a spend `stuck`, a Claude wake for nothing, with a
+    review counted or a step committed for a round that never ran (#1118, 2026-11-23)."""
+    if task.spec.get("via") != "api":
+        return
+    if (m := models.lookup(task.spec.get("model") or "")) is None:
         die(runner.left_catalog(task), 3)
+    if why := meter.refusal(m, task.spec.get("role")):
+        die(why, 3)
 
 
 def _opencode_again(task: store.Task) -> None:
@@ -1464,7 +1471,7 @@ def cmd_start(a):
         "base_branch": gitops.start_branch(repo, a.base),  # where wb accept --merge lands
         # the weights behind the id: a record on other weights under it isn't this model's (#726)
         **({"weights_id": w} if (w := models.identity(m)) else {}),
-        "branch": gitops.branch_name(a.name), "model": m.id, "model_label": m.label,
+        "branch": gitops.branch_name(a.name), "model": m.id, "model_label": models.task_label(m),
         "opencode_model": m.id, "route": why, "size": size, "stack": stack,
         **_routed_keys(routed),  # via, role; an API model's provider, thinking, said (#1016)
         **({"trial": True} if a.trial else {}), "test_cmd": a.test, "test_timeout": a.test_timeout,
@@ -3081,13 +3088,49 @@ KEY_HELD = {"oauth": "an OAuth login", "signing": "a cloud login that signs each
             "config": "written in OpenCode's config", "ollama": "Ollama's own login", "": "none stored"}
 
 
+CATALOG_LATER = "hosted.reading"  # in the state dir: when _route_pane last started a catalog read
+# How old a cache listing no stored key may be before the pane reads the catalog again (#1069's
+# review, 2026-11-23): /connect changes no stamp, so a cache written before it kept saying
+# NO_PROVIDER for HOSTED_TTL; the pane reads wb route on a Settings open or a Stats load, and only
+# polls it while an API task works (a key stored, so never this), so a minute costs little
+PANE_REREAD_SECS = 60
+
+
+def _read_catalog_later() -> None:
+    """A catalog read in the background, at most one per CATALOG_TIMEOUT: the pane reads only the
+    cache (never inline: #1013's review), and with keys stored but no cache yet, it said 'No API
+    provider connected' until some other command built one, sending the user to /connect again
+    for nothing (#1069, 2026-11-23). Always a fresh read: /connect changes no stamp, so a cache
+    read before it would otherwise stand for HOSTED_TTL (the review of #1069)."""
+    mark = store.home() / CATALOG_LATER
+    try:
+        if time.time() - mark.stat().st_mtime < models.CATALOG_TIMEOUT + 10:
+            return
+    except OSError:
+        pass
+    try:
+        mark.touch()
+        subprocess.Popen([sys.executable, "-X", "utf8", "-c",
+                          "from workbench import models; models.hosted_doc(fresh=True)"],
+                         cwd=PKG_ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:  # the next poll tries again once the mark is old
+        pass
+
+
 def _route_pane() -> dict:
     """`wb route --json`'s keys for the pane's Settings tab (#1023): `spend_today` (the day
     ledger's, spend-api.jsonl: {usd, by_provider}) and `providers` ({id: {name, key, why}}, key
     stored, ollama (Ollama cloud's login), env, oauth or none, from the cached catalog: never a
-    network probe or OpenCode run)."""
+    network probe or OpenCode run inline; with no cache, or one past PANE_REREAD_SECS that lists no
+    stored key, one read in the background, _read_catalog_later)."""
+    doc = models._read_hosted()
+    ts = doc.get("ts")
+    if not any(p.get("key") == "stored" for p in (doc.get("providers") or {}).values()) \
+            and not (isinstance(ts, (int, float)) and 0 <= time.time() - ts < PANE_REREAD_SECS):
+        _read_catalog_later()
     provs = {}
-    for pid, p in (models._read_hosted().get("providers") or {}).items():
+    for pid, p in (doc.get("providers") or {}).items():
         raw, name, pkg = str(p.get("key") or ""), str(p.get("name") or pid), str(p.get("package") or "")
         key = "env" if raw.startswith("env:") else KEY_STATES.get(raw, "none")
         held = f"key in {raw[4:]}" if key == "env" else KEY_HELD.get(raw, raw)
@@ -4319,8 +4362,9 @@ def _set_on(ts) -> str:
         return ""
 
 
-def _held(key: str) -> str:
-    """A provider's key source as wb models says it (Model.key, #1013)."""
+def _key_held(key: str) -> str:
+    """A provider's key source as wb models says it (Model.key, #1013). Not ``_held``:
+    that name is discard's, and a second def of it replaced the first (#1090, 2026-11-23)."""
     if key == "stored":
         return "stored"
     if key == "ollama":
@@ -4382,7 +4426,7 @@ def _api_section(gpu: bool) -> tuple[list[str], bool]:
                 lines.append(f"  {role:12} gpu " + (
                     ("(the router's pick above)" if gpu else "(no local model: none can run)")
                     if pick == "auto" else pick) + (f" · API kept: {r['api']}" if r.get("api") else "") + when)
-    lines.append("  keys: " + (", ".join(f"{pid} ({_held(k)})" for pid, k in keys.items())
+    lines.append("  keys: " + (", ".join(f"{pid} ({_key_held(k)})" for pid, k in keys.items())
                                or "none: /connect in OpenCode stores one"))
     lines.append(f"  {catalog}")
     if listed:
@@ -6097,23 +6141,33 @@ def api_key_lines(keys: dict | None) -> list[str]:
     """wb setup's API keys (#1024), from models.connected(): one `ok` line for the providers with
     a stored key and which roles use them, one `--` line for those whose key wb can't hold
     outside the lane (an environment variable, OAuth, a cloud login) with the fix, one for each
-    key written in a config file (remove it there, #1075), and one for a stored key on a package the keyhole can't carry (models.unspoken_providers,
-    #1066); NO_KEY for none; nothing when `auth list` can't be read."""
+    key written in a config file (remove it there, #1075), one for a stored key on a package the
+    keyhole can't carry (models.unspoken_providers, #1066), and one for each provider a role on API
+    uses with no key at all, required (#1067); else NO_KEY for none; nothing when `auth list`
+    can't be read."""
     if keys is None:
         return []
+    try:
+        doc = routes.read()
+    except routes.RoutesError:
+        doc = None
+    uses = {} if doc is None else {r: doc["roles"][r]["api"].split("/", 1)[0] for r in routes.ROLES
+                                   if routes.effective_via(doc, r) == "api" and doc["roles"][r].get("api")}
+    # a provider a role on API uses with no key at all: required, not NO_KEY's "optional" (#1067)
+    unkeyed = {}
+    for r, p in uses.items():
+        if p not in keys:
+            unkeyed.setdefault(p, []).append(r)
+    need = [f"--  no API key for {p}, which {' and '.join(rs)} use{'s' if len(rs) == 1 else ''}: "
+            "/connect in OpenCode adds it (required: those tasks can't start without it)"
+            for p, rs in unkeyed.items()]
     if not keys:
-        return [NO_KEY]
+        return need or [NO_KEY]
     out = []
     stored = [p for p, k in keys.items() if k["key"] == "stored"]
     # a stored key on a package the keyhole can't carry read `ok`, and every task failed (#1066)
     odd = models.unspoken_providers(stored)
     if stored := [p for p in stored if p not in odd]:
-        try:
-            doc = routes.read()
-        except routes.RoutesError:
-            doc = None
-        uses = {} if doc is None else {r: doc["roles"][r]["api"].split("/", 1)[0] for r in routes.ROLES
-                                       if routes.effective_via(doc, r) == "api" and doc["roles"][r].get("api")}
         used = [r for r, p in uses.items() if p in stored]
         said = ("" if doc is None else "; no role uses one yet" if not used else
                 f"; {' and '.join(used)} use{'s' if len(used) == 1 else ''} it" if len(stored) == 1 else
@@ -6140,7 +6194,7 @@ def api_key_lines(keys: dict | None) -> list[str]:
         names = ", ".join(f"{p} ({pkg or nopkg})" for p, pkg in odd.items())
         out.append(f"--  {names}: the keyhole doesn't speak {'its' if one else 'their'} API, so wb can't run "
                    f"{'its' if one else 'their'} models; another provider's key works")
-    return out
+    return out + need
 
 
 def first_run() -> list[str]:
@@ -6174,7 +6228,22 @@ def first_run() -> list[str]:
             on_windows = [x for x in here if x.get("windows")]
             answering = len(here) > len(on_windows)
     keys = models.connected() if good else None  # an API key makes a local model optional (#1024)
-    stored = not found and any(k["key"] == "stored" for k in (keys or {}).values())
+    try:  # and so does every role on API, key or not: the key line then says it is required (#1067)
+        doc = routes.read()
+        api_only = all(routes.effective_via(doc, r) == "api" for r in routes.ROLES)
+    except routes.RoutesError:
+        api_only = False
+    stored = not found and (api_only or any(k["key"] == "stored" for k in (keys or {}).values()))
+    # a key stored that the cache doesn't list as stored (none yet, or one read before /connect):
+    # the pane's API settings read this cache (#1069); an OpenCode config that doesn't parse
+    # stops no checklist (the review of #1067, 2026-11-23: wb setup exited 1 at it)
+    cached = models._read_hosted().get("providers") or {}
+    if any(k["key"] == "stored" and (cached.get(pid) or {}).get("key") != "stored"
+           for pid, k in (keys or {}).items()):
+        try:
+            models.hosted_doc(fresh=True)
+        except (RuntimeError, OSError):
+            pass
     if not answering and on_windows:  # WSL2: answering at the Windows host only (#663)
         out.append(f"--  a model server answers on Windows at {on_windows[0]['root']} (usually "
                    f"{on_windows[0]['usually']}): it needs local: true (wb remote "
@@ -6345,9 +6414,16 @@ def _mod_behind() -> str | None:
 
 def _install_kind() -> str:
     """"marketplace": this copy is Claude Code's own clone, which its update re-clones; "clone":
-    one the user owns (a developer's, or wb patch init's)."""
-    marketplace = context.claude_home() / "plugins" / "marketplaces"
-    return "marketplace" if PKG_ROOT.resolve().is_relative_to(marketplace.resolve()) else "clone"
+    one the user owns (a developer's, or wb patch init's). Under either plugins root the mod's
+    gateConf counts: <CLAUDE_CONFIG_DIR or ~/.claude>/plugins, and CLAUDE_CODE_PLUGIN_CACHE_DIR,
+    where Claude Code keeps the marketplace clone when it is set: read there as the user's own,
+    wb update skipped the rescue and Claude Code's re-clone wiped the local commits (#1099,
+    2026-11-23)."""
+    roots = [context.claude_home() / "plugins"]
+    if cache := os.environ.get("CLAUDE_CODE_PLUGIN_CACHE_DIR"):
+        roots.append(Path(os.path.expanduser(cache)))
+    here = PKG_ROOT.resolve()
+    return "marketplace" if any(here.is_relative_to((r / "marketplaces").resolve()) for r in roots) else "clone"
 
 
 def _running(live, a) -> str:
@@ -6630,6 +6706,28 @@ def idle_line() -> str | None:
             "or failed one, wb report <name> shows where one stands, wb discard <name> drops one")
 
 
+def _api_role_lines(doc: dict) -> list[tuple[bool, str]]:
+    """wb doctor's line for each role on API: `<role> role: <id> ready`, or wb start's own refusal
+    for it (routes.resolve and _role_cant_run: no key, a key wb can't hold, gone from the
+    catalog, out of credit, no price, the day cap). Doctor never asked, so it said the same
+    whether the API roles could run or not (#1067, 2026-11-23). No request to a provider: the
+    catalog as wb start reads it, the key's source and api-health.json (models.status)."""
+    out = []
+    for role in routes.ROLES:
+        if routes.effective_via(doc, role) != "api":
+            continue
+        try:
+            m, state, _, routed = routes.resolve(role, routes.role_and_size(role, None)[1], None)
+        except routes.Refused as e:
+            out.append((False, str(e)))
+            continue
+        if state["available"]:
+            out.append((True, f"{role} role: {m.id} ready"))
+        else:
+            out.append((False, _role_cant_run(m, state, routed) or f"{role} role: {m.id} can't run: {state['why']}"))
+    return out
+
+
 def cmd_doctor(a):
     ok = True
 
@@ -6660,11 +6758,22 @@ def cmd_doctor(a):
         if good and not old and (drift := runner.untested(runner.opencode_version())):
             print(f"--  {drift}")
     files = models.opencode_config_files()
+    try:  # the roles (#1014), read once here: with none on the GPU, no local model is needed
+        roles_doc = routes.read()
+    except routes.RoutesError:
+        roles_doc = None  # said BAD with the roles below
+    # every role on API: the GPU's lines inform, as wb setup's first run says them; a healthy
+    # API-only setup read BAD twice and exit 1, the same verdict as one whose key was gone (#1067)
+    on_gpu = roles_doc is None or any(routes.effective_via(roles_doc, r) == "gpu" for r in routes.ROLES)
     try:
         models.read_config()
-        line(bool(files), "OpenCode config " + (" + ".join(map(str, files)) or
-                                                f"{models.opencode_config_path()} (none)")
-             + (" (OpenCode layers them; wb won't rewrite either)" if len(files) > 1 else ""))
+        if files or on_gpu:
+            line(bool(files), "OpenCode config " + (" + ".join(map(str, files)) or
+                                                    f"{models.opencode_config_path()} (none)")
+                 + (" (OpenCode layers them; wb won't rewrite either)" if len(files) > 1 else ""))
+        else:
+            print(f"--  OpenCode config {models.opencode_config_path()} (none: every role runs on API, "
+                  "which needs none)")
     except RuntimeError as e:  # "<file> doesn't parse (…)"
         line(False, str(e))
         sys.exit(1)  # nothing below can read the models
@@ -6717,7 +6826,10 @@ def cmd_doctor(a):
              "reaches its service: on macOS run Install Certificates.command (in your Python's "
              "Applications folder); elsewhere install ca-certificates, or set SSL_CERT_FILE")
     found = models.discover()
-    line(bool(found), f"{len(found)} local model(s)")
+    if found or on_gpu:
+        line(bool(found), f"{len(found)} local model(s)")
+    else:
+        print("--  0 local model(s): every role runs on API")
     for pid, why in models.skipped_providers():  # once dropped without a word (the 2026-11-16 audit)
         print(f"--  provider {pid}: {why}")
     provs = models.providers()
@@ -6813,6 +6925,12 @@ def cmd_doctor(a):
             print(f"--  roles: {routes.summary(doc)} (wb route)")
     except routes.RoutesError as e:
         line(False, routes.unreadable(e))
+    else:
+        for good, said in _api_role_lines(doc):  # whether each API role can start now (#1067)
+            line(good, said)
+        if any(routes.effective_via(doc, r) == "api" for r in routes.ROLES) and (keys := models.connected()):
+            for said in api_key_lines(keys):
+                print(said)
     try:  # every wb command makes it: a fresh home has no ~/.local/state yet (the 2026-11-16 audit)
         store.home().mkdir(parents=True, exist_ok=True)
         why = "" if os.access(store.home(), os.W_OK | os.X_OK) else "not writable"
