@@ -34228,6 +34228,50 @@ class ApiSpend(Base):
         self.cap(100)                                           # the user raised it: a GPU-like go on
         self.assertTrue(runner._go_on(task, 2, "auto-fix"))
 
+    def local_only(self):
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {"local_only": True}}}))
+
+    def test_a_queued_api_task_whose_repo_became_local_only_stops_before_it_sends_or_spends_anything(self):
+        # #1215: wb next, feedback and resume refused such a task, but its runner, queued for a
+        # slot (or in checkout, setup or the base check), ran round 1 to the provider and billed it
+        task = self.api_task("t-lo-q", SPEND_M, "ok", FAKE_STEP_IN="100")
+        self.local_only()
+        runner.drive(task)
+        st = task.status
+        self.assertEqual((st["phase"], st["infra"], st["round"]), ("stuck", "local_only", 1))
+        self.assertNotIn("leased", st)                          # no provider slot taken either
+        self.assertEqual(self.rows("t-lo-q"), [])               # nothing booked
+        ev, _ = store.read_jsonl(task.dir / "events.jsonl")
+        self.assertFalse([e for e in ev if e["kind"] in ("round", "step")])   # OpenCode never ran
+        (notice,) = self.notices("t-lo-q", "stuck")
+        self.assertEqual(notice["cause"], "local_only")
+        self.assertIn("round 1 didn't run, so nothing more went to its provider: this repo is "
+                      "local-only now; the task's model is API (meterco): wb takeover t-lo-q or "
+                      "wb discard t-lo-q", notice["text"])
+
+    def test_an_auto_fix_round_after_the_repo_became_local_only_mid_round_never_runs(self):
+        # #1215: the rounds the runner starts itself went to the provider past the mark too
+        task = self.api_task("t-lo-fix", SPEND_M, "fix", "--test", TEST_CMD, "--auto-fix", "2",
+                             FAKE_STEP_IN="100")
+        real = runner.run_tests
+
+        def tests_then_mark(*a, **kw):                          # round 1 has been sent: the mark now
+            self.local_only()
+            return real(*a, **kw)
+        with mock.patch.object(runner, "run_tests", tests_then_mark):
+            runner.drive(task)
+        st = task.status
+        self.assertEqual((st["phase"], st["infra"], st["round"]), ("stuck", "local_only", 2))
+        self.assertTrue(self.rows("t-lo-fix", "step"))
+        self.assertEqual({r["round"] for r in self.rows("t-lo-fix")}, {1})   # round 1's alone
+        ev, _ = store.read_jsonl(task.dir / "events.jsonl")
+        self.assertFalse([e for e in ev if e.get("round") == 2 and e["kind"] in ("round", "step")])
+        (notice,) = self.notices("t-lo-fix", "stuck")
+        self.assertEqual(notice["cause"], "local_only")
+        self.assertIn("round 2 didn't run", notice["text"])
+        self.assertIn("Round 1's report (wb report t-lo-fix --round 1):\n"
+                      + task.round_dir(1).joinpath("summary.md").read_text(), notice["text"])
+
     def test_half_the_cap_wakes_claude_once_a_day_across_every_task(self):
         self.cap(2)
         for name in ("t-half1", "t-half2", "t-half3"):          # $0.60 each: the second crosses $1
