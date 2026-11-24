@@ -67,8 +67,9 @@ its dependency yourself: that is the user's (ask, and say what it would catch).
 ## By language
 Checked on this machine (2026-11-22): Guile and SBCL, for the exit-status forms below, and `perl
 -c`, `protoc -o /dev/null`, `chktex -q`, `glslangValidator`. The rest is each tool's documented
-command line; the base check proves a command before round 1, so a wrong
-one shows there, not in the agent's rounds.
+command line; the base check runs it before round 1: one the agent's environment
+lacks (`command not found`) checks in then, and its rounds' failures aren't sent back to the
+agent; any other failure there is in the first report, for you to judge.
 
 | Language | Configured: the signal → the check | Syntax only, no config |
 |---|---|---|

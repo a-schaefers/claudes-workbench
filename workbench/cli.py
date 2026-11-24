@@ -1538,7 +1538,7 @@ def cmd_start(a):
     if a.test and not a.no_base_check:
         print("base check: the runner runs the acceptance command once on the base first; what "
               "it saw comes with the first report (a check-in at once if --test-timeout cuts it "
-              "short)")  # a base that passes is a note in that report, no wake (#881)
+              "short or its command isn't found)")  # a base that passes is a note in that report, no wake (#881; #1152)
     if dirty:
         print("note: the repo has uncommitted changes; the agent's worktree starts from "
               f"{a.base}, without them")

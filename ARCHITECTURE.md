@@ -351,7 +351,8 @@ at ~36 tokens/s; slower models get longer ones, never shorter (*Budgets and spee
 2, counted since the last review round or step) goes back as `auto_fix_prompt` (fix the code,
 don't weaken tests, check its own expected values by hand, never blame the compiler: 2026-11-18)
 without waking Claude. `not_the_code` (#496: a timeout, a lane-refused device, `lane_refused`,
-#331) gets none: review, status `last` the cause, the report led by `auto-fix skipped: <cause>`
+#331; a command not found, `missing_command`, with the same line as the base check's for the same
+command, #1152, its fix `GIVE_TOOL`) gets none: review, status `last` the cause, the report led by `auto-fix skipped: <cause>`
 with the fix (`wb allow --path` of `lane_grant`'s grant, `shlex.quote`d, #670). Except `hang`
 (tests `hang {base, limit}`): a timeout where the base check passed the same command in
 `HANG_SHARE` (a quarter) of the limit or less is the change's, sent back saying so (#779). A
@@ -841,7 +842,7 @@ Feedback, next and resume refuse 1.x (exit 3) and note one outside `OPENCODE_TES
      `stuck`/`failed`, a notice, exit; edits stay.
    - else `run_tests` (a note arriving meanwhile → `_steer_round`), the report to
      `rounds/<n>/summary.md`. Failing with auto-fix left, unless `not_the_code` (a timeout, a lane
-     refusal) → an auto-fix round.
+     refusal, a command not found as on the base) → an auto-fix round.
    - else phase `review`, a `review` notice: the report, `review_diff`, the agent's proposed
      instruction files (*Claude's files*); exit.
 
@@ -1171,7 +1172,10 @@ once on the base in a scratch checkout (`verify.on_base`, a `--shared` clone,
 `min(BASE_CHECK_SECS (120 s), --test-timeout)`. Output to `base-tests.txt`; status `base_check`
 `{ok, exit, tail (8 lines, 1500 characters), limit, secs, cmd}` (`secs` excludes waits, #779).
 `base_check_line`: a note when it passes (Claude checks the diff adds tests that fail without the
-change), a warning plus an immediate `checkin` when `--test-timeout` cut it, a note past 120 s
+change), a warning plus an immediate `checkin` when `--test-timeout` cut it or the shell didn't find
+its command (`missing_command`: exit 127, the tail's last line `NOT_FOUND`'s, bash's or zsh's
+`command not found`, dash's `: not found`; not `No such file or directory`, a script the step may
+make; the warning ends `GIVE_TOOL`, #1152), a note past 120 s
 (#496), not checked when the checkout failed or was `"filtered"`, else exit and tail. A passing base
 is a note, not a check-in (that cost a restart in one task of two, 2026-11-17). `--no-base-check`
 (task.json `no_base_check`) skips it.
@@ -2445,7 +2449,8 @@ in its CLAUDE.md.
 
 Notices go to `$WB_HOME/notify.jsonl` (`Task.notify`: `{ts, task, kind, text, round?, id?, cause?,
 tasks?}`). Kinds: `review` (report and `review_diff`), `stuck`, `failed`, `question` (with `id`),
-`checkin` (periodic, a nudge, a mid-round handover before the last allowed, a base check cut short).
+`checkin` (periodic, a nudge, a mid-round handover before the last allowed, a base check cut short
+or whose command wasn't found).
 `cause` (`stuck`/`failed` with a round): `guard`, `agent`, `server` (#657), `provider` (an API provider's
 `rate_limited`/`outage` after its one revive, `quota`, `auth`: #1020; `refused`: #1082, #1084; the
 keyhole's `setup`, this machine's, #1080), `spend` (the day's API spend
