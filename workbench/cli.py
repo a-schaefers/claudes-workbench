@@ -1444,6 +1444,11 @@ def cmd_start(a):
     if not a.no_sign:  # said now, not after the whole task at wb accept (#374)
         _say(gitops.sign_problem(repo, a.base))
     setup = _worktree_setup(repo, a, sub, m.kind, models.provider_name(m))
+    # the user's MCP servers commands.json names for this repo (#1202): one that holds a
+    # credential is refused by name and key, never its value, like a token file (API_HIDDEN)
+    mcp = context.mcp_names(repo, sub)
+    if bad := context.mcp_servers(mcp)[1]:
+        die(bad[0], 3)
     checkout_bytes = _disk_room(repo, a.base, setup)
     # Two projects, one GPU: a task that can't run beside the GPU's holders used to queue in
     # silence behind them, maybe for hours (the 2026-11-16 audit). Say so before any worktree.
@@ -1547,6 +1552,7 @@ def cmd_start(a):
         **({"trial": True} if a.trial else {}), "test_cmd": a.test, "test_timeout": a.test_timeout,
         **({"local_only": True} if a.local_only else {}),  # this task's alone (#1021)
         **setup,  # setup, copy, siblings: runner.prepare, before the base check (#201)
+        **({"mcp": mcp} if mcp else {}),  # the user's MCP servers its agent gets (#1202)
         **({"worktree": str(wt.relative_to(task.dir))} if wt != task.dir / "worktree" else {}),
         "checkout": "runner",  # the runner makes the worktree, before its setup (#529)
         # the next start counts it as taken until the runner has made it (#676)
@@ -1591,6 +1597,9 @@ def cmd_start(a):
     spawn_runner(task)
     print(f"started {a.name} on {f'{m.id} (API)' if api else m.label} · branch {gitops.branch_name(a.name)} · "
           f"base {base[:8]}" + (f" · tests `{a.test}`, auto-fix {fixes}" if a.test else ""))
+    if mcp:  # each server's tools go into every request: prefill on the GPU (#1202)
+        print(f"MCP: {', '.join(mcp)} (commands.json \"mcp\"): each server's tools go into every "
+              "request")
     if a.test and not a.no_base_check:
         print("base check: the runner runs the acceptance command once on the base first; what "
               "it saw comes with the first report (a check-in at once if --test-timeout cuts it "
@@ -7029,6 +7038,18 @@ def _api_role_lines(doc: dict) -> list[tuple[bool, str]]:
     return out
 
 
+def _mcp_named() -> dict[str, str]:
+    """Each MCP server commands.json names (`mcp`, `repos.<path>.mcp`), with whose tasks get it:
+    "every task", else the repos', for wb doctor (#1202)."""
+    conf = context.commands_conf()
+    out = {n: "every task" for n in conf.get("mcp") or ()}
+    for repo, v in (conf.get("repos") or {}).items():
+        for n in v.get("mcp") or ():
+            if out.get(n) != "every task":
+                out[n] = f"{out[n]}, {repo}" if n in out else repo
+    return out
+
+
 def cmd_doctor(a):
     ok = True
 
@@ -7318,6 +7339,9 @@ def cmd_doctor(a):
     except RuntimeError as e:
         line(False, str(e))
         sys.exit(1)  # every task reads it: nothing runs until it is fixed
+    for name, where in _mcp_named().items():  # the user's MCP servers for agents (#1202)
+        why = context.mcp_servers([name])[1]
+        line(not why, why[0] if why else f"MCP server {name} (commands.json): the agents of {where}")
     snapped = context.snaps(context.TOOLCHAINS) if context.lane_on() else []
     if snapped and sys.platform.startswith("linux"):
         print(f"--  {', '.join(snapped)}: snaps, which can't run in the agent's lane "

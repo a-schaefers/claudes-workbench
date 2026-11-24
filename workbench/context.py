@@ -10,6 +10,7 @@ itself are hidden, leaving the project's own; so is `question`, which nobody ans
 """
 from __future__ import annotations
 
+import fnmatch
 import glob
 import hashlib
 import json
@@ -686,6 +687,8 @@ def commands_conf() -> dict:
         v = conf.get(key)
         if v is not None and not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
             raise RuntimeError(f'{path}: "{key}" must be a list of strings, e.g. ["make *"]')
+    if why := mcp_list_refusal(conf.get("mcp")):
+        raise RuntimeError(f"{path}: {why}")
     repos = conf.get("repos")
     if repos is not None and not isinstance(repos, dict):
         raise RuntimeError(f'{path}: "repos" must map a repo\'s path to its settings, e.g. '
@@ -708,6 +711,8 @@ def commands_conf() -> dict:
         if "local_only" in v and not isinstance(v["local_only"], bool):
             raise RuntimeError(f'{path}: "repos" → {repo!r}: "local_only" is true or false '
                                '(true: API models never get this repo)')
+        if why := mcp_list_refusal(v.get("mcp")):
+            raise RuntimeError(f'{path}: "repos" → {repo!r}: {why}')
     return conf
 
 
@@ -2801,6 +2806,7 @@ def readable(task: store.Task) -> list[str] | None:
                                           *lane_paths(task), *siblings(task))  # the git shim,
             if p}                                                              # the ask server
     keep |= tool_roots(hidden) | sdk_roots(hidden) | search_roots(hidden)
+    keep |= mcp_roots(task)  # the user's MCP servers this task runs (#1202); their secrets stay hidden
     # OpenCode's global config where OPENCODE_CONFIG_DIR keeps it, outside the dotfiles: the
     # agent's OpenCode loads it itself (#370, the audit of 1.6)
     if os.environ.get("OPENCODE_CONFIG_DIR"):
@@ -2936,6 +2942,137 @@ OPENCODE_FILES = ("*opencode.json", "*opencode.jsonc", ".opencode/*", "*/.openco
 MCP_RULES = ({"action": "*_*", "resource": "*", "effect": "deny"},
              {"action": "workbench_*", "resource": "*", "effect": "allow"},
              {"action": "doom_loop", "resource": "*", "effect": "allow"})  # what --auto gave it
+
+# The user's own MCP servers an agent may have (#1202, 2026-11-24): each one the user names in
+# commands.json `mcp` (every task) or `repos.<path>.mcp` (that repo's tasks), from their OpenCode
+# config, if it holds no credential: no `environment`, `headers` or `oauth`, no password in a URL
+# or a key in its query, no token flag in its command and no {env:}/{file:} for OpenCode to fill
+# in (the 2026-11-16 audit's GitHub and database servers reached every agent with their tokens).
+# Only the user names one: `wb allow --always` never writes `mcp`. A name is letters, digits and
+# hyphens, as OpenCode names its tools <server>_<tool>: an underscore would let `a_*` allow a
+# server `a_b`'s tools, and a name whose tools a denied rule matches (`opencode`, DENIED_TOOLS)
+# would be listed and never callable.
+MCP_NAME = re.compile(r"^[A-Za-z0-9-]+$")
+MCP_TOKEN_FLAG = re.compile(r"^--?[\w-]*(token|secret|passw|api[_-]?key|access[_-]?key|auth)",
+                            re.I)
+MCP_URL_PASSWORD = re.compile(r"\w+://[^/@\s:]*:[^/@\s]+@")
+MCP_QUERY_KEY = re.compile(r"key|token|secret|passw|auth|sig|cred", re.I)
+
+
+def mcp_list_refusal(v) -> str:
+    """Why commands.json's `mcp` value ``v`` (top level or a repo's) is refused, or ''."""
+    if v is None:
+        return ""
+    if not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
+        return '"mcp" must be a list of your OpenCode MCP servers\' names, e.g. ["docs"]'
+    for name in v:
+        if not MCP_NAME.match(name):
+            return f'"mcp": {name!r}: a server\'s name is letters, digits and hyphens'
+        if name == "workbench" or any(fnmatch.fnmatchcase(f"{name}_tool", p) for p in DENIED_TOOLS):
+            return f'"mcp": {name!r} is a name workbench keeps for itself or denies; rename the server'
+    return ""
+
+
+def users_mcp_servers() -> dict:
+    """The user's OpenCode MCP servers by name, or {}: the 2.x shape, mcp.servers.<name>, over
+    the 1.x one, mcp.<name>, which OpenCode 2.3.2 still starts beside the layer's mcp.servers.
+    Read in the 2.x shape alone, a 1.x entry was never stubbed (runner.users_servers_off) and
+    started in every agent's OpenCode, its `environment` and `headers` with it; a 2.x stub of
+    its name stops it (both measured, 2026-11-24, #1202)."""
+    try:
+        mcp = models.read_config().get("mcp") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+    if not isinstance(mcp, dict):
+        return {}
+    v2 = mcp.get("servers") if isinstance(mcp.get("servers"), dict) else {}
+    return {**{k: v for k, v in mcp.items() if k != "servers" and isinstance(v, dict)}, **v2}
+
+
+def mcp_refusal(name: str, entry) -> str:
+    """Why the user's MCP server ``name`` (its OpenCode entry) can't go to an agent, or '': the
+    key that holds a credential, never its value."""
+    head = f"MCP server {name!r} (commands.json \"mcp\")"
+    if not isinstance(entry, dict):
+        return f"{head} isn't in your OpenCode config ({models.opencode_config_path()}): add it there"
+    fix = f"; take it out of commands.json \"mcp\", or give {name!r} no credential"
+    kind = entry.get("type")
+    if kind == "local":
+        cmd = entry.get("command")
+        if not (isinstance(cmd, list) and cmd and all(isinstance(x, str) for x in cmd)):
+            return f"{head}: its `command` isn't a list of strings"
+        if entry.get("environment"):
+            return f"{head} sets `environment`, which can hold a token{fix}"
+        if flag := next((w for w in cmd if MCP_TOKEN_FLAG.match(w)), None):
+            return f"{head}: its `command` passes {flag.split('=', 1)[0]}, a credential{fix}"
+    elif kind == "remote":
+        if entry.get("headers"):
+            return f"{head} sets `headers`, which can hold a token{fix}"
+        if entry.get("oauth") not in (None, False):
+            return f"{head} sets `oauth`{fix}"
+        url = entry.get("url")
+        if not isinstance(url, str):
+            return f"{head}: its `url` isn't a string"
+        if any(MCP_QUERY_KEY.search(k) for k, _ in urllib.parse.parse_qsl(
+                urllib.parse.urlsplit(url).query, keep_blank_values=True)):
+            return f"{head}: its `url` carries a key in its query{fix}"
+    else:
+        return f"{head}: its `type` is neither local nor remote"
+    text = json.dumps(entry)
+    if MCP_URL_PASSWORD.search(text):
+        return f"{head}: a URL in it carries a password{fix}"
+    if "{env:" in text or "{file:" in text:
+        return f"{head} uses {{env:}} or {{file:}}, which OpenCode fills in from your environment or files{fix}"
+    return ""
+
+
+def mcp_servers(names) -> tuple[dict, list[str]]:
+    """The user's servers ``names`` for the agent's layer, {name: entry}, and the refusal lines
+    (mcp_refusal) of those that can't go. An entry goes as the user wrote it, `codemode` too:
+    OpenCode 2.3.2 sends every tool as a direct one when `execute` is denied, whatever its
+    `codemode`, and DENIED_TOOLS always denies it (its tool builder, read 2026-11-24; the
+    real-OpenCode test's server says `codemode: true`)."""
+    have = users_mcp_servers() if names else {}
+    ok, bad = {}, []
+    for name in names or ():
+        if why := mcp_refusal(name, have.get(name)):
+            bad.append(why)
+        else:
+            ok[name] = have[name]
+    return ok, bad
+
+
+def mcp_names(repo: str | Path, sub: str | None = None) -> list[str]:
+    """The servers commands.json gives the tasks of ``repo`` (its package ``sub``): the top
+    level's, then the repo entry's (repo_conf), each once."""
+    conf = commands_conf()
+    return list(dict.fromkeys([*(conf.get("mcp") or []), *(repo_conf(repo, sub).get("mcp") or [])]))
+
+
+def task_mcp(task: store.Task) -> dict:
+    """The user's servers this task's agent gets: task.json `mcp` (fixed at wb start), less any
+    that now holds a credential (checked again every round: the user's config can change)."""
+    return mcp_servers(task.spec.get("mcp") or [])[0]
+
+
+def mcp_roots(task: store.Task) -> set[str]:
+    """The files a task's local MCP servers run from, for the lane to read: each absolute path
+    in a server's command, a program's install (its parent when it is in a `bin`), a script's
+    directory. One under a non-dot home directory (~/src/schema-mcp) couldn't start in the lane
+    otherwise. Never `/` nor the home directory itself."""
+    home = os.path.realpath(Path.home())
+    out = set()
+    for entry in task_mcp(task).values():
+        for word in entry.get("command") or () if entry.get("type") == "local" else ():
+            w = os.path.expanduser(word)
+            if not os.path.isabs(w) or not os.path.exists(w):
+                continue
+            p = os.path.realpath(w)
+            d = p if os.path.isdir(p) else os.path.dirname(p)
+            d = os.path.dirname(d) if os.path.basename(d) == "bin" else d
+            if d not in ("/", home) and not _under(home, d):
+                out.add(d)
+    return out
 
 
 def rules_dir(task: store.Task) -> Path:
@@ -3415,6 +3552,9 @@ def layer(task: store.Task) -> dict:
     files, nested = instruction_files(task)
     note = write_map(task, nested)
     rules = [dict(r) for r in MCP_RULES]   # external_directory gets its own below
+    # the user's servers commands.json names (#1202): after MCP_RULES' deny, before DENIED_TOOLS,
+    # whose `opencode_*` and `execute` the last match keeps denied
+    rules += [{"action": f"{n}_*", "resource": "*", "effect": "allow"} for n in task_mcp(task)]
     rules += [{"action": t, "resource": "*", "effect": "deny"} for t in DENIED_TOOLS]
     rules += shell_rules(task)
     rules += external_rules(task)

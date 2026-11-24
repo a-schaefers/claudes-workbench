@@ -305,7 +305,9 @@ read first, the existing code to imitate, and the skills to hand it (below).
 **The web is yours**: research for a spec, a question or the model check uses this session's
 browsing tools; a 403, a CAPTCHA or an empty page is not checked: say so, never fill it from
 memory. Put what the agent needs in the spec, not a URL (its web tools are denied). How, and a
-browser check of the agent's work as a test: `reference/driving.md`.
+browser check of the agent's work as a test: `reference/driving.md`. An MCP server the agent has
+(`MCP: <names>` at `wb start`) is the user's own choice in commands.json `mcp`: never suggest or
+add one; a start it refuses (a server holding a credential) names what the user must change.
 
 **Your skills reach the agent as decisions.** Before writing a spec, check which skills and tools
 in your own session fit the task, whatever the field: a design plugin for a UI, a writing guide

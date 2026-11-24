@@ -323,11 +323,13 @@ def write_config_layer(task: store.Task) -> Path:
         "compaction": {"background": False, **({"auto": True, "buffer": buffer} if buffer else {})},
         # with probe on, one tool call's output sized to the window (output_cap)
         **({"tool_output": output_cap(cfg)} if context.experiment(task, "probe") else {}),
-        "mcp": {"servers": {**users_servers_off(), "workbench": {  # 2.x shape: mcp.servers.<name>
+        "mcp": {"servers": {**users_servers_off(task), "workbench": {  # 2.x shape: mcp.servers.<name>
             "type": "local",
             "command": [sys.executable, str(PKG_ROOT / "bin" / "wb-ask-mcp")],
             "environment": {"WB_TASK": task.name, "WB_HOME": str(store.home())},
-            "codemode": False,  # a plain tool the model sees, not one behind code mode
+            # a direct tool even if `execute` were ever allowed: denied, as now, OpenCode 2.3.2
+            # sends every tool direct whatever its codemode (context.mcp_servers)
+            "codemode": False,
             # the tool blocks until Claude answers; OpenCode must not give up on it first
             "timeout": {"startup": 15000, "execution": wait_ms},
         }}},
@@ -395,18 +397,22 @@ def output_cap(cfg: dict) -> dict:
     return {"max_bytes": cap, "max_lines": cap // OUTPUT_CAP_LINE}
 
 
-def users_servers_off() -> dict:
+def users_servers_off(task: store.Task | None = None) -> dict:
     """The user's own MCP servers (their global OpenCode config), each replaced by one that
     can't run: OpenCode would start them for the agent and connect to a remote one with the
     user's token (the 2026-11-16 audit). OpenCode 2.3 starts a server whose entry says
     `"enabled": false` all the same, so the command itself goes. Their tools are denied besides
-    (context.MCP_RULES)."""
-    try:
-        servers = (models.read_config().get("mcp") or {}).get("servers") or {}
-    except (OSError, ValueError, AttributeError):
-        return {}
-    return {name: {"type": "local", "command": ["false"], "enabled": False}
-            for name in servers if name != "workbench"}
+    (context.MCP_RULES). But the ones commands.json names for ``task`` that hold no credential
+    (context.task_mcp, #1202): those go as the user wrote them, run by the agent's OpenCode in
+    its lane, environment and home, and stop with the round (sweep)."""
+    servers = context.users_mcp_servers()
+    mine = context.task_mcp(task) if task is not None else {}
+    if task is not None and task.spec.get("mcp"):  # one given a credential since wb start: said, not run
+        gone = [n for n in task.spec.get("mcp") or () if n not in mine]
+        task.set_status(mcp_left_out={"round": task.status.get("round", 1),
+                                      "why": context.mcp_servers(gone)[1]} if gone else None)
+    return {**{name: {"type": "local", "command": ["false"], "enabled": False}
+               for name in servers if name != "workbench" and name not in mine}, **mine}
 
 
 # The project's own OpenCode config stays out of the agent's OpenCode: a project's opencode.json
@@ -3364,6 +3370,8 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     if full:
         lines.append("reading: " + full[-1]["text"])
     lines += backend_lines(task, n)  # #1021
+    if (left := st.get("mcp_left_out") or {}).get("round") == n:  # #1202
+        lines += [f"note: {w}: this round's agent ran without it" for w in left.get("why") or ()]
     if st.get("claude_rules_gone") == n:  # #1119
         lines.append(RULES_GONE.format(claude=privacy.home_path(context.claude_home()),
                                        mine=privacy.home_path(context.user_agents_md())))

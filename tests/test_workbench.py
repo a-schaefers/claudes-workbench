@@ -8035,6 +8035,158 @@ class ConfigLayer(Base):
         self.assertEqual(json.loads(out.stdout)["result"]["serverInfo"]["name"], "workbench")
 
 
+class UsersMcpServers(Base):
+    """#1202 (2026-11-24): an MCP server of the user's own that commands.json names reaches the
+    agent, run by its OpenCode in the lane; every other server stays stubbed and denied (the
+    2026-11-16 audit), and one that holds a credential is refused by name, never shown."""
+
+    def setUp(self):
+        super().setUp()
+        self.server = [sys.executable, str(ROOT / "tests" / "fake_mcp.py"), "lookup", "schema"]
+        self.servers({"docs": {"type": "local", "command": self.server},
+                      "other": {"type": "local", "command": self.server}})
+        self.mcp_log = Path(self.tmp.name) / "mcp.jsonl"
+        os.environ["FAKE_MCP_LOG"] = str(self.mcp_log)
+
+    def servers(self, servers: dict) -> None:
+        """The user's OpenCode config with these MCP servers beside the test's providers."""
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(
+            json.dumps({**OPENCODE_CONFIG, "mcp": {"servers": servers}}))
+
+    def commands(self, conf: dict) -> None:
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps(conf))
+
+    def refused(self, name: str) -> str:
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as e, redirect_stderr(err), redirect_stdout(io.StringIO()):
+            self.start(name, "ok")
+        self.assertEqual(e.exception.code, 3)
+        self.assertFalse(store.Task(name).exists)
+        return err.getvalue()
+
+    def test_a_listed_server_reaches_the_agent_with_its_allow_rule_and_the_rest_stay_stubbed(self):
+        from workbench import runner
+        self.commands({"mcp": ["docs"]})
+        out = self.start("t-mcp", "ok")
+        self.assertIn('MCP: docs (commands.json "mcp")', out)
+        wait_phase("t-mcp", {"review"})
+        task = store.Task("t-mcp")
+        self.assertEqual(task.spec["mcp"], ["docs"])
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        servers = layer["mcp"]["servers"]
+        self.assertEqual(servers["docs"], {"type": "local", "command": self.server})  # as written
+        self.assertEqual(servers["other"], {"type": "local", "command": ["false"], "enabled": False})
+        rules = layer["permissions"]
+        actions = [(r["action"], r["effect"]) for r in rules]
+        allow = actions.index(("docs_*", "allow"))
+        self.assertLess(actions.index(("*_*", "deny")), allow)          # after MCP_RULES' deny
+        self.assertGreater(actions.index(("opencode_*", "deny")), allow)  # the last match: denied
+        self.assertGreater(actions.index(("execute", "deny")), allow)
+        self.assertNotIn(("other_*", "allow"), actions)
+        # the agent's OpenCode started the listed server and listed its tools, and not the other
+        ran = [json.loads(line) for line in self.mcp_log.read_text().splitlines()]
+        self.assertEqual(ran[0]["docs"], ["lookup", "schema"])
+        self.assertNotIn("other", ran[0])
+
+    def test_a_server_in_opencodes_1x_shape_is_stubbed_and_can_be_named_too(self):
+        from workbench import runner
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({**OPENCODE_CONFIG, "mcp": {
+            "legacy": {"type": "remote", "url": "https://mcp.example.com/",
+                       "headers": {"Authorization": "Bearer CANARY-VALUE"}},
+            "old-docs": {"type": "local", "command": self.server}}}))
+        self.commands({"mcp": ["old-docs"]})
+        self.start("t-v1", "ok")
+        wait_phase("t-v1", {"review"})
+        servers = json.loads(runner.write_config_layer(store.Task("t-v1")).read_text())["mcp"]["servers"]
+        self.assertEqual(servers["legacy"], {"type": "local", "command": ["false"], "enabled": False})
+        self.assertEqual(servers["old-docs"]["command"], self.server)
+
+    def test_a_repos_server_reaches_that_repos_tasks_alone(self):
+        other = Path(self.tmp.name) / "other-repo"
+        shutil.copytree(self.repo, other)
+        self.commands({"repos": {str(self.repo): {"mcp": ["docs"]}}})
+        self.start("t-mine", "ok")
+        wait_phase("t-mine", {"review"})
+        out = run_wb("start", "t-theirs", "--spec", str(self.spec), "--repo", str(other), "--model", "mimo")
+        self.assertNotIn("MCP:", out)
+        wait_phase("t-theirs", {"review"})
+        self.assertEqual(store.Task("t-mine").spec["mcp"], ["docs"])
+        self.assertNotIn("mcp", store.Task("t-theirs").spec)
+        ran = [json.loads(line) for line in self.mcp_log.read_text().splitlines()]
+        self.assertEqual([sorted(r) for r in ran], [["docs", "workbench"], ["workbench"]])
+
+    def test_a_listed_server_holding_a_credential_is_refused_by_name_never_its_value(self):
+        self.commands({"mcp": ["docs"]})
+        cases = {"environment": {"type": "local", "command": self.server,
+                                 "environment": {"DB_TOKEN": "CANARY-VALUE"}},
+                 "headers": {"type": "remote", "url": "https://mcp.example.com/",
+                             "headers": {"Authorization": "Bearer CANARY-VALUE"}},
+                 "oauth": {"type": "remote", "url": "https://mcp.example.com/",
+                           "oauth": {"clientSecret": "CANARY-VALUE"}},
+                 "a password": {"type": "local",
+                                "command": ["db-mcp", "postgres://me:CANARY-VALUE@db/app"]},
+                 "--api-key": {"type": "local", "command": ["mcp", "--api-key=CANARY-VALUE"]},
+                 "query": {"type": "remote", "url": "https://mcp.example.com/?api_key=CANARY-VALUE"},
+                 "{env:}": {"type": "local", "command": ["mcp", "{env:CANARY_VALUE}"]}}
+        for i, (key, entry) in enumerate(cases.items()):
+            self.servers({"docs": entry})
+            err = self.refused(f"t-cred-{i}")
+            self.assertIn("MCP server 'docs'", err)
+            self.assertIn(key, err)
+            self.assertNotIn("CANARY", err)
+        self.servers({})
+        self.assertIn("isn't in your OpenCode config", self.refused("t-missing"))
+        # none of it is a credential: a remote server without one starts
+        self.servers({"docs": {"type": "remote", "url": "https://mcp.example.com/mcp?page=1",
+                               "oauth": False, "headers": {}}})
+        self.start("t-clean-remote", "ok")
+        wait_phase("t-clean-remote", {"review"})
+
+    def test_commands_json_mcp_takes_a_list_of_server_names_and_never_workbenchs_own(self):
+        for bad in ("docs", ["docs", 3], ["my_docs"], ["workbench"], ["opencode"], ["a worktree"],
+                    ["my-worktree"]):
+            for conf in ({"mcp": bad}, {"repos": {str(self.repo): {"mcp": bad}}}):
+                self.commands(conf)
+                with self.assertRaises(RuntimeError) as e:
+                    context.commands_conf()
+                self.assertIn('"mcp"', str(e.exception))
+        self.commands({"mcp": ["docs", "Schema-2"]})
+        self.assertEqual(context.commands_conf()["mcp"], ["docs", "Schema-2"])
+        context.allow_always("allow", ["make *"])  # wb allow --always: allow and paths, never mcp
+        self.assertEqual(json.loads(Path(os.environ["WB_COMMANDS"]).read_text())["mcp"], ["docs", "Schema-2"])
+
+    def test_a_credential_added_after_wb_start_leaves_the_server_out_and_the_report_says_so(self):
+        from workbench import runner
+        self.commands({"mcp": ["docs"]})
+        self.start("t-later", "ok")
+        wait_phase("t-later", {"review"})
+        self.servers({"docs": {"type": "local", "command": self.server,
+                               "environment": {"DB_TOKEN": "CANARY-VALUE"}}})
+        run_wb("feedback", "t-later", "--text", "Again.")
+        wait_phase("t-later", {"review"})
+        task = store.Task("t-later")
+        summary = (task.round_dir(2) / "summary.md").read_text()
+        self.assertIn("note: MCP server 'docs'", summary)
+        self.assertIn("ran without it", summary)
+        self.assertNotIn("CANARY", summary)
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        self.assertEqual(layer["mcp"]["servers"]["docs"]["command"], ["false"])
+        self.assertNotIn("docs_*", [r["action"] for r in layer["permissions"]])
+
+    def test_wb_doctor_lists_the_named_servers_and_flags_one_it_would_refuse(self):
+        self.commands({"mcp": ["docs"], "repos": {str(self.repo): {"mcp": ["vault"]}}})
+        self.servers({"docs": {"type": "local", "command": self.server},
+                      "vault": {"type": "remote", "url": "https://v.example.com/",
+                                "headers": {"X-Key": "CANARY-VALUE"}}})
+        buf = io.StringIO()
+        with redirect_stdout(buf), contextlib.suppress(SystemExit):
+            cli.main(["doctor"])
+        out = buf.getvalue()
+        self.assertIn("ok  MCP server docs (commands.json): the agents of every task", out)
+        self.assertIn("BAD MCP server 'vault' (commands.json \"mcp\") sets `headers`", out)
+        self.assertNotIn("CANARY", out)
+
+
 class SlowFirstToken(Base):
     """#491 (the audit of 1.90): OpenCode's 300 s header timeout cut every request a slow reader
     hadn't answered in 5 minutes, its retry lines reset the silence clock, and no read speed was
@@ -8868,11 +9020,11 @@ class RealOpenCode(Base):
             self.assertTrue("CANARY-PROJ-SKILL" in text, flag)  # (not assertIn: a prompt per failure)
 
 
-    def run_calls(self, name, calls, *extra, before=None, in_lane=True):
+    def run_calls(self, name, calls, *extra, before=None, in_lane=True, reads=False):
         """Run real opencode in a task's worktree, in its lane (unless not ``in_lane``: a machine
         without Landlock), against a fake model that makes these tool calls; returns the tool
         results it got back, in order. `before(task)` runs once the task is set up, before
-        OpenCode starts."""
+        OpenCode starts. ``reads``: the lane keeps its reads too, as the runner's does."""
         self.start(name, "ok", *extra)
         wait_phase(name, {"review"})
         task = store.Task(name)
@@ -8897,7 +9049,8 @@ class RealOpenCode(Base):
         time.sleep(0.5)
         cmd = ["opencode", "run", "--standalone", "-m", "cap/cap", "--auto", "--format", "json", "go"]
         if in_lane:
-            cmd = lane.wrap(context.writable(task), cmd)
+            cmd = lane.wrap(context.writable(task), cmd,
+                            *((context.readable(task), context.unix_paths(task)) if reads else ()))
         subprocess.run(cmd, cwd=task.worktree, env=env, capture_output=True, timeout=180)
         reqs = [json.loads(line) for line in out.read_text().splitlines()]
         last = max(reqs, key=lambda r: len(r.get("messages", [])))
@@ -9130,6 +9283,49 @@ class RealOpenCode(Base):
         self.assertFalse(marker.exists())                     # never started either
         self.assertEqual(runner.claude_files_changed("?? opencode.json\n?? .opencode/x.json\n"),
                          ["opencode.json", ".opencode/x.json"])
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_a_server_commands_json_names_reaches_the_agent_in_its_lane_and_no_other_does(self):
+        # #1202 (2026-11-24): the user's own MCP server, named in commands.json, is passed through
+        # as written, here in code mode (`codemode: true`): with `execute` denied, OpenCode 2.3.2
+        # sends its tools direct all the same. It is run by the agent's OpenCode in the lane: its
+        # program under a non-dot home directory read, its writes there refused, SECRET_ENV not in
+        # its environment; the unlisted one stubbed
+        home = Path(tempfile.mkdtemp(dir=Path.home(), prefix="wb-mcp-test-"))
+        self.addCleanup(shutil.rmtree, home, True)
+        shutil.copy(ROOT / "tests" / "fake_mcp.py", home / "fake_mcp.py")
+        planted = home / "planted"
+        command = [sys.executable, str(home / "fake_mcp.py"), "lookup"]
+        # `other` in OpenCode's 1.x shape, mcp.<name>, which 2.3.2 still starts: read in the 2.x
+        # shape alone, it was never stubbed and ran in every agent's OpenCode (found here)
+        # where the agent's OpenCode reads it too, as the user's global config
+        xdg = Path(self.tmp.name) / "xdg"
+        (xdg / "opencode").mkdir(parents=True)
+        Path(os.environ["WB_OPENCODE_CONFIG"]).unlink()
+        os.environ.update(WB_OPENCODE_CONFIG=str(xdg / "opencode" / "opencode.json"),
+                          XDG_CONFIG_HOME=str(xdg))
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({**OPENCODE_CONFIG, "mcp": {
+            "servers": {"docs": {"type": "local", "command": command, "codemode": True}},
+            "other": {"type": "local", "command": [*command[:2], "leak"]}}}))
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"mcp": ["docs"]}))
+        started = Path(self.tmp.name) / "mcp-started"
+        os.environ.update(WB_TEST_SECRET_TOKEN="CANARY-SECRET", FAKE_MCP_OUTSIDE=str(planted),
+                          FAKE_MCP_STARTED=str(started))
+        task, answers = self.run_calls("t-mcp-real", [{"name": "docs_lookup", "arguments": {}}],
+                                       reads=True)
+        self.assertIn("CANARY-MCP lookup secret=- write=refused", answers[0])
+        self.assertIn(str(home), context.readable(task))
+        self.assertFalse(planted.exists())
+        reqs = [json.loads(line) for line in
+                (Path(self.tmp.name) / "t-mcp-real-requests.jsonl").read_text().splitlines()]
+        tools = {t["function"]["name"] for r in reqs for t in r.get("tools", [])}
+        self.assertIn("docs_lookup", tools)
+        self.assertIn("workbench_ask_reviewer", tools)
+        self.assertFalse([t for t in tools if t.startswith("other_")], tools)
+        self.assertFalse({"execute", "question", "subagent"} & tools)
+        self.assertNotIn("leak", started.read_text().split())   # never started either
+        self.assertIn("lookup", started.read_text().split())
 
     def test_a_projects_agents_md_and_skills_reach_the_agent_and_its_config_lifts_nothing(self):
         # #994 (2026-11-22): the rules went again in OPENCODE_CONFIG_CONTENT, whose 120,000 bytes
