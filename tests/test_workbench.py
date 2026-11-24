@@ -28012,7 +28012,7 @@ class Keyhole(_KeyholeTest):
         said = runner.keyhole_failure(e.exception)
         self.assertEqual(said, "can't read broken's key: opencode auth export exited 1: "
                                "Error: Database is locked")              # no /connect remedy
-        self.assertNotIn(self.kh_mod.REMEDY, said)
+        self.assertNotIn("opencode auth login", said)
 
     def test_a_python_with_no_ca_certificates_reaches_the_provider_through_macos_own_bundle(self):
         # #1080 (2026-11-23): the keyhole's bare default context had no CAs under python.org's
@@ -28128,7 +28128,8 @@ class Keyhole(_KeyholeTest):
         os.environ["OPENCODE_CONFIG_CONTENT"] = json.dumps(
             {"provider": {"incontent": {"options": {"apiKey": self.CANARY}}}})
         for provider, why in (("literal", f"written in {os.environ['WB_OPENCODE_CONFIG']}, which "
-                                          "agents can read: remove it there, and store the key with /connect"),
+                                          "agents can read: remove it there, and store the key with "
+                                          "`opencode auth login literal`"),
                               ("viaenv", "$VIAENV_KEY"),
                               ("incontent", "written in OPENCODE_CONFIG_CONTENT")):
             with self.assertRaises(self.kh_mod.KeyholeError) as e:
@@ -28397,12 +28398,88 @@ class Keyhole(_KeyholeTest):
         conf["providers"] = {"envv2": {"settings": {"apiKey": "{env:ENVV2_KEY}"}}}  # not checked: still refused
         path.write_text(json.dumps(conf))
         self.assertEqual(self.kh_mod.load_key("envstored").value, self.CANARY)
-        for provider, why in (("envonly", "envonly's key is only in the environment ($ENVONLY_KEY)"),
-                              ("envv2", "envv2's key is only in the environment ($ENVV2_KEY)")):
+        # with none stored, the variable is read (#1189): here unset, so said, and a V2 one never
+        os.environ.pop("ENVONLY_KEY", None)
+        for provider, why in (("envonly", "$ENVONLY_KEY isn't set where wb start ran: export it, or "
+                                          "store the key with `opencode auth login envonly`"),
+                              ("envv2", "envv2's key is read from $ENVV2_KEY in a header or V2 `settings`")):
             with self.assertRaises(self.kh_mod.KeyholeError) as e:
                 self.kh_mod.load_key(provider)
             self.assertIn(why, str(e.exception))
             self.assert_no_canary(str(e.exception))
+
+    def test_with_none_stored_the_key_comes_from_the_variable_opencode_names_in_the_runners_environment(self):
+        # #1189: an exported key was refused ("only in the environment, which agents don't get")
+        # and the user sent to /connect in OpenCode's TUI, though the runner already carries the
+        # environment wb start ran in (context.detached_env) and the agent's drops the variable
+        self.fake_auth({"xenv": {"list": [{"type": "env", "name": "XENV_API_KEY"}]},
+                        "lone": {},
+                        "both": {"export": [self.key_row("both", {"type": "key", "key": self.CANARY})],
+                                 "list": [{"type": "env", "name": "BOTH_API_KEY"}]}})
+        path = Path(os.environ["WB_OPENCODE_CONFIG"])
+        conf = json.loads(path.read_text())
+        conf.setdefault("provider", {})["lone"] = {"options": {"apiKey": "{env:LONE_API_KEY}"}}
+        path.write_text(json.dumps(conf))
+        os.environ.update(XENV_API_KEY=self.CANARY + "\n", LONE_API_KEY=self.CANARY,
+                          BOTH_API_KEY="sk-the-other-" + "Z" * 30)
+        for provider, var in (("xenv", "XENV_API_KEY"), ("lone", "LONE_API_KEY")):
+            key = self.kh_mod.load_key(provider)
+            self.assertEqual((key.value, key.source), (self.CANARY, f"${var}"))   # trimmed, as a paste
+            self.assert_no_canary(repr(key), str(key))
+            self.assertEqual(self.models.env_why(provider, var), "")
+        key = self.kh_mod.load_key("both")                               # a stored key first
+        self.assertEqual((key.value, key.source), (self.CANARY, ""))
+        calls = [json.loads(x)["argv"][:3] for x in Path(os.environ["FAKE_AUTH_ARGV"]).read_text().splitlines()]
+        self.assertEqual(calls, [["auth", "export", "xenv"], ["auth", "list", "--format"],
+                                 ["auth", "export", "lone"], ["auth", "export", "both"]])  # lone: no list
+        # what the runner logs names the variable, never its value
+        m = self.model("xenv")
+        m.package = "@opencode/ai/providers/deepinfra"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            kh = self.kh_mod.start(self.task, m)
+        self.addCleanup(kh.close)
+        self.assertEqual(out.getvalue().strip(),
+                         f"keyhole: xenv on 127.0.0.1:{kh.port} for {m.id} (key from $XENV_API_KEY)")
+        self.assertEqual(self.post(kh)[0], 200)
+        self.assertEqual(self.up.seen[-1]["headers"]["Authorization"], f"Bearer {self.CANARY}")
+        self.assert_no_canary(json.dumps(self.kh_mod.layer_options(kh)))
+
+    def test_an_environment_key_the_agent_would_get_too_or_that_isnt_set_refuses(self):
+        # #1189's guard: the keyhole takes a variable only where the agent's environment drops it
+        # (runner.env_kept: SECRET_ENV by its name, and not passed through by commands.json
+        # `env`), and only when it is set where wb start ran; each refusal names the variable,
+        # never its value, and its own fix
+        self.fake_auth({"xenv": {"list": [{"type": "env", "name": "XENV_API_KEY"}]}, "plain": {}})
+        path = Path(os.environ["WB_OPENCODE_CONFIG"])
+        conf = json.loads(path.read_text())
+        conf.setdefault("provider", {})["plain"] = {"options": {"apiKey": "{env:PLAINVAR}"}}
+        path.write_text(json.dumps(conf))
+        need = "needs a key wb can hold outside the lane: "
+        os.environ.pop("XENV_API_KEY", None)
+        cases = [("xenv", {}, "$XENV_API_KEY isn't set where wb start ran: export it, or store the key "
+                              "with `opencode auth login xenv`"),
+                 ("xenv", {"XENV_API_KEY": "  "}, "$XENV_API_KEY isn't set where wb start ran: export it, or "
+                                                  "store the key with `opencode auth login xenv`"),
+                 ("xenv", {"XENV_API_KEY": self.CANARY, "commands": ["XENV_API_KEY"]},
+                  "$XENV_API_KEY is passed to agents (commands.json env): remove it there"),
+                 ("plain", {"PLAINVAR": self.CANARY}, "agents get $PLAINVAR too (wb keeps a variable from "
+                                                      "them by a key's name, such as *_API_KEY): rename it, or "
+                                                      "store the key with `opencode auth login plain`"),
+                 ("xenv", {"XENV_API_KEY": self.CANARY[:20] + "\x01" + self.CANARY[20:]},
+                  "$XENV_API_KEY holds a character an HTTP header can't carry: export it again, or store "
+                  "the key with `opencode auth login xenv`")]
+        for provider, env, why in cases:
+            with self.subTest(why=why):
+                Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": env.pop("commands", [])}))
+                with mock.patch.dict(os.environ, env):
+                    with self.assertRaises(self.kh_mod.KeyholeError) as e:
+                        self.kh_mod.load_key(provider)
+                    self.assertEqual(str(e.exception), need + why)
+                    self.assertEqual(runner.keyhole_failure(e.exception, provider), need + why)  # its own fix
+                    var = "PLAINVAR" if provider == "plain" else "XENV_API_KEY"
+                    self.assertEqual(self.models.env_why(provider, var), why)
+                    self.assert_no_canary(str(e.exception))
 
     def test_a_key_in_a_models_own_entry_or_the_v2_form_cant_run(self):
         # the review of #1015 (2026-11-23): only provider.<pid>.options was read, so a model's
@@ -28625,11 +28702,35 @@ class RealOpenCodeAPI(_KeyholeTest):
         self.addCleanup(lambda: [os.kill(pid, signal.SIGKILL) for pid in ours()])
         service("set", "port", str(port))       # not the user's service's port
         self.assertEqual(service("status"), "stopped")
+        os.environ.pop("DEEPSEEK_API_KEY", None)  # one the caller exported is read now (#1189)
         with self.assertRaises(self.kh_mod.KeyholeError) as e:
             self.kh_mod.load_key("deepseek")                             # none stored here
         self.assertIn("OpenCode has no key stored for deepseek", str(e.exception))
         self.assertEqual(service("status"), "stopped")
         self.assertEqual(ours(), [])
+
+    def test_real_opencode_names_the_variable_the_keyhole_reads_a_key_from(self):
+        # #1189: with none stored, the keyhole reads the variable OpenCode's own `auth list`
+        # names (an `env` connection, listed only while it is set), never one wb guesses. No
+        # request goes anywhere: only the key's read, in a scratch home
+        tmp = Path(self.tmp.name)
+        env = {"PATH": os.environ["PATH"], "HOME": str(tmp / "home"),
+               "OPENCODE_DISABLE_MODELS_FETCH": "1",
+               **{f"XDG_{d.upper()}_HOME": str(tmp / "svc" / d)
+                  for d in ("config", "data", "state", "cache")}}
+        for k in ("OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR",
+                  "WB_OPENCODE_CONFIG", "WB_OPENCODE_BIN", "OPENCODE_DB"):
+            os.environ.pop(k, None)
+        os.environ.update(env, DEEPSEEK_API_KEY=self.CANARY)
+        key = self.kh_mod.load_key("deepseek")
+        self.assertEqual((key.value, key.source), (self.CANARY, "$DEEPSEEK_API_KEY"))
+        auth, _ = self.models._auth_rows()
+        self.assertEqual(self.models._key_source("deepseek", auth, None), "env:DEEPSEEK_API_KEY")
+        self.assertEqual(self.models.env_why("deepseek", "DEEPSEEK_API_KEY"), "")
+        os.environ.pop("DEEPSEEK_API_KEY")
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:          # unset: OpenCode names none
+            self.kh_mod.load_key("deepseek")
+        self.assertIn("OpenCode has no key stored for deepseek", str(e.exception))
 
     def test_a_response_is_booked_before_opencode_prints_its_step_finish(self):
         # #1114 (2026-11-23): OpenCode prints step_finish when it reads [DONE], not at the body's
@@ -29822,6 +29923,25 @@ class ApiHarness(Base):
         self.assertEqual(json.loads(self.fake("auth", "list", "--format", "json", "--standalone")[2])[0]["connections"],
                          [{"type": "env", "name": "XAI_API_KEY"}])  # the test's own rows
 
+    def test_the_fakes_env_state_lists_a_variable_only_while_it_is_set_and_exports_no_key(self):
+        # #1189, as 2.3.2 prints it (checked in a scratch home, 2026-11-24): a provider whose key
+        # is only in its variable has one `env` connection while the variable is set, none after
+        self.catalog()
+        os.environ["WB_FAKE_API"] = "deepinfra=env"
+        os.environ["FAKE_AUTH_EXPORT"] = json.dumps([{"id": "c", "integrationID": "deepinfra", "label": "x",
+                                                      "active": True, "value": {"type": "key", "key": "k"}}])
+        os.environ.pop("DEEPINFRA_API_KEY", None)
+
+        def listed():
+            return {a["id"]: a["connections"] for a in
+                    json.loads(self.fake("auth", "list", "--format", "json", "--standalone")[2])}
+        self.assertEqual(list(listed()), ["anthropic"])               # unset: not listed
+        os.environ["DEEPINFRA_API_KEY"] = "not-a-real-key"
+        self.assertEqual(listed()["deepinfra"], [{"type": "env", "name": "DEEPINFRA_API_KEY"}])
+        self.assertEqual(json.loads(self.fake("auth", "export", "deepinfra", "--standalone")[2]), [])
+        self.assertEqual([e["providerID"] for e in self.fake("api", "model.list")[1][0]["data"]],
+                         ["deepinfra", "anthropic"])                   # its models still listed
+
     def test_a_provider_without_a_key_drops_out_of_every_list_and_its_models_cant_run(self):
         self.catalog()
         os.environ["WB_FAKE_API"] = "anthropic=nokey"
@@ -30331,8 +30451,9 @@ class ApiDiscovery(Base):
         os.environ["WB_FAKE_API"] = "xenv=ratelimit"  # a run's state: status never runs one
         st, up, fix = self.state(FLASH)
         self.assertEqual((st["available"], st["why"], up),
-                         (False, "no key for deepinfra: run /connect in OpenCode and add it", False))
-        self.assertEqual(fix, "run /connect in OpenCode and add an API key for deepinfra")
+                         (False, "no key for deepinfra: run `opencode auth login deepinfra` in a terminal "
+                                 "and add it", False))
+        self.assertEqual(fix, "")                                  # the line says it (#1189)
         st, up, fix = self.state("oauthco/chat-1")
         self.assertEqual((st["available"], up), (False, False))
         self.assertEqual(st["why"], "can't run: needs a key wb can hold outside the lane (OAuthCo's is "
@@ -30388,7 +30509,8 @@ class ApiDiscovery(Base):
             self.assertFalse(st["available"])
             self.assertTrue(st["why"].startswith("can't run: needs a key wb can hold outside the lane"), st)
             self.assertFalse(self.models.may_come_up(st))
-        self.assertIn("(XEnv's is from the environment, XENV_API_KEY)", said["xenv/grok-9"]["why"])
+        # a variable OpenCode names that isn't set here (#1189: a set one runs)
+        self.assertIn("$XENV_API_KEY isn't set where wb start ran", said["xenv/grok-9"]["why"])
         self.assertIn(f"(literal's is written in {os.environ['WB_OPENCODE_CONFIG']})", said["literal/model-a"]["why"])
         self.assertNotIn("not-a-real-key", json.dumps(said) + (store.home() / "hosted.json").read_text())
 
@@ -30584,7 +30706,7 @@ class ApiDiscovery(Base):
             cli.main(["route", "trivial", "lan/coder", "--day-usd", "1"])
         self.assertEqual((code.exception.code, err.getvalue()), (3, f"wb: lan/coder can't be a role's model: {hint}\n"))
 
-    def test_a_hosted_provider_added_by_hand_keeps_connect_and_a_tailnet_box_gets_the_hint(self):
+    def test_a_hosted_provider_added_by_hand_keeps_the_key_remedy_and_a_tailnet_box_gets_the_hint(self):
         # #1109's review (2026-11-23): the hint replaced /connect for any host off this machine,
         # so a cloud provider configured by hand (api.together.xyz) lost the key it needed, and
         # following the hint would make a cloud host count as a local model
@@ -30602,7 +30724,7 @@ class ApiDiscovery(Base):
         with self.assertRaises(SystemExit) as code, redirect_stderr(err):
             cli.main(["route", "trivial", "together/qwen-coder", "--day-usd", "1"])
         self.assertEqual(code.exception.code, 3)
-        self.assertIn("/connect", err.getvalue())
+        self.assertIn("`opencode auth login together`", err.getvalue())   # a hosted one's fix (#1189)
         self.assertNotIn("local", err.getvalue())
         err = io.StringIO()
         with self.assertRaises(SystemExit) as code, redirect_stderr(err):
@@ -30682,7 +30804,7 @@ class ApiDiscovery(Base):
             self.assertEqual((found["mix/zero"].key, found["mix/paid"].key), ("none", ""))
             self.assertTrue(self.models.status(found["mix/zero"])["available"])
             self.assertEqual(self.models.status(found["mix/paid"])["why"],
-                             "no key for mix: run /connect in OpenCode and add it")
+                             "no key for mix: run `opencode auth login mix` in a terminal and add it")
             self.models._AUTH_FRESH.clear()                     # the fresh check, from either one
             self.models.status(self.models.hosted()["mix/zero"])
             self.assertEqual(self.models.hosted()["mix/paid"].key, "")
@@ -31133,9 +31255,9 @@ class Routes(Base):
         runner.models.hosted(fresh=True)
         code, _, err = self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
         self.assertEqual(code, 3)
-        self.assertIn("deepseek/deepseek-flash can't be a role's model: no key for deepseek: run /connect in "
-                      "OpenCode and add it", err)
-        for mid, held in (("oauthco/chat-1", "an OAuth login"), ("xenv/grok-9", "from the environment, XENV_API_KEY"),
+        self.assertIn("deepseek/deepseek-flash can't be a role's model: no key for deepseek: run `opencode auth "
+                      "login deepseek` in a terminal and add it", err)
+        for mid, held in (("oauthco/chat-1", "an OAuth login"), ("xenv/grok-9", "$XENV_API_KEY isn't set where wb start ran"),
                           ("opencode/big-pickle-free", "none: a free model takes no key")):
             with self.subTest(mid=mid):
                 code, _, err = self.route("trivial", mid, "--day-usd", "5")
@@ -32077,7 +32199,7 @@ class ApiTasks(_ApiTask, _KeyholeTest):
                 self.assertFalse(results.step(task, landed=False)["stuck"])  # never the step's
                 if guard == "auth":
                     self.assertEqual(st["last"], f"deepinfra refused the API key (HTTP {code})")
-                    self.assertIn("/connect", note["text"])
+                    self.assertIn("`opencode auth login deepinfra` in a terminal", note["text"])
                     continue
                 self.assertEqual(st["last"], f"deepinfra refused the request (HTTP {code}): {message}")
                 self.assertNotIn("API key", note["text"])
@@ -32154,8 +32276,50 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual(content["theme"], "x")                      # the rest of theirs stays
         self.assert_no_canary(json.dumps(content), json.dumps(layer))
 
-    def test_oauth_and_env_keys_fail_the_task_with_the_connect_remedy(self):
-        # the /connect half of Keyhole.test_oauth_and_env_keys_cant_run, through the runner
+    def test_a_key_exported_where_wb_start_ran_reaches_only_the_keyhole_never_the_agent(self):
+        # #1189: the key only in DEEPINFRA_API_KEY (the fake's `env` state: auth list names the
+        # variable, auth export holds none), exported where wb start runs. wb start's check takes
+        # it as runnable, the runner's keyhole reads it from its own environment and sends it
+        # upstream, and the agent's OpenCode, its layer, its catalog and runner.log never get it
+        m = self.local_api_model()
+        m.key = "env:DEEPINFRA_API_KEY"
+        os.environ["WB_FAKE_API"] = "deepinfra=env"
+        runs = Path(self.tmp.name) / "runs.jsonl"
+        os.environ["FAKE_RUNS"] = str(runs)
+        os.environ.pop("DEEPINFRA_API_KEY", None)
+        with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()) as err:
+            self.start_api("api-unset", "http", spawn=False)      # unset: refused at start, no task
+        self.assertEqual(e.exception.code, 3, err.getvalue())          # a model that can't run
+        self.assertIn("$DEEPINFRA_API_KEY isn't set where wb start ran: export it, or store the key with "
+                      "`opencode auth login deepinfra`", err.getvalue())
+        self.assertFalse(store.Task("api-unset").dir.exists())
+        os.environ["DEEPINFRA_API_KEY"] = self.CANARY
+        self.start_api("api-envkey", "http", spawn=False)
+        log = self.drive_here("api-envkey")
+        task = store.Task("api-envkey")
+        self.assertEqual(task.status["phase"], "review", task.status.get("last"))
+        self.assertEqual(len(self.up.seen), 1)                       # through the keyhole
+        self.assertEqual(self.up.seen[0]["headers"]["Authorization"], f"Bearer {self.CANARY}")
+        self.assertIn(f"keyhole: deepinfra on 127.0.0.1:", log)
+        self.assertIn(f"for {m.id} (key from $DEEPINFRA_API_KEY)", log)
+        [run] = [json.loads(x) for x in runs.read_text().splitlines()]
+        self.assertNotIn("DEEPINFRA_API_KEY", run["env_names"])      # SECRET_ENV dropped it
+        self.assertIn("PATH", run["env_names"])
+        self.assertNotIn("DEEPINFRA_API_KEY", runner.agent_env(task))
+        self.assert_no_canary(log, self.all_files(task.dir), json.dumps(task.status), json.dumps(run),
+                              self.all_files(store.home() / "rules" / task.name))
+        # passed through to agents by commands.json `env`: the runner refuses, naming the fix
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": ["DEEPINFRA_API_KEY"]}))
+        self.start_api("api-through", "http", "--force", spawn=False)
+        self.drive_here("api-through")
+        last = store.Task("api-through").status["last"]
+        self.assertIn("$DEEPINFRA_API_KEY is passed to agents (commands.json env): remove it there", last)
+        self.assertEqual(len(self.up.seen), 1)                       # nothing went upstream
+        self.assert_no_canary(last, self.all_files(store.Task("api-through").dir))
+
+    def test_an_oauth_login_and_an_unset_env_key_fail_the_task_with_the_login_remedy(self):
+        # the remedy half of Keyhole.test_oauth_and_env_keys_cant_run, through the runner: OpenCode's
+        # one terminal command, the provider's id filled in (#1189)
         os.environ["FAKE_AUTH_EXPORT"] = json.dumps([self.key_row("deepinfra", {
             "type": "oauth", "methodID": "m", "refresh": self.CANARY, "access": self.CANARY,
             "expires": 1})])
@@ -32164,7 +32328,8 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         task = store.Task("api-oauth")
         last = task.status["last"]
         self.assertIn("needs a key wb can hold outside the lane: deepinfra is signed in with OAuth", last)
-        self.assertIn("store an API key with /connect in OpenCode", last)
+        self.assertIn("store an API key with `opencode auth login deepinfra` in a terminal (or /connect in "
+                      "OpenCode)", last)
         self.assertEqual(task.status.get("failed_before"), "load")
         note = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
                 if r.get("task") == "api-oauth"][-1]
@@ -32173,14 +32338,17 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertIn("wb resume api-oauth", note["text"])
         self.assertNotIn("could not load", note["text"])
         self.assert_no_canary(self.all_files(task.dir), json.dumps(task.status))
-        # a key only in the environment (auth list names the variable; nothing to export)
+        # a key only in a variable auth list names (nothing to export), unset where the runner
+        # runs (#1189: a set one is read): said once, with its own fix
+        os.environ.pop("DEEPINFRA_API_KEY", None)
         os.environ["FAKE_AUTH_EXPORT"] = "[]"
         self.catalog(API_CATALOG, [key_row("deepinfra", "DeepInfra", {"type": "env", "name": "DEEPINFRA_API_KEY"})])
         self.start_api("api-env", "ok", "--force")
         wait_phase("api-env", {"failed"})
         last = store.Task("api-env").status["last"]
-        self.assertIn("deepinfra's key is only in the environment ($DEEPINFRA_API_KEY)", last)
-        self.assertIn("store an API key with /connect in OpenCode", last)
+        self.assertIn("needs a key wb can hold outside the lane: $DEEPINFRA_API_KEY isn't set where wb start "
+                      "ran: export it, or store the key with `opencode auth login deepinfra`", last)
+        self.assertNotIn("/connect", last)
 
     def test_the_keyholes_answers_set_the_providers_health(self):
         self.local_api_model()
@@ -36325,8 +36493,8 @@ class RoleResolution(Base):
             code, out, err = self.begin("t-nokey", "--size", "trivial")
         self.assertEqual((code, out), (3, ""))
         self.assertEqual(err, "wb: trivial role: deepseek/deepseek-flash can't run: no key for deepseek: run "
-                              "/connect in OpenCode and add it. Ask the user: fix that, or put the role on the GPU "
-                              "(wb route trivial gpu)\n")
+                              "`opencode auth login deepseek` in a terminal and add it. Ask the user: fix that, or "
+                              "put the role on the GPU (wb route trivial gpu)\n")
         self.assertEqual(chose, [])                            # no fallback to the GPU
         self.assertFalse(store.Task("t-nokey").dir.exists())
         # --force is a --model's: a role's API model that can't run never starts anyway (#1016's review)
@@ -36516,19 +36684,29 @@ class FirstRunApi(Base):
         self.assertEqual(self.key_lines(), ["ok  API keys: deepseek (stored via /connect), anthropic (stored via "
                                             "/connect); significant uses deepseek, trivial uses deepseek"])
 
-    def test_an_env_key_or_an_oauth_login_is_never_shown_as_usable(self):
+    def test_an_oauth_login_or_an_env_key_wb_cant_read_is_never_shown_as_usable_and_one_it_can_is(self):
+        # #1189: a variable OpenCode names reads as the keyhole's when set here and dropped from
+        # the agent's environment; it said "wb can't hold it outside the lane yet" before
+        os.environ.pop("XAI_API_KEY", None)
         self.keys(key_row("xai", "xAI", {"type": "env", "name": "XAI_API_KEY"}))
-        self.assertEqual(self.key_lines(), ["--  xai's key is in XAI_API_KEY: wb can't hold it outside the lane "
-                                            "yet; /connect stores one it can"])
+        unset = ("--  xai's key is in $XAI_API_KEY, which wb can't use: $XAI_API_KEY isn't set where wb start "
+                 "ran: export it, or store the key with `opencode auth login xai`")
+        self.assertEqual(self.key_lines(), [unset])
+        with mock.patch.dict(os.environ, {"XAI_API_KEY": "xai-not-a-real-key"}):
+            self.assertEqual(self.key_lines(), ["ok  API keys: xai (key from $XAI_API_KEY); no role uses one yet"])
+            Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": ["XAI_API_KEY"]}))
+            self.assertEqual(self.key_lines(), ["--  xai's key is in $XAI_API_KEY, which wb can't use: $XAI_API_KEY "
+                                                "is passed to agents (commands.json env): remove it there"])
+            Path(os.environ["WB_COMMANDS"]).write_text("{}")
         self.keys(key_row("anthropic", "Anthropic", OAUTH))
         self.assertEqual(self.key_lines(), ["--  anthropic is signed in with OAuth: wb can't hold that outside the "
                                             "lane; an API key through /connect works"])
         self.keys(key_row("xai", "xAI", {"type": "env", "name": "XAI_API_KEY"}), key_row("anthropic", "Anthropic", OAUTH),
                   key_row("deepseek", "DeepSeek", STORED))
         lines = self.key_lines()
-        self.assertEqual(lines, ["ok  API keys: deepseek (stored via /connect); no role uses one yet",
-                                 "--  xai's key is in XAI_API_KEY, anthropic is signed in with OAuth: wb can't hold "
-                                 "those outside the lane; /connect stores a key it can"])
+        self.assertEqual(lines, ["ok  API keys: deepseek (stored via /connect); no role uses one yet", unset,
+                                 "--  anthropic is signed in with OAuth: wb can't hold that outside the lane; an "
+                                 "API key through /connect works"])
         self.keys()
         self.assertEqual(self.key_lines(), [cli.NO_KEY])
         # no `auth list` to read (OpenCode missing): its own line says so, and none of keys
@@ -36589,13 +36767,13 @@ class FirstRunApi(Base):
         code, out = doctor()
         self.assertEqual(code, 1)
         self.assertIn("BAD trivial role: deepseek/deepseek-flash can't run: no key for ", out)
-        self.assertIn("/connect", out)
+        self.assertIn("opencode auth login deepseek", out)
         with mock.patch.object(cli.models, "discover", return_value={}):
             lines = cli.first_run()                                  # wb setup: the key is required
         self.assertIn(cli.NO_LOCAL_OPTIONAL, lines)
         self.assertNotIn(cli.NO_KEY, lines)
-        self.assertIn("--  no API key for deepseek, which significant and trivial and writing use: /connect "
-                      "in OpenCode adds it (required: those tasks can't start without it)", lines)
+        self.assertIn("--  no API key for deepseek, which significant and trivial and writing use: `opencode "
+                      "auth login deepseek` in a terminal adds it (required: those tasks can't start without it)", lines)
 
     def test_setup_with_a_stored_key_and_an_opencode_config_that_doesnt_parse_still_prints_its_checklist(self):
         # the review of #1067 (2026-11-23): wb setup's catalog read for a stored key ran outside
@@ -36931,7 +37109,14 @@ class SettingsRoles(Base):
         p = shown["providers"]
         self.assertEqual(p["deepseek"], {"name": "DeepSeek", "key": "stored"})
         self.assertEqual((p["xenv"]["key"], p["xenv"]["why"]),
-                         ("env", "can't run: needs a key wb can hold outside the lane (key in XENV_API_KEY)"))
+                         ("env", "can't run: $XENV_API_KEY isn't set where wb start ran: export it, or store "
+                                 "the key with `opencode auth login xenv`"))
+        self.assertNotIn("runs", p["xenv"])
+        with mock.patch.dict(os.environ, {"XENV_API_KEY": "xenv-not-a-real-key"}):  # set: it runs (#1189)
+            p = json.loads(self.wb("route", "--json")[1])["providers"]
+        self.assertEqual({k: p["xenv"][k] for k in ("key", "why", "runs")},
+                         {"key": "env", "why": "key from $XENV_API_KEY", "runs": True})
+        self.assertNotIn("xenv-not-a-real-key", json.dumps(p))
         self.assertEqual(p["oauthco"]["key"], "oauth")
         self.assertIn("needs a key wb can hold outside the lane (an OAuth login)", p["oauthco"]["why"])
         ledger.unlink()
@@ -37623,8 +37808,9 @@ class ApiCompat(Base):
         self.assertIn("  significant  gpu (no local model: none can run)", out)
         self.assertIn("  trivial      acme/coder-flash  ready · thinking off · set by you 11-20", out)
         self.assertIn("keys: acme (stored), deepinfra (stored), nolimit (stored), oauthco (OAuth login: "
-                      "can't run, needs a key wb can hold outside the lane), xenv (environment: can't run, "
-                      "needs a key wb can hold outside the lane)", out)
+                      "can't run, needs a key wb can hold outside the lane), xenv (key from $XENV_API_KEY: "
+                      "can't run: $XENV_API_KEY isn't set where wb start ran: export it, or store the key "
+                      "with `opencode auth login xenv`)", out)
         self.assertIn(f"opencode 1 (free: {cli.FREE_NOTE})", out)
         self.assertNotIn("coder-pro", out)                          # counts, never ids
         Path(os.environ["WB_ROUTES"]).unlink()

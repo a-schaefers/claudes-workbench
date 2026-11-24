@@ -1253,10 +1253,24 @@ def _key_source(pid: str, auth: dict, prov: dict | None) -> str:
     return source
 
 
+def env_why(pid: str, var: str) -> str:
+    """Why the keyhole can't take ``pid``'s key from ``$var`` in this process's environment, which
+    a runner wb start spawns inherits (keyhole.env_source, #1189), or "" when it can."""
+    from . import keyhole  # keyhole imports this module lazily too
+    return keyhole.env_source(pid, var)
+
+
+def key_runs(pid: str, key: str) -> bool:
+    """Whether a provider's key source (Model.key, connected()'s `key`) is one a task runs with:
+    a stored key, or an environment variable the keyhole can read and the agent can't (#1189)."""
+    return key == "stored" or (key.startswith("env:") and not env_why(pid, key[4:]))
+
+
 def connected() -> dict[str, dict] | None:
     """The API providers OpenCode holds a key for, read fresh from `auth list` (never a secret):
     {provider id: {"name", "key"}}, `key` as Model.key says it (_key_source: "stored" is the only
-    one the keyhole can hold; "oauth", "env:<NAME>", "config", "signing" can't run). Providers
+    one the keyhole can hold, and "env:<NAME>" when key_runs says so, #1189; "oauth", "config",
+    "signing" can't run). Providers
     configured on this machine (the GPU side) are left out. None when `auth list` can't be read
     (OpenCode missing, or its error): wb setup and the router then say nothing of keys (#1024)."""
     auth, _ = _auth_rows()
@@ -1852,13 +1866,16 @@ def _api_status(m: Model, down=frozenset()) -> dict:
     key = m.key
     if not key:
         key, who = _fresh_key(m)
-    if not key:
-        return _no(f"no key for {who}: run /connect in OpenCode and add it")
-    if key == "oauth" or key == "signing" or key == "config" or key.startswith("env:"):
+    from . import keyhole  # keyhole imports this module lazily too
+    if not key:  # OpenCode's one terminal command, not its TUI's /connect (#1189)
+        return _no(f"no key for {who}: run `{keyhole.login(m.provider)}` in a terminal and add it")
+    if key.startswith("env:"):  # the runner's own environment holds it (#1189): runs, unless
+        if why := env_why(m.provider, key[4:]):
+            return _no(f"can't run: {keyhole.NEEDS}: {why}")
+    elif key == "oauth" or key == "signing" or key == "config":
         held = ("an OAuth login" if key == "oauth" else
                 "a cloud login that signs each request" if key == "signing" else
-                f"written in {_key_file(m.provider)}" if key == "config" else
-                f"from the environment, {key[4:]}")
+                f"written in {_key_file(m.provider)}")
         # a key written in a file: /connect alone changed nothing while the apiKey stayed (#1075)
         fix = "remove its apiKey there, and store the key with /connect" if key == "config" else \
             "store an API key with /connect"
@@ -2121,8 +2138,9 @@ def remedy(m: Model, state: dict) -> str:
     why = state.get("why", "")
     if m.kind == "api":
         who = provider_name(m)
-        if why.startswith("no key for "):
-            return f"run /connect in OpenCode and add an API key for {who}"
+        if why.startswith("no key for ") or (why.startswith("can't run: needs a key") and (
+                "opencode auth login" in why or "remove it there" in why)):
+            return ""  # the reason says its own fix (#1189)
         if why.startswith("can't run: needs a key") and "remove its apiKey there" in why:
             return f"remove options.apiKey for {who} from {_key_file(m.provider)}, and store the key with /connect in OpenCode"
         if why.startswith("can't run: needs a key"):

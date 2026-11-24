@@ -568,7 +568,7 @@ def cant_run(role: str, mid: str, why: str, fix: str, doc: dict) -> str:
     """The one line for a role whose API model can't run: never another model (#1016)."""
     other = ("set Agents to Both or GPU (wb route all both|gpu)" if doc.get("use") == "api"
              else f"put the role on the GPU (wb route {role} gpu)")
-    said = fix and (fix in why or any(w in why for w in ("/connect", "top it up")))  # its own remedy
+    said = fix and (fix in why or any(w in why for w in ("/connect", "opencode auth login", "top it up")))  # its own remedy
     return (f"{role} role: {mid} can't run: {why}" + (f" ({fix})" if fix and not said else "")
             + f". Ask the user: fix that, or {other}")
 

@@ -32,6 +32,7 @@ from . import (__version__, ask_mcp, audio, bench, chat, context, gitops, hardwa
                transcript, tuning, verify, webpush)
 from .watch import Watcher, wait_exit
 from . import runner
+from . import keyhole
 from . import meter
 from . import privacy
 from .runner import PKG_ROOT
@@ -3067,12 +3068,20 @@ def _off_lan() -> dict[str, str]:
             if remote and "isn't this machine" in why and _on_lan(urlparse(url).hostname or "")}
 
 
-def _runs_held(m: models.Model) -> bool:
+def _runs_held(m: models.Model, seen: dict | None = None) -> bool:
     """Whether an API model's key is one a task can run with: stored by /connect (the keyhole
-    holds it outside the lane), or an Ollama cloud model's, which this machine's Ollama holds and
-    no keyhole needs (runner.needs_keyhole). Refused, doctor's "set a role to use it" led nowhere,
-    with a /connect that changes nothing for Ollama (#1077, 2026-11-23)."""
-    return m.key == "stored" or (m.cloud and m.key == "ollama")
+    holds it outside the lane), or in a variable of this environment the keyhole reads and the
+    agent never gets (models.key_runs, #1189), or an Ollama cloud model's, which this machine's
+    Ollama holds and no keyhole needs (runner.needs_keyhole). Refused, doctor's "set a role to use
+    it" led nowhere, with a /connect that changes nothing for Ollama (#1077, 2026-11-23).
+    ``seen``: {provider: answer} kept over a pass through the catalog (one config read each)."""
+    if m.cloud and m.key == "ollama":
+        return True
+    if seen is None:
+        return models.key_runs(m.provider, m.key)
+    if (m.provider, m.key) not in seen:
+        seen[m.provider, m.key] = models.key_runs(m.provider, m.key)
+    return seen[m.provider, m.key]
 
 
 def _route_api(mid: str, role: str) -> models.Model:
@@ -3102,7 +3111,7 @@ def _route_api(mid: str, role: str) -> models.Model:
         fix = models.remedy(m, st) if not st["available"] else \
             f"store an API key for {models.provider_name(m)} with /connect in OpenCode"
         # once: "no key for p: run /connect …" came with its remedy's own /connect line (#1109)
-        said = fix and (fix in why or "/connect" in why)
+        said = fix and (fix in why or "/connect" in why or "opencode auth login" in why)
         die(f"{mid} can't be a role's model: {why}" + (f": {fix}" if fix and not said else ""), 3)
     return m
 
@@ -3318,7 +3327,16 @@ def _route_pane() -> dict:
         raw, name, pkg = str(p.get("key") or ""), str(p.get("name") or pid), str(p.get("package") or "")
         key = "env" if raw.startswith("env:") else KEY_STATES.get(raw, "none")
         held = f"key in {raw[4:]}" if key == "env" else KEY_HELD.get(raw, raw)
-        if key == "stored" and models.unspoken(pid, pkg):
+        # a key the keyhole reads from this environment runs as a stored one (#1189): `runs`
+        # tells the pane so, `why` where it comes from, or why it can't
+        env_why = models.env_why(pid, raw[4:]) if key == "env" else ""
+        if key == "env" and not env_why and not models.unspoken(pid, pkg):
+            provs[pid] = {"name": name, "key": key, "why": f"key from ${raw[4:]}", "runs": True}
+            continue
+        if key == "env" and env_why:
+            provs[pid] = {"name": name, "key": key, "why": f"can't run: {env_why}"}
+            continue
+        if key in ("stored", "env") and models.unspoken(pid, pkg):
             # a stored key the keyhole can't carry read "Google (key stored)" while wb setup said
             # it can't run and wb models --json left its models out (#1066, 2026-11-23)
             provs[pid] = {"name": name, "key": "none", "why": models.unspoken_why(name, pkg)}
@@ -4534,9 +4552,9 @@ def _models_json() -> dict:
             "sizes": list(m.extra.get("sizes") or []),
             "cards": models.card_numbers(m.root, seen) if m.engine == "ollama" and not m.remote else None}
            for m in models.discover().values()]
-    api = []
+    api, held = [], {}
     for m in models._models_of(models._read_hosted()).values():
-        if not _runs_held(m) or models.keyhole_refusal(m):  # a package the keyhole can't carry (#1066)
+        if not _runs_held(m, held) or models.keyhole_refusal(m):  # a package the keyhole can't carry (#1066)
             continue
         cost = next((c for c in m.config.get("cost") or [] if isinstance(c, dict)), None) \
             if isinstance(m.config.get("cost"), list) else m.config.get("cost")
@@ -4571,15 +4589,18 @@ def _set_on(ts) -> str:
         return ""
 
 
-def _key_held(key: str) -> str:
+def _key_held(key: str, pid: str = "") -> str:
     """A provider's key source as wb models says it (Model.key, #1013). Not ``_held``:
-    that name is discard's, and a second def of it replaced the first (#1090, 2026-11-23)."""
+    that name is discard's, and a second def of it replaced the first (#1090, 2026-11-23). A key
+    in the environment says its variable, and why it can't run when it can't (#1189)."""
     if key == "stored":
         return "stored"
     if key == "ollama":
         return "Ollama's login"
-    what = ("environment" if key.startswith("env:") else "OAuth login" if key == "oauth" else
-            "cloud signing" if key == "signing" else "in a config file")
+    if key.startswith("env:"):
+        why = models.env_why(pid, key[4:])
+        return f"key from ${key[4:]}" + (f": can't run: {why}" if why else "")
+    what = "OAuth login" if key == "oauth" else "cloud signing" if key == "signing" else "in a config file"
     return f"{what}: {CANT_HOLD}"
 
 
@@ -4602,7 +4623,7 @@ def _api_section(gpu: bool) -> tuple[list[str], bool]:
     provs = doc.get("providers") if isinstance(doc.get("providers"), dict) else {}
     keys = {pid: str(p.get("key") or "") for pid, p in sorted(provs.items())
             if isinstance(p, dict) and str(p.get("key") or "") not in ("", "none")}
-    used = bool(on_api) or "stored" in keys.values()
+    used = bool(on_api) or any(models.key_runs(pid, k) for pid, k in keys.items())
     counts: dict = {}
     for m in cat.values():
         n, free = counts.get(m.provider, (0, 0))
@@ -4637,7 +4658,7 @@ def _api_section(gpu: bool) -> tuple[list[str], bool]:
                 lines.append(f"  {role:12} gpu " + (
                     ("(the router's pick above)" if gpu else "(no local model: none can run)")
                     if pick == "auto" else pick) + (f" · API kept: {r['api']}" if r.get("api") else "") + when)
-    lines.append("  keys: " + (", ".join(f"{pid} ({_key_held(k)})" for pid, k in keys.items())
+    lines.append("  keys: " + (", ".join(f"{pid} ({_key_held(k, pid)})" for pid, k in keys.items())
                                or "none: /connect in OpenCode stores one"))
     lines.append(f"  {catalog}")
     if listed:
@@ -5137,6 +5158,8 @@ def scout_api_lines() -> list[str]:
             out.append(f"  {pid}: {len(tools)}" + (f", {free} of them free" if free else "")
                        + (f", {unsaid} the catalog doesn't say" if unsaid else "")
                        + ("" if key in ("stored", "none", "ollama") or any(m.free for m in ms)
+                          or models.key_runs(pid, key)  # a variable the keyhole reads (#1189)
+                          else f" (can't run: {models.env_why(pid, key[4:])})" if key.startswith("env:")
                           else f" (can't run: {_held_elsewhere(pid, key) if key else 'no key'})"))
     elif err := models.hosted_error():
         out.append(f"connected providers: OpenCode's catalog couldn't be read ({err})")
@@ -6427,9 +6450,8 @@ NO_KEY = ("--  no API key connected (optional: /connect in OpenCode adds a provi
 
 
 def _held_elsewhere(pid: str, key: str) -> str:
-    """A provider whose key the keyhole can't hold, as wb setup says it (decision 6)."""
-    if key.startswith("env:"):
-        return f"{pid}'s key is in {key[4:]}"
+    """A provider whose key the keyhole can't hold, as wb setup says it (decision 6); one in the
+    environment has its own line (api_key_lines, #1189)."""
     return {"oauth": f"{pid} is signed in with OAuth", "signing": f"{pid} signs with a cloud login",
             "config": f"{pid}'s key is written in {models._key_file(pid)}"}.get(key, f"{pid}'s key is {key}")
 
@@ -6455,13 +6477,15 @@ def api_key_lines(keys: dict | None) -> list[str]:
     for r, p in uses.items():
         if p not in keys:
             unkeyed.setdefault(p, []).append(r)
+    # OpenCode's one terminal command for the key, not its TUI's /connect (#1189)
     need = [f"--  no API key for {p}, which {' and '.join(rs)} use{'s' if len(rs) == 1 else ''}: "
-            "/connect in OpenCode adds it (required: those tasks can't start without it)"
+            f"`{keyhole.login(p)}` in a terminal adds it (required: those tasks can't start without it)"
             for p, rs in unkeyed.items()]
     if not keys:
         return need or [NO_KEY]
     out = []
-    stored = [p for p, k in keys.items() if k["key"] == "stored"]
+    # a key in this environment's variable that the keyhole reads runs as a stored one (#1189)
+    stored = [p for p, k in keys.items() if models.key_runs(p, k["key"])]
     # a stored key on a package the keyhole can't carry read `ok`, and every task failed (#1066)
     odd = models.unspoken_providers(stored)
     if stored := [p for p in stored if p not in odd]:
@@ -6469,8 +6493,15 @@ def api_key_lines(keys: dict | None) -> list[str]:
         said = ("" if doc is None else "; no role uses one yet" if not used else
                 f"; {' and '.join(used)} use{'s' if len(used) == 1 else ''} it" if len(stored) == 1 else
                 "; " + ", ".join(f"{r} uses {uses[r]}" for r in used))
-        out.append(f"ok  API keys: {', '.join(f'{p} (stored via /connect)' for p in stored)}{said}")
-    other = [(p, k["key"]) for p, k in keys.items() if k["key"] != "stored"]
+        held = {p: "stored via /connect" if keys[p]["key"] == "stored" else f"key from ${keys[p]['key'][4:]}"
+                for p in stored}
+        out.append(f"ok  API keys: {', '.join(f'{p} ({held[p]})' for p in stored)}{said}")
+    other = [(p, k["key"]) for p, k in keys.items() if p not in stored and p not in odd]
+    # a variable the keyhole can't read from (one agents get too, unset, or named where the
+    # agent's OpenCode expands it): its own fix, which the line says (#1189)
+    out += [f"--  {p}'s key is in ${k[4:]}, which wb can't use: {models.env_why(p, k[4:])}"
+            for p, k in other if k.startswith("env:")]
+    other = [x for x in other if not x[1].startswith("env:")]
     # a key written in a config file: /connect alone changed nothing while the apiKey stayed, so
     # the line said "/connect stores a key it can" to a user who had (#1075, 2026-11-23)
     written, other = [p for p, k in other if k == "config"], [x for x in other if x[1] != "config"]
@@ -6478,9 +6509,6 @@ def api_key_lines(keys: dict | None) -> list[str]:
         if len(other) == 1 and other[0][1] == "oauth":
             out.append(f"--  {other[0][0]} is signed in with OAuth: wb can't hold that outside the lane; an API "
                        "key through /connect works")
-        elif len(other) == 1 and other[0][1].startswith("env:"):
-            out.append(f"--  {_held_elsewhere(*other[0])}: wb can't hold it outside the lane yet; /connect "
-                       "stores one it can")
         else:
             out.append(f"--  {', '.join(_held_elsewhere(p, k) for p, k in other)}: wb can't hold "
                        f"{'that' if len(other) == 1 else 'those'} outside the lane; /connect stores a key it can")
@@ -6530,7 +6558,7 @@ def first_run() -> list[str]:
         api_only = all(routes.effective_via(doc, r) == "api" for r in routes.ROLES)
     except routes.RoutesError:
         api_only = False
-    stored = not found and (api_only or any(k["key"] == "stored" for k in (keys or {}).values()))
+    stored = not found and (api_only or any(models.key_runs(p, k["key"]) for p, k in (keys or {}).items()))
     # a key stored that the cache doesn't list as stored (none yet, or one read before /connect):
     # the pane's API settings read this cache (#1069); an OpenCode config that doesn't parse
     # stops no checklist (the review of #1067, 2026-11-23: wb setup exited 1 at it)

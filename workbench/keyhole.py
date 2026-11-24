@@ -65,7 +65,22 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from . import privacy, store
 
 NEEDS = "needs a key wb can hold outside the lane"
-REMEDY = "store an API key with /connect in OpenCode"
+# OpenCode's own command for a key, one terminal line instead of /connect in its TUI (#1189). It asks
+# for the key on a terminal (2.3.2's auth form: `secret` requires an interactive one), so it can't
+# run from Claude's Bash or `!`: wb names it, the user runs it.
+LOGIN = "opencode auth login {provider}"
+REMEDY = "store an API key with `opencode auth login <provider>` in a terminal (or /connect in OpenCode)"
+
+
+def remedy(provider: str = "") -> str:
+    """REMEDY with the provider's id filled in (#1189)."""
+    return REMEDY.replace("<provider>", provider) if provider else REMEDY
+
+
+def login(provider: str) -> str:
+    """`opencode auth login <provider>`, quoted for a shell when the id needs it."""
+    import shlex
+    return LOGIN.format(provider=shlex.quote(provider))
 # The paths OpenCode 2.3.2 posts a model request to, at the end of the path under the base (the
 # spike, #1009): OpenAI chat and responses, Anthropic's messages and its token count.
 MODEL_PATHS = ("/chat/completions", "/responses", "/messages", "/messages/count_tokens")
@@ -134,12 +149,14 @@ class KeyholeError(Exception):
 
 class Key:
     """A provider's static API key, held in the runner's memory only. Its repr and str name the
-    provider, never the key."""
-    __slots__ = ("provider", "_value")
+    provider, never the key. ``source``: "" for a stored key, else the variable it was read from
+    (`$DEEPSEEK_API_KEY`, #1189): a name, never the value."""
+    __slots__ = ("provider", "_value", "source")
 
-    def __init__(self, provider: str, value: str):
+    def __init__(self, provider: str, value: str, source: str = ""):
         self.provider = provider
         self._value = value
+        self.source = source
 
     @property
     def value(self) -> str:
@@ -230,8 +247,10 @@ def _lone_env(prov) -> tuple[str, str]:
 def _configured_key(provider: str) -> tuple[str | None, str]:
     """(where the user's OpenCode config gives ``provider`` an apiKey the agent could read: a
     file, or OPENCODE_CONFIG_CONTENT (the agent's environment), "env:<VAR>" for a `{env:VAR}` one
-    elsewhere (a header could replace the token); VAR of a lone provider-level `{env:VAR}` apiKey,
-    which a stored key may stand beside, _lone_env)."""
+    elsewhere (a header or V2 `settings`: the agent's OpenCode would expand it and send that over
+    the token, so the keyhole can't stand in for it); VAR of a lone provider-level `{env:VAR}`
+    apiKey, which the layer replaces with the token and a stored key may stand beside, _lone_env:
+    the variable load_key reads when none is stored, #1189)."""
     from . import models
     try:
         layers = [(str(p), layer) for p, layer in models._layers()]
@@ -310,26 +329,79 @@ def _first_line(text: str) -> str:
     return redact(next((ln.strip() for ln in (text or "").splitlines() if ln.strip()), ""))[:200]
 
 
+def _written(provider: str, where: str) -> str:
+    """load_key's refusal of a key the user's config writes where the agent reads it (_configured_key)."""
+    if where.startswith("env:"):
+        # the agent's OpenCode expands `{env:VAR}` in a header or V2 settings itself and sends it
+        # over the token; only a lone provider-level options.apiKey is the layer's to replace
+        return (f"{provider}'s key is read from ${where[4:]} in a header or V2 `settings`, which "
+                f"the keyhole can't stand in for: give it as provider.{provider}.options.apiKey "
+                f"\"{{env:{where[4:]}}}\" instead, or store the key with `{login(provider)}`")
+    # /connect alone changed nothing while the written key stayed (#1075, 2026-11-23)
+    return (f"its key is written in {where}, which agents can read: remove it there, and store "
+            f"the key with `{login(provider)}`")
+
+
+def env_refusal(provider: str, var: str, value: str | None = None) -> str:
+    """Why the keyhole can't take ``provider``'s key from the environment variable ``var`` that
+    OpenCode names for it (#1189), or "" when it can. The runner already carries the environment
+    of the wb command that started it (context.detached_env), so reading the variable there moves
+    the key nowhere new; it must only be one the agent's environment drops (runner.env_kept:
+    SECRET_ENV by its name, and not passed through by commands.json `env`), and set where wb start
+    ran. ``value``: the variable's, read from os.environ when not given. Never names the value."""
+    from . import context, runner
+    value = (os.environ.get(var, "") if value is None else value).strip()
+    if not value:
+        return (f"${var} isn't set where wb start ran: export it, or store the key with "
+                f"`{login(provider)}`")
+    through = set((store.read_json(context.commands_path(), {}) or {}).get("env") or [])
+    if var in through:
+        return f"${var} is passed to agents (commands.json env): remove it there"
+    if runner.env_kept(var, value, through):
+        return (f"agents get ${var} too (wb keeps a variable from them by a key's name, such as "
+                f"*_API_KEY): rename it, or store the key with `{login(provider)}`")
+    if not KEY_CHARS.fullmatch(value):
+        return (f"${var} holds a character an HTTP header can't carry: export it again, or store "
+                f"the key with `{login(provider)}`")
+    return ""
+
+
+def env_source(provider: str, var: str) -> str:
+    """Why ``provider``'s key can't come from ``var`` (env_refusal), with a key the config writes
+    where the agent reads it first (_configured_key: a `{env:VAR}` header or V2 one), or "". What
+    models.status asks of a key whose source is the environment."""
+    try:
+        where, _ = _configured_key(provider)
+    except KeyholeError as e:
+        return str(e)
+    return _written(provider, where) if where else env_refusal(provider, var)
+
+
+def _from_env(provider: str, var: str) -> Key:
+    """``provider``'s key from ``var`` in the runner's own environment (#1189), or KeyholeError."""
+    if why := env_refusal(provider, var):
+        raise KeyholeError(f"{NEEDS}: {why}")
+    return Key(provider, os.environ[var].strip(), source=f"${var}")
+
+
 def load_key(provider: str, package: str = "") -> Key:
-    """``provider``'s static API key from the user's own OpenCode store (`opencode auth export`),
-    run with the runner's environment, outside the lane. Only stdout is read, into memory; a
-    failure's stderr is cut to its first line and redacted, and copied nowhere else. Raises
-    KeyholeError ("needs a key wb can hold outside the lane: <why>") for OAuth, request signing,
-    a key only in the environment, or one written where the agent can read it."""
+    """``provider``'s static API key: from the user's own OpenCode store (`opencode auth export`),
+    run with the runner's environment, outside the lane; else, with none stored, from the
+    variable OpenCode itself names for it (a lone provider-level `{env:VAR}` apiKey, or `auth
+    list`'s `env` connection; wb never guesses a name), read from the runner's environment
+    (_from_env, #1189): the order OpenCode sends them in (models._key_source). Only stdout is read,
+    into memory; a failure's stderr is cut to its first line and redacted, and copied nowhere
+    else. Raises KeyholeError ("needs a key wb can hold outside the lane: <why>") for OAuth,
+    request signing, a variable the agent gets too or that isn't set, or a key written where the
+    agent can read it."""
     if _signs(provider, package):
         raise KeyholeError(f"{NEEDS}: {provider} signs each request (SigV4 or Vertex)")
     where, env_var = _configured_key(provider)
     if where:
-        if where.startswith("env:"):
-            raise KeyholeError(f"{NEEDS}: {provider}'s key is only in the environment "
-                               f"(${where[4:]}), which agents don't get")
-        # /connect alone changed nothing while the written key stayed (#1075, 2026-11-23)
-        raise KeyholeError(f"{NEEDS}: its key is written in {where}, which agents can read: "
-                           "remove it there, and store the key with /connect")
+        raise KeyholeError(f"{NEEDS}: {_written(provider, where)}")
     r = _opencode("auth", "export", provider)
-    if r.returncode != 0 and env_var:  # no stored key beside it (OpenCode's "not found"): say why
-        raise KeyholeError(f"{NEEDS}: {provider}'s key is only in the environment (${env_var}), "
-                           "which agents don't get")
+    if r.returncode != 0 and env_var:  # no stored key beside it (OpenCode's "not found")
+        return _from_env(provider, env_var)
     if r.returncode != 0:
         raise KeyholeError(f"can't read {provider}'s key: opencode auth export exited "
                            f"{r.returncode}: {_first_line(r.stderr) or 'no message'}")
@@ -352,23 +424,25 @@ def load_key(provider: str, package: str = "") -> Key:
                 "is an OAuth login, whose tokens rotate" if active == "oauth" else
                 f"is a {active} credential, not an API key")
         raise KeyholeError(f"{NEEDS}: {provider}'s active credential {what}: `opencode auth "
-                           "switch` to its API key, or store one with /connect")
+                           f"switch` to its API key, or store one with `{login(provider)}`")
     for row in rows:
         v = row["value"]
         if v.get("type") == "key" and isinstance(v.get("key"), str) and v["key"].strip():
             value = v["key"].strip()  # a paste's newline: OpenCode trims on /connect, not a hand edit
             if not KEY_CHARS.fullmatch(value):
                 raise KeyholeError(f"can't use {provider}'s stored key: it holds a character an "
-                                   "HTTP header can't carry; store it again with /connect")
+                                   f"HTTP header can't carry; store it again with `{login(provider)}`")
             return Key(provider, value)
     kinds = {row["value"].get("type") for row in rows}
     if "oauth" in kinds:
         raise KeyholeError(f"{NEEDS}: {provider} is signed in with OAuth, whose tokens rotate")
     if "external" in kinds:
         raise KeyholeError(f"{NEEDS}: {provider}'s credential comes from an external source")
+    # none stored: the variable OpenCode names, from this runner's environment (#1189). It
+    # refused here before ("only in the environment, which agents don't get") and sent the user
+    # to /connect in OpenCode's TUI, though the runner held the variable and the agent never did
     if var := env_var or _env_only(provider):
-        raise KeyholeError(f"{NEEDS}: {provider}'s key is only in the environment (${var}), "
-                           "which agents don't get")
+        return _from_env(provider, var)
     raise KeyholeError(f"{NEEDS}: OpenCode has no key stored for {provider}")
 
 
@@ -1234,5 +1308,7 @@ def start(task, m, *, log=None, on_usage=None, on_health=None, room=None) -> Key
     kh = Keyhole(task, m, key, mirror_path(package, m.base_url), protocol, log=log,
                  on_usage=on_usage, on_health=on_health, room=room,
                  order=task.spec.get("order") if task is not None else None)  # #1021
-    kh.log(f"keyhole: {m.provider} on 127.0.0.1:{kh.port} for {m.id}")
+    # the variable's name, never its value: where the key came from, for runner.log (#1189)
+    kh.log(f"keyhole: {m.provider} on 127.0.0.1:{kh.port} for {m.id}"
+           + (f" (key from {key.source})" if key.source else ""))
     return kh

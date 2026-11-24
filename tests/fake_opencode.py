@@ -62,7 +62,7 @@ FAKE_SURROGATE: a run first reads a file whose name and text end in half an emoj
 unpaired surrogate escaped, which is valid JSON).
 FAKE_LATIN1: a run first prints a line that isn't UTF-8 (`caf\xe9`, Latin-1).
 FAKE_RUNS rows also say what OpenCode's environment had (`opencode_db`, `xdg_data`, `xdg_state`,
-`shell`) and what a command the agent runs through `$SHELL -c` sees (`shell_sees`: its
+`shell`, and `env_names`: every variable's name, never a value) and what a command the agent runs through `$SHELL -c` sees (`shell_sees`: its
 XDG_DATA_HOME, XDG_STATE_HOME, OPENCODE_DB and SHELL, `-` for one unset).
 A run with OPENCODE_DB set records its new session in that home (`<db>.sessions`), as OpenCode
 keeps it in its database (#1010). `session export` prints one finished step, its `info.home` the
@@ -98,6 +98,9 @@ WB_FAKE_API sets a model's or a provider's state, `<provider>[/<id>]=<state>,…
 one of the API scenarios above (or `ok`): a run of that model (a config model's too) plays it,
 its own state before its provider's, and a `nokey` provider
 drops out of `api model.list`, `models` and `auth list`, as one OpenCode can't authenticate does.
+An `env` provider (#1189) has its key only in `<PROVIDER>_API_KEY` (env_var): `auth list` gives it
+one connection, `{type: "env", name}`, while that variable is set (and drops it otherwise), as
+2.3.2 does, and `auth export` prints no row of it; its runs play `ok`.
 `api model.list` prints `{location, data}`; `serve --stdio` (how wb reads the catalog: models.model_list)
 prints `{"url": ...}`, a server on 127.0.0.1 asking Basic `opencode:<OPENCODE_PASSWORD>` (401
 otherwise), until its stdin closes: GET /api/plugin `{location, data: [plugins]}`, GET /api/model
@@ -162,6 +165,12 @@ def api_state(provider: str, mid: str = "") -> str:
         name, _, state = item.rpartition("=")
         states[name] = state
     return states.get(f"{provider}/{mid}") or states.get(provider) or "ok"
+
+
+def env_var(provider: str) -> str:
+    """The variable an `env` provider's key is in: `<PROVIDER>_API_KEY`, as the catalog names
+    DeepSeek's DEEPSEEK_API_KEY."""
+    return re.sub(r"[^A-Z0-9]", "_", provider.upper()) + "_API_KEY"
 
 
 def reachable() -> list:
@@ -249,6 +258,10 @@ if args[:2] == ["auth", "list"]:
                                                       "label": "default", "method": "key"}]}
                 for p in dict.fromkeys(e["providerID"] for e in doc["data"])]
     rows = [r for r in rows if api_state(r["id"]) != "nokey"]
+    # `env`: the key only in the provider's variable, as 2.3.2 lists it (#1189): an `env`
+    # connection, and only while the variable is set in OpenCode's environment
+    rows = [{**r, "connections": [{"type": "env", "name": env_var(r["id"])}]} if api_state(r["id"]) == "env"
+            else r for r in rows if api_state(r["id"]) != "env" or os.environ.get(env_var(r["id"]))]
     print(json.dumps(rows) if "json" in args else "\n".join(r["id"] for r in rows))
     sys.exit(0)
 if args == ["--version"]:  # wb doctor; FAKE_VERSION plays an older or odder build
@@ -260,7 +273,8 @@ if args[:2] == ["auth", "export"]:  # models.auth_key: OpenCode 2.x's credential
         with open(os.environ["FAKE_AUTH_LOG"], "a") as f:
             f.write(f"{pid}\n")
     rows = json.loads(os.environ.get("FAKE_AUTH_EXPORT") or "[]")
-    print(json.dumps([r for r in rows if pid is None or r.get("integrationID") == pid]))
+    print(json.dumps([r for r in rows if (pid is None or r.get("integrationID") == pid)
+                      and api_state(r.get("integrationID") or "") != "env"]))  # none stored (#1189)
     sys.exit(0)
 
 
@@ -507,6 +521,7 @@ if os.environ.get("FAKE_RUNS") and args and args[0] == "run":  # which runs cont
                              "fetch_off": os.environ.get("OPENCODE_DISABLE_MODELS_FETCH"),
                              "models_path": os.environ.get("OPENCODE_MODELS_PATH"),
                              "content": os.environ.get("OPENCODE_CONFIG_CONTENT"),
+                             "env_names": sorted(os.environ),  # names only, never a value (#1189)
                              "shell_sees": sees}) + "\n")
 if args and args[0] == "run" and "-m" in args:  # the model: <provider>/<id>[#<variant>]
     ref = args[args.index("-m") + 1]
