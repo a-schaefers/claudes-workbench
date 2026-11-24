@@ -4361,8 +4361,9 @@ def cmd_savings(a):
         print(json.dumps({"period": period, **t, "score": savings.score(t), "price": savings.price(),
                           "api": savings.api_totals(store.results(trials=True), since)}))
     else:
-        print(savings.summary(t, period))
-        if api := savings.api_summary(savings.api_totals(store.results(trials=True), since)):
+        api_t = savings.api_totals(store.results(trials=True), since)
+        print(savings.summary(t, period, api_t["tasks"]))
+        if api := savings.api_summary(api_t):
             print(api)
 
 
@@ -4411,8 +4412,10 @@ def cmd_backlog(a):
                     "branch": t.spec.get("branch") if st.get("phase") == "accepted" else None,
                     "saving": savings.line(row) if row else None})
     batch = savings.totals([r for t in tasks if (r := rows.get(t.name)) and not r.get("trial")])
+    # the batch's API money, trials in as wb savings counts it: never summed (#1121, 2026-11-23)
+    api_t = savings.api_totals([r for t in tasks if (r := rows.get(t.name))])
     if a.json:
-        print(json.dumps({"backlog": a.name, "tasks": out, "totals": batch}))
+        print(json.dumps({"backlog": a.name, "tasks": out, "totals": {**batch, "api": api_t}}))
         return
     phases = {}
     for o in out:
@@ -4422,7 +4425,9 @@ def cmd_backlog(a):
     for o in out:
         tail = " · ".join(x for x in (o["branch"], o["saving"]) if x)
         print(f"{o['task']:22} {o['phase']:9} {o['rounds']:>3} {o['minutes']:>5.0f}m  {tail}".rstrip())
-    print(savings.summary(batch, "the batch"))
+    print(savings.summary(batch, "the batch", api_t["tasks"]))
+    if api := savings.api_summary(api_t):
+        print(api)
 
 
 def cmd_tune(a):

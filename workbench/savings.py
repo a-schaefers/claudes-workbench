@@ -253,12 +253,16 @@ def energy(wh: float) -> str:
     return f"{wh / 1000:.1f} kWh" if wh >= 1000 else f"{wh:.0f} Wh"
 
 
-def summary(t: dict, period: str) -> str:
+def summary(t: dict, period: str, api: int = 0) -> str:
     """`wb savings`' one line over ``totals`` (``period`` a PERIODS key, or a label: `wb
     backlog`'s "the batch"): what the tasks cost Claude, the estimate of
     writing them, the saving and its share of that estimate (the badge's score, #101), the
-    energy and what it cost."""
+    energy and what it cost. ``api``: the period's API tasks, which the score leaves out."""
     when = {"week": "the last 7 days", "month": "the last 30 days", "all": "all time"}.get(period, period)
+    if not t["tasks"] and api:
+        # an API-only week or backlog had its Claude usage and diff, and read as if it hadn't
+        # (#1121, 2026-11-23): the score is the GPU's alone, and their line follows
+        return f"{when}: no GPU task to compare (API tasks are below, apart from the score)"
     if not t["tasks"]:
         return (f"{when}: no task to compare yet (an accepted task needs its Claude usage and "
                 "its diff, recorded since 0.95)")

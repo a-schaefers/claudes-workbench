@@ -31645,6 +31645,25 @@ class ApiStats(Base):
             t.set_status(served={"model": same, "by": None})
             self.assertNotIn("served_model", results.api_usage(t), same)
 
+    def test_an_api_only_week_and_backlog_name_the_api_line_and_sum_the_batches_dollars(self):
+        # #1121 (2026-11-23): both said "an accepted task needs its Claude usage and its diff" of
+        # tasks that had both, and wb backlog never summed the batch's dollars
+        for name, cost in (("n-1", 0.81), ("n-2", 0.42)):
+            self.api_task(name, {"phase": "accepted"}, backlog="night")
+            self.rows(self.api_row(cost=cost, task=name, provider="deepinfra"))
+        first = run_wb("savings").splitlines()[0]
+        self.assertEqual(first, "the last 7 days: no GPU task to compare (API tasks are below, apart "
+                                "from the score)")
+        out = run_wb("backlog", "night").splitlines()
+        self.assertEqual(out[-2], "the batch: no GPU task to compare (API tasks are below, apart from "
+                                  "the score)")
+        self.assertTrue(out[-1].startswith("api: 2 task(s) · $1.23 (deepinfra $1.23)"), out)
+        j = json.loads(run_wb("backlog", "night", "--json"))
+        self.assertEqual((j["totals"]["tasks"], j["totals"]["api"]["tasks"], j["totals"]["api"]["cost"]),
+                         (0, 2, 1.23))
+        from workbench import savings                     # no task at all: the reason stands
+        self.assertIn("needs its Claude usage", savings.summary(savings.totals([]), "week"))
+
     def test_the_stats_feed_has_the_weeks_api_money_by_provider_and_energy_leaves_api_rows_out(self):
         self.rows(self.gpu_row(gpu_wh=30.0), self.api_row(gpu_wh=500.0),   # a stray reading: not ours
                   self.api_row(cost=0.1, trial=True))                     # money spent is spent
