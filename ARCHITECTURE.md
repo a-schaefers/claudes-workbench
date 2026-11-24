@@ -4570,7 +4570,10 @@ client; the server needs no browser.
 - **Marked.** Its message is `{from: <name>, role: "agent"}` (`chat._inbound`: indexed in
   `open.json`, receipted, expired, listed by `pending` as the user's), reaches Claude as `[agent
   <name>] …` (the mod, *The web chat listener*), never makes the user away, shows on the page with
-  its name (`agentMeta`, `.row.agent`; no *send again*), and `wb chat log` says `agent <name>`. The
+  its name (`agentMeta`, `.row.agent`; no *send again*), and `wb chat log` says `agent <name>`.
+  Claude's reply to agents alone (`to` without `"user"`) is no news for the user on the page either:
+  its meta says `Claude to <name>` (`forUser`, as `chat._for_user`; `.row.claude.to-agent`), and it
+  never counts in the tab's unread (it read as a reply to the user, counted, #1128). The
   skill: a teammate's request, answered with `wb chat reply --to <id>`, the user's consent gates
   untouched.
 - **Send, then wait.** `wb chat reply` writes `re` (`--to`, else `chat.taken`, the user's alone
@@ -4812,7 +4815,7 @@ work" for a test), tagged `wb-chat`. Turning notifications on subscribes with th
 when it changed. A page posts what it showed to `/api/seen`: for every device while in use
 (visible, focused, an input within `USING_MS` 2 min), else with its `endpoint` if subscribed (#537).
 A reply only to agents (`to` without `"user"`, `chat._for_user`) is no news: neither pushed nor
-`/api/latest`'s (#1042). The `Pusher` thread (on each change, and every `PUSH_DELAY`/2) pushes each device news no page
+`/api/latest`'s (#1042), nor counted in the page's unread (`forUser`, #1128). The `Pusher` thread (on each change, and every `PUSH_DELAY`/2) pushes each device news no page
 showed within `PUSH_DELAY` 10 s and under `PUSH_WINDOW` 15 min old (never a backlog; nothing worked
 out with no subscriber; seen.jsonl read on incrementally, `_seen_update`, #456), marking `push` per
 device. Transient failures (`_transient`: unreached, 429, 5xx) retry after `PUSH_RETRY` 30 s (#86);
@@ -6057,7 +6060,8 @@ runner on real OpenCode (`wb start --model cap`): argv, `run --format json` even
 and Chromium (`$CHROMIUM`, `/usr/bin/chromium`, else Playwright's) as a Pixel 7: sends land exactly once through
 outages, reloads and a SIGSTOP past the 40 s watchdog; cards, plans, settings, install over https, `/api/seen` and
 `/api/active` only while in use, notices, shot pairs, listen's shortlist, the keyboard, uploads, an agent's message
-shown with its name and its reply through `/api/wait`, its state without the user's, a dialog for it saying so on the
+shown with its name and its reply through `/api/wait`, that reply named `Claude to <agent>` and
+never counted unread (#1128), its state without the user's, a dialog for it saying so on the
 card and in the push (#1042), a 25-task backlog's strip at most three lines on a phone, the queued counted apart
 (#1097); and `sw.js` in a node `vm` (`swSays`) for a push's text.
 `WebChat` runs the agents' client, `skill/agents/claude-workbench/scripts/ask_claude.py`, against its server with a

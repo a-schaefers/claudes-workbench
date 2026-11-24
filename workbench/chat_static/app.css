@@ -123,6 +123,9 @@ main { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow
   white-space: pre-wrap; box-shadow: var(--shadow);
 }
 .agent .agent-name { font-weight: 600; color: var(--fg); }
+/* Claude's reply to an agent alone (#1128): Claude's, so on Claude's side, but not to the user */
+.claude.to-agent .bubble { background: var(--panel); border-color: var(--line); }
+.claude.to-agent .agent-name { font-weight: 600; color: var(--fg); }
 /* a dialog waiting in the terminal (#959): said, not asked, so no card and no buttons */
 .row.notice { align-items: center; }
 .notice .bubble {

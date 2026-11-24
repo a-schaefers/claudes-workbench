@@ -209,6 +209,11 @@
     return [...state.messages, ...asks].sort((x, y) => x.ts - y.ts).concat(pending)
   }
 
+  // A reply Claude wrote to agents alone (`to` without "user", #1042) is no news for the user, as
+  // the server keeps it from their pushes (chat._for_user): it read as a reply to them, counted
+  // in the tab's unread, with no addressee (#1128, 2026-11-23)
+  const forUser = m => !Array.isArray(m.to) || !m.to.length || m.to.includes('user')
+
   function metaFor(m) {
     const meta = document.createElement('div'); meta.className = 'meta'
     if (m.ask) {
@@ -228,7 +233,8 @@
     }
     if (m.role === 'agent') return agentMeta(meta, m)
     if (m.from === 'claude') {
-      meta.append(span('', 'Claude · ' + clock(m.ts) + ' · '))
+      if (forUser(m)) meta.append(span('', 'Claude · ' + clock(m.ts) + ' · '))
+      else meta.append(span('', 'Claude to '), span('agent-name', m.to.join(', ')), span('', ' · ' + clock(m.ts) + ' · '))
       const c = document.createElement('button'); c.textContent = 'copy'
       c.onclick = async () => {
         c.textContent = await copyText(m.text) ? 'copied' : 'copy failed'
@@ -339,7 +345,7 @@
         nodes.set(w.key, el)
       }
       if (w.m) {
-        el.className = `row ${w.m.role === 'agent' ? 'agent' : w.m.from}${w.same ? ' same' : ''}${w.m.local ? ' pending' : ''}${w.m.error ? ' failed' : ''}${w.m.ask && w.m.ask.answer ? ' done' : ''}`
+        el.className = `row ${w.m.role === 'agent' ? 'agent' : w.m.from}${w.m.from === 'claude' && !forUser(w.m) ? ' to-agent' : ''}${w.same ? ' same' : ''}${w.m.local ? ' pending' : ''}${w.m.error ? ' failed' : ''}${w.m.ask && w.m.ask.answer ? ' done' : ''}`
         el.querySelector('.meta').replaceWith(metaFor(w.m))
       }
       if (anchor.nextSibling !== el) anchor.after(el)
@@ -571,7 +577,7 @@
     if (m.files && m.files.length) row.append(makeFiles(m.files))
     if (m.from === 'user' || m.role === 'agent') b.textContent = m.text
     else if (seen.has(m.id) || firstVisit || document.hidden || reduced.matches) {
-      if (!seen.has(m.id) && !firstVisit && document.hidden) { unread++; document.title = `(${unread}) Workbench` }
+      if (!seen.has(m.id) && !firstVisit && document.hidden && forUser(m)) { unread++; document.title = `(${unread}) Workbench` }
       rich(b, m.text); seen.add(m.id); save(K.seen, [...seen].slice(-500))
     } else {
       b.classList.add('flowing'); flows.set(m.id, { text: m.text, shown: 0, el: b })
