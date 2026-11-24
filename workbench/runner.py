@@ -36,7 +36,6 @@ from . import (ask_mcp, context, gitguard, gitops, hardware, keyhole, lane, less
                routes, skills, stats, store, tuning)
 from . import meter
 from . import privacy
-from . import routes  # the Agents switch, before each API round (#1213)
 from .events import ANYWHERE, EDIT_TOOLS, StuckDetector, compaction_failed, normalize, shell_names, written
 from .watch import Watcher
 
