@@ -2338,6 +2338,79 @@ class Lifecycle(Base):
                       err.getvalue())
         self.assertEqual(self.branch("delegate/t-fix"), t.spec["base"])
 
+    def test_wb_next_refuses_a_file_claude_wrote_under_an_ignored_path_until_include(self):
+        # #1179's review (2026-11-24): wb next commits the step as accept does, so a review fix
+        # Claude wrote under lib/ was dropped from the step's commit unless wb next read it too
+        self.ignore_lib()
+        self.start("t-nx", "ok", "--test", TEST_CMD)
+        wait_phase("t-nx", {"review"})
+        t = store.Task("t-nx")
+        (t.worktree / "lib").mkdir()
+        (t.worktree / "lib" / "fix.py").write_text("FIX = 1\n")
+        (t.worktree / "app.py").write_text("from lib.fix import FIX\n")
+        nxt = Path(self.tmp.name) / "step2.md"
+        nxt.write_text("Step two: print FIX.\n")
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("next", "t-nx", "--spec", str(nxt), "-m", "step1")
+        self.assertEqual(e.exception.code, 1)
+        self.assertIn("not committed: git ignores files written in the worktree (lib/fix.py)", err.getvalue())
+        spawned.assert_not_called()
+        self.assertEqual(self.branch("delegate/t-nx"), t.spec["base"])       # nothing committed
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb("next", "t-nx", "--spec", str(nxt), "-m", "step1", "--include")
+        spawned.assert_called_once()
+        tree = subprocess.run(["git", "-C", str(t.worktree), "ls-tree", "-r", "--name-only", "HEAD"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertIn("lib/fix.py", tree)
+        self.assertIn("app.py", tree)
+
+    def test_a_file_claude_writes_under_an_ignored_path_after_taking_over_a_running_task_is_refused_at_accept(self):
+        # #1179's review (2026-11-24): every takeover test took over at review, whose status
+        # write marks hands_off_at itself; a takeover mid-round relies on the stop's mark
+        # (cli._stop_runner, the runner's exit), and without it the file was lost silently
+        self.ignore_lib()
+        self.start("t-hot", "slow", "--test", TEST_CMD)
+        running("t-hot")
+        t = store.Task("t-hot")
+        deadline = time.time() + 15
+        while not t.status.get("session"):                   # the agent is at work
+            self.assertLess(time.time(), deadline, t.status)
+            time.sleep(POLL)
+        self.assertIsNone(t.status.get("hands_off_at"))       # the agent's now
+        run_wb("takeover", "t-hot")
+        self.assertTrue(t.status.get("hands_off_at"), t.status)
+        (t.worktree / "lib").mkdir()
+        (t.worktree / "lib" / "helper.py").write_text("def answer():\n    return 42\n")
+        (t.worktree / "main.py").write_text("from lib.helper import answer\nprint(answer())\n")
+        self.assertEqual(runner.hand_wrote(t), ["lib/helper.py"])
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-hot", "-m", "feat: one")
+        self.assertIn("not committed: git ignores files written in the worktree (lib/helper.py)",
+                      err.getvalue())
+        self.assertEqual(self.branch("delegate/t-hot"), t.spec["base"])       # nothing committed
+
+    def test_a_file_written_under_an_ignored_path_after_a_reaped_runner_is_claudes(self):
+        # #1179's review (2026-11-24): a runner killed without a word never reaches its own mark,
+        # so the reap marks the agent gone; unmarked, what Claude writes next was never named
+        self.ignore_lib()
+        self.start("t-reap", "hang")
+        st = running("t-reap")
+        t = store.Task("t-reap")
+        self.assertIsNone(t.status.get("hands_off_at"))
+        os.kill(st["pid"], signal.SIGKILL)
+        if sys.platform.startswith("linux"):                 # the kernel takes the agent with it
+            self.assertTrue(wait_gone(st["agent_pid"]))
+        backdate("t-reap")
+        self.assertTrue(cli.reap(t))
+        self.assertTrue(t.status.get("hands_off_at"), t.status)
+        (t.worktree / "lib").mkdir()
+        (t.worktree / "lib" / "helper.py").write_text("def answer():\n    return 42\n")
+        (t.worktree / "main.py").write_text("from lib.helper import answer\nprint(answer())\n")
+        self.assertEqual(runner.hand_wrote(t), ["lib/helper.py"])
+
     def test_diff_of_a_merged_task_hints_a_command_that_still_works(self):
         # #477 (the audit of 1.8): the hint named delegate/<task>, which the merge had deleted,
         # and git said "unknown revision"
