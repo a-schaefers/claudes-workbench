@@ -379,6 +379,10 @@ class Lifecycle(Base):
                 note = [r for r in store.notices() if r["task"] == name][-1]
                 self.assertIn(f'round 2 never reached the agent: once the model can run, wb feedback '
                               f'{name} --text "carry on" sends its prompt', note["text"])
+                # #1247 (bar loop round 5, 2026-11-24): the remedy is the notice's own text, not
+                # the failed wake's generic wb feedback or discard: a cause outside the step's
+                self.assertEqual(note["cause"], "model")
+                self.assertNotIn(note["cause"], cli.results.THE_STEP)
                 reviews = st.get("reviews", 0)
                 with mock.patch.object(cli, "spawn_runner"):
                     out = run_wb("feedback", name, "--text", "carry on")
@@ -4922,7 +4926,12 @@ class Lifecycle(Base):
         self.start("t-smudge", "ok", "--queue")
         st = wait_phase("t-smudge", {"failed"})
         self.assertIsNone(st.get("session"))
-        note = [r for r in store.notices() if r["task"] == "t-smudge"][-1]["text"]
+        notice = [r for r in store.notices() if r["task"] == "t-smudge"][-1]
+        note = notice["text"]
+        # #1247 (bar loop round 5, 2026-11-24): cause-less, the mod's wake said wb feedback, which
+        # runs no round on a worktree never made; a cause outside the step's says do as it says
+        self.assertEqual(notice["cause"], "checkout")
+        self.assertNotIn(notice["cause"], cli.results.THE_STEP)
         self.assertIn("making the worktree failed", note)
         self.assertIn("smudge filter wb failed", note)
         self.assertNotIn("Traceback", note)
@@ -5229,6 +5238,10 @@ class RepoMoved(Base):
         last = [r for r in store.notices() if r["task"] == "t-776"][-1]
         self.assertEqual(last["kind"], "failed")
         self.assertNotIn("Traceback", last["text"])
+        # #1247 (bar loop round 5, 2026-11-24): cause-less, the mod's wake said wb feedback, whose
+        # runner fails at once on the moved repo; with one outside the step it names relocate
+        self.assertEqual(last["cause"], "repo")
+        self.assertNotIn(last["cause"], cli.results.THE_STEP)
 
     def test_a_moved_repo_is_relocated_and_its_task_accepts(self):
         for name in ("t-m1", "t-m2"):
@@ -5527,6 +5540,10 @@ class WorktreeSetup(Base):
         self.assertEqual(note["kind"], "failed")
         self.assertIn("the setup command failed (exit 5)", note["text"])
         self.assertIn("NO-NETWORK", note["text"])
+        # #1247 (bar loop round 5, 2026-11-24): cause-less, the mod's wake said wb feedback; the
+        # notice's own remedy is wb resume, which sets the worktree up again
+        self.assertEqual(note["cause"], "setup")
+        self.assertNotIn(note["cause"], cli.results.THE_STEP)
         self.assertIn("NO-NETWORK", (t.dir / "setup.txt").read_text())
 
     @unittest.skipUnless(lane.abi(), "needs Landlock: without it nothing is the lane's (#773)")
@@ -24120,6 +24137,19 @@ class DiskRoom(Base):
         self.assertEqual(task.status["phase"], "failed")
         self.assertIn("the disk is full", task.status["last"])
         self.assertIn("wb resume t-full", task.status["last"])
+        # #1247 (bar loop round 5, 2026-11-24): cause-less, the mod's wake said wb feedback on a
+        # disk with no room for its round; a cause outside the step's says free some and resume
+        note = [r for r in store.notices() if r["task"] == "t-full"][-1]
+        self.assertEqual(note["cause"], "disk")
+        self.assertNotIn(note["cause"], cli.results.THE_STEP)
+        # a plain crash keeps no cause: a bug in the runner, which the failed wake's text covers
+        task.set_status(phase="review")
+        with mock.patch.object(sys, "argv", ["runner", "t-full"]), \
+                mock.patch.object(runner, "drive", side_effect=RuntimeError("a bug")):
+            runner.main()
+        note = [r for r in store.notices() if r["task"] == "t-full"][-1]
+        self.assertIn("the runner crashed", note["text"])
+        self.assertNotIn("cause", note)
         task.set_status(phase="review")
         before, out = task.status, io.StringIO()
         with redirect_stdout(out), mock.patch.object(sys, "argv", ["runner", "t-full"]), \
@@ -38563,6 +38593,11 @@ class RoleResolution(Base):
         self.assertEqual(rounds, [])
         note = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r.get("task") == "t-left"][-1]
         self.assertEqual(note["text"], line)
+        # #1247 (bar loop round 5, 2026-11-24): cause-less, the mod's wake ended with the failed
+        # one's "wb feedback … or wb discard", refused above; a cause outside the step's says
+        # "do as the notice says" (register.test.tsx's #1247 test)
+        self.assertEqual(note["cause"], "catalog")
+        self.assertNotIn(note["cause"], cli.results.THE_STEP)
 
     def test_a_catalog_that_cant_be_read_never_reads_as_the_model_having_left(self):
         # #1016's review: a failed read lists nothing (models.hosted is {}), and the task was

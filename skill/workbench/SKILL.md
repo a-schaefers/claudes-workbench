@@ -503,6 +503,7 @@ coding choice is the user's (`wb coding`), never changed by a check.
 - **stuck / failed** — `wb log <name> -n 30` if the report isn't enough; then feedback that unblocks
   it, or discard. Past step 1, discard drops only this step: the steps `wb next` committed stay on
   the branch, and the report says how to accept them instead. A failed round's edits so far stay in the worktree (`wb resume` carries on). A setup or load failure before the agent ran: fix it, then `wb resume <name>`; one later ("round N never reached the agent"): fix it, then `wb feedback <name> --text "carry on"`, which sends round N's prompt first.
+  A wake saying `(not its agent's doing)` (a model gone from OpenCode's catalog, a moved repo, a full disk…): do what the notice names; `wb feedback` only when it names it.
   A `rate_limited`, `outage`, `quota`, `auth` or `refused` stop is the API provider's, not the
   agent's (the report says "the provider's stop"): tell the user so, and its remedy (wait, top
   up, or /connect the key again), then `wb feedback <name> --text "carry on"` once it allows (no review round counted);

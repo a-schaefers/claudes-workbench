@@ -167,7 +167,7 @@ model's `provider`, `thinking`, `said`; a task from before #1016 has none, and r
 a 1.91 task on an opted-in `:cloud` model ran as API yet was recorded as GPU): feedback, next and resume never resolve again, so a role
 changed mid-task applies to the next new task only. **A model gone from the catalog mid-task**:
 the runner fails an API task whose `models.resolve` raises (`runner._left_catalog`, `infra`
-"model", before any round) with `runner.left_catalog`'s line, `task <t>: <id> left OpenCode's
+"model", before any round, `cause` `catalog`, #1247) with `runner.left_catalog`'s line, `task <t>: <id> left OpenCode's
 catalog: workbench never switches a task's model. wb takeover <t> to finish it, or wb discard <t>`
 (a bare KeyError said `could not load <id>: '<id>'`), and `wb feedback`, `next` and `resume` exit 3
 with it first (`cli._model_still_listed`, which also refuses at the day cap, *Spend*), before any round is written. A catalog whose read failed
@@ -848,7 +848,13 @@ never discard it; it once ended with the stuck wake's "Steer it … or wb discar
 notice (`runner._local_only_stop`, #1215) wakes as `was stopped: its repo became local-only` (`LOCAL_ONLY_HEADLINE`,
 the toast's too) and ends with `LOCAL_ONLY_NEXT`: tell the user, then `wb takeover` or `wb discard` as they choose,
 since wb feedback and resume are refused while the repo stays local-only and only the user lifts it; it once ended with
-the stuck wake's feedback line, which exit 3 refused (#1232).
+the stuck wake's feedback line, which exit 3 refused (#1232). Any other `cause` outside `results.THE_STEP`
+(`outsideTheStep`, the same allowlist: `catalog`, `repo`, `checkout`, `setup`, `model`, `disk`, `server`, a lone `died`)
+wakes as `failed (not its agent's doing)` or `was stopped (not its agent's doing)` (`OUTSIDE_HEADLINE`, the toast's too)
+and ends with `OUTSIDE_NEXT`: do what the notice names, `wb feedback` only when it names it, else `--text "carry on"` once
+the cause is gone. A model gone from the catalog and a moved repo woke with the failed wake's feedback line, which exit 3
+refused or a runner that failed at once followed (#1247), so every such stop's notice names its own remedy and carries
+its cause; one with a dedicated text (`spend`, `provider`, `local_only`) or a batch (`tasks`) keeps that.
 
 **The check-in at half** (`CHECKIN_SHARE` 0.5): a priced row that leaves today at or past half the
 cap, with no `checkin` row today, appends one (under `spend-api.jsonl.checkin.lock`, so tasks in
@@ -2765,7 +2771,10 @@ keyhole's `setup`, this machine's, #1080), `spend` (the day's API spend
 cap, #1019: `runner.SPEND`; Agents on GPU, `guard` `agents`, #1213), `updated`
 (`runner._updated`), `opencode` (`runner.opencode_moved`), `local_only` (an API task's repo marked local-only since it started:
 `runner.LOCAL_ONLY`, #1215), `signal` (`SIGNAL_STOP`), `died`
-(`reap`), `update` (`wb update --stop`). `tasks` names a batch (restart, shutdown, `wb update
+(`reap`), `update` (`wb update --stop`). A failure whose text names its own remedy has a cause too, with no round:
+`checkout` (`_checkout_failed`), `setup` (`_prepare`), `repo` (`_repo_gone`), `catalog` (`_left_catalog`, both of
+`left_catalog`'s lines), `model` (`_load_failed`, not `Damaged`), `disk` (the crash handler's full disk; a crash has
+none), so the mod's wake is `OUTSIDE_NEXT`'s (#1247). `tasks` names a batch (restart, shutdown, `wb update
 --stop`), or the one task `_updated` or `opencode_moved` stopped, so its wake is an interruption's
 (`BATCH_NEXT`, #1176). `wb` itself writes only `reap`'s `failed` and `cli._stop_for_update`'s `stuck`, one per
 owner (#694). The file is out of the agent's lane (2026-11-16 audit: it could forge or wipe wakes).
@@ -2788,7 +2797,7 @@ A batch's other tasks are acked up to the row's stamp as written, never below th
   (`session.send`, `MIDTURN_NOTE`); if refused and then closed with `NO_ANSWER`, it wakes Claude
   after the turn with `MISSED_NOTE` (#542). Otherwise the mod writes `acked`, toasts, and submits
   `[workbench] Task <n> <headline>.`, the text and the next commands (`NEXT[kind]` in
-  `register.tsx`; a question names `wb answer <n> --id <id>`, a PERMISSION one its `wb allow`); a batch wakes as `[workbench] Tasks <a>, <b> were interrupted.` with
+  `register.tsx`; a `cause` outside the step's, `OUTSIDE_NEXT`, #1247; a question names `wb answer <n> --id <id>`, a PERMISSION one its `wb allow`); a batch wakes as `[workbench] Tasks <a>, <b> were interrupted.` with
   `BATCH_NEXT` (#544). A prompt the engine drops puts `acked` back (unless something acted since)
   and the safety net retries.
 - **Acting acknowledges.** `feedback`, `next`, `answer`, `allow`, `note`, `resume`, `takeover`,
@@ -5025,7 +5034,7 @@ effect's hit came 0.8-1.45 s in (the skill says to trim the lead); ACE-Step peak
   A task outlives its checkout (#498): repo-level git runs where `gitops.repo_of` says, task.json
   `repo` while it is a checkout of the repository, else the main worktree (from task.json
   `git_common`). A git dir gone (the repo moved): `_pinned`, accept (`cli._repo`), feedback, next,
-  resume (`cli._worktree_problem`) and the runner (`runner._repo_gone`) say "the repo moved or was
+  resume (`cli._worktree_problem`) and the runner (`runner._repo_gone`, a notice with `cause` `repo`, #1247) say "the repo moved or was
   deleted … wb relocate <task> --repo <its new path>" before changing anything; the shim and lane
   (`context.repo_dirs`, #776) and `wb bench add` (`bench._repo`, #909; a case's siblings from
   case.json `checkout`) follow `repo_of` too; commands.json `repos` matches a linked worktree by git
@@ -7301,7 +7310,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   table and the round report's `agent tokens` (an API task's) together. `WbTop`'s type is unchanged (the API fields are optional keys of `running` rows): `top-1` stays.
 - **Which session a task is** → the mod's `mine` and `cli._scope`: the same rule, the home-or-`/` exception included;
   `scope()` passes every id.
-- **A notice kind or its text** → the mod's `HEADLINE`, `NEXT` (a `cause` `provider` notice: `PROVIDER_HEADLINE`, `PROVIDER_NEXT`; `local_only`, `runner.LOCAL_ONLY` ↔ `LOCAL_ONLY_HEADLINE`, `LOCAL_ONLY_NEXT` ↔ `privacy.since_start_line`, #1232), both still-true rules (`_ack_all`'s, the mod's), `wb wait`.
+- **A notice kind or its text** → the mod's `HEADLINE`, `NEXT` (a `cause` `provider` notice: `PROVIDER_HEADLINE`, `PROVIDER_NEXT`; `local_only`, `runner.LOCAL_ONLY` ↔ `LOCAL_ONLY_HEADLINE`, `LOCAL_ONLY_NEXT` ↔ `privacy.since_start_line`, #1232; any other `cause` outside `results.THE_STEP` ↔ the mod's `THE_STEP`, `OUTSIDE_HEADLINE`, `OUTSIDE_NEXT`, and its notice's text names its remedy, #1247), both still-true rules (`_ack_all`'s, the mod's), `wb wait`.
 - **A task.json or status key** → *Files and formats*; a results key a reader uses → `results.record` and defaults for
   old rows.
 - **The GPU admission rule** (`models.admits`, `can_share`) → the lease, `wb start`'s refusal, `cli._gpu_holders`,
