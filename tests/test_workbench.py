@@ -679,16 +679,61 @@ class Lifecycle(Base):
         # dotted name; a top-level one the spec names alone (`pytest`) is still a missing tool
         line = lambda m: {"exit": 1, "tail": f"/usr/bin/python3: No module named {m}"}  # noqa
         prompt = store.round_prompt(task, 1)
+        # as wb start writes it: the spec, then the protocol, whose acceptance line names --test's
+        # own module, which counts for nothing (#1181's second review)
+        proto = cli.PROTOCOL.format(branch="delegate/t-own", budget=0, experiment_protocol="",
+                                    test_line=cli.test_line("python3 -m elsewhere.cli tests"))
+        self.assertIn("python3 -m elsewhere.cli", proto)
         prompt.write_text("Add tool1181/__main__.py, and newpkg/cli.py as python3 -m newpkg.cli. "
-                          "Test it with pytest.\n")
+                          "Test it with pytest.\n" + proto)
         self.assertIsNone(runner.missing_command(line("tool1181"), task))
         self.assertIsNone(runner.missing_command(line("newpkg.cli"), task))
-        prompt.write_text("Wire python3 -m otherpkg.main up. Test it with pytest.\n")
+        prompt.write_text("Wire python3 -m otherpkg.main up. Test it with pytest.\n" + proto)
         self.assertIsNone(runner.missing_command(line("otherpkg.main"), task))
         self.assertEqual(runner.missing_command(line("pytest"), task),
                          "/usr/bin/python3: No module named pytest")
         self.assertEqual(runner.missing_command(line("elsewhere.cli"), task),
                          "/usr/bin/python3: No module named elsewhere.cli")
+
+    def test_a_dotted_module_the_agents_environment_lacks_checks_in_though_the_acceptance_line_names_it(self):
+        # #1181's second review (2026-11-24): own_module read the whole round 1 prompt, whose
+        # protocol says `The acceptance command is <test>`, so every dotted -m of --test was the
+        # repo's own: `Error while finding module specification for 'x.y'` never checked in, and
+        # round 1 and both auto-fix rounds ran on correct code, the issue's symptom
+        self.start("t-dot", "ok", "--test", "python3 -m nosuchtool1181.runner tests", "--auto-fix", "2",
+                   "--no-self-review")
+        st = wait_phase("t-dot", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (1, 1))
+        self.assertIn("Error while finding module specification for 'nosuchtool1181.runner'",
+                      st["base_check"]["tail"])
+        task = store.Task("t-dot")
+        self.assertIn("python3 -m nosuchtool1181.runner", store.round_prompt(task, 1).read_text())
+        self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        checkins = [r["text"] for r in store.notices() if r["task"] == "t-dot" and r["kind"] == "checkin"]
+        self.assertEqual(len(checkins), 1)
+        self.assertIn("can't run in the agent's environment", checkins[0])
+        self.assertTrue((task.round_dir(1) / "summary.md").read_text().startswith("auto-fix skipped: "))
+
+    def test_a_module_of_a_package_committed_at_the_base_is_the_repos_own_though_the_spec_names_neither(self):
+        # #1181's second review (2026-11-24): the worktree's and the base commit's package made a
+        # module the repo's own untested, for the spec named the module's file as well; here the
+        # spec names neither the file nor the dotted name, and the acceptance line counts for nothing
+        (self.repo / "pkg").mkdir()
+        (self.repo / "pkg" / "__init__.py").write_text("")
+        for a in (("add", "."), ("commit", "-qm", "pkg")):
+            subprocess.run(["git", "-C", str(self.repo), *a], check=True, capture_output=True)
+        self.spec.write_text("Give the package a command-line entry point that prints 42.\n")
+        self.start("t-pkg", "ok", "--test", "python3 -m pkg.newcli", "--auto-fix", "1",
+                   "--no-self-review")
+        st = wait_phase("t-pkg", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (1, 2))
+        self.assertFalse([r for r in store.notices() if r["task"] == "t-pkg" and r["kind"] == "checkin"])
+        task = store.Task("t-pkg")
+        self.assertIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        line = {"exit": 1, "tail": "/usr/bin/python3: No module named pkg.newcli"}
+        self.assertIsNone(runner.missing_command(line, task))
+        shutil.rmtree(task.worktree / "pkg")                 # gone from the worktree: the base's
+        self.assertIsNone(runner.missing_command(line, task))
 
     def test_a_command_not_found_reads_the_same_in_every_shell_and_a_path_is_never_a_missing_tool(self):
         # nightly run 45362198509 (2026-11-24): under WSL's Debian $SHELL is /bin/sh, dash, which

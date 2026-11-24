@@ -3036,10 +3036,15 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     return None
 
 
+# Where a prompt's spec ends and the protocol begins (cli.PROTOCOL, cli.WRITING_PROTOCOL; bench.FOLD).
+PROTOCOL_FOLD = "\n---\nHow to work"
+
+
 def own_module(task: store.Task, module: str) -> bool:
     """Whether ``module`` (`pkg.newcli`) is the repo's own code, which the step may be making:
     its top-level name a `<top>/` or `<top>.py` where the tests run, in the worktree or at the
-    base commit, or the module named in the step's spec (its file, or its dotted name). Counted
+    base commit, or the module named in the step's spec (its file, or its dotted name; the spec
+    alone, not the protocol after it, whose acceptance line names --test's own). Counted
     as a missing tool, `--test 'python3 -m pkg.newcli'` for a step adding pkg/newcli.py checked
     in before round 1 with a false "no round can fix that" (and its pip install advice), and
     skipped the agent's one auto-fix round, where a script the step makes was already left out
@@ -3058,6 +3063,10 @@ def own_module(task: store.Task, module: str) -> bool:
         spec = current_task_prompt(task)
     except OSError:
         return False
+    # the spec alone: the protocol after it names the acceptance command (cli.test_line), so
+    # every dotted `-m` of --test read as the repo's own, and a tool the agent's environment
+    # lacks never checked in nor skipped auto-fix (#1181's second review, 2026-11-24)
+    spec = re.sub(r"The acceptance command is `[^`\n]*`", "", spec.split(PROTOCOL_FOLD, 1)[0])
     path = module.replace(".", "/")
     if any(f"/{p}".endswith(f"/{path}.py") or f"/{path}/" in f"/{p}"
            for p in context.spec_paths(spec)):  # pkg/newcli.py, pkg/newcli/__main__.py

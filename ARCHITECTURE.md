@@ -1295,8 +1295,9 @@ found`, the same in every shell, nightly run 45362198509; #1152; or exit 1, the 
 for `-m` (or its `Error while finding module specification` for a dotted one's parent), not an
 import error inside the tests, nor a module of the repo's own code (`own_module`: its top-level
 name a `<top>/` or `<top>.py` where the tests run, in the worktree or at the base commit, or the
-module's file or dotted name in the spec: `python3 -m pkg.newcli` for a step adding
-`pkg/newcli.py`), which the step may make, as a script, #1181; the warning ends `GIVE_TOOL`, a
+module's file or dotted name in the spec, the spec alone, before `runner.PROTOCOL_FOLD`, never the
+protocol's acceptance line, which names --test's own `-m` and so made every dotted one the repo's:
+`python3 -m pkg.newcli` for a step adding `pkg/newcli.py`), which the step may make, as a script, #1181; the warning ends `GIVE_TOOL`, a
 module's fix the worktree's `.venv`), a note past 120 s
 (#496), not checked when the checkout failed or was `"filtered"`, else exit and tail. A passing base
 is a note, not a check-in (that cost a restart in one task of two, 2026-11-17). `--no-base-check`
@@ -1345,7 +1346,7 @@ by prefix; rewording one silently changes those:
 
 | Text | Written by | Read by |
 |---|---|---|
-| `\n---\nHow to work` (`cli.PROTOCOL`, `cli.WRITING_PROTOCOL`) | `wb start`, `wb next` | `transcript` folds it away, `bench.FOLD`, `runner.outline_section`'s split (up to `{branch}`) |
+| `\n---\nHow to work` (`cli.PROTOCOL`, `cli.WRITING_PROTOCOL`) | `wb start`, `wb next` | `transcript` folds it away, `bench.FOLD`, `runner.outline_section`'s split (up to `{branch}`), `runner.own_module` (`PROTOCOL_FOLD`: the spec before it) |
 | `Lesson:` lines in the agent's summary | the protocol asks for them | `lessons` |
 | `Review feedback from the senior reviewer` (`lessons.FEEDBACK_HEAD`) | `wb feedback` | `lessons` (feedback items), `round_asks` (stops there, but not at a round marked `resumed`, #1169), `transcript` (label) |
 | `The acceptance tests fail` | the auto-fix round | `transcript` |
