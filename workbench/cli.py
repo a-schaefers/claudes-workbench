@@ -763,7 +763,9 @@ def _fallback_start(role: str, size: str, a, repo: Path, sub: str | None, stack,
     exited 3, "wb never switches models" (the review of #1196, 2026-11-24), where waiting for a
     slot is what --queue means. A ``held`` one (rate-limited or unreachable) runs on ``m`` and
     waits it out in the round, as with no fallback: a full fallback can't take it, so it stays
-    there, where the move made a start that ran before exit 4 (the second review, 2026-11-24)."""
+    there, where the move made a start that ran before exit 4 (the second review, 2026-11-24); so
+    does a GPU fallback the GPU's holders would make it wait for (the third review). Out of credit,
+    a busy GPU is still the fallback's: cmd_start queues it (--queue) or exits 4, the line said."""
     if a.model or routed.get("via") != "api" or routed.get("busy") \
             or (routed.get("said") or "").startswith("asked for") or models.api_health(m.provider) is None:
         return ""
@@ -774,9 +776,17 @@ def _fallback_start(role: str, size: str, a, repo: Path, sub: str | None, stack,
     local = ("this task is kept local (--local-only)" if a.local_only else
              f"{repo.name} is kept local ({kept})" if (kept := privacy.local_only(repo, sub)) else "")
     got = routes.fallback_pick(doc, role, size, stack, getattr(a, "name", None), m, tokens, local)
-    if not isinstance(got, tuple) or got[0].kind != "api":
+    if not isinstance(got, tuple):
         return got
     fb = got[0]
+    if fb.kind != "api":
+        # a held start the GPU would make wait stays on ``m`` too, as a full API fallback's: the
+        # move made a start that runs with no fallback exit 4 on the GPU's holders (the third
+        # review of #1196, 2026-11-24)
+        if held and (gpu := _gpu_wait(fb, getattr(a, "name", None)))[1]:
+            return f"the {role} role's fallback {fb.id} can't take it: " + models.busy(
+                gpu[0], f"{fb.id} would wait behind {'it' if len(gpu[0]) == 1 else 'them'}")
+        return got
     if held and not _api_slots_free(fb, getattr(a, "name", None)):
         return (f"the {role} role's fallback {fb.id} can't take it: every one of "
                 f"{models.api_provider(fb)}'s {models.API_PARALLEL} slots is taken")
@@ -1518,6 +1528,7 @@ def cmd_start(a):
     elif waits and moved:
         print(f"note: {moved}")
     if waits and not a.queue:
+        _say(fell)  # the start was the role's GPU fallback's: a GPU Claude never picked (#1196)
         die(models.busy(held, f"{m.id} can't run beside {'it' if len(held) == 1 else 'them'}. "
                         "--queue starts it anyway, to wait behind; or do this step yourself"), 4)
 

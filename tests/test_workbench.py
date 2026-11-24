@@ -37522,6 +37522,37 @@ class Fallbacks(Base):
                       "anthropic's", out)
         self.assertNotIn(routes.FALLBACK_LINE, out)
 
+    def test_a_held_provider_whose_gpu_fallback_would_wait_starts_on_the_roles_own_model(self):
+        # the third review of #1196 (2026-11-24): moved to the GPU fallback behind a busy GPU, a
+        # start that runs with no fallback, waiting out the limit in its round, exited 4
+        self.on_api("gpu")
+        runner.models.note_api("deepseek", "rate_limited", "HTTP 429", time.time() + 60)
+        with mock.patch.object(cli, "_gpu_wait", lambda m, me=None: ({"gpu0": {"task": "other", "model": m.id}}, True)):
+            code, out, err = self.begin("t-hb", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        sp = store.Task("t-hb").spec
+        self.assertEqual((sp["model"], sp["via"]), ("deepseek/deepseek-flash", "api"))
+        self.assertNotIn("fallback", sp)
+        self.assertIn("note: the trivial role's fallback ", out)
+        self.assertIn(" can't take it: the GPU is in use by other: ", out)
+        self.assertNotIn(routes.FALLBACK_LINE, out)
+
+    def test_out_of_credit_onto_a_busy_gpu_fallback_exits_4_saying_it_was_the_fallback(self):
+        # the third review of #1196 (2026-11-24): exit 4 named a GPU model Claude never picked, and
+        # not that the role was out of credit or moved; --queue still waits behind, as any GPU start
+        self.on_api("gpu")
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        with mock.patch.object(cli, "_gpu_wait", lambda m, me=None: ({"gpu0": {"task": "other", "model": m.id}}, True)):
+            code, out, err = self.begin("t-cb", "--role", "trivial")
+            self.assertEqual(code, 4, err)
+            self.assertIn("the GPU is in use by other: ", err)
+            self.assertIn("deepseek/deepseek-flash: out of credit or quota at DeepSeek", out)
+            self.assertIn(routes.FALLBACK_LINE, out)
+            self.assertFalse(store.Task("t-cb").exists)
+            code, out, err = self.begin("t-cq", "--role", "trivial", "--queue")
+        self.assertEqual(code, 0, err)
+        self.assertEqual((store.Task("t-cq").spec["via"], store.Task("t-cq").spec["fallback"]), ("gpu", True))
+
     def test_an_api_fallback_meets_the_cap_a_repo_kept_local_and_commands_jsons_standing_copy(self):
         self.on_api()
         runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")

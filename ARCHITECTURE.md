@@ -3939,7 +3939,10 @@ catalog, on another provider, able to run, within the day cap; the GPU one found
   one (`rate_limited`, `unreachable`), which with no fallback runs and waits it out in its round,
   stays on its own model instead (`note: … can't take it: every one of <provider>'s N slots is
   taken`, N `API_PARALLEL`, `_fallback_start`'s `held`), where the move made it exit 4 (the second
-  review); a fallback start says
+  review), and so does one whose GPU fallback the GPU's holders would make wait (`_gpu_wait`: `note:
+  … can't take it: the GPU is in use by …`, the third review); a start out of credit is the GPU
+  fallback's even then, which `--queue` queues behind the holders and which without it exits 4, the
+  fallback line printed first (it names a GPU model Claude never picked); a fallback start says
   `<id>: <why>: on the role's fallback, as you set (<fallback>)` (`routes.FALLBACK_LINE`) under its
   model line (`… · trivial role's fallback, set by you MM-DD · …`, `routes.said_part`); task.json gets
   `fallback: true` and `fallback_from` (`routes.fallback_routed`, through `cli._routed_keys`), its
@@ -6859,8 +6862,8 @@ one with none, and new backends on a busy role count as newly sent (`routes._bus
 goes to API; at `wb start` a provider marked out of credit starts the API fallback (task.json `fallback`, the line, the
 where-note, the results row) and a held one the GPU fallback, a fallback that can't take it (out of credit too, the
 cap, a repo kept local, commands.json's standing copy) or none leaves the start as before, a busy-routed start and a
-`--model` never move, and one with its slots full queues with `--queue` and exits 4 without (the fallback line said),
-or for a held provider leaves the start on the role's model; in the runner a `quota`
+`--model` never move, and one with its slots full, or a GPU fallback with the GPU busy, queues with `--queue` and
+exits 4 without (the fallback line said), or for a held provider leaves the start on the role's model; in the runner a `quota`
 round (the fake's `WB_FAKE_API`) moves to an API fallback (each keyhole one model, a fresh session that is no
 overflow, the report's line, the fallback's own catalog), a round held again after its revive to the GPU fallback, a
 provider marked out of credit after the start moves before round 1 (no handoff), while it waits for its provider
