@@ -5420,9 +5420,17 @@ def _model_price(mid: str, inp, out, read, write, clear: bool = False) -> None:
     cache = {k: v for k, v in (("read", read), ("write", write)) if v is not None}
     row = {"input": inp, "output": out, **({"cache": cache} if cache else {})}
     models.set_override(mid, "cost", [row])
+    # a cache price left out is the catalog's ratio to input, at theirs (models.own_cache: priced
+    # as input, cache reads booked a task at 18x its bill, #1155, 2026-11-24); said, so it's seen
+    catalog = m.extra.get("catalog_cost") if models.own_price(m) else m.config.get("cost")
+    priced = models.own_cache(row, catalog)
+    scaled = [k for k in priced if k not in cache]
     print(f"{mid}: your prices, {_per_m(inp)} in / {_per_m(out)} out"
-          + "".join(f" / {_per_m(v)} cache {k}" for k, v in cache.items())
-          + " per 1M tokens; its costs say \"your prices\" from its next task (--clear: the catalog's)")
+          + "".join(f" / {_per_m(priced[k])} cache {k}" for k in ("read", "write") if k in priced)
+          + " per 1M tokens"
+          + (f" (cache {' and '.join(scaled)} at the catalog's ratio to input: "
+             + ", ".join(f"--cache-{k}" for k in scaled) + " to set)" if scaled else "")
+          + "; its costs say \"your prices\" from its next task (--clear: the catalog's)")
 
 
 def _api_id(model_id: str) -> bool:

@@ -639,4 +639,5 @@ week's total and its score out of 100 when the user asks what it's saving; `wb s
 score is the GPU's alone; `wb savings --api` gives what API tasks cost: the closed ones by
 provider, and what was spent (open tasks too) by day, as the day cap counts it. Only when the user
 compares a figure with their provider's bill, or asks why they differ: `wb model price <id> --input X
---output Y` sets the prices they are billed (`--clear` undoes it); never suggest it otherwise.
+--output Y [--cache-read Z] [--cache-write W]` sets the prices they are billed (a cache price left
+out is the catalog's ratio to input) (`--clear` undoes it); never suggest it otherwise.

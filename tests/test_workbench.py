@@ -32161,7 +32161,8 @@ class ApiSpend(Base):
             return m, row, line, runner._spend_part(task)
 
         out = run_wb("model", "price", SPEND_FLASH, "--input", "0.098", "--output", "0.294", "--cache-read", "0.00294")
-        self.assertIn("your prices, $0.098 in / $0.294 out / $0.00294 cache read per 1M tokens", out)
+        self.assertIn("your prices, $0.098 in / $0.294 out / $0.00294 cache read / $0 cache write per 1M "
+                      "tokens (cache write at the catalog's ratio to input: --cache-write to set)", out)
         m, row, line, report = task_at("t-mine", 0.392)
         self.assertEqual((round(row["usd"], 9), row.get("prices")), (0.392, "yours"))
         self.assertEqual(line, "paid meterco $0.39 (meterco/flash-1, your prices)")
@@ -32171,7 +32172,8 @@ class ApiSpend(Base):
         runner.CURRENT["keyhole"] = types.SimpleNamespace(task=store.Task("t-mine"), model=m)
         catalog = json.loads(runner.write_catalog(store.Task("t-mine")).read_text())  # OPENCODE_MODELS_PATH's
         self.assertEqual(catalog["meterco"]["models"]["flash-1"]["cost"]["text"],
-                         {"input": {"price": 0.098, "cache": {"read": 0.00294}}, "output": {"price": 0.294}})
+                         {"input": {"price": 0.098, "cache": {"read": 0.00294, "write": 0.0}},
+                          "output": {"price": 0.294}})
 
         self.assertIn("back to the catalog's prices", run_wb("model", "price", SPEND_FLASH, "--clear"))
         m, row, line, report = task_at("t-est", 0.8)
@@ -32186,6 +32188,31 @@ class ApiSpend(Base):
         self.assertIn("by day: ", savings.api_report(week, "week", None, savings.spent()))
         self.assertIn("≈$1.19 today (the day ledger: open tasks and bench replays in, catalog prices)",
                       savings.api_report(week, "week", None, savings.spent()))
+
+    def test_prices_set_with_only_input_and_output_meter_cache_reads_at_the_catalogs_ratio_to_input(self):
+        # #1155 (2026-11-24): `wb model price <id> --input X --output Y`, the skill's form, priced
+        # every cache read as input: a DeepInfra task's real split (616K in, 35.8M cache reads,
+        # 129K out) booked $3.61, exact, where its bill was $0.20
+        from workbench import models, results, savings
+        usage = {"prompt_tokens": 615959 + 35793792, "completion_tokens": 129380,
+                 "prompt_tokens_details": {"cached_tokens": 35793792}}
+        out = run_wb("model", "price", SPEND_FLASH, "--input", "0.098", "--output", "0.294")
+        self.assertIn("your prices, $0.098 in / $0.294 out / $0.00294 cache read / $0 cache write per 1M tokens "
+                      "(cache read and write at the catalog's ratio to input: --cache-read, --cache-write to set)", out)
+        self.assertEqual(models._overrides()[SPEND_FLASH]["cost"], [{"input": 0.098, "output": 0.294}])
+        task = self.api_task("t-io", SPEND_FLASH)
+        m = models.lookup(SPEND_FLASH)
+        mt = self.meter.for_task(task, m)
+        mt.begin(1)
+        mt.on_usage(usage)
+        self.assertAlmostEqual(mt.total, (615959 * 0.098 + 35793792 * 0.00294 + 129380 * 0.294) / 1e6, places=6)
+        self.assertEqual(savings.api_line({"kind": "api", "provider": "meterco", "model": SPEND_FLASH,
+                                           "api": results.api_usage(task)}),
+                         "paid meterco $0.20 (meterco/flash-1, your prices)")
+        runner.CURRENT["keyhole"] = types.SimpleNamespace(task=task, model=m)
+        catalog = json.loads(runner.write_catalog(task).read_text())  # OpenCode's estimate agrees
+        self.assertEqual(catalog["meterco"]["models"]["flash-1"]["cost"]["text"]["input"]["cache"],
+                         {"read": 0.00294, "write": 0.0})
 
     def test_prices_all_zero_are_refused_and_a_plan_models_listing_ends_at_its_price(self):
         # #1135's review (2026-11-23): `--input 0 --output 0` made a priced model meter.is_free, so
