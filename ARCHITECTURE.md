@@ -5187,7 +5187,8 @@ reloads (`reloadOnce`, once a minute). Use counts (`reportActive`, #959): on scr
 `wb-chat-files`, bytes in IndexedDB (`wb-chat`, `files`) until the message lands; `pump` uploads one
 at a time (XHR; `STALL_MS` 30 s without progress retries the same id); edit restores the files, the
 `about` (`setAbout`, #843) and the words before the box's (#958); thumbnails load near view
-(`whenNear`, #754); `sweepSoon` revokes unused object URLs (#746). The receipt texts, dialog cards
+(`whenNear`, #754), and before the server's thread is in only from this browser's bytes: the rest wait
+in `nearLater`, judged again by `nearAgain` where that thread put them (a photo the saved thread showed was fetched, 2026-11-24); `sweepSoon` revokes unused object URLs (#746). The receipt texts, dialog cards
 (`makeAsk`), notices (`makeNotice`) and the gear's sections (`#away-when` states the away rule
 above; `drawSaved` shows no currency sign, as `wb savings`, #845, and after it `apiSaved`'s `API
 models: 6 tasks, ≈$1.27 (DeepSeek ≈$0.84, Anthropic ≈$0.43; catalog prices).`, or that alone, #1022, #1135) are in `app.js`. Over plain HTTP
@@ -5494,8 +5495,9 @@ agent <name>`, and writes no `away.json` (an agent never makes the user away); a
 `[agent ` is never the user typing (`prompt.submit`). Each message given to Claude goes into
 `mem.chatTurn` with its `grace`, as `mem.chatOwed`; at each main turn's end (`chatTurnEnd`) those
 at 0 are recorded with `wb chat ended <ids> --by <key>`, and with none, a turn in which
-`chat/messages.jsonl` grew (stat at `turn.start`, `chatTurnStart`; a reply, maybe a later report)
-is recorded with no ids. Nothing while the chat is off.
+`chat/messages.jsonl` grew (stat at `turn.start`, `chatTurnStart`, a promise the end awaits: a
+turn ending before its stat came back once read the size from the turn before, 2026-11-24; a
+reply, maybe a later report) is recorded with no ids. Nothing while the chat is off.
 
 Dialogs (`classic.PermissionRequest`; the terminal's dialog stands meanwhile and the hook's answer
 settles it), unless a settings hook decided or the session isn't delegating with the chat on. At
@@ -5644,7 +5646,8 @@ dialog's, the pane's, a terminal's or a hand edit, reaches the conversation as o
 adds none): `Roles (the user's, wb route): <summary>. Day cap $5. Never pass --model for an API model or change a role without the user's yes (the mod asks them in a dialog);
 recommend only.` (`No day cap yet.` without one). The `/workbench` skill's text carries it the same way (`unsaid`).
 
-**Tests** (`register.test.tsx`: an in-memory filesystem, a fake `wb events`). Not covered: check-in
+**Tests** (`register.test.tsx`: an in-memory filesystem, a fake `wb events`; `statHeld`, a path
+whose stat comes back late). Not covered: check-in
 wakes, the one-hour cutoff, scrolling, `WB_COMPACT_AT`.
 
 **Troubleshooting.** With `wb` missing from Claude Code's PATH or failing, the mod toasts once
