@@ -102,7 +102,7 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
 ## How a task runs
 Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change must not break:
 1. `wb start` resolves the role (`--role`, else from `--size`; unset: GPU): GPU through the router, API to the
-   role's model, never the other side (exit 3). It checks (a committed CLAUDE.md, the model, GPU room, or for an API model a free
+   role's model, never the other side (exit 3) but the role's `fallback`, the user's (#1196). It checks (a committed CLAUDE.md, the model, GPU room, or for an API model a free
    provider slot of `API_PARALLEL`: exit 4 unless `--queue`),
    writes round 1's prompt (spec plus `PROTOCOL`), spawns the runner and returns at once:
    anything slow (checkout, setup, base check) is the runner's, as Claude's Bash stops at 2 min.
@@ -113,7 +113,7 @@ Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change mus
    `rules/<task>/opencode.json`. Guards stop a stuck agent (an API task at the day cap too:
    `spend`, in the round and before each next one); an API provider's rate limit,
    outage or queue pauses their clocks, and held 10 minutes stops the round as `rate_limited`
-   (or `outage`), the provider's and never silence, run again once; `wb steer` queues a note.
+   (or `outage`), the provider's and never silence, run again once, then (or on `quota`) the role's fallback; `wb steer` queues a note.
 3. `--test` runs in the agent's lane, environment and shell (its code gains no rights when
    tested); failures go back up to `--auto-fix` times (2, on API 1) without waking Claude. At `fresh_at` a
    fresh session takes over; OpenCode's compaction is a backstop just past it, never ahead.

@@ -13,7 +13,11 @@ $WB_HOME, one-shot, fresh for ROUTE_OK_SECS). A GPU model pin needs no dialog; t
 every change as a [workbench] row. A role's `said`/`by`/`ts` record its last gated change (who
 sent its code where), `gpu_by`/`gpu_ts` its last change that needed no yes: a pin never rewrites
 the record of the user's yes (2026-11-23 review). The change line is the dialog's text: the mod shows what
-`wb route --dry-run --json` prints, so both come from `change` here (Couplings)."""
+`wb route --dry-run --json` prints, so both come from `change` here (Couplings).
+
+A role's `fallback` (#1196, the user's own, none by default): an exact API id on another provider,
+or `gpu` (the role's GPU side), which a task of the role on its API model moves to when that
+provider is down or out of credit: at wb start, and once in the runner. Claude never sets one."""
 from __future__ import annotations
 
 import copy
@@ -47,7 +51,8 @@ AGENTS_STOPS = "an API task already started stops before its next round"  # the 
 AGENTS_BACK = "Ask the user: Agents back to Both or API (wb route all both)"
 # When the GPU is busy (#1023, the owner's opt-in): routes.json `busy`, missing is "wait" (queue, or
 # exit 4, as before); "api" starts a role that has an API model on it instead, at wb start only (a
-# running task never moves, nor does anything go from API to the GPU). Agents GPU overrides it.
+# running task never moves, nor does anything go from API to the GPU, but by the role's fallback,
+# #1196). Agents GPU overrides it.
 BUSY = ("wait", "api")
 BUSY_LINE = "GPU busy: on the role's API model, as you set"  # wb start's line when it applies
 THINKING = ("off", "on")
@@ -60,6 +65,12 @@ ROUTE_OK = "route-ok.json"  # $WB_HOME/route-ok.json: the mod's dialog approved 
 ROUTE_OK_SECS = 120  # the dialog's yes is for the call it let through, run at once, as SEND_OK_SECS
 NO_CAP = (f"no day cap yet: ask the user for one (suggest ${DAY_USD_SUGGEST}), then add "
           f"--day-usd {DAY_USD_SUGGEST}")
+# A role's fallback (#1196): `wb route <role> fallback <id>|gpu|none`. `gpu` is the role's GPU side
+# (its pin, else the router's pick): it spends nothing and sends nothing off the machine, so it
+# needs no yes; an API id does, and a day cap. None is set by default, and Claude never sets one.
+FALLBACK_GPU = "gpu"
+FALLBACK_OFF = "none"
+FALLBACK_LINE = "on the role's fallback, as you set"  # wb start's line and the move's (#1196)
 
 
 class RoutesError(RuntimeError):
@@ -122,6 +133,11 @@ def normalize(doc) -> dict:
             if not isinstance(order, list) or not all(isinstance(b, str) and b.strip() for b in order):
                 raise RoutesError(f"{r}'s order is {order!r}, not a list of backend names")
             row["order"] = list(order)
+        # the role's fallback (#1196): an API id, or gpu (the role's GPU side)
+        if e.get("fallback") is not None:
+            if not isinstance(e["fallback"], str) or not e["fallback"].strip() or e["fallback"] == FALLBACK_OFF:
+                raise RoutesError(f"{r}'s fallback is {e['fallback']!r}, not an API model id or gpu")
+            row["fallback"] = e["fallback"]
         for key in STAMPS:
             if key in e:
                 row[key] = e[key]
@@ -163,6 +179,23 @@ def busy_api(doc: dict, role: str) -> str | None:
 def busy_api_any(doc: dict) -> bool:
     """Whether the busy opt-in can send any role to API now (busy_api for some role)."""
     return any(busy_api(doc, r) for r in ROLES)
+
+
+def fallback_of(doc: dict, role: str) -> str | None:
+    """``role``'s fallback as it applies now (#1196): its `fallback`, an API id or FALLBACK_GPU;
+    None when it has none, or it is `gpu` while Agents is API (every role on its API model). It
+    applies only to a task on the role's own API model: never a `--model` one, nor one the busy
+    opt-in sent there (the GPU, its own side, is what that one waits for)."""
+    fb = doc["roles"][role].get("fallback")
+    if not fb or (fb == FALLBACK_GPU and doc.get("use") == "api"):
+        return None
+    return fb
+
+
+def fallback_name(fb: str, gpu: str = AUTO) -> str:
+    """A fallback as the change line and the show say it: `GPU (the router's pick)`, `GPU (<id>)`,
+    or the API id."""
+    return f"GPU ({_gpu_name(gpu)})" if fb == FALLBACK_GPU else fb
 
 
 def _busy_newly(doc: dict, new: dict) -> list:
@@ -214,6 +247,84 @@ def busy_routed(doc: dict, role: str, m) -> dict:
             "thinking": row["thinking"], "said": row.get("said") or "", "said_ts": row.get("ts"), "busy": True,
             # an OpenRouter role's backends, as resolve's: the keyhole routes by them (wave 2's merge)
             **({"order": list(row["order"])} if row.get("order") and m.provider == OPENROUTER else {})}
+
+
+def fallback_routed(doc: dict, role: str, m, primary: str) -> dict:
+    """task.json's routing keys for a task on ``m``, the role's fallback (#1196), in place of its
+    API model ``primary``: as routes.resolve's for a role on API (on the GPU `via` and `role`),
+    with `fallback` and `fallback_from`."""
+    from . import models
+    if m.kind != "api":
+        return {"via": "gpu", "role": role, "fallback": True, "fallback_from": primary}
+    row = doc["roles"][role]
+    return {"via": "api", "role": role, "provider": m.provider, "provider_name": models.provider_name(m),
+            "thinking": row["thinking"], "said": row.get("said") or "", "said_ts": row.get("ts"),
+            "fallback": True, "fallback_from": primary}
+
+
+def fallback_pick(doc: dict, role: str, size: str, stack, name: str | None, primary, tokens: int | None = None,
+                  local: str = "") -> tuple | str:
+    """The role's fallback for a task whose API model ``primary`` can't take it now (#1196):
+    (model, state, why, routed), or the line saying why the fallback can't either ("" when the role
+    has none). ``local``: why the task's code must stay on this machine (a local-only spot), which
+    refuses an API fallback. An API fallback must be in the catalog, of kind api, on another
+    provider than ``primary``'s, able to run now and within the day cap (meter.refusal, with the
+    first request's input ``tokens``); `gpu` is the role's pin, else the router's pick, and must
+    be able to run. Shared by wb start (cli._fallback_start) and the runner (runner._fallback_move)."""
+    from . import meter, models, router  # they import more than routes needs at its import
+    fb = fallback_of(doc, role)
+    if not fb:
+        return ""
+    row = doc["roles"][role]
+    if fb == FALLBACK_GPU:
+        if row["gpu"] != AUTO:
+            try:
+                m = models.resolve(row["gpu"])
+            except KeyError:
+                return f"the {role} role's GPU fallback, its GPU model {row['gpu']}, isn't found"
+            why = f"the {role} role's GPU model (wb route)"
+        else:
+            top, why = router.choose(size, stack, name, role=role)
+            if top is None:
+                return f"the {role} role's GPU fallback has no model: {why}"
+            m = top.model
+        state = models.status(m)
+        if not state["available"]:
+            return f"the {role} role's GPU fallback {m.id} can't run: {state['why']}"
+        return m, state, f"{why} · {FALLBACK_LINE}", fallback_routed(doc, role, m, primary.id)
+    m = models.lookup(fb)
+    if m is None or m.kind != "api":
+        return f"the {role} role's fallback {fb} isn't in OpenCode's catalog now"
+    if m.provider == primary.provider:  # a hand edit's: wb route refuses one
+        return f"the {role} role's fallback {fb} is on {primary.provider} too"
+    if local:
+        return f"the {role} role's fallback {fb} is an API model, and {local}"
+    state = models.status(m)
+    if not state["available"]:
+        return f"the {role} role's fallback {fb} can't run: {state['why']}"
+    if why := meter.refusal(m, role, advice=False, tokens=meter.FIRST_TOKENS if tokens is None else tokens):
+        return f"the {role} role's fallback {fb} can't take it: {why}"
+    routed = fallback_routed(doc, role, m, primary.id)
+    return m, state, f"{routed_line(m.id, routed)} · {FALLBACK_LINE}", routed
+
+
+def _fallback_part(old: dict, row: dict, cap, who: Callable[[str], str]) -> tuple[list, bool]:
+    """A role's fallback clauses (#1196) and whether they take the user's yes: an API fallback set
+    or changed sends the role's code to its provider whenever the role's own is down or out of
+    credit, so it takes the yes and a day cap (NO_CAP); `gpu` or none sends nothing anywhere new."""
+    was, now = old.get("fallback"), row.get("fallback")
+    if was == now:
+        return [], False
+    before = fallback_name(was, old["gpu"]) if was else "none"
+    if now is None:
+        return [f"fallback {before} → none"], False
+    if now == FALLBACK_GPU:
+        return [f"fallback {before} → {fallback_name(now, row['gpu'])} when its API model's provider is down "
+                "or out of credit"], False
+    if cap is None:
+        raise RoutesError(NO_CAP)
+    return [f"fallback {before} → {now}: your code goes to {who(now)} when its API model's provider is down "
+            "or out of credit", f"thinking {row['thinking']}", f"cap {money(cap)}/day"], True
 
 
 def _busy_part(doc: dict, new: dict, cap, free: Callable[[str], bool] = lambda mid: False) -> tuple[str, bool]:
@@ -329,6 +440,9 @@ def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str],
                         f"thinking {row['thinking']}"]
             if row.get("order"):  # an OpenRouter role's backends (#1021): part of what is agreed to
                 clauses.append(f"backends {', '.join(row['order'])}")
+            if (fb := row.get("fallback")) and fb == old.get("fallback"):  # a kept one (#1196)
+                clauses.append(f"fallback {fallback_name(fb, row['gpu'])}"
+                               + (f" ({who(fb)})" if fb != FALLBACK_GPU else ""))
             if cap is not None:
                 clauses.append(f"cap {money(cap)}/day")
         elif row.get("api"):
@@ -355,7 +469,8 @@ def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str],
     if row.get("order") and old.get("order") != row["order"] and not (moved and on_api):
         clauses.append(f"backends {', '.join(old.get('order') or ['none'])} → {', '.join(row['order'])}")
         gated = True  # where the code goes, within OpenRouter (#1021)
-    return clauses, gated
+    more, g = _fallback_part(old, row, cap, who)
+    return clauses + more, gated or g
 
 
 def _goes_to(roles: list, doc: dict, who: Callable[[str], str]) -> str:
@@ -397,7 +512,7 @@ def _agents_part(doc: dict, new: dict, cap, who: Callable[[str], str],
 def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None = None,
            api: str | None = None, thinking: str | None = None, day_usd=None,
            who: Callable[[str], str] = lambda mid: mid.split("/", 1)[0], use: str | None = None,
-           order: list[str] | None = None, busy: str | None = None,
+           order: list[str] | None = None, busy: str | None = None, fallback: str | None = None,
            free: Callable[[str], bool] = lambda mid: False) -> Change:
     """What a `wb route` does to ``doc``: ``role`` one of ROLES, "all" (``use``, the Agents
     switch, and ``thinking`` only) or None (the cap alone). ``who``: an API id's provider, as the
@@ -405,7 +520,9 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
     made: `api` with no API model kept, and the first API role with no cap (NO_CAP). ``order``:
     an OpenRouter role's backends (#1021), dropped when the role's API model is another
     provider's. ``free``: whether an API id is a free model (meter.is_free): its role's line says
-    FREE_LINE, and no cap is asked while every model newly on API is free (#1193)."""
+    FREE_LINE, and no cap is asked while every model newly on API is free (#1193). ``fallback``
+    (#1196): an API id, FALLBACK_GPU, or FALLBACK_OFF to clear it; an API one that is the role's
+    own API model, on the same provider, or OpenRouter's is refused."""
     new = copy.deepcopy(doc)
     new.setdefault("use", "both")
     if day_usd is not None:
@@ -431,6 +548,12 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
             row["thinking"] = thinking
         if order is not None:
             row["order"] = list(order)
+        if fallback == FALLBACK_OFF:
+            row.pop("fallback", None)
+        elif fallback is not None:
+            row["fallback"] = fallback
+        if (fb := row.get("fallback")) and fb != FALLBACK_GPU and (fallback is not None or api is not None):
+            _fallback_check(r, fb, row.get("api"))
         if row.get("order") and str(row.get("api") or "").split("/", 1)[0] != OPENROUTER:
             row.pop("order")
         if via == "api" and not row.get("api"):
@@ -492,6 +615,21 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
     if not changed and not agents and not busy_line and cap == doc["day_usd"]:
         return Change(new, "", False, [])
     return Change(new, "; ".join(parts), gated, changed)
+
+
+def _fallback_check(r: str, fb: str, api: str | None) -> None:
+    """An API fallback wb route refuses (#1196): the role's own API model, one on its provider (a
+    provider down or out of credit stops both), or OpenRouter's (its backends are the role's own
+    model's, chosen with --order, which already fail over among themselves)."""
+    p = fb.split("/", 1)[0]
+    if p == OPENROUTER:
+        raise RoutesError(f"{fb}: an OpenRouter model can't be a fallback; an OpenRouter role's own backends "
+                          "(--order) already fail over among themselves")
+    if fb == api:
+        raise RoutesError(f"{fb} is the {r} role's own API model: a fallback is another provider's model, or gpu")
+    if api and p == api.split("/", 1)[0]:
+        raise RoutesError(f"the {r} role's fallback {fb} is on {p}, as its API model {api} is: a provider down "
+                          "or out of credit stops both, so the fallback is another provider's model, or gpu")
 
 
 def change_pairs(doc: dict, pairs: list, day_usd=None,
@@ -558,15 +696,17 @@ def summary(doc: dict) -> str:
         # an OpenRouter role's backends (`order`, #1021) are where its code goes: left out, a
         # change of them alone reached the conversation as nothing (#1126, 2026-11-23)
         backends = f", backends {', '.join(row['order'])}" if row.get("api") and row.get("order") else ""
+        # the role's fallback (#1196): where its code may go too, so a change of it alone is a row
+        fb = f", fallback {'GPU' if row['fallback'] == FALLBACK_GPU else row['fallback']}" if row.get("fallback") else ""
         if row["via"] == "api":
-            out.append(f"{r} API {row['api']}{backends}, thinking {row['thinking']}")
+            out.append(f"{r} API {row['api']}{backends}, thinking {row['thinking']}{fb}")
             continue
         text = f"{r} GPU " + ("(the router picks)" if row["gpu"] == AUTO else row["gpu"])
         if row.get("api"):
             text += f", API kept: {row['api']}{backends}"
         if row["thinking"] == "on":
             text += ", thinking on"
-        out.append(text)
+        out.append(text + fb)
     use = doc.get("use", "both")
     head = f"Agents {USE_NAMES[use]}, over each role's own: " if use != "both" else ""
     tail = "; when the GPU is busy, a role with an API model runs on it" if doc.get("busy") == "api" else ""
@@ -663,7 +803,7 @@ def said_part(routed: dict) -> str:
     said = routed.get("said") or ""
     if said.startswith("asked for"):
         return said
-    out = f"{routed.get('role')} role"
+    out = f"{routed.get('role')} role" + ("'s fallback" if routed.get("fallback") else "")
     if isinstance(ts := routed.get("said_ts"), (int, float)):
         out += f", set by you {time.strftime('%m-%d', time.localtime(ts))}"
     return out
@@ -693,7 +833,8 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
     #1104); the role's side
     (effective_via): the GPU, its pin or the router's pick (router.choose as before roles), or
     the role's API model by its exact id. No fallback in either direction: a GPU role with no
-    GPU model never tries its stored API model, and an API role that can't run never the GPU.
+    GPU model never tries its stored API model, and an API role that can't run never the GPU (the
+    user's own `fallback` is wb start's to apply, after this: cli._fallback_start, #1196).
     Either API path meets meter.refusal (no price, or today at the cap, #1019, or within one
     request at its worst of it, #1150, its input ``tokens``: round 1's, runner.first_tokens,
     #1173; None, a fresh session's least) first: the `--model` one before the dialog, the role's
