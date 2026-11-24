@@ -37,9 +37,9 @@ from its handbook and will ask (`ask_reviewer`) or say so in its summary when th
 of those; then you do it. Its hard limits: no sudo, git read-only (a `git` of workbench's own on
 its PATH; scratch repos under the temp directory or nested in the worktree, which tests make,
 stay writable), no `gh`, and no edits to CLAUDE.md, AGENTS.md or `.claude/`. The shell rules
-refuse the direct forms; behind them, where `wb doctor` reports Landlock, the kernel refuses root and writes to the repo's git,
-and no credential is in the agent's reach, so `gh` or a push gets no login. Without Landlock
-(macOS, old kernels) only the rules hold: read the report's flagged files closely and check
+refuse the direct forms; behind them, where `wb doctor` reports Landlock or Seatbelt (macOS), the kernel refuses root and writes to the repo's git,
+and no credential is in the agent's reach, so `gh` or a push gets no login. Without either
+(old kernels) only the rules hold: read the report's flagged files closely and check
 `git -C <repo> log` after a task. The rules stop mistakes, not a determined agent: the
 round report flags any of your files it changed anyway (through the shell). Talk to it like a teammate: answer its questions, send notes while
 it works, explain the why in feedback.
@@ -259,7 +259,7 @@ and a task already on API stops before its next round: wb takeover or wb discard
 only First run step 3's free try offers one, as one choice of three), and
 never pick an OpenRouter backend (`--order`) for the user: ask which. An API task's lane hides
 each registry config that holds a credential (a token, password, key; one without stays readable
-and its tool works; with no lane, as on macOS, none is hidden and there's no note); when
+and its tool works; with no lane none is hidden and there's no note); when
 `wb start`'s note says a tool stops on every run there (Maven, Gradle, dotnet, Bundler…), that
 repo's task won't build on API: tell the user, and offer the GPU role.
 Model servers (none runnable, which server, a model on another machine), updating workbench, and

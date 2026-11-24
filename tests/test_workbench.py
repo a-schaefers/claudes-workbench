@@ -11760,7 +11760,7 @@ class Lane(Base):
         os.chmod(locked, 0o700)
         with mock.patch.object(lane, "abi", lambda: 6):
             self.assertEqual(runner.lane_refused(task, out), [f"{locked}/data.db"])
-        with mock.patch.object(lane, "abi", lambda: 0):     # macOS, or no Landlock: no lane
+        with mock.patch.object(lane, "kind", lambda: None):  # no Landlock, no Seatbelt: no lane
             self.assertEqual(runner.lane_refused(task, out), [])
         if os.geteuid() == 0:
             return
@@ -12125,6 +12125,534 @@ class Lane(Base):
                              text=True, timeout=20)
         self.assertIn("NoNewPrivs:\\t1", out.stdout, out.stderr)
 
+    # macOS's lane (#1194, 2026-11-24): Seatbelt behind lane.wrap and lane.py's main, drawn from
+    # the same lists. These run anywhere (the profile is text); the last one needs a Mac
+    def seatbelt_reads(self, rules, writable, path):
+        """Whether Seatbelt would let `path` be read under `rules`: the last match wins."""
+        real, ok = os.path.realpath(path), True
+        for effect, p in [*rules, *(("allow", w) for w in writable)]:
+            p = os.path.realpath(p)
+            if real == p or real.startswith(p.rstrip("/") + "/"):
+                ok = effect == "allow"
+        return ok
+
+    def landlock_reads(self, readable, writable, path):
+        real = os.path.realpath(path)
+        return any(real == r or real.startswith(r.rstrip("/") + "/")
+                   for r in map(os.path.realpath, [*readable, *writable]))
+
+    def test_seatbelts_profile_writes_only_the_lane_and_passes_each_path_as_a_parameter(self):
+        # every path a -D parameter, so none is quoted into the profile's text, and its real
+        # path: Seatbelt matches the resolved one, and macOS's /tmp is /private/tmp
+        base = Path(self.tmp.name)
+        odd = base / 'a "quoted" dir (x)'
+        odd.mkdir()
+        link = base / "link"
+        link.symlink_to(odd)
+        hidden, kept, sock = base / "h", base / "h" / "k", base / "sock"
+        text, params = lane.profile([str(link), "/dev/null"],
+                                    [("deny", str(hidden)), ("allow", str(kept))], [str(sock)])
+        self.assertTrue(all(p.startswith("-D") for p in params))
+        values = [p[2:].split("=", 1) for p in params]
+        self.assertIn(str(odd), [v for _, v in values])
+        self.assertNotIn(str(link), [v for _, v in values])
+        self.assertNotIn("quoted", text)
+        self.assertEqual(text.count("("), text.count(")"))
+
+        def name(path):
+            return next(k for k, v in values if v == path)
+        lines = text.splitlines()
+        self.assertEqual(lines[:3], ["(version 1)", "(allow default)", "(deny file-write*)"])
+        self.assertIn(f'(subpath (param "{name(str(odd))}"))', lines[3])
+        self.assertTrue(lines[3].startswith("(allow file-write* "))
+        hide = lines.index(f'(deny file-read-data (subpath (param "{name(str(hidden))}")))')
+        keep = lines.index(f'(allow file-read-data (subpath (param "{name(str(kept))}")))')
+        self.assertLess(hide, keep)                       # the last match wins: kept is read
+        lane_read = next(i for i, ln in enumerate(lines) if ln.startswith("(allow file-read-data ")
+                         and name(str(odd)) in ln)
+        self.assertGreater(lane_read, keep)               # the lane is read, as with Landlock
+        unix = lines.index("(deny network-outbound (remote unix-socket))")
+        self.assertIn(f'"{name(str(sock))}"', lines[unix + 1])
+        self.assertIn(f'"{name("/private/var/run/mDNSResponder")}"', lines[unix + 1])  # lookups
+        for rule in ("(deny signal)", "(allow signal (target same-sandbox))",
+                     "(deny process-info*)", "(allow process-info* (target same-sandbox))",
+                     "(deny file-link)"):
+            self.assertIn(rule, lines)
+        refused = next(ln for ln in lines if ln.startswith("(deny process-exec "))
+        for prog in ("/usr/bin/sudo", "/usr/bin/su", "/usr/bin/login", "/usr/bin/open"):
+            self.assertIn(f'"{name(prog)}"', refused)
+
+    @home_outside_the_lane
+    def test_seatbelts_read_rules_hide_what_landlocks_read_lane_leaves_out(self):
+        # Seatbelt reads by a list of refusals, Landlock by one of grants: the rules are the
+        # read walk's complement, so the two lanes read the same files
+        home = self.fake_home()
+        for f in (".ssh/id_ed25519", ".config/gh/hosts.yml", ".config/tool/conf", "Documents/tax.pdf",
+                  "Library/Application Support/tool/conf", "Library/Keychains/login.keychain-db",
+                  "bin/tool", "code/other/main.py"):
+            (home / f).parent.mkdir(parents=True, exist_ok=True)
+            (home / f).write_text("x")
+        task = self.bare_task("t-1194", self.repo)
+        task.worktree.mkdir()
+        (task.worktree / "a.py").write_text("x")
+        rules, readable = context.read_rules(task), context.readable(task)
+        writable = context.writable(task)
+        self.assertTrue(rules)
+        self.assertTrue(all(e in ("deny", "allow") and os.path.isabs(p) for e, p in rules))
+        depths = [len(Path(p).parts) for _, p in rules]
+        self.assertEqual(depths, sorted(depths))          # ancestors first: each over the wider
+        files = [home / f for f in (".ssh/id_ed25519", ".config/gh/hosts.yml", ".config/tool/conf",
+                                    "Documents/tax.pdf", "Library/Application Support/tool/conf",
+                                    "Library/Keychains/login.keychain-db", "bin/tool",
+                                    "code/other/main.py")]
+        files += [task.worktree / "a.py", task.dir / "task.json", ROOT / "workbench" / "lane.py",
+                  Path(sys.executable), Path("/etc/hosts")]
+        for f in files:
+            self.assertEqual(self.seatbelt_reads(rules, writable, f),
+                             self.landlock_reads(readable, writable, f), f)
+        said = {f.relative_to(home).as_posix(): self.seatbelt_reads(rules, writable, f)
+                for f in files[:8]}
+        self.assertEqual(said, {".ssh/id_ed25519": False, ".config/gh/hosts.yml": False,
+                                ".config/tool/conf": True, "Documents/tax.pdf": False,
+                                "Library/Application Support/tool/conf": True,  # macOS's dotfiles
+                                "Library/Keychains/login.keychain-db": False, "bin/tool": True,
+                                "code/other/main.py": False})
+        self.assertTrue(self.seatbelt_reads(rules, writable, task.worktree / "a.py"))
+        self.assertTrue(self.seatbelt_reads(rules, writable, ROOT / "workbench" / "lane.py"))
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": ["*"]}))
+        self.assertIsNone(context.read_rules(task))
+
+    # #1194's review (2026-11-24): with Library readable, each of these tools' macOS logins was
+    # read while its Linux twin was hidden: each row is (macOS, Linux)
+    MAC_TWINS = [("Library/Application Support/sops/age/keys.txt", ".config/sops/age/keys.txt"),
+                 ("Library/Application Support/com.vercel.cli/auth.json",
+                  ".local/share/com.vercel.cli/auth.json"),
+                 ("Library/Preferences/.wrangler/config/default.toml",
+                  ".config/.wrangler/config/default.toml"),
+                 ("Library/Application Support/Bitwarden CLI/data.json", ".config/Bitwarden CLI/data.json"),
+                 ("Library/Preferences/helm/registry/config.json", ".config/helm/registry/config.json"),
+                 ("Library/Preferences/netlify/config.json", ".config/netlify/config.json"),
+                 ("Library/Application Support/dart/pub-credentials.json",
+                  ".config/dart/pub-credentials.json"),
+                 ("Library/Application Support/loadimpact/k6/config.json",
+                  ".config/loadimpact/k6/config.json"),
+                 ("Library/Application Support/doctl/config.yaml", ".config/doctl/config.yaml"),
+                 ("Library/Thunderbird/Profiles/p.default/logins.json",
+                  ".thunderbird/p.default/logins.json"),
+                 ("Library/Application Support/Chromium/Default/Login Data",
+                  ".config/chromium/Default/Login Data"),
+                 ("Library/Application Support/openstack/secure.yaml", ".config/openstack/secure.yaml"),
+                 ("Library/Application Support/openstack/clouds.yaml", ".config/openstack/clouds.yaml")]
+
+    @home_outside_the_lane
+    def test_on_macos_each_tools_login_is_hidden_where_its_linux_twin_is(self):
+        home = self.fake_home()
+        files = [f for pair in self.MAC_TWINS for f in pair] + ["Library/Application Support/tool/conf"]
+        for f in files:
+            (home / f).parent.mkdir(parents=True, exist_ok=True)
+            (home / f).write_text("x")
+        task = self.bare_task("t-1194-twins", self.repo)
+        rules, writable = context.read_rules(task), context.writable(task)
+        said = {f: self.seatbelt_reads(rules, writable, home / f) for f in files}
+        self.assertEqual(said, {**{f: False for f in files[:-1]}, files[-1]: True})
+        # and pip's macOS config in an API task's lane when it holds a credential, as its XDG one
+        pip = home / "Library/Application Support/pip/pip.conf"
+        pip.parent.mkdir(parents=True)
+        pip.write_text("[global]\nindex-url = https://u:tok@pypi.example/simple\n")
+        self.assertIn(os.path.realpath(pip), context.api_hidden_paths())
+        self.assertEqual(context._api_hidden_tools()[os.path.realpath(pip)], "pip")
+
+    def test_macos_volumes_are_read_only_where_something_is_kept_and_its_system_disk_link_reads_root(self):
+        # #1194's review: /Volumes holds the external disks and network shares, as /media and
+        # /mnt do; `Macintosh HD` there is a link to /, which must not deny the system
+        self.assertIn("/Volumes", context.ONLY_KEPT)
+        root = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-volumes-"))  # not in the lane
+        self.addCleanup(shutil.rmtree, root, True)
+        self.fake_home()
+        (root / "Macintosh HD").symlink_to("/")
+        (root / "Backup").mkdir()
+        (root / "Backup" / "photos.jpg").write_text("x")
+        task = self.bare_task("t-1194-volumes", self.repo)
+        # in its place, and /home read (as / is) so that its one deny shows
+        kept = tuple(str(root) if p == "/Volumes" else p for p in context.ONLY_KEPT if p != "/home")
+        with mock.patch.object(context, "ONLY_KEPT", kept):
+            rules, readable = context.read_rules(task), context.readable(task)
+        writable = context.writable(task)
+        real = os.path.realpath(root)
+        self.assertIn(("deny", real), rules)
+        self.assertFalse([p for _, p in rules if context._under(p, real)])    # one rule, no descent
+        for f in (root / "Backup" / "photos.jpg", root / "Macintosh HD" / "etc" / "hosts"):
+            self.assertEqual(self.seatbelt_reads(rules, writable, f),
+                             self.landlock_reads(readable, writable, f), f)
+        self.assertFalse(self.seatbelt_reads(rules, writable, root / "Backup" / "photos.jpg"))
+        self.assertTrue(self.seatbelt_reads(rules, writable, root / "Macintosh HD" / "etc" / "hosts"))
+
+    def seatbelt_writes(self, text, params, path, link=False):
+        """Whether the Seatbelt profile ``text`` with ``params`` lets `path` be written: its
+        file-write* rules in order, the last match winning; a `literal` filter is the path
+        alone, a `subpath` one the path and what is beneath it. ``link``: the path's own name,
+        its directory resolved (an unlink or a rename of a link)."""
+        values = dict(p[2:].split("=", 1) for p in params)
+        real = os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path)) \
+            if link else os.path.realpath(path)
+        ok = False
+        for line in text.splitlines():
+            if line.startswith(("(allow file-write*", "(deny file-write*")):
+                refs = re.findall(r'\((subpath|literal) \(param "([^"]+)"\)\)', line)
+                if not refs or any(real == values[n] or kind == "subpath" and
+                                   real.startswith(values[n].rstrip("/") + "/")
+                                   for kind, n in refs):
+                    ok = line.startswith("(allow")
+        return ok
+
+    @home_outside_the_lane
+    def test_with_seatbelt_a_lane_root_holding_a_denied_place_cant_be_renamed_or_replaced(self):
+        # #1194's third review (2026-11-24): with Seatbelt the lane keeps ~/.cargo, ~/.dotnet
+        # and Library/Caches whole and denies only bin/, tools/ and com.apple.python by path, but
+        # a subpath allow takes in the root itself: `mv ~/.cargo $TMPDIR/old`, a ~/.cargo made
+        # in the temp directory with a planted bin/cargo, then moved into its place, ran as the
+        # user at their next cargo, every rename on an allowed path. A rename's source and
+        # destination are writes on their paths: the root's own path, and each directory down
+        # to the place, are refused, what is in them is not
+        home = self.fake_home()
+        for d in (".cargo/bin", ".cargo/registry", ".dotnet/tools", "Library/Caches/com.example"):
+            (home / d).mkdir(parents=True)
+        task = self.bare_task("t-1194-rename", self.repo)
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            w = context.writable(task)
+            text, params = lane.profile(w, context.read_rules(task), [], context.write_denied(w))
+        real = {os.path.realpath(p) for p in w}
+        for root in (".cargo", ".dotnet", "Library/Caches"):
+            self.assertIn(os.path.realpath(home / root), real, root)         # whole, as before
+            self.assertFalse(self.seatbelt_writes(text, params, home / root), root)
+        for f in (".cargo/bin/x", ".cargo/bin", ".dotnet/tools/x", "Library/Caches/com.apple.python"):
+            self.assertFalse(self.seatbelt_writes(text, params, home / f), f)
+        for f in (".cargo/registry/x", ".cargo/new", ".cargo/registry", ".dotnet/x",
+                  "Library/Caches/com.example/x", "Library/Caches/golangci-lint"):
+            self.assertTrue(self.seatbelt_writes(text, params, home / f), f)
+        # a grant above the root: each directory between it and the place too, made or not
+        work = Path(os.path.realpath(self.tmp.name)) / "grant"
+        (work / "a").mkdir(parents=True)
+        text, params = lane.profile([str(work)], [], [], [str(work / "a" / "b" / "c")])
+        for f in (work, work / "a", work / "a" / "b", work / "a" / "b" / "c" / "x"):
+            self.assertFalse(self.seatbelt_writes(text, params, f), f)
+        for f in (work / "x", work / "a" / "x", work / "a" / "b" / "x"):
+            self.assertTrue(self.seatbelt_writes(text, params, f), f)
+
+    @home_outside_the_lane
+    def test_cargos_own_config_is_out_of_the_lane_on_both_kernels_made_or_not(self):
+        # #1194's fourth review (2026-11-24): with Seatbelt ~/.cargo was whole but bin/ and env,
+        # so the agent could make ~/.cargo/config.toml, whose build.rustc-wrapper or target
+        # linker cargo ran as the user at their next build, outside the lane; Landlock's split
+        # refused a new one but granted one already there. And a ~/.cargo holding only the
+        # user's config.toml is split around it with cargo's own entries made first
+        home = self.fake_home()
+        for d in (".cargo/bin", ".cargo/registry"):
+            (home / d).mkdir(parents=True)
+        (home / ".cargo" / "env").write_text("export PATH")
+        moved = home / "moved-cargo"                   # CARGO_HOME, outside the temp roots
+        moved.mkdir()
+        (moved / "config.toml").write_text("[build]\n")    # the user's own, and nothing else
+        os.environ["CARGO_HOME"] = str(moved)
+        task = self.bare_task("t-1194-cargo-config", self.repo)
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            w = context.writable(task)
+            text, params = lane.profile(w, context.read_rules(task), [], context.write_denied(w))
+        for f in (home / ".cargo/config.toml", home / ".cargo/config", moved / "config.toml",
+                  moved / "config"):
+            self.assertFalse(self.seatbelt_writes(text, params, f), f)
+        for f in (home / ".cargo/registry/x", home / ".cargo/git", moved / "registry"):
+            self.assertTrue(self.seatbelt_writes(text, params, f), f)
+        (home / ".cargo" / "config.toml").write_text("[build]\n")   # already there
+        with mock.patch.object(lane, "kind", lambda: "landlock"):
+            w = context.writable(task)
+        for f in (home / ".cargo/config.toml", home / ".cargo/config", moved / "config.toml",
+                  moved / "config"):
+            self.assertFalse([q for q in w if q == str(f) or str(f).startswith(q + "/")], f)
+            self.assertIsNotNone(context.kept_out(str(f)), f)       # no grant reaches it
+        self.assertIn(str(home / ".cargo/registry"), w)
+        self.assertIn(str(moved / "registry"), w)                   # made first, then granted
+
+    @home_outside_the_lane
+    def test_with_landlock_a_distros_cargo_home_is_split_so_no_config_can_be_made(self):
+        # #1194's fifth review (2026-11-24): a distro's cargo (Arch's rust, Debian's, Fedora's)
+        # makes only registry/, and writable() split a cargo home only when bin/, env or a
+        # config was there, so ~/.cargo (and a CARGO_HOME like it) was granted whole and the
+        # agent made a config.toml whose build.rustc-wrapper cargo ran at the user's next build
+        home = self.fake_home()
+        (home / ".cargo/registry").mkdir(parents=True)
+        moved = home / "moved-cargo"
+        (moved / "registry").mkdir(parents=True)
+        os.environ["CARGO_HOME"] = str(moved)
+        task = self.bare_task("t-1194-distro-cargo", self.repo)
+        with mock.patch.object(lane, "kind", lambda: "landlock"):
+            w = context.writable(task)
+        for c in (home / ".cargo", moved):
+            self.assertNotIn(str(c), w)                      # split, never whole
+            for n in ("config.toml", "config", "bin", "env"):
+                f = c / n
+                self.assertFalse([q for q in w if q == str(f) or str(f).startswith(q + "/")], f)
+            for n in ("registry", "git", ".package-cache"):  # cargo's own, made first
+                self.assertIn(str(c / n), w)
+
+    @home_outside_the_lane
+    def test_with_seatbelt_a_linked_cargo_config_is_denied_by_its_own_name(self):
+        # #1194's fifth review (2026-11-24): ~/.cargo/config.toml linked into ~/dotfiles (stow;
+        # home-manager links it into /nix/store) was denied only at its target, outside the lane
+        # and dropped, so the agent could unlink the link inside the whole ~/.cargo and write a
+        # config.toml whose build.rustc-wrapper ran as the user at their next build
+        home = self.fake_home()
+        for d in (".cargo/bin", ".cargo/registry", "dotfiles"):
+            (home / d).mkdir(parents=True)
+        (home / ".cargo/env").write_text("export PATH")
+        (home / "dotfiles/cargo.toml").write_text("[build]\n")
+        (home / ".cargo/config.toml").symlink_to(home / "dotfiles/cargo.toml")
+        task = self.bare_task("t-1194-linked-config", self.repo)
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            w = context.writable(task)
+            denied = context.write_denied(w)
+            text, params = lane.profile(w, context.read_rules(task), [], denied)
+        link = home / ".cargo/config.toml"
+        self.assertIn(os.path.join(os.path.realpath(home / ".cargo"), "config.toml"), denied)
+        self.assertFalse(self.seatbelt_writes(text, params, link, link=True))  # rm, mv onto it
+        self.assertTrue(self.seatbelt_writes(text, params, home / ".cargo/registry/x"))
+
+    @home_outside_the_lane
+    def test_with_seatbelt_apples_python_bytecode_is_denied_inside_a_whole_library_caches(self):
+        # #1194's review: Library/Caches was writable whole, and the Command Line Tools'
+        # /usr/bin/python3 loads its stdlib's .pyc from Library/Caches/com.apple.python: one the
+        # agent planted ran as the user, outside the lane, at the next python3 anywhere. And its
+        # second review: split around that folder, Library/Caches refused every tool's first
+        # cache folder (golangci-lint's, pipenv's, black's, Homebrew's) but a few made for it.
+        # Seatbelt denies the one place by path instead, made or not
+        home = self.fake_home()
+        caches = home / "Library" / "Caches"
+        (caches / "com.example.app").mkdir(parents=True)
+        bytecode = caches / "com.apple.python"
+        task = self.bare_task("t-1194-pyc", self.repo)
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            w = context.writable(task)
+            denied = context.write_denied(w)
+            argv = context.lane_wrap(task)(["true"])
+            text, params = lane.profile(w, context.read_rules(task), [], denied)
+            only = context.read_only(task, w)
+            rules = context.read_only_rules(task)
+        self.assertIn(os.path.realpath(caches), map(os.path.realpath, w))   # whole
+        self.assertFalse(bytecode.exists())                                # nothing made for it
+        self.assertEqual(sorted(p.name for p in caches.iterdir()), ["com.example.app"])
+        self.assertEqual(denied, [os.path.realpath(bytecode)])
+        self.assertEqual(argv[argv.index("--deny-write") + 1], os.path.realpath(bytecode))
+        for f in (bytecode, bytecode / "lib" / "os.cpython-39.pyc"):
+            self.assertFalse(self.seatbelt_writes(text, params, f), f)
+        for n in ("com.example.app", "golangci-lint", "pipenv", "prisma-nodejs", "black",
+                  "Homebrew", "pip", "go-build"):
+            self.assertTrue(self.seatbelt_writes(text, params, caches / n / "x"), n)
+        self.assertIsNotNone(context.kept_out(str(bytecode / "Library")))   # no grant reaches it
+        self.assertIn(os.path.realpath(bytecode), only)                    # read, as the toolchains
+        self.assertIn({"action": "edit", "resource": f"{os.path.realpath(bytecode)}/*",
+                       "effect": "deny"}, rules)                           # never the file tools'
+        # Landlock can only allow: there the lane is split around the place once it is made
+        bytecode.mkdir()
+        with mock.patch.object(lane, "kind", lambda: "landlock"):
+            w = context.writable(task)
+            self.assertEqual(context.write_denied(w), [])
+        real = os.path.realpath(bytecode)
+        self.assertFalse([p for p in w if os.path.realpath(p) == real
+                          or context._under(real, os.path.realpath(p))])
+        self.assertIn(str(caches / "com.example.app"), w)
+
+    def test_a_read_rule_isnt_drawn_through_a_link_but_a_grant_by_one_is(self):
+        # a link's way to a place says nothing of the place (Landlock rules sit on the files):
+        # ~/sys-etc, a home folder the lane doesn't read, mustn't deny /etc, and ~/.tools
+        # pointing into one (~/src/tools) grants it, whatever order the walk met them in. A home
+        # outside /home, as root's or a service's (/var/lib/<svc>), is read but its folders
+        home = self.fake_home()
+        (home / "sys-etc").symlink_to("/etc")
+        (home / "src" / "tools").mkdir(parents=True)
+        (home / "src" / "tools" / "t").write_text("x")
+        (home / "src" / "other").write_text("x")
+        (home / ".tools").symlink_to(home / "src" / "tools")
+        (home / ".claude").mkdir()
+        (home / ".claude" / "settings.json").write_text("{}")
+        task = self.bare_task("t-1194-link", self.repo)
+        with mock.patch.object(context, "ONLY_KEPT", ("/dev",)):
+            rules, readable = context.read_rules(task), context.readable(task)
+        writable = context.writable(task)
+        self.assertNotIn(("deny", "/etc"), rules)
+        for f in ("/etc/hosts", home / "src" / "tools" / "t", home / "src" / "other",
+                  home / ".claude" / "settings.json"):
+            self.assertEqual(self.seatbelt_reads(rules, writable, f),
+                             self.landlock_reads(readable, writable, f), f)
+        self.assertTrue(self.seatbelt_reads(rules, writable, "/etc/hosts"))
+        self.assertTrue(self.seatbelt_reads(rules, writable, home / "src" / "tools" / "t"))
+        self.assertFalse(self.seatbelt_reads(rules, writable, home / "src" / "other"))
+        self.assertFalse(self.seatbelt_reads(rules, writable, home / ".claude" / "settings.json"))
+
+    def test_on_macos_the_lane_execs_sandbox_exec_once_its_profile_holds(self):
+        work = Path(self.tmp.name) / "lane"
+        work.mkdir()
+        reads = [("deny", "/Users"), ("allow", str(work))]
+        no = str(work / "no")
+        argv = lane.wrap([str(work)], ["true", "x"], unix=[str(work)], reads=reads, deny_write=[no])
+        self.assertEqual(argv[:3], [sys.executable, "-I", os.path.abspath(lane.__file__)])
+        self.assertEqual(argv[argv.index("--hide") + 1], "/Users")
+        self.assertNotIn("--reads", argv)
+        text, params = lane.profile([str(work)], reads, [str(work)], [no])
+        self.assertFalse(self.seatbelt_writes(text, params, work / "no" / "x"))   # #1194
+        self.assertTrue(self.seatbelt_writes(text, params, work / "x"))
+        tried, execd, err = [], [], io.StringIO()
+
+        def run(code):
+            return lambda cmd, **kw: tried.append(cmd) or subprocess.CompletedProcess(
+                cmd, code, "", "sandbox-exec: profile rejected" if code else "")
+
+        def main(args, code=0):
+            with mock.patch.object(lane, "kind", lambda: "seatbelt"), \
+                    mock.patch.object(lane, "die_with_parent", lambda: None), \
+                    mock.patch.object(lane, "restrict", side_effect=AssertionError("Landlock")), \
+                    mock.patch.object(lane.subprocess, "run", run(code)), \
+                    mock.patch.object(lane.os, "execv", lambda *a: execd.append(a)), \
+                    redirect_stderr(err):
+                lane.main(args)
+        main(argv[3:])
+        self.assertEqual(tried, [[lane.SANDBOX_EXEC, "-p", text, *params, "/usr/bin/true"]])
+        self.assertEqual(execd, [(lane.SANDBOX_EXEC,
+                                  [lane.SANDBOX_EXEC, "-p", text, *params, "--", "true", "x"])])
+        # a profile sandbox-exec refuses: never run outside it, and lane.py's own message
+        with self.assertRaises(SystemExit) as stop:
+            main(argv[3:], code=65)
+        self.assertEqual(stop.exception.code, 126)
+        self.assertIn("workbench lane: macOS refused the lane (sandbox-exec: profile rejected); "
+                      "not running true", err.getvalue())
+        with self.assertRaises(SystemExit) as stop:      # 127, as Landlock's side says it
+            main(lane.wrap([str(work)], ["wb-no-such-command"])[3:])
+        self.assertEqual(stop.exception.code, 127)
+        self.assertIn("can't run wb-no-such-command", err.getvalue())
+        self.assertEqual(len(execd), 1)
+
+    def test_the_lane_is_seatbelt_on_a_mac_with_sandbox_exec_and_landlock_first(self):
+        darwin = mock.patch.object(lane.sys, "platform", "darwin")
+        there = mock.patch.object(lane.os, "access", lambda p, m: p == lane.SANDBOX_EXEC)
+        with mock.patch.object(lane, "abi", lambda: 0), darwin, there:
+            self.assertEqual((lane.kind(), lane.held()), ("seatbelt", True))
+        with mock.patch.object(lane, "abi", lambda: 0), darwin, \
+                mock.patch.object(lane.os, "access", lambda p, m: False):
+            self.assertEqual((lane.kind(), lane.held()), (None, False))
+        with mock.patch.object(lane, "abi", lambda: 6):
+            self.assertEqual((lane.kind(), lane.held()), ("landlock", True))
+        gaps = " ".join(lane.gaps("seatbelt"))
+        for said in ("deprecated", "--disable-sandbox", "--no-sandbox", "TCP", "by a list"):
+            self.assertIn(said, gaps)
+
+    def test_a_tasks_lane_hands_seatbelt_its_read_rules_and_its_own_sockets(self):
+        task = self.bare_task("t-1194-wrap", self.repo)
+        task.worktree.mkdir()
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            argv = context.lane_wrap(task)(["opencode", "run"])
+        self.assertEqual(argv[-3:], ["--", "opencode", "run"])
+        self.assertIn("--hide", argv)
+        self.assertNotIn("--reads", argv)
+        unix = [argv[i + 1] for i, a in enumerate(argv) if a == "--unix"]
+        self.assertIn(str(task.worktree), unix)              # its own sockets, never /tmp
+        self.assertNotIn(os.path.realpath("/tmp"), map(os.path.realpath, unix))
+        with mock.patch.object(lane, "kind", lambda: "landlock"):
+            argv = context.lane_wrap(task)(["opencode", "run"])
+        self.assertIn("--reads", argv)
+        self.assertNotIn("--hide", argv)
+        if lane.held():  # and what it draws runs here, in this machine's own lane
+            out = subprocess.run(context.lane_wrap(task)([sys.executable, "-c", "print('ran')"]),
+                                 cwd=task.worktree, capture_output=True, text=True, timeout=60)
+            self.assertEqual(out.stdout, "ran\n", out.stderr)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": ["*"]}))
+        self.assertEqual(context.lane_wrap(task)(["opencode", "run"]), ["opencode", "run"])
+
+    def test_with_seatbelt_a_socket_outside_the_tasks_own_places_is_named_with_its_grant(self):
+        # Seatbelt can't tell the agent's sockets from the user's in a temp directory (tmux's,
+        # the SSH agent's), so one there is refused like ABI 9's, and named
+        task = self.bare_task("t-1194-sock", self.repo)
+        task.worktree.mkdir()
+        d = Path(os.path.realpath(tempfile.mkdtemp(prefix="wb-1194-")))
+        self.addCleanup(shutil.rmtree, d, True)
+        socks = []
+        for where in (d / "s", task.worktree / "s"):
+            srv = socket.socket(socket.AF_UNIX)
+            srv.bind(str(where))
+            self.addCleanup(srv.close)
+            socks.append(str(where))
+        out = "".join(f"connect {s}: Operation not permitted\n" for s in socks)
+        with mock.patch.object(lane, "abi", lambda: 0), mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            self.assertEqual(runner.lane_refused(task, out), socks[:1])
+        with mock.patch.object(lane, "abi", lambda: 0), mock.patch.object(lane, "kind", lambda: None):
+            self.assertEqual(runner.lane_refused(task, out), [])   # no lane, no refusal of its
+
+    @unittest.skipUnless(lane.kind() == "seatbelt", "needs macOS's sandbox-exec")
+    @home_outside_the_lane
+    def test_seatbelt_holds_the_lane_on_a_real_mac(self):
+        # the nightly macOS job runs this; a skip is not a pass
+        home = self.fake_home()
+        (home / ".ssh").mkdir()
+        (home / ".ssh" / "id_ed25519").write_text("secret")
+        (home / ".config" / "tool").mkdir(parents=True)
+        (home / ".config" / "tool" / "conf").write_text("conf")
+        (home / "Library" / "Caches").mkdir(parents=True)
+        (home / ".cargo" / "bin").mkdir(parents=True)
+        (home / ".cargo" / "registry").mkdir()
+        (home / "dotfiles").mkdir()                    # a stowed config, #1194's fifth review
+        (home / "dotfiles" / "cargo.toml").write_text("[build]\n")
+        (home / ".cargo" / "config.toml").symlink_to(home / "dotfiles" / "cargo.toml")
+        task = self.bare_task("t-1194-mac", self.repo)
+        task.worktree.mkdir()
+        d = Path(os.path.realpath(tempfile.mkdtemp(prefix="wb-1194-")))
+        self.addCleanup(shutil.rmtree, d, True)
+        sock = d / "s"
+        srv = socket.socket(socket.AF_UNIX)
+        srv.bind(str(sock))
+        srv.listen()
+        self.addCleanup(srv.close)
+        script = textwrap.dedent("""\
+            import os, socket, subprocess, sys
+            def say(what, f):
+                try:
+                    f(); print(what, "ok")
+                except (OSError, subprocess.CalledProcessError) as e:
+                    print(what, "refused", getattr(e, "errno", None))
+            home, wt, sock = sys.argv[1:4]
+            say("write-outside", lambda: open(os.path.join(home, "planted"), "w").close())
+            say("write-worktree", lambda: open(os.path.join(wt, "made"), "w").close())
+            caches = os.path.join(home, "Library", "Caches")
+            say("write-cache", lambda: os.makedirs(os.path.join(caches, "golangci-lint", "x")))
+            say("write-pyc", lambda: os.makedirs(os.path.join(caches, "com.apple.python", "x")))
+            # #1194's third review: a root holding a denied place can't be moved aside, into
+            # the temp directory the lane writes
+            import tempfile
+            aside = tempfile.mkdtemp()
+            say("mv-caches", lambda: os.rename(caches, os.path.join(aside, "caches")))
+            say("mv-cargo", lambda: os.rename(os.path.join(home, ".cargo"),
+                                              os.path.join(aside, "cargo")))
+            # #1194's fifth review: a linked config is unlinked on its own path
+            say("rm-linked-config", lambda: os.unlink(os.path.join(home, ".cargo", "config.toml")))
+            say("read-secret", lambda: open(os.path.join(home, ".ssh", "id_ed25519")).read())
+            say("read-dotfile", lambda: open(os.path.join(home, ".config", "tool", "conf")).read())
+            say("socket-outside", lambda: socket.socket(socket.AF_UNIX).connect(sock))
+            say("signal-outside", lambda: os.kill(os.getppid(), 0))
+            say("sudo", lambda: subprocess.run(["/usr/bin/sudo", "-n", "true"], check=True,
+                                               capture_output=True))
+            """)
+        out = subprocess.run(context.lane_wrap(task)([sys.executable, "-c", script, str(home),
+                                                      str(task.worktree), str(sock)]),
+                             cwd=task.worktree, capture_output=True, text=True, timeout=60)
+        said = dict(ln.split(" ", 1) for ln in out.stdout.splitlines())
+        no = f"refused {errno.EPERM}"   # Seatbelt's, which REFUSAL reads: not sudo's own failure
+        self.assertEqual(said, {"write-outside": no, "write-worktree": "ok", "write-cache": "ok",
+                                "write-pyc": no, "mv-caches": no, "mv-cargo": no,
+                                "rm-linked-config": no, "read-secret": no,
+                                "read-dotfile": "ok", "socket-outside": no, "signal-outside": no,
+                                "sudo": no}, out.stderr)
+        self.assertFalse((home / "planted").exists())
+        self.assertTrue((home / ".cargo" / "config.toml").is_symlink())
+        self.assertEqual(runner.lane_refused(task, f"connect {sock}: Operation not permitted\n"),
+                         [str(sock)])
+
     def test_doctor_names_what_an_old_landlock_cant_confine(self):
         self.assertEqual(lane.gaps(10), [])
         self.assertTrue(any("truncat" in g for g in lane.gaps(2)))
@@ -12382,10 +12910,10 @@ class CheckoutVenv(Base):
         # none active: pip installs where Landlock bounds it, else it asks
         rules = context.shell_rules(task)
         self.assertEqual(Permission.verdict(rules, "pip install -e ."),
-                         "allow" if lane.abi() else "deny")
+                         "allow" if lane.held() else "deny")
         # pipenv makes its own venv in the worktree: no lane needed for that (#950)
         self.assertEqual(Permission.verdict(rules, "pipenv install"), "allow")
-        with mock.patch.object(lane, "abi", return_value=0):
+        with mock.patch.object(lane, "kind", return_value=None):
             self.assertEqual(Permission.verdict(context.shell_rules(task), "pipenv install"), "allow")
 
     def test_a_venv_in_a_per_project_home_or_on_path_alone_is_the_checkouts_too(self):
@@ -19912,7 +20440,7 @@ class Setup(Base):
                      "--  the Claude Code mod (the pane, the wake-ups) isn't among",
                      "ok  python 3."):                                     # which one runs wb (#259)
             self.assertIn(want, out)
-        if lane.abi():
+        if lane.held():
             self.assertIn("ok  agents write only in their lane", out)
         self.assertEqual(self.setup()[0], 0)
         (home / ".claude/plugins").mkdir(parents=True)
@@ -20124,7 +20652,7 @@ class Setup(Base):
         self.assertRegex(tail, r"ok  opencode .*2\.3\.0")
         self.assertIn("ok  a model server answers", tail)
         self.assertIn("local model(s) registered", tail)
-        self.assertRegex(tail, r"(ok  Landlock ABI \d+|--  no Landlock here)")
+        self.assertRegex(tail, r"(ok  Landlock ABI \d+|ok  Seatbelt|--  no lane here)")
         os.environ["WB_OPENCODE_BIN"] = str(Path(self.tmp.name) / "no-such-opencode")
         with mock.patch.object(cli.models, "discover", return_value={}):
             lines = cli.first_run()
@@ -37166,7 +37694,7 @@ class Privacy(_KeyholeTest):
         (home / ".m2/settings.xml").write_text("<settings><servers><server><id>r</id>"
                                                "<password>p</password></server></servers></settings>")
         with mock.patch.dict(os.environ, {"HOME": str(home)}):
-            with mock.patch.object(lane, "abi", return_value=0):         # macOS, a kernel without it
+            with mock.patch.object(lane, "kind", return_value=None):    # no Landlock, no Seatbelt
                 out = self.start_api("t-nl1")
                 self.assertNotIn("can't read", out)
                 self.assertEqual(context.api_hidden_note(store.Task("t-nl1")), "")

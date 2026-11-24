@@ -51,7 +51,7 @@ yourself, not only what `wb` reports.
 | Where | Result | Notes |
 |---|---|---|
 | Linux (Debian or Ubuntu) | | |
-| macOS on Apple silicon, natively | | |
+| macOS on Apple silicon, natively (`wb doctor`: `ok  agents write only in their lane (Seatbelt)`) | | |
 | WSL2, the repo in WSL's own file system | | |
 | WSL2, the repo on a Windows drive (`/mnt/c`) | | |
 

@@ -590,8 +590,8 @@ def _own_pins(layer: dict) -> dict:
 # project installed, instead of fetching a package unasked (npm says yes by itself without a
 # terminal; the 2026-11-16 audit). Not the tests' environment: they run as they would for you.
 # And OpenCode reads ~/.claude/CLAUDE.md itself as a global instruction (with the user's own
-# ~/.config/opencode/AGENTS.md), which only the lane's SECRETS kept out: with no Landlock (macOS,
-# an old kernel, `"paths": ["*"]`) the user's CLAUDE.md, written to Claude, reached every agent
+# ~/.config/opencode/AGENTS.md), which only the lane's SECRETS kept out: with no lane (a Mac before
+# Seatbelt, #1194; an old kernel, `"paths": ["*"]`) the user's CLAUDE.md, written to Claude, reached every agent
 # whatever wb handed it (measured on OpenCode 2.3.2 with tests/capture_llm.py, #1061, 2026-11-23).
 # The switch drops only that file: the project's CLAUDE.md is wb's to hand (PROJECT_CONFIG_OFF).
 OPENCODE_ENV = {"npm_config_yes": "false", "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT": "1"}
@@ -1668,9 +1668,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     env = opencode_env(task, run)
     if not task.status.get("opencode_home"):  # its sessions are in the task's home from now on
         task.set_status(opencode_home=True)
-    cmd = lane.wrap(context.writable(task), cmd,   # writes stay in the agent's lane (lane.py),
-                    context.readable(task),       # and credentials out of its reach
-                    context.unix_paths(task))
+    # writes stay in the agent's lane (lane.py: Landlock, or Seatbelt on macOS, #1194), and
+    # credentials out of its reach
+    cmd = context.lane_wrap(task)(cmd)
     try:  # this round's OpenCode marks it again: kept from round 1, the report's note about a
         (ask_mcp.ask_dir(task) / ask_mcp.LISTED).unlink()  # lost ask tool could fire only there (#481)
     except OSError:
@@ -2232,8 +2232,7 @@ def run_in_lane(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]
     # in the agent's lane, environment and shell: the tests run the agent's code, and must pass
     # or fail as they did when the agent ran them
     sh = test_shell()
-    argv = lane.wrap(context.writable(task), [sh, *shell_args(sh), cmd], context.readable(task),
-                     context.unix_paths(task))
+    argv = context.lane_wrap(task)([sh, *shell_args(sh), cmd])
     run = _issue()  # its own mark: sweep ends what it left, and nothing else (#324)
     proc = subprocess.Popen(argv, cwd=task.workdir, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, env=agent_env(task, run),
@@ -2314,17 +2313,18 @@ def lane_refused(task: store.Task, output: str) -> list[str]:
     reach (`lane_grant`): /dev/kvm and /dev/fuse (#331, the audit of 1.4), and since #437 (the
     audit of 1.8) any path, an Android keystore, a Flutter lockfile, a NuGet cache, which read as
     the project's bug, and the agent spent its auto-fix rounds on them. The report names
-    `wb allow --path` for each. Only a refusal the lane made: without Landlock (macOS, a kernel
-    without it) there is none, and a path the runner, outside the lane, may not use either is the
+    `wb allow --path` for each. Only a refusal the lane made: without Landlock or Seatbelt (a
+    kernel without it) there is none, and a path the runner, outside the lane, may not use either is the
     user's own permissions (#773, the second 2026-11-21 audit: a test's Permission denied on
     /usr/share skipped auto-fix and woke Claude with a grant that couldn't help)."""
     places = context.writable(task)
-    if places is None or not lane.abi():
+    if places is None or not lane.held():
         return []
     guard = context.repo_dirs(task)  # the user's checkout: no lane may write it
     # From ABI 9 a socket made outside the lane is refused even inside a writable place: the
-    # user's Postgres or MySQL socket in /tmp read as a broken database, no grant named (#826)
-    sockets = context.unix_paths(task) if lane.abi() >= 9 else None
+    # user's Postgres or MySQL socket in /tmp read as a broken database, no grant named (#826);
+    # Seatbelt refuses one outside the task's own places too (#1194)
+    sockets = context.socket_places(task) if lane.abi() >= 9 or lane.kind() == "seatbelt" else None
     hidden = context.api_hidden(task)  # once: each path's check reads every token file
     found = []
     for line in output[-200_000:].splitlines():

@@ -47,8 +47,9 @@ How to work (workbench protocol):
 question(s) for this task). Otherwise make reasonable choices and say what you assumed.
 - Stay inside the scope of the spec. No unrelated refactors, no new dependencies unless asked.
 - You can write only in this worktree, the temp directory and build caches: "Permission denied"
-  anywhere else is that limit, so don't keep trying it. Need a directory outside? Call `ask_reviewer`
-  with `path` set to it (this doesn't use the question budget).
+  (on macOS "Operation not permitted") anywhere else is that limit, so don't keep trying it. Need
+  a directory outside? Call `ask_reviewer` with `path` set to it (this doesn't use the question
+  budget).
 - CLAUDE.md and AGENTS.md are Claude's, and you can't edit them. When the task asks for a change
   to one, write the whole new file next to it as `<name>.proposed` (`CLAUDE.md.proposed`); Claude
   reads the difference and takes it.
@@ -76,8 +77,9 @@ question(s) for this task). Otherwise make reasonable choices and say what you a
   quote, name, command or link: write [TK: what is missing] and list it in your summary.
 - Don't reflow, rewrap or reformat text you aren't changing: Claude reviews the diff line by line.
 - You can write only in this worktree, the temp directory and build caches: "Permission denied"
-  anywhere else is that limit, so don't keep trying it. Need a directory outside? Call `ask_reviewer`
-  with `path` set to it (this doesn't use the question budget).
+  (on macOS "Operation not permitted") anywhere else is that limit, so don't keep trying it. Need
+  a directory outside? Call `ask_reviewer` with `path` set to it (this doesn't use the question
+  budget).
 - CLAUDE.md and AGENTS.md are Claude's, and you can't edit them. When the task asks for a change
   to one, write the whole new file next to it as `<name>.proposed` (`CLAUDE.md.proposed`); Claude
   reads the difference and takes it.
@@ -6710,8 +6712,9 @@ def first_run() -> list[str]:
     out += api_key_lines(keys)
     v = lane.abi()
     out.append(f"ok  Landlock ABI {v}: each agent writes only inside its task" if v else
-               "--  no Landlock here: agents run unconfined (on Linux, a 5.13+ kernel with Landlock "
-               "on; none on macOS)")
+               "ok  Seatbelt: each agent writes only inside its task" if lane.kind() == "seatbelt" else
+               "--  no lane here: agents run unconfined (on Linux, a 5.13+ kernel with Landlock "
+               "on; on macOS, /usr/bin/sandbox-exec)")
     return out
 
 
@@ -7436,7 +7439,8 @@ def cmd_doctor(a):
         line(False, f"{models.SHARED_GPU} is the machine's shared GPU lease, and this account can't "
              "write it: add it to the directory's group, then log in again")
     v = lane.abi()
-    if v:  # draw a real lane and try a write outside it: the check is the refusal itself
+    name = f"Landlock ABI {v}" if v else "Seatbelt"   # macOS's sandbox-exec (#1194)
+    if lane.held():  # draw a real lane and try a write outside it: the check is the refusal itself
         import tempfile
         with tempfile.TemporaryDirectory() as inside, tempfile.TemporaryDirectory(dir=Path.home()) as out:
             probe = [sys.executable, "-c", f"open({str(Path(out) / 'x')!r}, 'w')"]
@@ -7446,10 +7450,10 @@ def cmd_doctor(a):
             # PermissionError's path (the 2026-11-16 audit)
             held = (r.returncode not in (0, 126) and "PermissionError" in r.stderr
                     and not (Path(out) / "x").exists())
-        line(held, f"agents write only in their lane (Landlock ABI {v})" if held else
+        line(held, f"agents write only in their lane ({name})" if held else
              f"the lane didn't hold a write outside it: {r.stderr.strip()[-200:] or 'the write went through'}")
-        for gap in lane.gaps(v):  # what this kernel's Landlock can't confine (the 2026-11-16 audit)
-            print(f"--  Landlock ABI {v}: {gap}")
+        for gap in lane.gaps(v or "seatbelt"):  # what this kernel's lane can't confine (the 2026-11-16 audit)
+            print(f"--  {name}: {gap}")
         if gap := context.interop_gap():  # WSL: a Windows program escapes it (the 0.90 review)
             print(f"--  {gap}")
         if gap := context.home_gap():
@@ -7460,7 +7464,7 @@ def cmd_doctor(a):
                   "stop TCP, so an agent can reach it")
     else:
         print("--  agents' writes outside their lane and reads of credentials aren't refused here "
-              "(no Landlock): only OpenCode's file tools keep to it; " +
+              "(no Landlock, no sandbox-exec): only OpenCode's file tools keep to it; " +
               ("sudo still is (no-new-privileges)" if sys.platform.startswith("linux")
                else "nor is sudo"))
     try:
