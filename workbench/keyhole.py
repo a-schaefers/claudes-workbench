@@ -183,7 +183,7 @@ def _package_name(package: str) -> str:
     # a config provider's V1 npm, the form OpenCode's docs give a custom provider: read as its
     # scope, `@ai-sdk`, every such provider was refused as one the keyhole can't speak (#1137,
     # 2026-11-23). OpenCode 2.3.2 runs `@ai-sdk/<name>` as its own `@opencode/ai/providers/<name>`
-    # where it has one (`api model.list` prints that); an unknown `@ai-sdk/foo` still reads as
+    # where it has one (model.list prints that); an unknown `@ai-sdk/foo` still reads as
     # None through PACKAGES, and its `aisdk:@ai-sdk/foo` (an npm package OpenCode loads) too.
     for prefix in (PACKAGE_PREFIX, AI_SDK_PREFIX):
         if name.startswith(prefix):
