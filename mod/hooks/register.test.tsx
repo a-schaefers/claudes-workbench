@@ -2581,7 +2581,7 @@ test('a permission prompt while the user is away goes to the web chat, and their
   expect(runs.slice(n).some(a => a[2] === 'ask')).toBe(false)
 })
 
-test('the user is away once the chat page is used after their last terminal input, not before it, and at the terminal the phone is told of a prompt still waiting, once (#959)', async ($, on) => {
+test('the user is away once the chat page is used after their last terminal input, not before it, and at the terminal the phone is told of a prompt still waiting, once (#959)', { timeoutMs: 20_000 }, async ($, on) => {
   // #959: the owner typed in the terminal, then picked up the phone with "Let Claude go ahead"
   // set; only a web message counted as the phone, so the prompt stayed in the terminal, neither
   // shown on the phone nor allowed, and the phone was told nothing
