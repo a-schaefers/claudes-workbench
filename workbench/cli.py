@@ -2958,10 +2958,15 @@ def _route_pane() -> dict:
     stored, env, oauth or none, from the cached catalog: never a network probe or OpenCode run)."""
     provs = {}
     for pid, p in (models._read_hosted().get("providers") or {}).items():
-        raw = str(p.get("key") or "")
+        raw, name, pkg = str(p.get("key") or ""), str(p.get("name") or pid), str(p.get("package") or "")
         key = "env" if raw.startswith("env:") else KEY_STATES.get(raw, "none")
         held = f"key in {raw[4:]}" if key == "env" else KEY_HELD.get(raw, raw)
-        provs[pid] = {"name": str(p.get("name") or pid), "key": key,
+        if key == "stored" and models.unspoken(pid, pkg):
+            # a stored key the keyhole can't carry read "Google (key stored)" while wb setup said
+            # it can't run and wb models --json left its models out (#1066, 2026-11-23)
+            provs[pid] = {"name": name, "key": "none", "why": models.unspoken_why(name, pkg)}
+            continue
+        provs[pid] = {"name": name, "key": key,
                       **({} if key == "stored" else
                          {"why": f"can't run: needs a key wb can hold outside the lane ({held})" if raw
                           else "no key: /connect in OpenCode adds one"})}

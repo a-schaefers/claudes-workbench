@@ -1579,9 +1579,13 @@ def keyhole_refusal(m: Model) -> str:
     a keyless free one: runner.needs_keyhole) is never refused here."""
     if m.cloud or m.key == "none" or (m.free and not m.key) or not unspoken(m.provider, m.package):
         return ""
-    return (f"can't run: the keyhole doesn't speak {provider_name(m)}'s API "
-            f"({m.package or 'no provider package'}), so wb can't hold its key outside the lane: "
-            "a model of another provider can run")
+    return unspoken_why(provider_name(m), m.package)
+
+
+def unspoken_why(who: str, package: str) -> str:
+    """keyhole_refusal's line, which the Settings tab's provider list says too (#1066)."""
+    return (f"can't run: the keyhole doesn't speak {who}'s API ({package or 'no provider package'}), "
+            "so wb can't hold its key outside the lane: a model of another provider can run")
 
 
 def unspoken_providers(pids) -> dict[str, str]:

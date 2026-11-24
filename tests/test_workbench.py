@@ -29105,6 +29105,10 @@ class Routes(Base):
         self.assertEqual(lines, ["ok  API keys: deepseek (stored via /connect); no role uses one yet",
                                  "--  google (@opencode/ai/providers/google): the keyhole doesn't speak "
                                  "its API, so wb can't run its models; another provider's key works"])
+        # and the Settings tab's Connected line: not "Google (key stored)"
+        provs = json.loads(self.route("--json")[1])["providers"]
+        self.assertEqual(provs["google"], {"name": "Google", "key": "none", "why": st["why"]})
+        self.assertEqual(provs["deepseek"]["key"], "stored")
         self.assertTrue(runner.models.status(runner.models.hosted()["deepseek/deepseek-flash"])["available"])
 
     def test_a_role_out_of_credit_runs_again_once_the_recheck_time_has_passed(self):

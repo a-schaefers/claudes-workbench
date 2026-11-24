@@ -1675,7 +1675,8 @@ outside the lane: <provider> takes its key in a way the keyhole doesn't speak" r
 or 404 on every request. Status says it first (`models.keyhole_refusal`, through `models.unspoken`,
 #1066: only `start` checked, so a Gemini model was listed, routed on the user's yes and started,
 then failed every time), so `wb route`, `wb start`, `wb models` and the pane refuse it, `wb models
---json` leaves it out and `wb setup` names it on a `--` line. The upstream is the catalog's API base (`m.base_url`), never anything
+--json` leaves it out, `wb setup` names it on a `--` line and `wb route --json`'s `providers` gives it
+key `none` with that why (the Settings tab's Connected line). The upstream is the catalog's API base (`m.base_url`), never anything
 from a request, with what the package appends to it already appended (`mirror_path`: DeepInfra's
 `/openai`). OpenCode gets `layer_options(kh)`:
 `baseURL` the keyhole's `base` and `apiKey` its `token` (`secrets.token_urlsafe(32)`, new each
@@ -3470,7 +3471,8 @@ GPU; wb route all both goes back to each role's own below)`); `--json` the norma
 `step` and `reconcile` rows of the day ledger, spend-api.jsonl; `usd` is `meter.today()`'s, the sum the
 cap is checked against) and `providers` (`{<id>: {name, key,
 why?}}` from the cached catalog: `key` `stored`, `env`, `oauth` or `none`, with the why for any but
-stored). While busy is `api` the show adds `When the GPU is busy: a role with an API model starts on
+stored; a stored key on a package the keyhole can't carry is `none` with `models.unspoken_why`'s
+line, which status says too: it read `Google (key stored)` while nothing could run on it, #1066). While busy is `api` the show adds `When the GPU is busy: a role with an API model starts on
 it (wb route busy wait: queue instead)`.
 The changes (each one exit 3 with one line when refused, writing nothing):
 - `wb route <role> gpu|api` flips the selector; `api` with no API model kept: `<role> has no API
