@@ -3166,6 +3166,13 @@ def _who(mid: str) -> str:
     return models.provider_name(m) if m is not None and m.kind == "api" else mid.split("/", 1)[0]
 
 
+def _thinks(mid: str, thinking: str) -> str:
+    """routes.change's ``thinks``: what API model ``mid`` does with that thinking setting, as its
+    task would run it (routes.thinking_of, #1237); the setting itself for one not in the catalog."""
+    m = models.lookup(mid)
+    return routes.thinking_of(m, thinking) if m is not None and m.kind == "api" else routes.plain_thinks(mid, thinking)
+
+
 def _route_argv(role, target, gpu, api, thinking, day, order=None) -> list[str]:
     """The change as one canonical command (after `wb`): what the dialog approved and the gate
     compares, whatever spelling (an abbreviation, `--flag=value`) Claude used."""
@@ -3179,9 +3186,10 @@ def _route_argv(role, target, gpu, api, thinking, day, order=None) -> list[str]:
 
 
 def start_line(name: str, m: models.Model) -> str:
-    """The dialog's line for `wb start --model <API id>` (#1014)."""
+    """The dialog's line for `wb start --model <API id>` (#1014), its thinking what the task will
+    do (routes.thinking_of): `thinking off` was said for a model that can't turn it off (#1237)."""
     return f"start {name} on API {m.id} (not a role's choice) · your code goes to " \
-           f"{models.provider_name(m)} · thinking off"
+           f"{models.provider_name(m)} · {routes.thinking_of(m, 'off')}"
 
 
 def start_gate(name: str, m: models.Model) -> None:
@@ -3475,7 +3483,8 @@ def cmd_route(a):
             die("no role has an API model yet: wb route <role> <provider/model>", 3)
         try:
             ch = routes.change(doc, None if what == "cap" else role, via=via, gpu=gpu, api=api,
-                               thinking=a.thinking, day_usd=day, who=_who, use=use, order=order, busy=busy)
+                               thinking=a.thinking, day_usd=day, who=_who, use=use, order=order, busy=busy,
+                               thinks=_thinks)
         except routes.RoutesError as e:
             die(str(e), 3)
         # a kept API model a role newly runs on (its own flip, or the Agents switch) must still be
@@ -3535,7 +3544,7 @@ def _route_pairs(a) -> None:
 
     def changed(doc) -> routes.Change:
         try:
-            ch = routes.change_pairs(doc, pairs, day_usd=a.day_usd, who=_who)
+            ch = routes.change_pairs(doc, pairs, day_usd=a.day_usd, who=_who, thinks=_thinks)
         except routes.RoutesError as e:
             die(str(e), 3)
         for r, via, mid in pairs:  # a kept API model a role newly runs on must still be one it may run

@@ -32676,6 +32676,17 @@ class Routes(Base):
                          "Agents is API, so the moves of significant to API, trivial to the GPU apply once Agents is "
                          "Both (wb route all both)")
 
+    def test_under_agents_api_a_roles_held_move_still_says_what_its_model_does_with_thinking(self):
+        # #1236 and #1237 met in the bar4 merge (2026-11-24): #1236's held move restates the
+        # role's clauses through a second _role_part, which dropped #1237's `thinks`, so under
+        # Agents API the thinking clause said the role's setting again, not what the model does
+        doc = {"v": 1, "day_usd": 5, "use": "api", "roles": {r: {
+            "via": "gpu", "gpu": None, "api": "deepseek/deepseek-flash", "thinking": "off"} for r in routes.ROLES}}
+        line = routes.change(doc, "significant", via="api", thinking="on",
+                             thinks=lambda mid, t: f"{mid} thinks {t}").line
+        self.assertIn("thinking off → on: deepseek/deepseek-flash thinks on", line)
+        self.assertIn("the move of significant to API applies once Agents is Both", line)
+
     def test_thinking_turned_on_while_a_roles_api_side_is_dormant_is_named_by_the_yes_that_sends_it_there(self):
         # #1177 (2026-11-24): thinking on a GPU role (an API model kept, or none yet) needs no
         # dialog, but the later yes to Agents API, busy api or a new API model never said it, so
@@ -32705,7 +32716,7 @@ class Routes(Base):
                 self.assertTrue(asked["gate"])
                 self.assertIn("thinking on", asked["change"])
         self.assertIn("when the GPU is busy, writing starts on its API model (your code goes to Anthropic "
-                      "(writing); thinking on (writing); cap $5/day)", asked["change"])
+                      "(writing); thinking on (effort high) (writing); cap $5/day)", asked["change"])  # #1237: its effort
 
     def test_a_kept_api_model_is_checked_again_when_its_role_goes_back_to_api(self):
         # ARCHITECTURE.md, *Roles*: the kept model must still be one the role may run
@@ -37814,6 +37825,46 @@ class RoleResolution(Base):
         code, out, _ = self.begin("t-api2", "--role", "trivial")
         self.assertEqual(code, 0)
         self.assertNotIn("this task sends", out)
+
+    def test_a_model_that_cant_turn_thinking_off_is_said_so_in_the_dialog_the_start_line_and_task_json(self):
+        # #1237 (2026-11-24): an Anthropic adaptive model with no `none` runs on its bare id,
+        # thinking as its default, but the dialog, the start line, task.json's route and wb watch's
+        # routed line all said the role's setting, `thinking off`: the user agreed to no reasoning
+        # and paid for it at the output rate
+        adaptive = api_entry("anthropic", "claude-sonnet-x", variants=[
+            {"id": v, "settings": {"thinking": {"type": "adaptive"}, "effort": v}} for v in ("low", "medium", "high")])
+        self.catalog([*ROLE_CATALOG, adaptive], ROLE_AUTH)
+        runner.models.hosted(fresh=True)
+        does = "thinking as the model's default (it lists no lower setting)"
+        mid = "anthropic/claude-sonnet-x"
+        code, out, err = self.wb("route", "--dry-run", "--json", "significant", mid, "--day-usd", "5")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["change"],
+                         f"significant: GPU → API {mid} · your code goes to Anthropic · {does} · cap $5/day")
+        self.set_role("significant", mid, "--day-usd", "5")
+        code, out, err = self.begin("t1", "--size", "significant")
+        self.assertEqual(code, 0, err)
+        self.assertIn(f" · significant role, set by you {time.strftime('%m-%d')} · {does} · today $0.00 of $5", out)
+        self.assertNotIn("thinking off", out)
+        sp = store.Task("t1").spec
+        self.assertEqual((sp["opencode_model"], sp["thinking"], sp["thinking_shown"]), (mid, "off", does))
+        self.assertTrue(sp["route"].endswith(f" · {does}"), sp["route"])
+        rows = [json.loads(x) for x in self.wb("watch", "t1", "--json")[1].splitlines()]
+        self.assertTrue(rows[1]["t"].endswith(f" · {does}"), rows[1])   # as the meta line above it says
+        # the --model dialog said `thinking off` whatever the model
+        self.assertEqual(cli.start_line("t2", runner.models.lookup(mid)),
+                         f"start t2 on API {mid} (not a role's choice) · your code goes to Anthropic · {does}")
+        # turning thinking on or off says what the model does with it
+        code, out, err = self.wb("route", "--dry-run", "--json", "significant", "--thinking", "on")
+        self.assertEqual(json.loads(out)["change"], "significant: thinking off → on (effort high)", err)
+        self.set_role("significant", "--thinking", "on")
+        code, out, err = self.wb("route", "--dry-run", "--json", "significant", "--thinking", "off")
+        self.assertEqual(json.loads(out)["change"], f"significant: thinking on → off: {does}", err)
+        # Agents to API, a role on the GPU with the model kept: the yes names its thinking too
+        self.set_role("significant", "--thinking", "off")
+        self.set_role("significant", "gpu")
+        code, out, err = self.wb("route", "--dry-run", "--json", "all", "api")
+        self.assertIn(f"{does} (significant)", json.loads(out)["change"], err)
 
     def test_an_api_tasks_report_watch_line_and_commit_name_its_model_not_only_the_provider(self):
         # #1078 (audit 1 of 2.0): all read "DeepSeek (API)", so two roles on one provider looked
