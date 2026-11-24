@@ -2108,11 +2108,21 @@ def test_shell() -> str:
     command as `$SHELL -c`, or bash's when SHELL is unset (tests/RealOpenCode checks it). The
     runner used /bin/sh, which is dash on Debian and Ubuntu: `source .venv/bin/activate &&
     pytest` passed for the agent and failed for the runner, and each false failure cost an
-    auto-fix round (#196, the 2026-11-19 audit)."""
+    auto-fix round (#196, the 2026-11-19 audit). Run it with `shell_args`, as OpenCode does."""
     sh = os.environ.get("SHELL") or ""
     if os.path.isabs(sh) and os.access(sh, os.X_OK) and Path(sh).name not in NOT_POSIX:
         return sh
     return shutil.which("bash") or "/bin/sh"
+
+
+def shell_args(shell: str) -> list[str]:
+    """The flags before the command, as OpenCode 2.3.2 picks them by the shell's name (its
+    lowercased basename): zsh's `+o nomatch -c`, else `-c`. With a bare `-c` under zsh an
+    unmatched glob (`pip install -e .[dev]`, a pytest id `test_x[1]`) failed "no matches found"
+    for the setup, the base check and the tests while it passed for the agent: a task failed
+    before round 1, or an auto-fix round was spent on a false FAIL (#1170, 2026-11-24; the
+    #1010 review had fixed only the agent's shim)."""
+    return ["+o", "nomatch", "-c"] if Path(shell).name.lower() == "zsh" else ["-c"]
 
 
 # The variables OpenCode's environment moves into the task's home (context.opencode_home_env),
@@ -2157,7 +2167,8 @@ def run_in_lane(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]
     decoded output (its head and tail when long)."""
     # in the agent's lane, environment and shell: the tests run the agent's code, and must pass
     # or fail as they did when the agent ran them
-    argv = lane.wrap(context.writable(task), [test_shell(), "-c", cmd], context.readable(task),
+    sh = test_shell()
+    argv = lane.wrap(context.writable(task), [sh, *shell_args(sh), cmd], context.readable(task),
                      context.unix_paths(task))
     run = _issue()  # its own mark: sweep ends what it left, and nothing else (#324)
     proc = subprocess.Popen(argv, cwd=task.workdir, stdout=subprocess.PIPE,

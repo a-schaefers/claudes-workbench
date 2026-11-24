@@ -535,6 +535,33 @@ class Lifecycle(Base):
         del os.environ["SHELL"]
         self.assertEqual(runner.test_shell(), shutil.which("bash") or "/bin/sh")
 
+    def test_under_zsh_the_setup_base_check_and_tests_run_with_opencodes_nomatch_off(self):
+        # #1170 (2026-11-24): OpenCode 2.3.2 runs a zsh command as `zsh +o nomatch -c`, the
+        # runner as `zsh -c`, so an unmatched glob (`pip install -e .[dev]`, a pytest id
+        # `test_x[1]`) failed the setup before round 1, or the tests as a false FAIL, while the
+        # agent's own run passed. The stand-in fails any `[` as zsh's NOMATCH does, unless +o
+        zsh = Path(self.tmp.name) / "shells" / "zsh"
+        zsh.parent.mkdir()
+        zsh.write_text('#!/bin/sh\necho "ZSH-ARGS: $1 $2"\n'
+                       'if [ "$1" = "+o" ] && [ "$2" = "nomatch" ]; then shift 2; exec /bin/sh "$@"; fi\n'
+                       'case "$2" in *"["*) echo "zsh: no matches found: [" >&2; exit 1;; esac\n'
+                       'exec /bin/sh "$@"\n')
+        zsh.chmod(0o755)
+        os.environ["SHELL"] = str(zsh)
+        self.assertEqual(runner.shell_args(str(zsh)), ["+o", "nomatch", "-c"])
+        self.assertEqual(runner.shell_args("/bin/bash"), ["-c"])
+        self.start("t-zsh", "ok", "--setup", "echo .[dev]",
+                   "--test", f"{TEST_CMD} && echo tests/test_a.py::test_x[1]", "--auto-fix", "0",
+                   "--no-self-review")
+        st = wait_phase("t-zsh", {"review", "failed"})
+        t = store.Task("t-zsh")
+        self.assertEqual(st["phase"], "review", (t.dir / "setup.txt").read_text())
+        self.assertIn("ZSH-ARGS: +o nomatch", (t.dir / "setup.txt").read_text())
+        self.assertIs(st["base_check"]["ok"], False)              # fails on the base for its grep
+        self.assertNotIn("no matches found", (t.dir / "base-tests.txt").read_text())
+        self.assertIs(st["tests"]["ok"], True)
+        self.assertIn("ZSH-ARGS: +o nomatch", (t.round_dir(1) / "tests.txt").read_text())
+
     def test_unknown_events_never_hold_a_round_past_its_limit(self):
         # #195 (the 2026-11-19 audit): a line that wasn't a known event `continue`d past the
         # round's clocks, so a stream of them ran on past --round-timeout and held the GPU

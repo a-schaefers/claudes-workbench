@@ -1118,7 +1118,7 @@ and failed, tokens, `now:`, the latest words (400), files changed, and a NOTE fo
 spec never names (`outside_spec`: path or basename not in the step's prompt; silent when it names
 none).
 
-**Tests** (`run_tests`, `run_in_lane`): `<shell> -c` in the worktree, the agent's lane and
+**Tests** (`run_tests`, `run_in_lane`): `<shell> -c` (zsh: `+o nomatch -c`) in the worktree, the agent's lane and
 environment, its own group, `--test-timeout` (900 s), the runner's `CURRENT`. Read as it comes
 (`_Capture`; a `setsid` server may hold the pipe): ends at the shell's exit, the timeout (exit
 `timeout`) or `TEST_OUTPUT_CAP` (20 MB, exit `output limit`), then group kill and `sweep`. Kept:
@@ -1127,7 +1127,11 @@ environment, its own group, `--test-timeout` (900 s), the runner's `CURRENT`. Re
 line, 4000 in all). `rounds/<n>/tests.txt`: `$ cmd`, `exit: N`, `shell: <path>`, output.
 `test_shell` is the agent's, as OpenCode 2.3 runs `$SHELL -c`: `$SHELL` when an executable absolute
 path not in `NOT_POSIX` (fish, nu, …), else bash, else `/bin/sh`; `/bin/sh` (dash) made `source .venv/bin/activate` fail only for the runner
-(#196).
+(#196). Its flags are OpenCode's too (`shell_args`, by the shell's lowercased name, as 2.3.2
+picks them): zsh's `+o nomatch -c`, else `-c`; with a bare `-c` under zsh an unmatched glob
+(`pip install -e .[dev]`, a pytest id `test_x[1]`) failed the setup, the base check and the tests
+for the runner alone (#1170). Every `run_in_lane` command gets them: setup, base check, tests,
+`wb verify`, `wb shot`, bench.
 
 **Setting the worktree up** (`prepare`, `_prepare`, before the base check and the GPU; #201: a
 worktree holds only committed files, so checks needing installs, ignored files or `../lib` failed
@@ -6802,7 +6806,7 @@ doc needs its own `!/` line).
   `transcript.stores` (`export`, `find_session`, and through them `finished_export`, `wb watch`, `context_state`,
   `measure_speed`, `last_words`), the fake's `<db>.sessions`, `RealOpenCodeRun`. A variable it moves → `runner.SHIM_RESTORES`,
   which the shell shim gives back; the shim's shell and its name ↔ `runner.test_shell` (the tests run where the agent's
-  commands do; OpenCode picks its flags by the name).
+  commands do; OpenCode picks its flags by the name, which `runner.shell_args` restates for the runner's own commands).
 - **The layer's `permissions`** → the layer file alone, the project's config shut out (`rules_env`,
   `PROJECT_CONFIG_OFF`, #994); never `OPENCODE_CONFIG_CONTENT` (`CONFIG_CONTENT_MAX`); the user's own (`USERS_RULES`)
   before them. A key a project config mustn't change → `RESTATED`.
