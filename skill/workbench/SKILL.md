@@ -81,8 +81,9 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
      question asks which (the model's Providers tab on openrouter.ai), and each OpenRouter role is a
      `wb route <role> <id> --order <name>[,<name>]` of its own, `--day-usd` on the first (in a
      several-role `wb route` it exits 3); any others still go in one. Another answer: do what they said. A "not changed" (the
-     dialog's Don't): say it wasn't set, every role stays on the GPU; ask again only if they bring
-     it up. Ask nothing before it: no server install, no `wb scout`.
+     dialog's Don't): say which roles it left on the GPU (after an earlier Allow in the OpenRouter
+     routes, `wb route` shows what is set) and that their tasks need a GPU model; ask again only if
+     they bring it up. Ask nothing before it: no server install, no `wb scout`.
   3. **No GPU model and no key**: lay out both ways in two lines, a local server
      (reference/models.md, which names no server for them) or `/connect` in OpenCode for an API
      provider; let the user pick, and install nothing unasked. A server: `wb scout`, recommend

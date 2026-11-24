@@ -6104,7 +6104,10 @@ sends the agent's real request to that upstream through the keyhole.
 (and which roles use it, the Agents switch heeded), an environment key, an OAuth login, several
 providers and none; the GPU lines optional only with a stored key and no local model; several roles in
 one `wb route` (one line, one approval, all or nothing, the refusal naming the pair, OpenRouter set
-alone, `--order` refused beside pairs, a kept OpenRouter model with no backends refused); the router's `no GPU …` refusal with the API choice only for a stored key (never while Agents is GPU), and `wb start`'s
+alone, `--order` refused beside pairs, a kept OpenRouter model with no backends refused); the skill's
+own first-run command, read from SKILL.md and run: writing on the significant model so a `--role writing`
+start runs on API (#1101), each OpenRouter role in a `wb route` of its own with `--order`, and a Don't
+after an earlier Allow reported role by role from `wb route` (#1100); the router's `no GPU …` refusal with the API choice only for a stored key (never while Agents is GPU), and `wb start`'s
 exit 3 with it; `wb scout`'s API section (one line per provider at 300 models, a task's mean cost by
 `results.row_cost`, the spend line by `savings.api_totals`) and none with no provider and no API role.
 

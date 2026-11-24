@@ -32476,6 +32476,29 @@ class FirstRunApi(Base):
         self.assertEqual({r: (doc["roles"][r]["via"], doc["roles"][r]["order"]) for r in routes.ROLES},
                          {r: ("api", ["baseten"]) for r in routes.ROLES})
 
+    def test_a_dont_after_an_earlier_openrouter_allow_is_reported_role_by_role_from_wb_route(self):
+        # #1100 (2026-11-23): split into a route per OpenRouter role, the first run has several
+        # dialogs; a Don't after one Allow leaves trivial on API and the rest on the GPU, so the
+        # skill's "every role stays on the GPU" was false there. It now says which roles stay, from
+        # wb route
+        first = self.skills_first_run()
+        self.assertNotIn("every role stays on the GPU", first)
+        self.assertIn("say which roles it left on the GPU (after an earlier Allow in the OpenRouter "
+                      "routes, `wb route` shows what is set)", first)
+        self.catalog([*ROUTES_CATALOG, api_entry("openrouter", "vendor/model-x")],
+                     [key_row("openrouter", "OpenRouter", STORED)])
+        runner.models.hosted(fresh=True)
+        code, _, err = self.wb("route", "trivial", "openrouter/vendor/model-x", "--order", "baseten",
+                               "--day-usd", "5")
+        self.assertEqual(code, 0, err)                                # the Allow; then a Don't
+        doc = routes.read()
+        self.assertEqual({r: doc["roles"].get(r, {}).get("via", "gpu") for r in routes.ROLES},
+                         {"trivial": "api", "significant": "gpu", "writing": "gpu"})
+        shown = self.wb("route")[1]
+        self.assertIn("openrouter/vendor/model-x", shown)
+        for role in ("significant", "writing"):
+            self.assertRegex(shown, rf"(?m)^{role} +GPU ")
+
     # the router's refusal
 
     def test_the_routers_refusal_says_gpu_and_offers_an_api_role_only_with_a_stored_key(self):
