@@ -358,9 +358,9 @@ def session_entries(data: dict, worktree: str, verbose: bool) -> list[Entry]:
 # there, and a test checks task_entries has a branch for each (#861).
 EVENT_KINDS = frozenset({
     "round", "tests", "autofix", "self_review", "ask", "answer", "captain", "steer", "skills",
-    "allow", "interrupted", "fresh", "full", "load", "left_bg", "reading_full", "compacted",
-    "limits", "export", "resumed", "coding", "spec_gap", "next_step", "takeover", "stopped",
-    "error", "retry", "gpu", "served", "rate_limited", "backend"})
+    "allow", "interrupted", "fresh", "full", "load", "left_bg", "lingered", "reading_full",
+    "compacted", "limits", "export", "resumed", "coding", "spec_gap", "next_step", "takeover",
+    "stopped", "error", "retry", "gpu", "served", "rate_limited", "backend"})
 
 
 def task_entries(task: store.Task) -> list[Entry]:
@@ -408,6 +408,7 @@ def task_entries(task: store.Task) -> list[Entry]:
         # spec_gap and coding were dropped as kinds with no branch (#846), and then compacted,
         # limits and export, written just before (#865)
         elif kind in ("fresh", "full", "load", "left_bg", "reading_full", "compacted", "limits", "export",
+                      "lingered",  # the agent's turn over, OpenCode still open: stopped (#1160)
                       "served",  # served: the keyhole, an API model's provider changed what ran
                       "rate_limited"):  # an API provider's wait, the clocks paused (#1020)
             out.append(Entry(ts, key, [("sys", f"■ {r.get('text', '')}")]))

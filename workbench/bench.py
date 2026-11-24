@@ -735,8 +735,13 @@ def _start_task(case: dict, model: str, name: str, repo: Path, skills: list[str]
             argv += ["--setup-timeout", str(secs)]
     if _kept(case, "unload_for_tests"):
         argv += ["--unload-for-tests"]
+    # a case's copies are repo-relative, and from a package wb start reads a --copy from the
+    # package first (cli._copy_path): named as kept, a case from packages/app that copied both
+    # node_modules/ replayed with the package's twice and never the root's, a false failure
+    # every run; named from the package, each reads back as itself (#1158, 2026-11-24)
+    sub = (subdir(case) or "").strip("/")
     for p in case.get("copy") or []:
-        argv += ["--copy", p]
+        argv += ["--copy", os.path.relpath(f"/{p}", f"/{sub}") if sub else p]  # no cwd read
     for s in case.get("siblings") or []:
         argv += ["--sibling", s]
     for path in case.get("paths") or []:
