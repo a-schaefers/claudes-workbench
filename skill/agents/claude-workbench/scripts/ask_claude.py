@@ -9,8 +9,8 @@ Environment: CLAUDE_WB_URL (the chat's address, e.g. http://localhost:1337) and 
 
 Prints each of Claude's replies to stdout as it comes, and on stderr the ids to follow up with.
 Exit status: 0 when Claude's turn is done, 1 on an error or the timeout (Claude still at work: wait
-again with --after), 2 when Claude isn't listening, 3 when the token is refused. A wait the server
-cuts (it restarts on an update) is asked again until the timeout.
+again with --after), 2 when Claude isn't listening or the chat stays unreachable, 3 when the token
+is refused. A wait the server cuts (it restarts on an update) is asked again for up to two minutes.
 """
 from __future__ import annotations
 
@@ -29,10 +29,14 @@ from urllib.parse import quote, urlencode
 WAIT_EACH = 300  # seconds one GET /api/wait may hold (the server's default)
 # A wait cut by the server going away for a moment (it re-execs itself on a code change, `wb
 # update`, a rebind or a restart of its unit; a proxy in front answers 502 to 504 meanwhile) is
-# asked again after a pause growing from RETRY_FIRST to RETRY_MOST seconds, until the deadline:
-# it ended the client at once with a bare error and no `--after` id (#1107, 2026-11-23)
+# asked again after a pause growing from RETRY_FIRST to RETRY_MOST seconds: it ended the client at
+# once with a bare error and no `--after` id (#1107, 2026-11-23). A chat cut longer than any
+# restart takes (OUTAGE_MOST seconds in a row: `wb chat off`, the machine asleep, the tailnet down)
+# ends it with exit 2 and the `--after` id, never a wait to the deadline (an hour by default:
+# the #1107 review, 2026-11-23)
 TRANSIENT = (502, 503, 504)
 RETRY_FIRST, RETRY_MOST = 1.0, 15.0
+OUTAGE_MOST = 120.0
 # straight to the chat, never through an http_proxy from the environment: the token would pass it
 _open = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
 
@@ -97,7 +101,7 @@ def send(text: str, files: list[str]) -> dict:
 def follow(after: str, until: str, deadline: float) -> int:
     """Print Claude's replies after ``after`` until the turn is done (``until`` "reply": first a
     new reply, for a later report)."""
-    last, quiet_since, paused, pause, cut = after, None, False, RETRY_FIRST, None
+    last, quiet_since, paused, pause, cut, cut_since = after, None, False, RETRY_FIRST, None, None
     while True:
         left = deadline - time.monotonic()
         if left <= 0:
@@ -111,10 +115,13 @@ def follow(after: str, until: str, deadline: float) -> int:
             code, got = None, {"error": str(e)}
         if code is None or code in TRANSIENT:
             cut = got.get("error") or f"HTTP {code}"
+            cut_since = cut_since or time.monotonic()
+            if time.monotonic() - cut_since > OUTAGE_MOST:
+                return _say(f"the chat is unreachable ({cut}): ask_claude.py --after {last} waits on later", 2)
             time.sleep(max(0, min(pause, deadline - time.monotonic())))
             pause = min(pause * 2, RETRY_MOST)
             continue
-        pause, cut = RETRY_FIRST, None
+        pause, cut, cut_since = RETRY_FIRST, None, None
         if code != 200:
             return _say(got.get("error") or f"HTTP {code}", 1)
         for r in got.get("replies") or []:

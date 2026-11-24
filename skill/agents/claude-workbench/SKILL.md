@@ -39,9 +39,10 @@ Do small, local edits yourself: a round trip costs more than they do.
    exits:
    - `0`: Claude's turn is done. Read the report.
    - `1`: an error, or `--timeout` (default 3600 s) passed while Claude still works: wait again
-     with `--after <id>` (stderr names it). A wait cut by the chat restarting is asked again,
-     until the timeout.
-   - `2`: Claude isn't listening. Your message, if sent, waits in the queue.
+     with `--after <id>` (stderr names it). A wait cut by the chat restarting is asked again
+     for up to two minutes.
+   - `2`: Claude isn't listening, or the chat stayed unreachable for two minutes. Your message,
+     if sent, waits in the queue: do the work yourself, or try later with `--after <id>`.
    - `3`: your token was refused.
 3. **Read the report.** Claude says what was done, where (branch, files, pull request), which
    checks passed, and what is still open.

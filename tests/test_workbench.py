@@ -23443,6 +23443,31 @@ class WebChat(Base):
         self.assertGreater(len(hits), 1)
         self.assertIn("ask_claude.py --after m1 waits on", err.getvalue())
 
+    def test_ask_claude_gives_up_on_a_chat_that_stays_unreachable_long_before_its_deadline(self):
+        # the #1107 review: retrying a cut wait to the deadline (an hour by default) also covered a
+        # chat gone for good (`wb chat off`, the machine asleep, the tailnet down): the agent sat an
+        # hour where it got exit 1 at once before; past OUTAGE_MOST in a row it is exit 2 and --after
+        import importlib.util
+        script = Path(__file__).resolve().parent.parent / "skill/agents/claude-workbench/scripts/ask_claude.py"
+        spec = importlib.util.spec_from_file_location("ask_claude_1107b", script)
+        ac = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ac)
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        port = srv.getsockname()[1]
+        srv.close()                                      # nothing listens there: refused, every time
+        env = {"CLAUDE_WB_URL": f"http://127.0.0.1:{port}", "CLAUDE_WB_TOKEN": "wba-x"}
+        err = io.StringIO()
+        began = time.monotonic()
+        with mock.patch.dict(os.environ, env), mock.patch.object(ac, "RETRY_FIRST", 0.05), \
+                mock.patch.object(ac, "RETRY_MOST", 0.1), mock.patch.object(ac, "OUTAGE_MOST", 0.5), \
+                redirect_stdout(io.StringIO()), redirect_stderr(err):
+            rc = ac.follow("m1", "done", time.monotonic() + 30)  # far past OUTAGE_MOST
+        self.assertEqual(rc, 2, err.getvalue())
+        self.assertLess(time.monotonic() - began, 10)
+        self.assertIn("the chat is unreachable", err.getvalue())
+        self.assertIn("ask_claude.py --after m1 waits on later", err.getvalue())
+
     def test_the_chats_task_strip_leaves_out_a_task_wb_stop_all_parked(self):
         # #1097: open_tasks listed every task not accepted or discarded, so a review the quit
         # parked (out of `wb status` and the status line, #541) stayed on the phone's strip for good

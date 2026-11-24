@@ -183,7 +183,8 @@ A long poll for Claude's replies after the message `after` (a message's or a rep
   when 16 waits are open already.
 - A wait can be cut: the server restarts itself on an update (a reset connection, or 502 to 504
   from a proxy in front meanwhile), and `503` passes. Wait again, after a short pause, with the
-  same `after`: nothing was lost (`ask_claude.py` does, until its `--timeout`).
+  same `after`: nothing was lost (`ask_claude.py` does for up to two minutes in a row, then exits
+  2 naming `--after`: a chat down that long is off, asleep or out of reach, not restarting).
 
 ### `POST /api/send`
 JSON body, `Content-Type: application/json` (else 415 `json only`), at most 32 KB (else 413 `too
