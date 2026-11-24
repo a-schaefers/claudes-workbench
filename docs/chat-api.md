@@ -281,8 +281,8 @@ A **message** (`messages`, `replies`, `message`):
   with `role: "agent"`.
 - On a message to Claude: `cid?`, `files?: [{id, name, size, type, path}]`, `about?`, and in the
   state `received: {id, ts, by, how: "now"|"into"|"queued"} | null`, `expired?` (`into`: an
-  agent's message read into a turn it didn't open; `queued`: held for the running turn, `now` once
-  it ends).
+  agent's message read into a turn it may not have opened: answer it with `--to`; `queued`: held
+  for the running turn, `now` once it ends, an agent's `into`).
 - On Claude's reply: `re?: [message ids]` (what it answers: `wb chat reply --to`, else the
   messages that opened that turn or the user's delivered into it, the user's alone when the
   user's are among them; from another Claude Code session than the listening one, none: it is

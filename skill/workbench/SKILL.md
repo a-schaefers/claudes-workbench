@@ -242,8 +242,8 @@ real tasks with `--model` (ones you'd review closely anyway).
 user's `~/.config/workbench/AGENTS.md` to its provider (never their `~/.claude` files). When you propose an API role, say where the code goes
 (the provider, as `wb route --dry-run`'s line names it; its data-policy page comes in the note
 of the repo's first task there). Never remove a `local_only`
-from commands.json (a repo the user keeps off API models: `wb start` exits 3 with the choices;
-ask the user). Never name a free model first (the provider may keep or train on the code), and
+from commands.json (a repo the user keeps off API models: `wb start` exits 3 with the choices,
+and a task already on API stops before its next round: wb takeover or wb discard; ask the user). Never name a free model first (the provider may keep or train on the code), and
 never pick an OpenRouter backend (`--order`) for the user: ask which. An API task's lane hides
 each registry config that holds a credential (a token, password, key; one without stays readable
 and its tool works; with no lane, as on macOS, none is hidden and there's no note); when
@@ -375,7 +375,7 @@ this machine's GPU even when the model is on a wb remote box; without it they se
 `wb verify` and `wb shot` wait for the GPU alone too.
 A suite slower than 15 minutes: `--test-timeout <secs>` above its time, or
 narrow the command; a run past it isn't sent back to the agent (nor one the lane refused a
-device, nor a command or Python module (`python3 -m pytest`, not one of the repo's own, nor one whose file or dotted name the spec gives; a bare name such as `greet` still counts as a tool) not found as on the base, which checks in before round 1, or a command a `wb next --test` command itself names), you're woken with `auto-fix skipped:` and the cause, unless the base check ran the same
+device, nor a command or Python module (`python3 -m pytest`, not one of the repo's own, nor one whose file or dotted name the spec gives, nor a package or module the spec makes, as in "make a new package greet", unless your own Python has it; a name the spec only mentions, "with pytest tests", still counts as a tool) not found as on the base, which checks in before round 1, or a command a `wb next --test` command itself names), you're woken with `auto-fix skipped:` and the cause, unless the base check ran the same
 command in a quarter of the limit: then it's the change's hang, and auto-fix gets it.
 Once the tests pass, the agent checks its own change against your review checks in one more
 round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it);
@@ -520,8 +520,11 @@ coding choice is the user's (`wb coding`), never changed by a check.
   request) is the user's call, never a retry: ask them, as the notice says (it names a cap that
   would do). A higher cap or tomorrow: `wb resume <name>` once it allows. `wb feedback`, `next`
   or `resume` refused at the cap (exit 3) is the same call.
-  The role on the GPU is for the next tasks; this one keeps its API model (resume never
+  The notice's route change is for the next tasks; this one keeps its API model (resume never
   re-routes), so `wb takeover` or `wb discard` it. Nothing but the user raises the cap.
+  With Agents on GPU the same stop says `Agents is GPU, so nothing spends`: API tasks already
+  started stop before their next round, and feedback, next, resume and an API `--model` are
+  refused. Ask the user (Agents back to Both or API, then `wb resume`), or takeover or discard.
 
 - **Lessons**: when the `lessons:` line says one was seen in more than one task, or you just
   corrected something the next agent will get wrong too, triage it now (`reference/skills.md`).
@@ -555,10 +558,12 @@ still has room (how handovers work: `reference/driving.md`).
 Check a directory flagged as possible build output before you accept a step. Remove or gitignore
 generated files. When the bulk additions or large binaries belong in the commit, pass
 `--include` to `wb next` or `wb accept` after reviewing them. `NOTE: git ignores files the agent
-wrote` names files no diff shows and no commit takes: read them, then `--include` lands them. A
-file you write under an ignored path (a takeover, a fix) is refused the same way: `--include`.
-`note: git ignores N more files … leaves out as build or test output` names the rest you changed
-there: `wb next`'s stay in the worktree (`git -C <worktree> add -f <file>` keeps one), `wb
+wrote` (with its edit tools, or a shell command that names them) names files no diff shows and no commit takes: read them, then `--include` lands them. A
+file you write under an ignored path (a takeover, a fix) is refused the same way: `--include`;
+not what your rerun of the task's `--test` or setup writes where its own run wrote. Another
+build you run there (`tsc` when the test is jest's) is: delete its output before `wb next`/`accept`.
+`note: git ignores N more files … leaves out as build or test output` names the rest you or the
+agent changed there: `wb next`'s stay in the worktree (`git -C <worktree> add -f <file>` keeps one), `wb
 accept`'s are copied to the task's `left-out/` before the worktree goes.
 When a command says the repo `moved or was deleted`, ask the user where it is now, then
 `wb relocate <name> --repo <dir>`; a removed linked worktree needs nothing (its main one is used).

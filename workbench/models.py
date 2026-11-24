@@ -1724,21 +1724,30 @@ def credit_turn(pid: str, task: str = "") -> dict | None:
     `ok` or the keyhole's next 402, rather than each sending a round that wakes Claude with its
     own stop (#1178, 2026-11-24). A mark `asked_by` this task (credit_ask: the user's resume of
     the task the 402 stopped) is its turn: None."""
+    return credit_recheck(pid, task)[0]
+
+
+def credit_recheck(pid: str, task: str = "") -> tuple[dict | None, bool]:
+    """credit_turn's answer, and whether this call made ``task`` the one to ask the provider
+    again past the mark's `until`. NoLease.load counts it a recheck only after a wait: then its
+    402 is the stop Claude was already told of, so its round goes back to waiting with no stop of
+    its own (#1216, 2026-11-24). A turn with no wait first (a new start past an expired mark)
+    and the user's resume (credit_ask) are no recheck: their 402 still stops them."""
     def waits(row: dict) -> dict | None:
         return None if row["state"] != "no_credit" or (task and row.get("asked_by") == task) else row
     if (row := api_health(pid)) is not None:
-        return waits(row)
+        return waits(row), False
     path = api_health_path()
     with store.locked(path.with_name(path.name + ".lock")):
         doc = store.read_json(path, {})
         row = doc.get(pid) if isinstance(doc, dict) else None
         if not isinstance(row, dict) or row.get("state") != "no_credit":
-            return None
+            return None, False
         if (held := api_health(pid)) is not None:  # another runner asked meanwhile
-            return waits(held)
+            return waits(held), False
         doc[pid] = {**row, "until": time.time() + CREDIT_RECHECK_SECS, "asked_by": task}
         store.write_json(path, doc)
-    return None
+    return None, True
 
 
 def credit_ask(pid: str, task: str) -> bool:
@@ -3853,6 +3862,7 @@ class NoLease:
         self.pool = None
         self.aside = False
         self.loaded = True
+        self.recheck = False  # this load waited, then was the one to ask again past a 402's mark (#1216)
         self.fd: int | None = None
         self.path: Path | None = None
 
@@ -3904,8 +3914,13 @@ class NoLease:
         waiters left the task whose turn it was (the user's resume) waiting for a slot, and each
         of them for its 2xx, until the mark's 900 s ran out (the review of #1178, 2026-11-24)."""
         pid = self.m.provider or api_provider(self.m)
+        self.recheck = False
         try:
-            row = credit_turn(pid, self.task)
+            # a turn handed here, with no wait first, is no recheck: a new start (or a next round)
+            # past an expired mark is the first to meet the 402 since, and its stop is the one
+            # notice Claude gets; counted as one, it waited forever untold (the review of #1216,
+            # 2026-11-24). Only the turn handed after a wait below is a recheck
+            row = credit_recheck(pid, self.task)[0]
         except Exception:  # an unreadable file: the round's keyhole answers instead
             return 0.0
         if row is None:
@@ -3928,9 +3943,9 @@ class NoLease:
                     said = msg
                 w.wait(min(max(until - time.time(), 0.1), API_WAIT[1]))
                 try:
-                    row = credit_turn(pid, self.task)
+                    row, self.recheck = credit_recheck(pid, self.task)
                 except Exception:
-                    row = None
+                    row, self.recheck = None, False
         if held:  # not on a stop (wb stop's signal): that runner sends nothing more
             self.__enter__()
         return 0.0

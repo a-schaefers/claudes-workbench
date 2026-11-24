@@ -900,8 +900,27 @@ test('on a file system that ignores case, a task under ~/Repos is a session in ~
   on('ui.toast', () => ({ value: undefined }))
   const woken: string[] = []
   on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
-  files['/uSERS/U/REPOS/A'] = ''  // the directory, every letter's case swapped: APFS finds it
+  files['/Users/u/repos/A'] = ''  // the directory, its name's case swapped in its parent: APFS finds it
   await $.session.start({ cwd: '/Users/u/repos/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('REPORT-cased'))).toHaveLength(1)
+})
+
+test('on WSL2\'s /mnt/c, which ignores case under a root that keeps it, a task under C:\\Users is a session in /mnt/c/users\'s', async ($, on) => {
+  // #1217: the whole path swapped, /MNT/C/uSERS/…, isn't on the ext4 root, so drvfs read as
+  // case-sensitive. Its own components fold: a directory WSL made there (code) keeps case
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'cased', 'review', { repo: '/mnt/c/Users/Me/code/a', cwd: '/mnt/c/Users/Me/code/a' })
+  notice(files, { ts: ts0, task: 'cased', kind: 'review', text: 'REPORT-cased' })
+  fakeTasks(on, files, ['cased'])
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  files['/mnt/c/USERS'] = ''  // C:\Users, Windows' own, finds a name in any case
+  await $.session.start({ cwd: '/mnt/c/users/me/code/a', surface: 'terminal', isInteractive: true })
   await clock.advance(3000)
   expect(woken.filter(t => t.includes('REPORT-cased'))).toHaveLength(1)
 })
@@ -1124,7 +1143,7 @@ test('a stop at the day\'s API spend cap wakes Claude to ask the user, never to 
   await clock.advance(3000)
   expect(woken).toHaveLength(1)
   // no routes.json here, so no cap: a cap is what lets it go on, never tomorrow (#1095)
-  expect(woken[0]).toContain('Ask the user for a day cap (`wb route cap <usd>`), then `wb resume a`; or the role on the GPU')
+  expect(woken[0]).toContain('Ask the user for a day cap (`wb route cap <usd>`), then `wb resume a`; or the route change the notice names')
   expect(woken[0]).not.toContain('tomorrow')
   expect(woken[0]).not.toContain('Steer it')
   expect(woken[0]).not.toContain('wb feedback')
@@ -1149,9 +1168,34 @@ test('#1095: a spend stop\'s wake under a cap never pairs the role on the GPU wi
   await clock.advance(3000)
   expect(woken).toHaveLength(1)
   expect(woken[0]).toContain('Ask the user: a higher cap (`wb route cap <usd>`) or tomorrow, then `wb resume a`; ' +
-    'or the role on the GPU for the next tasks (`wb route <role> gpu`, on their yes), with `wb takeover a` or ' +
+    'or the route change the notice names, if any, for the next tasks (on their yes), with `wb takeover a` or ' +
     '`wb discard a` for this one: resume keeps its API model.')
   expect(woken[0]).not.toMatch(/GPU[^.;]*then `wb resume/)
+  // #1218 (2026-11-24): the wake's own `wb route <role> gpu` changed nothing under Agents API
+  expect(woken[0]).not.toContain('wb route <role> gpu')
+})
+
+test('#1213: a stop for Agents on GPU wakes Claude to ask for the switch back, never a cap', async ($, on) => {
+  // bar loop round 3 (2026-11-24): Agents on GPU now stops an API task already started, a
+  // `spend` stop whose remedy is the switch: SPEND_NEXT's "a higher cap" lets nothing go on
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  files['/home/u/.config/workbench/routes.json'] = JSON.stringify({ v: 1, use: 'gpu', day_usd: 5, roles: {} })
+  task(files, 'a', 'stuck')
+  notice(files, { ts: ts0, task: 'a', kind: 'stuck', round: 1, cause: 'spend', guard: 'agents',
+    text: 'a stopped: Agents is GPU, so nothing spends, and it runs on its API model (deepseek/deepseek-flash).' })
+  fakeTasks(on, files, ['a'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken).toHaveLength(1)
+  expect(woken[0]).toContain('Ask the user: Agents back to Both or API (the workbench pane, or `wb route all both` ' +
+    'on their yes), then `wb resume a`; or `wb takeover a` or `wb discard a`.')
+  expect(woken[0]).not.toContain('higher cap')
+  expect(woken[0]).not.toContain('wb feedback')
 })
 
 test('#1124: a stop by the task\'s API provider wakes Claude to pass on its remedy, never to steer or discard it', async ($, on) => {
@@ -2693,6 +2737,74 @@ test('#1175: an agent\'s message delivered into a running turn is acked into, so
   expect(sent[0].text).toContain('wb chat reply --to <id>')
   expect(runs.filter(r => r.includes('chat ack a1'))).toEqual([expect.stringMatching(/ --how into$/)])
   expect(runs.filter(r => r.includes('chat ack u1'))).toEqual([expect.stringMatching(/ --how now$/)])  // the user's: now
+})
+
+test('#1212: an agent\'s message queued behind a running turn is acked into once that turn ends, never now', async ($, on) => {
+  // #1212, 2026-11-24: the mid-turn send refused, readQueued acked it `now`, so the next wake
+  // turn's plain report to the away user went to the agent alone, pushed to no phone
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('session.send', () => ({ isDelivered: false, reason: 'busy' }))  // refused: a queued prompt instead
+  const runs: string[] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv.join(' ')); return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } } })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'a long review', turnId: 't1' })
+  await $.tool.call({ tool: 'Bash', command: 'wb start t --spec s.md' })  // workbench mode: the chat listens
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'a1', ts: 1_800_000_000, from: 'hermes', role: 'agent', text: 'please refactor foo' }) + '\n' +
+    JSON.stringify({ id: 'u1', ts: 1_800_000_001, from: 'user', text: 'status?' }) + '\n'
+  await clock.advance(3000)
+  expect(asked.some(a => a.startsWith('[agent hermes] please refactor foo'))).toBe(true)
+  const acks = (id: string) => runs.filter(r => r.includes(`chat ack ${id} `)).map(r => r.split(' --how ')[1])
+  expect([acks('a1'), acks('u1')]).toEqual([['queued'], ['queued']])
+  await $.turn.complete(endTurn('t1'))
+  await clock.advance(3000)
+  expect([acks('a1'), acks('u1')]).toEqual([['queued', 'into'], ['queued', 'now']])  // the user's: now
+})
+
+test('#1212: an agent\'s message submitted behind a task\'s wake is acked into, alone it is acked now', async ($, on) => {
+  // #1212, 2026-11-24: behind a wake submitted in the same poll it was acked `now` at once, so
+  // the wake's turn's plain report to the away user went to the agent alone
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'fix-it', 'review', { repo: '/home/u/project', cwd: '/home/u/project', session: 'sess-1' })
+  fakeTasks(on, files)
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  const runs: string[] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv.join(' ')); return { value: { exitCode: 0, stdout: '', stderr: '' } } })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  const acks = (id: string) => runs.filter(r => r.includes(`chat ack ${id} `)).map(r => r.split(' --how ')[1])
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  const turn = async (id: string, command?: string) => {
+    await $.turn.start({ text: '', turnId: id })
+    if (command) await $.tool.call({ tool: 'Bash', command })
+    await $.turn.complete(endTurn(id))
+    await clock.advance(3000)
+  }
+  await turn('t0', 'wb start t --spec s.md')                     // workbench mode: the chat listens
+  notice(files, { ts: ts0 + 40, task: 'fix-it', kind: 'review', text: 'REPORT-fix-it' })
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'a1', ts: ts0 + 40, from: 'hermes', role: 'agent', text: 'please refactor foo' }) + '\n'
+  await clock.advance(31_000)                                    // one poll: the wake, then the message
+  const at = (needle: string) => asked.findIndex(a => a.includes(needle))
+  expect(at('[agent hermes] please refactor foo')).toBeGreaterThan(at('REPORT-fix-it'))
+  expect(at('REPORT-fix-it')).toBeGreaterThanOrEqual(0)
+  expect(acks('a1')).toEqual(['into'])
+  await turn('t1')                                               // the wake's turn
+  await turn('t2', 'wb chat reply --to a1 --text "On it."')     // the agent's, answered: no follow-up
+  files['/wb/chat/messages.jsonl'] += JSON.stringify({ id: 'a2', ts: ts0 + 50, from: 'hermes', role: 'agent', text: 'and bar' }) + '\n'
+  await clock.advance(31_000)                                    // nothing ahead of it: its own turn
+  expect(acks('a2')).toEqual(['now'])
 })
 
 test('a web message queued behind a running turn reads as read once that turn ends', async ($, on) => {

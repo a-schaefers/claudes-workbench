@@ -1535,20 +1535,11 @@ def _text(full: str) -> bool:
         return False
 
 
-def hand_written(worktree: Path, since: float, left: list[str] | None = None) -> list[str]:
-    """The files git ignores and doesn't track that changed in the worktree since ``since`` (a
-    time.time()) and look written by hand, not by a build or a test run: text, named like a file
-    the commit would hold (its suffix, or its whole name when it has none), under no directory
-    that marks itself a cache (_marks_cache), and fewer than BUILD_FILES such files in their
-    ignored directory (an install), else, ignored one by one, their top-level one. A module Claude
-    wrote under Python.gitignore's lib/ after a takeover was left out of wb accept's commit and
-    deleted with the worktree, with no warning: only the agent's edit tools were read (#1179,
-    2026-11-24). A test run's .pyc, .pytest_cache/ and logs, or an npm install, must not refuse
-    the commit (Claude runs the tests there). ``left`` gets the rest that are text outside a
-    cache, fewer than BUILD_FILES such in their group, any suffix: the commit leaves them out,
-    said, never silently dropped (left_out_line, #1179's review). The kind filter alone is
-    waived, for the .csv beside Claude's module: unfiltered, a test run's bytecode was named at
-    every accept, and an npm install's 20,000 paths went into status.json (#1179's review)."""
+def _ignored_changed(worktree: Path, since: float):
+    """hand_written's scan: (top, outside, kept, key) for the files git ignores and doesn't track
+    that changed since ``since``: ``outside``, those under no cache; ``kept``, those of them text
+    and of a kind the commit would hold; ``key(p)``, the outermost ignored directory holding p,
+    else p itself. None when nothing changed."""
     top = os.path.abspath(worktree)
     changed = []
     for raw in git_bytes(worktree, "ls-files", "--others", "--ignored", "--exclude-standard",
@@ -1563,7 +1554,7 @@ def hand_written(worktree: Path, since: float, left: list[str] | None = None) ->
         if stat.S_ISREG(st.st_mode) and max(st.st_mtime, st.st_ctime) >= since - CLOCK_SLACK:
             changed.append(p)
     if not changed:
-        return []
+        return None
     held = git_bytes(worktree, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
     kinds = {_kind(os.fsdecode(p)) for p in held.split(b"\0") if p}
     caches: dict[str, bool] = {}
@@ -1578,21 +1569,65 @@ def hand_written(worktree: Path, since: float, left: list[str] | None = None) ->
                 return True
         return False
 
-    # Only the files the other filters keep count toward BUILD_FILES: counted before them, the
-    # .pyc of Claude's first test run (agents run without bytecode) in a 60-module app/ cut
-    # app/lib/helper.py, and accept --merge dropped it without a word (#1179, 2026-11-24).
-    # Counted by ignored directory: by top-level one, setuptools' in-tree services/api/build/lib
-    # copies of 60 modules cut services/api/lib/helper.py the same way (#1179's review)
     outside = [p for p in changed if not in_cache(p)]
     kept = [p for p in outside if _kind(p) in kinds and _text(os.path.join(top, p))]
     dirs = {os.fsdecode(d).rstrip("/") for d in git_bytes(
         worktree, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory",
         "-z").split(b"\0") if d.endswith(b"/")}
 
-    def group(p: str) -> str:
+    def key(p: str) -> str:
         parts = p.split("/")[:-1]
-        return next((d for i in range(1, len(parts) + 1) if (d := "/".join(parts[:i])) in dirs),
-                    _top(p))
+        return next((d for i in range(1, len(parts) + 1) if (d := "/".join(parts[:i])) in dirs), p)
+    return top, outside, kept, key
+
+
+def under(p: str, keys) -> bool:
+    """Whether path ``p`` is one of ``keys`` or under one (ran_wrote's directories and files)."""
+    return any(p == k or p.startswith(k + "/") for k in keys)
+
+
+def ran_wrote(worktree: Path, since: float) -> list[str]:
+    """Where the runner's own setup or test run, begun at ``since``, wrote what hand_written
+    would take for Claude's (text, of a kind the commit holds, outside a cache): each such file's
+    outermost ignored directory, else the file itself. A rerun of that command by Claude writes
+    there again, and is no one's work: `mvn test`'s target/surefire-reports, tsc's dist/*.d.ts or
+    jest's coverage/ refused wb accept and wb next as files written by hand, the runner's later
+    runs rewrote them, and every accept after was refused again (#1211, 2026-11-24)."""
+    if not (scan := _ignored_changed(worktree, since)):
+        return []
+    _, _, kept, key = scan
+    return sorted({key(p) for p in kept})
+
+
+def hand_written(worktree: Path, since: float, left: list[str] | None = None,
+                 ran=()) -> list[str]:
+    """The files git ignores and doesn't track that changed in the worktree since ``since`` (a
+    time.time()) and look written by hand, not by a build or a test run: text, named like a file
+    the commit would hold (its suffix, or its whole name when it has none), under no directory
+    that marks itself a cache (_marks_cache), not where the runner's own runs wrote (``ran``,
+    ran_wrote's: Claude's rerun of the acceptance command, #1211), and fewer than BUILD_FILES
+    such files in their ignored directory (an install), else, ignored one by one, their top-level
+    one. A module Claude
+    wrote under Python.gitignore's lib/ after a takeover was left out of wb accept's commit and
+    deleted with the worktree, with no warning: only the agent's edit tools were read (#1179,
+    2026-11-24). A test run's .pyc, .pytest_cache/ and logs, or an npm install, must not refuse
+    the commit (Claude runs the tests there). ``left`` gets the rest that are text outside a
+    cache, fewer than BUILD_FILES such in their group, any suffix: the commit leaves them out,
+    said, never silently dropped (left_out_line, #1179's review). The kind filter alone is
+    waived, for the .csv beside Claude's module: unfiltered, a test run's bytecode was named at
+    every accept, and an npm install's 20,000 paths went into status.json (#1179's review)."""
+    if not (scan := _ignored_changed(worktree, since)):
+        return []
+    top, outside, kept, key = scan
+    kept = [p for p in kept if not under(p, ran)]
+    # Only the files the other filters keep count toward BUILD_FILES: counted before them, the
+    # .pyc of Claude's first test run (agents run without bytecode) in a 60-module app/ cut
+    # app/lib/helper.py, and accept --merge dropped it without a word (#1179, 2026-11-24).
+    # Counted by ignored directory: by top-level one, setuptools' in-tree services/api/build/lib
+    # copies of 60 modules cut services/api/lib/helper.py the same way (#1179's review)
+
+    def group(p: str) -> str:
+        return k if (k := key(p)) != p else _top(p)
     groups = Counter(group(p) for p in kept if "/" in p)
     out = sorted(p for p in kept if "/" not in p or groups[group(p)] < BUILD_FILES)
     if left is not None:
@@ -1607,13 +1642,14 @@ def hand_written(worktree: Path, since: float, left: list[str] | None = None) ->
 
 
 def left_out_line(paths: list[str], worktree: Path, kept: Path | None = None, gone: bool = False) -> str:
-    """The note for the ignored files changed since the agent stopped that the commit leaves out,
-    as hand_written took them for a build's or a test run's: a .csv beside Claude's module under
-    lib/ was dropped without a word, --include or not (#1179's review, 2026-11-24). ``kept``: the
+    """The note for the ignored files changed in the worktree that the commit leaves out, as
+    hand_written took them for a build's or a test run's: a .csv beside Claude's module under
+    lib/ was dropped without a word, --include or not (#1179's review, 2026-11-24); the agent's
+    shell's since its first round too, so not "since the agent stopped" (#1210). ``kept``: the
     copy wb accept keeps of them before the worktree goes; ``gone``: too many to copy; else where
     `git add -f` stages one."""
     head = (f"note: git ignores {len(paths)} more file{'s' if len(paths) != 1 else ''} changed "
-            f"since the agent stopped, which the commit leaves out as build or test output "
+            f"in the worktree, which the commit leaves out as build or test output "
             f"({', '.join(brief(paths))})")
     if kept is not None:
         return f"{head}: a copy is in {kept}"

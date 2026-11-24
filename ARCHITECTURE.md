@@ -142,7 +142,7 @@ stuck, failed, asking; `CLOSED` = accepted, discarded.
 | `running` / `asking` | the runner per round; `asking` while a question is open (`ask_mcp.relay`) |
 | `testing` | the runner while the acceptance command runs |
 | `review` | the runner (tests pass, auto-fix spent, or no `--test`); `wb takeover` |
-| `stuck` | the runner (a guard; a SIGTERM not wb's: `runner.SIGNAL_STOP`; `runner.UPDATED`, #603); `wb stop`; `wb accept` whose commit fails on a live task ("accept failed: …") |
+| `stuck` | the runner (a guard; a SIGTERM not wb's: `runner.SIGNAL_STOP`; `runner.UPDATED`, #603; an API task's repo marked local-only, #1215); `wb stop`; `wb accept` whose commit fails on a live task ("accept failed: …") |
 | `failed` | the runner (opencode exited non-zero: `runner.died`; setup; load; a crash or full disk); `cli.reap`. All but `runner.died` (save one whose server went down again, `infra` "model", #657) set status `infra`, which `wb bench` doesn't grade (#508) |
 | `accepted` / `discarded` | `wb accept` / `wb discard` |
 
@@ -158,8 +158,9 @@ Agents switch over the role's own `via`): the GPU, its pin (`gpu`) or the router
 fallback, in either direction**: a GPU role with no GPU model exits 3 with the router's line and
 never tries its stored API model; an API role whose model can't run exits 3 with one line
 (`routes.cant_run`: `trivial role: <id> can't run: <why> (<fix>). Ask the user: fix that, or put
-the role on the GPU (wb route trivial gpu)`, or `… set Agents to Both or GPU (wb route all
-both|gpu)` under Agents API) and never the GPU; Agents on API with a role that has no API model
+the role on the GPU (wb route trivial gpu)`, or under Agents API `routes.off_api`'s `… set Agents to Both or
+GPU (wb route all both|gpu)`, `set Agents to GPU (wb route all gpu)` for a role whose own side is API or
+that the busy opt-in would send back, #1218) and never the GPU; Agents on API with a role that has no API model
 exits 3 too (`routes.no_api_model`). The choice is fixed in task.json (`via`, `role`, an API
 model's `provider`, `thinking`, `said`; a task from before #1016 has none, and reads as GPU until its runner writes
 `via` (and an API model's `provider`) once from the model it resolves, `runner.settle_via`, #1111:
@@ -327,7 +328,13 @@ credit or quota (<why>): top it up, or wait for the plan's reset; wb asks it aga
 gives up)`, on a watch of `$WB_HOME` (an `ok` or the keyhole's next mark wakes it), looking again at
 most every `API_WAIT`'s 30 s; past the mark's `until` one runner asks (the mark held
 `CREDIT_RECHECK_SECS` more under its lock, `asked_by` that task) and the others wait for its
-answer. The tasks queued behind a 402 each sent a round, met the 402 and woke Claude with a stop of
+answer. That runner's round (`models.credit_recheck` says this load, after it waited, made it the
+one to ask: `NoLease.recheck`) that meets the 402 again before any answer (`quota`, not
+`answered`) goes back to waiting in `drive`, the 402's new mark held, with no stop or notice of its
+own: stopped, each waiter in turn woke Claude, 900 s apart, with the same stop (#1216). A turn
+handed with no wait first (a new `wb start`, or a running task's next round, past an expired mark)
+is no recheck: its 402 is the first since, and stops it with its notice (counted as one, it waited
+forever untold: the review of #1216). The tasks queued behind a 402 each sent a round, met the 402 and woke Claude with a stop of
 its own, though wb start refused in that state (#1178). A mark `asked_by` the task is its turn: `wb
 feedback` or `wb resume` of a task its provider stopped (status `infra: provider`, an API task)
 hands it the turn first (`cli._credit_turn`, `models.credit_ask`: `asked_by` it, `until` moved
@@ -352,7 +359,7 @@ worktree, `OPENCODE_CONFIG` the layer. Later rounds continue the session until a
 |---|---|---|
 | the same tool call in a row (its input hashed, cut to 400 characters, #497) | 4 | `events.StuckDetector` |
 | failing tool calls in a row | 6 | |
-| calls since the last edit to the task's files (outside the worktree doesn't count: 2026-11-18; a relative path is the workdir's, and a `patch` counts if any file it wrote is the task's, #1148) | 40; an API task's 40 per 32K of the window, at most 160 (`runner.no_edit_limit`, #1087: 40 stopped 131K API one-shots still exploring); a GPU task's stays 40 at any window, as in 1.91.x; in a self-review round with the tree its tests passed on, the round's finish instead (`settled`, #1168; its fresh session after a full window too, #1188) | |
+| calls since the last edit to the task's files (outside the worktree doesn't count: 2026-11-18; a relative path is the workdir's, and a `patch` counts if any file it wrote is the task's, #1148) | 40; an API task's 40 per 32K of the window, at most 160 (`runner.no_edit_limit`, #1087: 40 stopped 131K API one-shots still exploring); a GPU task's stays 40 at any window, as in 1.91.x; in a self-review round with the tree its tests passed on, the round's finish instead (`settled`, #1168; its fresh session after a full window too, #1188, and the round a nudge or a note starts in it, #1207) | |
 | no output (not while waiting on Claude; a background job gets the test timeout if longer) | 15 min | `--silence-timeout` |
 | one round, waits on Claude excluded | 40 min | `--round-timeout` |
 | mid-round handovers in one review round | more than `HANDOVER_MAX` (5) | `runner.drive` |
@@ -370,10 +377,10 @@ at ~36 tokens/s; slower models get longer ones, never shorter (*Budgets and spee
 2, counted since the last review round or step) goes back as `auto_fix_prompt` (fix the code,
 don't weaken tests, check its own expected values by hand, never blame the compiler: 2026-11-18)
 without waking Claude. `not_the_code` (#496: a timeout, a lane-refused device, `lane_refused`,
-#331; a command or Python module not found, `missing_command` (not the repo's own, `own_module`: a `<top>/` or `<top>.py` in the worktree, which a `--setup` may generate, or at the base commit, or one whose file or dotted name the spec gives; a bare name the spec gives, `greet`, still counts as a tool, as `pytest` would), with the same line as the base check's (wb's `<name>: command not found` in every shell; for a Python module the same module, `_missing_key`, as the line starts with the interpreter's path, a `--setup` .venv's in the base check's scratch checkout and in the worktree, #1181's review) for the same
-command, #1152, #1181, or, when no base check ran the command (`wb next --test`, `--no-base-check`), a
-tool the command itself names, `missing_name` in `command_words`, not one a script it runs names,
-which the step may write, #1172; its fix `GIVE_TOOL`) gets none: review, status `last` the cause, the report led by `auto-fix skipped: <cause>`
+#331; a command or Python module not found, `missing_command` (not the repo's own, `own_module`: a `<top>/` or `<top>.py`, or `src/<top>`, in the worktree, which a `--setup` may generate, or at the base commit, or one whose file or dotted name the spec gives, or a top-level name the spec makes, `spec_makes` (its `<name>/` path, or a package or module so named in a sentence that makes something: `Make a new Python package answerpkg`), that the user's own environment can't import either, `user_imports`, #1209; one the spec merely names, `with pytest tests`, `python3 -m pytest -q`, still counts as a tool, #1209's review), with the same line as the base check's (wb's `<name>: command not found` in every shell, or `<path>: not in the worktree (…)` for a tool in an install's `TOOL_DIRS`, #1206; for a Python module the same module, `_missing_key`, as the line starts with the interpreter's path, a `--setup` .venv's in the base check's scratch checkout and in the worktree, #1181's review) for the same
+command, #1152, #1181, or, unless a base check passed the same command (when none ran it, `wb next --test`, `--no-base-check`, #1172, or it failed before reaching the tool, an `&&` chain's first command, #1208), a
+tool or `-m` module the command itself names, `_missing_word` in `command_words`, not one a script it runs names,
+which the step may write; its fix `GIVE_TOOL`) gets none: review, status `last` the cause, the report led by `auto-fix skipped: <cause>`
 with the fix (`wb allow --path` of `lane_grant`'s grant, `shlex.quote`d, #670). Except `hang`
 (tests `hang {base, limit}`): a timeout where the base check passed the same command in
 `HANG_SHARE` (a quarter) of the limit or less is the change's, sent back saying so (#779). A
@@ -388,14 +395,15 @@ it ran at) gets one more round, `runner.SELF_REVIEW` (its file copied aside into
 #1085),
 Claude's own review checks (each rejection proved by breaking its check and seeing a test fail).
 Such a round reads and runs by design: when the calls-without-an-edit guard comes due in it
-(status `round_for` `self_review`, or `fresh` for the session carrying it on past a full window,
-#1188) with the tree its tests passed on (status `self_review_tree`, `gitops.mark` as it was
-queued; `runner.green_tree`), the round ends as the agent's finish, not stuck and no guard
+(status `round_for` `self_review`, or a round carrying it on, `runner.SELF_REVIEW_ROUNDS`:
+`fresh` past a full window, #1188, `steer` after the think nudge or Claude's note, #1207) with the
+tree its tests passed on (status `self_review_tree`, `gitops.mark` as it was queued;
+`runner.green_tree`), the round ends as the agent's finish, not stuck and no guard
 counted (`settled` recorded, not `died`; a `settled {text}` event; the report's `self-review: N
 tool calls without changing a file in the task, the tree its tests passed on; stopped as its
 finish`), then the tests and review: a green change woke Claude as stuck and its step was
-recorded stuck (#1168). A tree it changed is stopped as before, and so is a fresh session's tree
-as the full one left it, a check maybe still commented out (#1188).
+recorded stuck (#1168). A tree it changed is stopped as before, and so is a fresh or steered
+session's tree as the round before left it, a check maybe still commented out (#1188).
 On by default because a feedback round costs a whole wake (2026-11-18); a model it doesn't help
 learns it off.
 
@@ -548,8 +556,10 @@ doesn't bill; the row is never below the ledger the day cap counted nor the roun
 export is OpenCode's catalog estimate, so it is compared with the meter at the same prices
 (status `api.at_catalog`, `results.at_catalog`: a provider's own row at its catalog figure, its
 `metered`; a status without it, `api.usd`): the cost is the meter plus whatever the export says
-past that (`source: "opencode"` when that is more than 0; with no provider row, the export itself,
-as before). Compared with the meter's total, OpenCode's export at the catalog's ran about 2x
+past that (`source: "opencode"` when that is more than the status figures' 6-place rounding,
+`meter.STATUS_EPS`; with no provider row, the export itself, as before). Compared within
+`meter.EPS` (1e-9), an unrounded export a few 1e-7 past a rounded-down `at_catalog` closed 4 of 10
+real DeepInfra tasks, every row DeepInfra's own, as `catalog prices` (#1220, 2026-11-24). Compared with the meter's total, OpenCode's export at the catalog's ran about 2x
 DeepInfra's bill in every closed task's `paid`, and a gate on a meter of provider rows alone
 (status `api.prices` `provider`) let it back whenever one catalog `reconcile` row joined them: a
 `step_finish` reaching `Meter.step` before the keyhole's thread booked that response's usage, 2 of
@@ -721,7 +731,15 @@ saying so, never NO_CAP's advice; an unpriced model that started anyway is stopp
 room negative and `stop_reason` the NO_PRICE line): `trivial role: API spend today is ≈$5.03 of the $5 day cap (it resets at local midnight).
 Ask the user: a higher cap (wb route cap <usd>), the role on the GPU (wb route trivial gpu), or
 tomorrow` (the busy opt-in's note, `advice=False`, ends at `midnight)`: its role is on the GPU, the start only
-waits); and within one request at its worst of it (#1150: it passed, and the room refused the first request
+waits). **The way off API** in this advice, the local-only refusal, the spend stop's notice and the provider's
+advice is `routes.off_api(role)`'s, from routes.json as it is now, never a fixed `wb route <role> gpu`: under
+Agents API `Agents on GPU (wb route all gpu)` (`Agents on Both or GPU (wb route all both|gpu)` when the role's
+own side is the GPU and `busy` is wait); for a role on the GPU that the busy opt-in sends to API, `waiting for
+a busy GPU (wb route busy wait)`; for a role off API already (a `--model` task's, or one the user has
+just moved), nothing: a running task's advice is then `… or wb takeover <task> or wb discard <task> (it keeps its
+API model)`. No role, or routes.json unreadable: `wb route <role> gpu`, as before. Under Agents API
+`wb route trivial gpu` changed nothing, the user's yes was spent, and the retry was refused with the same
+line (#1218, 2026-11-24). And within one request at its worst of it (#1150: it passed, and the room refused the first request
 after the checkout, setup and base check, a wake for nothing): `meter.request_floor(m, tokens)`, the
 round's first request at its worst as the room reckons it, at the dearest tier's prices: its input `tokens`
 at the input price and the model's pinned output (`options.max_tokens`, else `limit.output`, else
@@ -746,7 +764,8 @@ step's feedback back to its review (`round_asks`) and Claude's undelivered notes
 bare RESUME named a cap the room refused at); with no cap set too (#1089's refusal). Their advice is a running task's
 (`meter.refusal(m, role, tokens=…, task=task)`, `meter._ask`): `… (it resets at local midnight). Ask the user: a higher
 cap (wb route cap <usd>) or tomorrow, then try again; or the role on the GPU (wb route <role> gpu) for the next
-tasks, with wb takeover <task> or wb discard <task> for this one (it keeps its API model)` (`a cap of at least
+tasks, with wb takeover <task> or wb discard <task> for this one (it keeps its API model)` (the way off API
+`routes.off_api`'s) (`a cap of at least
 $5.17` within one request of it), as `meter.stop_text` says (#1095): offered as this task's remedy, the role on
 the GPU had the user say yes and the retry refused with the same line (#1171). `meter.tail(m)` is the start line's part, ` · today ≈$0.42 of $5 (catalog prices)` (plain `$0.42 of $5` when today's rows and the model's last are the provider's own, `meter.next_basis`, #1165), or a plan's ` · plan
 usage (OpenCode Go): 1.2M tokens today`, which wb start's model line ends with (`cli.cmd_start`).
@@ -774,7 +793,8 @@ today, and its next request could cost up to $0.33`, #1150). Parallel tasks over
 one worst request each. `Meter.begin(n)` clears an old `api_stop`, whatever its guard, as each
 round starts (a resumed task begins clean). **Between
 rounds** (`runner._go_on(task, n, what)`, #1017's helper, before each `continue` in `drive`: the
-handover, Claude's notes, the revive, auto-fix, self-review): at the cap, or within one
+handover, Claude's notes, the revive, auto-fix, self-review; Agents on GPU first, `runner._agents_gpu`,
+*Roles*, #1213): at the cap, or within one
 `request_floor` of it, the next round's first request's input with it (`first_tokens(task)`, #1173;
 `stop_reason(task, ahead=True, tokens)`: `too near the day's API spend cap for its next
 request: ≈$4.80 of $5 today, and it could cost up to $0.36`, #1150), phase `stuck`, status
@@ -785,7 +805,9 @@ have `cause` `spend`, not the step's own (`results.THE_STEP`), so the slice isn'
 with `meter.stop_text`: `<task> stopped: the day's API spend cap is reached (≈$5.02 of $5 today; catalog prices). Its
 work so far is in the worktree. Ask the user: a higher cap (wb route cap <usd>) or tomorrow, then wb
 resume <task>; or the role on the GPU (wb route <role> gpu) for the next tasks, with wb takeover <task>
-or wb discard <task> for this one (resume keeps its API model).` (with no cap: `meter.no_cap()`, then
+or wb discard <task> for this one (resume keeps its API model).` (the way off API `routes.off_api`'s, #1218;
+none left to offer: `… then wb resume <task>; or wb takeover <task> or wb discard <task> (resume keeps its API
+model).`; with no cap: `meter.no_cap()`, then
 `wb resume`; never tomorrow). Under the cap (the room's stop, or `_go_on`'s look ahead) it never says the
 cap is reached, which had Claude resume into the same stop (#1150): `<task> stopped: too near the day's API
 spend cap for its next request (up to $0.33; ≈$4.80 of $5 today; catalog prices). Its work so far is in the
@@ -799,7 +821,9 @@ the notice said the cap was reached with a cap that would not do (#1150's review
 the GPU … then wb resume" resumed into the same stop (#1095); `wb resume` at the cap is now refused
 before any round (`cli._model_still_listed`, #1118). The mod's `GUARD_WORDS.spend` names it,
 and its wake for a `cause` `spend` notice ends with `SPEND_NEXT` (the same choices, asked of the user;
-`Ask the user for a day cap` when routes.json has none, `readRoutes`), not the stuck wake's
+`Ask the user for a day cap` when routes.json has none, `readRoutes`; for the next tasks `the route change the
+notice names, if any`, never its own `wb route <role> gpu`, a no-op under Agents API, #1218; with `guard` `agents`, the Agents
+switch's stop, `AGENTS_NEXT`: Agents back to Both or API, then `wb resume`, or takeover or discard, #1213), not the stuck wake's
 feedback line: feedback would run a round the cap stops again at once. A `cause` `provider` notice (a quota, key, rate-limit
 or outage stop) wakes as `was stopped by its API provider` (`PROVIDER_HEADLINE`, the toast's too) and ends with
 `PROVIDER_NEXT`: pass the notice's remedy on, `wb feedback <task> --text "carry on"` once the user says it is fixed,
@@ -958,9 +982,37 @@ resolves it) under an ignored
 path (`gitops.ignored_files`) is in no diff or commit (a module under `lib/` was lost, audit round
 2 of 1.91): the report says "NOTE: git ignores files the agent wrote (…)" (`gitops.ignored_line`)
 and `commit_all` refuses until `--include` (`add -f`), saying "git ignores files written in the
-worktree (…)". What tests or shell commands wrote there (build output) isn't counted. Nor did
-Claude's files count, which no event shows: a module written under `lib/` after `wb takeover`
-was lost (#1179). So a file written while no runner runs counts too (`runner.hand_wrote`): one
+worktree (…)". Nor did the agent's shell's count (`mkdir -p lib && cat > lib/util.py <<EOF`, a
+`mv` there): no edit row shows them, and `wb accept --merge` landed a `main.py` importing a module
+it deleted (#1210). So `runner.shell_wrote` counts too: what `gitops.hand_written` (below) finds
+changed since the agent's first round (status `agent_from`, set once, after the checkout, setup,
+`--copy` and base check), less what the runner's own test runs changed (status `test_wrote`, kept
+by `run_tests` after each: a Maven run's surefire reports are no one's work), that one of the
+agent's shell rows names (`runner._shell_named`, row by row and exact: a word of its `names`,
+`events.shell_names`, which joins a word after a `cd` or `pushd` in the row to its directory,
+until the subshell it ran in ends (`( … )`, `$( … )`, a backquote's) or a `popd` goes back
+(carried past them, `(cd lib && make) && cat > top.py` named lib/top.py; a `popd` with no
+`pushd` in the row, `cd "$D"` or `cd -`, to where no word says, makes a word after it `*/<word>`,
+the file by that path in any directory: kept as written, `cd "$D" && cat > util.py` named a top-level
+util.py and dropped the lib/util.py it wrote, so where the directory can't be known it names rather
+than drops, a false name costing a look at accept and a false drop the work), resolved against the row's `workdir`
+(the shell tool's, which OpenCode 2.3.2 tells the model to set instead of a cd: dropped, `cat >
+util.py` run in lib/ named nothing, and `wb accept --merge` left lib/util.py out under a main.py
+importing it, #1210's third review), else the task's workdir, an absolute one against the
+worktree, equal to the path; or the
+file's name a word's last part, the file in a directory the same row names, as `mv util.py lib/`;
+every shell row, a failed one too; an older row without `names`, its brief's words). One set of
+every row's words, matched by suffix, took `grep -n answer pkg/a.py` for a name of `python -m
+build`'s `build/lib/pkg/a.py`, and `cat package.json` for a library build's `dist/package.json`
+(#1210's second review). Unnamed, it was all
+of them, and the `dist/` of the agent's own `npm run build` (tsc's, `python -m build`'s
+`build/lib`, an `mvn test` wider than `--test`) was "files the agent wrote", refused at every
+accept, and `--include` put build output on main (#1210's review); naming reads as writing, so a
+`node dist/index.js` names that file, and `ls build/lib/pkg && cat pkg/a.py` its copy. The report's NOTE names `shell_wrote`, less status
+`hand_wrote`; the rest (`runner.shell_left`: the unnamed and `hand_written`'s rest, less
+`test_wrote`, the edit rows' and `hand_wrote`) joins `hand_left`'s note and `left-out/` copy. Nor did Claude's files
+count, which no event shows: a module written under `lib/` after `wb takeover` was lost (#1179).
+So a file written while no runner runs counts too (`runner.hand_wrote`): one
 `gitops.hand_written` finds changed (mtime or ctime) since the agent stopped (status
 `hands_off_at`, set at review, at the runner's exit, by `cli._stop_runner` and `cli.reap`, the
 earliest kept), kept in status `hand_wrote` by the next runner before its rounds (`_hands_on`),
@@ -970,14 +1022,29 @@ directory marking itself a cache (a `CACHEDIR.TAG`, or a `.gitignore` of `*` alo
 `BUILD_FILES` such files in its ignored directory (the outermost one `git ls-files --directory`
 names), else, one ignored by name, its top-level directory (only those count: a test run's bytecode
 in a big package once pushed a hand-written file out; counted by top-level directory, setuptools'
-in-tree `build/lib` copies did the same, #1179's review). The rest it finds changed that a person
-might have written, text outside a cache, under `BUILD_FILES` text files in its group, of any name
+in-tree `build/lib` copies did the same, #1179's review), and nowhere the runner's own setup (`--setup`,
+`--copy`) or `--test` run in the worktree, or its base check in the scratch checkout (the same
+relative paths), wrote such a file (`gitops.ran_wrote`, after each run: the file's
+outermost ignored directory, else the file; status `ran_wrote`): Claude's rerun of the acceptance
+command at review wrote `mvn test`'s surefire reports, tsc's `dist/*.d.ts` and jest's `coverage/`
+again, and accept refused them as Claude's until `--include` committed them (#1211); the base
+check's run counts because a takeover in round 1, or a stuck round, comes before any `--test` run
+in the worktree (#1211's review; with `--no-base-check`, or a command that stops on the base before
+it writes, it is the worktree's runs alone). One kept in
+`hand_wrote` before a run wrote there moves to `hand_left` once one does (`runner._by_hand`), so a
+report from a test the runner hadn't run yet stops refusing; one written by a command the runner
+never runs is still taken for Claude's, so a build Claude runs that isn't the task's (`mvn test`
+beside a `--test` of `grep`, `tsc` beside jest's) is refused until its output goes or `--include`
+(still open in #1211: telling Claude's writes apart needs the mod to record them, a hook on Write
+and Edit; a directory where the same window changed files the filters drop was rejected as the
+sign, as it would send #1179's module under `lib/`, beside Claude's `.csv`, to `hand_left`).
+The rest it finds changed that a person might have written, text outside a cache, under `BUILD_FILES` text files in its group, of any name
 (the one filter waived), is never dropped without a word (`runner.hand_left`, status `hand_left`: a
 `.csv` beside Claude's module under `lib/` went with the worktree, `--include` or not, #1179's
 review; bytecode and an install's files aren't named: unfiltered, a test run's `.pyc` was named at
 every accept, and an npm install put 20,000 paths in status.json, #1179's review): a
 refused commit names them after its line, and `wb next` and `wb accept` say "note: git ignores N
-more files changed since the agent stopped, which the commit leaves out as build or test output
+more files changed in the worktree, which the commit leaves out as build or test output
 (…)" (`gitops.left_out_line`, `cli._left_out`): `wb next`'s with `git -C <worktree> add -f <file>`,
 which has the next commit keep one; `wb accept`'s with "a copy is in `tasks/<task>/left-out`",
 copied before the worktree goes (`cli._keep_left`; past `NEW_FILES_MAX` files or
@@ -1051,10 +1118,12 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   lease stepped aside, a wait to the provider's `api-health.json` `until`, else `RATE_LIMIT_SECS`,
   at most `RATE_WAIT_S`, a steer note ending it into `_steer_round`, `wb stop` ending the runner),
   continuing the session: one revive a round, as a revive re-sends the whole context, which costs
-  money. A second stop, or a quota, key, setup or refused stop, ends it `stuck` with `cause` `provider`, `infra`
+  money. A quota stop of a recheck (`NoLease.recheck`: a turn handed after a wait, the round never `answered`) waits as
+  queued again, a `load` event "<provider> is still out of credit: the task waits as queued
+  again" and no notice (#1216). A second stop, or a quota, key, setup or refused stop, ends it `stuck` with `cause` `provider`, `infra`
   `provider` (a bench replay scores `error`), and `provider_remedy` under the STOPPED line (`wb
-  feedback <task> --text "carry on"` once the provider allows, a round that counts no review, #1153, and `wb route <role> gpu (the user's
-  yes)` when the task has a role; top up or wait for the plan's reset; /connect for a refused
+  feedback <task> --text "carry on"` once the provider allows, a round that counts no review, #1153, and `routes.off_api`'s command, `wb route <role> gpu (the user's
+  yes)` or under Agents API `wb route all gpu`, when the task has a role and its next tasks aren't off API already, #1218; top up or wait for the plan's reset; /connect for a refused
   key; for `setup`, "this machine's stop, not the agent's or <provider>'s: mend what the line
   above says", #1080; for `refused`, `wb feedback` once what the provider said is fixed, and on a
   404 `wb takeover` or `wb discard` if it no longer serves the model, which wb never switches). Its `stopped` event says `by: "provider"`, so it is never a lesson about the agent (the
@@ -1092,7 +1161,8 @@ Claude read the diff.
 - *Mid-round*, at each `step_finish`: past `fresh_at × window` a fresh session takes over
   (`_full_round`), only when this session changed a file (`gitops.mark`, a hash of the diff and
   untracked files, moved) and
-  `status.session_floor` (its context at its first change) sits `HANDOVER_ROOM` (a quarter of the
+  `status.session_floor` (its prompt, input and cache, at its first change: never the step's
+  output, where a thinking model's long think is counted and never sent back, #1219) sits `HANDOVER_ROOM` (a quarter of the
   window) below the point (seen: twenty handovers with no edit). Otherwise it carries on and a
   `reading_full` event (`_reading_full`, once a round) becomes the report's `reading:` line, waking
   no one. At most `HANDOVER_MAX` a runner, then stuck (2026-11-16 audit: hours of handovers, Claude
@@ -1101,13 +1171,16 @@ Claude read the diff.
   as it would and the between-rounds check starts any next round fresh (#1151: a finished agent
   was killed there and a fresh session paid to redo the round). A compaction between steps
   (`compacted_between`, #774: `run --format json` prints none, so a step in the same session
-  under the last one's by more than that margin, or the last step's reasoning if more (the next
-  request needn't resend it): under half, the rule until #1185, missed most compactions whose kept
+  whose prompt, input and cache, is under the last one's by more than that margin (the last step's
+  reasoning, or a think counted in its output, is no part of a prompt: the next request needn't
+  resend it): under half, the rule until #1185, missed most compactions whose kept
   tail brought the context back over half, 156 of 242 offline on OpenCode 2.4.1; the last
-  step within `fresh_ceiling`'s margin of the handover point with the tool output since counted in, each
+  step's context within `fresh_ceiling`'s margin of the handover point with the tool output since counted in, each
   tool row's `part.state.output` at `context.CHARS_PER_TOKEN` a token, as OpenCode compacts with
   it in: parallel reads from a step well under the point went unseen, #1086) hands over given a change and room (the floor,
-  or the last step's context when nothing changed before it; status `full_compacted`, reason
+  or the last step's prompt when nothing changed before it; prompts, not contexts: a
+  thinking model's 8K think in the last step's output, never sent back, read as a compaction
+  with the history kept, inflated the floor and blocked the real handover, #1219; status `full_compacted`, reason
   `COMPACTED`), else a `compacted` event ("…: its turn ended there" on its turn's last step). A *failed* compaction (`error` type `compaction.failed`, or a message
   opening "Compaction ", `events.compaction_failed`) hands over at once whatever the exit, change,
   `keep` or room: `full` the last step's context (else the window), `compacted` and
@@ -1313,18 +1386,30 @@ bytes (`verify.filter_gap`, `_filter_failed`) exits `"filtered"`, naming `filter
 **The base check** (`_base_check`, `base_check`, before round 1 and the GPU): the acceptance command
 once on the base in a scratch checkout (`verify.on_base`, a `--shared` clone,
 `gitops.scratch_clone`, in the task's lane; in the worktree its writes stayed, #192), at most
-`min(BASE_CHECK_SECS (120 s), --test-timeout)`. Output to `base-tests.txt`; status `base_check`
+`min(BASE_CHECK_SECS (120 s), --test-timeout)`; where its run wrote build or test output joins
+status `ran_wrote` (`verify._run`'s `ran`, `runner._note_ran`; #1211's review: `runner.hand_wrote`). Output to `base-tests.txt`; status `base_check`
 `{ok, exit, tail (8 lines, 1500 characters), limit, secs, cmd}` (`secs` excludes waits, #779).
 `base_check_line`: a note when it passes (Claude checks the diff adds tests that fail without the
 change), a warning plus an immediate `checkin` when `--test-timeout` cut it or the shell didn't find
 its command (`missing_command`: exit 127, the tail's last line `NOT_FOUND`'s, bash's or zsh's
 `command not found`, dash's `: not found`; not `No such file or directory`, a script the step may
 make, nor a name with a `/`, which dash says `not found` for; worded by wb, `<name>: command not
-found`, the same in every shell, nightly run 45362198509; #1152; or exit 1, the last line `NO_MODULE`'s, Python's `<path>/python3: No module named <m>`
+found`, the same in every shell, nightly run 45362198509; #1152; but a path in an install's
+`TOOL_DIRS` (`.venv/bin`, `venv/bin`, `node_modules/.bin`, `vendor/bin`, at any depth), bash's and
+zsh's `NO_SUCH` or dash's `not found`, which a worktree never has and a step never makes, unlike a
+build's output (`target/debug/newbin`), is one, `<path>: not in the worktree (.venv/ is an
+install's, never checked out)`, `NOT_CHECKED_OUT` for `missing_name`, #1206; or exit 1, the last line `NO_MODULE`'s, Python's `<path>/python3: No module named <m>`
 for `-m` (or its `Error while finding module specification` for a dotted one's parent), not an
 import error inside the tests, nor a module of the repo's own code (`own_module`: its top-level
-name a `<top>/` or `<top>.py` where the tests run, in the worktree or at the base commit, or the
-module's file or dotted name in the spec, the spec alone, before `runner.PROTOCOL_FOLD`, never the
+name a `<top>/` or `<top>.py` where the tests run, or under its `src/`, in the worktree or at the
+base commit, or the module's file or dotted name in the spec, or a top-level name the spec makes
+(`spec_makes`: its `<name>/` or `src/<name>/` path, or the name as a package or module in a
+sentence with a making word, `MAKING`) that the user's own environment can't import either
+(`user_imports`: the line's interpreter by name on the runner's PATH, with the checkout venv
+`python_env` keeps from the agent and the user's PYTHONPATH; `python3 -m answerpkg` for a spec
+making it checked in falsely, #1209; a name the spec merely gives, `with pytest tests`, or beside
+`-m`, is a tool, as any bare name counted ran #1181's incident again on a machine without pytest,
+#1209's review), the spec alone, before `runner.PROTOCOL_FOLD`, never the
 protocol's acceptance line, which names --test's own `-m` and so made every dotted one the repo's:
 `python3 -m pkg.newcli` for a step adding `pkg/newcli.py`), which the step may make, as a script, #1181; the warning ends `GIVE_TOOL`, a
 module's fix the worktree's `.venv`), a note past 120 s
@@ -1386,8 +1471,8 @@ by prefix; rewording one silently changes those:
 | `Before Claude reviews this` (`SELF_REVIEW`) | the self-review round | `transcript`, the fake OpenCode (`selfreads`) |
 | `You are picking this task up in a fresh session` | `handoff_prompt` | `transcript`, the fake OpenCode (`fill`, `compact`, `compactfail`) |
 | `Step N of this task is done and committed` | `wb next` | `transcript` |
-| `INTERRUPT_HEAD`, `NOTE_HEAD` | `_steer_round` | `transcript` |
-| `NUDGE` (`without a tool call. Stop planning`) | the think nudge | `transcript` (labelled the workbench's, not Claude's) |
+| `INTERRUPT_HEAD`, `NOTE_HEAD` | `_steer_round` | `transcript`, the fake OpenCode (`FAKE_SELF_STALL`: `Claude, your reviewer`) |
+| `NUDGE` (`without a tool call. Stop planning`) | the think nudge | `transcript` (labelled the workbench's, not Claude's), the fake OpenCode (`FAKE_SELF_STALL`) |
 | `Claude picked these skills`, `Claude handed you more skills`, `Claude took back:` | `skills_note` | `transcript.SKILLS_HEADS` (skips the note to label what follows) |
 | `CARRY_ON`, `RESUME` (first 60 characters) | `_full_round`, `wb resume` | `round_asks` skips them (but their `notes.md`), `lessons.feedback` (none of their copied feedback), the fake OpenCode (`selfreads`, `FAKE_SELF_FILL`) |
 | `agent's summary:` | `summary_text` | `lessons` (a round with no `final.md`, from before #1186) |
@@ -2609,14 +2694,15 @@ in its CLAUDE.md.
 ## Waking Claude, exactly once
 
 Notices go to `$WB_HOME/notify.jsonl` (`Task.notify`: `{ts, task, kind, text, round?, id?, cause?,
-tasks?}`). Kinds: `review` (report and `review_diff`), `stuck`, `failed`, `question` (with `id`),
+guard?, tasks?}`; `guard` `agents` on a `spend` stop for the Agents switch, #1213). Kinds: `review` (report and `review_diff`), `stuck`, `failed`, `question` (with `id`),
 `checkin` (periodic, a nudge, a mid-round handover before the last allowed, a base check cut short
 or whose command wasn't found).
 `cause` (`stuck`/`failed` with a round): `guard`, `agent`, `server` (#657), `provider` (an API provider's
 `rate_limited`/`outage` after its one revive, `quota`, `auth`: #1020; `refused`: #1082, #1084; the
 keyhole's `setup`, this machine's, #1080), `spend` (the day's API spend
-cap, #1019: `runner.SPEND`), `updated`
-(`runner._updated`), `opencode` (`runner.opencode_moved`), `signal` (`SIGNAL_STOP`), `died`
+cap, #1019: `runner.SPEND`; Agents on GPU, `guard` `agents`, #1213), `updated`
+(`runner._updated`), `opencode` (`runner.opencode_moved`), `local_only` (an API task's repo marked local-only since it started:
+`runner.LOCAL_ONLY`, #1215), `signal` (`SIGNAL_STOP`), `died`
 (`reap`), `update` (`wb update --stop`). `tasks` names a batch (restart, shutdown, `wb update
 --stop`), or the one task `_updated` or `opencode_moved` stopped, so its wake is an interruption's
 (`BATCH_NEXT`, #1176). `wb` itself writes only `reap`'s `failed` and `cli._stop_for_update`'s `stuck`, one per
@@ -2687,7 +2773,8 @@ session's. One without a `session` goes by
 directory: its `repo` is or is inside the session's directory, or the session's directory is inside
 the task's spot (`repo`/`subdir`, else a `cwd` inside the repo, else the repo: `spotOf`, `_scope`;
 #695), or its `cwd` is or is inside the session's directory; by whole components of real paths,
-case-folded where the file system ignores case (`mem.fold`, `store.folds_case`; 2026-11-19 audit). A
+case-folded where the file system ignores case (`mem.fold`, `store.folds_case`: any component of the path found
+in its parent with its case swapped, WSL2's `/mnt/c` too, #1217; 2026-11-19 audit). A
 session in `~` or `/` claims none by directory; a task with neither key is everyone's. Another
 session's notice is at most toasted. `wb status`, a bare `wait`, and `stop`/`takeover`/`resume
 --all` from Claude Code's Bash take the caller's scope (`cli._caller`: `CLAUDE_CODE_SESSION_ID`,
@@ -3234,7 +3321,7 @@ read as a wrong id, Claude hunted for the "right" one).
 - `note_api(pid, state, why="", until=None)` writes `$WB_HOME/api-health.json` under
   `api-health.json.lock`: `no_credit` (402, a 429 saying `insufficient_quota` or a plan limit; for
   `CREDIT_RECHECK_SECS` 900, then the next start, or one runner waiting for credit
-  (`credit_turn`, #1178), asks once (at once for a provider-stopped task the user resumed:
+  (`credit_turn`, #1178; its 402 again waits again, no stop: `credit_recheck`, #1216), asks once (at once for a provider-stopped task the user resumed:
   `credit_ask`), a 402 isn't billed, and the keyhole records it again if it
   still holds: held until an `ok`, it held forever, since wb start refused the
   task that could get one, #1068; a row from before with no `until` expires from its `ts`), `rate_limited` (until `Retry-After`, else `RATE_LIMIT_SECS` 60),
@@ -3912,6 +3999,21 @@ it, never `via`. `wb route all gpu|api|both` sets `use` alone, never a role's `v
 Both restores the per-role mix. With Agents on API a role with no API model can't start (exit 3:
 `<role> role has no API model, and Agents is set to API: ask the user to pick one (wb route <role>
 --api <id>) or set Agents to Both or GPU (wb route all both|gpu)`).
+With Agents on GPU nothing spends, tasks already started included (#1213, 2026-11-24: only `wb start`
+read the switch, and an API task queued behind its provider's slots took one after it and ran on).
+`routes.agents_gpu()` (False for a routes.json that can't be read) is asked by: `wb start` with an API
+`--model` (exit 3 before any dialog: `cli._route_start`'s dry run gives the same line, so the mod never asks; `routes.AGENTS_GPU`: `Agents is GPU, so nothing spends: <id> is an
+API model. Ask the user: Agents back to Both or API (wb route all both), or a GPU model`); `wb feedback`,
+`next` and `resume` of an API task (exit 3, `cli._agents_gpu_now` in `_model_still_listed`; `wb resume
+--all` prints it and goes on); and the runner, which stops an API task before its first round (after
+its provider slot came) and before each next one (`runner._agents_gpu`, in `_go_on`): a round already
+running finishes. The stop is the user's spending, as the cap's (*Spend*): phase `stuck`, status
+`guard` `agents`, `infra` `spend`, and a `stuck` notice with `cause` `spend` and `guard` `agents`:
+`<task> stopped: Agents is GPU, so nothing spends, and it runs on its API model (<id>). Its work so far
+is in the worktree. Ask the user: Agents back to Both or API (wb route all both), then wb resume
+<task>; or wb takeover <task> or wb discard <task>.` then `<what> didn't run: Agents is GPU, so nothing
+spends.` A role's own move to the GPU stops nothing: its started tasks keep their model, and its change
+line says so.
 
 **When the GPU is busy** (#1023, the owner's opt-in, off by default): routes.json's `busy`
 (`routes.BUSY`: `wait`, missing, or `api`; any other value a `RoutesError`), set by `wb route busy
@@ -3945,7 +4047,8 @@ takes the dialog's yes.
 **Followed by `wb start`** (#1016, *A task, start to finish*): every start resolves a role
 (`--role`, else from `--size`), and a role on the GPU with a pinned `gpu` runs that model, the
 router's ranking, exploring and `_cheaper` not applying (`the <role> role's GPU model (wb route)`;
-a pin no longer found exits 3, never the router's other pick).
+the pin matched by its exact id in `discover()`, as `wb route`'s listing finds it; a pin no
+longer found exits 3, never the router's other pick nor a model its id is a fragment of, #1214).
 
 **`wb route`** (`cli.cmd_route`): shows each role (`GPU (the router picks)`, `GPU <id> (pinned)`,
 `API <id> (<provider>) · thinking off`, `API kept: <id>`, `set by you|Claude MM-DD`: on API from
@@ -3971,7 +4074,7 @@ The changes (each one exit 3 with one line when refused, writing nothing):
   model yet: wb route <role> <provider/model>`.
 - `wb route <role> <provider/model>` sets the API model and goes to API; `--api <id>` sets it and
   leaves the selector; `--gpu <id|auto>` sets the GPU model (a fragment will do, as `--model`
-  takes one: `models.resolve`; an API id refused); `--thinking on|off`; `--day-usd N`.
+  takes one: `models.resolve`; its exact id is what is stored; an API id refused); `--thinking on|off`; `--day-usd N`.
 - `wb route all gpu|api|both` sets the Agents switch (`use`), no role's own selector; `api` with no
   role holding an API model: `no role has an API model yet`; a role with none then can't start, and
   the line says so. `wb route all --thinking on|off` sets every role's thinking.
@@ -3999,13 +4102,15 @@ The changes (each one exit 3 with one line when refused, writing nothing):
 **The change line** (`routes.change`, which never writes) is the dialog's text, one part per role
 changed, joined by `; `: `trivial: GPU → API deepseek/deepseek-flash · your code goes to DeepSeek ·
 thinking off · cap $5/day` (the provider's name from the catalog, `models.provider_name`, else its
-id); back to the GPU, `trivial: API <id> → GPU · API kept: <id>`; an API model set while on the GPU,
+id); back to the GPU, `trivial: API <id> → GPU · API kept: <id> · its tasks already started keep their
+model` (under Both: only Agents on GPU stops them, #1213); an API model set while on the GPU,
 `API model none → <id> (<provider>), used once it goes to API` (`used from the next start` when Agents
 on API already runs the role there, #1149, then `· thinking on` if it is); `GPU model the router's pick → <id>`;
 `thinking off → on`; and `day cap none → $5/day` (unless a role's part says the new cap). The Agents
 switch's part comes first (`routes._agents_part`): `Agents: Both → API (every role on its API model;
 writing has no API model and can't start; your code goes to DeepSeek (trivial); cap $5/day)`, `Agents:
-Both → GPU (every role on the GPU; each role's own choice is kept for Both)`, `Agents: GPU → Both (each
+Both → GPU (every role on the GPU; an API task already started stops before its next round; each role's
+own choice is kept for Both)` (`routes.AGENTS_STOPS`, #1213), `Agents: GPU → Both (each
 role as set: …; your code goes to …)`; it takes the yes going to API, or to Both when that puts a role
 back on its API model (from GPU; from API it sends nothing new), never going to GPU. A role's own change the switch holds over adds `Agents is GPU, so this
 applies once Agents is Both (wb route all both)`. The first role newly on API by any of these with no
@@ -4106,17 +4211,23 @@ nearest entry that states it (*Files and formats*), or `wb start --local-only` (
 `cli.local_only_refusal`: a `--model` resolving to `kind: api`, else the role's side as it runs, `routes.effective_via`
 over `routes.read()`), so before `pick_model`'s `--model` gate, exit 3, never the GPU instead: `wb: ~/src/client is local-only (commands.json "repos"): the trivial role is
 on API (deepseek/deepseek-flash). Choices: put trivial on the GPU (wb route trivial gpu, the user's yes), or the user
-lifts local_only for this repo.` (with `--local-only`: `… or the user drops --local-only for this task`; for a `--model`:
+lifts local_only for this repo.` (under Agents API `routes.off_api`'s `set Agents to GPU (wb route all gpu, the user's
+yes)`, #1218; with `--local-only`: `… or the user drops --local-only for this task`; for a `--model`:
 `the task's model is API (<id>, --model). Choices: a GPU model, …`). The mod's dialog for `wb start --model` (#1014's)
 asks before `wb start` runs, from `wb route --dry-run --start <its args>` (`cli._route_start`), which parses the start's
 `--repo` (else the command's cwd) and `--local-only`, and exits 3 with `cli.local_only_refusal`'s line in
 place of a dialog line, so the user is never asked to approve a start that would be refused; so it does for
-`meter.refusal`, a model that can't run (`cli._cant_run`, a rate limit or outage passing), a `--base` naming no
+Agents on GPU (`routes.agents_gpu()`, exit 3, wb start's own line, #1213), `meter.refusal`, a model that can't run (`cli._cant_run`, a rate limit or outage passing), a `--base` naming no
 commit (`cli._no_base`, exit 1) and, without `--queue`, the provider's slots full (`cli._slots_full`, exit 4) (#1104). A linked worktree of a local-only repo is that repo
 (the git-dir match). `wb next`, `wb feedback` and `wb resume` on an API task whose repo became local-only since it started
 exit 3 (`cli._local_only_since`, `_local_only_now`, by `runner.api_task`: a task with no `via` by its model's kind, #1111): `this repo is local-only now; the task's model is API (<provider>):
 wb takeover <t> or wb discard <t>` (the model is fixed per task); `wb resume --all` prints that line for such a task and
-goes on with the rest, as for a worktree problem. `wb route all api` is global and reads no repo: the check is per start.
+goes on with the rest, as for a worktree problem. The runner checks the same (`runner.local_only_now`, which
+`_local_only_now` calls) before the lease and before every round (`runner._local_only_stop`, #1215: a task queued for
+a slot, or in checkout, setup or the base check, sent round 1 to the provider anyway and billed it, and so did the
+rounds the runner starts itself): `stuck` before anything more is sent, status `infra` `local_only` (`runner.LOCAL_ONLY`),
+a `stopped` event `by` it, a `stuck` notice with `cause` `local_only`, `task <t>: round N didn't run, so nothing more went
+to its provider: ` + that line, and the latest round's report, as `_go_on`'s. A round already running finishes. `wb route all api` is global and reads no repo: the check is per start.
 Only the user lifts one: the mod's tool.call hook refuses Claude's Edit, MultiEdit or Write of commands.json
 (`$WB_COMMANDS`, else `~/.config/workbench/commands.json`, matched by real path: `/./` or a linked config directory is
 the same file) whose new text drops a `"local_only": true` the old text had, or gives an entry a `local_only` other than
@@ -4208,7 +4319,7 @@ copies the hidden files over the worktree (replacing a planted link, never writi
 driver is outside the lane) and runs the acceptance command and `--check` in the lane
 (`grade.txt`); then discards task and clone and appends to `bench/runs.jsonl`. Passed is both exiting
 0; stuck or failed is failed, unless status `infra` says the machine failed it (stuck: `provider`,
-`spend`, `updated`, `opencode`, #1176): an `error` row, graded neither way and replayed next run (#508).
+`spend`, `updated`, `opencode`, #1176, `local_only`, #1215): an `error` row, graded neither way and replayed next run (#508).
 
 A replay stays out of real work: task.json `bench` silences `Task.notify` and `results.record`, hides
 it from `wb status` (unless `--all` or named) and the mod; `--trial` keeps its lessons out; its
@@ -5155,7 +5266,7 @@ client; the server needs no browser.
   unknown counting as yes; another session's plain reply is the user's: its report went to the
   agent the listener was answering, pushed to no phone, #1129; the user's alone
   when it holds one of theirs: an agent's message delivered into the user's turn read every plain
-  reply to them, the #1042 review; `taken`: the messages whose newest receipt is `now` by the listening session (never `into`: an agent's message the mod delivered into a wake turn took that turn's plain report to the away user, sent to the agent alone, pushed to no phone, #1175), under `MESSAGE_EXPIRE` old, that no
+  reply to them, the #1042 review; `taken`: the messages whose newest receipt is `now` by the listening session (never `into`: an agent's message the mod delivered into a wake turn, or queued or submitted behind a wake, took that turn's plain report to the away user, sent to the agent alone, pushed to no phone, #1175, #1212), under `MESSAGE_EXPIRE` old, that no
   `turns.jsonl` row lists: a session that died mid-turn left its agent's message taken, and the
   next session's replies went to that agent alone, the #1042 review) and `to`
   (whose: `"user"` or agent names; `chat.reply`; an unknown `--to` exits 1). `GET /api/wait?after=
@@ -5224,7 +5335,7 @@ client; the server needs no browser.
 - `audio/<batch>/`: `<n>.<ext>` copies and `audio.json` `{batch, ts, clips: [{n, name, path, file,
   type, line, engine?, seed?, voice?}]}`; the newest `LISTEN_KEPT` 20 kept.
 - `receipts.jsonl`: `{id, ts, by, how: "now"|"into"|"queued"}` from `wb chat ack` (newest per id stands;
-  `into`: an agent's message delivered into a running turn, #1175; `queued` is acked `now` when its turn ends); `{by: "wb", how: "expired"}` (retired unread);
+  `into`: an agent's message that may not have opened its turn: delivered into a running one, #1175, queued, or submitted behind another prompt, #1212; `queued` is acked `now`, an agent's `into`, when its turn ends); `{by: "wb", how: "expired"}` (retired unread);
   `{by: "terminal", how: "answered"}` (`chat.notice_done`, which also marks it seen).
 - `open.json`: `{messages, asks, answered}`: the unreceipted user messages and unanswered asks
   (`chat.open_work`), under `open.lock`, kept by send/ack/ask/answer, rebuilt once when missing
@@ -5651,8 +5762,8 @@ it). Standing by, it still takes the user's messages that answer its own rows (b
 writes `chat/listener.json` on a change (with `parent`, `mem.claudePid`, #1129) and delivers each
 unreceipted message from `open.json` once `wb chat claim <id> --by <key>` grants it (refused:
 retried a minute later; two sessions both submitted one, #84): idle → `prompt.submit('[web chat]
-<words>', asUser)`, receipt `now`; busy → `session.send` with WEB_NOTE (an agent's: AGENT_NOTE, receipt `into`, so the turn's plain `wb chat reply` is never its answer, #1175), else a queued prompt
-(`queued`, acked `now` when that turn ends: `mem.chatQueued`, `readQueued`); `wb chat ack <id> --by
+<words>', asUser)`, receipt `now` (an agent's behind a prompt submitted this poll, `mem.submitted`: `into`, #1212); busy → `session.send` with WEB_NOTE (an agent's: AGENT_NOTE, receipt `into`, so the turn's plain `wb chat reply` is never its answer, #1175), else a queued prompt
+(`queued`, acked `now`, an agent's `into`, when that turn ends: `mem.chatQueued`, `readQueued`; acked `now`, the next wake turn's report went to the agent, #1212); `wb chat ack <id> --by
 <key> --how …` once it entered (a dropped prompt is retried a minute later); `chat/away.json` `{at:
 now, by: <key>}`. Away is read by every session (`away()`); a typed prompt writes `{at: 0}`
 (`back`), as does a terminal dialog answered there after that use (`termDialogDone`). Typed is
@@ -5922,8 +6033,8 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 ### Running tasks
 | Command | Flags (defaults) | What it does |
 |---|---|---|
-| `wb start <task> --spec <file\|->` | `--repo` (.), `--role significant\|trivial\|writing` (from `--size`: trivial, else significant), `--size trivial\|significant` (from `--role`: trivial for the trivial role, else significant; both given, the role picks the model and the size the slice and the GPU router's size), `--model <id or fragment>`, `--test <cmd>` (granted to the shell too: `context.test_allowances`), `--auto-fix N` (2 on the GPU, 1 on API: `cli.AUTO_FIX`, `cli.auto_fix`; a given value is kept and the start line prints the one used, #1017), `--self-review`/`--no-self-review` (the `self_review` knob), `--checkin MIN` (0 off), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S` (unset or 0: measured budgets), `--think-timeout S` (0 off), `--test-timeout S` (900), `--unload-for-tests` (task.json `unload_for_tests`: every model on the GPU but `keep_loaded` let go before each test run, the GPU held meanwhile, the GPU held from other tasks while tests run, a remote model's tests too, #428, #943, its device nodes in the lane, `context.gpu_nodes`), `--no-sign` (task.json `sign: false`; without it `gitops.sign_problem` and `gitops.presence_signer` are said at start), `--no-base-check` (`no_base_check`; else `--test` runs once on the base first, *The base check*), `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--setup CMD`, `--setup-timeout S` (1800, `setup_timeout`), `--copy PATH…`, `--sibling PATH…` (*Setting the worktree up*), `--force` (queue a `--model` that can't run now), `--queue` (wait behind the GPU's holders, or for an API provider's slot), `--trial`, `--local-only` (task.json `local_only`: an API model is refused for this task, as for a repo commands.json marks local-only, *Privacy for API roles*), `--backlog NAME` (task.json `backlog`; a finished batch's name, its newest start `BACKLOG_GAP` 6 h old, is refused with a dated one, `cli._backlog_done`, #880), `--group NAME` (task.json `group`: one request's fan-out, *Dynamic workflows*; `cli.GROUP_RE`, a task name's characters up to 32, else refused before anything is made, `cli._check_group`, #1048), `--no-claude-md` | Refuses before writing anything: a bad or reused name (`^[a-z0-9][a-z0-9-]{0,47}\Z`), a spec not strict UTF-8 (`cli.read_text`, #873), a repo `_lane_fits` refuses (home, where credentials live; a snap `--test`), opencode missing or 1.x (exit 3, `runner.OPENCODE_GET`, #654), no runnable model (exit 3), an API model (a `--model`, or the role's side as it runs, `routes.effective_via`) in a local-only spot, before any model is picked (exit 3, `cli._local_only_check`, #1021), an unreadable routes.json (exit 3, *Roles*), a role that can't run (exit 3, one line, never the other side: an API role's model without a key, gone from the catalog or out of credit, `routes.cant_run`, never rate-limited or unreachable, a note, #1088; Agents on API with a role that has no API model; a GPU role with no GPU model, the router's line; a pinned GPU model not found; *A task, start to finish*, #1016), an API model with no price or today's spend at the cap, or within one request at its worst of it (`meter.request_floor`, #1150; its input round 1's, `runner.first_tokens`, #1173) (exit 3, `meter.refusal` in `routes.resolve`, both API paths: a `--model`'s before the dialog, *Spend*, #1019; no cap at all too, `meter.no_cap`, #1089), a `--model` naming an API model under Claude Code without the dialog's yes (exit 3, `cli.start_gate`, #1014; checked last, after every other refusal, so a refused start never uses the yes up, #1104), a task's worktree as repo, a `--base` naming no commit, no git identity, no committed or gitignored CLAUDE.md (or a package's: task.json `subdir`), a `_worktree_setup` problem, a noexec state dir (`store.noexec`), no disk room (`cli._disk_room`), a clashing branch (`gitops.branch_clash`, `case_clash`), the GPU (exit 4; with routes.json `busy` api a role with an API model starts on it instead, `cli._busy_api`, #1023), an API model's provider already running `API_PARALLEL` (3) tasks, those on their way to a slot counted (exit 4, `cli._slots_full`, `cli._api_pending`, #1116; `--queue` waits for a slot, #1015). Writes `starting.json` (pid, start; undone by the next start or `wb gc` if killed, #376), round 1's prompt (spec + PROTOCOL, a writing task's `WRITING_PROTOCOL`) before task.json (a failed write leaves a dead start for gc, not a task with no status), task.json (`session` from `CLAUDE_CODE_SESSION_ID`, `claude_pid` from `CLAUDE_PID`), status; spawns the runner, which makes the checkout (*A task, start to finish*, #529). Notes (`_missing_dirs` with `INSTALL_DIRS`, `context.home_gap`, `context.mise_trusted`, `runner.dropped_proxies`, `context.on_windows`, `cli.WSL_SLEEPS`, `context.fixed_prompt` at `FIXED_SHARE` 40%, `runner.untested`), the model and why (an API task's `model: <id> · API (<provider>) · <role> role, set by you MM-DD · thinking off`, `routes.model_line`; its `started … on <id> (API)`; then `cli._api_notes`: the first API task in a repo for a provider adds the where-note, `note: this task sends the repo, its spec, CLAUDE.md files … to <provider> (the <role> role's model; data policy: <url>)`, its OpenRouter backends task.json's `order`, and `context.api_hidden_note`, *Privacy for API roles*), `next: wb wait <task>`. A writing task (task.json `role: writing`, *The writing role*) gets self-review off unless `--self-review` (`cli.self_review`), probe off (`experiments_off` `a writing task`), the writing handbook, and `--test` stays optional (no note asks for one). |
-| `wb feedback <task> --text "…" \| --message <file\|->` | `--fresh` \| `--keep-context`, `--spec-gap "…"…` | Reaps first. Review/stuck/failed with no live runner; refuses a moved repo (`wb relocate`), OpenCode 1.x (exit 3, `_opencode_again`, #866), an API task whose model left OpenCode's catalog, has no price, no day cap (routes.json `day_usd`, #1089) or meets today's, or comes within one request at its worst of it (#1150; its input the round's first request's, the session's context and the text, #1173, after round N's own prompt when an unsent round runs again, #1180) (exit 3, `_model_still_listed`, #1016, #1118; next and resume too), an API task whose repo became local-only (exit 3, `_local_only_since`, #1021), empty text. Prompt: `FEEDBACK_HEAD` + "Make exactly these changes, then re-run the acceptance command and finish with a short summary:" (re-run only with a test) + text; reviews+1, none when status `infra` is set (a stop not the step's: the provider's "carry on" counted, one real review made the step go badly, #1153), which prints `feedback sent to <task> (round N): it resumes after a stop that wasn't the agent's (<infra>), so no review round is counted`, `round_for` `resume`, and marks the round `rounds/<n>/resumed` (`runner.RESUMED`), so `round_asks` walks on to the feedback the stop interrupted (#1169); after a provider's stop (`infra: provider`) its provider's `no_credit` mark becomes its turn to ask (`cli._credit_turn`, wb resume too, #1178). Stuck/failed with round n never sent (`runner.reached` false: the model's load, the server's wait, the keyhole stopped it first; wb next's step or the last feedback lost, the agent told only "carry on", #1180): round n again, the prompt after its own (`runner.add_to_round`), no review counted, `round_for` and its `resumed` mark kept, printing `feedback sent to <task> (round N): after round N's own prompt, which never reached the agent (<infra>), so no review round is counted`. Warns past three reviews. Gathers lessons. |
+| `wb start <task> --spec <file\|->` | `--repo` (.), `--role significant\|trivial\|writing` (from `--size`: trivial, else significant), `--size trivial\|significant` (from `--role`: trivial for the trivial role, else significant; both given, the role picks the model and the size the slice and the GPU router's size), `--model <id or fragment>`, `--test <cmd>` (granted to the shell too: `context.test_allowances`), `--auto-fix N` (2 on the GPU, 1 on API: `cli.AUTO_FIX`, `cli.auto_fix`; a given value is kept and the start line prints the one used, #1017), `--self-review`/`--no-self-review` (the `self_review` knob), `--checkin MIN` (0 off), `--ask-budget N` (2), `--ask-timeout S` (1200), `--round-timeout S`, `--silence-timeout S` (unset or 0: measured budgets), `--think-timeout S` (0 off), `--test-timeout S` (900), `--unload-for-tests` (task.json `unload_for_tests`: every model on the GPU but `keep_loaded` let go before each test run, the GPU held meanwhile, the GPU held from other tasks while tests run, a remote model's tests too, #428, #943, its device nodes in the lane, `context.gpu_nodes`), `--no-sign` (task.json `sign: false`; without it `gitops.sign_problem` and `gitops.presence_signer` are said at start), `--no-base-check` (`no_base_check`; else `--test` runs once on the base first, *The base check*), `--base REF` (HEAD), `--skill NAME…`, `--allow PATTERN…`, `--allow-path DIR…`, `--setup CMD`, `--setup-timeout S` (1800, `setup_timeout`), `--copy PATH…`, `--sibling PATH…` (*Setting the worktree up*), `--force` (queue a `--model` that can't run now), `--queue` (wait behind the GPU's holders, or for an API provider's slot), `--trial`, `--local-only` (task.json `local_only`: an API model is refused for this task, as for a repo commands.json marks local-only, *Privacy for API roles*), `--backlog NAME` (task.json `backlog`; a finished batch's name, its newest start `BACKLOG_GAP` 6 h old, is refused with a dated one, `cli._backlog_done`, #880), `--group NAME` (task.json `group`: one request's fan-out, *Dynamic workflows*; `cli.GROUP_RE`, a task name's characters up to 32, else refused before anything is made, `cli._check_group`, #1048), `--no-claude-md` | Refuses before writing anything: a bad or reused name (`^[a-z0-9][a-z0-9-]{0,47}\Z`), a spec not strict UTF-8 (`cli.read_text`, #873), a repo `_lane_fits` refuses (home, where credentials live; a snap `--test`), opencode missing or 1.x (exit 3, `runner.OPENCODE_GET`, #654), no runnable model (exit 3), an API model (a `--model`, or the role's side as it runs, `routes.effective_via`) in a local-only spot, before any model is picked (exit 3, `cli._local_only_check`, #1021), an unreadable routes.json (exit 3, *Roles*), a role that can't run (exit 3, one line, never the other side: an API role's model without a key, gone from the catalog or out of credit, `routes.cant_run`, never rate-limited or unreachable, a note, #1088; Agents on API with a role that has no API model; a GPU role with no GPU model, the router's line; a pinned GPU model not found; *A task, start to finish*, #1016), an API model with no price or today's spend at the cap, or within one request at its worst of it (`meter.request_floor`, #1150; its input round 1's, `runner.first_tokens`, #1173) (exit 3, `meter.refusal` in `routes.resolve`, both API paths: a `--model`'s before the dialog, *Spend*, #1019; an API `--model` while Agents is GPU (exit 3, `routes.AGENTS_GPU`, before the dialog, *Roles*, #1213); no cap at all too, `meter.no_cap`, #1089), a `--model` naming an API model under Claude Code without the dialog's yes (exit 3, `cli.start_gate`, #1014; checked last, after every other refusal, so a refused start never uses the yes up, #1104), a task's worktree as repo, a `--base` naming no commit, no git identity, no committed or gitignored CLAUDE.md (or a package's: task.json `subdir`), a `_worktree_setup` problem, a noexec state dir (`store.noexec`), no disk room (`cli._disk_room`), a clashing branch (`gitops.branch_clash`, `case_clash`), the GPU (exit 4; with routes.json `busy` api a role with an API model starts on it instead, `cli._busy_api`, #1023), an API model's provider already running `API_PARALLEL` (3) tasks, those on their way to a slot counted (exit 4, `cli._slots_full`, `cli._api_pending`, #1116; `--queue` waits for a slot, #1015). Writes `starting.json` (pid, start; undone by the next start or `wb gc` if killed, #376), round 1's prompt (spec + PROTOCOL, a writing task's `WRITING_PROTOCOL`) before task.json (a failed write leaves a dead start for gc, not a task with no status), task.json (`session` from `CLAUDE_CODE_SESSION_ID`, `claude_pid` from `CLAUDE_PID`), status; spawns the runner, which makes the checkout (*A task, start to finish*, #529). Notes (`_missing_dirs` with `INSTALL_DIRS`, `context.home_gap`, `context.mise_trusted`, `runner.dropped_proxies`, `context.on_windows`, `cli.WSL_SLEEPS`, `context.fixed_prompt` at `FIXED_SHARE` 40%, `runner.untested`), the model and why (an API task's `model: <id> · API (<provider>) · <role> role, set by you MM-DD · thinking off`, `routes.model_line`; its `started … on <id> (API)`; then `cli._api_notes`: the first API task in a repo for a provider adds the where-note, `note: this task sends the repo, its spec, CLAUDE.md files … to <provider> (the <role> role's model; data policy: <url>)`, its OpenRouter backends task.json's `order`, and `context.api_hidden_note`, *Privacy for API roles*), `next: wb wait <task>`. A writing task (task.json `role: writing`, *The writing role*) gets self-review off unless `--self-review` (`cli.self_review`), probe off (`experiments_off` `a writing task`), the writing handbook, and `--test` stays optional (no note asks for one). |
+| `wb feedback <task> --text "…" \| --message <file\|->` | `--fresh` \| `--keep-context`, `--spec-gap "…"…` | Reaps first. Review/stuck/failed with no live runner; refuses a moved repo (`wb relocate`), OpenCode 1.x (exit 3, `_opencode_again`, #866), an API task whose model left OpenCode's catalog, has no price, no day cap (routes.json `day_usd`, #1089) or meets today's, or comes within one request at its worst of it (#1150; its input the round's first request's, the session's context and the text, #1173, after round N's own prompt when an unsent round runs again, #1180) (exit 3, `_model_still_listed`, #1016, #1118; next and resume too), an API task whose repo became local-only (exit 3, `_local_only_since`, #1021), an API task while Agents is GPU (exit 3, `_agents_gpu_now`, #1213; next and resume too), empty text. Prompt: `FEEDBACK_HEAD` + "Make exactly these changes, then re-run the acceptance command and finish with a short summary:" (re-run only with a test) + text; reviews+1, none when status `infra` is set (a stop not the step's: the provider's "carry on" counted, one real review made the step go badly, #1153), which prints `feedback sent to <task> (round N): it resumes after a stop that wasn't the agent's (<infra>), so no review round is counted`, `round_for` `resume`, and marks the round `rounds/<n>/resumed` (`runner.RESUMED`), so `round_asks` walks on to the feedback the stop interrupted (#1169); after a provider's stop (`infra: provider`) its provider's `no_credit` mark becomes its turn to ask (`cli._credit_turn`, wb resume too, #1178). Stuck/failed with round n never sent (`runner.reached` false: the model's load, the server's wait, the keyhole stopped it first; wb next's step or the last feedback lost, the agent told only "carry on", #1180): round n again, the prompt after its own (`runner.add_to_round`), no review counted, `round_for` and its `resumed` mark kept, printing `feedback sent to <task> (round N): after round N's own prompt, which never reached the agent (<infra>), so no review round is counted`. Warns past three reviews. Gathers lessons. |
 | `wb next <task> --spec <file> -m "…"` | `--include` (bulk additions, large binaries, ignored files the agent or Claude wrote), `--no-sign`, `--test` (replaces it, granted to the shell too), `--skill` (replaces the set), `--fresh`, `--allow PATTERN…` (adds to the grants), `--spec-gap`, `--take-claude-md` (*Claude's files*) | Review only; an API task whose repo became local-only exits 3 (`_local_only_since`, #1021). Commits the step (`<m>` + `Workbench-Task: <task> (step N)` + `OpenCode-Session:`; an empty step advances uncommitted, #507); prompt "Step N of this task is done and committed (<sha>). The next step:" + spec + the task's protocol (`cli.protocol_for`: a writing task keeps `WRITING_PROTOCOL`); advances round, steps, step_round, `reviews` reset, `step_base` the worktree's HEAD (#652), phase queued in one status write right before the spawn (#191: written earlier, an interrupt left the step under review with no runner). A retry after its commit landed (`cli._step_landed`) measures from `HEAD~1` (#85). Says `runner.fresh_reason`'s verdict. Gathers lessons. |
 | `wb answer <task> --text "…" \| --file <f>` | `--id` | `ask/<id>.answer` via `ask_mcp.write_answer`; the id into status `answered`. Refuses empty, over `ask_mcp.FILE_MAX` 256 KiB (`too_long`: never read, the agent waited out its timeout, #605), or closed, racing too (`answer_once`, #938). |
 | `wb allow <task> ["<pattern>"…]` | `--path DIR…`, `--always`, `--text "…"` (the whole answer checked against `FILE_MAX` before any grant, #605) | Into `rules/<task>/grants.json` (`--always`: commands.json, once `context.commands_conf` passes); answers the oldest permission request (else the question) "Claude allowed … for this task. Run it again now and carry on." (`from now on` with `--always`), sent to a live agent as a `--now` steer. `--path` through `_lane_dir` (no link; not what `lane_refusal` or `kept_out` refuses, #912, nor a file the task's API lane hides, `api_hidden_refusal`, #1093; not in the task's repo or its git dir, where a planted hook runs outside the lane; a missing path named like a file refused, #670; made if missing); `*` turns the lane off. |
@@ -5939,7 +6050,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb verify <task>` | `--test CMD`, `--files PATH…`, `--expect TEXT`, `--timeout N` (300), `--setup` | *Verifying a fix against the base*; refused while the agent runs. SIGTERM/SIGHUP end it cleanly (`cli._ends_cleanly`, #372), like `wb image`, `wb audio`, `wb bench add`, `wb bench self` (`media.run_group`: the child's whole process group killed, since killing only a wrapper left its worker holding the GPU, #589). |
 | `wb stop [<task> \| --all]` | `--repo DIR`, `--session ID`, `--all-sessions`, `--park-waiting` | Status `stopping`, SIGTERM (15 s, `wait_exit`, then SIGKILL to its session and the agent's), `runner.sweep`, phase `stuck`, acked; worktree kept. `--all` (`stop_everything`): a `stopped` event, status `parked` (`store.parked`: out of `wb status` and the mod's counts until `spawn_runner` or a takeover clears it, #541); `--park-waiting` (with `--all`, the mod's quit) parks review/stuck/failed too, acking their news (`_park_waiting`, #698); unscoped, `bench.stop_driver` first (another host's left, #876). Others: `left running (other sessions'): …`. |
 | `wb resume <task> [<task>…]` | several names (start order, failures said, exit 1, #692), `--all` (`last` in `cli.INTERRUPTED` or starting `runner.UPDATED`: `cli._interrupted`, #788; never a guard's stop or a crash; in `store.all_tasks` order, each under its command lock, #544; a worktree problem or an API task whose repo became local-only is said and skipped, the rest go on), `--repo DIR`, `--session ID…`, `--all-sessions`, `--backlog NAME` | Reaps first. Stuck/failed, no live runner; an API task whose repo became local-only exits 3 (`_local_only_since`, #1021). Round n+1 on a fresh session (`runner.RESUME`), undelivered notes as `NOTE_HEAD`; after a provider's stop (`infra: provider`) its provider's `no_credit` mark becomes its turn to ask (`cli._credit_turn`, #1178). Never ran a round: round 1 again (`_early_notes`); checkout cut short: remade (`_rechecks_out`). |
-| `wb accept <task> -m "…"` | `--include`, `--no-sign`, `--merge`, `--merge-as merge\|ff\|squash` (implies `--merge`; commands.json `repos` `merge` sets the default, without implying it), `--force` (any open phase; stops a live runner), `--spec-gap`, `--take-claude-md` | Reaps; a moved repo refused first (#498). Review only; a closed one only when status `unrecorded` (`_finish_record`, #88). A live task with nothing changed on its first step is refused before its runner stops; a failed commit leaves it `stuck`, not live with no runner. Commits `<m>` + "Delegated to <label> via OpenCode: R round(s), F automatic test-fix, V review round(s)." + `Workbench-Task:` + `OpenCode-Session:` (no AI co-author line); a retry past it (`cli._accept_landed`) measures from `HEAD~1` (#879) and puts `delegate/<task>` on that commit (`gitops.put_on_branch`, refused when the branch holds commits it lacks, #417). Ignored files changed since the agent stopped that the commit leaves out are copied to `left-out/` first and named (`cli._keep_left`, #1179's review). Removes the worktree and runtime dir, records `tip`, keeps base..tip in `steps.bundle` (`gitops.bundle_steps`; `refs/workbench/accepted/<task>`, `gitops.keep_accepted`, only if it fails, #799, deleted once a merge lands the tip, else by gc). `--merge`: *Git, commits and projects* (`gitops.merge_lock`; failure: the accept stands, exit 5 `NOT_MERGED`, #247). A retry resumes from status `closing` (#246) while the worktree is gone or clean (`cli._gained_work`); meanwhile (`cli._accepting`) discard, feedback, next, resume and takeover refuse it (#878: discard recorded committed work as discarded); a merge already made is found by ancestry (`gitops.contains`), a squash by `closing`'s `merge_from` (#432). Writes the row, drops the rules (`_closed`), says how far CLAUDE.md is behind and the `claude:` cost. |
+| `wb accept <task> -m "…"` | `--include`, `--no-sign`, `--merge`, `--merge-as merge\|ff\|squash` (implies `--merge`; commands.json `repos` `merge` sets the default, without implying it), `--force` (any open phase; stops a live runner), `--spec-gap`, `--take-claude-md` | Reaps; a moved repo refused first (#498). Review only; a closed one only when status `unrecorded` (`_finish_record`, #88). A live task with nothing changed on its first step is refused before its runner stops; a failed commit leaves it `stuck`, not live with no runner. Commits `<m>` + "Delegated to <label> via OpenCode: R round(s), F automatic test-fix, V review round(s)." + `Workbench-Task:` + `OpenCode-Session:` (no AI co-author line); a retry past it (`cli._accept_landed`) measures from `HEAD~1` (#879) and puts `delegate/<task>` on that commit (`gitops.put_on_branch`, refused when the branch holds commits it lacks, #417). Ignored files changed since the agent stopped, or by its shell (#1210), that the commit leaves out are copied to `left-out/` first and named (`cli._keep_left`, #1179's review). Removes the worktree and runtime dir, records `tip`, keeps base..tip in `steps.bundle` (`gitops.bundle_steps`; `refs/workbench/accepted/<task>`, `gitops.keep_accepted`, only if it fails, #799, deleted once a merge lands the tip, else by gc). `--merge`: *Git, commits and projects* (`gitops.merge_lock`; failure: the accept stands, exit 5 `NOT_MERGED`, #247). A retry resumes from status `closing` (#246) while the worktree is gone or clean (`cli._gained_work`); meanwhile (`cli._accepting`) discard, feedback, next, resume and takeover refuse it (#878: discard recorded committed work as discarded); a merge already made is found by ancestry (`gitops.contains`), a squash by `closing`'s `merge_from` (#432). Writes the row, drops the rules (`_closed`), says how far CLAUDE.md is behind and the `claude:` cost. |
 | `wb relocate <task> --repo <dir>` | | Refuses a repo without the base or a linked worktree; refuses a `.git` naming another git dir; repairs the link (`git worktree repair`), rewrites `gitdir.json`, task.json `repo`, `git_common`, `cwd`, `submodules.json` (`gitops.relocate`, #498, #682). |
 | `wb discard <task>` | `--reason "…"`, `--spec-gap`, `--keep-branch`, `--drop-steps` | Stops, records, removes worktree, runtime dir, rules (`_closed`) and branch (`deleted (was <sha>)`, status `tip`, in the repo `gitops.repo_of` finds), not with `--keep-branch`, a moved repo, or committed steps unless `--drop-steps` (#494; then accept's merge line for them, #1174); a cut-short checkout's only while `branch_made` holds (#416). Closed: refused unless `unrecorded`. |
 
@@ -6046,7 +6157,7 @@ $WB_HOME (~/.local/state/workbench)
                                  unreachable, until (epoch; a null from before #1068 reads as ts + CREDIT_RECHECK_SECS), why (redacted), ts,
                                  asked_by (a no_credit mark past its until that a waiting runner asks again, or one a
                                  provider-stopped task's wb feedback or wb resume asks at once: its task,
-                                 until moved CREDIT_RECHECK_SECS on, models.credit_turn, models.credit_ask, #1178)}}; ok removes it; past until reads as ok; the provider's cooldown every keyhole waits out, and the revive's wait (#1020)
+                                 until moved CREDIT_RECHECK_SECS on, models.credit_turn, models.credit_ask, #1178; the keyhole's next 402 drops it)}}; ok removes it; past until reads as ok; the provider's cooldown every keyhole waits out, and the revive's wait (#1020)
   api/<provider>.<i>.lock        an API provider's task slots (models.NoLease, #1015): API_PARALLEL (3) files, each flocked by the
                                  runner holding it, its task's name inside (models.api_holders); never in gpu.json
   spend-api.jsonl  .lock .checkin.lock  the API ledger (meter.py, #1019; *Spend*), one row each, every row {ts, day (local
@@ -6115,7 +6226,7 @@ $WB_HOME (~/.local/state/workbench)
     prepared.json                for scratch checkouts (runner.PREPARED): {paths (ignored paths copied instead of rerunning the setup, unless a virtualenv
                                  or rebuilt), marks ({path: fingerprint}, runner.prepared_mark), bytes (checked against free space)}
     steps.bundle                 an accepted task's base..tip (gitops.bundle_steps, STEPS_BUNDLE), kept with the task for wb bench add
-    left-out/                    wb accept's copy of the ignored files changed since the agent stopped that the commit left out (cli._keep_left, #1179's review)
+    left-out/                    wb accept's copy of the ignored files changed since the agent stopped, or by its shell, that the commit left out (cli._keep_left, #1179's review, #1210)
     .export-<sid>.json           an earlier session's export, made once before a handover, for wb watch
     <name> → ../<name>           a sibling's link beside the worktree (`--sibling`; not one of context.TASK_FILES)
     tree/<parents>/worktree/     the worktree instead, for a sibling more than one level up (task.json `worktree`)
@@ -6163,7 +6274,10 @@ wins, the spot itself else the nearest directory above it, so the root's holds f
 package's never for the root or another package (#778: matched by git dir alone, every task got the first package
 entry); by real path, else git dir and the path inside the worktree, both in lower case where the file system
 ignores case (`store.folds_case`: a key typed `~/Code/ClientX` for git's `~/code/clientx` on macOS matched nothing,
-and a local-only repo went to the API model, #1157); wb accept reads it the same way. `--setup`,
+and a local-only repo went to the API model, #1157). It asks each component of the real path in its own parent, its
+letters' case swapped, so WSL2's drvfs (`/mnt/c`, folding under an ext4 root that doesn't) counts too: the whole path
+swapped, `/MNT/C/uSERS/…`, isn't there, and a key in another case than the cwd's missed (#1217). wb accept reads it
+the same way. `--setup`,
 `--setup-timeout` (a positive whole number) replace; `--copy`, `--sibling` add; `merge` is `wb accept --merge`'s way
 (`context.MERGE_AS`; `--merge-as` overrides). `local_only` is read further up: the nearest entry that states it decides
 (`context.repo_entries`, nearest first; `privacy.local_only`), so a package's entry for its setup alone doesn't lift
@@ -6244,15 +6358,18 @@ off), not `wb start`'s.
 | `reviews` | review rounds this step (`wb feedback` +1, none after an `infra` stop, #1153; `wb next` resets) |
 | `auto_fixes`, `auto_fixes_total` | since the last review or step; earlier |
 | `self_reviewed` | `[steps, reviews]` at the last self-review (once per review round) |
-| `self_review_tree` | `gitops.mark` of the tree the last self-review was queued on, its tests green; carried to the `fresh` round that takes a full self-review over, dropped (null) by any other's (`runner._full_round`); the explore guard's finish holds to it (`runner.green_tree`, #1188) |
+| `self_review_tree` | `gitops.mark` of the tree the last self-review was queued on, its tests green; carried to the `fresh` or `steer` round that follows one of `runner.SELF_REVIEW_ROUNDS` (a handover, the think nudge, Claude's note: #1207), dropped (null) by one after any other round (`runner.carried_tree`, in `_full_round` and `_steer_round`); the explore guard's finish holds to it (`runner.green_tree`, #1188) |
 | `reviewed` | `{step, tree}`: the tree the last review notice showed (`gitops.snapshot`, bulky new files left out); the next shows the diff since (the whole diff once git gc pruned it) |
 | `tests` | `{ok, exit, tail, round, lane?, proxy?, hang?}` (`exit`: code, `timeout`, `output limit`; `lane`: devices refused; `proxy`: variables left out, on a connection failure; `hang`: `{base, limit}`, a timeout where the base check ran it in a quarter of the limit or less) |
 | `base_check` | `{ok, exit, tail, limit, secs, cmd}`, `runner.base_check` in the lane before round 1, with `--test` and no `--no-base-check` (`exit` may be `"timeout"`, `"setup failed"`, `"filtered"`: not the task's bytes) |
-| `infra` | the machine failed it: `setup` (`_prepare`), `model` (`_load_failed`: no load, or the server down past `DOWN_WAIT`), `provider` (an API provider's stop, #1020), `spend` (the day's API spend cap, #1019), `updated` (`runner._updated`), `opencode` (`runner.opencode_moved`, #1176), `crash`, `disk full` (the crash handler), `runner died` (`cli.reap`); `wb feedback` then counts no review (#1153); cleared at runner start; a replay with it is an `error` row |
+| `infra` | the machine failed it: `setup` (`_prepare`), `model` (`_load_failed`: no load, or the server down past `DOWN_WAIT`), `provider` (an API provider's stop, #1020), `spend` (the day's API spend cap, #1019), `updated` (`runner._updated`), `opencode` (`runner.opencode_moved`, #1176), `local_only` (an API task's repo marked local-only since it started, `runner._local_only_stop`, #1215), `crash`, `disk full` (the crash handler), `runner died` (`cli.reap`); `wb feedback` then counts no review (#1153); cleared at runner start; a replay with it is an `error` row |
 | `prepared`, `setup_secs` | the worktree is set up (`_prepare`), so a later runner doesn't again; how long (older tasks: `prepared_paths`, `prepared_marks`, `prepared_bytes`, `runner.prepared_record`) |
 | `checked_out`, `checkout_secs` | `runner.checkout` made the worktree; how long |
 | `hands_off_at` | when the agent last stopped (review, the runner's exit, `cli._stop_runner`, `cli.reap`; an earlier one kept): ignored files changed since are Claude's (`runner.hand_wrote`, #1179); cleared by the next runner once it has kept them |
-| `hand_wrote` | ignored files written while no runner ran, kept by each runner at its start (`runner._hands_on`): `wb accept`/`wb next` refuse them until `--include` (#1179) |
+| `hand_wrote` | ignored files written while no runner ran, kept by each runner at its start (`runner._hands_on`): `wb accept`/`wb next` refuse them until `--include` (#1179); none under `ran_wrote` |
+| `agent_from` | when the agent's first round began, after the checkout, setup, `--copy` and base check (set once): ignored files changed since that `gitops.hand_written` keeps, less `test_wrote`, that a shell row's `names` name are the agent's shell's (`runner.shell_wrote`), refused at `wb accept`/`wb next` until `--include` and named in the report; the rest are `shell_left`, noted and left out (#1210) |
+| `test_wrote` | the ignored files the runner's test runs changed (`runner._tests_wrote`, after each in `run_tests`; what `hand_written` keeps and its rest): build or test output, never the agent's shell's (#1210) |
+| `ran_wrote` | where the runner's own setup or `--test` run in the worktree, or its base check in the scratch checkout, wrote a file `gitops.hand_written` would take for Claude's (`gitops.ran_wrote`: its outermost ignored directory, else the file), grown after each run: a file changed there is build or test output (`hand_left`), as Claude's rerun of the acceptance command wrote `mvn test`'s reports there (#1211) |
 | `hand_left` | the other ignored files changed while no runner ran that `gitops.hand_written` took for build or test output but a person might have written (text, outside a cache, under `BUILD_FILES` text files in their group, any suffix: never bytecode nor an install's), kept the same way: `wb accept`/`wb next` name them as left out of the commit (`gitops.left_out_line`; accept keeps a copy in `left-out/`, #1179's review) |
 | `taken_over` | `wb takeover`: `runner.checkout` then fails a task not checked out rather than recheck it out (#655); cleared by the hand-back once checked out, for the mod's `delegatedWork` (#926) |
 | `branch_made` | the commit `runner.checkout` makes `delegate/<task>` at, recorded before `worktree add` when no such branch exists: the only branch a cut-short cleanup deletes (#416) |
@@ -6271,7 +6388,7 @@ off), not `wb start`'s.
 | `unrecorded` | `{outcome, step, extra}` until the results row is written: what a retried accept/discard writes |
 | `closing` | `wb accept` after its commit: `{commit, step, merge, merge_into, merge_as, sign, merge_from?, merged_head?}`, with `tip`; `sign` false keeps a retry's merge unsigned; a retry uses that object and destination (`gitops.squashed` from `merge_from`), a recovered refusal still exits 5 (#246, #432); while it stands, discard, feedback, next, resume, takeover refuse (`cli._accepting`) |
 | `grants_kept` | `{allow, paths}` at close, for `context.grants` afterwards (`wb bench add`) |
-| `session`, `sessions`, `session_mark`, `session_floor` | the session; earlier ones; `gitops.mark` at its start; context read at its first change |
+| `session`, `sessions`, `session_mark`, `session_floor` | the session; earlier ones; `gitops.mark` at its start; its prompt (input and cache) at its first change |
 | `claude_rules_gone` | the round whose layer deleted an earlier wb's copy of Claude's global files (`runner.write_config_layer`, #1119): that round's report adds `runner.RULES_GONE` |
 | `opencode_home` | `true` once a round ran in the task's own OpenCode home (`run_round`, #1010); a `session` without it began in the user's store, and the next round starts fresh (`fresh_reason`: `OLD_STORE`, the old session's last words exported from there) |
 | `context` | one-round instruction: `fresh`, `keep`, `full` |
@@ -6294,18 +6411,18 @@ off), not `wb start`'s.
 | `ratelimit_until`, `ratelimit` | the keyhole's hold or queue (#1020): epoch seconds, at least 60 s ahead; `{kind: rate_limited\|outage\|queued, provider, code, since, retry_after, why?}`; cleared at the first data, at each round's start and end |
 | `api` | an API task's spend (#1019, *Spend*): `{usd (the task's ledger total; null for a plan), metered, at_catalog (that total as OpenCode's estimate prices it, a provider's own row at its `metered`: what `results.api_usage` compares the export with, #1165; none for a plan), source (the last row's), tok {in, out, cache_read, cache_write, reasoning}, prices, plan?}`, per ledger row |
 | `api_stop` | `{guard, text}` (`spend`'s with `worst`, the refused request's at its worst, which the round's stop carries on to `meter.stop_text`, #1150): stop the round now: the keyhole's `quota` (#1020) or `setup` (a certificate or proxy of this machine's, #1080), or `spend` (`Meter.room` refused a request, #1019); consumed by the runner's stop (`_ProviderWait.stop`, whose `stopped_by` makes `spend` its own cause), and cleared, whatever its guard, as each round begins (`Meter.begin`) |
-| `guard` | `spend` when `runner._go_on` stopped the task before a round (the day cap, or within one worst request of it, #1150), with `infra` `spend` |
+| `guard` | `spend` when `runner._go_on` stopped the task before a round (the day cap, or within one worst request of it, #1150), `agents` when Agents on GPU did (`runner._agents_gpu`, #1213); with `infra` `spend` |
 | `updated_at` | every write |
 
-**events.jsonl** rows are `{ts, round, kind, …}`. From OpenCode (`events.normalize`): `tool {tool, brief, ok, error?, path?, paths?}`
+**events.jsonl** rows are `{ts, round, kind, …}`. From OpenCode (`events.normalize`): `tool {tool, brief, ok, error?, path?, paths?, programs?, names?, workdir?}`
 (`brief`: command, path, pattern, url, query or description, 90 chars; a skill's id; a patch's first
-file; `path` an edit's or a read's whole path; `paths` the files a `patch` wrote, `events.patched`, #1148), `text {text}` (2000), `step {in,
+file; `path` an edit's or a read's whole path; `paths` the files a `patch` wrote, `events.patched`, #1148; a shell row's `programs`, `events.shell_programs`, 8, `names`, the words that may name a file it wrote, paths first, a word after a `cd` or `pushd` joined to its directory (until the subshell it ran in ends or a `popd`; after one to where no word says, `*/<word>`, any directory's: `events.ANYWHERE`), `events.shell_names`, `NAMES_MAX` 300: `runner.shell_wrote`, #1210, and `workdir`, the shell tool's input as given (absolute, or relative to the task's workdir), which `names` resolve against: OpenCode 2.3.2 tells the model to set it instead of a cd, #1210's third review), `text {text}` (2000), `step {in,
 out, cache, cache_read, cache_write, reasoning?, cost?}` (reasoning apart from `out`; `cache` the read and write summed,
 which the handover check reads; `cost` OpenCode's `part.cost` in USD, only when a number: missing is unknown, never 0, #1022; the meter's step price too, #1019), `error {text}`, `retry {text, attempt}` (OpenCode resent a request). From the runner: `round`, `stopped {text}`, `steer
 {now, by: "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow, compacted}` (`compacted` after a failed compaction too),
 `autofix`, `self_review`, `reading_full`, `full`, `compacted {text}` (mid-round, and it carried on), `load` (a reload before a round), `limits {text}` (stretched),
-`left_bg {text}` (a job left in the background), `lingered {text}` (the turn over, OpenCode still open: stopped, #1160), `settled {text}` (a self-review round at the explore guard, on the tree its tests passed on: stopped as its finish, #1168, #1188), `round_end {secs, how, guard?}` (stats recording on), `export` (the
-export failed: judged by `live_used`), `stopped {by: "signal"|"provider"|"spend"}` (`provider`: an API provider's stop, #1020; `spend`: the day's spend cap, #1019; `lessons.gather` skips any with `by`), `gpu {text}` (a load warning), `ask {id}`, `answer {id}`, `served {model, by, text}` (the keyhole: the served model changed; `wb watch` and `wb log` show the text), `rate_limited {provider, code, state, since, secs, text}` (a run of an API provider's waiting ended, or the round stopped: #1020), `backend {by, text}` (the keyhole: OpenRouter served a backend outside the task's `order`, `OpenRouter served <x>, not <order>`; a line in the round's report too, #1021). From
+`left_bg {text}` (a job left in the background), `lingered {text}` (the turn over, OpenCode still open: stopped, #1160), `settled {text}` (a self-review round at the explore guard, on the tree its tests passed on: stopped as its finish, #1168, #1188, #1207), `round_end {secs, how, guard?}` (stats recording on), `export` (the
+export failed: judged by `live_used`), `stopped {by: "signal"|"provider"|"spend"|"local_only"}` (`provider`: an API provider's stop, #1020; `spend`: the day's spend cap, #1019; `local_only`: an API task's repo marked local-only, `runner.LOCAL_ONLY`, #1215; `lessons.gather` skips any with `by`), `gpu {text}` (a load warning), `ask {id}`, `answer {id}`, `served {model, by, text}` (the keyhole: the served model changed; `wb watch` and `wb log` show the text), `rate_limited {provider, code, state, since, secs, text}` (a run of an API provider's waiting ended, or the round stopped: #1020), `backend {by, text}` (the keyhole: OpenRouter served a backend outside the task's `order`, `OpenRouter served <x>, not <order>`; a line in the round's report too, #1021). From
 `wb`: `spec_gap`, `next_step`, `stopped` (bail out), `resumed`, `allow`, `steer {now}`, `captain`, `takeover`, `coding` (the user allowed Claude an edit), `error`
 (`reap`: the runner died without a report).
 
@@ -6600,8 +6717,8 @@ else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `path`: `events._brief` reads both). Records `FAKE_PROMPTS`, `FAKE_RUNS` (each run's `session`, `prompt`, `cwd`,
 `pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
 `FAKE_LESSON`, `FAKE_PAD` (that many characters before the Lesson line, #1186), `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
-`ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
-`read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087), `selfreads` (ok, then a self-review, told by its prompt, that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168; `FAKE_SELF_FILL`: its first session breaks it and fills 76%, the fresh one restores it, or with `FAKE_SELF_KEEP` only reads: #1188), `floor` (`HANDOVER_ROOM`), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151; `FAKE_COMPACT_KEPT`: the step after at 34%, over half, a kept tail: #1185), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
+`ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `shellwrite` (lib/util.py through a `bash` row's `cat > util.py <<X` with `workdir` lib/, main.py and answer.txt with `write`: #1210, its third review), `buildout` (dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names neither, then answer.txt: #1210's review), `pkgbuild` (a `bash` row `grep -n answer pkg/a.py`, then build/lib/pkg/{__init__,a,b}.py behind one `python -m build`, then answer.txt: #1210's second review), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
+`read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087), `selfreads` (ok, then a self-review, told by its prompt, that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168; `FAKE_SELF_FILL`: its first session breaks it and fills 76%, the fresh one restores it, or with `FAKE_SELF_KEEP` only reads: #1188; `FAKE_SELF_STALL`: it breaks it and goes silent, the run after a nudge or a note restores it: #1207), `floor` (`HANDOVER_ROOM`), `think` (a long think in a step's output, then a prompt that grew: no compaction, #1219), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151; `FAKE_COMPACT_KEPT`: the step after at 34%, over half, a kept tail: #1185), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
 2.3's `{"type": "error", …, "error": {"type": "compaction.failed", "message": "Compaction produced no summary"}}`;
 `FAKE_COMPACT_MSG`, `FAKE_COMPACT_EXIT`, `FAKE_COMPACT_EDIT`, `FAKE_REFAIL`), `bgwait` (`FAKE_BGWAIT`), `toolhang`,
 `retry` (`FAKE_RETRY_EVERY`), `say`, `stay` (as `ok`, then open and silent: #1160), `spend` (#1019: a read and a priced step every `FAKE_STEP_EVERY` s, `FAKE_STEPS` of
@@ -6651,7 +6768,8 @@ named DeepSeek with a stored key): the document, the change line, the gate's con
 command, another line), every gated kind (a flip, an API model, thinking on API, also on a GPU role Agents on API or the busy
 opt-in runs there, `--api` on the GPU, the cap), a pin
 keeping the record of the user's yes, the flips, the refusals (a kept model checked again, one gone from the catalog, a
-provider's passing state), the Agents switch (its line, its gate, `use` alone set), the start refused before any dialog (`API_RUNS` patched off) and its gate, `wb try`'s
+provider's passing state), the Agents switch (its line, its gate, `use` alone set), a role's own move to the GPU
+saying its started tasks keep their model (#1213), the start refused before any dialog (`API_RUNS` patched off) and its gate, `wb try`'s
 refusal, an unreadable file; `Base` points `WB_ROUTES` at the
 test's own file, never the user's. The mod's half (the dialog, the file-tool denies, the echo, `said-3`) is in
 register.test.tsx (`routeProbe`). **Dynamic workflows** (`DynamicWorkflows`, #1041): off with no file, an unreadable
@@ -6673,7 +6791,8 @@ into a real `Meter`, then OpenCode's catalog figure booking no top-up, #1165; th
 roles' row plain once the rows are the provider's own), and its `test_real_opencode_*` runs the real OpenCode through a closed
 keyhole (the 400, not retried). The room's stop under the cap is driven whole too: the fake's `http` scenario's request
 through the keyhole, refused for its input alone (a model with no output price, `request_floor(m, 0)` 0), and the notice's
-lead says too near with the room's `worst` (#1150's review). The cap a near-cap refusal names lets the round's first
+lead says too near with the room's `worst` (#1150's review). An API task whose repo is marked local-only, queued or between round 1's send and its auto-fix round, stops `stuck`
+with nothing more sent or booked (#1215). The cap a near-cap refusal names lets the round's first
 request through, the room's own check, for wb next on a session carrying 120K tokens, `_go_on` on one carrying
 80K, wb start's round 1, and, past what `meter.FIRST_TOKENS` alone covers, `wb start` (by `--model` and by
 `--role`, `routes.resolve`'s path) and its dialog's dry run (`_route_start`) with an 80 KB spec, `wb next` with an
@@ -6729,7 +6848,7 @@ with it shut out (#994), and the instructions: the user's `~/.config/workbench/A
 `~/.claude/CLAUDE.md` and rules out, in the lane and (OpenCode's own read, `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT`) without
 it (#513, #1061). `run_calls(name, calls, *start_flags)` runs `opencode run --auto` through `agent_env` and
 `lane.wrap`; refusals read `permission.rejected`, `external_directory` or `Permission denied`. `RealOpenCodeRun` is the
-runner on real OpenCode (`wb start --model cap`): argv, `run --format json` events (a `tool_use`'s `state.output`, #1086), `session export`
+runner on real OpenCode (`wb start --model cap`): argv, `run --format json` events (a `tool_use`'s `state.output`, #1086; the shell tool's `workdir` in `state.input`, #1210's third review), `session export`
 (`context_state`), `session list` (`find_session`), `--session`, a real compaction (and the tail it keeps, `compaction.keep`, #1185), the task's own OpenCode home
 (no credentials in it, the user's store given no session, its commands seeing the user's `XDG_DATA_HOME`, #1010)
 (CLAUDE.md's *OpenCode quirks* points here). They are the only checks of the quirks, interop and lane: a skip is not a pass.
@@ -6782,10 +6901,13 @@ the binary lacks fails without the file and runs through the keyhole with it.
 `_ApiTask`, #1015). `_ApiTask.start_api` is `run_wb("start", …, "--model", FLASH)` in process,
 outside Claude Code so no dialog (`FLASH`, from `API_CATALOG` in `WB_FAKE_CATALOG`, its key a
 canary row of `FAKE_AUTH_EXPORT`, a $100 day cap in the test's routes.json, without which wb
-start refuses the task, #1019, #1089). **Roles at start** (`RoleResolution`, #1016): the no-fallback
+start refuses the task, #1019, #1089). Agents on GPU stops a queued API task before round 1, with
+its slot let go, refuses its resume and an API `--model` start, and `_go_on` stops one between rounds
+(#1213). **Roles at start** (`RoleResolution`, #1016): the no-fallback
 matrix (an unset role on the router's pick, an API role on its model with task.json's keys, no key
 and no GPU model each exit 3 with no task directory and never the other side, Agents on API with a
-role that has none, an unreadable routes.json, `--role`/`--size` each from the other, a GPU pin),
+role that has none, an unreadable routes.json, `--role`/`--size` each from the other, a GPU pin,
+and one gone from the config whose id is a fragment of another's: exit 3, #1214),
 the start line, `wb status`'s via column, `wb watch --json`'s `routed`, the chat's snapshot, and a
 model gone from the catalog (feedback, next, resume, the runner) and a catalog that can't be read
 (never said as gone). With `spawn=False` the runner is
@@ -7108,4 +7230,4 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **`runner.thinking_variant`** (`THINKING_OFF`, `OFF_VARIANT`, `DEFAULT_EFFORT`, `_no_off_listed`, `_off_form`, the V2 move in `_as_v2`) → `fake_opencode.py`'s variant check (`layer_variants`: V1 and V2, the layer file and the content), `transcript.model_line` (`thinking_shown`), *Thinking off by default*.
 - **A model name** → never in code or the skill: OpenCode's config, the router, the weekly check.
 - **A runner guard** (`out["guard"]`: `repeat`, `errors`, `no_edit`, `round`, `silence`, `think`, `handovers`, `spend`) → the mod's `GUARD_WORDS`, *Stats recording*'s list.
-- **The spend stop** (#1019): `meter.request_floor` ↔ `Meter.room`'s worst (#1150: the start's refusal and `_go_on`'s look ahead keep room's margin; its input `runner.first_tokens` ↔ what `run_round` sends: status `live_used`, `handoff_prompt`, `PROMPT_ARG_MAX`, #1173) ↔ `meter.stop_reason` ↔ `runner._go_on` (#1017, before each `continue` in `drive`) ↔ `runner._spend_guard` ↔ the keyhole's `close(reason)` and `room` hook (`Meter.hooks()`, which `runner.start_keyhole` passes to `keyhole.start`) ↔ status `api_stop` (the keyhole's `quota` stop writes it too, #1020; `_ProviderWait.stop` consumes it, keeping its `worst` for `runner._spend_lead` ↔ `meter.stop_text(task, worst)`, #1150, and `Meter.begin` clears it at each round's start, whatever its guard). `events.normalize`'s step `cost` ↔ `tests/fake_opencode.py`'s `part.cost` (`FAKE_STEP_COST`) ↔ `meter.step_tokens`. A `spend` notice's `cause` ↔ the mod's `SPEND_NEXT`.
+- **The spend stop** (#1019): `meter.request_floor` ↔ `Meter.room`'s worst (#1150: the start's refusal and `_go_on`'s look ahead keep room's margin; its input `runner.first_tokens` ↔ what `run_round` sends: status `live_used`, `handoff_prompt`, `PROMPT_ARG_MAX`, #1173) ↔ `meter.stop_reason` ↔ `runner._go_on` (#1017, before each `continue` in `drive`) ↔ `runner._spend_guard` ↔ the keyhole's `close(reason)` and `room` hook (`Meter.hooks()`, which `runner.start_keyhole` passes to `keyhole.start`) ↔ status `api_stop` (the keyhole's `quota` stop writes it too, #1020; `_ProviderWait.stop` consumes it, keeping its `worst` for `runner._spend_lead` ↔ `meter.stop_text(task, worst)`, #1150, and `Meter.begin` clears it at each round's start, whatever its guard). `events.normalize`'s step `cost` ↔ `tests/fake_opencode.py`'s `part.cost` (`FAKE_STEP_COST`) ↔ `meter.step_tokens`. A `spend` notice's `cause` ↔ the mod's `SPEND_NEXT`; its `guard` `agents` (`runner.AGENTS`) ↔ the mod's `AGENTS_NEXT`, and `routes.AGENTS_GPU`/`AGENTS_STOPS` ↔ the mod's `AGENTS_STOPS` text (#1213). The way off API (#1218): `routes.off_api` ↔ `routes.effective_via` and `busy_api` ↔ its users, `meter._ask`, `meter.stop_text`, `privacy.local_only_line`, `runner.provider_remedy` and `routes.cant_run` under Agents API: a new remedy that offers the GPU asks it.
