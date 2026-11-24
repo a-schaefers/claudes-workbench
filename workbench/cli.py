@@ -6730,7 +6730,7 @@ def cmd_doctor(a):
     else:
         for good, said in _api_role_lines(doc):  # whether each API role can start now (#1067)
             line(good, said)
-        if (keys := models.connected()) and any(routes.effective_via(doc, r) == "api" for r in routes.ROLES):
+        if any(routes.effective_via(doc, r) == "api" for r in routes.ROLES) and (keys := models.connected()):
             for said in api_key_lines(keys):
                 print(said)
     try:  # every wb command makes it: a fresh home has no ~/.local/state yet (the 2026-11-16 audit)
