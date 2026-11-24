@@ -760,8 +760,9 @@ Feedback, next and resume refuse 1.x (exit 3) and note one outside `OPENCODE_TES
    `run_tests`'s `testing` (left `running`, `wb steer --now` promised an interrupt it couldn't
    keep, #943). `_rejoin` (phase `queued`, "waiting for the GPU") retakes it
    first-come by the task's start; a review end doesn't rejoin. Scratch-checkout checks (base
-   check, `wb verify`, `wb shot`) take no part of the lease; with `--unload-for-tests` each takes
-   the GPU alone (`verify.gpu`, #502). `lease.load()` adds to `status.load_secs` (never overwrites,
+   check, `wb verify`, `wb shot`, `wb bench`'s checks and grades) take no part of the lease; with
+   `--unload-for-tests` each takes the GPU alone (`verify.gpu`, #502; a replay's grade
+   without queueing, `bench._grade_alone`, #1098). `lease.load()` adds to `status.load_secs` (never overwrites,
    #567), `limit.context` to `status.window`, and `tuning.tune` sets `status.tuned` once. A load
    error: `failed`.
 3. Each round n: after the first, rejoin and `lease.load()` again (Ollama's keep-alive resets per
@@ -3811,7 +3812,11 @@ non-trial task. It keeps the task's setup and `--setup-timeout`, copies, sibling
 `grants_kept`, `cli._keep_grants`, since the rules go at the close, #250), package (`subdir`) and
 `unload_for_tests`, and passes them to its base check, reference check, each replay and
 `wb bench self` (`bench._inputs`; without the limit a long build stopped at 1800 s and was an `error` every
-run, without the flag GPU tests ran beside the resident model, #735; an older case reads them from
+run, without the flag GPU tests ran beside the resident model, #735; the flag gives a replay's
+rounds `--unload-for-tests`, and the base check, the reference check and `wb bench self`'s grade
+run inside `verify.gpu`, #1098; a replay's grade, after its runner has let the lease go, takes the
+GPU alone only once nothing holds or waits for it, `bench._grade_alone`, asking every `GRADE_POLL`
+(5 s) without queueing: queued, its place was the replay's start, ahead of later real tasks; an older case reads them from
 its task, `bench._kept`, `bench.subdir`; task gone too: `error` rows). A replay runs from the
 package (`--repo <checkout>/<subdir>`: from the root an `answer.txt` passed a check of
 `app/answer.txt`, #425). The step's commit is found by its trailer
@@ -3871,7 +3876,10 @@ A replay stays out of real work: task.json `bench` silences `Task.notify` and `r
 it from `wb status` (unless `--all` or named) and the mod; `--trial` keeps its lessons out; its
 speeds do go to speed.json. Real work that would wait for the GPU behind a replay (or `wb optimize`)
 preempts it (`cli._preempt_bench`, phase stuck, `PREEMPTED`; never another host's, #895), and the
-driver replays it later. A driver killed without warning closes nothing (#511), so `wb gc` and the
+driver replays it later. A grade holding the GPU is preempted too: `PREEMPTED` is set before the
+sweep ends its command, the grade runs no next one and its row is `preempted`, never the model's
+`failed`, and `_preempt_bench` waits up to `BENCH_EXIT` (30 s) for the driver's hold to go before
+the caller reads the GPU's holders (the review of #1098: it was refused, exit 4, the room it made). A driver killed without warning closes nothing (#511), so `wb gc` and the
 next `wb bench run` call `bench.sweep`: each unclosed replay whose driver is gone is discarded and
 its clones removed (never another host's whose runner beats, #876). A rerun skips each (case, model,
 label, repeat) already passed or failed (`done_keys`); rows carry `wb_commit` and `label`, so a
@@ -6512,6 +6520,8 @@ doc needs its own `!/` line).
   `bench._step_prompt`).
 - **A task.json `bench` key** → `Task.notify`, `results.record`, `cmd_status`, `_preempt_bench`, the mod's task
   listing, which all leave a replay out of real work; the Bench tests and the mod's replay test.
+- **`bench.PREEMPTED`** → `cli._preempt_bench`, which sets it before its stop, and `bench.replay`, which reads it
+  after `_wait` and before each grade command (#1098's review: a killed grade read as `failed`).
 - **`cli.PROTOCOL`'s acceptance line or fold, `wb next`'s step opening** → `bench.py`, which reads them back out of old prompts (`TEST_LINE`
   without status `step_tests`, `FOLD`, `STEP_HEAD`). **The trailers `wb next` and `wb accept` write** → `gitops.step_commit`; `bundle_steps` (base..tip) must
   hold every step it looks for.
