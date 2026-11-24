@@ -1341,7 +1341,11 @@ is a note, not a check-in (that cost a restart in one task of two, 2026-11-17). 
 4. `tests: PASS|FAIL (`cmd`, exit N)`, 25 lines on a failure; `base check: …` while on the first
    step with no review round; `auto-fix rounds used: a/b`.
 5. `tools: name×n …`, up to four `tool error:` lines.
-6. `agent's summary:` and the last text (2500 characters).
+6. `agent's summary:` and the last text: whole up to `SUMMARY_MAX` (2,500 characters), else its
+   first `SUMMARY_HEAD` (1,650) and last `SUMMARY_TAIL` (800) around `[… N chars cut: <task>/rounds/<n>/final.md]`
+   (`cut_final`): the end holds the assumptions and `Lesson:` lines; cut head-only, 75 of 409
+   summaries lost them (#1186). `write_report` writes the whole text to `final.md` (`FINAL_MD`)
+   before `summary.md`.
 7. `files changed:` (`git status --porcelain`), NOTEs for files outside the spec, Claude's files
    (`claude_files_changed`: CLAUDE.md, CLAUDE.local.md, AGENTS.md, `.claude/`), `NOTE: edits in
    submodule <path> can't land: …` (`gitops.submodule_edits`, #419), `NOTE: new files in submodule
@@ -1374,7 +1378,7 @@ by prefix; rewording one silently changes those:
 | `NUDGE` (`without a tool call. Stop planning`) | the think nudge | `transcript` (labelled the workbench's, not Claude's) |
 | `Claude picked these skills`, `Claude handed you more skills`, `Claude took back:` | `skills_note` | `transcript.SKILLS_HEADS` (skips the note to label what follows) |
 | `CARRY_ON`, `RESUME` (first 60 characters) | `_full_round`, `wb resume` | `round_asks` skips them (but their `notes.md`), `lessons.feedback` (none of their copied feedback) |
-| `agent's summary:` | `summary_text` | `lessons` |
+| `agent's summary:` | `summary_text` | `lessons` (a round with no `final.md`, from before #1186) |
 | `--title "wb: <task>"` | `run_round` | `transcript.find_session` |
 | `Outline of <file> (from probe symbols):` (`context.OUTLINE_HEAD`), `… N more: `+"`probe symbols <file>`"+` (`OUTLINE_MORE`) | `runner.add_outline`, after round 1's protocol (probe on, *Experiments*) | nothing by prefix: being after the protocol, `transcript`'s fold and `bench._spec_of` leave it out of the spec (a replay makes its own) |
 
@@ -4398,7 +4402,8 @@ own, up to a folded `NOTE_HEAD` note, so wb feedback's text added to a round nev
 `runner.add_to_round`, is never joined to the round's own last item, #1180; a round whose prompt
 isn't a feedback is read only for that added text, from its `notes.md` (`lessons.round_feedback`),
 and a `CARRY_ON` or `RESUME` prompt, which copies the earlier feedback whole, for none of its own:
-read, each item was recorded again under the handover's or resume's round, #1180's review); `agent` (`Lesson: …` lines in `summary.md`, which PROTOCOL asks for;
+read, each item was recorded again under the handover's or resume's round, #1180's review); `agent` (`Lesson: …` lines in the round's `final.md`, the agent's whole last message, or a round from before it
+`summary.md`'s section (#1186), which PROTOCOL asks for;
 skipped for a discarded task, whose open ones close as dropped: dead ends, not a recipe); `stopped`
 ("the guard stopped the agent: …", not a stop with `by`); `question` (each answered ask, `wb allow`
 included); `spec` ("the spec missed: …", from `status.spec_gaps`, for Claude's spec checklist);
@@ -6094,6 +6099,7 @@ $WB_HOME (~/.local/state/workbench)
     <name> → ../<name>           a sibling's link beside the worktree (`--sibling`; not one of context.TASK_FILES)
     tree/<parents>/worktree/     the worktree instead, for a sibling more than one level up (task.json `worktree`)
     rounds/<n>/                  prompt.md instructions.md (before a handover rewrote it) summary.md tests.txt
+                                 final.md (the agent's last message whole, which summary.md may cut: runner.write_report, #1186)
                                  notes.md (Claude's notes folded into prompt.md: runner.folded_notes) nudged (prompt.md is the think nudge; round_asks skips it)
                                  resumed (a wb feedback after an infra stop: round_asks walks past it, #1169)
     ask/<id>.json  <id>.answer   questions and permission requests; answers
@@ -6571,7 +6577,7 @@ else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `text`, `step_finish` with tokens). Live tool names are 1.x-style (`bash`, `filePath`; 2.x `shell`,
 `path`: `events._brief` reads both). Records `FAKE_PROMPTS`, `FAKE_RUNS` (each run's `session`, `prompt`, `cwd`,
 `pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
-`FAKE_LESSON`, `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
+`FAKE_LESSON`, `FAKE_PAD` (that many characters before the Lesson line, #1186), `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
 `ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
 `read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087), `selfreads` (ok, then a self-review that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168), `floor` (`HANDOVER_ROOM`), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
 2.3's `{"type": "error", …, "error": {"type": "compaction.failed", "message": "Compaction produced no summary"}}`;
