@@ -1576,11 +1576,27 @@ async function gateConf($: any): Promise<Gate> {
   return { home, cwd, slug, dirs, plugins }
 }
 
+// The consent dialog's answer, '' when $.ui.ask rejected: dismissed, a `-p` run, or a surface that
+// couldn't draw it, each a no (the gates fail closed). Off the terminal the person may never have
+// seen it (#1200), so a toast says where it does show; on the terminal alone a rejection is the
+// person's own Esc, and nothing more is said. Not the web chat: away, the gates refuse without a
+// dialog, and the user approves once back at Claude Code.
+async function askOrNo($: any, question: string, options: string[], outcome: string): Promise<string> {
+  try {
+    return await $.ui.ask(question, options)
+  } catch {
+    if ([...mem.surfaces].some(s => s !== 'terminal'))
+      $.ui.toast(`workbench: the question went unanswered, so ${outcome}. If it didn't show here, ` +
+        'ask again from Claude Code in a terminal, where it does.')
+    return ''
+  }
+}
+
 // The dialog, or its refusal: '' lets the call through on exactly 'Send it'
 async function askToSend($: any, question: string): Promise<string> {
   // the dialog would wait at an empty terminal
   if (await away($, await read($, chat))) return NOT_SENT_AWAY
-  const said = await $.ui.ask(question, [SEND_ASK, "Don't send"]).catch(() => '')
+  const said = await askOrNo($, question, [SEND_ASK, "Don't send"], 'nothing was sent')
   return said === SEND_ASK ? '' : NOT_SENT
 }
 
@@ -1835,7 +1851,7 @@ async function routeRefusal($: any, e: Row): Promise<string> {
   }
   if (!q?.gate || typeof q.change !== 'string' || !q.change) return '' // a GPU model pin, or nothing
   if (await away($, await read($, chat))) return NOT_CHANGED_AWAY // the dialog would wait at an empty terminal
-  const said = await $.ui.ask(q.change, [ROUTE_ALLOW, "Don't"]).catch(() => '')
+  const said = await askOrNo($, q.change, [ROUTE_ALLOW, "Don't"], 'nothing changed')
   if (said !== ROUTE_ALLOW) return NOT_CHANGED
   await $.fs.write(`${mem.root}/${ROUTE_OK}`, JSON.stringify({ ...q.approval, at: (await $.clock.now()) / 1000 })).catch(() => {})
   return ''
@@ -2182,6 +2198,7 @@ const mem = {
   picked: '', // the task whose row the user pressed: followed while listed (#1048)
   rolesReading: false, // a rolesNow for the Tasks tab's day-cap line under way (capNow)
   wb: 'wb',
+  surfaces: new Set<string>(), // where this session is drawn: session.start's, then each attach's (#1200)
   liveKey: '', // the followed task and its updated_at when last read
   liveAt: 0, // when its transcript was last read
   statsReading: false, // a `wb stats --json` under way (refreshStats)
@@ -4311,6 +4328,19 @@ export function absolutePath(v: string, home: string, cwd: string): string {
   return `/${out.join('/')}`
 }
 
+// The wb the mod runs without WB_BIN: `wb` by name while a directory on PATH has one, else wb
+// setup's link, ~/.local/bin/wb. A desktop app or an IDE started from the GUI (macOS above all)
+// may not have ~/.local/bin on its PATH, and the mod only said "Put wb on Claude Code's PATH"
+// (#1200). PATH is read, not tried: no wb run at every session start. wb doctor says the same
+// (cli.mod_wb).
+async function findWb($: any, home: string): Promise<string> {
+  const path = String((await $.env.get('PATH').catch(() => '')) ?? '')
+  for (const dir of path.split(':'))
+    if (dir.startsWith('/') && (await $.fs.stat(`${dir.replace(/\/+$/, '')}/wb`).catch(() => undefined))?.kind === 'file') return 'wb'
+  const linked = `${home}/.local/bin/wb`
+  return home && (await $.fs.stat(linked).catch(() => undefined))?.kind === 'file' ? linked : 'wb'
+}
+
 // The task /workbench was given, as the skill's text has it after expansion ("**First task:**
 // `<arguments>`."): empty when the user typed /workbench alone.
 const firstTask = (text: string) => /\*\*First task:\*\* `([\s\S]*?)`\. Empty\?/.exec(text)?.[1].trim() ?? ''
@@ -4329,7 +4359,7 @@ export const register: Register = (on, options) => {
     // `~/repos/workbench/bin/wb` ran a literal `~`, and the mod couldn't run wb at all, #699); a
     // bare name still goes through PATH
     const bin = await $.env.get('WB_BIN')
-    mem.wb = bin ? (bin.includes('/') || bin.startsWith('~') ? abs(bin) : bin) : 'wb'
+    mem.wb = bin ? (bin.includes('/') || bin.startsWith('~') ? abs(bin) : bin) : await findWb($, home ?? '')
     const config = await $.env.get('CLAUDE_CONFIG_DIR')
     mem.skill = `${config ? abs(config) : `${home}/.claude`}/skills/workbench/SKILL.md`
     const priced = await $.env.get('WB_SAVINGS')
@@ -4384,6 +4414,7 @@ export const register: Register = (on, options) => {
     // other sessions' wakes, the weekly check and a `wb status` before every prompt (the
     // 2026-11-16 audit). It stays quiet until then.
     mem.person = e.isInteractive || e.surface != null
+    if (e.surface) mem.surfaces.add(e.surface)
     if (mem.person) {
       await checkVersion($)
       startEars($)
@@ -4392,6 +4423,7 @@ export const register: Register = (on, options) => {
   })
 
   on('session.attach', async ($, e, next) => {
+    if (e.surface) mem.surfaces.add(e.surface)
     if (!mem.person && mem.root) {
       mem.person = true
       startEars($)

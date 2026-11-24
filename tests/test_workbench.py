@@ -19263,7 +19263,7 @@ class Setup(Base):
         code, out = self.setup(cmd="doctor")
         self.assertEqual(code, 1)
         for want in ("BAD opencode opencode v1.9.0: workbench needs OpenCode 2.x",
-                     "BAD wb isn't on PATH: Claude runs it by name in Bash",
+                     "BAD wb isn't on PATH: Claude runs it by name in Bash; the mod runs WB_BIN=/x/wb;",
                      "WB_BIN=/x/wb covers only the mod's calls",
                      f"ok  state dir {home / '.local/state/workbench'}\n",
                      f"BAD /workbench isn't in {home / '.claude/skills'}: wb setup links it",
@@ -19279,7 +19279,8 @@ class Setup(Base):
         os.environ.update(FAKE_VERSION="opencode v2.3.0")
         os.environ.pop("WB_BIN")
         code, out = self.setup(cmd="doctor")
-        for want in ("ok  opencode opencode v2.3.0", f"ok  wb on PATH: {home / '.local/bin/wb'}",
+        for want in ("ok  opencode opencode v2.3.0",
+                     f"ok  wb on PATH: {home / '.local/bin/wb'}; the mod runs it by name, else ~/.local/bin/wb where its PATH has no wb\n",
                      f"ok  /workbench skill at {home / '.claude/skills/workbench'}",
                      "ok  the Claude Code mod is installed"):
             self.assertIn(want, out)
@@ -19292,6 +19293,23 @@ class Setup(Base):
         os.environ.update(FAKE_VERSION="opencode v3.1.0")  # finding 26: past the tested range
         self.assertIn("--  OpenCode 3.1 is outside what workbench is tested with", self.setup(cmd="doctor")[1])
         self.assertIn("--  wb comes from /usr, not this copy", out)
+
+    def test_doctor_names_the_wb_the_mod_runs_and_wb_setups_link_when_its_path_has_none(self):
+        # #1200: a desktop app or an IDE started from the GUI may lack ~/.local/bin on its PATH; the
+        # mod (findWb in register.tsx) then runs wb setup's link, and doctor says which wb it runs
+        self.assertEqual(cli.mod_wb("/x/wb", "/usr/bin/wb", True), "WB_BIN=/x/wb")
+        self.assertEqual(cli.mod_wb(None, "/usr/bin/wb", False), "it by name")
+        self.assertEqual(cli.mod_wb(None, "/usr/bin/wb", True), "it by name, else ~/.local/bin/wb where its PATH has no wb")
+        self.assertEqual(cli.mod_wb(None, None, True), "~/.local/bin/wb (wb setup's link)")
+        self.assertEqual(cli.mod_wb(None, None, False), "nothing: no wb on PATH or in ~/.local/bin")
+        home = Path(self.tmp.name) / "home"
+        (home / ".local/bin").mkdir(parents=True)
+        (home / ".local/bin/wb").write_text("#!/bin/sh\n")
+        os.environ.update(HOME=str(home), WB_HOME=str(home / ".local/state/workbench"), FAKE_VERSION="opencode v2.3.0",
+                          PATH=os.path.dirname(shutil.which("git")))
+        os.environ.pop("WB_BIN", None)
+        out = self.setup(cmd="doctor")[1]
+        self.assertIn("BAD wb isn't on PATH: Claude runs it by name in Bash; the mod runs ~/.local/bin/wb (wb setup's link);", out)
 
     def test_setup_and_doctor_say_where_the_rules_for_agents_go_until_the_user_has_moved_them(self):
         # #1061 (2026-11-23): agents no longer get ~/.claude/CLAUDE.md or ~/.claude/rules (the

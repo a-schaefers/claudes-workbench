@@ -56,7 +56,10 @@ agents typically costs Claude about half the tokens of writing the code itself.
   Claude proposes a model that fits your machine and your use's licence, and asks before
   downloading it. Small speech models run on the CPU; music wants a GPU.
 
-Tested in the Claude Code CLI only, not the Claude desktop app.
+The mod's hooks (the pane, wake-ups, dialogs) are tested on Claude Code's terminal, desktop,
+VS Code and mobile surfaces; the live CLI is checked by hand. In the desktop app, add the plugin
+with + by the prompt box, then Plugins, Add marketplace (`a-schaefers/claudes-workbench`), then
+Add plugin; `wb setup` below still runs once from a terminal.
 
 ### In your terminal
 
