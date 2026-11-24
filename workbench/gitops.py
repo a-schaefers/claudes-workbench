@@ -1114,7 +1114,8 @@ def snapshot(worktree: Path, landing: bool = False) -> str:
 
 def has_tree(cwd: Path, rev: str) -> bool:
     """Whether ``rev`` still names a tree here. A review snapshot (snapshot_left) is reachable from
-    nothing, so git gc prunes it once gc.pruneExpire passes (#795)."""
+    nothing but its REVIEW_REF (#1198), so without one, a review from before then or a ref deleted
+    by hand, git gc prunes it once gc.pruneExpire passes (#795)."""
     return not _run(cwd, ("cat-file", "-e", f"{rev}^{{tree}}"), check=False).returncode
 
 
@@ -1130,6 +1131,17 @@ def snapshot_left(worktree: Path, landing: bool = False) -> tuple[str, list[str]
     of BINARY_MAX or more and the directories past NEW_FILES_MAX, and a big text file, which
     accept commits, is kept: verify ran without a 1.1 MB text file its test read, said proven,
     and the test failed on main once accept had landed it (#642, Codex's audit of 1.90.6)."""
+    return review_snapshot(worktree, landing)[:2]
+
+
+KEEP_MAX = 100  # the paths a review tree records as left out (keep) before they go by directory
+
+
+def review_snapshot(worktree: Path, landing: bool = False) -> tuple[str, list[str], list[str]]:
+    """snapshot_left's tree and lines, and the paths it left out as wb rewind matches them
+    (``keep``: `dir/` for a directory, else a file, as `shown` writes it; past KEEP_MAX by
+    top-level directory): a rewind to the tree leaves them as they are, since the tree has no
+    copy of them to put back (#1198)."""
     files = _new_files(worktree)
     if landing:
         big = [(p, n) for p, n in files if n >= BINARY_MAX and _binary(worktree, p)]
@@ -1137,20 +1149,107 @@ def snapshot_left(worktree: Path, landing: bool = False) -> tuple[str, list[str]
         big = [(p, n) for p, n in files if n >= BINARY_MAX]
     skip = set(big)
     rest = [r for r in files if r not in skip]
-    dirs, count = [], Counter(_top(shown(p)) for p, _ in rest)
+    dirs, count, keep = [], Counter(_top(shown(p)) for p, _ in rest), []
     for d, n in count.most_common():
         if len(rest) <= NEW_FILES_MAX:
             break
         dirs.append(f"{d} ({n:,} new file{'s' if n != 1 else ''})")
+        # "(top level)" is no directory: its files go by name
+        keep += [d] if d.endswith("/") else [shown(p) for p, _ in rest if _top(shown(p)) == d]
         rest = [(p, m) for p, m in rest if _top(shown(p)) != d]
     rest.sort(key=lambda r: r[1])
     while not landing and rest and sum(n for _, n in rest) > SNAPSHOT_MAX:
         big.append(rest.pop())
     if len(rest) == len(files):
-        return with_new_files(worktree, "write-tree", whole=True).strip(), []
+        return with_new_files(worktree, "write-tree", whole=True).strip(), [], []
+    keep += [shown(p) for p, _ in big]
+    if len(keep) > KEEP_MAX:  # bounded in status.json; keeping more only deletes less
+        keep = sorted({_top(k) if "/" in k else k for k in keep})
     tree = with_new_files(worktree, "write-tree", whole=True, new=[p for p, _ in rest]).strip()
     return tree, dirs + brief([f"{shown(p)} ({n / (1 << 20):.0f} MB)" if n >= 1 << 20
-                               else f"{shown(p)} ({n >> 10:,} KB)" for p, n in sorted(big)])
+                               else f"{shown(p)} ({n >> 10:,} KB)" for p, n in sorted(big)]), sorted(keep)
+
+
+# Each review tree of a task's step, pinned (#1198): a review snapshot is reachable from nothing,
+# so git gc pruned it (#795), and wb rewind had no tree to go back to. One ref per review round,
+# in the user's repo as ACCEPTED_REF is, deleted at wb next, accept and discard (drop_reviews).
+REVIEW_REF = "refs/workbench/review/{}/{}"
+
+
+def keep_review(cwd: Path, task: str, rnd: int, tree: str) -> bool:
+    """Pin round ``rnd``'s review ``tree`` at REVIEW_REF; whether it took. Never fails a review."""
+    return not _run(cwd, ("update-ref", "-m", "workbench: review", REVIEW_REF.format(task, rnd),
+                          tree), check=False).returncode
+
+
+def drop_reviews(repo: Path, task: str) -> int:
+    """Delete every REVIEW_REF of ``task``, in one transaction; how many there were."""
+    refs = git(repo, "for-each-ref", "--format=%(refname)", REVIEW_REF.format(task, ""),
+               check=False).split()
+    if refs:
+        _run(repo, ("update-ref", "--stdin"), check=False,
+             input="".join(f"delete {r}\n" for r in refs).encode())
+    return len(refs)
+
+
+def _kept(path: bytes, keep) -> bool:
+    s = shown(path)
+    return any(s == k or (k.endswith("/") and s.startswith(k)) for k in keep)
+
+
+def restore_tree(worktree: Path, tree: str, keep=(), now: str | None = None) -> dict:
+    """Put the worktree's files back to ``tree``, a review snapshot (wb rewind, #1198). Only what
+    differs from the worktree now (its own snapshot) is touched: a file the tree has and the
+    worktree lacks or holds otherwise is written from a scratch index (`read-tree` and
+    `checkout-index -f`, as fill_submodules does), and one the worktree has and the tree lacks is
+    deleted, unless ``keep`` (review_snapshot's paths left out of the tree) names it, since the
+    tree holds no copy of it. Ignored files, nested repositories and submodules are in neither
+    tree, and stay. Nothing is committed and the worktree's own index is left alone: a
+    `read-tree HEAD` there would drop a sparse checkout's skip-worktree bits, and every file
+    outside the cone would read as deleted. ``now``: the worktree's snapshot, when the caller
+    has just taken it. {"written", "deleted", "kept"}: the paths, as `shown` writes them."""
+    wt = Path(worktree)
+    now = now or snapshot(wt)
+    out = {"written": [], "deleted": [], "kept": []}
+    if now == tree:
+        return out
+    raw = git_bytes(wt, "diff-tree", "-r", "-z", "--raw", "--no-renames", tree, now).split(b"\0")
+    write, gone = [], []
+    for meta, path in zip(raw[0::2], raw[1::2]):
+        fields = meta.split()
+        if len(fields) < 5 or b"160000" in (fields[0].lstrip(b":"), fields[1]):
+            continue  # a submodule's commit: its files are in neither tree
+        if fields[4] == b"A":
+            (out["kept"] if _kept(path, keep) else gone).append(path)
+        else:
+            write.append(path)
+    top, done = os.fsencode(os.path.realpath(wt)), []
+    for path in gone:
+        f = os.path.join(top, path)
+        parent = os.path.realpath(os.path.dirname(f))
+        # never through a link out of the worktree: a parent swapped for one since the snapshot
+        if parent != top and not parent.startswith(top + b"/") or not os.path.lexists(f) \
+                or os.path.isdir(f) and not os.path.islink(f):
+            continue
+        os.unlink(f)
+        done.append(path)
+        d = os.path.dirname(f)
+        while d != top:
+            try:
+                os.rmdir(d)  # only an empty one: git tracks no directory of its own
+            except OSError:
+                break
+            d = os.path.dirname(d)
+    if write:
+        store.home().mkdir(parents=True, exist_ok=True)  # the scratch index: never in the lane
+        with tempfile.TemporaryDirectory(prefix=store.scratch("wb-index-"), dir=store.home()) as scratch:
+            env = {"GIT_INDEX_FILE": os.path.join(scratch, "index")}
+            _run(wt, ("read-tree", tree), env=env)
+            _run(wt, ("checkout-index", "-f", "-z", "--stdin"), env=env,
+                 input=b"".join(p + b"\0" for p in write))
+    out.update(written=[shown(p) for p in write], deleted=[shown(p) for p in done],
+               kept=[shown(p) for p in out["kept"]])
+    return out
 
 
 def left_line(left: list[str]) -> str:

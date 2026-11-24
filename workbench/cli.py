@@ -243,7 +243,7 @@ def spawn_runner(task: store.Task) -> int:
     env = context.detached_env()  # the user's PYTHONPATH kept for the agent (#512)
     env.pop("WB_TASK", None)  # the agent's mark (runner.sweep kills what carries it), not the runner's
     # a stop wb made earlier says nothing about this runner, nor an earlier runner's beat (#872)
-    task.set_status(stopping=None, parked=None, beat=None)
+    task.set_status(stopping=None, parked=None, beat=None, rewound_to=None)  # said once (#1198)
     # handed back to the agent: no longer Claude's, so a later session adopting its review turns
     # workbench mode back on (#926: the mod's delegatedWork read the old takeover). Kept for a
     # task not checked out, whose runner's #655 guard reads it
@@ -1717,8 +1717,13 @@ def cmd_feedback(a):
     if not text.strip():  # before anything is written: an empty one cost a round (the audit)
         die("the feedback is empty")
     rerun = " re-run the acceptance command and" if task.spec.get("test_cmd") else ""
-    said = (f"{lessons.FEEDBACK_HEAD} Make exactly these changes, then{rerun} finish with a short "
-            "summary:\n\n" + text.strip())
+    # after wb rewind (#1198): in the head paragraph, which lessons never read as an item
+    back = st.get("rewound_to")
+    reset = f" {REWOUND_LINE.format(back)}" if back else ""
+    said = (f"{lessons.FEEDBACK_HEAD}{reset} Make exactly these changes, then{rerun} finish with a "
+            "short summary:\n\n" + text.strip())
+    # the old session remembers edits that are gone: a fresh one, handed the work as it is now
+    fresh = a.fresh or bool(back and not a.keep_context)
     # Round n stopped before it reached the agent (its model couldn't load, the GPU server was
     # down, the API key gone): its prompt, wb next's step or the last review's feedback, was
     # never sent. Written as round n + 1 from the new text alone, the agent got "carry on" and
@@ -1733,7 +1738,7 @@ def cmd_feedback(a):
     # when that runs again: the text alone passed, and the room refused the rerun's first
     # request at once, a spend wake for nothing (the merge of #1173 and #1180, 2026-11-24)
     own = store.round_prompt(task, n).read_text() + "\n\n" if unsent else ""
-    _model_still_listed(task, own + said, True if a.fresh else False if a.keep_context else None)
+    _model_still_listed(task, own + said, True if fresh else False if a.keep_context else None)
     _spec_gaps(task, a.spec_gap)
     dropped = _stale_notes(task)
     if unsent:
@@ -1761,7 +1766,7 @@ def cmd_feedback(a):
         mark.unlink(missing_ok=True)
     reviews = st.get("reviews", 0) + (0 if resumed or unsent else 1)
     handled = store.now()  # everything before the new round; what its runner raises stays news
-    task.set_status(context="fresh" if a.fresh else "keep" if a.keep_context else None)
+    task.set_status(context="fresh" if fresh else "keep" if a.keep_context else None)
     gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
     task.set_status(round=n, reviews=reviews, phase="queued",  # the pane: "resumed", not "feedback 0"
                     # an unsent round keeps its own (`next`: the pane's `step 2`)
@@ -1780,10 +1785,104 @@ def cmd_feedback(a):
               f"agent's ({st['infra']}), so no review round is counted")
     else:
         print(f"feedback round {reviews} sent to {a.name} (round {n})"
+              + (f", from round {back}'s files" if back else "")
               + ("  — that is past the usual 3 review rounds" if reviews > 3 else ""))
     _say(gpu)
     _say_dropped(dropped)
     _say(lessons.nudge(task))
+
+
+# The next feedback's word on a rewind, in its head paragraph (#1198)
+REWOUND_LINE = "Your files were reset to round {}'s state; the edits after it are gone."
+
+
+def _tests_on(task: store.Task, rnd: int) -> str | None:
+    """Round ``rnd``'s tests, from its tests.txt: they ran on the tree its review notice showed."""
+    try:
+        text = task.round_dir(rnd).joinpath("tests.txt").read_text(errors="replace")
+    except OSError:
+        return None
+    code = next((line[len("exit: "):].strip() for line in text.splitlines()[:3]
+                 if line.startswith("exit: ")), None)
+    return None if code is None else "passed" if code == "0" else \
+        "timed out" if code == "timeout" else f"failed (exit {code})"
+
+
+def _drop_reviews(task: store.Task) -> None:
+    """The step's review trees go (gitops.drop_reviews): at wb next, accept and discard (#1198)."""
+    if (repo := gitops.repo_of(task.spec)).is_dir():
+        gitops.drop_reviews(repo, task.name)
+    if task.status.get("review_trees") is not None or task.status.get("rewound_to") is not None:
+        task.set_status(review_trees=None, rewound_to=None)
+
+
+@one_at_a_time
+def cmd_rewind(a):
+    """Put the worktree back to the tree an earlier review notice of this step showed (#1198)."""
+    task = need(a.name)
+    reap(task)
+    st = task.status
+    if st.get("phase") not in ("review", "stuck", "failed"):
+        die(f"{a.name} is {st.get('phase')}; a rewind goes to a task waiting for review")
+    if why := _accepting(task):  # (#878)
+        die(why)
+    if runner_alive(task):
+        die(f"{a.name}'s runner is still running")
+    _need_worktree(task)
+    steps, wt, now_round = st.get("steps", 1), task.worktree, st.get("round", 1)
+    trees = {k: v for k, v in (st.get("review_trees") or {}).items() if v.get("step") == steps}
+    want = trees.get(str(a.round))
+    if not want:
+        have = ", ".join(sorted(trees, key=int)) or "none yet"
+        die(f"{a.name} has no review of round {a.round} in step {steps} (its reviewed rounds: "
+            f"{have}; a rewind never goes back past wb next's commit)")
+    if not gitops.has_tree(wt, want["tree"]):  # its ref deleted by hand, and gc pruned it
+        die(f"round {a.round}'s tree is gone from the repo (its ref "
+            f"{gitops.REVIEW_REF.format(a.name, a.round)} was deleted)")
+    try:
+        now, now_left, now_keep = gitops.review_snapshot(wt)
+    except (gitops.GitError, OSError) as e:
+        die(f"can't read the worktree: {e}")
+    saved = ""
+    if now not in {v["tree"] for v in trees.values()} and str(now_round) not in trees:
+        # a stuck or failed round's files, which no review showed: kept, so a rewind comes back
+        trees[str(now_round)] = {"step": steps, "tree": now, "left": now_left, "keep": now_keep,
+                                 "reviewed": False}
+        gitops.keep_review(wt, a.name, now_round, now)
+        saved = (f"\nround {now_round}'s files (not reviewed) are kept: wb rewind {a.name} "
+                 f"{now_round} brings them back")
+    elif now not in {v["tree"] for v in trees.values()}:
+        # no round ran since (it would be a new round): edits by hand, in the stat above
+        saved = "\nyour edits since the last review or rewind are undone too, and kept nowhere"
+    task.set_status(review_trees=trees)
+    if now == want["tree"]:
+        print(f"{a.name}'s files are round {a.round}'s already")
+        return
+    undone = gitops.git(wt, "diff", "--no-ext-diff", "--no-color", "--stat",
+                        f"--stat-count={gitops.CHANGED_SHOWN}", want["tree"], now, check=False).rstrip()
+    try:
+        done = gitops.restore_tree(wt, want["tree"], want.get("keep") or [], now=now)
+    except (gitops.GitError, OSError) as e:
+        die(f"the rewind stopped partway ({e}): wb rewind {a.name} {a.round} again")
+    # the next review's diff counts from here; the next round starts a fresh session (feedback)
+    task.set_status(reviewed={"step": steps, "tree": want["tree"]}, rewound_to=a.round,
+                    context="fresh")
+    task.event({"ts": store.now(), "round": now_round, "kind": "rewound",
+                "text": f"Claude rewound the files to round {a.round}'s"})
+    _ack_all(task)
+    print(f"rewound {a.name} to round {a.round}'s files (step {steps}); undone:\n{undone}")
+    tests = _tests_on(task, a.round) if task.spec.get("test_cmd") else None
+    if tests:
+        print(f"round {a.round}'s tests on these files: {tests}")
+    left = list(dict.fromkeys((want.get("left") or []) + now_left))
+    left += gitops.brief([k for k in done["kept"] if not any(x.startswith(k) for x in left)])
+    if left:
+        print(f"left as they are, in no review snapshot: {', '.join(left)}")
+    if saved:
+        print(saved.lstrip("\n"))
+    force = "" if st.get("phase") == "review" else " --force"
+    print(f"next: wb accept {a.name}{force} -m \"…\", or wb feedback {a.name} --text \"…\" (a fresh "
+          "session unless --keep-context)")
 
 
 @contextmanager
@@ -1869,7 +1968,8 @@ def cmd_next(a):
         die("the next step's spec is empty")
     # after the spec, before the commit: the step's first request carries the session's context
     # and the spec with the protocol (#1173)
-    _model_still_listed(task, nxt + protocol_for(spec), True if a.fresh else None)
+    fresh = a.fresh or bool(st.get("rewound_to"))  # the session remembers edits rewound away
+    _model_still_listed(task, nxt + protocol_for(spec), True if fresh else None)
     commit = _step_landed(task, step)
     measured = results.step(task, landed=True, since="HEAD~1" if commit else "HEAD", gaps=a.spec_gap)
     if not commit:
@@ -1920,7 +2020,7 @@ def cmd_next(a):
                    step_active_s=st.get("active_s") or 0, progress_checks=0,
                    step_sizes=(st.get("step_sizes") or []) + [measured],
                    step_tests={**(st.get("step_tests") or {}), str(step + 1): test},  # #941
-                   context="fresh" if a.fresh else None,
+                   context="fresh" if fresh else None, review_trees=None, rewound_to=None,
                    auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                    auto_fixes=0, phase="queued", last=f"step {step} " + (
                        "committed" if commit else "had no changes") + "; next step queued",
@@ -1936,6 +2036,7 @@ def cmd_next(a):
     why = runner.fresh_reason(task, {**task.status, **advance})
     gpu = _gpu_note(task)
     task.set_status(**advance)
+    gitops.drop_reviews(task.worktree, a.name)  # a rewind never crosses the step's commit (#1198)
     task.event({"ts": store.now(), "round": n, "kind": "next_step",
                 "text": f"step {step} " + (f"committed as {commit}" if commit else
                                            "had no changes") + "; next step sent"})
@@ -3967,6 +4068,8 @@ def _finish_record(task: store.Task) -> bool:
         results.record(task, todo["outcome"], todo.get("step"), **(todo.get("extra") or {}))
     task.set_status(unrecorded=None)
     _ack_all(task)
+    with contextlib.suppress(OSError, gitops.GitError):
+        _drop_reviews(task)  # the interrupted close never reached _closed (#1198)
     commit = (todo.get("extra") or {}).get("commit")
     print(f"{task.name} was {todo['outcome']}" + (f" as {commit}" if commit else "")
           + "; its result is recorded now")
@@ -4086,6 +4189,10 @@ def _closed(task: store.Task) -> None:
     a day the rest of gc. Never an accept's or discard's failure."""
     _keep_grants(task)
     shutil.rmtree(store.home() / "rules" / task.name, ignore_errors=True)
+    try:
+        _drop_reviews(task)  # its review trees' refs (#1198)
+    except (OSError, gitops.GitError) as e:
+        print(f"wb: {e}", file=sys.stderr)
     if time.time() - ((store.read_json(store.home() / "gc.json", {}) or {}).get("at") or 0) > GC_EVERY:
         try:
             gc()
@@ -7490,6 +7597,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--spec-gap", action="append", metavar="WHAT",
                    help="this round is the spec's fault: what it missed (repeatable)")
     s.set_defaults(f=cmd_feedback)
+    s = sub.add_parser("rewind", help="put the worktree back to an earlier review round's files")
+    s.add_argument("name"); s.add_argument("round", type=int, help="the review round, as its notice says")
+    s.set_defaults(f=cmd_rewind)
     s = sub.add_parser("next", help="commit the approved step and send the same agent the next one")
     s.add_argument("name"); s.add_argument("--spec", required=True, help="the next step's spec file, or - for stdin")
     s.add_argument("--message", "-m", required=True, help="commit subject for the approved step")
