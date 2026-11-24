@@ -1594,6 +1594,74 @@ def no_edit_limit(window, *, api: bool) -> int:
     return min(NO_EDIT_MAX, NO_EDIT_PER_32K * max(1, w // 32768))
 
 
+# OpenCode's own log, in the task's home: OpenCode 2.3.2 writes a line for each MCP server it
+# connects, `message="mcp connected" server=<name> tools=<n>`, or fails to, `message="mcp connect
+# failed" server=<name> status.error="<why>"` (read 2026-11-24). A server the user named that died
+# at its start in the lane (its venv or node_modules unread) left the agent without its tools,
+# while wb start had said `MCP: docs` and the report said nothing (#1202's review)
+MCP_LOG_LINE = re.compile(r'message="mcp (connected|connect failed)" server=([A-Za-z0-9-]+)')
+MCP_LOG_ERROR = re.compile(r'status\.error="((?:[^"\\]|\\.)*)"')
+MCP_LOG_READ = 4 << 20  # of the round's part, from its start: the servers connect first
+MCP_WHY_MAX = 200
+
+
+def opencode_log(task: store.Task) -> Path:
+    """OpenCode's own log in the task's home (XDG_DATA_HOME/opencode/log)."""
+    return Path(context.opencode_home_env(task)["XDG_DATA_HOME"]) / "opencode" / "log" / "opencode.log"
+
+
+def opencode_log_size(task: store.Task) -> int:
+    try:
+        return opencode_log(task).stat().st_size
+    except OSError:
+        return 0
+
+
+def mcp_unreached(task: store.Task, since: int) -> dict[str, str]:
+    """The user's servers this round's layer ran (task.json `mcp`, less one left out) that its
+    OpenCode never connected, each with the last line of why when its log says: {name: why}.
+    None when the round's log has no line for workbench's own server, which every round
+    connects: a log this code can't read says nothing. The log is in the agent's lane, so this
+    is a note for the report alone, read from a plain file only (never a link, nor a FIFO left to
+    hang the runner)."""
+    names = task.spec.get("mcp") or []
+    if not names:
+        return {}
+    try:
+        servers = json.loads((context.rules_dir(task) / "opencode.json").read_text())["mcp"]["servers"]
+        ran = [n for n in names if (servers.get(n) or {}).get("command") != ["false"]]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
+    path = opencode_log(task)
+    home = os.path.realpath(context.opencode_home(task))
+    if os.path.realpath(path) != os.path.join(home, os.path.relpath(path, context.opencode_home(task))):
+        return {}  # a link on the way, the agent's: not followed out of its home
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return {}
+    with os.fdopen(fd, "rb") as fh:
+        info = os.fstat(fh.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            return {}
+        size = info.st_size
+        fh.seek(since if since <= size else 0)  # one cut short since: read it whole
+        text = fh.read(MCP_LOG_READ).decode("utf-8", "replace")
+    connected, why = set(), {}
+    for line in text.splitlines():
+        if not (m := MCP_LOG_LINE.search(line)):
+            continue
+        if m.group(1) == "connected":
+            connected.add(m.group(2))
+        elif e := MCP_LOG_ERROR.search(line):
+            err = e.group(1).replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
+            last = [x.strip() for x in err.splitlines() if x.strip()]
+            why[m.group(2)] = last[-1][:MCP_WHY_MAX] if last else ""
+    if "workbench" not in connected:
+        return {}
+    return {n: why.get(n, "") for n in ran if n not in connected}
+
+
 def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     """One `opencode run`. keep: Claude asked for this session to carry on (wb feedback
     --keep-context), so the round never hands over mid-way."""
@@ -1629,6 +1697,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     except OSError:
         pass
     log = open(task.dir / "runner.log", "a")
+    log_from = opencode_log_size(task)  # where this round's lines in OpenCode's own log begin
     proc = subprocess.Popen(cmd, cwd=task.workdir, env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=log, encoding="utf-8",
                             # a byte that isn't UTF-8 (a plugin's Latin-1 print) is U+FFFD, not
@@ -1983,6 +2052,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         out["lingered"] = True  # our stop's exit, not a crash: the round is what its events say
     log.close()
     provider.end(out, time.time())
+    if unreached := mcp_unreached(task, log_from):  # #1202's review
+        out["mcp_unreached"] = unreached
     ask_mcp.close(task, opened)  # its server is gone: closed, so nothing takes them for open
     if task.status.get("asking") or task.status.get("phase") == "asking":  # it ended
         task.set_status(asking=None, phase="running")  # mid-question: nothing reads that answer now
@@ -3404,6 +3475,10 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
         lines.append("NOTE: the agent's OpenCode never listed workbench_ask_reviewer, so it can't "
                      f"ask you anything; PWD={task.workdir} OPENCODE_CONFIG="
                      f"{context.rules_dir(task) / 'opencode.json'} opencode mcp list --print-logs says why")
+    if rnd["exit"] == 0 and (unreached := rnd.get("mcp_unreached")):  # #1202's review
+        lines += [f"NOTE: the agent's OpenCode never connected to MCP server '{name}', so the agent "
+                  "had none of its tools" + (f": {why}" if why else "") for name, why in unreached.items()]
+        lines.append(f"(OpenCode's log: {opencode_log(task)}, \"mcp connect failed\")")
     if tests is not None:
         lines.append(f"tests: {'PASS' if tests['ok'] else 'FAIL'} (`{spec['test_cmd']}`, "
                      f"exit {tests['exit']})")

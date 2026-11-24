@@ -307,7 +307,8 @@ browsing tools; a 403, a CAPTCHA or an empty page is not checked: say so, never 
 memory. Put what the agent needs in the spec, not a URL (its web tools are denied). How, and a
 browser check of the agent's work as a test: `reference/driving.md`. An MCP server the agent has
 (`MCP: <names>` at `wb start`) is the user's own choice in commands.json `mcp`: never suggest or
-add one; a start it refuses (a server holding a credential) names what the user must change.
+add one; a start it refuses (a server holding a credential) names what the user must change, and
+a report's `never connected to MCP server` note (it died at its start: the error) is the user's to fix.
 
 **Your skills reach the agent as decisions.** Before writing a spec, check which skills and tools
 in your own session fit the task, whatever the field: a design plugin for a UI, a writing guide

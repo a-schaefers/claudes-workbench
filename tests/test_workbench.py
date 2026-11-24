@@ -8087,6 +8087,78 @@ class UsersMcpServers(Base):
         ran = [json.loads(line) for line in self.mcp_log.read_text().splitlines()]
         self.assertEqual(ran[0]["docs"], ["lookup", "schema"])
         self.assertNotIn("other", ran[0])
+        self.assertNotIn("never connected", (task.round_dir(1) / "summary.md").read_text())
+
+    def test_a_named_server_that_dies_at_its_start_is_noted_in_the_round_report(self):
+        # #1202's review (2026-11-24): a server whose venv the lane didn't read died at its start,
+        # wb start had said `MCP: docs`, and the report said nothing of the tools the agent lacked
+        self.servers({"docs": {"type": "local", "command": [
+            sys.executable, "-c", "import sys; sys.exit(\"ModuleNotFoundError: No module named 'schema_mcp'\")"]}})
+        self.commands({"mcp": ["docs"]})
+        self.start("t-dead", "ok")
+        wait_phase("t-dead", {"review"})
+        summary = (store.Task("t-dead").round_dir(1) / "summary.md").read_text()
+        self.assertIn("NOTE: the agent's OpenCode never connected to MCP server 'docs', so the agent "
+                      "had none of its tools: ModuleNotFoundError: No module named 'schema_mcp'", summary)
+        self.assertIn("opencode.log", summary)
+        from workbench import runner
+        task = store.Task("t-dead")
+        self.assertEqual(set(runner.mcp_unreached(task, 0)), {"docs"})
+        # the log is in the agent's lane: a link it leaves on the way is never followed
+        log_dir = runner.opencode_log(task).parent
+        elsewhere = Path(self.tmp.name) / "elsewhere"
+        shutil.copytree(log_dir, elsewhere)
+        shutil.rmtree(log_dir)
+        log_dir.symlink_to(elsewhere)
+        self.assertEqual(runner.mcp_unreached(task, 0), {})
+        log_dir.unlink()
+        # a log it can't read (no line for workbench's own server) says nothing
+        os.environ["FAKE_NO_MCP"] = "1"
+        run_wb("feedback", "t-dead", "--text", "Again.")
+        wait_phase("t-dead", {"review"})
+        self.assertNotIn("never connected", (store.Task("t-dead").round_dir(2) / "summary.md").read_text())
+
+    def test_a_servers_venv_and_its_projects_node_modules_are_read_not_only_the_resolved_program(self):
+        # #1202's review (2026-11-24): the realpath'd program alone left out the venv
+        # (`srv/.venv/bin/python` resolves to the base interpreter) and srv/node_modules (`node
+        # srv/dist/index.js` read dist/), so either server died at its start in the lane
+        root = Path(os.path.realpath(self.tmp.name))
+        home = root / "home"
+        py = home / "src" / "py-srv"
+        (py / ".venv" / "bin").mkdir(parents=True)
+        (py / "pyproject.toml").write_text("[project]\nname = 'schema-mcp'\n")
+        (py / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        (py / ".venv" / "bin" / "python").symlink_to(os.path.realpath(sys.executable))
+        js = home / "src" / "js-srv"
+        (js / "dist").mkdir(parents=True)
+        (js / "node_modules").mkdir()
+        (js / "package.json").write_text("{}")
+        (js / "dist" / "index.js").write_text("")
+        bare = home / "tools"           # no project of its own: its directory, never the home
+        bare.mkdir()
+        (bare / "mcp.js").write_text("")
+        (home / ".git").mkdir()         # the home a dotfiles repo
+        base = os.path.realpath(sys.executable)
+        base_dir = os.path.dirname(os.path.dirname(base)) if \
+            os.path.basename(os.path.dirname(base)) == "bin" else os.path.dirname(base)
+        task = types.SimpleNamespace(spec={"mcp": ["docs"]})
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for command, want in (([str(py / ".venv" / "bin" / "python"), "-m", "schema_mcp"], str(py)),
+                                  (["node", str(js / "dist" / "index.js")], str(js)),
+                                  (["node", str(bare / "mcp.js")], str(bare))):
+                self.servers({"docs": {"type": "local", "command": command}})
+                roots = context.mcp_roots(task)
+                self.assertIn(want, roots, command)
+                self.assertNotIn(str(home), roots)
+                self.assertFalse([r for r in roots if r != want and context._under(r, want)], roots)
+            self.servers({"docs": {"type": "local", "command": [
+                str(py / ".venv" / "bin" / "python"), "-m", "schema_mcp"]}})
+            self.assertIn(base_dir, context.mcp_roots(task))   # the base interpreter's install too
+            # on an API task never the checkout, which its lane hides (#1091): the bare directory
+            (py / ".venv" / "bin" / "mcp").write_text("")
+            api = types.SimpleNamespace(spec={"mcp": ["docs"], "via": "api", "repo": str(py)})
+            self.servers({"docs": {"type": "local", "command": [str(py / ".venv" / "bin" / "mcp")]}})
+            self.assertEqual(context.mcp_roots(api), {str(py / ".venv")})
 
     def test_a_server_in_opencodes_1x_shape_is_stubbed_and_can_be_named_too(self):
         from workbench import runner
@@ -9297,6 +9369,16 @@ class RealOpenCode(Base):
         shutil.copy(ROOT / "tests" / "fake_mcp.py", home / "fake_mcp.py")
         planted = home / "planted"
         command = [sys.executable, str(home / "fake_mcp.py"), "lookup"]
+        # and in a project's own venv, run as a module (#1202's review): the venv's python
+        # resolves to the base interpreter, so the lane read neither the venv nor the module,
+        # the server died at its start, and nothing said so; `broken` dies at its start anyway
+        srv = Path(tempfile.mkdtemp(dir=Path.home(), prefix="wb-mcp-venv-"))  # beside, not in, home
+        self.addCleanup(shutil.rmtree, srv, True)
+        (srv / "pyproject.toml").write_text("[project]\nname = 'fake-mcp-srv'\n")
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(srv / ".venv")], check=True)
+        site = srv / ".venv" / "lib" / f"python{sys.version_info[0]}.{sys.version_info[1]}" / "site-packages"
+        shutil.copy(ROOT / "tests" / "fake_mcp.py", site / "fake_mcp_srv.py")
+        in_venv = [str(srv / ".venv" / "bin" / "python"), "-m", "fake_mcp_srv", "schema"]
         # `other` in OpenCode's 1.x shape, mcp.<name>, which 2.3.2 still starts: read in the 2.x
         # shape alone, it was never stubbed and ran in every agent's OpenCode (found here)
         # where the agent's OpenCode reads it too, as the user's global config
@@ -9306,9 +9388,12 @@ class RealOpenCode(Base):
         os.environ.update(WB_OPENCODE_CONFIG=str(xdg / "opencode" / "opencode.json"),
                           XDG_CONFIG_HOME=str(xdg))
         Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({**OPENCODE_CONFIG, "mcp": {
-            "servers": {"docs": {"type": "local", "command": command, "codemode": True}},
+            "servers": {"docs": {"type": "local", "command": command, "codemode": True},
+                        "venv-docs": {"type": "local", "command": in_venv},
+                        "broken": {"type": "local", "command": [
+                            sys.executable, "-c", "import wb_no_such_module"]}},
             "other": {"type": "local", "command": [*command[:2], "leak"]}}}))
-        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"mcp": ["docs"]}))
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"mcp": ["docs", "venv-docs", "broken"]}))
         started = Path(self.tmp.name) / "mcp-started"
         os.environ.update(WB_TEST_SECRET_TOKEN="CANARY-SECRET", FAKE_MCP_OUTSIDE=str(planted),
                           FAKE_MCP_STARTED=str(started))
@@ -9321,8 +9406,13 @@ class RealOpenCode(Base):
                 (Path(self.tmp.name) / "t-mcp-real-requests.jsonl").read_text().splitlines()]
         tools = {t["function"]["name"] for r in reqs for t in r.get("tools", [])}
         self.assertIn("docs_lookup", tools)
+        self.assertIn("venv-docs_schema", tools)
+        self.assertIn(str(srv), context.mcp_roots(task))
         self.assertIn("workbench_ask_reviewer", tools)
         self.assertFalse([t for t in tools if t.startswith("other_")], tools)
+        # OpenCode's own log names the one that never connected, and why (the round's note)
+        self.assertEqual(runner.mcp_unreached(task, 0),
+                         {"broken": "ModuleNotFoundError: No module named 'wb_no_such_module'"})
         self.assertFalse({"execute", "question", "subagent"} & tools)
         self.assertNotIn("leak", started.read_text().split())   # never started either
         self.assertIn("lookup", started.read_text().split())

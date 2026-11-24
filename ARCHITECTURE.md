@@ -2287,9 +2287,20 @@ is denied, whatever its `codemode`, and `DENIED_TOOLS` always denies it: its too
 "<name>_*", "effect": "allow"}` right after `MCP_RULES`, before `DENIED_TOOLS`, so `opencode_*`
 and `execute` stay denied (the last match wins). A local one is the agent's OpenCode's child: in
 the lane, its environment (`SECRET_ENV` stripped) and its home, ended with the round (`sweep`); the
-lane reads the files its command names (`context.mcp_roots`: a program's install, a script's
-directory, never `/` or the home itself). One the user gave a credential after `wb start` is left
-out of that round (status `mcp_left_out`; the report's `note: MCP server '<name>' … this round's
+lane reads the files its command names (`context.mcp_roots`: each absolute path's directory, a
+`bin`'s parent, both as written and resolved, so a venv's `.venv/bin/python` keeps the venv beside
+the base interpreter's install; a file's widened to its project, `mcp_project`, the nearest
+directory up holding one of `MCP_PROJECT_MARKS`, package.json, pyproject.toml or .git, so `node
+srv/dist/index.js` reads `srv/node_modules`; on an API task never one that is or holds the checkout;
+never `/`, the home itself or one holding it: #1202's review). A named server the round's OpenCode
+never connected (`runner.mcp_unreached`: OpenCode 2.3.2's own log in the task's home,
+`runner.opencode_log`, `share/opencode/log/opencode.log`, a plain file never read through a link,
+read from the size it had when the round's OpenCode started (`opencode_log_size`; `MCP_LOG_READ`, 4 MB, of it),
+`message="mcp connected" server=<name>` or `"mcp connect failed" … status.error`; nothing said when
+no line names workbench's own server) gets a clean round's report `NOTE: the agent's OpenCode never
+connected to MCP server '<name>', so the agent had none of its tools: <the error's last line>`
+(`MCP_WHY_MAX`, 200 characters) and the log's path. One the user gave a credential after `wb start`
+is left out of that round (status `mcp_left_out`; the report's `note: MCP server '<name>' … this round's
 agent ran without it`). `wb allow --always` never writes `mcp`, and `wb doctor` lists each named
 server, `BAD` for one it would refuse. A remote server runs in OpenCode's own process, beyond the
 lane, as a remote provider does: with no credential it reaches only what the open network does.
@@ -6596,7 +6607,7 @@ production cap a test isn't about (`STOP_SETTLE`, `SIGN_SECS`, `OPTIMIZE_EXIT`) 
 sizes the fake GPU (unset: no sharing). A runner keeps its spawn env: a `FAKE_*` change reaches only later runners.
 
 **The fake OpenCode** handles `--version` (`FAKE_VERSION`, else `opencode v2.3.0`), `run …` (prompt last, `--session`
-continues; starts the config's local MCP servers (workbench's, and a user's the layer passes through: `tests/fake_mcp.py <tool>…`, whose call answers what it sees, `FAKE_MCP_OUTSIDE` written or refused, and `FAKE_MCP_STARTED` logs each start, #1202) and lists their tools unless `FAKE_NO_MCP`, one line a run in `FAKE_MCP_LOG`; a `-` prompt without `--` prints
+continues; starts the config's local MCP servers (workbench's, and a user's the layer passes through: `tests/fake_mcp.py <tool>…`, whose call answers what it sees, `FAKE_MCP_OUTSIDE` written or refused, and `FAKE_MCP_STARTED` logs each start, #1202) and lists their tools unless `FAKE_NO_MCP`, writing each one's connection to OpenCode's log in `$XDG_DATA_HOME/opencode/log/opencode.log` as 2.3.2 does (`mcp connected` with its tool count, else `mcp connect failed` with its stderr), one line a run in `FAKE_MCP_LOG`; a `-` prompt without `--` prints
 usage, exit 1; with `OPENCODE_DB` set a new session is recorded in that home, `<db>.sessions`), `session export`
 (tokens `FAKE_FILL` or 1200, answer.txt 41 → 42; `FAKE_COMPACTED`; `info.home` the database read; in a home that
 records sessions one it doesn't hold is "Session not found", exit 1), `session list` (the home's recorded ones); session
@@ -6972,7 +6983,8 @@ doc needs its own `!/` line).
 - **Permissions or the config layer** (`context.py`, `write_config_layer`) → the real-OpenCode tests, unskipped.
 - **The user's MCP servers** (commands.json `mcp`, `context.mcp_refusal`, `mcp_servers`, `mcp_roots`, the `<name>_*`
   allow between `MCP_RULES` and `DENIED_TOOLS`) → `UsersMcpServers`, RealOpenCode's #1202 test (its `run_calls(…,
-  reads=True)` keeps the lane's reads, as the runner's lane does), the fake's MCP start (`FAKE_MCP_LOG`), `wb doctor`.
+  reads=True)` keeps the lane's reads, as the runner's lane does; a server in its own venv, one that dies at its start), the fake's MCP start (`FAKE_MCP_LOG`, its OpenCode log lines), `wb doctor`.
+  OpenCode's log line for an MCP connection (`runner.MCP_LOG_LINE`, `MCP_LOG_ERROR`) → the fake's lines and that real test.
   `execute` taken out of `DENIED_TOOLS` → `mcp_servers` (a server without `codemode: false` would then go behind it).
 - **The lane** (`context.writable`, `readable`, `SECRETS`, `lane.py`) → the Lane and RealOpenCode tests on Landlock, the
   protocol's lane line, the handbook. What it leaves writable that runs later outside it (`TOOL_HOMES`, `NOT_WRITABLE`), what WSL's interop

@@ -3055,24 +3055,56 @@ def task_mcp(task: store.Task) -> dict:
     return mcp_servers(task.spec.get("mcp") or [])[0]
 
 
+# What marks a server's own project (mcp_project): its node_modules, its venv and its sources
+# sit beside one of these
+MCP_PROJECT_MARKS = ("package.json", "pyproject.toml", ".git")
+
+
 def mcp_roots(task: store.Task) -> set[str]:
-    """The files a task's local MCP servers run from, for the lane to read: each absolute path
-    in a server's command, a program's install (its parent when it is in a `bin`), a script's
-    directory. One under a non-dot home directory (~/src/schema-mcp) couldn't start in the lane
-    otherwise. Never `/` nor the home directory itself."""
+    """The files a task's local MCP servers run from, for the lane to read: for each absolute
+    path in a server's command, its directory (its parent when it is a `bin`) both as written
+    and resolved, each widened to its project (mcp_project); a directory named as itself. One
+    under a non-dot home directory (~/src/schema-mcp) couldn't start in the lane otherwise. The
+    resolved path alone missed the two usual layouts of a server built by hand (#1202's review,
+    2026-11-24): `srv/.venv/bin/python -m schema_mcp` resolved to the base interpreter, so
+    Python started without its venv, and `node srv/dist/index.js` read dist/ without
+    srv/node_modules; each server died at its start in the lane. Never `/` nor the home
+    directory itself."""
     home = os.path.realpath(Path.home())
+    # on an API task never the checkout or a directory holding it, which its lane hides (#1091)
+    checkout = _repo_parts(task)[0] if task.spec.get("via") == "api" else set()
     out = set()
     for entry in task_mcp(task).values():
         for word in entry.get("command") or () if entry.get("type") == "local" else ():
             w = os.path.expanduser(word)
             if not os.path.isabs(w) or not os.path.exists(w):
                 continue
-            p = os.path.realpath(w)
-            d = p if os.path.isdir(p) else os.path.dirname(p)
-            d = os.path.dirname(d) if os.path.basename(d) == "bin" else d
-            if d not in ("/", home) and not _under(home, d):
-                out.add(d)
+            for p in dict.fromkeys((os.path.abspath(w), os.path.realpath(w))):
+                if os.path.isdir(p):
+                    d = p
+                else:
+                    d = os.path.dirname(p)
+                    d = os.path.dirname(d) if os.path.basename(d) == "bin" else d
+                    top = mcp_project(d, home)
+                    if top and not any(c == top or _under(c, top) for c in checkout):
+                        d = top
+                d = os.path.realpath(d)
+                if d not in ("/", home) and not _under(home, d):
+                    out.add(d)
     return out
+
+
+def mcp_project(d: str, home: str) -> str | None:
+    """The nearest of ``d`` and its parents holding a MCP_PROJECT_MARKS file, below ``home``
+    when under it; never `/`, the home directory nor one holding it."""
+    while d not in ("/", home) and not _under(home, d):
+        if any(os.path.lexists(os.path.join(d, m)) for m in MCP_PROJECT_MARKS):
+            return d
+        up = os.path.dirname(d)
+        if up == d:
+            return None
+        d = up
+    return None
 
 
 def rules_dir(task: store.Task) -> Path:
