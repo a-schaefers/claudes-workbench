@@ -190,18 +190,20 @@ def _coding_used(task: store.Task) -> None:
             {**x, "used": x.get("used") or (store.now() if _spent(x) else None)} for x in rows]})
 
 
-def _model_still_listed(task: store.Task) -> None:
+def _model_still_listed(task: store.Task, prompt: str | None = None, fresh: bool | None = None) -> None:
     """An API task's model must still be in OpenCode's catalog before feedback, next or resume
     writes a round: exit 3 with runner.left_catalog's line, never another model (#1016). And
     wb start's spend refusal (meter.refusal: no price, no day cap (#1089), today at the cap or
     within one request at its worst of it, #1150), the same exit: the round written past it
     stopped at once as a spend `stuck`, a Claude wake for nothing, with a review counted or a
-    step committed for a round that never ran (#1118, 2026-11-23)."""
+    step committed for a round that never ran (#1118, 2026-11-23). That request's input is the
+    round's first (runner.first_tokens of ``prompt`` and ``fresh``): the session's context
+    left out, the check passed and the room refused it at once (#1173, 2026-11-24)."""
     if task.spec.get("via") != "api":
         return
     if (m := models.lookup(task.spec.get("model") or "")) is None:
         die(runner.left_catalog(task), 3)
-    if why := meter.refusal(m, task.spec.get("role")):
+    if why := meter.refusal(m, task.spec.get("role"), tokens=runner.first_tokens(task, prompt, fresh)):
         die(why, 3)
 
 
@@ -647,19 +649,20 @@ def ago(ts) -> str:
     return f"{s}s" if s < 90 else f"{s // 60}m" if s < 5400 else f"{s // 3600}h"
 
 
-def pick_model(role: str, size: str, wanted: str | None, stack=(), name: str | None = None
-               ) -> tuple[models.Model, dict, str, dict]:
+def pick_model(role: str, size: str, wanted: str | None, stack=(), name: str | None = None,
+               tokens: int | None = None) -> tuple[models.Model, dict, str, dict]:
     """The task's model, its state, why, and how it was routed (task.json's `via`, `role` and an
     API model's keys): routes.resolve (#1016), the one asked for (an API one needs the user's yes in
     the mod's dialog, #1014, which cmd_start takes last: cli.start_gate), else the role's side: the router's choice on the evidence for the
     GPU (the record on this kind of work first: router.score; ``name``: the task's, which decides
     whether it explores, router.explores), or the role's API model. Exit 3 with one line for a
-    role that can't run, never another model."""
+    role that can't run, never another model. ``tokens``: round 1's first request's input, for
+    the day cap's look ahead (runner.first_tokens, #1173)."""
     def gate(m):  # the dialog's yes is cmd_start's, after every refusal (#1104)
         if not API_RUNS:
             die(f"{m.id} {API_NOT_YET}", 3)
     try:
-        return routes.resolve(role, size, wanted, stack, name, gate=gate)
+        return routes.resolve(role, size, wanted, stack, name, gate=gate, tokens=tokens)
     except routes.Refused as e:
         die(str(e), e.code)
 
@@ -686,7 +689,7 @@ def _routed_keys(routed: dict) -> dict:
     return {k: routed[k] for k in keys if routed.get(k) is not None}
 
 
-def _busy_api(role: str, a, repo: Path, sub: str | None):
+def _busy_api(role: str, a, repo: Path, sub: str | None, tokens: int | None = None):
     """When the GPU is busy and the user opted in (routes.json `busy` api, #1023): the role's API
     model as pick_model gives one, (m, state, why, routed); "" when the opt-in doesn't apply (off,
     Agents GPU, a --model asked for, a role with no API model: it queues or exits 4 as before); a
@@ -715,7 +718,8 @@ def _busy_api(role: str, a, repo: Path, sub: str | None):
         why = _standing_gap(context.repo_conf(repo, sub), a, models.provider_name(m), repo, sub) or None
     if why is None:  # no price, or today at the day cap (#1019), without an API start's advice:
         # the role is on the GPU and this start only waits for it (wave 2's merge)
-        why = meter.refusal(m, role, advice=False)
+        why = meter.refusal(m, role, advice=False,  # round 1's input too (#1173)
+                            tokens=meter.FIRST_TOKENS if tokens is None else tokens)
     if why:
         return f"the GPU is busy, and the {role} role's API model {mid} can't take it: {why}"
     routed = routes.busy_routed(doc, role, m)
@@ -1394,7 +1398,10 @@ def cmd_start(a):
     # (that would move the user off their API choice unsaid, #1014)
     role, size = routes.role_and_size(a.role, a.size)
     _local_only_check(a, repo, role, _package(repo, Path(a.repo).resolve(), a.base))  # #1021
-    m, state, why, routed = pick_model(role, size, a.model, stack, a.name)
+    # round 1's first request, input and all, for the day cap's look ahead: without its input a
+    # start within that of the cap passed, then the room refused that request at once (#1173)
+    first = runner.first_tokens(prompt=spec_text)
+    m, state, why, routed = pick_model(role, size, a.model, stack, a.name, tokens=first)
     # a rate limit or outage a task met on this provider (api-health.json) is no refusal: the
     # keyhole waits it out inside the round, which stops as rate_limited or outage if it holds.
     # One 503 any task saw blocked every start of the role for 60 s, --queue and --force too, and
@@ -1434,7 +1441,7 @@ def cmd_start(a):
         if not getattr(a, "bench", None):
             _say(_preempt_bench(m, a.name))
         held, waits = _gpu_wait(m, a.name)
-    if waits and not isinstance(moved := _busy_api(role, a, repo, sub), str):  # #1023, the user's opt-in
+    if waits and not isinstance(moved := _busy_api(role, a, repo, sub, first), str):  # #1023, the user's opt-in
         m, state, why, routed = moved
         api, held, waits, slots_full = True, {}, False, False
     elif waits and moved:
@@ -1687,11 +1694,12 @@ def cmd_feedback(a):
         die(f"{a.name}'s runner is still running")
     _need_worktree(task)
     _opencode_again(task)
-    _model_still_listed(task)
     text = a.text if a.text is not None else \
         read_text(a.message, "the feedback")
     if not text.strip():  # before anything is written: an empty one cost a round (the audit)
         die("the feedback is empty")
+    # after the text: the round's first request carries it (#1173)
+    _model_still_listed(task, text, True if a.fresh else False if a.keep_context else None)
     _spec_gaps(task, a.spec_gap)
     dropped = _stale_notes(task)
     n = st.get("round", 1) + 1
@@ -1801,7 +1809,6 @@ def cmd_next(a):
         die(f"{a.name}'s runner is still running")
     _need_worktree(task)
     _opencode_again(task)
-    _model_still_listed(task)
     step = st.get("steps", 1)
     try:  # read before anything is committed: a bad path must leave the step as it was
         nxt = read_text(a.spec, "the next step's spec")
@@ -1809,6 +1816,9 @@ def cmd_next(a):
         die(f"can't read the next step's spec: {e}")
     if not nxt.strip():
         die("the next step's spec is empty")
+    # after the spec, before the commit: the step's first request carries the session's context
+    # and the spec with the protocol (#1173)
+    _model_still_listed(task, nxt + protocol_for(spec), True if a.fresh else None)
     commit = _step_landed(task, step)
     measured = results.step(task, landed=True, since="HEAD~1" if commit else "HEAD", gaps=a.spec_gap)
     if not commit:
@@ -2591,7 +2601,8 @@ def _resume(task: store.Task) -> None:
     if not _rechecks_out(task):
         _need_worktree(task)
     _opencode_again(task)
-    _model_still_listed(task)
+    # a fresh session (#1173): round 1's own prompt, else the handoff of RESUME
+    _model_still_listed(task, None if _first_round(st) else runner.RESUME, fresh=True)
     n = st.get("round", 1)
     if _first_round(st):
         # it never ran a round (queued behind the GPU, its model or the base check): round 1
@@ -3071,7 +3082,12 @@ def _route_start(a) -> None:
         repo = sub = None  # wb start says why
     if repo is not None and (why := local_only_refusal(repo, sub, _role(ns), ns.model, ns.local_only)):
         die(why, 3)
-    if why := meter.refusal(m):  # no price, no cap, or today at the cap (#1019, #1089): wb start's too
+    try:  # round 1's input, as wb start reckons it (#1173): stdin's is read by wb start alone
+        spec_text = "" if ns.spec == "-" else Path(ns.spec).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        spec_text = ""
+    # no price, no cap, or today at the cap (#1019, #1089): wb start's too
+    if why := meter.refusal(m, tokens=runner.first_tokens(prompt=spec_text)):
         die(why, 3)
     # wb start's cheap refusals too, in place of a dialog for a start that then exits 1, 3 or 4
     # (#1104, 2026-11-23): the model can't run, a --base naming no commit, the provider's slots
