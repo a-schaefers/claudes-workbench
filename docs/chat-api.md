@@ -120,14 +120,15 @@ curl -s "${auth[@]}" "$CLAUDE_WB_URL/api/wait?after=1795436900301-a1b2c3&timeout
 An agent's token reads only its own conversation:
 - **`/api/state` and `/api/stream`** carry `{api, messages, listener, uploads, expire, now}`, and
   `messages` holds only its own messages and Claude's rows whose `to` names it. No `asks`, `prefs`,
-  `push`, `savings`, `build` or `tasks`: those are the user's. `/api/send`'s `state` is the same view.
+  `push`, `savings`, `build`, `tasks` or `dictate`: those are the user's. `/api/send`'s `state` is the same view.
 - **`/api/wait`** on an id that is neither its own message nor a reply to it is `404 {"error":
   "no such message"}`.
 - **Files:** `GET /api/upload/<id>` and `/api/file/<id>` answer only for a file it uploaded or one
   attached to a row in its view; any other id is 404, as if there were none. A `PUT` under an id
   someone else stored is `409 {"error": "that upload id is another sender's"}`, and a send can
   attach only its own uploads.
-- **403:** `/api/latest`, `/api/ask/<id>`, `/api/shot`, `/api/audio`, `/api/task`, and the user's `POST`s.
+- **403:** `/api/latest`, `/api/ask/<id>`, `/api/shot`, `/api/audio`, `/api/task`, and the user's `POST`s
+  (`/api/transcribe/<id>` among them).
 - **`/api/health`** and the `listener` are as for the user.
 
 The user's own token reads everything, as below.
@@ -159,6 +160,8 @@ The whole state the page draws (an agent's token gets its own view: *An agent's 
 - `build`: the page files' stamp (a page whose stamp differs reloads).
 - `tasks`: the open tasks, for the strip over the thread: `[{name, phase, model, via: "gpu"|"api",
   provider_name}]` (none accepted, discarded or parked by `wb stop --all`).
+- `dictate`: true while the computer has a listener (a speech recognizer in `wb audio`'s
+  audio.json) for `POST /api/transcribe/<id>`: the page shows its mic only then.
 - `expire`: seconds a message waits before it is never passed on (21600).
 - `now`: the server's time (seconds).
 
@@ -267,6 +270,17 @@ open task"}`. Every answer is `{task, part, …, now}`:
   and `more: true` when older ones were left out.
 
 400 for another `part` or a bad `n`. All of it is text the agent wrote: show it as text.
+
+### `POST /api/transcribe/<id>` (user only)
+`{}`: the words of an upload that is a voice clip (`audio/*`, `video/*` or
+`application/octet-stream`), heard by the computer's listener → `{"text": "..."}`, for the user to
+edit and send as a message (the clip itself is never sent to Claude). The words are kept with the
+upload, so asking again never transcribes twice. Errors: 404 `no such upload`, `dictation is off:
+…` (no listener); 415 `not a voice clip (<type>)`; 409 `{error, busy: true, why}` while a task
+holds the GPU a GPU listener needs (it never waits for it: ask again later, as the page does);
+503 `{error, retry: true}` while a url listener's server doesn't answer (ask again too); 502 `the
+listener failed: …` (it ran and failed). It answers once the listener is done: give it minutes,
+not seconds.
 
 ### `POST /api/answer` (user only)
 Answer a dialog: `{id, answer: "allow"|"deny", note?: ≤ 2000 characters, answers?: {question:

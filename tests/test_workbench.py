@@ -27981,6 +27981,147 @@ class ChatUploads(Base):
         self.assertFalse((self.uploads() / "eeeeeeee-1").exists())
 
 
+    # ---- dictation (#1203): the page's mic sends a clip, the listener's words come back ----
+    def listener(self, entry: dict | None) -> None:
+        path = Path(self.tmp.name) / "audio.json"
+        path.write_text(json.dumps({"ear": {"kind": "listen", **entry}} if entry else {}))
+        os.environ["WB_AUDIO"] = str(path)
+
+    def ear(self, said: str, code: int = 0) -> str:
+        """A listener command: logs each clip it gets (its path and first bytes), prints ``said``."""
+        fake = Path(self.tmp.name) / "ear.py"
+        fake.write_text("import json, sys\nclip = sys.argv[1]\n"
+                        "open(sys.argv[0] + '.calls', 'a').write(json.dumps([clip, open(clip, 'rb').read(12).hex()]) + '\\n')\n"
+                        f"print({said!r})\nsys.exit({code})\n")
+        return f"{sys.executable} {fake} {{in}}"
+
+    def calls(self) -> list:
+        log = Path(self.tmp.name) / "ear.py.calls"
+        return [json.loads(l) for l in log.read_text().splitlines()] if log.exists() else []
+
+    def transcribe(self, uid: str, tok: str | None = None):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        c.request("POST", f"/api/transcribe/{uid}", "{}", {"Host": f"localhost:{self.port}",
+                  "Authorization": f"Bearer {tok or self.tok}", "Content-Type": "application/json"})
+        r = c.getresponse()
+        out = r.status, json.loads(r.read())
+        c.close()
+        return out
+
+    def test_a_voice_clip_comes_back_as_its_words_once_and_a_retry_never_runs_the_listener_again(self):
+        # #1203: a voice memo attached in the chat reached Claude as audio it can't hear. The page's
+        # mic uploads the clip as any attachment and gets its words for the box; Claude gets text
+        self.listener(None)
+        self.assertFalse(self.chat.snapshot()["dictate"])                    # no listener: no mic
+        uid = "dddddddd-1203-4000-8000-000000000001"
+        self.assertEqual(self.put(uid, b"\x1aE\xdf\xa3 a webm clip", name='my "voice" -x.webm',
+                                  ctype="audio/webm;codecs=opus")[0], 200)
+        self.assertEqual(self.transcribe(uid)[0], 404)
+        self.listener({"gpu": False, "command": self.ear("  Fix the parser, then run the tests.  ")})
+        self.assertTrue(self.chat.snapshot()["dictate"])
+        self.assertNotIn("dictate", self.chat.agent_snapshot("x"))
+        self.assertEqual(self.transcribe(uid), (200, {"text": "Fix the parser, then run the tests."}))
+        self.assertEqual(self.transcribe(uid), (200, {"text": "Fix the parser, then run the tests."}))
+        calls = self.calls()
+        self.assertEqual(len(calls), 1)                                      # kept: never heard twice
+        self.assertEqual(Path(calls[0][0]).name, "clip.webm")                # a plain name, not the user's
+        self.assertEqual(calls[0][1], (b"\x1aE\xdf\xa3 a webm clip"[:12]).hex())  # not audio to ffmpeg: as sent
+        self.assertEqual(sorted(p.name for p in (self.uploads() / uid).iterdir()),
+                         [".meta.json", ".transcript.txt", 'my "voice" -x.webm'])
+        self.assertEqual(self.chat.thread(), [])                            # nothing sent: the words go to the box
+        # a file that isn't audio, an upload that isn't there, and an agent's token are refused
+        self.put("tttttttt-1", b"notes", name="notes.txt", ctype="text/plain")
+        self.assertEqual(self.transcribe("tttttttt-1"), (415, {"error": "not a voice clip (text/plain)"}))
+        self.assertEqual(self.transcribe("nnnnnnnn-1"), (404, {"error": "no such upload"}))
+        with contextlib.redirect_stderr(io.StringIO()):
+            agent = run_wb("chat", "token", "add", "my-agent").strip()
+        self.assertEqual(self.transcribe(uid, agent),
+                         (403, {"error": "agent tokens can't transcribe the user's voice clips"}))
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_a_listener_that_fails_is_a_502_with_its_words_and_the_next_try_runs_it_again(self):
+        self.listener({"gpu": False, "command": self.ear("", code=3)})
+        self.put("ffffffff-1203", b"RIFF a clip", name="memo.m4a", ctype="audio/mp4")
+        with redirect_stderr(io.StringIO()) as log:
+            code, got = self.transcribe("ffffffff-1203")
+            self.assertEqual((code, got["error"][:30]), (502, "the listener failed: listener "))
+            self.assertIn("exited 3", got["error"])
+            self.assertFalse((self.uploads() / "ffffffff-1203" / ".transcript.txt").exists())
+            self.assertEqual(self.transcribe("ffffffff-1203")[0], 502)
+        self.assertEqual(len(self.calls()), 2)
+        self.assertIn("wb chat: dictation: the listener failed", log.getvalue())   # serve.log
+
+    def test_a_gpu_listener_gives_way_to_a_task_on_the_gpu_at_once_and_runs_once_it_is_free(self):
+        # #1203: dictation must never queue behind a task (the page would hang for its whole
+        # round): a GPU listener is 409 at once while anything holds the GPU, and never runs
+        self.listener({"command": self.ear("hello")})                       # no "gpu": false: on the GPU
+        self.put("gggggggg-1203", b"OggS a clip", name="voice.ogg", ctype="audio/ogg")
+        held = subprocess.Popen([sys.executable, "-c", (
+            "import sys\nsys.path.insert(0, sys.argv[1])\nfrom workbench import models\n"
+            "with models.GpuLease(None, 't-busy', lambda *_: None):\n"
+            "    print('held', flush=True)\n    sys.stdin.read()\n"), str(ROOT)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: held.poll() is None and held.kill())
+        self.assertEqual(held.stdout.readline().strip(), "held")
+        began = time.monotonic()
+        code, got = self.transcribe("gggggggg-1203")
+        self.assertLess(time.monotonic() - began, 10)
+        self.assertEqual((code, got["error"], got["busy"]),
+                         (409, "the GPU is busy with a task", True))
+        self.assertIn("t-busy", got["why"])
+        self.assertEqual(self.calls(), [])
+        held.stdin.close()
+        held.wait(30)
+        self.assertEqual(self.transcribe("gggggggg-1203"), (200, {"text": "hello"}))
+        from workbench import models
+        self.assertEqual(models.holders(), {})                              # the turn was let go
+
+    def test_a_url_listener_nothing_answers_at_is_a_503_to_try_again_not_the_listeners_502(self):
+        # #1203: the page dropped a clip on any answer but a 408/425/429, so a url listener's server
+        # restarting lost what the user had just said: down for now is 503 `retry`, kept and asked again
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]                                     # nothing listens there now
+        self.listener({"gpu": False, "url": f"http://127.0.0.1:{port}/v1/audio/transcriptions"})
+        self.put("kkkkkkkk-1203", b"\x1aE\xdf\xa3 webm", name="voice.webm", ctype="audio/webm")
+        with redirect_stderr(io.StringIO()) as log:
+            code, got = self.transcribe("kkkkkkkk-1203")
+        self.assertEqual((code, got.get("retry")), (503, True))
+        self.assertIn("the listener isn't answering: listener ear: nothing answers at", got["error"])
+        self.assertIn("wb chat: dictation: the listener is down", log.getvalue())
+        # it answered the probe, then dropped the connection before the clip's reply: down too
+        with mock.patch.object(audio, "ready", return_value=""), \
+                mock.patch.object(audio, "_ffmpeg", return_value=None), redirect_stderr(io.StringIO()):
+            code, got = self.transcribe("kkkkkkkk-1203")
+        self.assertEqual((code, got.get("retry")), (503, True))
+
+    def test_a_server_listener_gets_the_clips_own_type_when_there_is_no_ffmpeg_to_convert_it(self):
+        # #1203: _multipart labelled every file audio/wav, so a phone's webm reached a
+        # /v1/audio/transcriptions server mislabelled when nothing here could convert it
+        from http.server import BaseHTTPRequestHandler
+        got = []
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(404); self.end_headers()
+
+            def do_POST(self):
+                got.append(self.rfile.read(int(self.headers["Content-Length"])))
+                self.send_response(200); self.end_headers(); self.wfile.write(b'{"text": "from the server"}')
+
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        self.listener({"gpu": False, "url": f"http://127.0.0.1:{srv.server_port}/v1/audio/transcriptions"})
+        self.put("hhhhhhhh-1203", b"\x1aE\xdf\xa3 webm", name="voice.webm", ctype="audio/webm")
+        with mock.patch.object(audio, "_ffmpeg", return_value=None):
+            self.assertEqual(self.transcribe("hhhhhhhh-1203"), (200, {"text": "from the server"}))
+        self.assertIn(b'filename="clip.webm"\r\nContent-Type: audio/webm\r\n\r\n\x1aE\xdf\xa3 webm', got[0])
+
+
 class Top(Base):
     """wb top (#407): a live feed read from files, sysfs and one nvidia-smi stream."""
 
