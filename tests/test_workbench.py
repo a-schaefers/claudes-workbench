@@ -32157,11 +32157,30 @@ class RoleResolution(Base):
         out = self.wb("status")[1].splitlines()
         self.assertRegex(out[0], r"^task +phase +rnd via model {20}")
         rows = {line.split()[0]: line for line in out[1:]}
-        self.assertIn(" api openrouter/deepseek/dee… ", rows["t-or"])
+        self.assertIn(" api openrouter/…k-v4.1-flash ", rows["t-or"])  # the model's own name (#1117)
         self.assertIn(" api deepseek/deepseek-flash ", rows["t-ds"])
         self.assertRegex(rows["t-gpu"], r" gpu \S+ ")
         self.assertEqual(cli.status_model({"via": "api", "model": "averyveryverylongprovider/m-1"}),
                          ("api", "averyveryverylongprovider/…"))  # the provider whole, the line longer
+
+    def test_wb_status_tells_two_models_of_one_provider_and_vendor_apart(self):
+        # #1117: the vendor segment took the room, and DeepSeek Flash and Pro on DeepInfra both
+        # read `deepinfra/deepseek-ai/D…` in wb status and the session's open-tasks block
+        for a, b in (("deepinfra/deepseek-ai/DeepSeek-V4.1-Flash", "deepinfra/deepseek-ai/DeepSeek-V4.1-Pro"),
+                     ("deepinfra/deepseek-ai/DeepSeek-V4.1-Flash-1017", "deepinfra/deepseek-ai/DeepSeek-V4.1-Pro-1017"),
+                     ("openrouter/deepseek/deepseek-v4.1-flash", "openrouter/deepseek/deepseek-r2"),
+                     ("openrouter/anthropic/claude-haiku-5.5", "openrouter/anthropic/claude-sonnet-5")):
+            with self.subTest(a=a, b=b):
+                short = {x: cli.status_model({"via": "api", "model": x}) for x in (a, b)}
+                self.assertNotEqual(short[a], short[b])
+                for x, (via, col) in short.items():
+                    self.assertEqual(via, "api")
+                    self.assertLessEqual(len(col), cli.STATUS_MODEL)
+                    self.assertTrue(col.startswith(x.split("/")[0] + "/"), col)  # the provider whole
+        self.assertEqual(cli.status_model({"via": "api", "model": "openrouter/deepseek/deepseek-r2"}),
+                         ("api", "openrouter/…/deepseek-r2"))       # the vendor cut, the name whole
+        self.assertEqual(cli.status_model({"via": "api", "model": "deepinfra/deepseek-ai/DeepSeek-V4.1-Flash"}),
+                         ("api", "deepinfra/…ek-V4.1-Flash"))      # the name's end, where they differ
 
     def test_an_api_role_that_cant_run_exits_3_with_one_line_and_never_the_gpu(self):
         self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")

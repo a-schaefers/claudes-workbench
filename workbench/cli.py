@@ -2153,17 +2153,24 @@ STATUS_MODEL = 24  # wb status's model column
 
 
 def status_model(sp: dict) -> tuple[str, str]:
-    """wb status's via and model columns (#1016): an API task's `provider/model`, the model part
-    cut to fit and the provider never cut (one model served by two providers read alike, cut to its
-    first 16 characters: robustness minor 3); a GPU task's last segment, as before."""
+    """wb status's via and model columns (#1016): an API task's `provider/model` to fit, the
+    provider never cut (one model served by two providers read alike, cut to its first 16
+    characters: robustness minor 3); a GPU task's last segment, as before. Cut, a vendor segment
+    between goes to `…/` and the model's own name (the last segment) stays, its end when it alone
+    overflows: kept from the left, `deepinfra/deepseek-ai/D…` was DeepSeek Flash and Pro alike
+    (#1117, 2026-11-23)."""
     mid = sp.get("model", "")
     if sp.get("via") != "api":
         return "gpu", mid.split("/")[-1][:STATUS_MODEL]
-    pid, _, rest = mid.partition("/")
-    room = STATUS_MODEL - len(pid) - 1
     if len(mid) <= STATUS_MODEL:
         return "api", mid
-    return "api", f"{pid}/{rest[:room - 1]}…" if room > 1 else f"{pid}/…"
+    pid, _, rest = mid.partition("/")
+    name = rest.rpartition("/")[2]
+    head = f"{pid}/…/" if "/" in rest else f"{pid}/"
+    if len(head) + len(name) <= STATUS_MODEL:
+        return "api", head + name
+    room = STATUS_MODEL - len(pid) - 2  # `<provider>/…`, then the name's end
+    return "api", f"{pid}/…{name[-room:]}" if room > 0 else f"{pid}/…"
 
 
 def cmd_status(a):
