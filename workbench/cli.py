@@ -6717,7 +6717,10 @@ def cmd_try(a):
     # unlocking failed wb try at once, or with a terminal (WSL2) hung it on a prompt (#1226)
     argv = ["start", name, "--spec", str(TRY / "spec.md"), "--repo", str(d), "--size", "trivial",
             "--trial", "--no-sign", "--test", f"{py} -m unittest",
-            *(["--model", a.model] if a.model else [])]
+            *(["--model", a.model] if a.model else []),
+            # wb start's busy-GPU refusal names --queue, which wb try once refused as an unknown
+            # argument: the setup check couldn't wait behind a task or a bench (#1251, 2026-11-24)
+            *(["--queue"] if a.queue else [])]
     try:
         # the copy and its init inside: wb init refusing (no git identity, a home that is a
         # git repo) left try/<n> behind, one more at each retry (#530)
@@ -8045,6 +8048,8 @@ def parser() -> argparse.ArgumentParser:
                        "started as a trivial trial, and the hidden check to run at review")
     s.add_argument("--model", help="a model id (a GPU model's fragment will do; an API model "
                    "never matches one); default: the router's pick for a trivial task")
+    s.add_argument("--queue", action="store_true", help="start even when the GPU's holders leave "
+                   "no room for its model: it waits behind them (else exit 4)")
     s.set_defaults(f=cmd_try)
     s = sub.add_parser("remote", help="use the Ollama on another machine (LAN, tailnet): its "
                        "provider, marked local, and its tool-capable models registered")
