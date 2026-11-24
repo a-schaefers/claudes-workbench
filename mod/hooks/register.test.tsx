@@ -6734,6 +6734,26 @@ for (const surface of SURFACES)
     await clock.advance(1000)
   })
 
+// The desktop app's session starts with no surface and gets one only from session.attach (the
+// wake test below): the toast must count that attach, or the app the toast was built for never
+// shows it (the #1200 review: deleting attach's surfaces.add left the suite green)
+test('#1200: a session that starts with no surface and then attaches the desktop app toasts a send dialog that came back unanswered', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const w = upstreamWorld(on, files)
+  on('session.attach', (_: any, e: any) => ({ clientId: e.clientId }))
+  await $.session.start({ cwd: SOURCE, surface: null, isInteractive: false })   // how the app's session starts
+  await $.session.attach({ surface: 'desktop', clientId: 'desktop:default' })
+  await clock.advance(1000)
+  w.answer = null                                                                     // dismissed, or never drawn
+  const deny = ((await $.tool.call({ tool: 'Bash', command: 'git push' } as any)) as any).deny as string | undefined
+  expect(deny).toContain('not sent: the user did not approve it')
+  expect(w.asked).toHaveLength(1)
+  expect(w.toasts).toEqual(["workbench: the question went unanswered, so nothing was sent. If it didn't show here, ask again from Claude Code in a terminal, where it does."])
+  await clock.advance(1000)
+})
+
 for (const surface of ['desktop', 'vscode'] as const)
   test(`#1200: a session that starts with no surface takes its wake once ${surface} attaches, once, and acknowledges it`, async ($, on) => {
     const clock = mock.clock(on, { now: 1_800_000_000_000 })

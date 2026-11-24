@@ -5839,7 +5839,8 @@ recommend only.` (`No day cap yet.` without one). The `/workbench` skill's text 
 **Tests** (`register.test.tsx`: an in-memory filesystem, a fake `wb events`; `statHeld`, a path
 whose stat comes back late; `SURFACES`, the four the kit mounts on: the empty pane, the Tasks tab's
 review, stuck and failed rows, Stats, Settings, both consent dialogs on each, a wake after
-`session.attach` on desktop and vscode, and `findWb`, #1200). Not covered: check-in
+`session.attach` on desktop and vscode, the unanswered-dialog toast for a desktop surface that
+attaches after a surfaceless start, and `findWb`, #1200). Not covered: check-in
 wakes, the one-hour cutoff, scrolling, `WB_COMPACT_AT`.
 
 **Troubleshooting.** With `wb` missing from Claude Code's PATH (and no `~/.local/bin/wb`, `findWb`)
