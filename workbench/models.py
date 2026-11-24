@@ -891,6 +891,8 @@ def discover() -> dict[str, Model]:
     (hosted()), so the lease, residency, free_gpu, media and the router, which all read this,
     stay on this machine's GPU (and the boxes opted in) without asking each model its kind."""
     extra, dirs = _overrides(), _provider_dirs()
+    if follow_windows_host(extra):  # the provider now names Windows' new address (#1159)
+        extra = _overrides()
     found: dict[str, Model] = {}
     for pid, prov, url, engine, remote in _local_providers(read_config(), extra, dirs):
         opts = prov.get("options") or prov.get("settings") or {}
@@ -1485,6 +1487,7 @@ def _api_model(mid: str, entry: dict, prov: dict, extra: dict) -> Model:
     # DeepInfra's bill, and every figure with it (#1135, 2026-11-23). Kept in config, so the meter
     # and the task's catalog.json (catalog_doc) price alike; the catalog's in `catalog_cost`
     if (mine := own_cost((extra.get(mid) or {}).get("cost"))) is not None:
+        mine = [{**mine[0], **({"cache": c} if (c := own_cache(mine[0], config.get("cost"))) else {})}]
         over = {**over, "catalog_cost": config.get("cost"), "cost": mine}
         config = {**config, "cost": mine}
     config = api_limits(config)
@@ -1513,6 +1516,26 @@ def own_cost(v) -> list | None:
         return None
     return [{**{k: float(r[k]) for k in PRICE_KEYS},
              **({"cache": {k: float(x) for k, x in cache.items()}} if cache else {})}]
+
+
+def own_cache(row: dict, catalog) -> dict:
+    """The cache prices for the user's own row (wb model price): theirs, and for each one they left
+    out, the catalog's base row's at its ratio to input, times their input (0.006 of 0.2 with
+    --input 0.098: 0.00294). A missing one is priced as input (meter.price), and with only --input
+    and --output, the form the skill gave, cache reads (85-98% of an API task's tokens) booked a
+    DeepInfra task at 18x its bill, as exact (#1155, 2026-11-24). Without a catalog input price to
+    scale from, a missing one stays missing."""
+    cache = dict(row.get("cache") or {})
+    rows = catalog if isinstance(catalog, list) else [catalog] if isinstance(catalog, dict) else []
+    base = next((r for r in rows if isinstance(r, dict) and not r.get("tier")), None) or {}
+    ok = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool) and x >= 0  # noqa: E731
+    their = _dict(base.get("cache"))
+    if ok(base.get("input")) and base["input"] > 0:
+        for k in ("read", "write"):
+            v = their.get(k, base.get(f"cache_{k}"))
+            if k not in cache and ok(v):
+                cache[k] = round(v / base["input"] * row["input"], 10)
+    return cache
 
 
 def own_price(m: Model) -> bool:
@@ -2069,6 +2092,8 @@ def remedy(m: Model, state: dict) -> str:
             return f"wait for {who}'s limit to lift ({why.rpartition(' until ')[2]})"
         if why.startswith("can't reach "):
             return f"check the network to {urlparse(m.base_url).hostname or who}; it may come up"
+    if why == "ollama is not answering" and (moved := windows_moved(m)):
+        return moved
     if why == "ollama is not answering":
         return f"start Ollama at {m.root} (ollama serve, or its service or app)"
     if why.endswith(" is not pulled"):
@@ -4054,10 +4079,10 @@ def ollama_root_here() -> str:
     return f"{u.scheme}://{f'[{host}]' if ':' in host else host}:{u.port or OLLAMA_PORT}"
 
 
-def ollama_answers(root: str) -> bool:
+def ollama_answers(root: str, timeout: float = 1.5) -> bool:
     if _fake():
         return False
-    body = _get(f"{root}/api/version", timeout=1.5)
+    body = _get(f"{root}/api/version", timeout=timeout)
     return isinstance(body, dict) and "version" in body and not emulator(root)
 
 
@@ -4131,6 +4156,137 @@ def remote_pid(host: str) -> str:
     return "ollama-" + (re.sub(r"[^a-z0-9]+", "-", remote_host(host)).strip("-") or "host")
 
 
+# WSL2's default NAT networking gives Windows a new address when the WSL VM restarts (a Windows
+# reboot, wsl --shutdown). wb remote <that address> wrote provider ollama-<address> with it, so
+# after a reboot every wb start was refused with "start Ollama", which was running, a --queue
+# start waited for good, and wb remote <new address> made a second provider, whose new model ids
+# started the router's history, slices and tuning over (#1159, 2026-11-24). Windows' Ollama is one
+# provider, ollama-windows, marked `wsl_host` in models.json, and discovery follows the address.
+WSL_PID = "ollama-windows"
+
+
+def _remote_pid_for(cfg: dict, host: str, root: str | None = None) -> str:
+    """The provider wb remote uses for ``host``: remote_pid's, except WSL2's Windows host, which
+    is the provider marked `wsl_host` in models.json when OpenCode's config has one (one at
+    ``root`` first, when adding), else WSL_PID unless a provider of the old ollama-<address> id is
+    already there (at ``root``, when adding), kept so its models keep their ids (#1159)."""
+    pid = remote_pid(host)
+    if host != (windows_host() or "").lower():
+        return pid
+    # an adopted ollama-<old address> keeps its id after discovery repoints it, so at Windows'
+    # next address remote_pid named nothing there: wb remote made a second provider, ollama-windows,
+    # with new model ids, and --remove found nothing to remove (#1159's review, 2026-11-24)
+    marked = [p for p, e in _overrides().items()
+              if isinstance(e, dict) and e.get("wsl_host") and _provider(cfg, p) is not None]
+    if marked:
+        here = f"{root}/v1" if root else None
+        return min(marked, key=lambda p: (_provider_url(_provider(cfg, p)).rstrip("/") != here,
+                                          p != WSL_PID, p))
+    prov = _provider(cfg, pid)
+    old = prov is not None and (root is None or _provider_url(prov).rstrip("/") == f"{root}/v1")
+    return pid if old else WSL_PID
+
+
+def _follows_windows(pid: str, prov: dict) -> bool:
+    """Whether provider ``pid`` is one wb remote made for WSL2's Windows host, still pointing
+    where it made it: its models.json `wsl_host` and `remote` marks, the baseURL the mark's. One
+    the user repointed is theirs (#242)."""
+    mark = _overrides().get(pid) or {}
+    return bool(mark.get("wsl_host") and mark.get("remote")) and \
+        _provider_url(prov).rstrip("/") == f"{mark['remote']}/v1"
+
+
+def _repoint(pid: str, root: str) -> None:
+    """Point provider ``pid`` (one wb remote made) at ``root``/v1 in OpenCode's config, and its
+    `remote` mark with it. Refused as own_config refuses, or while another layer sets it."""
+    change = f'set provider "{pid}"\'s baseURL to "{root}/v1"'
+    with own_config(change) as (target, own):
+        if where := set_elsewhere(target, "provider", pid):
+            raise _not_ours(f"provider {pid}", where, change)
+        entry = (own.get("provider") or {}).get(pid) or (own.get("providers") or {}).get(pid)
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"provider {pid} isn't in {target}: make this change by hand: {change}")
+        opts = entry.get("options") if "options" in entry or "settings" not in entry else entry["settings"]
+        if not isinstance(opts, dict):
+            opts = entry["options"] = {}
+        opts["baseURL"] = f"{root}/v1"
+    set_override(pid, "remote", root)
+
+
+def _moved_to(mark: str, root: str) -> bool:
+    """Whether Windows' Ollama left ``mark`` for ``root``: the old root silent, the new answering.
+    Both probed at once, briefly, so a dead provider costs discovery a second, not three."""
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(2) as pool:
+        old, new = pool.map(lambda r: ollama_answers(r, timeout=1), (mark, root))
+    return new and not old
+
+
+def follow_windows_host(extra: dict) -> list[str]:
+    """Repoint each provider wb remote made for WSL2's Windows host (models.json `wsl_host`) whose
+    address is no longer windows_host()'s, keeping its port, when Ollama has stopped answering at
+    the old address and answers at the new one; a line each on stderr, once. Read in discover(),
+    so every command after the reboot finds it there (#1159). One wb can't rewrite (comments,
+    another layer) stays as it is, and remedy() names the new address."""
+    marked = {pid: e["remote"] for pid, e in extra.items()
+              if isinstance(e, dict) and e.get("wsl_host") and isinstance(e.get("remote"), str)}
+    if not marked or not (win := windows_host()):
+        return []
+    cfg, said = read_config(), []
+    for pid, mark in marked.items():
+        prov, was = _provider(cfg, pid), urlparse(mark)
+        if prov is None or (was.hostname or "").lower() == win.lower() or not _follows_windows(pid, prov):
+            continue
+        try:
+            root = remote_root(win, was.port or OLLAMA_PORT)
+            # windows_host() is only the default gateway: under networkingMode=mirrored (which
+            # WSL_NAT and the remedy advise) it is the LAN router, and a VPN inside WSL moves it
+            # too. A working provider was rewritten to the router, a false "moved" line said, and
+            # every wb start sent the user to start Ollama there (#1159's review, 2026-11-24)
+            if not _moved_to(mark, root):
+                continue
+            _repoint(pid, root)
+        except (RuntimeError, OSError, ValueError):
+            continue
+        said.append(f"wb: Windows' address moved from {was.hostname} to {win} (WSL2's NAT): "
+                    f"{pid} now points at {root}/v1")
+        print(said[-1], file=sys.stderr, flush=True)
+    return said
+
+
+def windows_moved(m: Model) -> str:
+    """remedy()'s step for a remote Ollama (or one wb remote made) that doesn't answer at an
+    address that isn't WSL2's Windows host now, or "": it may be Windows at its address before a
+    reboot, where "start Ollama" sent the user to one already running (#1159)."""
+    if not (m.remote or m.extra.get("remote")) or m.cloud or not (win := windows_host()):
+        return ""
+    host = (urlparse(m.root).hostname or "").lower()
+    if not host or host == win.lower():
+        return ""
+    mirrored = ("networkingMode=mirrored under [wsl2] in %UserProfile%\\.wslconfig keeps 127.0.0.1 "
+                "for good")
+    if m.extra.get("wsl_host"):
+        port = urlparse(m.root).port or OLLAMA_PORT
+        with contextlib.suppress(RuntimeError):
+            if ollama_answers(remote_root(win, port)):
+                return (f"WSL2's NAT gave Windows a new address, {win}: wb remote {win} points it at "
+                        f"Windows' new address, and {mirrored}")
+        # nothing answers at the default gateway: under mirrored networking (or a VPN) that is
+        # the router, not Windows, and "WSL2's NAT gave Windows a new address" sent the user
+        # there (#1159's review, 2026-11-24)
+        return (f"start Ollama on Windows: it answers neither at {m.root} nor at {win}, WSL2's "
+                f"default gateway; under networkingMode=mirrored Windows' Ollama is on 127.0.0.1 "
+                f"here instead, which wb remote 127.0.0.1 --port {port} adds (its models get new ids)")
+    # wb remote <new> doesn't repoint this one: nothing says its address was Windows', so it makes
+    # ollama-windows beside it, and saying "points it at" sent the user round again (#1159's
+    # review, 2026-11-24)
+    drop = (f"wb remote {host} --remove drops this one" if m.extra.get("remote")
+            else f"{m.provider} can go from OpenCode's config")
+    return (f"start Ollama at {m.root}; or, if {host} was Windows' address (WSL2's NAT gives it a "
+            f"new one on a reboot), wb remote {win} adds Windows' Ollama as {WSL_PID}, which follows "
+            f"its address from now on (its models get new ids), {drop}, and {mirrored}")
+
+
 def remote_host(host: str) -> str:
     """A wb remote host as one spelling: lower case, an IPv6 literal without its brackets."""
     host = host.strip().lower()
@@ -4168,12 +4324,15 @@ def add_remote(host: str, port: int = OLLAMA_PORT) -> tuple[str, str, list[str]]
     if not ollama_answers(root):
         raise RuntimeError(f"no Ollama answers at {root}: on {host}, have Ollama listen on the "
                            "network (OLLAMA_HOST=0.0.0.0, then restart it), and check the port")
-    pid = remote_pid(host)
     cfg = read_config()
+    win = host == (windows_host() or "").lower()
+    pid = _remote_pid_for(cfg, host, root)
     prov = _provider(cfg, pid)
     if prov is None:
-        _add_provider(cfg, pid, f"Ollama on {host}", f"{root}/v1")
+        _add_provider(cfg, pid, "Ollama on Windows" if win else f"Ollama on {host}", f"{root}/v1")
         set_override(pid, "remote", root)  # wb made it, so --remove may delete it
+    elif _provider_url(prov).rstrip("/") != f"{root}/v1" and win and _follows_windows(pid, prov):
+        _repoint(pid, root)  # WSL2's NAT gave Windows a new address: the same provider (#1159)
     elif _provider_url(prov).rstrip("/") != f"{root}/v1":
         # a provider of that id for another endpoint (a port of its own, or the user's): kept,
         # and its models were reported as the new endpoint's (#197, the 2026-11-19 audit)
@@ -4182,6 +4341,8 @@ def add_remote(host: str, port: int = OLLAMA_PORT) -> tuple[str, str, list[str]]
                            f"alone. Rename or remove it, or add that server's models with wb model "
                            f"add <provider>/<model> --url {root}/v1")
     set_override(pid, "local", True)  # the user's own machine: its models count as local
+    if win:  # discovery follows it to Windows' next address (follow_windows_host, #1159)
+        set_override(pid, "wsl_host", True)
     names = []
     for row in (_get(f"{root}/api/tags") or {}).get("models", []):
         name = row.get("name")
@@ -4199,8 +4360,8 @@ def add_remote(host: str, port: int = OLLAMA_PORT) -> tuple[str, str, list[str]]
 def remove_remote(host: str) -> tuple[str, list[str]]:
     """Undo add_remote: its models out of OpenCode's config with their models.json entries, the
     provider and its local mark gone. (provider id, the models removed)."""
-    host, pid = remote_host(host), remote_pid(host)
-    cfg = read_config()
+    host, cfg = remote_host(host), read_config()
+    pid = _remote_pid_for(cfg, host)
     key = "provider" if pid in (cfg.get("provider") or {}) else "providers"
     prov = (cfg.get(key) or {}).get(pid)
     if prov is None:

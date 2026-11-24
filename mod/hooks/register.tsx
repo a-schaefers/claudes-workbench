@@ -2234,7 +2234,7 @@ const mem = {
   chatQueued: new Map<string, string>(), // web messages whose receipt says queued (id → by): read once a turn ends
   chatOwed: new Map<string, Owed>(), // web messages passed to Claude with no reply in the chat yet (#767)
   chatTurn: new Map<string, number>(), // web messages given to Claude: turn ends to skip before theirs (#1042)
-  chatTurnSize: -1, // messages.jsonl's size when the turn started: grown, it may hold a reply (#1042)
+  chatTurnSize: Promise.resolve(-1), // messages.jsonl's size when the turn started, once read: grown, it may hold a reply (#1042)
   agentTurn: new Map<string, string>(), // an agent's message given to Claude (id → its name): its turn's dialogs go to the page (#1042)
   chatAsks: new Map<string, ChatAsk>(), // dialogs on the page this session waits on: whose call (#1042)
   listenerAt: new Map<string, number>(), // another session's chat listener (pid@start), when last seen alive (#839)
@@ -3837,9 +3837,13 @@ async function owedAtTurnEnd($: any) {
 // messages that turn took (a queued one, `grace`, only the turn after), so an agent's GET /api/wait
 // knows Claude is done with its message; with none, when messages.jsonl grew in the turn (a reply
 // Claude wrote, maybe a later report), so a wait on that reply ends too. Nothing while the chat is off.
-async function chatTurnStart($: any) {
-  mem.chatTurnSize = (await read($, chat)).web
-    ? (await $.fs.stat(`${mem.root}/chat/messages.jsonl`).catch(() => undefined))?.size ?? 0 : -1
+// The start's size is a promise the end awaits, taken and cleared at once: set when its stat came
+// back, a turn that ended first read the previous turn's size, and the late one became the next
+// turn's, so a turn that wrote nothing was recorded for a row written before it (Claude Code
+// 2.1.330 ends a test's turn before its start's stat returns; the nightly run, 2026-11-24).
+function chatTurnStart($: any) {
+  mem.chatTurnSize = (async () => (await read($, chat)).web
+    ? (await $.fs.stat(`${mem.root}/chat/messages.jsonl`).catch(() => undefined))?.size ?? 0 : -1)().catch(() => -1)
 }
 async function chatTurnEnd($: any) {
   const ids: string[] = []
@@ -3849,8 +3853,9 @@ async function chatTurnEnd($: any) {
   }
   for (const id of [...mem.agentTurn.keys()]) if (!mem.chatTurn.has(id)) mem.agentTurn.delete(id) // their turn is over
   for (const id of [...mem.chatAsks.keys()]) if (!mem.asksOpen.has(id)) mem.chatAsks.delete(id) // a hook dropped outright
-  const was = mem.chatTurnSize
-  mem.chatTurnSize = -1
+  const start = mem.chatTurnSize
+  mem.chatTurnSize = Promise.resolve(-1)
+  const was = await start
   const grew = was >= 0 && ((await $.fs.stat(`${mem.root}/chat/messages.jsonl`).catch(() => undefined))?.size ?? 0) > was
   if (!ids.length && !grew) return
   const { ok, out } = await runWb($, ['chat', 'ended', ...ids, '--by', (await read($, chat)).key], 15_000)
@@ -4591,7 +4596,7 @@ export const register: Register = (on, options) => {
     if (!e.agentId) {
       mem.busy = true
       mem.submitted = false
-      void chatTurnStart($)
+      chatTurnStart($)
       void poll($) // the chat page shows "working" now
     }
     return next(e)

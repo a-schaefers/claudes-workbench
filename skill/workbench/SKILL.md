@@ -246,8 +246,9 @@ from commands.json (a repo the user keeps off API models: `wb start` exits 3 wit
 ask the user). Never name a free model first (the provider may keep or train on the code), and
 never pick an OpenRouter backend (`--order`) for the user: ask which. An API task's lane hides
 each registry config that holds a credential (a token, password, key; one without stays readable
-and its tool works); when `wb start`'s note says a tool stops on every run there (Maven, Gradle,
-dotnet, Bundler…), that repo's task won't build on API: tell the user, and offer the GPU role.
+and its tool works; with no lane, as on macOS, none is hidden and there's no note); when
+`wb start`'s note says a tool stops on every run there (Maven, Gradle, dotnet, Bundler…), that
+repo's task won't build on API: tell the user, and offer the GPU role.
 Model servers (none runnable, which server, a model on another machine), updating workbench, and
 **the weekly model check** (the mod asks once a week; `/workbench-models`): read
 `reference/models.md` beside this file first.
@@ -355,7 +356,7 @@ In a monorepo, `--repo` inside a package with its own committed CLAUDE.md (`pack
 runs the agent, the setup and the tests in that package; the diff stays the whole repo's.
 The worktree holds only committed files. When the acceptance command needs what the user
 installed (node_modules, a .venv, a build), add `--setup '<install command>'` (a .venv always: a copy still runs the original) (or `--copy <ignored
-path>`; `--sibling <path>` for a `../<name>` or `../../<path>` the project uses, by that same path): `wb start` names the ignored
+path>`, from a package as the note names it; `--sibling <path>` for a `../<name>` or `../../<path>` the project uses, by that same path): `wb start` names the ignored
 directories it lacks, and a failing setup fails the task before any round (so does a checkout
 that fails: the runner makes the worktree, so `wb start` returns at once on any repo). A setup gets 30
 minutes; a first build that needs longer (a big Rust or C++ project, torch over a slow link) takes
@@ -374,7 +375,7 @@ this machine's GPU even when the model is on a wb remote box; without it they se
 `wb verify` and `wb shot` wait for the GPU alone too.
 A suite slower than 15 minutes: `--test-timeout <secs>` above its time, or
 narrow the command; a run past it isn't sent back to the agent (nor one the lane refused a
-device), you're woken with `auto-fix skipped:` and the cause, unless the base check ran the same
+device, nor a command not found as on the base, which checks in before round 1), you're woken with `auto-fix skipped:` and the cause, unless the base check ran the same
 command in a quarter of the limit: then it's the change's hang, and auto-fix gets it.
 Once the tests pass, the agent checks its own change against your review checks in one more
 round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it).
@@ -503,7 +504,7 @@ coding choice is the user's (`wb coding`), never changed by a check.
   the branch, and the report says how to accept them instead. A failed round's edits so far stay in the worktree (`wb resume` carries on). A setup or load failure before the agent ran: fix it, then `wb resume <name>`.
   A `rate_limited`, `outage`, `quota`, `auth` or `refused` stop is the API provider's, not the
   agent's (the report says "the provider's stop"): tell the user so, and its remedy (wait, top
-  up, or /connect the key again), then `wb feedback <name> --text "carry on"` once it allows. A
+  up, or /connect the key again), then `wb feedback <name> --text "carry on"` once it allows (no review round counted). A
   `refused` one (the provider turned the request down: a moderation flag, a schema, a model gone)
   quotes what it said: fix that, then `wb feedback`; on an HTTP 404 the model is gone, so `wb
   takeover` or `wb discard`. Never switch the task's model or role yourself: a route change
@@ -513,8 +514,9 @@ coding choice is the user's (`wb coding`), never changed by a check.
   Tell the user what the STOPPED line names (on macOS Python's Install Certificates command, else
   the system's CA certificates, `SSL_CERT_FILE` or the proxy), then `wb feedback <name> --text
   "carry on"` once it's mended; never change the route for it.
-  A `spend` stop (cause `spend`: the day's API spend cap is reached) is the user's call, never a
-  retry: ask them, as the notice says. A higher cap or tomorrow: `wb resume <name>` once it allows.
+  A `spend` stop (cause `spend`: the day's API spend cap is reached, or too near it for the next
+  request) is the user's call, never a retry: ask them, as the notice says (it names a cap that
+  would do). A higher cap or tomorrow: `wb resume <name>` once it allows.
   The role on the GPU is for the next tasks; this one keeps its API model (resume never
   re-routes), so `wb takeover` or `wb discard` it. Nothing but the user raises the cap.
 
@@ -639,4 +641,5 @@ week's total and its score out of 100 when the user asks what it's saving; `wb s
 score is the GPU's alone; `wb savings --api` gives what API tasks cost: the closed ones by
 provider, and what was spent (open tasks too) by day, as the day cap counts it. Only when the user
 compares a figure with their provider's bill, or asks why they differ: `wb model price <id> --input X
---output Y` sets the prices they are billed (`--clear` undoes it); never suggest it otherwise.
+--output Y [--cache-read Z] [--cache-write W]` sets the prices they are billed (a cache price left
+out is the catalog's ratio to input) (`--clear` undoes it); never suggest it otherwise.

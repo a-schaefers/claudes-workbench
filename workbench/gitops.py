@@ -1717,16 +1717,21 @@ def jj_colocated(repo: Path) -> bool:
     return (Path(repo) / ".jj").is_dir() and (Path(repo) / ".git").exists()
 
 
-def merge_by_hand(repo: Path, branch: str, how: str = "merge", sign: bool = True) -> str:
+def merge_by_hand(repo: Path, branch: str, how: str = "merge", sign: bool = True,
+                  into: str | None = None) -> str:
     """The git command that lands ``branch`` as wb accept --merge would: in the repo's mode (the
     --merge-as, else commands.json's `merge`) and unsigned after --no-sign. The line said merge
-    --no-ff whatever the repo kept to (#471, the audit of 1.8)."""
+    --no-ff whatever the repo kept to (#471, the audit of 1.8). With ``into`` (the branch it
+    belongs on) not checked out, or HEAD detached, it switches there first: the line printed
+    after "has feature-x out, not main" merged into feature-x, or onto a detached HEAD the next
+    checkout dropped (#1154, 2026-11-24)."""
     g, nosign = f"git -C {shlex.quote(str(repo))}", "" if sign else " --no-gpg-sign"
+    switch = f"{g} switch {shlex.quote(into)} && " if into and current_branch(repo) != into else ""
     if how == "ff":
-        return f"{g} merge --ff-only {branch}"
+        return f"{switch}{g} merge --ff-only {branch}"
     if how == "squash":
-        return f"{g} merge --squash --ff {branch} && {g} commit{nosign} -C {branch}"
-    return f"{g} merge --no-ff{nosign} {branch}"
+        return f"{switch}{g} merge --squash --ff {branch} && {g} commit{nosign} -C {branch}"
+    return f"{switch}{g} merge --no-ff{nosign} {branch}"
 
 
 def jj_merge(repo: Path, branch: str) -> str:

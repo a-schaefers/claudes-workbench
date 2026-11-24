@@ -2,6 +2,10 @@
 """Stands in for `opencode run --format json` in tests. FAKE_SCENARIO picks the behaviour:
 
   ok     write answer.txt = "42", say so
+  patch  as ok, and lib/helper.py too, in one `patch` call (a GPT model's in 2.3.2: no edit or
+         write): input `patchText` only, the files in `state.metadata.files[].file` (#1148)
+  stay   as ok, then stays open for an hour, its output open and silent: the agent's turn over
+         (reason stop) and OpenCode not exiting (#1160)
   fix    first round writes "41" (wrong); a continued session (--session) writes "42"
   loop   run the same failing command over and over (the stuck detector should stop it)
   hang   print one event, then go silent (the silence timeout should stop it)
@@ -14,11 +18,14 @@
   fill   writes "41", then a step that fills 76% of a 32K window (6K of it reasoning), then
          works on for an hour; a fresh session handed the task behaves like ok
   read   reads, a step that fills 76% before any change, then writes "42" like ok
+  donefull  writes "42", a step at 3K, then its last step (reason stop) at 20.2K of a 32K window
+         (61%), past fresh_at only as its turn ends (#1151); a fresh session behaves like ok
   compact  writes "41", a step at 52% of a 32K window, then one at 15%: OpenCode compacted it
          between them, which `run --format json` doesn't print (#774); then works on for an
          hour; a fresh session handed the task behaves like ok. FAKE_COMPACT_READ: it reads
          before writing, its first step at 50%. FAKE_COMPACT_BURST: its step before is at 30%,
-         then three reads whose 16 KB outputs (`state.output`) take it past the point (#1086)
+         then three reads whose 16 KB outputs (`state.output`) take it past the point (#1086).
+         FAKE_COMPACT_DONE: it writes "42" and its step at 15% ends its turn (reason stop, #1151)
   floor  reads 48% of its window before its first change, then fills to 76%, then writes "42"
   refill every session changes a file, then fills 76% and works on for an hour
   explore  FAKE_READS (41) reads of different files, each a small step, then 2 s (the runner
@@ -448,12 +455,14 @@ def api_request() -> None:
     fail("provider.rate-limit", "too many retries", 429)
 
 
-def tool(name, inp, status="completed", error=None, output=None):
+def tool(name, inp, status="completed", error=None, output=None, metadata=None):
     state = {"status": status, "input": inp}
     if error:
         state["error"] = error
     if output is not None:  # `part.state.output`, the result as the model gets it (2.3.2)
         state["output"] = output
+    if metadata is not None:  # `part.state.metadata`: a patch's `files` (2.3.2, #1148)
+        state["metadata"] = metadata
     emit("tool_use", tool=name, state=state)
 
 
@@ -573,7 +582,7 @@ if scenario == "http" and args and args[0] == "run":  # a model request through 
     scenario = "ok"
 if scenario == "slow":
     scenario = "ok" if "--session" in args else "hang"
-if (scenario in ("fill", "compact") or scenario == "compactfail" and not os.environ.get("FAKE_REFAIL")) \
+if (scenario in ("fill", "compact", "donefull") or scenario == "compactfail" and not os.environ.get("FAKE_REFAIL")) \
         and "picking this task up in a fresh session" in args[-1]:
     scenario = "ok"
 if scenario in ("crash", "crashtalk") and os.path.exists(os.environ.get("FAKE_DOWN", "") + ".crashed"):
@@ -635,13 +644,30 @@ if scenario in ("ratelimit", "down") and os.environ.get("FAKE_RETRY_OK"):
 if scenario == "api":  # one request through a keyhole, then as ok (#1020)
     api_request()
     scenario = "ok"
-if scenario in ("ok", "fix"):
+if scenario in ("ok", "fix", "stay"):
     value = "41" if scenario == "fix" and "--session" not in args else "42"
     with open("answer.txt", "w") as fh:
         fh.write(value + "\n")
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": value})
     emit("text", text=f"Wrote answer.txt = {value}."
          + (f"\nLesson: {os.environ['FAKE_LESSON']}" if os.environ.get("FAKE_LESSON") else ""))
+    finish()
+    if scenario == "stay":
+        time.sleep(3600)
+elif scenario == "patch":  # #1148: a GPT model's one `patch` call, as OpenCode 2.3.2 prints it
+    os.makedirs("lib", exist_ok=True)
+    with open(os.path.join("lib", "helper.py"), "w") as fh:
+        fh.write("ANSWER = 42\n")
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("patch", {"patchText": "*** Begin Patch\n*** Add File: lib/helper.py\n+ANSWER = 42\n"
+                                "*** Add File: answer.txt\n+42\n*** End Patch"},
+         output="Success. Updated the following files:\nA lib/helper.py\nA answer.txt",
+         metadata={"files": [{"file": "lib/helper.py", "status": "added", "additions": 1,
+                              "deletions": 0, "patch": "@@ -0,0 +1 @@\n+ANSWER = 42"},
+                             {"file": "answer.txt", "status": "added", "additions": 1,
+                              "deletions": 0, "patch": "@@ -0,0 +1 @@\n+42"}]})
+    emit("text", text="Wrote lib/helper.py and answer.txt = 42.")
     finish()
 elif scenario == "loop":
     for _ in range(10):
@@ -725,6 +751,15 @@ elif scenario == "read":
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
     emit("text", text="Wrote answer.txt = 42.")
     finish()
+elif scenario == "donefull":  # #1151: done, its last step past fresh_at
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
+                                                      "cache": {"read": 900}})  # 3000
+    emit("text", text="Done: answer.txt = 42.")
+    emit("step_finish", reason="stop", tokens={"input": 2000, "output": 200,
+                                                "cache": {"read": 18000}})  # 20200: 61%
 elif scenario == "explore":  # #1087: many small reads before the first edit
     for i in range(int(os.environ.get("FAKE_READS", 41))):
         tool("read", {"filePath": os.path.abspath(f"src/f{i}.py")})
@@ -788,9 +823,16 @@ elif scenario == "compact":  # #774: a tool result past the margin compacted it 
         emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
                                                           "cache": {"read": 14900}})  # 17000: 52%
     tool("read", {"filePath": os.path.abspath("answer.txt")})
-    emit("step_finish", reason="tool-calls", tokens={"input": 4000, "output": 900,
-                                                      "cache": {"read": 0}})  # 4900: 15%
-    if os.environ.get("FAKE_COMPACT_READ"):  # a session that carries on: it finishes the work
+    if os.environ.get("FAKE_COMPACT_DONE"):  # #1151: the compacted step is its turn's last
+        with open("answer.txt", "w") as fh:
+            fh.write("42\n")
+        tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
+        emit("text", text="Done: answer.txt = 42.")
+    emit("step_finish", reason="stop" if os.environ.get("FAKE_COMPACT_DONE") else "tool-calls",
+         tokens={"input": 4000, "output": 900, "cache": {"read": 0}})  # 4900: 15%
+    if os.environ.get("FAKE_COMPACT_DONE"):
+        pass  # its turn is over: the run ends
+    elif os.environ.get("FAKE_COMPACT_READ"):  # a session that carries on: it finishes the work
         with open("answer.txt", "w") as fh:
             fh.write("42\n")
         tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
