@@ -5161,7 +5161,10 @@ class Context(Base):
         t = store.Task("t-1169")
         with mock.patch.object(cli, "spawn_runner"):
             run_wb("feedback", "t-1169", "--text", "1. RENAME foo TO bar in x.py")
-            t.set_status(phase="stuck", infra="provider")      # round 2 stopped by its provider
+            # round 2 reached the agent (drive's `round` event), then its provider stopped it: a
+            # round never sent runs again with the carry-on after its own prompt instead (#1180)
+            t.event({"ts": store.now(), "round": 2, "kind": "round", "text": "started"})
+            t.set_status(phase="stuck", infra="provider")
             self.assertIn("no review round is counted", run_wb("feedback", "t-1169", "--text", "carry on"))
         asks = runner.round_asks(t, 3)
         self.assertEqual(len(asks), 2, asks)
@@ -19112,7 +19115,11 @@ class UpdatedUnderATask(Base):
                 with mock.patch.object(cli, "spawn_runner"):
                     out = run_wb("feedback", name, "--text", "carry on")
                 self.assertIn("no review round is counted", out)
-                self.assertEqual((task.status["reviews"], task.status["round_for"]), (0, "resume"))
+                # the auto-fix round the stop came before never reached the agent: it runs again
+                # as itself, the carry-on after its prompt (#1180), so round_for stays `fix`
+                self.assertIn(f"({cause})", out)
+                self.assertEqual((task.status["reviews"], task.status["round"], task.status["round_for"]),
+                                 (0, 2, "fix"))
                 runner.drive(task)
                 self.assertEqual(task.status["phase"], "review", task.status.get("last"))
                 with mock.patch.object(cli, "spawn_runner"):
