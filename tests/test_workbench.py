@@ -5995,6 +5995,40 @@ class Context(Base):
         self.assertEqual(transcript._user_message(runner.RERUN, False)[0],
                          "workbench → agent · the round again, after its provider or server stopped it")
 
+    def test_a_note_sent_while_the_server_was_down_reaches_the_round_run_again_after_rerun(self):
+        # the review of #1235 (2026-11-24): a note `wb steer` queued while the round waited to
+        # run again was folded into prompt.md by _early_notes and counted delivered, then RERUN
+        # replaced prompt.md whole: the agent never got it. It goes after RERUN, once
+        self.start("t-n1235", "ok", "--test", TEST_CMD, "--no-self-review")
+        wait_phase("t-n1235", {"review"})
+        with mock.patch.object(cli, "spawn_runner"):
+            run_wb("feedback", "t-n1235", "--message", str(self.feedback))
+        task = store.Task("t-n1235")
+        os.environ["FAKE_EXIT"] = "1"                 # killed after the model's first words
+        before = len(self.runs())
+        gone = lambda m: "FAKE_EXIT" in os.environ and len(self.runs()) > before  # noqa: E731
+
+        def up(t, m):                                 # back, and a note came in meanwhile
+            os.environ.pop("FAKE_EXIT")
+            store.append_jsonl(t.dir / "steer.jsonl", {"ts": store.now(), "text": "NOTE-1235: also say 42."})
+            return m
+        try:
+            with mock.patch.object(runner, "_down", side_effect=gone), \
+                    mock.patch.object(runner, "_stopped", return_value=False), \
+                    mock.patch.object(runner, "_wait_up", side_effect=up):
+                runner.drive(task)
+        finally:
+            runner._end_agent(task)
+            task.set_status(pid=None)
+            runner.CURRENT.clear()
+        feedback, again = self.runs()[-2:]
+        self.assertEqual((feedback["session"], again["session"]), (True, True))
+        self.assertNotIn("NOTE-1235", feedback["prompt"])
+        self.assertTrue(again["prompt"].startswith(runner.RERUN + "\n\n"), again["prompt"])
+        self.assertEqual(again["prompt"].count("NOTE-1235: also say 42."), 1, again["prompt"])
+        self.assertNotIn("Add a trailing comment line.", again["prompt"])   # the round's, not again
+        self.assertEqual(task.status.get("steer_taken"), 1)
+
     def test_a_fresh_round_run_again_after_its_server_died_is_handed_over_once(self):
         # #780 (the second 2026-11-21 audit): a round that began fresh, revived before its first
         # event, ran _start_fresh again: the handoff went over instructions.md and was wrapped in
@@ -33868,6 +33902,24 @@ class RateLimits(Base):
         self.assertIn('wb feedback t-only --text "carry on" resumes it once deepseek allows; or '
                       'wb route significant gpu (the user\'s yes) for the next tasks', n["text"])
         self.assertIsNone(runner.read_bound(task, 1, {"guard": "rate_limited", "waited": 900}))
+
+    def test_a_revived_rounds_new_session_still_hears_the_skills(self):
+        # the review of #1235 (2026-11-24): _run_again dropped the unanswered try's session but
+        # kept the skills_told that try set, so the new session got skills_note's empty change
+        # and never heard the skills Claude picked; dropped, it hears them again, as _start_fresh's
+        run_wb("skill", "add", "alpha", "--from", str(write_skill(Path(self.tmp.name) / "drafts" / "alpha",
+               "alpha", "Use when ALPHA.", "Steps.\n")), "-m", "a")
+        os.environ.update(FAKE_RETRIES="200", FAKE_RETRY_EVERY="0.5",
+                          FAKE_RUNS=str(Path(self.tmp.name) / "runs.jsonl"))
+        task = self.api_task("t-sk1235", "ratelimit", "--silence-timeout", "2", "--think-timeout", "2",
+                             "--skill", "alpha")
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"v": 1, "roles": {
+            "significant": {"via": "api", "api": task.spec["model"]}}}))
+        with mock.patch.object(runner, "RATE_WAIT_S", 3):
+            runner.drive(task)
+        rows = [json.loads(x) for x in Path(os.environ["FAKE_RUNS"]).read_text().splitlines()]
+        self.assertEqual([(r["session"], "Claude picked these skills" in r["prompt"]) for r in rows],
+                         [(False, True)] * 2, rows)
 
     def test_a_providers_stop_is_not_held_against_the_steps_size(self):
         from workbench import models, results, router

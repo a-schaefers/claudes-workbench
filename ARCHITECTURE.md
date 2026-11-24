@@ -1138,9 +1138,11 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   (#657), `_run_again`: OpenCode keeps a failed run's message in its session, so prompt.md sent
   again with `--session` put the spec and protocol there once a try, and a night of 402
   rechecks billed dozens of copies at the top-up (#1235). A session the try began (`run_round`'s
-  `new_session`) with no answer is dropped (status `session` none: the round begins anew, a
-  handover's through `_start_fresh` again, #780); one holding more gets `RERUN` in prompt.md's
-  place (status `unanswered`); a try that printed no event (`reached` false) sends prompt.md. A second stop, or a quota, key, setup or refused stop, ends it `stuck` with `cause` `provider`, `infra`
+  `new_session`) with no answer is dropped (status `session` and `skills_told` none: the round
+  begins anew, its new session told the skills, a handover's through `_start_fresh` again, #780);
+  one holding more gets `RERUN` in prompt.md's place, then what prompt.md gained since the try
+  (a note `_early_notes` folded in while it waited), and a skills change (status `unanswered`;
+  the review of #1235: RERUN alone lost a note counted delivered); a try that printed no event (`reached` false) sends prompt.md. A second stop, or a quota, key, setup or refused stop, ends it `stuck` with `cause` `provider`, `infra`
   `provider` (a bench replay scores `error`), and `provider_remedy` under the STOPPED line (`wb
   feedback <task> --text "carry on"` once the provider allows, a round that counts no review, #1153, and `routes.off_api`'s command, `wb route <role> gpu (the user's
   yes)` or under Agents API `wb route all gpu`, when the task has a role and its next tasks aren't off API already, #1218; top up or wait for the plan's reset; /connect for a refused
@@ -2538,7 +2540,7 @@ carry on." and, if the agent runs, queues it as a `--now` note: rules are read w
 **Notes.** `wb steer <task> --text "…"` (queued, running, testing or asking, live runner) is
 delivered when the current run ends, before the tests. `--now` wakes the runner (`_steer_bell`),
 stops the agent and starts the next round with the note first, marked overriding. During tests it
-waits; while waiting for the GPU it rides the round's prompt (`runner._early_notes`), or after the
+waits; while waiting for the GPU (or a provider or server, to run the round again: after `RERUN`) it rides the round's prompt (`runner._early_notes`), or after the
 tests under `--unload-for-tests`; `cli._when_delivered` says which (an API task's: a provider slot, #1112). An undelivered note goes to the
 stuck report; `wb resume` carries it, `wb feedback`/`wb next` drop it and say so.
 
@@ -6418,7 +6420,7 @@ off), not `wb start`'s.
 | `closing` | `wb accept` after its commit: `{commit, step, merge, merge_into, merge_as, sign, merge_from?, merged_head?}`, with `tip`; `sign` false keeps a retry's merge unsigned; a retry uses that object and destination (`gitops.squashed` from `merge_from`), a recovered refusal still exits 5 (#246, #432); while it stands, discard, feedback, next, resume, takeover refuse (`cli._accepting`) |
 | `grants_kept` | `{allow, paths}` at close, for `context.grants` afterwards (`wb bench add`) |
 | `session`, `sessions`, `session_mark`, `session_floor` | the session; earlier ones; `gitops.mark` at its start; its prompt (input and cache) at its first change |
-| `unanswered` | `{round, session}`: that session holds the round's message already, so its next run sends `runner.RERUN`, not prompt.md (`_run_again`, #1235); the next `run_round` clears it |
+| `unanswered` | `{round, session, at}`: that session holds the round's message already, so its next run sends `runner.RERUN`, not prompt.md, then prompt.md past `at` (its length as sent, stripped: notes folded in since) (`_run_again`, #1235); the next `run_round` clears it |
 | `claude_rules_gone` | the round whose layer deleted an earlier wb's copy of Claude's global files (`runner.write_config_layer`, #1119): that round's report adds `runner.RULES_GONE` |
 | `opencode_home` | `true` once a round ran in the task's own OpenCode home (`run_round`, #1010); a `session` without it began in the user's store, and the next round starts fresh (`fresh_reason`: `OLD_STORE`, the old session's last words exported from there) |
 | `context` | one-round instruction: `fresh`, `keep`, `full` |

@@ -1670,8 +1670,12 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     note = skills_note(task, n)
     if (again := st.get("unanswered")) is not None:  # one run's: _run_again sets it for the next
         task.set_status(unanswered=None)
-        if not new_session and again == {"round": n, "session": st["session"]}:
-            note, prompt = "", RERUN  # the session holds the round's message already (#1235)
+        if not new_session and (again.get("round"), again.get("session")) == (n, st["session"]):
+            # the session holds the round's message already (#1235), but not what came after
+            # it: a note _early_notes folded in since (or a skills change, `note`) went nowhere
+            # while counted delivered (the review of #1235, 2026-11-24)
+            since = prompt[int(again.get("at") or len(prompt)):].strip()
+            prompt = RERUN + ("\n\n" + since if since else "")
     if len((note + prompt).encode()) > PROMPT_ARG_MAX:
         prompt = (f"Your instructions for this round are long, so they are in the file "
                   f"{task.round_dir(n) / 'prompt.md'}. Read all of it first (in parts if it is "
@@ -4717,15 +4721,19 @@ def _run_again(task: store.Task, n: int, rnd: dict) -> None:
     revive, a server's, a 402 recheck's, #1216): never its prompt.md into a session that holds it
     already (#1235). A session this run began that nothing answered holds that message alone: it
     is dropped, and the round begins anew. One that holds more (earlier rounds, work done) is
-    sent RERUN instead (status `unanswered`, for run_round). A run that printed no event (none
-    shows OpenCode had the session) sends prompt.md again, as before."""
+    sent RERUN instead (status `unanswered`, for run_round), and after it what prompt.md gained
+    since (a note _early_notes folded in). A run that printed no event (none shows OpenCode had
+    the session) sends prompt.md again, as before."""
     sid = task.status.get("session")
     if not sid or not rnd.get("reached"):
         return
     if rnd.get("new_session") and not rnd.get("answered"):
-        task.set_status(session=None)
-    else:
-        task.set_status(unanswered={"round": n, "session": sid})
+        # a new session hears the skills again, as _start_fresh's: skills_told kept from the
+        # dropped one left the next session without them (the review of #1235, 2026-11-24)
+        task.set_status(session=None, skills_told=None)
+    else:  # `at`: prompt.md as sent (add_to_round strips it before appending), for what follows
+        sent = task.round_dir(n).joinpath("prompt.md").read_text().rstrip()
+        task.set_status(unanswered={"round": n, "session": sid, "at": len(sent)})
 
 
 def _rejoin(task: store.Task, lease) -> None:
