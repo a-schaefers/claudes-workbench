@@ -209,6 +209,11 @@
     return [...state.messages, ...asks].sort((x, y) => x.ts - y.ts).concat(pending)
   }
 
+  // A reply Claude wrote to agents alone (`to` without "user", #1042) is no news for the user, as
+  // the server keeps it from their pushes (chat._for_user): it read as a reply to them, counted
+  // in the tab's unread, with no addressee (#1128, 2026-11-23)
+  const forUser = m => !Array.isArray(m.to) || !m.to.length || m.to.includes('user')
+
   function metaFor(m) {
     const meta = document.createElement('div'); meta.className = 'meta'
     if (m.ask) {
@@ -228,7 +233,8 @@
     }
     if (m.role === 'agent') return agentMeta(meta, m)
     if (m.from === 'claude') {
-      meta.append(span('', 'Claude · ' + clock(m.ts) + ' · '))
+      if (forUser(m)) meta.append(span('', 'Claude · ' + clock(m.ts) + ' · '))
+      else meta.append(span('', 'Claude to '), span('agent-name', m.to.join(', ')), span('', ' · ' + clock(m.ts) + ' · '))
       const c = document.createElement('button'); c.textContent = 'copy'
       c.onclick = async () => {
         c.textContent = await copyText(m.text) ? 'copied' : 'copy failed'
@@ -289,15 +295,28 @@
   }
 
   // The open tasks in one line over the thread (chat.open_tasks, #1016): which model each runs on,
-  // GPU or API and whose, as the pane's row says it. A server without `tasks` (an older wb): none
-  const ACTIVE = ['queued', 'running', 'testing', 'asking']
+  // GPU or API and whose, as the pane's row says it. A server without `tasks` (an older wb): none.
+  // At most TASKS_SHOWN named, the running first, then those waiting on Claude, then the queued,
+  // with the counts said apart: a 25-task backlog was 22 lines of "Running: …", the queued read
+  // as running, and the thread a sliver on a phone (#1097, 2026-11-23). `asking` waits on Claude
+  // (store.NEEDS_CLAUDE): counted running, a task blocked on its question told the away user that
+  // nothing needed Claude (the #1097 review, 2026-11-23)
+  const RUNNING = ['running', 'testing'], TASKS_SHOWN = 3
   function tasksLine(tasks) {
     if (!Array.isArray(tasks) || !tasks.length) return ''
-    return 'Running: ' + tasks.map(t => {
+    const rank = t => RUNNING.includes(t.phase) ? 0 : t.phase === 'queued' ? 2 : 1
+    const all = [...tasks].sort((a, b) => rank(a) - rank(b))
+    const named = all.slice(0, TASKS_SHOWN).map(t => {
       const short = String(t.model || '').split('/').pop()
       const on = t.via === 'api' ? `API ${short}${t.provider_name ? ` (${t.provider_name})` : ''}` : `GPU ${short}`
-      return `${t.name}${ACTIVE.includes(t.phase) ? '' : ` (${t.phase})`} · ${on}`
-    }).join('; ')
+      return `${t.name}${RUNNING.includes(t.phase) ? '' : ` (${t.phase})`} · ${on}`
+    })
+    if (all.length > TASKS_SHOWN) named.push(`+${all.length - TASKS_SHOWN} more`)
+    const n = r => all.filter(t => rank(t) === r).length
+    const counts = [[n(0), 'running'], [n(1), 'waiting on Claude'], [n(2), 'queued']].filter(([c]) => c)
+    const head = counts.length === 1 && n(0) && all.length <= TASKS_SHOWN ? 'Running'
+      : counts.map(([c, what]) => `${c} ${what}`).join(', ')
+    return head + ': ' + named.join('; ')
   }
   function drawTasks() {
     const el = $('tasks'), text = tasksLine(state.tasks)
@@ -328,7 +347,7 @@
         nodes.set(w.key, el)
       }
       if (w.m) {
-        el.className = `row ${w.m.role === 'agent' ? 'agent' : w.m.from}${w.same ? ' same' : ''}${w.m.local ? ' pending' : ''}${w.m.error ? ' failed' : ''}${w.m.ask && w.m.ask.answer ? ' done' : ''}`
+        el.className = `row ${w.m.role === 'agent' ? 'agent' : w.m.from}${w.m.from === 'claude' && !forUser(w.m) ? ' to-agent' : ''}${w.same ? ' same' : ''}${w.m.local ? ' pending' : ''}${w.m.error ? ' failed' : ''}${w.m.ask && w.m.ask.answer ? ' done' : ''}`
         el.querySelector('.meta').replaceWith(metaFor(w.m))
       }
       if (anchor.nextSibling !== el) anchor.after(el)
@@ -560,7 +579,7 @@
     if (m.files && m.files.length) row.append(makeFiles(m.files))
     if (m.from === 'user' || m.role === 'agent') b.textContent = m.text
     else if (seen.has(m.id) || firstVisit || document.hidden || reduced.matches) {
-      if (!seen.has(m.id) && !firstVisit && document.hidden) { unread++; document.title = `(${unread}) Workbench` }
+      if (!seen.has(m.id) && !firstVisit && document.hidden && forUser(m)) { unread++; document.title = `(${unread}) Workbench` }
       rich(b, m.text); seen.add(m.id); save(K.seen, [...seen].slice(-500))
     } else {
       b.classList.add('flowing'); flows.set(m.id, { text: m.text, shown: 0, el: b })

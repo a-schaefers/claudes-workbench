@@ -52,8 +52,11 @@ does the whole flow below with the standard library alone.
   `[web chat] …`, and treats it as a teammate's request. Anything that needs the user's yes
   (spending, pushing, opening a pull request, deleting) waits for the user; Claude says so in
   its reply.
-- **Agent access** is on whenever the chat is on and at least one agent token exists. There is no
-  other switch.
+- **Agent access** is on while the chat's server runs and at least one agent token exists. There
+  is no other switch. With the chat off (`wb chat off`) no session listens: `/api/health` says
+  `listening: false`, and a message sent waits, unread, until a session listens with the chat on,
+  or is never passed on past 6 hours. `wb chat off` stops a server it started; one a service keeps
+  up runs on until the service is stopped.
 - **Transport:** HTTP/1.0, one request per connection, no CORS. A connection that sends nothing
   for 30 s is closed. Every response has `Cache-Control: no-store` (but `/api/file`) and a
   `X-Workbench-Chat` header naming whose chat it is.
@@ -112,7 +115,7 @@ curl -s "${auth[@]}" "$CLAUDE_WB_URL/api/wait?after=1795436900301-a1b2c3&timeout
 An agent's token reads only its own conversation:
 - **`/api/state` and `/api/stream`** carry `{api, messages, listener, uploads, expire, now}`, and
   `messages` holds only its own messages and Claude's rows whose `to` names it. No `asks`, `prefs`,
-  `push`, `savings` or `build`: those are the user's. `/api/send`'s `state` is the same view.
+  `push`, `savings`, `build` or `tasks`: those are the user's. `/api/send`'s `state` is the same view.
 - **`/api/wait`** on an id that is neither its own message nor a reply to it is `404 {"error":
   "no such message"}`.
 - **Files:** `GET /api/upload/<id>` and `/api/file/<id>` answer only for a file it uploaded or one
@@ -140,12 +143,16 @@ The whole state the page draws (an agent's token gets its own view: *An agent's 
 - `asks`: Claude Code's dialogs for the user (while they are away, or while Claude works on an
   agent's request): the newest 20 and every open one (*Rows*). A
   settled plan's text is cut at 1,200 characters with `detail.cut` (the whole is `/api/ask/<id>`).
-- `listener`: the listening session `{session, cwd, pid, start, machine?, busy}`, or null.
+- `listener`: the listening session `{session, cwd, pid, start, machine?, parent?, busy}`, or null.
 - `prefs`: `{away: "ask"|"allow"}`.
 - `push`: `{key: the VAPID public key or null, test: the last test push's time or null}`.
-- `savings`: the week's `wb savings` totals and `score`.
+- `savings`: the week's `wb savings` totals and `score`, and `api`: the week's API tasks apart
+  (`tasks`, `cost` in dollars, `unknown`, `plan`, `trials`, `claude`, `self_est`, `by_provider`,
+  `by_day`, and `names`: each provider's name), never part of the score.
 - `uploads`: `{file, message, files}`: bytes per file, bytes per message, files per message.
 - `build`: the page files' stamp (a page whose stamp differs reloads).
+- `tasks`: the open tasks, for the strip over the thread: `[{name, phase, model, via: "gpu"|"api",
+  provider_name}]` (none accepted, discarded or parked by `wb stop --all`).
 - `expire`: seconds a message waits before it is never passed on (21600).
 - `now`: the server's time (seconds).
 
@@ -174,6 +181,10 @@ A long poll for Claude's replies after the message `after` (a message's or a rep
 - Errors: 400 for a bad `after`, `timeout` or `until`; `404 {"error": "no such message"}` for an
   id not in the thread's recent part (the last 4 MiB), or, for an agent, not in its view; `503`
   when 16 waits are open already.
+- A wait can be cut: the server restarts itself on an update (a reset connection, or 502 to 504
+  from a proxy in front meanwhile), and `503` passes. Wait again, after a short pause, with the
+  same `after`: nothing was lost (`ask_claude.py` does for up to two minutes in a row, then exits
+  2 naming `--after`: a chat down that long is off, asleep or out of reach, not restarting).
 
 ### `POST /api/send`
 JSON body, `Content-Type: application/json` (else 415 `json only`), at most 32 KB (else 413 `too
@@ -266,11 +277,13 @@ A **message** (`messages`, `replies`, `message`):
 - On a message to Claude: `cid?`, `files?: [{id, name, size, type, path}]`, `about?`, and in the
   state `received: {id, ts, by, how: "now"|"queued"} | null`, `expired?`.
 - On Claude's reply: `re?: [message ids]` (what it answers: `wb chat reply --to`, else the
-  messages Claude was given in that turn, the user's alone when the user's are among them),
+  messages Claude was given in that turn, the user's alone when the user's are among them; from
+  another Claude Code session than the listening one, none: it is the user's),
   `to?: ["user" | agent names]` (whose those messages are, or `"user"` for a question to the
-  user, `wb chat reply --to user`; absent means the user's), `shots?`, `audio?`, and `session?`,
-  `claude_pid?`, `claude_start?`, `claude_machine?` (the Claude Code session that wrote it, so the
-  user's answer goes back to that session: `wb chat reply` writes them).
+  user, `wb chat reply --to user`; absent means the user's), `shots?`, `audio?`, `claude_pid?`
+  (the Claude Code process that wrote it, on every Claude row: a reply, a screenshot, a listen),
+  and on a `wb chat reply` from Claude Code `session?`, `claude_start?`, `claude_machine?` beside
+  it (the Claude Code session that wrote it, so the user's answer goes back to that session).
 
 An **ask** (`asks`, `/api/ask/<id>`): `{id: "ask-…", ts, tool, text, kind:
 "permission"|"plan"|"question", detail?, for?: [agent names], answer: null|"allow"|"deny"|"expired",

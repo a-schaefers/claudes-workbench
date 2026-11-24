@@ -17157,6 +17157,22 @@ class Shot(Base):
         self.assertEqual(m["shots"]["base"]["rev"], store.Task("t").spec["base"])
         self.assertIn("Reply here to send feedback on it.", m["text"])
 
+    def test_a_pair_sent_to_the_web_chat_names_the_claude_code_that_sent_it(self):
+        # the #1129 review: only `wb chat reply` stamped `claude_pid`, so a screenshot another
+        # delegating session posted while the user was away read, to the mod, as the listener's
+        # own answer and settled its owed reply (#767): the follow-up never went
+        with mock.patch.dict(os.environ, {"CLAUDE_PID": "9100"}):
+            run_wb("shot", "t", "--capture", self.CAPTURE, "--chat")
+        from workbench import chat
+        self.assertEqual(chat.thread()[-1]["claude_pid"], 9100)
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PID"}
+        with mock.patch.dict(os.environ, env, clear=True):       # outside Claude Code: none
+            chat.send("a note", "claude")
+            self.assertNotIn("claude_pid", chat.thread()[-1])
+            with mock.patch.dict(os.environ, {"CLAUDE_PID": "9100"}):
+                chat.send("hi", "user")                               # never on another's row
+        self.assertNotIn("claude_pid", chat.thread()[-1])
+
     def test_a_new_binary_left_out_of_the_candidate_is_said_in_the_report_and_the_chat(self):
         # #836: a new 2 MB photo wasn't in the candidate's checkout, so its picture showed a
         # broken image, and neither the report, shots.json nor the chat's message said why
@@ -23813,6 +23829,94 @@ class WebChat(Base):
         self.assertEqual(r.stdout.strip(), "Done: fix the parser in ~/src/app (notes.txt).")
         self.assertIn("[done: follow up with ask_claude.py --after ", r.stderr)
 
+    def test_ask_claude_asks_a_wait_the_server_cut_again_and_names_after_only_at_the_deadline(self):
+        # #1107: the server re-execs itself on a code change (a `wb update`), and a proxy in front
+        # answers 502 meanwhile; the client ended at once, exit 1, with a bare error and no
+        # `--after` id, so an agent could send its request again and pay for the work twice
+        import importlib.util
+        script = Path(__file__).resolve().parent.parent / "skill/agents/claude-workbench/scripts/ask_claude.py"
+        spec = importlib.util.spec_from_file_location("ask_claude_1107", script)
+        ac = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ac)
+        hits, answers = [], []
+
+        class Stub(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                hits.append(self.path)
+                what = answers.pop(0) if answers else "drop"
+                if what == "drop":                       # the server going away mid-wait
+                    return
+                code, body = (502, {"error": "bad gateway"}) if what == "502" else (200, {
+                    "replies": [{"id": "r1", "text": "Done: pushed."}], "done": True, "listener": {}})
+                data = json.dumps(body).encode()
+                self.send_response(code)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Stub)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        env = {"CLAUDE_WB_URL": f"http://127.0.0.1:{srv.server_address[1]}", "CLAUDE_WB_TOKEN": "wba-x"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(ac, "RETRY_FIRST", 0.05):
+            answers[:] = ["drop", "502", "reply"]
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = ac.follow("m1", "done", time.monotonic() + 20)
+            self.assertEqual((rc, len(hits)), (0, 3), err.getvalue())
+            self.assertEqual(out.getvalue().strip(), "Done: pushed.")
+            hits.clear()                                 # down past the deadline: then --after
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                rc = ac.follow("m1", "done", time.monotonic() + 1)
+        self.assertEqual(rc, 1)
+        self.assertGreater(len(hits), 1)
+        self.assertIn("ask_claude.py --after m1 waits on", err.getvalue())
+
+    def test_ask_claude_gives_up_on_a_chat_that_stays_unreachable_long_before_its_deadline(self):
+        # the #1107 review: retrying a cut wait to the deadline (an hour by default) also covered a
+        # chat gone for good (`wb chat off`, the machine asleep, the tailnet down): the agent sat an
+        # hour where it got exit 1 at once before; past OUTAGE_MOST in a row it is exit 2 and --after
+        import importlib.util
+        script = Path(__file__).resolve().parent.parent / "skill/agents/claude-workbench/scripts/ask_claude.py"
+        spec = importlib.util.spec_from_file_location("ask_claude_1107b", script)
+        ac = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ac)
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        port = srv.getsockname()[1]
+        srv.close()                                      # nothing listens there: refused, every time
+        env = {"CLAUDE_WB_URL": f"http://127.0.0.1:{port}", "CLAUDE_WB_TOKEN": "wba-x"}
+        err = io.StringIO()
+        began = time.monotonic()
+        with mock.patch.dict(os.environ, env), mock.patch.object(ac, "RETRY_FIRST", 0.05), \
+                mock.patch.object(ac, "RETRY_MOST", 0.1), mock.patch.object(ac, "OUTAGE_MOST", 0.5), \
+                redirect_stdout(io.StringIO()), redirect_stderr(err):
+            rc = ac.follow("m1", "done", time.monotonic() + 30)  # far past OUTAGE_MOST
+        self.assertEqual(rc, 2, err.getvalue())
+        self.assertLess(time.monotonic() - began, 10)
+        self.assertIn("the chat is unreachable", err.getvalue())
+        self.assertIn("ask_claude.py --after m1 waits on later", err.getvalue())
+
+    def test_the_chats_task_strip_leaves_out_a_task_wb_stop_all_parked(self):
+        # #1097: open_tasks listed every task not accepted or discarded, so a review the quit
+        # parked (out of `wb status` and the status line, #541) stayed on the phone's strip for good
+        def task(name, phase, **status):
+            t = store.Task(name)
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"name": name, "model": "m", "created_at": store.now()})
+            t.set_status(phase=phase, round=1, **status)
+        task("t-parked", "review", parked=store.now())
+        task("t-review", "review")
+        task("t-queued", "queued")
+        task("t-done", "accepted")
+        self.assertEqual(sorted(t["name"] for t in self.chat.open_tasks()), ["t-queued", "t-review"])
+        self.assertEqual(sorted(t["name"] for t in self.chat.snapshot()["tasks"]), ["t-queued", "t-review"])
+
     # ---- the #1042 review ----
 
     def _held_wait(self, path, token):
@@ -23904,6 +24008,30 @@ class WebChat(Base):
         run_wb("chat", "ack", m2, "--by", "s0")                            # not the listener's
         run_wb("chat", "reply", "--text", "Your task is in review.")
         self.assertNotIn("to", self.chat.thread()[-1])
+
+    def test_another_sessions_plain_reply_goes_to_the_user_never_onto_the_listeners_message(self):
+        # #1129: a second delegating session, told to report through `wb chat reply` while the
+        # user is away, threaded its report onto the message the listener was answering: sent to
+        # that agent alone, pushed to no phone. listener.json's `parent` is the listening Claude Code
+        tok = self._agent()
+        self._listening()
+        lst = self.chat.chat_dir() / "listener.json"
+        store.write_json(lst, {**store.read_json(lst, None), "parent": 9000})
+        mid = self.call("/api/send", {"text": "please summarize"}, token=tok)[1]["message"]["id"]
+        run_wb("chat", "ack", mid, "--by", "s1")                          # the listener took it
+        with mock.patch.dict(os.environ, {"CLAUDE_PID": "9100"}):        # another session
+            run_wb("chat", "reply", "--text", "Task sb1 is ready for review.")
+        r = self.chat.thread()[-1]
+        self.assertEqual((r.get("re"), r.get("to"), r["claude_pid"]), (None, None, 9100))
+        self.assertIn(r["id"], self.chat.news(store.now() + 20))              # the user's, pushed
+        with mock.patch.dict(os.environ, {"CLAUDE_PID": "9000"}):        # the listener's own
+            run_wb("chat", "reply", "--text", "Summary: two tasks.")
+        r = self.chat.thread()[-1]
+        self.assertEqual((r["re"], r["to"], r["claude_pid"]), ([mid], ["my-agent"], 9000))
+        store.write_json(lst, {k: v for k, v in store.read_json(lst, None).items() if k != "parent"})
+        with mock.patch.dict(os.environ, {"CLAUDE_PID": "9100"}):        # an older mod's claim: as before
+            run_wb("chat", "reply", "--text", "Still on it.")
+        self.assertEqual(self.chat.thread()[-1]["re"], [mid])
 
     def test_an_agents_stream_never_pushes_the_users_page_out(self):
         tok, user = self._agent(), self.chat.token()

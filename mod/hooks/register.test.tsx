@@ -3001,6 +3001,54 @@ test('a follow-up the engine dropped is not sent again once Claude answered in t
   expect(followUps()).toHaveLength(1)
 })
 
+test('another session\'s report in the chat leaves a web message owed, and this Claude Code\'s own reply settles it (#1129)', async ($, on) => {
+  // #1129: any `from: claude` row since the message counted as its answer, so a report another
+  // delegating session posted meanwhile kept the #767 follow-up from ever going; the listener's
+  // claim names this Claude Code (`parent`), which `wb chat reply` stamps as `claude_pid`
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [], true, [], false)
+  on('process.spawn', async function* () {     // `wb events`: its parent is this Claude Code, pid 9000
+    yield { stream: 'stdout', text: '{"hello": 4242, "parent": 9000, "parent_start": "77"}\n' }
+    await new Promise(() => {})
+    return { code: 0, signal: null }
+  })
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  const posted: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[0] === 'wb' && e.argv[1] === 'chat' && e.argv[2] === 'reply') posted.push(e.argv)
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  const followUps = () => asked.filter(a => a.includes("hasn't heard back"))
+  const row = (r: Record<string, any>) => {
+    files['/wb/chat/messages.jsonl'] += JSON.stringify({ from: 'claude', ts: 1_800_000_100, ...r }) + '\n'
+  }
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  const turn = async (id: string, during?: () => void) => {
+    await $.turn.start({ text: '', turnId: id })
+    if (id === 't0') await $.tool.call({ tool: 'Bash', command: 'wb start t --spec s.md' })
+    during?.()
+    await $.turn.complete(endTurn(id))
+    await clock.advance(3000)
+  }
+  await turn('t0')                                               // workbench mode: the chat listens
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'Status' }) + '\n'
+  await clock.advance(31_000)
+  expect(asked.some(a => a.includes('[web chat] Status'))).toBe(true)
+  expect(JSON.parse(files['/wb/chat/listener.json']).parent).toBe(9000)
+  await turn('t1', () => row({ id: 'r1', text: 'Task sb1 is ready for review.', claude_pid: 5151 }))  // another session's
+  expect(followUps()).toHaveLength(1)                            // still owed: asked for once
+  await turn('t2', () => row({ id: 'r2', text: 'All quiet.', claude_pid: 9000 }))                    // this one's
+  await turn('t3')
+  expect(followUps()).toHaveLength(1)
+  expect(posted.filter(a => a.some(x => x.includes('answered in the terminal')))).toHaveLength(0)
+})
+
 test('a /loop firing, another plugin\'s prompt or a channel message leaves the user away and the follow-up owed; the user\'s Enter ends it (#835)', async ($, on) => {
   // #835: any prompt that wasn't isMeta counted as the user back at the terminal, so a /loop
   // firing ended away for every session and cancelled the #767 follow-up
