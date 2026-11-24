@@ -2656,9 +2656,10 @@ def _when_delivered(task: store.Task, phase: str, running: str) -> str:
     if phase == "testing":
         return (f"its tests are running (up to {int(task.spec.get('test_timeout') or 900)}s); "
                 "the agent gets it when they end")
-    if phase == "queued":
-        return ("it is waiting for the GPU or its model, before a round or a round's tests; the "
-                "agent gets it when the round starts, or once the tests end")
+    if phase == "queued":  # an API task waits for a provider slot, never the GPU (#1112, 2026-11-23)
+        return (("it is waiting for a provider slot or its setup" if runner.api_task(task) else
+                 "it is waiting for the GPU or its model") + ", before a round or a round's tests; "
+                "the agent gets it when the round starts, or once the tests end")
     return running
 
 

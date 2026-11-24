@@ -2954,7 +2954,8 @@ def _base_check(task: store.Task) -> None:
     report, and a check-in at once when it says the command can't do its job."""
     task.set_status(last="checking the acceptance command on the base")
     r = base_check(task)
-    task.set_status(base_check=r, last="waiting for the GPU")
+    # an API task waits on no GPU: drive's "starting" stood until here (#1112, 2026-11-23)
+    task.set_status(base_check=r, last="waiting for the GPU" if _gpu_side(task) else "starting")
     if r["exit"] == "timeout" and r["limit"] < BASE_CHECK_SECS:  # every round's tests will too
         task.notify("checkin", f"task {task.name}: {base_check_line(r, task)}",
                     round=task.status.get("round", 1))

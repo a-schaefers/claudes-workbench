@@ -29118,6 +29118,31 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.addCleanup(p.stop)
         return m
 
+    def test_an_api_task_never_says_it_waits_for_the_gpu_while_queued(self):
+        # #1112: the base check wrote "waiting for the GPU" for an API task, wb watch printed
+        # "■ waiting for the GPU" under "Waiting for an API slot", the activity row's fallback and
+        # wb steer's queued note said the GPU too; a GPU task's still do
+        self.start("gpu-q", "ok", "--test", TEST_CMD, "--no-base-check")
+        wait_phase("gpu-q", {"review"})
+        self.start_api("api-q", "ok", "--test", TEST_CMD, spawn=False)
+        said = {}
+        for name in ("gpu-q", "api-q"):
+            task = store.Task(name)
+            with mock.patch.object(runner, "base_check", lambda t: {"exit": 0, "limit": 900}):
+                runner._base_check(task)
+            after_check = task.status["last"]
+            task.set_status(phase="queued", last="resumed by the reviewer")   # before the runner's first write
+            out = io.StringIO()
+            transcript.follow(task, once=True, as_json=True, out=out)
+            sys_lines = [r["t"] for r in map(json.loads, out.getvalue().splitlines()) if r["s"] == "sys"]
+            said[name] = (after_check, transcript.activity(task, {}), sys_lines,
+                          cli._when_delivered(task, "queued", ""))
+        self.assertEqual(said["api-q"][:3], ("starting", "Starting…", ["■ waiting to start"]))
+        self.assertNotIn("GPU", json.dumps(said["api-q"]))
+        self.assertIn("waiting for a provider slot", said["api-q"][3])
+        self.assertEqual(said["gpu-q"][:3], ("waiting for the GPU", "Waiting for the GPU…", ["■ waiting for the GPU"]))
+        self.assertIn("waiting for the GPU", said["gpu-q"][3])
+
     def test_a_runners_first_line_says_what_it_waits_for_before_the_model_is_looked_up(self):
         # the review of #1015 (2026-11-23): `last` came only after models.resolve, which may read
         # the catalog, and a GPU task sent back by wb feedback showed "Claude reviews next" as

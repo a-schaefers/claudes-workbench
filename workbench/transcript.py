@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 from . import models, store
 from .watch import Watcher
-from .runner import INTERRUPT_HEAD, NOTE_HEAD, opencode_bin
+from .runner import INTERRUPT_HEAD, NOTE_HEAD, api_task, opencode_bin
 
 STYLE = {"claude": "1;38;5;208", "agent": "1;36", "think": "2;3", "tool": "33", "out": "2",
          "ok": "1;32", "bad": "1;31", "sys": "34", "add": "32", "del": "31", "head": "1"}
@@ -459,7 +459,9 @@ def activity(task: store.Task, data: dict, now: float | None = None) -> str | No
         if last.startswith(("loading", "starting", "stopping", "unloading", "sharing", "waiting",
                             "checking", "setting", "reloading")):
             return f"{last[:1].upper()}{last[1:]}…"
-        return "Waiting for the GPU…"
+        # "resumed by the reviewer" and the like, before the runner's first write: an API task
+        # holds no GPU and waits for none (#1112, 2026-11-23)
+        return "Starting…" if api_task(task) else "Waiting for the GPU…"
     if phase == "testing":
         return f"Running the acceptance tests… `{task.spec.get('test_cmd', '')}`"
     if phase == "asking":
@@ -557,7 +559,7 @@ def clock_line(task: store.Task, now: float | None = None, data: dict | None = N
 
 
 PHASE_LINE = {
-    "queued": ("sys", "■ waiting for the GPU"),
+    "queued": ("sys", "■ waiting for the GPU"),   # an API task's: API_QUEUED_LINE
     "review": ("ok", "■ done: Claude reviews next"),
     "stuck": ("bad", "■ stuck: waiting for Claude"),
     "failed": ("bad", "■ failed: waiting for Claude"),
@@ -565,6 +567,9 @@ PHASE_LINE = {
     "accepted": ("ok", "■ Claude accepted it"),
     "discarded": ("bad", "■ Claude discarded it"),
 }
+
+# an API task's queued line: "waiting for the GPU" under "Waiting for an API slot" (#1112, 2026-11-23)
+API_QUEUED_LINE = ("sys", "■ waiting to start")
 
 
 def header(task: store.Task, paint: Painter, data: dict | None = None) -> str:
@@ -687,7 +692,8 @@ def follow(task: store.Task, verbose: bool = False, once: bool = False, color: b
             print("\r\033[K" + row, end="", file=out, flush=True)
         if phase != last_phase and phase in PHASE_LINE and (last_phase is not None or once
                                                             or phase not in ("running",)):
-            emit(*PHASE_LINE[phase], **({"keep": True} if as_json else {}))
+            line = API_QUEUED_LINE if phase == "queued" and api_task(task) else PHASE_LINE[phase]
+            emit(*line, **({"keep": True} if as_json else {}))
         last_phase = phase
         if once or phase in store.CLOSED:
             return

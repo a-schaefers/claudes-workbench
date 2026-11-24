@@ -307,7 +307,7 @@ slot `LOCK_SH|LOCK_NB` and lets go, so two probes at once don't read each other 
 #1015), while a holder's `LOCK_EX` still refuses it. It never
 appears in gpu.json, loads and unloads nothing, has no `short_window` check and no server-down
 wait (`runner._down` is False), runs no `_Power` sampler and no keep-warm thread, and its first
-status says `last: starting`, not `waiting for the GPU` (`runner._gpu_side`: from the config
+status says `last: starting`, not `waiting for the GPU`, and so does the base check's after it (#1112) (`runner._gpu_side`: from the config
 alone, in `drive`'s first write, before `models.resolve` may read the catalog; a GPU task showed
 the last run's line meanwhile, the review of #1015). Its tests run under
 this machine's pool as any task's (`_tests_gpu`, `--unload-for-tests`). The bench counts it as
@@ -2038,7 +2038,7 @@ carry on." and, if the agent runs, queues it as a `--now` note: rules are read w
 delivered when the current run ends, before the tests. `--now` wakes the runner (`_steer_bell`),
 stops the agent and starts the next round with the note first, marked overriding. During tests it
 waits; while waiting for the GPU it rides the round's prompt (`runner._early_notes`), or after the
-tests under `--unload-for-tests`; `cli._when_delivered` says which. An undelivered note goes to the
+tests under `--unload-for-tests`; `cli._when_delivered` says which (an API task's: a provider slot, #1112). An undelivered note goes to the
 stuck report; `wb resume` carries it, `wb feedback`/`wb next` drop it and say so.
 
 **Check-ins.** `--checkin MIN` raises a `checkin` notice every MIN minutes of a round with a digest
@@ -2476,7 +2476,8 @@ words (`Claude → agent · spec`, `· review feedback`, `· next step`, `· INT
 the work so far, what's next`); the protocol folds to `(+ the workbench protocol; -v shows it)`.
 `ask_reviewer` calls are left out for their `ask`/`answer` events. Each model call gets `⏱ N tokens
 in (M cached), read in Xs · K out in Ys · R tok/s`. `-v` raises the caps. Under it: `activity`
-(queued: `Waiting for the GPU…` or `status.last`, #869; testing, asking; running: the server's `GET
+(queued: `status.last`, #869, else `Waiting for the GPU…`, an API task's `Starting…`, and its
+phase line `■ waiting to start` (`transcript.API_QUEUED_LINE`), never the GPU's, #1112; testing, asking; running: the server's `GET
 <root>/metrics` `live` object `{state, phase, prompt_tokens, generated, tok_s}`, which
 `models._server_idle` reads too; without one, a rotating verb) and the clock (`⏲ task T · round N t
 · model load t`, the ETA from `router.expected_minutes`, the median active minutes a step on the
