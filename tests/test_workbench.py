@@ -22468,6 +22468,17 @@ class WebChat(Base):
             with redirect_stdout(buf), contextlib.suppress(SystemExit):
                 cli.main(["doctor"])
         self.assertIn("BAD web chat notifications: this Python has no CA certificates", buf.getvalue())
+        # an API role needs them as much, for its keyhole (#1080, 2026-11-23): said with no push
+        # subscription too
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"roles": {"trivial": {
+            "via": "api", "api": "deepinfra/x"}}, "day_usd": 1}))
+        for sub in list(wp.subscriptions()):
+            wp.unsubscribe(sub["endpoint"])
+        with mock.patch.object(wp, "has_cas", return_value=False):
+            buf = io.StringIO()
+            with redirect_stdout(buf), contextlib.suppress(SystemExit):
+                cli.main(["doctor"])
+        self.assertIn("BAD API roles: this Python has no CA certificates", buf.getvalue())
         self.assertTrue(wp.has_cas())                                        # this machine's has them
 
     def test_a_page_only_on_screen_silences_its_own_devices_push_and_not_the_phones(self):
@@ -25685,6 +25696,25 @@ class _QuietUpstream(ThreadingHTTPServer):
         pass
 
 
+def _tls_upstream(tmp: Path, handler, server=None):
+    """``handler`` served over TLS on 127.0.0.1 with a self-signed certificate for localhost:
+    (server, the certificate's path), for #1080's tests. Skips without openssl."""
+    import ssl
+    if not shutil.which("openssl"):
+        raise unittest.SkipTest("needs openssl")
+    key, cert = tmp / "tls-k.pem", tmp / "tls-c.pem"
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+                    "-nodes", "-keyout", key, "-out", cert, "-days", "1", "-subj", "/CN=localhost",
+                    "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"],
+                   check=True, capture_output=True)
+    srv = (server or _QuietUpstream)(("127.0.0.1", 0), handler)
+    srv.daemon_threads = True
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(cert, key)
+    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    return srv, cert
+
+
 class _Upstream(http.server.BaseHTTPRequestHandler):
     """A provider for the keyhole's tests: records each request (method, path, headers, body) on
     its server's `seen` and answers as its server's `mode` says: "ok" (an OpenAI SSE answer,
@@ -26105,8 +26135,11 @@ class Keyhole(_KeyholeTest):
         m.base_url = "https://api.example.invalid/v1/openai"
         kh = self.keyhole(m, hold=0)  # no address for it: an outage, passed back at once
         code, _, text = self.post(kh)
-        self.assertEqual(code, 502)
-        self.assertIn("keyhole: can't reach api.example.invalid: ", text)
+        # the proxy refusing the tunnel is this machine's setup: the round stops (#1080)
+        self.assertEqual(code, 400)
+        self.assertIn("keyhole: this machine can't reach deepinfra (api.example.invalid): Tunnel "
+                      "connection failed: 403", text)
+        self.assertEqual(self.task.status["api_stop"]["guard"], "setup")
         self.assertEqual(tunnels, [("api.example.invalid:443",
                                     "Basic " + base64.b64encode(b"me:p@ss").decode())])
         os.environ["no_proxy"] = ".example.invalid"
@@ -26172,6 +26205,37 @@ class Keyhole(_KeyholeTest):
         self.assertEqual(said, "can't read broken's key: opencode auth export exited 1: "
                                "Error: Database is locked")              # no /connect remedy
         self.assertNotIn(self.kh_mod.REMEDY, said)
+
+    def test_a_python_with_no_ca_certificates_reaches_the_provider_through_macos_own_bundle(self):
+        # #1080 (2026-11-23): the keyhole's bare default context had no CAs under python.org's
+        # Python (before Install Certificates), so every request failed while OpenCode worked;
+        # webpush.tls() already added MAC_CAS. One that still doesn't verify stops the round.
+        from workbench import webpush
+        tmp = Path(self.tmp.name)
+        up, cert = _tls_upstream(tmp, _Upstream)
+        up.seen, up.mode, up.status, up.message = [], "ok", 200, ""
+        up.retry_after, up.chunks, up.gap = None, 1, 0
+        up.served, up.by, up.ctype, up.pieces = "served-model", None, "application/json", []
+        threading.Thread(target=up.serve_forever, daemon=True).start()
+        self.addCleanup(up.server_close)
+        self.addCleanup(up.shutdown)
+        (tmp / "no-cas.pem").write_text("")
+        (tmp / "no-cas").mkdir()
+        os.environ.update(SSL_CERT_FILE=str(tmp / "no-cas.pem"), SSL_CERT_DIR=str(tmp / "no-cas"))
+        m = self.model()
+        base = f"https://localhost:{up.server_port}/v1/openai"
+        for bundle, want in ((cert, 200), (tmp / "none.pem", 400)):
+            with mock.patch.object(webpush, "_ctx", []), mock.patch.object(webpush, "MAC_CAS", str(bundle)):
+                kh = self.kh_mod.Keyhole(self.task, m, self.kh_mod.Key(m.provider, self.CANARY), base,
+                                         "bearer", log=self.lines.append)
+                self.addCleanup(kh.close)
+                code, _, text = self.post(kh)
+            self.assertEqual(code, want, text)
+        self.assertEqual(len(up.seen), 1)                                # the first, verified
+        self.assertIn("this machine can't reach deepinfra (localhost): its certificate didn't verify",
+                      text)
+        self.assertIn("the round stops", text)                           # a 400: OpenCode won't retry
+        self.assertEqual(self.task.status["api_stop"]["guard"], "setup")
 
     def test_oauth_and_env_keys_cant_run(self):
         self.fake_auth({"oauthco": {"export": [self.key_row("oauthco", {
@@ -29934,11 +29998,11 @@ class RateLimits(Base):
                                                   "role": "significant"})
         return task
 
-    def keyhole(self, task, hold=3):
+    def keyhole(self, task, hold=3, base=None):
         """The keyhole as drive starts it for the task (#1015), its log in runner.log; FAKE_API
-        points the fake's `api` scenario at it."""
+        points the fake's `api` scenario at it. ``base``: another upstream than self.up."""
         m = self.models.Model(id="deepseek/deepseek-flash", provider="deepseek", name="deepseek-flash",
-                              base_url=f"http://127.0.0.1:{self.up.server_port}/v1", engine="api",
+                              base_url=base or f"http://127.0.0.1:{self.up.server_port}/v1", engine="api",
                               label="deepseek-flash", kind="api", key="stored")
         log = task.dir / "runner.log"
         kh = self.kh_mod.Keyhole(task, m, self.kh_mod.Key("deepseek", self.CANARY), m.base_url, "bearer",
@@ -30156,6 +30220,31 @@ class RateLimits(Base):
         wait.on_error({"error": {"type": "provider.invalid-request", "status": 400,
                                  "message": "max_tokens: billing tier allows at most 8192"}})
         self.assertIsNone(wait.fatal)
+
+    def test_a_certificate_that_doesnt_verify_stops_the_round_at_once_as_this_machines(self):
+        # #1080 (2026-11-23): the keyhole's 502 was retried, read as the provider's outage for
+        # RATE_WAIT_S (600 s), run again and stopped again, the notice blaming the provider
+        tmp = Path(self.tmp.name)
+        up, _ = _tls_upstream(tmp, _RateUpstream, ThreadingHTTPServer)  # trusted by nothing here
+        up.seen, up.rate_until, up.code, up.after, up.body, up.keepalive = [], 0.0, 429, None, "", 0
+        threading.Thread(target=up.serve_forever, daemon=True).start()
+        self.addCleanup(up.server_close)
+        self.addCleanup(up.shutdown)
+        task = self.api_task("t-cert", "api", "--silence-timeout", "30")
+        self.keyhole(task, base=f"https://localhost:{up.server_port}/v1")
+        began = time.monotonic()
+        runner.drive(task)
+        self.assertLess(time.monotonic() - began, 30)                   # not RATE_WAIT_S, nor twice
+        st = task.status
+        self.assertEqual((st["phase"], st.get("infra")), ("stuck", "provider"), st["last"])
+        self.assertIn("this machine can't reach deepseek (localhost): its certificate didn't verify",
+                      st["last"])
+        self.assertEqual(up.seen, [])                                    # nothing got through
+        self.assertFalse(self.events(task, "load"))                     # never revived
+        n = self.notice(task)
+        self.assertIn("this machine's stop, not the agent's or deepseek's", n["text"])
+        self.assertNotIn("didn't answer", n["text"])
+        self.assertNotIn("wb route", n["text"])
 
     def test_read_bound_records_nothing_for_a_rate_limited_round(self):
         from workbench import router

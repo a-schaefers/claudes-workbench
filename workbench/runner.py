@@ -1256,7 +1256,9 @@ class _Clock:
 RATE_WAIT_S = 600
 RETRY_PAUSE_S = 60   # an API `retry` line pauses the clocks this long: OpenCode's own backoff
 HELD = ("rate_limited", "outage")
-PROVIDER_GUARDS = frozenset({*HELD, "quota", "auth"})  # stops that are the provider's (cause "provider")
+# stops that are the provider's (cause "provider"); `setup` is this machine's way to it (a
+# certificate, a proxy: the keyhole's api_stop, #1080), never the agent's either, and not revived
+PROVIDER_GUARDS = frozenset({*HELD, "quota", "auth", "setup"})
 # #1019's day spend cap: status `api_stop {guard: "spend"}` or its own stop between rounds. A cause
 # of its own, `spend`, outside results.THE_STEP like `provider`: the user's budget, never held
 # against the model or its slice (the engineer's call, 2026-11-23)
@@ -3813,6 +3815,9 @@ def provider_remedy(task: store.Task, guard: str) -> str:
     if guard == "auth":
         return (f"the provider's stop, not the agent's: store {p}'s API key again with /connect "
                 f"in OpenCode; then {resume} resumes it")
+    if guard == "setup":  # #1080: no route change or wait mends this machine's own setup
+        return (f"this machine's stop, not the agent's or {p}'s: mend what the line above says; "
+                f"then {resume} resumes it")
     role = task.spec.get("role")
     return (f"the provider's stop, not the agent's: {resume} resumes it once {p} allows"
             + (f"; or wb route {role} gpu (the user's yes) for the next tasks" if role else ""))

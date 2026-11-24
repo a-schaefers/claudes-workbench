@@ -562,6 +562,16 @@ class Keyhole:
             self.task.set_status(api_stop={"guard": "quota", "text": text})
         return text
 
+    def unreachable(self, why: str) -> str:
+        """This machine's setup can't reach the provider (a certificate that doesn't verify, a
+        proxy refusing the tunnel): `api_stop` with guard `setup`, so the round stops at once and
+        isn't revived, and the text OpenCode is answered with. As a 502 it was held, read as the
+        provider's outage for 10 minutes, then run again (#1080, 2026-11-23)."""
+        text = f"this machine can't reach {self.model.provider} ({self._up.hostname}): {why}"
+        if self.task is not None:
+            self.task.set_status(api_stop={"guard": "setup", "text": text})
+        return text
+
     def usage(self, usage) -> None:
         try:
             self.on_usage(usage)
@@ -592,7 +602,11 @@ class Keyhole:
         proxy = None
         if host not in LOOPBACK and not urllib.request.proxy_bypass_environment(host):
             proxy = urllib.request.getproxies_environment().get("https")
-        ctx = ssl.create_default_context()
+        # webpush's context: the default one, plus macOS's own bundle when Python's store is empty
+        # (python.org's Python before Install Certificates.command). The bare default failed every
+        # request there while OpenCode, with Bun's CAs, worked (#1080, 2026-11-23).
+        from .webpush import tls
+        ctx = tls()
         if not proxy:
             return http.client.HTTPSConnection(host, port, timeout=self.timeout, context=ctx)
         p = urllib.parse.urlsplit(proxy if "://" in proxy else f"http://{proxy}")
@@ -659,12 +673,20 @@ def _unreachable_why(kh: Keyhole, e: Exception) -> str:
 
 def _transient(e: Exception) -> bool:
     """A failure that may pass on its own (refused, reset, DNS, TLS, a timeout): held. Not a
-    certificate that doesn't verify, nor a proxy refusing the tunnel: those are the setup's,
-    said at once."""
+    certificate that doesn't verify, nor a proxy refusing the tunnel: those are the setup's, and
+    stop the round at once (_setup_failure, #1080)."""
     if isinstance(e, ssl.SSLCertVerificationError):
         return False
     return isinstance(e, (ConnectionError, socket.gaierror, socket.timeout, TimeoutError,
                           ssl.SSLError, http.client.IncompleteRead))
+
+
+def _setup_failure(e: Exception) -> bool:
+    """A transport failure that is this machine's setup, never passing on its own: a certificate
+    that doesn't verify, or the proxy refusing the tunnel (http.client's "Tunnel connection
+    failed: 403 …")."""
+    return isinstance(e, ssl.SSLCertVerificationError) or (
+        isinstance(e, OSError) and str(e).startswith("Tunnel connection failed"))
 
 
 def _short_why(e: Exception) -> str:
@@ -861,6 +883,9 @@ def _handler(kh: Keyhole):
                                 e, http.client.InvalidURL):
                             why = kh.redact(_unreachable_why(kh, e))
                             kh.health("unreachable", why)
+                            if _setup_failure(e):  # the round stops: no wait or retry helps (#1080)
+                                return self.send_json(400, f"keyhole: {kh.unreachable(why)}: "
+                                                           "the round stops")
                             how = (self.hold_on("outage", None, backoff, deadline, _short_why(e))
                                    if _transient(e) else "pass")
                             if how == "again":
