@@ -6917,6 +6917,90 @@ class Context(Base):
         self.assertEqual((st["phase"], st["round"]), ("stuck", 2))
         self.assertIn("the same call 4 times in a row", st["last"])
 
+    def quiet_self_review(self, name, *flags, **env):
+        """A self-review that breaks the check, copies it back and goes quiet (FAKE_READS 0):
+        the green tree, no tool call or word after it (#1261)."""
+        os.environ.update(FAKE_READS="0", **env)
+        self.start(name, "selfreads", "--test", TEST_CMD, "--self-review", *flags)
+        st = wait_phase(name, {"review", "stuck", "failed"}, timeout=60)
+        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == name]
+        return st, rows
+
+    def assert_settled(self, name, st, rows, said, rounds=(2, "self_review"), kinds=("review",)):
+        self.assertEqual((st["phase"], st["round"], st["round_for"]), ("review", *rounds), st.get("last"))
+        self.assertTrue(st["tests"]["ok"])
+        self.assertFalse(st.get("guards"))
+        self.assertEqual([r["kind"] for r in rows], list(kinds))
+        self.assertIn("tests: PASS", rows[-1]["text"])
+        self.assertIn(f"self-review: {said}", rows[-1]["text"])
+        self.assertIn("the tree its tests passed on; stopped as its finish", rows[-1]["text"])
+        from workbench import results
+        self.assertFalse(results.step(store.Task(name), landed=False)["stuck"])  # the router's
+
+    def test_a_self_review_thinking_past_its_budget_on_the_green_tree_goes_to_review_with_no_nudge(self):
+        # #1261 (bar loop round 6, 2026-11-24): #1168/#1250's finish was the stuck detector's
+        # alone, so the think nudge woke Claude with a check-in mid self-review on a green change
+        st, rows = self.quiet_self_review("t-sqt", "--think-timeout", "3", "--silence-timeout", "120")
+        self.assert_settled("t-sqt", st, rows, "no tool call or word for")
+        self.assertFalse(st.get("nudges"))
+
+    def test_a_self_review_silent_past_its_limit_on_the_green_tree_goes_to_review(self):
+        # #1261: the silence guard stopped it as stuck, 'STOPPED: no output', no tests line, the
+        # step counted against the model
+        st, rows = self.quiet_self_review("t-sqs", "--silence-timeout", "4", "--think-timeout", "120")
+        self.assert_settled("t-sqs", st, rows, "no output for 0 minutes")
+
+    def test_a_self_review_past_the_rounds_wall_on_the_green_tree_goes_to_review(self):
+        # #1261: the round's wall, the same
+        st, rows = self.quiet_self_review("t-sqw", "--round-timeout", "6", "--silence-timeout", "120",
+                                          "--think-timeout", "120")
+        self.assert_settled("t-sqw", st, rows, "the round ran past its 0-minute limit")
+
+    def test_a_self_review_nudged_mid_check_then_quiet_again_on_the_green_tree_goes_to_review(self):
+        # #1261: the nudge's round, stalled again, was the think guard's "even after a nudge"
+        # stop; on the green tree it is the finish (the first nudge, mid-check, stays: the tree
+        # was the broken one)
+        st, rows = self.quiet_self_review("t-sqn", "--think-timeout", "3", "--silence-timeout", "120",
+                                          FAKE_SELF_STALL="1")
+        self.assert_settled("t-sqn", st, rows, "0 minutes again with no tool call, even after a nudge",
+                            rounds=(3, "steer"),
+                            kinds=("checkin", "review"))
+        self.assertEqual(st["nudges"], 1)
+
+    def test_a_self_review_silent_on_a_changed_tree_is_still_stopped_as_stuck(self):
+        # #1261's finish, like #1168's, is for the green tree: one left changed is stopped
+        st, rows = self.quiet_self_review("t-sqk", "--silence-timeout", "4", "--think-timeout", "120",
+                                          FAKE_SELF_KEEP="1")
+        self.assertEqual((st["phase"], st["round"]), ("stuck", 2))
+        self.assertIn("no output for 0 minutes", st["last"])
+        self.assertEqual([r["kind"] for r in rows], ["stuck"])
+
+    def test_every_guards_stop_settles_on_a_self_reviews_green_tree_and_only_there(self):
+        # #1261: one mechanism for any guard (the provider's, the spend cap's, drive's handover
+        # limit too), never one guard at a time; another tree or a round that is no self-review
+        # keeps its stop
+        self.start("t-sqm", "ok", "--test", TEST_CMD, "--no-base-check", "--no-self-review")
+        wait_phase("t-sqm", {"review"})
+        t = store.Task("t-sqm")
+        green = gitops.mark(t.worktree)
+        t.set_status(round=2, round_for="self_review", self_review_tree=green)
+        for guard in ("round", "silence", "think", "rate_limited", "spend", "handovers"):
+            out = {"stuck": f"{guard}'s stop", "guard": guard}
+            self.assertTrue(runner.settle(t, 2, out, green), guard)
+            self.assertEqual(out, {"stuck": None, "guard": None, "settled": f"{guard}'s stop"})
+        out = {"stuck": None, "guard": None}
+        self.assertTrue(runner.settle(t, 2, out, green, "no tool call or word for 7 minutes"))  # the nudge
+        self.assertEqual(out["settled"], "no tool call or word for 7 minutes")
+        self.assertFalse(runner.settle(t, 2, {"stuck": None, "guard": None}, green))  # nothing stopped
+        t.set_status(self_review_tree="another tree")
+        out = {"stuck": "silence's stop", "guard": "silence"}
+        self.assertFalse(runner.settle(t, 2, out, green))
+        self.assertEqual(out, {"stuck": "silence's stop", "guard": "silence"})
+        t.set_status(round_for="feedback", self_review_tree=green)
+        self.assertFalse(runner.settle(t, 2, out, green))
+        settled = [e for e in store.read_jsonl(t.dir / "events.jsonl")[0] if e.get("kind") == "settled"]
+        self.assertEqual(len(settled), 7)
+
     def test_a_self_review_begun_in_a_fresh_session_that_reads_past_the_explore_guard_goes_to_review(self):
         # #1188 (2026-11-24): the five recorded trips (bench-big-compaction, big-logout,
         # big-this-host) each had round 1's session compacted, so the self-review began in a

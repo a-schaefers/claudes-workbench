@@ -411,7 +411,7 @@ def task_entries(task: store.Task) -> list[Entry]:
         # limits and export, written just before (#865)
         elif kind in ("fresh", "full", "load", "left_bg", "reading_full", "compacted", "limits", "export",
                       "lingered",  # the agent's turn over, OpenCode still open: stopped (#1160)
-                      "settled",  # a self-review at a guard, the tree its tests passed on: stopped (#1168, #1250)
+                      "settled",  # a self-review at a guard, the tree its tests passed on: stopped (#1168, #1250, #1261)
                       "served",  # served: the keyhole, an API model's provider changed what ran
                       "rate_limited"):  # an API provider's wait, the clocks paused (#1020)
             out.append(Entry(ts, key, [("sys", f"■ {r.get('text', '')}")]))
