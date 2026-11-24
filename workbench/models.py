@@ -1003,6 +1003,9 @@ CATALOG_TIMEOUT = 30     # a read past it fails, cached as one for DOWN_SECS
 OLLAMA_CLOUD = "Ollama cloud (ollama.com)"
 # Providers that sign each request with cloud credentials (SigV4, Vertex): no key wb can hold
 SIGNING = frozenset({"amazon-bedrock", "google-vertex", "google-vertex-anthropic"})
+# of those, the ones whose stored API key OpenCode sends as a bearer ahead of signing (Bedrock's,
+# #1192): "stored", which the keyhole holds; any other login still signs
+KEYED_SIGNING = frozenset({"amazon-bedrock"})
 API_STATES = ("no_credit", "rate_limited", "unreachable")
 RATE_LIMIT_SECS = 60     # a 429 without Retry-After: how long its provider reads rate-limited
 # A 402 or a plan limit with no `until` held forever: only a 2xx cleared it, and wb start refused
@@ -1248,7 +1251,7 @@ def _key_source(pid: str, auth: dict, prov: dict | None) -> str:
         source = "oauth"
     if not source and (env := next((c for c in conns if c.get("type") == "env"), None)):
         source = f"env:{env.get('name') or '?'}"
-    if source and pid in SIGNING:
+    if source and pid in SIGNING and not (source == "stored" and pid in KEYED_SIGNING):
         return "signing"
     return source
 
@@ -1301,6 +1304,34 @@ def _dict(value) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,62}")
+
+
+def catalog_base(package: str, settings: dict) -> str:
+    """A catalog model's API base: its `settings.baseURL`, else the one its package builds from
+    the settings, as OpenCode 2.3.2 does (#1192): Azure's `https://<resourceName>.openai.azure.com
+    /openai` (azure.ts), Bedrock's `https://bedrock-runtime.<region>.amazonaws.com` for Converse
+    and `https://bedrock-mantle.<region>.api.aws/v1` (`/anthropic/v1` for Messages) for Mantle,
+    the region `settings.region`, else AWS_REGION, AWS_DEFAULT_REGION, us-east-1 (bedrock-auth.ts
+    resolveRegion). Not a secret: model.list prints these beside the key, which wb never reads."""
+    if base := str(settings.get("baseURL") or ""):
+        return base
+    from . import keyhole  # keyhole imports this module lazily too
+    path = keyhole._package_path(package)
+    if path.split("/")[0] == "azure":
+        res = str(settings.get("resourceName") or "").strip()
+        return f"https://{res}.openai.azure.com/openai" if _NAME.fullmatch(res) else ""
+    if keyhole._bedrock("", path):
+        region = str(settings.get("region") or os.environ.get("AWS_REGION")
+                     or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1")
+        if not _NAME.fullmatch(region):
+            return ""
+        if "mantle" not in path:
+            return f"https://bedrock-runtime.{region}.amazonaws.com"
+        return f"https://bedrock-mantle.{region}.api.aws/{'anthropic/v1' if path.endswith('/messages') else 'v1'}"
+    return ""
+
+
 def _off_machine(pid: str, url: str, extra: dict) -> bool:
     """A configured provider whose baseURL is on another host and not opted in (`local: true`):
     discovery skips it (with its hint), and its models are API models."""
@@ -1341,7 +1372,7 @@ def _build_hosted() -> dict:
         pid = e["providerID"]
         mid = f"{pid}/{e['id']}"
         settings, caps = _dict(e.get("settings")), _dict(e.get("capabilities"))
-        api = str(settings.get("baseURL") or "")
+        api = catalog_base(e.get("package") if isinstance(e.get("package"), str) else "", settings)
         # a server on this machine that OpenCode found by itself (2.3.2 lists a running Ollama at
         # 127.0.0.1 with no config): GPU work, added through wb model add, never an API model that
         # would be told to /connect (#1013's review). No DNS: a catalog lists dozens of hosts.
@@ -1491,13 +1522,16 @@ def _api_model(mid: str, entry: dict, prov: dict, extra: dict) -> Model:
         over = {**over, "catalog_cost": config.get("cost"), "cost": mine}
         config = {**config, "cost": mine}
     config = api_limits(config)
+    # the model's own base and package before its provider's: one provider's models post through
+    # several (Azure's Responses, Chat and Claude on Foundry; Google's Gemini and Interactions),
+    # and the first model seen set them for all (#1192)
     return Model(id=mid, provider=pid, name=str(entry.get("name") or mid.split("/", 1)[1]),
-                 base_url=str(prov.get("api") or ""), engine="api",
+                 base_url=str(entry.get("api") or prov.get("api") or ""), engine="api",
                  label=over.get("label") or (OLLAMA_CLOUD if cloud else f"{prov.get('name') or pid} (API)"),
                  extra=over, config=config, remote=True, cloud=cloud, kind="api",
                  key=str(prov.get("key") or ("none" if entry.get("free") else "")),
                  free=bool(entry.get("free")),
-                 package=str(prov.get("package") or ""))
+                 package=str(entry.get("package") or prov.get("package") or ""))
 
 
 PRICE_KEYS = ("input", "output")  # per million tokens; cache read and write go in `cache`
@@ -1824,11 +1858,22 @@ def unspoken_providers(pids) -> dict[str, str]:
     any when the catalog can't be built: a config that doesn't parse stopped wb setup's checklist
     (#1067's guard, which this read came after, 2026-11-23), and wb doctor names the config."""
     try:
-        provs = _dict(hosted_doc().get("providers")) if pids else {}
+        doc = hosted_doc() if pids else {}
     except (RuntimeError, OSError):
         return {}
-    return {p: str(provs[p].get("package") or "") for p in pids
-            if isinstance(provs.get(p), dict) and unspoken(p, str(provs[p].get("package") or ""))}
+    provs, listed = _dict(doc.get("providers")), _dict(doc.get("models"))
+    out = {}
+    for p in pids:
+        if not isinstance(provs.get(p), dict):
+            continue
+        own = str(provs[p].get("package") or "")
+        # each model's own package (#1192): Google's lists Gemini and Interactions ones, and
+        # the provider runs if any of its models can
+        pkgs = {str(e.get("package") or own) for mid, e in listed.items()
+                if mid.split("/", 1)[0] == p and isinstance(e, dict)} or {own}
+        if all(unspoken(p, k) for k in pkgs):
+            out[p] = own
+    return out
 
 
 def _api_status(m: Model, down=frozenset()) -> dict:

@@ -623,7 +623,10 @@ the last byte, and a provider sending that byte late had the response booked twi
 (`input_tokens_details`, `output_tokens_details`) and Anthropic (`cache_read_input_tokens`,
 `cache_creation_input_tokens`, `output_tokens_details.thinking_tokens` as reasoning), told by its
 cache fields first: its `message_delta` carries `output_tokens_details` too, read as the Responses
-API with every cache read and write 0 (#1081). It sees every request the model gets, titles and compaction too
+API with every cache read and write 0 (#1081); Gemini's `usageMetadata` (`promptTokenCount` holding
+`cachedContentTokenCount`, `toolUsePromptTokenCount` beside it, `candidatesTokenCount` without
+`thoughtsTokenCount`) and Bedrock Converse's (`inputTokens` without `cacheReadInputTokens` and
+`cacheWriteInputTokens`, `outputTokens`), #1192. It sees every request the model gets, titles and compaction too
 (which no `step_finish` carries), and a provider's own figure wins over the catalog (`source:
 provider`): `usage.cost` (OpenRouter's), else `usage.estimated_cost` (DeepInfra's, in its last,
 `choices: []` chunk, at its own rate; the keyhole's `_merged` keeps it over the finish chunk's
@@ -763,7 +766,8 @@ OpenCode 2.3.2 doesn't retry that 400 (`provider.invalid-request`, exit 1 at onc
 keyhole, both protocols: `ApiSpendKeyhole`'s real-OpenCode check); were the 400 retried after all, the next tick (5 s)
 stops it from the ledger. **The room** (`Meter.room(body, size)`, the keyhole's `room` hook before
 each request): the cap less today less the request at its worst (its body's length / 4 at the
-dearest tier's input price, its `max_tokens`, `max_completion_tokens` or `max_output_tokens`,
+dearest tier's input price, its `max_tokens`, `max_completion_tokens` or `max_output_tokens`, Gemini's
+`generationConfig.maxOutputTokens` or Converse's `inferenceConfig.maxTokens` (`meter.max_output`, #1192),
 else `models.API_OUTPUT`, at the output price). Negative: refused the same way, and status
 `api_stop` `{guard: spend, worst, text}` stops the round on the next tick; its text leads with `STOP`
 at the cap, else `meter.NEAR` (`too near the day's API spend cap for its next request: ≈$4.80 of $5
@@ -1996,7 +2000,9 @@ an API key with /connect in OpenCode") an OAuth login (its tokens rotate: a copy
 the user out), an external credential, any credential that isn't a key (OAuth, external, or a
 type such as 1.x's `wellknown`) active over an older key kept beside it ("<provider>'s active
 credential is an OAuth login …: `opencode auth switch` to its API key, or store one with
-/connect": the inactive key was billed, #1110), request signing (SigV4, Vertex: a header swap can't work),
+/connect": the inactive key was billed, #1110), request signing (Vertex; Bedrock without a Bedrock API key stored,
+SigV4: a header swap can't work, "<provider> signs each request (SigV4) without a Bedrock API key stored in
+OpenCode"; with one, OpenCode 2.3.2 sends it as a bearer ahead of SigV4 and it runs, #1192),
 a key only in the environment (`{env:VAR}`, or `auth list` naming a variable: `SECRET_ENV` drops it
 from the agent anyway; a lone `{env:VAR}` V1 `options.apiKey` beside a stored key is no refusal,
 `_lone_env`: OpenCode 2.3.2 sends the stored key over any config apiKey, checked 2026-11-23, and the
@@ -2011,12 +2017,19 @@ own key counts because OpenCode 2.3.2 sends a model's settings over its provider
 #1015: one in the content went unseen, in the agent's environment). A stored key is trimmed (a paste's newline: OpenCode trims only on
 `/connect`) and must then be printable ASCII (`KEY_CHARS`), else "can't use <provider>'s stored key:
 it holds a character an HTTP header can't carry" (http.client's refusal quoted the header, key and
-all, the 2026-11-23 review). The protocol comes from the catalog's provider package (`protocol_of`,
-`PACKAGES`: OpenCode 2.3.2's packages whose model routes post the base plus a `MODEL_PATHS` path):
-Anthropic's and `anthropic-compatible` take `x-api-key` (and keep `anthropic-version`); alibaba,
-cerebras, cloudflare-workers-ai, deepinfra, deepseek, digitalocean, fireworks, groq, meta, minimax,
-mistral, moonshot, openai, openai-compatible(-responses), openrouter, togetherai, venice, xai, zai
-and zai-coding-plan take `Authorization: Bearer`. A config provider's V1 npm `@ai-sdk/<name>` (the
+all, the 2026-11-23 review). The protocol (`PROTOCOLS`) comes from the model's own catalog package
+(`protocol_of`: `SUBPACKAGES` by the package's whole path under `@opencode/ai/providers/`, else
+`PACKAGES` by its first part; OpenCode 2.3.2's packages whose model routes post the base plus a
+`MODEL_PATHS` path, unless said): `anthropic`, Anthropic's and `anthropic-compatible` (Claude on Azure
+Foundry too), take `x-api-key` (and keep `anthropic-version`); `bearer`, alibaba, cerebras,
+cloudflare-workers-ai, deepinfra, deepseek, digitalocean, fireworks, groq, meta, minimax, mistral,
+moonshot, openai, openai-compatible(-responses), openrouter, togetherai, venice, xai, zai,
+zai-coding-plan and Bedrock Mantle's (`amazon-bedrock/mantle/{responses,chat,messages}`, old name
+`amazon-bedrock-mantle`: a Bedrock API key), take `Authorization: Bearer`; and since #1192
+`google` (Gemini) takes `x-goog-api-key` and posts `GEMINI_PATH`, `<base>/models/<id>:streamGenerateContent?alt=sse`
+(protocols/gemini.ts); `api-key` (Azure OpenAI, `azure` and its `/responses` and `/chat`) takes
+`api-key`; `converse` (`amazon-bedrock`: Converse, a Bedrock API key as a bearer, which
+amazon-bedrock.ts sends ahead of SigV4) posts `CONVERSE_PATH`, `<base>/model/<encodeURIComponent(id)>/converse-stream`. A config provider's V1 npm `@ai-sdk/<name>` (the
 form OpenCode's docs give a custom provider: `@ai-sdk/openai-compatible`, `@ai-sdk/anthropic`) reads
 as `<name>` (`AI_SDK_PREFIX`, as `PACKAGE_PREFIX`): OpenCode 2.3.2 runs it as its own
 `@opencode/ai/providers/<name>` where it has one (openai-compatible, anthropic, openai, deepinfra,
@@ -2024,51 +2037,76 @@ as `<name>` (`AI_SDK_PREFIX`, as `PACKAGE_PREFIX`): OpenCode 2.3.2 runs it as it
 `@ai-sdk/foo` (OpenCode's `aisdk:@ai-sdk/foo`, an npm package it loads) still reads as none. A raw
 `@ai-sdk/deepseek` reads as bearer although OpenCode loads that one from npm too (its
 `aisdk:@ai-sdk/deepseek`); it posts Bearer to the base plus `/chat/completions` as well, not
-checked on real OpenCode. Any other package (Google's `x-goog-api-key` and
-`/models/<id>:streamGenerateContent`, Azure's `api-key`, Cohere's native `/chat`, gateways with
-their own paths or headers, none at all) can't run: `start` raises "needs a key wb can hold
+checked on real OpenCode. Any other package (Cohere's native `/chat`, Google's Interactions route
+`google/interactions`, Vertex's, gateways with their own paths or headers, none at all) can't run: `start` raises "needs a key wb can hold
 outside the lane: <provider> takes its key in a way the keyhole doesn't speak" rather than a 401
 or 404 on every request. Status says it first (`models.keyhole_refusal`, through `models.unspoken`,
-#1066: only `start` checked, so a Gemini model was listed, routed on the user's yes and started,
-then failed every time), so `wb route`, `wb start`, `wb models` and the pane refuse it, `wb models
+#1066: only `start` checked, so a Gemini model, unspoken then, was listed, routed on the user's yes
+and started, then failed every time), so `wb route`, `wb start`, `wb models` and the pane refuse it, `wb models
 --json` leaves it out, `wb setup` names it on a `--` line and `wb route --json`'s `providers` gives it
-key `none` with that why (the Settings tab's Connected line). The upstream is the catalog's API base (`m.base_url`), never anything
+key `none` with that why (the Settings tab's Connected line); a provider whose models post through
+several packages (Google's Gemini and Interactions) is named there only when none of them can run.
+The upstream is the model's catalog API base (`m.base_url`), never anything
 from a request, with what the package appends to it already appended (`mirror_path`: DeepInfra's
-`/openai`). OpenCode gets `layer_options(kh)`:
+`/openai`; Azure's `/v1` to an `*.openai.azure.com` base), and `upstream_query` set on each forwarded
+query (Azure's `api-version=v1`, over any OpenCode sent): azure.ts adds both only for an
+`*.openai.azure.com` base and posts any other host's as it is, so on 127.0.0.1 OpenCode posts
+`<keyhole base>/responses` or `/chat/completions` and the keyhole forwards to
+`https://<resource>.openai.azure.com/openai/v1/…?api-version=v1`, the URL OpenCode would have
+used; its WebSocket Responses transport turns on only for such a host, so the keyhole gets plain
+HTTP (#1192). OpenCode gets `layer_options(kh)`:
 `baseURL` the keyhole's `base` and `apiKey` its `token` (`secrets.token_urlsafe(32)`, new each
 runner). The base mirrors the upstream's path on 127.0.0.1, because a package builds its URL from
 the base alone (`new URL(trim(baseURL) + path)`, DeepInfra first appending `/openai` unless the base
 ends in it), so OpenCode posts to the path it would have posted upstream and the keyhole sends that
 path and its query to the upstream's host: DeepInfra `…/v1/openai/chat/completions`, Anthropic
 `…/v1/messages?beta=true`, a custom provider on `@ai-sdk/anthropic` `…/v1/messages` (*API models
-through OpenCode*; checked on real OpenCode in `RealOpenCodeAPI`). A package that rewrites its base by the host (Azure) would not map.
+through OpenCode*; checked on real OpenCode in `RealOpenCodeAPI`), Gemini `…/v1beta/models/<id>:streamGenerateContent?alt=sse`,
+Azure's Chat route `…/openai/v1/chat/completions?api-version=v1`, Bedrock Mantle `…/v1/responses` and Converse
+`/model/<id>/converse-stream` (#1192, the same test). An Azure config's own `apiVersion` or
+`useDeploymentBasedUrls` isn't mirrored (the version sent is `v1`; deployment paths are a 404).
 A request passes, in order, each refusal a JSON error body: the path (a POST to exactly the base
-plus one of `MODEL_PATHS`, `chat/completions`, `responses`, `messages`, `messages/count_tokens`,
+plus one of `MODEL_PATHS`, `chat/completions`, `responses`, `messages`, `messages/count_tokens`
+(Gemini's: `GEMINI_PATH`, `models/<id>` or `tunedModels/<id>` then `:streamGenerateContent`, no
+`:generateContent` or `:countTokens`, which 2.3.2 never posts; Converse's: `CONVERSE_PATH`),
 no segment between, since OpenCode never posts one and `…/threads/<id>/messages` carried the key
-to OpenAI's Assistants API; `GET <base>/models` answered with only the task's model, nothing
+to OpenAI's Assistants API; `GET <base>/models` answered with only the task's model, in Google's
+`{models: [{name: "models/<id>"}]}` shape for Gemini, none for Converse, nothing
 forwarded; else 404 `keyhole: <path> isn't a model request`), with a query of printable ASCII
 only (`QUERY`; else 400 `keyhole: a query that isn't printable ASCII`: a control character made
-http.client fail and marked the model unreachable); the token (`Authorization: Bearer` or
-`x-api-key`, `hmac.compare_digest`, never in the URL, which reaches OpenCode's error text and
+http.client fail and marked the model unreachable; Gemini's POST takes only `alt=sse`, else 400,
+and a `key=` query, any case, is 400 `keyhole: a key in the query is refused`: Google takes a key
+there too, a second way in, #1192); the token (`Authorization: Bearer`, else `x-api-key`, `api-key`
+or `x-goog-api-key`, `hmac.compare_digest`, never in the URL, which reaches OpenCode's error text and
 runner.log; 401 `keyhole: not this task's token`); the body (`BODY_CAP`, 32 MB, else 413 unread,
 a chunked body checked before each chunk, each size line hex of at most 8 digits (`CHUNK_SIZE`,
 `LINE_CAP`) else 400; UTF-8 JSON with no NaN, else 400; its `model` must be `Model.name` and it
 may hold no `models` fallback list, no duplicate key anywhere, and no other top-level key that
 folds (NFKC, `casefold`) to `model` or `models`, since Go's encoding/json matches keys
 case-insensitively and some parsers keep the first duplicate, so a body read here as the task's
-model went on to route elsewhere (`_strict_json`, the 2026-11-23 review): 403
+model went on to route elsewhere (`_strict_json`, the 2026-11-23 review); for Gemini and Converse,
+whose path names the model, the path's instead (`other_model`, #1192): Gemini's id must be
+`Model.name` under `models/` (a `tunedModels/` one is another model) and the body names no `model`;
+Converse's must be the name as OpenCode writes it (`encodeURIComponent`: an unencoded `:` is
+another spelling, refused) and a body `modelId`, if any, the name: 403
 `invalid_request_error` "keyhole: this task may use only <id>", which OpenCode doesn't retry,
 logged once per model as `keyhole: refused <model> (this task runs <id>)`). Then the body goes on
-as it is, hop-by-hop and every client auth header (`authorization`, `x-api-key`, `api-key`)
-dropped and the real one added, `Host` the upstream's, `Accept-Encoding: identity`, on a new
+as it is, hop-by-hop and every client auth header (`CLIENT_AUTH`: `authorization`, `x-api-key`,
+`api-key`, `x-goog-api-key`) dropped and the real one added (`auth_header`: the protocol's), `Host` the upstream's, `Accept-Encoding: identity`, on a new
 connection per request (`ssl.create_default_context()`, through wb's own `https_proxy` by
 `CONNECT` unless `NO_PROXY` covers the host or it is loopback; the timeout the task's silence limit
 + 60 s). A 2xx comes back as it arrives, SSE a whole line at a time (a partial line waits for its
 end), its `data:` lines read on the way for the served model (`model`, Anthropic's
-`message_start.message.model`, the Responses API's `response.model`) and OpenRouter's `provider`:
-status `served: {model, by}` when it first appears or changes, with a `served` event; and `usage`
-(top-level, `message.usage`, `response.usage` in `response.completed`) for `on_usage` (for the
-meter, *Spend*). The key itself never passes (a body that isn't SSE holds back its last
+`message_start.message.model`, the Responses API's `response.model`, Gemini's `modelVersion`) and
+OpenRouter's `provider`: status `served: {model, by}` when it first appears or changes, with a
+`served` event; and `usage` (top-level, `message.usage`, `response.usage` in `response.completed`,
+Gemini's `usageMetadata`) for `on_usage` (for the meter, *Spend*). Gemini sends no `[DONE]` and no
+end event: its usage, a running total in every chunk, goes at the stream's end, which is where
+OpenCode ends the step too (gemini.ts has no terminal event, only `onHalt`), never at a
+`finishReason` (a later chunk would be booked again). A Bedrock event stream
+(`application/vnd.amazon.eventstream`) is read frame by frame (`frames`: `[total][headers][crc]
+[headers][payload][crc]`) for its `metadata` event's `usage`; a frame that can't be one ends the
+reading, and OpenCode's figure books it (#1192). The key itself never passes (a body that isn't SSE holds back its last
 `len(key) - 1` bytes so a key split across reads is caught), and an SSE line whose JSON has an
 `error` goes through `redact`: a mid-stream error arrives inside a 200 (Anthropic's `event: error`,
 OpenRouter's `data: {"error": …}`). An error is read whole (`ERROR_CAP`, 64 KB; a longer one is cut
@@ -2091,7 +2129,10 @@ run again, #1080); a request http.client won't send
 only and never `unreachable`. Anything else a handler raises is one line in the log, `keyhole: a
 request failed (<type>)` (`_Server.handle_error`), never socketserver's traceback on stderr. Each outcome goes to
 `on_health(state, why, until)`: 2xx `ok`; a quota answer (below) or `insufficient_quota` `no_credit`; a 429 or 529
-`rate_limited` until `Retry-After`, else the hold's backoff while it holds (below), else `RATE_LIMIT_SECS` (60 s); 5xx and transport failures
+`rate_limited` until `Retry-After` (else Google's RetryInfo `retryDelay`, which the hold waits too), else the hold's
+backoff while it holds (below), else `RATE_LIMIT_SECS` (60 s); Gemini's per-minute 429 says "You exceeded your current
+quota" as its daily one does, so a 429 whose body names a `PerMinute` quota id is a rate, held, not a spent balance
+(`_google_rate`, read before `redact`, which takes the 52-letter quota ids for keys; #1192); 5xx and transport failures
 `unreachable` (the model's health record takes it with #1013). The start line, `keyhole:
 <provider> on 127.0.0.1:<port> for <id>`, the refusals and that failure line are all it logs (the runner's stdout,
 runner.log); no request is logged, and no line holds the key or the token. Accepted: the agent's
@@ -3133,18 +3174,23 @@ read as a wrong id, Claude hunted for the "right" one).
   whether or not `discover()` still does (a renamed or retired model, an old task's id, `wb model
   rename OLD`, a typo): `resolve`, `lookup` and `cli._api_id` ask no catalog for one (it cost two
   OpenCode starts on every `wb watch --json` the pane polls).
-- *The model.* `base_url` the catalog's `settings.baseURL` (the upstream; an off-machine or Ollama
-  provider's own baseURL), `engine` `api`, `name` the id at the provider (the entry's `modelID`, which
+- *The model.* `base_url` the model's catalog base (`catalog_base`: `settings.baseURL`, else what its package
+  builds from the settings, as 2.3.2 does: Azure's `https://<resourceName>.openai.azure.com/openai`, Bedrock
+  Converse's `https://bedrock-runtime.<region>.amazonaws.com`, Mantle's `https://bedrock-mantle.<region>.api.aws/v1`
+  or `/anthropic/v1`, the region `settings.region`, else `AWS_REGION`, `AWS_DEFAULT_REGION`, `us-east-1`; the
+  upstream; an off-machine or Ollama provider's own baseURL), `engine` `api`, `name` the id at the provider (the entry's `modelID`, which
   an alias's differs from, else its `id`), `label` `<Provider name>
-  (API)` (the auth list's name, else the id), `remote` true, `package` the catalog's (or the
-  config's `npm`), `config` the catalog entry (`limit`, `cost`, `variants` as the catalog's list,
+  (API)` (the auth list's name, else the id), `remote` true, `package` the model's own catalog package (or the
+  config's `npm`; one provider's models post through several, Azure's and Google's, and the first model seen set
+  both for all, #1192), `config` the catalog entry (`limit`, `cost`, `variants` as the catalog's list,
   `capabilities`, `tool_call` from `capabilities.tools`, `reasoning`, `family`, `status`; values
   unchanged, a field of the wrong shape dropped; never `settings`, where 2.3.2 prints the key it
   holds for a layer or a free model, `settings.apiKey`), `free` (`opencode/*-free`, or every price 0; only marked here). `key`, the source
   (never the key): a config `apiKey` first (`env:<NAME>` for a lone `{env:NAME}`, else `config`;
   a lone `{env:NAME}` in `options` beside a stored key is `stored`, #1075: OpenCode sends the stored
   one, and read as `env:` it was told to `/connect` again, which changed nothing), then auth list's `credential` with `method: "key"` (`stored`), another credential (`oauth`), an
-  `env` connection (`env:<NAME>`); a signing provider (`SIGNING`: Bedrock, Vertex) is `signing`;
+  `env` connection (`env:<NAME>`); a signing provider (`SIGNING`: Bedrock, Vertex) is `signing`, except
+  Bedrock's stored key (`KEYED_SIGNING`), `stored`: OpenCode sends it as a bearer, #1192;
   `ollama`; else `""` (`_key_source`, the provider's); a keyless free model is `none`, its own: a
   provider holds free and paid models alike, and one source per provider made every sibling `none`.
 - *Its window and output* (`api_limits`, #1017; decision 10 of #1008). `config.limit` is capped once
@@ -4062,7 +4108,9 @@ only, never a claim about the policy; each fetched and its title read 2026-11-23
 `OLLAMA_PAGE` for a cloud model, else null and the line says `see <name>'s data policy`. The line is `your code goes to
 <name>`, then `via OpenRouter to <backends>, no fallbacks (OpenRouter's account setting decides whether backends may keep
 it)` for OpenRouter, then `free: the provider may keep or train on your code` for a free model (`Model.free`: OpenCode's
-`opencode/*-free`, or every catalog price 0). Free models are never suggested (the skill); `wb doctor` says nothing of
+`opencode/*-free`, or every catalog price 0), else a provider whose free tier is a key's (`FREE_TIER`, #1192: Gemini's
+paid and unpaid keys run the same models at the same prices) says so of every task there: `on Gemini's free tier (a key
+without billing) Google may use your code to improve its products`. Free models are never suggested (the skill); `wb doctor` says nothing of
 the ones OpenCode lists (a line on every run for models wb never uses: wave 2's review), the line above says it where one is chosen.
 
 **The where-note.** The first API task of each repo and provider prints `note: this task sends the repo, its spec,
@@ -6350,8 +6398,8 @@ lane, never a secret): `ok  API keys: deepseek (stored via /connect); no role us
 wb can't hold it outside the lane yet; /connect stores one it can`, `anthropic is signed in with
 OAuth: …`), one for each key written in a config file (`literal's key is written in <file>: remove its
 apiKey there, and store the key with /connect`, as status says it: "/connect stores a key it can" told a
-user who had, #1075), a `--` line for a stored key on a package the keyhole can't carry (`google
-(@opencode/ai/providers/google): the keyhole doesn't speak its API, so wb can't run its models;
+user who had, #1075), a `--` line for a stored key on a package the keyhole can't carry (`cohere
+(@opencode/ai/providers/cohere): the keyhole doesn't speak its API, so wb can't run its models;
 another provider's key works`, `models.unspoken_providers`, #1066), for a provider a role on API uses
 with no key at all `--  no API key for deepseek, which trivial uses: /connect in OpenCode adds it
 (required: those tasks can't start without it)` (#1067), else `NO_KEY` for none. With a stored key,
@@ -6608,7 +6656,9 @@ retried `FAKE_CUT_RETRIES` times (10), then that error, #1083; then as `ok`), `a
 (the no-route error); the upstream message (`FAKE_ERROR_BODY`) comes through verbatim in `message` and
 `response.body`. `http` (#1015) makes the request for real: the provider's `options` from `OPENCODE_CONFIG`, then
 `OPENCODE_CONFIG_CONTENT` over them, a POST to `<baseURL>/chat/completions` with `Authorization: Bearer <apiKey>`
-(`/messages?beta=true` with `x-api-key` for `anthropic`) through urllib, so the agent's proxies apply; each request
+(`/messages?beta=true` with `x-api-key` for `anthropic`; `google`, #1192: `/models/<id>:streamGenerateContent?alt=sse`
+with `x-goog-api-key` and no `model` in the body; `azure`: `/chat/completions` with `api-key`) through urllib, so the
+agent's proxies apply; each request
 in `FAKE_HTTP_LOG`; a 2xx plays `ok`, an HTTP error the matching error event with the body's `error.message`, an
 unreachable base `provider.transport`. With `OPENCODE_MODELS_PATH` the fake lists that file's models in place of
 `WB_FAKE_CATALOG`'s (as 2.3.2 does), their variants the config's only. `WB_FAKE_API=<provider>[/<id>]=<state>,…` gives a model (its own entry first; a config model too) or a provider one
@@ -6744,7 +6794,14 @@ canary, OpenCode's own with only the token, at the path OpenCode would have used
 a key with a newline, bad queries and chunk sizes (`raw_request`, for what http.client won't send),
 an error body cut across the key, errors inside a 200 stream (`_Upstream`'s "raw" mode), packages
 the keyhole can't speak, `@ai-sdk/<name>` npm names (#1137), DeepInfra's appended `/openai`, a key written as a header, a key in a
-model's own entry or the V2 form (#1015's review). Its
+model's own entry or the V2 form (#1015's review). #1192's: Gemini's header, path, query, `usageMetadata` booked,
+another model in its path (403) and a `key=` query refused, its per-minute 429 held and its daily one a quota stop;
+Azure's `api-key`, `/v1` and `api-version`; Converse's path model and event-stream usage; a stored Bedrock key and
+Vertex still refused (`Keyhole`); each model's own package and base, Azure's from its resourceName, and the Gemini
+free-tier line (`Routes`); a Gemini task end to end on the fake (`ApiTasks`); and on real OpenCode, Gemini, Azure's
+Chat route, Mantle's Responses and Converse each posting through the keyhole (`RealOpenCodeAPI`). `_Upstream`
+answers Gemini (`gemini_events`), Converse (`es_frame`, `CONVERSE_EVENTS`) and a Responses stream with its whole item
+lifecycle, which 2.3.2's Responses protocols require. Its
 `test_the_tasks_own_catalog_*` (#1015) takes real model.list entries (`models.model_list`, as every real test reads the catalog: `ApiHarness.real_list`) through `hosted()`,
 `catalog_doc` and the runner's overlay: real OpenCode reads them back field for field (the `limit` capped), and a model
 the binary lacks fails without the file and runs through the keyhole with it.
@@ -6850,8 +6907,9 @@ doc needs its own `!/` line).
   (`/api/v1/providers`: a display name that doesn't fold to its slug). **The where-line** (`privacy.where`'s `line`, `PRIVACY_PAGES`) is the start's where-note (`cli._api_notes`); the
   route dialog's text is `routes.change`'s line, which the mod reads from `wb route … --dry-run --json` (#1014's), never words of its own. **The local_only edit guard**
   (`localOnlyRefusal` in register.tsx) and commands.json's `repos` shape change together.
-- **The keyhole's paths** (`keyhole.MODEL_PATHS`, the base mirroring the upstream's path in `layer_options`,
-  `mirror_path`) and **its packages** (`keyhole.PACKAGES`, `AI_SDK_PREFIX`'s npm names) → what OpenCode posts for each package and how it sends the
+- **The keyhole's paths** (`keyhole.MODEL_PATHS`, `GEMINI_PATH`, `CONVERSE_PATH`, the base mirroring the upstream's path in `layer_options`,
+  `mirror_path`, `upstream_query`) and **its packages** (`keyhole.PACKAGES`, `SUBPACKAGES`, `AI_SDK_PREFIX`'s npm names, and the bases
+  `models.catalog_base` builds) → what OpenCode posts for each package and how it sends the
   key (*API models through OpenCode*; packages/ai/src/providers): re-check with `RealOpenCodeAPI` and the source on
   each OpenCode bump. `keyhole.redact` → any new place an upstream error is shown.
 - **The keyhole overlay** (`runner.keyhole_overlay`) → `write_config_layer`'s provider merge and `rules_env`'s

@@ -243,9 +243,23 @@ def usage_tokens(u: dict) -> dict:
       `cache_creation_input_tokens` beside it, `output_tokens` with
       `output_tokens_details.thinking_tokens`. Told by its cache fields before the Responses
       API's details: its message_delta now carries `output_tokens_details` too, which read it as
-      the Responses API and booked every cache read and write as 0 (#1081, 2026-11-23).
+      the Responses API and booked every cache read and write as 0 (#1081, 2026-11-23);
+    - Gemini's `usageMetadata` (#1192): `promptTokenCount` holds the cache reads
+      (`cachedContentTokenCount`), `toolUsePromptTokenCount` is input beside it, and
+      `candidatesTokenCount` leaves out `thoughtsTokenCount` (OpenCode's gemini.ts mapUsage);
+    - Bedrock Converse's (#1192): `inputTokens` without the cache, `cacheReadInputTokens` and
+      `cacheWriteInputTokens` beside it, `outputTokens` (bedrock-converse.ts mapUsage).
     A cache read it doesn't name is priced as input: never under."""
     d = lambda k: u.get(k) if isinstance(u.get(k), dict) else {}  # noqa: E731
+    if "promptTokenCount" in u or "candidatesTokenCount" in u:
+        prompt = _n(u.get("promptTokenCount")) + _n(u.get("toolUsePromptTokenCount"))
+        read = min(prompt, _n(u.get("cachedContentTokenCount")))
+        return {"in": prompt - read, "cache_read": read, "cache_write": 0,
+                "out": _n(u.get("candidatesTokenCount")), "reasoning": _n(u.get("thoughtsTokenCount"))}
+    if "inputTokens" in u or "outputTokens" in u:
+        return {"in": _n(u.get("inputTokens")), "cache_read": _n(u.get("cacheReadInputTokens")),
+                "cache_write": _n(u.get("cacheWriteInputTokens")), "out": _n(u.get("outputTokens")),
+                "reasoning": 0}
     if "prompt_tokens" in u or "completion_tokens" in u:
         pd, cd = d("prompt_tokens_details"), d("completion_tokens_details")
         prompt = _n(u.get("prompt_tokens"))
@@ -267,6 +281,21 @@ def usage_tokens(u: dict) -> dict:
     return {"in": _n(u.get("input_tokens")), "cache_read": _n(u.get("cache_read_input_tokens")),
             "cache_write": _n(u.get("cache_creation_input_tokens")),
             "out": outp - think, "reasoning": think}
+
+
+def max_output(body) -> int | float:
+    """A request's output cap, wherever its API puts it: top-level `max_tokens` and the like,
+    Gemini's `generationConfig.maxOutputTokens`, Converse's `inferenceConfig.maxTokens` (#1192);
+    models.API_OUTPUT (the layer's cap) when it names none."""
+    if not isinstance(body, dict):
+        return models.API_OUTPUT
+    nested = [(body.get(o), k) for o, k in (("generationConfig", "maxOutputTokens"),
+                                            ("inferenceConfig", "maxTokens"))]
+    for v in [body.get(k) for k in ("max_tokens", "max_completion_tokens", "max_output_tokens")] + [
+            o.get(k) for o, k in nested if isinstance(o, dict)]:
+        if _num(v):
+            return v
+    return models.API_OUTPUT
 
 
 def _total(tok: dict) -> int:
@@ -720,8 +749,7 @@ class Meter:
                 self.task.set_status(api_stop={"guard": "spend", "text": no_cap()})
             return -1.0
         top = self.prices[-1]  # the dearest tier: the worst case
-        out = next((body.get(k) for k in ("max_tokens", "max_completion_tokens", "max_output_tokens")
-                    if _num(body.get(k))), models.API_OUTPUT) if isinstance(body, dict) else models.API_OUTPUT
+        out = max_output(body)
         worst = (size / 4 * top["input"] + out * max(top["output"], top["reasoning"])) / 1e6
         t = today()["usd"]
         left = c - t - worst

@@ -27500,10 +27500,50 @@ def _tls_upstream(tmp: Path, handler, server=None):
     return srv, cert
 
 
+def gemini_events(served: str) -> list[dict]:
+    """A Gemini stream as generativelanguage sends one (#1192): `usageMetadata` a running total
+    in every chunk, `modelVersion` the served model, the last candidate's `finishReason`."""
+    return [{"candidates": [{"content": {"role": "model", "parts": [{"text": "o"}]}, "index": 0}],
+             "usageMetadata": {"promptTokenCount": 9, "candidatesTokenCount": 1, "totalTokenCount": 10},
+             "modelVersion": served, "responseId": "r1"},
+            {"candidates": [{"content": {"role": "model", "parts": [{"text": "k"}]}, "index": 0,
+                             "finishReason": "STOP"}],
+             "usageMetadata": {"promptTokenCount": 9, "cachedContentTokenCount": 4,
+                               "candidatesTokenCount": 3, "thoughtsTokenCount": 5,
+                               "totalTokenCount": 17},
+             "modelVersion": served, "responseId": "r1"}]
+
+
+CONVERSE_EVENTS = [("messageStart", {"role": "assistant"}),
+                   ("contentBlockDelta", {"contentBlockIndex": 0, "delta": {"text": "ok"}}),
+                   ("contentBlockStop", {"contentBlockIndex": 0}),
+                   ("messageStop", {"stopReason": "end_turn"}),
+                   ("metadata", {"usage": {"inputTokens": 7, "outputTokens": 3, "totalTokens": 12,
+                                           "cacheReadInputTokens": 2}, "metrics": {"latencyMs": 5}})]
+
+
+def es_frame(event_type: str, payload: dict) -> bytes:
+    """One AWS event-stream frame, CRCs and all, as Bedrock's converse-stream sends it."""
+    import zlib
+
+    def header(name, value):
+        n, v = name.encode(), value.encode()
+        return bytes([len(n)]) + n + b"\x07" + len(v).to_bytes(2, "big") + v
+    heads = (header(":event-type", event_type) + header(":content-type", "application/json")
+             + header(":message-type", "event"))
+    body = json.dumps(payload).encode()
+    total = 12 + len(heads) + len(body) + 4
+    prelude = total.to_bytes(4, "big") + len(heads).to_bytes(4, "big")
+    prelude += zlib.crc32(prelude).to_bytes(4, "big")
+    msg = prelude + heads + body
+    return msg + zlib.crc32(msg).to_bytes(4, "big")
+
+
 class _Upstream(http.server.BaseHTTPRequestHandler):
     """A provider for the keyhole's tests: records each request (method, path, headers, body) on
     its server's `seen` and answers as its server's `mode` says: "ok" (an OpenAI SSE answer,
-    or Anthropic's for /messages), "status" (`status`, a body echoing part of the key the way
+    or Anthropic's for /messages, Gemini's for :streamGenerateContent, a Bedrock event stream for
+    /converse-stream), "status" (`status`, a body echoing part of the key the way
     OpenAI's 401 does, `retry_after`), "chunks" (`chunks` SSE pieces `gap` s apart; the
     Responses API's events for /responses), "raw" (`status`, `ctype`, then `pieces` sent as they
     are, one chunk each, the end `tail` s later), with `served` (the response's model) and `by` (OpenRouter's
@@ -27547,10 +27587,30 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path.split("?")[0].endswith("/converse-stream"):  # #1192: AWS event-stream frames
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.amazon.eventstream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            for kind, ev in CONVERSE_EVENTS:
+                frame = es_frame(kind, ev)
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(frame), frame))
+                self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
+        if ":streamGenerateContent" in self.path:  # #1192: running usage, and no [DONE]
+            for i, ev in enumerate(gemini_events(s.served)):
+                if i:
+                    time.sleep(s.gap)
+                line = f"data: {json.dumps(ev)}\r\n\r\n".encode()
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(line), line))
+                self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+            return
         if "/messages" in self.path:
             events = [{"type": "message_start", "message": {
                 "id": "msg_up", "type": "message", "role": "assistant", "model": s.served,
@@ -27564,13 +27624,27 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
                  "usage": {"output_tokens": 2}},
                 {"type": "message_stop"}]
         elif self.path.endswith("/responses"):
-            events = [{"type": "response.created", "sequence_number": 0, "response": {
+            # the whole item lifecycle: OpenCode 2.3.2's Responses protocols (Azure's, Bedrock
+            # Mantle's: #1192) refuse a delta without its item_id, and a stream without the item
+            item = {"id": "msg_up", "type": "message", "role": "assistant", "status": "in_progress",
+                    "content": []}
+            text = {"type": "output_text", "text": "ok", "annotations": []}
+            at = {"item_id": "msg_up", "output_index": 0, "content_index": 0}
+            done = {**item, "status": "completed", "content": [text]}
+            events = [{"type": "response.created", "response": {
                 "id": "resp_up", "object": "response", "model": s.served, "status": "in_progress",
-                "usage": None}},
-                {"type": "response.output_text.delta", "sequence_number": 1, "delta": "ok"},
-                {"type": "response.completed", "sequence_number": 2, "response": {
-                    "id": "resp_up", "object": "response", "model": s.served,
-                    "status": "completed", "usage": {"input_tokens": 9, "output_tokens": 4}}}]
+                "output": [], "usage": None}},
+                {"type": "response.output_item.added", "output_index": 0, "item": item},
+                {"type": "response.content_part.added", **at, "part": {**text, "text": ""}},
+                {"type": "response.output_text.delta", **at, "delta": "ok"},
+                {"type": "response.output_text.done", **at, "text": "ok"},
+                {"type": "response.content_part.done", **at, "part": text},
+                {"type": "response.output_item.done", "output_index": 0, "item": done},
+                {"type": "response.completed", "response": {
+                    "id": "resp_up", "object": "response", "model": s.served, "status": "completed",
+                    "output": [done], "usage": {"input_tokens": 9, "output_tokens": 4}}}]
+            for i, ev in enumerate(events):
+                ev["sequence_number"] = i
         else:
             events = [{"model": s.served, **({"provider": s.by} if s.by else {}),
                        "choices": [{"index": 0, "delta": {"content": f"part {i}"}}]}
@@ -28290,12 +28364,11 @@ class Keyhole(_KeyholeTest):
         self.assertEqual((code, json.loads(text)["text"]), (200, f"{ident} [key redacted]"))
 
     def test_a_package_the_keyhole_cant_speak_cant_run(self):
-        # Google's x-goog-api-key and Gemini paths, Azure's api-key, Cohere's native /chat:
-        # every request was a 401 or 404 after a start that said nothing (the protocol review,
-        # 2026-11-23)
+        # Cohere's native /chat, Google's Interactions route: every request was a 401 or 404
+        # after a start that said nothing (the protocol review, 2026-11-23); Gemini's and Azure's
+        # are spoken since #1192
         need = "needs a key wb can hold outside the lane: "
-        for provider, package in (("google", "@opencode/ai/providers/google"),
-                                  ("azure", "@opencode/ai/providers/azure"),
+        for provider, package in (("google", "@opencode/ai/providers/google/interactions"),
                                   ("cohere", "@opencode/ai/providers/cohere"),
                                   ("someco", "")):
             self.assertIsNone(self.kh_mod.protocol_of(package))
@@ -28309,15 +28382,192 @@ class Keyhole(_KeyholeTest):
         for package, want in (("@opencode/ai/providers/anthropic", "anthropic"),
                               ("@opencode/ai/providers/meta/messages", "bearer"),
                               ("@opencode/ai/providers/openai", "bearer"),
-                              ("@opencode/ai/providers/deepinfra", "bearer")):
-            self.assertEqual(self.kh_mod.protocol_of(package), want)
+                              ("@opencode/ai/providers/deepinfra", "bearer"),
+                              ("@opencode/ai/providers/google", "google"),               # #1192
+                              ("@opencode/ai/providers/azure/responses", "api-key"),
+                              ("@opencode/ai/providers/azure/chat", "api-key"),
+                              ("@opencode/ai/providers/amazon-bedrock", "converse"),
+                              ("@opencode/ai/providers/amazon-bedrock/mantle/responses", "bearer"),
+                              ("@opencode/ai/providers/amazon-bedrock/mantle/messages", "bearer"),
+                              ("@opencode/ai/providers/google-vertex", None)):
+            self.assertEqual(self.kh_mod.protocol_of(package), want, package)
+
+    # #1192: Gemini, Azure OpenAI and Bedrock's API key through the keyhole
+
+    def gemini(self, **kw):
+        return self.keyhole(self.model("google", "gemini-x-flash", "/v1beta",
+                                       "@opencode/ai/providers/google"), **kw)
+
+    def test_gemini_gets_its_key_in_x_goog_api_key_on_its_model_path_and_its_usage_is_booked(self):
+        from workbench import meter
+        got = []
+        kh = self.gemini(on_usage=got.append)
+        self.up.served = "gemini-x-flash-001"
+        code, _, text = self.post(kh, "/models/gemini-x-flash:streamGenerateContent?alt=sse",
+                                  body={"contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                                        "generationConfig": {"maxOutputTokens": 8192}},
+                                  headers={"Authorization": None, "x-goog-api-key": kh.token})
+        self.assertEqual(code, 200, text)
+        [req] = self.up.seen
+        self.assertEqual(req["path"], "/v1beta/models/gemini-x-flash:streamGenerateContent?alt=sse")
+        heads = {k.lower(): v for k, v in req["headers"].items()}
+        self.assertEqual(heads["x-goog-api-key"], self.CANARY)
+        self.assertNotIn("authorization", heads)
+        self.assertNotIn(kh.token, json.dumps(req))
+        # the running total read once, at the stream's end (no [DONE], no end event)
+        self.assertEqual(got, [{"promptTokenCount": 9, "candidatesTokenCount": 3, "totalTokenCount": 17,
+                                "cachedContentTokenCount": 4, "thoughtsTokenCount": 5}])
+        self.assertEqual(meter.usage_tokens(got[0]), {"in": 5, "cache_read": 4, "cache_write": 0,
+                                                      "out": 3, "reasoning": 5})
+        self.assertEqual(self.task.status["served"], {"model": "gemini-x-flash-001", "by": None})
+        self.assertIn('"text": "k"', text)                                 # the stream went on whole
+        code, _, text = self.post(kh, "/models", method="GET",
+                                  headers={"Authorization": None, "x-goog-api-key": kh.token})
+        self.assertEqual((code, json.loads(text)["models"][0]["name"]), (200, "models/gemini-x-flash"))
+        self.assertEqual(meter.max_output({"generationConfig": {"maxOutputTokens": 512}}), 512)
+        self.assertEqual(meter.max_output({"inferenceConfig": {"maxTokens": 256}}), 256)
+        self.assertEqual(meter.max_output({"contents": []}), self.models.API_OUTPUT)
+
+    def test_gemini_refuses_another_model_in_the_path_and_a_key_in_the_query(self):
+        kh = self.gemini()
+        heads = {"Authorization": None, "x-goog-api-key": kh.token}
+        body = {"contents": []}
+        for path, body_, want in (
+                ("/models/gemini-x-pro:streamGenerateContent?alt=sse", body, 403),
+                ("/tunedModels/gemini-x-flash:streamGenerateContent?alt=sse", body, 403),
+                ("/models/gemini-x-flash/../gemini-x-pro:streamGenerateContent?alt=sse", body, 403),
+                ("/models/gemini-x-flash:streamGenerateContent?alt=sse", {**body, "model": "x"}, 403),
+                ("/models/gemini-x-flash:streamGenerateContent?alt=sse",
+                 {**body, "models": ["gemini-x-pro"]}, 403),
+                ("/models/gemini-x-flash:streamGenerateContent?alt=sse&key=AIzaOther", body, 400),
+                ("/models/gemini-x-flash:streamGenerateContent?KEY=AIzaOther", body, 400),
+                ("/models/gemini-x-flash:streamGenerateContent?alt=json", body, 400),
+                ("/models/gemini-x-flash:generateContent", body, 404),
+                ("/models/gemini-x-flash:countTokens", body, 404),
+                ("/chat/completions", {"model": "gemini-x-flash"}, 404)):
+            code, _, text = self.post(kh, path, body=body_, headers=heads)
+            self.assertEqual(code, want, (path, text))
+        self.assertEqual(self.up.seen, [])                                    # nothing went on
+        self.assertIn(f"keyhole: refused models/gemini-x-pro (this task runs {kh.model.id})", self.lines)
+        self.assertIn(f"keyhole: refused tunedModels/gemini-x-flash (this task runs {kh.model.id})", self.lines)
+        code, _, _ = self.post(kh, "/models/gemini-x-flash:streamGenerateContent?alt=sse", body=body,
+                               headers={"Authorization": None, "x-goog-api-key": "nope"})
+        self.assertEqual((code, self.up.seen), (401, []))
+
+    def test_geminis_per_minute_429_is_held_as_a_rate_and_its_daily_one_stops_the_round(self):
+        # Google's free tier says "You exceeded your current quota" of both: QUOTA read the
+        # per-minute one as a spent balance and stopped the round
+        told = []
+        kh = self.gemini(hold=0, on_health=lambda state, why, until: told.append((state, until)))
+        rpm = {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": (
+            "You exceeded your current quota, please check your plan and billing details."),
+            "details": [{"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [{
+                "quotaMetric": "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+                "quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}]},
+                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "41s"}]}}
+        self.up.mode, self.up.status, self.up.ctype = "raw", 429, "application/json"
+        self.up.pieces = [json.dumps(rpm).encode()]
+        path, heads = ("/models/gemini-x-flash:streamGenerateContent?alt=sse",
+                       {"Authorization": None, "x-goog-api-key": kh.token})
+        code, _, _ = self.post(kh, path, body={"contents": []}, headers=heads)
+        self.assertEqual(code, 429)                                       # passed back after the hold
+        self.assertNotIn("api_stop", self.task.status)
+        [(state, until)] = told
+        self.assertEqual(state, "rate_limited")
+        self.assertAlmostEqual(until, time.time() + 41, delta=5)           # RetryInfo's wait
+        daily = json.loads(json.dumps(rpm).replace("PerMinute", "PerDay"))
+        self.up.pieces = [json.dumps(daily).encode()]
+        code, _, text = self.post(kh, path, body={"contents": []}, headers=heads)
+        self.assertEqual(code, 400, text)                                 # no wait helps: the round stops
+        self.assertEqual(self.task.status["api_stop"]["guard"], "quota")
+
+    def test_azure_openai_gets_api_key_and_its_api_version_on_the_path_opencode_posts(self):
+        # azure.ts: an `*.openai.azure.com` base gets `/v1` and `?api-version=v1`; the keyhole's
+        # on 127.0.0.1 gets neither, so the keyhole mirrors the one and adds the other
+        up = "https://myres.openai.azure.com/openai"
+        for package in ("@opencode/ai/providers/azure/responses", "@opencode/ai/providers/azure/chat"):
+            self.assertEqual(self.kh_mod.mirror_path(package, up), up + "/v1")
+            self.assertEqual(self.kh_mod.upstream_query(package, up), {"api-version": "v1"})
+        other = "https://gw.example.test/openai"                         # posted to as it is
+        self.assertEqual(self.kh_mod.mirror_path("@opencode/ai/providers/azure", other), other)
+        self.assertEqual(self.kh_mod.upstream_query("@opencode/ai/providers/azure", other), {})
+        self.assertEqual(self.kh_mod.upstream_query("@opencode/ai/providers/openai", up), {})
+        self.assertEqual(self.models.catalog_base("@opencode/ai/providers/azure/responses",
+                                                  {"resourceName": "myres"}), up)
+        self.assertEqual(self.models.catalog_base("@opencode/ai/providers/azure/responses",
+                                                  {"resourceName": "my.evil/host"}), "")
+        m = self.model("azure", "gpt-x-mini", "/openai/v1", "@opencode/ai/providers/azure/responses")
+        kh = self.keyhole(m, query={"api-version": "v1"})
+        code, _, text = self.post(kh, "/responses?api-version=2020-01-01", body={"model": "gpt-x-mini"},
+                                  headers={"Authorization": None, "api-key": kh.token})
+        self.assertEqual(code, 200, text)
+        [req] = self.up.seen
+        self.assertEqual(req["path"], "/openai/v1/responses?api-version=v1")
+        heads = {k.lower(): v for k, v in req["headers"].items()}
+        self.assertEqual(heads["api-key"], self.CANARY)
+        self.assertNotIn("authorization", heads)
+        self.assertEqual(self.post(kh, "/responses", body={"model": "gpt-x"},
+                                   headers={"Authorization": None, "api-key": kh.token})[0], 403)
+
+    def test_bedrocks_api_key_runs_converse_with_the_model_in_the_path_and_its_usage_is_booked(self):
+        from workbench import meter
+        # amazon-bedrock.ts sends a Bedrock API key as a bearer ahead of SigV4; Converse names
+        # the model in the path, encodeURIComponent'd, and frames its stream as AWS event-stream
+        got = []
+        name = "us.anthropic.claude-x-1:0"
+        kh = self.keyhole(self.model("amazon-bedrock", name, "", "@opencode/ai/providers/amazon-bedrock"),
+                          on_usage=got.append)
+        good = "/model/us.anthropic.claude-x-1%3A0/converse-stream"
+        conn = http.client.HTTPConnection("127.0.0.1", kh.port, timeout=30)
+        self.addCleanup(conn.close)
+        conn.request("POST", good, body=json.dumps({"modelId": name, "messages": []}),
+                     headers={"Authorization": f"Bearer {kh.token}"})
+        r = conn.getresponse()
+        self.assertEqual((r.status, r.read()), (200, b"".join(es_frame(*ev) for ev in CONVERSE_EVENTS)))
+        [req] = self.up.seen
+        self.assertEqual(req["path"], good)
+        self.assertEqual(req["headers"]["Authorization"], f"Bearer {self.CANARY}")
+        self.assertEqual(got, [CONVERSE_EVENTS[-1][1]["usage"]])
+        self.assertEqual(meter.usage_tokens(got[0]), {"in": 7, "cache_read": 2, "cache_write": 0,
+                                                      "out": 3, "reasoning": 0})
+        for path, body in (("/model/us.anthropic.claude-x-1:0/converse-stream", {"modelId": name}),
+                           ("/model/us.anthropic.claude-x-2%3A0/converse-stream", {"modelId": name}),
+                           (good, {"modelId": "us.anthropic.claude-x-2:0"}),
+                           (good, {"modelId": name, "model": "other"})):
+            self.assertEqual(self.post(kh, path, body=body)[0], 403, (path, body))
+        for path in ("/model/x/converse", "/model/x/invoke", "/chat/completions"):
+            self.assertEqual(self.post(kh, path, body={"modelId": name})[0], 404, path)
+        self.assertEqual(self.post(kh, "/models", method="GET")[0], 404)
+        self.assertEqual(len(self.up.seen), 1)
+        self.assertEqual(self.models.catalog_base("@opencode/ai/providers/amazon-bedrock",
+                                                  {"region": "eu-west-1"}),
+                         "https://bedrock-runtime.eu-west-1.amazonaws.com")
+        self.assertEqual(self.models.catalog_base("@opencode/ai/providers/amazon-bedrock/mantle/responses",
+                                                  {"region": "eu-west-1"}),
+                         "https://bedrock-mantle.eu-west-1.api.aws/v1")
+        self.assertEqual(self.models.catalog_base("@opencode/ai/providers/amazon-bedrock/mantle/messages",
+                                                  {"region": "eu-west-1"}),
+                         "https://bedrock-mantle.eu-west-1.api.aws/anthropic/v1")
+
+    def test_bedrock_runs_on_a_stored_api_key_and_still_refuses_signing(self):
+        self.fake_auth({"amazon-bedrock": {"export": [self.key_row("amazon-bedrock", {
+            "type": "key", "key": self.CANARY})]}})
+        self.assertEqual(self.kh_mod.load_key("amazon-bedrock").value, self.CANARY)
+        auth = {"amazon-bedrock": {"connections": [{"type": "credential", "method": "key"}]},
+                "google-vertex": {"connections": [{"type": "credential", "method": "key"}]}}
+        self.assertEqual(self.models._key_source("amazon-bedrock", auth, None), "stored")
+        self.assertEqual(self.models._key_source("google-vertex", auth, None), "signing")
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:
+            self.kh_mod.start(self.task, self.model("google-vertex", "gemini-x", "/v1",
+                                                    "@opencode/ai/providers/google-vertex"))
+        self.assertIn("signs each request (Vertex)", str(e.exception))
 
     def test_an_ai_sdk_npm_runs_through_the_keyhole_as_its_opencode_package(self):
         # #1137 (2026-11-23): a config provider's npm `@ai-sdk/openai-compatible` read as its
         # scope, `@ai-sdk`, so a custom provider set up as OpenCode's docs say was refused
         for package, want in (("@ai-sdk/openai-compatible", "bearer"), ("@ai-sdk/anthropic", "anthropic"),
                               ("@ai-sdk/openai", "bearer"), ("@ai-sdk/deepinfra", "bearer"),
-                              ("@ai-sdk/foo", None), ("@ai-sdk/google", None), ("@acme/openai", None),
+                              ("@ai-sdk/foo", None), ("@ai-sdk/google", "google"), ("@acme/openai", None),
                               ("aisdk:@ai-sdk/openai", None), ("@ai-sdk", None)):
             self.assertEqual(self.kh_mod.protocol_of(package), want, package)
         # as OpenCode runs `@ai-sdk/deepinfra`: its own package, which appends /openai
@@ -28555,6 +28805,54 @@ class RealOpenCodeAPI(_KeyholeTest):
             [sent] = asked
             self.assertIn(kh.token, sent[header])                          # OpenCode had the token
             self.assert_no_canary(json.dumps(sent))                        # and never the key
+
+    def test_gemini_azure_and_bedrock_post_through_the_keyhole_as_their_packages_do(self):
+        # #1192: what OpenCode 2.3.2's own packages send a keyhole base: Gemini's model path,
+        # `?alt=sse` and x-goog-api-key; Azure OpenAI's api-key, no `/v1` or api-version added to
+        # a base off `*.openai.azure.com` (the keyhole adds the version); a Bedrock API key as a
+        # bearer, ahead of SigV4, for Mantle's Responses and Converse's model path
+        from workbench import keyhole
+        tmp = Path(self.tmp.name)
+        keys = {"disabled_providers": ["ollama"], "provider": {
+            "google": {"options": {"apiKey": "dummy-not-a-key"}},
+            "azure": {"options": {"apiKey": "dummy-not-a-key", "resourceName": "wbtest"}},
+            "amazon-bedrock": {"options": {"apiKey": "dummy-not-a-key", "region": "us-east-1"}}}}
+        (tmp / "keys-1192.json").write_text(json.dumps(keys))
+        rows = self.listed(tmp / "keys-1192.json", "bundled-1192")
+        cases = (("google", "@opencode/ai/providers/google", "/v1beta", None,
+                  "x-goog-api-key", self.CANARY, "/v1beta/models/{name}:streamGenerateContent?alt=sse"),
+                 # Azure through its Chat route: its Responses one builds the same URL and auth
+                 # (azure.ts `endpoint`, `auth`), but OpenCode's OpenAI Responses parser ends this
+                 # test upstream's stream as incomplete, retrying for 90 s (2026-11-24)
+                 ("azure", "@opencode/ai/providers/azure/chat", "/openai/v1", {"api-version": "v1"},
+                  "api-key", self.CANARY, "/openai/v1/chat/completions?api-version=v1"),
+                 ("amazon-bedrock", "@opencode/ai/providers/amazon-bedrock/mantle/responses", "/v1", None,
+                  "authorization", f"Bearer {self.CANARY}", "/v1/responses"),
+                 ("amazon-bedrock", "@opencode/ai/providers/amazon-bedrock", "", None,
+                  "authorization", f"Bearer {self.CANARY}", "/model/{quoted}/converse-stream"))
+        for provider, package, path, query, header, want, upstream in cases:
+            row = next((r for r in rows if r["providerID"] == provider and r.get("package") == package), None)
+            if row is None:  # a newer OpenCode's catalog without one: said, not passed silently
+                self.fail(f"the bundled catalog lists no {provider} model on {package}")
+            name = row["id"]
+            self.up.seen.clear()
+            m = self.model(provider, name, path, package)
+            kh = keyhole.Keyhole(self.task, m, keyhole.Key(provider, self.CANARY), m.base_url,
+                                 keyhole.protocol_of(package), log=self.lines.append, query=query)
+            self.addCleanup(kh.close)
+            with self.subTest(package):
+                self.run_opencode(kh, provider)
+                self.check_1192(req=self.up.seen, header=header, want=want, upstream=upstream.format(
+                    name=name, quoted=urllib.parse.quote(name, safe="-_.!~*'()")), token=kh.token)
+
+    def check_1192(self, req, header, want, upstream, token):
+        [req] = req                                                      # one request upstream
+        heads = {k.lower(): v for k, v in req["headers"].items()}
+        self.assertEqual(req["path"], upstream)
+        self.assertEqual(heads[header], want)
+        self.assertFalse({"authorization", "x-api-key", "api-key", "x-goog-api-key"} - {header}
+                         & set(heads))                                  # the key in one header only
+        self.assertNotIn(token, json.dumps(req))
 
     def test_a_custom_provider_on_an_ai_sdk_npm_posts_through_the_keyhole(self):
         # #1137 (2026-11-23): the documented form of a custom provider, V1 npm `@ai-sdk/...`,
@@ -31436,36 +31734,71 @@ class Routes(Base):
 
     def test_a_stored_key_on_a_package_the_keyhole_cant_speak_is_refused_before_the_dialog(self):
         # #1066: only keyhole.start checked the package, so a Gemini model was listed, offered,
-        # routed with the user's yes and started, then failed every time
-        gemini = {**api_entry("google", "gemini-2.5-flash"), "package": "@opencode/ai/providers/google"}
-        self.catalog([*ROUTES_CATALOG, gemini], [*ROUTES_AUTH, key_row("google", "Google", STORED)])
-        m = runner.models.hosted(fresh=True)["google/gemini-2.5-flash"]
+        # routed with the user's yes and started, then failed every time (Gemini runs since
+        # #1192: Cohere's native API is still one the keyhole doesn't speak)
+        cohere = {**api_entry("cohere", "command-x"), "package": "@opencode/ai/providers/cohere"}
+        self.catalog([*ROUTES_CATALOG, cohere], [*ROUTES_AUTH, key_row("cohere", "Cohere", STORED)])
+        m = runner.models.hosted(fresh=True)["cohere/command-x"]
         self.assertEqual(m.key, "stored")
         st = runner.models.status(m)
         self.assertEqual((st["available"], st["why"]), (False, (
-            "can't run: the keyhole doesn't speak Google's API (@opencode/ai/providers/google), so wb "
+            "can't run: the keyhole doesn't speak Cohere's API (@opencode/ai/providers/cohere), so wb "
             "can't hold its key outside the lane: a model of another provider can run")))
         self.assertEqual(runner.models.remedy(m, st), "")          # not "/connect": it can't help
-        code, _, err = self.route("trivial", "google/gemini-2.5-flash", "--day-usd", "1")
+        code, _, err = self.route("trivial", "cohere/command-x", "--day-usd", "1")
         self.assertEqual(code, 3)
-        self.assertIn("the keyhole doesn't speak Google's API", err)
+        self.assertIn("the keyhole doesn't speak Cohere's API", err)
         self.assertFalse(self.path.exists())
         out = io.StringIO()
         with redirect_stdout(out):
             cli.main(["models", "--json"])
         api = [x["id"] for x in json.loads(out.getvalue())["api"]]
         self.assertIn("deepseek/deepseek-flash", api)
-        self.assertNotIn("google/gemini-2.5-flash", api)
+        self.assertNotIn("cohere/command-x", api)
         lines = cli.api_key_lines({"deepseek": {"name": "DeepSeek", "key": "stored"},
-                                   "google": {"name": "Google", "key": "stored"}})
+                                   "cohere": {"name": "Cohere", "key": "stored"}})
         self.assertEqual(lines, ["ok  API keys: deepseek (stored via /connect); no role uses one yet",
-                                 "--  google (@opencode/ai/providers/google): the keyhole doesn't speak "
+                                 "--  cohere (@opencode/ai/providers/cohere): the keyhole doesn't speak "
                                  "its API, so wb can't run its models; another provider's key works"])
-        # and the Settings tab's Connected line: not "Google (key stored)"
+        # and the Settings tab's Connected line: not "Cohere (key stored)"
         provs = json.loads(self.route("--json")[1])["providers"]
-        self.assertEqual(provs["google"], {"name": "Google", "key": "none", "why": st["why"]})
+        self.assertEqual(provs["cohere"], {"name": "Cohere", "key": "none", "why": st["why"]})
         self.assertEqual(provs["deepseek"]["key"], "stored")
         self.assertTrue(runner.models.status(runner.models.hosted()["deepseek/deepseek-flash"])["available"])
+
+    def test_each_model_runs_through_its_own_package_and_base_and_gemini_and_azure_keys_run(self):
+        # #1192: one provider's models post through several packages (Google's Gemini and
+        # Interactions; Azure's Responses, Chat and Claude on Foundry), and the first model seen
+        # set the package and base for all; Azure's base is built from its resourceName
+        g = "@opencode/ai/providers/google"
+        gemini = {**api_entry("google", "gemini-x-flash"), "package": g,
+                  "settings": {"baseURL": "https://generativelanguage.googleapis.com/v1beta"}}
+        inter = {**api_entry("google", "deep-x"), "package": g + "/interactions",
+                 "settings": {"baseURL": "https://generativelanguage.googleapis.com/v1beta"}}
+        gpt = {**api_entry("azure", "gpt-x"), "package": "@opencode/ai/providers/azure/responses",
+               "settings": {"resourceName": "myres", "apiKey": LISTED_KEY}}
+        claude = {**api_entry("azure", "claude-x"), "package": "@opencode/ai/providers/anthropic-compatible",
+                  "settings": {"resourceName": "myres", "provider": "azure",
+                               "baseURL": "https://myres.services.ai.azure.com/anthropic/v1"}}
+        self.catalog([*ROUTES_CATALOG, inter, gemini, claude, gpt],
+                     [*ROUTES_AUTH, key_row("google", "Google", STORED), key_row("azure", "Azure", STORED)])
+        hosted = runner.models.hosted(fresh=True)
+        got = {mid: (hosted[mid].package, hosted[mid].base_url) for mid in
+               ("google/gemini-x-flash", "google/deep-x", "azure/gpt-x", "azure/claude-x")}
+        self.assertEqual(got, {
+            "google/gemini-x-flash": (g, "https://generativelanguage.googleapis.com/v1beta"),
+            "google/deep-x": (g + "/interactions", "https://generativelanguage.googleapis.com/v1beta"),
+            "azure/gpt-x": ("@opencode/ai/providers/azure/responses", "https://myres.openai.azure.com/openai"),
+            "azure/claude-x": ("@opencode/ai/providers/anthropic-compatible",
+                               "https://myres.services.ai.azure.com/anthropic/v1")})
+        for mid in ("google/gemini-x-flash", "azure/gpt-x", "azure/claude-x"):
+            self.assertTrue(runner.models.status(hosted[mid])["available"], mid)
+        self.assertIn("the keyhole doesn't speak Google's API", runner.models.status(hosted["google/deep-x"])["why"])
+        self.assertEqual(runner.models.unspoken_providers(["google", "azure"]), {})   # each runs a model
+        # Gemini's free tier, which no price tells apart, said where the code goes
+        line = cli.privacy.where(hosted["google/gemini-x-flash"])["line"]
+        self.assertIn("on Gemini's free tier (a key without billing) Google may use your code", line)
+        self.assertNotIn("free tier", cli.privacy.where(hosted["azure/gpt-x"])["line"])
 
     def test_a_role_out_of_credit_runs_again_once_the_recheck_time_has_passed(self):
         # #1068: no_credit had no `until` and only a 2xx cleared it, which only a running task
@@ -31919,6 +32252,33 @@ class ApiTasks(_ApiTask, _KeyholeTest):
             time.sleep(0.05)
         self.assertEqual(sorted(went), [x.task for x in leases])      # at its ok
         self.assertEqual(self.models.api_holders("deepinfra"), sorted(x.task for x in leases))  # theirs again
+
+    def test_a_gemini_task_runs_through_the_keyhole_and_books_its_usage(self):
+        # #1192: a Gemini key stored with /connect runs a task, the model in the path, the key
+        # in x-goog-api-key, the usage read from usageMetadata at the stream's end
+        from workbench import meter
+        m = self.model("google", "gemini-x-flash", "/v1beta", "@opencode/ai/providers/google")
+        m.kind, m.key, m.remote = "api", "stored", True
+        m.config = {"limit": {"context": 200000, "output": 8192}, "cost": [{"input": 1.0, "output": 2.0}]}
+        real = self.models.resolve
+        p = mock.patch.object(self.models, "resolve", lambda w: m if w == m.id else real(w))
+        p.start()
+        self.addCleanup(p.stop)
+        os.environ["FAKE_AUTH_EXPORT"] = json.dumps([
+            {"id": "cred_g", "integrationID": "google", "label": "main", "active": True,
+             "value": {"type": "key", "key": self.CANARY}}])
+        self.start_api("api-gemini", "http", model=m.id, spawn=False)
+        self.drive_here("api-gemini")
+        task = store.Task("api-gemini")
+        self.assertEqual(task.status["phase"], "review", task.status)
+        [req] = self.up.seen
+        self.assertEqual(req["path"], "/v1beta/models/gemini-x-flash:streamGenerateContent?alt=sse")
+        self.assertEqual({k.lower(): v for k, v in req["headers"].items()}["x-goog-api-key"], self.CANARY)
+        self.assertNotIn("model", req["body"])
+        rows, _ = store.read_jsonl(meter.ledger_path())
+        [row] = [r for r in rows if r.get("task") == "api-gemini" and r.get("source") == "keyhole"]
+        self.assertEqual(row["tok"], {"in": 5, "cache_read": 4, "cache_write": 0, "out": 3, "reasoning": 5})
+        self.assert_no_canary(self.all_files(task.dir), (Path(os.environ["WB_HOME"]) / "spend-api.jsonl").read_text())
 
     def test_with_unload_for_tests_an_api_tasks_tests_run_under_this_machines_pool(self):
         from workbench import verify

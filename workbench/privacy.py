@@ -41,6 +41,11 @@ PRIVACY_PAGES = {
 OLLAMA_PAGE = "https://ollama.com/privacy"  # an Ollama cloud model's (its provider id is the user's)
 
 FREE_LINE = "free: the provider may keep or train on your code"
+# A provider whose free tier is a key's, not a model's (#1192): Gemini's paid and unpaid keys run
+# the same models at the same catalog prices, so `free` can't tell them apart, and the line says
+# it of every task there (the first-task note and the route dialog, never a warning of its own)
+FREE_TIER = {"google": "on Gemini's free tier (a key without billing) Google may use your code "
+                       "to improve its products"}
 OPENROUTER = "openrouter"
 OPENROUTER_ACCOUNT = "(OpenRouter's account setting decides whether backends may keep it)"
 
@@ -63,6 +68,8 @@ def where(m, order=None) -> dict:
         parts.append(f"see {name}'s data policy")
     if m.free:
         parts.append(FREE_LINE)
+    elif pid in FREE_TIER and not m.cloud:
+        parts.append(FREE_TIER[pid])
     return {"provider": pid, "name": name, "line": " · ".join(parts), "policy": policy,
             "free": bool(m.free), "backends": backends}
 
