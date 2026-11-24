@@ -962,6 +962,49 @@ class Lifecycle(Base):
         self.assertEqual((st["base_check"]["exit"], st["round"]), (127, 2))
         self.assertFalse([r for r in store.notices() if r["task"] == "t-nf2" and r["kind"] == "checkin"])
 
+    def test_the_feedback_a_skipped_auto_fix_advises_once_the_tool_is_given_is_no_review_round(self):
+        # #1257 (bar round 6 of 2.0): the `then wb feedback` GIVE_TOOL advises, sent once the tool
+        # was in the worktree, counted as a review the agent caused: with one real review the step
+        # read as two, went badly and shrank the model's slice from 3 files to 1
+        from workbench import router, results, tuning
+        self.start("t-env", "ok", "--test", "answercheck-1257", "--auto-fix", "2", "--no-self-review")
+        st = wait_phase("t-env", {"review"})
+        self.assertEqual(st["env_skip"], "the acceptance command can't run in the agent's environment")
+        task = store.Task("t-env")
+        venv = task.worktree / ".venv"   # GIVE_TOOL's own fix: the worktree's .venv, first on PATH
+        (venv / "bin").mkdir(parents=True)
+        (venv / "pyvenv.cfg").write_text(f"home = {Path(sys.executable).parent}\n")
+        tool = venv / "bin" / "answercheck-1257"
+        tool.write_text(f"#!/bin/sh\nexec {TEST_CMD}\n")
+        tool.chmod(0o755)
+        with mock.patch.object(cli, "spawn_runner"):
+            out = run_wb("feedback", "t-env", "--text", "The tool is in the worktree now: run the "
+                                                         "acceptance command again.")
+        self.assertIn("it follows a skipped auto-fix that wasn't the code's (the acceptance command "
+                      "can't run in the agent's environment), so no review round is counted", out)
+        self.assertEqual((task.status["reviews"], task.status["round_for"]), (0, "resume"))
+        self.assertTrue((task.round_dir(2) / runner.RESUMED).exists())  # round_asks walks past it
+        runner.drive(task)
+        self.assertEqual((task.status["phase"], task.status["tests"]["ok"]), ("review", True))
+        self.assertIsNone(task.status.get("env_skip"))  # cleared as the run started
+        # one real review after it is one, and the step still went well
+        with mock.patch.object(cli, "spawn_runner"):
+            self.assertIn("feedback round 1 sent", run_wb("feedback", "t-env", "--text", "1. Add a line."))
+        runner.drive(task)
+        step = results.step(task, True)
+        self.assertEqual((tuning.agent_reviews(step), router._went(step)), (1, "well"))
+
+    def test_the_discard_a_skipped_auto_fix_offers_is_not_the_models_rejected_work(self):
+        # #1257: GIVE_TOOL's other way out, wb discard and start again with a --setup, is a
+        # stop from outside the step as an infra stop's discard is (#1245)
+        from workbench import tuning
+        self.start("t-envd", "ok", "--test", "answercheck-1257", "--no-self-review")
+        wait_phase("t-envd", {"review"})
+        run_wb("discard", "t-envd")
+        row = store.results()[-1]
+        self.assertEqual((row["outcome"], row["infra"]), ("discarded", "environment"))
+        self.assertTrue(tuning.stopped_outside(row))
+
     @unittest.skipUnless(shutil.which("make"), "no make")
     def test_a_command_not_found_behind_make_test_checks_in_at_once_and_skips_auto_fix(self):
         # #1229 (bar round 4 of 2.0): make ends with its own `make: *** [Makefile:2: test] Error

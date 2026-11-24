@@ -3414,10 +3414,16 @@ RUNNER_TAIL = re.compile("|".join(RUNNER_LINES))
 MAKE_EXEC = re.compile(r"g?make(?:\[\d+\])?: (?P<n>[^:]+): No such file or directory")
 # wb's words for a tool not checked out (missing_command), the same in every shell, and its path
 NOT_CHECKED_OUT = re.compile(r"(?P<p>[^:]+): not in the worktree \(")
+# The words of a skipped auto-fix whose remedy is a wb feedback once Claude gives the agent's
+# environment what it lacked (GIVE_TOOL's tool, the lane's `wb allow`): that round fixes the
+# environment, not the code, and counted as a review the agent caused, it plus one real review
+# made the step go badly and shrank the model's slice (#1257, bar round 6, 2026-11-24). So the
+# review stop says so in status `env_skip`, its cause, which drive clears as the next run starts.
+THEN_FEEDBACK = ", then wb feedback"
 # What gives the agent's environment that command, for the check-in and the skipped auto-fix
 GIVE_TOOL = ("no round can fix that: put the tool in the worktree (a .venv there comes first on "
              "the agent's PATH; a Python module: python3 -m venv .venv && .venv/bin/pip install "
-             "<module>), then wb feedback; or wb discard and start again with a --setup that "
+             f"<module>){THEN_FEEDBACK}; or wb discard and start again with a --setup that "
              "installs it (a module: that .venv), or a --test that names it by its path")
 
 
@@ -4434,7 +4440,7 @@ def not_the_code(task: store.Task, tests) -> str:
         grants = list(dict.fromkeys(lane_grant(n, task) or n for n in nodes))
         said = [f"the lane refused {', '.join(map(shlex.quote, nodes))}: "
                 + "; ".join(f"wb allow {task.name} --path {shlex.quote(g)}" for g in grants)
-                + ", then wb feedback, if the tests need it"] if nodes else []
+                + f"{THEN_FEEDBACK}, if the tests need it"] if nodes else []
         return "; ".join(said + [f"the lane refused {', '.join(map(shlex.quote, hidden))}: "
                                  f"{context.API_HIDDEN_WHY}"] if hidden else said)
     return ""
@@ -5138,7 +5144,7 @@ def drive(task: store.Task) -> None:
     # `last` at once, from the config alone (gpu_side): left to after resolve, which may read the
     # catalog, a GPU task showed the last run's line ("Claude reviews next") as queued (the
     # review of #1015, 2026-11-23)
-    task.set_status(phase="queued", pid=os.getpid(), infra=None,
+    task.set_status(phase="queued", pid=os.getpid(), infra=None, env_skip=None,
                     last="waiting for the GPU" if _gpu_side(task) else "starting",
                     boot=store.boot_id(),  # a later boot reaps it as a restart's (cli.reap)
                     machine=store.machine(), host=store.host(),  # whose pid it is (#849)
@@ -5423,6 +5429,9 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 continue
             task.set_status(phase="review", tests=tests,
                             hands_off_at=store.now(),  # Claude's to edit from now (#1179)
+                            # a tool or path the agent's environment lacks, whose fix is Claude's
+                            # wb feedback once it is given: no review round (cli.cmd_feedback)
+                            env_skip=skip.split(":")[0] if THEN_FEEDBACK in skip else None,
                             last="tests passed: Claude reviews next" if tests and tests["ok"]
                             else f"{skip.split(':')[0]}: Claude reviews next" if skip
                             else "Claude reviews next")
