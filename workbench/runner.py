@@ -2942,9 +2942,10 @@ NOT_FOUND = re.compile(r"command not found|: not found$")
 # the agent's Python (`python3 -m pytest` on a system Python without it, or with the user's venv
 # that python_env leaves out) ran round 1 and both auto-fix rounds on correct code, each told the
 # bug was the change's, where `pytest` alone (exit 127) checked in (#1181, 2026-11-24). A dotted
-# module's parent missing says it the second way.
-NO_MODULE = re.compile(r"\S*python[\w.]*: (No module named [\w.]+|Error while finding module "
-                       r"specification for '[\w.]+' \(ModuleNotFoundError: No module named '[\w.]+'\))")
+# module's parent missing says it the second way. `m` (or `d`) is the module `-m` named.
+NO_MODULE = re.compile(r"\S*python[\w.]*: (No module named (?P<m>[\w.]+)|Error while finding module "
+                       r"specification for '(?P<d>[\w.]+)' \(ModuleNotFoundError: No module named "
+                       r"'[\w.]+'\))")
 # What gives the agent's environment that command, for the check-in and the skipped auto-fix
 GIVE_TOOL = ("no round can fix that: put the tool in the worktree (a .venv there comes first on "
              "the agent's PATH; a Python module: python3 -m venv .venv && .venv/bin/pip install "
@@ -2952,19 +2953,52 @@ GIVE_TOOL = ("no round can fix that: put the tool in the worktree (a .venv there
              "installs it (a module: that .venv), or a --test that names it by its path")
 
 
-def missing_command(r: dict | None) -> str | None:
+def missing_command(r: dict | None, task: store.Task | None = None) -> str | None:
     """The line saying the command's tool isn't there, when run ``r`` (the base check's, or a
     round's tests) ended with it: the shell's not-found line at exit 127 (#1152), or Python's
     no-module line for `-m` at exit 1 (#1181). A tool the agent's environment lacks (one outside
     the agent's PATH, which python_env and agent_path trim), which no edit in a round can give
-    it; else None."""
+    it; else None. A module of ``task``'s own code (own_module) is none: the step may make it."""
     if not r or r.get("exit") not in (1, 127):
         return None
     last = (r.get("tail") or "").strip().splitlines()[-1:]
     line = last[0].strip() if last else ""
-    if r["exit"] == 127 and NOT_FOUND.search(line) or r["exit"] == 1 and NO_MODULE.fullmatch(line):
+    if r["exit"] == 127 and NOT_FOUND.search(line):
         return line
+    if r["exit"] == 1 and (m := NO_MODULE.fullmatch(line)):
+        return None if task and own_module(task, m["m"] or m["d"]) else line
     return None
+
+
+def own_module(task: store.Task, module: str) -> bool:
+    """Whether ``module`` (`pkg.newcli`) is the repo's own code, which the step may be making:
+    its top-level name a `<top>/` or `<top>.py` where the tests run, in the worktree or at the
+    base commit, or the module named in the step's spec (its file, or its dotted name). Counted
+    as a missing tool, `--test 'python3 -m pkg.newcli'` for a step adding pkg/newcli.py checked
+    in before round 1 with a false "no round can fix that" (and its pip install advice), and
+    skipped the agent's one auto-fix round, where a script the step makes was already left out
+    for saying `No such file or directory` on the base too (#1152) (#1181's review, 2026-11-24)."""
+    top, sub = module.split(".")[0], task.spec.get("subdir", "")
+    names = [top, f"{top}.py"]
+    if (task.workdir / top).is_dir() or (task.workdir / f"{top}.py").is_file():
+        return True
+    try:
+        if gitops.git(task.worktree, "ls-tree", "--name-only", task.spec["base"], "--",
+                      *(f"{sub}/{n}" if sub else n for n in names)).strip():
+            return True
+    except (gitops.GitError, KeyError, OSError):
+        pass
+    try:
+        spec = current_task_prompt(task)
+    except OSError:
+        return False
+    path = module.replace(".", "/")
+    if any(f"/{p}".endswith(f"/{path}.py") or f"/{path}/" in f"/{p}"
+           for p in context.spec_paths(spec)):  # pkg/newcli.py, pkg/newcli/__main__.py
+        return True
+    # a dotted name in the spec is the module's own; a top-level one (`pytest`) is a tool the
+    # spec may well name
+    return "." in module and re.search(rf"(?<![\w.]){re.escape(module)}(?!\w)", spec) is not None
 
 
 def base_check_line(r: dict, task: store.Task) -> str:
@@ -2985,7 +3019,7 @@ def base_check_line(r: dict, task: store.Task) -> str:
         return (f"note: the acceptance command ran past {limit}s on the base; not checked"
                 + (f". If it runs that long, a round's run may pass --test-timeout ({full}s) too: "
                    "raise it for a slow suite" if full > limit else ""))
-    if line := missing_command(r):  # every round's tests will fail so too (#1152, 2026-11-24)
+    if line := missing_command(r, task):  # every round's tests will fail so too (#1152, 2026-11-24)
         return (f"warning: the acceptance command can't run in the agent's environment: {line} "
                 f"(exit {r['exit']} on the base), so every round's tests will fail the same way; {GIVE_TOOL}")
     if r["ok"]:
@@ -3152,7 +3186,7 @@ def _base_check(task: store.Task) -> None:
     task.set_status(base_check=r, last="waiting for the GPU" if _gpu_side(task) else "starting")
     # every round's tests will too: a cut-short run, or a command the agent's environment lacks
     # (#1152, 2026-11-24: round 1 and both auto-fix rounds ran first, told the bug was the change's)
-    if r["exit"] == "timeout" and r["limit"] < BASE_CHECK_SECS or missing_command(r):
+    if r["exit"] == "timeout" and r["limit"] < BASE_CHECK_SECS or missing_command(r, task):
         task.notify("checkin", f"task {task.name}: {base_check_line(r, task)}",
                     round=task.status.get("round", 1))
 
@@ -3662,7 +3696,7 @@ def not_the_code(task: store.Task, tests) -> str:
                 "the change; run it in the worktree yourself, or narrow it (wb next --test); "
                 "start a slow suite's task with a larger --test-timeout")
     base = task.status.get("base_check") or {}
-    if (line := missing_command(tests)) and line == missing_command(base) \
+    if (line := missing_command(tests, task)) and line == missing_command(base, task) \
             and base.get("cmd") == task.spec.get("test_cmd"):
         # the same command (or Python module, #1181) not found as on the base: auto-fix rounds
         # told "the system works; the bug is in this change" each failed the same way, before
