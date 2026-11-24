@@ -30771,14 +30771,16 @@ class RateLimits(Base):
         self.assertEqual(n["cause"], "provider")
         self.assertIn("top up your deepseek account, or wait for the plan's reset", n["text"])
         self.assertEqual(self.models.api_health("deepseek")["state"], "no_credit")
-        # OpenCode's own error line, no keyhole between: the same stop; another 400 isn't one
+        # OpenCode's own error line, no keyhole between: the same stop; another 400 isn't one, but
+        # the request the provider refused it is (#1082), with no top-up remedy
         wait = runner._ProviderWait(task, 1)
         wait.on_error({"error": {"type": "provider.invalid-request", "status": 400, "message": low}})
         self.assertEqual(wait.fatal[0], "quota")
         wait = runner._ProviderWait(task, 1)
         wait.on_error({"error": {"type": "provider.invalid-request", "status": 400,
                                  "message": "max_tokens: billing tier allows at most 8192"}})
-        self.assertIsNone(wait.fatal)
+        self.assertEqual(wait.fatal, ("refused", "deepseek refused the request (HTTP 400): "
+                                                 "max_tokens: billing tier allows at most 8192"))
 
     def test_a_certificate_that_doesnt_verify_stops_the_round_at_once_as_this_machines(self):
         # #1080 (2026-11-23): the keyhole's 502 was retried, read as the provider's outage for
