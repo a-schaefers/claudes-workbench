@@ -494,7 +494,9 @@ coding choice is the user's (`wb coding`), never changed by a check.
     call over your whole context: five of them cost more than the agent's round (2026-11-17).
   Accept only what you would have written.
 - **question** — answer it briefly and decisively: `wb answer <name> --text "…"`. The agent is
-  blocked until you do.
+  blocked until you do. It reads only its worktree (and what `wb allow --path` adds), never a
+  path you name elsewhere (a plan under ~/.claude, another repo): paste the text, or use
+  `wb answer <name> --file <path>`, which sends the file's contents.
 - **stuck / failed** — `wb log <name> -n 30` if the report isn't enough; then feedback that unblocks
   it, or discard. Past step 1, discard drops only this step: the steps `wb next` committed stay on
   the branch, and the report says how to accept them instead. A failed round's edits so far stay in the worktree (`wb resume` carries on). A setup or load failure before the agent ran: fix it, then `wb resume <name>`.

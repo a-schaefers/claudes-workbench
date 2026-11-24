@@ -147,6 +147,16 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertTrue(callable(cli.start_gate))
         self.assertIn("calls.push(['--start'", (ROOT / "mod/hooks/register.tsx").read_text())
 
+    def test_the_skills_question_bullet_sends_a_files_text_never_a_path_outside_the_lane(self):
+        # #1133 (2026-11-23): an answer naming ~/.claude/plans/x.md (hidden from the lane whole)
+        # or another repo got the agent a denied read and another question, another wake
+        skill = (ROOT / "skill/workbench/SKILL.md").read_text()
+        bullet = skill[skill.index("- **question** —"):skill.index("- **stuck / failed** —")]
+        bullet = " ".join(bullet.split())
+        self.assertIn("never a path you name elsewhere (a plan under ~/.claude, another repo)", bullet)
+        self.assertIn("`wb answer <name> --file <path>`, which sends the file's contents", bullet)
+        self.assertIn("Path(a.file).read_text(", (ROOT / "workbench/cli.py").read_text())   # cmd_answer's
+
     def test_every_web_chat_api_path_is_in_the_api_reference(self):
         # #1042: docs/chat-api.md is the page another agent is handed; a path the server answers
         # that it doesn't name is one nobody can find
