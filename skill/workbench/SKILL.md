@@ -375,11 +375,13 @@ this machine's GPU even when the model is on a wb remote box; without it they se
 `wb verify` and `wb shot` wait for the GPU alone too.
 A suite slower than 15 minutes: `--test-timeout <secs>` above its time, or
 narrow the command; a run past it isn't sent back to the agent (nor one the lane refused a
-device, nor a command or Python module (`python3 -m pytest`, not one of the repo's own, nor one whose file or dotted name the spec gives, nor a package or module the spec makes, as in "make a new package greet", unless your own Python has it; a name the spec only mentions, "with pytest tests", still counts as a tool) not found as on the base, which checks in before round 1, or a command a `wb next --test` command itself names), you're woken with `auto-fix skipped:` and the cause, unless the base check ran the same
+device, nor a command or Python module (`python3 -m pytest`, not one of the repo's own, nor one whose file or dotted name the spec gives, nor a package or module the spec makes, as in "make a new package greet", unless your own Python has it; a name the spec only mentions, "with pytest tests", still counts as a tool), or a `.venv/bin/activate` it sources, not found as on the base, which checks in before round 1, or a command a `wb next --test` command itself names), you're woken with `auto-fix skipped:` and the cause, unless the base check ran the same
 command in a quarter of the limit: then it's the change's hang, and auto-fix gets it.
+Its own `then wb feedback`, once you've given the tool or the grant, counts no review round.
 Once the tests pass, the agent checks its own change against your review checks in one more
 round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it);
-one that only reads on is stopped as its finish, not stuck (`self-review: … stopped as its finish`).
+one that only reads on, or goes quiet, on the tree its tests passed on is stopped as its finish,
+not stuck and no nudge check-in (`self-review: … stopped as its finish`).
 On API it's off unless you pass `--self-review` (each round you don't see is paid).
 It returns at once; a detached runner does the work. **Don't poll.** With the workbench mod loaded
 the session is woken by a `[workbench]` prompt when the task needs you (review, question, stuck,
@@ -560,7 +562,7 @@ still has room (how handovers work: `reference/driving.md`).
 Check a directory flagged as possible build output before you accept a step. Remove or gitignore
 generated files. When the bulk additions or large binaries belong in the commit, pass
 `--include` to `wb next` or `wb accept` after reviewing them. `NOTE: git ignores files the agent
-wrote` (with its edit tools, or a shell command that names them) names files no diff shows and no commit takes: read them, then `--include` lands them. A
+wrote` (with its edit tools, or a shell command that names them) names files the diff shows but no commit takes: read them, then `--include` lands them. A
 file you write under an ignored path (a takeover, a fix) is refused the same way: `--include`;
 not what your rerun of the task's `--test` or setup writes, nor another build you run there
 (`tsc` when the test is jest's): that is left out as below. So write your own files there with

@@ -1548,9 +1548,11 @@ class _ProviderWait:
                          "since": run["since"], "secs": secs,
                          "text": f"{what} for {_span(secs)}: the round's clocks were paused"})
 
-    def end(self, out: dict, now: float) -> None:
+    def end(self, out: dict, now: float, settle=None) -> None:
         """After the round: OpenCode that exited on a rate limit, an outage or a quota error is
-        the provider's stop; the wait's event; the status keys cleared; `held` for drive."""
+        the provider's stop, unless ``settle`` (run_round's: a self-review on its green tree,
+        #1261) takes it for the agent's finish; the wait's event; the status keys cleared;
+        `held` for drive."""
         if not self.api:
             return
         if not out["stuck"] and out["exit"] not in (0, None) and not (
@@ -1558,8 +1560,9 @@ class _ProviderWait:
             self.st = self.task.status
             if why := self.stop(now, gave_up=True):
                 out["guard"], out["stuck"] = why
-                self.task.event({"ts": store.now(), "round": self.n, "kind": "stopped", "text": why[1],
-                                 **({"by": by} if (by := stopped_by(why[0])) else {})})
+                if not (settle and settle()):
+                    self.task.event({"ts": store.now(), "round": self.n, "kind": "stopped", "text": why[1],
+                                     **({"by": by} if (by := stopped_by(why[0])) else {})})
         self._ended(now)
         out["held"] = self.held
         if self.worst is not None:
@@ -1655,6 +1658,27 @@ def green_tree(task: store.Task, began: str) -> str | None:
     if st.get("round_for") == "self_review":
         return st.get("self_review_tree", began)
     return carried_tree(task)
+
+
+def settle(task: store.Task, n: int, out: dict, began: str | None, why: str | None = None) -> bool:
+    """A guard's stop of a self-review round (out["stuck"]; or ``why``, the think nudge about
+    to interrupt it) on the tree its tests passed on (green_tree) is the agent's finish, never a
+    stop: out["settled"] takes the reason and the stuck and guard keys go, so the round goes on
+    to the tests, then review. A self-review is reads, runs and thinking by design (break a
+    check, see a test fail, copy the file back), and each guard that met it there woke Claude
+    with a stuck notice and no tests line for a green change, the step recorded stuck: the
+    explore guard (#1168), then the repeat and error guards (#1250), then the think nudge (a
+    needless check-in), silence and the round's wall (#1261, 2026-11-24), each fixed alone. So
+    every stop goes through here: run_round's guards, the provider's (in the round or at
+    OpenCode's exit), the spend cap's in the round, and drive's handover limit. A tree the
+    self-review left changed, or any other round: False, nothing changed, stopped as before."""
+    why = out.get("stuck") or why
+    if not why or gitops.mark(task.worktree) != green_tree(task, began):
+        return False
+    out["settled"], out["stuck"], out["guard"] = why, None, None
+    task.event({"ts": store.now(), "round": n, "kind": "settled",
+                "text": f"self-review: {why}, the tree its tests passed on: stopped as its finish"})
+    return True
 
 
 def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
@@ -1755,7 +1779,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     # OpenCode sent again, each with why
     out = {"exit": None, "stuck": None, "texts": [], "tools": {}, "errors": [], "retries": [],
            "tok_in": 0, "tok_out": 0, "interrupted": False, "full": None, "guard": None,
-           "answered": False, "new_session": new_session, "reached": False}
+           "answered": False, "new_session": new_session, "reached": False,
+           "began": began}  # the tree as it began, for drive's settle (#1261)
     window = st.get("window")
     fresh_at = tuning.value(task, "fresh_at")
     # The last step's (session, context, prompt): a later step in it whose prompt is smaller by
@@ -1936,25 +1961,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 m = gitops.mark(task.worktree)
                 if detector.guard == "no_edit" and m != edit_mark:  # a shell edit: an edit, not a repeat
                     edit_mark, detector.since_edit, why = m, 0, None
-                elif m == green_tree(task, began):
-                    # A self-review round is reads and runs by design (break a check, see a test
-                    # fail, copy the file back): on a change whose tests passed, the explore
-                    # guard stopped it as stuck, so a green task woke Claude as stuck and its
-                    # step was recorded stuck (#1168, 2026-11-24). On the tree those tests
-                    # passed on, it ends as the agent's finish: the tests, then review. A tree
-                    # it changed is stopped as before. Any of the detector's guards, not only
-                    # the explore guard: a 9B's self-review that ran the acceptance command
-                    # four times in a row on the green tree met the repeat guard, stuck again
-                    # (#1250, 2026-11-24); a string of failing calls there is no less its finish.
-                    out["settled"], why = why, None
-            if why:
+            if why:  # on a self-review's green tree, settled below with the other guards' (#1168)
                 out["stuck"], out["guard"] = why, detector.guard
-        if out.get("settled"):  # #1168: not a guard's stop
-            task.event({"ts": store.now(), "round": n, "kind": "settled",
-                        "text": f"self-review: {out['settled']}, the tree its tests passed on: "
-                                "stopped as its finish"})
-            _stop(proc)
-            break
         quiet = clock.quiet(mono)
         hush = wait_hush if waiting_bg else silence
         # The agent's turn is over (its last step's reason `stop`) and OpenCode is still open:
@@ -1997,6 +2005,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         # and tell Claude. The nudge starts a new round, and that round stalling again is
         # stopped, whatever it did first: else a model that never answers, or a command that
         # prints nothing for longer than the budget, would be nudged and rerun forever.
+        nudge = False
         if (think and heard and not waiting_bg and not nudged and not out["stuck"] and not asking
                 and quiet > think):
             mins = int(quiet // 60)
@@ -2006,21 +2015,30 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                                 if not out["tools"] and not out["texts"] else
                                 f"{mins} minutes again with no tool call, even after a nudge")
             else:
-                nudged = True
-                text = NUDGE.format(mins=mins)
-                task.set_status(nudged_round=n)
-                store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text,
-                                                             "now": True, "by": "workbench"})
-                task.event({"ts": store.now(), "round": n, "kind": "steer", "now": True,
-                            "by": "workbench", "text": text})
-                nudges = task.status.get("nudges", 0) + 1
-                task.set_status(nudges=nudges)
-                task.notify("checkin", checkin_text(task, n, out, max(started, float(
-                    task.status.get("checkin_at") or 0)), step_prior + clock.ran(mono)) + f"\nthe runner nudged it: {mins} min of "
-                    f"thinking with no tool call (nudge {nudges} this task; budget {int(think)}s)",
-                    round=n)
+                nudge = True
         if not out["stuck"] and spend:
             _spend_guard(task, out)
+        # Any guard's stop, and the nudge, of a self-review on its green tree: its finish (#1261:
+        # the think nudge woke Claude with a check-in, and silence, the wall or the stop after a
+        # nudge set stuck, past #1168/#1250's settle, which was the detector's alone)
+        if (out["stuck"] or nudge) and settle(
+                task, n, out, began, f"no tool call or word for {_span(quiet)}"):
+            _stop(proc)
+            break
+        if nudge:
+            nudged = True
+            text = NUDGE.format(mins=mins)
+            task.set_status(nudged_round=n)
+            store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text,
+                                                         "now": True, "by": "workbench"})
+            task.event({"ts": store.now(), "round": n, "kind": "steer", "now": True,
+                        "by": "workbench", "text": text})
+            nudges = task.status.get("nudges", 0) + 1
+            task.set_status(nudges=nudges)
+            task.notify("checkin", checkin_text(task, n, out, max(started, float(
+                task.status.get("checkin_at") or 0)), step_prior + clock.ran(mono)) + f"\nthe runner nudged it: {mins} min of "
+                f"thinking with no tool call (nudge {nudges} this task; budget {int(think)}s)",
+                round=n)
         if out["stuck"]:
             # by: the provider's or the spend cap's stop is no lesson about the agent
             # (lessons.gather; #1020)
@@ -2073,7 +2091,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         out["exit"] = proc.wait()
         out["lingered"] = True  # our stop's exit, not a crash: the round is what its events say
     log.close()
-    provider.end(out, time.time())
+    provider.end(out, time.time(), lambda: settle(task, n, out, began))
     ask_mcp.close(task, opened)  # its server is gone: closed, so nothing takes them for open
     if task.status.get("asking") or task.status.get("phase") == "asking":  # it ended
         task.set_status(asking=None, phase="running")  # mid-question: nothing reads that answer now
@@ -3080,6 +3098,23 @@ def ignored_writes(task: store.Task) -> list[str]:
         return []
 
 
+def accept_writes(task: store.Task) -> list[str]:
+    """The files wb accept and wb next check for git ignoring them (commit_all's ``written``): the
+    agent's edit tools' and shell's, and Claude's (#1179, #1210)."""
+    return agent_wrote(task) + hand_wrote(task) + shell_wrote(task)
+
+
+def ignored_to_commit(task: store.Task) -> list[str]:
+    """Of accept_writes, the ones git ignores, which --include commits: what the review diff and
+    wb diff show beside git's own view (gitops.diff's ``force``), so an agent's feedback-round
+    change to its lib/util.py is in "the diff since your last review", not "(no changes)" (#1259,
+    2026-11-24); [] when git can't say."""
+    try:
+        return gitops.ignored_files(task.worktree, accept_writes(task))
+    except (gitops.GitError, OSError):
+        return []
+
+
 def _ignored_paths(wt: Path) -> list[str]:
     """The worktree's ignored files and directories (a directory once, not its files)."""
     out = gitops.git(wt, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
@@ -3386,6 +3421,8 @@ NO_MODULE = re.compile(r"(?P<py>\S*python[\w.]*): (No module named (?P<m>[\w.]+)
 TOOL_DIRS = (".venv/bin", "venv/bin", "node_modules/.bin", "vendor/bin")
 # bash's and zsh's line for a path that isn't there (dash's and ksh's is NOT_FOUND's)
 NO_SUCH = re.compile(r"no such file or directory: (?P<z>.+)$|(?P<n>[^:]+): No such file or directory$")
+# dash's line for a file `.` can't read (it exits 2; bash says NO_SUCH's, exit 1, zsh NO_SUCH's z)
+NO_SOURCE = re.compile(r"\.: cannot open (?P<p>[^:]+)(?::.*)?$")
 # A task runner's own lines after its recipe's output, each runner's in one entry, its group (if
 # any) the recipe's exit: GNU make's `make: *** [Makefile:2: test] Error 127` (it exits 2), a
 # sub-make's `Leaving directory`, -k's `Target … not remade`; just's `error: Recipe `test` failed
@@ -3410,14 +3447,23 @@ RUNNER_LINES = (
 )
 RUNNER_TAIL = re.compile("|".join(RUNNER_LINES))
 # make's own line for a recipe it runs without a shell (no shell syntax in it) that execvp can't
-# find: a name without a `/` is one not on PATH, the shell's `command not found` (#1229)
-MAKE_EXEC = re.compile(r"g?make(?:\[\d+\])?: (?P<n>[^:]+): No such file or directory")
+# find: a name without a `/` is one not on PATH, the shell's `command not found` (#1229). GNU
+# Make 3.81 (macOS's /usr/bin/make, Xcode's) says `Command not found`, which none of the
+# patterns read: a Mac's plain `make test` recipe ran round 1 and both auto-fix rounds on correct
+# code, each told the bug was the change's (#1262, bar round 6, 2026-11-24).
+MAKE_EXEC = re.compile(r"g?make(?:\[\d+\])?: (?P<n>[^:]+): (?:No such file or directory|Command not found)")
 # wb's words for a tool not checked out (missing_command), the same in every shell, and its path
 NOT_CHECKED_OUT = re.compile(r"(?P<p>[^:]+): not in the worktree \(")
+# The words of a skipped auto-fix whose remedy is a wb feedback once Claude gives the agent's
+# environment what it lacked (GIVE_TOOL's tool, the lane's `wb allow`): that round fixes the
+# environment, not the code, and counted as a review the agent caused, it plus one real review
+# made the step go badly and shrank the model's slice (#1257, bar round 6, 2026-11-24). So the
+# review stop says so in status `env_skip`, its cause, which drive clears as the next run starts.
+THEN_FEEDBACK = ", then wb feedback"
 # What gives the agent's environment that command, for the check-in and the skipped auto-fix
 GIVE_TOOL = ("no round can fix that: put the tool in the worktree (a .venv there comes first on "
              "the agent's PATH; a Python module: python3 -m venv .venv && .venv/bin/pip install "
-             "<module>), then wb feedback; or wb discard and start again with a --setup that "
+             f"<module>){THEN_FEEDBACK}; or wb discard and start again with a --setup that "
              "installs it (a module: that .venv), or a --test that names it by its path")
 
 
@@ -3427,7 +3473,8 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     `<name>: command not found`, so the check-in and the base's line compared with a round's
     read the same under bash, zsh, dash or ksh (#1152; nightly run 45362198509, 2026-11-24), a
     name with a `/` never, but for one in TOOL_DIRS, which says `<path>: not in the worktree (…)`
-    (#1206); or Python's no-module line for `-m` at exit 1 (#1181). A tool the
+    (#1206), as does a file sourced from one at exit 1 or 2 (`source .venv/bin/activate`, #1258);
+    or Python's no-module line for `-m` at exit 1 (#1181). A tool the
     agent's environment lacks (one outside the agent's PATH, which python_env and agent_path
     trim), which no edit in a round can give it; else None. A module of ``task``'s own code
     (own_module) is none: the step may make it; nor is a console script of its own
@@ -3445,27 +3492,32 @@ def missing_command(r: dict | None, task: store.Task | None = None) -> str | Non
     code = int(inner) if inner else code
     if wrapped and not inner and lines and NOT_FOUND.search(lines[-1]):
         code = 127  # pnpm exits 1 and names no code: the shell's not-found line is its 127 (#1243)
-    if code not in (1, 127):
+    if code not in (1, 2, 127):
         return None
     line = lines[-1].strip() if lines else ""
+    name = None
     if code == 127:
         name = missing_name(line) or ((m := MAKE_EXEC.fullmatch(line)) and m["n"].strip())
         if name and "/" not in name:
             # one the step's reinstall puts in the worktree's venv, first on the agent's PATH (#1244)
             return None if task and context.own_venv(task) and own_command(task, name) \
                 else f"{name}: command not found"
-        # a path: a script the step may make, but not a tool an install puts there (#1206)
-        path = name or ((m := NO_SUCH.search(line)) and (m["z"] or m["n"]).strip())
-        if path and (top := next((t for t in TOOL_DIRS if f"/{t}/" in f"/{path}"), None)):
-            s = f"/{path}"
-            where, tool = s[1:s.find(f"/{top}/") + 1 + len(top)], path.rsplit("/", 1)[-1]
-            # an install dir the setup made in the worktree: never "never checked out", and a
-            # console script the step adds to it is the step's own (#1244, bar round 5, 2026-11-24)
-            if task and not os.path.isabs(path) and (task.workdir / where).is_dir():
-                return None if own_command(task, tool) else \
-                    f"{path}: not in the worktree ({where}/ is there, without {tool})"
-            return f"{path}: not in the worktree ({top.split('/')[0]}/ is an install's, never checked out)"
-        return None
+    # a path: a script the step may make, but not a tool an install puts there (#1206); nor, at
+    # exit 1 or 2, a file the shell sourced from one: `source .venv/bin/activate && pytest` with
+    # no .venv in the worktree exits 1 under bash (dash's `.: cannot open`, 2), and round 1 and
+    # both auto-fix rounds ran on correct code, each told the bug was the change's (#1258, bar
+    # round 6, 2026-11-24)
+    path = name or ((m := NO_SUCH.search(line)) and (m["z"] or m["n"]).strip()) \
+        or ((m := NO_SOURCE.search(line)) and m["p"].strip())
+    if path and (top := next((t for t in TOOL_DIRS if f"/{t}/" in f"/{path}"), None)):
+        s = f"/{path}"
+        where, tool = s[1:s.find(f"/{top}/") + 1 + len(top)], path.rsplit("/", 1)[-1]
+        # an install dir the setup made in the worktree: never "never checked out", and a
+        # console script the step adds to it is the step's own (#1244, bar round 5, 2026-11-24)
+        if task and not os.path.isabs(path) and (task.workdir / where).is_dir():
+            return None if own_command(task, tool) else \
+                f"{path}: not in the worktree ({where}/ is there, without {tool})"
+        return f"{path}: not in the worktree ({top.split('/')[0]}/ is an install's, never checked out)"
     if code == 1 and (m := NO_MODULE.fullmatch(line)):
         return None if task and own_module(task, m["m"] or m["d"], m["py"]) else line
     return None
@@ -3803,8 +3855,9 @@ def review_diff(task: store.Task) -> str:
     # all the same (#79, the 2026-11-18 audit).
     props = [str(p.relative_to(task.worktree)) for _, p in proposals(task.worktree)]
     code = (".", *(f":(exclude,literal){p}" for p in props))
+    force = ignored_to_commit(task)  # what --include commits, in the snapshot and the diffs (#1259)
     try:
-        tree, left = gitops.snapshot_left(task.worktree)  # bulky new files left out (#431)
+        tree, left = gitops.snapshot_left(task.worktree, force=force)  # bulky new files left out (#431)
         task.set_status(reviewed={"step": steps, "tree": tree})
         left = gitops.left_line(left)
         if since and not gitops.has_tree(task.worktree, since):
@@ -3814,7 +3867,7 @@ def review_diff(task: store.Task) -> str:
             since, gone = None, "\n\nthe last review's snapshot is gone (git gc pruned it): all of it again"
         if since:
             # bounded: a big diff is never read whole only to show its stat (#348, the audit of 1.4)
-            full = gitops.diff(task.worktree, since, paths=code, limit=REVIEW_DIFF_MAX)
+            full = gitops.diff(task.worktree, since, paths=code, limit=REVIEW_DIFF_MAX, force=force)
             same = not props or not gitops.diff(task.worktree, since,
                                                  paths=tuple(f":(literal){p}" for p in props))
             prop = ("\n\nthe agent's proposed instruction files: unchanged since your last review"
@@ -3825,7 +3878,7 @@ def review_diff(task: store.Task) -> str:
                 return (f"\n\nthe diff since your last review (wb diff {task.name} for all of "
                         f"it):\n{full}" + prop)
             base = since
-        full = gitops.diff(task.worktree, base, paths=code, limit=REVIEW_DIFF_MAX)
+        full = gitops.diff(task.worktree, base, paths=code, limit=REVIEW_DIFF_MAX, force=force)
         prop = proposal_diff(task) + left
         if full == "":
             return gone + "\n\nthe diff: (no changes)" + prop
@@ -3833,7 +3886,7 @@ def review_diff(task: store.Task) -> str:
             return (f"{gone}\n\nthe diff (all of it; wb diff {task.name} again only after a change):"
                     f"\n{full}" + prop)
         return (f"{gone}\n\nthe diff is over {REVIEW_DIFF_MAX} characters, too big to include: "
-                f"its stat:\n{gitops.diff(task.worktree, base, stat=True, stat_count=gitops.CHANGED_SHOWN)}" + prop)
+                f"its stat:\n{gitops.diff(task.worktree, base, stat=True, stat_count=gitops.CHANGED_SHOWN, force=force)}" + prop)
     except (gitops.GitError, OSError):
         return ""
 
@@ -4434,7 +4487,7 @@ def not_the_code(task: store.Task, tests) -> str:
         grants = list(dict.fromkeys(lane_grant(n, task) or n for n in nodes))
         said = [f"the lane refused {', '.join(map(shlex.quote, nodes))}: "
                 + "; ".join(f"wb allow {task.name} --path {shlex.quote(g)}" for g in grants)
-                + ", then wb feedback, if the tests need it"] if nodes else []
+                + f"{THEN_FEEDBACK}, if the tests need it"] if nodes else []
         return "; ".join(said + [f"the lane refused {', '.join(map(shlex.quote, hidden))}: "
                                  f"{context.API_HIDDEN_WHY}"] if hidden else said)
     return ""
@@ -4537,7 +4590,8 @@ def _repo_gone(task: store.Task) -> None:
     never named wb relocate, which accept's own check does (#776)."""
     text = (f"{task.spec['repo']} moved or was deleted: wb relocate {task.name} --repo <its new "
             "path>, then wb resume")
-    task.set_status(phase="failed", last=text[:200])
+    # `infra`: the repo moved under it, not the step's doing (cli.stopped_outside, #1260)
+    task.set_status(phase="failed", last=text[:200], infra="repo")
     # its cause, so the mod's wake names the notice's relocate, not wb feedback: a runner that
     # fails at once on the moved repo and wakes Claude again (the bar loop, #1247, 2026-11-24)
     task.notify("failed", f"task {task.name}: {text}", cause="repo")
@@ -5138,7 +5192,7 @@ def drive(task: store.Task) -> None:
     # `last` at once, from the config alone (gpu_side): left to after resolve, which may read the
     # catalog, a GPU task showed the last run's line ("Claude reviews next") as queued (the
     # review of #1015, 2026-11-23)
-    task.set_status(phase="queued", pid=os.getpid(), infra=None,
+    task.set_status(phase="queued", pid=os.getpid(), infra=None, env_skip=None,
                     last="waiting for the GPU" if _gpu_side(task) else "starting",
                     boot=store.boot_id(),  # a later boot reaps it as a restart's (cli.reap)
                     machine=store.machine(), host=store.host(),  # whose pid it is (#849)
@@ -5287,15 +5341,18 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                     if not _go_on(task, n, "the handover"):
                         return
                     continue
-                rnd["guard"] = "handovers"
-                rnd["stuck"] = (f"handed over to a fresh session {HANDOVER_MAX} times in this "
-                                "round without finishing"
-                                # the last one a failed compaction, named: not a silent failure,
-                                # and the reading, not OpenCode, is what to cut (#969)
-                                + (f" (the last when OpenCode's compaction failed: "
-                                   f"{rnd['compact_failed']})" if rnd.get("compact_failed") else "")
-                                + ": the step is too big for this model's "
-                                "window; split it (wb next) or take it over")
+                # a self-review's, on its green tree, is its finish, as any guard's is (#1261)
+                if not settle(task, n, rnd, rnd.get("began"),
+                              f"handed over to a fresh session {HANDOVER_MAX} times"):
+                    rnd["guard"] = "handovers"
+                    rnd["stuck"] = (f"handed over to a fresh session {HANDOVER_MAX} times in this "
+                                    "round without finishing"
+                                    # the last one a failed compaction, named: not a silent failure,
+                                    # and the reading, not OpenCode, is what to cut (#969)
+                                    + (f" (the last when OpenCode's compaction failed: "
+                                       f"{rnd['compact_failed']})" if rnd.get("compact_failed") else "")
+                                    + ": the step is too big for this model's "
+                                    "window; split it (wb next) or take it over")
             _round_end(task, n, rnd, began)
             if rnd["interrupted"] or (pending_steer(task) and not rnd["stuck"]):
                 _steer_round(task, n, rnd["interrupted"])
@@ -5423,6 +5480,9 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 continue
             task.set_status(phase="review", tests=tests,
                             hands_off_at=store.now(),  # Claude's to edit from now (#1179)
+                            # a tool or path the agent's environment lacks, whose fix is Claude's
+                            # wb feedback once it is given: no review round (cli.cmd_feedback)
+                            env_skip=skip.split(":")[0] if THEN_FEEDBACK in skip else None,
                             last="tests passed: Claude reviews next" if tests and tests["ok"]
                             else f"{skip.split(':')[0]}: Claude reviews next" if skip
                             else "Claude reviews next")
@@ -5664,6 +5724,8 @@ def _updated(task: store.Task) -> bool:
 # (status `stopping`, cli._stop_runner); any other leaves the task stuck, with a notice, so it
 # doesn't sit in a live phase that nothing will ever end (the 2026-11-16 audit).
 SIGNAL_STOP = "the runner was stopped by a signal (a shutdown, a logout or a kill), not by Claude"
+# ... and its status `infra`: not the step's, which wb discard and wb feedback read (cli.stopped_outside)
+SIGNAL_INFRA = "signal"
 # A shutdown or logout signals every runner at once: each raised a stuck notice of its own, and
 # the mod woke Claude once a task (#544). A runner stopped by a signal waits, up to this long
 # after its own signal, while another task of its session still runs, so the others stop too
@@ -5827,7 +5889,7 @@ def main():
             task.event({"ts": store.now(), "round": st.get("round"), "kind": "stopped",
                         "by": "signal", "text": SIGNAL_STOP})
             at = SIGNALLED[0] if SIGNALLED else time.time()
-            task.set_status(phase="stuck", last=SIGNAL_STOP, signalled=at)
+            task.set_status(phase="stuck", last=SIGNAL_STOP, signalled=at, infra=SIGNAL_INFRA)
             _signal_notice(task, at)
     except Exception as e:
         err = traceback.format_exc()
@@ -5901,6 +5963,7 @@ SPEAKS_HOST = {"deepseek": "deepseek.com", "openrouter": "openrouter.ai", "anthr
 THINKING_ON = "thinking on"
 THINKING_NOT = "thinking off (the model doesn't reason)"
 THINKING_OFF_LINE = "thinking off"
+# its opening is the mod's thinkStops LOWEST_SAID: still cheaper than On there (Couplings, #1263)
 THINKING_LOWEST = "thinking at its lowest effort (it can't turn off)"
 THINKING_STAYS = "thinking on (it can't turn off)"
 THINKING_DEFAULT = "thinking as the model's default (it lists no lower setting)"
