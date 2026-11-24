@@ -5085,7 +5085,8 @@ reloads (`reloadOnce`, once a minute). Use counts (`reportActive`, #959): on scr
 `wb-chat-files`, bytes in IndexedDB (`wb-chat`, `files`) until the message lands; `pump` uploads one
 at a time (XHR; `STALL_MS` 30 s without progress retries the same id); edit restores the files, the
 `about` (`setAbout`, #843) and the words before the box's (#958); thumbnails load near view
-(`whenNear`, #754); `sweepSoon` revokes unused object URLs (#746). The receipt texts, dialog cards
+(`whenNear`, #754), and before the server's thread is in only from this browser's bytes: the rest wait
+in `nearLater`, judged again by `nearAgain` where that thread put them (a photo the saved thread showed was fetched, 2026-11-24); `sweepSoon` revokes unused object URLs (#746). The receipt texts, dialog cards
 (`makeAsk`), notices (`makeNotice`) and the gear's sections (`#away-when` states the away rule
 above; `drawSaved` shows no currency sign, as `wb savings`, #845, and after it `apiSaved`'s `API
 models: 6 tasks, ≈$1.27 (DeepSeek ≈$0.84, Anthropic ≈$0.43; catalog prices).`, or that alone, #1022, #1135) are in `app.js`. Over plain HTTP
