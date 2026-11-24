@@ -25848,6 +25848,13 @@ class _KeyholeTest(Base):
         script.write_text(textwrap.dedent("""\
             import json, os, sys
             auth = json.loads(os.environ["FAKE_AUTH"])
+            with open(os.environ["FAKE_AUTH_ARGV"], "a") as f:
+                f.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(),
+                                    "pwd": os.environ.get("PWD"),
+                                    "noproject": os.environ.get("OPENCODE_DISABLE_PROJECT_CONFIG")})
+                        + "\\n")
+            if "--standalone" not in sys.argv:  # as real OpenCode with another home's service (#1070)
+                sys.exit("Managed service port 49374 on 127.0.0.1 is already in use by PID 1")
             if sys.argv[1:3] == ["auth", "export"]:
                 p = auth.get(sys.argv[3], {})
                 if p.get("fail"):
@@ -25860,6 +25867,7 @@ class _KeyholeTest(Base):
             """))
         os.environ["WB_OPENCODE_BIN"] = shlex.join([sys.executable, str(script)])
         os.environ["FAKE_AUTH"] = json.dumps(auth)
+        os.environ["FAKE_AUTH_ARGV"] = str(Path(self.tmp.name) / "fake_auth.argv")
 
     def key_row(self, provider, value, active=True):
         return {"id": "cred_1", "integrationID": provider, "label": "main", "active": active,
@@ -26138,6 +26146,32 @@ class Keyhole(_KeyholeTest):
         self.assert_no_canary(out.getvalue(), str(e.exception), repr(kh._key),
                               self.all_files(self.task.dir))
         self.assertNotIn(kh.token, out.getvalue())
+
+    def test_the_key_is_read_standalone_in_the_state_directory_never_through_the_service(self):
+        # #1070 (2026-11-23): without --standalone the first API task started OpenCode's
+        # background service with the runner's environment (PYTHONPATH, CLAUDECODE=1), and where
+        # another home's service held the port the export exited 1 and the task failed at start,
+        # told to store a key it had (the fake refuses `auth` without --standalone, as that does)
+        self.fake_auth({"deepinfra": {"export": [self.key_row("deepinfra", {"type": "key",
+                                                                            "key": self.CANARY})]},
+                        "xenv": {"list": [{"type": "env", "name": "XENV_API_KEY"}]}})
+        self.assertEqual(self.kh_mod.load_key("deepinfra").value, self.CANARY)
+        with self.assertRaises(self.kh_mod.KeyholeError):
+            self.kh_mod.load_key("xenv")                                 # auth list too
+        calls = [json.loads(x) for x in Path(os.environ["FAKE_AUTH_ARGV"]).read_text().splitlines()]
+        self.assertEqual([c["argv"] for c in calls],
+                         [["auth", "export", "deepinfra", "--standalone"],
+                          ["auth", "export", "xenv", "--standalone"],
+                          ["auth", "list", "--format", "json", "--standalone"]])
+        home = str(store.home())
+        self.assertTrue(all(c["cwd"] == c["pwd"] == home and c["noproject"] == "1" for c in calls))
+        self.fake_auth({"broken": {"fail": "Error: Database is locked\n"}})
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:
+            self.kh_mod.load_key("broken")
+        said = runner.keyhole_failure(e.exception)
+        self.assertEqual(said, "can't read broken's key: opencode auth export exited 1: "
+                               "Error: Database is locked")              # no /connect remedy
+        self.assertNotIn(self.kh_mod.REMEDY, said)
 
     def test_oauth_and_env_keys_cant_run(self):
         self.fake_auth({"oauthco": {"export": [self.key_row("oauthco", {
@@ -26533,6 +26567,47 @@ class RealOpenCodeAPI(_KeyholeTest):
             [sent] = asked
             self.assertIn(kh.token, sent[header])                          # OpenCode had the token
             self.assert_no_canary(json.dumps(sent))                        # and never the key
+
+    def test_reading_a_key_starts_no_background_service(self):
+        # #1070 (2026-11-23): `opencode auth export` without --standalone started `opencode serve
+        # --service` in the runner's environment, left running after the task
+        tmp = Path(self.tmp.name)
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        env = {"PATH": os.environ["PATH"], "HOME": str(tmp / "home"),
+               "OPENCODE_DISABLE_MODELS_FETCH": "1",
+               **{f"XDG_{d.upper()}_HOME": str(tmp / "svc" / d)
+                  for d in ("config", "data", "state", "cache")}}
+        for k in ("OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR",
+                  "WB_OPENCODE_CONFIG", "WB_OPENCODE_BIN", "OPENCODE_DB"):
+            os.environ.pop(k, None)
+        os.environ.update(env)
+
+        def service(*argv):
+            return subprocess.run(["opencode", "service", *argv], env=env, capture_output=True,
+                                  text=True, timeout=60).stdout.strip()
+
+        def ours():  # a service this scratch home started: killed by its pid, never by name
+            out = []
+            for pid in subprocess.run(["pgrep", "-x", "opencode"], capture_output=True,
+                                      text=True).stdout.split():
+                try:
+                    seen = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+                except OSError:
+                    continue
+                if f"HOME={tmp / 'home'}".encode() in seen:
+                    out.append(int(pid))
+            return out
+
+        self.addCleanup(lambda: [os.kill(pid, signal.SIGKILL) for pid in ours()])
+        service("set", "port", str(port))       # not the user's service's port
+        self.assertEqual(service("status"), "stopped")
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:
+            self.kh_mod.load_key("deepseek")                             # none stored here
+        self.assertIn("OpenCode has no key stored for deepseek", str(e.exception))
+        self.assertEqual(service("status"), "stopped")
+        self.assertEqual(ours(), [])
 
     def scratch_env(self, layer, name, models_path=None):
         """Real OpenCode's environment with nothing of the user's: scratch homes, no catalog
@@ -27672,7 +27747,7 @@ class ApiHarness(Base):
     def test_the_fake_lists_the_catalog_and_its_keys_as_opencode_23_prints_them(self):
         code, rows, _ = self.fake("api", "model.list")
         self.assertEqual((code, rows[0]["data"]), (0, []))           # no catalog: an empty list
-        self.assertEqual(self.fake("auth", "list", "--format", "json")[2].strip(), "[]")
+        self.assertEqual(self.fake("auth", "list", "--format", "json", "--standalone")[2].strip(), "[]")
         self.catalog()
         code, rows, _ = self.fake("api", "model.list", "--standalone")
         self.assertEqual(set(rows[0]), {"location", "data"})
@@ -27681,13 +27756,13 @@ class ApiHarness(Base):
                          [FLASH, "anthropic/claude-haiku-5-5"])
         code, _, _ = self.fake("models", "deepinfra")           # 2.3.2 takes no provider argument
         self.assertEqual(code, 1)
-        auth = json.loads(self.fake("auth", "list", "--format", "json")[2])
+        auth = json.loads(self.fake("auth", "list", "--format", "json", "--standalone")[2])
         self.assertEqual([(a["id"], [c["type"] for c in a["connections"]]) for a in auth],
                          [("deepinfra", ["credential"]), ("anthropic", ["credential"])])
         self.assertEqual(auth[0]["connections"][0]["method"], "key")
         self.catalog(auth=[{"id": "xai", "name": "xAI", "connections": [{"type": "env",
                                                                          "name": "XAI_API_KEY"}]}])
-        self.assertEqual(json.loads(self.fake("auth", "list", "--format", "json")[2])[0]["connections"],
+        self.assertEqual(json.loads(self.fake("auth", "list", "--format", "json", "--standalone")[2])[0]["connections"],
                          [{"type": "env", "name": "XAI_API_KEY"}])  # the test's own rows
 
     def test_a_provider_without_a_key_drops_out_of_every_list_and_its_models_cant_run(self):
@@ -27696,7 +27771,7 @@ class ApiHarness(Base):
         self.assertEqual([e["providerID"] for e in self.fake("api", "model.list")[1][0]["data"]],
                          ["deepinfra"])
         self.assertEqual(self.fake("models")[2].split(), [FLASH])
-        self.assertEqual([a["id"] for a in json.loads(self.fake("auth", "list", "--format", "json")[2])],
+        self.assertEqual([a["id"] for a in json.loads(self.fake("auth", "list", "--format", "json", "--standalone")[2])],
                          ["deepinfra"])
         code, rows, _ = self.fake("run", "--standalone", "-m", "anthropic/claude-haiku-5-5",
                                   "--format", "json", "--", "go")

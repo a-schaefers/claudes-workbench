@@ -3614,11 +3614,12 @@ def start_keyhole(task: store.Task, m: models.Model) -> keyhole.Keyhole:
 
 def keyhole_failure(e: Exception) -> str:
     """A KeyholeError's text with its remedy, when one is a key /connect can store (OAuth, a key
-    only in the environment, none stored, one OpenCode can't export) and the text doesn't name one
-    already. A provider that signs requests, or speaks a way the keyhole can't, has none."""
+    only in the environment, none stored) and the text doesn't name one already. A provider that
+    signs requests, or speaks a way the keyhole can't, has none, nor does OpenCode failing to run
+    or answer `auth export`: storing a key again doesn't mend that (#1070, 2026-11-23)."""
     text = str(e)
     if "/connect" in text or "signs each request" in text or "doesn't speak" in text \
-            or "API base" in text:
+            or "API base" in text or "opencode auth " in text:
         return text
     return f"{text}: {keyhole.REMEDY}"
 

@@ -1642,7 +1642,10 @@ directories mapped to the worktree; none left, no `PYTHONPATH`. The carrier neve
 request, and nothing OpenCode can read is hidden from its shell: its environment
 (`/proc/<pid>/environ`), the config layer, `OPENCODE_CONFIG_CONTENT`, and the lane doesn't restrict
 TCP. So the key never enters the lane: `keyhole.start(task, m)` loads it (`load_key`: `opencode auth
-export <provider>` with the runner's environment and the user's own OpenCode home, stdout read into
+export <provider> --standalone` with the runner's environment and the user's own OpenCode home, in
+the state directory with the project config off, as `models._opencode_json` runs one (without
+`--standalone` it started OpenCode's background service with the runner's environment, or failed
+where another home's service held its port: #1070), stdout read into
 memory, a failure's stderr cut to its first line and redacted, a `Key` whose repr is `Key(<provider>,
 api key)`) and serves a `Keyhole` from a daemon thread of the runner, outside the lane and dying with
 it, on `127.0.0.1:0` (never `localhost`, which may be `::1` first). It refuses
@@ -1734,7 +1737,8 @@ model whose `key` is `none`), starts it before the first round as `CURRENT["keyh
 health record; `on_usage` and `room` are the task's meter's, `meter.Meter.hooks`, #1019) and closes it when
 the drive ends. A `KeyholeError` fails the task through `_load_failed` (`<model> can't run:
 <why>`, a `failed` notice) with `keyhole.REMEDY` appended unless the text already gives the
-remedy (`keyhole_failure`). The layer's provider entry gets `keyhole_overlay(task)`:
+remedy, or is OpenCode failing to run or answer `opencode auth …`, which a key stored again
+doesn't mend (`keyhole_failure`, #1070). The layer's provider entry gets `keyhole_overlay(task)`:
 `provider.<pid>.options` from `layer_options`, and the same base and token as the task model's
 own `provider.api` and `options` (`models.<id>`, with the variants, below) where the model has an
 entry anyway: the task's catalog file, or one in a config file or the user's content, V1 or V2
@@ -5922,7 +5926,7 @@ continues; starts the config's MCP server and lists its tools unless `FAKE_NO_MC
 usage, exit 1; with `OPENCODE_DB` set a new session is recorded in that home, `<db>.sessions`), `session export`
 (tokens `FAKE_FILL` or 1200, answer.txt 41 → 42; `FAKE_COMPACTED`; `info.home` the database read; in a home that
 records sessions one it doesn't hold is "Session not found", exit 1), `session list` (the home's recorded ones); session
-commands fail without `--standalone`; `auth export <provider>` prints `FAKE_AUTH_EXPORT`'s rows for it (2.3.2's shape),
+and `auth` commands fail without `--standalone` (#1070); `auth export <provider>` prints `FAKE_AUTH_EXPORT`'s rows for it (2.3.2's shape),
 else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `text`, `step_finish` with tokens). Live tool names are 1.x-style (`bash`, `filePath`; 2.x `shell`,
 `path`: `events._brief` reads both). Records `FAKE_PROMPTS`, `FAKE_RUNS` (each run's `session`, `prompt`, `cwd`,

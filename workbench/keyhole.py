@@ -253,10 +253,20 @@ _AUTH_HEADER = re.compile(r"(?i)auth|key|token")
 
 
 def _opencode(*args: str) -> subprocess.CompletedProcess:
+    """An OpenCode command run as models._opencode_json runs one: `--standalone`, in the state
+    directory with the project config shut out. Without `--standalone` the first API task started
+    OpenCode's background service with the runner's environment (PYTHONPATH, CLAUDECODE=1), left
+    running for the user's own OpenCode to attach to, and where another home's service held its
+    port the export exited 1 and the task failed at start (#1070, 2026-11-23)."""
     from . import runner
+    from .media import run_group  # its group killed whole on a timeout, as _opencode_json's
+    where = store.home()
+    where.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "PWD": str(where), "OPENCODE_DISABLE_PROJECT_CONFIG": "1"}
     try:
-        return subprocess.run([*runner.opencode_bin(), *args], capture_output=True, text=True,
-                              stdin=subprocess.DEVNULL, timeout=60)
+        return run_group([*runner.opencode_bin(), *args, "--standalone"], 60, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True, cwd=where, env=env,
+                         stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired) as e:
         raise KeyholeError(f"can't run opencode {args[0]} {args[1]}: {type(e).__name__}") from None
 
