@@ -4134,7 +4134,7 @@ def _models_json() -> dict:
     optimize.json and the cached catalog only: no server is asked (a sleeping LAN box held the
     pane's draw, #705, #819), no catalog rebuilt. `gpu`: [{id, label, window, sizes, cards}],
     cards the numbers of the cards its Ollama sees (models.card_numbers; None when unknown);
-    `api`: the models of providers whose key wb can hold (stored by /connect), [{id, name,
+    `api`: the models of providers whose key wb can hold (stored by /connect, on a package the keyhole speaks), [{id, name,
     provider, provider_name, window, price {input, output} per million, free}]; `used`: the API
     models tasks ran on, newest first; `optimize`: {done_at, models, running}; `media`: the image
     and audio engines and their defaults (_media_json, #1047)."""
@@ -4145,7 +4145,7 @@ def _models_json() -> dict:
            for m in models.discover().values()]
     api = []
     for m in models._models_of(models._read_hosted()).values():
-        if m.key != "stored":
+        if m.key != "stored" or models.keyhole_refusal(m):  # a package the keyhole can't carry (#1066)
             continue
         cost = next((c for c in m.config.get("cost") or [] if isinstance(c, dict)), None) \
             if isinstance(m.config.get("cost"), list) else m.config.get("cost")
@@ -5956,13 +5956,17 @@ def api_key_lines(keys: dict | None) -> list[str]:
     """wb setup's API keys (#1024), from models.connected(): one `ok` line for the providers with
     a stored key and which roles use them, one `--` line for those whose key wb can't hold
     outside the lane (an environment variable, OAuth, a cloud login, a config file) with the
-    fix; NO_KEY for none; nothing when `auth list` can't be read."""
+    fix, and one for a stored key on a package the keyhole can't carry (models.unspoken_providers,
+    #1066); NO_KEY for none; nothing when `auth list` can't be read."""
     if keys is None:
         return []
     if not keys:
         return [NO_KEY]
     out = []
-    if stored := [p for p, k in keys.items() if k["key"] == "stored"]:
+    stored = [p for p, k in keys.items() if k["key"] == "stored"]
+    # a stored key on a package the keyhole can't carry read `ok`, and every task failed (#1066)
+    odd = models.unspoken_providers(stored)
+    if stored := [p for p in stored if p not in odd]:
         try:
             doc = routes.read()
         except routes.RoutesError:
@@ -5984,6 +5988,11 @@ def api_key_lines(keys: dict | None) -> list[str]:
         else:
             out.append(f"--  {', '.join(_held_elsewhere(p, k) for p, k in other)}: wb can't hold "
                        f"{'that' if len(other) == 1 else 'those'} outside the lane; /connect stores a key it can")
+    if odd:
+        one, nopkg = len(odd) == 1, "no provider package"
+        names = ", ".join(f"{p} ({pkg or nopkg})" for p, pkg in odd.items())
+        out.append(f"--  {names}: the keyhole doesn't speak {'its' if one else 'their'} API, so wb can't run "
+                   f"{'its' if one else 'their'} models; another provider's key works")
     return out
 
 

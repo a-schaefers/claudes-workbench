@@ -1668,7 +1668,10 @@ and zai-coding-plan take `Authorization: Bearer`. Any other package (Google's `x
 `/models/<id>:streamGenerateContent`, Azure's `api-key`, Cohere's native `/chat`, gateways with
 their own paths or headers, none at all) can't run: `start` raises "needs a key wb can hold
 outside the lane: <provider> takes its key in a way the keyhole doesn't speak" rather than a 401
-or 404 on every request. The upstream is the catalog's API base (`m.base_url`), never anything
+or 404 on every request. Status says it first (`models.keyhole_refusal`, through `models.unspoken`,
+#1066: only `start` checked, so a Gemini model was listed, routed on the user's yes and started,
+then failed every time), so `wb route`, `wb start`, `wb models` and the pane refuse it, `wb models
+--json` leaves it out and `wb setup` names it on a `--` line. The upstream is the catalog's API base (`m.base_url`), never anything
 from a request, with what the package appends to it already appended (`mirror_path`: DeepInfra's
 `/openai`). OpenCode gets `layer_options(kh)`:
 `baseURL` the keyhole's `base` and `apiKey` its `token` (`secrets.token_urlsafe(32)`, new each
@@ -2749,6 +2752,7 @@ read as a wrong id, Claude hunted for the "right" one).
   | State | `why` | `may_come_up` |
   |---|---|---|
   | no key (`key == ""`) | `no key for <Provider>: run /connect in OpenCode and add it` | no |
+  | a package the keyhole can't carry (`keyhole_refusal`, before the key, #1066) | `can't run: the keyhole doesn't speak <Provider>'s API (<package>), so wb can't hold its key outside the lane: a model of another provider can run` | no |
   | `oauth`, `env:NAME`, `config`, `signing` | `can't run: needs a key wb can hold outside the lane (<Provider>'s is an OAuth login / from the environment, NAME / written in <file> / a cloud login that signs each request): store an API key with /connect` | no |
   | `no_credit` | `out of credit or quota at <Provider> (<line, redacted>): top it up, or wait for the plan's reset (wb asks again from HH:MM); wb never switches models` | no |
   | `rate_limited` | `rate-limited by <Provider> until HH:MM` | yes |
@@ -5336,7 +5340,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 ### Models, skills, lessons, notes
 | Command | Flags | What it does |
 |---|---|---|
-| `wb models` | `--set-default`, `--json`, `--api TEXT` | State, slice, speeds, `bench:`, `size:`, `router.weights_changed`; the ranking, models under `router.EXPLORE_TRIES` marked (*Exploring*); the API section, and `--api TEXT` the catalog ids containing TEXT, at most 30 (*What `wb models` prints*). `--set-default` (a GPU model only): `models.set_default` (refused under `OPENCODE_CONFIG_CONTENT`, #421). `--json` (#1023, the pane's lists, `cli._models_json`, asking no server and rebuilding no catalog): `{gpu: [{id, label, window, sizes, cards}], api: [{id, name, provider, provider_name, window, price {input, output}, free}] (stored keys only), used (API models tasks ran on), free_line, optimize {done_at, models, running}, media {image\|speech\|sfx\|music: {default, engines: [{name, gpu}]}} (#1047; a file that doesn't parse leaves its kinds out)}`. |
+| `wb models` | `--set-default`, `--json`, `--api TEXT` | State, slice, speeds, `bench:`, `size:`, `router.weights_changed`; the ranking, models under `router.EXPLORE_TRIES` marked (*Exploring*); the API section, and `--api TEXT` the catalog ids containing TEXT, at most 30 (*What `wb models` prints*). `--set-default` (a GPU model only): `models.set_default` (refused under `OPENCODE_CONFIG_CONTENT`, #421). `--json` (#1023, the pane's lists, `cli._models_json`, asking no server and rebuilding no catalog): `{gpu: [{id, label, window, sizes, cards}], api: [{id, name, provider, provider_name, window, price {input, output}, free}] (stored keys only, on a package the keyhole speaks, #1066), used (API models tasks ran on), free_line, optimize {done_at, models, running}, media {image\|speech\|sfx\|music: {default, engines: [{name, gpu}]}} (#1047; a file that doesn't parse leaves its kinds out)}`. |
 | `wb model add <provider/model>` | `--pull`, `--label`, `--context N`, `--url URL`, `--start CMD`, `--stop CMD` | *Managing the set*: `--url` via `models.add_server_provider` (an existing provider never touched, one for another baseURL refuses; off this machine needs `local: true`); `--start`/`--stop` to models.json; refuses Ollama cloud models (API models) without `local: true` (one under a plain name always), unknown contexts, down servers. |
 | `wb optimize [start\|estimate\|report\|stop\|apply] [<id>…]` | `--bench`, `--if-due` | *Optimize*; `start` detached, refused while a task holds the GPU, stopped by a task that wants it; `--bench` then runs `wb bench run`; `apply` adds the measured window as its own entry (`optimize.entry_name`; refused when that name exists). |
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Provider `ollama-<host>`, `local: true`, its tool models added (IPv6 bracketed, #707); exit 1 when it doesn't answer; `--remove` not while `model`/`small_model` is one (#708). |
@@ -5732,7 +5736,9 @@ model server, a registered model, the API keys, Landlock). Its API keys line (#1
 lane, never a secret): `ok  API keys: deepseek (stored via /connect); no role uses one yet` (or
 `trivial and significant use it`), a `--` line for a key wb can't hold (`xai's key is in XAI_API_KEY:
 wb can't hold it outside the lane yet; /connect stores one it can`, `anthropic is signed in with
-OAuth: …`), `NO_KEY` for none. With a stored key and no local model the GPU lines read as optional
+OAuth: …`), a `--` line for a stored key on a package the keyhole can't carry (`google
+(@opencode/ai/providers/google): the keyhole doesn't speak its API, so wb can't run its models;
+another provider's key works`, `models.unspoken_providers`, #1066), `NO_KEY` for none. With a stored key and no local model the GPU lines read as optional
 (`NO_SERVER_OPTIONAL`, `NO_LOCAL_OPTIONAL`). No GPU is needed for a role on API (*Roles*). The plugin install copies only `mod/` into the plugin
 cache; `marketplace add` keeps a full clone (`installLocation` in `known_marketplaces.json`, or under
 `CLAUDE_CODE_PLUGIN_CACHE_DIR`), from which `wb setup` links `wb` and the skill. `wb update` (`/workbench-update` also

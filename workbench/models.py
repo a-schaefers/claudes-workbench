@@ -1533,6 +1533,34 @@ def _key_file(pid: str) -> str:
     return where[-1] if where else "OpenCode's config"
 
 
+def unspoken(pid: str, package: str) -> bool:
+    """Whether the keyhole can't carry a provider's requests (keyhole.protocol_of: Google's
+    x-goog-api-key, Azure's api-key, Cohere's native API, no package at all). A signing provider
+    isn't one: its key source says "signing"."""
+    from . import keyhole  # keyhole imports this module lazily too
+    return keyhole.protocol_of(package) is None and not keyhole._signs(pid, package)
+
+
+def keyhole_refusal(m: Model) -> str:
+    """Why ``m`` can't run through the keyhole for its package, or "". Only keyhole.start checked
+    it, so a Gemini, Azure or Cohere model was listed, offered, approved in the dialog and started,
+    then failed every time (#1066, 2026-11-23). A model needing no keyhole (an Ollama cloud one,
+    a keyless free one: runner.needs_keyhole) is never refused here."""
+    if m.cloud or m.key == "none" or (m.free and not m.key) or not unspoken(m.provider, m.package):
+        return ""
+    return (f"can't run: the keyhole doesn't speak {provider_name(m)}'s API "
+            f"({m.package or 'no provider package'}), so wb can't hold its key outside the lane: "
+            "a model of another provider can run")
+
+
+def unspoken_providers(pids) -> dict[str, str]:
+    """{provider: its package} of those of ``pids`` whose package the catalog says the keyhole
+    can't carry (wb setup's `--` line, #1066); a provider the catalog doesn't list isn't one."""
+    provs = _dict(hosted_doc().get("providers")) if pids else {}
+    return {p: str(provs[p].get("package") or "") for p in pids
+            if isinstance(provs.get(p), dict) and unspoken(p, str(provs[p].get("package") or ""))}
+
+
 def _api_status(m: Model, down=frozenset()) -> dict:
     """status() for an API model, from the config, the key source and api-health.json only: no
     network probe (no completion, no /models). wb models, scout, doctor and top call status for
@@ -1549,6 +1577,8 @@ def _api_status(m: Model, down=frozenset()) -> dict:
             return _no("ollama is not answering")
         if _tag_row(m.name, tags) is None:
             return _no(f"{m.name} is not pulled")
+    if why := keyhole_refusal(m):  # before the key: /connect can't fix it
+        return _no(why)
     key = m.key
     if not key:
         key, who = _fresh_key(m)

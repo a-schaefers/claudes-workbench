@@ -28085,8 +28085,9 @@ class ApiHarness(Base):
 def api_entry(pid, mid, context=200000, **extra):
     """One `api model.list` entry, as OpenCode 2.3.2 prints it (the spike for #1009): `modelID` the
     id at the provider (an alias's differs), `settings.apiKey` the key OpenCode holds, if any."""
+    from workbench import keyhole  # a made-up provider is OpenAI-compatible, as the keyhole speaks (#1066)
     return {"id": mid, "modelID": mid, "providerID": pid, "family": mid.split("-")[0],
-            "package": f"@opencode/ai/providers/{pid}",
+            "package": f"@opencode/ai/providers/{pid if pid in keyhole.PACKAGES else 'openai-compatible'}",
             "settings": {"baseURL": f"https://api.{pid}.test/v1", "apiKey": LISTED_KEY},
             "capabilities": {"tools": True, "input": ["text"], "output": ["text"], "temperature": True},
             "variants": [{"id": "none", "settings": {"reasoningEffort": "none"}}],
@@ -28144,7 +28145,7 @@ class ApiDiscovery(Base):
         self.assertEqual(m.config["limit"]["context"], 131072)                # capped (#1017)
         self.assertEqual(m.extra["catalog_limit"]["context"], 200000)        # the catalog's
         self.assertEqual((m.base_url, m.package, m.label),
-                         ("https://api.acme.test/v1", "@opencode/ai/providers/acme", "Acme (API)"))
+                         ("https://api.acme.test/v1", "@opencode/ai/providers/openai-compatible", "Acme (API)"))
         self.assertEqual(m.config["cost"], DISCOVERY_CATALOG[0]["cost"])
         self.assertEqual(m.config["variants"], DISCOVERY_CATALOG[0]["variants"])
         self.assertNotIn("acme/coder-flash", self.models.discover())
@@ -28156,7 +28157,7 @@ class ApiDiscovery(Base):
         self.assertFalse(m.free)
         doc = json.loads((store.home() / "hosted.json").read_text())
         self.assertEqual(doc["providers"]["acme"], {"name": "Acme", "key": "stored", "package":
-                                                    "@opencode/ai/providers/acme", "api": "https://api.acme.test/v1"})
+                                                    "@opencode/ai/providers/openai-compatible", "api": "https://api.acme.test/v1"})
         self.assertEqual((doc["v"], doc["error"]), (1, ""))
         self.assertEqual(self.models.lookup("acme/coder-flash").id, "acme/coder-flash")
         self.assertEqual(self.models.lookup("ollama/mimo-v2.6:9b-q8_0").kind, "gpu")
@@ -28994,6 +28995,35 @@ class Routes(Base):
         with redirect_stdout(out):
             cli.main(["models", "--api", "haiku"])
         self.assertIn("anthropic/claude-haiku-5-5", out.getvalue())
+
+    def test_a_stored_key_on_a_package_the_keyhole_cant_speak_is_refused_before_the_dialog(self):
+        # #1066: only keyhole.start checked the package, so a Gemini model was listed, offered,
+        # routed with the user's yes and started, then failed every time
+        gemini = {**api_entry("google", "gemini-2.5-flash"), "package": "@opencode/ai/providers/google"}
+        self.catalog([*ROUTES_CATALOG, gemini], [*ROUTES_AUTH, key_row("google", "Google", STORED)])
+        m = runner.models.hosted(fresh=True)["google/gemini-2.5-flash"]
+        self.assertEqual(m.key, "stored")
+        st = runner.models.status(m)
+        self.assertEqual((st["available"], st["why"]), (False, (
+            "can't run: the keyhole doesn't speak Google's API (@opencode/ai/providers/google), so wb "
+            "can't hold its key outside the lane: a model of another provider can run")))
+        self.assertEqual(runner.models.remedy(m, st), "")          # not "/connect": it can't help
+        code, _, err = self.route("trivial", "google/gemini-2.5-flash", "--day-usd", "1")
+        self.assertEqual(code, 3)
+        self.assertIn("the keyhole doesn't speak Google's API", err)
+        self.assertFalse(self.path.exists())
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.main(["models", "--json"])
+        api = [x["id"] for x in json.loads(out.getvalue())["api"]]
+        self.assertIn("deepseek/deepseek-flash", api)
+        self.assertNotIn("google/gemini-2.5-flash", api)
+        lines = cli.api_key_lines({"deepseek": {"name": "DeepSeek", "key": "stored"},
+                                   "google": {"name": "Google", "key": "stored"}})
+        self.assertEqual(lines, ["ok  API keys: deepseek (stored via /connect); no role uses one yet",
+                                 "--  google (@opencode/ai/providers/google): the keyhole doesn't speak "
+                                 "its API, so wb can't run its models; another provider's key works"])
+        self.assertTrue(runner.models.status(runner.models.hosted()["deepseek/deepseek-flash"])["available"])
 
     def test_a_role_out_of_credit_runs_again_once_the_recheck_time_has_passed(self):
         # #1068: no_credit had no `until` and only a 2xx cleared it, which only a running task
@@ -30144,7 +30174,8 @@ class RateLimits(Base):
         self.assertAlmostEqual(row["until"], time.time() + 2, delta=1.5)
         m = self.models.Model(id="deepseek/deepseek-flash", provider="deepseek", name="deepseek-flash",
                               base_url="https://api.deepseek.com", engine="api", label="deepseek-flash",
-                              kind="api", key="stored", config={"limit": {"context": 131072}})
+                              kind="api", key="stored", config={"limit": {"context": 131072}},
+                              package="@opencode/ai/providers/deepseek")   # a package the keyhole speaks (#1066)
         seen = len(self.up.seen)
         self.assertTrue(self.models.status(m)["why"].startswith("rate-limited by "))
         self.assertEqual(len(self.up.seen), seen)                   # no request to the provider
