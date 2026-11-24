@@ -1395,6 +1395,40 @@ class Real(unittest.TestCase):
         models.make_resident(found["lms/b"], say=lambda *_: None)
         self.assertEqual(loaded, {"a": 32768, "b": 32768})        # keep_loaded is kept
 
+    def test_lm_studio_for_windows_seen_from_wsl_unloads_the_model_a_switch_leaves(self):
+        # #1248 (bar loop round 5, 2026-11-24): LM Studio for Windows at WSL2's Windows host
+        # (`local: true`, so remote, yet same_gpu) was freed only when local, and on_this_gpu kept
+        # only Ollama among same_gpu servers: every switch stacked one more model in VRAM until
+        # LM Studio refused a load. 127.0.0.1 stands for the Windows host, localhost for WSL.
+        for k in ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
+            os.environ.pop(k, None)
+        loaded, posts, said = {}, [], []
+        srv, url = fake_lmstudio(loaded, posts)
+        self.servers.append(srv)
+        win = {"limit": {"context": 32768}}
+        here = mock.patch.object(models, "_this_host", lambda h, dns=True: h == "localhost")
+        here.start()
+        self.addCleanup(here.stop)
+        for same, gateway in ((None, "127.0.0.1"), (True, None), (False, "127.0.0.1")):
+            self.config({"win": {"options": {"baseURL": url + "/v1"}, "models": {"a": win, "b": win}}},
+                        {"win": {"local": True, **({} if same is None else {"same_gpu": same})}})
+            loaded.clear(), posts.clear(), said.clear()
+            with mock.patch.object(models, "windows_host", lambda: gateway):
+                found = models.discover()
+                self.assertTrue(found["win/a"].remote)
+                shared = same is not False
+                self.assertEqual(models.same_gpu(found["win/a"]), shared)
+                models.make_resident(found["win/a"], say=said.append)
+                models.make_resident(found["win/b"], say=said.append)
+                if shared:                                        # a let go before b loads
+                    self.assertEqual(loaded, {"b": 32768})
+                    self.assertEqual([p for p, _ in posts], ["/api/v1/models/load",
+                                                             "/api/v1/models/unload",
+                                                             "/api/v1/models/load"])
+                else:                                             # another machine's GPU: left be
+                    self.assertEqual(loaded, {"a": 32768, "b": 32768})
+                self.assertFalse([s for s in said if "can't stop" in s])  # never stopped
+
     def test_an_idle_lm_studio_neither_empties_the_gpu_of_ollamas_models_nor_stops_a_respread(self):
         # #808: just in time, LM Studio's /v1/models lists every downloaded model, so with nothing
         # loaded it read as a resident server: every round unloaded the user's Ollama models that
