@@ -5649,9 +5649,11 @@ def _model_rename(old: str, rest: list) -> None:
 
 def cmd_model(a):
     """Add a model to OpenCode's config (pulling it first with --pull), or retire one."""
-    # before sizes, which returned first: a flag for another action was accepted and ignored (#602)
-    if a.action != "add" and (a.url or a.start or a.stop or a.label or a.context or a.pull):
-        die("--url, --start, --stop, --label, --context and --pull go with wb model add")
+    # before sizes, which returned first: a flag for another action was accepted and ignored (#602);
+    # --thinking too, missed when #1187 added it (2026-11-24): retire took it with exit 0
+    if a.action != "add" and (a.url or a.start or a.stop or a.label or a.context or a.pull
+                              or a.thinking):
+        die("--url, --start, --stop, --label, --context, --pull and --thinking go with wb model add")
     if a.action != "retire" and a.delete:
         die("--delete goes with wb model retire")
     priced = [a.price_in, a.price_out, a.cache_read, a.cache_write]

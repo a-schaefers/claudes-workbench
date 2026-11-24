@@ -18863,6 +18863,9 @@ class LoneFlags(Base):
         for argv, says in ((["retire", "ollama/m", "--label", "x"], "go with wb model add"),
                            (["retire", "ollama/m", "--context", "8192"], "go with wb model add"),
                            (["retire", "ollama/m", "--pull"], "go with wb model add"),
+                           # #1187's --thinking: ignored with exit 0 on the other actions
+                           (["retire", "ollama/m", "--thinking"], "go with wb model add"),
+                           (["sizes", "ollama/m", "trivial", "--thinking"], "go with wb model add"),
                            (["sizes", "ollama/m", "--url", "http://127.0.0.1:1/v1"], "go with wb model add"),
                            (["add", "ollama/m", "--delete"], "--delete goes with wb model retire"),
                            (["retire", "ollama/m", "trivial"], "go with wb model sizes")):
