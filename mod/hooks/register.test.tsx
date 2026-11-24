@@ -22,9 +22,13 @@ const PANE = {
   },
 } as const
 
+// The surfaces the plugin kit mounts a tree on, each checked against its own element table (#1200)
+const SURFACES = ['terminal', 'desktop', 'vscode', 'mobile'] as const
+type Surface = typeof SURFACES[number]
+
 test('with no tasks the pane says how to start one, on every surface', async ($, on) => {
   on('clock.now', () => ({ value: 1_800_000_000_000 }))
-  for (const surface of ['terminal', 'desktop'] as const) {
+  for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...PANE, surface })
     expect((await ui.find({ type: 'Text', text: /No delegated tasks/ }))?.text)
       .toBe('No delegated tasks.')
@@ -3933,7 +3937,8 @@ const SLUG = 'a-schaefers/claudes-workbench'
 const SOURCE = '/home/u/.local/share/workbench/source'
 const MARKET = '/home/u/.claude/plugins/marketplaces/workbench'
 function upstreamWorld(on: any, files: Record<string, string>) {
-  const w = { cwd: SOURCE, answer: "Don't send" as string | null, asked: [] as string[], options: [] as unknown[], gits: [] as string[] }
+  const w = { cwd: SOURCE, answer: "Don't send" as string | null, asked: [] as string[], options: [] as unknown[], gits: [] as string[],
+    toasts: [] as string[] }
   files['/wb/patches.json'] = JSON.stringify({ source: SOURCE, upstream: SLUG })
   const origins: Record<string, string> = {
     [SOURCE]: `https://github.com/${SLUG}.git`,
@@ -3944,7 +3949,7 @@ function upstreamWorld(on: any, files: Record<string, string>) {
     '/home/u/.claude/plugins/marketplaces/other': 'https://github.com/u/other.git',
   }
   on('session.cwd', () => ({ value: w.cwd }))
-  on('ui.toast', () => ({ value: undefined }))
+  on('ui.toast', (_: any, e: any) => { w.toasts.push(e.text); return { value: undefined } })
   on('process.run', (_: any, e: any) => {
     if (e.argv[0] === 'git' && e.argv[3] === 'remote') {
       w.gits.push(e.argv[2])
@@ -5722,10 +5727,11 @@ const ROUTE_ARGV = ['route', 'trivial', 'deepseek/deepseek-flash', '--day-usd', 
 function routeWorld(on: any, files: Record<string, string>) {
   const w = {
     asked: [] as string[], options: [] as string[][], answer: "Don't" as string | null, dry: [] as string[][], dryAt: [] as string[], code: 0,
+    toasts: [] as string[],
     reply: { change: ROUTE_LINE, gate: true, approval: { argv: ROUTE_ARGV, change: ROUTE_LINE } } as Record<string, unknown>,
   }
   on('session.cwd', () => ({ value: '/home/u/project' }))
-  on('ui.toast', () => ({ value: undefined }))
+  on('ui.toast', (_: any, e: any) => { w.toasts.push(e.text); return { value: undefined } })
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
   on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
   on('process.run', (_: any, e: any) => {
@@ -5747,11 +5753,11 @@ function routeWorld(on: any, files: Record<string, string>) {
   return w
 }
 
-async function routeProbe($: any, on: any, files: Record<string, string> = {}) {
+async function routeProbe($: any, on: any, files: Record<string, string> = {}, surface: Surface = 'terminal') {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   fakeTasks(on, files, [])
   const w = routeWorld(on, files)
-  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.session.start({ cwd: '/home/u/project', surface, isInteractive: true })
   await clock.advance(1000)
   const call = async (input: Record<string, unknown>) => {
     const n = w.asked.length, d = w.dry.length
@@ -6358,13 +6364,13 @@ function settingsWorld(on: any, files: Record<string, string>) {
   return w
 }
 
-async function settingsTab($: any, on: any, files: Record<string, string> = {}) {
+async function settingsTab($: any, on: any, files: Record<string, string> = {}, surface: Surface = 'terminal') {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   fakeTasks(on, files, [])
   const w = settingsWorld(on, files)
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.session.start({ cwd: '/', surface, isInteractive: true })
   await clock.advance(1000)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 120 } })
+  const ui = await $.ui.mount({ ...PANE, surface, props: { ...PANE.props, bodyColumns: 120 } })
   await ui.press({ key: 'tab-settings' })
   const label = async (key: string) => (await ui.find({ key }))?.props.label as string | undefined
   const options = async () => (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => / {2}[❯ ] /.test(l))
@@ -6952,4 +6958,183 @@ test('#1048: Settings in a narrow pane: headings as Stats\' Now, read-only lines
   await ui.press({ key: 'chat' })
   expect(JSON.stringify(await ui.findAll({ type: 'Text' }))).toContain('No web server: Claude is reached in this terminal only.')
   await ui.unmount()
+})
+
+// #1200: the mod on every surface Claude Code offers (the desktop app, the IDE extensions, the
+// phone). The kit checks each tree against that surface's element table; how a surface paints it
+// is a check by hand (docs/release-checklist.md).
+
+test('#1200: the Tasks tab draws review, stuck and failed tasks alike on every surface', { timeoutMs: 20_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 * 1000 })
+  const files: Record<string, string> = {}
+  viewTask(files, 'menu-tweak', QWEN30, { phase: 'review', tests: { ok: true }, last: 'tests passed: Claude reviews next' })
+  viewTask(files, 'fix-crash', QWEN30, { phase: 'stuck', last: 'silent for 10 min: stopped' })
+  viewTask(files, 'fix-boot', QWEN30, { phase: 'failed', last: 'opencode exited 1' })
+  viewWorld(on, files, ['menu-tweak', 'fix-crash', 'fix-boot'])
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  const drawn: Record<string, string[]> = {}
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface, props: { ...PANE.props, bodyColumns: 71, scroll: { offset: 0, bodyRows: 40 } } })
+    drawn[surface] = await listRows(ui)
+    expect([surface, ['menu-tweak', 'fix-crash', 'fix-boot'].every(n => drawn[surface]!.some(r => r.includes(n)))]).toEqual([surface, true])
+    expect((await ui.findAll({ type: 'Button' })).slice(-3).map(b => b.props.label)).toEqual(['Tasks', 'Stats', 'Settings'])
+    await ui.unmount()
+  }
+  for (const surface of SURFACES) expect([surface, drawn[surface]]).toEqual([surface, drawn.terminal])
+})
+
+test('#1200: the Stats tab draws the history on every surface', { timeoutMs: 20_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = { '/wb/results.jsonl': '{}\n' }
+  const pane = fakeTasks(on, files, [])
+  on('process.run', (_: any, e: any) => e.argv[1] === 'stats' && e.argv[2] === '--json'
+    ? { value: { exitCode: 0, stdout: JSON.stringify(FEED), stderr: '' } } : { value: { exitCode: 0, stdout: '', stderr: '' } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  pane.show(true)
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface, props: { ...PANE.props, bodyColumns: 200 } })
+    await ui.press({ key: 'tab-stats' })
+    await clock.advance(10)
+    const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+    expect([surface, texts.includes('This week: score 62/100 · saved ~1.2M Claude tokens (estimate) · 4 tasks · 3 landed (75%) · 900 Wh')])
+      .toEqual([surface, true])
+    await ui.press({ key: 'tab-tasks' })
+    await ui.unmount()
+  }
+})
+
+for (const surface of SURFACES)
+  test(`#1200: the Settings tab draws its rows on ${surface}, and a pick there runs wb`, { timeoutMs: 20_000 }, async ($, on) => {
+    const { ui, texts, label, ran } = await settingsTab($, on, {}, surface)
+    expect((await texts()).filter(t => ['Shared', 'GPU', 'API', 'Experimental'].includes(t))).toEqual(['Shared', 'GPU', 'API', 'Experimental'])
+    const rows = (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => l.startsWith('▸ '))
+    expect(rows.slice(0, 3)).toEqual(['▸ Agents: Both (default)', '▸ When the GPU is busy: Wait (default)', '▸ Complex coding: GPU'])
+    expect((await ui.find({ key: 'cap' }))?.props.value).toBe('5')       // a typed value, an Input
+    await ui.press({ key: 'agents' })
+    await ui.press({ key: 'agents:gpu' })
+    expect(ran('wb route all gpu')).toBe(true)
+    expect(await label('agents')).toBe('▸ Agents: GPU')
+    await ui.unmount()
+  })
+
+for (const surface of SURFACES)
+  test(`#1200: a send to upstream asks with the session on ${surface}; a dialog that came back unanswered is a no, and off the terminal a toast says where it shows`, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_800_000_000_000 })
+    const files: Record<string, string> = {}
+    fakeTasks(on, files, [])
+    const w = upstreamWorld(on, files)
+    await $.session.start({ cwd: SOURCE, surface, isInteractive: true })
+    await clock.advance(1000)
+    const bash = async (command: string) => ((await $.tool.call({ tool: 'Bash', command } as any)) as any).deny as string | undefined
+    expect(await bash('git push')).toContain('not sent: the user did not approve it')   // "Don't send"
+    expect(w.asked).toHaveLength(1)
+    expect(w.toasts).toEqual([])                                                       // an answer: nothing more said
+    w.answer = null                                                                     // dismissed, or never drawn
+    expect(await bash('git push')).toContain('not sent')
+    expect(w.toasts).toEqual(surface === 'terminal' ? []
+      : ["workbench: the question went unanswered, so nothing was sent. If it didn't show here, ask again from Claude Code in a terminal, where it does."])
+    w.answer = 'Send it'
+    expect(await bash('git push')).toBeUndefined()
+    await clock.advance(1000)
+  })
+
+for (const surface of SURFACES)
+  test(`#1200: a role change asks with the session on ${surface}; only Allow writes the approval`, async ($, on) => {
+    const { clock, bash, files, w } = await routeProbe($, on, {}, surface)
+    expect((await bash('wb route trivial deepseek/deepseek-flash --day-usd 5')).deny).toContain('not changed: the user did not approve it')
+    expect('/wb/route-ok.json' in files).toBe(false)
+    w.answer = null
+    expect((await bash('wb route trivial deepseek/deepseek-flash --day-usd 5')).deny).toContain('not changed')
+    expect('/wb/route-ok.json' in files).toBe(false)
+    expect(w.toasts.filter(t => t.includes('unanswered'))).toEqual(surface === 'terminal' ? []
+      : ["workbench: the question went unanswered, so nothing changed. If it didn't show here, ask again from Claude Code in a terminal, where it does."])
+    w.answer = 'Allow'
+    expect((await bash('wb route trivial deepseek/deepseek-flash --day-usd 5')).deny).toBeUndefined()
+    expect(JSON.parse(files['/wb/route-ok.json']!)).toEqual({ argv: ROUTE_ARGV, change: ROUTE_LINE, at: expect.any(Number) })
+    await clock.advance(1000)
+  })
+
+// The desktop app's session starts with no surface and gets one only from session.attach (the
+// wake test below): the toast must count that attach, or the app the toast was built for never
+// shows it (the #1200 review: deleting attach's surfaces.add left the suite green)
+test('#1200: a session that starts with no surface and then attaches the desktop app toasts a send dialog that came back unanswered', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const w = upstreamWorld(on, files)
+  on('session.attach', (_: any, e: any) => ({ clientId: e.clientId }))
+  await $.session.start({ cwd: SOURCE, surface: null, isInteractive: false })   // how the app's session starts
+  await $.session.attach({ surface: 'desktop', clientId: 'desktop:default' })
+  await clock.advance(1000)
+  w.answer = null                                                                     // dismissed, or never drawn
+  const deny = ((await $.tool.call({ tool: 'Bash', command: 'git push' } as any)) as any).deny as string | undefined
+  expect(deny).toContain('not sent: the user did not approve it')
+  expect(w.asked).toHaveLength(1)
+  expect(w.toasts).toEqual(["workbench: the question went unanswered, so nothing was sent. If it didn't show here, ask again from Claude Code in a terminal, where it does."])
+  await clock.advance(1000)
+})
+
+for (const surface of ['desktop', 'vscode'] as const)
+  test(`#1200: a session that starts with no surface takes its wake once ${surface} attaches, once, and acknowledges it`, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_800_000_000_000 })
+    const files: Record<string, string> = {}
+    task(files, 'fix-it', 'review')
+    notice(files, { ts: ts0, task: 'fix-it', kind: 'review', text: 'REPORT' })
+    fakeTasks(on, files)
+    on('process.run', wbAck(files))
+    on('ui.toast', () => ({ value: undefined }))
+    on('session.attach', (_: any, e: any) => ({ clientId: e.clientId }))
+    const woken: string[] = []
+    on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+    await $.session.start({ cwd: '/', surface: null, isInteractive: false })   // how the app's session starts
+    await clock.advance(60_000)
+    expect([woken, files['/wb/tasks/fix-it/acked']]).toEqual([[], undefined])
+    await $.session.attach({ surface, clientId: `${surface}:default` })
+    await clock.advance(3000)
+    expect(woken.filter(t => t.includes('REPORT'))).toHaveLength(1)
+    expect(files['/wb/tasks/fix-it/acked']).toBe(String(ts0))
+    await clock.advance(120_000)
+    expect(woken.filter(t => t.includes('REPORT'))).toHaveLength(1)                 // and only once
+  })
+
+// Which wb the mod runs, given PATH and what is on disk; `wb events` is its first call
+async function wbRun($: any, on: any, env: Record<string, string>, onDisk: string[]): Promise<string> {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = Object.fromEntries(onDisk.map(p => [p, '#!/usr/bin/env python3\n']))
+  fakeTasks(on, files, [], true, [], false)
+  const spawned: string[][] = []
+  on('process.spawn', async function* (_: any, e: any) {
+    spawned.push(e.argv)
+    yield { stream: 'stdout', text: '{"hello": 4242}\n' }
+    await new Promise(() => {})
+    return { code: 0, signal: null }
+  })
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  engine.env = env
+  try {
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+    await clock.advance(1000)
+  } finally {
+    engine.env = undefined
+  }
+  return spawned.find(a => a[1] === 'events')?.[0] ?? ''
+}
+
+test('#1200: without WB_BIN the mod runs wb by name while a PATH directory has it', async ($, on) => {
+  expect(await wbRun($, on, { PATH: '/usr/bin:/home/u/.local/bin/' }, ['/home/u/.local/bin/wb'])).toBe('wb')
+})
+
+test('#1200: a GUI-started app without ~/.local/bin on its PATH runs wb setup\'s link there', async ($, on) => {
+  expect(await wbRun($, on, { PATH: '/usr/bin:/bin' }, ['/home/u/.local/bin/wb'])).toBe('/home/u/.local/bin/wb')
+})
+
+test('#1200: with no wb on PATH nor in ~/.local/bin the mod runs wb by name, as before', async ($, on) => {
+  expect(await wbRun($, on, { PATH: '/usr/bin:/bin' }, [])).toBe('wb')
+})
+
+test('#1200: WB_BIN still wins over PATH and wb setup\'s link', async ($, on) => {
+  expect(await wbRun($, on, { PATH: '/usr/bin', WB_BIN: '/opt/wb/bin/wb' }, ['/home/u/.local/bin/wb'])).toBe('/opt/wb/bin/wb')
 })

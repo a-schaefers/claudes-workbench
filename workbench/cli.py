@@ -6815,6 +6815,18 @@ def logout_stops() -> list[str]:
     return out
 
 
+def mod_wb(wb_bin, on_path, linked) -> str:
+    """Which wb the mod runs, by register.tsx's rule (`findWb`, #1200): WB_BIN, else `wb` by name
+    while PATH has one, else wb setup's ~/.local/bin/wb. A desktop app or an IDE started from the
+    GUI may lack ~/.local/bin on its PATH, and the mod only said to put wb there. Doctor reads its
+    own PATH, which may not be the app's: by name, the link is said as the mod's fallback."""
+    if wb_bin:
+        return f"WB_BIN={wb_bin}"
+    if on_path:
+        return "it by name" + (", else ~/.local/bin/wb where its PATH has no wb" if linked else "")
+    return "~/.local/bin/wb (wb setup's link)" if linked else "nothing: no wb on PATH or in ~/.local/bin"
+
+
 def path_advice(claude: bool = True) -> str:
     """How to put ~/.local/bin on PATH for the user's own shell, then restart Claude Code. "Add
     it" was all wb setup said, and on macOS, or in a Claude Code started from the Dock or an IDE,
@@ -6906,8 +6918,8 @@ def cmd_setup(a):
             print(f"--  {bindir} isn't on PATH: Claude Code runs wb from the plugin's bin/ and the "
                   f"marketplace clone, so only your own terminal lacks it. {path_advice(claude=False)}")
         else:
-            print(f"--  {bindir} isn't on PATH: Claude and the mod run wb by name (WB_BIN moves only "
-                  f"the mod's calls). {path_advice()}")
+            print(f"--  {bindir} isn't on PATH: Claude runs wb by name (the mod finds {bindir}/wb "
+                  f"without it, #1200). {path_advice()}")
     try:  # a minute or two, said up front; a task started meanwhile goes first
         for line in optimize.start(if_due=True):
             print(f"--  {line}")
@@ -7651,18 +7663,18 @@ def cmd_doctor(a):
     # the plugin's bin/ launcher (Claude Code's Bash, #1190) runs the marketplace clone's wb, not
     # a copy of its own: no "comes from" another copy
     launcher = bool(on_path) and plugin_launcher(on_path)
+    linked = (Path.home() / ".local/bin/wb").is_file()  # wb setup's link, maybe not on PATH (#274)
     if on_path:
         line(True, f"wb on PATH: {on_path}" + (" (the plugin's bin/: it runs the marketplace clone's)"
                                                if launcher else "")
-             + (f" (the mod runs WB_BIN={wb_bin})" if wb_bin else ""))
+             + f"; the mod runs {mod_wb(wb_bin, on_path, linked)}")
     elif mod_listed():  # Claude Code's Bash has the plugin's bin/, the mod the clone's (#1190)
         print("--  wb isn't on this shell's PATH: Claude Code gets it from the plugin's bin/; for "
-              "your own terminal, " + (path_advice(claude=False) if (Path.home() / ".local/bin/wb").exists()
+              "your own terminal, " + (path_advice(claude=False) if linked
                                        else "link bin/wb into a PATH directory (wb setup)"))
     else:
-        linked = (Path.home() / ".local/bin/wb").exists()  # wb setup's link, not on PATH (#274)
-        line(False, "wb isn't on PATH: Claude runs it by name in Bash, and the mod too; " +
-             (path_advice() if linked else "link bin/wb into a PATH directory (wb setup)")
+        line(False, f"wb isn't on PATH: Claude runs it by name in Bash; the mod runs {mod_wb(wb_bin, on_path, linked)}; "
+             + (path_advice() if linked else "link bin/wb into a PATH directory (wb setup)")
              + (f"; WB_BIN={wb_bin} covers only the mod's calls" if wb_bin else ""))
     elsewhere("wb", wb_bin or (None if launcher else on_path), PKG_ROOT / "bin/wb")
     # a warning, not BAD: a desktop that never logs out is fine (#351). The chat's line only

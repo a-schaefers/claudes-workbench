@@ -64,6 +64,16 @@ On at least one of them:
       awake (macOS, Linux: `systemd-inhibit --list` names workbench), or on WSL2 `wb start
       --backlog` says it can't.
 
+The mod in each Claude Code host at hand (#1200): its tests check each surface's tree and hooks,
+not how the host paints them. With a task through review on the user-scope install: the pane's
+Tasks, Stats and Settings tabs, a wake once the task is done, and a role change's dialog answered
+`Don't` (nothing changed) and dismissed (the toast says where it shows).
+
+| Where | Result | Notes |
+|---|---|---|
+| The desktop app's Code tab, a local session, started from the GUI (does the mod find `~/.local/bin/wb`?) | | |
+| VS Code's extension | | |
+
 ### The release evidence
 
 The runs the audit of v1.8 named (#482). Each row is one run, and a row naming several checks
