@@ -315,8 +315,16 @@ sent back included), as reference/driving.md says (#1130). The provider is
 `api_holders` read the slots for `wb start`'s refusal and the notes; their probe takes a free
 slot `LOCK_SH|LOCK_NB` and lets go, so two probes at once don't read each other as holders (with
 `LOCK_EX`, a start beside another start's probe saw every slot taken and exited 4, the review of
-#1015), while a holder's `LOCK_EX` still refuses it. It never
-appears in gpu.json, loads and unloads nothing, has no `short_window` check and no server-down
+#1015), while a holder's `LOCK_EX` still refuses it. Its `load()`, before each round, loads
+nothing but waits, the slot held, while the provider is out of credit (`models.credit_turn`:
+api-health.json's `no_credit` mark), as `phase: queued`, `last: waiting: <provider> is out of
+credit or quota (<why>): top it up, or wait for the plan's reset; wb asks it again at HH:MM (wb stop
+gives up)`, on a watch of `$WB_HOME` (an `ok` or the keyhole's next mark wakes it), looking again at
+most every `API_WAIT`'s 30 s; past the mark's `until` one runner asks (the mark held
+`CREDIT_RECHECK_SECS` more under its lock, `asked_by` that task) and the others wait for its
+answer. The tasks queued behind a 402 each sent a round, met the 402 and woke Claude with a stop of
+its own, though wb start refused in that state (#1178). It never
+appears in gpu.json, unloads nothing, has no `short_window` check and no server-down
 wait (`runner._down` is False), runs no `_Power` sampler and no keep-warm thread, and its first
 status says `last: starting`, not `waiting for the GPU`, and so does the base check's after it (#1112) (`runner._gpu_side`: from the config
 alone, in `drive`'s first write, before `models.resolve` may read the catalog; a GPU task showed
@@ -3069,8 +3077,9 @@ read as a wrong id, Claude hunted for the "right" one).
   API start goes on through either with a note, `cli.TRANSIENT`, #1088).
 - `note_api(pid, state, why="", until=None)` writes `$WB_HOME/api-health.json` under
   `api-health.json.lock`: `no_credit` (402, a 429 saying `insufficient_quota` or a plan limit; for
-  `CREDIT_RECHECK_SECS` 900, then the next start asks once, a 402 isn't billed, and the keyhole
-  records it again if it still holds: held until an `ok`, it held forever, since wb start refused the
+  `CREDIT_RECHECK_SECS` 900, then the next start, or one runner waiting for credit
+  (`credit_turn`, #1178), asks once, a 402 isn't billed, and the keyhole records it again if it
+  still holds: held until an `ok`, it held forever, since wb start refused the
   task that could get one, #1068; a row from before with no `until` expires from its `ts`), `rate_limited` (until `Retry-After`, else `RATE_LIMIT_SECS` 60),
   `unreachable` (connect, DNS, TLS, a 5xx: `DOWN_SECS`), `ok` (a 2xx) removes the entry. `why` is
   its first line, key-like strings (bearer tokens, `sk-`-style keys, `api_key=…`, 32+ character
@@ -5846,7 +5855,9 @@ $WB_HOME (~/.local/state/workbench)
                                  never their values): what models.catalog_doc rebuilds the task's catalog from, #1015}}}; fresh HOSTED_TTL 600 s
                                  (an error DOWN_SECS), rebuilt on a changed stamp; never holds a key
   api-health.json  .lock         each API provider's last bad answer (models.note_api): {<pid>: {state: no_credit|rate_limited|
-                                 unreachable, until (epoch; a null from before #1068 reads as ts + CREDIT_RECHECK_SECS), why (redacted), ts}}; ok removes it; past until reads as ok; the provider's cooldown every keyhole waits out, and the revive's wait (#1020)
+                                 unreachable, until (epoch; a null from before #1068 reads as ts + CREDIT_RECHECK_SECS), why (redacted), ts,
+                                 asked_by (a no_credit mark past its until that a waiting runner asks again: its task,
+                                 until moved CREDIT_RECHECK_SECS on, models.credit_turn, #1178)}}; ok removes it; past until reads as ok; the provider's cooldown every keyhole waits out, and the revive's wait (#1020)
   api/<provider>.<i>.lock        an API provider's task slots (models.NoLease, #1015): API_PARALLEL (3) files, each flocked by the
                                  runner holding it, its task's name inside (models.api_holders); never in gpu.json
   spend-api.jsonl  .lock .checkin.lock  the API ledger (meter.py, #1019; *Spend*), one row each, every row {ts, day (local

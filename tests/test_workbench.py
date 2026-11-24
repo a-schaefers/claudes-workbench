@@ -30903,6 +30903,59 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual(seen, [(self.models.API_PARALLEL - 1, ["api-first"])])
         self.assertEqual(self.models.api_slots_free("deepinfra"), self.models.API_PARALLEL)
 
+    def test_an_api_task_with_its_slot_waits_as_queued_while_its_provider_is_out_of_credit_and_runs_once_topped_up(self):
+        # #1178: a keyhole's 402 marks the provider no_credit and wb start refuses, but the tasks
+        # already queued took their slots, each sent a round, met the 402 and woke Claude with a
+        # stop of its own; now the runner waits before the round, sends nothing, and goes on at ok
+        self.start_api("api-credit", "ok", spawn=False)
+        self.models.note_api("deepinfra", "no_credit", "HTTP 402: Insufficient balance")
+        rounds = []
+        real = runner.run_round
+
+        def counted(task, n, keep=False):
+            rounds.append(n)
+            return real(task, n, keep)
+        task = store.Task("api-credit")
+        with mock.patch.object(runner, "run_round", counted):
+            driver = threading.Thread(target=self.drive_here, args=("api-credit",), daemon=True)
+            driver.start()
+            self.addCleanup(driver.join, 60)
+            self.addCleanup(self.models.note_api, "deepinfra", "ok")
+            deadline = time.time() + 30
+            while not (task.status.get("last") or "").startswith("waiting: deepinfra is out of credit"):
+                self.assertLess(time.time(), deadline, task.status)
+                self.assertTrue(driver.is_alive(), task.status)
+                time.sleep(POLL)
+            self.assertEqual(task.status["phase"], "queued")
+            self.assertIn("(HTTP 402: Insufficient balance): top it up, or wait for the plan's reset; "
+                          "wb asks it again at ", task.status["last"])
+            self.assertEqual(self.models.api_holders("deepinfra"), ["api-credit"])
+            time.sleep(1)
+            self.assertEqual(rounds, [])
+            self.assertEqual([r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
+                              if r.get("task") == "api-credit"], [])
+            self.models.note_api("deepinfra", "ok")                 # a top-up's 2xx, another task's
+            driver.join(60)
+        self.assertFalse(driver.is_alive())
+        self.assertEqual(rounds, [1])
+        self.assertEqual(task.status["phase"], "review", task.status)
+
+    def test_past_its_recheck_one_runner_asks_the_provider_again_and_the_others_wait_for_its_answer(self):
+        # #1178: at the no_credit mark's `until` every waiting runner went on at once, each to
+        # its own 402 and its own stop; one asks, the mark held for the rest until it answers
+        self.models.note_api("deepinfra", "no_credit", "HTTP 402: Insufficient balance",
+                             until=time.time() - 1)
+        self.assertIsNone(self.models.api_health("deepinfra"))
+        self.assertIsNone(self.models.credit_turn("deepinfra", "t-a"))           # t-a asks
+        row = self.models.credit_turn("deepinfra", "t-b")
+        self.assertEqual((row["state"], row["asked_by"], row["why"]),
+                         ("no_credit", "t-a", "HTTP 402: Insufficient balance"))
+        self.assertGreater(row["until"], time.time() + self.models.CREDIT_RECHECK_SECS - 60)
+        self.models.note_api("deepinfra", "ok")                                   # t-a's 2xx
+        self.assertIsNone(self.models.credit_turn("deepinfra", "t-b"))
+        self.models.note_api("deepinfra", "rate_limited", "HTTP 429")             # not this wait's
+        self.assertIsNone(self.models.credit_turn("deepinfra", "t-b"))
+
     def test_with_unload_for_tests_an_api_tasks_tests_run_under_this_machines_pool(self):
         from workbench import verify
         used = []

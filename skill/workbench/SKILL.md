@@ -504,7 +504,8 @@ coding choice is the user's (`wb coding`), never changed by a check.
   the branch, and the report says how to accept them instead. A failed round's edits so far stay in the worktree (`wb resume` carries on). A setup or load failure before the agent ran: fix it, then `wb resume <name>`.
   A `rate_limited`, `outage`, `quota`, `auth` or `refused` stop is the API provider's, not the
   agent's (the report says "the provider's stop"): tell the user so, and its remedy (wait, top
-  up, or /connect the key again), then `wb feedback <name> --text "carry on"` once it allows (no review round counted). A
+  up, or /connect the key again), then `wb feedback <name> --text "carry on"` once it allows (no review round counted);
+  the tasks queued behind a `quota` stop wait as queued, with no stop of their own, and go on by themselves. A
   `refused` one (the provider turned the request down: a moderation flag, a schema, a model gone)
   quotes what it said: fix that, then `wb feedback`; on an HTTP 404 the model is gone, so `wb
   takeover` or `wb discard`. Never switch the task's model or role yourself: a route change
