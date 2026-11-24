@@ -90,8 +90,8 @@ def stores(task: store.Task | None) -> list[tuple[dict | None, object]]:
     writable = context.writable(task)
     if writable is None:  # no lane: the agent's commands reach every file of the user's anyway
         return [(env, _same), (None, _same)]
-    readable, unix = context.readable(task), context.unix_paths(task)
-    return [(env, lambda cmd: lane.wrap(writable, cmd, readable, unix)), (None, _same)]
+    readable, unix, ports = context.readable(task), context.unix_paths(task), context.deny_ports(task)
+    return [(env, lambda cmd: lane.wrap(writable, cmd, readable, unix, ports)), (None, _same)]
 
 
 def export(session: str, strict: bool = False, task: store.Task | None = None) -> dict | None:

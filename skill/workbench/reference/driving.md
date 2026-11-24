@@ -4,7 +4,7 @@ Read from the /workbench skill when you steer, stop, take over or resume a task,
 check-in, when an agent asks for a command or a directory, a spec needs web research, or a
 `[web chat]` message arrives.
 
-## Commands and directories an agent asks for
+## Commands, directories and ports an agent asks for
 - **Commands it asks for.** The agent's shell runs the everyday tools of software work freely;
   anything else, and adding a package, is refused, and the agent asks you (a `PERMISSION`
   question). Lean to yes: their work is hard enough. `wb allow <name> "<pattern>"` (e.g.
@@ -41,6 +41,13 @@ check-in, when an agent asks for a command or a directory, a spec needs web rese
   Docker's socket is root on the machine, and rootless Podman's acts as the user outside the
   lane: grant one only when the user expects the tests to run containers. Docker Desktop's `~/.docker/desktop/docker.sock` can be granted alone;
   the rest of `~/.docker` (its logins) stays hidden.
+- **Ports it asks for.** From Linux 6.7 the lane refuses a TCP connect to local daemons' ports
+  (Docker's and Podman's API 2375 and 2376, adb 5037, GDB servers 3333 and 2331, Chrome's
+  DevTools 9222, Node's inspector 9229), listening or not; every other port, the model's and the
+  keyhole's included, stays open. A request names a `port`: `wb allow <name> --port <N>`
+  (`--always` keeps it in commands.json's `ports`). Grant one only when the task's own tests
+  serve on it (a suite that starts Chrome on 9222 or a Node server with `--inspect`); a daemon
+  of the user's there runs code outside the lane, so a Docker API on 2375 is root on the machine.
 
 ## The web is yours; the agent tests in a browser but does not browse
 Research (for a spec, an
@@ -106,9 +113,9 @@ You are the driver, not a spectator. When something tells you the agent is headi
   matters.
 - `wb takeover <name>`: stops it and hands you the worktree. Finish by hand, leaving it
   uncommitted (`wb accept` commits it), then `wb accept`, or hand it back with `wb feedback`. For when explaining would cost more than doing.
-- **Commands and directories it asks for** (a `PERMISSION` question): lean to yes for what the
-  task needs (`wb allow <name> "<pattern>"`, `wb allow <name> --path <dir>`); no to what reaches
-  outside it. sudo, git writes and `gh` stay refused whatever you allow. The rules and the
+- **Commands, directories and ports it asks for** (a `PERMISSION` question): lean to yes for
+  what the task needs (`wb allow <name> "<pattern>"`, `wb allow <name> --path <dir>`, `wb allow
+  <name> --port <N>`); no to what reaches outside it. sudo, git writes and `gh` stay refused whatever you allow. The rules and the
   traps (links, toolchains, `/dev/pts`): `reference/driving.md`.
 - `wb stop <name>`: just stop it. `wb resume <name>` continues it in a fresh session (not a
   review round), e.g. after fixing workbench under it. A task failed with "the runner died" (a

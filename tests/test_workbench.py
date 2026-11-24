@@ -11666,6 +11666,149 @@ class Lane(Base):
             s.listen(1)
             self.assertEqual(context.listening_daemons(ports={port: "x"}), [port])
 
+    # #1197 (2026-11-24): the lane left TCP open, so an agent reached a Docker API on 2375 (root
+    # on the host) or a debugger's port, and #993 only warned. Landlock lists the ports allowed,
+    # so the lane allows every port but the denied ones.
+    @unittest.skipUnless(lane.abi() >= context.NET_ABI, "needs Landlock's TCP rule (ABI 4)")
+    def test_the_lane_refuses_a_tcp_connect_to_a_denied_port_and_no_other(self):
+        import socket
+        probe = ("import socket, sys\nfor fam, host, port in ((socket.AF_INET, '127.0.0.1', "
+                 "int(sys.argv[1])), (socket.AF_INET, '127.0.0.1', int(sys.argv[2])), "
+                 "(socket.AF_INET6, '::1', int(sys.argv[3]))):\n    s = socket.socket(fam)\n"
+                 "    try:\n        s.connect((host, port))\n        print('ok')\n"
+                 "    except PermissionError:\n        print('refused')\n"
+                 "    except OSError as e:\n        print(e.errno)\n"
+                 "b = socket.socket(); b.bind(('127.0.0.2', int(sys.argv[2])))\n"
+                 "print('bound')\n")
+        with socket.socket() as open_, socket.socket() as denied, \
+                socket.socket(socket.AF_INET6) as denied6:
+            for s, host in ((open_, "127.0.0.1"), (denied, "127.0.0.1")):
+                s.bind((host, 0))
+                s.listen()
+            port = denied.getsockname()[1]
+            try:
+                denied6.bind(("::1", port))
+                denied6.listen()
+            except OSError:
+                self.skipTest("no IPv6 loopback")
+            inside = Path(self.tmp.name) / "inside"
+            inside.mkdir()
+            out = subprocess.run(lane.wrap([str(inside)], [sys.executable, "-c", probe,
+                                           str(open_.getsockname()[1]), str(port), str(port)],
+                                           deny_ports=[port]),
+                                 capture_output=True, text=True, timeout=30)
+        # the test's own server connects, the denied port is refused on either family, and
+        # binding stays free
+        self.assertEqual(out.stdout.split(), ["ok", "refused", "refused", "bound"], out.stderr)
+
+    def test_the_lane_denies_the_local_daemons_ports_less_the_grants_and_the_rounds_own(self):
+        task = self.bare_task("t-ports", self.repo)
+        denied = context.deny_ports(task)
+        self.assertEqual(denied, sorted(context.DAEMON_PORTS))
+        self.assertTrue({2375, 9222, 9229} <= set(denied))       # listening or not
+        context.grant(task, "ports", [9229])
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"ports": [2375]}))
+        self.assertEqual(context.granted_ports(task), {2375, 9229})
+        self.assertNotIn(2375, context.deny_ports(None))         # the user's, for every task
+        self.assertEqual(set(context.deny_ports(task, keep=[5037, None])),
+                         set(context.DAEMON_PORTS) - {2375, 9229, 5037})
+        # the model server's and the keyhole's ports stay open with no grant: runner.lane_ports
+        m = mock.Mock(base_url="http://127.0.0.1:3333/v1")
+        kh = mock.Mock(port=2331, task=task)
+        with mock.patch.dict(runner.CURRENT, {"model": m, "keyhole": kh}):
+            self.assertEqual(runner.lane_ports(task), [2376, 5037, 9222])
+        self.assertEqual(context.url_port("https://api.example/v1"), 443)
+        self.assertIsNone(context.url_port("http://h:notaport/"))
+        argv = lane.wrap(["/x"], ["opencode"], deny_ports=[9229, 2375])
+        self.assertEqual(argv[argv.index("--") - 4:argv.index("--")],
+                         ["--deny-port", "2375", "--deny-port", "9229"])
+        self.assertNotIn("--deny-port", lane.wrap(["/x"], ["opencode"]))
+        self.assertEqual(lane.wrap(None, ["opencode"], deny_ports=[9229]), ["opencode"])
+        for bad in ([0], ["9229"], [True], 9229):                 # refused, not read as none
+            Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"ports": bad}))
+            with self.assertRaisesRegex(RuntimeError, '"ports" must be a list of TCP port'):
+                context.commands_conf()
+
+    @unittest.skipUnless(lane.abi() >= context.NET_ABI, "needs Landlock's TCP rule (ABI 4)")
+    def test_the_tests_run_in_a_lane_that_refuses_the_denied_ports(self):
+        import socket
+        self.start("t-tcp", "ok")
+        wait_phase("t-tcp", {"review"})
+        task = store.Task("t-tcp")
+        with socket.socket() as srv:
+            srv.bind(("127.0.0.1", 0))
+            srv.listen()
+            port = srv.getsockname()[1]
+            cmd = (f"{shlex.quote(sys.executable)} -c \"import socket; "
+                   f"socket.create_connection(('127.0.0.1', {port}), 5); print('reached')\"")
+            with mock.patch.dict(context.DAEMON_PORTS, {port: "a test daemon"}):
+                code, text = runner.run_in_lane(task, cmd, 30)
+                self.assertNotEqual(code, 0)
+                self.assertIn("Permission denied", text)
+                context.grant(task, "ports", [port])              # wb allow --port
+                self.assertEqual(runner.run_in_lane(task, cmd, 30), (0, "reached\n"))
+
+    def test_a_port_request_names_wb_allow_port_and_wb_allow_grants_it(self):
+        task = self.bare_task("t-port", self.repo)
+        q = lambda p: {"question": "the suite drives Chrome", "command": "", "path": "",
+                       "port": p, "context": ""}
+        body = ask_mcp.notice(task, "q1", q("9222"))
+        self.assertTrue(body.startswith("PERMISSION to connect to TCP port 9222 (outside its lane)"))
+        self.assertIn("Chrome's DevTools", body)
+        self.assertIn("wb allow t-port --port 9222", body)
+        body = ask_mcp.notice(task, "q2", q("8080"))               # not one the lane refuses
+        self.assertIn("no grant lifts it", body)
+        self.assertNotIn("wb allow", body)
+        self.assertEqual(ask_mcp._judge(task, q("9222"), {}), ("p", None))
+        for bad in ("0", "65536", "80; rm", "９２２２"):
+            self.assertEqual(ask_mcp._judge(task, q(bad), {})[0], "x", bad)
+        task.set_status(phase="review")
+        self.assertIn("allowed TCP port 9229 on t-port", run_wb("allow", "t-port", "--port", "9229"))
+        self.assertEqual(context.grants(task)["ports"], [9229])
+        run_wb("allow", "t-port", "--port", "2375", "--always")
+        self.assertEqual(json.loads(Path(os.environ["WB_COMMANDS"]).read_text())["ports"], [2375])
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(err):
+            run_wb("allow", "t-port", "--port", "8080")          # nothing to lift
+        self.assertIn("doesn't refuse TCP port 8080", err.getvalue())
+        self.assertNotIn(8080, context.grants(task)["ports"])
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            run_wb("allow", "t-port", "--port", "http")
+
+    @unittest.skipUnless(lane.abi() >= context.NET_ABI, "needs Landlock's TCP rule (ABI 4)")
+    def test_an_abi_4_lane_packs_the_net_field_without_scopes_and_still_refuses_the_port(self):
+        # ABI 4-5's ruleset attr is 16 bytes (no `scoped`): drawn as an ABI 4 kernel would be
+        # asked, on this newer one, which takes the shorter struct
+        script = ("import socket, sys; sys.path.insert(0, sys.argv[1]); from workbench import lane\n"
+                  "srv = socket.socket(); srv.bind(('127.0.0.1', 0)); srv.listen()\n"
+                  "port = srv.getsockname()[1]\n"
+                  "lane.abi = lambda: 4; lane.restrict([sys.argv[2]], deny_ports=[port])\n"
+                  "try:\n    socket.create_connection(('127.0.0.1', port), 5); print('ok')\n"
+                  "except PermissionError:\n    print('refused')\n")
+        out = subprocess.run([sys.executable, "-c", script, str(ROOT), self.tmp.name],
+                             capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.stdout.split(), ["refused"], out.stderr)
+
+    def test_an_old_landlock_says_tcp_ports_arent_refused(self):
+        self.assertTrue(any("TCP" in g for g in lane.gaps(3)))
+        self.assertFalse(any("TCP" in g for g in lane.gaps(4)))
+
+    @unittest.skipUnless(lane.abi() >= context.NET_ABI, "needs Landlock's TCP rule (ABI 4)")
+    def test_doctor_checks_the_lane_refuses_a_denied_port(self):
+        self.assertEqual(cli._tcp_refused(), (True, ""))
+        with mock.patch.object(lane, "wrap", lambda w, cmd, *a, **k: cmd):   # no lane at all
+            held, why = cli._tcp_refused()
+        self.assertFalse(held)
+        self.assertEqual(why, "the connect went through")
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"ports": [9229]}))
+        buf = io.StringIO()
+        with redirect_stdout(buf), contextlib.suppress(SystemExit):
+            cli.main(["doctor"])
+        n = len(context.DAEMON_PORTS) - 1
+        self.assertIn(f"ok  local daemons' TCP ports are out of the lane ({n} ports)", buf.getvalue())
+        self.assertIn("commands.json lets every agent connect to TCP port 9229", buf.getvalue())
+        self.assertNotIn("listens here", buf.getvalue())     # #993's warning: old kernels only
+
 
 class CheckoutVenv(Base):
     """#490 (the audit of 1.90): the user's activated venv, when it is their checkout's, stays out

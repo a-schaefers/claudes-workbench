@@ -2777,6 +2777,17 @@ def _lane_dir(raw: str, guard: set[str] = frozenset(), task: store.Task | None =
     return str(path)
 
 
+def tcp_port(text: str) -> int:
+    """A TCP port number (wb allow --port), or argparse's refusal."""
+    try:
+        n = int(text)
+    except ValueError:
+        n = 0
+    if not 0 < n < 65536:
+        raise argparse.ArgumentTypeError(f"{text!r} isn't a TCP port (1-65535)")
+    return n
+
+
 def _permission_asked(task: store.Task) -> str | None:
     """The oldest permission request still open. status.asking is the oldest question of any
     kind, and `wb allow` answered a plain question asked before the request with its leave,
@@ -2793,23 +2804,30 @@ def _permission_asked(task: store.Task) -> str | None:
 
 def cmd_allow(a):
     """Let a task's agent run commands outside the everyday list (context.ALLOWED_COMMANDS), or
-    use a directory outside its lane (--path, context.writable): for this task, or --always for
-    every task. A pending request is answered, and a running agent is restarted on its session at
+    use a directory outside its lane (--path, context.writable) or connect to a TCP port the lane
+    refuses (--port, context.deny_ports): for this task, or --always for every task. A pending
+    request is answered, and a running agent is restarted on its session at
     once so the new rule applies (OpenCode reads it at start, the lane is drawn at start)."""
     task = need(a.name)
     pats = [p.strip() for p in a.pattern if p.strip()]
     dirs = [_lane_dir(p, context.repo_dirs(task), task) for p in a.path or [] if p.strip()]
-    if not pats and not dirs:
+    ports = list(dict.fromkeys(a.port or []))
+    if free := [p for p in ports if p not in context.DAEMON_PORTS]:  # nothing to lift: say so
+        die(f"the lane doesn't refuse TCP port {', '.join(map(str, free))} (only local daemons' "
+            f"{', '.join(map(str, sorted(context.DAEMON_PORTS)))}): the agent can connect to it "
+            "already, so a refusal there is something else")
+    if not pats and not dirs and not ports:
         die("nothing to allow")
     context.commands_conf()  # refused unless it parses, before any grant: rewriting it would lose it
-    said = ", ".join([f"`{p}`" for p in pats] + [f"the directory {d}" for d in dirs])
+    said = ", ".join([f"`{p}`" for p in pats] + [f"the directory {d}" for d in dirs]
+                     + [f"TCP port {p}" for p in ports])
     text = (f"Claude allowed {said}" + (" from now on" if a.always else " for this task")
             + ". Run it again now and carry on." + (f" {a.text.strip()}" if a.text else ""))
     # the answer as written, before any grant (#605): a guess at the words around --text let
     # many patterns past it, the grants were saved and write_answer's refusal was a traceback
     if why := ask_mcp.too_long(text):
         die(f"--text: {why} ({task.worktree})")
-    for key, new in (("allow", pats), ("paths", dirs)):
+    for key, new in (("allow", pats), ("paths", dirs), ("ports", ports)):
         if not new:
             continue
         context.grant(task, key, new)
@@ -7029,6 +7047,25 @@ def _api_role_lines(doc: dict) -> list[tuple[bool, str]]:
     return out
 
 
+def _tcp_refused() -> tuple[bool, str]:
+    """Whether a real lane refuses a TCP connect to a port it denies: a listener of this
+    process's own, on a port the kernel picked, denied to a lane drawn for it (a daemon's port
+    can't be borrowed: it may be in use). (held, why not)."""
+    import socket
+    import tempfile
+    with socket.socket() as srv, tempfile.TemporaryDirectory() as inside:
+        srv.bind(("127.0.0.1", 0))
+        srv.listen()
+        port = srv.getsockname()[1]
+        probe = [sys.executable, "-c", "import socket,sys\ntry:\n socket.create_connection("
+                 f"('127.0.0.1', {port}), 5)\nexcept PermissionError:\n sys.exit(13)"]
+        r = subprocess.run(lane.wrap([inside], probe, deny_ports=[port]), capture_output=True,
+                           text=True, timeout=30)
+    if r.returncode == 13:
+        return True, ""
+    return False, r.stderr.strip()[-200:] or "the connect went through"
+
+
 def cmd_doctor(a):
     ok = True
 
@@ -7302,10 +7339,24 @@ def cmd_doctor(a):
             print(f"--  {gap}")
         if gap := context.home_gap():
             print(f"--  {gap}")
-        # what TCP reaches past the lane (#993, 2026-11-22): a warning, the user's own daemon
-        for port in context.listening_daemons():
-            print(f"--  port {port} listens here ({context.DAEMON_PORTS[port]}): the lane doesn't "
-                  "stop TCP, so an agent can reach it")
+        # what TCP reaches past the lane (#993, 2026-11-22): from ABI 4 the lane refuses local
+        # daemons' ports (#1197, 2026-11-24), checked by a refused connect; before it, a warning
+        if v >= context.NET_ABI:
+            try:
+                granted = sorted(context.granted_ports() & set(context.DAEMON_PORTS))
+            except RuntimeError:  # commands.json doesn't parse: its own BAD line follows
+                granted = []
+            denied = sorted(set(context.DAEMON_PORTS) - set(granted))
+            held, why = _tcp_refused() if denied else (True, "")
+            line(held, f"local daemons' TCP ports are out of the lane ({len(denied)} ports)"
+                 if held else f"the lane didn't refuse a TCP connect to a denied port: {why}")
+            if granted:
+                print(f"--  commands.json lets every agent connect to TCP port "
+                      f"{', '.join(map(str, granted))}")
+        else:
+            for port in context.listening_daemons():
+                print(f"--  port {port} listens here ({context.DAEMON_PORTS[port]}): the lane "
+                      "doesn't stop TCP, so an agent can reach it")
     else:
         print("--  agents' writes outside their lane and reads of credentials aren't refused here "
               "(no Landlock): only OpenCode's file tools keep to it; " +
@@ -7640,6 +7691,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("name"); s.add_argument("pattern", nargs="*")
     s.add_argument("--path", action="append", metavar="DIR",
                    help="let it read and write this directory outside its lane (repeatable)")
+    s.add_argument("--port", action="append", metavar="N", type=tcp_port,
+                   help="let it connect to this TCP port, which the lane refuses (repeatable)")
     s.add_argument("--always", action="store_true", help="for every task from now on (commands.json)")
     s.add_argument("--text", help="a word for the agent with it")
     s.set_defaults(f=cmd_allow)

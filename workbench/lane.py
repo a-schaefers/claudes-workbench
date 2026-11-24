@@ -7,10 +7,13 @@ and reading files when `--read` names what may be read (context.py: everything b
 credentials live; running a program reads it, so it must be readable too). Where the kernel can
 (ABI 9, ABI 6), it also refuses connecting to a UNIX socket made outside the lane (the session
 bus, the SSH and GPG agents: `--unix` names the places that may), an abstract socket, or a signal
-to a process outside it (the runner, other tasks, Claude Code). Listing directories and the network
-stay as they were. Landlock doesn't cover metadata: chmod, chown, utimes and xattrs on a file
-outside the lane still succeed. A write elsewhere fails with "Permission denied", and the agent
-asks Claude for the directory (`wb allow --path`). context.py decides the lane; OpenCode's own
+to a process outside it (the runner, other tasks, Claude Code). From ABI 4 it refuses a TCP connect
+to each `--deny-port` (context.deny_ports: local daemons that take commands, a debugger's port),
+on any address: Landlock only allows ports, so every other port gets a rule. Listing directories,
+binding and the rest of the network stay as they were. Landlock doesn't cover metadata: chmod,
+chown, utimes and xattrs on a file outside the lane still succeed. A write or a denied connect
+fails with "Permission denied", and the agent asks Claude for the directory (`wb allow --path`)
+or the port (`wb allow --port`). context.py decides the lane; OpenCode's own
 `external_directory` rule keeps its file tools to it as well.
 
 No-new-privileges (no sudo, su or other setuid program) is set on every Linux machine, Landlock
@@ -33,7 +36,7 @@ import sys
 CREATE_RULESET, ADD_RULE, RESTRICT_SELF = 444, 445, 446
 UNIFIED = ("x86_64", "amd64", "i386", "i686", "aarch64", "arm64", "armv7l", "armv6l", "riscv64",
            "ppc64le", "ppc64", "s390x", "loongarch64")
-RULE_PATH_BENEATH = 1
+RULE_PATH_BENEATH, RULE_NET_PORT = 1, 2
 PR_SET_NO_NEW_PRIVS = 38
 PR_SET_PDEATHSIG = 1
 WRITE_FILE, READ_FILE, REMOVE_DIR, REMOVE_FILE = 1 << 1, 1 << 2, 1 << 4, 1 << 5
@@ -41,6 +44,7 @@ MAKE = sum(1 << b for b in range(6, 13))        # char, dir, reg, sock, fifo, bl
 REFER, TRUNCATE = 1 << 13, 1 << 14               # ABI 2 and 3
 RESOLVE_UNIX = 1 << 16                           # ABI 9: connect to a socket made outside
 SCOPE_ABSTRACT_UNIX, SCOPE_SIGNAL = 1, 2         # ABI 6: ruleset_attr.scoped
+CONNECT_TCP = 1 << 1                             # ABI 4: ruleset_attr.handled_access_net
 
 
 def _libc():
@@ -59,11 +63,12 @@ def abi() -> int:
 
 
 def restrict(writable: list[str], readable: list[str] | None = None,
-             unix: list[str] | None = None) -> int:
+             unix: list[str] | None = None, deny_ports: list[int] | None = None) -> int:
     """Forbid this process and its children every write outside `writable` (directories, and
     files such as /dev/null) and, given `readable`, reading a file outside it and `writable`;
-    connecting to a UNIX socket made outside the lane except beneath `unix`, and signalling a
-    process outside it. Returns the ABI used, 0 when Landlock isn't there."""
+    connecting to a UNIX socket made outside the lane except beneath `unix`, signalling a
+    process outside it, and connecting over TCP to a port of `deny_ports`. Returns the ABI
+    used, 0 when Landlock isn't there."""
     version = abi()
     libc = _libc()
     # Before Landlock: no-new-privileges holds on any Linux, so sudo is refused even where the
@@ -90,10 +95,18 @@ def restrict(writable: list[str], readable: list[str] | None = None,
     # 2026-11-16 audit). Sockets the lane's own processes make are theirs whatever the rules.
     if version >= 9:
         handled |= RESOLVE_UNIX
-    if version >= 6:  # handled_access_net stays 0: the network (the model servers) stays free
+    # TCP connect handled only with ports to refuse, each other port allowed by a rule of its
+    # own: Landlock lists the ports allowed, never those refused, so the agent's tests still
+    # reach the servers they start on any port (#1197, 2026-11-24: 65,530 rules and
+    # restrict_self took 0.05 s on ABI 10). Binding stays unhandled.
+    deny = {p for p in deny_ports or () if 0 <= p <= 65535} if version >= 4 else set()
+    net = CONNECT_TCP if deny else 0
+    if version >= 6:
         attr = ctypes.create_string_buffer(
-            struct.pack("=QQQ", handled, 0, SCOPE_ABSTRACT_UNIX | SCOPE_SIGNAL), 24)
+            struct.pack("=QQQ", handled, net, SCOPE_ABSTRACT_UNIX | SCOPE_SIGNAL), 24)
         size = 24
+    elif version >= 4:  # handled_access_net, and no `scoped` before ABI 6
+        attr, size = ctypes.create_string_buffer(struct.pack("=QQ", handled, net), 16), 16
     else:
         attr, size = ctypes.c_uint64(handled), 8
     fd = libc.syscall(CREATE_RULESET, ctypes.byref(attr), ctypes.c_size_t(size), ctypes.c_uint32(0))
@@ -122,11 +135,25 @@ def restrict(writable: list[str], readable: list[str] | None = None,
                     raise OSError(ctypes.get_errno(), f"landlock_add_rule {path}")
             finally:
                 os.close(pfd)
+        if net:
+            _allow_ports(libc, fd, deny)
         if libc.syscall(RESTRICT_SELF, fd, ctypes.c_uint32(0)) < 0:
             raise OSError(ctypes.get_errno(), "landlock_restrict_self")
     finally:
         os.close(fd)
     return version
+
+
+def _allow_ports(libc, fd: int, deny: set[int]) -> None:
+    """A connect rule for every TCP port but those of `deny`, one buffer reused (speed)."""
+    rule = ctypes.create_string_buffer(16)  # landlock_net_port_attr: allowed_access, port
+    add, flags = libc.syscall, ctypes.c_uint32(0)
+    for port in range(65536):
+        if port in deny:
+            continue
+        struct.pack_into("=QQ", rule, 0, CONNECT_TCP, port)
+        if add(ADD_RULE, fd, RULE_NET_PORT, rule, flags) < 0 and port:  # 0: no connect's
+            raise OSError(ctypes.get_errno(), f"landlock_add_rule port {port}")
 
 
 def gaps(version: int) -> list[str]:
@@ -140,6 +167,9 @@ def gaps(version: int) -> list[str]:
         out.append("moving or hard-linking a file between directories fails even inside the "
                    "lane (\"Invalid cross-device link\"; most tools fall back to a copy) before "
                    "ABI 2 (Linux 5.19)")
+    if 0 < version < 4:
+        out.append("the agent can connect to local daemons' TCP ports (a Docker API, adb, a "
+                   "debugger's port) before ABI 4 (Linux 6.7)")
     if 0 < version < 6:
         out.append("the agent can signal the user's other processes before ABI 6 (Linux 6.12)")
     if 0 < version < 9:
@@ -148,8 +178,8 @@ def gaps(version: int) -> list[str]:
     return out
 
 
-def wrap(writable: list[str] | None, cmd: list[str],
-         readable: list[str] | None = None, unix: list[str] | None = None) -> list[str]:
+def wrap(writable: list[str] | None, cmd: list[str], readable: list[str] | None = None,
+         unix: list[str] | None = None, deny_ports: list[int] | None = None) -> list[str]:
     """The command that runs `cmd` inside the lane; `cmd` itself when there is no lane."""
     if writable is None:
         return cmd
@@ -157,7 +187,8 @@ def wrap(writable: list[str] | None, cmd: list[str],
             *(a for p in writable for a in ("--write", p)),
             *(["--reads"] if readable is not None else []),
             *(a for p in readable or [] for a in ("--read", p)),
-            *(a for p in unix or [] for a in ("--unix", p)), "--", *cmd]
+            *(a for p in unix or [] for a in ("--unix", p)),
+            *(a for p in sorted(deny_ports or ()) for a in ("--deny-port", str(p))), "--", *cmd]
 
 
 def die_with_parent() -> None:
@@ -180,8 +211,9 @@ def main(argv: list[str]) -> None:
     sep = argv.index("--")
     pick = lambda flag: [argv[i + 1] for i in range(sep) if argv[i] == flag]  # noqa: E731
     readable = pick("--read") if "--reads" in argv[:sep] else None
+    deny = [int(p) for p in pick("--deny-port")]  # wrap's own numbers: a bad one is a traceback
     try:
-        restrict(pick("--write"), readable, pick("--unix"))
+        restrict(pick("--write"), readable, pick("--unix"), deny)
     except OSError as e:  # Landlock is there but refused the lane: don't run outside it
         print(f"workbench lane: the kernel refused the lane ({e}); not running "
               f"{argv[sep + 1]}", file=sys.stderr)

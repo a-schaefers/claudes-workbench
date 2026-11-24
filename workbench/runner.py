@@ -1616,8 +1616,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     if not task.status.get("opencode_home"):  # its sessions are in the task's home from now on
         task.set_status(opencode_home=True)
     cmd = lane.wrap(context.writable(task), cmd,   # writes stay in the agent's lane (lane.py),
-                    context.readable(task),       # and credentials out of its reach
-                    context.unix_paths(task))
+                    context.readable(task),       # and credentials out of its reach,
+                    context.unix_paths(task), lane_ports(task))  # local daemons' TCP too
     try:  # this round's OpenCode marks it again: kept from round 1, the report's note about a
         (ask_mcp.ask_dir(task) / ask_mcp.LISTED).unlink()  # lost ask tool could fire only there (#481)
     except OSError:
@@ -2165,6 +2165,15 @@ def write_shell_shim(task: store.Task) -> Path:
     return path
 
 
+def lane_ports(task: store.Task) -> list[int]:
+    """The TCP ports the task's lane refuses (context.deny_ports), less those its round needs:
+    its model server's and its keyhole's (#1197), so a model served on one of them still works
+    with no grant."""
+    m, kh = CURRENT.get("model"), keyhole_of(task)
+    return context.deny_ports(task, keep=[context.url_port(m.base_url) if m else None,
+                                          kh.port if kh else None])
+
+
 def run_in_lane(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]:
     """Run `cmd` in the task's worktree, in the agent's lane and with its environment; the
     exit code ("timeout" past `limit` seconds, "output limit" past TEST_OUTPUT_CAP bytes) and the
@@ -2173,7 +2182,7 @@ def run_in_lane(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]
     # or fail as they did when the agent ran them
     sh = test_shell()
     argv = lane.wrap(context.writable(task), [sh, *shell_args(sh), cmd], context.readable(task),
-                     context.unix_paths(task))
+                     context.unix_paths(task), lane_ports(task))
     run = _issue()  # its own mark: sweep ends what it left, and nothing else (#324)
     proc = subprocess.Popen(argv, cwd=task.workdir, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, env=agent_env(task, run),
@@ -4400,6 +4409,7 @@ def drive(task: store.Task) -> None:
                     machine=store.machine(), host=store.host(),  # whose pid it is (#849)
                     beat=BEAT_SECS)  # and that its lock file beats (#872)
     say = lambda msg: task.set_status(last=msg)  # noqa: E731
+    CURRENT.pop("model", None)  # an earlier task's, driven in-process (the tests)
     try:
         m = models.resolve(task.spec["model"])
     except KeyError as e:
@@ -4407,6 +4417,7 @@ def drive(task: store.Task) -> None:
             return _left_catalog(task)
         return _load_failed(task, e)
     api = m.kind == "api"
+    CURRENT["model"] = m  # its server's port stays open in the lane (lane_ports)
     settle_via(task, api)
     # an API task waits for no GPU (#1015): its first line says so
     task.set_status(last="starting" if api else "waiting for the GPU")
@@ -4442,7 +4453,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
         return
     if _down(m):  # before the lease: a server that is down holds no GPU from other tasks
         try:
-            m = _wait_up(task, m)  # at Windows' new address, when discovery followed it (#1167)
+            m = CURRENT["model"] = _wait_up(task, m)  # at Windows' new address, when discovery followed it (#1167)
         except RuntimeError as e:
             return _load_failed(task, e)
     if needs_base_check(task):
