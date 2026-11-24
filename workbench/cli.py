@@ -193,9 +193,10 @@ def _coding_used(task: store.Task) -> None:
 def _model_still_listed(task: store.Task) -> None:
     """An API task's model must still be in OpenCode's catalog before feedback, next or resume
     writes a round: exit 3 with runner.left_catalog's line, never another model (#1016). And
-    wb start's spend refusal (meter.refusal: no price, no day cap (#1089), today at the cap), the same exit: the
-    round written past it stopped at once as a spend `stuck`, a Claude wake for nothing, with a
-    review counted or a step committed for a round that never ran (#1118, 2026-11-23)."""
+    wb start's spend refusal (meter.refusal: no price, no day cap (#1089), today at the cap or
+    within one request at its worst of it, #1150), the same exit: the round written past it
+    stopped at once as a spend `stuck`, a Claude wake for nothing, with a review counted or a
+    step committed for a round that never ran (#1118, 2026-11-23)."""
     if task.spec.get("via") != "api":
         return
     if (m := models.lookup(task.spec.get("model") or "")) is None:
@@ -711,7 +712,7 @@ def _busy_api(role: str, a, repo: Path, sub: str | None):
     if why is None and (kept := privacy.local_only(repo, sub)):  # commands.json's (#1021)
         why = f"{repo.name} is kept local ({kept})"
     if why is None:  # commands.json's standing copy/siblings, unnamed (#1021), as an API start's
-        why = _standing_gap(context.repo_conf(repo, sub), a, models.provider_name(m)) or None
+        why = _standing_gap(context.repo_conf(repo, sub), a, models.provider_name(m), repo, sub) or None
     if why is None:  # no price, or today at the day cap (#1019), without an API start's advice:
         # the role is on the GPU and this start only waits for it (wave 2's merge)
         why = meter.refusal(m, role, advice=False)
@@ -982,11 +983,12 @@ def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu", whe
     the repo the lane may read."""
     conf = context.repo_conf(repo, sub)  # the package's entry, not the repo's first (#778)
     if via == "api":  # nothing standing goes to a provider unnamed (#1021)
-        _standing_refusal(conf, a, where)
+        _standing_refusal(conf, a, where, repo, sub)
     setup = a.setup if a.setup is not None else conf.get("setup") or ""
     copy, sibs = [], []
-    for raw in [*conf.get("copy", []), *(a.copy or [])]:
-        p = os.path.normpath(raw.strip()).rstrip("/")
+    for raw, given in [*((x, False) for x in conf.get("copy", [])), *((x, True) for x in a.copy or [])]:
+        # commands.json's paths stay the repo's; a --copy from a package is read from it (#1158)
+        p = (_copy_path(repo, raw, sub) if given else os.path.normpath(raw.strip())).rstrip("/")
         if os.path.isabs(p) or p == ".." or p.startswith("../") or p in (".", ""):
             die(f"--copy {raw}: a path inside the repo, ignored there (e.g. node_modules)")
         parts = p.split("/")
@@ -1056,26 +1058,55 @@ def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu", whe
                               ("setup_timeout", limit if setup else None)) if v}
 
 
-def _standing_refusal(conf: dict, a, where: str) -> None:
+def _copy_path(repo: Path, raw: str, sub: str | None) -> str:
+    """A --copy path as the repo-relative path it names. From a package (`sub`), read from the
+    package, where wb start's note names the ignored directories from and the setup runs: from
+    packages/app, `--copy node_modules` copied the root's node_modules/, the package's stayed
+    missing and every round ran against a worktree that couldn't pass, and the note's
+    `../../node_modules` was refused (#1158, 2026-11-24). A path only the root has is still the
+    root's (`packages/app/node_modules`, as given before); `.` and a path outside stay refused."""
+    p = os.path.normpath(raw.strip())
+    if not sub or os.path.isabs(p) or p == ".":
+        return p
+    there = os.path.normpath(f"{sub.strip('/')}/{p}")
+    if os.path.lexists(repo / there) or p == ".." or p.startswith("../") \
+            or not os.path.lexists(repo / p):
+        return there
+    return p
+
+
+def _standing_refusal(conf: dict, a, where: str, repo: Path, sub: str | None) -> None:
     """An API task takes commands.json's standing `copy` and `siblings` only when this command
     line names them too: a `.env.local` copied into every worktree, or a `../shared` the lane
     reads, would reach the provider unasked (#1021). Exit 3, the entry and how to name it."""
-    if why := _standing_gap(conf, a, where):
+    if why := _standing_gap(conf, a, where, repo, sub):
         die(why, 3)
 
 
-def _standing_gap(conf: dict, a, where: str) -> str:
+def _standing_gap(conf: dict, a, where: str, repo: Path, sub: str | None) -> str:
     """_standing_refusal's line, or '': also the busy opt-in's (#1023), which moves a GPU start to
-    an API model after _worktree_setup checked it as a GPU one (wave 2's merge)."""
-    named_copy = {os.path.normpath(x.strip()).rstrip("/") for x in a.copy or []}
+    an API model after _worktree_setup checked it as a GPU one (wave 2's merge). A --copy names
+    the path it copies, from a package the package's (_copy_path, #1158)."""
+    named_copy = {_copy_path(repo, x, sub).rstrip("/") for x in a.copy or []}
     named_sib = {x.strip().rstrip("/").removeprefix("../") for x in a.sibling or []}
     for raw in conf.get("copy", []):
-        if os.path.normpath(raw.strip()).rstrip("/") not in named_copy:
-            return privacy.standing_refusal("copy", raw, where)
+        if (entry := os.path.normpath(raw.strip()).rstrip("/")) not in named_copy:
+            return privacy.standing_refusal("copy", raw, where, _copy_name(repo, entry, sub))
     for raw in conf.get("siblings", []):
         if raw.strip().rstrip("/").removeprefix("../") not in named_sib:
             return privacy.standing_refusal("siblings", raw, where)
     return ""
+
+
+def _copy_name(repo: Path, entry: str, sub: str | None) -> str:
+    """How to type commands.json's repo-relative `copy` entry as a --copy from the package `sub`,
+    so that _copy_path reads it back as the entry: from packages/app the refusal advised
+    `--copy node_modules`, read as the package's, and refused the same start again and again
+    (#1158's review, 2026-11-24). The entry as written when it already reads back, else the path
+    from the package (`../../node_modules`)."""
+    if not sub or _copy_path(repo, entry, sub).rstrip("/") == entry:
+        return entry
+    return os.path.relpath(entry, sub.strip("/"))
 
 
 def _role(a) -> str:
@@ -1145,9 +1176,10 @@ def _local_only_since(task: store.Task) -> None:
 def _api_notes(task_name: str, repo: Path, m: models.Model, a, routed: dict) -> list[str]:
     """An API task's start notes: on the repo's first task to this provider, what goes, to whom
     and whose choice it was (privacy.where_note, #1016's first-task note with #1021's words), and
-    the token files its lane hides: those holding a credential (#1021). ``routed``: what task.json
-    holds (_routed_keys): the backends named are the ones the keyhole routes by, never routes.json's
-    (an `order` the note named once never reached the task: wave 2's review)."""
+    the token files its lane hides: those holding a credential (#1021), when it has a lane (#1156).
+    ``routed``: what task.json holds (_routed_keys): the backends named are the ones the keyhole
+    routes by, never routes.json's (an `order` the note named once never reached the task: wave
+    2's review)."""
     notes = []
     if privacy.first_for(repo, m.provider, task_name):
         info = privacy.where(m, routed.get("order"))
@@ -1156,7 +1188,7 @@ def _api_notes(task_name: str, repo: Path, m: models.Model, a, routed: dict) -> 
         whose = ("asked for" if (routed.get("said") or "").startswith("asked for")
                  else f"the {routed.get('role') or _role(a)} role's model")
         notes.append(privacy.where_note(info, rules, named, whose))
-    if gap := context.api_hidden_note():
+    if gap := context.api_hidden_note(store.Task(task_name)):  # none with no lane (#1156)
         notes.append(gap)
     if gap := context.git_url_note(repo):  # a token in a remote URL (#1072)
         notes.append(gap)
@@ -1537,7 +1569,7 @@ def cmd_start(a):
     if a.test and not a.no_base_check:
         print("base check: the runner runs the acceptance command once on the base first; what "
               "it saw comes with the first report (a check-in at once if --test-timeout cuts it "
-              "short)")  # a base that passes is a note in that report, no wake (#881)
+              "short or its command isn't found)")  # a base that passes is a note in that report, no wake (#881; #1152)
     if dirty:
         print("note: the repo has uncommitted changes; the agent's worktree starts from "
               f"{a.base}, without them")
@@ -1668,17 +1700,28 @@ def cmd_feedback(a):
     task.round_dir(n).joinpath("prompt.md").write_text(
         f"{lessons.FEEDBACK_HEAD} Make exactly these changes, then{rerun} finish with a short "
         "summary:\n\n" + text.strip(), encoding="utf-8")
-    reviews = st.get("reviews", 0) + 1
+    # a stop that wasn't the step's (status `infra`: an API provider's, the spend cap's, a reaped
+    # runner's, a restart's, a model server's): the round it resumes is no review. Counted, the
+    # "carry on" the provider's stop notice advises plus one real review read as two, and the
+    # step went badly, shrinking the model's slice (#1153, 2026-11-24). drive clears `infra` at
+    # each round's start, so a task in review never has it.
+    resumed = bool(st.get("infra"))
+    reviews = st.get("reviews", 0) + (0 if resumed else 1)
     handled = store.now()  # everything before the new round; what its runner raises stays news
     task.set_status(context="fresh" if a.fresh else "keep" if a.keep_context else None)
     gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
-    task.set_status(round=n, reviews=reviews, phase="queued", round_for="feedback",
+    task.set_status(round=n, reviews=reviews, phase="queued",  # the pane: "resumed", not "feedback 0"
+                    round_for="resume" if resumed else "feedback",
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0)
     spawn_runner(task)
     _ack_all(task, upto=handled)
-    print(f"feedback round {reviews} sent to {a.name} (round {n})"
-          + ("  — that is past the usual 3 review rounds" if reviews > 3 else ""))
+    if resumed:
+        print(f"feedback sent to {a.name} (round {n}): it resumes after a stop that wasn't the "
+              f"agent's ({st['infra']}), so no review round is counted")
+    else:
+        print(f"feedback round {reviews} sent to {a.name} (round {n})"
+              + ("  — that is past the usual 3 review rounds" if reviews > 3 else ""))
     _say(gpu)
     _say_dropped(dropped)
     _say(lessons.nudge(task))
@@ -2156,7 +2199,7 @@ def _scope(tasks, where, sessions=None):
     # real paths on both sides, in lower case where the file system ignores case (macOS): a
     # symlinked project, /tmp against /private/tmp, or ~/Repos typed for ~/repos once missed
     # (the 2026-11-19 audit)
-    fold = bool(where) and _folds_case(where)
+    fold = bool(where) and store.folds_case(where)
     real = lambda p: Path(os.path.realpath(p).lower() if fold else os.path.realpath(p))  # noqa: E731
     here = real(where) if where else None
     broad = here in (real(Path.home()), Path("/"))
@@ -2202,16 +2245,6 @@ def _caller(a) -> tuple:
     ids = list(dict.fromkeys([*(store.claude_sessions(pid, start=models._started(int(pid)))
                                 if pid.isdigit() else []), sid]))
     return os.getcwd(), ids
-
-
-def _folds_case(path) -> bool:
-    """Whether the file system holding ``path`` ignores case: the path with every letter's case
-    swapped is the same directory (APFS and HFS+ as macOS formats them; not ext4)."""
-    p = os.path.realpath(path)
-    try:
-        return p.swapcase() != p and os.path.samefile(p, p.swapcase())
-    except OSError:
-        return False
 
 
 def _others_line(others, what):
@@ -3733,10 +3766,7 @@ def cmd_accept(a):
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
           (f", merged into {close['merge_into']} as {merged}" if merged else
            f"\nmerge with: {gitops.jj_merge(repo, spec['branch'])}" if gitops.jj_colocated(repo) else
-           f"\nmerge with: " + gitops.merge_by_hand(
-               repo, spec["branch"], close.get("merge_as") if close.get("merge") else
-               context.repo_conf(spec["repo"], spec.get("subdir")).get("merge") or "merge",
-               close.get("sign", True) and _signed(spec, a))))
+           "\n" + _merge_line(repo, spec, close, a)))
     _say(savings.line(row) or spend.line(row.get("claude")))
     _say(checked)
     _say(lessons.nudge(task, "accepted"))
@@ -3762,6 +3792,23 @@ def _gained_work(task: store.Task, repo: Path, commit: str) -> bool:
 
 
 NOT_MERGED = 5  # wb accept --merge's exit status when the accept stands and the merge was refused
+
+
+def _merge_line(repo: Path, spec: dict, close: dict, a) -> str:
+    """wb accept's line for merging by hand: into the branch --merge chose, else the one the task
+    started from, else the checkout's, switching there first. It merged into whatever was out,
+    so after "has feature-x out, not main" it landed on feature-x, or on a detached HEAD the next
+    checkout dropped (#1154, 2026-11-24). No branch known on a detached HEAD: no line to run."""
+    into = close.get("merge_into") if close.get("merge") else _merge_into(spec, repo)
+    if into in (None, "HEAD"):
+        into = gitops.current_branch(repo)
+    if not into:
+        return (f"to merge: {repo} has a detached HEAD and the task recorded no branch; check out "
+                f"the branch {spec['branch']} belongs on, then merge it there")
+    return f"merge into {into} with: " + gitops.merge_by_hand(
+        repo, spec["branch"], close.get("merge_as") if close.get("merge") else
+        context.repo_conf(spec["repo"], spec.get("subdir")).get("merge") or "merge",
+        close.get("sign", True) and _signed(spec, a), into)
 
 
 def _merge_into(spec: dict, repo: Path) -> str | None:
@@ -5420,9 +5467,17 @@ def _model_price(mid: str, inp, out, read, write, clear: bool = False) -> None:
     cache = {k: v for k, v in (("read", read), ("write", write)) if v is not None}
     row = {"input": inp, "output": out, **({"cache": cache} if cache else {})}
     models.set_override(mid, "cost", [row])
+    # a cache price left out is the catalog's ratio to input, at theirs (models.own_cache: priced
+    # as input, cache reads booked a task at 18x its bill, #1155, 2026-11-24); said, so it's seen
+    catalog = m.extra.get("catalog_cost") if models.own_price(m) else m.config.get("cost")
+    priced = models.own_cache(row, catalog)
+    scaled = [k for k in priced if k not in cache]
     print(f"{mid}: your prices, {_per_m(inp)} in / {_per_m(out)} out"
-          + "".join(f" / {_per_m(v)} cache {k}" for k, v in cache.items())
-          + " per 1M tokens; its costs say \"your prices\" from its next task (--clear: the catalog's)")
+          + "".join(f" / {_per_m(priced[k])} cache {k}" for k in ("read", "write") if k in priced)
+          + " per 1M tokens"
+          + (f" (cache {' and '.join(scaled)} at the catalog's ratio to input: "
+             + ", ".join(f"--cache-{k}" for k in scaled) + " to set)" if scaled else "")
+          + "; its costs say \"your prices\" from its next task (--clear: the catalog's)")
 
 
 def _api_id(model_id: str) -> bool:
@@ -7281,7 +7336,7 @@ def parser() -> argparse.ArgumentParser:
                    "(default 1800, or commands.json \"repos\" \"setup_timeout\")")
     s.add_argument("--copy", action="append", metavar="PATH",
                    help="copy this ignored path from your checkout into the worktree (repeatable; "
-                   "never a secret)")
+                   "from a package, read from the package; never a secret)")
     s.add_argument("--sibling", action="append", metavar="PATH",
                    help="let the agent read a directory around the repo at the same relative "
                    "path: NAME or ../NAME beside it, ../../shared/lib further up (repeatable)")

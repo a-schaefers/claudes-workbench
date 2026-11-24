@@ -430,6 +430,17 @@ def boot_id() -> str | None:
     return _BOOT[0]
 
 
+def folds_case(path) -> bool:
+    """Whether the file system holding ``path`` ignores case: the path with every letter's case
+    swapped is the same directory (APFS and HFS+ as macOS formats them; not ext4). Here, not in
+    cli, since context.repo_entries needs it too (#1157, 2026-11-24)."""
+    p = os.path.realpath(path)
+    try:
+        return p.swapcase() != p and os.path.samefile(p, p.swapcase())
+    except OSError:
+        return False
+
+
 _MACHINE: list = []
 
 

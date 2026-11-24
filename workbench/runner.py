@@ -36,7 +36,7 @@ from . import (ask_mcp, context, gitguard, gitops, hardware, keyhole, lane, less
                skills, stats, store, tuning)
 from . import meter
 from . import privacy
-from .events import EDIT_TOOLS, StuckDetector, compaction_failed, normalize
+from .events import EDIT_TOOLS, StuckDetector, compaction_failed, normalize, written
 from .watch import Watcher
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
@@ -1372,6 +1372,7 @@ class _ProviderWait:
         self.held = False               # any wait this round (measure_speed skips the round)
         self.queued_since = None        # a queue no answer has ended yet (#1083)
         self.cut = ""                   # OpenCode's provider.invalid-output: answers that never ended
+        self.worst = None               # the room's refused request at its worst, for stop_text (#1150)
         st = task.status
         if self.api and (st.get("ratelimit_until") or st.get("ratelimit")):
             # a runner killed mid-hold left them: the new round starts with none (edge cases)
@@ -1471,6 +1472,9 @@ class _ProviderWait:
             # cause `spend`, not `provider` (stopped_by). Before `fatal`: the keyhole answers its
             # own quota and spend stops with a 400, which on_error would call `refused` (#1082)
             self.task.set_status(api_stop=None)
+            # its `worst` goes on with the round (out["worst"], in end): stop_text, after the
+            # round, would find no api_stop and say "the cap is reached" under it (#1150, 2026-11-24)
+            self.worst = stop.get("worst")
             return str(stop["guard"]), str(stop.get("text") or f"{self.provider} stopped the round")
         if self.fatal:
             return self.fatal
@@ -1520,6 +1524,8 @@ class _ProviderWait:
                                  **({"by": by} if (by := stopped_by(why[0])) else {})})
         self._ended(now)
         out["held"] = self.held
+        if self.worst is not None:
+            out["worst"] = self.worst
         st = self.task.status
         if st.get("ratelimit_until") or st.get("ratelimit"):
             self.task.set_status(ratelimit_until=None, ratelimit=None)
@@ -1630,7 +1636,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
 
     detector = StuckDetector(**{"no_edit": no_edit_limit(st.get("window"), api=api_task(task)),
                                 **spec.get("stuck", {})},
-                             worktree=task.worktree)
+                             worktree=task.worktree, workdir=task.workdir)
     wall, silence, think = limit(task, "round"), limit(task, "silence"), limit(task, "think")
     # A shell command OpenCode moved to the background (past 2 minutes it does, and the turn
     # ends waiting on it) prints nothing until it is done: a long test suite counted as thinking,
@@ -1770,14 +1776,17 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                     if changed and floor is None:  # it changed nothing by the step before
                         floor = last_step[1]
                         task.set_status(session_floor=floor)
-                    if changed and not keep and not out["full"] \
+                    # and not on its turn's last step (#1151): the agent is done, so the event,
+                    # and fresh_reason (the export counts the compaction) starts any next round fresh
+                    if changed and not keep and not out["full"] and not turn_over \
                             and fresh_at * window - floor >= HANDOVER_ROOM * window:
                         out["full"], out["compacted"] = min(before, window), True
                     else:
                         task.event({"ts": store.now(), "round": n, "kind": "compacted",
                                     "text": f"OpenCode compacted the agent's session mid-round at "
-                                            f"{min(100, 100 * before // window)}% of its window: it "
-                                            f"works on from its own summary"})
+                                            f"{min(100, 100 * before // window)}% of its window: "
+                                            + ("its turn ended there" if turn_over else
+                                               "it works on from its own summary")})
                 if used:
                     last_step, pending = (sid, used), 0
                 if floor is None and window:
@@ -1793,7 +1802,12 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                             out["reading_full"] = used
                             _reading_full(task, n, used, window)
                     elif fresh_at * window - floor >= HANDOVER_ROOM * window:
-                        out["full"] = used
+                        # Not on the step that ended the agent's turn (reason `stop`): it is done,
+                        # and a handover there killed it and paid a fresh session to redo the
+                        # round, whose summary Claude got instead (#1151, 2026-11-24). The round
+                        # ends as it would; fresh_reason starts any next one fresh.
+                        if not turn_over:
+                            out["full"] = used
                     elif not out.get("reading_full"):
                         out["reading_full"] = used
                         _reading_full(task, n, used, window, floor)
@@ -2625,14 +2639,18 @@ def venv_in(path: Path) -> Path | None:
 
 def agent_wrote(task: store.Task) -> list[str]:
     """The files the agent wrote with its edit tools, relative to the worktree, from events.jsonl:
-    what an ignored path would hide from the diff and the commit (gitops.ignored_files)."""
+    what an ignored path would hide from the diff and the commit (gitops.ignored_files). A patch
+    row's every file too (`paths`, #1148); a relative path is the workdir's, as OpenCode resolves
+    it against its directory, the package in a monorepo."""
     root = os.path.realpath(task.worktree)
+    base = os.path.realpath(task.workdir)
     out = set()
     for r in store.read_jsonl(task.dir / "events.jsonl")[0]:
-        if r.get("kind") == "tool" and r.get("ok") and r.get("tool") in EDIT_TOOLS and r.get("path"):
-            full = os.path.realpath(os.path.join(root, str(r["path"])))
-            if full.startswith(root + os.sep):
-                out.add(os.path.relpath(full, root))
+        if r.get("kind") == "tool" and r.get("ok") and r.get("tool") in EDIT_TOOLS:
+            for p in written(r):
+                full = os.path.realpath(os.path.join(base, p))
+                if full.startswith(root + os.sep):
+                    out.add(os.path.relpath(full, root))
     return sorted(out)
 
 
@@ -2916,6 +2934,26 @@ def hang(task: store.Task, limit: int) -> dict | None:
     return None
 
 
+# The shell's own line for a command it can't find on PATH: bash's and zsh's `command not found`,
+# dash's and ksh's `: not found` (exit 127). Not `No such file or directory`, which a script the
+# step creates (`./check.sh`) says on the base too.
+NOT_FOUND = re.compile(r"command not found|: not found$")
+# What gives the agent's environment that command, for the check-in and the skipped auto-fix
+GIVE_TOOL = ("no round can fix that: put the tool in the worktree (a .venv there comes first on "
+             "the agent's PATH), then wb feedback; or wb discard and start again with a --setup "
+             "that installs it, or a --test that names it by its path")
+
+
+def missing_command(r: dict | None) -> str | None:
+    """The shell's not-found line, when run ``r`` (the base check's, or a round's tests) exited
+    127 with it last: a tool the agent's environment lacks (one outside the agent's PATH, which
+    python_env and agent_path trim), which no edit in a round can give it (#1152); else None."""
+    if not r or r.get("exit") != 127:
+        return None
+    last = (r.get("tail") or "").strip().splitlines()[-1:]
+    return last[0].strip() if last and NOT_FOUND.search(last[0].strip()) else None
+
+
 def base_check_line(r: dict, task: store.Task) -> str:
     """What the acceptance command did on the base, for Claude to judge (the first report)."""
     if r["exit"] == "setup failed":
@@ -2934,6 +2972,9 @@ def base_check_line(r: dict, task: store.Task) -> str:
         return (f"note: the acceptance command ran past {limit}s on the base; not checked"
                 + (f". If it runs that long, a round's run may pass --test-timeout ({full}s) too: "
                    "raise it for a slow suite" if full > limit else ""))
+    if line := missing_command(r):  # every round's tests will fail so too (#1152, 2026-11-24)
+        return (f"warning: the acceptance command can't run in the agent's environment: {line} "
+                f"(exit 127 on the base), so every round's tests will fail the same way; {GIVE_TOOL}")
     if r["ok"]:
         # the usual case when the agent writes the step's tests: a warning that said to discard
         # and start again cost a whole restart in one task of two (the 2026-11-17 measurement)
@@ -3096,7 +3137,9 @@ def _base_check(task: store.Task) -> None:
     r = base_check(task)
     # an API task waits on no GPU: drive's "starting" stood until here (#1112, 2026-11-23)
     task.set_status(base_check=r, last="waiting for the GPU" if _gpu_side(task) else "starting")
-    if r["exit"] == "timeout" and r["limit"] < BASE_CHECK_SECS:  # every round's tests will too
+    # every round's tests will too: a cut-short run, or a command the agent's environment lacks
+    # (#1152, 2026-11-24: round 1 and both auto-fix rounds ran first, told the bug was the change's)
+    if r["exit"] == "timeout" and r["limit"] < BASE_CHECK_SECS or missing_command(r):
         task.notify("checkin", f"task {task.name}: {base_check_line(r, task)}",
                     round=task.status.get("round", 1))
 
@@ -3594,7 +3637,8 @@ def not_the_code(task: store.Task, tests) -> str:
     """Why a failed test run says nothing about the change, so no auto-fix round is spent on it
     (#496, the audit of 1.90): a run past --test-timeout went back as "the bug is in this change"
     and the agent edited code that may well have been right, nothing naming the limit; a device
-    the lane refused (lane_refused, #331) was named only after both auto-fix rounds. The part
+    the lane refused (lane_refused, #331) was named only after both auto-fix rounds, and so was a
+    command the agent's environment lacks (missing_command, #1152). The part
     before the first colon is the cause, for status.last. "" when the failure may be the code's
     (a dropped proxy may be either: its auto-fix prompt says so, auto_fix_prompt)."""
     if not tests or tests["ok"]:
@@ -3604,6 +3648,14 @@ def not_the_code(task: store.Task, tests) -> str:
                 f"({int(task.spec.get('test_timeout') or 900)}s): its failure says nothing about "
                 "the change; run it in the worktree yourself, or narrow it (wb next --test); "
                 "start a slow suite's task with a larger --test-timeout")
+    base = task.status.get("base_check") or {}
+    if (line := missing_command(tests)) and line == missing_command(base) \
+            and base.get("cmd") == task.spec.get("test_cmd"):
+        # the same command not found as on the base: auto-fix rounds told "the system works; the
+        # bug is in this change" each failed the same way, before Claude heard (#1152, 2026-11-24).
+        # A command the step makes says something else once made.
+        return (f"the acceptance command can't run in the agent's environment: {line} (exit 127, "
+                f"as on the base); {GIVE_TOOL}")
     if nodes := tests.get("lane"):
         # the grant that reaches each, as the report names it: the path itself, when it was a
         # file not made yet, sent Claude's `wb allow --path` to make a directory of that name (#670)
@@ -4052,6 +4104,8 @@ def _spend_guard(task: store.Task, out: dict) -> None:
     stop = task.status.get("api_stop")
     if isinstance(stop, dict) and stop.get("text"):
         why, guard = str(stop["text"]), str(stop.get("guard") or "spend")
+        if stop.get("worst") is not None:  # for stop_text, as _ProviderWait.stop keeps it (#1150)
+            out["worst"] = stop["worst"]
     elif why := meter.stop_reason(task):
         guard = "spend"
     else:
@@ -4080,15 +4134,16 @@ def _spend_end(task: store.Task) -> None:
 
 def _spend_lead(task: store.Task, rnd: dict) -> str:
     """The stuck notice's first line for a spend stop: what to ask the user."""
-    return meter.stop_text(task) + "\n" if rnd.get("guard") == "spend" else ""
+    return meter.stop_text(task, rnd.get("worst")) + "\n" if rnd.get("guard") == "spend" else ""
 
 
 def _go_on(task: store.Task, n: int, what: str) -> bool:
     """Before each `continue` in drive (#1017, #1019): for an API task, today's spend under the
-    cap. At it, the task stops before ``what`` runs: phase `stuck`, status `guard` `spend`, a
-    `stuck` notice with cause `spend` (not the step's own: results.THE_STEP). A GPU task always
-    goes on, for nothing."""
-    if meter.for_task(task) is None or not (why := meter.stop_reason(task)):
+    cap by at least one request at its worst (meter.request_floor, #1150). Short of that, the
+    task stops before ``what`` runs: phase `stuck`, status `guard` `spend`, a `stuck` notice
+    with cause `spend` (not the step's own: results.THE_STEP). A GPU task always goes on, for
+    nothing."""
+    if meter.for_task(task) is None or not (why := meter.stop_reason(task, ahead=True)):
         return True
     if (kh := CURRENT.get("keyhole")) is not None:
         kh.close(why)
