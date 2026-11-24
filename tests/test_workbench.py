@@ -5,6 +5,7 @@ import collections
 import contextlib
 import dataclasses
 import errno
+import fcntl
 import functools
 import re
 import glob
@@ -205,15 +206,59 @@ def lane_device():
     return next((n for n in ("/dev/kvm", "/dev/fuse") if os.access(n, os.R_OK | os.W_OK)), None)
 
 
+RUNNER_LOCK = ".runner.lock"  # store.task_lock(name, "runner")'s suffix
+
+
+def runners_left() -> list[tuple[str, int | None]]:
+    """The runners still alive in this WB_HOME, as (task, pid): a status pid that runs the task's
+    runner (one just spawned, before it takes its lock), or a runner lock someone still holds.
+    The lock is what tells: a runner clears its status pid and then still writes (#1225), and it
+    holds its lock until the process exits; the pid, the holder's in the file, only names it."""
+    out = {t.name: t.status.get("pid") for t in store.all_tasks() if cli.runner_alive(t)}
+    for path in (store.home() / "locks").glob("*" + RUNNER_LOCK):
+        name = path.name[:-len(RUNNER_LOCK)]
+        if name in out:
+            continue
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            held = os.read(fd, 32).decode(errors="replace").strip()
+            out[name] = int(held) if held.isdigit() else None
+        except OSError:  # no locks on this file system: nothing to tell by
+            pass
+        else:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+    return sorted(out.items())
+
+
+def wait_runners(secs: float) -> list[tuple[str, int | None]]:
+    deadline = time.time() + secs
+    while (left := runners_left()) and time.time() < deadline:
+        time.sleep(POLL)
+    return left
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         # `wb start` leaves its runner running on purpose (it outlives the command)
         warnings.simplefilter("ignore", ResourceWarning)
+        self.threads_before = set(threading.enumerate())  # tearDown waits for the test's own
         self.tmp = tempfile.TemporaryDirectory()
         # its real path: macOS's temp directory is under /var, a link to /private/var, and wb
         # records repos and directories by their real paths (git's toplevel, getcwd)
         self.tmp.name = os.path.realpath(self.tmp.name)
         tmp = Path(self.tmp.name)
+        # the directory goes last, after the test's own cleanups too: they run after tearDown,
+        # and one ending a GPU lease (DynamicWorkflows' fan-out: its holder process, its
+        # ExitStack) wrote gpu.json and gpu.admit into a directory already removed (#1225's runs)
+        self.still_running: list[str] = []
+        self.addCleanup(self.remove_tmp)
         self.env_before = dict(os.environ)
         # and again after every cleanup: a mock.patch.dict a test started (Lane.fake_home) stops
         # after tearDown and put this test's WB_* back, so a later class read its WB_GPU_DIR
@@ -264,25 +309,77 @@ class Base(unittest.TestCase):
         self.spec.write_text("Write the answer to answer.txt.\n")
 
     def tearDown(self):
-        # A runner still writing its last status races the rmtree (CI, 2026-11-17): let it finish.
-        deadline = time.time() + 15
-        while time.time() < deadline and any(cli.runner_alive(t) for t in store.all_tasks()):
-            time.sleep(0.1)
+        # Whatever the test started ends before its directory goes, or tearDown fails naming it
+        # (#1225). A runner still writing its last status raced the rmtree (CI, 2026-11-17), and
+        # waiting on its status pid wasn't enough: a runner clears that, then still writes
+        # (hands_off's status lock and status.json), so `Directory not empty: 'state'` (RepoMoved,
+        # CI, 2026-11-24). runners_left waits on the runner's lock, held until it exits.
+        left = wait_runners(15)
         # A runner a failed test left running (blocked on a question, a hang) held CI's output open
         # until the job was cancelled, 15 minutes after the suite ended (#141): stop it.
         for t in store.all_tasks():
             if cli.runner_alive(t):
                 cli._stop_runner(t)
+        stuck = wait_runners(5) if left else []
+        for name, pid in stuck:  # past its stop: killed, so CI's output closes, and named below
+            if pid and runner.models.runs(pid, "workbench.runner", name):
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(pid, signal.SIGKILL)  # its own session (cli.detach)
+        # A thread the test started and left running writes into the next lines' rmtree: an
+        # AskServer test's answer_soon relayed once more after the answer came back, recreating
+        # tasks/t-ask/status.json (`Directory not empty: 't-ask'`, CI, 2026-11-18).
+        deadline = time.time() + 15
+        threads = [th for th in threading.enumerate()
+                   if th not in self.threads_before and not th.daemon and th is not threading.current_thread()]
+        for th in threads:
+            th.join(max(0.0, deadline - time.time()))
+        self.still_running = [f"runner of {name} (pid {pid})" for name, pid in stuck] + \
+                             [f"thread {th.name}" for th in threads if th.is_alive()]
         for t in store.all_tasks():  # the agents' runtime directories are in /tmp, not the state
             context.drop_runtime_dir(t)
         os.environ.clear()
         os.environ.update(self.env_before)
-        self.tmp.cleanup()
+
+    def remove_tmp(self):
+        """The last cleanup (setUp's first): the test's directory, never an error ignored."""
+        still = self.still_running
+        try:
+            self.tmp.cleanup()
+        except OSError as e:  # say what was still being written, and what still ran
+            def age(p):
+                with contextlib.suppress(OSError):
+                    return time.time() - p.lstat().st_mtime
+                return 1e9
+            # the newest first: what was written as rmtree ran, the rest what it hadn't reached
+            there = [str(p.relative_to(self.tmp.name)) for p in sorted(Path(self.tmp.name).rglob("*"), key=age)]
+            raise AssertionError(f"something still wrote into the test's directory as it was "
+                                 f"removed: {there[:12]}; still running: {still or 'nothing'}") from e
+        if still:
+            self.fail(f"still running after the test, past tearDown's wait: {', '.join(still)}")
 
     def start(self, name, scenario, *extra):
         os.environ["FAKE_SCENARIO"] = scenario
         return run_wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo),
                       "--model", "mimo", *extra)
+
+
+class TearDown(Base):
+    def test_a_runner_lock_still_held_is_a_runner_left_though_its_status_pid_is_cleared(self):
+        # #1225: a runner clears its status pid, then still writes (hands_off), and tearDown,
+        # waiting on the status pid alone, removed the directory under those writes (CI, 2026-11-24)
+        lock = store.task_lock("t-tail", "runner")
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        holder = subprocess.Popen([sys.executable, "-c", (
+            "import fcntl, os, sys, time\nfh = open(sys.argv[1], 'a+')\n"
+            "fcntl.flock(fh, fcntl.LOCK_EX)\nfh.truncate(0); fh.write(str(os.getpid())); fh.flush()\n"
+            "print('held', flush=True)\ntime.sleep(60)\n"), str(lock)], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(holder.wait)
+        self.addCleanup(holder.kill)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
+        self.assertEqual(runners_left(), [("t-tail", holder.pid)])
+        holder.kill()
+        holder.wait()
+        self.assertEqual(wait_runners(5), [])  # its lock went with it: nothing left to wait for
 
 
 class Lifecycle(Base):
@@ -7043,7 +7140,8 @@ class Steering(Base):
 
     def test_the_runner_touches_its_lock_file_while_it_lives(self):
         # #872: the beat another machine tells a live runner by
-        lock = Path(tempfile.mkdtemp()) / "x.runner.lock"
+        # in the test's own directory: a mkdtemp of its own outlived the suite (#1225's runs)
+        lock = Path(self.tmp.name) / "x.runner.lock"
         lock.write_text("1")
         os.utime(lock, (1, 1))
         with mock.patch.object(runner, "BEAT_SECS", 0.05):
