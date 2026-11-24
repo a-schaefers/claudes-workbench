@@ -1359,6 +1359,7 @@ def _api_model(mid: str, entry: dict, prov: dict, extra: dict) -> Model:
     # DeepInfra's bill, and every figure with it (#1135, 2026-11-23). Kept in config, so the meter
     # and the task's catalog.json (catalog_doc) price alike; the catalog's in `catalog_cost`
     if (mine := own_cost((extra.get(mid) or {}).get("cost"))) is not None:
+        mine = [{**mine[0], **({"cache": c} if (c := own_cache(mine[0], config.get("cost"))) else {})}]
         over = {**over, "catalog_cost": config.get("cost"), "cost": mine}
         config = {**config, "cost": mine}
     config = api_limits(config)
@@ -1387,6 +1388,26 @@ def own_cost(v) -> list | None:
         return None
     return [{**{k: float(r[k]) for k in PRICE_KEYS},
              **({"cache": {k: float(x) for k, x in cache.items()}} if cache else {})}]
+
+
+def own_cache(row: dict, catalog) -> dict:
+    """The cache prices for the user's own row (wb model price): theirs, and for each one they left
+    out, the catalog's base row's at its ratio to input, times their input (0.006 of 0.2 with
+    --input 0.098: 0.00294). A missing one is priced as input (meter.price), and with only --input
+    and --output, the form the skill gave, cache reads (85-98% of an API task's tokens) booked a
+    DeepInfra task at 18x its bill, as exact (#1155, 2026-11-24). Without a catalog input price to
+    scale from, a missing one stays missing."""
+    cache = dict(row.get("cache") or {})
+    rows = catalog if isinstance(catalog, list) else [catalog] if isinstance(catalog, dict) else []
+    base = next((r for r in rows if isinstance(r, dict) and not r.get("tier")), None) or {}
+    ok = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool) and x >= 0  # noqa: E731
+    their = _dict(base.get("cache"))
+    if ok(base.get("input")) and base["input"] > 0:
+        for k in ("read", "write"):
+            v = their.get(k, base.get(f"cache_{k}"))
+            if k not in cache and ok(v):
+                cache[k] = round(v / base["input"] * row["input"], 10)
+    return cache
 
 
 def own_price(m: Model) -> bool:

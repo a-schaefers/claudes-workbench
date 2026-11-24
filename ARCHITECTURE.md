@@ -612,7 +612,10 @@ prices`; nothing to set, nothing asked, and wb never fetches or guesses a price.
 price <exact id> --input X --output Y [--cache-read Z] [--cache-write W]`** (dollars per M, as the
 provider bills) writes models.json `cost` (`[{input, output, cache?: {read?, write?}}]`,
 `models.own_cost`) on that model; `models._api_model` puts it in `config["cost"]` (the catalog's
-kept in `extra.catalog_cost`; `models.own_price(m)` says whether), so the meter and the task's
+kept in `extra.catalog_cost`; `models.own_price(m)` says whether), each cache price left out filled
+in at the catalog's base row's ratio to input, times theirs (`models.own_cache`: 0.006 of 0.2 at
+`--input 0.098` is 0.00294; never stored, and printed with `at the catalog's ratio to input`): priced
+as input, a missing cache read booked a DeepInfra task at 18x its bill, as exact (#1155); so the meter and the task's
 catalog.json (`models.catalog_doc`, OPENCODE_MODELS_PATH) price alike: OpenCode's own estimate then
 agrees and `reconcile` books no difference back. `--clear` goes back to the catalog's. Refused for an
 id not in the catalog, a plan, a free model, one `catalog_doc` can't carry (its OpenCode would
@@ -3176,7 +3179,8 @@ provider:
 - `variant_of`/`replaces`: a `wb optimize apply` variant's source and parent; one record
   (`router.lineage`), the variant first (#584, #723); `wb model retire` keeps both;
 - `cost`: `wb model price` (#1135): an API model's own prices, `[{input, output, cache?: {read?,
-  write?}}]` per M, over the catalog's (*Estimates or your prices*); a malformed one is ignored;
+  write?}}]` per M, over the catalog's (*Estimates or your prices*; a cache price left out is the
+  catalog's ratio to input, `models.own_cache`, #1155); a malformed one is ignored;
 - `renamed_from`: `wb model rename OLD NEW`, followed back (`router.earlier`): score, slice, knobs
   (`tuning._rows`), speed and Stats line carry over (#818). Without it, a vanished id whose newest
   row ran on the digest the model has now (`weights_id` vs `models.identity`) links the same way;
@@ -5716,7 +5720,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Provider `ollama-<host>`, `local: true`, its tool models added (IPv6 bracketed, #707); exit 1 when it doesn't answer; `--remove` not while `model`/`small_model` is one (#708). |
 | `wb model retire <id>` | `--delete` | Not OpenCode's `model` or `small_model` (#708); keeps `variant_of`, `replaces` (#723); `--delete` drops Ollama's weights; an API id refused (`cli.API_SIZES`, #1013). |
 | `wb model rename <old id> <new id>` | | models.json `renamed_from` (#818); refused while the old id is configured, or for an API id. |
-| `wb model price <exact id>` | `--input X`, `--output Y`, `--cache-read Z`, `--cache-write W`, `--clear` | An API model's own prices per M (models.json `cost`, *Estimates or your prices*, #1135): its figures say `your prices`, no `≈`; `--clear` the catalog's again. Needs `--input` and `--output`; refused for an id not in the catalog, a plan, a free model, one `models.catalog_doc` can't carry, prices all 0 (free, outside the cap); another action's flag refused. |
+| `wb model price <exact id>` | `--input X`, `--output Y`, `--cache-read Z`, `--cache-write W`, `--clear` | An API model's own prices per M (models.json `cost`, *Estimates or your prices*, #1135): its figures say `your prices`, no `≈`; `--clear` the catalog's again. Needs `--input` and `--output`; a cache price left out is the catalog's ratio to input, printed (`models.own_cache`, #1155); refused for an id not in the catalog, a plan, a free model, one `models.catalog_doc` can't carry, prices all 0 (free, outside the cap); another action's flag refused. |
 | `wb model sizes <id> [trivial] [significant]` | | The sizes it's routed; another action's flag refused (#602); an API id refused: `sizes are for GPU models; API models run by role`. |
 | `wb route [<role> gpu\|api\|<provider/model>] [<role> <choice>…]` (several roles, one change, #1024) / `wb route all gpu\|api\|both` (the Agents switch, `use`) / `wb route cap <usd>\|off` / `wb route busy wait\|api` (#1023) | `--gpu ID\|auto`, `--api ID`, `--thinking on\|off`, `--day-usd N`, `--order NAME[,NAME]` (an OpenRouter role's backends, `privacy.parse_order`; an OpenRouter model set or switched to without them exits 3, `privacy.order_refusal`, #1021), `--json` (show: the roles, `busy`, `summary`, each API model's `api_status`, `spend_today`, `providers`; with `--dry-run`: `{change, gate, approval}`), `--dry-run` (the change line, nothing written, no approval needed), `--start ARGS` (with `--dry-run`: the dialog line for `wb start ARGS` on an API `--model`, the mod's; exit 3 with `API_NOT_YET` while `cli.API_RUNS` is off) | *Roles*. No role: shows them. A change prints `changed: <line>` (`unchanged: <summary>` for none); exit 3 for an API id not in the catalog, a GPU id, one with no key wb can hold, `api` with none kept, the first API role with no cap, and under Claude Code a gated change the mod's dialog didn't approve (`route-ok.json`). A GPU pin needs no dialog. |
 | `wb scout` | `--done [--notes "…"]` (`--notes` alone refused, #602), `--due` (7 days), `--watch "…"`, `--unwatch N` (1-based) | The weekly facts: `cli.gpu_line`, `cli.ollama_line`, `cli.server_lines` (`models.SERVER_COMMANDS`, `models.SERVER_PORTS`, `NEEDS_KEY`, `models.WSL_NAT`, `models.server_key`), `audio.coverage`, `cli.image_server_lines`; the API section (`cli.scout_api_lines`: roles, API records, spend, a count per provider, #1024). |
