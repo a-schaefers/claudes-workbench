@@ -600,6 +600,65 @@ class Lifecycle(Base):
         self.assertEqual((st["steps"], st["round"], st["auto_fixes"]), (3, 5, 2))
         self.assertIn("nosuch-inner-1172: ", st["tests"]["tail"])  # bash's or dash's line
 
+    def test_a_python_module_not_found_on_the_base_checks_in_at_once_and_skips_auto_fix(self):
+        # #1181 (bar round 2 of 2.0): `python3 -m pytest` without pytest printed `No module named
+        # pytest` (exit 1, not #1152's 127), and round 1 and both auto-fix rounds ran on correct code
+        self.start("t-nm", "ok", "--test", "python3 -m nosuch_module_1181 -q", "--auto-fix", "2",
+                   "--no-self-review")
+        st = wait_phase("t-nm", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (1, 1))
+        task = store.Task("t-nm")
+        self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        checkins = [r["text"] for r in store.notices() if r["task"] == "t-nm" and r["kind"] == "checkin"]
+        self.assertEqual(len(checkins), 1)
+        self.assertRegex(checkins[0], r"can't run in the agent's environment: \S*python3: No module "
+                                      r"named nosuch_module_1181 \(exit 1 on the base\)")
+        self.assertIn("a Python module: python3 -m venv .venv && .venv/bin/pip install <module>",
+                      checkins[0])
+        summary = (task.round_dir(1) / "summary.md").read_text()
+        self.assertTrue(summary.startswith("auto-fix skipped: the acceptance command can't run in "
+                                           "the agent's environment: "), summary)
+        self.assertIn("No module named nosuch_module_1181 (exit 1, as on the base)", summary)
+        # an import error inside the tests (a module the step's code lacks) still goes back
+        self.assertIsNone(runner.missing_command(
+            {"exit": 1, "tail": "E   ModuleNotFoundError: No module named 'slug'"}))
+        self.assertIsNone(runner.missing_command({"exit": 2, "tail": "python3: No module named x"}))
+
+    def test_a_module_of_the_repos_own_code_missing_on_the_base_goes_back_to_the_agent(self):
+        # #1181's review (2026-11-24): a module the step itself makes (`python3 -m pkg.newcli`
+        # for a step adding pkg/newcli.py) is missing on the base too, and was taken for a tool
+        # the agent's environment lacks: a false check-in before round 1 advising pip install,
+        # and its auto-fix round skipped. #1152 left a script the step makes out the same way
+        # (`No such file or directory`, the t-nf2 case above).
+        (self.repo / "pkg").mkdir()
+        (self.repo / "pkg" / "__init__.py").write_text("")
+        for a in (("add", "."), ("commit", "-qm", "pkg")):
+            subprocess.run(["git", "-C", str(self.repo), *a], check=True, capture_output=True)
+        self.spec.write_text("Add pkg/newcli.py, runnable as python3 -m pkg.newcli.\n")
+        self.start("t-own", "ok", "--test", "python3 -m pkg.newcli", "--auto-fix", "1",
+                   "--no-self-review")
+        st = wait_phase("t-own", {"review"})
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (1, 2))
+        self.assertIn("No module named pkg.newcli", st["base_check"]["tail"])
+        self.assertFalse([r for r in store.notices() if r["task"] == "t-own" and r["kind"] == "checkin"])
+        task = store.Task("t-own")
+        self.assertIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
+        self.assertNotIn("auto-fix skipped", (task.round_dir(1) / "summary.md").read_text())
+        # a module that is nowhere in the repo yet, but the spec names it: its file, or its
+        # dotted name; a top-level one the spec names alone (`pytest`) is still a missing tool
+        line = lambda m: {"exit": 1, "tail": f"/usr/bin/python3: No module named {m}"}  # noqa
+        prompt = store.round_prompt(task, 1)
+        prompt.write_text("Add tool1181/__main__.py, and newpkg/cli.py as python3 -m newpkg.cli. "
+                          "Test it with pytest.\n")
+        self.assertIsNone(runner.missing_command(line("tool1181"), task))
+        self.assertIsNone(runner.missing_command(line("newpkg.cli"), task))
+        prompt.write_text("Wire python3 -m otherpkg.main up. Test it with pytest.\n")
+        self.assertIsNone(runner.missing_command(line("otherpkg.main"), task))
+        self.assertEqual(runner.missing_command(line("pytest"), task),
+                         "/usr/bin/python3: No module named pytest")
+        self.assertEqual(runner.missing_command(line("elsewhere.cli"), task),
+                         "/usr/bin/python3: No module named elsewhere.cli")
+
     def test_what_the_base_check_writes_never_reaches_the_agents_worktree(self):
         # #192 (the 2026-11-19 audit): the base check ran in the task's worktree, and a stamp it
         # wrote made the same failing command pass after the agent's unrelated edit

@@ -368,8 +368,8 @@ at ~36 tokens/s; slower models get longer ones, never shorter (*Budgets and spee
 2, counted since the last review round or step) goes back as `auto_fix_prompt` (fix the code,
 don't weaken tests, check its own expected values by hand, never blame the compiler: 2026-11-18)
 without waking Claude. `not_the_code` (#496: a timeout, a lane-refused device, `lane_refused`,
-#331; a command not found, `missing_command`, with the same line as the base check's for the same
-command, #1152, or, when no base check ran the command (`wb next --test`, `--no-base-check`), a
+#331; a command or Python module not found, `missing_command` (not the repo's own, `own_module`), with the same line as the base check's for the same
+command, #1152, #1181, or, when no base check ran the command (`wb next --test`, `--no-base-check`), a
 tool the command itself names, `missing_name` in `command_words`, not one a script it runs names,
 which the step may write, #1172; its fix `GIVE_TOOL`) gets none: review, status `last` the cause, the report led by `auto-fix skipped: <cause>`
 with the fix (`wb allow --path` of `lane_grant`'s grant, `shlex.quote`d, #670). Except `hang`
@@ -889,8 +889,8 @@ Feedback, next and resume refuse 1.x (exit 3) and note one outside `OPENCODE_TES
      `stuck`/`failed`, a notice, exit; edits stay.
    - else `run_tests` (a note arriving meanwhile → `_steer_round`), the report to
      `rounds/<n>/summary.md`. Failing with auto-fix left, unless `not_the_code` (a timeout, a lane
-     refusal, a command not found as on the base, or one the command itself names when no base check
-     ran it) → an auto-fix round.
+     refusal, a command or Python module not found as on the base, or a command the command itself
+     names when no base check ran it) → an auto-fix round.
    - else phase `review`, a `review` notice: the report, `review_diff`, the agent's proposed
      instruction files (*Claude's files*); exit.
 
@@ -1256,7 +1256,13 @@ once on the base in a scratch checkout (`verify.on_base`, a `--shared` clone,
 change), a warning plus an immediate `checkin` when `--test-timeout` cut it or the shell didn't find
 its command (`missing_command`: exit 127, the tail's last line `NOT_FOUND`'s, bash's or zsh's
 `command not found`, dash's `: not found`; not `No such file or directory`, a script the step may
-make; the warning ends `GIVE_TOOL`, #1152), a note past 120 s
+make; #1152; or exit 1, the last line `NO_MODULE`'s, Python's `<path>/python3: No module named <m>`
+for `-m` (or its `Error while finding module specification` for a dotted one's parent), not an
+import error inside the tests, nor a module of the repo's own code (`own_module`: its top-level
+name a `<top>/` or `<top>.py` where the tests run, in the worktree or at the base commit, or the
+module's file or dotted name in the spec: `python3 -m pkg.newcli` for a step adding
+`pkg/newcli.py`), which the step may make, as a script, #1181; the warning ends `GIVE_TOOL`, a
+module's fix the worktree's `.venv`), a note past 120 s
 (#496), not checked when the checkout failed or was `"filtered"`, else exit and tail. A passing base
 is a note, not a check-in (that cost a restart in one task of two, 2026-11-17). `--no-base-check`
 (task.json `no_base_check`) skips it.
