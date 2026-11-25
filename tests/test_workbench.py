@@ -1735,7 +1735,8 @@ class Lifecycle(Base):
         # as wb start writes it: the spec, then the protocol, whose acceptance line names --test's
         # own module, which counts for nothing (#1181's second review)
         proto = cli.PROTOCOL.format(branch="delegate/t-own", budget=0, experiment_protocol="",
-                                    test_line=cli.test_line("python3 -m elsewhere.cli tests"))
+                                    test_line=cli.test_line("python3 -m elsewhere.cli tests"),
+                                    spec=task.round_dir(1) / "prompt.md")
         self.assertIn("python3 -m elsewhere.cli", proto)
         prompt.write_text("Add tool1181/__main__.py, and newpkg/cli.py as python3 -m newpkg.cli. "
                           "Test it with pytest.\n" + proto)
@@ -11009,6 +11010,15 @@ class RealOpenCode(Base):
         answers = [json.dumps(m["content"]) for m in last["messages"] if m.get("role") == "tool"]
         self.assertEqual(len(answers), len(calls), "not every fake call came back")
         return task, answers
+
+    def test_the_prompt_file_the_protocol_names_is_one_the_agent_reads_in_its_lane(self):
+        # E11 (#1134): the path every round's protocol names must be one OpenCode reads in the
+        # lane with no ask, or the pointer sends a compacted agent to a "Permission denied"
+        spec = store.Task("t-sf-lane").round_dir(1) / "prompt.md"
+        task, answers = self.run_calls("t-sf-lane", [{"name": "read", "arguments": {"path": str(spec)}}])
+        self.assertIn(f"saved in `{spec}`", spec.read_text())
+        self.assertIn("Write the answer to answer.txt", answers[0])
+        self.assertIn("session is compacted", answers[0])
 
     def test_the_users_opentelemetry_collector_hears_from_no_agent_unless_commands_json_names_it(self):
         # found by #1205's research (2026-11-24): OpenCode 2.3.2 exports OTLP/HTTP traces and
@@ -31746,7 +31756,7 @@ class ProbeOn(Base):
         prompt = task.round_dir(1).joinpath("prompt.md").read_text()
         self.assertEqual(prompt, self.spec.read_text().rstrip() + cli.PROTOCOL.format(
             branch=task.spec["branch"], test_line=cli.test_line(None), budget=task.spec["ask_budget"],
-            experiment_protocol=""))                                      # byte for byte
+            experiment_protocol="", spec=task.round_dir(1) / "prompt.md"))  # byte for byte
         self.assertNotIn("outline", task.status)                          # no probe symbols run
         self.assertNotIn("tool_output", json.loads((context.rules_dir(task) / "opencode.json").read_text()))
         run_wb("discard", "t-off")
@@ -38981,6 +38991,34 @@ class Privacy(_KeyholeTest):
         self.assertIn(cli.privacy.FREE_LINE, cli.privacy.where(self.api_model("opencode/a-free", free=True))["line"])
 
 
+class SpecFile(Base):
+    """E11 of #1134 (ARCHITECTURE.md, *The runner, inside*): 6 of the 16 asks on record were the
+    agent asking Claude for its spec again after OpenCode compacted its session. Every round's
+    protocol names the step's prompt file, and the handbook's "if you lose the thread" line points
+    there; measured on the GPU (3 pairs, 2026-11-24), tokens x0.40 (3/3 lower), minutes x0.81."""
+
+    def test_each_steps_protocol_names_its_own_prompt_file_and_the_handbook_sends_the_agent_there(self):
+        self.start("t-sf", "ok")
+        wait_phase("t-sf", {"review"})
+        task = store.Task("t-sf")
+        first = task.round_dir(1) / "prompt.md"
+        prompt = first.read_text()
+        self.assertTrue(prompt.startswith(self.spec.read_text().rstrip()))
+        self.assertIn(f"is saved in `{first}`. If your\n  session is compacted", prompt)
+        handbook = (context.rules_dir(task) / "HANDBOOK.md").read_text()
+        self.assertNotIn("start of this conversation", handbook)  # after a compaction: the summary
+        self.assertIn("read your task's file again (\"Your task\", below, names it)", handbook)
+        self.assertTrue(handbook.endswith(context.spec_note(task)))         # #1071's note, below
+        self.assertNotIn("spec_file", task.spec["experiments"])             # no switch: always on
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Write the second answer to answer2.txt.\n")
+        run_wb("next", "t-sf", "--spec", str(step2), "-m", "feat: step one")
+        wait_phase("t-sf", {"review"})
+        second = task.round_dir(2) / "prompt.md"
+        self.assertIn(f"is saved in `{second}`.", second.read_text())        # the step's own file
+        self.assertIn(f"`{second}`", (context.rules_dir(task) / "HANDBOOK.md").read_text())
+
+
 class Writing(Base):
     """The writing role (#1025): prose under its own short handbook and protocol, not the coding
     rules; self-review and probe off unless asked; `--test` optional; its record apart in the
@@ -39002,9 +39040,10 @@ class Writing(Base):
         self.addCleanup(patch.stop)
         self.spec.write_text("Write the answer to answer.txt, for the README's readers.\n")
 
-    def protocol(self, task, protocol, test=None):
+    def protocol(self, task, protocol, test=None, n=1):
         return protocol.format(branch=task.spec["branch"], test_line=cli.test_line(test),
-                               budget=task.spec["ask_budget"], experiment_protocol="")
+                               budget=task.spec["ask_budget"], experiment_protocol="",
+                               spec=task.round_dir(n) / "prompt.md")
 
     def test_a_writing_task_gets_the_writing_handbook_and_protocol_and_a_coding_one_the_coding_ones(self):
         for name, role, handbook, protocol in (("t-w", "writing", context.WRITING, cli.WRITING_PROTOCOL),
@@ -39081,7 +39120,7 @@ class Writing(Base):
         run_wb("next", "t-next", "--spec", str(step2), "-m", "docs: the answer")
         task = store.Task("t-next")
         prompt = task.round_dir(2).joinpath("prompt.md").read_text()
-        self.assertTrue(prompt.endswith(self.protocol(task, cli.WRITING_PROTOCOL)))
+        self.assertTrue(prompt.endswith(self.protocol(task, cli.WRITING_PROTOCOL, n=2)))
         self.assertNotIn("No unrelated refactors", prompt)
         wait_phase("t-next", {"review"})
 
