@@ -10912,11 +10912,13 @@ class UsersMcpServers(Base):
         self.assertIn("--  MCP server 'fs' names", out)
 
     def test_with_no_lane_to_hide_the_checkout_neither_says_a_server_in_it_wont_be_reached(self):
-        # #1202's review (2026-11-24): with no Landlock (every Mac) or the lane off the server
-        # reads the checkout, yet both said it wouldn't, and Claude, as the skill says, told the
-        # user to change a config that works (api_hidden_note's gate, #1156)
+        # #1202's review (2026-11-24): with no lane or the lane off the server reads the
+        # checkout, yet both said it wouldn't, and Claude, as the skill says, told the user to
+        # change a config that works (api_hidden_note's gate, #1156). No lane is kind() None:
+        # Landlock off alone left a Mac its Seatbelt lane, which does hide the checkout, and the
+        # note was right there (the 2.1 macOS nightly, 2026-11-25)
         self.servers_in_the_repo()
-        with mock.patch.object(lane, "abi", return_value=0):
+        with mock.patch.object(lane, "kind", return_value=None):
             out = _ApiTask.start_api(self, "t-no-landlock", "ok", spawn=False)
             self.assertIn("MCP: ", out)
             self.assertNotIn("note: MCP server", out)
@@ -13613,6 +13615,29 @@ class Lane(Base):
         (task.dir / "task.json").write_text(json.dumps({"name": name, "repo": str(repo)}))
         return task
 
+    def writable_as(self, kind, task) -> list[str]:
+        """context.writable(task) as the lane `kind` draws it: Landlock's splits a toolchain home
+        around NOT_WRITABLE's places, Seatbelt's keeps it whole and denies them by path."""
+        with mock.patch.object(lane, "kind", lambda: kind):
+            return context.writable(task)
+
+    def seatbelt_keeps_out(self, task, places, writes=()):
+        """With Seatbelt, each of ``places`` is denied by path (write_denied) or outside the lane,
+        and each of ``writes`` written: the 2.1 macOS nightly (2026-11-25) ran the Landlock
+        split's assertions under Seatbelt, which keeps a cargo, rustup or nimble home whole."""
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            w = [os.path.realpath(q) for q in context.writable(task)]
+            denied = context.write_denied(w)
+
+        def written(p):
+            real = os.path.realpath(p)
+            return any(real == q or context._under(real, q) for q in w) and \
+                not any(real == d or context._under(real, d) for d in denied)
+        for p in places:
+            self.assertFalse(written(p), p)
+        for p in writes:
+            self.assertTrue(written(p), p)
+
     def reads_in_lane(self, task, files, extra=()):
         script = ("import sys\nfor f in sys.argv[1:]:\n    try:\n        open(f).read()\n"
                   "        print('read')\n    except PermissionError:\n        print('refused')\n")
@@ -13768,14 +13793,18 @@ class Lane(Base):
         subprocess.run(["git", "init", "-q", str(home / "src" / "app")], check=True)
         os.environ["GOPATH"] = str(home / "src")      # a GOPATH that holds every project
         task = self.bare_task("t-tools", home / "src" / "app")
-        w = context.writable(task)
-        for p in (".cargo/registry", ".cargo/.package-cache", "go/pkg", ".pub-cache"):
+        w = self.writable_as("landlock", task)
+        caches = (".cargo/registry", ".cargo/.package-cache", "go/pkg", ".pub-cache")
+        for p in caches:
             self.assertIn(str(home / p), w)
-        for p in (".cargo/bin", ".cargo/env", ".cargo/credentials.toml", "go/bin", ".local/lib",
-                  "src"):                           # the PATH, the shell's startup, user site
+        out = (".cargo/bin", ".cargo/env", ".cargo/credentials.toml", "go/bin", ".local/lib",
+               "src")                               # the PATH, the shell's startup, user site
+        for p in out:
             self.assertFalse([q for q in w if q == str(home / p) or q.startswith(f"{home / p}/")
                               or str(home / p).startswith(q + "/")], p)
         self.assertFalse([q for q in w if str(home / "src" / "app").startswith(q + "/")])
+        self.seatbelt_keeps_out(task, [home / p for p in (*out, "src/app")],
+                                [home / p for p in caches])
         r = context.readable(task)
         self.assertIn(str(home / "R"), r)               # R's and Perl's user libraries
         self.assertIn(str(home / "perl5"), r)
@@ -13934,12 +13963,16 @@ class Lane(Base):
         os.environ["CARGO_HOME"] = str(moved)
         (home / ".dotnet").mkdir()                      # no bin or env: never made
         task = self.bare_task("t-cargo", self.repo)
-        w = context.writable(task)
+        w = self.writable_as("landlock", task)
+        made = ("registry", "git", ".package-cache", ".package-cache-mutate", ".global-cache")
         for c in (home / ".cargo", moved):
-            for n in ("registry", "git", ".package-cache", ".package-cache-mutate", ".global-cache"):
+            for n in made:
                 self.assertIn(str(c / n), w)
             self.assertFalse([q for q in w if q in (str(c), str(c / "bin"), str(c / "env"))])
         self.assertEqual(os.listdir(home / ".dotnet"), [])
+        self.seatbelt_keeps_out(task, [c / n for c in (home / ".cargo", moved)
+                                       for n in ("bin", "env", "config.toml", "config")],
+                                [c / n for c in (home / ".cargo", moved) for n in made])
 
     @home_outside_the_lane
     def test_uvs_tools_and_pythons_and_rustups_toolchains_stay_out_of_the_lane(self):
@@ -13955,13 +13988,16 @@ class Lane(Base):
         (home / ".rustup" / "settings.toml").write_text("")
         os.environ["RUSTUP_HOME"] = str(moved)          # no toolchains/ yet: made, so split out
         task = self.bare_task("t-uv", self.repo)
-        w = context.writable(task)
-        for p in (".cache", ".rustup/downloads", ".rustup/settings.toml", "rustuphome/downloads"):
+        w = self.writable_as("landlock", task)
+        kept = (".cache", ".rustup/downloads", ".rustup/settings.toml", "rustuphome/downloads")
+        for p in kept:
             self.assertIn(str(home / p), w)             # the caches and rustup's own state
-        for p in (".local/share/uv", ".rustup/toolchains", "rustuphome/toolchains"):
+        out = (".local/share/uv", ".rustup/toolchains", "rustuphome/toolchains")
+        for p in out:
             self.assertFalse([q for q in w if q == str(home / p) or q.startswith(f"{home / p}/")
                               or str(home / p).startswith(q + "/")], p)
         self.assertTrue((moved / "toolchains").is_dir())
+        self.seatbelt_keeps_out(task, [home / p for p in out], [home / p for p in kept])
 
     @home_outside_the_lane
     def test_nim_elm_and_clojure_homes_and_caches_moved_by_their_variables_are_in_the_lane(self):
@@ -13980,14 +14016,17 @@ class Lane(Base):
                "XDG_DATA_HOME": str(home / "data"), "XDG_STATE_HOME": str(home / "state")}
         task = self.bare_task("t-911", self.repo)
         with mock.patch.dict(os.environ, env):
-            w = context.writable(task)
-            for p in (".elm", "ccache", "hf", "jd1", "jd2", "data/pnpm/store", "state/cabal",
-                      ".nimble/pkgs2", "nimbledir/pkgs2"):
+            w = self.writable_as("landlock", task)
+            kept = (".elm", "ccache", "hf", "jd1", "jd2", "data/pnpm/store", "state/cabal",
+                    ".nimble/pkgs2", "nimbledir/pkgs2")
+            for p in kept:
                 self.assertIn(str(home / p), w, p)
-            for p in (".nimble/bin", "nimbledir/bin", "cabaldir/bin",   # made first, split out
-                      ".local/share/pnpm/store"):    # the XDG variable moved it
+            out = (".nimble/bin", "nimbledir/bin", "cabaldir/bin",   # made first, split out
+                   ".local/share/pnpm/store")    # the XDG variable moved it
+            for p in out:
                 self.assertFalse([q for q in w if q == str(home / p) or q.startswith(f"{home / p}/")
                                   or str(home / p).startswith(q + "/")], p)
+            self.seatbelt_keeps_out(task, [home / p for p in out], [home / p for p in kept])
             self.assertTrue((home / ".nimble" / "bin").is_dir())
             self.assertTrue((home / "nimbledir" / "bin").is_dir())
             # not made yet: the grant names the home, which wb allow --path then makes (#824)
@@ -14061,10 +14100,13 @@ class Lane(Base):
         (home / "nimbledir").mkdir()
         (home / "nimbledir" / "nimbledata2.json").write_text('{"version": 1, "reverseDeps": {"x": {}}}')
         task = self.bare_task("t-911b", self.repo)
+        made = ("pkgs2", "pkgcache", "buildtemp", "packages_temp.json", "nimbledata2.json")
         with mock.patch.dict(os.environ, {"NIMBLE_DIR": str(home / "nimbledir")}):
-            w = context.writable(task)
+            w = self.writable_as("landlock", task)
+            self.seatbelt_keeps_out(task, [home / d / "bin" for d in (".nimble", "nimbledir")],
+                                    [home / d / n for d in (".nimble", "nimbledir") for n in made])
         for d in (".nimble", "nimbledir"):
-            for n in ("pkgs2", "pkgcache", "buildtemp", "packages_temp.json", "nimbledata2.json"):
+            for n in made:
                 self.assertIn(str(home / d / n), w, f"{d}/{n}")
             self.assertNotIn(str(home / d), w)
             self.assertNotIn(str(home / d / "bin"), w)
@@ -15079,8 +15121,10 @@ class Lane(Base):
         (root / "Backup").mkdir()
         (root / "Backup" / "photos.jpg").write_text("x")
         task = self.bare_task("t-1194-volumes", self.repo)
-        # in its place, and /home read (as / is) so that its one deny shows
-        kept = tuple(str(root) if p == "/Volumes" else p for p in context.ONLY_KEPT if p != "/home")
+        # in its place, and /home (macOS's /Users) read as / is, so that its one deny shows: with
+        # /Users kept, the 2.1 macOS nightly (2026-11-25) found one deny of /Users above it
+        kept = tuple(str(root) if p == "/Volumes" else p for p in context.ONLY_KEPT
+                     if p not in ("/home", "/Users"))
         with mock.patch.object(context, "ONLY_KEPT", kept):
             rules, readable = context.read_rules(task), context.readable(task)
         writable = context.writable(task)
@@ -21942,6 +21986,16 @@ class ScheduledRuns(Base):
         # a systemctl that logs each call, exiting FAKE_SYSTEMCTL_EXIT (0): never the user's manager
         (self.bin / "systemctl").write_text('#!/bin/sh\necho "$*" >> "$FAKE_SYSTEMCTL_LOG"\n'
                                             'exit "${FAKE_SYSTEMCTL_EXIT:-0}"\n')
+        # and a launchctl the same, and the systemd side on every OS but in the tests that say
+        # macOS: on the 2.1 macOS nightly (2026-11-25) every add wrote its plist into the runner's
+        # real ~/Library/LaunchAgents and bootstrapped it with the real launchctl, and the
+        # systemd tests found no unit
+        (self.bin / "launchctl").write_text('#!/bin/sh\necho "launchctl $*" >> "$FAKE_SYSTEMCTL_LOG"\n'
+                                            'exit "${FAKE_SYSTEMCTL_EXIT:-0}"\n')
+        from workbench import schedule
+        linux = mock.patch.object(schedule, "_macos", return_value=False)
+        linux.start()
+        self.addCleanup(linux.stop)
         # a claude that records its argv and environment, and prints a result as claude -p does
         (self.bin / "claude").write_text(textwrap.dedent(f"""\
             #!{sys.executable}
@@ -22103,8 +22157,6 @@ class ScheduledRuns(Base):
         import plistlib
         from workbench import schedule
         home = Path(self.tmp.name) / "home"
-        (self.bin / "launchctl").write_text('#!/bin/sh\necho "launchctl $*" >> "$FAKE_SYSTEMCTL_LOG"\n')
-        (self.bin / "launchctl").chmod(0o755)
         with mock.patch.object(schedule, "_macos", return_value=True), \
                 mock.patch.object(Path, "home", return_value=home):
             self.add("night", "Sat,Sun 02:00")
@@ -46324,7 +46376,8 @@ class FirstRunApi(Base):
         lines = cli.first_run()
         self.assertTrue(lines[0].startswith("ok  "), lines)
         self.assertIn("ok  API keys: deepseek (stored via /connect); no role uses one yet", lines)
-        self.assertTrue(any("Landlock" in x for x in lines), lines)
+        # the lane's line, last: Seatbelt's on a Mac (the 2.1 macOS nightly, 2026-11-25)
+        self.assertTrue(any("Landlock" in x or "Seatbelt" in x for x in lines), lines)
 
     # wb route: several roles in one change
 
