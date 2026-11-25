@@ -2353,7 +2353,7 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       session: String(sp.session ?? ''),
       claude_pid: Number(sp.claude_pid ?? 0), claude_start: String(sp.claude_start ?? ''),
       backlog: String(sp.backlog ?? ''),
-      parked: ['review', 'stuck', 'failed'].includes(phase) && !!st.parked, // as store.parked (#698)
+      parked: PARKS.has(phase) && !!st.parked, // as store.parked (#698)
       allowed: allowedLine((await readJson($, `${base}/coding.json`)).allowed),
       ...viewFacts(sp, st),
     })
