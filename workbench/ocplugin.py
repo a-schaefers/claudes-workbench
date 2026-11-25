@@ -27,9 +27,10 @@ import json
 import os
 import re
 import shutil
+import uuid
 from pathlib import Path
 
-from . import models, store
+from . import gitops, models, store
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
 DIR = PKG_ROOT / "opencode-plugin"
@@ -185,9 +186,93 @@ def loaded_from(root: Path | None = None) -> bool:
         d, wb = f.get("dir"), f["options"].get("wb")
         if d is not None and d.resolve() in (root, root / "opencode-plugin"):
             return True
+        if d is not None and (note := copy_info(d)) and Path(str(note.get("clone"))).resolve() == root:
+            return True
         if isinstance(wb, str) and os.path.isabs(wb) and Path(wb).resolve() == root / "bin" / "wb":
             return True
     return False
+
+
+COPY_NOTE = "copy.json"  # in each copy's directory: {commit, tree, clone}
+
+
+def copies_dir() -> Path:
+    """Where wb setup --opencode keeps the copies of opencode-plugin/ that OpenCode loads (#1321's
+    finding 16): beside wb patch init's clone, out of every lane's writable places, and readable
+    there, as the agent's OpenCode imports the module to learn its id before its layer removes it."""
+    return Path.home() / ".local/share/workbench/opencode-plugin"
+
+
+def copy_info(d: Path) -> dict | None:
+    """A copy's note (its commit, its tree, the clone it came from) when ``d`` is a copy wb made,
+    copies_dir()/<tree>/opencode-plugin; else None."""
+    try:
+        if d.resolve().parent.parent != copies_dir().resolve():
+            return None
+        note = json.loads((d.parent / COPY_NOTE).read_text())
+    except (OSError, ValueError):
+        return None
+    return note if isinstance(note, dict) else None
+
+
+def head_tree(root: Path | None = None) -> tuple[str, str] | None:
+    """(the commit, opencode-plugin/'s tree) at the clone's HEAD; None off git, or without it."""
+    try:
+        out = gitops.git(root or PKG_ROOT, "rev-parse", "HEAD", "HEAD:opencode-plugin").split()
+    except (gitops.GitError, OSError):
+        return None
+    return (out[0], out[1]) if len(out) == 2 else None
+
+
+def make_copy(root: Path | None = None) -> tuple[Path, str] | None:
+    """opencode-plugin/ as committed at the clone's HEAD (its tests left out), copied once per tree
+    to copies_dir()/<tree>/opencode-plugin: (that directory, the commit it was copied at). What wb
+    setup --opencode's entry loads: OpenCode watches a configured local plugin and reloads it on
+    every change (core/src/config/plugin/source.ts), so an entry on the clone's live
+    opencode-plugin/ ran each save uncommitted, a patch under test with it, and wb patch init
+    deleted it (#1321's finding 16). None off git: the live directory then."""
+    root = root or PKG_ROOT
+    if (got := head_tree(root)) is None:
+        return None
+    commit, tree = got
+    final = copies_dir() / tree[:12]
+    if (note := copy_info(final / "opencode-plugin")) is not None:  # this tree's, made before
+        return final / "opencode-plugin", str(note.get("commit") or commit)
+    final.parent.mkdir(parents=True, exist_ok=True)
+    tmp = final.parent / f".tmp-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    try:
+        for row in gitops.git_bytes(root, "ls-tree", "-r", "-z", tree).split(b"\0"):
+            meta, _, name = row.partition(b"\t")
+            mode, kind, sha = (meta.split() + [b"", b"", b""])[:3]
+            rel = name.decode("utf-8", "surrogateescape")
+            if kind != b"blob" or mode == b"120000" or not rel or rel.split("/")[0] == "test":
+                continue
+            out = tmp / "opencode-plugin" / rel
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(gitops.git_bytes(root, "cat-file", "blob", sha.decode()))
+            out.chmod(0o755 if mode == b"100755" else 0o644)
+        (tmp / COPY_NOTE).write_text(json.dumps({"commit": commit, "tree": tree, "clone": str(root.resolve())}))
+        try:
+            os.rename(tmp, final)
+        except OSError:  # another wb made it meanwhile
+            if copy_info(final / "opencode-plugin") is None:
+                raise
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return final / "opencode-plugin", commit
+
+
+def _prune_copies(keep: set[Path]) -> None:
+    """The copies no entry loads any more, but ``keep``: the new one and those the file named before
+    the change (a running OpenCode may still hold one until it reloads)."""
+    keep = {k.resolve() for k in keep}
+    try:
+        old = [d for d in copies_dir().iterdir() if re.fullmatch(r"[0-9a-f]{12}", d.name)]
+    except OSError:
+        return
+    for d in old:
+        if d.resolve() not in keep and copy_info(d / "opencode-plugin") is not None:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 def copy_of(spec: str) -> Path | None:
@@ -282,29 +367,33 @@ def install() -> list[str]:
     to this one; with none, this copy's opencode-plugin/ is added. Its lines, as wb setup prints
     them. RuntimeError (own_config's: a file with comments, two layered files) says the change."""
     opts = options()
-    change = (f'add {json.dumps({"package": str(DIR), "options": opts})} to "plugins" '
+    made = make_copy()
+    load = made[0] if made else DIR
+    change = (f'add {json.dumps({"package": str(load), "options": opts})} to "plugins" '
               f"(or run {ADD})")
-    lines = []
+    lines, before = [], set()
     with models.own_config(change) as (path, own):
         plugins = own.get("plugins", [])
         if not isinstance(plugins, list):
             raise RuntimeError(f'{path}: "plugins" isn\'t a list; make this change by hand: {change}')
         at = [i for i, e in enumerate(plugins) if ours(e, path.parent)]
+        before = {d.parent for i in at if (d := local_dir(target(plugins[i]) or "", path.parent)) is not None
+                  and copy_info(d) is not None}
         found = [f["dir"] for f in installs() if f["kind"] == "discovered"]
         if not at and found:  # OpenCode's plugins directory loads it: an entry would be a duplicate
             lines.append(f"--  {found[0]} loads the OpenCode plugin already (OpenCode's plugins "
                          f"directory), without options: it runs wb by name; left as it is")
         elif not at:
-            plugins.append({"package": str(DIR), "options": opts})
-            lines.append(f"ok  the OpenCode plugin {DIR} added to {path} (made)")
+            plugins.append({"package": str(load), "options": opts})
+            lines.append(f"ok  the OpenCode plugin {load} added to {path} (made)")
         else:
             i = at[0]  # the one OpenCode loads; a second of the same id is a duplicate it refuses
             spec = target(plugins[i])
             old = plugins[i].get("options") if isinstance(plugins[i], dict) else None
             d = local_dir(spec, path.parent)
-            if d is not None and d.resolve() != DIR.resolve():
-                plugins[i] = {"package": str(DIR), "options": opts}
-                lines.append(f"ok  the OpenCode plugin in {path} → {DIR} (was {spec})")
+            if d is not None and d.resolve() != load.resolve():
+                plugins[i] = {"package": str(load), "options": opts}
+                lines.append(f"ok  the OpenCode plugin in {path} → {load} (was {spec})")
             else:
                 plugins[i] = {"package": spec, "options": {**(old if isinstance(old, dict) else {}), **opts}}
                 lines.append(f"ok  the OpenCode plugin {spec} in {path}: its options name {opts['wb']}")
@@ -314,7 +403,38 @@ def install() -> list[str]:
             lines.append(f'--  "{PLUGIN_OFF}" in {path} turns it off: left as it is')
         if plugins or "plugins" in own:
             own["plugins"] = plugins
+    if made:
+        _prune_copies({load.parent, *before})
+        lines.append(f"ok  OpenCode loads a copy of {DIR} as committed at {made[1][:7]}, not the live "
+                     f"directory it reloads on every change: wb update refreshes it")
+        if gitops.git(PKG_ROOT, "status", "--porcelain", "--", "opencode-plugin", check=False).strip():
+            lines.append("--  opencode-plugin/ has uncommitted changes, which the copy leaves out: commit "
+                         "them, then wb setup --opencode")
+    else:
+        lines.append(f"--  {PKG_ROOT} isn't a git clone: OpenCode loads its live opencode-plugin/, "
+                     f"reloading it on every change")
     return lines
+
+
+def refresh() -> list[str]:
+    """wb update's: an entry loading a copy of this clone (or its live opencode-plugin/) moved to
+    the copy of HEAD's, when opencode-plugin/ changed; [] when nothing did (a rewrite of the
+    config would reload OpenCode's plugins for nothing)."""
+    try:
+        found = installs()
+    except (RuntimeError, OSError):
+        return []
+    here, made = PKG_ROOT.resolve(), None
+    for f in found:
+        d = f.get("dir")
+        if f["kind"] != "local" or d is None:
+            continue
+        note = copy_info(d)
+        if d.resolve() in (DIR.resolve(), here) or (note and Path(str(note.get("clone"))).resolve() == here):
+            made = made or make_copy()
+            if made and d.resolve() != made[0].resolve():
+                return install()
+    return []
 
 
 def doctor_lines() -> list[tuple[bool | None, str]]:
@@ -330,15 +450,27 @@ def doctor_lines() -> list[tuple[bool | None, str]]:
     for f in on:
         d, opts = f["dir"], f["options"]
         mine = d is not None and d.resolve() in (DIR.resolve(), PKG_ROOT.resolve())
+        note = copy_info(d) if d is not None and f["kind"] == "local" else None
+        clone = Path(str(note.get("clone"))) if note else None
         how = {"git": "OpenCode's own install, from Git",
                "package": "OpenCode's own install, from npm",
                "discovered": "found in OpenCode's plugins directory",
-               "local": ("this clone's opencode-plugin/" if d.resolve() == DIR.resolve() else "this clone")
+               "local": (f"a copy of {'this clone' if clone.resolve() == PKG_ROOT.resolve() else clone}'s "
+                         f"opencode-plugin/ as committed at {str(note.get('commit'))[:7]}") if note
+               else ("this clone's opencode-plugin/" if d.resolve() == DIR.resolve() else "this clone")
                if mine else f"another copy's: {d}"}[f["kind"]]
         if d is not None and not is_copy(d):
             out.append((False, f"the OpenCode plugin in {f['where']} names {d}, which holds no copy of "
                                f"it: wb setup --opencode from your Workbench clone"))
             continue
+        after: list[tuple[bool | None, str]] = []
+        if note and (now := head_tree(clone)) and now[1] != note.get("tree"):
+            after.append((None, f"the OpenCode plugin's copy is as of {str(note.get('commit'))[:7]}, older "
+                                f"than {clone}'s opencode-plugin/ at {now[0][:7]}: wb update (or wb setup "
+                                f"--opencode there) refreshes it"))
+        elif mine and f["kind"] == "local":  # the live directory OpenCode reloads on every save
+            after.append((None, f"the OpenCode plugin loads {d} as it is, reloaded on every change there "
+                                f"(#1321): wb setup --opencode loads a copy of what is committed"))
         wb = opts.get("wb") if isinstance(opts.get("wb"), str) else None
         # without options the plugin runs the wb its package brings (wb.ts's OWN, ../bin/wb):
         # a clone's, or the Git install's in OpenCode's package cache (#1311's review)
@@ -363,6 +495,7 @@ def doctor_lines() -> list[tuple[bool | None, str]]:
             out.append((True, f"the OpenCode plugin {f['spec']} ({how}, in {f['where']}) runs wb by "
                               f"name from OpenCode's PATH ({which}'s here; the background "
                               f"service's may differ: wb setup --opencode names it)"))
+        out += after
     for f in found:
         if f["kind"] == "off":
             out.append((None, f'"{PLUGIN_OFF}" in {f["where"]} turns the OpenCode plugin off'))

@@ -12525,6 +12525,24 @@ class RealOpenCodeRun(Base):
         after = {p: p.read_bytes() for p in (cache / "opencode/npm").rglob("*") if p.is_file()}
         self.assertEqual(after, before)           # nothing the agent's OpenCode installed or moved
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock: the copy read-only to the agent")
+    @home_outside_the_lane
+    def test_a_round_runs_with_wb_setup_opencodes_copy_of_the_plugin_in_the_users_config(self):
+        # #1321's finding 16: the entry wb setup --opencode writes loads a copy of the committed
+        # plugin under ~/.local/share/workbench, outside the temp roots here; the agent's OpenCode
+        # imports it (for its id) and the layer removes it, and the round goes on as before
+        from workbench import ocplugin
+        home = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-ochome-"))
+        self.addCleanup(shutil.rmtree, home, True)
+        os.environ["HOME"] = str(home)
+        ocplugin.install()
+        copy = Path(json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())["plugins"][0]["package"])
+        self.assertTrue(copy.is_relative_to(ocplugin.copies_dir()), copy)
+        before = {p: p.read_bytes() for p in copy.rglob("*") if p.is_file()}
+        task, st = self.answered([WRITE_42])
+        self.assertTrue(st["tests"]["ok"], (task.dir / "runner.log").read_text())
+        self.assertEqual({p: p.read_bytes() for p in copy.rglob("*") if p.is_file()}, before)
+
     @unittest.skipUnless(lane.abi(), "needs Landlock: the package cache read-only to the agent")
     @home_outside_the_lane
     def test_a_round_runs_with_wb_itself_from_opencodes_package_cache(self):
@@ -15489,6 +15507,32 @@ class Lane(Base):
         self.assertEqual(out.stdout.split(), ["refused", "refused"] + ["wrote"] * 5, out.stderr)
         self.assertEqual((pkg / "bin" / "wb").read_text(), "#!/bin/sh\n")
         self.assertFalse((cache / "opencode/npm/git-y").exists())
+
+    @home_outside_the_lane
+    def test_the_opencode_plugins_copy_is_read_in_the_lane_and_never_written(self):
+        # #1321's finding 16: OpenCode loads wb setup --opencode's copy of the committed plugin,
+        # running it outside the lane, so no agent may change it or plant the next one; the agent's
+        # own OpenCode imports it to learn its id before the layer removes it, so it stays readable
+        from workbench import ocplugin
+        home = self.fake_home()
+        copy, _ = ocplugin.make_copy()
+        self.assertTrue(copy.is_relative_to(home / ".local/share/workbench/opencode-plugin"))
+        task = self.bare_task("t-1321-copy", self.repo)
+        task.worktree.mkdir()
+        base = str(ocplugin.copies_dir())
+        for kind in ("landlock", "seatbelt"):
+            w = self.writable_as(kind, task)
+            self.assertFalse([p for p in w if p == base or base.startswith(p + "/") or p.startswith(base + "/")], kind)
+        if not lane.abi():
+            return
+        read = "import sys; print('read' if open(sys.argv[1]).read() else 'empty')"
+        out = subprocess.run(context.lane_wrap(task)([sys.executable, "-c", read, str(copy / "server.ts")]),
+                             cwd=task.worktree, capture_output=True, text=True, timeout=60)
+        self.assertEqual(out.stdout.split(), ["read"], out.stderr)
+        out = subprocess.run(context.lane_wrap(task)([
+            sys.executable, "-c", self.WRITE_EACH, str(copy / "server.ts"), str(Path(base) / "000000000000/x")]),
+            cwd=task.worktree, capture_output=True, text=True, timeout=60)
+        self.assertEqual(out.stdout.split(), ["refused", "refused"], out.stderr)
 
     @home_outside_the_lane
     def test_with_seatbelt_a_linked_cargo_config_is_denied_by_its_own_name(self):
@@ -24512,6 +24556,11 @@ class Setup(Base):
     def plugins(self) -> list:
         return json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text()).get("plugins")
 
+    def plugin_copy(self, home: Path) -> Path:
+        """Where wb setup --opencode copies this clone's committed opencode-plugin/ (#1321's 16)."""
+        from workbench import ocplugin
+        return home / ".local/share/workbench/opencode-plugin" / ocplugin.head_tree()[1][:12] / "opencode-plugin"
+
     def test_wb_setup_opencode_adds_this_copys_plugin_with_its_wb_and_paths_and_no_claude_skill(self):
         # #1311: the OpenCode path's fallback install. OpenCode's background service starts without
         # the user's shell, so the entry's options name this copy's bin/wb and the WB_* paths set
@@ -24520,8 +24569,9 @@ class Setup(Base):
         home = self.opencode_home()
         code, out = self.setup("--opencode")
         self.assertEqual(code, 0, out)
-        self.assertIn(f"ok  the OpenCode plugin {ocplugin.DIR} added to {os.environ['WB_OPENCODE_CONFIG']} (made)", out)
-        want = {"package": str(ocplugin.DIR), "options": {"wb": str(ROOT / "bin" / "wb"), "env": {
+        copy = self.plugin_copy(home)
+        self.assertIn(f"ok  the OpenCode plugin {copy} added to {os.environ['WB_OPENCODE_CONFIG']} (made)", out)
+        want = {"package": str(copy), "options": {"wb": str(ROOT / "bin" / "wb"), "env": {
             v: os.environ[v] for v in store.PATH_VARS if v.startswith("WB_") and os.environ.get(v)}}}
         self.assertEqual(self.plugins(), [want])
         self.assertEqual(want["options"]["env"]["WB_HOME"], str(home / ".local/state/workbench"))
@@ -24530,6 +24580,7 @@ class Setup(Base):
         self.assertEqual(self.setup("--opencode")[0], 0)          # again: still one entry
         self.assertEqual(self.plugins(), [want])
         self.assertEqual(json.loads((ocplugin.DIR / "package.json").read_text())["name"], ocplugin.PACKAGE)
+        self.assertEqual(json.loads((copy / "package.json").read_text())["name"], ocplugin.PACKAGE)
 
     def test_the_root_package_opencode_installs_from_git_brings_the_plugin_and_its_wb(self):
         # #1311's review (2026-11-25): `opencode plugin add` of opencode-plugin/ alone brought no
@@ -24555,6 +24606,62 @@ class Setup(Base):
         self.assertTrue(ocplugin.ours(alone, ROOT) and not ocplugin.brings_wb(alone))
         self.assertFalse(ocplugin.ours("github:a-schaefers/workbench-other#main", ROOT))
 
+    def test_wb_setup_opencode_loads_a_copy_of_whats_committed_which_a_new_commit_refreshes(self):
+        # #1321's finding 16: the entry named the clone's live opencode-plugin/, which OpenCode
+        # watches and reloads on every change, so each save ran uncommitted (a patch under test
+        # with it). It loads a copy of HEAD's, per tree; refresh (wb update's) moves it to a new
+        # commit's when opencode-plugin/ changed, keeping the one before
+        from workbench import ocplugin
+        home = self.opencode_home()
+        clone, git = plugin_repo(Path(self.tmp.name) / "clone")
+        (clone / "opencode-plugin/test").mkdir()
+        (clone / "opencode-plugin/test/x.test.ts").write_text("// a test\n")
+        git("add", "-A"); git("commit", "-qm", "a test")
+        copies = home / ".local/share/workbench/opencode-plugin"
+        tree = lambda: git("rev-parse", "HEAD:opencode-plugin").stdout.decode().strip()  # noqa: E731
+        head = lambda: git("rev-parse", "HEAD").stdout.decode().strip()  # noqa: E731
+        with mock.patch.object(cli, "PKG_ROOT", clone), mock.patch.object(ocplugin, "PKG_ROOT", clone), \
+                mock.patch.object(ocplugin, "DIR", clone / "opencode-plugin"):
+            code, out = self.setup("--opencode")
+            self.assertEqual(code, 0, out)
+            first = copies / tree()[:12] / "opencode-plugin"
+            self.assertEqual(self.plugins()[0]["package"], str(first))
+            self.assertIn(f"ok  OpenCode loads a copy of {clone / 'opencode-plugin'} as committed at {head()[:7]}", out)
+            self.assertEqual((first / "server.ts").read_text(), (clone / "opencode-plugin/server.ts").read_text())
+            self.assertFalse((first / "test").exists())                    # the tests stay home
+            self.assertEqual(ocplugin.copy_info(first), {"commit": head(), "tree": tree(), "clone": str(clone)})
+            self.assertTrue(ocplugin.loaded_from())
+            conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+            kept = conf.read_text()
+            conf.write_text(json.dumps({**json.loads(kept), "plugins": [str(first)]}))  # no options
+            self.assertTrue(ocplugin.loaded_from())                        # still this clone's copy
+            conf.write_text(kept)
+            # an edit not committed: never loaded, and said
+            (clone / "opencode-plugin/server.ts").write_text("// unsaved work\n")
+            self.assertNotIn("unsaved", (first / "server.ts").read_text())
+            out = self.setup("--opencode")[1]
+            self.assertIn("--  opencode-plugin/ has uncommitted changes, which the copy leaves out", out)
+            self.assertEqual(self.plugins()[0]["package"], str(first))
+            self.assertEqual(ocplugin.refresh(), [])                       # nothing committed: no rewrite
+            git("commit", "-qam", "the plugin changed")
+            out = self.setup(cmd="doctor")[1]
+            self.assertIn(f"--  the OpenCode plugin's copy is as of {ocplugin.copy_info(first)['commit'][:7]}, "
+                          f"older than {clone}'s opencode-plugin/ at {head()[:7]}: wb update", out)
+            lines = ocplugin.refresh()
+            second = copies / tree()[:12] / "opencode-plugin"
+            self.assertIn(f"ok  the OpenCode plugin in {os.environ['WB_OPENCODE_CONFIG']} → {second} (was {first})", lines)
+            self.assertEqual((second / "server.ts").read_text(), "// unsaved work\n")
+            self.assertTrue(first.exists())                                # a running OpenCode's, kept
+            (clone / "README.md").write_text("docs\n")
+            git("add", "-A"); git("commit", "-qm", "not the plugin")
+            self.assertEqual(ocplugin.refresh(), [])                       # the same tree: the same copy
+            (clone / "opencode-plugin/server.ts").write_text("// again\n")
+            git("commit", "-qam", "again")
+            ocplugin.refresh()
+            self.assertFalse(first.exists())                               # two back: removed
+            self.assertTrue(second.exists())
+            self.assertNotIn("older than", self.setup(cmd="doctor")[1])
+
     def test_wb_setup_opencode_keeps_opencodes_own_git_install_and_gives_it_the_options(self):
         # the owner's decision on #1357: OpenCode's own plugin mechanism first. An entry
         # `opencode plugin add` wrote keeps its source, which OpenCode updates; it gains the options
@@ -24570,7 +24677,7 @@ class Setup(Base):
 
     def test_wb_setup_opencode_moves_an_entry_from_another_copy_to_this_one(self):
         from workbench import ocplugin
-        self.opencode_home()
+        home = self.opencode_home()
         conf = Path(os.environ["WB_OPENCODE_CONFIG"])
         gone = Path(self.tmp.name) / "old-clone" / "opencode-plugin"
         other = Path(self.tmp.name) / "acme" / "opencode-plugin"  # another project's, same name
@@ -24580,7 +24687,7 @@ class Setup(Base):
                                                 str(other), ocplugin.PLUGIN_OFF]}))
         code, out = self.setup("--opencode")
         self.assertEqual(code, 0, out)
-        self.assertEqual(self.plugins(), [{"package": str(ocplugin.DIR), "options": ocplugin.options()},
+        self.assertEqual(self.plugins(), [{"package": str(self.plugin_copy(home)), "options": ocplugin.options()},
                                           str(other), ocplugin.PLUGIN_OFF])
         self.assertIn(f"(was {gone})", out)
         self.assertIn(f'--  "{ocplugin.PLUGIN_OFF}" in {conf} turns it off: left as it is', out)
@@ -24625,8 +24732,8 @@ class Setup(Base):
         self.assertIn(f"BAD /workbench isn't in {home / '.claude/skills'}: wb setup links it", out)
         self.setup("--opencode")
         code, out = self.setup(cmd="doctor")
-        self.assertIn(f"ok  the OpenCode plugin {ocplugin.DIR} (this clone's opencode-plugin/, in {conf}) "
-                      f"runs {ROOT / 'bin' / 'wb'}\n", out)
+        self.assertIn(f"ok  the OpenCode plugin {self.plugin_copy(home)} (a copy of this clone's opencode-plugin/ "
+                      f"as committed at {ocplugin.head_tree()[0][:7]}, in {conf}) runs {ROOT / 'bin' / 'wb'}\n", out)
         self.assertIn(f"--  /workbench isn't in {home / '.claude/skills'}: Claude Code's path only", out)
         self.assertNotIn("BAD /workbench", out)
         self.assertIn("--  the Claude Code mod (the pane, the wake-ups) isn't among", out)
@@ -25138,6 +25245,33 @@ class Update(Base):
         os.environ["PATH"] = str(only_git)
         self.assertIn("claude isn't on PATH", self.update())
         self.assertFalse((self.copy / "new.txt").exists())
+
+    def test_an_update_moves_opencodes_plugin_to_a_copy_of_the_pulled_commit(self):
+        # #1321's findings 16 and N2: OpenCode loads a copy of the clone's committed
+        # opencode-plugin/, so the update that pulls a new one moves the entry to its copy
+        from workbench import ocplugin
+        tmp = Path(self.tmp.name)
+        os.environ.update(HOME=str(tmp / "home"), CLAUDE_CONFIG_DIR=str(tmp / "elsewhere"))
+        git = lambda d, *a: subprocess.run(["git", "-C", str(d), "-c", "user.name=t", "-c", "user.email=t@t", *a],  # noqa
+                                           check=True, capture_output=True)
+        (self.origin / "opencode-plugin").mkdir()
+        shutil.copy(ROOT / "opencode-plugin/package.json", self.origin / "opencode-plugin/package.json")
+        (self.origin / "opencode-plugin/server.ts").write_text("// one\n")
+        git(self.origin, "add", "-A"); git(self.origin, "commit", "-qm", "the plugin")
+        git(self.copy, "pull", "-q", "--ff-only")
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        with mock.patch.object(ocplugin, "PKG_ROOT", self.copy), \
+                mock.patch.object(ocplugin, "DIR", self.copy / "opencode-plugin"):
+            ocplugin.install()
+            first = json.loads(conf.read_text())["plugins"][0]["package"]
+            (self.origin / "opencode-plugin/server.ts").write_text("// two\n")
+            git(self.origin, "commit", "-qam", "the plugin changed")
+            out = self.update()
+            second = Path(json.loads(conf.read_text())["plugins"][0]["package"])
+        self.assertIn("updated clone ", out)
+        self.assertIn(f"→ {second} (was {first})", out)
+        self.assertEqual((second / "server.ts").read_text(), "// two\n")
+        self.assertFalse(self.calls.exists())                     # OpenCode's alone: no claude step
 
     def test_a_clone_only_opencodes_plugin_loads_updates_without_claude(self):
         # #1321's findings 4 and 15: wb setup --opencode's clone, which Claude Code doesn't have,
@@ -34372,6 +34506,29 @@ class RealOpenCodePlugin(Base):
                                   "-d", '{"input":{}}'))
         self.assertEqual(got["output"], {"wb": str(ROOT / "bin" / "wb"), "found": True,
                                          "from": "options", "home": str(home)})
+
+    def test_a_real_opencode_loads_wb_setup_opencodes_copy_and_never_the_clones_live_edits(self):
+        # #1321's finding 16: OpenCode watches a configured local plugin and reloads it on every
+        # change, so an entry on the clone's opencode-plugin/ ran each save. The entry names a
+        # copy of what is committed: a broken edit in the clone, uncommitted, never reaches it
+        from workbench import ocplugin
+        os.environ.update(HOME=str(self.root / "home"), WB_OPENCODE_CONFIG=str(self.conf))
+        self.conf.write_text("{}")
+        clone, _ = plugin_repo(self.root / "clone")
+        with mock.patch.object(ocplugin, "PKG_ROOT", clone), mock.patch.object(ocplugin, "DIR", clone / "opencode-plugin"):
+            ocplugin.install()
+        copy = Path(json.loads(self.conf.read_text())["plugins"][0]["package"])
+        self.assertTrue(copy.is_relative_to(self.root / "home"), copy)
+        url = self.serve(WB_HOME="")
+        out = self.listed(url, ocplugin.PLUGIN_ID)
+        self.assertRegex(out, rf"(?m)^{ocplugin.PLUGIN_ID}\s+local\s+{re.escape(str(copy))}$", out)
+        status = lambda: json.loads(self.ask(url, "api", "POST", f"/api/rpc/{ocplugin.PLUGIN_ID}/status",  # noqa
+                                             "-d", '{"input":{}}'))["output"]
+        self.assertEqual((status()["from"], status()["wb"]), ("options", str(clone / "bin" / "wb")))
+        (clone / "opencode-plugin/server.ts").write_text("export default { this is not TypeScript\n")
+        time.sleep(3)                                  # a watcher on the clone would have reloaded
+        self.assertTrue(status()["found"])
+        self.assertIn(ocplugin.PLUGIN_ID, self.ask(url, "plugin", "list"))
 
     def test_opencodes_own_git_install_brings_the_wb_the_plugin_runs(self):
         # #1311's review (2026-11-25): `opencode plugin add` of opencode-plugin/ alone (npm's

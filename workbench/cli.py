@@ -8004,6 +8004,12 @@ def cmd_update(a):
         if rebased:
             print("\n".join([*settled.dropped, *patches.landed_lines(rebased)]))
     say_later()
+    if kind == "clone":  # OpenCode's plugin loads a copy of the clone's committed opencode-plugin/
+        try:             # (#1321's findings 16 and N2): moved to HEAD's when that changed
+            for line in ocplugin.refresh():
+                print(line)
+        except (RuntimeError, OSError, gitops.GitError) as e:
+            print(f"couldn't refresh the OpenCode plugin's copy (wb setup --opencode does): {e}")
     if kind == "clone":  # a pull request merged: its pr/ branch, worktree and body go (#1005)
         try:
             for line in [*patches.closed_lines(PKG_ROOT, settled), *patches.retire_sent(PKG_ROOT),
