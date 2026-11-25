@@ -22788,8 +22788,68 @@ class LocalPatches(Base):
         out = self.wb("patch", "init")
         self.assertIn("already runs from a clone you own", out)
         self.assertIn("branch main-copy", out)
-        self.assertIn("switch -c local", out)
+        self.assertIn("switch -c local --track origin/main", out)
         self.assertFalse(self.calls.exists())
+
+    def test_a_local_branch_made_with_a_plain_switch_gets_origins_upstream_and_doctor_says_so(self):
+        # #1327 (2026-11-24): `git switch -c local`, as the texts said, tracks nothing: wb update
+        # --check died "fatal: no upstream configured" and wb doctor skipped the row
+        os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self.tmp.name) / "elsewhere")
+        self.g(self.copy, "switch", "-q", "-c", "local")
+        merge = lambda: subprocess.run(["git", "-C", str(self.copy), "config", "--get", "branch.local.merge"],
+                                       capture_output=True, text=True).stdout.strip()
+        self.assertIn(f"--  local patches: branch local tracks no upstream: git -C {self.copy} branch -u "
+                      "origin/main local (wb update sets it)", patches.doctor_lines(self.copy, "clone"))
+        out = self.wb("update", "--check")
+        self.assertTrue(out.startswith("update available: 1 new commit(s)"), out)  # the mod's toast
+        self.assertIn("branch local tracked no upstream: it tracks origin/main now", out)
+        self.assertEqual(merge(), "refs/heads/main")
+        self.assertNotIn("tracks no upstream", "\n".join(patches.doctor_lines(self.copy, "clone")))
+        self.g(self.copy, "branch", "-q", "--unset-upstream", "local")
+        self.assertIn("it tracks origin/main now", self.wb("patch", "init"))  # init adopts it too
+        self.assertEqual(merge(), "refs/heads/main")
+        self.g(self.copy, "switch", "-q", "-c", "side")   # not local: named, not changed
+        self.assertIn(f"couldn't check for an update: branch side tracks no upstream: git -C {self.copy} "
+                      "branch -u origin/main side", self.wb("update", "--check"))
+
+    def test_patch_init_reusing_a_directory_whose_local_tracks_nothing_gives_it_origins_upstream(self):
+        # #1327 (2026-11-24): a reused DIR's `local`, made with a plain `git switch -c local`, was
+        # kept as it was, tracking nothing, so wb update died there next
+        dest = Path(self.tmp.name) / "source"
+        self.g(Path(self.tmp.name), "clone", "-q", str(self.origin), str(dest))
+        self.g(dest, "remote", "set-url", "origin", self.g(self.copy, "config", "remote.origin.url"))
+        self.g(dest, "switch", "-q", "-c", "local")
+        out = self.wb("patch", "init", "--dir", str(dest))
+        self.assertIn(f"{dest} already has branch local: kept as it is", out)
+        self.assertIn("branch local tracked no upstream: it tracks origin/main now", out)
+        self.assertEqual(self.g(dest, "config", "--get", "branch.local.merge"), "refs/heads/main")
+
+    def test_a_plain_update_on_a_local_that_tracks_nothing_says_updated_first_then_the_new_upstream(self):
+        # #1327 (2026-11-24): the tracked line goes after "updated clone", or the mod's
+        # /workbench-update (out.startsWith('updated'), #1005) skips /reload-plugins
+        os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self.tmp.name) / "elsewhere")
+        self.g(self.copy, "switch", "-q", "-c", "local")
+        self.commit(self.copy, "mine.txt", "mine\n", "a local fix")
+        out, err, code = self.wb_split("update")
+        self.assertEqual((code, err), (0, ""))
+        self.assertTrue(out.startswith("updated clone "), out)
+        self.assertIn("1 local patch(es) on top of upstream", out)
+        self.assertIn("\nbranch local tracked no upstream: it tracks origin/main now", out)
+        self.assertEqual(self.g(self.copy, "rev-parse", "--abbrev-ref", "local@{u}"), "origin/main")
+
+    def test_patch_zip_on_a_local_that_tracks_nothing_gives_it_origins_upstream_and_writes_the_zip(self):
+        # #1327 (2026-11-24): zip refused "local tracks no upstream" on a `local` made with a plain
+        # `git switch -c local`, as the texts said
+        os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self.tmp.name) / "elsewhere")
+        self.g(self.copy, "switch", "-q", "-c", "local")
+        self.commit(self.copy, "mine.txt", "mine\n", "fix the thing")
+        home = self.no_gh_home()
+        out = self.wb("patch", "zip")
+        self.assertIn("branch local tracked no upstream: it tracks origin/main now", out)
+        path = Path(re.search(r"^wrote (\S+\.zip): 1 patch\(es\) on upstream's ", out, re.M).group(1))
+        self.assertEqual(path.parent, home / "Downloads")
+        self.assertTrue(path.is_file())
+        self.assertEqual(self.g(self.copy, "config", "--get", "branch.local.merge"), "refs/heads/main")
 
     def sent(self):
         """Whether anything reached upstream or a fork: a pr/ branch on either."""

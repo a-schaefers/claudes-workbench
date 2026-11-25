@@ -22,7 +22,8 @@ Decide before you offer anything, and tell the user which and why in a line.
    the old copy had (or `wb update` rescued under `$WB_HOME/rescued/`) become the first patches;
    its stashes and other branches' commits are saved there only (it says so).
    Then the user runs `/reload-plugins`. On a clone the user already owns, it says so: work on
-   branch `local` there (`git -C <root> switch -c local`).
+   branch `local` there (`git -C <root> switch -c local --track origin/main`; one made without
+   `--track` gets it from `wb update` or `wb patch init`).
 2. Write the fix yourself, in the clone, imitating the code around it and following its CLAUDE.md
    (docs in the same commit, a test that fails without the fix: it is how `wb patch check` later
    tells whether upstream fixed the same thing). Don't delegate it: a task's
