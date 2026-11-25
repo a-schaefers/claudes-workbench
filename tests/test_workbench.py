@@ -24715,13 +24715,23 @@ class Setup(Base):
                / ocplugin.PACKAGE)
         pkg.mkdir(parents=True)
         said = f"OpenCode updates it (it follows {ocplugin.GIT_SPEC}, checked at its start and daily)"
+        real_which = shutil.which
+        no_wb = mock.patch.object(shutil, "which", lambda n, *a, **k: None if n == "wb" else real_which(n, *a, **k))
         with mock.patch.object(cli, "PKG_ROOT", pkg), mock.patch.object(ocplugin, "PKG_ROOT", pkg):
             self.assertEqual(run_wb("update", "--check"), f"OpenCode's install at {pkg}: {said}\n")
             self.assertEqual(run_wb("update", "--stop"),
                              f"wb update leaves OpenCode's install at {pkg} to OpenCode: {said}\n")
-            out = self.setup(cmd="doctor")[1]
+            with no_wb:
+                out = self.setup(cmd="doctor")[1]
             self.assertIn(f"ok  install: OpenCode's, at {pkg}: {said}\n", out)
             self.assertNotIn("git can't read", out)
+            # Claude Code's wb link and skill aren't BAD here (#1321's finding 26), and wb setup
+            # is no answer: it refuses (below)
+            self.assertIn("--  wb isn't on this shell's PATH: OpenCode's plugin runs its own (its line below "
+                          f"says which); for your own terminal, a clone's: git clone https://github.com/"
+                          f"{ocplugin.REPO}, then bin/wb setup --opencode there", out)
+            self.assertIn(f"--  /workbench isn't in {home / '.claude/skills'}: Claude Code's path only", out)
+            self.assertNotIn("BAD wb isn't on PATH", out)
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
                 self.assertEqual(self.setup("list", cmd="patch")[0], 1)
@@ -24737,6 +24747,20 @@ class Setup(Base):
             self.assertEqual(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text(), before)
         self.assertFalse(ocplugin.runs_from_cache())             # this clone isn't
         self.assertIn("ok  install: developer clone at", self.setup(cmd="doctor")[1])
+        # installed from another Git spec (a fork, a git+file:// clone): its entry is the plugin's,
+        # found by the package OpenCode put in its cache, and it is what OpenCode follows
+        fork = "git+file:///srv/fork#main"
+        pkg = home / ".cache/opencode/npm" / ocplugin._git_key(fork) / "2" / "node_modules" / ocplugin.PACKAGE
+        pkg.mkdir(parents=True)
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        conf.write_text(json.dumps({**json.loads(conf.read_text()), "plugins": [fork]}))
+        self.assertFalse(ocplugin.ours(fork, home))              # no copy there yet
+        shutil.copy(ROOT / "package.json", pkg / "package.json")
+        self.assertTrue(ocplugin.ours(fork, home))
+        with mock.patch.object(cli, "PKG_ROOT", pkg), mock.patch.object(ocplugin, "PKG_ROOT", pkg):
+            self.assertEqual(run_wb("update", "--check"), f"OpenCode's install at {pkg}: OpenCode updates it "
+                             f"(it follows {fork}, checked at its start and daily)\n")
+            self.assertIn(f"the OpenCode plugin {fork} (OpenCode's own install, from Git", self.setup(cmd="doctor")[1])
 
     def test_doctor_survives_an_opencode_config_that_isnt_an_object_or_cant_be_read(self):
         # #1311's review (2026-11-25): installs() called .get on a top level that is a list

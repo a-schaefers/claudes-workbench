@@ -7828,8 +7828,8 @@ def cmd_update(a):
     --check only says whether there is news; --if-due asks the network at most weekly."""
     kind = _install_kind()
     if kind == "opencode":  # nothing of wb's to pull or rebase: never a git error (#1311's third review)
-        print(f"OpenCode's install at {PKG_ROOT}: {ocplugin.UPDATED_BY}" if a.check else
-              f"wb update leaves OpenCode's install at {PKG_ROOT} to OpenCode: {ocplugin.UPDATED_BY}")
+        print(f"OpenCode's install at {PKG_ROOT}: {ocplugin.updated_by()}" if a.check else
+              f"wb update leaves OpenCode's install at {PKG_ROOT} to OpenCode: {ocplugin.updated_by()}")
         return
     if kind == "clone" and not a.check and patches.branch(PKG_ROOT) == patches.PATCH_BRANCH:
         patches.note_install(PKG_ROOT)  # the mod reads which clone holds the patches (#1005)
@@ -8241,6 +8241,13 @@ def cmd_doctor(a):
     old = bool(have) and have < gitops.GIT_FLOOR  # #527: init -b and the rest, unchecked
     line(good and not old, said + (f": workbench needs git {'.'.join(map(str, gitops.GIT_FLOOR))} "
                                    "or newer; upgrade it" if old else ""))
+    try:  # the OpenCode path's installs (#1311): optional, so none only informs
+        oc_lines = ocplugin.doctor_lines()
+    except RuntimeError as e:  # a config file that doesn't parse or can't be read (#1311's review)
+        oc_lines = [(None, f"the OpenCode plugin: {e}")]
+    # the OpenCode path alone: Claude Code's wb link and skill aren't BAD there (#1321's finding 26)
+    kind = _install_kind()
+    opencode_only = not mod_listed() and (kind == "opencode" or any(good is not None for good, _ in oc_lines))
     # Claude's Bash runs `wb` by name whatever WB_BIN says: WB_BIN only moves the mod's own calls
     # (the 2026-11-16 audit: doctor said ok beside "the mod can't run it")
     on_path, wb_bin = shutil.which("wb"), os.environ.get("WB_BIN")
@@ -8256,6 +8263,12 @@ def cmd_doctor(a):
         print("--  wb isn't on this shell's PATH: Claude Code gets it from the plugin's bin/; for "
               "your own terminal, " + (path_advice(claude=False) if linked
                                        else "link bin/wb into a PATH directory (wb setup)"))
+    elif opencode_only:  # the plugin runs the wb it names or brings (#1311)
+        print("--  wb isn't on this shell's PATH: OpenCode's plugin runs its own (its line below says "
+              "which); for your own terminal, " + (
+                  path_advice(claude=False) if linked else
+                  f"a clone's: git clone https://github.com/{ocplugin.REPO}, then bin/wb setup --opencode "
+                  "there" if kind == "opencode" else "link bin/wb into a PATH directory (wb setup --opencode)"))
     else:
         line(False, f"wb isn't on PATH: Claude runs it by name in Bash; the mod runs {mod_wb(wb_bin, on_path, linked)}; "
              + (path_advice() if linked else "link bin/wb into a PATH directory (wb setup)")
@@ -8503,11 +8516,6 @@ def cmd_doctor(a):
               'off with commands.json "paths": ["*"]')
     skill = context.claude_home() / "skills/workbench/SKILL.md"
     listed = mod_listed()  # information only: a mod loaded another way isn't listed here
-    try:  # the OpenCode path's installs (#1311): optional, so none only informs
-        oc_lines = ocplugin.doctor_lines()
-    except RuntimeError as e:  # a config file that doesn't parse or can't be read (#1311's review)
-        oc_lines = [(None, f"the OpenCode plugin: {e}")]
-    opencode_only = not listed and any(good is not None for good, _ in oc_lines)
     if skill.exists() or not opencode_only:
         line(skill.exists(), f"/workbench skill at {skill.parent}" if skill.exists() else
              f"/workbench isn't in {skill.parent.parent}: wb setup links it")
@@ -8525,8 +8533,8 @@ def cmd_doctor(a):
             print(f"--  {said}")
         else:
             line(good, said)
-    if (kind := _install_kind()) == "opencode":  # no clone: git's error was said (#1311's third review)
-        print(f"ok  install: OpenCode's, at {PKG_ROOT}: {ocplugin.UPDATED_BY}")
+    if kind == "opencode":  # no clone: git's error was said (#1311's third review)
+        print(f"ok  install: OpenCode's, at {PKG_ROOT}: {ocplugin.updated_by()}")
     else:
         try:  # how workbench is installed, its local patches, and gh when they need it (#1005)
             for row in patches.doctor_lines(PKG_ROOT, kind):

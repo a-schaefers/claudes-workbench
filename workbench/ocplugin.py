@@ -92,9 +92,11 @@ def ours(entry, base: Path) -> bool:
         # project's directory that happens to share the name
         return is_copy(d) or (d.name == "opencode-plugin" and not d.exists())
     # a Git install of this repository, or of opencode-plugin/ alone (npm's `::path:` selector,
-    # a fork's too)
+    # a fork's too), or any Git spec OpenCode installed this package from (a fork, a git+file://
+    # clone: doctor called a working install missing, #1311's live check, 2026-11-25)
     return spec.split("#", 1)[-1].endswith(SUBDIR) or bool(
-        re.search(rf"(^|[/:]){re.escape(REPO)}(\.git)?($|#|::)", spec.lower()))
+        re.search(rf"(^|[/:]){re.escape(REPO)}(\.git)?($|#|::)", spec.lower())) or (
+        spec.startswith(GIT_SCHEMES) and copy_of(spec) is not None)
 
 
 def brings_wb(spec: str) -> bool:
@@ -137,8 +139,17 @@ def runs_from_cache(root: Path | None = None) -> bool:
         return False
 
 
-# what wb update and wb doctor say of OpenCode's install (runs_from_cache)
-UPDATED_BY = f"OpenCode updates it (it follows {GIT_SPEC}, checked at its start and daily)"
+def updated_by() -> str:
+    """What wb update and wb doctor say of OpenCode's install (runs_from_cache): the `plugins`
+    entry OpenCode installed this copy from, GIT_SPEC when none names it (a removed entry)."""
+    here, spec = PKG_ROOT.resolve(), GIT_SPEC
+    try:
+        spec = next((f["spec"] for f in installs() if f["kind"] == "git"
+                     and (c := copy_of(f["spec"])) is not None and here.is_relative_to(c.resolve().parent.parent.parent)),
+                    GIT_SPEC)
+    except (RuntimeError, OSError):
+        pass
+    return f"OpenCode updates it (it follows {spec}, checked at its start and daily)"
 
 
 def brought_wb(d: Path) -> Path | None:
