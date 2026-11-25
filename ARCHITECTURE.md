@@ -7636,7 +7636,7 @@ doc needs its own `!/` line).
   after `updated`).
 - **`patches.json`'s keys** (`source`, `upstream`) **and `patches.source_dir`'s default** → the mod's `upstreamRefusal`.
   **Where workbench lives on GitHub** → the mod's `UPSTREAM` and, on a rename, the old name into `FORMER_UPSTREAM` (patches.py keeps no constant: `note_install` reads the
-  remote's URL), `webpush.SUBJECT`, `scripts/github-settings.sh`, `.github/ISSUE_TEMPLATE/config.yml`, the README's badges and CONTRIBUTING.md's `gh issue` lines. **Workbench's contact** (`patches.UPSTREAM_CONTACT`, #1291) →
+  remote's URL), `webpush.SUBJECT`, `scripts/github-settings.sh`, `.github/ISSUE_TEMPLATE/config.yml`, the README's badges and CONTRIBUTING.md's `gh issue` lines. **The owner's GitHub Sponsors** (`github.com/sponsors/a-schaefers`) → `.github/FUNDING.yml` (GitHub's own Sponsor button on the repo page) and the README badge row's last badge. **Workbench's contact** (`patches.UPSTREAM_CONTACT`, #1291) →
   `wb patch zip`'s README.txt and output (its row in *Every `wb` command* quotes the line), CONTRIBUTING.md's
   contributing line (never the README: the owner's call), *Sending a patch without GitHub*; the skill names no address ("the address it
   printed"), so a new one never leaves Claude telling a user the old. **What sends** (`wb patch send`'s name, the gh and git commands it
