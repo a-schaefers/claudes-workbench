@@ -5,7 +5,8 @@
   patch  as ok, and lib/helper.py too, in one `patch` call (a GPT model's in 2.3.2: no edit or
          write): input `patchText` only, the files in `state.metadata.files[].file` (#1148)
   shellwrite  lib/util.py with a `bash` row run in lib/ by its `workdir` (cat > util.py <<X),
-         then main.py importing it and answer.txt = "42" with write (#1210, its third review)
+         then main.py importing it and answer.txt = "42" with write (#1210, its third review);
+         a continued session (--session, a feedback round) adds a line to lib/util.py (#1259)
   buildout  dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names
          neither, then answer.txt = "42" with write (#1210's review)
   pkgbuild  a `bash` row `grep -n answer pkg/a.py`, then build/lib/pkg/{__init__,a,b}.py behind
@@ -41,16 +42,25 @@
   explore  FAKE_READS (41) reads of different files, each a small step, then FAKE_EXPLORE_PAUSE
          seconds (2: the runner sees the last read before the edit; a runner slower than that
          finds the file changed and lifts the guard) and writes "42" like ok: a one-shot still
-         exploring
+         exploring. FAKE_EXPLORE_ONCE: the reads, then an hour's wait; a continued session
+         (--session) behaves like ok: an agent the runner's explore nudge set to work (#1134)
   selfreads  behaves like ok; a run whose prompt is the self-review's (runner.SELF_REVIEW, in
          a continued session, a fresh one's handoff or a carry-on) breaks answer.txt ("41") and
          writes it back, then FAKE_READS (45) reads and goes on exploring for an hour: the tree
-         as it began (#1168). FAKE_SELF_KEEP: it leaves "43" instead. FAKE_SELF_FILL: the
+         as it began (#1168). FAKE_SELF_RERUN: those calls rerun the acceptance command
+         (`shell grep -qx 42 answer.txt`); FAKE_SELF_MISS: the reads fail (#1250).
+         FAKE_SELF_KEEP: it leaves "43" instead. FAKE_SELF_FILL: the
          self-review's first session breaks it, then fills 76% of a 32K window and works on for
          an hour; the fresh session carrying on plays the rest (#1188), or with FAKE_SELF_KEEP only
          reads, the check left broken. FAKE_SELF_STALL: the self-review's first run breaks it,
          says a few words and is silent for an hour; the run after a nudge or a note (its prompt
-         the NUDGE or a steer's, "Claude, your reviewer") plays the rest (#1207)
+         the NUDGE or a steer's, "Claude, your reviewer") plays the rest (#1207).
+         FAKE_SELF_API (ratelimit or down): the self-review's run plays that API scenario, its
+         tree the green one. FAKE_SELF_REFILL: every session of the self-review breaks answer.txt
+         or restores it, by turns, and fills 76% of a 32K window: the sixth, past HANDOVER_MAX,
+         on the green tree (#1261). FAKE_SELF_CRASH: after its reads the self-review's run
+         ends on its server's error (a provider.http 500, as Ollama's runner killed out of
+         memory), exit 1, the server still up (#1270)
   bgwait a command OpenCode moved to the background: `background_wait`, quiet for FAKE_BGWAIT
          seconds (6), then writes "42" like ok
   devserver  writes "42", starts `npm run dev` in the background, ends its turn (reason stop),
@@ -141,7 +151,8 @@ provider's unknown model is `nokey`'s error, its unknown variant (the catalog's 
 unavailable for <id>: <v>`, exit 1. Every `step_finish` carries `part.cost` (USD, from the
 catalog's first price, its context tier past `size`; FAKE_COST for a model with none, else 0) and
 `part.tokens{input, output, reasoning, cache{read, write}}`; `session export` gives each assistant
-message `cost` (FAKE_COST, else 0) and `tokens`, and `info.cost`, `info.tokens` their sums.
+message `cost` (FAKE_COST, else 0) and `tokens`, and `info.cost`, `info.tokens` their sums; its
+first message is the `agent-switched` one each `run --agent` records (`agent`, `previous`).
 FAKE_STEP_IN sets a step's input tokens (120), so a test prices it; FAKE_STEP_COST plays
 OpenCode's figure (a number, or `none`: no `part.cost`); scenario `spend` (#1019): a read and a
 priced `step_finish` every FAKE_STEP_EVERY seconds (0.3), FAKE_STEPS of them (50), then `ok`'s
@@ -149,7 +160,10 @@ answer, as an API task spending until the spend guard stops it.
 With OPENCODE_MODELS_PATH (a models.dev v2 catalog, as 2.3.2 reads it in place of its own), a
 `run -m` of a provider the file lists finds the model there or not at all (`nokey`'s error), its
 variants the config's only (the file makes none: wb leaves `reasoning` unsupported); FAKE_RUNS
-rows record it as `models_path`, and OPENCODE_CONFIG_CONTENT as `content`.
+rows record it as `models_path`, and OPENCODE_CONFIG_CONTENT as `content`. `run --agent <id>`
+takes an agent OpenCode 2.3.2 has built in or the config defines (`agents.<id>` in
+OPENCODE_CONFIG, then OPENCODE_CONFIG_CONTENT; `disabled: true` removes it), else prints
+`Agent not found: "<id>"`, exit 1 (#1290); FAKE_RUNS rows record it as `agent` (None: no flag).
   http   a model request as OpenCode makes one, through its config (#1015): the run's provider's
          options from OPENCODE_CONFIG, then OPENCODE_CONFIG_CONTENT over them; POST
          <baseURL>/chat/completions with `Authorization: Bearer <apiKey>` (an `anthropic`
@@ -334,10 +348,14 @@ if args[:2] == ["session", "export"]:  # `wb watch`: one finished step, as OpenC
     compacted = [{"type": "compaction", "id": f"{sid}-c", "status": "completed", "reason": "auto",
                   "summary": "Earlier: read answer.txt.", "time": {"created": 1500}}] \
         if os.environ.get("FAKE_COMPACTED") else []
-    exported = {"info": {"id": sid, "home": db_path()}, "messages": [
+    # each round's `--agent wb-code` puts an `agent-switched` message before its prompt, even to
+    # the agent the session had (2.3.2, #1290): readers go by a message's type, never its place
+    exported = {"info": {"id": sid, "home": db_path(), "agent": "wb-code"}, "messages": [
+        {"type": "agent-switched", "id": f"{sid}-m0", "time": {"created": 900}, "agent": "wb-code",
+         "previous": "wb-code"},
         {"type": "user", "id": f"{sid}-m1", "time": {"created": 1000}, "text": "Write the answer."},
         *compacted,
-        {"type": "assistant", "id": f"{sid}-m2", "finish": "stop",
+        {"type": "assistant", "id": f"{sid}-m2", "agent": "wb-code", "finish": "stop",
          "time": {"created": 2000, "firstToken": 3000, "streamed": 5000, "completed": 5000},
          "cost": float(os.environ.get("FAKE_COST") or 0),
          "tokens": {"input": int(os.environ.get("FAKE_FILL", 1200)), "output": 80, "reasoning": 0,
@@ -403,10 +421,8 @@ def fail(kind: str, message: str, status: int | None = None):
     sys.exit(1)
 
 
-def layer_variants(provider: str, mid: str) -> set:
-    """The variants the config adds to a model: V1 `provider.<p>.models.<m>.variants.<name>`,
-    V2 `providers.<p>.models.<m>.variants: [{id}]`, from the layer file and the content."""
-    found = set()
+def config_docs() -> list:
+    """The layer file and the content, in the order OpenCode loads them."""
     docs = []
     if os.environ.get("OPENCODE_CONFIG"):
         try:
@@ -418,7 +434,14 @@ def layer_variants(provider: str, mid: str) -> set:
         docs.append(json.loads(os.environ.get("OPENCODE_CONFIG_CONTENT") or "{}"))
     except ValueError:
         pass
-    for doc in docs:
+    return docs
+
+
+def layer_variants(provider: str, mid: str) -> set:
+    """The variants the config adds to a model: V1 `provider.<p>.models.<m>.variants.<name>`,
+    V2 `providers.<p>.models.<m>.variants: [{id}]`, from the layer file and the content."""
+    found = set()
+    for doc in config_docs():
         for key in ("provider", "providers"):
             v = (((doc.get(key) or {}).get(provider) or {}).get("models") or {}).get(mid) or {}
             v = v.get("variants") or {}
@@ -567,6 +590,7 @@ if os.environ.get("FAKE_RUNS") and args and args[0] == "run":  # which runs cont
             connect = e.errno
     with open(os.environ["FAKE_RUNS"], "a") as fh:
         fh.write(json.dumps({"session": "--session" in args, "prompt": args[-1], "connect": connect,
+                             "agent": args[args.index("--agent") + 1] if "--agent" in args else None,
                              "cwd": os.getcwd(), "pwd": os.environ.get("PWD"),
                              "opencode_db": os.environ.get("OPENCODE_DB"),
                              "xdg_data": os.environ.get("XDG_DATA_HOME"),
@@ -578,6 +602,13 @@ if os.environ.get("FAKE_RUNS") and args and args[0] == "run":  # which runs cont
                              "env_names": sorted(os.environ),  # names only, never a value (#1189)
                              "files": attached,
                              "shell_sees": sees}) + "\n")
+if args and args[0] == "run" and "--agent" in args:  # OpenCode 2.3.2's: built in, or the config's
+    known = {"build", "general", "explore", "compaction", "title", "summary"}
+    for doc in config_docs():
+        for name, entry in (doc.get("agents") or {}).items():
+            (known.discard if (entry or {}).get("disabled") else known.add)(name)
+    if (wanted := args[args.index("--agent") + 1]) not in known:
+        fail("unknown", f'Agent not found: "{wanted}"')
 if args and args[0] == "run" and "-m" in args:  # the model: <provider>/<id>[#<variant>]
     ref = args[args.index("-m") + 1]
     provider, _, rest = ref.partition("/")
@@ -667,6 +698,10 @@ if scenario == "selfreads" and "Before Claude reviews this" not in (args[-1] if 
         and not (os.environ.get("FAKE_SELF_STALL")  # #1207: the nudge's or the note's round
                  and re.search(r"Claude, your reviewer|Stop planning", args[-1] if args else "")):
     scenario = "ok"  # #1168: round 1 is ok's
+if scenario == "selfreads" and os.environ.get("FAKE_SELF_API") in ("ratelimit", "down"):
+    scenario = os.environ["FAKE_SELF_API"]  # #1261: the self-review's run ends on its provider's error
+if scenario == "explore" and os.environ.get("FAKE_EXPLORE_ONCE") and "--session" in args:
+    scenario = "ok"
 if (scenario in ("fill", "compact", "donefull") or scenario == "compactfail" and not os.environ.get("FAKE_REFAIL")) \
         and "picking this task up in a fresh session" in args[-1]:
     scenario = "ok"
@@ -796,7 +831,7 @@ elif scenario == "patch":  # #1148: a GPT model's one `patch` call, as OpenCode 
 elif scenario == "shellwrite":  # #1210: a module written with the shell, the rest with write
     os.makedirs("lib", exist_ok=True)
     with open(os.path.join("lib", "util.py"), "w") as fh:
-        fh.write("def answer():\n    return 42\n")
+        fh.write("def answer():\n    return 42\n" + ("# changed in round 2\n" if "--session" in args else ""))
     # in lib/ by the shell tool's `workdir`, not a cd, as OpenCode 2.3.2 tells the model to
     # (#1210's third review)
     tool("bash", {"command": "mkdir -p lib", "description": "Make lib"}, output="")
@@ -927,12 +962,25 @@ elif scenario == "explore":  # #1087: many small reads before the first edit
     for i in range(int(os.environ.get("FAKE_READS", 41))):
         tool("read", {"filePath": os.path.abspath(f"src/f{i}.py")})
         emit("step_finish", reason="tool-calls", tokens={"input": 1000 + 100 * i, "output": 50})
-    time.sleep(float(os.environ.get("FAKE_EXPLORE_PAUSE", 2)))
+    time.sleep(3600 if os.environ.get("FAKE_EXPLORE_ONCE") else float(os.environ.get("FAKE_EXPLORE_PAUSE", 2)))
     with open("answer.txt", "w") as fh:
         fh.write("42\n")
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
     emit("text", text="Wrote answer.txt = 42.")
     finish()
+elif scenario == "selfreads" and os.environ.get("FAKE_SELF_REFILL"):  # #1261: past HANDOVER_MAX
+    # every session of it breaks the check or restores it, by turns (a session that changed
+    # nothing reads to its fill, never handed over), so the sixth leaves the green tree
+    with open("answer.txt") as fh:
+        text = "41" if fh.read().strip() == "42" else "42"
+    with open("answer.txt", "w") as fh:
+        fh.write(text + "\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": text})
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
+                                                      "cache": {"read": 900}})  # changed early
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 900, "reasoning": 6000,
+                                                      "cache": {"read": 16100}})  # 76%, as fill's
+    time.sleep(3600)
 elif scenario == "selfreads" and os.environ.get("FAKE_SELF_FILL") \
         and "Your last session filled up" not in args[-1]:  # #1188: it fills mid-check
     with open("answer.txt", "w") as fh:
@@ -956,9 +1004,16 @@ elif scenario == "selfreads":  # #1168: a self-review that breaks a check, copie
         with open("answer.txt", "w") as fh:
             fh.write(text + "\n")
         tool("write", {"filePath": os.path.abspath("answer.txt"), "content": text})
+    miss = os.environ.get("FAKE_SELF_MISS")  # #1250: reads that fail, the error-streak guard's
     for i in range(int(os.environ.get("FAKE_READS", 45))):
-        tool("read", {"filePath": os.path.abspath(f"src/f{i}.py")})
+        if os.environ.get("FAKE_SELF_RERUN"):  # #1250: the acceptance command, again and again
+            tool("shell", {"command": "grep -qx 42 answer.txt"})
+        else:
+            tool("read", {"filePath": os.path.abspath(f"src/f{i}.py")},
+                 **({"status": "error", "error": "File not found"} if miss else {}))
         emit("step_finish", reason="tool-calls", tokens={"input": 1000 + 100 * i, "output": 50})
+    if os.environ.get("FAKE_SELF_CRASH"):  # #1270: the server answers 500 and OpenCode exits 1
+        fail("provider.http", "model runner has unexpectedly stopped", 500)
     time.sleep(3600)
 elif scenario == "probing":  # #857: probe in a compound line, a long file read whole and in part
     with open("long.py", "w") as fh:

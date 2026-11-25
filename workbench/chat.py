@@ -671,7 +671,7 @@ def pending() -> list[dict]:
 # without `to` is the user's). The mod records each main-loop turn's end that took a message or
 # wrote a reply in turns.jsonl `{ids, ended, by}`, `ids` the messages it took. So a wait is done
 # for a message once a turn listing it has ended, and for a reply once a turn has ended after it
-# (the turn that wrote it, or a later one).
+# (the turn that wrote it, or a later one; the listener's own, `turn_by`, #1303).
 
 def _turns() -> list[dict]:
     return [r for r in store.read_jsonl_tail(chat_dir() / "turns.jsonl", THREAD_BYTES) if isinstance(r, dict)]
@@ -742,6 +742,11 @@ def reply(text: str, to: list[str] | None = None, **extra) -> dict:
         # into the user's running turn read every plain `wb chat reply` to them (the #1042 review)
         if any(rows[i].get("from") == "user" for i in ids):
             ids = [i for i in ids if rows[i].get("from") == "user"]
+    # whose turn wrote it (`turn_by`, the listener's key, as its turns.jsonl rows have it): any
+    # session's turn end counted, and another session's ending after the listener's "On it" told
+    # the agent Claude was done while the listener still worked (#1303, 2026-11-24)
+    if (lst := listener()) and isinstance(lst.get("session"), str) and lst["session"] and caller_listens():
+        extra.setdefault("turn_by", lst["session"])
     whose = list(dict.fromkeys(["user"] * bool(to and "user" in to) + [
         "user" if rows[i].get("from") == "user" else str(rows[i].get("from")) for i in ids]))
     return send(text, "claude", re=ids, to=whose, **extra)
@@ -767,8 +772,9 @@ def addressed(row: dict, caller: str) -> bool:
 
 def wait_state(after: str, caller: str) -> dict | None:
     """What GET /api/wait answers for message ``after``: {replies (Claude's rows after it for the
-    caller), done (a turn has ended since the newest of those, else since ``after``: one that took
-    it, for a message to Claude)}; None when ``after`` is in no recent part of the thread."""
+    caller), done (a turn has ended since the newest of those, the listener's that wrote it when
+    the row says `turn_by`, else since ``after``: one that took it, for a message to Claude)};
+    None when ``after`` is in no recent part of the thread."""
     rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", THREAD_BYTES)
     at = next((n for n, r in enumerate(rows) if isinstance(r, dict) and r.get("id") == after), None)
     if at is None or (caller != "user" and not in_view(rows[at], caller)):  # another's is no message to it
@@ -776,8 +782,11 @@ def wait_state(after: str, caller: str) -> dict | None:
     replies = [r for r in rows[at + 1:] if isinstance(r, dict) and addressed(r, caller)]
     # done since the last row the caller now has: its newest reply's turn, else the message's
     me, turns = (replies or rows[at:at + 1])[-1], _turns()
+    # a reply's: a turn of the session that wrote it (`turn_by`; an older or another session's
+    # row has none: any), never another session's turn ending meanwhile (#1303)
+    by = me.get("turn_by")
     done = (any(me["id"] in (t.get("ids") or []) for t in turns) if _inbound(me)
-            else any(t.get("ended", 0) >= me.get("ts", 0) for t in turns))
+            else any(t.get("ended", 0) >= me.get("ts", 0) and (not by or t.get("by") == by) for t in turns))
     return {"replies": replies, "done": done}
 
 
@@ -2235,13 +2244,22 @@ class Handler(BaseHTTPRequestHandler):
             return ""
         return addr.lower().removeprefix("::ffff:").split("%")[0]
 
-    def _from_loopback(self) -> bool:
-        """Whether the request came from this machine: the peer is a loopback address."""
+    def _peer(self) -> str:
+        """The address the request came from, normalised as `_local` is."""
         try:
-            peer = str(self.client_address[0]).lower().removeprefix("::ffff:").split("%")[0]
+            return str(self.client_address[0]).lower().removeprefix("::ffff:").split("%")[0]
         except (AttributeError, IndexError, TypeError):
-            return False
-        return peer == "::1" or peer.startswith("127.")
+            return ""
+
+    def _from_this_machine(self) -> bool:
+        """Whether the request came from this machine: the peer is a loopback address, or the very
+        address it connected to. A process reaching this machine's own LAN or tailnet IP comes
+        from that IP, not 127.*, so a chat bound only there (`bind: ["tailscale"]`, which serves
+        no localhost) refused every agent token, its own machine's too (#1274, 2026-11-24). No
+        other machine can come from it: a connection is TCP's, whose handshake answers the source
+        address, and the kernel drops an outside packet that claims one of its own."""
+        peer = self._peer()
+        return peer == "::1" or peer.startswith("127.") or bool(peer) and peer == self._local()
 
     def _authed(self) -> str | None:
         """Who calls: "user" for the user's token, "agent <name>" for an agent's (and ``agent``
@@ -2252,11 +2270,13 @@ class Handler(BaseHTTPRequestHandler):
         if self.secret and got and hmac.compare_digest(got.encode(), self.secret.encode()):
             return "user"
         if got and (name := agent_for(got)):
-            if not self._from_loopback():
+            if not self._from_this_machine():
                 # agents are this machine's own (owner, 2026-11-23): an agent token sent from
                 # another machine (a tailnet or LAN peer of a chat bound for the user's phone) is
-                # refused, whatever the bind; the user's own token is unaffected
-                self._json(403, {"error": "agent tokens work only from this machine (localhost)"})
+                # refused, whatever the bind; the user's own token is unaffected. It named
+                # localhost, which a chat bound only to the tailnet doesn't serve (#1274)
+                self._json(403, {"error": "agent tokens work only from this machine, at the address"
+                                          " `wb chat url` prints"})
                 return None
             self.agent, self.agent_token = name, got
             return f"agent {name}"

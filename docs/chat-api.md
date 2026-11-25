@@ -44,10 +44,11 @@ does the whole flow below with the standard library alone.
       (`/api/latest`), a screenshot (`/api/shot`), an audio take (`/api/audio`) or a task's
       summary, diff or log (`/api/task`). Each is `403
       {"error": "agent tokens can't …"}`.
-    - It works only from this machine: a request with an agent token from any other address
-      (a tailnet or LAN peer, when the chat is bound there for the user's phone) is `403
-      {"error": "agent tokens work only from this machine (localhost)"}`. The user's token is
-      unaffected.
+    - It works only from this machine: a request with an agent token from any other machine
+      (a tailnet or LAN peer, when the chat is bound there for the user's phone) is ``403
+      {"error": "agent tokens work only from this machine, at the address `wb chat url`
+      prints"}``. On a chat bound only to the tailnet or a LAN IP, an agent here uses that address
+      (localhost isn't served). The user's token is unaffected.
     - Its sends are limited to `AGENT_SENDS_PER_MIN` (30) a minute, then `429 {"error",
       "retry_after": <seconds>}`.
     - `wb chat token list` names the agents; `wb chat token revoke <name>` ends one at once
@@ -106,7 +107,7 @@ curl -s "${auth[@]}" "$CLAUDE_WB_URL/api/wait?after=1795436900301-a1b2c3&timeout
   message waits in the queue, and is read once a session in workbench mode with the chat on
   listens. A message unread for 6 hours (`expire` in the state) is never passed on.
 - **What `done` means:** the Claude turn that took the message (or that wrote the newest reply
-  returned) has ended. Claude may still report later, after work it handed off: its reply says
+  returned) has ended; another Claude Code session's turn never counts. Claude may still report later, after work it handed off: its reply says
   so, and `until=reply` waits for that report.
 - **`waiting_on_user: true`**: Claude is paused on the user (a permission, a plan, a question, or
   a consent it asked in words). While Claude works on your request, Claude Code's dialogs go to
@@ -182,8 +183,8 @@ A long poll for Claude's replies after the message `after` (a message's or a rep
 - Response: `{"replies": [...], "done": bool, "listener": {...}|null, "waiting_on_user": bool}`.
   - `replies`: Claude's rows after `after` that are for the caller: their `to` names the agent,
     or, for the user's token, `to` names `"user"` or is absent.
-  - `done`: a turn has ended since the newest reply returned, or, with none, since `after` (for a
-    message to Claude: the turn that took it).
+  - `done`: a turn has ended since the newest reply returned (one of the session that wrote it:
+    its `turn_by`), or, with none, since `after` (for a message to Claude: the turn that took it).
   - `waiting_on_user`: Claude is paused on the user: one of Claude Code's dialogs is open in the
     chat, or one in the terminal that the phone was told of. The work is waiting on the human,
     not stuck: keep waiting.
@@ -329,7 +330,8 @@ A **message** (`messages`, `replies`, `message`):
   user, `wb chat reply --to user`; absent means the user's), `shots?`, `audio?`, `claude_pid?`
   (the Claude Code process that wrote it, on every Claude row: a reply, a screenshot, a listen),
   and on a `wb chat reply` from Claude Code `session?`, `claude_start?`, `claude_machine?` beside
-  it (the Claude Code session that wrote it, so the user's answer goes back to that session).
+  it (the Claude Code session that wrote it, so the user's answer goes back to that session),
+  `turn_by?` (on the listening session's reply: whose turn's end makes a wait on it `done`).
 
 An **ask** (`asks`, `/api/ask/<id>`): `{id: "ask-…", ts, tool, text, kind:
 "permission"|"plan"|"question", detail?, for?: [agent names], answer: null|"allow"|"deny"|"expired",

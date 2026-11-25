@@ -1,4 +1,5 @@
-"""What a task saved Claude, against Claude writing it itself: an estimate, always shown as one.
+"""What a task saved Claude, against Claude writing it itself: an estimate, its figures marked `~`
+(the words "(estimate)" after a `~` said it twice, #1322).
 
 The estimate comes from eight paired runs on 2026-11-17: Claude made roughly 4.9 +
 lines/69 calls, each costing the session's context cost per call, and wrote about 36
@@ -15,6 +16,7 @@ import os
 from pathlib import Path
 
 from . import meter, spend, store
+from .meter import money, usd
 
 # The eight-paired-run fit (2026-11-17), see the module docstring.
 SELF_CALLS = 4.9
@@ -51,7 +53,7 @@ def of_row(row: dict) -> dict | None:
     but its GPU energy was still spent, so it records a negative saving.
     An API task's row is None: the score answers QUESTION, the GPU's, and an API task's paid
     tokens are on the other side, which it can't see ("saved 60%" for a task that cost $3,
-    #1022); api_totals and api_line say it apart."""
+    #1022); api_totals and api_summary say it apart."""
     if row.get("kind") == "api":
         return None
     return _compare(row)
@@ -65,8 +67,7 @@ def _compare(row: dict) -> dict | None:
         if not isinstance(u, dict):
             return None
         c = spend.weighted(u)
-        return {"claude": c, "self_est": 0, "saved": -c, "wh": row.get("gpu_wh"),
-                "remote": bool(row.get("remote_gpu"))}
+        return {"claude": c, "self_est": 0, "saved": -c, "wh": _wh(row)}
     if "claude" not in row or "diff" not in row:
         return None
     pc = per_call(row["claude"])
@@ -80,8 +81,13 @@ def _compare(row: dict) -> dict | None:
     lines = d.get("added", 0) + d.get("removed", 0) - gone.get("removed", 0)
     self_est = estimate_self(max(0, lines), pc) + (round(pc) if gone.get("files") else 0)
     claude = spend.weighted(row["claude"])
-    return {"claude": claude, "self_est": self_est, "saved": self_est - claude,
-            "wh": row.get("gpu_wh"), "remote": bool(row.get("remote_gpu"))}
+    return {"claude": claude, "self_est": self_est, "saved": self_est - claude, "wh": _wh(row)}
+
+
+def _wh(row: dict) -> float | None:
+    """The task's GPU energy; None when not measured (another machine's GPU, which nothing here
+    reads: nothing is shown for it, #117, #1322)."""
+    return None if row.get("remote_gpu") else row.get("gpu_wh")
 
 
 def _path() -> Path:
@@ -129,18 +135,14 @@ def totals(rows: list[dict], since: float = 0) -> dict:
     ``tasks`` is how many of them have both sides; ``claude``/``self_est``/``saved``
     are the token sums (weighted); ``wh`` is their GPU energy in watt-hours; ``cost``
     is what that energy is worth at the set price, rounded to a cent."""
-    period = [(r, of_row(r)) for r in rows if r.get("ts", 0) >= since]
-    parts = [p for _, p in period if p is not None]
+    parts = [p for r in rows if r.get("ts", 0) >= since and (p := of_row(r)) is not None]
     wh = round(sum(p["wh"] for p in parts if p["wh"] is not None), 1)
     cost = round(wh / 1000 * price(), 2) if parts and price() is not None else None
     return {"tasks": len(parts),
-            # the coverage: every closed task of the period, compared or not (#101)
-            "of": sum(p is not None or r.get("outcome") in ("accepted", "discarded") for r, p in period
-                      if r.get("kind") != "api"),  # an API task is no GPU task left uncompared
             "claude": sum(p["claude"] for p in parts),
             "self_est": sum(p["self_est"] for p in parts),
             "saved": sum(p["saved"] for p in parts),
-            "wh": wh, "cost": cost, "remote": sum(p["remote"] for p in parts)}
+            "wh": wh, "cost": cost}
 
 
 # #101's badge: one number from 1 to 100, about the percent of Claude's usage saved, from the
@@ -209,41 +211,13 @@ def card(t: dict, period: str) -> str:
     else:
         more, y = _wrapped(NO_SCORE, y + 10, 17, 34, ink)
         lines += more
-    more, y = _wrapped(f"{when} · {t['tasks']} of {t.get('of', t['tasks'])} tasks counted · "
-                       "estimated", y + 6, 13, 48, 'fill="#555"')
+    more, y = _wrapped(f"{when} · {t['tasks']} task{'' if t['tasks'] == 1 else 's'} · estimated",
+                       y + 6, 13, 48, 'fill="#555"')
     lines += more
     h = y + 10
     return (f'<svg xmlns="http://www.w3.org/2000/svg" width="360" height="{h}" viewBox="0 0 360 {h}" '
             'font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif">'
             f'<rect width="360" height="{h}" rx="20" fill="#fbf8f3"/>' + "".join(lines) + "</svg>\n")
-
-
-def _gpu(est: dict) -> str:
-    """The energy part of a line: a remote model's GPU is another machine's, which nothing here
-    reads, so it says so instead of showing nothing (#117)."""
-    if est["remote"]:
-        return " · GPU energy not measured (another machine's)"
-    return f" · GPU {est['wh']:.0f} Wh" if est["wh"] is not None else ""
-
-
-def line(row: dict) -> str | None:
-    """One row's savings, readable: claude: 56K · writing it yourself: ~59K
-    (estimate) · saved ~3K · GPU 41 Wh; None when there is no comparison.
-    A discarded row reads: claude: 21K · discarded, nothing saved · GPU 12 Wh."""
-    if row.get("kind") == "api":
-        return api_line(row)
-    est = of_row(row)
-    if est is None:
-        return None
-    saved, wh = est["saved"], est["wh"]
-    k = lambda n: f"{n / 1000:.0f}K"  # noqa: E731
-    if row.get("outcome") == "discarded":
-        mid = " · discarded, nothing saved"
-        mid += _gpu(est)
-        return f"claude: {k(est['claude'])}{mid}"
-    mid = f" · saved ~{k(saved)}" if saved >= 0 else f" · cost ~{k(-saved)} more"
-    mid += _gpu(est)
-    return f"claude: {k(est['claude'])} · writing it yourself: ~{k(est['self_est'])} (estimate){mid}"
 
 
 PERIODS = {"week": 7 * 86400, "month": 30 * 86400, "all": None}  # wb savings --week|--month|--all
@@ -255,28 +229,21 @@ def energy(wh: float) -> str:
 
 def summary(t: dict, period: str, api: int = 0) -> str:
     """`wb savings`' one line over ``totals`` (``period`` a PERIODS key, or a label: `wb
-    backlog`'s "the batch"): what the tasks cost Claude, the estimate of
-    writing them, the saving and its share of that estimate (the badge's score, #101), the
-    energy and what it cost. ``api``: the period's API tasks, which the score leaves out."""
+    backlog`'s "the batch"): what the tasks cost Claude, the estimate of writing them, the saving
+    and its share of that estimate (the one figure: a score beside it was the percent again,
+    #1322), the energy and what it cost. ``api``: the period's API tasks: with none of the GPU's
+    to compare, "" (their line follows alone, #1121)."""
     when = {"week": "the last 7 days", "month": "the last 30 days", "all": "all time"}.get(period, period)
-    if not t["tasks"] and api:
-        # an API-only week or backlog had its Claude usage and diff, and read as if it hadn't
-        # (#1121, 2026-11-23): the score is the GPU's alone, and their line follows
-        return f"{when}: no GPU task to compare (API tasks are below, apart from the score)"
     if not t["tasks"]:
-        return (f"{when}: no task to compare yet (an accepted task needs its Claude usage and "
-                "its diff, recorded since 0.95)")
+        return "" if api else f"{when}: nothing to compare yet"
     k = lambda n: f"{n / 1000:.0f}K"  # noqa: E731
     saved = (f"saved ~{k(t['saved'])}" if t["saved"] >= 0 else f"cost ~{k(-t['saved'])} more")
     pct = f" ({100 * t['saved'] / t['self_est']:.0f}%)" if t["self_est"] > 0 else ""
     gpu = f" · GPU {energy(t['wh'])}" if t["wh"] else ""
     # no currency sign: the price is the user's, in whatever they pay in (a `$` was hard-coded, #609)
     cost = f", cost {t['cost']:.2f}" if gpu and t["cost"] is not None else ""
-    away = (f" · {t['remote']} on another machine's GPU, not measured" if t.get("remote") else "")
-    s = score(t)
     return (f"{when}: {t['tasks']} task(s) · claude {k(t['claude'])} · writing it yourself "
-            f"~{k(t['self_est'])} (estimate) · {saved}{pct}{gpu}{cost}{away}"
-            + (f" · score {s['score']}/100" if s else ""))
+            f"~{k(t['self_est'])} · {saved}{pct}{gpu}{cost}")
 
 
 def share(rows: list[dict], period: str, since: float, gpus: list[dict],
@@ -292,7 +259,7 @@ def share(rows: list[dict], period: str, since: float, gpus: list[dict],
     cards = ", ".join(f"{g['name']}" + (f" ({gb(g['vram'])} VRAM)" if g.get("vram") else "")
                       for g in gpus) or "none found"
     sizes = sorted(weights.get(m) or 0 for m in {r.get("model") for r in used})
-    out = [f"workbench savings, {when} (an estimate: `wb savings --share`)",
+    out = [f"workbench savings, {when} (`wb savings --share`)",
            f"- machine: {system}; GPU: {cards}",
            f"- local models: {len(sizes)}" + (" (" + ", ".join(gb(s) if s else "size unknown"
                                                               for s in sizes) + " of weights)"
@@ -301,7 +268,7 @@ def share(rows: list[dict], period: str, since: float, gpus: list[dict],
         return "\n".join(out + ["- no task to compare yet"])
     k = lambda n: f"{n / 1000:.0f}K"  # noqa: E731
     out.append(f"- tasks: {t['tasks']}; Claude used {k(t['claude'])} input-equivalent tokens, "
-               f"writing them itself ~{k(t['self_est'])} (estimate)"
+               f"writing them itself ~{k(t['self_est'])}"
                + (f"; handoff/self {t['claude'] / t['self_est']:.2f}" if t["self_est"] else ""))
     out.append(f"- {COUNTS}")
     s = score(t)  # the badge's number and its words, as the card says them (#101)
@@ -314,32 +281,14 @@ def share(rows: list[dict], period: str, since: float, gpus: list[dict],
     out.append("- by size: " + ", ".join(
         f"{size} {c / s:.2f} ({n})" if s else f"{size} discarded ({n})"
         for size, (n, c, s) in sorted(by.items())))
-    out.append(f"- GPU energy: {energy(t['wh'])}" if t["wh"] else "- GPU energy: not measured")
-    if t["remote"]:
-        out[-1] += f" ({t['remote']} task(s) on another machine's GPU, not measured)"
+    if t["wh"]:
+        out.append(f"- GPU energy: {energy(t['wh'])}")
     return "\n".join(out)
 
 
 # --- API tasks (#1022): their own line, beside the score, never in it ------------------------
 # Dollars are OpenCode's unit (Money.USD), so they carry a `$`; the electricity's cost doesn't
 # (the price is the user's own, #609, #845). Never netted against Claude's tokens.
-
-def usd(x: float) -> str:
-    """$0.42; a cent's fraction to two figures, written out ($0.0041, $0.00004: `:.2g` gave
-    $4e-05, #1022's review); a free model's $0. The pane's and the chat's `usd` say the same."""
-    from decimal import Decimal
-    if x == 0:
-        return "$0"
-    if abs(x) >= 0.01:
-        return f"${x:.2f}"
-    r = float(f"{x:.2g}")  # 0.009999 rounds to a cent: $0.01, not $0.010
-    return f"${r:.2f}" if abs(r) >= 0.01 else "$" + format(Decimal(repr(r)), "f")
-
-
-def money(x: float, b: str = "catalog") -> str:
-    """usd(), with `≈` in front of a catalog estimate (meter.basis, #1135); $0 is none."""
-    return ("≈" if b == meter.CATALOG and x else "") + usd(x)
-
 
 def provider_labels(pids) -> dict[str, str]:
     """Providers as OpenCode names them (hosted.json, as it is, read once: no catalog read), else
@@ -389,14 +338,14 @@ def spent(since: float = 0) -> dict:
 
 def api_totals(rows: list[dict], since: float = 0) -> dict:
     """The API rows measured after ``since``, trials and discards included (money spent is money
-    spent): tasks, the known dollars (`cost`), how many have no known cost (`unknown`; of them
-    `unrecorded`, a priced model whose figure never came back, #1106) or count against a plan
-    (`plan`), the trials among them, Claude's side (`claude`, `self_est`: weighted tokens,
+    spent): tasks, the known dollars (`cost`), how many have no known cost (`unknown`: no price,
+    or a priced model whose figure never came back, #1106, said alike, #1322) or count against a
+    plan (`plan`), the trials among them, Claude's side (`claude`, `self_est`: weighted tokens,
     side by side, never subtracted from the dollars), and the dollars by provider. Closed tasks
     only, by their close: the money by day is the ledger's (`spent`, #1094). `prices`, the total's
     and each provider's: meter.basis of the dollars (#1135)."""
     from .results import row_basis, row_cost
-    out = {"tasks": 0, "cost": 0.0, "unknown": 0, "unrecorded": 0, "plan": 0, "trials": 0,
+    out = {"tasks": 0, "cost": 0.0, "unknown": 0, "plan": 0, "trials": 0,
            "claude": 0, "self_est": 0, "by_provider": {}}
     for r in rows:
         if r.get("kind") != "api" or (r.get("ts") or 0) < since:
@@ -414,9 +363,6 @@ def api_totals(rows: list[dict], since: float = 0) -> dict:
         elif cost is None:
             out["unknown"] += 1
             p["unknown"] += 1
-            if api.get("source") == "unrecorded":
-                out["unrecorded"] += 1
-                p["unrecorded"] = p.get("unrecorded", 0) + 1
         else:
             out["cost"] += cost
             p["cost"] += cost
@@ -435,36 +381,19 @@ def api_totals(rows: list[dict], since: float = 0) -> dict:
     return out
 
 
-def _paid(row: dict) -> str:
-    from .results import row_cost
+def paid(row: dict) -> str:
+    """An API task's money at its close, for wb accept's and discard's line: `paid ≈$0.12`,
+    `paid: unknown` (no price, or no figure came back: said alike, #1322), `plan usage (…)`;
+    "" for a GPU task. Its Claude side isn't said there: a line of estimates on every close cost
+    Claude tokens and changed nothing it did (#1322)."""
+    from .results import row_basis, row_cost
+    if row.get("kind") != "api":
+        return ""
     api = row.get("api") if isinstance(row.get("api"), dict) else {}
-    pid = str(row.get("provider") or "?")
     if api.get("source") == "plan":
-        return f"plan usage ({api.get('plan') or pid})"
+        return f"plan usage ({api.get('plan') or row.get('provider') or '?'})"
     cost = row_cost(row)
-    if cost is None:  # by its cause: a priced model whose figure never came back has a price (#1106)
-        return ("paid: unknown (no figure recorded)" if api.get("source") == "unrecorded"
-                else "paid: unknown (no price for this model)")
-    from .results import row_basis
-    b = row_basis(row)  # ≈ and "catalog prices" unless the user set the model's (#1135)
-    return f"paid {provider_label(pid)} {money(cost, b)} ({row.get('model')}{NOTE_IN[b] if cost else ''})"
-
-
-NOTE_IN = {meter.CATALOG: ", catalog prices", meter.YOURS: ", your prices", meter.PROVIDER: ""}
-
-
-def api_line(row: dict) -> str:
-    """An API task's line at its close (line() gives it for one): Claude's side as line() says it,
-    then what the provider was paid, apart: claude: 56K · writing it yourself: ~59K (estimate) ·
-    paid DeepSeek ≈$0.12 (deepseek/deepseek-flash, catalog prices)."""
-    est = _compare(row)
-    k = lambda n: f"{n / 1000:.0f}K"  # noqa: E731
-    if est is None:
-        return _paid(row)
-    if row.get("outcome") == "discarded":
-        return f"claude: {k(est['claude'])} · discarded · {_paid(row)}"
-    return (f"claude: {k(est['claude'])} · writing it yourself: ~{k(est['self_est'])} (estimate) · "
-            f"{_paid(row)}")
+    return "paid: unknown" if cost is None else f"paid {money(cost, row_basis(row))}"
 
 
 def _priced(v: dict) -> bool:
@@ -473,37 +402,19 @@ def _priced(v: dict) -> bool:
 
 
 def unknown_parts(a: dict) -> list[str]:
-    """The tasks with no known cost, by cause: `N with no price` (the catalog has none) and `N
-    with no figure recorded` (a priced model whose figure never came back: it said "no price"
-    for a model the catalog prices, #1106, 2026-11-23)."""
-    late = a.get("unrecorded") or 0
-    return ([f"{a['unknown'] - late} with no price"] if a["unknown"] > late else []) \
-        + ([f"{late} with no figure recorded"] if late else [])
+    """The tasks with no known cost, in one wording whatever the cause (no price, or no figure
+    recorded: #1106's two texts, one since #1322)."""
+    return [f"{a['unknown']} with no known cost"] if a.get("unknown") else []
 
 
 def unpriced(v: dict) -> str:
-    """A provider with no known dollars: `plan usage`, `no price`, `no figure` (#1106), or
-    `unknown` when its tasks are both."""
-    if v.get("plan"):
-        return "plan usage"
-    late = v.get("unrecorded") or 0
-    return "no figure" if late and late == v["unknown"] else "unknown" if late else "no price"
+    """A provider with no known dollars: `plan usage` (a quota, not dollars), else `unknown`."""
+    return "plan usage" if v.get("plan") else "unknown"
 
 
 def money_of(v: dict) -> str:
     """A total's dollars with its `≈` (money, #1135): a row from before it is the catalog's."""
     return money(v["cost"], v.get("prices", meter.CATALOG))
-
-
-def note(a: dict) -> str:
-    """The basis said once with a line's dollars: `catalog prices`, `your prices`, or "" with no
-    dollars or the provider's own (#1135)."""
-    return meter.NOTE[a.get("prices", meter.CATALOG)].strip(" ()") if a.get("cost") else ""
-
-
-def inside(*parts: str) -> str:
-    """` (deepseek ≈$0.84, anthropic ≈$0.43; catalog prices)`: the parts given, "" with none."""
-    return f" ({'; '.join(p for p in parts if p)})" if any(parts) else ""
 
 
 def _by_provider(a: dict) -> str:
@@ -512,23 +423,14 @@ def _by_provider(a: dict) -> str:
 
 
 def _money(a: dict) -> str:
-    """The period's dollars, the tasks with no price, no figure and on a plan said apart: never
+    """The period's dollars, the tasks with no known cost and on a plan said apart: never
     `$0.00` for a task whose price is unknown."""
     known = a["tasks"] - a["unknown"] - a["plan"]
-    parts = [money_of(a) + inside(_by_provider(a), note(a))] if known else []
+    parts = [money_of(a) + (f" ({by})" if (by := _by_provider(a)) else "")] if known else []
     parts += unknown_parts(a)
     if a["plan"]:
         parts.append(f"{a['plan']} on plan usage")
     return " + ".join(parts)
-
-
-def _counts(a: dict) -> str:
-    """`--api`'s first line: the dollars and the tasks with no price or on a plan, without the
-    providers (its `by provider:` line says them, #1022's review)."""
-    known = a["tasks"] - a["unknown"] - a["plan"]
-    return ", ".join(([money_of(a) + (f" at {n}" if (n := note(a)) else "")] if known else [])
-                     + unknown_parts(a)
-                     + ([f"{a['plan']} on plan usage"] if a["plan"] else []))
 
 
 def api_summary(a: dict) -> str | None:
@@ -537,33 +439,32 @@ def api_summary(a: dict) -> str | None:
         return None
     k = lambda n: f"{n / 1000:.0f}K"  # noqa: E731
     return (f"api: {a['tasks']} task(s) · {_money(a)}"
-            + (f" · claude {k(a['claude'])} · writing it yourself ~{k(a['self_est'])} (estimate)"
+            + (f" · claude {k(a['claude'])} · writing it yourself ~{k(a['self_est'])}"
                if a["claude"] else ""))
 
 
 def api_report(a: dict, period: str, bench: dict | None = None, paid: dict | None = None) -> str:
-    """`wb savings --api`: the period's closed API tasks and their money by provider, what the
-    day ledger says was spent (``paid``, `spent`: open tasks and bench replays in) and by day, and
-    the bench's replays (their rows are bench/runs.jsonl's, not results')."""
+    """`wb savings --api`: the day ledger's dollars (``paid``, `spent`: open tasks and bench
+    replays in, as the day cap and the pane count them, #1094) with today's, by provider and by
+    day; the period's closed tasks counted (their dollars are --json's: a second total for the
+    same period that disagreed with the first, #1322); the bench's replays, already in the total."""
     when = {"week": "the last 7 days", "month": "the last 30 days", "all": "all time"}.get(period, period)
-    paid = paid or {"usd": 0.0, "today": 0.0, "by_day": {}}
+    paid = paid or {"usd": 0.0, "today": 0.0, "by_day": {}, "by_provider": {}}
     if not a["tasks"] and not (bench or {}).get("tasks") and not paid["by_day"]:
         return f"api, {when}: no API task"
+    b = paid.get("prices", meter.CATALOG)
     trial = f" (incl. {a['trials']} trial{'s' if a['trials'] > 1 else ''})" if a["trials"] else ""
-    out = [f"api, {when}: {a['tasks']} task(s) closed" + (f", {_counts(a)}" if a["tasks"] else "") + trial]
-    provs = sorted(a["by_provider"].items(), key=lambda kv: (-kv[1]["cost"], kv[0]))
-    if provs:
-        out.append("  by provider: " + " · ".join(
-            f"{p} " + (money_of(v) if _priced(v) else unpriced(v))
-            + f" ({v['tasks']})"
-            for p, v in provs))
-    if paid["by_day"]:  # the ledger's: what the day cap and the pane count (#1094)
-        b = paid.get("prices", meter.CATALOG)
-        out.append(f"  spent: {money(paid['usd'], b)}, {money(paid['today'], b)} today (the "
-                   f"day ledger: open tasks and bench replays in{NOTE_IN[b]})")
+    closed = ", ".join([f"{a['tasks']} task(s) closed{trial}", *unknown_parts(a),
+                        *([f"{a['plan']} on plan usage"] if a["plan"] else [])]) if a["tasks"] else ""
+    # the ledger's dollars when it booked any: a plan-only week never reads `$0` (#1022's review)
+    spent_ = f"{money(paid['usd'], b)} ({money(paid['today'], b)} today)" if paid["by_day"] else ""
+    out = [f"api, {when}: " + " · ".join(x for x in (spent_, closed) if x)]
+    if provs := [(p, v) for p, v in sorted((paid.get("by_provider") or {}).items(), key=lambda kv: -kv[1]) if v]:
+        out.append("  by provider: " + " · ".join(f"{p} {money(v, b)}" for p, v in provs))
+    if paid["by_day"]:
         out.append("  by day: " + " · ".join(f"{d[5:]} {money(v, b)}" for d, v in paid["by_day"].items()))
     if bench and bench.get("tasks"):
         out.append(f"  bench replays: {money(bench['cost'], bench.get('prices', meter.CATALOG))} "
                    f"({bench['tasks']})"
-                   + (f" + {bench['unknown']} with no price" if bench.get("unknown") else ""))
+                   + (f" + {bench['unknown']} with no known cost" if bench.get("unknown") else ""))
     return "\n".join(out)

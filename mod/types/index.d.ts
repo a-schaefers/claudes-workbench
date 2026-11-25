@@ -81,7 +81,7 @@ export type WbLive = { task: string; lines: WbLine[] }
 export type WbChat = { key: string; delegating: boolean; url: string; web: boolean }
 
 /** The pane's view: its tab ('tasks', 'stats' or 'settings'), the settings row open ('' none,
- * 'coding', 'chat', 'record', 'live', 'every', 'progress', 'splash', 'probe', and #1023's 'agents', 'busy',
+ * 'coding', 'chat', 'progress', 'splash', 'probe', and #1023's 'agents', 'busy',
  * 'workflows', 'role-<role>', 'gpu-<role>', 'size-<model id>', 'api-<role>', 'think-<role>'; #1047's
  * 'media-image|speech|sfx|music'), the option the focus ring is on ('' none),
  * so its sentence shows, and whether the user closed it (a strip above the prompt stands in for it). */
@@ -96,8 +96,9 @@ export type WbRoutes = {
   use: 'gpu' | 'api' | 'both'
   busy: 'wait' | 'api'
   day_usd: number | null
+  /** `thinks`: what the role's API model does with each thinking setting (routes.with_thinks, #1263) */
   roles: Record<'significant' | 'trivial' | 'writing', { via: 'gpu' | 'api'; gpu: string; api?: string;
-    thinking: 'off' | 'on'; label: string }>
+    thinking: 'off' | 'on'; label: string; thinks?: { api: string; off: string; on: string } }>
   /** `prices`: the dollars' basis (meter.basis, #1135): catalog (an estimate, ≈), yours (wb model price), provider */
   spend_today: { usd: number; prices?: 'catalog' | 'yours' | 'provider'; by_provider: Record<string, number> }
   // runs: a key in the environment the keyhole reads (#1189), which runs tasks as a stored one does;
@@ -125,7 +126,7 @@ export type WbMedia = { default: string | null; engines: { name: string; gpu: bo
 
 /** The Stats tab's history: `wb stats --json` as last read (null before the first read), and the
  * key of the files it was read from (results.jsonl, stats.json, optimize.json, bench/runs.jsonl,
- * speed.json and savings.json: size and mtime). */
+ * speed.json: size and mtime). */
 export type WbStats = { key: string; feed: Record<string, any> | null }
 
 /** The Stats tab's live view (#408): `wb top --json`'s newest tick (null before the first), and
@@ -142,8 +143,6 @@ declare module 'claude-code' {
   interface PluginState {
     workbench: {
       tasks: Shaped<WbTask[]>; live: Shaped<WbLive>; chat: Shaped<WbChat>; sessions: Shaped<string[]>
-      /** the pane's footer: the week's saving, `savedLine` of `wb savings --json` ('' for none) */
-      savings: Shaped<string>
       /** the pane's settings rows (WbPane) */
       pane: Shaped<WbPane>
       /** the Stats tab's history (WbStats, #406) */

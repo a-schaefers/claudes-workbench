@@ -45,5 +45,5 @@ for clone in "$listed" "${cache:+$cache/marketplaces/workbench}" "$config/plugin
     fi
 done
 
-echo "wb: workbench's marketplace clone isn't in known_marketplaces.json or at ${cache:-$config/plugins}/marketplaces/workbench: claude plugin marketplace add a-schaefers/claudes-workbench" >&2
+echo "wb: workbench's marketplace clone isn't in known_marketplaces.json or at ${cache:-$config/plugins}/marketplaces/workbench: claude plugin marketplace add a-schaefers/workbench" >&2
 exit 127

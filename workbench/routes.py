@@ -23,7 +23,6 @@ from __future__ import annotations
 import copy
 import json
 import os
-import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +30,10 @@ from typing import Callable
 
 from . import store
 from .privacy import FREE_LINE, OPENROUTER  # OPENROUTER: the provider whose roles keep an `order` (#1021)
+# An OpenRouter role with no `order`: OpenRouter picks the backend by its own and the user's
+# account settings, no fallbacks (keyhole.route_body). Said in the dialog, never refused: wb
+# once refused it until Claude asked the user which backends, before a dialog that asks anyway.
+OPENROUTER_ANY = "via OpenRouter to its choice of backend"
 
 ROLES = ("significant", "trivial", "writing")
 # how the pane names them (#1023); files and commands keep the role names
@@ -49,8 +52,8 @@ USE_NAMES = {"gpu": "GPU", "api": "API", "both": "Both"}  # as the dialog and th
 AGENTS_GPU = "Agents is GPU, so nothing spends"
 AGENTS_STOPS = "an API task already started stops before its next round"  # the change line's clause
 AGENTS_BACK = "Ask the user: Agents back to Both or API (wb route all both)"
-# When the GPU is busy (#1023, the owner's opt-in): routes.json `busy`, missing is "wait" (queue, or
-# exit 4, as before); "api" starts a role that has an API model on it instead, at wb start only (a
+# When the GPU is busy (#1023, the owner's opt-in): routes.json `busy`, missing is "wait" (queue, as
+# before); "api" starts a role that has an API model on it instead, at wb start only (a
 # running task never moves, nor does anything go from API to the GPU, but by the role's fallback,
 # #1196). Agents GPU overrides it.
 BUSY = ("wait", "api")
@@ -60,7 +63,7 @@ AUTO = "auto"  # the GPU model the router picks: today's behaviour, the default
 BY = ("dialog", "pane", "terminal", "claude")  # who made a role's last change (`by`, `gpu_by`)
 STAMPS = ("said", "by", "ts", "gpu_by", "gpu_ts")  # a role's record of its changes (stamp)
 CAP_OFF = "off"  # `wb route cap off`: no day cap (#1023), refused while anything can spend
-DAY_USD_SUGGEST = 5  # the dialog's and the first run's suggestion only: there is no default cap
+DAY_USD_SUGGEST = 5  # the cap the first API role takes unless --day-usd gives one (#1322)
 ROUTE_OK = "route-ok.json"  # $WB_HOME/route-ok.json: the mod's dialog approved this one change
 ROUTE_OK_SECS = 120  # the dialog's yes is for the call it let through, run at once, as SEND_OK_SECS
 NO_CAP = (f"no day cap yet: ask the user for one (suggest ${DAY_USD_SUGGEST}), then add "
@@ -75,6 +78,14 @@ FALLBACK_LINE = "on the role's fallback, as you set"  # wb start's line and the 
 
 class RoutesError(RuntimeError):
     """routes.json can't be read, or a change can't be made; the message says why."""
+
+
+class _NoCap(RoutesError):
+    """A change that can spend with no day cap: change() makes it again with DAY_USD_SUGGEST as
+    its cap, said in its one line (#1322), unless the change itself took the cap off."""
+
+    def __init__(self):
+        super().__init__(NO_CAP)
 
 
 def path() -> Path:
@@ -127,7 +138,7 @@ def normalize(doc) -> dict:
         if row["via"] == "api" and not row.get("api"):
             raise RoutesError(f"{r} is on API with no api model")
         # an OpenRouter role's backends (wb route --order, #1021): the keyhole routes every
-        # request to them alone, and the start's where-note names them
+        # request to them alone
         if e.get("order") is not None:
             order = e["order"]
             if not isinstance(order, list) or not all(isinstance(b, str) and b.strip() for b in order):
@@ -141,6 +152,11 @@ def normalize(doc) -> dict:
         for key in STAMPS:
             if key in e:
                 row[key] = e[key]
+        # what its API model does with thinking (with_thinks, #1263): wb's own record, read
+        # again on every change, so a malformed one is left out rather than refused
+        t = e.get("thinks")
+        if isinstance(t, dict) and all(isinstance(t.get(k), str) for k in ("api", "off", "on")):
+            row["thinks"] = {k: t[k] for k in ("api", "off", "on")}
         out[r] = row
     use = doc.get("use", "both")
     if use not in USES:
@@ -213,14 +229,71 @@ def _sent(doc: dict, role: str, mid: str | None) -> tuple:
     return mid, tuple(order or ())
 
 
-def _thinking_on(roles: list, doc: dict) -> list:
+def plain_thinks(mid: str, thinking: str) -> str:
+    """change()'s ``thinks`` with no catalog to ask: the role's setting as it is."""
+    return f"thinking {thinking}"
+
+
+def thinking_of(m, thinking: str) -> str:
+    """What API model ``m`` does with the role's ``thinking`` (off or on), as its task will run
+    it: runner.thinking_variant's line (task.json `thinking_shown`). The dialog, the start line
+    and task.json's route said the role's setting, `thinking off`, for a model that can't turn it
+    off (Anthropic's adaptive ones with no `none`), so the user agreed to no reasoning and paid for
+    it (#1237, 2026-11-24)."""
+    from . import runner  # it imports far more than routes needs at its import, as resolve's
+    return runner.thinking_variant(m, thinking)[1]
+
+
+def model_thinks(m) -> dict:
+    """A role's `thinks` record for API model ``m``: what it does with each thinking setting
+    (thinking_of), and which model that was said of (`api`)."""
+    return {"api": m.id, "off": thinking_of(m, "off"), "on": thinking_of(m, "on")}
+
+
+def with_thinks(doc: dict, cached: bool = True) -> dict:
+    """``doc`` with each role's `thinks` read again from the catalog (model_thinks) for its API
+    model. wb writes it with every change (cli._route_apply) so a reader with no catalog, the
+    mod's routesSummary, says what the model does (#1263). A model the catalog doesn't list now
+    keeps a record said of it (`api` its id) and loses any other: hosted.json holds no models
+    for DOWN_SECS after a failed read, and dropping the record then said `thinking off` again,
+    and wrote that to routes.json with any change, one to another role too (#1263's review,
+    2026-11-24); thinking_said reads a record only while its `api` is the role's."""
+    from . import models
+    for row in doc["roles"].values():
+        m = models.lookup(row["api"], cached=cached) if row.get("api") else None
+        if m is not None and m.kind == "api":
+            row["thinks"] = model_thinks(m)
+        elif m is not None or not row.get("api") or (row.get("thinks") or {}).get("api") != row["api"]:
+            row.pop("thinks", None)
+    return doc
+
+
+def thinking_said(row: dict) -> str:
+    """What a role's thinking does on its API model: its `thinks` record (with_thinks') for the
+    setting, else the setting as it is. Every view of a role's thinking says this one line (the
+    mod's routesSummary the same: Couplings): the roles listing, its summary, the pane and wb scout
+    said `thinking off` for a model that can't turn it off after #1237 fixed the dialog and the
+    start line, so the user kept a model that thinks and paid for it (#1263, 2026-11-24)."""
+    t = row.get("thinks")
+    if isinstance(t, dict) and t.get("api") == row.get("api") and isinstance(t.get(row["thinking"]), str):
+        return t[row["thinking"]]
+    return plain_thinks(row.get("api") or "", row["thinking"])
+
+
+def _thinking_on(roles: list, doc: dict, thinks: Callable[[str, str], str] = plain_thinks) -> list:
     """`thinking on (trivial)`, for those of ``roles`` (the ones a change newly sends to an API
-    model) whose thinking is on, as a clause list ([] for none). Thinking can be turned on with no
-    dialog while a role's API side is dormant (on the GPU, or no API model yet): the yes that
-    later sends its code there must name it, or API tasks bill reasoning tokens nobody agreed to
-    (#1177, 2026-11-24). Off, the default, costs nothing and goes unsaid."""
-    on = [r for r in roles if doc["roles"][r]["thinking"] == "on"]
-    return [f"thinking on ({', '.join(on)})"] if on else []
+    model) that will think, as a clause list ([] for none): what ``thinks`` says the model does.
+    Thinking can be turned on with no dialog while a role's API side is dormant (on the GPU, or no
+    API model yet): the yes that later sends its code there must name it, or API tasks bill
+    reasoning tokens nobody agreed to (#1177, 2026-11-24); so must a model that thinks with the
+    role's off (#1237). Off, the default, costs nothing and goes unsaid."""
+    said: dict[str, list] = {}
+    for r in roles:
+        row = doc["roles"][r]
+        text = thinks(row["api"], row["thinking"])
+        if not text.startswith("thinking off"):
+            said.setdefault(text, []).append(r)
+    return [f"{text} ({', '.join(rs)})" for text, rs in said.items()]
 
 
 def _free_part(roles: list, doc: dict, free: Callable[[str], bool]) -> list:
@@ -234,7 +307,7 @@ def _free_part(roles: list, doc: dict, free: Callable[[str], bool]) -> list:
 
 def _priced(roles: list, doc: dict, free: Callable[[str], bool]) -> bool:
     """Whether any of ``roles`` runs on an API model that isn't free (or on none yet): the day
-    cap is asked for (NO_CAP) only then, a free model having nothing for it to keep (#1193)."""
+    cap is taken (DAY_USD_SUGGEST when none) only then, a free model having nothing for it to keep (#1193)."""
     return not roles or any(not free(doc["roles"][r].get("api") or "") for r in roles)
 
 
@@ -244,7 +317,8 @@ def busy_routed(doc: dict, role: str, m) -> dict:
     from . import models
     row = doc["roles"][role]
     return {"via": "api", "role": role, "provider": m.provider, "provider_name": models.provider_name(m),
-            "thinking": row["thinking"], "said": row.get("said") or "", "said_ts": row.get("ts"), "busy": True,
+            "thinking": row["thinking"], "thinking_shown": thinking_of(m, row["thinking"]),
+            "said": row.get("said") or "", "said_ts": row.get("ts"), "busy": True,
             # an OpenRouter role's backends, as resolve's: the keyhole routes by them (wave 2's merge)
             **({"order": list(row["order"])} if row.get("order") and m.provider == OPENROUTER else {})}
 
@@ -308,10 +382,12 @@ def fallback_pick(doc: dict, role: str, size: str, stack, name: str | None, prim
     return m, state, f"{routed_line(m.id, routed)} · {FALLBACK_LINE}", routed
 
 
-def _fallback_part(old: dict, row: dict, cap, who: Callable[[str], str]) -> tuple[list, bool]:
+def _fallback_part(old: dict, row: dict, cap, who: Callable[[str], str],
+                   thinks: Callable[[str, str], str] = plain_thinks) -> tuple[list, bool]:
     """A role's fallback clauses (#1196) and whether they take the user's yes: an API fallback set
     or changed sends the role's code to its provider whenever the role's own is down or out of
-    credit, so it takes the yes and a day cap (NO_CAP); `gpu` or none sends nothing anywhere new."""
+    credit, so it takes the yes and a day cap (DAY_USD_SUGGEST when none, #1322); `gpu` or none
+    sends nothing anywhere new."""
     was, now = old.get("fallback"), row.get("fallback")
     if was == now:
         return [], False
@@ -322,14 +398,15 @@ def _fallback_part(old: dict, row: dict, cap, who: Callable[[str], str]) -> tupl
         return [f"fallback {before} → {fallback_name(now, row['gpu'])} when its API model's provider is down "
                 "or out of credit"], False
     if cap is None:
-        raise RoutesError(NO_CAP)
+        raise _NoCap()
     return [f"fallback {before} → {now}: your code goes to {who(now)} when its API model's provider is down "
-            "or out of credit", f"thinking {row['thinking']}", f"cap {money(cap)}/day"], True
+            "or out of credit", thinks(now, row["thinking"]), f"cap {money(cap)}/day"], True
 
 
-def _busy_part(doc: dict, new: dict, cap, free: Callable[[str], bool] = lambda mid: False) -> tuple[str, bool]:
+def _busy_part(doc: dict, new: dict, cap, free: Callable[[str], bool] = lambda mid: False,
+               thinks: Callable[[str, str], str] = plain_thinks) -> tuple[str, bool]:
     """The busy row's part of the change line: ('', False) when it is as it was; to api takes the
-    user's yes (it can spend), and a day cap first (NO_CAP) unless every API model is free; back
+    user's yes (it can spend), and a day cap (DAY_USD_SUGGEST when none) unless every API model is free; back
     to wait none."""
     was, now = doc.get("busy", "wait"), new.get("busy", "wait")
     if was == now:
@@ -338,9 +415,9 @@ def _busy_part(doc: dict, new: dict, cap, free: Callable[[str], bool] = lambda m
         return "When the GPU is busy: the role's API model → wait (queue, as before)", False
     has = [r for r in ROLES if new["roles"][r].get("api")]
     if cap is None and _priced(has, new, free):
-        raise RoutesError(NO_CAP)
+        raise _NoCap()
     what = ([f"a role with an API model ({', '.join(has)}) starts on it while the GPU is busy",
-             *_thinking_on(has, new), *_free_part(has, new, free)]
+             *_thinking_on(has, new, thinks), *_free_part(has, new, free)]
             if has else ["no role has an API model yet, so nothing changes until one does"])
     capped = f"; cap {money(cap)}/day" if cap is not None else ""
     return f"When the GPU is busy: wait → the role's API model ({'; '.join(what)}{capped})", True
@@ -420,12 +497,20 @@ class Change:
 
 
 def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str],
-               new: dict, free: Callable[[str], bool] = lambda mid: False) -> tuple[list, bool]:
+               new: dict, free: Callable[[str], bool] = lambda mid: False,
+               thinks: Callable[[str, str], str] = plain_thinks) -> tuple[list, bool]:
     """``r``'s clauses of the change line and whether they take the user's yes. ``new``: the
     document after the change (its `use` and `busy`), so what the role's code does is judged by
     where it actually goes: with Agents on API, or the busy opt-in on, a role whose own `via` is
     gpu still runs on its API model, and thinking turned on there billed reasoning tokens with no
     dialog (#1149, 2026-11-24)."""
+    if new.get("use") == "api" and old["via"] != row["via"]:
+        # Agents on API holds over only the role's own side (#1016): its API model, thinking and
+        # backends are what its next start runs on, so they are said as if the role kept its side,
+        # and the side as held (_held's `the move of ...`). Said as one held move, a new model
+        # read as waiting for Both while the next start spent on it (#1236, 2026-11-24)
+        clauses, _ = _role_part(r, old, {**row, "via": old["via"]}, cap, who, new, free, thinks)
+        return [*clauses, f"{_side(old)} → {_side(row)}"], True
     clauses, gated = [], False
     on_api = row["via"] == "api"
     after = {**new, "roles": {**new["roles"], r: row}}
@@ -437,9 +522,11 @@ def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str],
         if on_api:
             clauses += [f"your code goes to {who(row['api'])}",
                         *([FREE_LINE] if free(row["api"]) else []),  # what the yes is to (#1193)
-                        f"thinking {row['thinking']}"]
+                        thinks(row["api"], row["thinking"])]
             if row.get("order"):  # an OpenRouter role's backends (#1021): part of what is agreed to
                 clauses.append(f"backends {', '.join(row['order'])}")
+            elif str(row["api"]).split("/", 1)[0] == OPENROUTER:  # none named: OpenRouter's pick (#1322)
+                clauses.append(OPENROUTER_ANY)
             if (fb := row.get("fallback")) and fb == old.get("fallback"):  # a kept one (#1196)
                 clauses.append(f"fallback {fallback_name(fb, row['gpu'])}"
                                + (f" ({who(fb)})" if fb != FALLBACK_GPU else ""))
@@ -457,19 +544,27 @@ def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str],
         now = effective_via(after, r) == "api"
         clauses.append(f"API model {old.get('api') or 'none'} → {row['api']} ({who(row['api'])}), "
                        + ("used from the next start" if now else "used once it goes to API"))
-        if now and old["thinking"] == row["thinking"] == "on":  # else the thinking clause says it
-            clauses.append("thinking on")  # turned on with no dialog before it had a model (#1177)
+        # else the thinking clause says it: turned on with no dialog before it had a model
+        # (#1177), or a model that thinks with the role's off (#1237)
+        does = thinks(row["api"], row["thinking"])
+        if now and old["thinking"] == row["thinking"] and not does.startswith("thinking off"):
+            clauses.append(does)
         if now and free(row["api"]):  # once it goes to API, that change's line says it (#1193)
             clauses.append(FREE_LINE)
     if old["gpu"] != row["gpu"] and not (moved and not on_api):
         clauses.append(f"GPU model {_gpu_name(old['gpu'])} → {_gpu_name(row['gpu'])}")
     if old["thinking"] != row["thinking"] and not (moved and on_api):
-        clauses.append(f"thinking {old['thinking']} → {row['thinking']}")
+        # what the model does with it (#1237): `thinking off → on (effort high)`, or `thinking on
+        # → off: thinking as the model's default (…)` for one that can't turn it off
+        new_said = plain_thinks("", row["thinking"])
+        does = thinks(row["api"], row["thinking"]) if row.get("api") else new_said
+        clauses.append(f"thinking {old['thinking']} → " + (does.removeprefix("thinking ") if does.startswith(new_said)
+                                                          else f"{row['thinking']}: {does}"))
         gated |= on_api or sends
     if row.get("order") and old.get("order") != row["order"] and not (moved and on_api):
         clauses.append(f"backends {', '.join(old.get('order') or ['none'])} → {', '.join(row['order'])}")
         gated = True  # where the code goes, within OpenRouter (#1021)
-    more, g = _fallback_part(old, row, cap, who)
+    more, g = _fallback_part(old, row, cap, who, thinks)
     return clauses + more, gated or g
 
 
@@ -482,7 +577,8 @@ def _goes_to(roles: list, doc: dict, who: Callable[[str], str]) -> str:
 
 
 def _agents_part(doc: dict, new: dict, cap, who: Callable[[str], str],
-                 free: Callable[[str], bool] = lambda mid: False) -> tuple[str, bool, list]:
+                 free: Callable[[str], bool] = lambda mid: False,
+                 thinks: Callable[[str, str], str] = plain_thinks) -> tuple[str, bool, list]:
     """The Agents switch's part of the change line (#1016): ('', False, []) when `use` is as it
     was; else the clause, whether it takes the user's yes (to API, or to Both when that puts a
     role back on its API model; never to GPU) and the roles whose side it moves."""
@@ -501,7 +597,7 @@ def _agents_part(doc: dict, new: dict, cap, who: Callable[[str], str],
     else:
         what = ["each role as set: " + ", ".join(f"{r} {_side(new['roles'][r])}" for r in ROLES)]
     if to_api:
-        what += [_goes_to(to_api, new, who), *_free_part(to_api, new, free), *_thinking_on(to_api, new)]
+        what += [_goes_to(to_api, new, who), *_free_part(to_api, new, free), *_thinking_on(to_api, new, thinks)]
         if cap is not None:
             what.append(f"cap {money(cap)}/day")
     # to Both only when it newly puts a role on API (from GPU): from API it sends nothing new
@@ -509,20 +605,55 @@ def _agents_part(doc: dict, new: dict, cap, who: Callable[[str], str],
     return f"Agents: {USE_NAMES[was]} → {USE_NAMES[use]} ({'; '.join(what)})", gated, moved
 
 
+def _held(doc: dict, new: dict, roles: list, chose: bool) -> str:
+    """What the Agents switch holds over of ``roles``' own change, '' for none; ``chose``: the
+    change set a side or an API model. Agents on GPU holds all of it (a role's API side is
+    dormant there); Agents on API only the roles' moves between GPU and API, as their next start
+    runs on their API model already (#1236, 2026-11-24)."""
+    use = new.get("use", "both")
+    if use == "gpu" and roles and chose:
+        return "Agents is GPU, so this applies once Agents is Both (wb route all both)"
+    moved = [r for r in roles if doc["roles"][r]["via"] != new["roles"][r]["via"]] if use == "api" else []
+    if not moved:
+        return ""
+    to = ", ".join(f"{r} to {'API' if new['roles'][r]['via'] == 'api' else 'the GPU'}" for r in moved)
+    return (f"Agents is API, so the move{'s' if len(moved) > 1 else ''} of {to} "
+            f"appl{'y' if len(moved) > 1 else 'ies'} once Agents is Both (wb route all both)")
+
+
 def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None = None,
            api: str | None = None, thinking: str | None = None, day_usd=None,
            who: Callable[[str], str] = lambda mid: mid.split("/", 1)[0], use: str | None = None,
            order: list[str] | None = None, busy: str | None = None, fallback: str | None = None,
-           free: Callable[[str], bool] = lambda mid: False) -> Change:
+           free: Callable[[str], bool] = lambda mid: False,
+           thinks: Callable[[str, str], str] = plain_thinks) -> Change:
     """What a `wb route` does to ``doc``: ``role`` one of ROLES, "all" (``use``, the Agents
     switch, and ``thinking`` only) or None (the cap alone). ``who``: an API id's provider, as the
-    user knows it (the catalog's name). Never writes. RoutesError for a change that can't be
-    made: `api` with no API model kept, and the first API role with no cap (NO_CAP). ``order``:
-    an OpenRouter role's backends (#1021), dropped when the role's API model is another
-    provider's. ``free``: whether an API id is a free model (meter.is_free): its role's line says
-    FREE_LINE, and no cap is asked while every model newly on API is free (#1193). ``fallback``
-    (#1196): an API id, FALLBACK_GPU, or FALLBACK_OFF to clear it; an API one that is the role's
-    own API model, on the same provider, or OpenRouter's is refused."""
+    user knows it (the catalog's name); ``thinks``: what an API id does with a thinking setting,
+    as its task would run it (thinking_of, #1237). Never writes. RoutesError for a change that can't be
+    made: `api` with no API model kept. The first API role with no cap takes DAY_USD_SUGGEST as
+    the change's cap, in its line (`cap $5/day`), so the dialog's one yes sets both: it was a
+    refusal (NO_CAP) whose answer was always --day-usd 5 (#1322); with the cap taken off in
+    this change it is still refused. ``order``: an OpenRouter role's backends (#1021), dropped
+    when the role's API model is another provider's. ``free``: whether an API id is a free model
+    (meter.is_free): its role's line says FREE_LINE, and no cap is taken while every model newly
+    on API is free (#1193). ``fallback`` (#1196): an API id, FALLBACK_GPU, or FALLBACK_OFF to
+    clear it; an API one that is the role's own API model, on the same provider, or OpenRouter's
+    is refused."""
+    args = dict(role=role, via=via, gpu=gpu, api=api, thinking=thinking, who=who, use=use,
+                order=order, busy=busy, fallback=fallback, free=free, thinks=thinks)
+    try:
+        return _change(doc, day_usd=day_usd, **args)
+    except _NoCap:
+        if day_usd is not None:
+            raise
+    return _change(doc, day_usd=DAY_USD_SUGGEST, **args)
+
+
+def _change(doc: dict, role: str | None, via: str | None, gpu: str | None, api: str | None,
+            thinking: str | None, day_usd, who: Callable[[str], str], use: str | None,
+            order: list[str] | None, busy: str | None, fallback: str | None,
+            free: Callable[[str], bool], thinks: Callable[[str, str], str]) -> Change:
     new = copy.deepcopy(doc)
     new.setdefault("use", "both")
     if day_usd is not None:
@@ -560,19 +691,16 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
             raise RoutesError(f"{r} has no API model yet: wb route {r} <provider/model>")
         if via is not None:
             row["via"] = via
-        clauses, g = _role_part(r, old, row, cap, who, new, free)
+        clauses, g = _role_part(r, old, row, cap, who, new, free, thinks)
         if not clauses:
             continue
         parts.append(f"{r}: " + " · ".join(clauses))
         gated |= g
         changed.append(r)
         new["roles"][r] = row  # its stamps kept: stamp() renews the side this change touched
-    held = new["use"]
-    if changed and role != "all" and held != "both" and (
-            via is not None or held == "gpu" and api is not None):
-        # the role's own choice, which the Agents switch holds over for now: never read as moved
-        parts.append(f"Agents is {USE_NAMES[held]}, so this applies once Agents is Both (wb route all both)")
-    agents, g, moved = _agents_part(doc, new, cap, who, free)
+    if changed and role != "all" and (held := _held(doc, new, changed, via is not None or api is not None)):
+        parts.append(held)  # the role's own choice, which the Agents switch holds over for now
+    agents, g, moved = _agents_part(doc, new, cap, who, free, thinks)
     if agents:
         parts.insert(0, agents)
         gated |= g
@@ -581,11 +709,12 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
     newly = [r for r in ROLES if effective_via(new, r) == "api" and new["roles"][r].get("api")
              and (effective_via(doc, r) != "api" or doc["roles"][r].get("api") != new["roles"][r].get("api"))]
     to_api = bool(newly)
-    # every one on a free model: no cap to ask for, as the guard keeps none for it (#1193); a
-    # priced model set later asks then
+    # every one on a free model: no cap to take, as the guard keeps none for it (#1193); a
+    # priced model set later takes one then
     if to_api and cap is None and _priced(newly, new, free):
-        raise RoutesError(NO_CAP)
-    busy_line, g = _busy_part(doc, new, cap, free)
+        raise _NoCap()
+    busy_line, g = _busy_part(doc, new, cap, free, thinks)
+    capped = to_api or g  # a line that says "cap $N/day" already
     if busy_line:
         parts.append(busy_line)
         gated |= g
@@ -595,12 +724,12 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
         # (2026-11-23 review: `wb route all both` re-enabled it with no dialog, and a role's API
         # model set after `cap off` spent with no cap)
         if cap is None and _priced(busy_now, new, free):
-            raise RoutesError(NO_CAP)
-        said = [_goes_to(busy_now, new, who), *_free_part(busy_now, new, free), *_thinking_on(busy_now, new),
-                *([f"cap {money(cap)}/day"] if cap is not None else [])]
+            raise _NoCap()
+        said = [_goes_to(busy_now, new, who), *_free_part(busy_now, new, free),
+                *_thinking_on(busy_now, new, thinks), *([f"cap {money(cap)}/day"] if cap is not None else [])]
         parts.append(f"when the GPU is busy, {', '.join(busy_now)} {'starts' if len(busy_now) == 1 else 'start'} "
                      f"on {'its' if len(busy_now) == 1 else 'their'} API model ({'; '.join(said)})")
-        gated = True
+        gated = capped = True
     if cap is None and doc["day_usd"] is not None:  # `wb route cap off` (#1023): never under an API role
         if spends := [r for r in ROLES if effective_via(new, r) == "api"] + (["busy"] if busy_api_any(new) else []):
             raise RoutesError(f"the day cap stays while {', '.join(spends)} can spend on API: put "
@@ -609,7 +738,8 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
         gated = True
     elif cap != doc["day_usd"]:
         gated = True
-        if doc["day_usd"] is not None or not to_api:  # else the role's "cap $N/day" said it
+        # else the role's, its fallback's or busy's "cap $N/day" said it
+        if doc["day_usd"] is not None or not (capped or f"cap {money(cap)}/day" in "; ".join(parts)):
             parts.append(f"day cap {money(doc['day_usd']) if doc['day_usd'] is not None else 'none'}"
                          f" → {money(cap)}/day")
     if not changed and not agents and not busy_line and cap == doc["day_usd"]:
@@ -634,7 +764,8 @@ def _fallback_check(r: str, fb: str, api: str | None) -> None:
 
 def change_pairs(doc: dict, pairs: list, day_usd=None,
                  who: Callable[[str], str] = lambda mid: mid.split("/", 1)[0],
-                 free: Callable[[str], bool] = lambda mid: False) -> Change:
+                 free: Callable[[str], bool] = lambda mid: False,
+                 thinks: Callable[[str, str], str] = plain_thinks) -> Change:
     """Several roles in one change, one line and one yes (#1024: the first run's question):
     ``pairs`` [(role, via, api)] each as change() takes them, ``day_usd`` the cap for all. All or
     nothing: RoutesError for any pair change() refuses. The line: each role's move, then where
@@ -642,7 +773,7 @@ def change_pairs(doc: dict, pairs: list, day_usd=None,
     significant: GPU → API b · your code goes to DeepSeek · thinking off · cap $5/day`."""
     new, roles, gated = doc, [], False
     for i, (r, via, api) in enumerate(pairs):
-        ch = change(new, r, via=via, api=api, day_usd=day_usd if i == 0 else None, who=who, free=free)
+        ch = change(new, r, via=via, api=api, day_usd=day_usd if i == 0 else None, who=who, free=free, thinks=thinks)
         new, gated = ch.doc, gated or ch.gated
         roles += [x for x in ch.roles if x not in roles]
     cap = new["day_usd"]
@@ -651,10 +782,10 @@ def change_pairs(doc: dict, pairs: list, day_usd=None,
     parts, sent = [], []
     for r in roles:
         old, row = doc["roles"][r], new["roles"][r]
-        clauses, _ = _role_part(r, old, row, cap, who, new, free)
+        clauses, _ = _role_part(r, old, row, cap, who, new, free, thinks)
         if row["via"] == "api" and (old["via"] != "api" or old.get("api") != row.get("api")):
             sent.append(r)  # said once for all below, not per role
-            once = {f"your code goes to {who(row['api'])}", f"thinking {row['thinking']}", FREE_LINE}
+            once = {f"your code goes to {who(row['api'])}", thinks(row["api"], row["thinking"]), FREE_LINE}
             # no cap with only free models (#1193): nothing to leave out, and money(None) raised
             clauses = [c for c in clauses if c not in once and (cap is None or c != f"cap {money(cap)}/day")]
         parts.append(f"{r}: " + " · ".join(clauses))
@@ -664,15 +795,15 @@ def change_pairs(doc: dict, pairs: list, day_usd=None,
             by.setdefault(who(new["roles"][r]["api"]), []).append(r)
         parts.append(f"your code goes to {next(iter(by))}" if len(by) == 1 else _goes_to(sent, new, who))
         parts += _free_part(sent, new, free)
-        think = {new["roles"][r]["thinking"] for r in sent}
-        parts.append(f"thinking {think.pop()}" if len(think) == 1 else
-                     "thinking " + ", ".join(f"{new['roles'][r]['thinking']} ({r})" for r in sent))
+        does = {r: thinks(new["roles"][r]["api"], new["roles"][r]["thinking"]) for r in sent}
+        parts.append(next(iter(does.values())) if len(set(does.values())) == 1 else
+                     "thinking " + ", ".join(f"{t.removeprefix('thinking ')} ({r})" for r, t in does.items()))
         if cap is not None:
             parts.append(f"cap {money(cap)}/day")
     if cap != doc["day_usd"] and (doc["day_usd"] is not None or not sent):
         parts.append(f"day cap {money(doc['day_usd']) if doc['day_usd'] is not None else 'none'} → {money(cap)}/day")
-    if roles and new.get("use", "both") != "both":
-        parts.append(f"Agents is {USE_NAMES[new['use']]}, so this applies once Agents is Both (wb route all both)")
+    if held := _held(doc, new, roles, True):
+        parts.append(held)
     return Change(new, " · ".join(parts), gated, roles)
 
 
@@ -699,7 +830,7 @@ def summary(doc: dict) -> str:
         # the role's fallback (#1196): where its code may go too, so a change of it alone is a row
         fb = f", fallback {'GPU' if row['fallback'] == FALLBACK_GPU else row['fallback']}" if row.get("fallback") else ""
         if row["via"] == "api":
-            out.append(f"{r} API {row['api']}{backends}, thinking {row['thinking']}{fb}")
+            out.append(f"{r} API {row['api']}{backends}, {thinking_said(row)}{fb}")
             continue
         text = f"{r} GPU " + ("(the router picks)" if row["gpu"] == AUTO else row["gpu"])
         if row.get("api"):
@@ -797,31 +928,34 @@ def cant_run(role: str, mid: str, why: str, fix: str, doc: dict) -> str:
 
 
 def said_part(routed: dict) -> str:
-    """Why an API task runs where it does, as the start line and `routed` say it: `trivial role,
-    set by you 11-20` (only the user sets a role: the dialog, the pane or a terminal), or `asked
-    for, approved in the dialog` for a gated --model."""
+    """Why an API task runs where it does, as the start line and `routed` say it: `trivial role`
+    (only the user sets a role, so no stamp says who or when: the roles' listing has it, #1322),
+    or `asked for, approved in the dialog` for a gated --model."""
     said = routed.get("said") or ""
     if said.startswith("asked for"):
         return said
-    out = f"{routed.get('role')} role" + ("'s fallback" if routed.get("fallback") else "")
-    if isinstance(ts := routed.get("said_ts"), (int, float)):
-        out += f", set by you {time.strftime('%m-%d', time.localtime(ts))}"
-    return out
+    return f"{routed.get('role')} role" + ("'s fallback" if routed.get("fallback") else "")
+
+
+def _thinking_said(routed: dict) -> str:
+    """What the task does with thinking: `thinking_shown` (thinking_of's, #1237), else, for a
+    task.json from before it, the role's setting."""
+    return routed.get("thinking_shown") or f"thinking {routed.get('thinking') or 'off'}"
 
 
 def routed_line(model_id: str, routed: dict) -> str:
     """An API task's routing in one line (task.json's keys): `API <id> (<provider>) · <why> ·
     thinking off`. The start line, task.json `route` and wb watch's `routed` say it."""
     return (f"API {model_id} ({routed.get('provider_name') or routed.get('provider')}) · "
-            f"{said_part(routed)} · thinking {routed.get('thinking') or 'off'}")
+            f"{said_part(routed)} · {_thinking_said(routed)}")
 
 
 def model_line(model_id: str, routed: dict) -> str:
-    """wb start's model line for an API task: `model: <id> · API (<provider>) · trivial role, set by
-    you 11-20 · thinking off`, which wb start ends with meter.tail (today's spend); a GPU task's
+    """wb start's model line for an API task: `model: <id> · API (<provider>) · trivial role ·
+    thinking off`, which wb start ends with meter.tail (today's spend); a GPU task's
     line is as before roles."""
     return (f"model: {model_id} · API ({routed.get('provider_name') or routed.get('provider')}) · "
-            f"{said_part(routed)} · thinking {routed.get('thinking') or 'off'}")
+            f"{said_part(routed)} · {_thinking_said(routed)}")
 
 
 def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None = None,
@@ -856,12 +990,13 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
             raise Refused(f"{AGENTS_GPU}: {m.id} is an API model. {AGENTS_BACK}, or a GPU model")
         if gate is not None:  # API_RUNS: the dialog's yes is wb start's own, last (#1104)
             gate(m)
-        if why := meter.refusal(m, tokens=first):  # before the dialog: never ask for a start that is refused
+        if why := meter.refusal(m, tokens=first, asked=True):  # before the dialog: never ask for a start that is refused
             raise Refused(why)
         approved = os.environ.get("CLAUDECODE") == "1"
         return m, models.status(m), "asked for", {
             "via": "api", "role": role, "provider": m.provider, "provider_name": models.provider_name(m),
-            "thinking": "off", "said": "asked for" + (", approved in the dialog" if approved else "")}
+            "thinking": "off", "thinking_shown": thinking_of(m, "off"),
+            "said": "asked for" + (", approved in the dialog" if approved else "")}
     row = doc["roles"][role]
     if effective_via(doc, role) == "gpu":
         if row["gpu"] != AUTO:  # the user's pin: that model, never the router's other pick
@@ -894,7 +1029,8 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
     if why := meter.refusal(m, role, tokens=first):
         raise Refused(why)
     routed = {"via": "api", "role": role, "provider": m.provider, "provider_name": models.provider_name(m),
-              "thinking": row["thinking"], "said": row.get("said") or "", "said_ts": row.get("ts")}
+              "thinking": row["thinking"], "thinking_shown": thinking_of(m, row["thinking"]),
+              "said": row.get("said") or "", "said_ts": row.get("ts")}
     # an OpenRouter role's backends (#1021): task.json's `order`, which the keyhole routes every
     # request by; the user agreed to them in the dialog, and once they never reached the task
     if row.get("order") and m.provider == OPENROUTER:

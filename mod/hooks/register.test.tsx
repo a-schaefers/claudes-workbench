@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { absolutePath, agentOf, isAbort, rolesRead, wbThrew, type WbRun, agentsFor, askForArgs, attachedLines, awayNow, chatPrompt, cardName, delegates, hangWords, liveLines, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, sameCall, savedLine, spark, spendLine, apiParts, splashTarget, statsLines, usd, wrapParts, wrapWords } from './register.js'
+import { thinkStops, absolutePath, agentOf, isAbort, rolesRead, wbThrew, type WbRun, agentsFor, askForArgs, attachedLines, awayNow, chatPrompt, cardName, delegates, hangWords, liveLines, pageShape, parsePrice, quietForJobs, routeCalls, routesSummary, sameCall, spark, spendLine, apiParts, splashTarget, statsLines, taskOfPath, tasksNamed, usd, wrapParts, wrapWords } from './register.js'
 import { pixels } from './apprentice.js'
 import { BAR, frameCells, frameCount, plan, ratio } from './splash.js'
 import { activity, loopLength, tickerCells } from './modeline.js'
@@ -1385,11 +1385,99 @@ test('#1124: a stop by the task\'s API provider wakes Claude to pass on its reme
   await clock.advance(3000)
   expect(woken).toHaveLength(1)
   expect(woken[0]).toContain('[workbench] Task `a` was stopped by its API provider.')
-  expect(woken[0]).toContain('once they say it is fixed (or the rate limit has passed), `wb feedback a --text "carry on"`')
+  expect(woken[0]).toContain('Not the agent\'s doing: its remedy is the notice\'s, above; tell the user when it needs them.')     // the notice says the remedy (#1322)
+  expect(woken[0]).toContain('never discard it for this')       // work that is fine
+  expect(woken[0]).not.toContain('nor change its model or role yourself')
   expect(woken[0]).not.toContain('Steer it')
   expect(woken[0]).not.toContain('got stuck')
   expect(woken[0]).not.toContain('wb discard')
   expect(toasts.join('\n')).toContain('workbench: a was stopped by its API provider')
+})
+
+test('#1232: a stop for a repo marked local-only wakes Claude to takeover or discard, never to steer it with feedback', async ($, on) => {
+  // bar loop round 4 (2026-11-24): cause `local_only` (runner._local_only_stop, #1215) woke as
+  // "was stopped: it got stuck" ending "Steer it with wb feedback …", which wb refuses with exit 3
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'a', 'stuck')
+  notice(files, { ts: ts0, task: 'a', kind: 'stuck', round: 1, cause: 'local_only',
+    text: 'task a: round 1 didn\'t run, so nothing more went to its provider: this repo is local-only now; ' +
+      'the task\'s model is API (deepinfra): wb takeover a or wb discard a' })
+  fakeTasks(on, files, ['a'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken).toHaveLength(1)
+  expect(woken[0]).toContain('[workbench] Task `a` was stopped: its repo became local-only.')
+  expect(woken[0]).toContain('Not the agent\'s doing: its remedy is the notice\'s, above; tell the user when it needs them.')     // the notice names takeover or discard (#1322)
+  expect(woken[0]).not.toContain('names no step')                // its notice always names one
+  expect(woken[0]).not.toContain('never you')
+  expect(woken[0]).not.toContain('Steer it')
+  expect(woken[0]).not.toContain('got stuck')
+  expect(woken[0]).not.toContain('wb feedback a')
+  expect(toasts.join('\n')).toContain('workbench: a was stopped: its repo became local-only')
+  expect(toasts.join('\n')).not.toContain('got stuck')
+})
+
+test('#1247: a stop outside the step wakes Claude to do as its notice says, never to steer it with feedback', async ($, on) => {
+  // bar loop round 5 (2026-11-24): a model gone from OpenCode's catalog (cause `catalog`) and a
+  // moved repo (`repo`) woke as "failed" ending "then wb feedback … or wb discard": wb refuses the
+  // first with exit 3, and the second ran a runner that failed at once, next to the notice's own
+  // takeover or relocate. One rule, any cause outside results.THE_STEP; `agent` keeps its own.
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  for (const n of ['a', 'b', 'c']) task(files, n, 'failed')
+  notice(files, { ts: ts0, task: 'a', kind: 'failed', cause: 'catalog',
+    text: 'task a: deepseek/deepseek-flash left OpenCode\'s catalog: workbench never switches a task\'s ' +
+      'model. wb takeover a to finish it, or wb discard a' })
+  notice(files, { ts: ts0 + 1, task: 'b', kind: 'failed', cause: 'repo',
+    text: 'task b: /src/b moved or was deleted: wb relocate b --repo <its new path>, then wb resume' })
+  notice(files, { ts: ts0 + 2, task: 'c', kind: 'failed', round: 1, cause: 'agent',
+    text: 'task c: round 1: opencode exited 1' })
+  fakeTasks(on, files, ['a', 'b', 'c'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  for (let i = 0; i < 4 && woken.length < 3; i++) await clock.advance(3000)
+  expect(woken).toHaveLength(3)
+  const [a, b, c] = ['a', 'b', 'c'].map(n => woken.find(w => w.includes(`Task \`${n}\``)) ?? '')
+  for (const [w, n] of [[a, 'a'], [b, 'b']]) {
+    expect(w).toContain(`[workbench] Task \`${n}\` failed (not its agent's doing).`)
+    expect(w).toContain('Not the agent\'s doing: its remedy is the notice\'s, above; tell the user when it needs them.')
+    expect(w).not.toContain(`then \`wb feedback ${n} --message <file>\``)
+  }
+  expect(a).toContain('wb takeover a to finish it, or wb discard a')
+  expect(b).toContain('wb relocate b --repo')
+  // the agent's own failure keeps the failed wake's next step
+  expect(c).toContain('[workbench] Task `c` failed.')
+  expect(c).toContain('then `wb feedback c --message <file>` or `wb discard c`')
+  expect(toasts.join('\n')).toContain('workbench: a failed (not its agent\'s doing)')
+})
+
+test('#1322: a stop outside the step whose notice names no step still wakes with carry on once the cause is gone', async ($, on) => {
+  // runner's model failure once the round reached the agent says only `can't run: <e>`; the first
+  // cut of OUTSIDE_NEXT pointed at a remedy "above" that wasn't there
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'a', 'failed')
+  notice(files, { ts: ts0, task: 'a', kind: 'failed', round: 2, cause: 'model',
+    text: 'task a: deepseek/deepseek-flash can\'t run: connection refused' })
+  fakeTasks(on, files, ['a'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken).toHaveLength(1)
+  expect(woken[0]).toContain('A notice that names no step: `wb feedback a --text "carry on"` once that cause is gone; ' +
+    'never discard it for this.')
 })
 
 test('two wakes due in one turn both arrive, the second after the first one\'s turn', async ($, on) => {
@@ -1421,7 +1509,7 @@ test('two wakes due in one turn both arrive, the second after the first one\'s t
   expect(woken.join('\n')).not.toContain('no notice reached Claude')
 })
 
-test('two questions asked at once both reach Claude, each with its own id', async ($, on) => {
+test('two questions asked at once both reach Claude, each with its own id, and a plain question gets no wb allow paragraph', async ($, on) => {
   // the 2026-11-16 audit: the newest alone was delivered, and the first stayed blocked
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
@@ -1439,6 +1527,7 @@ test('two questions asked at once both reach Claude, each with its own id', asyn
   await clock.advance(3000)
   expect(woken.filter(t => t.includes('Q: q1?') && t.includes('wb answer fix-it --id q1'))).toHaveLength(1)
   expect(woken.filter(t => t.includes('Q: q2?') && t.includes('wb answer fix-it --id q2'))).toHaveLength(1)
+  expect(woken.join('\n')).not.toContain('PERMISSION request')   // only a PERMISSION notice's (#1322)
 })
 
 test('a question whose task no longer asks is acknowledged without a wake', async ($, on) => {
@@ -2066,11 +2155,14 @@ test('one very long transcript line is cut, and the lines before it still show',
   await ui.unmount()
 })
 
-test('the weekly model check comes once, in a quiet moment of a session in use; /workbench-models asks now', async ($, on) => {
+test('the weekly model check is one toast, in a quiet moment of a session in use; /workbench-models asks now', async ($, on) => {
+  // #1322: it was a turn of its own, about 650 tokens, raised again every day until done
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [], false)
-  on('ui.toast', () => ({ value: undefined }))
+  const toasts: string[] = []
+  const due = () => toasts.filter(t => t === 'workbench: the weekly model check is due: /workbench-models')
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
   const asked: string[] = []
   on('prompt.submit', (_: any, e: any) => {
@@ -2085,25 +2177,26 @@ test('the weekly model check comes once, in a quiet moment of a session in use; 
   await $.turn.start({ text: 'hi', turnId: 't1' })
   await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
   await clock.advance(2000)
-  expect(asked.length).toBe(0)                       // not at once: Claude may have just asked something
+  expect(due()).toEqual([])                          // not at once: Claude may have just asked something
   await clock.advance(90_000)                        // a quiet minute later
-  expect(asked.length).toBe(1)
-  expect(asked[0]).toContain('The weekly model check is due')
-  expect(asked[0]).toContain('`wb scout`')
-  // the audio engines too, licences first: they change (#398)
-  expect(asked[0]).toContain('audio and image engines')
-  expect(asked[0]).toContain('licence today against its licence text')
-  expect(JSON.parse(files['/wb/scout.json']).offered_at).toBeGreaterThan(1_800_000_000)  // raised: not again today
+  expect(due()).toHaveLength(1)
+  expect(asked).toEqual([])                          // no turn of its own
+  expect(JSON.parse(files['/wb/scout.json']).offered_at).toBeGreaterThan(1_800_000_000)  // raised
 
-  await clock.advance(10_000)
-  expect(asked.length).toBe(1)
+  await $.turn.start({ text: 'hi', turnId: 't2' })
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(120_000)                       // still due, a quiet minute after another turn: no second toast
+  expect(due()).toHaveLength(1)
 
-  // done this week: nothing more, until the user asks for it
+  // the user asks for it: Claude's turn, the steps without what wb scout says itself
   files['/wb/scout.json'] = JSON.stringify({ done_at: 1_800_000_010 })
   await $.command.run({ command: 'workbench-models', args: '' })
   await clock.advance(2000)
-  expect(asked.length).toBe(2)
-  expect(asked[1]).toContain('The weekly model check is due')
+  expect(asked.length).toBe(1)
+  expect(asked[0]).toContain('The weekly model check is due')
+  expect(asked[0]).toContain('`wb scout`')
+  expect(asked[0]).toContain('`wb scout --done --notes')
+  expect(asked[0]).not.toContain('licence')          // wb scout says it beside the engines it lists
 })
 
 for (const [what, options, mode] of [['a session that never used workbench', {}, false],
@@ -2145,7 +2238,7 @@ test('/workbench-models when the weekly check is due raises it once, not twice',
   expect(asked.filter(t => t.includes('The weekly model check is due'))).toHaveLength(1)
 })
 
-test('#1024: the weekly model check covers GPU and API alike, recommends only for API roles and names no model', async ($, on) => {
+test('#1024: the weekly model check covers GPU and API alike and names no model', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
@@ -2161,7 +2254,7 @@ test('#1024: the weekly model check covers GPU and API alike, recommends only fo
   expect(note).toContain('the best models for each role, GPU and API alike')
   expect(note).not.toContain('local agents')
   expect(note).toContain('`wb scout`\'s API section: each role\'s model, its record and spend')
-  expect(note).toContain('API roles: recommend in chat only; never run `wb route` or pass `--model` for an API model unasked')
+  expect(note).not.toContain('recommend in chat only')                  // the roles' dialog is the yes (#1322)
   // the convention: no model is named in code (only placeholders such as <provider/model>)
   expect(note).not.toMatch(/\b(deepseek|claude|haiku|sonnet|opus|gpt|grok|gemini|qwen|mimo|llama|mistral|kimi|glm)\b/i)
   expect(note.replace(/<[^>]*>/g, '')).not.toMatch(/\b[\w.-]+\/[\w.:-]+\b/)          // no provider/model id
@@ -2834,7 +2927,7 @@ test('a dialog wb chat ask refuses is announced on the phone, and a long plan or
   expect(runs.filter(a => a[2] === 'ask').at(-1)).toContain('--text=--version')
 })
 
-test('a task\'s wake while the user is away on the web chat tells Claude to answer them there, and stops once they type in the terminal (#540)', async ($, on) => {
+test('a task\'s wake while the user is away on the web chat tells Claude to answer them there, in full once a stretch, and stops once they type in the terminal (#540)', async ($, on) => {
   // the web-chat block comes once per conversation: a user who went to the web chat after the
   // first message was never said to be away, and a task's news reached only the terminal
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
@@ -2863,13 +2956,20 @@ test('a task\'s wake while the user is away on the web chat tells Claude to answ
   expect(wakes()[0]).toContain('REPORT-1')
   expect(wakes()[0]).toContain('they last used the web chat')
   expect(wakes()[0]).toContain('wb chat reply')
+  notice(files, { ts: ts0 + 8, task: 'fix-it', kind: 'review', text: 'REPORT-1b' })
+  await clock.advance(31_000)
+  expect(wakes()).toHaveLength(2)                               // still away: one line, not the paragraph (#1322)
+  expect(wakes()[1]).toContain('REPORT-1b')
+  expect(wakes()[1]).toContain('(User away: answer with `wb chat reply`.)')
+  expect(wakes()[1]).not.toContain('they last used the web chat')
 
   await $.prompt.submit({ text: 'back now' } as any)            // typed in the terminal: back
   notice(files, { ts: ts0 + 12, task: 'fix-it', kind: 'review', text: 'REPORT-2' })
   await clock.advance(31_000)                                   // nothing runs: the safety poll reads it
-  expect(wakes()).toHaveLength(2)
-  expect(wakes()[1]).toContain('REPORT-2')
-  expect(wakes()[1]).not.toContain('web chat')
+  expect(wakes()).toHaveLength(3)
+  expect(wakes()[2]).toContain('REPORT-2')
+  expect(wakes()[2]).not.toContain('web chat')
+  expect(wakes()[2]).not.toContain('User away')
 })
 
 test('running wb counts as workbench mode, and a web message reaches a running turn', async ($, on) => {
@@ -3418,6 +3518,82 @@ test('another session\'s report in the chat leaves a web message owed, and this 
   expect(posted.filter(a => a.some(x => x.includes('answered in the terminal')))).toHaveLength(0)
 })
 
+test('#1273: an agent\'s unanswered message gets its own follow-up naming --to, and a reply to the user never settles it', async ($, on) => {
+  // #1273, 2026-11-24: the follow-up said the user wrote and named a plain `wb chat reply`, which
+  // went to the user's phone; that reply settled the agent's debt, so its wait heard nothing at all
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: '', stderr: '' } } })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  const posted = () => runs.filter(r => r[1] === 'chat' && r[2] === 'reply')
+  const userFollowUps = () => asked.filter(a => a.includes("hasn't heard back"))
+  const agentFollowUps = () => asked.filter(a => a.startsWith("[workbench] Agent hermes's message a1 has no answer"))
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  const turn = async (id: string, command?: string, row?: Record<string, any>) => {
+    await $.turn.start({ text: '', turnId: id })
+    if (command) await $.tool.call({ tool: 'Bash', command })
+    if (row) files['/wb/chat/messages.jsonl'] += JSON.stringify({ from: 'claude', ts: 1_800_000_900, ...row }) + '\n'
+    await $.turn.complete(endTurn(id))
+    await clock.advance(3000)
+  }
+  await turn('t0', 'wb start t --spec s.md')                     // workbench mode: the chat listens
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'a1', ts: 1_800_000_000, from: 'hermes', role: 'agent', text: 'please refactor foo' }) + '\n'
+  await clock.advance(31_000)
+  expect(asked.filter(a => a.startsWith('[agent hermes] please refactor foo'))).toHaveLength(1)
+  await turn('t1', 'wb chat reply --text "Done."', { id: 'r1', text: 'Done.', re: [], to: ['user'] })  // the user's, not the agent's
+  expect(userFollowUps()).toHaveLength(0)
+  expect(agentFollowUps()).toHaveLength(1)
+  expect(agentFollowUps()[0]).toContain('wb chat reply --to a1 --text')
+  await $.prompt.submit({ text: 'and the tests?' } as any)       // the user back at the terminal answers no agent
+  await turn('t2')                                               // the follow-up's turn: no reply to it either
+  expect(posted()).toEqual([['wb', 'chat', 'reply', '--text=Claude answered in the terminal; nothing was sent here.', '--to=a1']])
+})
+
+test('#1273: a reply to an agent settles its message only, and the user\'s message is still owed its follow-up', async ($, on) => {
+  // #1273, 2026-11-24: any reply this Claude Code wrote settled every message owed, whoever it went to
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: '', stderr: '' } } })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  const posted = () => runs.filter(r => r[1] === 'chat' && r[2] === 'reply')
+  const userFollowUps = () => asked.filter(a => a.includes("hasn't heard back"))
+  const agentFollowUps = () => asked.filter(a => a.startsWith('[workbench] Agent '))
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  const turn = async (id: string, command?: string, row?: Record<string, any>) => {
+    await $.turn.start({ text: '', turnId: id })
+    if (command) await $.tool.call({ tool: 'Bash', command })
+    if (row) files['/wb/chat/messages.jsonl'] += JSON.stringify({ from: 'claude', ts: 1_800_000_900, ...row }) + '\n'
+    await $.turn.complete(endTurn(id))
+    await clock.advance(3000)
+  }
+  await turn('t0', 'wb start t --spec s.md')                     // workbench mode: the chat listens
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'a1', ts: 1_800_000_000, from: 'hermes', role: 'agent', text: 'please refactor foo' }) + '\n'
+  await clock.advance(31_000)
+  await turn('t1', 'wb chat reply --to a1 --text "Refactored."', { id: 'r1', text: 'Refactored.', re: ['a1'], to: ['hermes'] })
+  expect(agentFollowUps()).toHaveLength(0)                       // answered: no follow-up
+  files['/wb/chat/messages.jsonl'] += JSON.stringify({ id: 'u1', ts: 1_800_000_100, from: 'user', text: 'Status' }) + '\n'
+  await clock.advance(31_000)
+  expect(asked.filter(a => a.startsWith('[web chat] Status'))).toHaveLength(1)
+  await turn('t2', 'wb chat reply --to a1 --text "Also: tests pass."', { id: 'r2', text: 'Also: tests pass.', re: ['a1'], to: ['hermes'] })
+  expect(userFollowUps()).toHaveLength(1)                        // the agent's reply isn't the user's answer
+  expect(agentFollowUps()).toHaveLength(0)
+  expect(posted()).toEqual([])
+})
+
 test('a /loop firing, another plugin\'s prompt or a channel message leaves the user away and the follow-up owed; the user\'s Enter ends it (#835)', async ($, on) => {
   // #835: any prompt that wasn't isMeta counted as the user back at the terminal, so a /loop
   // firing ended away for every session and cancelled the #767 follow-up
@@ -3630,7 +3806,7 @@ test('/workbench alone turns workbench mode on for the session: the pane opens, 
   expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('user-notes')
   files['/wb/notes.md'] = '- Review strictly: reject any diff without tests\n'
   const notes = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'user-notes')
-  expect(notes?.text).toContain('reject any diff without tests')
+  expect(notes?.text).toBe("The user's delegation notes (`wb notes`):\n- Review strictly: reject any diff without tests")
 
   await $.command.run({ command: 'workbench-quit', args: '' })
   await clock.advance(2000)
@@ -3811,12 +3987,13 @@ test('the bubble wraps its words into lines that fit, never cutting a line short
   expect(wrapWords('', 30)).toEqual([''])
 })
 
-test('the Tasks tab ends with the week\'s saving, read from wb savings; the web chat link is the Settings tab\'s', async ($, on) => {
+test('the Tasks tab ends with the modeline, no saving above it, and never runs wb savings; the web chat link is the Settings tab\'s', async ($, on) => {
+  // #1322: the week's saving was the Tasks tab's footer, wb savings read every ten minutes
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   fakeTasks(on, chatOn({}))
-  const week = { period: 'week', tasks: 3, claude: 160000, self_est: 1390000, saved: 1230000, wh: 900, cost: null }
+  const runs: string[][] = []
   on('process.run', (_: any, e: any) => {
-    if (e.argv[1] === 'savings') return { value: { exitCode: 0, stdout: JSON.stringify(week), stderr: '' } }
+    runs.push(e.argv)
     if (e.argv[1] === 'chat' && e.argv[2] === 'url')
       return { value: { exitCode: 0, stdout: 'https://box.tail.ts.net/#token=abc\n', stderr: '' } }
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
@@ -3825,24 +4002,14 @@ test('the Tasks tab ends with the week\'s saving, read from wb savings; the web 
   await clock.advance(3000)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-  const at = texts.indexOf('this week: saved ~1.2M Claude tokens (88%, estimate) · 900 Wh')
-  expect(at).toBeGreaterThan(-1)
-  expect(texts.slice(at + 1)).toEqual(["[•_•] Claude's Workbench"])          // never under the tasks (the user, 2026-11-19): only the modeline
+  expect(texts.at(-1)).toBe("[•_•] Claude's Workbench")
+  expect(texts.some(t => t.startsWith('this week:'))).toBe(false)
+  expect(runs.some(r => r[1] === 'savings')).toBe(false)
   await ui.press({ key: 'tab-settings' })
   expect((await ui.findAll({ type: 'Text' })).map(t => t.text).slice(-4, -1)).toEqual(['web chat https://box.tail.ts.net/#token=abc',
     'web chat ', 'https://box.tail.ts.net/#token=abc'])                      // then the tabs and the modeline
   await ui.press({ key: 'tab-tasks' })
   await ui.unmount()
-})
-
-test('the saving reads in thousands or millions, says when it cost more, and is empty with nothing to show', () => {
-  const t = (o: object) => JSON.stringify({ tasks: 1, claude: 50000, self_est: 80000, saved: 30000, wh: 0, ...o })
-  expect(savedLine(t({}))).toBe('this week: saved ~30K Claude tokens (38%, estimate)')
-  expect(savedLine(t({ wh: 1500 }))).toBe('this week: saved ~30K Claude tokens (38%, estimate) · 1.5 kWh')
-  expect(savedLine(t({ wh: 1500, cost: 0.45 }))).toBe('this week: saved ~30K Claude tokens (38%, estimate) · 1.5 kWh, cost 0.45')
-  expect(savedLine(t({ saved: -4000 }))).toBe('this week: cost ~4K more Claude tokens (estimate)')
-  expect(savedLine(t({ tasks: 0 }))).toBe('')
-  expect(savedLine('usage: wb …')).toBe('')
 })
 
 test('a night\'s backlog keeps the user away past six hours; without one, away lapses', () => {
@@ -3901,8 +4068,8 @@ test('Claude\'s edit of commands.json never drops a repo\'s local_only; other ed
   expect(w.deny).toContain('~/src/client')
   expect((await $.tool.call({ tool: 'Write', file_path: conf, content: files[conf].replace('"make *"', '"go *"') } as any) as any).deny).toBeUndefined()
   expect((await edit('"local_only": true', '"local_only": false', '/home/u/other.json')).deny).toBeUndefined()  // another file
-  // a nearer entry saying false lifts the root's (the nearest that states it decides): refused,
-  // as is a false written where none was (#1021's review)
+  // a false written where none was: refused (#1021's review), though since #1255 it lifts no
+  // other entry's true
   const nearer = await edit('"repos": {', '"repos": {\n  "~/src/client/pkg": {"local_only": false},')
   expect(nearer.deny).toContain('sets "local_only" to something other than true for ~/src/client/pkg')
   expect((await edit('"setup": "npm ci"', '"setup": "npm ci", "local_only": false')).deny).toContain('~/src/app')
@@ -3928,16 +4095,30 @@ test('Claude coding: its own edit in a task\'s worktree waits for the user\'s ye
     '/wb/tasks/fix-it/status.json': JSON.stringify({ phase: 'review', round: 1, updated_at: ts }),
   }
   fakeTasks(on, files)
-  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
-  on('tool.call', () => ({ result: {}, text: '' }))                // the engine's own tool
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: '', stderr: '' } } })
+  const asked: string[] = []
+  let answer = "Don't"
+  on('tool.call', (_: any, e: any) => {
+    if (e.tool !== 'AskUserQuestion') return { result: {}, text: '' }   // the engine's own tool
+    const q = e.questions[0]
+    asked.push(q.question)
+    return { result: { questions: e.questions, answers: { [q.question]: answer } }, text: '' }
+  })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.advance(1000)
   const edit = (path = '/wb/tasks/fix-it/worktree/power.py') =>
     $.tool.call({ tool: 'Edit', file_path: path, old_string: 'w', new_string: 'w / 1000' } as any) as Promise<any>
   expect((await edit()).deny).toBeUndefined()                      // no saved choice: as before
   files['/wb/coding.json'] = JSON.stringify({ mode: 'ask' })
-  expect((await edit()).deny).toContain('"Ask me first"')
+  // #1322: "Ask me first" asks at the edit, in a dialog; a no refuses it
+  expect((await edit()).deny).toContain("the user said no to editing fix-it's code")
+  expect(asked).toEqual(["Let Claude edit fix-it's code now?"])
+  answer = 'Allow'                                                 // their yes: recorded, and the edit goes
+  expect((await edit()).deny).toBeUndefined()
+  expect(runs.filter(r => r[1] === 'coding')).toEqual([['wb', 'coding', 'allow', 'fix-it', '--said=Allow, in the workbench dialog']])
   expect((await edit('/home/u/project/power.py')).deny).toBeUndefined()   // not a task's: Claude's own
+  expect(asked.length).toBe(2)
   files['/wb/tasks/fix-it/coding.json'] = JSON.stringify({ allowed: [{ edit: 'w / 1000', used: null }] })
   expect((await edit()).deny).toBeUndefined()                      // the user said yes
   files['/wb/tasks/fix-it/coding.json'] = JSON.stringify({ allowed: [{ edit: 'w / 1000', used: ts }] })
@@ -3950,14 +4131,88 @@ test('Claude coding: its own edit in a task\'s worktree waits for the user\'s ye
   expect((await edit('/wb/tasks/fix-it/tree/shared/lib/power.py')).deny).toBeUndefined()   // a sibling's link
 })
 
+test('the tasks a shell command of Claude\'s runs in or names, by any spelling of the state directory (#1211)', () => {
+  const roots = ['/home/u/.local/state/workbench', '/data/state/workbench']
+  const named = (command: string, cwd = '/home/u/project') => tasksNamed(command, cwd, roots, ['/home/u'])
+  expect(named('cd /home/u/.local/state/workbench/tasks/fix-it/worktree && mvn test')).toEqual(['fix-it'])
+  expect(named('cd ~/.local/state/workbench/tasks/fix-it/worktree && tsc')).toEqual(['fix-it'])
+  expect(named('cd "$HOME/.local/state/workbench/tasks/a-1/worktree" && make')).toEqual(['a-1'])
+  expect(named('cd ${WB_HOME}/tasks/b/worktree; npx jest --coverage')).toEqual(['b'])
+  expect(named('ls /data/state/workbench/tasks/c/worktree')).toEqual(['c'])        // the real path
+  expect(named('mvn test', '/home/u/.local/state/workbench/tasks/fix-it/worktree/sub')).toEqual(['fix-it'])
+  expect(named('mvn test')).toEqual([])                                              // the user's project
+  expect(named('cat /home/u/other/tasks/x/a')).toEqual([])                           // another tasks/ directory
+  expect(named('diff ~/.local/state/workbench/tasks/a/worktree/x ~/.local/state/workbench/tasks/b/worktree/x'))
+    .toEqual(['a', 'b'])
+  expect(taskOfPath('/wb/tasks/fix-it/worktree/lib/a.py', '/wb')).toBe('fix-it')
+  expect(taskOfPath('/wb/tasks/fix-it/tree/apps/worktree/a.py', '/wb')).toBe('fix-it')
+  expect(taskOfPath('/wb/tasks/fix-it/status.json', '/wb')).toBe('')
+  expect(taskOfPath('/home/u/project/a.py', '/wb')).toBe('')
+})
+
+test('Claude\'s own calls in a task\'s worktree are kept for wb as they begin, each with when it ran (#1211, #1272)', async ($, on) => {
+  // #1211 (2026-11-24): `mvn test` that Claude ran beside a --test of grep wrote reports that wb
+  // accept refused as files written by hand; wb tells them apart by these rows
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const ts = 1_800_000_000
+  const files: Record<string, string> = {
+    '/wb/tasks/fix-it/task.json': JSON.stringify({ name: 'fix-it', model: 'm', created_at: ts }),
+    '/wb/tasks/fix-it/status.json': JSON.stringify({ phase: 'review', round: 1, updated_at: ts }),
+  }
+  fakeTasks(on, files)
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('tool.call', async (_: any, e: any) => {                                                // the engine's, 3 s
+    await clock.sleep(3000)
+    return String(e.command).includes('rm -rf') ? { deny: 'the user said no' } : { result: {}, text: '' }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  const rows = () => Object.keys(files).filter(p => p.startsWith('/wb/rules/fix-it/claude-calls/'))
+    .map(p => JSON.parse(files[p]) as Record<string, any>)
+  const call = async (input: Record<string, any>) => {
+    const done = $.tool.call(input as any) as Promise<any>
+    await clock.advance(3000)
+    return done
+  }
+  const began = clock.now() / 1000
+  // kept as it begins, running (end null): a build and `wb accept` in one call read no row of
+  // the build's while it ran (#1272, 2026-11-24)
+  const running = $.tool.call({ tool: 'Bash', command: 'cd /wb/tasks/fix-it/worktree && mvn -q test', tool_use_id: 'toolu_1' } as any)
+  await clock.advance(1000)
+  expect(rows()).toEqual([{ tool: 'Bash', command: 'cd /wb/tasks/fix-it/worktree && mvn -q test',
+    cwd: '/home/u/project', at: began, end: null }])
+  await clock.advance(2000)
+  await running
+  expect(rows()).toEqual([{ tool: 'Bash', command: 'cd /wb/tasks/fix-it/worktree && mvn -q test',
+    cwd: '/home/u/project', at: began, end: began + 3 }])
+  // one the user refused at its dialog never ran: marked so (#1272)
+  await call({ tool: 'Bash', command: 'rm -rf /wb/tasks/fix-it/worktree/dist', tool_use_id: 'toolu_2' })
+  expect(rows().find(r => r.command?.startsWith('rm -rf'))).toMatchObject({ denied: true })
+  expect(rows().filter(r => !r.denied).length).toBe(1)
+  await call({ tool: 'Bash', command: 'mvn -q test' })                         // the user's project: none
+  await call({ tool: 'Bash', command: 'cat /wb/tasks/gone/worktree/a' })       // no such task: none, no directory
+  expect(rows().length).toBe(2)
+  expect(Object.keys(files).some(p => p.startsWith('/wb/rules/gone'))).toBe(false)
+  await call({ tool: 'Write', file_path: '/wb/tasks/fix-it/worktree/lib/a.py', content: 'x = 1\n' })
+  expect(rows().map(r => r.path ?? r.command)).toContain('/wb/tasks/fix-it/worktree/lib/a.py')
+  // a refused edit wrote nothing: no row
+  files['/wb/coding.json'] = JSON.stringify({ mode: 'only' })
+  const denied = await call({ tool: 'Edit', file_path: '/wb/tasks/fix-it/worktree/lib/b.py', old_string: 'a', new_string: 'b' })
+  expect(denied.deny).toContain('"Only when I say"')
+  expect(rows().map(r => r.path ?? r.command)).not.toContain('/wb/tasks/fix-it/worktree/lib/b.py')
+})
+
 // The upstream gate's world (#1005): the patch clone, the user's project, a developer's own clone
 // of upstream, each with its origin; a dialog answered with `answer` (null: dismissed, or -p)
-const SLUG = 'a-schaefers/claudes-workbench'
+const SLUG = 'a-schaefers/workbench'
 const SOURCE = '/home/u/.local/share/workbench/source'
 const MARKET = '/home/u/.claude/plugins/marketplaces/workbench'
+const GIT_LOG = '/test/git-log'  // what upstreamWorld's `git -C <dir> log` prints
+
 function upstreamWorld(on: any, files: Record<string, string>) {
   const w = { cwd: SOURCE, answer: "Don't send" as string | null, asked: [] as string[], options: [] as unknown[], gits: [] as string[],
-    toasts: [] as string[] }
+    toasts: [] as string[], chats: [] as string[][] }   // chats: wb chat's calls, the line for an away user
   files['/wb/patches.json'] = JSON.stringify({ source: SOURCE, upstream: SLUG })
   const origins: Record<string, string> = {
     [SOURCE]: `https://github.com/${SLUG}.git`,
@@ -3970,11 +4225,14 @@ function upstreamWorld(on: any, files: Record<string, string>) {
   on('session.cwd', () => ({ value: w.cwd }))
   on('ui.toast', (_: any, e: any) => { w.toasts.push(e.text); return { value: undefined } })
   on('process.run', (_: any, e: any) => {
+    // the Scope trailers of a send's branch (#1322): a test sets them, else none
+    if (e.argv[0] === 'git' && e.argv[3] === 'log') return { value: { exitCode: 0, stdout: files[GIT_LOG] ?? '', stderr: '' } }
     if (e.argv[0] === 'git' && e.argv[3] === 'remote') {
       w.gits.push(e.argv[2])
       const url = origins[e.argv[2]]
       return { value: { exitCode: url ? 0 : 2, stdout: url ? `${url}\n` : '', stderr: url ? '' : 'error: No such remote' } }
     }
+    if (e.argv[1] === 'chat') w.chats.push(e.argv.slice(1))
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
   })
   on('tool.call', (_: any, e: any) => {
@@ -4086,14 +4344,39 @@ test('#1005: every command that would send to workbench upstream waits for the u
   await clock.advance(1000)                                      // the poll the calls started ends here
 })
 
-test('#1005: with the user away on the web chat a send to upstream is refused without a dialog', async ($, on) => {
-  // 2026-11-22: the dialog would wait at an empty terminal; Claude is told it waits for them
+test('#1291: wb patch zip sends nothing, so the gate never asks about it, even in the patch clone', async ($, on) => {
+  // 2026-11-24: a zip for a user without GitHub to email upstream themselves; only a send asks
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const w = upstreamWorld(on, files)
+  w.answer = "Don't send"
+  await $.session.start({ cwd: SOURCE, surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  for (const command of [
+    'wb patch zip', 'wb patch zip 1a2b3c4 5d6e7f8 --name fix-push', `python3 ${SOURCE}/bin/wb patch zip`,
+    `cd ${SOURCE} && wb patch zip`, 'bash -lc "wb patch zip"', 'bash <<EOF\nwb patch zip\nEOF',
+  ]) {
+    const r = await $.tool.call({ tool: 'Bash', command } as any) as any
+    expect([command, r.deny]).toEqual([command, undefined])
+  }
+  expect(w.asked).toEqual([])
+  // a send still asks
+  expect(((await $.tool.call({ tool: 'Bash', command: 'git push' } as any)) as any).deny).toContain('not sent')
+  expect(w.asked.length).toBe(1)
+  await clock.advance(1000)                                      // the poll the calls started ends here
+})
+
+test('#1005: with the user away on the web chat a send to upstream asks in the terminal, and the chat says it waits there', async ($, on) => {
+  // 2026-11-22: it was refused while they were away, a round trip for nothing; #1322's first cut
+  // asked on the chat page, which cut a long question at 2000 characters and left a user back at
+  // the terminal with no dialog. The owner's rule (#1340): consent is answered in the terminal.
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
   chatOn(files)
   const w = upstreamWorld(on, files)
-  w.answer = 'Send it'
+  w.answer = "Don't send"
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
   on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
   await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
@@ -4102,10 +4385,15 @@ test('#1005: with the user away on the web chat a send to upstream is refused wi
   files['/wb/chat/away.json'] = JSON.stringify({ at: clock.now() / 1000, by: 'page' })
   w.cwd = SOURCE
   const r = await $.tool.call({ tool: 'Bash', command: 'git push' } as any) as any
-  expect(r.deny).toContain('the user is away: it waits until they are at the terminal')
-  expect(w.asked).toEqual([])
-  w.cwd = '/home/u/project'
-  expect((await $.tool.call({ tool: 'Bash', command: 'git push' } as any) as any).deny).toBeUndefined()  // their own
+  expect(r.deny).toContain('not sent: the user did not approve it')    // their no, in the terminal
+  expect(w.asked.length).toBe(1)
+  expect(w.asked[0]).toContain(`Claude wants to send this to GitHub (${SLUG})`)
+  expect(w.chats.filter(a => a[1] === 'reply')).toEqual([['chat', 'reply', '--text=Claude is waiting on a workbench dialog in the terminal: answer it there.', '--to=user']])
+  expect(w.chats.some(a => a[1] === 'ask')).toBe(false)                // never asked on the page
+  w.answer = 'Send it'
+  expect((await $.tool.call({ tool: 'Bash', command: 'git push' } as any) as any).deny).toBeUndefined()   // their yes
+  w.answer = null                                                      // dismissed (an interrupt): no
+  expect((await $.tool.call({ tool: 'Bash', command: 'git push' } as any) as any).deny).toContain('not sent')
   await clock.advance(1000)                                      // the poll the calls started ends here
 })
 
@@ -4226,6 +4514,19 @@ test('#1005: "Send it" on wb patch send tells wb what was approved, and nothing 
   await clock.advance(1000)
 })
 
+test('#1322: a Scope: me commit on the branch wb patch send sends is said in its one dialog', async ($, on) => {
+  // wb patch send refused it unless --anyway, a second yes after the dialog's: now the dialog says it
+  const { clock, bash, files } = await gateProbe($, on)
+  files['/home/u/pr.md'] = 'the body\n'
+  files[GIT_LOG] = 'everybody\nme\n'
+  const send = 'wb patch send fix-push --title "Fix the push" --body-file ../pr.md'
+  const mine = await bash(send)
+  expect([mine.asked, mine.question]).toEqual([1, expect.stringContaining("A personal patch: a commit's Scope trailer is me.\n\nTitle: Fix the push")])
+  files[GIT_LOG] = 'everybody\n\n'
+  expect((await bash(send)).question).not.toContain('personal patch')
+  await clock.advance(1000)
+})
+
 test('#1005: Monitor\'s command and the GitHub MCP tools pass the same gate', async ($, on) => {
   // the review of #1005, 2026-11-22: only Bash was gated; Monitor runs its script in the same
   // shell, and the github plugin patching.md offers can open issues and pull requests itself
@@ -4234,20 +4535,24 @@ test('#1005: Monitor\'s command and the GitHub MCP tools pass the same gate', as
   expect((await call({ tool: 'Monitor', command: 'git push', description: 'x', timeout_ms: 1000 })).deny).toContain('not sent')
   w.cwd = '/home/u/project'
   const mcp = 'mcp__plugin_github_github__'
-  const issue = await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'claudes-workbench', title: 'T', body: 'B' })
+  const issue = await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'workbench', title: 'T', body: 'B' })
   expect([issue.asked, issue.deny]).toEqual([1, expect.stringContaining('not sent')])
   expect(issue.question).toContain(`Claude wants to send this to GitHub (${SLUG}), publicly: ${mcp}create_issue`)
   expect(issue.question).toContain('"title": "T"')
-  expect((await call({ tool: `${mcp}push_files`, owner: 'someone', repo: 'claudes-workbench', branch: 'x', files: [] })).asked).toBe(1)
+  expect((await call({ tool: `${mcp}push_files`, owner: 'someone', repo: 'workbench', branch: 'x', files: [] })).asked).toBe(1)
+  // the repo's former name (renamed from claudes-workbench, 2026-11-24): GitHub redirects it, so a
+  // send naming it lands upstream and asks first, by MCP or by gh
+  expect((await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'claudes-workbench', title: 'T' })).asked).toBe(1)
+  expect((await call({ tool: 'Bash', command: 'gh issue create -R a-schaefers/claudes-workbench --title T --body B' })).asked).toBe(1)
   expect((await call({ tool: `${mcp}add_issue_comment`, url: `https://github.com/${SLUG}/issues/3`, body: 'x' })).asked).toBe(1)
   for (const input of [
-    { tool: `${mcp}get_issue`, owner: 'a-schaefers', repo: 'claudes-workbench', issue_number: 3 },   // a read
+    { tool: `${mcp}get_issue`, owner: 'a-schaefers', repo: 'workbench', issue_number: 3 },   // a read
     { tool: `${mcp}create_issue`, owner: 'u', repo: 'project', title: 'T' },                       // the user's own
   ]) expect(await call(input)).toEqual({ deny: undefined, asked: 0, question: '' })
   w.cwd = MARKET                                         // Claude Code's clone, upstream its origin: no developer's
-  expect((await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'claudes-workbench', title: 'T' })).asked).toBe(1)
+  expect((await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'workbench', title: 'T' })).asked).toBe(1)
   w.cwd = '/home/u/repos/workbench'                                                            // a developer's clone
-  expect((await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'claudes-workbench', title: 'T' })).asked).toBe(0)
+  expect((await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'workbench', title: 'T' })).asked).toBe(0)
   await clock.advance(1000)
 })
 
@@ -4310,15 +4615,11 @@ test('the probe row says whether it works, and turned on without probe it asks C
   expect(checks).toBe(1)                                            // off: asked once (it runs no probe then)
   await ui.press({ key: 'probe' })
   await ui.press({ key: 'probe:on' })
-  expect(toasts.filter(t => t.includes('code navigation'))).toEqual([
-    "workbench: Agent code navigation is on but not set up: probe isn't installed. Claude will offer to set it up."])
+  expect(toasts.filter(t => t.includes('code navigation'))).toEqual([])   // the row says it (#1322)
   expect(await row(ui)).toBe('▸ Agent code navigation: On (large files only), not set up')
   await clock.advance(5000)                                         // the next poll starts Claude's turn
-  expect(asked).toHaveLength(1)
-  expect(asked[0]).toContain('The user just turned on Agent code navigation')
-  expect(asked[0]).toContain(missing('on'))
-  expect(asked[0]).toContain('github.com/probelabs/probe/releases')
-  expect(asked[0]).toContain('install nothing without their yes')
+  expect(asked).toEqual(["[workbench] probe isn't on PATH: offer to install its release binary " +
+    '(github.com/probelabs/probe/releases), then `wb experiment probe`.'])
 
   found = true                                                      // Claude installed it
   await clock.advance(31_000)
@@ -4331,8 +4632,7 @@ test('the probe row says whether it works, and turned on without probe it asks C
   expect(await row(ui)).toBe('▸ Agent code navigation: Off (default)')
   await ui.press({ key: 'probe' })
   await ui.press({ key: 'probe:on' })
-  expect(toasts.filter(t => t.includes('code navigation'))).toHaveLength(2)
-  expect(toasts.at(-1)).toBe('workbench: Agent code navigation is on and working (probe-code 0.6.0): tasks started from now use it.')
+  expect(toasts.filter(t => t.includes('code navigation'))).toEqual([])   // working: no toast either
   await clock.advance(5000)
   expect(asked).toHaveLength(1)                                     // working: nothing for Claude
   await ui.unmount()
@@ -4449,8 +4749,9 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
     expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: Off (default)')  // opt-in
     expect(await ui.find({ key: 'coding:ask' })).toBeUndefined()                                       // one row each at rest
     const labels = (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => l.startsWith('▸ '))
-    expect(labels.slice(-2)).toEqual(['▸ Web chat: Off (default)', '▸ Agent code navigation: Off (default)'])  // last, apart (the user, 2026-11-21)
-    expect(await ui.find({ type: 'Text', text: /^Experimental · may change or go away$/ })).toBeDefined()   // under their own heading
+    expect(labels.slice(-2)).toEqual(['▸ Web chat: Off (default)', '▸ Agent code navigation: Off (default)'])  // the probe last, apart (the user, 2026-11-21)
+    expect(await ui.find({ type: 'Text', text: /^Experimental$/ })).toBeDefined()   // under its own heading, no caveat (#1322)
+    expect(await ui.find({ type: 'Text', text: /Click a row|may change or go away/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /web chat / })).toBeUndefined()                         // and no link
     await ui.press({ key: 'tab-tasks' })
     await ui.unmount()
@@ -4488,13 +4789,12 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
 })
 
 const FEED = {
-  ts: 1_800_000_000, tasks: 9, settings: { recording: true, live: true, every: 2 },
+  ts: 1_800_000_000, tasks: 9, settings: { live: true, every: 2 },
   periods: {
     week: { tasks: 4, landed: 3, accepted_pct: 75, savings: { saved: 1_230_000, wh: 600, cost: null }, score: { score: 62 },
       energy: { wh: 900 } },
     all: { tasks: 9, landed: 8, accepted_pct: 89 },
   },
-  streak: { current: 0, best: 3, days: 5 },
   absorbed: { auto_fixes: 7, auto_fixed_tasks: 3 },
   questions: { asked: 2, answered: 1 },
   models: { 'ollama/m': { tasks: 9, accepted_pct: 89, rounds: 1.4, minutes: 14, speed: { write: 38 },
@@ -4525,8 +4825,8 @@ test('the Stats tab draws the history, read from wb stats only while it is shown
   await clock.advance(10)
   expect(reads.length).toBe(1)
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-  expect(texts).toContain('This week: score 62/100 · saved ~1.2M Claude tokens (estimate) · 4 tasks · 3 landed (75%) · 900 Wh')
-  expect(texts).toContain('Streak: best: 3 days in a row with a task landed')          // a run that ended isn't said
+  expect(texts).toContain('This week: 4 tasks · 3 landed (75%)')                     // no score, saving or energy (#1322)
+  expect(texts.some(t => t.startsWith('Streak'))).toBe(false)
   expect(texts.some(t => t.includes('the same call repeated 2 · silence 1'))).toBe(true)
   expect(texts.some(t => t.includes(`writes ~38${NB}tok/s ▆█ (+12%)`))).toBe(true)
   await clock.advance(31_000)
@@ -4631,17 +4931,19 @@ test('the Stats tab reads the history again after wb optimize, a bench run, a pr
   expect(reads.length).toBe(1)
   await clock.advance(31_000)
   expect(reads.length).toBe(1)                                           // nothing changed
-  const steps: [string, string][] = [['/wb/optimize.json', '{"models": {}}'], ['/wb/bench/runs.jsonl', '{}\n'],
-    ['/home/u/.config/workbench/savings.json', '{"kwh_price": 0.3}']]
+  const steps: [string, string][] = [['/wb/optimize.json', '{"models": {}}'], ['/wb/bench/runs.jsonl', '{}\n']]
   for (const [i, [path, text]] of steps.entries()) {
     files[path] = text
     await clock.advance(31_000)
     expect(reads.length).toBe(2 + i)
   }
+  files['/home/u/.config/workbench/savings.json'] = '{"kwh_price": 0.3}' // the feed costs no energy now (#1322)
+  await clock.advance(31_000)
+  expect(reads.length).toBe(3)
   await ui.press({ key: 'tab-tasks' })
   await ui.press({ key: 'tab-stats' })                                   // pressed: read, files unchanged
   await clock.advance(10)
-  expect(reads.length).toBe(5)
+  expect(reads.length).toBe(4)
   await ui.press({ key: 'tab-tasks' })
   await ui.unmount()
 })
@@ -4674,53 +4976,23 @@ test('the Stats tab reads the history again after a machine of a network home me
   await ui.unmount()
 })
 
-test('the Stats tab\'s settings pick through wb, progress checks stay off by default, and the price is typed', async ($, on) => {
+test('progress checks pick through wb and stay off by default; the Stats tab\'s own knobs and the price have no row', async ($, on) => {
+  // #1322: Stats recording, Live view and Live refresh (each on, or 2 s, by default) and the
+  // electricity price input were rows nobody needed; wb stats set and wb savings --price keep them
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
   const runs: string[][] = []
-  on('process.run', (_: any, e: any) => {
-    runs.push(e.argv)
-    if (e.argv[1] === 'stats' && e.argv[2] === 'set')
-      files['/wb/stats.json'] = JSON.stringify({ [e.argv[3]]: e.argv[3] === 'every' ? Number(e.argv[4]) : e.argv[4] === 'on' })
-    if (e.argv[1] === 'savings' && e.argv[2] === '--price')
-      return { value: { exitCode: 0, stdout: JSON.stringify(e.argv[3] === 'off' ? { tasks: 0, price: null } :
-        { tasks: 1, claude: 50000, self_est: 80000, saved: 30000, wh: 1500, cost: 0.45, price: Number(e.argv[3]) }), stderr: '' } }
-    return { value: { exitCode: 0, stdout: '', stderr: '' } }
-  })
+  on('process.run', (_: any, e: any) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: '', stderr: '' } } })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.advance(1000)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'tab-settings' })
-  expect((await ui.find({ key: 'record' }))?.props.label).toBe('▸ Stats recording: On (default)')
-  expect((await ui.find({ key: 'live' }))?.props.label).toBe('▸ Live view: On (default)')
-  expect((await ui.find({ key: 'every' }))?.props.label).toBe('▸ Live refresh: 2 s (default)')
+  for (const key of ['record', 'live', 'every', 'price']) expect([key, await ui.find({ key })]).toEqual([key, undefined])
   expect((await ui.find({ key: 'progress' }))?.props.label).toBe('▸ Progress checks: Off (default)')
-  await ui.press({ key: 'record' })
-  await ui.press({ key: 'record:off' })
-  expect(runs.some(r => r.join(' ') === 'wb stats set recording off')).toBe(true)
-  expect((await ui.find({ key: 'record' }))?.props.label).toBe('▸ Stats recording: Off')
-  await ui.press({ key: 'every' })
-  await ui.press({ key: 'every:5' })
-  expect(runs.some(r => r.join(' ') === 'wb stats set every 5')).toBe(true)
   await ui.press({ key: 'progress' })
   await ui.press({ key: 'progress:on' })
   expect(runs.some(r => r.join(' ') === 'wb progress on')).toBe(true)
-  await ui.input({ key: 'price', text: 'cheap' })                        // not a number: wb isn't asked
-  expect(runs.some(r => r[2] === '--price')).toBe(false)
-  await ui.input({ key: 'price', text: '$0.30' })
-  expect(runs.some(r => r.join(' ') === 'wb savings --price 0.3 --json')).toBe(true)
-  expect((await ui.find({ key: 'price' }))?.props.value).toBe('0.3')
-  runs.length = 0
-  await ui.input({ key: 'price', text: '0,30' })                         // #609: a decimal comma
-  expect(runs.some(r => r.join(' ') === 'wb savings --price 0.3 --json')).toBe(true)
-  await ui.press({ key: 'tab-tasks' })                                  // the footer shows the cost
-  expect((await ui.findAll({ type: 'Text' })).some(t => String(t.text).includes('1.5 kWh, cost 0.45'))).toBe(true)
-  await ui.press({ key: 'tab-settings' })
-  runs.length = 0
-  await ui.input({ key: 'price', text: '' })                             // an empty submit clears it
-  expect(runs.some(r => r.join(' ') === 'wb savings --price off --json')).toBe(true)
-  expect((await ui.find({ key: 'price' }))?.props.value).toBe('')
   await ui.press({ key: 'tab-tasks' })
   await ui.unmount()
 })
@@ -4987,10 +5259,10 @@ test('a live view the engine put away starts again as soon as the pane is back, 
   await ui.unmount()
 })
 
-test('a card wb top knows but has no reading for says so, not nothing (#547)', () => {
+test('a card wb top knows but cannot read just now keeps its row, with nothing said of the gap (#547, #1322)', () => {
   const text = (gpus: any[]) => liveLines({ snap: { ts: 0, every: 2, gpus, running: [], rack: [], queue: [] }, busy: {} } as any)
     .map(r => r.map(p => p.text).join(''))
-  expect(text([{ index: 0, name: 'NVIDIA GeForce RTX 4090', driver: 'nvidia', stale: true }])[0]).toBe('GPU 0 NVIDIA GeForce RTX 4090 no reading ')
+  expect(text([{ index: 0, name: 'NVIDIA GeForce RTX 4090', driver: 'nvidia', stale: true }])[0]).toBe('GPU 0 NVIDIA GeForce RTX 4090 ')
 })
 
 test('an idle Apple silicon Mac draws its RAM in use against all its RAM and names the GPU limit beside it (#701)', () => {
@@ -5026,50 +5298,26 @@ test('the history says nothing it has no data for, and a new install how to begi
     optimized: { 'ollama/x': { window: 32768, fits: true } }, bench: { 'ollama/x': { run: 'r1', day: '2026-11-20', passed: 3, of: 4 } } })
   expect(early).toEqual([{ label: 'Bench', text: 'ollama/x 3/4 (2026-11-20)' },
     { label: 'Optimized', text: 'ollama/x 32K all on the GPU' }])
-  // #609: the energy's cost labelled as the footer and `wb savings` label it, no bare "(0.27)"
-  expect(statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, energy: { wh: 900, cost: 0.27 } } } })[0].text)
-    .toContain('900 Wh, cost 0.27')
+  // #1322: a period's energy, its cost and the savings estimate are not said
+  expect(statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, energy: { wh: 900, cost: 0.27 },
+    savings: { saved: 5000 }, score: { score: 62 }, spec_gaps: 1 } } })[0].text).toBe('1 task · 1 landed')
   const lines = statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, accepted_pct: 100 } } })
   expect(lines).toEqual([{ label: 'This week', text: '1 task · 1 landed (100%)' }])   // no savings, no zeros
   expect(spark([0, 0])).toBe('')
   expect(spark([1, 4, 8])).toBe('▂▅█')
-  expect(priceOf('{"price": 0.3}')).toBe(0.3)
   // #609: a decimal comma and a currency sign or code before or after; empty clears; no hex
   for (const typed of ['0,30', '€0.30', '0.30 EUR', '$0.3', ' 0.3 ', '0.30€', 'kr 0,3', '.3'])
     expect(parsePrice(typed)).toBe(0.3)
   expect(parsePrice('')).toBe('off')
   for (const typed of ['0x10', '1e3', 'cheap', '0', '-0.3', '1,000.50', '0.3.1'])
     expect(parsePrice(typed)).toBe(null)
-  expect(priceOf('{"price": null}')).toBe(null)
-  expect(priceOf('not json')).toBe(null)
 })
 
-test('the history claims no more fixed or answered than the feed confirms', () => {
-  // #562: two failed auto-fix rounds read "fixed by the agent", a timed-out question "answered"
-  const said = (f: any) => statsLines({ tasks: 1, ...f }).map(l => `${l.label}: ${l.text}`)
-  const lines = said({ absorbed: { auto_fixes: 2 }, questions: { asked: 1 } })
-  expect(lines).toContain('Without waking Claude: 2 test failures sent back to the agent')
-  expect(lines).toContain('Questions: 1 asked mid-task')
-  expect(lines.join('\n')).not.toMatch(/fixed|answered/)
-  expect(said({ absorbed: { auto_fixes: 3, auto_fixed_tasks: 1 }, questions: { asked: 3, answered: 1 } }))
-    .toEqual(['Without waking Claude: 3 test failures sent back to the agent (1 task then green)',
-      'Questions: 3 asked mid-task · 1 answered'])
-})
-
-test('a period says the spec-gap discards its saving counts beside its task count', () => {
-  // #569: "cost ~115K more Claude tokens · 0 tasks · 0 landed" for a period of one such discard
-  const lines = statsLines({ tasks: 0, periods: { week: { tasks: 0, landed: 0, spec_gaps: 1,
-    savings: { saved: -115_000, tasks: 1 } } } })
-  expect(lines[0]).toEqual({ label: 'This week',
-    text: 'cost ~115K more Claude tokens (estimate) · 0 tasks · 0 landed · and 1 discard put down to the spec' })
-})
-
-test('a period\'s energy is every task\'s, compared by the saving or not', () => {
-  // #568: three tasks used 287 Wh and the tab said 12, the one task the saving could compare
-  const week = (p: any) => statsLines({ tasks: 3, periods: { week: { tasks: 3, landed: 3, accepted_pct: 100, ...p } } })[0].text
-  expect(week({ savings: { saved: 5000, wh: 12, cost: 0 }, energy: { wh: 287, cost: 0.09 } }))
-    .toBe('saved ~5K Claude tokens (estimate) · 3 tasks · 3 landed (100%) · 287 Wh, cost 0.09')
-  expect(week({ energy: { wh: 1500 } })).toBe('3 tasks · 3 landed (100%) · 1.5 kWh')  // nothing compared
+test('the history says no score, saving, streak, bests, milestones, work absorbed, questions or 30 days\' line (#1322)', () => {
+  const said = statsLines({ tasks: 1, streak: { current: 2, best: 3 }, absorbed: { auto_fixes: 2 }, questions: { asked: 1 },
+    days: [{ tasks: 1 }, { tasks: 2 }], milestones: [{ kind: 'landed', n: 1, day: 'd1' }, { kind: 'saved', n: 100_000, day: 'd2' }],
+    model_lines: { lines: [{ model: 'm', tasks: 1, accepted_pct: 100, claude: 40_000 }] } }).map(l => `${l.label}: ${l.text}`)
+  expect(said).toEqual(['m: 1 task · 100% landed'])
 })
 
 test('a bench run still going or cut short shows beside the last finished one, never in its place', () => {
@@ -5162,13 +5410,12 @@ const MANY = (n: number) => Array.from({ length: n }, (_, i) => `ollama/m${i}`)
 const tabFeed = (ids: string[], more?: any) => ({
   ts: 1, until: 2, settings: {}, tasks: 400,
   periods: { week: { tasks: 12, landed: 10, accepted_pct: 83 }, all: { tasks: 400, landed: 330, accepted_pct: 83 } },
-  streak: { current: 3, best: 9 }, absorbed: { auto_fixes: 4, auto_fixed_tasks: 2 }, questions: { asked: 2 },
+  absorbed: { auto_fixes: 4, auto_fixed_tasks: 2 }, questions: { asked: 2 },
   models: Object.fromEntries(ids.map(m => [m, { tasks: 13, accepted_pct: 80 }])),
   model_lines: { lines: ids.slice(0, 3).map((m, i) => ({ model: m, variants: [m], windows: [32768], last: 100 - i, tasks: 13, accepted_pct: 80 })),
     ...(more ? { more } : {}) },
   sizes: { trivial: { tasks: 300, accepted_pct: 90 }, small: { tasks: 100, accepted_pct: 60 } },
   days: [{ day: '2026-11-20', tasks: 3, landed: 2 }, { day: '2026-11-21', tasks: 5, landed: 4 }],
-  bests: { fastest: { minutes: 2, task: 'quick' } }, milestones: [{ kind: 'landed', n: 300, day: '2026-11-19' }],
   guards: { repeat: 3 },
   helps: Object.fromEntries(ids.map(m => [m, { hint: [2, 3] }])),
   bench: Object.fromEntries(ids.map(m => [m, { run: 'r1', day: '2026-11-20', passed: 7, of: 10 }])),
@@ -5186,7 +5433,7 @@ test('the stats tab stays under 25 rows with 30 models, the rest folded and coun
   const now = text(liveLines(tabTop(ids)))
   const history = statsLines(tabFeed(ids, { models: 27, tasks: 351 })).map(l => `${l.label}: ${l.text}`)
   expect(now.length + history.length).toBeLessThanOrEqual(25)
-  expect(now).toContain("+29 more models idle, can't run or remote (wb top)")
+  expect(now).toContain('+29 more (wb top)')
   expect(now.some(r => r.includes('ollama/m0 resident') && r.includes('← fix-it'))).toBe(true)
   expect(now.some(r => r.startsWith('○ ollama/m1 '))).toBe(false)
   expect(history).toContain('Other models: 27 more models: 351 tasks (wb stats --all)')
@@ -5638,29 +5885,28 @@ test('the words fall into the modeline\'s row: the page\'s last when it fits, th
     claude_pid: 0, claude_start: '', backlog: '', parked: false, allowed: '', ...extra })
   const none = { task: '', lines: [] }
   // the empty page: the stage's margin, the apprentice and a bubble of three lines, the tabs' margin, the tabs, the modeline
-  const empty = pageShape([], none, true, '', 0, 60)
+  const empty = pageShape([], none, true, 0, 60)
   expect(empty).toEqual({ rows: 11, atLeast: 11, stage: 1, tail: 10 })
   expect(splashTarget(empty, 27)).toEqual({ stage: 1, bar: 10 })
   // one closed task, out of the mode: its folded line (#1048), the list's margin, the stage's
-  // margin, a bubble of two lines beside the apprentice, the saving, the tabs' margin, the tabs,
-  // the modeline
-  const one = pageShape([t('fix-it', 'accepted')], none, false, 'this week: saved ~1.2M Claude tokens', 0, 60)
-  expect(one).toEqual({ rows: 2 + 1 + 6 + 1 + 3, atLeast: 13, stage: 3, tail: 10 })
-  expect(splashTarget(one, 27)).toEqual({ stage: 3, bar: 12 })
+  // margin, a bubble of two lines beside the apprentice, the tabs' margin, the tabs, the modeline
+  const one = pageShape([t('fix-it', 'accepted')], none, false, 0, 60)
+  expect(one).toEqual({ rows: 2 + 1 + 6 + 3, atLeast: 12, stage: 3, tail: 9 })
+  expect(splashTarget(one, 27)).toEqual({ stage: 3, bar: 11 })
   // a review waiting with its last line: its two rows, none wrapping, so the page is still exact
-  const review = pageShape([t('fix-it', 'review', { last: 'auto-fix skipped: the base fails the same test' })], none, false, '', 0, 60)
+  const review = pageShape([t('fix-it', 'review', { last: 'auto-fix skipped: the base fails the same test' })], none, false, 0, 60)
   expect([review.rows, review.stage]).toEqual([3 + 1 + 6 + 1 + 2, 4])
   // many: the page overflows, the pane follows its end, the modeline is its last row (closed
   // tasks fold into one line, and so many open ones draw one row each: compactWanted)
-  const many = pageShape(Array.from({ length: 20 }, (_, i) => t(`task-${i}`, 'review')), none, false, '', 0, 60)
+  const many = pageShape(Array.from({ length: 20 }, (_, i) => t(`task-${i}`, 'review')), none, false, 0, 60)
   expect(splashTarget(many, 27)).toEqual({ stage: 27 - many.tail!, bar: 26 })
   // a line wider than the pane, or one of wide characters: its height isn't known, so no bar row
-  const wide = pageShape([t('fix-it', 'accepted', { last: 'x' })], { task: 'fix-it', lines: [{ s: 'out', t: 'y'.repeat(61) }] }, false, '', 0, 60)
+  const wide = pageShape([t('fix-it', 'accepted', { last: 'x' })], { task: 'fix-it', lines: [{ s: 'out', t: 'y'.repeat(61) }] }, false, 0, 60)
   expect([wide.rows, splashTarget(wide, 27).bar]).toEqual([null, null])
-  const cjk = pageShape([t('fix-it', 'review', { last: '完成した' })], none, false, '', 0, 60)
+  const cjk = pageShape([t('fix-it', 'review', { last: '完成した' })], none, false, 0, 60)
   expect([cjk.rows, splashTarget(cjk, 27).bar]).toEqual([null, null])
   // ...unless the page surely overflows anyway
-  const long = pageShape([t('fix-it', 'running')], { task: 'fix-it', lines: Array.from({ length: 40 }, () => ({ s: 'out', t: 'y'.repeat(70) })) }, false, '', 0, 60)
+  const long = pageShape([t('fix-it', 'running')], { task: 'fix-it', lines: Array.from({ length: 40 }, () => ({ s: 'out', t: 'y'.repeat(70) })) }, false, 0, 60)
   expect(splashTarget(long, 27).bar).toBe(26)
 })
 
@@ -5748,6 +5994,7 @@ function routeWorld(on: any, files: Record<string, string>) {
     asked: [] as string[], options: [] as string[][], answer: "Don't" as string | null, dry: [] as string[][], dryAt: [] as string[], code: 0,
     toasts: [] as string[],
     reply: { change: ROUTE_LINE, gate: true, approval: { argv: ROUTE_ARGV, change: ROUTE_LINE } } as Record<string, unknown>,
+    chats: [] as string[][],   // wb chat's calls: the line for an away user
   }
   on('session.cwd', () => ({ value: '/home/u/project' }))
   on('ui.toast', (_: any, e: any) => { w.toasts.push(e.text); return { value: undefined } })
@@ -5759,6 +6006,7 @@ function routeWorld(on: any, files: Record<string, string>) {
       w.dryAt.push(e.init?.cwd || '/home/u/project') // absent: the session's
       return { value: { exitCode: w.code, stdout: w.code ? '' : JSON.stringify(w.reply), stderr: w.code ? 'wb: no day cap yet' : '' } }
     }
+    if (e.argv[1] === 'chat') w.chats.push(e.argv.slice(1))
     return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
   })
   on('tool.call', (_: any, e: any) => {
@@ -5908,15 +6156,20 @@ test('#1014: a route change hidden in text another program runs, or two in one l
   await clock.advance(1000)
 })
 
-test('#1014: away on the web chat a role change is refused without a dialog', async ($, on) => {
+test('#1014: away on the web chat a role change asks in the terminal, and the chat says it waits there', async ($, on) => {
+  // #1322: it was refused until they were back; the owner's rule (#1340): consent is the terminal's
   const files: Record<string, string> = chatOn({})
-  const { clock, bash } = await routeProbe($, on, files)
+  const { clock, bash, w } = await routeProbe($, on, files)
   await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
   files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_003, from: 'user', text: 'hi' }) + '\n'
   await clock.advance(3000)                                     // a web message: the user is away
   const r = await bash('wb route trivial deepseek/deepseek-flash --day-usd 5')
-  expect([r.asked, r.deny]).toEqual([0, expect.stringContaining('the user is away: say in the web chat what you\'d change')])
+  expect([r.asked, r.deny]).toEqual([1, expect.stringContaining('not changed: the user did not approve it')])
+  expect(w.chats.filter(a => a[1] === 'reply')).toEqual([['chat', 'reply', '--text=Claude is waiting on a workbench dialog in the terminal: answer it there.', '--to=user']])
   expect('/wb/route-ok.json' in files).toBe(false)
+  w.answer = 'Allow'
+  expect((await bash('wb route trivial deepseek/deepseek-flash --day-usd 5')).deny).toBeUndefined()
+  expect(JSON.parse(files['/wb/route-ok.json']!)).toEqual({ argv: ROUTE_ARGV, change: ROUTE_LINE, at: expect.any(Number) })
   await clock.advance(1000)
 })
 
@@ -6173,37 +6426,30 @@ test('#1126: an OpenRouter role\'s backends are in the roles\' summary, so a cha
   expect(rows.at(-1)).toContain('The roles changed: routes.json can\'t be read (wb route says why)')  // as wb refuses it
 })
 
-test('API dollars at the catalog\'s prices read as estimates and at the user\'s own say so (#1135)', () => {
-  // the catalog ran about 2x DeepInfra's bill (2026-11-23): a figure says which prices it is at
+test('API dollars at the catalog\'s prices read ≈ and at the user\'s own plain, with no note after them (#1135, #1322)', () => {
+  // the catalog ran about 2x DeepInfra's bill (2026-11-23): a figure says which prices it is at,
+  // by its ≈ alone (#1322: a "(catalog prices)" note said it twice)
   const mine = { tasks: 2, cost: 0.2, unknown: 0, plan: 0, prices: 'yours', by_provider: { deepinfra: { tasks: 2, cost: 0.2, unknown: 0, prices: 'yours' } } }
-  const t = (o: object) => JSON.stringify({ tasks: 0, claude: 0, self_est: 0, saved: 0, wh: 0, ...o })
-  expect(savedLine(t({ api: mine }))).toBe('this week: API $0.20 on 2 tasks (no GPU task to compare)')
   expect(statsLines({ tasks: 2, periods: { week: { tasks: 2, landed: 2, api: mine } } })[0].text)
-    .toContain('API $0.20 (deepinfra $0.20; your prices)')
+    .toContain('API $0.20 (deepinfra $0.20)')
   const routes = (prices?: string) => ({ v: 1, day_usd: 5, roles: {}, providers: {}, spend_today: { usd: 0.42, by_provider: { deepinfra: 0.42 }, ...(prices ? { prices } : {}) } }) as any
-  expect(spendLine(routes('yours'))).toBe('Spend today: $0.42 of $5 (deepinfra $0.42; your prices)')
-  expect(spendLine(routes())).toBe('Spend today: ≈$0.42 of $5 (deepinfra $0.42; catalog prices)')
+  expect(spendLine(routes('yours'))).toBe('Spend today: $0.42 of $5 (deepinfra $0.42)')
+  expect(spendLine(routes())).toBe('Spend today: ≈$0.42 of $5 (deepinfra $0.42)')
   expect(apiParts({ via: 'api', spend: 0.12 })).toEqual(['≈$0.12', ''])
   expect(apiParts({ via: 'api', spend: 0.12, prices: 'yours' })).toEqual(['$0.12', ''])
 })
 
-test('an API task\'s dollars sit beside the saving, never in it, and an API-only week says there was no GPU task (#1022)', () => {
+test('an API week says its dollars on the Stats tab, never $0 for no price or plan usage (#1022)', () => {
   const api = { tasks: 6, cost: 1.27, unknown: 0, plan: 0, by_provider: { deepseek: { tasks: 4, cost: 0.84, unknown: 0 }, anthropic: { tasks: 2, cost: 0.43, unknown: 0 } } }
-  const t = (o: object) => JSON.stringify({ tasks: 1, claude: 50000, self_est: 80000, saved: 30000, wh: 0, ...o })
-  expect(savedLine(t({ api }))).toBe('this week: saved ~30K Claude tokens (38%, estimate) · API ≈$1.27')
-  expect(savedLine(t({ tasks: 0, saved: 0, api }))).toBe('this week: API ≈$1.27 on 6 tasks (no GPU task to compare)')
-  expect(savedLine(t({ tasks: 0, saved: 0, api: { tasks: 1, cost: 0, unknown: 1, plan: 0 } })))
-    .toBe('this week: 1 API task, no price (no GPU task to compare)')                    // never $0 for no price
-  expect(savedLine(t({ tasks: 0, saved: 0, api: { tasks: 2, cost: 0, unknown: 0, plan: 2 } })))
-    .toBe('this week: 2 API tasks, plan usage (no GPU task to compare)')                 // a quota, not $0
+  expect(statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, api: { tasks: 1, cost: 0, unknown: 1, plan: 0 } } } })[0].text)
+    .toContain('API no known cost')                                                         // never $0 for no price
   // the feed's plan count (stats._api_period) keeps a plan-only week from reading API $0 (#1022's review)
   expect(statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, api: { tasks: 1, cost: 0, unknown: 0, plan: 1,
     by_provider: { 'opencode-go': { tasks: 1, cost: 0, unknown: 0, plan: 1 } } } } } })[0].text).toContain('API plan usage')
-  // savings.usd's rule: a cent's fraction written out, never 4e-05 nor $0.010
-  expect([usd(4e-5), usd(4.1e-5), usd(0.0041), usd(0.009999), usd(0.42), usd(0)]).toEqual(['$0.00004', '$0.000041', '$0.0041', '$0.01', '$0.42', '$0'])
-  expect(savedLine(t({ api: { tasks: 0, cost: 0, unknown: 0, plan: 0 } }))).toBe('this week: saved ~30K Claude tokens (38%, estimate)')
+  // meter.usd's rule (#1322): cents, `<$0.01` under one, a free model's $0, never 4e-05
+  expect([usd(4e-5), usd(0.009999), usd(0.01), usd(0.42), usd(0), usd(5)]).toEqual(['<$0.01', '<$0.01', '$0.01', '$0.42', '$0', '$5.00'])
   const week = statsLines({ tasks: 6, periods: { week: { tasks: 6, landed: 6, api } } })[0].text
-  expect(week).toContain('API ≈$1.27 (deepseek ≈$0.84 · anthropic ≈$0.43; catalog prices)')
+  expect(week).toContain('API ≈$1.27 (deepseek ≈$0.84 · anthropic ≈$0.43)')
   const model = statsLines({ tasks: 2, model_lines: { lines: [{ model: 'deepseek/deepseek-flash', tasks: 2, accepted_pct: 100,
     kind: 'api', paid: 0.12, speed: { write: 80 } }] } }).find(l => l.label === 'API deepseek deepseek-flash')!
   expect(model.text).toContain('paid ~$0.12/task')
@@ -6398,19 +6644,18 @@ async function settingsTab($: any, on: any, files: Record<string, string> = {}, 
   return { clock, files, w, ui, label, options, texts, ran }
 }
 
-test('#1023: the Settings tab draws Shared, GPU, API and Experimental in order, the Agents switch first, the old rows as they were', { timeoutMs: 20_000 }, async ($, on) => {
+test('#1023: the Settings tab draws Shared, GPU, API and Experimental in order, the Agents switch first, the web chat last of Shared, the probe alone under Experimental', { timeoutMs: 20_000 }, async ($, on) => {
   const { ui, texts, label } = await settingsTab($, on)
   const heads = (await texts()).filter(t => ['Shared', 'GPU', 'API', 'Experimental'].includes(t))
   expect(heads).toEqual(['Shared', 'GPU', 'API', 'Experimental'])
   const rows = (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => l.startsWith('▸ '))
   expect(rows.slice(0, 7)).toEqual(['▸ Agents: Both (default)', '▸ When the GPU is busy: Wait (default)', '▸ Complex coding: GPU',
     '▸ Trivial coding: GPU', '▸ English writing: GPU', '▸ Claude coding: Let Claude decide (default)', '▸ Dynamic workflows: Off (default)'])
-  for (const [key, was] of [['coding', '▸ Claude coding: Let Claude decide (default)'], ['record', '▸ Stats recording: On (default)'],
-    ['live', '▸ Live view: On (default)'], ['every', '▸ Live refresh: 2 s (default)'], ['progress', '▸ Progress checks: Off (default)'],
+  for (const [key, was] of [['coding', '▸ Claude coding: Let Claude decide (default)'], ['progress', '▸ Progress checks: Off (default)'],
     ['splash', '▸ Opening animation: Enabled (default)'], ['chat', '▸ Web chat: Off (default)'], ['probe', '▸ Agent code navigation: Off (default)']])
     expect([key, await label(key)]).toEqual([key, was])
-  expect(rows.slice(-2)).toEqual(['▸ Web chat: Off (default)', '▸ Agent code navigation: Off (default)'])  // Experimental last
-  expect((await ui.find({ key: 'price' }))?.props.label).toBe('▸ Electricity price per kWh')
+  expect(rows.at(-1)).toBe('▸ Agent code navigation: Off (default)')  // the probe alone, last
+  expect(rows[rows.indexOf('▸ Web chat: Off (default)') - 1]).toBe('▸ Opening animation: Enabled (default)')  // Shared's last (#1322)
   expect((await ui.find({ key: 'cap' }))?.props.value).toBe('5')
   // wake: the plugin option's value, read-only
   expect(await texts()).toContain('Wake Claude: on · change it in /plugin → workbench → options')
@@ -6425,7 +6670,7 @@ test('#1023: a role\'s press writes the one-shot approval for exactly that chang
   expect(w.approvals.map(a => JSON.parse(a))).toEqual([{ argv: ['route', 'trivial', 'api'], change: 'CHANGE trivial api', by: 'pane', at: 1_800_000_001 }])
   expect(ran('wb route trivial api')).toBe(true)
   expect(w.asked).toBe(0)                                                // the press is the yes: no dialog
-  expect(w.toasts).toEqual([])
+  expect(w.toasts).toEqual(['workbench: CHANGE trivial api'])           // what it agreed to (#1263)
   expect(await label('role-trivial')).toBe('▸ Trivial coding: API (DeepSeek Flash)')
   w.unwritable = true                                                   // no approval reaches wb
   await ui.press({ key: 'role-trivial' })
@@ -6491,9 +6736,44 @@ test('#1023: a role\'s API model is a dropdown of the models wb can run, with Ot
   await ui.unmount()
 })
 
+test('#1263: a role\'s thinking row and the roles\' summary say what its API model does with thinking, not only the setting', { timeoutMs: 20_000 }, async ($, on) => {
+  // bar loop round 6 (2026-11-24): set from the pane, whose press is the yes, an adaptive model that
+  // can't turn thinking off read `Off (default)`, `Faster and cheaper`, and the summary Claude gets
+  // `thinking off`; tests.test_workbench.RoleResolution checks routes.summary and wb route the same way
+  const does = "thinking as the model's default (it lists no lower setting)"
+  const thinks = { api: 'anthropic/claude-x', off: does, on: 'thinking on (effort high)' }
+  const row = { via: 'api', api: 'anthropic/claude-x', thinking: 'off', thinks }
+  expect(routesSummary({ roles: { writing: row } })).toBe('significant GPU (the router picks); trivial GPU (the router picks); ' +
+    `writing API anthropic/claude-x, ${does}`)
+  expect(routesSummary({ roles: { writing: { ...row, thinking: 'on' } } })).toContain('writing API anthropic/claude-x, thinking on (effort high)')
+  expect(routesSummary({ roles: { writing: { ...row, api: 'anthropic/other' } } })).toContain(', thinking off')  // another model's record
+  const plain = [['off', 'Off (default)', 'Faster and cheaper; for tasks started after this.'],
+    ['on', 'On', 'Better on hard steps, slower and costs more; for tasks started after this.']]
+  expect(thinkStops({ thinking: 'off' })).toEqual(plain)
+  expect(thinkStops({ api: 'deepseek/x', thinks: { api: 'deepseek/x', off: 'thinking off', on: 'thinking on (effort high)' } })).toEqual(plain)
+  expect(thinkStops(row)[0]).toEqual(['off', `Off (default): ${does}`, 'This model can\'t turn thinking off, so it isn\'t cheaper; for tasks started after this.'])
+  expect(thinkStops(row)[1]).toEqual(plain[1])
+  // #1263's review: a model that can't turn thinking off but runs at a lower effort is still cheaper off
+  const lowest = 'thinking at its lowest effort (it can\'t turn off)'
+  expect(thinkStops({ api: 'x/y', thinking: 'off', thinks: { api: 'x/y', off: lowest, on: 'thinking on (effort high)' } })[0])
+    .toEqual(['off', `Off (default): ${lowest}`, 'This model can\'t turn thinking off, but its lowest effort is still cheaper than On; for tasks started after this.'])
+  expect(thinkStops({ api: 'x/y', thinks: { api: 'x/y', off: 'thinking on (it can\'t turn off)', on: 'thinking on (it can\'t turn off)' } })[0]![2])
+    .toBe('This model can\'t turn thinking off, so it isn\'t cheaper; for tasks started after this.')
+  const not = 'thinking off (the model doesn\'t reason)'
+  expect(thinkStops({ api: 'x/y', thinks: { api: 'x/y', off: not, on: not } }).map(s => s[1])).toEqual(['Off (default)', `On: ${not}`])
+  const { ui, w, label, clock } = await settingsTab($, on)
+  expect(await label('think-writing')).toBe('▸ English writing thinking: Off (default)')
+  w.routes.roles.writing = { ...row, gpu: 'auto', label: 'English writing' }
+  await clock.advance(11_000)                                           // past the roles' cache
+  await ui.press({ key: 'tab-tasks' })
+  await ui.press({ key: 'tab-settings' })
+  expect(await label('think-writing')).toBe(`▸ English writing thinking: Off (default): ${does}`)
+  await ui.unmount()
+})
+
 test('#1023: thinking runs wb route <role> --thinking, the day cap takes $5, 5,00 and 5 USD as 5 and empty as off, and spend today reads from wb route --json', { timeoutMs: 20_000 }, async ($, on) => {
   const { ui, w, texts, ran } = await settingsTab($, on)
-  expect(await texts()).toContain('Spend today: ≈$0.42 of $5 (DeepSeek $0.42; catalog prices)')  // #1135
+  expect(await texts()).toContain('Spend today: ≈$0.42 of $5 (DeepSeek $0.42)')  // #1135
   await ui.press({ key: 'think-writing' })
   expect(JSON.stringify(await ui.findAll({ type: 'Text' }))).toContain('for tasks started after this')
   await ui.press({ key: 'think-writing:on' })
@@ -6510,7 +6790,7 @@ test('#1023: thinking runs wb route <role> --thinking, the day cap takes $5, 5,0
   await ui.input({ key: 'cap', text: '' })
   expect(ran('wb route cap off')).toBe(true)
   expect((await ui.find({ key: 'cap' }))?.props.value).toBe('')
-  expect(await texts()).toContain('Spend today: ≈$0.42 (DeepSeek $0.42; catalog prices) · no day cap')
+  expect(await texts()).toContain('Spend today: ≈$0.42 (DeepSeek $0.42) · no day cap')
   await ui.unmount()
 })
 
@@ -6893,18 +7173,17 @@ test('#1048: the Stats tab names models and providers as the Tasks view does, a 
     model_lines: { lines: [{ model: 'ollama/qwen3-coder:30b', kind: 'gpu', tasks: 24, accepted_pct: 83, speed: { write: 61 } },
       { model: 'deepseek/deepseek-v4.1-flash', kind: 'api', tasks: 4, accepted_pct: 100, paid: 0.21 }] },
     sizes: { trivial: { tasks: 17, accepted_pct: 94 }, significant: { tasks: 24, accepted_pct: 71 } },
-    milestones: [{ kind: 'saved', n: 5_000_000, day: '2026-11-20' }],
     guards: { spend: 1 },
     helps: { 'ollama/qwen3-coder:30b': { hint: [3, 5] } },
     bench: { 'ollama/qwen3-coder:30b': { run: 'r7', day: '2026-11-19', passed: 17, of: 20 } },
     optimized: { 'ollama/qwen3-coder:30b': { window: 65536, spill: 0 } },
   }
   const said = statsLines(f, '', names).map(l => `${l.label}: ${l.text}`)
-  expect(said[0]).toContain('API ≈$1.27 (DeepSeek ≈$0.84 · Anthropic ≈$0.43; catalog prices)')  // names, not ids
+  expect(said[0]).toContain('API ≈$1.27 (DeepSeek ≈$0.84 · Anthropic ≈$0.43)')  // names, not ids
   expect(said).toContain(`qwen3-coder 30B: 24 tasks · 83% landed · writes ~61${NB}tok/s`)  // Now's label, not ollama/…
   expect(said).toContain('API DeepSeek deepseek-v4.1-flash: 4 tasks · 100% landed · paid ~$0.21/task')  // the Tasks view's place and model
   expect(said).toContain('By size: trivial 17 (94%) · complex 24 (71%)')             // "Complex coding", not significant
-  expect(said).toContain('Milestone: ~5.0M Claude tokens saved (estimate, 2026-11-20)')
+  expect(said.some(l => l.startsWith('Milestone') || l.startsWith('Bests'))).toBe(false)  // neither is said (#1322)
   expect(said).toContain('What stopped agents: the API day cap 1')                  // Settings' "API day cap"
   expect(said).toContain('What helps (qwen3-coder 30B): a hint helped 3 of 5')
   expect(said).toContain('Bench: qwen3-coder 30B 17/20 (2026-11-19)')
@@ -7017,7 +7296,7 @@ test('#1200: the Stats tab draws the history on every surface', { timeoutMs: 20_
     await ui.press({ key: 'tab-stats' })
     await clock.advance(10)
     const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-    expect([surface, texts.includes('This week: score 62/100 · saved ~1.2M Claude tokens (estimate) · 4 tasks · 3 landed (75%) · 900 Wh')])
+    expect([surface, texts.includes('This week: 4 tasks · 3 landed (75%)')])
       .toEqual([surface, true])
     await ui.press({ key: 'tab-tasks' })
     await ui.unmount()

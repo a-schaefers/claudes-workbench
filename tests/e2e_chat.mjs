@@ -44,7 +44,10 @@ async function check(name, fn) {
   try { await fn(); console.log('ok   ' + name) }
   catch (e) { failed++; console.log('FAIL ' + name + '\n     ' + String(e.message || e).split('\n')[0]) }
 }
-const until = async (fn, ms = 8000) => {
+// Every wait is on its condition, never a fixed sleep, and generous: CI's runners are slow at
+// random, and a different check failed each run (#1223). A sleep below is a claim that something
+// does not happen, or a span the page's own clock must pass.
+const until = async (fn, ms = 20000) => {
   const end = Date.now() + ms
   for (;;) {
     try { if (await fn()) return } catch {}
@@ -64,13 +67,30 @@ async function run(engine, device) {
   rmSync(join(home, 'state/chat/open.json'), { force: true })  // the last engine's unread, rebuilt from the files
   writeFileSync(join(home, 'state/results.jsonl'), '')
   const token = readFileSync(env.WB_CHAT_TOKEN, 'utf8').trim()
-  startServer(); await sleep(800)
+  startServer()
+  const base = `http://localhost:${PORT}/`
+  await until(async () => (await fetch(base)).status > 0)  // listening: 800 ms was a guess (#1223)
   const browser = await pw[engine].launch(engine === 'chromium' && CHROMIUM ? { executablePath: CHROMIUM } : {})
   const ctx = await browser.newContext(device ? pw.devices[device] : {})
   const page = await ctx.newPage()
+  // the server's thread held back 1.5 s while this tab's sessionStorage says `e2e-hold`, by the
+  // page's own fetch: Playwright's routes saw these requests but no longer held them once the
+  // service worker was registered, in Chromium as in WebKit (#1223)
+  await page.addInitScript(() => {
+    const real = window.fetch
+    window.fetch = (u, o) => {
+      let hold = false
+      try { hold = !!sessionStorage.getItem('e2e-hold') && /\/api\/(state|stream)$/.test(String(u)) } catch {}
+      return hold ? new Promise(r => setTimeout(r, 1500)).then(() => real(u, o)) : real(u, o)
+    }
+  })
   const errors = []
-  page.on('pageerror', e => errors.push(String(e)))
-  const base = `http://localhost:${PORT}/`
+  // WebKit reports a same-origin fetch that a reload cut off as "Fetch API cannot load … due to
+  // access control checks", a console message Playwright hands over as a page error (a pair's
+  // images asked for as the page unloaded, #1223). Every fetch here is same-origin, so no access
+  // control applies: that wording is only the cut-off load, never the page's script
+  const onError = e => { if (!/^(\w*Error: )?Fetch API cannot load .+ due to access control checks\.?$/.test(String(e))) errors.push(String(e)) }
+  page.on('pageerror', onError)
 
   await check('opens with the key, keeps it, drops it from the address', async () => {
     await page.goto(base + '#token=' + token)
@@ -115,9 +135,15 @@ async function run(engine, device) {
         if (cmd === 'copy') window.copied.push(el && el.value !== undefined ? el.value.slice(el.selectionStart, el.selectionEnd) : String(getSelection()))
         return real(cmd, ...rest)
       }
-      // what the button said: a state event redraws the row (and the button) at once
+      // what the button said, once it changed: a state event redraws the row (and the button) at
+      // once. Read 50 ms after the tap, a slow runner's copy had not answered yet (#1223)
       window.said = []
-      addEventListener('click', e => { const t = e.target; if (t.tagName === 'BUTTON') setTimeout(() => window.said.push(t.textContent), 50) }, true)
+      addEventListener('click', e => {
+        const t = e.target, was = t.textContent
+        if (t.tagName !== 'BUTTON') return
+        const seen = new MutationObserver(() => { if (t.textContent !== was) { seen.disconnect(); window.said.push(t.textContent) } })
+        seen.observe(t, { childList: true, characterData: true, subtree: true })
+      }, true)
     })
     try {
       await p.goto(base)
@@ -294,8 +320,10 @@ async function run(engine, device) {
       await page.evaluate(() => { document.hasFocus = document._hasFocus })
       await show(true); await show(false)                        // back on screen, in use
       await until(() => at() > was)
-      const away = JSON.parse(readFileSync(join(home, 'state/chat/away.json'), 'utf8'))
-      if (away.by !== 'page' || away.at !== at()) throw new Error(JSON.stringify(away))
+      // the server writes page.json, then away.json: read at once, it was missing or the last
+      // report's on a slow runner (#1223)
+      const away = () => existsSync(join(home, 'state/chat/away.json')) ? JSON.parse(readFileSync(join(home, 'state/chat/away.json'), 'utf8')) : {}
+      await until(() => away().by === 'page' && away().at === at())
       was = at()
       await show(true)
       await page.evaluate(() => { Object.defineProperty(document, 'hidden', { value: false, configurable: true }) })
@@ -346,15 +374,16 @@ async function run(engine, device) {
     if (!wb('chat', 'notice', '--done', id).startsWith('answered')) throw new Error('not settled')
     await until(async () => (await row.locator('.meta').textContent()).includes('answered in the terminal'))
   })
-  await check('the gear shows what the week\'s tasks saved Claude, as an estimate', async () => {
+  await check('the gear shows what the week\'s tasks saved Claude, once: the badge and its one line', async () => {
     const usage = { turns: 2, calls: 5, input: 1000, cache_write_5m: 0, cache_write_1h: 10000, cache_read: 200000, output: 3000 }
     writeFileSync(join(home, 'state/results.jsonl'), JSON.stringify({ ts: Date.now() / 1000, outcome: 'accepted',
       claude: usage, diff: { files: 4, added: 61, removed: 1 }, gpu_wh: 600 }) + '\n')
     await page.reload()
     await page.click('#gear')
-    await until(async () => (await page.textContent('#saved')).includes('In the last 7 days, 1 task: Claude used 56K tokens'))
+    await until(async () => (await page.textContent('#saved')).includes('The GPU used 600 Wh.'))
+    // #1322: the saving is the badge's alone, not said again in the paragraph
     const said = await page.textContent('#saved')
-    if (!said.includes('about 59K (an estimate). Saved about 3K (5%). The GPU used 600 Wh.')) throw new Error(said)
+    if (said.includes('3K') || said.includes('estimate')) throw new Error(said)
     // #845: a price in the user's own currency showed as dollars on the phone
     writeFileSync(env.WB_SAVINGS, JSON.stringify({ kwh_price: 0.3 }))
     await page.click('#gear')
@@ -374,7 +403,7 @@ async function run(engine, device) {
     await until(async () => await page.locator('#settings').isHidden())
     await page.reload()
     await page.click('#gear')
-    await until(async () => (await page.textContent('#saved')).includes('API models: 2 tasks, ≈$0.52 (deepseek ≈$0.42, deepinfra $0.10; catalog prices).'))
+    await until(async () => (await page.textContent('#saved')).includes('API models: 2 tasks, ≈$0.52 (deepseek ≈$0.42, deepinfra $0.10).'))
     if (!(await page.textContent('#saved')).includes('The GPU used 600 Wh, cost 0.18. API')) throw new Error(await page.textContent('#saved'))
     writeFileSync(env.WB_SAVINGS, '{}')  // no price again, for the next engine
     // #101: the badge, its number and its words, legible at phone width
@@ -382,7 +411,7 @@ async function run(engine, device) {
     const n = await page.textContent('#badge-n'), cls = await page.getAttribute('#badge-n', 'class')
     if (n !== '5 / 100' || cls !== 'badge-n red') throw new Error(`${n} ${cls}`)
     const s = await page.textContent('#badge-s')
-    if (s !== 'I used about 5% less Claude than if Claude had done this work alone.') throw new Error(s)
+    if (s !== '~3K Claude tokens saved this week') throw new Error(s)
     const box = await page.locator('#badge').boundingBox()
     if (box.width > (await page.evaluate(() => innerWidth))) throw new Error('wider than the phone')
     await page.click('#gear')
@@ -443,7 +472,7 @@ async function run(engine, device) {
     })
     await new Promise(r => proxy.listen(PORT + 7, '127.0.0.1', r))
     const p = await ctx.newPage()
-    p.on('pageerror', e => errors.push(String(e)))
+    p.on('pageerror', onError)
     const hide = h => p.evaluate(h => {
       Object.defineProperty(document, 'hidden', { value: h, configurable: true })
       document.dispatchEvent(new Event('visibilitychange'))
@@ -593,6 +622,9 @@ async function run(engine, device) {
     if (!(b.top >= a.bottom)) throw new Error('side by side on a phone')
     const width = await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)
     if (!width) throw new Error('the page scrolls sideways')
+    // Claude's words revealed in full first: the bubble growing over the pair moved the button
+    // from under the tap on a slow runner (#1223), as it did Keep's (#397)
+    await until(async () => (await page.locator('.bubble.flowing').count()) === 0)
     await page.click('text=Reply about these')
     await until(async () => (await page.textContent('#about-text')) === 'Replying about fix-nav, step 1')
     await page.fill('#input', 'the menu overlaps the logo')
@@ -682,16 +714,17 @@ async function run(engine, device) {
     await page.focus('#input')
     await page.evaluate(() => { document.body.style.transform = 'translateY(300px)'; document.body.style.height = '400px' })
     await page.evaluate(() => document.getElementById('input').blur())
-    await sleep(1400)
-    const at = await page.evaluate(() => ({ t: document.body.style.transform, h: document.body.style.height,
+    // the page fits again on a ladder of timers up to 1.2 s: waited for, not slept past (#1223)
+    const at = () => page.evaluate(() => ({ t: document.body.style.transform, h: document.body.style.height,
       foot: Math.round(document.getElementById('composer').getBoundingClientRect().bottom), vh: innerHeight, y: scrollY }))
-    if (at.t || at.h || at.y || Math.abs(at.foot - at.vh) > 2) throw new Error(JSON.stringify(at))
+    const down = a => !a.t && !a.h && !a.y && Math.abs(a.foot - a.vh) <= 2
+    await until(async () => down(await at())).catch(async () => { throw new Error(JSON.stringify(await at())) })
   })
   await check('two tabs offline, both closed, reopened: each message lands exactly once', async () => {
     // #199 (the 2026-11-19 audit): each tab saved its own copy of one outbox array over the
     // other's, and only the second tab's message ever reached the server
     const a = await ctx.newPage(), b = await ctx.newPage()
-    for (const t of [a, b]) { t.on('pageerror', e => errors.push(String(e))); await t.goto(base); await until(async () => await t.locator('#input').isEditable()) }
+    for (const t of [a, b]) { t.on('pageerror', onError); await t.goto(base); await until(async () => await t.locator('#input').isEditable()) }
     await stopServer()
     for (const [t, text] of [[a, 'queued in tab one'], [b, 'queued in tab two']]) {
       await t.fill('#input', text)
@@ -702,7 +735,7 @@ async function run(engine, device) {
     startServer()
     await until(async () => (await fetch(base)).status > 0)  // listening (WebKit's worker hid the wait)
     const c = await ctx.newPage()
-    c.on('pageerror', e => errors.push(String(e)))
+    c.on('pageerror', onError)
     await c.goto(base)
     for (const text of ['queued in tab one', 'queued in tab two']) {
       await until(() => messages().filter(m => m.text === text).length === 1, 20000)
@@ -719,7 +752,7 @@ async function run(engine, device) {
     // #245 (the audit of 1.2): at quota, Send cleared the box, no pending bubble showed, and
     // nothing reached the server
     const q = await ctx.newPage()
-    q.on('pageerror', e => errors.push(String(e)))
+    q.on('pageerror', onError)
     await q.goto(base)
     await until(async () => await q.locator('#input').isEditable())
     await q.evaluate(() => { Storage.prototype.setItem = () => { throw new DOMException('full', 'QuotaExceededError') } })
@@ -772,7 +805,7 @@ async function run(engine, device) {
     // while one is registered
     const qc = await browser.newContext({ ...(device ? pw.devices[device] : {}), serviceWorkers: 'block' })
     const q = await qc.newPage()
-    q.on('pageerror', e => errors.push(String(e)))
+    q.on('pageerror', onError)
     await q.goto(base + '#token=' + token)
     await until(async () => await q.locator('#input').isEditable())
     await q.evaluate(() => { Storage.prototype.setItem = () => { throw new DOMException('full', 'QuotaExceededError') } })
@@ -785,13 +818,13 @@ async function run(engine, device) {
       await q.fill('#input', text)
       await q.click('#send')
       for (let i = 1; i <= foreign.length; i++) {
-        await until(() => n >= i, 15000)
+        await until(() => n >= i, 30000)
         await sleep(200)
         if ((await q.inputValue('#input')) !== text) throw new Error(`the box was cleared by foreign 200 number ${i}`)
         if (messages().some(m => m.text === text)) throw new Error('reached the server through a foreign 200')
       }
       await until(() => messages().filter(m => m.text === text).length === 1, 20000)
-      await until(async () => (await q.inputValue('#input')) === '', 10000)
+      await until(async () => (await q.inputValue('#input')) === '')
       await sleep(1500)
       const rows = messages().filter(m => m.text === text)
       if (rows.length !== 1 || new Set(rows.map(m => m.cid)).size !== 1) throw new Error(`landed ${rows.length} times`)
@@ -818,7 +851,7 @@ async function run(engine, device) {
     })
     await new Promise(r => proxy.listen(PORT + 8, '127.0.0.1', r))
     const p = await ctx.newPage()
-    p.on('pageerror', e => errors.push(String(e)))
+    p.on('pageerror', onError)
     try {
       await p.goto(`http://localhost:${PORT + 8}/#token=${token}`)
       await until(async () => await p.locator('#input').isEditable())
@@ -829,7 +862,7 @@ async function run(engine, device) {
       }
       // POST_MS (15 s), then the first backoff
       await until(() => ['its reply stalled', 'sent after the stall'].every(t => messages().some(m => m.text === t)), 25000)
-      await until(async () => (await p.locator('.row.user.pending').count()) === 0, 10000)
+      await until(async () => (await p.locator('.row.user.pending').count()) === 0)
       await sleep(1500)
       for (const text of ['its reply stalled', 'sent after the stall']) {
         const n = messages().filter(m => m.text === text).length
@@ -847,7 +880,7 @@ async function run(engine, device) {
     // worker: WebKit's routing doesn't see a page's fetches while one is registered
     const tc = await browser.newContext({ ...(device ? pw.devices[device] : {}), serviceWorkers: 'block' })
     const t = await tc.newPage()
-    t.on('pageerror', e => errors.push(String(e)))
+    t.on('pageerror', onError)
     try {
       await t.goto(base + '#token=' + token)
       await until(async () => await t.locator('#input').isEditable())
@@ -856,7 +889,7 @@ async function run(engine, device) {
         : route.fulfill({ status: 429, headers: { 'Retry-After': '1' }, contentType: 'text/plain', body: 'slow down' }))
       await t.fill('#input', 'throttled once')
       await t.click('#send')
-      await until(() => messages().filter(m => m.text === 'throttled once').length === 1, 15000)
+      await until(() => messages().filter(m => m.text === 'throttled once').length === 1)
       if (throttled !== 2) throw new Error(`sent ${throttled} times`)
       await until(async () => (await t.locator('.row.user.pending').count()) === 0)
       if (await t.locator('.row.user.failed').count()) throw new Error('marked not sent')
@@ -914,7 +947,7 @@ async function run(engine, device) {
     })
     await new Promise(r => proxy.listen(PORT + 9, '127.0.0.1', r))
     const p = await ctx.newPage()
-    p.on('pageerror', e => errors.push(String(e)))
+    p.on('pageerror', onError)
     try {
       await p.goto(`http://localhost:${PORT + 9}/#token=${token}`)
       await until(async () => await p.locator('#input').isEditable())
@@ -922,7 +955,7 @@ async function run(engine, device) {
       const text = 'held over a slow link'
       await p.fill('#input', text)
       await p.click('#send')
-      await until(() => messages().filter(m => m.text === text).length === 1, 10000)
+      await until(() => messages().filter(m => m.text === text).length === 1)
       await sleep(2000)
       if ((await p.inputValue('#input')) !== text) throw new Error('the box was cleared before the reply came')
       await until(async () => (await p.inputValue('#input')) === '', 30000)   // 18 s of reply
@@ -962,6 +995,7 @@ async function run(engine, device) {
     // its own row's button: #821's expired fix-old pair can sort after it in the thread
     const pair = page.locator('.row', { hasText: 'screenshots of fix-nav again.' }).locator('text=Reply about these')
     await until(async () => (await pair.count()) > 0)
+    await until(async () => (await page.locator('.bubble.flowing').count()) === 0)  // as above (#1223)
     await pair.last().click()
     await until(async () => (await page.textContent('#about-text')) === 'Replying about fix-nav, step 1')
     await page.fill('#input', 'x'.repeat(8001))                    // past MAX_TEXT: refused
@@ -1038,13 +1072,12 @@ async function run(engine, device) {
     const count = r => { if (r.url().includes('/api/file/')) gets.push(r.url()) }
     page.on('request', count)
     // the server's thread held back, so the saved one is on screen for many frames, not one or none
-    // (Chromium: Playwright's WebKit doesn't route a page's requests once a service worker is registered)
-    const api = /\/api\/(state|stream)$/, slow = async r => { await sleep(1500); await r.continue().catch(() => {}) }
-    if (engine === 'chromium') await page.route(api, slow)
+    const hold = on => page.evaluate(on => on ? sessionStorage.setItem('e2e-hold', '1') : sessionStorage.removeItem('e2e-hold'), on)
+    await hold(true)
     try {
       await page.reload()  // rows written behind the server's back: a load shows them (and keeps them)
       await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('filler reply 59'))
-      if (engine === 'chromium') await page.unroute(api, slow)
+      await hold(false)
       await sleep(1500)
       if (gets.length) throw new Error(`fetched ${gets.length} photo(s) the saved thread showed, far above the view in the server's`)
       await page.reload()
@@ -1054,7 +1087,7 @@ async function run(engine, device) {
       await page.$eval('.row.user .files', f => f.scrollIntoView())
       await until(() => gets.length === 1)
       await until(() => page.$eval('.row.user .files .pic img', i => i.complete && i.naturalWidth > 0))
-    } finally { page.off('request', count); if (engine === 'chromium') await page.unroute(api, slow) }
+    } finally { page.off('request', count); await hold(false) }
   })
   await check('a file over the limit is refused on its chip, and ✕ drops it', async () => {
     writeFileSync(env.WB_CHAT_CONFIG, JSON.stringify({ upload_mb: 0.001 }))
@@ -1115,7 +1148,7 @@ async function run(engine, device) {
     })
     try {
       await page.setInputFiles('#pick', { name: 'flaky.txt', mimeType: 'text/plain', buffer: Buffer.from('flaky') })
-      await until(async () => ((await page.locator('#tray .att.refused').textContent()) || '').includes('Input/output error'), 15000)
+      await until(async () => ((await page.locator('#tray .att.refused').textContent()) || '').includes('Input/output error'), 30000)
       await sleep(2500)
       if (flaky.length !== 3) throw new Error(`sent ${flaky.length} times`)
       await page.click('#tray .att .x')

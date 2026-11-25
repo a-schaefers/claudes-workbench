@@ -53,8 +53,9 @@ export const MARK: Record<string, string> = {
 export const ROLE_WORDS: Record<string, string> = { significant: 'complex', trivial: 'trivial', writing: 'writing' }
 // progress.TYPICAL_MIN: an estimate needs this many timed tasks of the model and size behind it
 const TYPICAL_MIN = 3
-// meter.CHECKIN_SHARE (#1019): past this share of the day cap its line turns warning
-const CHECKIN_SHARE = 0.5
+// past this share of the day cap the cap row turns warning: its own, which wakes nobody (meter's
+// half-cap check-in that woke Claude is gone, #1322)
+const WARN_SHARE = 0.5
 
 export const ago = (ms: number) => {
   const s = Math.max(0, Math.round(ms / 1000))
@@ -82,8 +83,8 @@ const ctxBar = (frac: number, freshAt: number | null, w: number) => {
   return b.join('')
 }
 
-// the pane passes wave 2's usd() (savings.usd's rule); this, a free model's $0, else cents, is the default
-const plainUsd = (x: number) => (x === 0 ? '$0' : `$${x.toFixed(2)}`)
+// the pane passes register's usd(); this default is the same rule, meter.usd's (#1322)
+const plainUsd = (x: number) => (x === 0 ? '$0' : Math.abs(x) < 0.01 ? '<$0.01' : `$${x.toFixed(2)}`)
 
 const tokens = (n: number) =>
   n < 100 ? `${n} out` : n < 100_000 ? `${(n / 1000).toFixed(1)}K out` : n < 1e6 ? `${Math.round(n / 1000)}K out`
@@ -495,7 +496,7 @@ export const apiWorking = (list: Pick<TaskFacts, 'via' | 'phase'>[]) => list.som
 
 /** The API day cap's line, only while an API task is working (the owner, 2026-11-23: on Tasks only
  * then; Settings has it always): `API today $0.42 of the $5 day cap  █▍░░░░░░░░`, warning from
- * CHECKIN_SHARE of the cap, error at it; without a cap, today's spend alone. `est`: today's spend
+ * WARN_SHARE of the cap, error at it; without a cap, today's spend alone. `est`: today's spend
  * is at the catalog's prices, drawn `≈$0.42` (#1135). */
 export function capRow(list: TaskFacts[], spent: number, cap: number | null, cols: number,
   usd: (x: number) => string = plainUsd, est = false): Part[] | null {
@@ -503,7 +504,7 @@ export function capRow(list: TaskFacts[], spent: number, cap: number | null, col
   const today = (est && spent ? '≈' : '') + usd(spent)
   if (!(cap && cap > 0)) return clipParts([{ text: `API today ${today}`, dim: true }], cols)
   const share = spent / cap
-  const color = share >= 1 ? 'error' : share >= CHECKIN_SHARE ? 'warning' : 'success'
+  const color = share >= 1 ? 'error' : share >= WARN_SHARE ? 'warning' : 'success'
   const capText = Number.isInteger(cap) ? `$${cap}` : usd(cap)
   return clipParts([{ text: `API today ${today} of the ${capText} day cap  `, dim: true },
     { text: bar(share, 10), color }], cols)

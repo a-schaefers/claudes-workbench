@@ -16,6 +16,7 @@
   let viewing = null, sweeping = false  // the photo the viewer shows; a sweep of object URLs queued (#746)
   let nearView = null  // loads the thread's thumbnails as they near the view (#754)
   const nearLater = new Set()  // thumbnails seen near the view before the server's thread was in
+  let drawnAt = 0  // when render() last drew the thread (performance.now()): an older nearness is stale
   const DEAD_MS = 40000          // the server pings every 15 s: this long silent means the line is dead
   const CONNECT_MS = 12000       // a connection that never answers: dial again
   const HIDDEN_GRACE_MS = 60000  // a hidden page keeps its stream this long, then lets go
@@ -91,14 +92,19 @@
   const reduced = matchMedia('(prefers-reduced-motion: reduce)')
 
   // ---- sticky follow (stays at the newest line unless the reader scrolls up) ----
-  let follow = true, lastTop = 0, touchY = 0
+  let follow = true, lastTop = 0, lastHeight = 0, touchY = 0
   const nearEnd = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60
   const release = () => { follow = false; jump.hidden = nearEnd() }
   scroller.addEventListener('scroll', () => {
-    const top = scroller.scrollTop
+    const top = scroller.scrollTop, height = scroller.scrollHeight
+    // A scroll that came with the thread's height changing is the layout's, not the reader's:
+    // the saved thread's images loading after a reload grew it and moved scrollTop up 24 px, that
+    // read as the reader going up, and the server's thread was then drawn with the view left mid-
+    // thread, far from the newest line (#1223, under load; CI saw its photo fetched). A wheel or a
+    // finger still releases at once
     if (top > lastTop + 2 && nearEnd()) follow = true       // the reader came back down
-    else if (top < lastTop - 2 && !nearEnd()) follow = false // the reader went up
-    lastTop = top
+    else if (top < lastTop - 2 && !nearEnd() && height === lastHeight) follow = false // the reader went up
+    lastTop = top; lastHeight = height
     jump.hidden = follow || nearEnd()
   }, { passive: true })
   scroller.addEventListener('wheel', e => { if (e.deltaY < 0) release() }, { passive: true })
@@ -109,7 +115,7 @@
     touchY = y
   }, { passive: true })
   const toEnd = force => {
-    if (force || follow) { scroller.scrollTop = scroller.scrollHeight; lastTop = scroller.scrollTop; follow = true; jump.hidden = true }
+    if (force || follow) { scroller.scrollTop = scroller.scrollHeight; lastTop = scroller.scrollTop; lastHeight = scroller.scrollHeight; follow = true; jump.hidden = true }
   }
   jump.addEventListener('click', () => scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' }))
 
@@ -471,6 +477,7 @@
     sweepSoon()
     toEnd()
     if (list.length) firstVisit = false
+    drawnAt = performance.now()
   }
 
   // An ask: a permission (Allow, Deny), a finished plan (Approve, Keep planning with a note) or
@@ -1192,10 +1199,19 @@
   // fetched whole, though the newer messages then put it far above the view (CI, 2026-11-24). One
   // left for later is looked at again once the server's thread is drawn (`nearAgain`), or at once
   // when that thread came while this browser's own store was still being asked.
+  // An entry is measured at a frame and delivered as a later task, so a render can come between:
+  // the saved thread's photo, measured near its end, was delivered after the server's thread had
+  // put it far above and fetched whole (CI, 2026-11-24, #1223). One measured before the last
+  // render is observed afresh, to be judged where that render put it.
   function whenNear(el, load) {
     if (!('IntersectionObserver' in window)) return load()
     nearView = nearView || new IntersectionObserver(es => {
-      for (const e of es) if (e.isIntersecting) { nearView.unobserve(e.target); e.target.wbLoad() }
+      for (const e of es) {
+        if (!e.isIntersecting) continue
+        nearView.unobserve(e.target)
+        if (e.time < drawnAt) nearView.observe(e.target)
+        else e.target.wbLoad()
+      }
     }, { root: document.querySelector('main'), rootMargin: '600px 0px' })
     el.wbLoad = load; nearView.observe(el)
   }
@@ -1536,41 +1552,38 @@
   function drawSaved() {
     const t = state.savings, s = t && t.score
     $('badge').hidden = !s
+    // the badge's number and one line under it: the sentence and the paragraph said the same
+    // saving twice more (#1322)
     if (s) {
       const n = $('badge-n'); n.className = 'badge-n ' + s.color
       n.textContent = String(s.score); n.append(Object.assign(document.createElement('small'), { textContent: ' / 100' }))
-      $('badge-s').textContent = s.sentence
+      $('badge-s').textContent = t.saved >= 0 ? `~${tokens(t.saved)} Claude tokens saved this week` : `~${tokens(-t.saved)} more Claude tokens this week`
     }
     const api = apiSaved(t && t.api)
     if (!t || !t.tasks) {
       $('saved').textContent = api || 'Nothing to compare yet. Once a delegated task is accepted, this shows what it saved Claude this week.'
       return
     }
-    const saved = t.saved >= 0
-      ? `Saved about ${tokens(t.saved)}${t.self_est > 0 ? ` (${Math.round(100 * t.saved / t.self_est)}%)` : ''}.`
-      : `It cost about ${tokens(-t.saved)} more.`
-    const gpu = t.wh ? ` The GPU used ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}${t.cost != null ? `, cost ${t.cost.toFixed(2)}` : ''}.` : ''  // no currency sign: the price is the user's, in theirs (#845, as #609)
-    $('saved').textContent = `In the last 7 days, ${t.tasks} task${t.tasks === 1 ? '' : 's'}: Claude used ${tokens(t.claude)} tokens where writing them itself would have taken about ${tokens(t.self_est)} (an estimate). ${saved}${gpu}${api ? ' ' + api : ''}`
+    const gpu = t.wh ? `The GPU used ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}${t.cost != null ? `, cost ${t.cost.toFixed(2)}` : ''}.` : ''  // no currency sign: the price is the user's, in theirs (#845, as #609)
+    // no badge (nothing written to compare against, only discards): the saving here instead
+    const saved = s ? '' : t.saved >= 0 ? `~${tokens(t.saved)} Claude tokens saved this week.` : `~${tokens(-t.saved)} more Claude tokens this week.`
+    $('saved').textContent = [saved, gpu, api].filter(Boolean).join(' ')
   }
   // The week's API tasks, apart from the saving (#1022): dollars, OpenCode's unit, so a `$`;
   // a task with no price is counted, never shown as $0
   function apiSaved(a) {
     if (!a || !a.tasks) return ''
-    const usd = x => {  // savings.usd's rule: a cent's fraction to two figures, written out
-      if (x === 0) return '$0'
-      if (Math.abs(x) >= 0.01) return `$${x.toFixed(2)}`
-      const r = Number(x.toPrecision(2))
-      return Math.abs(r) >= 0.01 ? `$${r.toFixed(2)}` : `$${r.toFixed(2 - Math.floor(Math.log10(Math.abs(r)))).replace(/0+$/, '')}`
-    }
-    // ≈: at the catalog's prices, an estimate, unless the user set the model's (wb model price, #1135)
+    // meter.usd's rule: $0.42, `<$0.01` under a cent, $0 for none (#1322)
+    const usd = x => x === 0 ? '$0' : Math.abs(x) < 0.01 ? '<$0.01' : `$${x.toFixed(2)}`
+    // ≈: at the catalog's prices, an estimate, unless the user set the model's (wb model price, #1135);
+    // the `≈` alone says it, no "(catalog prices)" after it (#1322)
     const est = v => ((v.prices || 'catalog') === 'catalog' && v.cost ? '≈' : '') + usd(v.cost)
-    const note = a.cost ? ({ catalog: 'catalog prices', yours: 'your prices' })[a.prices || 'catalog'] : ''
     const provs = Object.entries(a.by_provider || {}).filter(([, v]) => v.tasks > v.unknown + (v.plan || 0))
       .sort((x, y) => y[1].cost - x[1].cost).map(([p, v]) => `${(a.names || {})[p] || p} ${est(v)}`)
     const known = a.tasks - a.unknown - (a.plan || 0)
-    const inside = [provs.join(', '), note].filter(Boolean).join('; ')
+    const inside = provs.join(', ')
     const parts = [known ? `${est(a)}${inside ? ` (${inside})` : ''}` : '',
-      a.unknown ? `${a.unknown} with no price` : '', a.plan ? `${a.plan} on plan usage` : ''].filter(Boolean)
+      a.unknown ? `${a.unknown} with no known cost` : '', a.plan ? `${a.plan} on plan usage` : ''].filter(Boolean)
     return `API models: ${a.tasks} task${a.tasks === 1 ? '' : 's'}, ${parts.join(', ')}.`
   }
   function drawSettings() {

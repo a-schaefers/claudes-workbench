@@ -26,18 +26,20 @@ const KEEP_ON_COMPACT =
   'delegated (names, repos, branches, what each is for), which are open and what each needs ' +
   'next, and what was accepted, merged or discarded. Drop the diffs, reports and transcripts of ' +
   'finished tasks; `wb status` and `wb report <name>` bring back any detail.'
-// The weekly model check: once a week, in a quiet moment of a session the person is using,
-// Claude is asked to look at this machine, what is installed and how it has done, and what is
-// newest, and to recommend what to add or retire. /workbench-models asks for it now.
+// The weekly model check: once a week, in a quiet moment of a session the person is using, one
+// toast says it is due; /workbench-models asks Claude to look at this machine, what is installed
+// and how it has done, and what is newest, and to recommend what to add or retire. It was
+// submitted as a turn of its own, about 650 tokens, raised again daily until done (#1322).
 const SCOUT_EVERY_MS = 7 * 24 * 3600 * 1000
-const SCOUT_RETRY_MS = 24 * 3600 * 1000 // raised but never finished: ask again a day later
 const MODELS = 'workbench-models'
+const SCOUT_DUE = `workbench: the weekly model check is due: /${MODELS}`
+// what `wb scout` flags (the skill library, the media engines' licences) it says how to act on itself
 const SCOUT_NOTE =
   '[workbench] The weekly model check is due. As the driver, keep the agents on the best ' +
   'models for each role, GPU and API alike:\n' +
   '1. `wb scout`: this machine\'s hardware, what is installed, and how each model has done ' +
   '(real tasks), and its watch list: models set aside and what each needs ' +
-  'before it is tried again.\n' +
+  'before it is tried again. Act on what it flags.\n' +
   '2. Look up what is newest: open-weight coding models with tool calling, their sizes and ' +
   'quantizations, which fit this GPU\'s VRAM (with room for the context) and this RAM, and ' +
   'recent releases of the model server this machine runs (whichever it is: `wb scout` lists ' +
@@ -49,21 +51,9 @@ const SCOUT_NOTE =
   '3. Recommend in a few lines: keep, add (the model and quantization, why it should beat what ' +
   'is installed, its size and how it fits), retire (what it replaces, the disk it frees). ' +
   'Aim for the best results first, then efficiency. For each watch-list item, say whether ' +
-  'its conditions are met yet; `wb scout --unwatch N` once one is settled.\n' +
-  '4. Ask before downloading or deleting. With a yes: on Ollama `wb model add <provider/model> ' +
-  '--pull` in the background, on another server its own download then `wb model add`; ' +
-  '`wb model sizes <id> …` if it should only take some task sizes, and ' +
-  '`wb model retire <id> [--delete]` for what it replaces. Installed models that are not ' +
-  'registered may belong to other tools: ask first. API roles: recommend in chat only; never ' +
-  'run `wb route` or pass `--model` for an API model unasked (a role changes on the user\'s ' +
-  'words, through the dialog, or in the pane).\n' +
-  '5. The audio and image engines `wb scout` lists, if any (speech, sound effects, music, the ' +
-  'listener; images): check each model\'s licence today against its licence text, not its tag ' +
-  '(licences change: one audio model went non-commercial mid-2026), and whether a newer local ' +
-  'model of that kind fits this machine better. Recommend keep / add / retire as for the coding ' +
-  'models; keep each engine\'s `notes` (its licence) true.\n' +
-  '6. The skill library: rewrite or retire (`wb skill retire`) what `wb scout` flags.\n' +
-  '7. `wb scout --done --notes "<what you recommended or changed>"`.\n' +
+  'its conditions are met yet; `wb scout --unwatch N` once one is settled. Ask before ' +
+  'downloading or deleting (the skill\'s models reference says how).\n' +
+  '4. `wb scout --done --notes "<what you recommended or changed>"`.\n' +
   'Keep it short; if nothing is worth changing, say so in one line.'
 // Workbench mode: /workbench turns it on for the rest of the session and opens the pane, its sign.
 // The user then asks for things in plain words, and Claude hands the coding to OpenCode agents as
@@ -110,9 +100,6 @@ const live = atom({ plugin: 'workbench', key: 'live' } as const, { task: '', lin
   shape: 'live-1',
 })
 
-// The week's saving, the pane's last line (`wb savings --json`, read as the chat link is, and
-// again when a task closes): the user, 2026-11-18, nothing in the product showed it (#107).
-const savings = atom({ plugin: 'workbench', key: 'savings' } as const, '', { shape: 'savings-1' })
 const KEEP_LINES = 2000 // the pane scrolls back through this much history (`wb watch --last`)
 // One heredoc command or minified write is a single line of 100 KB or more, and alone it took the
 // whole HISTORY_CHARS budget, hiding everything before it (the 2026-11-16 audit): each line is
@@ -166,7 +153,6 @@ const TOP_RETRY_MS = 30_000 // a `wb top` that ended by itself (wb missing, fail
 // RETRY_MAX_MS; each poll ran it again, a full-history read a core kept busy on a slow host (#553)
 const STATS_RETRY_MS = 60_000
 const RETRY_MAX_MS = 10 * 60_000
-const SETTINGS_HINT = 'Click a row to see its options, then click one; or Tab to it and press Enter. A change applies at once.'
 const CHAT_STALE_MS = 15_000 // as wb's LISTENING_FOR: a listener silent this long has gone
 // the user counts as away this long after they last used the web chat: a web message, or a page
 // in use (chat/away.json's `at`, written by `wb chat serve`'s /api/active, #959)
@@ -213,17 +199,31 @@ async function away($: any, st: WbChat): Promise<boolean> {
   return st.web && awayNow(await webAt($), await $.clock.now(), await read($, tasks), mine)
 }
 async function back($: any) {
+  mem.awayNoted = false
   if (await webAt($)) await $.fs.write(awayFile(), JSON.stringify({ at: 0 })).catch(() => {})
 }
-// Said in the context blocks while away, and in each wake while away (#540): those blocks come once
+// Said in the context blocks while away, and in a wake while away (#540): those blocks come once
 // per conversation, so a user who went to the web chat later was never told of, and a task's
-// news reached only the terminal they had left.
+// news reached only the terminal they had left. In full once an away stretch (the block or the
+// first wake), then a line: every wake carried the whole paragraph (#1322). `mem.awayNoted`
+// ends with the stretch (awayEnded).
 const AWAY_NOTE =
   'The user is away from the terminal: they last used the web chat. Tell them ' +
   'there (`wb chat reply --text "…"`) when something they asked for is done or needs them; ' +
   '`wb chat log` shows the thread. Typing in the terminal, or answering a prompt there, ends this.'
+const AWAY_TAIL = '(User away: answer with `wb chat reply`.)'
 async function awayToo($: any, text: string): Promise<string> {
-  return (await away($, await read($, chat))) ? `${text}\n\n${AWAY_NOTE}` : text
+  if (!(await away($, await read($, chat)))) {
+    mem.awayNoted = false
+    return text
+  }
+  const said = mem.awayNoted
+  mem.awayNoted = true
+  return `${text}\n\n${said ? AWAY_TAIL : AWAY_NOTE}`
+}
+// The stretch ended (the user back, here or in another session): the next one says it in full
+async function awayEnded($: any) {
+  if (mem.awayNoted && !(await away($, await read($, chat)))) mem.awayNoted = false
 }
 const WEB = '[web chat]'
 // Only for a delivery into a running turn, which the engine frames as another session's message:
@@ -374,7 +374,7 @@ const NARROW = /^[\x20-\x7e -¬®-˿Ͱ-ԯ‐-‧‰- ⁰-⌙⌜-⌨⌫-⏨⏭
  * which can't be known here exactly, and `atLeast` counts each such line as one row. `stage` is
  * the row the apprentice's Raster starts on, `tail` the rows from there to the end.
  */
-export function pageShape(list: WbTask[], watched: WbLive, delegating: boolean, saved: string, now: number,
+export function pageShape(list: WbTask[], watched: WbLive, delegating: boolean, now: number,
   cols: number, bodyRows = 24): { rows: number | null; atLeast: number; stage: number; tail: number | null } {
   const spin = SPIN[0] ?? '✻'
   const page = pageParts(list, watched, delegating, now, spin, cols, true, bodyRows, capOf(list))
@@ -397,11 +397,10 @@ export function pageShape(list: WbTask[], watched: WbLive, delegating: boolean, 
   const said = wrapWords(page.say, page.room).length + (page.more ? wrapWords(page.more, page.room).length : 0) +
     (page.clock ? wrapWords(page.clock, page.room).length : 0)
   const stage = rows + 1 // the stage's marginTop
-  // the stage's height (the apprentice, the mouth, the bubble below its marginTop), the saving's
-  // line, the tabs' marginTop, the tabs, the modeline
-  const savedFits = !saved || (NARROW.test(saved) && saved.length <= cols)
-  const tail = Math.max(ROWS, MOUTH + 1, MOUTH - 1 + 2 + said) + (page.capLine ? 1 : 0) + (saved ? 1 : 0) + 3
-  return { rows: exact && savedFits ? stage + tail : null, atLeast: stage + tail, stage, tail: savedFits ? tail : null }
+  // the stage's height (the apprentice, the mouth, the bubble below its marginTop), the cap's
+  // line, the tabs' marginTop, the tabs, the modeline (the week's saving had a line too, #1322)
+  const tail = Math.max(ROWS, MOUTH + 1, MOUTH - 1 + 2 + said) + (page.capLine ? 1 : 0) + 3
+  return { rows: exact ? stage + tail : null, atLeast: stage + tail, stage, tail }
 }
 
 // Where the splash's last frame puts the apprentice and the modeline's bar, in a pane body of
@@ -513,13 +512,16 @@ const HEADLINE: Record<string, string> = {
   failed: 'failed',
   checkin: 'check-in (still running)',
 }
-const NEXT: Record<string, (n: string, id?: string) => string> = {
+// A question's notice opens `Q: ` or `PERMISSION to ` (ask_mcp.notice: an API); only a permission
+// request gets the `wb allow` paragraph, which every question once carried (#1322)
+const PERMISSION = 'PERMISSION to '
+const NEXT: Record<string, (n: string, id?: string, text?: string) => string> = {
   review: n => `Review it as /workbench says, from the diff above (\`wb diff ${n}\` when it was too ` +
     `big to include), then \`wb accept ${n} -m "…"\` or \`wb feedback ${n} --message <file>\`.`,
-  question: (n, id) => `Answer with \`wb answer ${n}${id ? ` --id ${id}` : ''} --text "…"\`; it is blocked until then. A ` +
-    `PERMISSION request (a refused command, directory or port): the \`wb allow ${n}\` it names ` +
-    `(\`--always\` to keep it) when it is reasonable, which answers it and restarts the agent ` +
-    `with it; else answer with another way.`,
+  question: (n, id, text) => `Answer with \`wb answer ${n}${id ? ` --id ${id}` : ''} --text "…"\`; it is blocked until then.` +
+    (text?.startsWith(PERMISSION) ? ` A PERMISSION request (a refused command, directory or port): the \`wb allow ${n}\` it ` +
+      `names (\`--always\` to keep it) when it is reasonable, which answers it and restarts the agent ` +
+      `with it; else answer with another way.` : ''),
   stuck: n => `Steer it with \`wb feedback ${n} --message <file>\`, or \`wb discard ${n}\`.`,
   failed: n => `Look at \`wb log ${n}\`; then \`wb feedback ${n} --message <file>\` or ` +
     `\`wb discard ${n}\`.`,
@@ -559,11 +561,36 @@ const AGENTS_NEXT = (n: string) =>
 // outage held 10 minutes, a quota or a refused key) isn't the agent's, yet it woke as "was stopped:
 // it got stuck" ending "Steer it with wb feedback …, or wb discard": a feedback round a quota or
 // key stop fails again at once, or work that is fine thrown away, next to the notice's own remedy
-// (#1124, 2026-11-23). The headline is the toast's too.
+// (#1124, 2026-11-23). The headline is the toast's too; its next step is OUTSIDE_NEXT.
 const PROVIDER_HEADLINE = 'was stopped by its API provider'
-const PROVIDER_NEXT = (n: string) => 'Tell the user it is the provider\'s stop and its remedy, as the ' +
-  `notice says; once they say it is fixed (or the rate limit has passed), \`wb feedback ${n} --text ` +
-  '"carry on"`. Never discard it for this, nor change its model or role yourself.'
+// A stop because the task's repo was marked local-only after it started (cause `local_only`:
+// runner._local_only_stop, #1215) isn't the agent's either, yet it woke as "was stopped: it got
+// stuck" ending "Steer it with wb feedback …", which wb refuses (exit 3) while the repo stays
+// local-only: the task's API model is fixed per task (the bar loop, #1232, 2026-11-24). Its next
+// step is OUTSIDE_NEXT: the notice names takeover or discard.
+const LOCAL_ONLY_HEADLINE = 'was stopped: its repo became local-only'
+// Every other stop outside the step (a `cause` not in results.THE_STEP, the allowlist of the
+// agent's own: a model that left OpenCode's catalog, a repo that moved, a setup, checkout, load,
+// full disk, model server or reaped runner) has its remedy in the notice itself, from wb, which
+// knows it: the wake ended with the failed or stuck one's "wb feedback …", which wb refused
+// (exit 3) for a model gone from the catalog, and for a moved repo ran a runner that failed at
+// once, next to the notice's own takeover or relocate (the bar loop, #1247, 2026-11-24; #1232's
+// shape). One rule for them all, so a new such stop needs only its cause. The provider's and the
+// local-only stop had next steps of their own, restating the notice and that Claude never changes
+// a role or lifts local-only (#1322): wb's notice says each remedy.
+const THE_STEP = new Set(['guard', 'agent'])
+const outsideTheStep = (row: Row) => typeof row.cause === 'string' && !THE_STEP.has(row.cause)
+const OUTSIDE_HEADLINE: Record<string, string> = {
+  stuck: 'was stopped (not its agent\'s doing)',
+  failed: 'failed (not its agent\'s doing)',
+}
+// Some name no step (a model failure once the round reached the agent: `can't run: <e>`, no remedy
+// line): those go on with "carry on" once the cause is gone, and never discard work that is fine
+// (#1322's first cut dropped the clause). A local-only stop always names takeover or discard, and
+// wb refuses its feedback: OUTSIDE_REMEDY alone.
+const OUTSIDE_REMEDY = 'Not the agent\'s doing: its remedy is the notice\'s, above; tell the user when it needs them.'
+const OUTSIDE_NEXT = (n: string) => `${OUTSIDE_REMEDY} A notice that names no step: ` +
+  `\`wb feedback ${n} --text "carry on"\` once that cause is gone; never discard it for this.`
 
 // A question delivered into a running turn (#542): the engine frames it as another session's
 // message, so one line says whose it is and that it can't wait for the turn to end.
@@ -594,10 +621,8 @@ const MODE_NOTE = (skill: string) =>
 
 // What Claude learned about how this user wants delegation run (`wb notes`), in any project:
 // Claude Code's own memory is per project, so these come back wherever workbench mode is on.
-const NOTES_NOTE = (notes: string) =>
-  'How this user wants delegation run, learned across their projects (`wb notes`; ' +
-  '`wb notes add "…"` when they tell you something that holds in any repo, `wb notes drop N` ' +
-  `when one no longer does):\n${notes}`
+// The add and drop housekeeping is the skill's (#1322: it was said in every conversation).
+const NOTES_NOTE = (notes: string) => `The user's delegation notes (\`wb notes\`):\n${notes}`
 
 // Every slash command is /workbench or starts with it, so typing /workbench lists them all.
 // /workbench is the skill; once the mode is on, running it again brings the pane back
@@ -610,12 +635,10 @@ const HAND_BACK = 'workbench-quit-and-hand-back-claude'
 // Claude coding (#92), the user's choice (`wb coding`): when Claude may write code for a delegated
 // task. "decide" (no saved choice) adds nothing, so Claude works as before there was a choice.
 const CODING_RULES: Record<string, string> = {
-  ask: 'Claude coding is "Ask me first" (the user\'s choice; `wb coding` shows it). The agent ' +
-    'gets the first shot; review and advise as always. Before you write any of a task\'s code (an ' +
-    'edit in its worktree, `wb takeover`), help the agent first (feedback, a smaller step). If it ' +
-    'still falls short, ask the user for one specific edit, naming the task and the exact change, ' +
-    'and wait: only their yes allows it. Record it with `wb coding allow <task> --edit "…" --said ' +
-    '"<their words>"`; it lasts until you hand the task back. Unanswered, the work stays with the agent.',
+  // the mod's dialog asks at the edit (codingRefusal): Claude once had to ask in chat, wait, and
+  // record the yes itself with --edit and --said (#1322)
+  ask: 'Claude coding is "Ask me first" (the user\'s choice; `wb coding` shows it): your edits in a ' +
+    'task\'s worktree ask the user first.',
   only: 'Claude coding is "Only when I say" (the user\'s choice; `wb coding` shows it). Never write ' +
     'a task\'s code yourself, not a one-line fix in review nor `wb takeover`: guide the agent, ' +
     'and when it stays stuck, report the blocker to the user and keep the work with the agent. ' +
@@ -630,7 +653,7 @@ const WORKFLOWS_RULE = 'Dynamic workflows are on (the user\'s choice; `wb workfl
   'role\'s model, never one you pick. Plan the fan-out as a handoff plan (each task its own spec, size, role and ' +
   'acceptance command), name its tasks with one shared prefix and pass it as `--group <prefix>` on each `wb start` ' +
   '(the pane draws them under one header), and say the plan in one line before you start them. ' +
-  'The GPU lease and the provider slots decide what runs together (`--queue` the rest). Review each result on its ' +
+  'The GPU lease and the provider slots decide what runs together (the rest queue). Review each result on its ' +
   'own merits; merge logic first, then tests, then UI or docs.'
 const WORKFLOWS_OFF = 'Dynamic workflows are now off (the user\'s choice; `wb workflows` shows it): run one task ' +
   'at a time again, as the /workbench skill says.'
@@ -648,7 +671,7 @@ async function workflowsMode($: any): Promise<string> {
 // how it was at the start (the user, 2026-11-19)
 const CODING_STOPS: [string, string, string][] = [
   ['only', 'Only when I say', 'You tell Claude when to write code.'],
-  ['ask', 'Ask me first', 'Claude can ask to make a specific fix and waits for your yes.'],
+  ['ask', 'Ask me first', 'Claude asks you in a dialog before it edits code in a task.'],
   ['decide', 'Let Claude decide (default)', 'Claude uses its judgment to guide the agent or make a fix itself.'],
 ]
 
@@ -710,33 +733,19 @@ function probeStops(s: ProbeState, mode: string): [string, string, string][] {
 }
 
 // Claude's turn when the user turns it on and probe isn't there: offer to set it up (the user,
-// 2026-11-20: "let Claude offer to help the user get it fully set up"), with wb's own line
-const PROBE_SETUP_NOTE = (said: string) =>
-  "[workbench] The user just turned on Agent code navigation (the probe experiment) in the " +
-  `pane's Settings, but it can't work yet. wb says: ${said}\n` +
-  'Offer to set it up, and install nothing without their yes. probe (github.com/probelabs/probe) ' +
-  'is a code-search command-line tool; the agents need its release binary, whose `probe --help` ' +
-  "lists `symbols` (crates.io's probe-code 0.6.0 doesn't, though it reports the same version). " +
-  'Pick the asset for this OS and CPU from github.com/probelabs/probe/releases, put `probe` in a ' +
-  'directory on the PATH you and wb run with (such as ~/.local/bin), then run `wb experiment ' +
-  'probe` until it says "and working". Tasks started from then use it; running ones keep ' +
-  'what they started with. If they would rather not, `wb experiment probe off`.'
+// 2026-11-20: "let Claude offer to help the user get it fully set up"). It was about 150 tokens,
+// with a toast beside it, and a toast for one that worked too (#1322): the row says which.
+const PROBE_SETUP_NOTE = "[workbench] probe isn't on PATH: offer to install its release binary " +
+  '(github.com/probelabs/probe/releases), then `wb experiment probe`.'
 
-// Turns the probe experiment on or off through wb, then says how it came out: on and working, or
-// on but not set up, which also asks Claude to offer the setup (once while it's queued)
+// Turns the probe experiment on or off through wb; on but not set up, it asks Claude to offer the
+// setup (once while it's queued). The row says the rest (`, working` or `, not set up`).
 async function setProbe($: any, value: string) {
   const { ok, out } = await runWb($, ['experiment', 'probe', value])
   mem.probe = null // the row asks wb again
   if (!ok) { $.ui.toast(`workbench: ${brief(out)}`); return }
   if (value === 'off') return
-  const s = probeSaid(out)
-  if (s.state === 'missing') {
-    $.ui.toast("workbench: Agent code navigation is on but not set up: probe isn't installed. Claude will offer to set it up.")
-    const line = out.split('\n').find(l => l.startsWith('probe:')) ?? out
-    if (!mem.queued.some(q => q.startsWith(PROBE_SETUP_NOTE('').slice(0, 60)))) mem.queued.push(PROBE_SETUP_NOTE(line))
-  } else if (s.state === 'ready') {
-    $.ui.toast(`workbench: Agent code navigation is ${value} and working${s.version ? ` (${s.version})` : ''}: tasks started from now use it.`)
-  }
+  if (probeSaid(out).state === 'missing' && !mem.queued.includes(PROBE_SETUP_NOTE)) mem.queued.push(PROBE_SETUP_NOTE)
 }
 
 // experiments.json's probe setting as wb reads it (context.setting): "on", true or an old level
@@ -750,23 +759,9 @@ async function probeMode($: any): Promise<string> {
   }
 }
 
-// The Stats tab's rows (#406): what wb records for it and its live view, on by default (the user,
-// 2026-11-20: a measurement that costs nothing is on, and every one can be turned off), then
-// progress checks, off by default since each one wakes Claude. Each is wb's choice: `wb stats set`
-// (stats.json), `wb progress` (progress.json).
-const RECORD_STOPS: [string, string, string][] = [
-  ['on', 'On (default)', 'Each task keeps how it went for the Stats tab: speeds, watts, what stopped it. Nothing leaves this machine.'],
-  ['off', 'Off', 'Tasks keep only what workbench itself learns from.'],
-]
-const LIVE_STOPS: [string, string, string][] = [
-  ['on', 'On (default)', 'The Stats tab shows this machine now (wb top), and only while it is on screen.'],
-  ['off', 'Off', 'The Stats tab shows the history only.'],
-]
-const EVERY_STOPS: [string, string, string][] = [
-  ['1', '1 s', 'How often the live view samples the GPU, the tasks and the models.'],
-  ['2', '2 s (default)', 'How often the live view samples the GPU, the tasks and the models.'],
-  ['5', '5 s', 'How often the live view samples the GPU, the tasks and the models.'],
-]
+// Progress checks, off by default since each one wakes Claude: wb's choice, `wb progress`
+// (progress.json). The live view and its refresh had rows here too, on by default, each wb's
+// (`wb stats set`): the pane keeps them on, and Stats recording is always on (#1322).
 const PROGRESS_OFF: [string, string, string] = ['off', 'Off (default)', 'No progress checks: each one wakes Claude, which spends its tokens.']
 const PROGRESS_STOPS: [string, string, string][] = [
   PROGRESS_OFF,
@@ -780,7 +775,7 @@ function progressStops(after: number): [string, string, string][] {
   return [PROGRESS_OFF, ['on', `On, after ${after} min`,
     `A task past ${after} min of active work gets a check and one recommendation, waking Claude.`]]
 }
-const SETTING_ROWS = /^(coding|chat|probe|record|live|every|progress|splash|agents|busy|workflows|(?:role|gpu|api|think|media)-[a-z]+|size-[^:]+):/ // the rows whose ring the pane follows
+const SETTING_ROWS = /^(coding|chat|probe|progress|splash|agents|busy|workflows|(?:role|gpu|api|think|media)-[a-z]+|size-[^:]+):/ // the rows whose ring the pane follows
 
 // One settings row: a Button naming the choice, which opens its options under it, each a Button
 // (a click, or Enter on the ring), the chosen one marked. Under them the sentence of the option
@@ -833,9 +828,9 @@ function infoLine(kit: Row, key: string, text: string) {
 }
 
 // A section's heading, on both tabs as Stats' Now: bold, in the theme's claude colour; `note` dim after it
-function heading(kit: Row, text: string, note = '') {
+function heading(kit: Row, text: string) {
   const { Text } = kit
-  return note ? <Text><Text bold color="claude">{text}</Text><Text dimColor>{note}</Text></Text> : <Text bold color="claude">{text}</Text>
+  return <Text bold color="claude">{text}</Text>
 }
 
 // A line in lines of at most `n`, each after the first indented `indent`, as Now's rows (wrapParts)
@@ -863,11 +858,11 @@ async function setWeb($: any, value: string) {
 
 // stats.json's settings as wb reads them (stats.py): each its default unless the file says
 // otherwise, a mistyped value ignored
-async function statsSettings($: any): Promise<{ recording: boolean; live: boolean; every: number }> {
+async function statsSettings($: any): Promise<{ live: boolean; every: number }> {
   let d: any = {}
   try { d = JSON.parse(await $.fs.read(`${mem.root}/stats.json`)) } catch { /* the defaults */ }
   const on = (v: unknown) => (typeof v === 'boolean' ? v : true)
-  return { recording: on(d?.recording), live: on(d?.live), every: [1, 2, 5].includes(d?.every) ? d.every : 2 }
+  return { live: on(d?.live), every: [1, 2, 5].includes(d?.every) ? d.every : 2 }
 }
 
 // progress.json as wb reads it (progress.py): on only when it says so; a fixed threshold when
@@ -881,9 +876,9 @@ async function progressSettings($: any): Promise<{ on: boolean; after: number }>
 
 // The Stats tab's history: `wb stats --json`, only while the tab is shown, and only when what it
 // is made from changed since the last read (results.jsonl: a task closed; stats.json: a setting;
-// optimize.json, bench/runs.jsonl, speed.json and the price's savings.json, which the feed reads
-// too and a stale tab kept for good, #549), the day it was counted from has ended (its `until`:
-// an ended streak and last week's numbers stayed for days, #575), or not yet in this load.
+// optimize.json, bench/runs.jsonl and speed.json, which the feed reads too and a stale tab kept for
+// good, #549), the day it was counted from has ended (its `until`: last week's numbers stayed for
+// days, #575), or not yet in this load.
 // `force` on the tab's press and after a settings pick. A stat a file is all a poll costs while
 // the tab is shown; nothing at all while it isn't.
 async function refreshStats($: any, force = false) {
@@ -899,7 +894,7 @@ async function refreshStats($: any, force = false) {
   const own = machines.filter(e => e.kind === 'dir').flatMap(e =>
     ['optimize.json', 'speed.json'].map(f => `machines/${e.name}/${f}`))
   const key = (await Promise.all(['results.jsonl', 'stats.json', 'optimize.json', 'bench/runs.jsonl',
-    'speed.json', ...own, mem.savingsFile || '-'].map(stamp))).join(' ')
+    'speed.json', ...own].map(stamp))).join(' ')
   const had = await read($, statsFeed)
   const now = await $.clock.now()
   const dayOver = typeof had.feed?.until === 'number' && now / 1000 >= had.feed.until
@@ -1064,7 +1059,6 @@ export function liveLines(t: WbTop, why = '', names: Names = NO_NAMES): { color?
     } else if (g.total) row.push({ dim: true, text: `${gib(g.total)} GiB${g.unified ? ' unified' : ''} ` })
     // an Apple GPU: its bar is the RAM, and the most of it the GPU may wire is said here (#701)
     if (typeof g.limit === 'number' && g.limit) row.push({ dim: true, text: `· GPU may wire ${gib(g.limit)} GiB ` })
-    if (g.stale) row.push({ dim: true, text: 'no reading ' })            // known, not read just now (#547)
     if (typeof g.busy === 'number')
       row.push({ dim: true, text: '· busy ' }, { color: g.busy > 80 ? 'warning' : 'success', text: bar(g.busy / 100, 8) },
         { text: ` ${g.busy}% ` })
@@ -1091,13 +1085,13 @@ export function liveLines(t: WbTop, why = '', names: Names = NO_NAMES): { color?
         ? ` ${gib(m.gpu_bytes)} GiB on the GPU${m.cpu_bytes ? ` + ${gib(m.cpu_bytes)} on the CPU` : ''}` : ''
     // with its unit, as the history's `writes ~61 tok/s`: "writes ~61" said 61 of nothing (#1048's review)
     const facts = [m.write_tok_s ? `writes ~${Math.round(m.write_tok_s)}${NB}tok/s` : '', m.read_tok_s ? `reads ~${Math.round(m.read_tok_s)}${NB}tok/s` : '',
-      m.load_s ? `loads ~${secs(m.load_s)}` : '', m.state === 'remote' ? 'another machine: no telemetry' : m.why ?? ''].filter(Boolean)
+      m.load_s ? `loads ~${secs(m.load_s)}` : '', m.why ?? ''].filter(Boolean)
     out.push([{ color: RACK_COLOR[m.state], dim: !RACK_COLOR[m.state], text: `${RACK_MARK[m.state] ?? '•'} ` },
       { text: `${m.label || m.model} ` }, { color: RACK_COLOR[m.state], dim: !RACK_COLOR[m.state], text: `${m.state}${where}` },
       { dim: true, text: facts.length ? ` · ${facts.join(' · ')}` : '' },
       ...(m.tasks?.length ? [{ color: 'claude', text: ` ← ${m.tasks.join(', ')}` }] : [])])
   }
-  if (fold) out.push([{ dim: true, text: `+${fold} more models idle, can't run or remote (wb top)` }])
+  if (fold) out.push([{ dim: true, text: `+${fold} more (wb top)` }])
   for (const q of (s.queue ?? []) as Row[])
     out.push([{ color: 'warning', text: '◌ ' }, { text: `${q.task} ` },
       { dim: true, text: `waits for the GPU${typeof q.waited_s === 'number' ? ` (${secs(q.waited_s)})` : ''}` }])
@@ -1296,7 +1290,11 @@ export function delegates(command: string): boolean {
 // `bash -c '…'` and `eval` are read inside; text a shell or an interpreter runs from a heredoc,
 // a here-string, a pipe or -c is caught by its words (OUTWARD_TEXT): `bash <<EOF … git push` once
 // went through (the review of #1005).
-const UPSTREAM = 'a-schaefers/claudes-workbench' // the GitHub home; patches.json's upstream when it has one (Couplings)
+const UPSTREAM = 'a-schaefers/workbench' // the GitHub home; patches.json's upstream when it has one (Couplings)
+// Its names before: the repo was renamed from claudes-workbench (the owner, 2026-11-24) and GitHub
+// redirects the old name, so a send naming it, or a clone whose origin and patches.json still say
+// it, still lands upstream and still asks first
+const FORMER_UPSTREAM = ['a-schaefers/claudes-workbench']
 const GH_WRITES: Record<string, Set<string>> = {
   pr: new Set(['create', 'comment', 'edit', 'merge', 'review', 'close', 'reopen', 'ready', 'update-branch', 'lock', 'unlock']),
   issue: new Set(['create', 'comment', 'edit', 'close', 'reopen', 'delete', 'lock', 'unlock', 'transfer', 'pin', 'unpin', 'develop']),
@@ -1319,8 +1317,6 @@ const SEND_ASK = 'Send it'
 // dialog of its own pleading for the yes the user had just refused (the review of #1005)
 const NOT_SENT = 'workbench: not sent: the user did not approve it in the dialog. Tell them it was not ' +
   'sent; try again only if they ask for it.'
-const NOT_SENT_AWAY = 'workbench: not sent: the user is away: it waits until they are at the terminal. ' +
-  'Tell them in the web chat what it would send; they approve it in the dialog once back.'
 const NOT_SHOWN = (why: string) => `workbench: not sent: the dialog can't show what it sends (${why}). Run ` +
   'wb patch send as a command of its own, its --title written out and --body-file naming the file, so the ' +
   'user sees both.'
@@ -1386,6 +1382,7 @@ function sendsOut(words: string[]): { kind: '' | 'send' | 'out'; dirs: string[] 
   }
   const wb = wbArgs(cmd, args)
   if (wb && wb[0] === 'patch' && wb[1] === 'send') return { kind: 'send', dirs: [] }
+  // wb patch zip only writes a file the user may email themselves: nothing outward (#1291)
   return { kind: '', dirs: [] }
 }
 
@@ -1408,10 +1405,12 @@ export function mentions(text: string, dir: string, home: string, root = ''): bo
 }
 
 // A git remote's URL is the upstream's (https, ssh or scp form, with or without .git)
-export function originIs(url: string, slug: string): boolean {
+export function originIs(url: string, slug: string | string[]): boolean {
   const u = url.trim().toLowerCase().replace(/\/+$/, '').replace(/\.git$/, '')
-  const s = slug.toLowerCase()
-  return u === s || u.endsWith(`/${s}`) || u.endsWith(`:${s}`)
+  return (Array.isArray(slug) ? slug : [slug]).some(one => {
+    const s = one.toLowerCase()
+    return u === s || u.endsWith(`/${s}`) || u.endsWith(`:${s}`)
+  })
 }
 
 // why: 'send' (wb patch send), 'dir' (it names, or runs in, a gated directory), 'plugin' (it runs
@@ -1436,7 +1435,7 @@ export type Aim = { why: '' | 'send' | 'dir' | 'plugin' | 'slug'; at: string; wo
 // in the whole line, whenever any command in it is outward: `export GH_REPO=<slug> && gh issue
 // create` or `gh repo set-default <slug> && …` named it outside the outward command and went
 // through (the review of #1005). `cd`, `cd --` and pushd are followed from `cwd`.
-export function upstreamAim(command: string, cwd: string, home: string, slug: string, dirs: string[], root = '',
+export function upstreamAim(command: string, cwd: string, home: string, slug: string | string[], dirs: string[], root = '',
   plugins: string[] = []): Aim {
   let here = cwd
   const lines = (src: string): string[][] => simpleCommands(src).flatMap(words => {
@@ -1448,7 +1447,7 @@ export function upstreamAim(command: string, cwd: string, home: string, slug: st
     return [words]
   })
   const textNames = dirs.some(d => mentions(command, d, home, root))
-  const named = command.toLowerCase().includes(slug.toLowerCase())
+  const named = (Array.isArray(slug) ? slug : [slug]).some(s => command.toLowerCase().includes(s.toLowerCase()))
   const outAt: string[] = []
   const inPlugins = (ps: string[]) => ps.find(p => plugins.some(d => inside(p, d)))
   let found: Aim | null = null
@@ -1523,6 +1522,21 @@ export function shownCommand(command: string, aim: Aim): string {
 
 type Sending = { question: string; approval?: Row } | { deny: string }
 
+// A commit's `Scope: me` trailer, said in the question: wb patch send refused it unless --anyway,
+// a second yes after this dialog's (#1322). The branch's commits no remote-tracking ref has: those
+// over upstream, as wb patch send counts them.
+const SLUG_RE = /^[a-z0-9][a-z0-9-]*$/
+const PERSONAL = 'A personal patch: a commit\'s Scope trailer is me.'
+async function personal($: any, wt: string): Promise<boolean> {
+  try {
+    const r = await $.process.run(['git', '-C', wt, 'log', '--format=%(trailers:key=Scope,valueonly,separator=%x2C)',
+      'HEAD', '--not', '--remotes', '--'], { timeoutMs: 5000 })
+    return r.exitCode === 0 && String(r.stdout ?? '').split(/[\n,]/).some(x => x.trim().toLowerCase() === 'me')
+  } catch {
+    return false
+  }
+}
+
 // The question: what goes public, word for word. For wb patch send its title and the body's
 // start too, which the command line only names, and what the gate tells wb it approved; one
 // whose title or body it can't read is refused, never asked about (#1005)
@@ -1540,8 +1554,9 @@ async function sendQuestion($: any, command: string, slug: string, aim: Aim, hom
   if (text === undefined) return { deny: NOT_SHOWN(`can't read ${path}`) }
   const lines = text.split('\n')
   const body = lines.slice(0, BODY_LINES).join('\n') + (lines.length > BODY_LINES ? '\n…' : '')
+  const mine = SLUG_RE.test(args.slug) && await personal($, `${mem.root}/upstream/${args.slug}`)
   return {
-    question: `${head}\n\nTitle: ${args.title}\n\nBody:\n${body}\n\nSend it?`,
+    question: `${head}\n\n${mine ? `${PERSONAL}\n\n` : ''}Title: ${args.title}\n\nBody:\n${body}\n\nSend it?`,
     approval: { slug: args.slug, title: args.title, body_file: path, body: text, draft: args.draft, anyway: args.anyway },
   }
 }
@@ -1559,13 +1574,13 @@ async function originOf($: any, dir: string): Promise<string> {
 // Claude Code's plugins directory: the marketplace install's own clone has that origin too, and
 // was exempted as a developer's (the review of #1005's blocker). Asked of git only once all
 // else matched.
-async function developerClone($: any, dir: string, slug: string, notIn: string[]): Promise<boolean> {
+async function developerClone($: any, dir: string, slug: string | string[], notIn: string[]): Promise<boolean> {
   if (notIn.some(d => inside(dir, d))) return false
   return originIs(await originOf($, dir), slug)
 }
 
 // What the gate reads each time: patches.json's clone and upstream, the gated directories
-type Gate = { home: string; cwd: string; slug: string; dirs: string[]; plugins: string[] }
+type Gate = { home: string; cwd: string; slug: string; slugs: string[]; dirs: string[]; plugins: string[] }
 async function gateConf($: any): Promise<Gate> {
   const conf = await readJson($, `${mem.root}/patches.json`)
   const home = (await $.env.get('HOME').catch(() => '')) || mem.home
@@ -1580,7 +1595,9 @@ async function gateConf($: any): Promise<Gate> {
   const cache = await $.env.get('CLAUDE_CODE_PLUGIN_CACHE_DIR').catch(() => '')
   const plugins = [`${absolutePath(cc, home, cwd)}/plugins`, ...(cache ? [absolutePath(cache, home, cwd)] : [])]
   const dirs = [source, `${mem.root}/upstream`, ...plugins.flatMap(p => [`${p}/marketplaces/workbench`, `${p}/cache/workbench`])]
-  return { home, cwd, slug, dirs, plugins }
+  // every name upstream answers to: the one in use and its former ones (FORMER_UPSTREAM)
+  const slugs = [...new Set([slug, UPSTREAM, ...FORMER_UPSTREAM].map(x => x.toLowerCase()))]
+  return { home, cwd, slug, slugs, dirs, plugins }
 }
 
 // The marketplace's full clone, which the mod runs wb from when no wb is on its PATH (#1190): a
@@ -1645,8 +1662,8 @@ async function setUp($: any, { ok, out, aborted }: WbRun) {
 // The consent dialog's answer, '' when $.ui.ask rejected: dismissed, a `-p` run, or a surface that
 // couldn't draw it, each a no (the gates fail closed). Off the terminal the person may never have
 // seen it (#1200), so a toast says where it does show; on the terminal alone a rejection is the
-// person's own Esc, and nothing more is said. Not the web chat: away, the gates refuse without a
-// dialog, and the user approves once back at Claude Code.
+// person's own Esc, and nothing more is said. Away on the web chat, consent says there in one line
+// that the dialog waits in the terminal (CONSENT_WAITING).
 async function askOrNo($: any, question: string, options: string[], outcome: string): Promise<string> {
   try {
     return await $.ui.ask(question, options)
@@ -1660,10 +1677,22 @@ async function askOrNo($: any, question: string, options: string[], outcome: str
 
 // The dialog, or its refusal: '' lets the call through on exactly 'Send it'
 async function askToSend($: any, question: string): Promise<string> {
-  // the dialog would wait at an empty terminal
-  if (await away($, await read($, chat))) return NOT_SENT_AWAY
-  const said = await askOrNo($, question, [SEND_ASK, "Don't send"], 'nothing was sent')
-  return said === SEND_ASK ? '' : NOT_SENT
+  return (await consent($, question, SEND_ASK, "Don't send", 'nothing was sent')) ? '' : NOT_SENT
+}
+
+// A consent dialog (a send upstream, a role change, an edit of a task's code): the user's own
+// click, in the terminal's dialog. The owner's rule (#1340, 2026-11-24): consent is answered in the
+// terminal, locally or over ssh and tmux, never relayed to the web chat for answering; while the
+// user is away on it the chat says in one line that Claude waits there (CONSENT_WAITING). #1322's
+// first cut asked on the chat page: it cut a long question at the chat's 2000 characters unmarked,
+// and a user back at the terminal had no dialog for up to 30 minutes; the refusal while away before
+// it ("they approve it in the dialog once back") was a round trip for nothing. A dismissed dialog
+// (an interrupt) rejects: no, and askOrNo says where it does show (#1200). ``outcome``: what a
+// no leaves, as its toast says it.
+const CONSENT_WAITING = 'Claude is waiting on a workbench dialog in the terminal: answer it there.'
+async function consent($: any, question: string, yes: string, no: string, outcome: string): Promise<boolean> {
+  if (await away($, await read($, chat))) await runWb($, ['chat', 'reply', `--text=${CONSENT_WAITING}`, '--to=user'], 15_000)
+  return (await askOrNo($, question, [yes, no], outcome)) === yes
 }
 
 const realPath = async ($: any, p: string): Promise<string> =>
@@ -1673,7 +1702,7 @@ const realPath = async ($: any, p: string): Promise<string> =>
 async function upstreamRefusal($: any, command: string): Promise<string> {
   if (!/\b(?:gh|git|wb|workbench)\b/i.test(command)) return '' // most calls: no parse
   const g = await gateConf($)
-  let aim = upstreamAim(command, g.cwd, g.home, g.slug, g.dirs, mem.root, g.plugins)
+  let aim = upstreamAim(command, g.cwd, g.home, g.slugs, g.dirs, mem.root, g.plugins)
   if (!aim.why && aim.outAt.length) { // a symlinked spelling of a gated directory: by real path
     const dirs = await Promise.all(g.dirs.map(d => realPath($, d)))
     for (const p of aim.outAt) {
@@ -1682,8 +1711,8 @@ async function upstreamRefusal($: any, command: string): Promise<string> {
     }
   }
   if (!aim.why) return ''
-  if (aim.why === 'plugin' && !aim.named && !originIs(await originOf($, aim.at), g.slug)) return ''
-  if (aim.why === 'slug' && await developerClone($, aim.at, g.slug, [...g.dirs, ...g.plugins])) return ''
+  if (aim.why === 'plugin' && !aim.named && !originIs(await originOf($, aim.at), g.slugs)) return ''
+  if (aim.why === 'slug' && await developerClone($, aim.at, g.slugs, [...g.dirs, ...g.plugins])) return ''
   const q = await sendQuestion($, command, g.slug, aim, g.home)
   if ('deny' in q) return q.deny
   const no = await askToSend($, q.question)
@@ -1697,19 +1726,21 @@ async function upstreamRefusal($: any, command: string): Promise<string> {
 // repository of its name (a fork's), asks the same; Bash was the only gate, and patching.md
 // offers that plugin (the review of #1005)
 const GITHUB_MCP = /^mcp__.*github.*__(.+)$/i
-export function mcpAimsUpstream(tool: string, input: Row, slug: string): boolean {
+export function mcpAimsUpstream(tool: string, input: Row, slug: string | string[]): boolean {
   const m = GITHUB_MCP.exec(tool)
   if (!m || /^(?:get|list|search)_/i.test(m[1]!)) return false
-  const s = slug.toLowerCase()
-  const name = s.split('/')[1] ?? s
   const repo = String(input.repo ?? input.repository ?? '').toLowerCase()
-  return repo === s || repo === name || repo.endsWith(`/${name}`) || JSON.stringify(input).toLowerCase().includes(s)
+  return (Array.isArray(slug) ? slug : [slug]).some(one => {
+    const s = one.toLowerCase()
+    const name = s.split('/')[1] ?? s
+    return repo === s || repo === name || repo.endsWith(`/${name}`) || JSON.stringify(input).toLowerCase().includes(s)
+  })
 }
 
 async function mcpRefusal($: any, tool: string, input: Row): Promise<string> {
   const g = await gateConf($)
-  if (!mcpAimsUpstream(tool, input, g.slug)) return ''
-  if (await developerClone($, g.cwd, g.slug, [...g.dirs, ...g.plugins])) return ''
+  if (!mcpAimsUpstream(tool, input, g.slugs)) return ''
+  if (await developerClone($, g.cwd, g.slugs, [...g.dirs, ...g.plugins])) return ''
   const text = JSON.stringify(input, null, 1)
   const shown = text.length > MCP_CHARS ? `${text.slice(0, MCP_CHARS)}… (${text.length - MCP_CHARS} more characters not shown)` : text
   return askToSend($, `Claude wants to send this to GitHub (${g.slug}), publicly: ${tool} ${shown} — Send it?`)
@@ -1738,8 +1769,6 @@ const ROUTE_ALLOW = 'Allow'
 const ROLES = ['significant', 'trivial', 'writing'] as const
 const NOT_CHANGED = 'workbench: not changed: the user did not approve it in the dialog. Tell them it was not ' +
   'changed; ask again only if they ask for it.'
-const NOT_CHANGED_AWAY = 'workbench: not changed: the user is away: say in the web chat what you\'d change; ' +
-  'they approve it in the dialog once back.'
 const ROUTE_OWN = 'workbench: not changed: run wb route (or wb start --model) as a command of its own, one ' +
   'to a call, so the dialog shows exactly what changes.'
 const ROUTE_OK_OWN = `workbench: not run: ${ROUTE_OK} is the mod's dialog's to write, on the user's yes; ` +
@@ -1748,6 +1777,8 @@ const ROUTES_EDIT = 'workbench: not edited: the roles change only through wb rou
   'mod\'s dialog (wb route shows them).'
 // text a shell or an interpreter runs, not parsed as commands: a route change hidden in it is refused
 const ROUTE_TEXT = /(?:\bwb|-m\s*workbench[\w.]*)\s+(?:route\b|start\b[^\n]*\s--m)/i
+// Said with the roles. Roles are settings, and Claude never changes one unasked (the owner's locked
+// rule, 2026-11-24): #1322 tried "Run it when it is the right call", and it went back
 const ROUTES_RULE = 'Never pass --model for an API model or change a role without the user\'s yes (the mod ' +
   'asks them in a dialog); recommend only.'
 
@@ -1810,6 +1841,15 @@ async function routesPath($: any): Promise<string> {
 
 const money = (v: number) => Number.isInteger(v) ? `$${v}` : `$${v.toFixed(2)}`
 
+// What a role's thinking does on its API model, as routes.thinking_said says it: the row's `thinks`
+// (wb writes it with every change, from the catalog) for the setting, else the setting. `thinking off`
+// was said for a model that can't turn it off (#1263, 2026-11-24)
+export function thinkingSaid(row: Row): string {
+  const thinking = row.thinking === 'on' ? 'on' : 'off'
+  const t = row.thinks
+  return t && typeof t === 'object' && t.api === row.api && typeof t[thinking] === 'string' ? t[thinking] : `thinking ${thinking}`
+}
+
 // The roles in one line, as routes.summary says it (Couplings: the two read alike)
 export function routesSummary(doc: Row): string {
   const rows = (doc.roles ?? {}) as Record<string, Row>
@@ -1822,7 +1862,7 @@ export function routesSummary(doc: Row): string {
     const backends = row.api && Array.isArray(row.order) && row.order.length ? `, backends ${row.order.join(', ')}` : ''
     // the role's fallback (routes.json `fallback`, #1196): where its code may go too, so a change of it alone is a row
     const fallback = typeof row.fallback === 'string' && row.fallback ? `, fallback ${row.fallback === 'gpu' ? 'GPU' : row.fallback}` : ''
-    if (row.via === 'api') return `${r} API ${row.api}${backends}, thinking ${thinking}${fallback}`
+    if (row.via === 'api') return `${r} API ${row.api}${backends}, ${thinkingSaid(row)}${fallback}`
     let text = `${r} GPU ${gpu === 'auto' ? '(the router picks)' : gpu}`
     if (row.api) text += `, API kept: ${row.api}${backends}`
     if (thinking === 'on') text += ', thinking on'
@@ -1919,9 +1959,7 @@ async function routeRefusal($: any, e: Row): Promise<string> {
     return '' // no dry run: wb itself refuses the change under Claude Code without route-ok.json
   }
   if (!q?.gate || typeof q.change !== 'string' || !q.change) return '' // a GPU model pin, or nothing
-  if (await away($, await read($, chat))) return NOT_CHANGED_AWAY // the dialog would wait at an empty terminal
-  const said = await askOrNo($, q.change, [ROUTE_ALLOW, "Don't"], 'nothing changed')
-  if (said !== ROUTE_ALLOW) return NOT_CHANGED
+  if (!(await consent($, q.change, ROUTE_ALLOW, "Don't", 'nothing changed'))) return NOT_CHANGED
   await $.fs.write(`${mem.root}/${ROUTE_OK}`, JSON.stringify({ ...q.approval, at: (await $.clock.now()) / 1000 })).catch(() => {})
   return ''
 }
@@ -1933,7 +1971,6 @@ export function spark(values: number[]): string {
   return top > 0 ? values.map(v => SPARKS[Math.min(7, Math.round((Math.max(0, v) / top) * 7))]).join('') : ''
 }
 
-const kilo = (x: number) => (Math.abs(x) >= 1e6 ? `${(x / 1e6).toFixed(1)}M` : `${Math.round(x / 1e3)}K`)
 const GUARD_WORDS: Record<string, string> = {
   repeat: 'the same call repeated', errors: 'tool errors in a row', no_edit: 'no file changed',
   round: 'the round time limit', silence: 'silence', think: 'thinking with no tool call',
@@ -1947,54 +1984,30 @@ const GUARD_WORDS: Record<string, string> = {
 const STATS_SHOWN = 3
 
 // The Stats tab's history as lines (a label in bold, then the text): what the feed holds, each
-// section left out when it has nothing, estimates said as such. A run of days that ended isn't
-// mentioned, only the best (the plan's rule: show what went right, never nag).
+// section left out when it has nothing.
 export function statsLines(f: Record<string, any> | null, why = '', names: Names = NO_NAMES): { label: string; text: string }[] {
   // `why`: the last `wb stats --json` failed, said (#553): with no feed yet "Reading…" never ended
   if (!f) return [{ label: '', text: why ? `History unavailable: ${why} (wb stats --json)` : 'Reading the history…' }]
   if (why) return [{ label: '', text: `Not updated: ${why} (wb stats --json)` }, ...statsLines(f, '', names)]
-  // only when the feed has no section at all: with no judged task, a period of spec-gap
-  // discards (#569), the optimized windows and the bench results still have something to say (#549)
+  // only when the feed has no section at all: with no judged task, the optimized windows and the
+  // bench results still have something to say (#549)
   if (!f.tasks && !Object.keys(f).some(k => !['ts', 'until', 'settings', 'tasks'].includes(k)))
     return [{ label: '', text: 'No finished tasks yet: delegate one with /workbench, and how it went shows here.' }]
   const out: { label: string; text: string }[] = []
   const period = (name: string, label: string) => {
     const p = f.periods?.[name]
     if (!p) return
-    const s = p.score
-    const saved = p.savings?.saved ?? 0
+    // the score, the savings estimate, spec-gap discards and the energy and its cost were here
+    // too: precision nobody acted on (#1322)
     const parts = [
-      s ? `score ${s.score}/100` : '',
-      p.savings ? (saved >= 0 ? `saved ~${kilo(saved)} Claude tokens (estimate)` : `cost ~${kilo(-saved)} more Claude tokens (estimate)`) : '',
       `${p.tasks} task${p.tasks === 1 ? '' : 's'}`,
       `${p.landed} landed${p.accepted_pct !== undefined ? ` (${p.accepted_pct}%)` : ''}`,
-      // left out of the count, not the saving: Claude's tokens were spent on them (#569)
-      p.spec_gaps ? `and ${p.spec_gaps} discard${p.spec_gaps === 1 ? '' : 's'} put down to the spec` : '',
-      // the period's own energy, every task's: the saving's counts only the tasks it compares (#568)
-      p.energy?.wh ? `${p.energy.wh >= 1000 ? `${(p.energy.wh / 1000).toFixed(1)} kWh` : `${Math.round(p.energy.wh)} Wh`}` +
-        (p.energy.cost != null ? `, cost ${p.energy.cost.toFixed(2)}` : '') : '',
       apiPeriod(p.api, names),
     ]
     out.push({ label, text: parts.filter(Boolean).join(' · ') })
   }
   period('week', 'This week')
   period('all', 'All time')
-  if (f.streak) out.push({ label: 'Streak', text: f.streak.current
-    ? `${f.streak.current} day${f.streak.current === 1 ? '' : 's'} in a row with a task landed · best ${f.streak.best}`
-    : `best: ${f.streak.best} day${f.streak.best === 1 ? '' : 's'} in a row with a task landed` })
-  const ab = f.absorbed
-  if (ab) {
-    const parts = [
-      // attempts, whatever came of them; "green" only for the tasks whose tests then passed (#562)
-      ab.auto_fixes ? `${ab.auto_fixes} test failure${ab.auto_fixes === 1 ? '' : 's'} sent back to the agent` +
-        (ab.auto_fixed_tasks ? ` (${ab.auto_fixed_tasks} task${ab.auto_fixed_tasks === 1 ? '' : 's'} then green)` : '') : '',
-      ab.handovers_landed ? `${ab.handovers_landed} landed after a handover to a fresh session` : '',
-    ].filter(Boolean)
-    if (parts.length) out.push({ label: 'Without waking Claude', text: parts.join(' · ') })
-  }
-  const q = f.questions // a question wakes Claude: its own line, "answered" only for wb answer's (#562)
-  if (q?.asked) out.push({ label: 'Questions', text: `${q.asked} asked mid-task` +
-    (q.answered ? ` · ${q.answered} answered` : '') })
   // the models OpenCode has now, a wb optimize variant folded under its source, the most recently
   // used first, the rest on one line (`model_lines`, #638); an older wb's feed: its `models`.
   // Capped here as well as in wb: a wb from before the cap sends every line (2026-11-21)
@@ -2014,7 +2027,7 @@ export function statsLines(f: Record<string, any> | null, why = '', names: Names
     const windows = (m.windows ?? []).length > 1 ? ` (${m.windows.map((w: number) => `${Math.round(w / 1024)}K`).join(', ')})` : ''
     out.push({ label: word(model) + windows, text: `${m.tasks} task${m.tasks === 1 ? '' : 's'} · ${m.accepted_pct}% landed` +
       (m.rounds != null ? ` · ${m.rounds} rounds` : '') + (m.minutes != null ? ` · ${m.minutes} min` : '') +
-      speed + (trend ? ` ${trend}` : '') + change + (m.claude ? ` · Claude ~${kilo(m.claude)}/task` : '') })
+      speed + (trend ? ` ${trend}` : '') + change })
   }
   // the recent ones past stats.STATS_MODEL_LINES (and past this cap) and the older ones, one row;
   // labelled "Other models" so the text after it doesn't say "more models" twice (2026-11-21)
@@ -2038,20 +2051,6 @@ export function statsLines(f: Record<string, any> | null, why = '', names: Names
     ? kept.join(' · ') + (rest ? ` · ${rest} more (${report})` : '') : `${rest} model${rest === 1 ? '' : 's'} (${report})`
   const sized = Object.entries(f.sizes ?? {}) as [string, any][]
   if (sized.length) out.push({ label: 'By size', text: sized.map(([k, v]) => `${ROLE_WORDS[k] ?? k} ${v.tasks} (${v.accepted_pct}%)`).join(' · ') })
-  if (f.days?.length) {
-    const line = spark(f.days.map((d: any) => d.tasks))
-    if (line) out.push({ label: 'Last 30 days', text: `${line}  tasks per day` })
-  }
-  const bests = [
-    f.bests?.largest_first_try ? `largest landed first try: ${f.bests.largest_first_try.lines} lines (${f.bests.largest_first_try.task})` : '',
-    f.bests?.fastest ? `fastest landing: ${f.bests.fastest.minutes} min (${f.bests.fastest.task})` : '',
-  ].filter(Boolean)
-  if (bests.length) out.push({ label: 'Bests', text: bests.join(' · ') })
-  const last = (f.milestones ?? []).at(-1)
-  if (last) out.push({ label: 'Milestone', text: last.kind === 'landed'
-    ? `${last.n} task${last.n === 1 ? '' : 's'} landed${last.day ? ` (${last.day})` : ''}`
-    // "(estimate)", as each period and the footer say it ("saved, estimated" said it a second way)
-    : `~${kilo(last.n)} Claude tokens saved (estimate${last.day ? `, ${last.day}` : ''})` })
   const guards = Object.entries(f.guards ?? {}) as [string, number][]
   if (guards.length) out.push({ label: 'What stopped agents', text: guards.sort((a, b) => b[1] - a[1])
     .map(([g, n]) => `${GUARD_WORDS[g] ?? g} ${n}`).join(' · ') })
@@ -2116,8 +2115,9 @@ const marksOf = (text: string, value: string) => (text.match(new RegExp(`"local_
 
 // Why Claude's edit of commands.json is refused, or '': only the user lifts a repo's local_only
 // (#1021). Refused: an edit that drops a `"local_only": true`, and one that writes a `false` the
-// text didn't have, since the nearest entry that states it decides (privacy.local_only): a
-// package's `false` under a local-only root lifted it (#1021's review). A text that isn't JSON
+// text didn't have: a package's `false` under a local-only root lifted it while the nearest entry
+// decided (#1021's review); since #1255 any entry's `true` holds for its whole repo, and the
+// guard stays, so Claude never writes the user's local_only either way. A text that isn't JSON
 // counts the marks instead. The file is matched by real path, so another spelling of it (`/./`,
 // a linked config directory) is the same file. A shell's write isn't seen here, as with
 // routes.json (#1014's gate).
@@ -2138,18 +2138,102 @@ async function localOnlyRefusal($: any, e: Row, path: string): Promise<string> {
     lifted = marksOf(text, 'false') > marksOf(now, 'false') ? ['a repo'] : []
   }
   const why = [...(dropped.length ? [`drops "local_only": true for ${dropped.join(', ')}`] : []),
-    ...(lifted.length ? [`sets "local_only" to something other than true for ${lifted.join(', ')} (the nearest entry that says it decides, so it lifts one above)`] : [])]
+    ...(lifted.length ? [`sets "local_only" to something other than true for ${lifted.join(', ')}`] : [])]
   if (!why.length) return ''
   return `workbench: not changed: this edit ${why.join(' and ')} in commands.json. ` +
     'Only the user lifts a repo\'s local_only (it keeps API models off that repo); tell them, and leave it as it is.'
 }
 
+// The task whose worktree holds the file, else '': tasks/<t>/worktree, or tasks/<t>/tree/…/worktree
+// for a sibling further up (#261)
+export function taskOfPath(path: string, root: string): string {
+  if (!root || !path.startsWith(`${root}/tasks/`)) return ''
+  return /^([^/]+)\/(?:tree\/(?:[^/]+\/)+)?worktree\//.exec(path.slice(root.length + 7))?.[1] ?? ''
+}
+
+// The tasks a shell command runs in (`cwd` inside tasks/<t>/) or names the directory of
+// (tasks/<t>/ under one of `roots`, as written, through `~` or $HOME, or $WB_HOME): which tasks'
+// rows a Bash call of Claude's goes in (callRows, #1211)
+export function tasksNamed(command: string, cwd: string, roots: string[], homes: string[]): string[] {
+  const out = new Set<string>()
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const ways = new Set(['$WB_HOME', '${WB_HOME}'])
+  for (const root of roots.filter(Boolean)) {
+    ways.add(root)
+    for (const home of homes.filter(h => h && inside(root, h) && root !== h)) {
+      const rest = root.slice(home.length)
+      for (const w of [`~${rest}`, `$HOME${rest}`, `\${HOME}${rest}`]) ways.add(w)
+    }
+    if (cwd.startsWith(`${root}/tasks/`)) {
+      const at = /^([a-z0-9][a-z0-9-]*)(?:\/|$)/.exec(cwd.slice(root.length + 7))?.[1]
+      if (at) out.add(at)
+    }
+  }
+  if (!command.includes('/tasks/')) return [...out]
+  for (const w of ways) {
+    for (const m of command.matchAll(new RegExp(`${esc(w)}/tasks/([a-z0-9][a-z0-9-]*)(?=$|[/\\s'"\`;&|)])`, 'g'))) out.add(m[1])
+  }
+  return [...out]
+}
+
+// Claude's own tool call in a task's worktree, kept for wb as one row a call in
+// rules/<task>/claude-calls/ (runner.CLAUDE_CALLS): an edit tool's file there, or a Bash command
+// that runs in a task's directory or names it. wb tells by them what Claude wrote by hand in the
+// worktree from what a build or test command it ran there wrote: `mvn test` beside a --test of
+// grep, tsc beside jest's, wrote reports and dist/ that wb accept and wb next refused as files
+// written by hand (#1211, 2026-11-24). The tasks it is for (with a task.json) and the row
+// without its times; no tasks for any other call.
+async function callRows($: any, e: Row): Promise<{ tasks: string[]; row: Row }> {
+  const none = { tasks: [] as string[], row: {} }
+  if (!mem.root) return none
+  const field = EDIT_TOOLS[e.tool]
+  let tasks: string[] = [], row: Row
+  if (field) {
+    const path = e[field]
+    if (typeof path !== 'string' || !path.includes('/tasks/')) return none
+    const real = await realPath($, mem.root)
+    const t = taskOfPath(path, mem.root) || taskOfPath(path, real)
+    tasks = t ? [t] : []
+    row = { tool: e.tool, path }
+  } else if (e.tool === 'Bash' && typeof e.command === 'string') {
+    const cwd = (await $.session.cwd().catch(() => '')) || mem.cwd
+    if (!e.command.includes('/tasks/') && !cwd.includes('/tasks/')) return none // most calls: no stat
+    const home = (await $.env.get('HOME').catch(() => '')) || ''
+    tasks = tasksNamed(e.command, cwd, [mem.root, await realPath($, mem.root)], [home, mem.home])
+    row = { tool: 'Bash', command: e.command, cwd }
+  } else return none
+  const found: string[] = []
+  for (const t of tasks) if (await $.fs.exists(`${mem.root}/tasks/${t}/task.json`).catch(() => false)) found.push(t)
+  return { tasks: found, row }
+}
+
+// The file of a call's row: one file a call, as a row in a shared file would be lost to a
+// parallel call's write
+function callFile(at: number, id: string): string {
+  return `${Math.round(at)}-${id.replace(/[^A-Za-z0-9_-]/g, '') || Math.random().toString(36).slice(2)}.json`
+}
+
+// The row callRows made, with when the call began (`at`, ms) and when it ended: written as it
+// begins with `end` null (running), then again once it is over, with `end`, or `denied` if it
+// never ran. A build and `wb accept` in one Bash call, as the skill says, had no row while accept
+// read them, and the build's dist/ was refused as files written by hand (#1272, 2026-11-24)
+async function noteCall($: any, tasks: string[], row: Row, at: number, name: string,
+                        how: 'begun' | 'over' | 'denied') {
+  const end = how === 'begun' ? null : (await $.clock.now()) / 1000
+  const text = JSON.stringify({ ...row, at: at / 1000, end, ...(how === 'denied' ? { denied: true } : {}) })
+  for (const t of tasks) await $.fs.write(`${mem.root}/rules/${t}/claude-calls/${name}`, text).catch(() => {})
+}
+
 // Why Claude may not make this edit now, or '': outside a task's worktree, under "decide", or
-// with the user's yes recorded for that task and not yet handed back (`wb coding allow`).
+// with the user's yes recorded for that task and not yet handed back (`wb coding allow`). Under
+// "Ask me first" the first such edit asks the user in a dialog (consent), and Allow records the
+// allowance, as the roles' dialog writes route-ok.json (#1322).
+const CODING_ALLOW = 'Allow'
+const CODING_SAID = 'Allow, in the workbench dialog'
+const NOT_EDITED = (task: string) => `workbench: not edited: the user said no to editing ${task}'s code. ` +
+  'Keep the work with the agent; ask again only if they ask for it.'
 async function codingRefusal($: any, path: string): Promise<string> {
-  const task = path.startsWith(`${mem.root}/tasks/`)
-    // tasks/<t>/worktree, or tasks/<t>/tree/…/worktree for a sibling further up (#261)
-    ? /^([^/]+)\/(?:tree\/(?:[^/]+\/)+)?worktree\//.exec(path.slice(mem.root.length + 7))?.[1] : undefined
+  const task = taskOfPath(path, mem.root)
   if (!task) return ''
   const mode = await codingMode($)
   if (mode === 'decide') return ''
@@ -2165,6 +2249,11 @@ async function codingRefusal($: any, path: string): Promise<string> {
       open.started = (await $.clock.now()) / 1000
       await $.fs.write(file, JSON.stringify({ allowed })).catch(() => {})
     }
+    return ''
+  }
+  if (mode === 'ask') {
+    if (!(await consent($, `Let Claude edit ${task}'s code now?`, CODING_ALLOW, "Don't", 'nothing was edited'))) return NOT_EDITED(task)
+    await runWb($, ['coding', 'allow', task, `--said=${CODING_SAID}`], 15_000)
     return ''
   }
   return `workbench: not edited: ${task} is the agent's. ${CODING_RULES[mode]}`
@@ -2273,6 +2362,7 @@ const mem = {
   statsReading: false, // a `wb stats --json` under way (refreshStats)
   statsLoaded: false, // the history was read in this load: the atom's feed may be an older load's
   statsWhy: '', // why the last `wb stats --json` failed ('' when it didn't): said on the tab (#553)
+  awayNoted: false, // AWAY_NOTE said in full this away stretch (awayToo)
   statsRetryAt: 0, // not again before then, unless the tab is pressed
   statsBackoff: 0, // the wait after the last failure, doubling
   topWhy: '', // why the last `wb top` ended by itself: its stderr's last line
@@ -2282,7 +2372,6 @@ const mem = {
   topKids: new Set<any>(), // every child started and not yet ended: stopTop ends them all (#546)
   topGen: 0, // bumped by each start and stop: a syncTop whose awaits saw it change starts nothing
   topRetryAt: 0, // not before then, after one ended by itself
-  price: null as number | null, // the electricity price wb says is set (`wb savings --json`)
   roles: null as null | PaneRoles, // the Settings tab's roles and models, as wb last said them (rolesNow, #1023)
   settingsCols: 0, // the Settings tab's body width at this draw (0 unknown): settingRow folds a long row to it
   provNames: new Map<string, string>(), // each API provider's id → its name, from the tasks' task.json (namesNow)
@@ -2326,7 +2415,6 @@ const mem = {
   listenerAt: new Map<string, number>(), // another session's chat listener (pid@start), when last seen alive (#839)
   submitted: false, // this mod submitted a prompt while Claude was idle, and no turn has started since (#837)
   chatUrlAt: 0, // when the web chat's link was last looked up
-  savingsAt: 0, // when the week's saving was last read
   eventsPid: 0, // the `wb events` child: its lines wake poll(); the chat counts it as this session
   eventsStart: '', // its start, as its hello says: with the pid, listener.json's proof of life (#532)
   claudePid: 0, // this Claude Code process, the `wb events` child's parent, as its hello says: 0 unknown (#687)
@@ -2348,7 +2436,6 @@ const mem = {
   posed: '' as Pose | '', // its pose as last drawn in a Raster: the timer animates it while set
   shown: '' as Pose | '', // the frame on screen now
   skill: '', // the /workbench skill's SKILL.md, for the workbench-mode block
-  savingsFile: '', // savings.json, where wb keeps the kWh price ($WB_SAVINGS): the Stats key stamps it
   commandsFile: '', // commands.json ($WB_COMMANDS): Claude's edit never drops a repo's local_only (#1021)
   fold: false, // the session's directory is on a file system that ignores case (macOS): `within`
   termDialogs: [] as TermDialog[], // dialogs up in the terminal while the user wasn't away (#959)
@@ -2678,14 +2765,16 @@ export function allowedLine(rows: unknown): string {
   return x.when ? `Claude may, once, if ${x.when}: ${x.edit}` : `Claude may: ${x.edit}`
 }
 
+// At most one toast while the check is due: raised since it fell due (by any session, or by
+// /workbench-models), not again until it is done and due once more
 async function scoutIfDue($: any, now: number): Promise<void> {
   const path = `${mem.root}/scout.json`
   const st = await readJson($, path)
   const done = Number(st.done_at ?? 0) * 1000
   const offered = Number(st.offered_at ?? 0) * 1000
-  if (now - done < SCOUT_EVERY_MS || now - offered < SCOUT_RETRY_MS) return
+  if (now - done < SCOUT_EVERY_MS || offered >= done + SCOUT_EVERY_MS) return
   await scoutOffered($, now)
-  void $.prompt.submit({ text: SCOUT_NOTE })
+  $.ui.toast(SCOUT_DUE)
 }
 
 // The model check is raised: not again in this load, nor by any session for a day. Also when
@@ -2711,11 +2800,7 @@ async function compactAtBoundary($: any): Promise<void> {
   const limit = b?.isAutoCompactEnabled && b.autoCompactThreshold ? b.autoCompactThreshold : context.window
   if (!context.tokens || context.tokens < at * limit) return
   try {
-    const r = await $.session.compact({ instructions: KEEP_ON_COMPACT })
-    if (!r.skip) {
-      $.ui.toast(`workbench: a task closed; compacted Claude's context ` +
-        `(${Math.round(context.tokens / 1000)}K tokens) to make room`)
-    }
+    await $.session.compact({ instructions: KEEP_ON_COMPACT }) // no toast: Claude Code shows it (#1322)
   } catch {
     // a turn began meanwhile: the next boundary tries again
   }
@@ -2890,30 +2975,12 @@ async function ears($: any) {
 // it buried the question Claude had just asked the person (the 2026-11-16 audit).
 const SCOUT_QUIET_MS = 60_000
 
-// `wb savings --json` as the pane's footer: "this week: saved ~1.2M Claude tokens (46%, estimate) · 0.9 kWh",
-// with ", cost 0.27" once a price is set (as the Stats tab and `wb savings` label it: no currency
-// sign, the price is the user's); '' until a task can be compared, or when the output isn't wb's.
-export function savedLine(out: string): string {
-  let t: any
-  try { t = JSON.parse(out) } catch { return '' }
-  const api = apiMoney(t?.api)
-  if (!t || typeof t.tasks !== 'number' || !t.tasks || typeof t.saved !== 'number') return api ? apiAlone(t.api, api) : ''
-  const n = (x: number) => (Math.abs(x) >= 1e6 ? `${(x / 1e6).toFixed(1)}M` : `${Math.round(x / 1e3)}K`)
-  const pct = t.self_est > 0 ? ` (${Math.round((100 * t.saved) / t.self_est)}%, estimate)` : ' (estimate)'
-  const what = t.saved >= 0 ? `saved ~${n(t.saved)} Claude tokens${pct}` : `cost ~${n(-t.saved)} more Claude tokens (estimate)`
-  const cost = typeof t.cost === 'number' ? `, cost ${t.cost.toFixed(2)}` : ''
-  const gpu = t.wh ? ` · ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}${cost}` : ''
-  return `this week: ${what}${gpu}${api ? ` · API ${api}` : ''}`
-}
-
 // API dollars (#1022): OpenCode's unit, so a `$`, unlike the electricity's cost (the user's own
-// price, #609); a cent's fraction to two figures, written out ($0.00004), a free model's $0:
-// savings.usd's rule, so the CLI and the pane agree (toPrecision gave $0.000040 and $0.010)
+// price, #609): meter.usd's rule, so the CLI and the pane agree: $0.42, `<$0.01` under a cent,
+// a free model's $0 (#1322: one rule, where two said one cap two ways)
 export function usd(x: number): string {
   if (x === 0) return '$0'
-  if (Math.abs(x) >= 0.01) return `$${x.toFixed(2)}`
-  const r = Number(x.toPrecision(2))
-  return Math.abs(r) >= 0.01 ? `$${r.toFixed(2)}` : `$${r.toFixed(2 - Math.floor(Math.log10(Math.abs(r)))).replace(/0+$/, '')}`
+  return Math.abs(x) < 0.01 ? '<$0.01' : `$${x.toFixed(2)}`
 }
 
 // The words one model or provider goes by on every tab (#1048's review, seen live): a GPU model by
@@ -2944,21 +3011,14 @@ function namesNow(list: WbTask[], top: WbTop | null): Names {
 // #1135, 2026-11-23: the catalog ran about 2x DeepInfra's bill): `prices` is meter.basis's, missing
 // on rows from before it (the catalog's)
 export const isEst = (prices: unknown) => prices !== 'yours' && prices !== 'provider'
+// the `≈` alone says it: a "(catalog prices)" note after it said it twice (#1322)
 export const estUsd = (x: number, prices: unknown) => (x && isEst(prices) ? '≈' : '') + usd(x)
-const PRICES: Record<string, string> = { catalog: 'catalog prices', yours: 'your prices' }
-export const pricesNote = (prices: unknown) => PRICES[typeof prices === 'string' ? prices : 'catalog'] ?? ''
 
-// A period's API money as the footer says it: never $0 for tasks with no price; '' with none
+// A period's API money as the Stats tab says it: never $0 for tasks with no price; '' with none
 export function apiMoney(a: any): string {
   if (!a || !a.tasks) return ''
   const known = a.tasks - (a.unknown ?? 0) - (a.plan ?? 0)
-  return known > 0 ? estUsd(a.cost ?? 0, a.prices) : a.plan ? 'plan usage' : 'no price'
-}
-
-// An API-only week: API $1.27 on 6 tasks, or 1 API task, no price (no dollars to put "on")
-export function apiAlone(a: any, money: string): string {
-  const tasks = `task${a.tasks === 1 ? '' : 's'}`
-  return `this week: ${/^≈?\$/.test(money) ? `API ${money} on ${a.tasks} ${tasks}` : `${a.tasks} API ${tasks}, ${money}`} (no GPU task to compare)`
+  return known > 0 ? estUsd(a.cost ?? 0, a.prices) : a.plan ? 'plan usage' : 'no known cost'
 }
 
 // A Stats period's API part (the feed's periods[*].api): API $1.27 (DeepSeek $0.84 · Anthropic $0.43)
@@ -2967,8 +3027,8 @@ export function apiPeriod(a: any, names: Names = NO_NAMES): string {
   if (!money) return ''
   const provs = Object.entries(a.by_provider ?? {}).filter(([, v]: any) => v.tasks > (v.unknown ?? 0) + (v.plan ?? 0))
     .sort((x: any, y: any) => y[1].cost - x[1].cost).map(([p, v]: any) => `${providerWord(p, names)} ${estUsd(v.cost, v.prices)}`)
-  const inside = [provs.join(' · '), a.cost ? pricesNote(a.prices) : ''].filter(Boolean).join('; ')
-  return `API ${money}${inside ? ` (${inside})` : ''}${a.unknown && money !== 'no price' ? ` + ${a.unknown} with no price` : ''}`
+  const inside = provs.join(' · ')
+  return `API ${money}${inside ? ` (${inside})` : ''}${a.unknown && money !== 'no known cost' ? ` + ${a.unknown} with no known cost` : ''}`
 }
 
 // An API task's RUNNING row's parts after its phase (wb top's `spend`, `waits`); its place and model
@@ -2978,45 +3038,16 @@ export function apiParts(r: Row): string[] {
   return [typeof r.spend === 'number' ? estUsd(r.spend, r.prices) : '', r.waits ? `waits for ${r.waits}` : '']
 }
 
-// The electricity price `wb savings --json` says is set (per kWh), or null
-export function priceOf(out: string): number | null {
-  try {
-    const p = JSON.parse(out).price
-    return typeof p === 'number' && p > 0 ? p : null
-  } catch {
-    return null
-  }
-}
-
-// What the price row was typed, as `wb savings --price` takes it: "0,30", "€0.30", "0.30 EUR" and
-// "$0.3" are 0.3 (one comma or point, a currency sign or code before or after); empty is 'off'
-// (it clears the price); anything else, "0x10" or "1e3" among them, is null. Number() took
-// "0x10" as 16, and "0,30" and "€0.30" as nothing, with no hint why (#609).
+// A typed amount (the day cap's, parseUsd; it was the electricity price row's, #1322): "0,30",
+// "€0.30", "0.30 EUR" and "$0.3" are 0.3 (one comma or point, a currency sign or code before or
+// after); empty is 'off' (it clears it); anything else, "0x10" or "1e3" among them, is null.
+// Number() took "0x10" as 16, and "0,30" and "€0.30" as nothing, with no hint why (#609).
 export function parsePrice(text: string): number | 'off' | null {
   const s = text.trim()
   if (!s) return 'off'
   const m = /^(?:[^\d\s.,+-]{1,3}\s*)?(\d+(?:[.,]\d+)?|[.,]\d+)(?:\s*[^\d\s.,+-]{1,3})?$/u.exec(s)
   const v = m ? Number(m[1].replace(',', '.')) : NaN
   return v > 0 ? v : null
-}
-
-// The Settings tab's price row: wb checks and keeps it (`wb savings --price`), and its answer
-// is the week's saving again, now with the energy's cost (the footer's `, cost …`)
-async function setPrice($: any, text: string) {
-  const v = parsePrice(text)
-  if (v === null) {
-    $.ui.toast('workbench: the electricity price per kWh is a number, like 0.30 or 0,30 (empty clears it)')
-    return
-  }
-  const { ok, out } = await runWb($, ['savings', '--price', String(v), '--json'])
-  if (!ok) {
-    $.ui.toast(`workbench: ${brief(out)}`)
-    return
-  }
-  mem.price = priceOf(out)
-  const said = savedLine(out)
-  if (said !== (await read($, savings))) await update($, savings, () => said)
-  $.ui.invalidate('ui.render')
 }
 
 // The Settings tab's roles (#1023): Shared (the Agents switch, the busy row, each role's GPU | API,
@@ -3057,6 +3088,24 @@ const THINK_STOPS: [string, string, string][] = [
   ['off', 'Off (default)', 'Faster and cheaper; for tasks started after this.'],
   ['on', 'On', 'Better on hard steps, slower and costs more; for tasks started after this.'],
 ]
+// A role's thinking row: THINK_STOPS, each stop its API model can't keep saying what the model does
+// instead (the row's `thinks`, thinkingSaid's): `Off (default)`, `Faster and cheaper` sat on a model
+// that can't turn thinking off, so the user kept it and paid for its reasoning (#1263, 2026-11-24).
+// Only a model's default or a thinking that stays on (runner's THINKING_DEFAULT, THINKING_STAYS) is
+// no cheaper: its lowest effort (THINKING_LOWEST, below the provider's default) still is, and the row
+// said On cost the same (#1263's review, 2026-11-24)
+const LOWEST_SAID = 'thinking at its lowest effort'
+export function thinkStops(row: Row): [string, string, string][] {
+  const said = (v: string) => thinkingSaid({ ...row, thinking: v })
+  const off = said('off'), on = said('on')
+  const offWhy = off.startsWith(LOWEST_SAID)
+    ? 'This model can\'t turn thinking off, but its lowest effort is still cheaper than On; for tasks started after this.'
+    : 'This model can\'t turn thinking off, so it isn\'t cheaper; for tasks started after this.'
+  return [
+    off.startsWith('thinking off') ? THINK_STOPS[0]! : ['off', `Off (default): ${off}`, offWhy],
+    on.startsWith('thinking off') ? ['on', `On: ${on}`, 'This model doesn\'t reason, so this changes nothing; for tasks started after this.'] : THINK_STOPS[1]!,
+  ]
+}
 // a size in the roles' words (tasks.ts ROLE_WORDS): `significant only` sat under "Complex coding"
 const SIZE_STOPS: [string, string, string][] = [
   ['all', 'Any size (default)', 'The router may give it any task.'],
@@ -3145,7 +3194,9 @@ export function rolesRead(last: PaneRoles | null, now: number, routesRun: WbRun,
 
 // A pane press on the roles: the change as wb computes it, approved for exactly that when it needs the
 // user's yes (the press is it), then made; wb's refusal (no day cap, an unknown id, a key wb can't hold)
-// in a toast, and the row keeps its old value
+// in a toast, and the row keeps its old value. A change that took the yes says its line in a toast:
+// the press is the yes, so no dialog showed what it agreed to (where the code goes, what the model does
+// with thinking: #1263, 2026-11-24)
 async function paneRoute($: any, args: string[]): Promise<boolean> {
   mem.roles = null
   const dry = await runWb($, ['route', '--dry-run', '--json', ...args], 60_000)
@@ -3157,6 +3208,7 @@ async function paneRoute($: any, args: string[]): Promise<boolean> {
   const { ok, out } = await runWb($, ['route', ...args])
   mem.roles = null
   if (!ok) $.ui.toast(`workbench: ${brief(out)}`)
+  else if (q.gate && q.change) $.ui.toast(`workbench: ${q.change}`)
   return ok
 }
 
@@ -3173,15 +3225,14 @@ async function setCap($: any, text: string) {
   $.ui.invalidate('ui.render')
 }
 
-// Spend today, from `wb route --json`: `≈$0.42 of $5 (DeepSeek $0.28 · Anthropic $0.14; catalog prices)`; the dollars by
+// Spend today, from `wb route --json`: `≈$0.42 of $5 (DeepSeek $0.28 · Anthropic $0.14)`; the dollars by
 // `usd`, the Stats tab's (#1022), so the two never say one sum two ways (wave 2's merge), and each
 // provider by its name and the Stats tab's ` · ` (#1048's review: `deepseek $0.28, anthropic`)
 export function spendLine(r: WbRoutes): string {
   const s: WbRoutes['spend_today'] = r.spend_today ?? { usd: 0, by_provider: {} }
   const by = Object.entries(s.by_provider ?? {}).filter(([, v]) => v > 0).map(([p, v]) => `${r.providers?.[p]?.name || p} ${usd(v)}`)
-  // ≈ and "catalog prices" unless at the user's own (#1135): once, the providers' share it
-  const inside = [by.join(' · '), s.usd ? pricesNote(s.prices) : ''].filter(Boolean).join('; ')
-  const each = inside ? ` (${inside})` : ''
+  // ≈ unless at the user's own prices or the provider's figure (#1135): once, the providers' share it
+  const each = by.length ? ` (${by.join(' · ')})` : ''
   return `Spend today: ${estUsd(s.usd ?? 0, s.prices)}${r.day_usd != null ? ` of ${money(r.day_usd)}${each}` : `${each} · no day cap`}`
 }
 
@@ -3211,7 +3262,7 @@ async function roleRows(kit: Row, $: any, view: WbPane, role: PaneRoles) {
   ]
   const cap = [
     <kit.Input key="cap" label="▸ API day cap" value={r.day_usd != null ? String(r.day_usd) : ''}
-      placeholder="not set (needed before an API role; $5 suggested)" submitLabel="set" onSubmit={(v: string) => { void setCap($, v) }} />,
+      placeholder="not set: $5 when the first role goes to API" submitLabel="set" onSubmit={(v: string) => { void setCap($, v) }} />,
   ]
   const gpu: any[] = []
   if (!m) gpu.push(dim('gpu-why', OLDER_WB))
@@ -3261,7 +3312,7 @@ async function roleRows(kit: Row, $: any, view: WbPane, role: PaneRoles) {
           }} />)
     }
     for (const { name, label, row } of roles)
-      api.push(settingRow(kit, $, `think-${name}`, `${label} thinking`, THINK_STOPS, row.thinking ?? 'off', view, v => paneRoute($, [name, '--thinking', v])))
+      api.push(settingRow(kit, $, `think-${name}`, `${label} thinking`, thinkStops(row), row.thinking ?? 'off', view, v => paneRoute($, [name, '--thinking', v])))
     api.push(dim('api-spend', spendLine(r)))
   }
   return { top, cap, gpu, api }
@@ -3324,7 +3375,6 @@ async function poll($: any) {
     // compacted every session's context, delegating or not (the 2026-11-16 audit).
     const open = new Set(list.filter(t => isOpen(t) && mine(t)).map(t => t.name))
     if (on && [...mem.open].some(name => !open.has(name))) mem.boundary = true
-    if ([...mem.open].some(name => !open.has(name))) mem.savingsAt = 0 // one closed: its row is new
     if (!on) mem.boundary = false
     mem.open = open
     await sayRules($, on)
@@ -3352,14 +3402,7 @@ async function poll($: any) {
     await listen($, now)
     await readSwitch($)
     await chatLink($)
-    if (now - mem.savingsAt > 10 * 60_000) {
-      mem.savingsAt = now
-      const { ok, out, aborted } = await runWb($, ['savings', '--json'])
-      const said = ok ? savedLine(out) : ''
-      mem.price = ok ? priceOf(out) : mem.price
-      if (aborted) mem.savingsAt = 0 // the line stays and the next poll reads (#1142)
-      else if (said !== (await read($, savings))) await update($, savings, () => said)
-    }
+    await awayEnded($)
   } finally {
     mem.polling = false
   }
@@ -3614,7 +3657,7 @@ async function checkUpdate($: any) {
 // limit) goes back on the queue and is tried again in a minute: the hand-back's turn was lost
 // after its agents were already stopped (the 2026-11-16 audit).
 async function sendQueued($: any, text: string) {
-  if (text === OWED_NOTE && !owedNudged()) return // answered, or the user came back, since it was queued (#837)
+  if (isOwedNote(text) && !owedNudged(text)) return // answered, or the user came back, since it was queued (#837)
   mem.submitted = true
   const r = await $.prompt.submit({ text }).catch((err: unknown) => ({ drop: String(err) }))
   if (!r?.drop) return
@@ -3830,19 +3873,19 @@ async function listen($: any, now: number) {
       // the away user went to the agent alone, pushed to no phone (#1212, 2026-11-24).
       if (r.isDelivered) await runWb($, ['chat', 'ack', id, '--by', st.key, '--how', agentOf(m) ? 'into' : 'now'])
       else void sendWeb($, id, text, 'queued', st.key, agentOf(m) ? 'into' : 'now')
-      mem.chatOwed.set(id, { at: now, grace: r.isDelivered ? 0 : 1, nudged: false }) // queued: maybe the next turn's
+      mem.chatOwed.set(id, { at: now, grace: r.isDelivered ? 0 : 1, nudged: false, agent: agentOf(m) }) // queued: maybe the next turn's
     } else {
       // behind a prompt submitted this poll (a wake, a queued turn, another web message) whose
       // turn hasn't started yet, it enters only the turn after: that turn's end, Claude not yet
       // having seen it, sent the follow-up for a message Claude then answered (#837). An agent's
       // is `now` only with nothing ahead: behind a wake, the wake's report went to it (#1212).
-      mem.chatOwed.set(id, { at: now, grace: mem.submitted ? 1 : 0, nudged: false })
+      mem.chatOwed.set(id, { at: now, grace: mem.submitted ? 1 : 0, nudged: false, agent: agentOf(m) })
       void sendWeb($, id, text, agentOf(m) && mem.submitted ? 'into' : 'now', st.key)
     }
     mem.chatTurn.set(id, mem.chatOwed.get(id)?.grace ?? 0) // its turn's end goes to turns.jsonl (#1042)
     if (agentOf(m)) { mem.agentTurn.set(id, agentOf(m)); $.ui.toast(`workbench: a message from agent ${agentOf(m)}`); continue } // never the user away
+    // no toast for the user's own message: they just sent it (#1322)
     await $.fs.write(awayFile(), JSON.stringify({ at: now / 1000, by: st.key })).catch(() => {})
-    $.ui.toast('workbench: a message from the web chat')
   }
 }
 
@@ -3899,38 +3942,56 @@ async function sendWeb($: any, id: string, text: string, how: string, by: string
 // goes to the chat, so the phone always hears something. A reply is a `wb chat reply` (or
 // `listen`, or `wb shot --chat`) in Bash, or a row of Claude's in messages.jsonl since; a prompt
 // typed in the terminal ends it (the user is back).
-type Owed = { at: number; grace: number; nudged: boolean }
+// An agent's message (`agent`, its name) is owed its own reply, `--to` it (#1273, 2026-11-24): the
+// follow-up said the user wrote and named a plain `wb chat reply`, which went to the user's phone,
+// and the agent's wait heard nothing; any reply to the user settled the agent's debt too, so not
+// even OWED_POSTED reached it. Only a reply to it settles it: a `--to` naming it, or a row whose
+// `re` holds its id or whose `to` its name.
+type Owed = { at: number; grace: number; nudged: boolean; agent: string }
 const OWED_NOTE =
   '[workbench] The user wrote from the web chat and hasn\'t heard back: answer there with ' +
   '`wb chat reply --text "…"` (the web thread is all they see), briefly. Nothing else to do.'
+const AGENT_OWED = '[workbench] Agent '
+const AGENT_OWED_NOTE = (agent: string, id: string) =>
+  `${AGENT_OWED}${agent}'s message ${id} has no answer: reply with \`wb chat reply --to ${id} --text "…"\` ` +
+  '(a plain reply goes to the user, not the agent), briefly. Nothing else to do.'
+const owedNote = (id: string, o: Owed) => o.agent ? AGENT_OWED_NOTE(o.agent, id) : OWED_NOTE
+const isOwedNote = (text: string) => text === OWED_NOTE || text.startsWith(AGENT_OWED)
 const OWED_POSTED = 'Claude answered in the terminal; nothing was sent here.'
 const REPLIES = /\bwb\b[^\n|;&]*\bchat\s+(reply|listen)\b|\bwb\b[^\n|;&]*\bshot\b[^\n]*--chat\b/
 // The follow-up is owed while a message it was queued for is still unanswered: a reply or the
 // user's return before it went left it in mem.queued, and it went anyway (#837)
-const owedNudged = () => [...mem.chatOwed.values()].some(o => o.nudged)
+const owedNudged = (text: string) => [...mem.chatOwed].some(([id, o]) => o.nudged && owedNote(id, o) === text)
 function owedSettled() {
-  if (owedNudged()) return
-  for (let i = mem.queued.indexOf(OWED_NOTE); i >= 0; i = mem.queued.indexOf(OWED_NOTE)) mem.queued.splice(i, 1)
+  for (let i = mem.queued.length - 1; i >= 0; i--)
+    if (isOwedNote(mem.queued[i]) && !owedNudged(mem.queued[i])) mem.queued.splice(i, 1)
+}
+// The user's debts only: a plain reply, or the user back at the terminal, answers the user, never an agent (#1273)
+function userOwedClear() {
+  for (const [id, o] of [...mem.chatOwed]) if (!o.agent) mem.chatOwed.delete(id)
+  owedSettled()
 }
 async function owedAtTurnEnd($: any) {
   if (!mem.chatOwed.size) return owedSettled()
   const tail = await readTail($, `${mem.root}/chat/messages.jsonl`, NOTIFY_TAIL)
-  // a reply settles it when it answers the message (`re`) or this Claude Code wrote it (`claude_pid`,
-  // unknown: yes): another session's report, posted meanwhile, read as the answer (#1129)
+  // a reply settles it when it answers the message (`re`) or this Claude Code wrote it to the
+  // message's sender (`claude_pid`, unknown: yes; `to`, none: the user's): another session's
+  // report, posted meanwhile, read as the answer (#1129); a reply to the user, as an agent's (#1273)
   const mine = (m: any) => !mem.claudePid || !Number(m.claude_pid ?? 0) || Number(m.claude_pid) === mem.claudePid
+  const toWhom = (m: any, o: Owed) => (Array.isArray(m.to) && m.to.length ? m.to : ['user']).includes(o.agent || 'user')
   const replied = parseLines(tail?.text ?? '').filter(m => m.from === 'claude')
-  let nudge = false
+  const nudge: string[] = []
   for (const [id, o] of [...mem.chatOwed]) {
-    if (replied.some(m => Number(m.ts ?? 0) * 1000 >= o.at && (mine(m) || (Array.isArray(m.re) && m.re.includes(id))))) {
+    if (replied.some(m => Number(m.ts ?? 0) * 1000 >= o.at && ((mine(m) && toWhom(m, o)) || (Array.isArray(m.re) && m.re.includes(id))))) {
       mem.chatOwed.delete(id)
       continue
     }
     if (o.grace > 0) { o.grace--; continue }
-    if (!o.nudged) { o.nudged = true; nudge = true; continue }
+    if (!o.nudged) { o.nudged = true; nudge.push(owedNote(id, o)); continue }
     mem.chatOwed.delete(id)
     await runWb($, ['chat', 'reply', `--text=${OWED_POSTED}`, `--to=${id}`], 15_000)
   }
-  if (nudge && !mem.queued.includes(OWED_NOTE)) mem.queued.push(OWED_NOTE)
+  for (const note of nudge) if (!mem.queued.includes(note)) mem.queued.push(note)
   owedSettled()
 }
 
@@ -4038,7 +4099,9 @@ async function deliver($: any, now: number) {
           : status.phase === (row.kind === 'question' ? 'asking' : row.kind)
       const batch = batchOf(row)
       const headline = batch ? (batch.length > 1 ? `and ${batch.length - 1} more were interrupted`
-        : 'was interrupted') : row.cause === 'provider' ? PROVIDER_HEADLINE : HEADLINE[row.kind] ?? row.kind
+        : 'was interrupted') : row.cause === 'provider' ? PROVIDER_HEADLINE
+        : row.cause === 'local_only' ? LOCAL_ONLY_HEADLINE
+        : (outsideTheStep(row) ? OUTSIDE_HEADLINE[row.kind] : undefined) ?? HEADLINE[row.kind] ?? row.kind
       const key = `${name}:${row.ts}`
       if (current && !mem.toasted.has(key)) {
         mem.toasted.add(key)
@@ -4047,8 +4110,9 @@ async function deliver($: any, now: number) {
       if (!own || !mem.wake) continue // the toast only: the notice stays for its session or wb wait
       // a batch's wake ends with its resume, not the failure's next step (#544)
       const next = batch ? BATCH_NEXT(batch) : row.cause === 'spend' ? (row.guard === 'agents' ? AGENTS_NEXT(name) : SPEND_NEXT(name, (await readRoutes($)).cap !== null))
-        : row.cause === 'provider' ? PROVIDER_NEXT(name)
-        : (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined)
+        : row.cause === 'local_only' ? OUTSIDE_REMEDY
+        : row.cause === 'provider' || (outsideTheStep(row) && OUTSIDE_HEADLINE[row.kind]) ? OUTSIDE_NEXT(name)
+        : (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined, String(row.text ?? ''))
       const who = batch && batch.length > 1 ? `Tasks ${batch.map(n => `\`${n}\``).join(', ')} were interrupted`
         : `Task \`${name}\` ${headline}`
       const text = `[workbench] ${who}.\n\n${row.text}\n\n${next}`
@@ -4448,8 +4512,6 @@ export const register: Register = (on, options) => {
     }
     const config = await $.env.get('CLAUDE_CONFIG_DIR')
     mem.skill = `${config ? abs(config) : `${home}/.claude`}/skills/workbench/SKILL.md`
-    const priced = await $.env.get('WB_SAVINGS')
-    mem.savingsFile = priced ? abs(priced) : `${home}/.config/workbench/savings.json`
     const commands = await $.env.get('WB_COMMANDS')
     mem.commandsFile = commands ? abs(commands) : `${home}/.config/workbench/commands.json`
     mem.startedAt = await $.clock.now()
@@ -4555,13 +4617,29 @@ export const register: Register = (on, options) => {
     // the dialog (#1014, routeRefusal): anyone's call alike
     const routing = await routeRefusal($, e as Row)
     if (routing) return { deny: routing }
-    if (next.origin.plugin !== 'engine') return next(e)
+    // Claude's own call in a task's worktree is kept for wb as it begins and once it is over,
+    // marked if refused (callRows, #1211, noteCall, #1272): anyone's alike, a subagent's or
+    // another plugin's
+    const kept = await callRows($, e as Row)
+    const at = kept.tasks.length ? await $.clock.now() : 0
+    const name = kept.tasks.length ? callFile(at, String((e as Row).tool_use_id ?? '')) : ''
+    if (kept.tasks.length) await noteCall($, kept.tasks, kept.row, at, name, 'begun').catch(() => {})
+    if (next.origin.plugin !== 'engine') {
+      if (!kept.tasks.length) return next(e)
+      const r = await next(e)
+      await noteCall($, kept.tasks, kept.row, at, name, (r as Row)?.deny ? 'denied' : 'over').catch(() => {})
+      return r
+    }
     // The engine's call settles its permission check, a dialog included, before it resolves: one
     // whose dialog came up at the terminal is over once it does, answered there (#959): the oldest
     // dialog of that tool in that loop (another loop's call of the tool settles none of its)
+    let denied = false
     try {
-      return await next(e)
+      const r = await next(e)
+      denied = !!(r as Row)?.deny
+      return r
     } finally {
+      if (kept.tasks.length) await noteCall($, kept.tasks, kept.row, at, name, denied ? 'denied' : 'over').catch(() => {})
       const agent = e.agentId ?? ''
       const d = mem.termDialogs.find(d => d.tool === e.tool && d.agent === agent)
       if (d) await termDialogDone($, d)
@@ -4596,8 +4674,11 @@ export const register: Register = (on, options) => {
     if (delegates(String(e.command ?? ''))) {
       await workbenchMode($, true)
     }
+    // answered in the chat (#767): a plain reply the user, `--to` the messages it names (#1273)
     if (REPLIES.test(String(e.command ?? ''))) {
-      mem.chatOwed.clear() // answered in the chat (#767)
+      const to = [...String(e.command).matchAll(/--to[= ]+['"]?([^\s'"]+)/g)].map(x => x[1])
+      if (!to.length || to.includes('user')) userOwedClear()
+      for (const id of to) mem.chatOwed.delete(id)
       owedSettled()
     }
     return next(e)
@@ -4635,8 +4716,7 @@ export const register: Register = (on, options) => {
   on('prompt.submit', async ($, e, next) => {
     if (byUser(e) && !e.text.startsWith(WEB) && !e.text.startsWith(AGENT) && !e.text.startsWith('[workbench]')) {
       await back($)
-      mem.chatOwed.clear() // back at the terminal: an answer there reaches them (#767)
-      owedSettled()
+      userOwedClear() // back at the terminal: an answer there reaches them (#767), never an agent (#1273)
     }
     return next(e)
   })
@@ -4647,8 +4727,7 @@ export const register: Register = (on, options) => {
     // waiting tasks too, as they stand: a review left at the quit stayed "awaiting review" and in
     // every new conversation's pick-up block (#698)
     const { ok, out } = await runWb($, ['stop', '--all', '--park-waiting', ...(await scope($))])
-    $.ui.toast(ok ? 'workbench: this session\'s delegated agents are stopped'
-      : `workbench: wb stop --all failed: ${brief(out)}`)
+    if (!ok) $.ui.toast(`workbench: wb stop --all failed: ${brief(out)}`) // success: the reply says it (#1322)
     return { text: ok ? `Delegation stopped. ${out}` : `Delegation not stopped: ${out}`, context: [QUIT_NOTE(out, ok)] }
   })
 
@@ -4712,7 +4791,10 @@ export const register: Register = (on, options) => {
     if (want.coding !== 'decide' && had?.coding !== want.coding) blocks.push({ name: 'claude-coding', text: CODING_RULES[want.coding] })
     if (want.notes && !had?.notes) blocks.push({ name: 'user-notes', text: NOTES_NOTE(want.notes) })
     if (want.workflows === 'on' && had?.workflows !== 'on') blocks.push({ name: 'dynamic-workflows', text: WORKFLOWS_RULE })
-    if (isAway) blocks.push({ name: 'web-chat', text: AWAY_NOTE })
+    if (isAway) {
+      blocks.push({ name: 'web-chat', text: AWAY_NOTE })
+      mem.awayNoted = true
+    }
     if (want.wakeOff && !had?.wakeOff) blocks.push({ name: 'workbench-wake', text: WAKE_OFF_NOTE })
     if (want.routes && had?.routes !== want.routes) { // read while delegating or with a task open, as `wanted` does
       const routes = await readRoutes($) // once any role has an API model (#1014)
@@ -4817,7 +4899,6 @@ export const register: Register = (on, options) => {
     const list = await read($, tasks)
     const watched = await read($, live)
     const { url, web, delegating } = await read($, chat)
-    const saved = await read($, savings)
     const view = await read($, pane)
     if (mem.splash) { // the opening animation, in place of the Tasks page while it plays (#963)
       const props = (e.props ?? {}) as Row
@@ -4830,7 +4911,7 @@ export const register: Register = (on, options) => {
       // the bar would land above the real modeline (2026-11-21, review of #963). Before the words
       // leave, that makes them rise away; once they fall, the bar goes to the row the page
       // reaches at least.
-      const shape = fits ? pageShape(list, watched, delegating, saved, await $.clock.now(), cols) : null
+      const shape = fits ? pageShape(list, watched, delegating, await $.clock.now(), cols) : null
       let target = shape ? splashTarget(shape, rows) : null
       if (target && target.bar === null && s.plan?.ending === 'fall') target = { ...target, bar: Math.min(rows - 1, shape!.atLeast - 1) }
       // a new size plans again, from the same frame: a dock's second draw is a row shorter than its
@@ -4882,22 +4963,20 @@ export const register: Register = (on, options) => {
       </Box>
     )
     // the Settings tab: Shared (the Agents switch, the busy row and the roles first, #1023; Claude
-    // coding, #93; Dynamic workflows, #1041; the day cap and wake; the Stats tab's, #406), one row
-    // each at rest; the prices are typed (an Input: wb checks them). Then GPU and API (#1023; API
-    // left out with no provider and no API role but its one line). Last, apart under Experimental,
-    // the web chat and the probe experiment: settings that may change or go away (the user, 2026-11-21)
+    // coding, #93; Dynamic workflows, #1041; the day cap and wake; progress checks, the opening
+    // animation), one row each at rest; the day cap is typed (an Input: wb checks it). Then GPU and
+    // API (#1023; API left out with no provider and no API role but its one line). Last, apart
+    // under Experimental, the probe experiment (the user, 2026-11-21); the web chat is Shared's
+    // last row, and the headings say no caveat (#1322)
     if (view.tab === 'settings') {
-      const st = await statsSettings($)
       const probe = await probeStatus($)
       const probeAt = await probeMode($)
       const prog = await progressSettings($)
-      const picked = (args: string[]) => runWb($, args).then(() => { void refreshStats($, true); void syncTop($) })
       mem.settingsCols = Number(((e.props ?? {}) as Row).bodyColumns ?? 0) // settingRow folds to it
       const roles = await roleRows(kit, $, view, await rolesNow($)) // Shared, GPU and API (#1023)
       return (
         <Box flexDirection="column">
-          <Text dimColor>{SETTINGS_HINT}</Text>
-          <Box flexDirection="column" marginTop={1}>
+          <Box flexDirection="column">
             {heading(kit, 'Shared')}
             {roles.top}
             {settingRow(kit, $, 'coding', 'Claude coding', CODING_STOPS, await codingMode($), view,
@@ -4906,18 +4985,11 @@ export const register: Register = (on, options) => {
               v => runWb($, ['workflows', v]))}
             {roles.cap}
             {infoLine(kit, 'wake', `Wake Claude: ${mem.wake ? 'on' : 'off'} · change it in /plugin → workbench → options`)}
-            {settingRow(kit, $, 'record', 'Stats recording', RECORD_STOPS, st.recording ? 'on' : 'off', view,
-              v => picked(['stats', 'set', 'recording', v]))}
-            {settingRow(kit, $, 'live', 'Live view', LIVE_STOPS, st.live ? 'on' : 'off', view,
-              v => picked(['stats', 'set', 'live', v]))}
-            {settingRow(kit, $, 'every', 'Live refresh', EVERY_STOPS, String(st.every), view,
-              v => picked(['stats', 'set', 'every', v]))}
             {settingRow(kit, $, 'progress', 'Progress checks', progressStops(prog.after), prog.on ? 'on' : 'off', view,
               v => runWb($, ['progress', v]))}
             {settingRow(kit, $, 'splash', 'Opening animation', SPLASH_STOPS, (await splashOn($)) ? 'on' : 'off', view,
               v => runWb($, ['splash', v]).then(({ ok, out }) => { if (!ok) $.ui.toast(`workbench: ${brief(out)}`) }))}
-            <kit.Input key="price" label="▸ Electricity price per kWh" value={mem.price ? String(mem.price) : ''}
-              placeholder="not set (energy shows in Wh)" submitLabel="set" onSubmit={(v: string) => { void setPrice($, v) }} />
+            {settingRow(kit, $, 'chat', 'Web chat', CHAT_STOPS, web ? 'on' : 'off', view, v => setWeb($, v))}
           </Box>
           <Box flexDirection="column" marginTop={1}>
             {heading(kit, 'GPU')}
@@ -4930,8 +5002,7 @@ export const register: Register = (on, options) => {
             </Box>
           ) : null}
           <Box flexDirection="column" marginTop={1}>
-            {heading(kit, 'Experimental', ' · may change or go away')}
-            {settingRow(kit, $, 'chat', 'Web chat', CHAT_STOPS, web ? 'on' : 'off', view, v => setWeb($, v))}
+            {heading(kit, 'Experimental')}
             {settingRow(kit, $, 'probe', 'Agent code navigation', probeStops(probe, probeAt), probeAt, view,
               v => setProbe($, v))}
           </Box>
@@ -5056,7 +5127,6 @@ export const register: Register = (on, options) => {
         )}
         {stage}
         {page.capLine && <Text wrap="truncate-end">{page.capLine.map(p => <Text color={p.color} dimColor={p.dim}>{p.text}</Text>)}</Text>}
-        {saved && <Text dimColor>{saved}</Text>}
         {tabs}
       </Box>
     )

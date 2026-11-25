@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 from . import models, store
 from .watch import Watcher
-from .runner import INTERRUPT_HEAD, NOTE_HEAD, api_task, opencode_bin
+from .runner import INTERRUPT_HEAD, NOTE_HEAD, RERUN, api_task, opencode_bin
 
 STYLE = {"claude": "1;38;5;208", "agent": "1;36", "think": "2;3", "tool": "33", "out": "2",
          "ok": "1;32", "bad": "1;31", "sys": "34", "add": "32", "del": "31", "head": "1"}
@@ -214,10 +214,14 @@ def _user_message(text: str, verbose: bool) -> tuple[str, list[tuple[str, str]]]
         head = "Claude → agent · next step"
     elif text.startswith(INTERRUPT_HEAD) and "without a tool call. Stop planning" in text:
         head = "workbench → agent · nudge: thinking too long without acting"  # runner.NUDGE
+    elif text.startswith(INTERRUPT_HEAD) and "without changing a file: make the first edit" in text:
+        head = "workbench → agent · nudge: many calls without changing a file"  # runner.EXPLORE_NUDGE
     elif text.startswith(INTERRUPT_HEAD):
         head = "Claude → agent · INTERRUPT, high priority"
     elif text.startswith(NOTE_HEAD):
         head = "Claude → agent · note"
+    elif text.startswith(RERUN[:40]):  # runner._run_again (#1235)
+        head = "workbench → agent · the round again, after its provider or server stopped it"
     else:
         head = "Claude → agent · spec"
     body = text = full
@@ -428,7 +432,7 @@ def task_entries(task: store.Task) -> list[Entry]:
         # limits and export, written just before (#865)
         elif kind in ("fresh", "full", "load", "left_bg", "reading_full", "compacted", "limits", "export",
                       "lingered",  # the agent's turn over, OpenCode still open: stopped (#1160)
-                      "settled",  # a self-review that only read, the tree unchanged: stopped (#1168)
+                      "settled",  # a self-review at a guard, the tree its tests passed on: stopped (#1168, #1250, #1261)
                       "served",  # served: the keyhole, an API model's provider changed what ran
                       "rate_limited"):  # an API provider's wait, the clocks paused (#1020)
             out.append(Entry(ts, key, [("sys", f"■ {r.get('text', '')}")]))
@@ -605,7 +609,7 @@ def header(task: store.Task, paint: Painter, data: dict | None = None) -> str:
 
 def routed_text(task: store.Task) -> str:
     """How the task's model was chosen (#1016): an API task's `API <id> (<provider>) · trivial
-    role, set by you 11-20 · thinking off` from task.json's keys, a GPU task's the router's why
+    role · thinking off` from task.json's keys, a GPU task's the router's why
     (task.json `route`); '' for neither. wb watch's `routed:` line, and --json's `routed` row."""
     from . import routes
     sp = task.spec

@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/workbench-splash.gif" alt="Claude Code on the left; on the right, the Workbench pane opening after /workbench." width="900"></p>
+<p align="center"><img src="docs/logo.jpg" alt="Claude's Workbench: a warm light directing three little robot craftsmen at a workbench" width="720"></p>
 
 # Claude's Workbench
 
@@ -6,14 +6,15 @@
 Claude Code plugin that connects the two inside your normal Claude Code session.
 
 <p align="center">
-<a href="https://github.com/a-schaefers/claudes-workbench/actions/workflows/check.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/a-schaefers/claudes-workbench/check.yml?branch=main&label=tests"></a>
-<a href="https://github.com/a-schaefers/claudes-workbench/actions/workflows/nightly.yml"><img alt="newest Claude Code" src="https://img.shields.io/github/actions/workflow/status/a-schaefers/claudes-workbench/nightly.yml?branch=main&label=newest%20Claude%20Code"></a>
-<a href="https://github.com/a-schaefers/claudes-workbench/actions/workflows/opencode.yml"><img alt="newest OpenCode" src="https://img.shields.io/github/actions/workflow/status/a-schaefers/claudes-workbench/opencode.yml?branch=main&label=newest%20OpenCode"></a>
-<a href="https://github.com/a-schaefers/claudes-workbench/releases"><img alt="release" src="https://img.shields.io/github/v/release/a-schaefers/claudes-workbench?label=release&color=blue"></a>
+<a href="https://github.com/a-schaefers/workbench/actions/workflows/check.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/a-schaefers/workbench/check.yml?branch=main&label=tests"></a>
+<a href="https://github.com/a-schaefers/workbench/actions/workflows/nightly.yml"><img alt="newest Claude Code" src="https://img.shields.io/github/actions/workflow/status/a-schaefers/workbench/nightly.yml?branch=main&label=newest%20Claude%20Code"></a>
+<a href="https://github.com/a-schaefers/workbench/actions/workflows/opencode.yml"><img alt="newest OpenCode" src="https://img.shields.io/github/actions/workflow/status/a-schaefers/workbench/opencode.yml?branch=main&label=newest%20OpenCode"></a>
+<a href="https://github.com/a-schaefers/workbench/releases"><img alt="release" src="https://img.shields.io/github/v/release/a-schaefers/workbench?label=release&color=blue"></a>
 <a href="#what-you-need"><img alt="Python, standard library only" src="https://img.shields.io/badge/Python-stdlib%20only-3776ab"></a>
 <a href="#what-you-need"><img alt="Linux, macOS, WSL2" src="https://img.shields.io/badge/runs%20on-Linux%20%C2%B7%20macOS%20%C2%B7%20WSL2-555"></a>
-<a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/a-schaefers/claudes-workbench"></a>
-<a href="https://github.com/a-schaefers/claudes-workbench/commits/main"><img alt="last commit" src="https://img.shields.io/github/last-commit/a-schaefers/claudes-workbench"></a>
+<a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/a-schaefers/workbench"></a>
+<a href="https://github.com/a-schaefers/workbench/commits/main"><img alt="last commit" src="https://img.shields.io/github/last-commit/a-schaefers/workbench"></a>
+<a href="https://github.com/sponsors/a-schaefers"><img alt="Sponsor me on GitHub" src="https://img.shields.io/badge/Sponsor%20me-on%20GitHub-ea4aaa?logo=githubsponsors&logoColor=white"></a>
 </p>
 
 - **Claude is the lead, your OpenCode agents are the crew:** Claude assigns each step to a model
@@ -28,17 +29,6 @@ Claude Code plugin that connects the two inside your normal Claude Code session.
 
 On bigger coding tasks, once the session is already open, handing the coding off to the
 agents typically costs Claude about half the tokens of writing the code itself.
-
-## Why small local models hold up
-
-| Local agents tend to… | Workbench |
-|---|---|
-| lose the thread on long tasks | sizes each step to the model, and hands over to a fresh session before its context fills |
-| loop or think in circles | guards stop repeats, error streaks and silence; a nudge past the think budget |
-| write code that only looks right | your tests run after every round, failures go back to the agent, then Claude reviews the diff |
-| touch what they shouldn't | their own git worktree, read-only git, and a sandbox: Landlock on Linux, Seatbelt on macOS |
-| cost Claude tokens to babysit | Claude sleeps until a task needs it: no polling |
-| differ from machine to machine | the model choice and time limits are learned from this machine's own results |
 
 ## Quickstart
 
@@ -59,13 +49,13 @@ agents typically costs Claude about half the tokens of writing the code itself.
 
 The mod's hooks (the pane, wake-ups, dialogs) are tested on Claude Code's terminal, desktop,
 VS Code and mobile surfaces; the live CLI is checked by hand. In the desktop app, add the plugin
-with + by the prompt box, then Plugins, Add marketplace (`a-schaefers/claudes-workbench`), then
+with + by the prompt box, then Plugins, Add marketplace (`a-schaefers/workbench`), then
 Add plugin; `wb setup` below still runs once from a terminal.
 
 ### In your terminal
 
 ```sh
-claude plugin marketplace add a-schaefers/claudes-workbench
+claude plugin marketplace add a-schaefers/workbench
 claude plugin install workbench@workbench
 ```
 
@@ -84,6 +74,10 @@ directing for you.
 `/workbench-quit` stops the agents and keeps their work for later.
 `/workbench-quit-and-hand-back-claude` has Claude finish their tasks itself.
 `/workbench-update` installs the latest workbench (Claude Code tells you when there's one).
+
+## Contributing
+
+Fixes are welcome: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

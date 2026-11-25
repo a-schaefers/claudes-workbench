@@ -38,6 +38,19 @@ ROOT_FILES = ("CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md")
 # lists opencode_worktree_remove; the rule then refuses the call.
 DENIED_TOOLS = ("question", "experimental_image_generate", "execute", "subagent", "websearch",
                 "webfetch", "opencode_*", "*worktree*")  # the network, like curl: Claude's to allow
+# wb's own OpenCode agent, which every `opencode run` names (`--agent`, runner.run_round; a
+# resumed `--session` is switched to it too). Without it OpenCode 2.3.2 took the session's agent
+# from the config's `default_agent`, and the user's global opencode.json is one of those
+# documents: an agent of theirs whose rules allowed webfetch and subagent gave every wb agent
+# both, the layer's denies notwithstanding, as an agent's own rules come after the top-level
+# ones and the last match wins (#1290, 2026-11-24, measured with tests/capture_llm.py). A user's
+# own `wb-code` (their JSON, or agents/wb-code.md) loads before the layer and kept its system,
+# steps and rules, so the layer removes any (`disabled`, AGENT_OFF) and rules_env's content,
+# loaded after the layer, makes it afresh (AGENT_ENTRY): a new agent starts from OpenCode's
+# defaults and takes every top-level rule, the layer's included, as the default `build` agent did.
+AGENT = "wb-code"
+AGENT_OFF = {AGENT: {"disabled": True}}
+AGENT_ENTRY = {AGENT: {"mode": "primary", "description": "Workbench's agent: the task's rules alone"}}
 # A command written `NAME=value cmd`: OpenCode matches each simple command's raw text, so `FOO=1
 # ls` was refused while `ls` and `env FOO=1 ls` ran. It is how CLAUDE.md files and READMEs spell
 # tests (`PYTHONPATH=. pytest`, `CI=1 npm test`), and a small model copying the project's command
@@ -1185,10 +1198,43 @@ def repo_conf(repo: str | Path, sub: str | None = None) -> dict:
     return next((v for _, v in repo_entries(repo, sub)), {})
 
 
-def repo_entries(repo: str | Path, sub: str | None = None) -> list[tuple[str, dict]]:
+def repo_conf_dir(repo: str | Path, sub: str | None = None) -> str:
+    """The directory of repo_conf's key inside the repo, as ``sub`` names it: '' for the top (or
+    no key). The spot itself or a directory above it, so a prefix of ``sub``, matched by real path
+    or by git dir as repo_entries does. A package key's `copy` paths are read from it: from the
+    root they copied the root's node_modules into every task of the package (#1346, 2026-11-24)."""
+    entries = repo_entries(repo, sub)
+    if not entries or not sub:
+        return ""
+    fold = store.folds_case(repo)
+    real = lambda p: os.path.realpath(p).lower() if fold else os.path.realpath(p)  # noqa: E731
+    kp, top = Path(entries[0][0]).expanduser(), real(repo)
+    kr, spot = real(kp), real(Path(repo) / sub)
+    # by path only when the spot is at or under the key, repo_entries' `near`: a key on a linked
+    # worktree under the top (.claude/worktrees/x) matches the main checkout by git dir, and its
+    # depth from the top, three parts, read the root key's node_modules as the package's (#1346's
+    # review, 2026-11-24)
+    if (kr == top or kr.startswith(top.rstrip(os.sep) + os.sep)) \
+            and (spot == kr or spot.startswith(kr.rstrip(os.sep) + os.sep)):
+        rel = os.path.relpath(kr, top)
+    else:  # by git dir: the key's path inside its own worktree
+        try:
+            rel = os.path.relpath(kr, real(gitops.toplevel(kp)))
+        except gitops.GitError:
+            return ""
+    depth = 0 if rel == "." else len(Path(rel).parts)
+    return "/".join(Path(sub.strip("/")).parts[:depth])
+
+
+def repo_entries(repo: str | Path, sub: str | None = None,
+                 whole: bool = False) -> list[tuple[str, dict]]:
     """Every commands.json `repos` entry for the task's spot, nearest first, as (key, entry):
-    repo_conf's rule, whose first is the one that applies. privacy.local_only reads further up
-    for a `local_only` the nearest doesn't state (#1021)."""
+    repo_conf's rule, whose first is the one that applies (the spot, else the nearest directory
+    above it, by real path, else by git dir with the path inside the worktree). ``whole``: every
+    entry for what a task's checkout holds, at or under the repo's top by path or by git dir (a
+    repo of its own nested under the top left out), the spot's first: privacy.local_only reads
+    them all, since a directory marked alone once went to the API model with every task started
+    outside it (#1255, 2026-11-24)."""
     repos = commands_conf().get("repos") or {}
     if not repos:
         return []
@@ -1199,28 +1245,42 @@ def repo_entries(repo: str | Path, sub: str | None = None) -> list[tuple[str, di
     real = lambda p: os.path.realpath(p).lower() if fold else os.path.realpath(p)  # noqa: E731
     top = real(repo)
     spot = real(Path(repo) / sub) if sub else top
+    common = gitops.common_dir(repo)
 
     def within(p: str, d: str) -> bool:
         return d == "." or p == d or p.startswith(d.rstrip(os.sep) + os.sep)
 
-    by_path = sorted(((len(kr), k, v) for k, v in repos.items()
-                      if within(kr := real(Path(k).expanduser()), top) and within(spot, kr)),
-                     key=lambda x: -x[0])
-    if by_path:
-        return [(k, v) for _, k, v in by_path]
-    common, rel_spot, found = gitops.common_dir(repo), os.path.relpath(spot, top), []
+    def ours(kp: Path) -> bool:  # a key under the top that isn't a repo of its own nested there
+        kc = gitops.common_dir(kp)
+        return kc is None or common is None or real(kc) == real(common)
+
+    # (far from the spot, nearest first, key, entry): by path, then by git dir
+    by_path = sorted((not near, -len(kr), k, v) for k, v in repos.items()
+                     if within(kr := real(Path(k).expanduser()), top)
+                     and ((near := within(spot, kr)) or whole and ours(Path(k).expanduser())))
+    if not whole and by_path:
+        return [(k, v) for *_, k, v in by_path]
+    found, rel_spot = [], os.path.relpath(spot, top)
     for k, v in repos.items() if common else ():
         kp = Path(k).expanduser()
-        if (kc := gitops.common_dir(kp)) is None or real(kc) != real(common):
+        # under the top, only whole mode skips a key (by_path holds it then): a key on a linked
+        # worktree nested there (Claude Code's .claude/worktrees/<name>) is the main checkout's by
+        # git dir, and skipping it always lost its setup (#1255's review, 2026-11-24)
+        if whole and within(real(kp), top) or (kc := gitops.common_dir(kp)) is None \
+                or real(kc) != real(common):
             continue
         try:
             rel = os.path.relpath(real(kp), real(gitops.toplevel(kp)))
         except gitops.GitError:
             continue
-        rank = 0 if rel == "." else len(rel) + 1
-        if within(rel_spot, rel):
-            found.append((rank, k, v))
-    return [(k, v) for _, k, v in sorted(found, key=lambda x: -x[0])]
+        if (near := within(rel_spot, rel)) or whole:
+            found.append((not near, 0 if rel == "." else -(len(rel) + 1), k, v))
+    found.sort(key=lambda x: x[:2])
+    if not whole:
+        return [(k, v) for *_, k, v in found]
+    # the spot's own first (by path, then by git dir), then the rest the same
+    return [(k, v) for far in (False, True) for rows in (by_path, found)
+            for f, _, k, v in rows if f is far]
 
 
 def shell_rules(task: store.Task) -> list[dict]:
@@ -2318,6 +2378,18 @@ API_HIDDEN_STOPS = frozenset({"Yarn", "Maven", "Gradle", "dotnet", "poetry", "Co
 # and what fails for a tool that installs nothing (#1092): huggingface_hub takes a token file it
 # can't read as no token, so only a gated or private model's download fails
 API_HIDDEN_FAILS = {"Hugging Face": "Hugging Face's gated and private models don't download"}
+# What says a checkout builds with each tool: a manifest at its top or in the task's package
+# (fnmatch patterns; poetry's pyproject.toml only with a [tool.poetry] table, _uses). The note
+# named every hidden file on every API start, whatever the repo built with, and the skill had
+# Claude tell the user the repo wouldn't build on API (#1322)
+API_HIDDEN_USES = {"npm": ("package.json",), "Yarn": ("package.json",), "bun": ("package.json",),
+                   "Maven": ("pom.xml",),
+                   "Gradle": ("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"),
+                   "dotnet": ("*.csproj", "*.fsproj", "*.vbproj", "*.sln", "nuget.config", "NuGet.Config"),
+                   "poetry": ("pyproject.toml",), "Composer": ("composer.json",), "Bundler": ("Gemfile",),
+                   "dart pub get": ("pubspec.yaml",), "Hex": ("mix.exs",),
+                   "pip": ("pyproject.toml", "requirements*.txt", "setup.py", "setup.cfg"),
+                   "Hugging Face": ("pyproject.toml", "requirements*.txt", "setup.py", "setup.cfg")}
 # Of the home directory's own entries, the dotfiles (tools' configs, caches, toolchains) stay
 # readable, and these (R's and Perl's user libraries); the user's documents and other projects
 # don't, beyond the task's repo, workbench itself, the programs on PATH and what Claude allowed.
@@ -2331,6 +2403,11 @@ HOME_READABLE = ("bin", "go", "R", "perl5", "Library")
 # theirs on macOS (#1194), /Volumes its external disks and network shares, as /media and /mnt
 # (#1194's review: its `Macintosh HD` is a link to /, which Seatbelt matches resolved)
 ONLY_KEPT = ("/dev", "/mnt", "/media", "/run/media", "/run/user", "/home", "/Users", "/Volumes")
+# The links in /dev to the calling process's own descriptors: they name no file. Resolved in wb's
+# process, /dev/stderr was /dev/null under `wb verify 2>/dev/null` and so was listed beside it, and
+# in the lane's child, where fd 2 is a pipe, Landlock refused the rule (EBADFD) and with it the
+# lane: both runs exited 126 and verify said "the candidate fails it" (#1308, 2026-11-24).
+FD_LINKS = ("/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/fd")
 # WSL2's Windows drives (DrvFs, /mnt/<letter> unless wsl.conf moved them): a Windows program there
 # runs through interop as a Windows process, as the user, outside Landlock and no-new-privileges.
 # The read lane let the agent start one: python3 running cmd.exe, or the allowed `npm` resolving to
@@ -2589,18 +2666,14 @@ def mise_trusted(task: store.Task, path: str | None = None) -> bool | None:
     return all(said) if said else None
 
 
-def venv_line(task: store.Task, setup: bool) -> str:
-    """For wb start: the active environments the agent leaves out, and how to give it its own."""
+def venv_line(task: store.Task) -> str:
+    """For wb start with no --setup: the active environments the agent leaves out, and how to
+    give it its own."""
     envs = checkout_envs(task)
     if not envs:
         return ""
-    said = "; ".join(f"{r} ({why})" for r, why in envs.items())
-    line = (f"the active Python environment {said} is your checkout's: the agent, its setup and "
-            "its tests leave it out, so they import the worktree's code")
-    if not setup:
-        line += ("; --setup 'uv sync' --test 'uv run pytest' (or the project's own install) gives "
-                 "the worktree its own .venv, first on their PATH")
-    return line
+    return (f"the agent leaves out your active venv ({', '.join(envs)}): --setup 'uv sync' (or "
+            "the project's install) gives the worktree its own")
 
 
 def interop_on() -> bool:
@@ -2637,7 +2710,6 @@ def interop_gap() -> str | None:
 DAEMON_PORTS = {2375: "a Docker or Podman API", 2376: "a Docker or Podman API (TLS)",
                 5037: "adb's server", 3333: "OpenOCD's GDB server", 2331: "J-Link's GDB server",
                 9222: "Chrome's DevTools", 9229: "Node's inspector"}
-PROC_TCP = ("/proc/net/tcp", "/proc/net/tcp6")
 NET_ABI = 4  # Landlock's TCP rule (Linux 6.7)
 
 
@@ -2663,28 +2735,6 @@ def deny_ports(task: store.Task | None = None, keep=()) -> list[int]:
     DAEMON_PORTS but the granted ones and ``keep``, the ports the round itself needs (its model
     server's, its keyhole's: runner.lane_ports), so no setup is ever asked for."""
     return sorted(set(DAEMON_PORTS) - granted_ports(task) - {p for p in keep if p})
-
-
-def listening_daemons(sources=PROC_TCP, ports=None) -> list[int]:
-    """The ports of ``ports`` (DAEMON_PORTS) listening on this machine, from the kernel's TCP
-    tables (LISTEN is state 0A); none where there are no such tables (off Linux)."""
-    ports = DAEMON_PORTS if ports is None else ports
-    found = set()
-    for src in sources:
-        try:
-            rows = Path(src).read_text().splitlines()[1:]
-        except OSError:
-            continue
-        for row in rows:
-            f = row.split()
-            if len(f) > 3 and f[3] == "0A" and ":" in f[1]:
-                try:
-                    port = int(f[1].rsplit(":", 1)[1], 16)
-                except ValueError:
-                    continue
-                if port in ports:
-                    found.add(port)
-    return sorted(found)
 
 
 def secret_paths() -> set[str]:
@@ -2763,18 +2813,47 @@ def api_hidden_refusal(task: store.Task, raw: str) -> str | None:
     return None
 
 
+def _uses(task: store.Task) -> set[str]:
+    """The tools of API_HIDDEN_USES whose manifest the task's checkout has, at its top or in its
+    package (task.json `subdir`)."""
+    repo = os.path.realpath(task.spec["repo"])
+    at = os.path.join(repo, task.spec["subdir"]) if task.spec.get("subdir") else repo
+    names = set()
+    for d in {repo, at}:
+        try:
+            names.update(os.listdir(d))
+        except OSError:
+            pass
+    used = {tool for tool, pats in API_HIDDEN_USES.items()
+            if any(fnmatch.fnmatch(n, pat) for n in names for pat in pats)}
+    if "poetry" in used and not any(_reads(os.path.join(d, "pyproject.toml"), "[tool.poetry")
+                                    for d in {repo, at}):
+        used.discard("poetry")
+    return used
+
+
+def _reads(path: str, text: str) -> bool:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return text in f.read(1 << 20)
+    except OSError:
+        return False
+
+
 def api_hidden_note(task: store.Task) -> str:
-    """wb start's note for an API task when a file API_HIDDEN names holds a credential, else '': the files,
-    then the tools that don't run in its lane (API_HIDDEN_STOPS), those whose private-registry
-    installs fail and what else fails (API_HIDDEN_FAILS: Hugging Face's gated models, #1092).
-    '' where ``task`` has no lane to hide them: neither Landlock nor Seatbelt, or the lane off."""
+    """wb start's note for an API task when a file API_HIDDEN names holds a credential and the
+    checkout builds with its tool (_uses), else '': the files, then the tools that don't run in
+    its lane (API_HIDDEN_STOPS), those whose private-registry installs fail and what else fails
+    (API_HIDDEN_FAILS: Hugging Face's gated models, #1092). '' where ``task`` has no lane to
+    hide them: neither Landlock nor Seatbelt, or the lane off."""
     # Without a lane nothing is hidden: the agent reads the file and Maven runs. On macOS every
     # API start said otherwise, so Claude, as the skill says, told the user the repo won't build
     # on API and that the token couldn't reach the provider (#1156, 2026-11-24)
     if not lane.held() or writable(task) is None:
         return ""
     home = os.path.realpath(Path.home())
-    tools = _api_hidden_tools()
+    uses = _uses(task)
+    tools = {p: tool for p, tool in _api_hidden_tools().items() if tool in uses}
     there = sorted(tools)  # each there and holding a credential (a file, or NuGet's config/)
     if not there:
         return ""
@@ -2985,6 +3064,8 @@ def _read_walk(task: store.Task) -> tuple[list[str], list[tuple[str, str]]] | No
         return now
 
     def visit(p: str, default: bool, was: bool = True) -> None:
+        if p in FD_LINKS:  # the caller's fds, not files: the child's are its own (#1308)
+            return
         real = os.path.realpath(p)
         if real in hidden or any(under(real, h) for h in hidden):
             if real in inner:
@@ -3846,4 +3927,5 @@ def layer(task: store.Task) -> dict:
     rules += [{"action": "edit", "resource": f"{p.rstrip('/')}/*", "effect": "deny"}
               for p in _both([skills.library()])]
     return {"instructions": [str(p) for p in files + ([note] if note else [])],
-            "permissions": rules, "skills": [*handed, *map(str, own)]}
+            "permissions": rules, "skills": [*handed, *map(str, own)],
+            "agents": json.loads(json.dumps(AGENT_OFF))}  # made afresh in the content (AGENT)
