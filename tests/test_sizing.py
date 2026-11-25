@@ -258,8 +258,8 @@ class Measured(Base):
         task = store.Task("t-upd")
         with mock.patch.dict(runner.CURRENT, code="the code before the update"):
             self.assertTrue(runner._updated(task))
-        note = [r for r in store.notices() if r["task"] == "t-upd"][-1]
-        self.assertEqual((note["kind"], note["cause"]), ("stuck", "updated"))
+        # since #1322 a runner of the new code carries on, with no notice at all
+        self.assertFalse([r for r in store.notices() if r["task"] == "t-upd" and r["kind"] == "stuck"])
         self.assertFalse(results.step(task, True)["stuck"])
         old = {"kind": "stuck", "round": 1, "text": f"task t: {runner.UPDATED}: wb resume t …"}
         self.assertTrue(results._not_the_step(old))                # one written before the cause
@@ -336,10 +336,10 @@ class ApiSizing(Base):
         self.assertEqual(models.api_limits({"limit": {"context": 131072, "output": 131072}})["limit"]["output"],
                          models.API_OUTPUT)                         # a large window: the cap as before
 
-    def test_a_small_catalog_input_limit_gets_a_note_that_names_it_not_the_output(self):
+    def test_a_small_catalog_input_limit_gets_no_note_at_start(self):
         # #1073: with the output bounded by api_limits, only a small catalog limit.input leaves no
-        # room for a handover, and wb start still said "lower limit.output and options.max_tokens",
-        # which changes nothing and isn't the user's to do for a catalog model
+        # room for a handover, which neither wb nor the user can change: its note at every wb
+        # start went in #1322 (2026-11-24), and a GPU entry's is wb doctor's
         self.catalog([{**tw.API_CATALOG[0], "limit": {"context": 1048576, "input": 16384, "output": 384000}}])
         m = models.hosted(fresh=True)[tw.FLASH]
         routed = {"via": "api", "role": "trivial", "provider": m.provider, "provider_name": m.provider,
@@ -347,11 +347,8 @@ class ApiSizing(Base):
         with mock.patch.object(tw.cli, "pick_model", lambda *a, **k: (m, models.status(m), "the role", routed)), \
                 mock.patch.object(tw.cli, "spawn_runner", lambda t: 0):
             out = run_wb("start", "t-input", "--spec", str(self.spec), "--repo", str(self.repo))
-        self.assertIn(f"note: {tw.FLASH}: its catalog limits (limit.input 16384, limit.output 32768 of a 128K "
-                      "window) put OpenCode's compaction at 9% of the window", out)
-        self.assertIn("no handover fits, so long steps compact; a catalog's limits aren't wb's or yours to "
-                      "change: a model with a larger input limit has room", out)
-        self.assertNotIn("lower limit.output", out)
+        self.assertIn("started", out)
+        self.assertNotIn("OpenCode's compaction", out)
         gpu = {"limit": {"context": 32768, "output": 32768}}                   # a GPU entry: as before
         self.assertTrue(runner.handover_warning(gpu).endswith("; lower limit.output and options.max_tokens"))
 

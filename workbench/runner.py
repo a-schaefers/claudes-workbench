@@ -103,21 +103,25 @@ def opencode_version() -> tuple[int, int] | None:
 
 
 def opencode_moved(task: store.Task) -> bool:
-    """Whether OpenCode changed under the task since the last wb command started its runner
-    (status `opencode`, set by wb start, feedback, next and resume), or is now before 2.0; if so,
-    the task is left stuck for wb resume, cause `opencode`: not the step's. Only wb start
-    looked: OpenCode reinstalled from npm (1.x) mid-task failed the next round as "opencode
-    exited 1", charged to the model's slice, and every resume repeated it (#866). Not installed
+    """Whether OpenCode is now before 2.0 under the task: if so, the task is left stuck for wb
+    resume, cause `opencode`: not the step's. Only wb start looked: OpenCode reinstalled from npm
+    (1.x) mid-task failed the next round as "opencode exited 1", charged to the model's slice,
+    and every resume repeated it (#866). A change within 2.x carries on: status `opencode` takes
+    the new version and the next round's report says so (`opencode_note`); it stopped the task
+    and woke Claude for a wb resume that was always the answer (#1322, 2026-11-24). Not installed
     or saying no version: the lane's own error says so."""
     if not (have := opencode_version()):
         return False
     now, was = f"{have[0]}.{have[1]}", task.status.get("opencode")
-    if have >= (2, 0) and (not was or was == now):
+    if have >= (2, 0):
+        if was and was != now:
+            drift = untested(have)
+            task.set_status(opencode=now, opencode_note={
+                "round": task.status.get("round", 1),
+                "text": f"OpenCode now {now}" + (f": {drift}" if drift else "")})
         return False
     msg = (f"OpenCode {now} can't run tasks: workbench needs OpenCode 2.x: {OPENCODE_GET}; then wb "
-           f"resume {task.name}" if have < (2, 0) else
-           f"{OPENCODE_MOVED} ({was}, now {now}): wb resume {task.name} continues it on {now}"
-           + (f". {drift}" if (drift := untested(have)) else ""))
+           f"resume {task.name}")
     # status `infra` and the notice's `tasks`, as for an interruption: without them wb feedback
     # (the wake advised it, "it got stuck") counted a review round, and one real review after it
     # made the step go badly (#1176, 2026-11-24)
@@ -127,6 +131,8 @@ def opencode_moved(task: store.Task) -> bool:
     return True
 
 
+# What a runner before #1322 left in status `last` when OpenCode changed within 2.x: still read
+# by cli._interrupted, so wb resume --all takes a task an older runner stopped so
 OPENCODE_MOVED = "OpenCode was changed under this task"
 
 
@@ -209,29 +215,25 @@ def fresh_ceiling(cfg: dict) -> float | None:
     return round(top - max(STEP_GROWTH / window, tuning.CEILING_MARGIN), 6)
 
 
-def handover_warning(cfg: dict, api: bool = False) -> str:
-    """What to say of an entry whose output cap puts OpenCode's compaction too close to the
-    earliest handover point (fresh_ceiling under every fresh_at value), or "". Nothing said so,
-    and every long step compacted, the small-model summary the handover exists to avoid (#595,
-    the audit of 1.90). At HANDOVER_ROOM or under, no successor has room, so no handover fits.
-    An API model's (``api``): models.api_limits already bounds its output, so only a small
-    catalog `limit.input` is left to cause it, which neither wb nor the user can lower: lowering
-    the output was advice that changed nothing (#1073, 2026-11-23)."""
+def handover_warning(cfg: dict) -> str:
+    """What wb doctor says of a GPU entry whose output cap puts OpenCode's compaction too close
+    to the earliest handover point (fresh_ceiling under every fresh_at value), or "". Nothing
+    said so, and every long step compacted, the small-model summary the handover exists to avoid
+    (#595, the audit of 1.90). At HANDOVER_ROOM or under, no successor has room, so no handover
+    fits. Said at every wb start until #1322 (2026-11-24), and for an API model too, whose
+    catalog limits neither wb nor the user can change (#1073): no longer."""
     top, at = fresh_ceiling(cfg), compaction_point(cfg)
     lo = min(tuning.KNOBS["fresh_at"].values)
     if top is None or top >= lo:
         return ""
     lim, opts = cfg.get("limit") or {}, cfg.get("options") or {}
-    said = (("limit.input", lim.get("input")), ("limit.output", lim.get("output"))) if api else \
-        (("limit.output", lim.get("output")), ("options.max_tokens", opts.get("max_tokens")))
-    caps = ", ".join(f"{k} {v}" for k, v in said if v)
-    return (f"{'its catalog limits' if api else 'its output cap'} ({caps} of a {lim['context'] // 1024}K "
-            f"window) put{'' if api else 's'} OpenCode's "
+    caps = ", ".join(f"{k} {v}" for k, v in (("limit.output", lim.get("output")),
+                                            ("options.max_tokens", opts.get("max_tokens"))) if v)
+    return (f"its output cap ({caps} of a {lim['context'] // 1024}K window) puts OpenCode's "
             f"compaction at {max(at, 0):.0%} of the window, under a step's growth past the earliest "
             f"handover point ({lo:.0%}): " + ("no handover fits, so long steps compact" if top <= HANDOVER_ROOM else
                                f"handovers come at {top:.0%}, with little room")
-            + ("; a catalog's limits aren't wb's or yours to change: a model with a larger input limit "
-               "has room" if api else "; lower limit.output and options.max_tokens"))
+            + "; lower limit.output and options.max_tokens")
 
 
 # OpenCode 2.3 gives every provider a 300 s wait for the response headers (`headerTimeout`) and
@@ -300,12 +302,6 @@ def write_config_layer(task: store.Task) -> Path:
     context and its rules (the user's own OPENCODE_CONFIG_CONTENT permissions, USERS_RULES,
     before them: rules_env), and the ask_reviewer server."""
     path = context.rules_dir(task) / "opencode.json"
-    rules = context.rules_dir(task)
-    if (rules / "CLAUDE.md").is_file() or (rules / "user-rules").is_dir():
-        # an earlier wb's copy of Claude's global files, which context.layer now deletes (#1061):
-        # this round's report says so, as nothing told an updating user or a task already open
-        # that its agent had lost them (#1119, 2026-11-23)
-        task.set_status(claude_rules_gone=task.status.get("round", 1))
     mine = context.layer(task)
     users = models.users_config_content()
     theirs = users.get("permissions")
@@ -1157,8 +1153,8 @@ def _event(line: str) -> list[dict]:
     return [raw] if isinstance(raw, dict) else []
 
 
-def _clock(secs: float) -> str:
-    return f"{int(secs // 60)}m{int(secs % 60):02d}s"
+def _mins(secs: float) -> str:
+    return f"{round(secs / 60)}m"
 
 
 def active_so_far(task: store.Task, now: float | None = None) -> float:
@@ -1223,29 +1219,17 @@ def checkin_text(task: store.Task, n: int, out: dict, since: float, active: floa
     eta = ""
     if typical:  # active work against active work: the wall clock held queues and reviews (#543)
         left = typical * 60 - (active_so_far(task, now) if active is None else active)
-        eta = (f" · ~{_clock(left)} left (typically {typical:.0f}m)" if left > 0 else
-               f" · {_clock(-left)} past its typical {typical:.0f}m")
+        eta = (f" · ~{_mins(left)} left (typically {typical:.0f}m)" if left > 0 else
+               f" · ~{_mins(-left)} past its typical {typical:.0f}m")
     rows = [r for r in store.read_jsonl(task.dir / "events.jsonl")[0] if r.get("ts", 0) > since]
-    tools: dict = {}
-    for r in rows:
-        if r.get("kind") == "tool":
-            tools[r["tool"]] = tools.get(r["tool"], 0) + 1
     errs = [r for r in rows if r.get("kind") == "tool" and not r.get("ok")]
-    tok_in = sum(r.get("in", 0) for r in rows if r.get("kind") == "step")
-    tok_out = sum(r.get("out", 0) for r in rows if r.get("kind") == "step")
-    lines = [f"task {task.name} · {spec['model_label']} · round {n} · running {_clock(took)}{eta}",
-             f"since the last check-in ({_clock(now - since)}): "
-             + (", ".join(f"{k}×{v}" for k, v in sorted(tools.items())) or "no tool calls")
-             + (f", {len(errs)} failed" if errs else "")
-             + f"; {tok_in} tokens read, {tok_out} written",
+    # whole minutes, no tool or token counts (#1322, 2026-11-24): nothing Claude acted on
+    lines = [f"task {task.name} · {spec['model_label']} · round {n} · {_mins(took)}{eta}"
+             + (f" · {len(errs)} failed" if errs else ""),
              f"now: {st.get('last') or '?'}"]
     if out["texts"]:
         lines.append("its latest words: " + out["texts"][-1].strip().replace("\n", " ")[:400])
-    files = gitops.changed(task.worktree)
-    lines.append("files changed so far: " + gitops.brief_paths(files))
-    if extra := outside_spec(task, files):
-        lines.append("NOTE: the spec doesn't name " + ", ".join(gitops.brief(extra))
-                     + ": check it is still on its task")
+    lines.append("files changed so far: " + gitops.brief_paths(gitops.changed(task.worktree)))
     return "\n".join(lines)
 
 
@@ -2013,7 +1997,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             if waiting_bg:
                 out["stuck"] += ", waiting on a background job"
         # Generating with nothing to show past the budget: interrupt with a nudge (once a round)
-        # and tell Claude. The nudge starts a new round, and that round stalling again is
+        # (its round's report says so). The nudge starts a new round, and that round stalling again is
         # stopped, whatever it did first: else a model that never answers, or a command that
         # prints nothing for longer than the budget, would be nudged and rerun forever.
         nudge = False
@@ -2044,12 +2028,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                                                          "now": True, "by": "workbench"})
             task.event({"ts": store.now(), "round": n, "kind": "steer", "now": True,
                         "by": "workbench", "text": text})
-            nudges = task.status.get("nudges", 0) + 1
-            task.set_status(nudges=nudges)
-            task.notify("checkin", checkin_text(task, n, out, max(started, float(
-                task.status.get("checkin_at") or 0)), step_prior + clock.ran(mono)) + f"\nthe runner nudged it: {mins} min of "
-                f"thinking with no tool call (nudge {nudges} this task; budget {int(think)}s)",
-                round=n)
+            # no wake: the next round's report says "nudged once" (#1322, 2026-11-24), as
+            # _reading_full became an event on 2026-11-17
+            task.set_status(nudges=task.status.get("nudges", 0) + 1)
         if out["stuck"]:
             # by: the provider's or the spend cap's stop is no lesson about the agent
             # (lessons.gather; #1020)
@@ -3990,10 +3971,8 @@ def _wrapped_program(rest: list[str], verb: str) -> set[str]:
 
 def base_check_line(r: dict, task: store.Task) -> str:
     """What the acceptance command did on the base, for Claude to judge (the first report)."""
-    if r["exit"] == "setup failed":
-        tail = "\n".join("    " + line for line in r["tail"].splitlines())
-        return (f"note: setting up the base's scratch checkout failed, so the base wasn't checked "
-                f"({task.dir / 'base-tests.txt'}):\n{tail}")
+    if r["exit"] == "setup failed":  # one line, its tail in the file (#1322, 2026-11-24)
+        return f"not checked, its setup failed ({task.dir / 'base-tests.txt'})"
     if r["exit"] == "filtered":  # its checkout isn't the task's bytes: a failure there says nothing (#932)
         return f"note: the base wasn't checked: {r['tail'].strip().strip('[]')}"
     if r["exit"] == "timeout":
@@ -4002,18 +3981,14 @@ def base_check_line(r: dict, task: store.Task) -> str:
             return (f"warning: the acceptance command ran past --test-timeout ({limit}s) on the "
                     "base, so every round's tests will time out too: raise --test-timeout or "
                     "narrow the command (wb discard, then start again)")
-        full = int(task.spec.get("test_timeout") or 900)  # #496: an 18-minute suite under 15
-        return (f"note: the acceptance command ran past {limit}s on the base; not checked"
-                + (f". If it runs that long, a round's run may pass --test-timeout ({full}s) too: "
-                   "raise it for a slow suite" if full > limit else ""))
+        return f"not checked, ran past {limit}s"  # its --test-timeout advice went (#1322)
     if line := missing_command(r, task):  # every round's tests will fail so too (#1152, 2026-11-24)
         return (f"warning: the acceptance command can't run in the agent's environment: {line} "
                 f"(exit {r['exit']} on the base), so every round's tests will fail the same way; {GIVE_TOOL}")
     if r["ok"]:
         # the usual case when the agent writes the step's tests: a warning that said to discard
         # and start again cost a whole restart in one task of two (the 2026-11-17 measurement)
-        return ("note: the acceptance command already passes on the base, so only the tests this "
-                "step adds can fail it: check the diff adds tests that fail without the change")
+        return "passes already (only the step's new tests can fail it)"
     tail = "\n".join("    " + line for line in r["tail"].splitlines())
     # an instruction, not a claim: the runner can't know why it fails (the 0.90 review: "as it
     # should, but only for what the step changes" read as checked, for a broken build too)
@@ -4194,22 +4169,16 @@ def steps_line(task: store.Task) -> str | None:
 
 
 def _spend_part(task: store.Task) -> str:
-    """The round report's money for an API task (#1022): ` · ≈$0.12 so far (catalog prices)`
-    (`$0.12 so far (your prices)` at the user's own, #1135), ` · cost unknown` (no price: never a
-    false $0); nothing for a GPU task."""
+    """The round report's money for an API task (#1022): ` · ≈$0.12 so far` (the ≈ marks the
+    catalog's estimate, #1322), `$0.12 so far (your prices)` at the user's own (#1135),
+    ` · cost unknown` (no price: never a false $0); nothing for a GPU task."""
     if task.spec.get("via") != "api":
         return ""
     from .results import live_basis, spend_so_far
     from .savings import money
     v, b = spend_so_far(task), live_basis(task.status)
-    return f" · {money(v, b)} so far{meter.NOTE[b] if v else ''}" if v is not None else " · cost unknown"
-
-
-# The round report's line for a task whose agent had a copy of Claude's global files until this
-# round (status `claude_rules_gone`, write_config_layer; #1119)
-RULES_GONE = ("note: until this round this task's agent read {claude}/CLAUDE.md and {claude}/rules/; "
-              "agents get none of Claude's files now. What it must still follow goes in your feedback; "
-              "for every task, the user puts it in {mine}: tell them")
+    return (f" · {money(v, b)} so far{meter.NOTE[b] if v and b == meter.YOURS else ''}"
+            if v is not None else " · cost unknown")
 
 
 # The agent's final message in the round report: whole up to SUMMARY_MAX characters, else its head
@@ -4255,40 +4224,36 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     c = context_state(task)
     if c.get("used") and c.get("window"):
         after = {**st, "round": n + 1}  # judged as the step's next round is (#781)
+        full = [e for e in store.read_jsonl(task.dir / "events.jsonl")[0]
+                if e.get("kind") == "reading_full" and e.get("round") == n]
+        # one line (#1322, 2026-11-24): the carries-on explanation and a `reading:` line of its own
+        # went; the reading's advice is for the next spec
         lines.append(f"agent context: {c['used'] / 1000:.1f}K of {c['window'] // 1024}K "
                      f"({100 * c['used'] // c['window']}%)"
                      + (f", compacted {c['compactions']}x" if c.get("compactions") else "")
-                     + ("; the next round starts a fresh session" if fresh_reason(task, after) else
-                        "; the next round carries on in this session: a fresh one would re-read "
-                        "what it read and have little room to work"
-                        if full_session(task, after, c) and no_room(task, after, c["window"])
-                        else ""))
-    full = [e for e in store.read_jsonl(task.dir / "events.jsonl")[0]
-            if e.get("kind") == "reading_full" and e.get("round") == n]
-    if full:
-        lines.append("reading: " + full[-1]["text"])
+                     + ("; next round fresh" if fresh_reason(task, after) else "")
+                     + (f"; {full[-1]['read']}% read before its first edit: name fewer files or "
+                        "put them in the spec" if full and full[-1].get("read") is not None else ""))
+    if task.round_dir(n).joinpath(NUDGED).exists():  # the think nudge's, no wake of its own (#1322)
+        lines.append("nudged once: it thought past its budget with no tool call")
     lines += backend_lines(task, n)  # #1021
-    if st.get("claude_rules_gone") == n:  # #1119
-        lines.append(RULES_GONE.format(claude=privacy.home_path(context.claude_home()),
-                                       mine=privacy.home_path(context.user_agents_md())))
+    if (oc := st.get("opencode_note") or {}).get("round") == n:  # opencode_moved (#1322)
+        lines.append(oc.get("text") or "")
     if rnd["stuck"]:
         lines.append(f"STOPPED: {rnd['stuck']}")
         if rnd.get("guard") in PROVIDER_GUARDS:
             lines.append(provider_remedy(task, rnd["guard"], str(rnd.get("stuck") or "")))
-    elif rnd.get("left_bg"):  # #658: what the agent left running, stopped with it
-        lines.append("the agent left " + ", ".join(f"`{j}`" for j in rnd["left_bg"])
-                     + " running in the background when its turn ended; stopped")
-    elif rnd.get("lingered"):  # #1160: the runner's stop, not OpenCode's exit code (#83)
-        lines.append("OpenCode was still open after the agent's output ended; stopped")
-    elif rnd.get("settled"):  # #1168: a self-review that read and left the tree as it was
-        lines.append(f"self-review: {rnd['settled']}, the tree its tests passed on; stopped as "
-                     "its finish")
-    elif rnd["exit"] not in (0, None):
+    # the runner's own housekeeping (a background job left running, #658; OpenCode still open,
+    # #1160; a self-review settled on its green tree, #1168) says nothing (#1322, 2026-11-24)
+    elif rnd["exit"] not in (0, None) and not (rnd.get("left_bg") or rnd.get("lingered")
+                                               or rnd.get("settled")):
         lines.append(f"opencode exited {rnd['exit']}"
                      + (": the round didn't finish; what it changed so far stays in the worktree"
                         if died(rnd) and gitops.changed(task.worktree) else "")
                      + f" (see {task.dir / 'runner.log'})")
-    if rnd.get("retries"):  # #491: a request cut at the provider's timeout, or refused, and resent
+    if rnd.get("retries") and died(rnd) and not rnd["stuck"]:
+        # #491: a request cut at the provider's timeout, or refused, and resent; said only for a
+        # round that died with no STOPPED line, where it may be why (#1322, 2026-11-24)
         why = rnd["retries"][-1]
         lines.append(f"OpenCode resent {len(rnd['retries'])} request(s) to the model's server: {why}"
                      + ("; it cut the request at the provider's timeout" if "Timed out" in why else ""))
@@ -4317,14 +4282,10 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
         if tests.get("proxy"):  # #380
             lines.append(f"{proxy_line(tests['proxy'])}, if the tests need the network (not the "
                          "agent's bug)")
-    if st.get("setup_secs") is not None and not st.get("reviews") and st.get("steps", 1) == 1:
-        lines.append(f"setup: {st['setup_secs']:.0f}s, once; the scratch checkouts copy what it made")
     if st.get("base_check") and not st.get("reviews") and st.get("steps", 1) == 1:
         lines.append("base check: " + base_check_line(st["base_check"], task))
     if st.get("auto_fixes"):
         lines.append(f"auto-fix rounds used: {st['auto_fixes']}/{spec.get('auto_fix', 0)}")
-    tools = ", ".join(f"{k}×{v}" for k, v in sorted(rnd["tools"].items())) or "none"
-    lines.append(f"tools: {tools}")
     for err in rnd["errors"][-4:]:
         lines.append(f"tool error: {err[:200]}")
     final = final_text(rnd)
@@ -4336,8 +4297,7 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     for d, k in gitops.build_dirs(task.worktree, files)[:gitops.CHANGED_SHOWN]:
         lines.append(f"NOTE: {d} holds {k:,} new files the project doesn't ignore: build output?")
     if extra := outside_spec(task, files):
-        lines.append("NOTE: the spec doesn't name " + ", ".join(gitops.brief(extra))
-                     + ": needed for the task, or drift?")
+        lines.append("not in the spec: " + ", ".join(gitops.brief(extra)))
     if mine := claude_files_changed(files):
         lines.append(f"NOTE: the agent changed your files ({', '.join(gitops.brief(mine))}): instructions and "
                      ".claude/ are yours to write; keep, rewrite or revert them")
@@ -5136,15 +5096,12 @@ def provider_remedy(task: store.Task, guard: str, said: str = "") -> str:
     if guard == "refused":  # the provider's reason is in the STOPPED line: no wait or key fixes it
         gone = (f"; if {p} no longer serves {task.spec.get('model')}, workbench never switches a "
                 f"task's model: wb takeover {name} or wb discard {name}") if "HTTP 404" in said else ""
-        return (f"the provider's stop, not the agent's: once what {p} said is fixed, {resume} "
-                f"resumes it" + gone
+        return (f"once what {p} said is fixed, {resume} resumes it" + gone
                 + route)
     if guard == "quota":
-        return (f"the provider's stop, not the agent's: top up your {p} account, or wait for the "
-                f"plan's reset; then {resume} resumes it")
+        return (f"top up your {p} account, or wait for the plan's reset; then {resume} resumes it")
     if guard == "auth":
-        return (f"the provider's stop, not the agent's: store {p}'s API key again with /connect "
-                f"in OpenCode; then {resume} resumes it")
+        return f"store {p}'s API key again with /connect in OpenCode; then {resume} resumes it"
     if guard == "setup":  # #1080: no route change or wait mends this machine's own setup
         return (f"this machine's stop, not the agent's or {p}'s: mend what the line above says; "
                 f"then {resume} resumes it")
@@ -5157,7 +5114,7 @@ def provider_remedy(task: store.Task, guard: str, said: str = "") -> str:
     until = mark.get("until") if mark.get("state") == "rate_limited" else None
     asked = (f"; {p} asked for a wait until {time.strftime('%H:%M', time.localtime(until))}"
              if isinstance(until, (int, float)) and until > time.time() + 60 else "")
-    return (f"the provider's stop, not the agent's: {resume} resumes it once {p} allows"
+    return (f"{resume} resumes it once {p} allows"
             + route + asked + f"; {p}'s other tasks wait for it before their next round, with no "
             "stop of their own")
 
@@ -5475,6 +5432,7 @@ def drive(task: store.Task) -> None:
     # `last` at once, from the config alone (gpu_side): left to after resolve, which may read the
     # catalog, a GPU task showed the last run's line ("Claude reviews next") as queued (the
     # review of #1015, 2026-11-23)
+    CURRENT.pop("successor", None)  # _updated's, for this runner's own drive
     task.set_status(phase="queued", pid=os.getpid(), infra=None, env_skip=None,
                     last="waiting for the GPU" if _gpu_side(task) else "starting",
                     boot=store.boot_id(),  # a later boot reaps it as a restart's (cli.reap)
@@ -5883,26 +5841,23 @@ def compacted_between(last: tuple, sid, prompt: int, point: float, window: int, 
 
 def _reading_full(task: store.Task, n: int, used: int, window: int,
                   floor: int | None = None) -> None:
-    pct = 100 * used // window
-    if floor is None:
-        what = "before it changed a file: the reading this step needs fills the handover point"
-    else:
-        what = (f"and had read {100 * floor // window}% before its first change: a fresh session "
-                f"re-reading that would have little room to work")
-    text = (f"the agent's session reached {pct}% of its window {what}, so it carries on in this "
-            f"session (OpenCode compacts it if it must). Name fewer files to read, or put what "
-            f"it needs in the spec.")
+    """The session filled its window reading (``floor``: what it had read at its first change;
+    None, it changed nothing yet), so it carries on: an event, whose `read` the round's context
+    line gives (summary_text; a `reading:` line of its own until #1322, 2026-11-24)."""
+    read = 100 * (used if floor is None else floor) // window
+    text = (f"the agent's session reached {100 * used // window}% of its window, {read}% of it read "
+            "before its first edit, so it carries on in this session")
     # Not a wake: the advice is for the next spec, which Claude reads in the round's report.
     # As a check-in it woke Claude mid-round with nothing to do, every round of a step, and then
     # once even on a trivial task (2026-11-17)
-    task.event({"ts": store.now(), "round": n, "kind": "reading_full", "text": text})
+    task.event({"ts": store.now(), "round": n, "kind": "reading_full", "text": text, "read": read})
 
 
 # Mid-round handovers in one review round before it is stopped as stuck. A session that changes
 # something early and then fills up reading handed over again and again, for hours, with Claude
 # told nothing (the 2026-11-16 audit). A big step needs a few; past this it is too big for the
-# window. The one before the last is a check-in, so Claude can steer or stop it; each before it
-# woke Claude to read "on course" and wait again (2026-11-17), and the last is a stuck report.
+# window. The last is a stuck report, the one notice: each before it woke Claude to read "on
+# course" and wait again (2026-11-17), and the one before the last did until #1322 (2026-11-24).
 HANDOVER_MAX = 5
 
 
@@ -5917,11 +5872,6 @@ def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
             + (", then OpenCode compacted it" if rnd.get("compacted") else "")  # #774
             + ": a fresh one takes over")
     task.event({"ts": store.now(), "round": n, "kind": "full", "text": text})
-    if handed == HANDOVER_MAX - 1:
-        files = gitops.changed(task.worktree)
-        task.notify("checkin", f"task {task.name}: {text} (handover {handed} this round; "
-                    f"stopped as stuck past {HANDOVER_MAX}); files changed so far: "
-                    + gitops.brief_paths(files), round=n)
     last = "\n\n".join(t.strip() for t in rnd["texts"][-2:] if t.strip())[-1200:]
     task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
     asks = round_asks(task, n)
@@ -5992,9 +5942,13 @@ def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:
 # gitguard) and the ask server (ask_mcp, store, watch). A `git pull` or Claude Code's plugin
 # update mid-task gave them new code under the old runner, and a changed interface between them
 # ended the task stuck or failed with the cause only in runner.log (#603, the audit of v1.90).
-# So the runner prints them at its start and, before each round, ends cleanly when they changed.
+# So the runner prints them at its start and, before each round, hands the task to a runner of
+# the new code when they changed (_updated, _successor): until #1322 (2026-11-24) it stopped the
+# task as stuck and woke Claude for a wb resume that was always the answer.
 CHILD_CODE = ("bin/wb-ask-mcp", "workbench/__init__.py", "workbench/ask_mcp.py",
               "workbench/gitguard.py", "workbench/lane.py", "workbench/store.py", "workbench/watch.py")
+# What a runner before #1322 left in status `last`: still read by cli._interrupted and
+# results._not_the_step, so wb resume --all takes a task an older runner stopped so
 UPDATED = "workbench was updated under this task"
 
 
@@ -6011,18 +5965,26 @@ def code_print() -> str:
 
 def _updated(task: store.Task) -> bool:
     """Whether the children's code changed since this runner started (CURRENT["code"]); if so,
-    the task is left stuck for wb resume, which starts a runner on the new code."""
+    the runner ends cleanly and main starts a runner on the new code in its place (_successor),
+    with no notice: the round it was about to run is the new runner's, its checks (the spend
+    cap, local_only, Agents on GPU) run again before it."""
     if not (was := CURRENT.get("code")) or code_print() == was:
         return False
-    msg = f"{UPDATED}: wb resume {task.name} continues it on the new code"
-    # not the step's: an update mid-step shrank the model's slice (#660). Status `infra`, so wb
-    # feedback counts no review round, and the notice's `tasks`, so the mod's wake says it was
-    # interrupted and names wb resume: it said "it got stuck" and advised wb feedback, which
-    # counted a round, and one real review after it made the step go badly (#1176, 2026-11-24)
-    task.set_status(phase="stuck", last=msg, infra="updated")
-    task.notify("stuck", f"task {task.name}: {msg}", round=task.status.get("round"), cause="updated",
-                tasks=[task.name])
+    CURRENT["successor"] = True
+    task.set_status(phase="queued", last="workbench was updated: a runner on the new code carries on")
+    task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "load",
+                "text": "workbench was updated: a runner on the new code carries on"})
     return True
+
+
+def _successor(task: store.Task) -> None:
+    """Replace this process with a runner on the code now on disk (_updated): the same pid, so
+    status `pid`, the scope and the awake inhibitor stay; the runner lock (opened close-on-exec)
+    is free for the new runner to take."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.chdir(PKG_ROOT)
+    os.execv(sys.executable, [sys.executable, "-X", "utf8", "-m", "workbench.runner", task.name])
 
 
 # A SIGTERM that didn't come from wb (a shutdown, a logout, a kill): wb marks its own stops
@@ -6221,16 +6183,22 @@ def main():
         try:
             _end_agent(task)  # a backstop: drive's own cleanup may not have been reached
         finally:
+            # a wb stop that came in meanwhile wins over the hand-over (_updated)
+            succeed = CURRENT.get("successor") and not task.status.get("stopping")
             try:
-                task.set_status(pid=None, stopping=None)
-                hands_off(task)  # the agent is stopped: what is written next is Claude's (#1179)
+                if not succeed:
+                    task.set_status(pid=None, stopping=None)
+                    hands_off(task)  # the agent is stopped: what is written next is Claude's (#1179)
             except OSError as e:
                 if not store.disk_full(e):
                     raise
             try:
-                awake_for_review(task)
+                if not succeed:
+                    awake_for_review(task)
             except Exception:  # never the runner's exit
                 pass
+    if succeed:
+        _successor(task)
 
 
 # Thinking per task (#1018). API providers think by default (DeepSeek at effort high), and

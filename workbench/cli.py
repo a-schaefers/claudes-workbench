@@ -232,9 +232,7 @@ def _opencode_again(task: store.Task) -> None:
     if (have := runner.opencode_version()) and have < (2, 0):
         die(f"OpenCode {have[0]}.{have[1]} can't run tasks: workbench needs OpenCode 2.x: "
             f"{runner.OPENCODE_GET}", 3)
-    if have:
-        if drift := runner.untested(have):
-            print(f"note: {drift}")
+    if have:  # outside OPENCODE_TESTED: wb doctor says it, not every command (#1322)
         task.set_status(opencode=f"{have[0]}.{have[1]}")
 
 
@@ -1701,8 +1699,6 @@ def cmd_start(a):
               "the worktree at every step: a clone in WSL's own filesystem (~/...) runs faster")
     if fixed:
         print(f"note: {fixed}")
-    if drift := runner.untested(have):
-        print(f"note: {drift}")
     # an API task's ends with today's spend against the cap, or its plan's usage (meter.tail, #1019)
     print(routes.model_line(m.id, routed) + meter.tail(m) if api else f"model: {why}" if why != "asked for"
           else f"model: {m.id} (asked for)")
@@ -1710,8 +1706,6 @@ def cmd_start(a):
     for note in _api_notes(a.name, repo, m, a, routed) if api else ():  # #1016, #1021
         print(f"note: {note}")
     print(f"slice: {router.slice(m).line()}")
-    if gaps := results.spec_gap_line():
-        print(gaps)
     if handed:
         print("skills handed: " + ", ".join(handed))
     elif fits := skills.suggest(spec_text):
@@ -1740,8 +1734,6 @@ def cmd_start(a):
     measured = None if api else (optimize.state().get("models") or {}).get(m.id)
     if measured and (fit := optimize.advice(m.id, measured)):
         print(f"note: {fit} (ask the user first: it adds to their OpenCode config)")
-    if gap := runner.handover_warning(m.config, api=api):  # #595; an API model's own words (#1073)
-        print(f"note: {m.id}: {gap}")
     print(f"next: wb wait {a.name}   (the workbench mod wakes Claude by itself when loaded)")
 
 
@@ -2676,9 +2668,9 @@ INTERRUPTED = (RESTARTED, RUNNER_DIED, runner.SIGNAL_STOP, UPDATE_STOP)
 
 def _interrupted(last) -> bool:
     """Whether status `last` says the task was interrupted from outside: one of INTERRUPTED, or
-    runner._updated's (runner.UPDATED, then the task's own `wb resume <name>`), which no exact
-    match could ever hit: after a pull under running tasks, wb resume --all resumed none (#788).
-    And runner.opencode_moved's, OpenCode changed under it (#866)."""
+    what a runner before #1322 left when workbench (runner.UPDATED, then the task's own `wb
+    resume <name>`, which no exact match could ever hit: after a pull under running tasks, wb
+    resume --all resumed none, #788) or OpenCode (runner.OPENCODE_MOVED, #866) changed under it."""
     return last in INTERRUPTED or isinstance(last, str) and last.startswith(
         (runner.UPDATED + ":", runner.OPENCODE_MOVED + " ("))
 
