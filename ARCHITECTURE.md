@@ -1621,7 +1621,10 @@ can run, wb feedback <task> --text "carry on" sends its prompt" (#1180).
 
 Scratch checkouts (base check, `wb verify`, `wb shot`: `verify._run`) get the same links and a copy
 of the prepared paths, not the setup (#249: each rebuilt from nothing): `prepare(at, prepared)`,
-reflinked where possible, `_copy_all` in `COPY_BATCH` (500) GNU `cp -a --parents` calls (#867). It
+reflinked where possible, `_copy_all` in `COPY_BATCH` (500) GNU `cp -a --parents` calls (#867); on
+macOS, which has no `--parents`, one `cp -cRp -- <paths> <dir>/` per directory of a batch, a
+directory's trailing `/` dropped (BSD cp would copy its insides), and `_copy` tries `cp -cRp` before
+GNU's flags there (BSD cp refused them: two cp a path, #1399); a failed batch or group goes path by path. It
 must fit (prepared.json `bytes`) with `CHECKOUT_SPARE` (2 GB) spare unless the filesystem clones
 (`runner._reflinks`), else "copy failed" with sizes and what to free (`_no_room_for`, #860: wb
 start's disk check predates the setup; no `--setup` offered). A file already there wins; an input
