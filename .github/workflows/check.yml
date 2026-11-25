@@ -6,7 +6,10 @@
 #
 # One serial job took 28 to 32 minutes at d80b924, its tests doubled in a day (#950), and a fifth
 # of that was one test sitting out a 300 s sleep. Six shards on separate runners (WB_TEST_SHARD,
-# tests/__init__.py: every sixth test, so each gets a slice of every class) take about five.
+# tests/__init__.py: every sixth test, so each gets a slice of every class) took 6.5 to 10 minutes
+# each by 2026-11-25, the check 9.5 to 10.5 (40 runs), one process leaving its runner's four CPUs
+# half idle; so each shard runs as four processes at once (scripts/suite.sh), every test still
+# once: a local shard 1/6 on four CPUs, 404 s in one process, 142 s in four.
 #
 # A pull request that changes only what no test reads (the README, docs/releases/, the images in
 # docs/) runs tests/test_docs.py and tests/test_workflows.py, not the whole suite; main always
@@ -45,7 +48,8 @@ env:
 jobs:
   suite:
     runs-on: ubuntu-latest
-    # a shard: about five minutes; a hung test fails after WB_TEST_HANG_SECS, named
+    # a shard: three to four minutes (locally, four CPUs: 157 to 222 s); a hung test fails after
+    # WB_TEST_HANG_SECS, named
     timeout-minutes: 30
     strategy:
       # a failed shard leaves the others running: each names its own failures, and ship.sh reads
@@ -55,7 +59,10 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6]
     env:
       WB_TEST_SHARD: ${{ matrix.shard }}/6
-      WB_TEST_HANG_SECS: '600'  # a hung test fails, named, and the suite goes on (tests/__init__.py, #950)
+      # a hung test fails, named, and the suite goes on (tests/__init__.py, #950); 300, not the
+      # nightlies' 600: the slowest test takes under 30 s, and a hang (one in the 40 runs to
+      # 2026-11-25) held its pull request 10 minutes past its other shards
+      WB_TEST_HANG_SECS: '300'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -100,8 +107,9 @@ jobs:
         if: steps.scope.outputs.scope == 'full'
         run: |
           python3 -c 'from workbench import lane; print("Landlock ABI", lane.abi() or "none here: the Lane tests skip")'
+      # the shard in four processes, one per CPU (scripts/suite.sh): each prints its log as it ends
       - if: steps.scope.outputs.scope == 'full'
-        run: python3 -m unittest
+        run: scripts/suite.sh "$WB_TEST_SHARD" 4
       - if: steps.scope.outputs.scope == 'docs' && matrix.shard == 1
         run: python3 -m unittest tests.test_docs tests.test_workflows
 

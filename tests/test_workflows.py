@@ -11,7 +11,9 @@ import json
 import os
 import re
 import subprocess
+import shutil
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -70,7 +72,8 @@ class RequiredCheck(unittest.TestCase):
             self.assertIn(want, gate)
         self.assertNotIn("continue-on-error", text("check.yml"))
         suite = job("check.yml", "suite")
-        for want in ("fail-fast: false", "WB_TEST_SHARD: ${{ matrix.shard }}/6", "run: python3 -m unittest\n"):
+        for want in ("fail-fast: false", "WB_TEST_SHARD: ${{ matrix.shard }}/6",
+                     'run: scripts/suite.sh "$WB_TEST_SHARD" 4\n'):
             self.assertIn(want, suite)
         self.assertIn("claude plugin validate mod && claude plugin test mod", job("check.yml", "mod"))
 
@@ -269,3 +272,43 @@ class SuiteHooks(unittest.TestCase):
                 for k, part in zip(range(1, n + 1), parts):
                     self.assertEqual(sorted(ids(f"{k}/{n}", named=True)), sorted(part))
         self.assertEqual(sorted(ids(named=True)), sorted(whole))
+
+    def test_suite_sh_runs_each_test_of_its_shard_once_across_its_processes_and_fails_with_any(self):
+        # check.yml's shards in four processes each (2026-11-25: one process left its runner's
+        # CPUs half idle, and the slowest shard was every pull request's 10-minute wait)
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / "tests").mkdir()
+        shutil.copy(ROOT / "tests" / "__init__.py", tmp / "tests" / "__init__.py")
+        (tmp / "ran").mkdir()
+        body = "".join(f"    def test_{i:02}(self):\n        ran(self)\n" for i in range(24))
+        (tmp / "tests" / "test_many.py").write_text(
+            "import os, unittest\n"
+            "def ran(test):\n"
+            "    name = test.id().rsplit('.', 1)[1]\n"
+            "    os.close(os.open(os.path.join('ran', name), os.O_CREAT | os.O_EXCL))  # twice: raises\n"
+            "    if os.path.exists(os.path.join('fail', name)):\n"
+            "        test.fail('told to fail: ' + name)\n"
+            "class Many(unittest.TestCase):\n" + body)
+        script = str(ROOT / "scripts" / "suite.sh")
+        env = {k: v for k, v in os.environ.items() if k != "WB_TEST_SHARD"}
+        r = subprocess.run(["bash", script, "2/3", "4"], cwd=tmp, env=env, capture_output=True,
+                           text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(sorted(p.name for p in (tmp / "ran").iterdir()),
+                         [f"test_{i:02}" for i in range(24) if i % 3 == 1])  # shard 2/3's, once each
+        for sub in ("2/12", "5/12", "8/12", "11/12"):
+            self.assertIn(f"=== WB_TEST_SHARD={sub}: exit 0", r.stdout)
+        # one process failing fails the shard, its log printed under its own shard
+        shutil.rmtree(tmp / "ran")
+        (tmp / "ran").mkdir()
+        (tmp / "fail").mkdir()
+        (tmp / "fail" / "test_04").touch()  # index 4: 4 mod 12 = 4, so 5/12's
+        r = subprocess.run(["bash", script, "2/3", "4"], cwd=tmp, env=env, capture_output=True,
+                           text=True, timeout=120)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        failed = r.stdout.split("=== WB_TEST_SHARD=5/12: exit 1\n", 1)[1].split("=== ", 1)[0]
+        self.assertIn("told to fail: test_04", failed)
+        self.assertEqual(len(list((tmp / "ran").iterdir())), 8)  # the others still ran
+        self.assertEqual(subprocess.run(["bash", script, "4/3", "4"], cwd=tmp, env=env,
+                                        capture_output=True).returncode, 64)
