@@ -38425,6 +38425,35 @@ class Privacy(_KeyholeTest):
                       err.getvalue())
         self.assertFalse(store.Task("t-cpb2").exists)
 
+    def test_an_api_task_takes_a_copied_directory_whose_files_only_mention_tokens(self):
+        # #1322's second review: in a copied directory holds_credential's matcher flagged any key
+        # with `token` in it and any line with a bare keyword, so a models/ copy's
+        # tokenizer_config.json (`bos_token`), a vocab.txt and a prose .txt refused every API
+        # start, named or not; and a deps/ copy for hex_metadata.config
+        (self.repo / ".gitignore").write_text("models/\ndeps/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
+        m = self.repo / "models" / "m"
+        m.mkdir(parents=True)
+        (m / "tokenizer_config.json").write_text(json.dumps({"bos_token": "<s>", "pad_token": "<pad>",
+                                                             "model_max_length": 512}))
+        (m / "vocab.txt").write_text("the\npassword\ntoken\n")
+        (m / "NOTES.txt").write_text("Set your API token in the environment\n")
+        (m / "generation.yml").write_text("max_tokens: 100\ntitle: Basic configuration\n")
+        hex_pkg = self.repo / "deps" / "oauth2"
+        hex_pkg.mkdir(parents=True)
+        (hex_pkg / "hex_metadata.config").write_text('{<<"name">>,<<"oauth2">>}.\n')
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"copy": ["models", "deps"]}}}))
+        self.role(via="api", api=FLASH)
+        self.start_api("t-cpt1")
+        self.assertEqual(store.Task("t-cpt1").spec["copy"], ["models", "deps"])
+        (m / "auth.json").write_text(json.dumps({"hub": {"api_key": "hf_abc123"}}))
+        with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
+            self.start_api("t-cpt2")
+        self.assertEqual(cm.exception.code, 3)
+        self.assertIn("commands.json copies models into every task and it holds a credential",
+                      err.getvalue())
+
     def test_an_api_task_takes_a_standing_sibling_and_a_big_copied_directory_as_configured(self):
         # #1322; a copied directory's package trees aren't read for a credential
         # (privacy.COPY_SKIP_DIRS): their code is full of `token = …`, which would refuse every

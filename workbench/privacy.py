@@ -111,55 +111,107 @@ def holds_credential(path) -> bool:
 # holds_credential reads any file it can't read or that is over the cap as holding one, right for
 # a token file the lane hides but not for a copy, where it refused every API start for a test.db,
 # a .so or a big .csv. A directory is walked (an entry like config/local/ went along unread), but
-# not the package trees in it, whose code is others' and full of `token = …`; in it, only the
-# config-shaped files are read, as source files spell secret keys as variables.
+# not the package trees in it, whose code is others' and full of `token = …`. In it, only the
+# strong signals count (#1322's second review): holds_credential's matcher, its bare keyword and
+# its every key with `token` in it, refused a models/ copy for tokenizer_config.json's
+# `bos_token`, a vocab.txt's `password`, a NOTES.txt's "your API token" and a deps/ copy for a
+# hex_metadata.config, on every start. So a directory's .txt, extensionless and .config files
+# aren't read; a dotfile or COPY_CONFIG_SUFFIXES file counts for a Bearer or Basic token, a
+# private key or a URL with a password, or a key that ends in a secret's name (COPY_SECRET_KEY:
+# `db_password`, `api_key`, `auth_token`, never `bos_token` or `max_tokens`) with a value.
 COPY_SKIP_DIRS = frozenset({"node_modules", "bower_components", "vendor", ".venv", "venv",
                             "site-packages", "__pycache__", ".git", "target", ".gradle", "Pods",
-                            ".tox", ".mypy_cache", ".pytest_cache", ".cache"})
-COPY_CONFIG_SUFFIXES = frozenset({"", ".yml", ".yaml", ".json", ".toml", ".ini", ".cfg", ".conf",
-                                  ".config", ".properties", ".xml", ".env", ".txt", ".pem", ".key",
-                                  ".netrc", ".npmrc", ".pypirc", ".local"})
+                            ".tox", ".mypy_cache", ".pytest_cache", ".cache", "deps", "_build",
+                            ".dart_tool", ".stack-work"})
+COPY_CONFIG_SUFFIXES = frozenset({".env", ".ini", ".yml", ".yaml", ".toml", ".properties",
+                                  ".netrc", ".json", ".pem", ".key"})
+COPY_SECRET_KEY = re.compile(r"(?i)(?:password|passwd|passphrase|secret|api[_.-]?key|"
+                             r"(?:secret|access|private|signing|encryption)[_.-]?key|"
+                             r"(?:auth|access|api|refresh|bearer|session|secret|client|personal)[_.-]?token"
+                             r"|^token|^_auth)$")
+_COPY_VALUE = re.compile(r"(?i)\b(?:bearer|basic)\s+(?=[a-z0-9._~+/-]*\d)[a-z0-9._~+/=-]{12,}"
+                         r"|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|://[^\s/@:'\"<>]+:[^\s/@'\"<>]+@")
+_NETRC_LOGIN = re.compile(r"(?i)\bpassword\s+\S")
 
 
 def copy_holds_credential(path) -> bool:
     """Whether a standing `copy` entry at ``path`` holds a credential: a file, if it is text under
-    CREDENTIAL_MAX and the matcher flags it; a directory, if one of its config-shaped files (a
-    dotfile, or COPY_CONFIG_SUFFIXES) does, outside COPY_SKIP_DIRS. A binary file, one over the
-    cap, a FIFO or one that can't be read goes along as configured."""
+    CREDENTIAL_MAX and the matcher flags it; a directory, if one of its dotfiles or
+    COPY_CONFIG_SUFFIXES files, outside COPY_SKIP_DIRS, shows a strong signal (_dir_file_holds).
+    A binary file, one over the cap, a FIFO or one that can't be read goes along as configured."""
     p = str(path)
     if not os.path.isdir(p):
-        return _text_holds(p)
+        text = _copied_text(p)
+        if text is None:
+            return False
+        if p.endswith(".json"):
+            try:
+                return _json_holds(json.loads(text), False)
+            except ValueError:
+                pass                             # tsconfig's comments: line by line
+        return any(_line_holds(line.strip()) for line in re.sub(r"(?s)<!--.*?-->", "", text).splitlines())
     if os.path.basename(os.path.normpath(p)) in COPY_SKIP_DIRS:
         return False
     for d, dirs, files in os.walk(p):           # links to directories aren't followed
         dirs[:] = [x for x in dirs if x not in COPY_SKIP_DIRS]
         for f in files:
             if (f.startswith(".") or os.path.splitext(f)[1].lower() in COPY_CONFIG_SUFFIXES) \
-                    and _text_holds(os.path.join(d, f)):
+                    and _dir_file_holds(os.path.join(d, f)):
                 return True
     return False
 
 
-def _text_holds(p: str) -> bool:
-    """holds_credential for one copied file, but what isn't text under the cap holds none, and a
-    JSON file that doesn't parse (tsconfig's comments) is read line by line."""
+def _copied_text(p: str) -> str | None:
+    """A copied file's text, or None if it isn't a regular text file under the cap."""
     try:
         st = os.stat(p)
         if not stat.S_ISREG(st.st_mode) or st.st_size > CREDENTIAL_MAX:
-            return False
+            return None
         with open(p, "rb") as f:
             data = f.read(CREDENTIAL_MAX + 1)
         if len(data) > CREDENTIAL_MAX or b"\0" in data:
-            return False
-        text = data.decode("utf-8-sig")
+            return None
+        return data.decode("utf-8-sig")
     except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _dir_file_holds(p: str) -> bool:
+    """A file found in a copied directory: a strong signal only (the comment above)."""
+    text = _copied_text(p)
+    if text is None:
         return False
     if p.endswith(".json"):
         try:
-            return _json_holds(json.loads(text), False)
+            return _copy_json_holds(json.loads(text), False)
         except ValueError:
             pass
-    return any(_line_holds(line.strip()) for line in re.sub(r"(?s)<!--.*?-->", "", text).splitlines())
+    netrc = os.path.basename(p) in (".netrc", "_netrc") or p.endswith(".netrc")
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line[0] in "#;%!" or line.startswith("//"):
+            continue
+        if _COPY_VALUE.search(line) or (netrc and _NETRC_LOGIN.search(line)):
+            return True
+        m = re.search(r"=|:(?=\s|$)", line)
+        if not m:
+            continue
+        key = line[:m.start()].strip().strip("\"'").removeprefix("export ").strip()
+        value = line[m.end():].strip().rstrip(",").strip().strip("\"'")
+        if COPY_SECRET_KEY.search(key) and value and not _ENV_REF.match(value):
+            return True
+    return False
+
+
+def _copy_json_holds(node, secret: bool) -> bool:
+    if isinstance(node, dict):
+        return any(_copy_json_holds(v, bool(COPY_SECRET_KEY.search(k))) for k, v in node.items())
+    if isinstance(node, list):
+        return any(_copy_json_holds(v, secret) for v in node)
+    if isinstance(node, str):
+        v = node.strip()
+        return bool(_COPY_VALUE.search(v)) or secret and bool(v) and not _ENV_REF.match(v)
+    return False
 
 
 def _line_holds(line: str) -> bool:

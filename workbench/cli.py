@@ -1129,9 +1129,10 @@ def _standing_gap(conf: dict, repo: Path, advice: bool = True) -> str:
     """_standing_refusal's line, or '': also the busy opt-in's (#1023), which moves a GPU start to
     an API model after _worktree_setup checked it as a GPU one (wave 2's merge), and the mod's
     dry run's (_route_start), so the dialog never asks for a start wb start then refuses (#1227).
-    A file is read if it is text under the cap, a directory's config-shaped files outside its
-    package trees (privacy.copy_holds_credential): only files were, by holds_credential, which
-    refused a binary test.db and let config/local/ go unread (#1322's review). Naming the entry
+    A file is read if it is text under the cap, a directory's config files outside its package
+    trees for a strong signal only (privacy.copy_holds_credential): only files were, by
+    holds_credential, which refused a binary test.db and let config/local/ go unread (#1322's
+    review), and its matcher refused a models/ copy for tokenizer_config.json's bos_token. Naming the entry
     once let it through, which every start then repeated (#1322)."""
     for raw in conf.get("copy", []):
         entry = os.path.normpath(raw.strip()).rstrip("/")

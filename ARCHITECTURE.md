@@ -1466,8 +1466,13 @@ everywhere). In order:
   `copy` stays repo-relative.
 - For an API task, a standing `copy` entry of commands.json's `repos` that holds a credential
   (`privacy.copy_holds_credential`: a file if it is text under `CREDENTIAL_MAX` and the matcher flags it, so a
-  binary `test.db` or a big `.csv` goes along; a directory by its config-shaped files, a dotfile or one of
-  `COPY_CONFIG_SUFFIXES`, outside `COPY_SKIP_DIRS` such as `node_modules`, whose code is full of `token = …`) is
+  binary `test.db` or a big `.csv` goes along; a directory by its dotfiles and `COPY_CONFIG_SUFFIXES` files
+  (`.env`, `.ini`, `.yml`, `.yaml`, `.toml`, `.properties`, `.netrc`, `.json`, `.pem`, `.key`) outside
+  `COPY_SKIP_DIRS` such as `node_modules` or `deps`, whose code is full of `token = …`, and only by a strong
+  signal: a Bearer or Basic token, a private key, a URL with a password, or a key ending in a secret's name,
+  `COPY_SECRET_KEY` (`db_password`, `api_key`, `auth_token`, never `bos_token` or `max_tokens`), with a value;
+  the token-file matcher's bare keyword refused every API start for a `models/` copy's
+  `tokenizer_config.json`, a `vocab.txt` or a prose `.txt`, #1322's second review) is
   refused, exit 3, named or not (`cli._standing_refusal`, its line `cli._standing_gap`,
   `privacy.standing_refusal`; #1021, #1322): `commands.json copies .env.local into every task and it holds a
   credential: an API task doesn't take it (run on the GPU, or keep the secret in an environment variable)`;
@@ -4212,8 +4217,8 @@ Agents not GPU (`routes.busy_api`) starts on the role's API model instead (`cli.
 task.json's `route` (`busy: true`, `routes.busy_routed`, with an OpenRouter role's `order` as
 `routes.resolve`'s). A role with no API model queues or exits 4
 as before; one whose API model can't take it now (not in the catalog, no key, its provider's slots
-full, a repo or task kept local, a standing commands.json `copy`/`siblings` the command line
-doesn't name, `cli._standing_gap`, the day cap reached, said without an API start's advice) does too, after `note: the GPU is busy, and the <role>
+full, a repo or task kept local, a standing commands.json `copy` that holds a credential,
+`cli._standing_gap`, the day cap reached, said without an API start's advice) does too, after `note: the GPU is busy, and the <role>
 role's API model <id> can't take it: <why>`. A running task never moves, and nothing goes from API to
 the GPU. Turning it to `api` takes the dialog's yes (it can spend) and a day cap (`NO_CAP`); back to
 `wait` none. While it is on, any change that lets a role newly start on an API model while the GPU is
@@ -6561,8 +6566,8 @@ by git dir, a repo of its own nested under the top left out; `privacy.local_only
 then its submodules', which fill_submodules puts in the checkout, and its superprojects' entries above it, #1267),
 since a task's checkout holds the whole repo: a package marked alone went to the API model with every task started at
 the root, or in the package when it had no CLAUDE.md of its own (#1255). A `false` lifts no other entry's `true`, and an
-entry for its setup alone lifts nothing; an API task never takes standing `copy`/`siblings`
-unnamed (*Setting the worktree up*).
+entry for its setup alone lifts nothing; an API task takes standing `copy`/`siblings` as
+configured but a copy that holds a credential (*Setting the worktree up*).
 
 **Store primitives** (`workbench/store.py`). `home()` is `$WB_HOME`, else `~/.local/state/workbench`. `PATH_VARS`
 (`WB_HOME`, `WB_MODELS`, `WB_SKILLS`, `WB_IMAGES`, `WB_AUDIO`, `WB_COMMANDS`, `WB_CHAT_TOKEN`, `WB_CHAT_CONFIG`,
@@ -7237,9 +7242,9 @@ exit 3 with it; `wb scout`'s API section (one line per provider at 300 models, a
 **The busy-GPU opt-in** (`BusyGpu`, #1023): with `busy` api a start the GPU would make wait runs on the
 role's API model (task.json `busy`, the start line with today's spend, the role's thinking, API's
 auto-fix); `wait`, Agents GPU, a `--model` and a free GPU never do; a role with no API model, full
-slots, the day cap, `--local-only`, a repo kept local and an unnamed standing `copy` leave the start
-as before after a note; an OpenRouter role keeps its backends (`order`), `wb route busy api` refuses
-one with none, and new backends on a busy role count as newly sent (`routes._busy_newly`).
+slots, the day cap, `--local-only`, a repo kept local and a standing `copy` that holds a credential leave the
+start as before after a note; an OpenRouter role keeps its backends (`order`), with none the backend is
+OpenRouter's pick, and new backends on a busy role count as newly sent (`routes._busy_newly`).
 
 **Conventions for a new test.** Names read as sentences; one class per feature, a one-line docstring; end to end through
 `self.start`/`wait_phase`/`run_wb`, asserting the phrases Claude reads and the state files; real processes and servers
