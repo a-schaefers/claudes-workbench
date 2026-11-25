@@ -93,13 +93,14 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
 - `spend.py`, `savings.py`: a task's cost to Claude, and against writing it (the score GPU-only; API dollars apart, `api_totals`). `meter.py`: an API
   task's money (the ledger `spend-api.jsonl`, the day cap, the `spend` guard: *Spend*). `bench.py`,
   `verify.py`, `optimize.py`, `top.py` (API tasks under RUNNING, never in rack or queue), `images.py`, `audio.py` (`media.py`, what those two
-  share): their `wb` commands. `progress.py`, `stats.py`, `lessons.py`: progress checks, the Stats
-  tab, lessons.jsonl. `transcript.py`: `wb watch`, and the runner's session `export`. `watch.py`:
-  inotify and pidfd waits. `chat.py` + `chat_static/`, `webpush.py`: the web chat. `try/`:
+  share): their `wb` commands. `progress.py`, `stats.py`, `lessons.py`: progress checks, the web
+  app's Stats, lessons.jsonl. `transcript.py`: `wb watch`, and the runner's session `export`. `watch.py`:
+  inotify and pidfd waits. `chat.py` + `chat_static/`, `webpush.py`: the web chat; `settings.py`,
+  its admin rows and their wb calls (*The admin table (settings.py)*). `try/`:
   `wb try`'s sample. `schedule.py`: `wb schedule` (a backlog on a timer, Claude headless: `claude -p`).
 - `agent/HANDBOOK.md`: in every agent prompt, so keep it short (prefill time). `agent/WRITING.md`:
   the writing role's, in its place in every writing prompt: keep it short too (under 3,000 bytes).
-- `skill/workbench/`: the `/workbench` procedure; `skill/agents/`: other agents' skill for the chat's API. `mod/`: the plugin (`hooks/register.tsx`, with
+- `skill/workbench/`: the `/workbench` procedure; `skill/agents/`: other agents' skill for the chat's API (`ask_claude.py`; `mcp_server.py`, the same over MCP, loopback only). `mod/`: the plugin (`hooks/register.tsx`, with
   the consent gates on sends to upstream and on the roles; `plugin.json` has no version, so installs track main).
   `kernel/`: the PureScript kernel (`BOUNDARY.md`, its contract), built by `scripts/kernel.py` (its toolchain
   fetched by hash into `~/.cache/workbench/kernel`) into the committed `mod/hooks/kernel.js`, imported only by
@@ -110,7 +111,7 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
   Git install, the plugin with its wb (`files`: what wb reads at run time) (ARCHITECTURE.md, *The OpenCode plugin*).
   `bin/`: the launchers. `tests/`: ARCHITECTURE.md's *The tests*. `.github/`, `scripts/`: CI and `ship.sh` (*Shipping to main*).
   `systemd/`, `launchd/`: keep the chat up. `docs/`: images (a replaced one gets a new name, for
-  GitHub's cache), the release checklist and notes, `chat-api.md` (the chat's HTTP API).
+  GitHub's cache), the release checklist and notes, `chat-api.md` (the chat's HTTP API; `chat-api.yaml`, its OpenAPI).
 
 ## How a task runs
 Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change must not break:
@@ -176,7 +177,8 @@ Environment (each in ARCHITECTURE.md): paths `WB_HOME`, `WB_MODELS`, `WB_SKILLS`
 `WB_OPENCODE_CONFIG`, `CLAUDE_CONFIG_DIR`, `WB_SOURCE` (`wb patch init`'s clone, else
 `~/.local/share/workbench/source`), `WB_ROUTES` (the roles; `wb start`'s local-only check reads it), `WB_AGENTS_MD`
 (the user's file for agents; the tests' own) (relative or `~` allowed: a new
-one joins `store.PATH_VARS`); the mod's `WB_BIN`, `WB_COMPACT_AT`; the agent's `WB_TASK`, `WB_RUN`,
+one joins `store.PATH_VARS`); the mod's `WB_BIN`, `WB_COMPACT_AT`; `WB_ACTOR` (the chat server's wb
+children only: `web` stamps a role change `by: "web"`); the agent's `WB_TASK`, `WB_RUN`,
 `WB_USER_PYTHONPATH`; a scheduled fire's `WB_SCHEDULE` (its Claude's `wb accept --merge` refused); `wb shot`'s `WB_SHOT_OUT`, `WB_SHOT_VIEWPORT`; Claude Code's
 `CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID` (whose task it is), `CLAUDECODE` (under it `wb patch send`
 sends and `wb route` changes the API side only on the mod's dialog's yes: `send-ok.json`,

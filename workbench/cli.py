@@ -288,14 +288,31 @@ def kills_sessions() -> bool:
         _loginctl("show-session", "-p", "KillUserProcesses", "--value") == "yes"
 
 
+SELF_CGROUP = Path("/proc/self/cgroup")
+
+
+def in_service() -> bool:
+    """This process runs in a systemd service's own cgroup (wb-chat.service's, for every wb the
+    web app runs), which a stop or restart of the unit kills whole. A terminal's is a scope; an
+    INVOCATION_ID alone says nothing, as terminals pass theirs on. False off Linux."""
+    try:
+        lines = SELF_CGROUP.read_text().splitlines()
+    except OSError:
+        return False
+    return any(ctl in ("", "name=systemd") and path.rstrip().endswith(".service")
+               for _, ctl, path in (ln.split(":", 2) for ln in lines if ln.count(":") >= 2))
+
+
 @functools.cache
 def runner_scope() -> tuple[str, ...]:
     """What starts a detached process (`detach`) in a scope of its own under the user's systemd
     manager, where logind kills a login session's processes at logout: a runner started from an
     SSH or desktop session died with it, and the night's backlog too (#351, the audit of 1.4).
-    `--scope` execs the command, so the pid is the command's. Empty anywhere else, or when the
-    manager doesn't answer."""
-    if not kills_sessions() or not shutil.which("systemd-run"):
+    So does one started from a service (`in_service`): the web app's Measure now ran wb optimize
+    in wb-chat.service's cgroup, and wb setup's restart of the unit killed the run (#1407,
+    2026-11-25). `--scope` execs the command, so the pid is the command's. Empty anywhere else,
+    or when the manager doesn't answer."""
+    if not (in_service() or kills_sessions()) or not shutil.which("systemd-run"):
         return ()
     argv = ("systemd-run", "--user", "--scope", "--quiet", "--collect")
     try:
@@ -305,14 +322,15 @@ def runner_scope() -> tuple[str, ...]:
     return argv if ok else ()
 
 
-def detach(argv: list[str], awake: str = "", **kw) -> subprocess.Popen:
+def detach(argv: list[str], awake: str = "", env: dict | None = None, **kw) -> subprocess.Popen:
     """Start what outlives this command: a runner, the bench driver, wb optimize, the chat `wb
     chat on` starts. Its own session, stdin from /dev/null, and its own scope where logind kills
     a session's processes at logout (runner_scope): the runners alone had one, so the others
     still died there (#531). With ``awake`` (why, for the inhibitor's list), the machine is kept
-    from idle-sleeping while it runs (keep_awake)."""
+    from idle-sleeping while it runs (keep_awake). ``env``: its whole environment, else this
+    one's (the chat's has no Claude Code variables, #1281)."""
     proc = subprocess.Popen([*runner_scope(), *argv], stdin=subprocess.DEVNULL,
-                            start_new_session=True, **kw)
+                            start_new_session=True, env=env, **kw)
     if awake:
         keep_awake(proc.pid, awake)
     return proc
@@ -717,9 +735,10 @@ def _routed_keys(routed: dict) -> dict:
     for API `provider`, `provider_name`, `thinking`, `said` and `said_ts` (when the role has one),
     an OpenRouter role's `order` (#1021), which the keyhole routes every request by, and `busy`
     when the busy opt-in sent it there (#1023); `fallback` and `fallback_from` (the role's API model
-    it stands in for) on the role's fallback, either side (#1196)."""
+    it stands in for) on the role's fallback, either side (#1196); `thinking_review` when the role's
+    is on (#1059: runner.with_thinking gives the task its `review_model`)."""
     keys = ("via", "role", "fallback", "fallback_from") + (
-        ("provider", "provider_name", "thinking", "said", "said_ts", "order", "busy")
+        ("provider", "provider_name", "thinking", "said", "said_ts", "order", "busy", "thinking_review")
         if routed.get("via") == "api" else ())
     return {k: routed[k] for k in keys if routed.get(k) is not None}
 
@@ -979,6 +998,16 @@ def _claude_md_at(repo: Path, ref: str, under: str = "") -> str | None:
     return next((p for p in PROJECT_MEMORY if _has_file(repo, ref, f"{under}/{p}".lstrip("/"))), None)
 
 
+def _agents_md_at(repo: Path, ref: str, under: str = "") -> bool:
+    """Whether an AGENTS.md (a file, not a link) is committed at ``ref`` in directory ``under``:
+    the OpenCode and Codex convention, which the layer hands the agent (context.agents_files).
+    A repo with only that was refused as one whose agent "would start blind", and a package with
+    only its own ran at the root (#1394, 2026-11-25). A link counts only through what it names."""
+    out = subprocess.run(["git", "-C", str(repo), "ls-tree", ref, "--", f"{under}/AGENTS.md".lstrip("/")],
+                         capture_output=True, text=True).stdout
+    return out.startswith(("100644 ", "100755 "))
+
+
 def _package(repo: Path, given: Path, base: str) -> str | None:
     """The nearest directory from ``given`` up to (not including) the repo's top with a CLAUDE.md
     of its own at ``base``: a monorepo's package, where the agent, the setup and the tests then
@@ -994,7 +1023,8 @@ def _package(repo: Path, given: Path, base: str) -> str | None:
         # not a `.claude` directory: its CLAUDE.md is its parent's .claude/CLAUDE.md, and from
         # .claude/skills/x the walk took the repo's own for a package at .claude (review of #606)
         if parts[n - 1] != ".claude" and (_claude_md_at(repo, base, sub := "/".join(parts[:n]))
-                                          or _local_package_md(repo, sub)):
+                                          or _local_package_md(repo, sub)
+                                          or _agents_md_at(repo, base, sub)):  # #1394
             return sub
     return None
 
@@ -1007,17 +1037,27 @@ def _local_package_md(repo: Path, sub: str) -> bool:
 
 
 def _need_claude_md(repo: Path, base: str, a, sub: str | None = None) -> None:
-    if sub and not _claude_md_at(repo, base, sub):  # a package's own, kept local (#785)
-        print(f"note: {sub}'s CLAUDE.md is gitignored: the agent gets your checkout's copy")
+    if sub and not _claude_md_at(repo, base, sub):
+        if _local_package_md(repo, sub):  # a package's own, kept local (#785)
+            print(f"note: {sub}'s CLAUDE.md is gitignored: the agent gets your checkout's copy")
+        else:  # its AGENTS.md alone (#1394)
+            print(f"note: {sub} has AGENTS.md and no CLAUDE.md: the agent gets it")
     if a.no_claude_md or sub:  # a package's own CLAUDE.md counts
         return
     if not _claude_md_at(repo, base) and (md := _local_claude_md(repo)):
         print(f"note: {md} is gitignored: the agent gets your checkout's copy")
+    elif not _claude_md_at(repo, base) and _agents_md_at(repo, base):  # #1394
+        print(f"note: AGENTS.md and no CLAUDE.md: the agent gets it; for Claude Code, wb init "
+              f"{shlex.quote(str(repo))} moves it to CLAUDE.md and links it back")
     elif not _claude_md_at(repo, base):
         die(f"{repo} has no CLAUDE.md (or .claude/CLAUDE.md) at {base}: the agent would start "
             "blind. Write it (what the project is, how to build and test it, its conventions), "
             f"commit it, and run wb init {shlex.quote(str(repo))} to link AGENTS.md (a monorepo "
             "package with its own: --repo <the package's directory>); --no-claude-md skips this check")
+
+
+NO_IDENTITY = ("git has no user.name/user.email here: the user's identity signs the commits "
+               "(git config --global user.name/user.email)")
 
 
 def _identity(repo: Path) -> bool:
@@ -1093,6 +1133,10 @@ def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu") -> 
     setup = a.setup if a.setup is not None else conf.get("setup") or ""
     copy, sibs = [], []
     home = context.repo_conf_dir(repo, sub)
+    # a standing setup runs from its key's directory, as its copy paths are read (#1346): a root
+    # entry's ./scripts/bootstrap.sh ran in the package and failed every package task before
+    # round 1 (#1376, 2026-11-25); a --setup still runs at the spot. "." is the top.
+    setup_dir = (home or ".") if a.setup is None and setup and home != (sub or "").strip("/") else ""
     for raw, given in [*((x, False) for x in conf.get("copy", [])), *((x, True) for x in a.copy or [])]:
         # a --copy from a package is read from it (#1158), a commands.json entry from its key's
         # directory (#1346); a standing entry's refusal names the entry, not a flag never given
@@ -1106,7 +1150,14 @@ def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu") -> 
             die(f"{what}: looks like a secret or a user's setting "
                 f"({', '.join(SECRET_FILES[:4])}…), which stays out of the agent's worktree")
         if not os.path.lexists(repo / p):
-            die(f"{what}: no {p} in {repo}")
+            if given:
+                die(f"{what}: no {p} in {repo}")
+            # a standing entry matches a linked worktree by git dir (#498), which has none of the
+            # main checkout's installs: its refusal blocked every start there, and no flag got
+            # past it (#1377, 2026-11-25); the task goes without it, the note says how to set it up
+            print(f"note: {what}: no {p} in {repo}, so the task goes without it; --setup "
+                  "'<install command>' sets it up")
+            continue
         # a virtualenv can't move: its activate and its scripts' shebangs name the checkout, so a
         # copied .venv ran the developer's environment, and its writes left the lane (#260, the
         # audit of 1.2)
@@ -1114,7 +1165,7 @@ def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu") -> 
             die(f"{what}: {venv.relative_to(repo)} is a Python virtualenv, which still runs "
                 f"from {repo} once copied; recreate it with --setup instead, e.g. --setup "
                 f"'python3 -m venv {venv.relative_to(repo)} && {venv.relative_to(repo)}/bin/pip "
-                "install -r requirements.txt' or --setup 'uv sync'")
+                "install -r requirements.txt' or, with a committed uv.lock, --setup 'uv sync --locked'")
         if not gitops.ignored(repo, p):
             die(f"{what}: not ignored in {repo}, so a copy would show in the review diff; "
                 "a tracked file is in the worktree already")
@@ -1163,8 +1214,8 @@ def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu") -> 
         else conf.get("setup_timeout")
     if limit is not None and limit <= 0:
         die("--setup-timeout is seconds: a positive whole number")
-    return {k: v for k, v in (("setup", setup), ("copy", copy), ("siblings", sibs),
-                              ("setup_timeout", limit if setup else None)) if v}
+    return {k: v for k, v in (("setup", setup), ("setup_dir", setup_dir), ("copy", copy),
+                              ("siblings", sibs), ("setup_timeout", limit if setup else None)) if v}
 
 
 def _copy_path(repo: Path, raw: str, sub: str | None) -> str:
@@ -1198,8 +1249,9 @@ def _standing_gap(conf: dict, repo: Path, sub: str | None, advice: bool = True) 
     dry run's (_route_start), so the dialog never asks for a start wb start then refuses (#1227).
     An entry is the path from its key's directory, as _worktree_setup copies it
     (context.repo_conf_dir, _copy_path, #1346): from the root, a package key's node_modules was
-    the root's. A file is read if it is text under the cap, a directory's config files outside
-    its package trees for a strong signal only (privacy.copy_holds_credential): only files were,
+    the root's. A file is read if it is text under the cap, as a directory's config files outside
+    its package trees are, for a strong signal only (privacy.copy_holds_credential; a file's by
+    the token-file matcher refused an llm.json's max_tokens, #1381): only files were,
     by holds_credential, which refused a binary test.db and let config/local/ go unread (#1322's
     review), and its matcher refused a models/ copy for tokenizer_config.json's bos_token. Naming
     the entry once let it through, which every start then repeated (#1322)."""
@@ -1317,14 +1369,17 @@ def _standing_setup(conf: dict, a, repo: Path, sub: str | None) -> list[str]:
     """What a start's worktree setup takes from commands.json "repos" (``conf``, the repo's
     entry) rather than its own flags: wb start says only that, as Claude knows what it passed
     (#1322). --setup takes the standing command's place (_worktree_setup). A copy is named by the
-    path it copies, from its key's directory (#1346)."""
+    path it copies, from its key's directory (#1346); a setup run from there, not the package,
+    says where (#1376)."""
     home = context.repo_conf_dir(repo, sub)
     links = conf.get("siblings") or []
-    copies = [_copy_path(repo, x, home).rstrip("/") for x in conf.get("copy") or []]
+    copies = [p for x in conf.get("copy") or []  # but one the checkout lacks (#1377)
+              if os.path.lexists(repo / (p := _copy_path(repo, x, home).rstrip("/")))]
     cmd = conf.get("setup") if a.setup is None else None
+    where = "" if home == (sub or "").strip("/") else " (from " + (home or "the repo's top") + ")"
     return [*(["links " + ", ".join(n if n.startswith("../") else f"../{n}" for n in links)] if links else []),
             *([f"copies {', '.join(copies)}"] if copies else []),
-            *([f"runs `{cmd}`"] if cmd else [])]
+            *([f"runs `{cmd}`{where}"] if cmd else [])]
 
 # The commands.json `repos` keys that set a task's worktree up: an entry with none of them still
 # gets wb start's note on the ignored directories the worktree lacks (#1299)
@@ -1614,9 +1669,11 @@ def after_time(text: str, now: float | None = None) -> float:
     raise argparse.ArgumentTypeError(f"{text!r}: no such time ahead")  # never: tomorrow's is
 
 
-def cmd_start(a):
-    if getattr(a, "after", None):  # held until then: the GPU's or a slot's room now says nothing
-        a.queue = True
+def _start_refusals(a, dry: bool = False) -> tuple[Path, str, tuple[int, int] | None]:
+    """wb start's refusals before a model is picked, and (its repo, the spec, OpenCode's version).
+    The dry run behind the start dialog (`_route_start`, ``dry``) runs them too: it put a dialog
+    up for a start under a taken or malformed name, from a missing spec or outside a repo, which
+    wb start then refused, and the retry asked again (#1395, 2026-11-25)."""
     if not store.NAME_RE.match(a.name):
         die("a task name is lowercase letters, digits and hyphens, at most 48")
     if a.backlog is not None and not store.NAME_RE.match(a.backlog):
@@ -1643,14 +1700,10 @@ def cmd_start(a):
         die(f"{repo} is task {owner.name}'s worktree, not a project: start from its repo "
             f"(--repo {owner.spec.get('repo', '<the project>')})")
     _lane_fits(repo, a.test, off="*" in (a.allow_path or []))
-    spec_text = read_text(a.spec, "the spec")
-    if not spec_text.strip():
+    # stdin's is wb start's alone to read: the dry run behind the start dialog leaves it
+    spec_text = read_text(a.spec, "the spec") if a.spec != "-" or not dry else ""
+    if not spec_text.strip() and not (dry and a.spec == "-"):
         die("the spec is empty")
-    shown = _images_given(getattr(a, "image", None))  # #1199
-    handed = _skill_names(a.skill)
-    # the repo's own directories (context.repo_dirs reads only the spec's repo: task.json is to come)
-    guard = context.repo_dirs(SimpleNamespace(spec={"repo": str(repo)}))
-    lane_dirs = [_lane_dir(p, guard) for p in a.allow_path or []]
     if not shutil.which(exe := runner.opencode_bin()[0]):  # else the runner emptied the GPU, then
         # the round died as "opencode exited 1" (the 2026-11-16 audit)
         die(f"{exe} isn't on PATH: install OpenCode 2.x ({runner.OPENCODE_GET}), or put it on the "
@@ -1662,6 +1715,19 @@ def cmd_start(a):
             f"{runner.OPENCODE_GET}", 3)
     if store.noexec():  # every git call the agent makes would exit 126 (#851)
         die(noexec_line())
+    return repo, spec_text, have
+
+
+def cmd_start(a):
+    if getattr(a, "after", None):  # held until then: the GPU's or a slot's room now says nothing
+        a.queue = True
+    repo, spec_text, have = _start_refusals(a)
+    shown = _images_given(getattr(a, "image", None))  # #1199, before anything is written
+    task = store.Task(a.name)
+    handed = _skill_names(a.skill)
+    # the repo's own directories (context.repo_dirs reads only the spec's repo: task.json is to come)
+    guard = context.repo_dirs(SimpleNamespace(spec={"repo": str(repo)}))
+    lane_dirs = [_lane_dir(p, guard) for p in a.allow_path or []]
     # the package first: its stack is the task's, not the whole monorepo's (#820). Read again
     # below, after the base is checked; a base that names no commit finds none here
     stack = gitops.stack(repo, _package(repo, Path(a.repo).resolve(), a.base))
@@ -1699,8 +1765,7 @@ def cmd_start(a):
     if nobase := _no_base(repo, a.base):  # first: a typo read as a missing CLAUDE.md (the audit)
         die(nobase)  # `nobase`, not `why`: that is the router's reason, task.json's route
     if not _identity(repo):
-        die("git has no user.name/user.email here: the user's identity signs the commits "
-            "(git config --global user.name/user.email)")
+        die(NO_IDENTITY)
     sub = _package(repo, Path(a.repo).resolve(), a.base)
     _need_claude_md(repo, a.base, a, sub)
     if sub:
@@ -2692,7 +2757,8 @@ def _scope(tasks, where, sessions=None):
     0.90), or with no `sessions` given (by hand), goes by directory: its `repo` is `where`
     or inside it, or `where` is inside the task's spot (its package, repo/subdir; else its `cwd`
     inside the repo; else the repo, #695), or its `cwd` (where wb start ran) is `where` or inside it. A session
-    in the home directory or / claims none by directory. A task with neither key is everyone's.
+    in the home directory or / claims none by directory, but for a gone session's task whose
+    `cwd` is exactly there (#1403). A task with neither key is everyone's.
     The others belong to another session, which its mod wakes and its quit commands stop (the
     2026-11-16 audit: two projects at once, one session's /workbench-quit stopped the other's
     agents; the 0.90 review: a task started from ~ belonged to every session under it, and one
@@ -2719,9 +2785,12 @@ def _scope(tasks, where, sessions=None):
         near = here is not None and not broad and bool(
             cwd and cwd.is_relative_to(here)
             or repo and (repo.is_relative_to(here) or here.is_relative_to(spot)))
+        # in ~ or /, a gone session's task started in that very directory: claude restarted
+        # there adopts it, which near (never there) left nobody's (#1403, 2026-11-25). Only
+        # here: a task without a session started in ~ stays no ~ session's (the 0.90 review)
         if sessions and sid:
-            ok = sid in sessions or near and _gone(t.spec.get("claude_pid"), t.spec.get("claude_start"),
-                                                   t.spec.get("claude_machine"))
+            ok = sid in sessions or (near or here is not None and cwd == here) and _gone(
+                t.spec.get("claude_pid"), t.spec.get("claude_start"), t.spec.get("claude_machine"))
         elif here is None or (not cwd and not repo):
             ok = True
         else:
@@ -3345,6 +3414,8 @@ def cmd_progress(a):
     the threshold of checks already on (it was ignored, and "on: …" printed as if saved: #602)."""
     if a.after is not None and a.state == "off":
         die("--after goes with on: wb progress on --after MIN")
+    if a.after is not None and a.after != 0 and progress.user_after({"after": a.after}) is None:
+        die("--after is minutes of active work: a positive number, or 0 to clear it")  # #1401
     if a.after is not None and not a.state:
         if not progress.settings().get("on"):
             die("progress checks are off: wb progress on --after MIN")
@@ -3352,7 +3423,8 @@ def cmd_progress(a):
     if a.state:
         progress.set_enabled(a.state == "on", a.after)  # --after kept unless given (0 clears it, #578)
     s = progress.settings()
-    print("progress checks: " + (f"on: a task past {s['after']:g} min of active work" if s.get("after")
+    after = progress.user_after(s)
+    print("progress checks: " + (f"on: a task past {after:g} min of active work" if after
                                   else "on: a task past its typical length of active work (until a model "
                                   f"and size have {progress.TYPICAL_MIN} timed tasks: "
                                   + ", ".join(f"{m} min {k}" for k, m in progress.DEFAULT_MIN.items()) + ")")
@@ -3484,6 +3556,86 @@ def cmd_splash(a):
                                    "any key skips it" if splash_on() else "Off: the Tasks page opens at once"))
 
 
+# wb settings (#1287): the web app's Settings rows (settings.py, the source of truth), for Claude
+# to explain the options and, on the user's clear ask and yes in the conversation, change one
+# through the same writer the web app uses (the owner, 2026-11-24: "claude is an interactive
+# assistant to the web panel, in case a user gets confused about the options"; "We trust Claude")
+SETTINGS_GROUPS = {"shared": "Shared", "gpu": "GPU", "api": "API", "terminal": "Terminal",
+                   "experimental": "Experimental"}
+SETTINGS_SET = "wb settings set <key> <value> changes one, on the user's clear ask and yes"
+
+
+def settings_lines(rows: list[dict]) -> list[str]:
+    """wb settings: each row by group, `key: label: value`, then its choices, `*` the current
+    one, each with its line (an API model's, its label alone); a read-only row says so."""
+    out: list[str] = []
+    group = None
+    for r in rows:
+        if r["group"] != group:
+            group = r["group"]
+            out.append(SETTINGS_GROUPS.get(group, group))
+        kind = r["kind"]
+        if kind == "note":
+            out.append(f"  {r['text']}")
+            continue
+        if kind == "info":
+            out.append(f"  {r['key']} (read-only): {r['text']}")
+            continue
+        if kind == "number":
+            v = r["value"]
+            now = "off" if v is None else routes.money(v) if r.get("unit") == "usd" else f"{v:g} per kWh"
+            out.append(f"  {r['key']}: {r['label']}: {now}. {r['says']} Takes a number, or off.")
+            continue
+        choices = r.get("choices") or []
+        if kind == "action":
+            out.append(f"  {r['key']}: {r['text']}")
+        else:
+            out.append(f"  {r['key']}: {r['label']}: {r['value'] if r['value'] is not None else 'none'}")
+            if r["value"] not in [c["value"] for c in choices] and r.get("says"):
+                out.append(f"      {r['says']}")
+        for c in choices:  # an API model's line is its name, provider and price: its says only repeat them
+            mark = "*" if kind == "choice" and c["value"] == r["value"] else " "
+            out.append(f"    {mark} {c['value']}: {c['label']}" + ("" if r.get("other") else f". {c['says']}"))
+        if r.get("other"):
+            out.append("      or any API model's exact provider/model id (wb models lists them)")
+    out.append(SETTINGS_SET)
+    return out
+
+
+def cmd_settings(a):
+    """List every Settings row, or set one as Claude (#1287): through settings.apply, wb's own
+    command for the row run with this environment, so under Claude Code a change wb route gates
+    (a role to API, the cap) still waits for the mod's dialog. A change that went through is a
+    settings-changes.jsonl row, by claude (terminal outside Claude Code)."""
+    from . import settings  # it imports this module
+    if a.action is None:
+        rows = settings.rows(fresh=True)
+        print(json.dumps(rows) if a.json else "\n".join(settings_lines(rows)))
+        return
+    try:
+        if a.dry_run:  # the mod's dialog: what the change's wb route --dry-run --json says
+            code, out, err = settings.dry_run(a.key, a.value)
+            print(out, end="")
+            print(err, end="", file=sys.stderr)
+            if code:
+                sys.exit(code)
+            return
+        before = next((r for r in settings.rows() if r["key"] == a.key), {})
+        done = settings.apply(a.key, a.value, by="claude")
+    except KeyError:
+        die(f"no setting {a.key!r}: wb settings lists them", 2)
+    except ValueError as e:
+        die(f"{e}: wb settings lists its choices", 2)
+    if not done["ok"]:
+        said = done["said"]
+        print(said if said.startswith("wb:") else f"wb: {said}", file=sys.stderr)
+        sys.exit(3)
+    settings.record(before, a.key, a.value, done, "claude" if os.environ.get("CLAUDECODE") == "1" else "terminal")
+    print(done["said"])
+    if done.get("help"):
+        print(done["help"])
+
+
 # The roles (#1014): wb route
 ROUTE_CATALOG = "not in OpenCode's catalog: wb models lists the API models"
 API_NOT_YET = ("is an API model, and this workbench doesn't start tasks on API models yet: wb "
@@ -3573,6 +3725,8 @@ def _route_api(mid: str, role: str) -> models.Model:
     if m.kind != "api":
         die(f"{mid} is a GPU model: wb route {role} --gpu {mid} pins it", 3)
     st = models.status(m)
+    if not _runs_held(m):  # status wrote a key stored since the cache's read back (#1388)
+        m = models.lookup(mid) or m
     # a server of the user's on another host of the LAN, not opted in, reads as an API provider
     # with no key: its own fix, never /connect, which a LAN server has no use for (#1109,
     # 2026-11-23); a public host keeps /connect, a hosted provider's fix (#1109's review). Nor
@@ -3627,11 +3781,11 @@ def _thinks(mid: str, thinking: str) -> str:
     return routes.thinking_of(m, thinking) if m is not None and m.kind == "api" else routes.plain_thinks(mid, thinking)
 
 
-def _route_argv(role, target, gpu, api, thinking, day, order=None) -> list[str]:
+def _route_argv(role, target, gpu, api, thinking, day, order=None, review=None) -> list[str]:
     """The change as one canonical command (after `wb`): what the dialog approved and the gate
     compares, whatever spelling (an abbreviation, `--flag=value`) Claude used."""
     out = ["route", *([role] if role else []), *([str(target)] if target is not None else [])]
-    for flag, v in (("--gpu", gpu), ("--api", api), ("--thinking", thinking),
+    for flag, v in (("--gpu", gpu), ("--api", api), ("--thinking", thinking), ("--thinking-review", review),
                     ("--day-usd", f"{day:g}" if day is not None else None),
                     ("--order", ",".join(order) if order is not None else None)):
         if v is not None:
@@ -3680,20 +3834,18 @@ def _route_start(a) -> None:
     # never asked to approve a start that then exits 3 (#1213's review, 2026-11-24)
     if routes.agents_gpu():
         die(f"{routes.AGENTS_GPU}: {m.id} is an API model. {routes.AGENTS_BACK}, or a GPU model", 3)
+    # wb start's first refusals (a taken or malformed name, the spec, the repo, OpenCode): its
+    # own line and exit, and no dialog for a start it refuses (#1395, 2026-11-25). Its notes
+    # aren't the JSON the mod parses. Round 1's input as wb start reckons it (#1173): stdin's is
+    # read by wb start alone
+    with redirect_stdout(io.StringIO()):
+        repo, spec_text, _ = _start_refusals(ns, dry=True)
+    sub = _package(repo, Path(ns.repo).resolve(), ns.base)
     # a local-only spot's refusal in place of a dialog line (#1021): never ask the user to
     # approve a start wb start refuses
-    try:
-        repo = gitops.toplevel(Path(ns.repo).resolve())
-        sub = _package(repo, Path(ns.repo).resolve(), ns.base)
-    except gitops.GitError:
-        repo = sub = None  # wb start says why
-    if repo is not None and (why := local_only_refusal(repo, sub, _role(ns), ns.model, ns.local_only,
-                                                       lane_places(repo, sub, ns), ns.base)):
+    if why := local_only_refusal(repo, sub, _role(ns), ns.model, ns.local_only,
+                                 lane_places(repo, sub, ns), ns.base):
         die(why, 3)
-    try:  # round 1's input, as wb start reckons it (#1173): stdin's is read by wb start alone
-        spec_text = "" if ns.spec == "-" else Path(ns.spec).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        spec_text = ""
     shown = _images_given(getattr(ns, "image", None))  # wb start's checks of --image (#1199)
     if shown:
         _images_fit(m, m.id)
@@ -3706,11 +3858,15 @@ def _route_start(a) -> None:
     state = models.status(m)
     if not state["available"] and not state["why"].startswith(TRANSIENT) and not ns.force:
         die(_cant_run(m, state), 3)
-    if repo is not None and (why := _no_base(repo, ns.base)):
+    if why := _no_base(repo, ns.base):
         die(why)
+    if not _identity(repo):  # #1395
+        die(NO_IDENTITY)
+    with redirect_stdout(io.StringIO()):  # its notes (#1395)
+        _need_claude_md(repo, ns.base, ns, sub)
     # commands.json's standing copy that holds a credential: wb start's exit 3, here before
     # the dialog, which had the user approve a start wb start then refused (#1227)
-    if repo is not None and (why := _standing_gap(context.repo_conf(repo, sub), repo, sub)):
+    if (why := _standing_gap(context.repo_conf(repo, sub), repo, sub)):
         die(why, 3)
     line = start_line(ns.name, m)
     print(json.dumps({"change": line, "gate": True,
@@ -3756,6 +3912,8 @@ def _route_show(as_json: bool) -> None:
                 bits.append(f"API kept: {row['api']}" + (" (not in OpenCode's catalog now)" if gone else ""))
             if row["thinking"] == "on":
                 bits.append("thinking on")
+            elif row.get("thinking_review") == "on":  # kept for API, as routes.summary says it (#1059)
+                bits.append(routes.REVIEW_ONLY)
         # on API: who sent its code there (the gated change), a GPU pin since never replacing
         # it; on the GPU: the newer of the two records
         keys = (("ts", "by"),) if row["via"] == "api" else (("ts", "by"), ("gpu_ts", "gpu_by"))
@@ -3817,7 +3975,8 @@ def _read_catalog_later() -> None:
 
 def _route_pane() -> dict:
     """`wb route --json`'s keys for the pane's Settings tab (#1023): `spend_today` (the day
-    ledger's, spend-api.jsonl: {usd, prices, by_provider}) and `providers` ({id: {name, key, why}}, key
+    ledger's, spend-api.jsonl: {usd, prices, by_provider}), `catalog_error` (models.hosted_error,
+    "" when the last read worked, #1342) and `providers` ({id: {name, key, why}}, key
     stored, ollama (Ollama cloud's login), env, oauth or none, from the cached catalog: never a
     network probe or OpenCode run inline; with no cache, or one past PANE_REREAD_SECS that lists no
     key a task runs with (models.key_runs), one read in the background, _read_catalog_later)."""
@@ -3860,7 +4019,7 @@ def _route_pane() -> dict:
                           else "no key: its free models need none; /connect in OpenCode adds one for "
                                "the rest" if pid == models.ZEN
                           else "no key: /connect in OpenCode adds one"})}
-    return {"spend_today": _spend_today(), "providers": provs}
+    return {"spend_today": _spend_today(), "providers": provs, "catalog_error": models.hosted_error()}
 
 
 def _spend_today() -> dict:
@@ -3901,7 +4060,7 @@ def cmd_route(a):
         return _route_start(a)
     what, target = a.what, a.target
     if what is None:
-        if any(v is not None for v in (target, a.gpu, a.api, a.thinking, a.day_usd, a.order)):
+        if any(v is not None for v in (target, a.gpu, a.api, a.thinking, a.thinking_review, a.day_usd, a.order)):
             die("name a role: wb route <role> gpu|api|<provider/model>, wb route all gpu|api|both, wb route cap <usd>, "
                 "wb route busy wait|api, or wb route <role> fallback <provider/model>|gpu|none")
         if a.dry_run:
@@ -3918,7 +4077,7 @@ def cmd_route(a):
         die("--order names an OpenRouter role's backends: wb route <role> openrouter/<model> --order <name>[,<name>]")
     busy = None
     if what == "cap":
-        if a.gpu or a.api or a.thinking or a.day_usd is not None:
+        if a.gpu or a.api or a.thinking or a.thinking_review or a.day_usd is not None:
             die("wb route cap <usd> takes only the amount")
         try:
             day = float(target) if target not in (None, routes.CAP_OFF) else target
@@ -3927,7 +4086,7 @@ def cmd_route(a):
         if day != routes.CAP_OFF and (day is None or not day > 0 or day == float("inf")):
             die(f"wb route cap <usd>|off: a day cap in dollars, such as {routes.DAY_USD_SUGGEST}, or off")
     elif what == "busy":  # #1023: the opt-in for a busy GPU
-        if a.gpu or a.api or a.thinking or a.day_usd is not None or target not in routes.BUSY:
+        if a.gpu or a.api or a.thinking or a.thinking_review or a.day_usd is not None or target not in routes.BUSY:
             die("wb route busy wait|api: when the GPU is busy, wait (queue, as before) or start a role "
                 "that has an API model on it")
         busy = target
@@ -3935,7 +4094,8 @@ def cmd_route(a):
         role = "all"
         if a.gpu or a.api:
             die("--gpu and --api name one role's model: wb route <role> --gpu|--api <id>")
-        if target not in (None, *routes.USES) or (target is None and a.thinking is None):
+        if target not in (None, *routes.USES) or (target is None and a.thinking is None
+                                                   and a.thinking_review is None):
             die("wb route all gpu|api|both: the Agents switch, every role on the GPU, every role on its API "
                 "model, or each role as set")
         use = target  # the Agents switch: no role's own via changes (#1016)
@@ -3960,7 +4120,7 @@ def cmd_route(a):
     else:  # an API id as resolved, given as the positional or --api
         argv = _route_argv(what, target if target in (None, *routes.USES) else api, gpu,
                            api if a.api is not None and target in (None, *routes.USES) else None,
-                           a.thinking, a.day_usd, order)
+                           a.thinking, a.day_usd, order, a.thinking_review)
 
     def changed(doc) -> routes.Change:
         if use == "api" and not routes.any_api(doc):
@@ -3968,7 +4128,7 @@ def cmd_route(a):
         try:
             ch = routes.change(doc, None if what == "cap" else role, via=via, gpu=gpu, api=api,
                                thinking=a.thinking, day_usd=day, who=_who, use=use, order=order, busy=busy,
-                               free=_free, thinks=_thinks)
+                               free=_free, thinks=_thinks, thinking_review=a.thinking_review)
         except routes.RoutesError as e:
             die(str(e), 3)
         # a kept API model a role newly runs on (its own flip, or the Agents switch) must still be
@@ -3988,7 +4148,8 @@ def _route_fallback(a) -> None:
     (at wb start, and once mid-task). An API id is checked as a role's model is (_route_api) and
     takes the dialog's yes and a day cap; gpu (the role's GPU side) and none take neither."""
     role = a.what
-    if len(a.more) != 1 or a.gpu or a.api or a.thinking or a.order is not None or a.day_usd is not None:
+    if len(a.more) != 1 or a.gpu or a.api or a.thinking or a.thinking_review or a.order is not None \
+            or a.day_usd is not None:
         die(f"wb route {role} fallback <provider/model>|gpu|none: one choice, in a wb route of its own")
     fb = a.more[0]
     if fb not in (routes.FALLBACK_GPU, routes.FALLBACK_OFF):
@@ -4009,10 +4170,11 @@ def _route_pairs(a) -> None:
     change, so the first run's one question is one dialog. A choice is gpu, api or an API model's
     exact id. All or nothing: any pair wb refuses (an id not in the catalog, a key wb can't hold, a
     role named twice) exits 3 naming it, before anything is written."""
-    if a.gpu or a.api or a.thinking or a.order is not None or a.start is not None or a.what in ("all", "cap", "busy") \
-            or "fallback" in a.more:
+    if a.gpu or a.api or a.thinking or a.thinking_review or a.order is not None or a.start is not None \
+            or a.what in ("all", "cap", "busy") or "fallback" in a.more:
         die("several roles take a choice each (gpu, api or an API model's exact id) and --day-usd; "
-            "--gpu, --api, --thinking, --order, all, cap, busy and fallback go in a wb route of their own")
+            "--gpu, --api, --thinking, --thinking-review, --order, all, cap, busy and fallback go in a wb "
+            "route of their own")
     words = [a.what, a.target, *a.more]
     if len(words) % 2:
         die(f"{words[-1]} has no choice: wb route <role> gpu|api|<provider/model> <role> …")
@@ -4075,7 +4237,11 @@ def _route_apply(a, argv: list[str], changed) -> None:
         else:
             print(ch.line or "unchanged")
         return
-    by = "claude" if os.environ.get("CLAUDECODE") == "1" else "terminal"
+    # the web app's Settings (#1279): its server runs wb with WB_ACTOR=web and Claude's variables
+    # scrubbed (settings.child_env), the user's click the yes as their terminal is; CLAUDECODE
+    # wins, so Claude setting WB_ACTOR changes nothing
+    by = "claude" if os.environ.get("CLAUDECODE") == "1" else \
+        "web" if os.environ.get("WB_ACTOR") == "web" else "terminal"
     try:
         with routes.editing(lenient=True) as held:  # the gate compares the line computed under the lock
             ch = noted(changed(held[0]), held[1])
@@ -4326,7 +4492,7 @@ def cmd_accept(a):
         # card priced the task at nothing
         measured = results.step(task, landed=True, gaps=a.spec_gap)  # recorded below (#904)
         try:
-            commit = _landed(task)
+            commit, reused = _landed(task), False
             if not commit:
                 head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
                 with _settle_proposals(task, a.take_claude_md):  # kept if the commit fails (#507)
@@ -4340,6 +4506,7 @@ def cmd_accept(a):
                     else:  # nothing new: the branch's commits past the base are the work (the
                         # steps wb next committed, or Claude's own after a takeover: the audit)
                         commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
+                        reused = True
                     if left:  # kept before the worktree goes (#1179's review)
                         print(_keep_left(task, left))
             # the branch must hold it before the worktree goes: on a detached HEAD the commit was
@@ -4358,6 +4525,8 @@ def cmd_accept(a):
             into = gitops.current_branch(repo)
         close = {"commit": commit, "step": measured, "merge": bool(a.merge), "merge_into": into,
                  "merge_as": a.merge_as or "merge", "sign": _signed(spec, a)}
+        if reused:  # no commit of accept's: its message for a squash, and said unused otherwise (#1393)
+            close["message"] = msg
         task.set_status(closing=close, tip=tip,  # before anything is removed
                         last=f"being accepted: wb accept {a.name} finishes it if this stops")  # #878
         _spec_gaps(task, a.spec_gap)
@@ -4387,7 +4556,7 @@ def cmd_accept(a):
         if into and into != "HEAD" and gitops.contains(repo, f"refs/heads/{into}", tip):
             merged = gitops.git(repo, "rev-parse", "--short", f"refs/heads/{into}").strip()  # made already
         elif into and into != "HEAD" and (merged := gitops.squashed(
-                repo, into, close.get("merge_from"), tip)):
+                repo, into, close.get("merge_from"), tip, close.get("message"))):
             pass  # a squash made already: it never holds the tip, so the retry squashed again (#432)
         else:
             try:
@@ -4411,6 +4580,7 @@ def cmd_accept(a):
                     merged = gitops.merge(repo, a.name, into, spec["base"], tip=tip,
                                           how=close.get("merge_as", "merge"),
                                           sign=close.get("sign", True) and _signed(spec, a),
+                                          message=close.get("message"),
                                           started=lambda pid: task.set_status(closing={
                                               **close, "merge_git": [pid, models._started(pid)]}))
             except gitops.GitError as e:
@@ -4452,6 +4622,10 @@ def cmd_accept(a):
         print("the repo has no CLAUDE.md: write one (wb init)")
     # an API task's money on its line; the savings estimate isn't said on every close (#1322)
     paid = f" · {p}" if (p := savings.paid(row)) else ""
+    # the branch ends on a commit that isn't accept's (a step's, Claude's own): -m went nowhere
+    # but a squash, and nothing said so (#1393, 2026-11-25)
+    if close.get("message") and not (merged and close.get("merge_as") == "squash"):
+        paid += f" (-m unused: nothing changed since {commit})"
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
           (f", merged into {close['merge_into']} as {merged}{paid}" if merged else
            f"{paid}\n" + _merge_line(repo, spec, close, a)))
@@ -5245,6 +5419,8 @@ def _api_list(text: str) -> None:
             if isinstance(cost, list) else None
         price = f" · ${rate.get('input') or 0:g}/${rate.get('output') or 0:g} per 1M in/out" \
             if rate and not m.free else ""
+        if meter.is_plan(m) and meter.is_free(m):  # a coding plan's 0s are no price (#1396)
+            price = " · plan usage"
         # the catalog's own window, the model's fact (an API task runs capped: models.api_window)
         own = (m.extra.get("catalog_limit") or m.config.get("limit") or {}).get("context")
         # a model without tool calls can't be a coder: the first run's free pick reads this (#1193)
@@ -5272,8 +5448,10 @@ def cmd_stats(a):
         return
     f = stats.feed(only=(*stats.SUMMARY, "model_lines"))  # the headline: none of the rest (#565)
     head, shown = stats.summary(f), f.get("model_lines") or {}
-    # the models OpenCode has now, as the Stats tab shows them; --all every one that ran (#638)
-    only = None if a.all or not shown else {v for x in shown.get("lines", []) for v in x["variants"]}
+    # the models OpenCode has now, as the Stats tab shows them; --all every one that ran (#638).
+    # None of them now (every one renamed, idle 90 days, a config it can't read): every one, or
+    # the table said "no finished tasks yet" under a headline of N tasks (#1400, 2026-11-25)
+    only = None if a.all or not shown.get("lines") else {v for x in shown["lines"] for v in x["variants"]}
     # the newest stats.STATS_MODEL_LINES of them, the rest counted on one line (2026-11-21)
     more, old = (shown.get("more"), shown.get("older")) if only is not None else (None, None)
     rest = (more or {}).get("models", 0) + (old or {}).get("models", 0)
@@ -6723,6 +6901,14 @@ def cmd_top(a):
 TOP_EVERY = (0.2, 3600)  # wb top --every's range, in seconds (NaN and inf fail the comparison)
 
 
+def _chat_started() -> str:
+    """Who started the chat `wb chat on` just brought up: the service, or wb's own server."""
+    rec = store.read_json(chat.chat_dir() / "serve.pid", None) or {}
+    if isinstance(rec, dict) and rec.get("pid") and chat._alive(rec["pid"], rec.get("start")):
+        return f"pid {rec['pid']}, {chat.chat_dir() / 'serve.log'}"
+    return chat.service_name()
+
+
 def _chat_writer() -> dict:
     """The Claude Code session writing a `wb chat reply`, as task.json records it (`session`,
     `claude_pid`, `claude_start`, `claude_machine`): the user's answer to the row is that
@@ -6739,7 +6925,6 @@ def cmd_chat(a):
     """The web chat: the user's side door to Claude while away from the terminal."""
     if a.more and a.action not in ("listen", "ended"):
         die(f"wb chat {a.action}: too many arguments")
-    named = a.port is not None
     if a.port is None:  # named: that port; else the running server's, else the default (#349)
         a.port = chat.PORT if a.action == "serve" else chat.port()
     if a.action == "serve":
@@ -6748,30 +6933,28 @@ def cmd_chat(a):
         except chat.ConfigError as e:  # 78 (EX_CONFIG): wb-chat.service stops, no retry fixes it
             die(str(e), 78)
     elif a.action == "url":  # silent but for the link: the mod reads it whole
-        back = chat.revive()  # a chat wb chat on started, gone after a reboot or a crash (#449)
-        print(chat.url(a.port if named or not back else back))  # the token is the key: keep it private
-    elif a.action == "on":  # the pane's switch, kept: the link shows and a session listens
-        # the switch goes on only with a server of ours answering: turned on first and left on
-        # when this died, the pane's row read On and pinned a link that gave a 401 or nothing,
-        # its reason never shown (#690)
-        who = chat.who_answers(a.port)
-        if who == "workbench":
-            chat.set_on(True)
-            print(f"web chat on: {chat.url(a.port)}")
-        elif who == "other":  # its link would open someone else's page (#200), or 401 (#554)
-            chat.set_on(False)
-            die(f"web chat left off: another account's chat (or another program, or a server still "
-                f"on a replaced token) answers on port {a.port}: wb chat on --port <free port> (and "
-                "the same --port in chat.json's service, if any)")
+        got = chat.ensure(a.port)  # up unless turned off: a reboot, a crash, no service (#449, #1281)
+        if a.json:
+            print(json.dumps(got))
+        elif not got["url"]:  # chat.json it can't follow
+            die(f"wb chat url: {got['why']}")
         else:
-            pid = chat.start(a.port)
-            log = chat.chat_dir() / "serve.log"
-            if not chat.wait_up(a.port, pid):
-                chat.set_on(False)
-                tail = (log.read_text(errors="replace").strip().splitlines() or ["(nothing)"])[-1]
-                die(f"web chat left off: its server didn't start: {tail} ({log})")
-            chat.set_on(True)
-            print(f"web chat on: started its server (pid {pid}, {log}): {chat.url(a.port)}")
+            print(got["url"])  # the token is the key: keep it private
+    elif a.action == "on":  # the switch, kept: the link shows and a session listens
+        # a failure puts the switch back as it was: turned on and left on when this died, the
+        # pane's row read On and pinned a link that gave a 401 or nothing (#690); left off, an
+        # on-by-default chat (#1281) stayed off after a port taken once
+        was = chat.is_on()
+        chat.set_on(True)
+        got = chat.ensure(a.port)
+        if got["state"] not in ("up", "started"):
+            chat.set_on(was)
+            said, why = "left off" if not was else "not up", got["why"]
+            if got["state"] == "failed" and not why.startswith(chat.service_name()):
+                why = f"its server didn't start: {why} ({chat.chat_dir() / 'serve.log'})"
+            die(f"web chat {said}: {why}")
+        print(f"web chat on: {got['url']}" if got["state"] == "up" else
+              f"web chat on: started its server ({_chat_started()}): {got['url']}")
         for why in logout_stops():  # its unit is a user service: a logout stops it (#351)
             print(f"--  {why}")
     elif a.action == "off":
@@ -6788,8 +6971,12 @@ def cmd_chat(a):
                 Path(a.message).read_text() if a.message and a.message != "-" else sys.stdin.read()).strip()
         if not text:
             die("the reply is empty")
+        # the mod's: a turn's own answer for a web message it didn't reply to, cut (#1352)
+        auto = {"auto": True} if a.turn_answer else {}
+        if auto:
+            text = chat.turn_answer(text)
         try:  # what it answers (`re`, `to`): --to, else the messages this turn took (#1042)
-            chat.reply(text, a.to, **_chat_writer())
+            chat.reply(text, a.to, **auto, **_chat_writer())
         except ValueError as e:
             die(f"wb chat reply: {e}")
         print("sent to the web chat")
@@ -6816,55 +7003,16 @@ def cmd_chat(a):
     elif a.action == "pending":
         for r in chat.pending():
             print(json.dumps(r))
-    elif a.action == "ask":  # the mod: a dialog for the away user; prints its id and its state
-        if not a.tool or a.kind not in chat.KINDS:
-            die("wb chat ask needs --tool, and --kind permission|plan|question")
-        try:
-            detail = json.loads(a.detail) if a.detail else None
-        except ValueError:
-            die("--detail is JSON")
-        unknown = False
-        if a.kind == "plan" and not (detail or {}).get("plan"):  # the input may hold only its file
-            detail = {"plan": chat.session_plan(a.session, (detail or {}).get("plan_file"))}
-            if unknown := not detail["plan"]:  # not another project's newest plan (#253)
-                detail["project"] = Path(a.repo).name if a.repo else ""
-        if not (a.text or a.kind != "permission"):
-            die("wb chat ask --kind permission needs --text")
-        try:
-            row = chat.ask(a.tool, a.text or "", a.kind, detail, pid=a.pid, for_=a.for_, here=a.here)
-            if unknown:  # nothing to answer on the page: the dialog comes up in its terminal
-                row = chat.answer(row["id"], "expired", "terminal")
-        except ValueError as e:
-            die(f"wb chat ask: {e}")
-        print(row["id"], row["answer"] or "open")
-    elif a.action == "notice":  # the mod: a dialog waits in the terminal, the user not away (#959)
-        if a.done:  # and was answered there: no push for it, the page says so
+    elif a.action == "notice":  # the mod: a dialog waits in the terminal (#959, #1350)
+        if a.done:  # and settled there: no push for it, and the page's line clears
             if not chat.notice_done(a.done):
                 die(f"wb chat notice --done: no notice {a.done} in the thread")
             print("answered", a.done)
             return
         if not a.tool or a.kind not in chat.KINDS:
-            die("wb chat notice needs --tool, and --kind permission|plan|question")
+            die("wb chat notice needs --tool, and --kind permission|plan|question|elicitation")
         row = chat.notice(a.tool, a.text or "", a.kind)
         print(row["id"] if row else "skipped: no chat page in use in a day, and no device with push on")
-    elif a.action == "wait":  # the mod: the answer once there is one; open at the timeout
-        if not a.id:
-            die("wb chat wait <ask id>")
-        try:
-            got = chat.wait_answer(a.id, a.timeout)
-        except KeyError:
-            die(f"no permission prompt {a.id}")
-        print(json.dumps(chat.find_ask(a.id)) if a.json else got or "open")
-    elif a.action == "answer":
-        if not a.id or a.verdict not in chat.ANSWERS:
-            die("wb chat answer <ask id> allow|deny|expired")
-        try:
-            cur = chat.answer(a.id, a.verdict, a.by or "cli", note=a.note)
-        except ValueError:
-            die("a question is answered on the page, with its choices")
-        if cur is None:
-            die(f"no permission prompt {a.id}")
-        print(cur["answer"])
     else:  # log
         for r in chat.thread()[-a.n:]:
             who = (f"agent {r['from']}" if r.get("role") == "agent"
@@ -6901,22 +7049,27 @@ def chat_token(what: str | None, name: str | None) -> None:
         die("wb chat token add <name> | list | revoke <name>")
 
 
-def chat_gap() -> str | None:
-    """With the switch on, what keeps the chat from answering: the pane shows its link whatever
-    runs, and a chat gone after a reboot or a crash went unnoticed (#449)."""
+def chat_line() -> tuple[bool | None, str]:
+    """wb doctor's one line on the web app, never its token (#1281): (True, "web app answers on
+    localhost:<port> (<who keeps it>)"), (None, "web app off (wb chat on)") for the user's off,
+    (False, "web app down: <why> (wb chat on)"). Doctor only looks: `wb chat url` and the mod
+    start it. A chat gone after a reboot or a crash once went unnoticed (#449). No token file
+    means no server of ours ever ran: who_answers would make one, and doctor made the user's
+    ~/.config/workbench/chat-token (and the tests' HOME's) just by looking (#1281's review)."""
     if not chat.is_on():
-        return None
-    port = chat.port()
+        return None, "web app off (wb chat on)"
     try:
+        port = chat.port()
+        if not chat.token_path().exists():
+            return False, f"web app down: no server answers on port {port} (wb chat on)"
         who = chat.who_answers(port)
     except RuntimeError as e:  # chat.json it can't follow
-        return f"the web chat is on, but {e}"
+        return False, f"web app down: {e} (wb chat on)"
     if who == "workbench":
-        return None
-    if who == "other":
-        return (f"the web chat is on, but something else answers on port {port} (another account's "
-                "chat, or another program): wb chat on --port <free port>")
-    return f"the web chat is on, but no server answers on port {port}: wb chat on starts one"
+        return True, (f"web app answers on localhost:{port} "
+                      f"({chat.service_name() if chat._unit_keeps_it() else 'started by wb'})")
+    why = chat.blocked_why(port) if who == "other" else f"no server answers on port {port}"
+    return False, f"web app down: {why} (wb chat on)"
 
 
 def logout_stops() -> list[str]:
@@ -7004,13 +7157,197 @@ def plugin_launcher(path: str | Path) -> bool:
         return False
 
 
+def _service_run(argv: list[str]) -> tuple[bool, str]:
+    """A service manager's command: whether it worked, and what it printed."""
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+    return r.returncode == 0, (r.stdout + r.stderr).strip()
+
+
+def _failed(argv: list[str], said: str) -> str:
+    return f"--  web app service: {' '.join(argv)} failed: {(said.splitlines() or ['(nothing)'])[-1]}"
+
+
+# The service manager's PATH (systemd's /usr/local/bin:/usr/bin, the plist's Homebrew one) has
+# none of the user's shell: a Python 3.11+ from pyenv, conda or uv was missing, so bin/wb exited 78
+# and the unit stayed down for good (#1343); OpenCode from its own installer (~/.opencode/bin) and a
+# probe in ~/.local/bin were missing, so the web Settings said OpenCode isn't installed (#1342). wb
+# setup writes what it runs with into the service: this drop-in on Linux (a `systemctl --user
+# edit`'s override.conf sorts after it and wins), the plist's EnvironmentVariables on macOS.
+SERVICE_DROPIN = "wb-chat.service.d/10-wb-setup.conf"
+SERVICE_MARK = "Written by `wb setup`"  # a plist that says so is wb's to rewrite; any other the user's
+# sha256 of launchd/workbench.chat.plist as releases before 2.0 shipped it, whose comment said to cp
+# it into ~/Library/LaunchAgents by hand: kept as the user's, the agent ran on without the PATH and
+# WB_* variables (#1406, 2026-11-25). A released change to that file adds its old sha256 here.
+SHIPPED_PLISTS = frozenset({"40c21dc91f5f2788cd015e2e2ee11545de9df4bfc8a6d6b4b5407e750b937001"})
+
+
+def service_env(manager_path: str = "") -> dict[str, str]:
+    """The environment wb setup gives the web app's service (#1342, #1343): PATH with the
+    directory of the Python running setup first (bin/wb re-execs into a 3.11+, so it is one), then
+    setup's own PATH, then the manager's; and every set store.PATH_VARS (WB_HOME, WB_CHAT_TOKEN, ...),
+    made absolute. A value with a newline is left out: neither file could carry it."""
+    dirs = [os.path.dirname(sys.executable), *os.environ.get("PATH", "").split(os.pathsep),
+            *manager_path.split(os.pathsep)]
+    env = {"PATH": os.pathsep.join(dict.fromkeys(d for d in dirs if os.path.isabs(d)))}
+    for var in store.PATH_VARS:
+        if os.environ.get(var):
+            env[var] = os.path.abspath(os.path.expanduser(os.environ[var]))
+    return {k: v for k, v in env.items() if "\n" not in v}
+
+
+def _systemd_dropin(env: dict[str, str]) -> str:
+    def quoted(v: str) -> str:  # systemd's quoting; % is a specifier
+        return v.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    return (f"# {SERVICE_MARK} (#1342, #1343): the PATH and WB_* variables it ran with, so the web\n"
+            "# app runs the same Python, OpenCode and probe as your shell. wb setup rewrites it; your own\n"
+            "# `systemctl --user edit wb-chat` (override.conf) loads after it and wins.\n[Service]\n"
+            + "".join(f'Environment="{k}={quoted(v)}"\n' for k, v in env.items()))
+
+
+def _launchd_plist(env: dict[str, str]) -> bytes:
+    import plistlib  # only here: wb setup's on macOS
+    with open(PKG_ROOT / "launchd/workbench.chat.plist", "rb") as f:
+        agent = plistlib.load(f)
+    agent["EnvironmentVariables"] = env
+    note = (f"<!-- {SERVICE_MARK} from launchd/workbench.chat.plist (#1342, #1343), with the PATH and "
+            "WB_* variables it ran with. wb setup rewrites it; remove this line to keep your edits. -->\n")
+    return plistlib.dumps(agent).replace(b"<plist ", note.encode() + b"<plist ", 1)
+
+
+def _write_if_changed(at: Path, body: bytes) -> bool:
+    try:
+        if at.read_bytes() == body:
+            return False
+    except OSError:
+        pass
+    at.parent.mkdir(parents=True, exist_ok=True)
+    tmp = at.with_name(at.name + ".tmp")
+    tmp.write_bytes(body)
+    os.replace(tmp, at)
+    return True
+
+
+def _came_up(stop: list[str]) -> str | None:
+    """None when the service's chat answers within chat.START_WAIT, else wb setup's `--` line, the
+    service stopped with ``stop`` and wb's own server started (chat.ensure): enable --now and
+    bootstrap succeed when the server exits at once (exit 78: a Python 3.11+ not on the unit's
+    PATH), and setup said `ok  kept up` over a web app left down for good (#1343)."""
+    if chat.wait_up(chat.PORT, None):
+        return None
+    _service_run(stop)
+    got = chat.ensure(chat.port())
+    kept = ("wb started its own server instead" if got["state"] in ("up", "started")
+            else f"and wb's own server didn't start either: {got.get('why')}")
+    why = ("journalctl --user -u wb-chat" if not chat._macos()
+           else f"launchctl print gui/$(id -u)/{chat.LAUNCHD_LABEL}")
+    return (f"--  web app service: {chat.service_name()} didn't answer within {chat.START_WAIT} s, so "
+            f"setup stopped it ({' '.join(stop)}) and {kept}; {why} says why, then wb setup again")
+
+
+def install_service(force: bool = False) -> str | None:
+    """wb setup's service for the web app (#1281), so it is up after a reboot with no Claude
+    session open: on Linux, where `systemctl --user` answers, systemd/wb-chat.service linked into
+    the user manager's unit directory with setup's environment in a drop-in (service_env,
+    SERVICE_DROPIN), then daemon-reload, enable, and start (restart when the drop-in changed); on
+    macOS the launchd agent written into ~/Library/LaunchAgents with that environment and
+    bootstrapped. First the server `wb chat on` started is stopped (chat.stop_started), so the unit
+    gets the port; a service whose chat doesn't answer then is stopped again and wb's own server
+    started (_came_up). Its one line, or None where neither manager serves this HOME (WSL without
+    systemd, a container, a HOME not the manager's: a test's, or sudo's), which the mod's `wb chat
+    url` covers. Safe to run again. The user's off stays off: nothing is installed while the
+    switch is."""
+    if not chat.is_on():
+        return "--  web app off: no service installed (wb chat on, then wb setup)"
+    if chat._macos():
+        return _install_launchd()
+    if not shutil.which("systemctl"):
+        return None
+    good, said = _service_run(["systemctl", "--user", "show-environment"])
+    if not good:
+        return None
+    env = dict(x.split("=", 1) for x in said.splitlines() if "=" in x)
+    if Path(env.get("HOME") or Path.home()).resolve() != Path.home().resolve():
+        return None  # it would never read a unit linked under this HOME
+    units = Path(env.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "systemd/user"
+    at, to = units / "wb-chat.service", PKG_ROOT / "systemd/wb-chat.service"
+    made, theirs = "", False
+    if at.is_symlink() and at.resolve() == to.resolve():
+        pass
+    elif at.is_symlink() and force:
+        at.unlink()
+    elif at.is_symlink() or at.exists():
+        theirs = True  # the user's own unit (a copy they edited): kept, and used
+    if not theirs and not at.is_symlink():
+        at.parent.mkdir(parents=True, exist_ok=True)
+        at.symlink_to(to)
+        made = " (linked)"
+    changed = _write_if_changed(units / SERVICE_DROPIN, _systemd_dropin(service_env(env.get("PATH", ""))).encode())
+    stopped = chat.stop_started()
+    for argv in (["systemctl", "--user", "daemon-reload"], ["systemctl", "--user", "enable", "wb-chat"],
+                 ["systemctl", "--user", "restart" if changed else "start", "wb-chat"]):
+        good, said = _service_run(argv)
+        if not good:
+            if stopped:  # not left down by setup
+                chat.ensure(chat.port())
+            return _failed(argv, said)
+    if down := _came_up(["systemctl", "--user", "disable", "--now", "wb-chat"]):
+        return down
+    return f"ok  web app kept up by systemd's wb-chat ({at}{', yours' if theirs else ' → ' + str(to)}{made})"
+
+
+def _install_launchd() -> str | None:
+    import pwd  # only here: Unix's, and wb setup's alone
+    if not shutil.which("launchctl"):
+        return None
+    if Path(pwd.getpwuid(os.getuid()).pw_dir).resolve() != Path.home().resolve():
+        return None  # launchd's agents run in the account's own home
+    at = Path.home() / "Library/LaunchAgents" / f"{chat.LAUNCHD_LABEL}.plist"
+    shipped = PKG_ROOT / "launchd/workbench.chat.plist"
+    made, changed = "", False
+    try:
+        was = at.read_bytes()
+    except OSError:
+        was = None
+    # an earlier setup's plain copy, an earlier release's (SHIPPED_PLISTS), or its own written one,
+    # is wb's to rewrite; a copy the user edited (and took the mark off) is theirs: kept
+    import hashlib
+    theirs = not (was is None or was == shipped.read_bytes() or SERVICE_MARK.encode() in was
+                  or hashlib.sha256(was).hexdigest() in SHIPPED_PLISTS)
+    if not theirs:
+        import plistlib
+        with open(shipped, "rb") as f:
+            base = plistlib.load(f).get("EnvironmentVariables", {}).get("PATH", "")
+        changed = _write_if_changed(at, _launchd_plist(service_env(base)))
+        made = " (written)" if changed else ""
+    target = f"gui/{os.getuid()}/{chat.LAUNCHD_LABEL}"
+    stopped = chat.stop_started()
+    loaded = chat._unit_keeps_it()
+    if loaded and changed:  # launchd reads a plist when it is bootstrapped
+        _service_run(["launchctl", "bootout", target])
+        loaded = False
+    if not loaded:
+        argv = ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(at)]
+        good, said = _service_run(argv)
+        if not good:
+            if stopped:
+                chat.ensure(chat.port())
+            return _failed(argv, said)
+    if down := _came_up(["launchctl", "bootout", target]):
+        return down
+    return f"ok  web app kept up by launchd's {chat.LAUNCHD_LABEL} ({at}{', yours' if theirs else made})"
+
+
 def cmd_setup(a):
     """Link `wb` onto PATH and /workbench into Claude Code's skills, from wherever this copy lives:
     the marketplace's clone (~/.claude/plugins/marketplaces/workbench) for users, a git clone for
-    development (2026-11-16: the plugin install copies only mod/, so these two come from here).
-    With --opencode, the OpenCode path's fallback (#1311): the wb link and the OpenCode plugin's
-    entry (ocplugin.install), never Claude Code's skill link, which OpenCode would also list
-    (it scans ~/.claude/skills: #1296, row 8)."""
+    development (2026-11-16: the plugin install copies only mod/, so these two come from here);
+    then the web app's service (install_service), unless --no-service. With --opencode, the
+    OpenCode path's fallback (#1311): the wb link and the OpenCode plugin's entry
+    (ocplugin.install), never Claude Code's skill link, which OpenCode would also list (it scans
+    ~/.claude/skills: #1296, row 8)."""
     links = [(Path.home() / ".local/bin/wb", PKG_ROOT / "bin/wb")]
     if not a.opencode:
         links.append((context.claude_home() / "skills/workbench", PKG_ROOT / "skill/workbench"))
@@ -7053,6 +7390,8 @@ def cmd_setup(a):
         else:
             print(f"--  {bindir} isn't on PATH: Claude runs wb by name (the mod finds {bindir}/wb "
                   f"without it, #1200). {path_advice()}")
+    if not a.no_service and (said := install_service(a.force)):
+        print(said)
     try:  # a minute or two, said up front; a task started meanwhile goes first
         for line in optimize.start(if_due=True):
             print(f"--  {line}")
@@ -7889,8 +8228,11 @@ def cmd_doctor(a):
     for why in logout_stops():
         if chat.is_on() or "wb-chat" not in why or "runners" in why:
             print(f"--  {why}")
-    if gap := chat_gap():
-        print(f"--  {gap}")
+    good, said = chat_line()
+    if good is None:
+        print(f"--  {said}")
+    else:
+        line(good, said)
     for good, said in schedule.doctor_lines():  # wb schedule (#1204)
         line(good, said)
     # #516: a warning, not BAD: a server or a desktop that never sleeps is fine. Its own name: once
@@ -8562,6 +8904,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--api", metavar="ID", help="the role's API model, its exact OpenCode id; the "
                    "selector stays as it is")
     s.add_argument("--thinking", choices=routes.THINKING, help="the role's thinking (off by default)")
+    s.add_argument("--thinking-review", choices=routes.THINKING, help="on: with the role's thinking off, "
+                   "an API task reviews its own change in one more round before Claude, that round alone "
+                   "thinking (off by default, #1059)")
     s.add_argument("--order", metavar="NAME[,NAME]", help="an OpenRouter role's backends, which every "
                    "request goes to alone (the model's Providers tab on openrouter.ai): the user's choice")
     s.add_argument("--day-usd", type=float, metavar="N", help="the day cap in dollars ($"
@@ -8580,7 +8925,19 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("state", nargs="?", metavar="on|off",
                    help="on or off; probe's on means large files only (wb experiment says what it does)")
     s.set_defaults(f=cmd_experiment)
-    s = sub.add_parser("stop", help="stop a running task (wb resume or wb feedback continues it)")
+    s = sub.add_parser("settings", help="the web app's Settings: list every row and its choices, or "
+                       "`set` one on the user's clear ask and yes")
+    s.add_argument("--json", action="store_true", help="the rows as JSON (the web app's)")
+    s.set_defaults(f=cmd_settings, action=None, dry_run=False)
+    x = s.add_subparsers(dest="action", metavar="set").add_parser(
+        "set", help="change one row, on the user's clear ask and yes")
+    x.add_argument("key", metavar="KEY", help="a row's key, as wb settings lists it")
+    x.add_argument("value", metavar="VALUE", help="one of its choices; a number or off for a number "
+                   "row; any exact API model id where the row says so")
+    x.add_argument("--dry-run", action="store_true", help="the change as JSON, whether it needs the "
+                   "mod's dialog, and its approval; nothing written (the mod's dialog reads it)")
+    x.add_argument("--json", action="store_true", help="with --dry-run: JSON (it always is)")
+    s = sub.add_parser("stop",help="stop a running task (wb resume or wb feedback continues it)")
     s.add_argument("name", nargs="?")
     s.add_argument("--all", action="store_true", help="every running agent")
     s.add_argument("--repo", metavar="DIR", help="with --all: only those of a session started in DIR")
@@ -8699,49 +9056,40 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("chat", help="the web chat: turn it on or off (on starts a server; kept as "
                        "left), serve it, its link, reply to the user there, takes for the user "
                        "to pick by ear (listen), "
-                       "the thread (log), receipts (ack, claim), what waits (pending), permission "
-                       "prompts for the away user (ask, wait, answer: the mod's), a notice "
-                       "that one waits in the terminal (notice: the mod's), other agents' tokens "
+                       "the thread (log), receipts (ack, claim), what waits (pending), the line "
+                       "that a dialog waits in the terminal (notice: the mod's), other agents' tokens "
                        "(token add|list|revoke), and a turn's end (ended: the mod's)")
     s.add_argument("action", choices=["serve", "url", "on", "off", "reply", "listen", "log", "ack",
-                                      "claim", "pending", "ask", "notice", "wait", "answer", "token",
-                                      "ended"], nargs="?",
+                                      "claim", "pending", "notice", "token", "ended"], nargs="?",
                    default="log")
-    s.add_argument("id", nargs="?", help="ack, claim: the message id; wait, answer: the prompt's "
-                   "id; listen: the clips (wb audio's takes, up to 8); token: add, list or revoke; "
-                   "ended: the messages the turn took")
-    s.add_argument("verdict", nargs="?", help="answer: allow, deny or expired; token: the agent's name")
+    s.add_argument("id", nargs="?", help="ack, claim: the message id; listen: the clips (wb "
+                   "audio's takes, up to 8); token: add, list or revoke; ended: the messages the "
+                   "turn took")
+    s.add_argument("verdict", nargs="?", help="token: the agent's name")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)  # listen's further clips
-    s.add_argument("--tool", help="ask, notice: the tool asking")
-    s.add_argument("--kind", default="permission", help="ask, notice: permission, plan or question")
+    s.add_argument("--tool", help="notice: the tool asking")
+    s.add_argument("--kind", default="permission", help="notice: permission, plan, question or "
+                   "elicitation")
     # --done takes the id itself: an optional positional after a flag (`notice --done <id>`) is
     # left unparsed before Python 3.12, so the mod's call failed on 3.11 (CI, 2026-11-21)
-    s.add_argument("--done", metavar="ID", help="notice: the notice whose dialog was answered in "
-                   "the terminal (no push for it)")
-    s.add_argument("--detail", help="ask: JSON, a question's {questions} or a plan's {plan} "
-                   "or {plan_file}")
-    s.add_argument("--session", help="ask: the Claude Code session asking (its plan file)")
-    s.add_argument("--repo", help="ask: the session's directory (named when its plan is unknown)")
-    s.add_argument("--pid", type=int, help="ask: the asking session's `wb events` process: once it "
-                   "is gone, the ask expires")
-    s.add_argument("--for", dest="for_", action="append", metavar="AGENT", help="ask: the agent whose "
-                   "request Claude is working on (again for more): the page says so (#1042)")
-    s.add_argument("--here", action="store_true", help="ask: the user is at the terminal, so their "
-                   "away setting doesn't answer it")
-    s.add_argument("--note", help="answer: words to pass on with it")
-    s.add_argument("--timeout", type=float, default=30, help="wait: seconds")
-    s.add_argument("--json", action="store_true", help="wait: the whole ask, answered or not")
+    s.add_argument("--done", metavar="ID", help="notice: the notice whose dialog settled in the "
+                   "terminal (no push for it; the page's line clears)")
+    s.add_argument("--json", action="store_true", help="url: {url, state: "
+                   "up|started|off|blocked|failed, why} (the mod's)")
     s.add_argument("--port", type=int, help=f"default: the running server's (chat/port.json), "
                    f"else {chat.PORT}")
     s.add_argument("--bind", action="append", help="serve: an address to listen on, `tailscale` "
                    "or 0.0.0.0 (default: chat.json's `bind`, else localhost)")
     s.add_argument("--host", action="append", help="serve: another host name to answer to (* any)")
-    s.add_argument("--text", help="reply, ask, notice, listen: the text"); s.add_argument("--message", help="reply: file, or -")
+    s.add_argument("--text", help="reply, notice, listen: the text"); s.add_argument("--message", help="reply: file, or -")
     s.add_argument("--to", action="append", metavar="ID", help="reply: the message it answers (again "
                    "for more; `user`: the user's thread; default: those this turn took, the user's alone if any)")
     s.add_argument("--by", help=argparse.SUPPRESS); s.add_argument("-n", type=int, default=10)
     # into: an agent's message delivered into a running turn it didn't open (#1175, 2026-11-24)
     s.add_argument("--how", choices=["now", "into", "queued"], default="now", help=argparse.SUPPRESS)
+    s.add_argument("--turn-answer", action="store_true", help="reply: the mod's: a turn's own answer, "
+                   "posted for a web message the turn didn't reply to (an `auto` row, cut to "
+                   f"{chat.TURN_ANSWER_MAX:,} characters)")
     s.set_defaults(f=cmd_chat)
     s = sub.add_parser("optimize", help="measure this machine for its models when the user asks: "
                        "the largest window each Ollama model keeps all on the GPU (detached; real "
@@ -8859,12 +9207,15 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("names", nargs="+")
     s.set_defaults(f=cmd_trial)
     s = sub.add_parser("setup", help="link wb onto PATH and /workbench into Claude Code's skills, "
-                                     "from this copy")
+                                     "from this copy, and keep the web app up (its systemd or launchd service)")
     s.add_argument("--opencode", action="store_true", help="for OpenCode alone: link wb and add this "
                    "copy's OpenCode plugin to OpenCode's config, with this wb in its options "
                    f"(OpenCode's own install, {ocplugin.ADD}, brings its wb: after it, this names a clone's)")
-    # a link that points elsewhere is replaced by default (#1322); kept for old callers
-    s.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
+    # a link of wb's that points elsewhere is replaced by default (#1322); --force now only
+    # replaces a web app service unit link that points elsewhere, kept and used without it
+    s.add_argument("--force", action="store_true", help="replace the web app's service unit link "
+                   "when it points elsewhere")
+    s.add_argument("--no-service", action="store_true", help="install no service for the web app")
     s.set_defaults(f=cmd_setup)
     s = sub.add_parser("update", help="update workbench (wb, the skill and the mod) from its origin")
     s.add_argument("--check", action="store_true", help="only say whether there is an update")

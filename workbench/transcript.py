@@ -367,7 +367,8 @@ EVENT_KINDS = frozenset({
     "round", "tests", "autofix", "self_review", "ask", "answer", "captain", "steer", "skills",
     "allow", "interrupted", "fresh", "full", "load", "left_bg", "lingered", "settled", "reading_full",
     "compacted", "limits", "export", "resumed", "coding", "spec_gap", "next_step", "takeover",
-    "stopped", "error", "retry", "gpu", "served", "rate_limited", "backend", "rewound"})
+    "stopped", "error", "retry", "gpu", "served", "rate_limited", "backend", "rewound",
+    "fallback"})  # a role's fallback model (#1196)
 
 
 # What `wb log` prints, and the web chat's task sheet (#1201): the agent's text, its tool calls,
@@ -438,7 +439,8 @@ def task_entries(task: store.Task) -> list[Entry]:
                       "lingered",  # the agent's turn over, OpenCode still open: stopped (#1160)
                       "settled",  # a self-review at a guard, the tree its tests passed on: stopped (#1168, #1250, #1261)
                       "served",  # served: the keyhole, an API model's provider changed what ran
-                      "rate_limited"):  # an API provider's wait, the clocks paused (#1020)
+                      "rate_limited",  # an API provider's wait, the clocks paused (#1020)
+                      "fallback"):  # the role's fallback model took the task, or couldn't (#1196)
             out.append(Entry(ts, key, [("sys", f"■ {r.get('text', '')}")]))
         elif kind == "backend":  # OpenRouter served a backend outside the role's order (#1021)
             out.append(Entry(ts, key, [("bad", f"■ {r.get('text', '')}")]))

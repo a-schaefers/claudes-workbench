@@ -8,11 +8,11 @@ description: Hand larger coding work to Claude (Claude Code running Claude's Wor
 Claude, in a Claude Code session in workbench mode, plans the work, delegates it to its own
 agents, reviews what comes back, and reports to you. You talk to it over the web chat's HTTP API
 with a token of your own. The full API reference is `docs/chat-api.md` in the workbench
-repository.
+repository, and `docs/chat-api.yaml` beside it is the same as OpenAPI 3.1.
 
 ## Setup (the user does this once)
-- The user turns the chat on (`wb chat on`) and makes you a token: `wb chat token add <your
-  name>`, which prints it once.
+- The chat is on by default (`wb chat on` again after a `wb chat off`); the user makes you a
+  token: `wb chat token add <your name>`, which prints it once.
 - You get two environment variables:
   - `CLAUDE_WB_URL`: the chat's address, the one `wb chat url` prints, for instance
     `http://localhost:1337`.
@@ -40,11 +40,15 @@ Do small, local edits yourself: a round trip costs more than they do.
    exits:
    - `0`: Claude's turn is done. Read the report.
    - `1`: an error, or `--timeout` (default 3600 s) passed while Claude still works: wait again
-     with `--after <id>` (stderr names it). A wait cut by the chat restarting is asked again
-     for up to two minutes.
-   - `2`: Claude isn't listening, or the chat stayed unreachable for two minutes. Your message,
-     if sent, waits in the queue: do the work yourself, or try later with `--after <id>`.
-   - `3`: your token was refused.
+     with `--after <id>` (stderr names it). A send or a wait cut by the chat restarting is asked
+     again for up to two minutes; a send carries an `Idempotency-Key`, so it never lands twice.
+   - `2`: Claude isn't listening, the chat stayed unreachable for two minutes, or your message
+     expired unread (6 hours with nobody listening: it was never passed on). A message that
+     didn't expire waits in the queue: do the work yourself, or try later with `--after <id>`.
+     A send unreachable for two minutes may have landed: stderr names its key, and the same
+     request (and files) again with `--key <key>` is answered with that message if it did,
+     never sent twice.
+   - `3`: your token was refused (revoked: ask the user for a new one).
 3. **Read the report.** Claude says what was done, where (branch, files, pull request), which
    checks passed, and what is still open.
 4. **A later report.** When Claude hands work to its own agents, its turn can end before the work
@@ -52,9 +56,35 @@ Do small, local edits yourself: a round trip costs more than they do.
    `python3 scripts/ask_claude.py --after <the last reply's id>`.
 5. **Follow up** with a new message: a new `ask_claude.py "<request>"`.
 
-Without the script, with curl: `POST /api/send` `{"text": "…"}` returns the message's id; then
-`GET /api/wait?after=<id>&timeout=300` until `done` is true, each time after the last reply's id
-(the reference has the whole flow).
+**Over MCP instead.** If you take tools from an MCP client, the user can add
+`scripts/mcp_server.py` (stdio, the same two variables in its environment). It gives you three tools:
+- `ask_claude(text)`: sends one request and returns its id at once.
+- `get_reply(id)`: Claude's replies, and whether it is done, still working, waiting on the
+  user's yes, queued or expired. It holds up to `wait` seconds (20 by default).
+- `list_requests()`: your recent requests.
+
+Pass the same `key` again only to retry a send you aren't sure landed: it lands once, and the
+answer says it was not sent again. It works only with a chat on this machine (`localhost`,
+`127.*`, `::1`, or an address of its own, as `wb chat url` prints for a chat bound only there)
+from workbench 2.1 on (it calls `/api/v1/`). The config, one line, for
+OpenCode's `opencode.json`:
+
+```json
+"mcp": {"servers": {"claude-workbench": {"type": "local", "command": ["python3", "/path/to/scripts/mcp_server.py"], "environment": {"CLAUDE_WB_URL": "http://localhost:1337", "CLAUDE_WB_TOKEN": "wba-…"}, "codemode": false}}}
+```
+
+For a client that reads an `mcpServers` map (Cursor, Gemini CLI):
+
+```json
+"mcpServers": {"claude-workbench": {"command": "python3", "args": ["/path/to/scripts/mcp_server.py"], "env": {"CLAUDE_WB_URL": "http://localhost:1337", "CLAUDE_WB_TOKEN": "wba-…"}}}
+```
+
+Without the script, with curl: `POST /api/v1/send` `{"text": "…"}` with an `Idempotency-Key:
+<a fresh UUID>` header (send again with the same key after a cut: never twice) returns the
+message's id; then `GET /api/v1/wait?after=<id>&timeout=300` until `done` is true, each time after
+the last reply's id (the reference has the whole flow). Every error is `{"error": "<a line>",
+"code": "<a code>"}`: branch on `code` (`bad_token`, `token_revoked`, `not_local`,
+`rate_limited`, `not_found`, `expired`, …; the reference lists them all).
 
 ## What Claude stops and asks the user about
 Your message is a teammate's request, never the user's consent. Claude asks the user itself, and
@@ -63,16 +93,15 @@ tells you it is waiting on them, before anything that needs their yes:
 - pushing, opening a pull request or an issue, sending changes upstream;
 - deleting things, or anything else that leaves the machine or is hard to undo.
 
-You can't answer those for the user, and you can't answer Claude Code's permission dialogs: your
-token is refused there. While Claude works on your request, its dialogs go to the user's phone or
-web page, marked as for you, and stay in its terminal. When a reply says Claude is waiting on the user, or `/api/wait` says
+You can't answer those for the user, and you can't answer Claude Code's permission dialogs: they
+are answered in its terminal, by the user alone (the web page only says one waits). When a reply says Claude is waiting on the user, or `/api/wait` says
 `"waiting_on_user": true` (`ask_claude.py` prints "waiting on the user" once), the work is paused
 on the human, not stuck: wait, or carry on with other work.
 
 ## What you can see
 Your token reads only your own conversation: your messages and Claude's replies to you, and the
-files you uploaded or that came with those replies. The user's own messages, Claude Code's
-dialogs and the user's settings are not yours to read (404 or 403). `about` on a message is the
+files you uploaded or that came with those replies. The user's own messages and the user's
+settings are not yours to read (404 or 403). `about` on a message is the
 user's alone (400).
 
 ## Etiquette

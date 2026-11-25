@@ -1219,6 +1219,11 @@ def _served_url(p: subprocess.Popen, deadline: float) -> str | None:
             continue
         chunk = os.read(fd, 65536)
         if not chunk:
+            # its stdout closes a moment before it exits: wait that out, or a loaded machine read
+            # an OpenCode that failed at once as one past the deadline (#1370's CI, 2026-11-25:
+            # "took over 30 s" for an immediate "Unable to connect")
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                p.wait(timeout=max(0.0, deadline - time.monotonic()))
             return None
         buf += chunk
         while b"\n" in buf:
@@ -1357,7 +1362,10 @@ def connected() -> dict[str, dict] | None:
 
 def _is_free(pid: str, entry: dict) -> bool:
     """An OpenCode free model: `opencode/*-free`, or every price 0 (marked only; child 13 warns
-    of its data use)."""
+    of its data use). Never a plan's (a coding plan lists every price 0: #1396)."""
+    from . import meter  # meter imports this module
+    if meter.plan_provider(pid):
+        return False
     if pid == "opencode" and str(entry.get("id") or "").endswith("-free"):
         return True
     cost = entry.get("cost")
@@ -1535,13 +1543,20 @@ def _read_hosted() -> dict:
 def hosted_doc(fresh: bool = False) -> dict:
     """hosted.json's document, rebuilt when missing, foreign, past HOSTED_TTL (a failed read
     past DOWN_SECS), its stamp changed, or ``fresh``. Two processes rebuilding at once both
-    write atomically: the last wins, equally fresh."""
+    write atomically: the last wins, equally fresh. A failed read by a process that finds no
+    OpenCode binary never replaces a good document: that one is answered (#1342)."""
     doc = _read_hosted()
     ts = doc.get("ts")
     ttl = DOWN_SECS if doc.get("error") else HOSTED_TTL
     if fresh or not isinstance(ts, (int, float)) or not 0 <= time.time() - ts < ttl \
             or doc.get("stamp") != _stamp():
-        doc = _build_hosted()
+        new = _build_hosted()
+        # a process with no OpenCode on its PATH (the web app's service under the manager's PATH)
+        # overwrote the terminal's good catalog with "opencode not found", and every read after
+        # it, the web Settings' too, failed (#1342): it keeps the good one, unwritten
+        if new.get("error") and not new["stamp"]["opencode"] and doc.get("models") and not doc.get("error"):
+            return doc
+        doc = new
         try:
             store.write_json(hosted_path(), doc)
         except OSError:  # a read-only state directory: still answer
@@ -1621,16 +1636,19 @@ def _api_model(mid: str, entry: dict, prov: dict, extra: dict) -> Model:
         over = {**over, "catalog_cost": config.get("cost"), "cost": mine}
         config = {**config, "cost": mine}
     config = api_limits(config)
-    # the model's own base and package before its provider's: one provider's models post through
-    # several (Azure's Responses, Chat and Claude on Foundry; Google's Gemini and Interactions),
-    # and the first model seen set them for all (#1192)
+    # the model's own package and base before its provider's, which is the catalog's first entry:
+    # one provider's models post through several (Azure's Responses, Chat and Claude on Foundry;
+    # Google's Gemini and Interactions: #1192), and OpenCode Zen's Claude models (anthropic,
+    # …/anthropic/v1) went out as its first one's (openai-compatible, …/openai/v1), every request a
+    # 404, and its Gemini ones read ready (#1387, 2026-11-25)
+    own = lambda k: entry[k] if isinstance(entry.get(k), str) and entry[k] else prov.get(k)  # noqa: E731
     return Model(id=mid, provider=pid, name=str(entry.get("name") or mid.split("/", 1)[1]),
-                 base_url=str(entry.get("api") or prov.get("api") or ""), engine="api",
+                 base_url=str(own("api") or ""), engine="api",
                  label=over.get("label") or (OLLAMA_CLOUD if cloud else f"{prov.get('name') or pid} (API)"),
                  extra=over, config=config, remote=True, cloud=cloud, kind="api",
                  key=str(prov.get("key") or ("none" if entry.get("free") else "")),
                  free=bool(entry.get("free")),
-                 package=str(entry.get("package") or prov.get("package") or ""))
+                 package=str(own("package") or ""))
 
 
 PRICE_KEYS = ("input", "output")  # per million tokens; cache read and write go in `cache`
@@ -2062,8 +2080,15 @@ def _api_status(m: Model, down=frozenset()) -> dict:
     if why := keyhole_refusal(m):  # before the key: /connect can't fix it
         return _no(why)
     key = m.key
-    if not key:
-        key, who = _fresh_key(m)
+    # any key a task can't run with is asked again, not only none: /connect changes no stamp, so
+    # a cached OAuth or environment key stood for HOSTED_TTL after the user stored one (#1388,
+    # 2026-11-25; #1076 was ids missing from the cache). An exported key the keyhole can read
+    # runs as it is (key_runs, #1189)
+    if key not in ("ollama", "none") and not key_runs(m.provider, key):
+        fresh, who = _fresh_key(m)
+        # an exported key still unset says so (env_why), not "no key": `auth list` lists no
+        # variable the reader's environment lacks
+        key = fresh or (key if key.startswith("env:") else "")
     from . import keyhole  # keyhole imports this module lazily too
     if not key:  # OpenCode's one terminal command, not its TUI's /connect (#1189)
         return _no(f"no key for {who}: run `{keyhole.login(m.provider)}` in a terminal and add it")
@@ -4642,15 +4667,28 @@ def _answers(base: str) -> bool:
     return _models_at("", 1, url=f"{base}/models") is not None
 
 
+# (mark, root, ollama) still answering at the mark, and when: under mirrored networking or a VPN
+# windows_host() is another address for good, and one that drops packets cost every discover() a
+# second, about 5 s a wb models (#1397, 2026-11-25). Asked again after DOWN_SECS, or at once when
+# windows_host() changes (the root is at it). Never kept while the mark is silent: a runner
+# waiting after a reboot asks each pass for the server at Windows' new address (#1167).
+_STAYED: dict[tuple, float] = {}
+
+
 def _moved_to(mark: str, root: str, ollama: bool = True) -> bool:
     """Whether Windows' Ollama left ``mark`` for ``root``: the old root silent, the new answering;
     with ``ollama`` False, any OpenAI-compatible server, ``mark`` and ``root`` baseURLs probed on
     /models (Ollama's /api/version had them all read as never moving, #1167). Both probed at
     once, briefly, so a dead provider costs discovery a second, not three."""
     from concurrent.futures import ThreadPoolExecutor
+    key = (mark, root, ollama)
+    if time.monotonic() - _STAYED.get(key, -DOWN_SECS) < DOWN_SECS:
+        return False
     probe = (lambda r: ollama_answers(r, timeout=1)) if ollama else _answers
     with ThreadPoolExecutor(2) as pool:
         old, new = pool.map(probe, (mark, root))
+    if old:
+        _STAYED[key] = time.monotonic()
     return new and not old
 
 
