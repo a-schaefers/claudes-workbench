@@ -10912,11 +10912,13 @@ class UsersMcpServers(Base):
         self.assertIn("--  MCP server 'fs' names", out)
 
     def test_with_no_lane_to_hide_the_checkout_neither_says_a_server_in_it_wont_be_reached(self):
-        # #1202's review (2026-11-24): with no Landlock (every Mac) or the lane off the server
-        # reads the checkout, yet both said it wouldn't, and Claude, as the skill says, told the
-        # user to change a config that works (api_hidden_note's gate, #1156)
+        # #1202's review (2026-11-24): with no lane or the lane off the server reads the
+        # checkout, yet both said it wouldn't, and Claude, as the skill says, told the user to
+        # change a config that works (api_hidden_note's gate, #1156). No lane is kind() None:
+        # Landlock off alone left a Mac its Seatbelt lane, which does hide the checkout, and the
+        # note was right there (the 2.1 macOS nightly, 2026-11-25)
         self.servers_in_the_repo()
-        with mock.patch.object(lane, "abi", return_value=0):
+        with mock.patch.object(lane, "kind", return_value=None):
             out = _ApiTask.start_api(self, "t-no-landlock", "ok", spawn=False)
             self.assertIn("MCP: ", out)
             self.assertNotIn("note: MCP server", out)
@@ -15119,8 +15121,10 @@ class Lane(Base):
         (root / "Backup").mkdir()
         (root / "Backup" / "photos.jpg").write_text("x")
         task = self.bare_task("t-1194-volumes", self.repo)
-        # in its place, and /home read (as / is) so that its one deny shows
-        kept = tuple(str(root) if p == "/Volumes" else p for p in context.ONLY_KEPT if p != "/home")
+        # in its place, and /home (macOS's /Users) read as / is, so that its one deny shows: with
+        # /Users kept, the 2.1 macOS nightly (2026-11-25) found one deny of /Users above it
+        kept = tuple(str(root) if p == "/Volumes" else p for p in context.ONLY_KEPT
+                     if p not in ("/home", "/Users"))
         with mock.patch.object(context, "ONLY_KEPT", kept):
             rules, readable = context.read_rules(task), context.readable(task)
         writable = context.writable(task)
@@ -46372,7 +46376,8 @@ class FirstRunApi(Base):
         lines = cli.first_run()
         self.assertTrue(lines[0].startswith("ok  "), lines)
         self.assertIn("ok  API keys: deepseek (stored via /connect); no role uses one yet", lines)
-        self.assertTrue(any("Landlock" in x for x in lines), lines)
+        # the lane's line, last: Seatbelt's on a Mac (the 2.1 macOS nightly, 2026-11-25)
+        self.assertTrue(any("Landlock" in x or "Seatbelt" in x for x in lines), lines)
 
     # wb route: several roles in one change
 
