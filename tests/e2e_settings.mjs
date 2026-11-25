@@ -58,6 +58,20 @@ const MOCK_ROWS = [
     choices: [{ value: 'on', label: 'Enabled (default)', says: 'An animation.' }, { value: 'off', label: 'Off', says: 'At once.' }] },
 ]
 
+// In the page, of a focused element: whether its ring shows (:focus-visible, an outline) and the
+// ring's contrast against what is under it, its own fill or the nearest one behind it (WCAG's ratio)
+export function ringContrast(el) {
+  const rgb = s => { const n = (s.match(/[\d.]+/g) || []).map(Number); return s.startsWith('color(') ? n.map(x => x * 255) : n }
+  const lum = c => { const [r, g, b] = c.slice(0, 3).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4 }); return 0.2126 * r + 0.7152 * g + 0.0722 * b }
+  const cs = getComputedStyle(el)
+  let under = el
+  while (under && (rgb(getComputedStyle(under).backgroundColor)[3] ?? 1) === 0) under = under.parentElement
+  const a = lum(rgb(cs.outlineColor)), b = lum(rgb(getComputedStyle(under || document.body).backgroundColor))
+  return { visible: el.matches(':focus-visible') && cs.outlineStyle !== 'none' && parseFloat(cs.outlineWidth) >= 2,
+    ratio: Math.round((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05) * 100) / 100, ring: cs.outlineColor,
+    under: getComputedStyle(under || document.body).backgroundColor }
+}
+
 export async function check(page, ctx) {
   const { base, token, env, home, until, goTo, desktop } = ctx
   const view = () => page.locator('#settings-rows')
@@ -251,6 +265,19 @@ export async function check(page, ctx) {
       await row('cap').locator('input').press('Enter')
       await until(async () => (await toast()) === 'cap: 6')
       if (await at() !== 'cap:INPUT::') throw new Error('after Enter: ' + await at())
+      await page.evaluate(() => document.activeElement.blur())
+    })
+
+    await ctx.check('the focus ring on a Settings choice, lit or not, stands 3:1 or more against what is under it (#1410)', async () => {
+      // #1410 (2026-11-25): the ring was the accent, drawn on the lit choice's own accent fill, and
+      // 2.99:1 on the panel
+      for (const v of ['off', 'on']) {                     // splash is off since the last check: lit, then not
+        const b = row('splash').locator(`[data-value="${v}"]`)
+        await b.focus()
+        await page.keyboard.press('ArrowRight')            // a key: the focus is the keyboard's
+        const got = await b.evaluate(ringContrast)
+        if (!got.visible || got.ratio < 3) throw new Error(`${v}: ${JSON.stringify(got)}`)
+      }
       await page.evaluate(() => document.activeElement.blur())
     })
 

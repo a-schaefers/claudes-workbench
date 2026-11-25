@@ -6241,7 +6241,9 @@ alone, and a generic renderer: a new setting touches only Python.
     choices, a `<select>` past it or with `other`. Such a select ends with "Other model…", which opens
     a text input (`input[data-other]`); Enter sends the typed id, Escape closes the input and the
     select shows the row's value again. A value off the list (none, for an API role without a model)
-    is the select's first option.
+    is the select's first option. The focus ring (choices, selects, text boxes; the nav's tabs too)
+    is the text's colour, `--fg`, and on a lit choice `--accent-fg`: the accent was unseen on the lit
+    choice's own fill and under 3:1 on the panel (#1410).
   - `number`: a text input (`inputmode=decimal`) with its unit (`usd` `$` … `/day`) and an Off
     button (`.set-off`, pressed while the value is null). Enter sends the value, blur a changed
     one; an empty box sends nothing, since Off is the button's.
@@ -7755,7 +7757,8 @@ view's (#1286): the groups in order, "Agents and roles" first, above the device 
 409 puts the control back and toasts, with a second click waiting for the first; a change made outside drawn at
 the window's `focus`, and a click on the value shown still sent (#1392); a POST that never answers given
 up after `POST_MS`, the next change sent (the wrapper rejects at the signal's abort, as a real fetch, #1391); a choice
-made with Space keeping the focus on its radio, and a number sent with Enter on its box (#1409); "Other model…": Escape closes
+made with Space keeping the focus on its radio, and a number sent with Enter on its box (#1409); the focus ring
+on a lit and an unlit choice at 3:1 or more against what is under it (`ringContrast`, #1410); "Other model…": Escape closes
 the input, the select back on the row's value, and Enter sends the typed id; a note drawn beside a choice in its
 group; a number's Enter and Off; `help`'s toast; the layout at the phone's width, and on the desktop at 1280 px
 (two columns) and 390 px (one), nothing past the view's edge. Its calls to `/api/settings` go through a page-side

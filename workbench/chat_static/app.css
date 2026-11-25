@@ -88,7 +88,7 @@ body[data-view="stats"] #view-stats, body[data-view="settings"] #view-settings {
 .tab[aria-current="true"] { color: var(--accent); }
 .tab[aria-current="true"] .tab-lbl { color: var(--fg); }
 .tab[aria-current="true"] svg { transform: translateY(-1px); }
-.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -4px; border-radius: 10px; }
+.tab:focus-visible { outline: 2px solid var(--fg); outline-offset: -4px; border-radius: 10px; }  /* the accent: under 3:1 (#1410) */
 .tab-badge { position: absolute; top: 4px; left: calc(50% + 5px); min-width: 18px; height: 18px; padding: 0 5px;
   border-radius: 9px; background: var(--accent); color: var(--accent-fg); font: 600 11px/18px var(--sans);
   text-align: center; box-shadow: 0 0 0 2px var(--panel); }
