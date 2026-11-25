@@ -6,7 +6,8 @@
 # /bin/sh, as a user who isn't root: scripts/ci-wsl.sh), both of which the README says workbench
 # runs on. Either one failing turns the run red, and a release waits for a green run on its commit
 # (docs/release-checklist.md; the 2026-11-19 audit: the macOS job could fail unseen and ran
-# without OpenCode, and nothing ran WSL at all).
+# without OpenCode, and nothing ran WSL at all). Its first macOS shard also runs the kernel's
+# `scripts/kernel.py check` (#1356): the same bundle bytes on macOS as on Linux.
 #
 # The real-OpenCode tests run against the OpenCode pinned below (OPENCODE_VERSION, installed from
 # its release with the hash pinned here); opencode.yml runs them on the newest OpenCode. The Lane
@@ -99,6 +100,17 @@ jobs:
         run: |
           python3 -c 'from workbench import lane; print("lane:", lane.kind() or "none here: the Seatbelt test skips")'
       - run: python3 -X faulthandler -m unittest -v
+      # The kernel on macOS, on one shard (#1356): its bundle must build to the same bytes here as on
+      # check.yml's Linux, and its props run under OpenCode's Bun. The toolchain as check.yml's.
+      - if: matrix.shard == 1
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/workbench/kernel
+          key: kernel-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('kernel/toolchain.json', 'kernel/spago.lock') }}
+      - if: matrix.shard == 1
+        run: python3 scripts/kernel.py fetch
+      - if: matrix.shard == 1
+        run: python3 scripts/kernel.py check
 
   wsl:
     runs-on: windows-2025

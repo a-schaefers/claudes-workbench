@@ -2,8 +2,8 @@
 # (tests/test_docs.py included; scripts/suite.sh, four processes a shard) in six shards on Python 3.11 (the floor); `mod` runs `claude
 # plugin validate mod && claude plugin test mod` against the Claude Code version the mod was last
 # verified with; `kernel` rebuilds the PureScript kernel with its pinned toolchain and fails when
-# the committed mod/hooks/kernel.js isn't what kernel/src builds (`scripts/kernel.py check`), then
-# runs its goldens under OpenCode's Bun; `check`, the ruleset's required check, is green only when
+# the committed mod/hooks/kernel.js isn't what kernel/src builds (`scripts/kernel.py check`, its
+# props included), then runs its goldens under OpenCode's Bun; `check`, the ruleset's required check, is green only when
 # all three are. nightly.yml runs the suite and the mod on the newest Claude Code. The README shows
 # both as badges.
 #
@@ -134,7 +134,8 @@ jobs:
 
   # The kernel (kernel/BOUNDARY.md, #1356): fetch the pinned purs, esbuild and packages by hash
   # into the per-user cache (cached here on both pin files), then `check`: lint, Tables against the
-  # Python, two builds byte-equal to each other and to the commit, exports, budgets. Then the same
+  # Python, two builds byte-equal to each other and to the commit, exports, budgets, the seeded props
+  # (kernel/test/Props.purs, under OpenCode's Bun: installed first). Then the same
   # goldens `mod` runs on Claude Code, under OpenCode's Bun (BUN_BE_BUN, checked on 2.3.0).
   kernel:
     runs-on: ubuntu-latest

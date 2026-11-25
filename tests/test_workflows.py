@@ -93,6 +93,23 @@ class RequiredCheck(unittest.TestCase):
         self.assertIn("hashFiles('kernel/toolchain.json', 'kernel/spago.lock')", kernel)
         self.assertNotIn("paths:", kernel)
 
+    def test_the_macos_nightly_checks_the_kernel_on_one_shard_and_opencode_yml_runs_the_goldens(self):
+        # #1356: the bundle's bytes must not depend on the platform, and BUN_BE_BUN, undocumented,
+        # must still hold on the newest OpenCode
+        mac = job("nightly.yml", "macos")
+        steps = ["actions/cache@", "python3 scripts/kernel.py fetch", "python3 scripts/kernel.py check"]
+        at = [mac.find(s) for s in steps]
+        self.assertNotIn(-1, at, steps)
+        self.assertEqual(at, sorted(at))
+        self.assertGreater(at[0], mac.find("python3 -X faulthandler -m unittest -v"), "after the suite")
+        for s in steps:
+            line_start = mac.rfind("\n      - ", 0, mac.find(s))
+            self.assertIn("if: matrix.shard == 1", mac[line_start:mac.find(s)], f"{s}: shard 1 only")
+        self.assertIn("hashFiles('kernel/toolchain.json', 'kernel/spago.lock')", mac)
+        oc = job("opencode.yml", "check")
+        self.assertIn("BUN_BE_BUN=1 opencode test opencode-plugin/test", oc)
+        self.assertLess(oc.find("scripts/install-opencode.sh newest"), oc.find("BUN_BE_BUN=1 opencode test"))
+
 
 def job(workflow: str, name: str) -> str:
     """One job's lines, up to the next job."""

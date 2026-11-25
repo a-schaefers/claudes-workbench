@@ -148,12 +148,24 @@ the code around your change.
   committing*), or say in the pull request that you couldn't.
 - **The web chat** (`chat.py`, `webpush.py`, `chat_static/`): also the browser test,
   `PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs`, in WebKit and Chromium.
+- **The kernel, without its toolchain** (`kernel/`; its contract `kernel/BOUNDARY.md`): a
+  TypeScript, Python or docs change needs no toolchain. The committed `mod/hooks/kernel.js` is what
+  the mod loads, and `python3 -m unittest` (`tests/test_kernel.py`) checks it offline, each failure
+  naming its fix. A change to a Python value the kernel's Tables copies (`store.ACTIVE`,
+  `NEEDS_CLAUDE`, `PARKS`, `CLOSED`, `ask_mcp.NO_ANSWER`, `chat.LISTENING_FOR`,
+  `spend.WAKE_OPENING`) fails the suite until `python3 scripts/kernel.py build`, with
+  `mod/hooks/golden/tables.ts` changed to match. A change to `kernel/src` needs the toolchain once:
+  `build` fetches the pinned purs and esbuild by hash (network; Linux, WSL2 or macOS, x64 or arm64)
+  into `~/.cache/workbench/kernel`; then `python3 scripts/kernel.py check`, whose props run on Bun
+  (`bun`, or OpenCode's own). `wb patch upstream` names that check for a patch that touches
+  `kernel/`. A `wb update` rebase that meets `kernel.js`, `kernel.d.ts` or `Tables.purs` stops:
+  take either side, then `build`.
 
 ## 5. What happens next
 
 - **CI waits for the owner.** A fork's workflows run only once the owner approves the run, every
-  time, not only the first. Then `check` runs the suite in six shards on Python 3.11 and the mod's
-  tests, with a read-only token and no secrets.
+  time, not only the first. Then `check` runs the suite in six shards on Python 3.11, the mod's
+  tests and the kernel's check, with a read-only token and no secrets.
 - **The owner reviews and merges.** main needs a pull request, `check` green and one approving
   review; only the owner's own pull requests are approved automatically. A push after an approval
   dismisses it, and the new run waits for approval again: push fixes together.

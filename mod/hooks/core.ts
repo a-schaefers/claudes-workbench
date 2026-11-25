@@ -16,9 +16,12 @@ export const CLOSED: ReadonlySet<string> = new Set(K.tables.closed)
 export const NO_ANSWER: string = K.tables.noAnswer
 // chat.LISTENING_FOR in ms: a web chat listener older than this is gone
 export const CHAT_STALE_MS: number = K.tables.chatStaleMs
+// spend.WAKE_OPENING: every wake starts with it, then the task's name in backticks; spend.WAKE
+// matches it to charge the turn to the task
+export const WAKE_OPENING: string = K.tables.wakeOpening
 
 export type PhaseFacts = Parameters<typeof K.phaseOf>[0]
 export type Phase = ReturnType<typeof K.phaseOf>
 // What a task's phase means (Kernel.Phase): no caller yet; #1325's M1 moves register.tsx's
-// ACTIVE/NEEDS/RUNNING/waitsOnClaude and tasks.ts's CLOSED onto it
+// RUNNING/waitsOnClaude and tasks.ts's phase checks onto it
 export const phaseOf = (facts: PhaseFacts): Phase => K.phaseOf(facts)

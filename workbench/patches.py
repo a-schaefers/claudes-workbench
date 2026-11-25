@@ -949,9 +949,12 @@ def upstream(root, kind, commit, slug) -> None:
     note_install(root)
     with _noting() as noted:  # the local commit wb update later drops when its pull request merges
         _table(noted, "prepared")[slug] = _ident(root, sha)
+    # the kernel's own check when the patch touches kernel/ (#1356): the suite holds the committed
+    # bundle offline, but only kernel.py check rebuilds it and runs its props (the toolchain once)
+    kernel = _git(root, "diff", "--quiet", f"{sha}^", sha, "--", "kernel", check=False).returncode != 0
     print("next (none of this has run):")
-    print(f"  cd {wt} && python3 -m unittest" + (" && claude plugin validate mod && claude plugin test mod"
-                                                 if mod else ""))
+    print(f"  cd {wt} && python3 -m unittest" + (" && python3 scripts/kernel.py check" if kernel else "")
+          + (" && claude plugin validate mod && claude plugin test mod" if mod else ""))
     if not repo:
         print(f"{remote} ({_shown_url(url)}) isn't on GitHub, and wb patch send sends only there: send it "
               "the way that project takes changes")
