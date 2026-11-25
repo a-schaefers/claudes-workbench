@@ -2286,7 +2286,10 @@ class Handler(BaseHTTPRequestHandler):
                     woke = hub.cond.wait_for(lambda: hub.version != seen,
                                              timeout=max(0.0, due - time.monotonic()))
                     seen = hub.version
-                if self.evicted or self._revoked():  # revoked: it ends, and its reconnect is 401
+                # revoked: it ends, and its reconnect is 401. A closed hub (Hub.close) ends it before
+                # another snapshot: woken by the close, a test's stream made one in the next test's
+                # WB_HOME, its push key cached there (nightly run 45577067512, 2026-11-25)
+                if self.evicted or self._revoked() or hub.closed.is_set():
                     return
                 if woke:
                     snap = self._snap()
