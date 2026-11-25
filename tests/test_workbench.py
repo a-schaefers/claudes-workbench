@@ -6429,6 +6429,43 @@ class WorktreeSetup(Base):
         if sys.platform != "darwin":
             self.assertEqual(len(cps), 1, cps)                      # one cp, not thirty
 
+    def test_macos_copies_prepared_files_in_one_cp_per_directory(self):
+        # #1399 (2026-11-25): macOS skipped #867's batch, and each path tried GNU's flags first,
+        # which BSD cp refuses: two cp a file, 40,000 for an in-tree build's 20,000 objects
+        src, dest = Path(self.tmp.name) / "built", Path(self.tmp.name) / "scratch-1399"
+        paths = []
+        for d, n in (("a", 400), ("b/c", 400), ("d", 200)):
+            (src / d).mkdir(parents=True)
+            for i in range(n):
+                (src / d / f"f{i}.o").write_text(d)
+                paths.append(f"{d}/f{i}.o")
+        for d in ("build", "gen"):
+            (src / "e" / d).mkdir(parents=True)
+            (src / "e" / d / "x").write_text("x")
+            paths.append(f"e/{d}/")                      # ls-files --directory's form
+        dest.mkdir()
+        real, cps = subprocess.run, []
+
+        def bsd(argv, *a, **k):                          # BSD cp: no long flags; -c clones (here -R)
+            if argv[0] != "cp":
+                return real(argv, *a, **k)
+            cps.append(argv)
+            if any(x.startswith("--") and x != "--" for x in argv) or "d/f0.o" in argv:
+                return subprocess.CompletedProcess(argv, 1)   # d's group fails: path by path
+            return real(["cp", "-Rp" if argv[1] == "-cRp" else argv[1], *argv[2:]], *a, **k)
+        with mock.patch.object(runner.sys, "platform", "darwin"), \
+                mock.patch.object(runner.subprocess, "run", bsd):
+            runner._copy_all(src, dest, paths)
+        for p in paths[:-2]:
+            self.assertEqual((dest / p).read_text(), p.split("/f")[0], p)
+        self.assertEqual([(dest / "e" / d / "x").read_text() for d in ("build", "gen")], ["x", "x"])
+        # BSD cp copies a source ending in "/" as its insides
+        self.assertFalse([c for c in cps if any(x.endswith("/") for x in c[3:-1])])
+        # a cp per directory and batch (a: 1, b/c: 2, d: 1), e's 2 its own batch, then d's 200
+        # one by one, each macOS's flags first: never GNU's and then BSD's
+        self.assertEqual(len(cps), 1 + 2 + 1 + 1 + 200, [c[:3] for c in cps][:10])
+        self.assertFalse([c for c in cps if "--reflink=auto" in c])
+
     def test_commands_json_gives_a_repo_its_setup_for_every_task(self):
         self.ignore("deps/")
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
@@ -21611,6 +21648,19 @@ class Stats(Base):
         out = run_wb("stats", "--all")
         self.assertIn("gone/model", out)
         self.assertIn("strata/strata", out)
+        self.assertNotIn("more model", out)
+
+    def test_a_history_on_models_no_longer_configured_is_never_called_no_finished_tasks(self):
+        # #1400 (2026-11-25): with every model that ran gone from OpenCode's config, wb stats said
+        # "5 task(s), 5 landed" and then "no finished tasks yet"
+        now = time.time()
+        for _ in range(5):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": "gone/model", "size": "trivial", "outcome": "accepted", "ran": True, "ts": now})
+        out = run_wb("stats")
+        self.assertIn("5 task(s), 5 landed", out)
+        self.assertNotIn("no finished tasks yet", out)
+        self.assertIn("gone/model", out)
         self.assertNotIn("more model", out)
 
     def test_thirty_recent_models_give_three_lines_and_the_rest_counted_as_more(self):
