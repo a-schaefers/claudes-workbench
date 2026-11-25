@@ -1008,6 +1008,15 @@ async function run(engine, device) {
     if (JSON.stringify(again.about) !== JSON.stringify(about)) throw new Error('about lost: ' + JSON.stringify(again.about))
     await until(async () => (await page.locator('.row.user', { hasText: 'run the backlog overnight' }).last().locator('.meta').textContent()).includes('Delivered'))
   })
+  await check('once the copy it sent has landed, "send again" can be pressed again, and sends another (the #1408 review)', async () => {
+    // the #1408 review (2026-11-25): a row's line kept while its words stay the same kept the
+    // pressed button disabled too, until a reload
+    const again = page.locator('.row.user', { hasText: 'run the backlog overnight' }).first().locator('.meta button', { hasText: 'send again' })
+    await until(async () => !(await again.isDisabled())).catch(() => { throw new Error('still disabled after the copy landed') })
+    await again.click()
+    await until(() => messages().filter(m => m.text === 'run the backlog overnight').length === 3)
+    await until(async () => !(await again.isDisabled()))
+  })
   await check('a refused message about a pair of screenshots, edited, is still about them (#843)', async () => {
     // #843: edit put the words and files back in the box but not what they were about. The pair
     // again, newest: the first one may have left the thread's newest 200 by now

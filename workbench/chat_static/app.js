@@ -302,7 +302,7 @@
       const h = Math.round((state.expire || 21600) / 3600)
       meta.append(span('', `Not passed to Claude (over ${h} h old) · ` + clock(m.ts) + ' · '))
       const b = document.createElement('button'); b.textContent = 'send again'
-      b.onclick = () => { b.disabled = true; resend(m) }
+      b.onclick = () => { b.disabled = true; b.dataset.cid = newId(); resend(m, b.dataset.cid) }
       meta.append(b)
     } else meta.append(span('tick', '✓'), span('', (state.listener ? 'Delivered · ' : 'Waiting for a Claude session · ')
       + clock(m.ts)))
@@ -380,7 +380,10 @@
         // a row's line made anew only when it says something new: one made on every update was
         // read out again and took the focus from its buttons (#1408, #1409)
         const meta = metaFor(w.m), was = el.querySelector('.meta'), key = meta.textContent + '\n' + (w.m.text || '')
-        if (was.dataset.said !== key) { meta.dataset.said = key; was.replaceWith(meta) }
+        // and once a "send again" it waits on has settled (landed, or deleted): kept, its button
+        // stayed disabled until a reload (the #1408 review)
+        const waits = was.querySelector('button[data-cid]:disabled')
+        if (was.dataset.said !== key || (waits && !outbox.some(o => o.cid === waits.dataset.cid))) { meta.dataset.said = key; was.replaceWith(meta) }
       }
       if (anchor.nextSibling !== el) anchor.after(el)
       anchor = el
@@ -1157,10 +1160,10 @@
   // an expired message, sent again as a new one through the outbox (its own cid), with its files:
   // already on the computer, so not a byte again (#623); and what it was about, a pair of
   // screenshots or a kept take: without it Claude got the words with no task or take (#843)
-  function resend(m) {
+  function resend(m, cid = newId()) {
     if (!token) return
     const files = (m.files || []).map(({ id, name, size, type }) => ({ id, name, size, type }))
-    const o = { cid: newId(), text: m.text, ts: now(), ...(m.about ? { about: m.about } : {}), ...(files.length ? { files } : {}) }
+    const o = { cid, text: m.text, ts: now(), ...(m.about ? { about: m.about } : {}), ...(files.length ? { files } : {}) }
     if (!save(OUT + o.cid, o)) { banner('Not sent: this browser keeps no outbox here. Copy it into the box.', true); return }
     outbox = outItems()
     render(); toEnd(true); flush(true)
