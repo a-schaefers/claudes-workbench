@@ -3271,6 +3271,8 @@ def _route_api(mid: str, role: str) -> models.Model:
     if m.kind != "api":
         die(f"{mid} is a GPU model: wb route {role} --gpu {mid} pins it", 3)
     st = models.status(m)
+    if not _runs_held(m):  # status wrote a key stored since the cache's read back (#1388)
+        m = models.lookup(mid) or m
     # a server of the user's on another host of the LAN, not opted in, reads as an API provider
     # with no key: its own fix, never /connect, which a LAN server has no use for (#1109,
     # 2026-11-23); a public host keeps /connect, a hosted provider's fix (#1109's review). Nor

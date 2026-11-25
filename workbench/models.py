@@ -1925,7 +1925,10 @@ def _api_status(m: Model, down=frozenset()) -> dict:
     if why := keyhole_refusal(m):  # before the key: /connect can't fix it
         return _no(why)
     key = m.key
-    if not key:
+    # any key a task can't run with is asked again, not only none: /connect changes no stamp, so
+    # a cached OAuth or environment key stood for HOSTED_TTL after the user stored one (#1388,
+    # 2026-11-25; #1076 was ids missing from the cache)
+    if key not in ("stored", "ollama", "none"):
         key, who = _fresh_key(m)
     if not key:
         return _no(f"no key for {who}: run /connect in OpenCode and add it")

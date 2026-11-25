@@ -3576,9 +3576,11 @@ read as a wrong id, Claude hunted for the "right" one).
   | `unreachable` | `can't reach <host> (<reason>)` | yes |
   | ok | `{"available": True, "resident": True, "why": "API (<Provider>)"}` | |
 
-  A "no key" answer is checked fresh first (`_fresh_key`: `auth list` again, ignoring the cache, once
-  per state directory each `AUTH_FRESH_SECS` 5 s, written back to hosted.json): a user who just ran
-  `/connect` isn't told to run it again. `remedy` gives `/connect`, top up, or wait;
+  Any cached key a task can't run with (none, `oauth`, `env:`, `config`, `signing`: all but
+  `stored`, `ollama` and a free model's `none`) is checked fresh first (`_fresh_key`: `auth list`
+  again, ignoring the cache, once per state directory each `AUTH_FRESH_SECS` 5 s, written back to
+  hosted.json): a user who just ran `/connect` isn't told to run it again (an OAuth or environment
+  key cached before it stood for `HOSTED_TTL`, as /connect changes no stamp, #1388). `remedy` gives `/connect`, top up, or wait;
   `may_come_up` follows the table (a rate limit or an outage is waited out, never a missing key: an
   API start goes on through either with a note, `cli.TRANSIENT`, #1088).
 - `note_api(pid, state, why="", until=None)` writes `$WB_HOME/api-health.json` under
@@ -4357,7 +4359,8 @@ The changes (each one exit 3 with one line when refused, writing nothing):
 - An API model is taken by its exact id only (`models.lookup`: fragments never match an API id,
   #1013), of kind `api`, with a key a task runs with (`cli._runs_held`: `key == "stored"`, /connect
   saved one, which the keyhole holds outside the lane; or an Ollama cloud model's `ollama`, the
-  login this machine's Ollama holds, which needs no keyhole, #1077), else refused with discovery's why (`cli._route_api`): `not in
+  login this machine's Ollama holds, which needs no keyhole, #1077; judged on the model read again
+  after `status`, whose fresh key check may have written a key stored since back, #1388), else refused with discovery's why (`cli._route_api`): `not in
   OpenCode's catalog: wb models lists the API models`, a GPU id (`… is a GPU model: wb route <role>
   --gpu <id> pins it`), no key (`… can't be a role's model: no key for <p>: run /connect in OpenCode
   and add it`, said once; a configured provider on another host of the LAN, not opted in, gets its
