@@ -1442,6 +1442,16 @@ def provider_of(task: store.Task) -> str:
     return str(task.spec.get("provider") or (task.spec.get("model") or "").partition("/")[0])
 
 
+def ollama_cloud(task: store.Task) -> bool:
+    """Whether the task's model is an Ollama cloud one, whose login this machine's Ollama holds
+    (ollama signin), never a key /connect stores (needs_keyhole); the cached catalog only."""
+    try:
+        m = models.lookup(str(task.spec.get("model") or ""), cached=True)
+    except Exception:  # an unreadable config or cache: a keyed provider's words, as before
+        return False
+    return bool(m and m.cloud)
+
+
 def _span(secs: float) -> str:
     secs = int(max(0, secs))
     if secs >= 120:
@@ -1541,7 +1551,8 @@ class _ProviderWait:
                                    f"(HTTP {code or 402})")
         elif code == 401 or ((kind == "provider.auth" or code == 403) and
                              (code is None or KEY_WORDS.search(said))):
-            self.fatal = ("auth", f"{self.provider} refused the API key (HTTP {code or 401})")
+            what = "this machine's ollama.com login" if ollama_cloud(self.task) else "the API key"  # #1389
+            self.fatal = ("auth", f"{self.provider} refused {what} (HTTP {code or 401})")
         elif (code in REFUSED_CODES or kind in REFUSED_KINDS or kind == "provider.auth") \
                 and not CONTEXT_WORDS.search(said):
             self.fatal = ("refused", f"{self.provider} refused the request"
@@ -5291,6 +5302,10 @@ def provider_remedy(task: store.Task, guard: str, said: str = "") -> str:
     if guard == "quota":
         return (f"top up your {p} account, or wait for the plan's reset; then {resume} resumes it")
     if guard == "auth":
+        # an Ollama cloud model takes no key: /connect changed nothing, and the task stayed
+        # stuck until someone thought of ollama signin (#1389, 2026-11-25; #1077 in wb route)
+        if ollama_cloud(task):
+            return f"sign this machine's Ollama in to ollama.com again (ollama signin); then {resume} resumes it"
         return f"store {p}'s API key again with /connect in OpenCode; then {resume} resumes it"
     if guard == "setup":  # #1080: no route change or wait mends this machine's own setup
         return (f"this machine's stop, not the agent's or {p}'s: mend what the line above says; "

@@ -35941,6 +35941,24 @@ class ApiTasks(_ApiTask, _KeyholeTest):
                                  "message": "API key not valid. Please pass a valid API key."}})
         self.assertEqual(wait.stop(time.time()), ("auth", "deepinfra refused the API key (HTTP 400)"))
 
+    def test_an_ollama_cloud_task_whose_login_is_refused_says_ollama_signin_not_connect(self):
+        # #1389, 2026-11-25: the 401 stop said "store ollama's API key again with /connect", which
+        # Ollama never reads: this machine's Ollama holds the ollama.com login
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"] = {"ollama": {"options": {"baseURL": "http://127.0.0.1:11434/v1"},
+                                      "models": {"gpt-oss:120b-cloud": {"limit": {"context": 131072}}}}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        mid = "ollama/gpt-oss:120b-cloud"
+        os.environ["WB_FAKE_API"] = f"{mid}=auth"
+        self.start_api("t-ocloud", "ok", model=mid, spawn=False)
+        self.drive_here("t-ocloud")
+        st = store.Task("t-ocloud").status
+        self.assertEqual((st["phase"], st["last"]), ("stuck", "ollama refused this machine's ollama.com login (HTTP 401)"))
+        note = [r for r in store.notices() if r.get("task") == "t-ocloud"][-1]
+        self.assertIn("sign this machine's Ollama in to ollama.com again (ollama signin); then wb feedback "
+                      't-ocloud --text "carry on" resumes it', note["text"])
+        self.assertNotIn("/connect", note["text"])
+
     def test_a_proxy_in_the_agents_env_doesnt_catch_the_keyhole(self):
         self.local_api_model()
         os.environ["http_proxy"] = "http://127.0.0.1:9"              # nothing listens there

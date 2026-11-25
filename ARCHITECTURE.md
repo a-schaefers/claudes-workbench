@@ -1337,7 +1337,8 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   `provider` (a bench replay scores `error`), and `provider_remedy` under the STOPPED line (`wb
   feedback <task> --text "carry on"` once the provider allows, a round that counts no review, #1153, and `routes.off_api`'s command, `wb route <role> gpu (the user's
   yes)` or under Agents API `wb route all gpu`, when the task has a role and its next tasks aren't off API already, #1218; top up or wait for the plan's reset; /connect for a refused
-  key, each the remedy alone (#1322 dropped "the provider's stop, not the agent's:"); for `setup`,
+  key, or for an Ollama cloud model (`runner.ollama_cloud`, the cached catalog's `cloud`)
+  `ollama signin`, its login being this machine's Ollama's, never a key (#1389), each the remedy alone (#1322 dropped "the provider's stop, not the agent's:"); for `setup`,
   "this machine's stop, not the agent's or <provider>'s: mend what the line above says", #1080; for `refused`, `wb feedback` once what the provider said is fixed, and on a
   404 `wb takeover` or `wb discard` if it no longer serves the model, which wb never switches). Its `stopped` event says `by: "provider"`, so it is never a lesson about the agent (the
   same limit on three tasks of one account read as a recurring one). An `api_stop` whose guard is
@@ -2547,7 +2548,8 @@ skips the title request: OpenCode sends nothing to another model. An upstream er
 `events.jsonl` only as the keyhole redacted it, and a round that died on one says it in status
 `last` (`opencode exited 1: <error>`, API tasks only); a refused key or a spent balance the
 keyhole saw ends the round first as the provider's `auth` or `quota` stop, whose line names it
-(`<provider> refused the API key (HTTP 401)`, *The hold*, #1020), and a request it refused for
+(`<provider> refused the API key (HTTP 401)`, *The hold*, #1020; an Ollama cloud model's
+`<provider> refused this machine's ollama.com login (HTTP 401)`, #1389), and a request it refused for
 another reason as `refused`, with the provider's words (#1082, #1084).
 
 *The task's own catalog* (`rules/<task>/catalog.json`, #1013's comment, #1015). The agent's
