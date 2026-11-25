@@ -1248,6 +1248,14 @@ function runsIn(src: string): string[][] {
 // unquoted `$(…)` leaves none) or to `-`; read as a literal path, it failed the dry run to spawn,
 // so the call skipped the dialog into wb's "is the mod loaded?" (the review of #1125). An
 // absolute one after it is known again.
+// Where `set` is in `wb settings …`'s words, or -1: wb takes `settings`' own `--json` before it, so
+// `wb settings --json set cap 9` was no call, and the change wb gates was refused unasked, as if
+// the mod weren't loaded (the review of #1336, 2026-11-25)
+function settingsSet(wb: string[]): number {
+  const s = wb.findIndex((w, j) => j > 0 && !w.startsWith('-'))
+  return s > 0 && wb[s] === 'set' ? s : -1
+}
+
 export function routeCalls(command: string, cwd = '', home = ''): { calls: string[][]; hidden: boolean; at: string[] } {
   const calls: string[][] = []
   const at: string[] = []
@@ -1265,7 +1273,10 @@ export function routeCalls(command: string, cwd = '', home = ''): { calls: strin
     if (RUNS_CODE.test(cmd)) runner = true
     const wb = wbArgs(cmd, words.slice(i + 1))
     if (wb?.[0] === 'route') calls.push(wb.slice(1))
-    else if (wb?.[0] === 'settings' && wb[1] === 'set') calls.push(['--settings', ...wb.slice(2)])
+    else if (wb?.[0] === 'settings' && settingsSet(wb) > 0) {
+      const s = settingsSet(wb)
+      calls.push(['--settings', ...wb.slice(1, s), ...wb.slice(s + 1)])
+    }
     else if (wb?.[0] === 'start' && wb.some(w => /^--m/.test(w))) calls.push(['--start', ...wb.slice(1)])
     else continue
     at.push(here)

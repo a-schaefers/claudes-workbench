@@ -6573,7 +6573,7 @@ atom.
 **The roles' dialog** (`routeRefusal`, beside `sendRefusal` in the same hook, #1014; *Roles*). In Bash and Monitor
 commands, read as above (`runsIn`: `simpleCommands`, `bash -c` and `eval` inside; `wbArgs`), each `wb route …` and each
 `wb start … --m…` (any abbreviation of `--model`) is a call (`routeCalls`), and each `wb settings set …` (#1287, a
-`--settings` call); a show (`wb route`, `--json`) and a dry run
+`--settings` call; `settings`' own `--json` before `set` too, `settingsSet`: the review of #1336); a show (`wb route`, `--json`) and a dry run
 change nothing. For each call, one after another (`routeDry`), the mod runs `wb route --dry-run --json <its args>` (a start's as `--start <wb start's
 args>`, parsed there by wb start's own parser: the task's name and an abbreviated `--model` as wb takes them; a
 Settings row's as `wb settings set <key> <value> --dry-run --json`, `settings.dry_run`: its row's own `wb route` dry
@@ -7516,7 +7516,7 @@ role's selector, the cap, thinking, an API model, a GPU pin) printing that call'
 the cap's approval taken by the real `wb settings set` once; `Base` points `WB_ROUTES` at the
 test's own file, never the user's. The mod's half (the dialog, the file-tool denies, the echo, `said-3`) is in
 register.test.tsx (`routeProbe`; #1287's and #1336's cases: a Settings row's `wb settings set` asking with its dry run's
-line, the cap, thinking and an API model row too, one wb's dry run refuses asking nothing). **Dynamic workflows** (`DynamicWorkflows`, #1041): off with no file, an unreadable
+line, the cap, thinking and an API model row too, one wb's dry run refuses asking nothing, `wb settings --json set` asking too). **Dynamic workflows** (`DynamicWorkflows`, #1041): off with no file, an unreadable
 or unknown one, `wb workflows on|off` kept, the skill's two rules, and a fan-out of three (one per role, under
 Claude Code, the API role set through the dialog's approval): the two GPU tasks on Ollamas on separate cards
 (`models.server_devices` patched; models that don't fit one card together) let in together, the API

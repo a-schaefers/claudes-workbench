@@ -4893,6 +4893,21 @@ test('#1287: wb settings set on a role row asks in the dialog with its dry run\'
   await clock.advance(1000)
 })
 
+test('#1336: wb settings --json set, settings\' own flag before set, is a Settings call too and asks', async ($, on) => {
+  // the review of #1336 (2026-11-25): wb takes it, the mod read no call, so the cap went to wb
+  // unasked and wb refused it as if the mod weren't loaded
+  const { clock, bash, files, w } = await routeProbe($, on)
+  w.answer = 'Allow'
+  expect(routeCalls('wb settings --json set cap 9').calls).toEqual([['--settings', '--json', 'cap', '9']])
+  expect(await bash('wb settings --json set cap 9')).toEqual({ deny: undefined, asked: 1, question: ROUTE_LINE,
+    dry: [['settings', 'set', '--json', 'cap', '9', '--dry-run', '--json']] })
+  expect(JSON.parse(files['/wb/route-ok.json']!)).toEqual({ argv: ROUTE_ARGV, change: ROUTE_LINE, at: expect.any(Number) })
+  for (const command of ['wb settings --json', 'wb settings --json sets cap 9']) {
+    expect([command, routeCalls(command).calls]).toEqual([command, []])
+  }
+  await clock.advance(1000)
+})
+
 test('#1336: the cap, thinking and an API model row ask with their own dry run\'s line; one wb refuses asks nothing', async ($, on) => {
   // #1296's G3: only a role's selector was tested to reach the dialog through wb settings set
   const { clock, bash, files, w } = await routeProbe($, on)
