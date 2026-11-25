@@ -1377,7 +1377,8 @@ class ApiLease(_ApiTask, Base):
         self.three_running()
         with mock.patch.object(cli, "spawn_runner", lambda task: 0):
             out = run_wb("feedback", "api-r", "--text", "1. Again.")
-        self.assertIn("note: 3 tasks run on deepinfra's API; api-r waits as queued for a slot", out)
+        self.assertIn("note: 3 tasks run on deepinfra's API (api-1, api-2, api-3); api-r waits as queued "
+                      "for a slot", out)                       # who holds them (#1322)
         self.assertNotIn("GPU", out)
 
     def test_a_runner_killed_with_sigkill_frees_its_slot(self):

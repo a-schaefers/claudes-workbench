@@ -41146,7 +41146,7 @@ class RoleResolution(Base):
         m = models.lookup("deepseek/deepseek-flash")
         self.assertEqual(models.provider_name(m), "DeepSeek")     # still the provider's own
 
-    def test_an_openrouter_roles_backends_reach_task_json_and_the_note_names_those_alone(self):
+    def test_an_openrouter_roles_backends_reach_task_json_and_the_start_line_never_restates_them(self):
         # wave 2's review: routes.json's `order` never reached task.json, so the keyhole sent no
         # order (any backend) while the start note, built from routes.json, named the chosen ones
         from workbench import runner as rn
@@ -41156,7 +41156,7 @@ class RoleResolution(Base):
         self.assertEqual(code, 0, err)
         t = store.Task("t-or")
         self.assertEqual(t.spec["order"], ["baseten", "deepinfra"])
-        self.assertIn("via OpenRouter to baseten, deepinfra, no fallbacks", out)
+        self.assertNotIn("via OpenRouter", out)   # said once, in the role's dialog (routes.change, #1322)
         self.assertEqual(rn.openrouter_routing(t)["provider"]["openrouter"]["models"]["deepseek/deepseek-v4.1-flash"]
                          ["options"]["provider"], {"order": ["baseten", "deepinfra"], "allow_fallbacks": False})
         self.set_role("trivial", "deepseek/deepseek-flash")    # another provider's role: no order
@@ -41167,7 +41167,7 @@ class RoleResolution(Base):
                                     "--repo", str(self.other_repo()))
         self.assertEqual(code, 0, err)
         self.assertNotIn("order", store.Task("t-or-asked").spec)
-        self.assertIn("via OpenRouter to its choice of backend, no fallbacks", out)
+        self.assertNotIn("via OpenRouter", out)
 
     def other_repo(self) -> Path:
         """A second repo with a committed CLAUDE.md: a provider's first task there says the note."""
