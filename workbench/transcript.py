@@ -363,7 +363,7 @@ EVENT_KINDS = frozenset({
     "round", "tests", "autofix", "self_review", "ask", "answer", "captain", "steer", "skills",
     "allow", "interrupted", "fresh", "full", "load", "left_bg", "lingered", "settled", "reading_full",
     "compacted", "limits", "export", "resumed", "coding", "spec_gap", "next_step", "takeover",
-    "stopped", "error", "retry", "gpu", "served", "rate_limited", "backend", "rewound"})
+    "stopped", "error", "retry", "gpu", "served", "rate_limited", "backend", "rewound", "fallback"})
 
 
 # What `wb log` prints, and the web chat's task sheet (#1201): the agent's text, its tool calls,
