@@ -1382,9 +1382,9 @@ def _strict_json(raw: bytes):
 
 def start(task, m, *, log=None, on_usage=None, on_health=None, room=None) -> Keyhole:
     """The keyhole for task ``task``'s API model ``m`` (models.Model: id, provider, name,
-    base_url, and the catalog's provider package as ``package``): its key loaded (load_key), its
-    protocol from the package, its upstream the catalog's base. Logs one line, no key and no
-    token. Raises KeyholeError when there is no key wb can hold, or no API base."""
+    base_url, and the catalog's package as ``package``: the model's own, else its provider's,
+    #1387): its key loaded (load_key), its protocol from the package, its upstream the catalog's
+    base. Logs one line, no key and no token. Raises KeyholeError when there is no key wb can hold, or no API base."""
     package = getattr(m, "package", "") or ""
     if _signs(m.provider, package):
         raise KeyholeError(f"{NEEDS}: {m.provider} signs each request (SigV4 or Vertex)")

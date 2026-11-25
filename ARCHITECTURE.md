@@ -2424,7 +2424,10 @@ own key counts because OpenCode 2.3.2 sends a model's settings over its provider
 #1015: one in the content went unseen, in the agent's environment). A stored key is trimmed (a paste's newline: OpenCode trims only on
 `/connect`) and must then be printable ASCII (`KEY_CHARS`), else "can't use <provider>'s stored key:
 it holds a character an HTTP header can't carry" (http.client's refusal quoted the header, key and
-all, the 2026-11-23 review). The protocol comes from the catalog's provider package (`protocol_of`,
+all, the 2026-11-23 review). The protocol comes from the model's catalog package, else its
+provider's (`protocol_of`; `models._api_model` takes the entry's own `package` and `api` first:
+OpenCode Zen lists openai-compatible, anthropic and google models at different bases, and each
+took the first entry's, so its Claude models posted to the OpenAI base, #1387;
 `PACKAGES`: OpenCode 2.3.2's packages whose model routes post the base plus a `MODEL_PATHS` path):
 Anthropic's and `anthropic-compatible` take `x-api-key` (and keep `anthropic-version`); alibaba,
 cerebras, cloudflare-workers-ai, deepinfra, deepseek, digitalocean, fireworks, groq, meta, minimax,
@@ -6850,7 +6853,8 @@ $WB_HOME (~/.local/state/workbench)
   hosted.json                    API models (models.hosted, #1013): {v: 1, ts, stamp: {opencode: [[path, size, mtime_ns]…],
                                  configs: [[path, mtime_ns]…], content: crc32}, error ("" or the failed read's first line),
                                  providers: {<pid>: {name, key (its source: stored|oauth|env:<NAME>|config|signing|ollama|""),
-                                 package, api (its base URL)}}, models: {<id>: {name (at the provider: modelID), limit, cost, variants,
+                                 package, api (its base URL: the catalog's first entry's; a model's own package and api come first,
+                                 models._api_model, #1387)}}, models: {<id>: {name (at the provider: modelID), limit, cost, variants,
                                  capabilities, reasoning, tool_call, family, status, free, cloud?, and from the catalog (catalog: true)
                                  type, title, released (ms), compatibility, package, api, overlay (bool: headers or a body of its own,
                                  never their values): what models.catalog_doc rebuilds the task's catalog from, #1015}}}; fresh HOSTED_TTL 600 s

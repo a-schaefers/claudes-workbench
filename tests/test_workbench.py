@@ -34878,6 +34878,40 @@ class Routes(Base):
         self.assertEqual(provs["deepseek"]["key"], "stored")
         self.assertTrue(runner.models.status(runner.models.hosted()["deepseek/deepseek-flash"])["available"])
 
+    def test_a_providers_models_each_keep_their_own_package_and_base_not_its_first_ones(self):
+        # #1387 (2026-11-25): OpenCode Zen lists openai-compatible, anthropic and google models at
+        # different bases; every one took the first entry's, so its Claude models posted /messages
+        # to …/openai/v1 with a bearer key (a 404 every request) and its Gemini ones read ready
+        from workbench import keyhole
+        base = "https://opencode.test/zen"
+        zen = [api_entry("opencode", "big-pickle", settings={"baseURL": f"{base}/openai/v1"},
+                         package="@opencode/ai/providers/openai-compatible"),
+               api_entry("opencode", "claude-x-5", settings={"baseURL": f"{base}/anthropic/v1"},
+                         package="@opencode/ai/providers/anthropic"),
+               api_entry("opencode", "gemini-x-4", settings={"baseURL": f"{base}/google/v1beta"},
+                         package="@opencode/ai/providers/google")]
+        rest = [e for e in ROUTES_CATALOG if e["providerID"] != "opencode"]
+        self.catalog([*rest, *zen], [*ROUTES_AUTH, key_row("opencode", "OpenCode Zen", STORED)])
+        hosted = runner.models.hosted(fresh=True)
+        pickle, claude, gemini = (hosted[f"opencode/{n}"] for n in ("big-pickle", "claude-x-5", "gemini-x-4"))
+        self.assertEqual((pickle.package, pickle.base_url),
+                         ("@opencode/ai/providers/openai-compatible", f"{base}/openai/v1"))
+        self.assertEqual((claude.package, claude.base_url),
+                         ("@opencode/ai/providers/anthropic", f"{base}/anthropic/v1"))
+        self.assertEqual(keyhole.protocol_of(claude.package), "anthropic")
+        self.assertEqual(runner.models.keyhole_refusal(claude), "")
+        self.assertIn("the keyhole doesn't speak", runner.models.keyhole_refusal(gemini))
+        self.assertFalse(runner.models.status(gemini)["available"])
+        code, _, err = self.route("trivial", "opencode/gemini-x-4", "--day-usd", "1")
+        self.assertEqual(code, 3, err)
+        self.assertIn("the keyhole doesn't speak", err)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.main(["models", "--json"])
+        api = [x["id"] for x in json.loads(out.getvalue())["api"]]
+        self.assertIn("opencode/claude-x-5", api)
+        self.assertNotIn("opencode/gemini-x-4", api)
+
     def test_a_role_out_of_credit_runs_again_once_the_recheck_time_has_passed(self):
         # #1068: no_credit had no `until` and only a 2xx cleared it, which only a running task
         # gets, and wb start refused that task: after a top-up or the plan's reset the role
