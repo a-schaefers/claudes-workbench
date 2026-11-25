@@ -211,7 +211,13 @@
     refocus = null
     const out = el('div', 'cards set-cards')
     if (!rows) {
-      if (why) { const c = el('div', 'card set-card'); c.append(el('p', 'small', `Settings couldn't load: ${why}`)); out.append(c) }
+      if (why) {
+        const c = el('div', 'card set-card'), again = el('button', 'plain set-retry', 'Try again')
+        again.type = 'button'
+        again.addEventListener('click', load)  // the line back, and nothing has said so (#1412)
+        c.append(el('p', 'small', `Settings couldn't load: ${why}`), again)
+        out.append(c)
+      }
     } else {
       const known = GROUPS.map(g => g[0])
       const groups = [...GROUPS, ...[...new Set(rows.map(r => r.group))].filter(g => !known.includes(g)).map(g => [g, g])]

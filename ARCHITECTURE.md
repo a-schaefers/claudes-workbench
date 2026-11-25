@@ -6025,7 +6025,9 @@ sent as JSON, and a JSON or string body gets `Content-Type: application/json`), 
 (`app.js`'s `post`: JSON, the key, given up after `POST_MS` of silence; a `{ok, status, headers,
 json()}`, #1391), `view(name, {mount(root),
 show(), hide()})` (`stats` gets `#stats-body`, `settings` `#settings-rows`; mounted once, at once,
-shown and hidden on each switch and on `visibilitychange`; a second registration is ignored),
+shown and hidden on each switch and on `visibilitychange`, and the view shown is shown again,
+`reshowView`, when the network comes back (`online`) or the stream does after a failure, #1412; a
+second registration is ignored),
 `toast(text)` (3.5 s), `on('state' | 'view', fn)` (each snapshot applied; each switch, its name),
 `current()`. Each view's files are its own, so the two are built apart.
 
@@ -6034,7 +6036,8 @@ what the agent does*). `WB.view('stats', …)`: `mount` puts two sections in `#s
 (`.st-now-box`) and the history (`.st-hist-box`), drawn apart so a tick redraws Now alone. `show`
 fetches `GET /api/stats` (`{feed, routes, models}`, the feed `wb stats --json`'s), again every
 `REFETCH_MS` 60 s and once `feed.until` (the next local midnight) passes; a failure says `History
-unavailable: <why> (wb stats --json)`, or `Not updated: …` over the last feed. With
+unavailable: <why> (wb stats --json)`, or `Not updated: …` over the last feed, each with a Try again
+button (`.st-retry`), and is read again once the line is back (`reshowView`, #1412). With
 `feed.settings.live` on it opens `GET /api/top` (a `fetch` with the bearer header, read as SSE like
 `/api/stream`): each `event: top` is one `wb top --json` snapshot, and `event: down` (`{why,
 retry}`) says `This machine can't be read: <why>; trying again in <retry>s (wb top --json)`; a
@@ -6228,7 +6231,9 @@ alone, and a generic renderer: a new setting touches only Python.
 - **Read.** `WB.view('settings', …)`; each `show` (the tab, or the page back on screen), and the
   window's `focus` while shown (beside the terminal it stays shown, #1392), runs `GET
   /api/settings` (`{rows, ts}`, #1280) into `#settings-rows`, above the device cards. A failed read
-  keeps the last rows, or says `Settings couldn't load: <why>` with none yet. A read that left
+  keeps the last rows, or says `Settings couldn't load: <why>` with none yet, and a Try again button
+  (`.set-retry`); the view shown is read again once the line is back (`reshowView`, *The views'
+  API*), so one opened before it was, as a phone waking, no longer waits for a tab switch (#1412). A read that left
   before a write ended is dropped (`reads`, `wrote`), since the write's own rows are newer.
 - **Groups** are `.card`s (`.set-card[data-group]`, an `h3` each) in a `.cards` grid, in `GROUPS`
   order with their names: `shared` "Agents and roles", `gpu` "GPU", `api` "API", `terminal`
@@ -7749,7 +7754,8 @@ then each view's own, `e2e_stats.mjs` and `e2e_settings.mjs` (`check(page, ctx)`
 results.jsonl's task count under This week, the labels in `statsLines`' order and none of the rows
 #1322 took (Streak, Last 30 days, Bests, Milestone, Questions, a score or estimate); `/api/top` opened on showing Stats with Live view on, let go on leaving it, never opened
 with Live view off; Now from fixed ticks (the GPU and RAM cards, the running rows, the rack folded,
-the queue); no sideways scroll at a phone's width and at 1280 px (two columns); the empty state.
+the queue); shown out of reach, `Not updated` with Try again, read again at the `online` event with no tab switch
+(#1412); no sideways scroll at a phone's width and at 1280 px (two columns); the empty state.
 Where the server answers neither `/api/stats` nor `/api/top`, the page's `fetch` stands in (the
 real `wb stats --json` of the run's `WB_HOME`; a held stream): Playwright's routes stop holding
 requests once the worker registers (#1223). The Settings
@@ -7757,7 +7763,8 @@ view's (#1286): the groups in order, "Agents and roles" first, above the device 
 `#settings`'s alone); Claude coding → "Ask me first" lit at once, then `coding.json` and `wb coding` say `ask`; a
 409 puts the control back and toasts, with a second click waiting for the first; a change made outside drawn at
 the window's `focus`, and a click on the value shown still sent (#1392); a POST that never answers given
-up after `POST_MS`, the next change sent (the wrapper rejects at the signal's abort, as a real fetch, #1391); a choice
+up after `POST_MS`, the next change sent (the wrapper rejects at the signal's abort, as a real fetch, #1391); opened with the
+computer out of reach, Try again shown and the rows drawn once the stream gets through, with no tab switch (#1412); a choice
 made with Space keeping the focus on its radio, and a number sent with Enter on its box (#1409); the focus ring
 on a lit and an unlit choice at 3:1 or more against what is under it (`ringContrast`, #1410); "Other model…": Escape closes
 the input, the select back on the row's value, and Enter sends the typed id; a note drawn beside a choice in its

@@ -282,6 +282,27 @@ export async function check(page, ctx) {
       await page.evaluate(() => document.activeElement.blur())
     })
 
+    await ctx.check('Settings opened while the computer is out of reach offers Try again, and draws its rows once the line is back, with no tab switch (#1412)', async () => {
+      // #1412 (2026-11-25): opened before the line was back, as a phone waking, it said it
+      // couldn't load until a tab switch. A page of its own: this one's rows are drawn already
+      const p = await ctx.context.newPage()
+      await p.addInitScript(() => {
+        window.e2eDown = true
+        const real = window.fetch
+        window.fetch = (u, o) => window.e2eDown && /^\/api\/(settings|state|stream)$/.test(new URL(String(u), location.href).pathname)
+          ? Promise.reject(new TypeError('Failed to fetch')) : real(u, o)
+      })
+      try {
+        await p.goto(base + '#settings')
+        await until(async () => (await p.textContent('#settings-rows')).includes("Settings couldn't load: the computer can't be reached"))
+        if (!(await p.locator('#settings-rows .set-retry').isVisible())) throw new Error('no Try again')
+        await p.evaluate(() => { window.e2eDown = false })   // the stream's next try gets through
+        await until(async () => (await p.locator('#settings-rows .set-card[data-group]').count()) > 0)
+          .catch(async () => { throw new Error(await p.textContent('#settings-rows')) })
+        if (await p.evaluate(() => document.body.dataset.view) !== 'settings') throw new Error('the view changed')
+      } finally { await p.close() }
+    })
+
     await ctx.check('"Other model…" opens a text input, Escape closes it, Enter sends the typed id; a note is a line beside its group\'s rows, an info row a line', async () => {
       let sent = null
       unmock()

@@ -74,8 +74,8 @@
   // the streak, the work absorbed, the questions, Claude's tokens a task, the 30 days, the bests and
   // the milestones were here too, as on the pane: precision nobody acted on, gone from the feed (#1322).
   function statsRows(f, why, n) {
-    if (!f) return [{ label: '', text: why ? `History unavailable: ${why} (wb stats --json)` : 'Reading the history…' }]
-    if (why) return [{ label: '', text: `Not updated: ${why} (wb stats --json)`, stale: true }, ...statsRows(f, '', n)]
+    if (!f) return [{ label: '', text: why ? `History unavailable: ${why} (wb stats --json)` : 'Reading the history…', retry: !!why }]
+    if (why) return [{ label: '', text: `Not updated: ${why} (wb stats --json)`, stale: true, retry: true }, ...statsRows(f, '', n)]
     if (!f.tasks && !Object.keys(f).some(k => !['ts', 'until', 'settings', 'tasks'].includes(k)))
       return [{ label: '', text: 'No finished tasks yet: delegate one with /workbench, and how it went shows here.', empty: true }]
     const out = []
@@ -240,7 +240,16 @@
     const dl = el('dl', 'st-rows')
     const head = []
     for (const r of rows) {
-      if (!r.label) { head.push(el('p', `small${r.stale ? ' st-note' : ''}${r.empty ? ' st-empty' : ''}`, r.text)); continue }
+      if (!r.label) {
+        head.push(el('p', `small${r.stale ? ' st-note' : ''}${r.empty ? ' st-empty' : ''}`, r.text))
+        if (r.retry) {  // the line back, and nothing has said so (#1412)
+          const again = el('button', 'plain st-retry', 'Try again')
+          again.type = 'button'
+          again.addEventListener('click', loadStats)
+          head.push(again)
+        }
+        continue
+      }
       const dd = el('dd', '')
       dd.append(r.text)
       if (r.trend) dd.append(sparkline(r.trend, 0, `${r.label}: its writing speed over its last tasks`))

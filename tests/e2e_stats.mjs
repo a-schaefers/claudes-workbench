@@ -41,6 +41,7 @@ export async function check(page, { desktop, home, wb, until, check, sleep, goTo
     const enc = new TextEncoder()
     window.fetch = async (u, o = {}) => {
       const path = new URL(String(u), location.href).pathname
+      if (path === '/api/stats' && top.statsDown) throw new TypeError('Failed to fetch')   // out of reach (#1412)
       if (path === '/api/stats' && !real) return new Response(JSON.stringify({ feed: JSON.parse(await window.e2eFeed()), routes: null, models: null }),
         { status: 200, headers: { 'Content-Type': 'application/json' } })
       if (path !== '/api/top') return realFetch(u, o)
@@ -95,6 +96,20 @@ export async function check(page, { desktop, home, wb, until, check, sleep, goTo
       for (let i = 1; i < got.length; i++) if (rank(got[i].label) < rank(got[i - 1].label)) throw new Error('out of order: ' + say())
       // #1322: no score, saving, streak or 30 days (the feed has none of them)
       if (got.some(r => /^(Streak|Last 30 days|Bests|Milestone|Questions)$/.test(r.label)) || /score|estimate/.test(say())) throw new Error(say())
+    })
+
+    await check('Stats shown while the computer is out of reach says so with Try again, and reads again once the network is back, with no tab switch (#1412)', async () => {
+      // #1412 (2026-11-25): shown before the line was back, as a phone waking, it stayed "Not
+      // updated" or "History unavailable" until a tab switch or the next minute's read
+      await page.evaluate(() => { window.e2eTop.statsDown = true })
+      try {
+        await again()
+        await until(async () => /Not updated: Failed to fetch/.test(await history()))
+        if (!(await page.locator('#stats-body .st-retry').isVisible())) throw new Error('no Try again: ' + await history())
+      } finally { await page.evaluate(() => { window.e2eTop.statsDown = false }) }
+      await page.evaluate(() => dispatchEvent(new Event('online')))
+      await until(async () => !/Not updated/.test(await history()), 10000).catch(async () => { throw new Error(await history()) })
+      if (await page.locator('#stats-body .st-retry').count()) throw new Error('Try again stays')
     })
 
     await check('Stats: the live stream opens when Stats is shown with Live view on, and closes on leaving it', async () => {

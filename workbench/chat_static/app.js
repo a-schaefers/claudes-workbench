@@ -643,7 +643,7 @@
           }
           if ((event === 'state' || event === 'patch') && data) {
             try { event === 'state' ? apply(JSON.parse(data)) : applyPatch(JSON.parse(data)) } catch {}
-            if (failures) { failures = 0; banner('') }
+            if (failures) { failures = 0; banner(''); reshowView() }
             flush()
           }
         }
@@ -680,7 +680,7 @@
   }
   // another tab queued, sent or dropped a message: show it, and send it if this tab can
   addEventListener('storage', e => { if (e.key === null || e.key.startsWith(OUT)) { outbox = outItems(); render(); flush(true) } })
-  addEventListener('online', () => { online = true; banner(''); reconnectNow(); flush(true); render() })
+  addEventListener('online', () => { online = true; banner(''); reconnectNow(); flush(true); render(); reshowView() })
   addEventListener('offline', () => { online = false; banner('Offline. Messages will send when the connection is back.', true); render() })
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
@@ -1414,6 +1414,10 @@
   const call = (v, fn, ...a) => { try { v.mod[fn] && v.mod[fn](...a) } catch (e) { console.error(e) } }
   const modShow = name => { const v = mods.get(name); if (v && !v.shown && !document.hidden) { v.shown = true; call(v, 'show') } }
   const modHide = name => { const v = mods.get(name); if (v && v.shown) { v.shown = false; call(v, 'hide') } }
+  // The view shown read again once the line is back (the network, or the stream after a failure):
+  // Settings or Stats opened before it was, as a phone waking does, said it couldn't load until a
+  // tab switch (#1412, 2026-11-25)
+  function reshowView() { const v = mods.get(curView); if (v && v.shown) call(v, 'show') }
   function drawShown() {  // what the old sheet drew while open, for the view that shows it
     if (curView === 'settings') drawSettings()
     else if (curView === 'stats') drawSaved()

@@ -27,5 +27,6 @@
 .view-in .plain.set-off[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 .set-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
 .view-in .set-actions .plain:disabled { opacity: .55; cursor: default; }
+.view-in .set-retry { align-self: flex-start; margin-top: 8px; }
 /* a group's name over its rows' names: the serif of the page's own title */
 .view-in .set-card > h3 { margin-bottom: 2px; font: 600 16px/1.3 var(--serif); letter-spacing: .01em; }
