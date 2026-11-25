@@ -69,7 +69,9 @@ claude plugin install workbench@workbench
 With `CLAUDE_CODE_PLUGIN_CACHE_DIR` set, Claude Code keeps the clone under it instead: run
 `bin/wb setup` in `"$CLAUDE_CODE_PLUGIN_CACHE_DIR"/marketplaces/workbench`.
 
-`wb setup` also starts the web app; its link is on the pane's modeline.
+`wb setup` also starts the web app; its link is on the pane's modeline. From it you message your
+driver from anywhere and most work runs there; a prompt the driver raises waits in its terminal
+(ssh + tmux) unless it runs with permissions granted, and your settings live there too.
 
 ### In Claude Code, inside your project
 

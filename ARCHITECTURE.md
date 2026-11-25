@@ -5340,6 +5340,13 @@ dialogs, push notifications (installable and notifying over https only: `tailsca
 on`): `chat.ensure` brings it up, `wb setup` installs its service, `wb doctor` says whether it
 answers; `wb chat off` (or the pane's Settings row) turns it off, and that choice is kept.
 
+**What it's for** (#1341; the owner, 2026-11-24): message the driver from anywhere, and most work
+can run from here; a prompt the driver raises waits in its terminal (ssh + tmux) unless the driver
+runs with permissions granted, and the settings live here too. The empty state (`#intro`) says so,
+and over a thread the same words are a hint (`#hint`, copied from the intro's) until dismissed on
+that device (`localStorage` `wb-chat-hint`, read and written in try/catch: a storage that throws
+shows it on each open). It says "the driver", not Claude, for the OpenCode path too.
+
 **Keeping it up.** One `chat._Server` per bound address, binding without HTTPServer's host-name
 lookup (it stalled macOS, #236). `systemd/wb-chat.service`: a user unit, `Restart=always`, no start
 limit, `RestartSteps` 10 s to 5 min (retrying is what brings it up when an address arrives late; a
@@ -5690,7 +5697,7 @@ address (#534).
 
 **The page** (`chat_static/`; no inline script, for the CSP). The token comes from the fragment (or
 `?token=`) into `localStorage` `wb-chat-token` and leaves the address bar before anything else reads the hash (other keys: `wb-chat-thread`, the
-  last 50 for a reload; `wb-chat-seen`, 500 ids not replayed; `wb-chat-draft`, `wb-chat-about`); over https the manifest
+  last 50 for a reload; `wb-chat-seen`, 500 ids not replayed; `wb-chat-draft`, `wb-chat-about`, `wb-chat-hint`); over https the manifest
 link carries `?k=<token>`, since an iPhone app has its own storage. The stream is a `fetch` with the
 bearer header (EventSource can't send one): each connection starts with a whole state, patches
 merge by id (`merge`), and a POST reply or `/api/state` older than the newest state's `now`
@@ -5721,7 +5728,7 @@ models: 6 tasks, ≈$1.27 (DeepSeek ≈$0.84, Anthropic ≈$0.43; catalog prices
 off localhost the page isn't a secure context: own ids, `copyText` (#745), no install or push.
 
 **The shell** (#1284; the owner, 2026-11-24: merecatholicity.com's three buttons at the foot). Three
-views, `<section id="view-chat">` (the strip `#tasks`, `main#scroll`, `#jump`, `#about`, `#tray`,
+views, `<section id="view-chat">` (the strip `#tasks`, `#hint`, `main#scroll`, `#jump`, `#about`, `#tray`,
 `#composer`), `#view-stats` and `#view-settings`; `body[data-view]` shows one. The hash is the route:
 `#chat`, `#stats`, `#settings`, anything else (none too) the chat; `hashchange` switches (`setView`;
 a tab's press sets the hash, `go`), so Back walks them and a reload keeps its view. `<nav
@@ -7348,7 +7355,9 @@ group; a number's Enter and Off; `help`'s toast; the layout at the phone's width
 `fetch` wrapper to a binding (`__wbSettings`), never `page.route`: the page is its service worker's client, and
 WebKit sends such a page's fetches past Playwright's routes. While the server answers that path 404, a stand-in
 answers from `settings.rows()` and `settings.apply()` on the run's `WB_HOME`, with #1280's shapes and statuses, so
-the click still runs the real wb. Sends land exactly once through
+the click still runs the real wb. What the chat is for (#1341): the empty state's words and no hint over it; over a
+thread the hint shows, dismisses, and stays dismissed after a reload, and where every storage call throws it still
+shows and dismisses with no page error. Sends land exactly once through
 outages, reloads and a SIGSTOP past the 40 s watchdog; cards, plans, settings, install over https, `/api/seen` and
 `/api/active` only while in use, notices, shot pairs, listen's shortlist, the keyboard, uploads, an agent's message
 shown with its name and its reply through `/api/wait`, that reply named `Claude to <agent>` and

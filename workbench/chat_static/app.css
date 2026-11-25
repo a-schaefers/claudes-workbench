@@ -132,6 +132,14 @@ body.kb-open #tabbar { display: none; }
 }
 .tasks[hidden] { display: none; }
 
+/* what the chat is for, over a thread until dismissed on this device (#1341): a hint, not a warning */
+.purpose { display: flex; align-items: flex-start; gap: 6px; max-width: 760px; width: 100%; margin: 0 auto;
+  padding: 6px 8px 6px 16px; font-size: 13px; line-height: 1.4; color: var(--dim); }
+.purpose p { margin: 0; flex: 1; padding-top: 4px; }
+.purpose code { font: 12px var(--mono); }
+.purpose button { flex: none; min-width: 36px; min-height: 36px; font: inherit; color: var(--dim); background: none; border: 0; cursor: pointer; }
+.purpose[hidden] { display: none; }
+
 /* thread */
 main { flex: 1; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 .thread { max-width: 760px; margin: 0 auto; padding: 18px max(16px, env(safe-area-inset-right)) 12px max(16px, env(safe-area-inset-left));

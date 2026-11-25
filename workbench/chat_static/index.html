@@ -29,12 +29,17 @@
 <div class="net" id="net" hidden></div>
 <section class="view" id="view-chat" aria-label="Chat">
   <div class="tasks" id="tasks" hidden></div>
+  <div class="purpose" id="hint" hidden>
+    <p id="hint-text"></p>
+    <button id="hint-x" type="button" aria-label="Dismiss this hint">✕</button>
+  </div>
   <main id="scroll" aria-live="polite" aria-relevant="additions">
     <div class="thread" id="thread">
       <div class="intro" id="intro">
         <div class="intro-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="/icon.svg#spark"/></svg></div>
-        <p>A second lane to Claude in your terminal, while <code>/workbench</code> runs there: what you send
-        reaches it, and it answers here with what matters, including what it needs from you while you're away.</p>
+        <p>Message your driver from anywhere: most work can run from here. A prompt the driver raises
+        waits in its terminal (<code>ssh</code> + <code>tmux</code>); run the driver with permissions granted to skip those.
+        Your settings live here too.</p>
         <div class="chips"><button class="chip" type="button">Status?</button><button class="chip" type="button">What needs me?</button><button class="chip" type="button">What are you working on?</button></div>
       </div>
     </div>
