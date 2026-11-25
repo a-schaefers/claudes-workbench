@@ -86,8 +86,7 @@ directing for you.
 
 ## Contributing
 
-Fixes are welcome: [CONTRIBUTING.md](CONTRIBUTING.md). No GitHub account? `wb patch zip` makes a
-.zip of your patch; email it to adam.schaefers@icloud.com.
+Fixes are welcome: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

@@ -6893,6 +6893,30 @@ class Context(Base):
         self.assertIn("fresh session: the task, the work so far",  # the fake's export is fixed,
                       transcript._user_message(p, False)[0])      # so read the head directly
 
+    def test_every_round_names_wbs_own_agent_and_the_config_makes_it_afresh(self):
+        # #1290 (2026-11-24): `opencode run` without --agent ran the user's default_agent, whose
+        # rules lifted the layer's denies. The first round, a fresh session and a continued one
+        # all name wb's agent; the layer removes a user's agent by its name, and the content,
+        # loaded after it, makes it again (the fake, like OpenCode, refuses one never made)
+        self.start("t-agent", "fill", "--test", TEST_CMD)      # round 1, then a fresh session
+        wait_phase("t-agent", {"review"}, timeout=60)
+        run_wb("feedback", "t-agent", "--message", str(self.feedback))    # a continued session
+        wait_phase("t-agent", {"review"})
+        runs = self.runs()
+        self.assertFalse(runs[1]["session"])
+        self.assertTrue(any(r["session"] for r in runs))
+        self.assertEqual({r["agent"] for r in runs}, {context.AGENT})
+        theirs = {"default_agent": "mine", "agents": {context.AGENT: {"system": "theirs"}},
+                  "agent": {context.AGENT: {"prompt": "theirs"}}, "theme": "dark"}
+        with mock.patch.object(runner.models, "users_config_content", return_value=theirs):
+            env = runner.agent_env(store.Task("t-agent"))
+        self.assertEqual(json.loads(Path(env["OPENCODE_CONFIG"]).read_text())["agents"],
+                         {context.AGENT: {"disabled": True}})
+        content = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(content["agents"], context.AGENT_ENTRY)  # theirs by that name never merged
+        self.assertNotIn("agent", content)
+        self.assertEqual(content["theme"], "dark")
+
     def test_a_session_filling_mid_round_hands_over_at_once(self):
         """The runner, not OpenCode's own summary, decides what a filling session keeps. The
         fake's full step is 58% of the window without its reasoning tokens: counted as OpenCode
@@ -9274,6 +9298,37 @@ class Watch(Base):
                 run_wb("watch", "t-handed", "--json")
         self.assertEqual(sorted(exported), ["ses_new"] * 3 + ["ses_old1", "ses_old2"])
 
+    def test_an_agent_switch_in_the_export_is_no_message_to_any_reader(self):
+        # #1290 (2026-11-24, OpenCode 2.3.2): every round's `--agent wb-code` puts an
+        # `agent-switched` message ahead of its prompt, the session's first and one per later
+        # round, with no tokens, text or cost; each reader goes by type, so none counts it
+        from workbench import results, router
+        t = store.Task("t-switch")
+        store.write_json(t.dir / "task.json", {"name": "t-switch", "created_at": store.now()})
+        t.set_status(phase="review", round=2, session="ses_s", window=32768)
+        switch = lambda at: {"type": "agent-switched", "id": f"m{at}", "time": {"created": at},  # noqa: E731
+                             "agent": context.AGENT, "previous": context.AGENT}
+        said = lambda at, text, n: {"type": "assistant", "id": f"a{at}", "agent": context.AGENT,  # noqa: E731
+                                    "finish": "stop", "cost": 0.5,
+                                    "time": {"created": at, "firstToken": at + 600, "completed": at + 2000},
+                                    "tokens": {"input": n, "output": 200, "reasoning": 0,
+                                               "cache": {"read": 0, "write": 0}},
+                                    "content": [{"type": "text", "text": text}]}
+        data = {"info": {"id": "ses_s"}, "messages": [
+            switch(1000), {"type": "user", "id": "u1", "time": {"created": 1100}, "text": "Round one."},
+            said(1200, "First.", 2000), {"type": "idle", "id": "i1", "time": {"created": 3300}},
+            switch(4000), {"type": "user", "id": "u2", "time": {"created": 4100}, "text": "Round two."},
+            said(4200, "Second.", 3000), {"type": "idle", "id": "i2", "time": {"created": 6300}}]}
+        with mock.patch.object(transcript, "export", lambda sid, strict=False, task=None: data):
+            self.assertEqual(runner.last_words(t, "ses_s"), "Second.")  # a handover's last words
+            self.assertEqual(runner.context_state(t)["used"], 3200)     # the last step's context
+        self.assertEqual(transcript.context_fill(data), 3200)
+        self.assertEqual(results._session_cost(data), 1.0)
+        self.assertEqual(router.speed_samples(data["messages"])["ttft"], [0.6, 0.6])
+        shown = transcript.session_entries(data, "", False)
+        self.assertEqual([e.key for e in shown if not e.key.startswith("a")], ["u1", "u2"])
+        self.assertNotIn("agent-switched", json.dumps([e.lines for e in shown]))
+
     def test_every_event_kind_with_readable_text_shows_in_wb_watch(self):
         # #846: reading_full, resumed, spec_gap and coding had no branch in task_entries, so a
         # session growing into compaction, a resume or the user's allowance left no line
@@ -11119,7 +11174,8 @@ class RealOpenCode(Base):
                                "limit": {"context": 32768, "output": 1024}}}}}
         layer_path.write_text(json.dumps(layer))
         time.sleep(0.5)
-        cmd = ["opencode", "run", "--standalone", "-m", "cap/cap", "--auto", "--format", "json", "go"]
+        cmd = ["opencode", "run", "--standalone", "--agent", context.AGENT, "-m", "cap/cap", "--auto",
+               "--format", "json", "go"]                           # the runner's argv (#1290)
         if in_lane:
             cmd = lane.wrap(context.writable(task), cmd)
         subprocess.run(cmd, cwd=task.worktree, env=env, capture_output=True, timeout=180)
@@ -11582,7 +11638,11 @@ class RealOpenCodeRun(Base):
                         steps)                                     # step_finish: part.tokens
         self.assertIn("ok", [r["text"] for r in rows if r.get("kind") == "text"])
         msgs = transcript.export(st["session"], task=task).get("messages", [])  # its home (#1010)
-        self.assertEqual([m["type"] for m in msgs][:1], ["user"])
+        # --agent (#1290) records an agent switch ahead of each round's prompt, to the agent the
+        # session already had too; every reader goes by a message's type, never its place
+        self.assertEqual([(m["type"], m.get("agent")) for m in msgs][:2],
+                         [("agent-switched", context.AGENT), ("user", None)])
+        self.assertEqual({m.get("agent") for m in msgs if m["type"] == "assistant"}, {context.AGENT})
         self.assertTrue(runner.context_state(task)["used"])        # an assistant message's tokens
         self.assertEqual(transcript.find_session(task), st["session"])  # session list, by title
         task.set_status(session=None)
@@ -11601,6 +11661,30 @@ class RealOpenCodeRun(Base):
         text = json.dumps(agent["messages"])
         self.assertIn("Write the answer to answer.txt", text)
         self.assertIn("Now say done.", text)
+
+    def test_neither_the_users_default_agent_nor_their_own_wb_code_lifts_a_deny_in_any_round(self):
+        # #1290 (2026-11-24, OpenCode 2.3.2): with no --agent, `opencode run` took the agent from
+        # the user's global default_agent, whose own rules come after the layer's, so webfetch
+        # and subagent reached every wb agent; and a user's own `wb-code` loads before the layer,
+        # its system and rules kept. The runner names wb's agent; the layer removes theirs, the
+        # content makes it afresh. A continued session (--session) is switched to it too
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        lift = [{"action": t, "resource": "*", "effect": "allow"} for t in ("webfetch", "subagent")]
+        conf.write_text(json.dumps({**json.loads(conf.read_text()), "default_agent": "mine", "agents": {
+            "mine": {"mode": "primary", "system": "CANARY-1290-MINE", "permissions": lift},
+            context.AGENT: {"mode": "subagent", "system": "CANARY-1290-OWN", "permissions": lift}}}))
+        task, st = self.answered([WRITE_42])
+        run_wb("feedback", "t-run", "--text", "Now say done.")
+        st = wait_phase("t-run", {"review", "stuck", "failed"}, timeout=180)
+        self.assertEqual(st["phase"], "review", (task.dir / "runner.log").read_text())
+        asked = [json.loads(x) for x in self.requests.read_text().splitlines()]
+        asked = [r for r in asked if r.get("tools")]
+        self.assertTrue(any("Now say done." in json.dumps(r["messages"]) for r in asked))  # round 2's
+        for r in asked:
+            tools = {t["function"]["name"] for t in r["tools"]}
+            self.assertTrue({"write", "shell", "workbench_ask_reviewer"} <= tools, tools)
+            self.assertFalse({"webfetch", "subagent"} & tools, tools)
+            self.assertNotIn("CANARY-1290", json.dumps(r["messages"]))
 
     def test_a_real_tool_use_event_carries_the_output_the_compaction_check_counts(self):
         # #1086: run_round counts each tool result's `part.state.output` (bytes / 4) toward the
@@ -11660,7 +11744,7 @@ class RealOpenCodeRun(Base):
         self.assertIs(st["opencode_home"], True)
         self.assertTrue((task.dir / "opencode/share/opencode/opencode.db").is_file())
         got = transcript.export(st["session"], task=task)
-        self.assertEqual([m["type"] for m in got.get("messages", [])][:1], ["user"])
+        self.assertEqual([m["type"] for m in got.get("messages", [])][:2], ["agent-switched", "user"])
         self.assertTrue(runner.context_state(task)["used"])
         task.set_status(session=None)
         self.assertEqual(transcript.find_session(task), st["session"])  # by title, there
@@ -25395,6 +25479,13 @@ class ConfigWrites(Base):
 class DiskRoom(Base):
     """#342 (the audit of 1.4): nothing watched the disk, and a full one wedged every task."""
     @staticmethod
+    def BUG(*_, **__):
+        """A fresh crash per call: one RuntimeError instance given as side_effect keeps its
+        traceback, so the in-process runner's frame, and its open runner lock, outlived main(),
+        and the next runner.main() said "another runner drives t-full" (#1293's CI, 2026-11-24)."""
+        raise RuntimeError("a bug")
+
+    @staticmethod
     def FULL(*_, **__):
         # a fresh one each time: one shared instance kept its traceback, and with it the frame
         # of the runner.main() that raised it, holding the runner's lock
@@ -25625,7 +25716,7 @@ class DiskRoom(Base):
         # a plain crash keeps no cause: a bug in the runner, which the failed wake's text covers
         task.set_status(phase="review")
         with mock.patch.object(sys, "argv", ["runner", "t-full"]), \
-                mock.patch.object(runner, "drive", side_effect=RuntimeError("a bug")):
+                mock.patch.object(runner, "drive", side_effect=self.BUG):
             runner.main()
         note = [r for r in store.notices() if r["task"] == "t-full"][-1]
         self.assertIn("the runner crashed", note["text"])
