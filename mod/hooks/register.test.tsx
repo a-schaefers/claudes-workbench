@@ -5681,6 +5681,7 @@ function routeWorld(on: any, files: Record<string, string>) {
   const w = {
     asked: [] as string[], options: [] as string[][], answer: "Don't" as string | null, dry: [] as string[][], dryAt: [] as string[], code: 0,
     reply: { change: ROUTE_LINE, gate: true, approval: { argv: ROUTE_ARGV, change: ROUTE_LINE } } as Record<string, unknown>,
+    replyFor: {} as Record<string, Record<string, unknown>>,  // one dry run's own reply, by its argv joined with spaces
   }
   on('session.cwd', () => ({ value: '/home/u/project' }))
   on('ui.toast', () => ({ value: undefined }))
@@ -5690,7 +5691,8 @@ function routeWorld(on: any, files: Record<string, string>) {
     if ((e.argv[1] === 'route' && e.argv[2] === '--dry-run') || (e.argv[1] === 'settings' && e.argv.includes('--dry-run'))) {
       w.dry.push(e.argv.slice(1))
       w.dryAt.push(e.init?.cwd || '/home/u/project') // absent: the session's
-      return { value: { exitCode: w.code, stdout: w.code ? '' : JSON.stringify(w.reply), stderr: w.code ? 'wb: no day cap yet' : '' } }
+      const reply = w.replyFor[e.argv.slice(1).join(' ')] ?? w.reply
+      return { value: { exitCode: w.code, stdout: w.code ? '' : JSON.stringify(reply), stderr: w.code ? 'wb: no day cap yet' : '' } }
     }
     return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
   })
@@ -5863,6 +5865,25 @@ test('#1287: wb settings set on a role row asks in the dialog with its dry run\'
   }
   expect((await bash('bash <<EOF\nwb settings set role-trivial api\nEOF')).deny).toContain('as a command of its own')
   expect(routeCalls('wb settings set cap 5').calls).toEqual([['--settings', 'cap', '5']])
+  await clock.advance(1000)
+})
+
+test('#1287: two Settings rows nothing gates pass in one line; a gated one beside another call is refused unasked', async ($, on) => {
+  // the review of #1287 (2026-11-24): two ungated rows in one Bash call were refused before any
+  // dry run, though only what wb route gates waits for the dialog
+  const { clock, bash, w } = await routeProbe($, on)
+  const dry = (key: string, value: string) => ['settings', 'set', key, value, '--dry-run', '--json']
+  w.reply = { change: '', gate: false }
+  expect(await bash('wb settings set coding ask && wb settings set splash off')).toEqual({ deny: undefined, asked: 0,
+    question: '', dry: [dry('coding', 'ask'), dry('splash', 'off')] })
+  const line = 'significant: GPU → API deepseek/deepseek-flash · your code goes to DeepSeek · thinking off'
+  w.replyFor[dry('role-significant', 'api').join(' ')] = { change: line, gate: true, approval: { argv: ['route', 'significant', 'api'], change: line } }
+  for (const command of ['wb settings set coding ask && wb settings set role-significant api',
+    'wb settings set role-significant api; wb route significant --gpu qwen']) {
+    const r = await bash(command)
+    expect([command, r.asked, r.deny]).toEqual([command, 0, expect.stringContaining('as a command of its own')])
+  }
+  expect((await bash('wb settings set role-significant api')).asked).toBe(1)  // alone, the dialog asks
   await clock.advance(1000)
 })
 

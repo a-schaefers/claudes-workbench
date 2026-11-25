@@ -1846,6 +1846,29 @@ async function routesFileRefusal($: any, path: string): Promise<string> {
   return real !== abs && (await Promise.all(gated.map(g => realPath($, g)))).includes(real) ? ROUTES_EDIT : ''
 }
 
+// A call's dry run when it prints a gated change (its `change` line and `approval`), else null: a
+// GPU model pin or nothing gated, a refusal (wb refuses the change itself, saying why), or no dry
+// run (wb itself refuses a gated change under Claude Code without route-ok.json)
+async function routeDry($: any, args: string[], cwd: string): Promise<Row | null> {
+  try {
+    // a start's in the directory it runs in: wb start's --repo is `.` unless given (#1125). Only a
+    // start's (wb route doesn't read its directory), and only one that exists: a directory the
+    // line makes (`mkdir x && cd x`) failed the dry run to spawn, and the call skipped the
+    // dialog; the session's is the better guess (the review of #1125, 2026-11-23)
+    const there = args[0] === '--start' && cwd && await $.fs.exists(cwd).catch(() => false) ? { cwd } : {}
+    // a Settings row's (#1287): `wb settings set <key> <value> --dry-run --json` is its wb route's
+    // dry run, or no gate for a row that isn't a role's
+    const dry = args[0] === '--settings' ? ['settings', 'set', ...args.slice(1), '--dry-run', '--json']
+      : ['route', '--dry-run', '--json', ...args]
+    const r = await $.process.run([mem.wb, ...dry], { timeoutMs: 60_000, ...there })
+    if (r.exitCode !== 0) return null
+    const q = JSON.parse(String(r.stdout ?? ''))
+    return q?.gate && typeof q.change === 'string' && q.change ? q : null
+  } catch {
+    return null
+  }
+}
+
 // The deny for a Bash or Monitor command that changes a role, or starts a task on an API model,
 // without the user's yes in the dialog now, else ''
 async function routeRefusal($: any, e: Row): Promise<string> {
@@ -1861,26 +1884,17 @@ async function routeRefusal($: any, e: Row): Promise<string> {
   const live = calls.flatMap((c, i) => !c.includes('--dry-run') && (c[0] === '--start' || c.some(a => a !== '--json'))
     ? [{ args: c, cwd: at[i] }] : [])
   if (!live.length) return ''
-  if (live.length > 1) return ROUTE_OWN
-  let q: Row
-  try {
-    // a start's in the directory it runs in: wb start's --repo is `.` unless given (#1125). Only a
-    // start's (wb route doesn't read its directory), and only one that exists: a directory the
-    // line makes (`mkdir x && cd x`) failed the dry run to spawn, and the call skipped the
-    // dialog; the session's is the better guess (the review of #1125, 2026-11-23)
-    const { args, cwd } = live[0]!
-    const there = args[0] === '--start' && cwd && await $.fs.exists(cwd).catch(() => false) ? { cwd } : {}
-    // a Settings row's (#1287): `wb settings set <key> <value> --dry-run --json` is its wb route's
-    // dry run, or no gate for a row that isn't a role's
-    const dry = args[0] === '--settings' ? ['settings', 'set', ...args.slice(1), '--dry-run', '--json']
-      : ['route', '--dry-run', '--json', ...args]
-    const r = await $.process.run([mem.wb, ...dry], { timeoutMs: 60_000, ...there })
-    if (r.exitCode !== 0) return '' // wb refuses it itself, saying why
-    q = JSON.parse(String(r.stdout ?? ''))
-  } catch {
-    return '' // no dry run: wb itself refuses the change under Claude Code without route-ok.json
+  // each call's dry run: only a gated change needs a call of its own. Two Settings rows nothing
+  // gates (`coding ask` and `splash off` in one line) were refused unasked, though only what
+  // wb route gates waits for the dialog (the review of #1287, 2026-11-24)
+  const gated: Row[] = []
+  for (const { args, cwd } of live) {
+    const q = await routeDry($, args, cwd)
+    if (q) gated.push(q)
   }
-  if (!q?.gate || typeof q.change !== 'string' || !q.change) return '' // a GPU model pin, or nothing
+  if (!gated.length) return '' // a GPU model pin, nothing, or wb refuses it itself
+  if (live.length > 1) return ROUTE_OWN // a gated change beside another call: the dialog shows one
+  const q = gated[0]!
   if (await away($, await read($, chat))) return NOT_CHANGED_AWAY // the dialog would wait at an empty terminal
   const said = await $.ui.ask(q.change, [ROUTE_ALLOW, "Don't"]).catch(() => '')
   if (said !== ROUTE_ALLOW) return NOT_CHANGED

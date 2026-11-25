@@ -6388,7 +6388,7 @@ atom.
 commands, read as above (`runsIn`: `simpleCommands`, `bash -c` and `eval` inside; `wbArgs`), each `wb route …` and each
 `wb start … --m…` (any abbreviation of `--model`) is a call (`routeCalls`), and each `wb settings set …` (#1287, a
 `--settings` call); a show (`wb route`, `--json`) and a dry run
-change nothing. For the one call, the mod runs `wb route --dry-run --json <its args>` (a start's as `--start <wb start's
+change nothing. For each call, one after another (`routeDry`), the mod runs `wb route --dry-run --json <its args>` (a start's as `--start <wb start's
 args>`, parsed there by wb start's own parser: the task's name and an abbreviated `--model` as wb takes them; a
 Settings row's as `wb settings set <key> <value> --dry-run --json`, `settings.dry_run`: its row's own dry run, or
 nothing gated for a row that isn't a role's), 60 s,
@@ -6405,7 +6405,8 @@ what you'd change; they approve it in the dialog once back.`); at the terminal `
 change}` or `{start: {task, model}, change}`) and lets the call through; anything else denies (`NOT_CHANGED`:
 `workbench: not changed: the user did not approve it in the dialog. Tell them it was not changed; ask again only if
 they ask for it.`). Refused without asking (`ROUTE_OWN`, `run wb route (or wb start --model) as a command of its own`):
-two calls in one line, and one inside text another program runs (`ROUTE_TEXT`, with a `RUNS_CODE` program in the
+a gated call beside another call in one line (calls nothing gates pass together: two ungated Settings rows in one
+Bash call were refused before any dry run, the review of #1287), and one inside text another program runs (`ROUTE_TEXT`, with a `RUNS_CODE` program in the
 line). The file tools (`EDIT_TOOLS`) on routes.json (`routesPath`: `WB_ROUTES`, else `~/.config/workbench/routes.json`,
 by real path too) or `$WB_HOME/route-ok.json` are denied (`routesFileRefusal`, `ROUTES_EDIT`), and so is a command
 naming `route-ok.json` with the state directory (as written, through `~`, or `$WB_HOME`: `ROUTE_OK_OWN`); a `grep` for
