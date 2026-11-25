@@ -1062,6 +1062,25 @@ def pending_steer(task: store.Task) -> list[dict]:
     return rows[task.status.get("steer_taken", 0):]
 
 
+# What a smaller step's note says first (wb steer --step, #95), and what the runner knows it by.
+STEP_NOTE = ("A smaller step: do only this now, then stop and report; the rest of the task waits "
+             "for the next step.\n\n")
+# Why a round after a smaller step's note gets no auto-fix and no self-review: the acceptance
+# command still tests the whole task, so each auto-fix round told an agent that did only the part
+# "the bug is in this change", sending it on to the rest Claude said should wait, then to review
+# as auto-fix 2/2, tests FAIL (#1300, bar loop round 8, 2026-11-24). Not `THEN_FEEDBACK`'s words:
+# the feedback after it carries the step on, not the environment.
+STEP_SKIP = ("a smaller step (wb steer --step): the acceptance command may test the whole task, "
+             "which waits for the next step; review the part done and send the rest with wb "
+             "feedback (no review round counted)")
+
+
+def step_noted(notes: list[dict]) -> dict:
+    """Status for ``notes`` as they are delivered: `step_note` when one is a smaller step's
+    (STEP_NOTE), which holds until Claude's next wb feedback or wb next (#1300)."""
+    return {"step_note": True} if any(r.get("text", "").startswith(STEP_NOTE) for r in notes) else {}
+
+
 def steer_prompt(notes: list[dict], interrupted: bool) -> str:
     body = "\n\n".join(r["text"].strip() for r in notes)
     if interrupted:
@@ -1912,6 +1931,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             elif row["kind"] == "step":
                 if spend:
                     spend.step(raw.get("part") or {})  # the ledger, before the guard below
+                    _cap_go_past(task)  # past its first request: the next waiter's turn (#1304)
                 out["tok_in"] += row["in"]
                 out["tok_out"] += row["out"]
                 used = row["in"] + row.get("cache", 0) + row["out"] + row.get("reasoning", 0)  # #644
@@ -2174,6 +2194,11 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
 # only its first KEEP_HEAD and last KEEP_TAIL bytes are kept, for tests.txt and the tail.
 TEST_OUTPUT_CAP = 20 << 20
 KEEP_HEAD, KEEP_TAIL = 64 << 10, 256 << 10
+# A run stopped there has no verdict: a passing but verbose suite (Maven's console logging,
+# `pytest -s`) went back through both auto-fix rounds as "the bug is in this change", the base
+# check silent, nothing saying how to get under the cap (#1301, bar round 8, 2026-11-24).
+OUTPUT_CAPPED = f"the acceptance command's output passed {TEST_OUTPUT_CAP >> 20} MB, where wb stops it"
+QUIET_IT = "quiet it (-q, less logging) or narrow it"
 
 
 class _Capture(threading.Thread):
@@ -4054,6 +4079,9 @@ def base_check_line(r: dict, task: store.Task) -> str:
         return (f"note: the acceptance command ran past {limit}s on the base; not checked"
                 + (f". If it runs that long, a round's run may pass --test-timeout ({full}s) too: "
                    "raise it for a slow suite" if full > limit else ""))
+    if r["exit"] == "output limit":  # every round's run will stop there too (#1301)
+        return (f"warning: on the base {OUTPUT_CAPPED}, so every round's tests will stop there "
+                f"too: {QUIET_IT} (wb discard, then start again)")
     if line := missing_command(r, task):  # every round's tests will fail so too (#1152, 2026-11-24)
         return (f"warning: the acceptance command can't run in the agent's environment: {line} "
                 f"(exit {r['exit']} on the base), so every round's tests will fail the same way; {GIVE_TOOL}")
@@ -4221,8 +4249,10 @@ def _base_check(task: store.Task) -> None:
     # an API task waits on no GPU: drive's "starting" stood until here (#1112, 2026-11-23)
     task.set_status(base_check=r, last="waiting for the GPU" if _gpu_side(task) else "starting")
     # every round's tests will too: a cut-short run, or a command the agent's environment lacks
-    # (#1152, 2026-11-24: round 1 and both auto-fix rounds ran first, told the bug was the change's)
-    if r["exit"] == "timeout" and r["limit"] < BASE_CHECK_SECS or missing_command(r, task):
+    # (#1152, 2026-11-24: round 1 and both auto-fix rounds ran first, told the bug was the change's),
+    # or output past TEST_OUTPUT_CAP, the same cap in every run (#1301)
+    if r["exit"] == "timeout" and r["limit"] < BASE_CHECK_SECS or r["exit"] == "output limit" \
+            or missing_command(r, task):
         task.notify("checkin", f"task {task.name}: {base_check_line(r, task)}",
                     round=task.status.get("round", 1))
 
@@ -4759,8 +4789,9 @@ def not_the_code(task: store.Task, tests) -> str:
     and the agent edited code that may well have been right, nothing naming the limit; a device
     the lane refused (lane_refused, #331) was named only after both auto-fix rounds, and so was a
     command the agent's environment lacks (missing_command, #1152; a Python module, #1181; one a
-    later step's --test names, #1172, or one a failing base check never reached, #1208). The
-    part before the first colon is the cause, for status.last. "" when the failure may be the
+    later step's --test names, #1172, or one a failing base check never reached, #1208), and a
+    run stopped at TEST_OUTPUT_CAP went back as the change's bug too (#1301). The part before
+    the first colon is the cause, for status.last. "" when the failure may be the
     code's (a dropped proxy may be either: its auto-fix prompt says so, auto_fix_prompt)."""
     if not tests or tests["ok"]:
         return ""
@@ -4771,6 +4802,11 @@ def not_the_code(task: store.Task, tests) -> str:
                 "start a slow suite's task with a larger --test-timeout")
     base = task.status.get("base_check") or {}
     cmd = task.spec.get("test_cmd")
+    if tests["exit"] == "output limit" and not (base.get("ok") and base.get("cmd") == cmd):
+        # #1301: unless the base check passed this same command, under the cap: then the
+        # flood is the change's (a print in a retry loop, the 2026-11-16 audit), as a hang is
+        return (f"{OUTPUT_CAPPED}: its failure says nothing about the change; run it in the "
+                f"worktree yourself, or {QUIET_IT} (wb next --test)")
     if (line := missing_command(tests, task)) and base.get("cmd") == cmd \
             and _missing_key(line) == _missing_key(missing_command(base, task)):
         # the same command (or Python module, #1181) not found as on the base: auto-fix rounds
@@ -5400,7 +5436,10 @@ def _stop_before(task: store.Task, n: int, what: str, why: str, lead: str, guard
         kh.close(why)
     # infra and `by` as the in-round stop has them (stopped_by, #1020): the user's budget, never
     # the step's, nor a lesson about the agent
-    task.set_status(phase="stuck", last=why[:200], guard=guard, infra=SPEND)
+    # the cap it stopped at (`cap_told`): only a higher one is a new question for the tasks
+    # waiting behind this stop (_cap_told, #1304)
+    task.set_status(phase="stuck", last=why[:200], guard=guard, infra=SPEND,
+                    cap_told=meter.cap() if guard == SPEND else None)
     task.event({"ts": store.now(), "round": n, "kind": "stopped", "text": f"{why}: {what} didn't run",
                 "by": SPEND})
     text = f"{lead}\n{what} didn't run: {why}."
@@ -5409,6 +5448,7 @@ def _stop_before(task: store.Task, n: int, what: str, why: str, lead: str, guard
     if (summary := task.round_dir(n) / "summary.md").exists():
         text += f"\nRound {n}'s report (wb report {task.name} --round {n}):\n{summary.read_text()}"
     task.notify("stuck", text, round=n, cause=SPEND, **({"guard": guard} if guard != SPEND else {}))
+    _cap_go_done(task)  # told: the waiters behind the cap wait behind this stop now (#1304)
 
 
 def _midnight(after: bool = False) -> float:
@@ -5420,10 +5460,13 @@ def _midnight(after: bool = False) -> float:
 def _cap_told(task: store.Task) -> str:
     """Another task whose spend stop has told Claude of today's cap, still standing, else '':
     phase `stuck`, status `infra` `spend` (not the Agents switch's `guard`), its newest notice
-    (`noticed`) today and since routes.json last changed (a cap raised since is a new question)."""
-    since = _midnight()
-    with contextlib.suppress(OSError):
-        since = max(since, os.stat(routes.path()).st_mtime)
+    (`noticed`) today, and the cap now no higher than the one it stopped at (status `cap_told`):
+    a raised cap is a new question. Any other routes.json write is none: the mtime test before
+    let a role moved to the GPU (the stop's own advice), a GPU pin, a thinking or busy change
+    release every waiter at once, each into round 1, the guard and its own notice, the same ask
+    once per task (#1304, the bar loop, 2026-11-24). A stop from before `cap_told` keeps that
+    test: told since routes.json last changed."""
+    since, now = _midnight(), meter.cap()
     with contextlib.suppress(OSError):
         for d in store.tasks_dir().iterdir():
             if d.name == task.name or not (d / "task.json").is_file():
@@ -5432,34 +5475,101 @@ def _cap_told(task: store.Task) -> str:
             if st.get("phase") != "stuck" or st.get("infra") != SPEND or st.get("guard") == AGENTS:
                 continue
             try:
-                if float((d / "noticed").read_text() or 0) >= since:
-                    return d.name
+                at = float((d / "noticed").read_text() or 0)
+                if meter._num(told := st.get("cap_told")):
+                    stands = at >= since and now is not None and now <= told + meter.EPS
+                else:
+                    stands = at >= max(since, os.stat(routes.path()).st_mtime)
             except (OSError, ValueError):
                 continue
+            if stands:
+                return d.name
     return ""
+
+
+# The one task at the cap let through to its own stop, and the fd of its lock (#1304's review,
+# 2026-11-24): a takeover or discard of the told stop ended it for every waiter on the same tick
+# (they look together: routes.json's writes wake them all), each into round 1, the guard and
+# its own spend notice, the ask once per task again. Held from the "no told stop, go on" until
+# its stop is told (_stop_before, the round's stop) or its first request is booked under the cap
+# (_cap_go_past), else drive's end; a runner's death lets it go too (flock). By task name: the
+# tests drive several tasks in one process.
+CAP_GO_LOCK = "cap-wait.lock"
+_CAP_GO: dict = {}
+
+
+def _cap_go(task: store.Task) -> str:
+    """'' when ``task``, at the cap with no told stop, is the one to go on to its own stop: it
+    holds locks/cap-wait.lock, taken now or before. Else what it waits behind: the task that
+    holds it ("<name> goes on first"), or a stop told while the lock was taken (_cap_told)."""
+    if task.name in _CAP_GO:
+        return ""
+    import fcntl
+    path = store.home() / "locks" / CAP_GO_LOCK
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = store.lock_fd(path, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            who = os.pread(fd, 256, 0).decode("utf-8", "replace").strip()
+        except OSError:
+            who = ""
+        os.close(fd)
+        return f"{who or 'another task'} goes on first"
+    if told := _cap_told(task):  # stopped and told between the look and the lock
+        os.close(fd)
+        return f"{told}'s stop has asked the user"
+    with contextlib.suppress(OSError):
+        os.ftruncate(fd, 0)
+        os.pwrite(fd, task.name.encode(), 0)
+    _CAP_GO[task.name] = fd
+    return ""
+
+
+def _cap_go_done(task: store.Task) -> None:
+    """``task``'s turn past the cap over (its stop told, its first request booked, its runner's
+    end): the next waiter may look for itself."""
+    if (fd := _CAP_GO.pop(task.name, None)) is None:
+        return
+    with contextlib.suppress(OSError):
+        os.ftruncate(fd, 0)
+    os.close(fd)  # the flock goes with its last fd
+
+
+def _cap_go_past(task: store.Task) -> None:
+    """After a step is booked: the task let through the cap is past its first request, and
+    under the cap still, so no stop of its comes for the waiters to wait behind."""
+    if task.name in _CAP_GO and not meter.stop_reason(task):
+        _cap_go_done(task)
 
 
 def _cap_wait(task: store.Task, lease) -> bool:
     """Before the first round this runner sends (#1249, 2026-11-24): an API task at the day cap,
     or within its first request of it, while another task's spend stop has told Claude so
     (_cap_told), waits as queued, its provider slot let go (taken again after), until the cap is
-    raised (a watch on routes.json's directory), local midnight or that stop no longer stands
-    (looked at every API_WAIT's 30 s). A backlog queued behind the cap each took its slot, ran
+    raised or Agents is switched to GPU (a watch on routes.json's directory; the switch's stop is
+    drive's next look, _agents_gpu: any other route change leaves it waiting, #1304), local
+    midnight or that stop no longer stands (looked at every API_WAIT's 30 s). A backlog queued behind the cap each took its slot, ran
     round 1 into the guard and woke Claude with the same stop, one ask of the user per task, as
-    #1178's 402. With no such stop it goes on, and its own stop is the notice Claude gets: never
-    a wait untold. True when it waited (the caller looks again)."""
+    #1178's 402. With no such stop one waiter goes on (_cap_go: the rest wait behind it as behind
+    a told stop, #1304), and its own stop is the notice Claude gets: never a wait untold. True
+    when it waited (the caller looks again)."""
     if meter.for_task(task) is None:
         return False
     waited, said = False, None
     with Watcher(routes.path().parent) as w:
         while True:
             why = meter.stop_reason(task, ahead=True, tokens=first_tokens(task))
-            if not why or not why.startswith((meter.STOP, meter.NEAR)) or not (told := _cap_told(task)):
+            if not why or not why.startswith((meter.STOP, meter.NEAR)) or routes.agents_gpu():
+                break
+            told = _cap_told(task)
+            if not (behind := f"{told}'s stop has asked the user" if told else _cap_go(task)):
                 break
             if not waited:
                 lease.__exit__(None, None, None)  # the slot, for a task the cap lets run
                 waited = True
-            msg = (f"waiting: {why}; {told}'s stop has asked the user: it goes on once the cap is "
+            msg = (f"waiting: {why}; {behind}: it goes on once the cap is "
                    f"raised (wb route cap <usd>) or at local midnight (wb stop gives up)")
             if msg != said:
                 task.set_status(phase="queued", last=msg)
@@ -5558,6 +5668,7 @@ def drive(task: store.Task) -> None:
     finally:
         if kh := CURRENT.pop("keyhole", None):  # a runner's own: it dies with it; closed for a
             kh.close()                          # runner driven in-process (the tests)
+        _cap_go_done(task)  # its turn past the cap, if it had one, ends with the runner (#1304)
 
 
 def _drive(task: store.Task, m: models.Model, say) -> None:
@@ -5772,12 +5883,16 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 ours = None if server else stopped_by(rnd["guard"])
                 # its guard with a provider's: a rate limit's or outage's told stop holds the
                 # tasks queued behind it (models.held_told, #1277)
+                # and a spend stop's cap, which the tasks waiting behind it go on past only
+                # once raised (_cap_told, #1304)
                 task.set_status(phase=phase, last=last,
                                 **({"infra": "model"} if server else {"infra": ours} if ours else {}),
-                                **({"guard": rnd["guard"]} if ours == "provider" else {}))
+                                **({"guard": rnd["guard"]} if ours == "provider" else {}),
+                                **({"cap_told": meter.cap()} if ours == SPEND else {}))
                 # what stopped it, for results.step: a guard or the agent's own exit (#582)
                 task.notify(phase, text, round=n, cause="server" if server else ours
                             or ("guard" if rnd["stuck"] else "agent"))
+                _cap_go_done(task)  # told (cap_told above): the waiters wait behind it (#1304)
                 return
             # the tests need no model: the GPU is the queue's, or theirs (--unload-for-tests), #257.
             # Theirs is waited for (a peer's round, up to its timeout; this machine's pool for a
@@ -5795,8 +5910,10 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                     return
                 continue
             text = summary_text(task, n, rnd, tests)
-            if skip := not_the_code(task, tests):  # first: what Claude must do about it
-                text = f"auto-fix skipped: {skip}\n" + text
+            # a failure after a smaller step's note is no bug in the part it did (#1300)
+            step = task.status.get("step_note")
+            if skip := not_the_code(task, tests) or (STEP_SKIP if step and tests and not tests["ok"] else ""):
+                text = f"auto-fix skipped: {skip}\n" + text  # first: what Claude must do about it
             if pending_steer(task):  # a note that came in while the report was written
                 _steer_round(task, n, False)
                 if not _go_on(task, n, "Claude's note"):
@@ -5819,8 +5936,8 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 # of the knob, which a test-less one could turn off (tuning.acted, #816)
                 task.set_status(self_review_due=True)
             mark = [task.status.get("steps", 1), task.status.get("reviews", 0)]
-            if tuning.value(task, "self_review") and tests and tests["ok"] \
-                    and task.status.get("self_reviewed") != mark:
+            if tuning.value(task, "self_review") and tests and tests["ok"] and not step \
+                    and task.status.get("self_reviewed") != mark:  # a smaller step stops (#1300)
                 task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
                 task.round_dir(n + 1).joinpath("prompt.md").write_text(
                     SELF_REVIEW.format(cmd=task.spec["test_cmd"], aside=self_review_aside(task)))
@@ -5983,7 +6100,7 @@ def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
                     full_compacted=True if rnd.get("compacted") else None,  # #774: fresh_reason
                     full_compact_failed=True if failed else None,  # #969: and its reason
                     handovers=task.status.get("handovers", 0) + 1,
-                    steer_taken=task.status.get("steer_taken", 0) + len(notes))
+                    steer_taken=task.status.get("steer_taken", 0) + len(notes), **step_noted(notes))
 
 
 def _undelivered(task: store.Task) -> str:
@@ -6020,7 +6137,7 @@ def _early_notes(task: store.Task, n: int) -> None:
     if not (notes := pending_steer(task)):
         return
     add_to_round(task, n, steer_prompt(notes, False))
-    task.set_status(steer_taken=task.status.get("steer_taken", 0) + len(notes))
+    task.set_status(steer_taken=task.status.get("steer_taken", 0) + len(notes), **step_noted(notes))
 
 
 def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:
@@ -6032,7 +6149,8 @@ def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:
         if theirs := [r for r in notes if r.get("by") != "workbench"]:  # ... Claude's notes are
             folded_notes(task, n + 1, theirs)
     task.set_status(round=n + 1, steer_taken=task.status.get("steer_taken", 0) + len(notes),
-                    round_for="steer", self_review_tree=carried_tree(task))  # #1207, as a handover
+                    round_for="steer", self_review_tree=carried_tree(task),  # #1207, as a handover
+                    **step_noted(notes))  # #1300
 
 
 # What a task's children load from the clone afresh each round, beside this runner's code loaded

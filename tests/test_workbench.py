@@ -23,6 +23,7 @@ import signal
 import socket
 import socketserver
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -87,6 +88,20 @@ def run_wb(*argv) -> str:
     with redirect_stdout(buf):
         cli.main(list(argv))
     return buf.getvalue()
+
+
+@contextlib.contextmanager
+def fd_to_devnull(fd: int):
+    """This process's ``fd`` on /dev/null for the block, as `wb … 2>/dev/null` runs (#1308)."""
+    saved = os.dup(fd)
+    null = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(null, fd)
+        yield
+    finally:
+        os.dup2(saved, fd)
+        os.close(saved)
+        os.close(null)
 
 
 def not_merged(*argv) -> str:
@@ -5881,6 +5896,42 @@ class AutoFix(Base):
             "says nothing about the change"))
         self.assertFalse(store.Task("t-slow").round_dir(2).exists())
 
+    def test_a_suite_whose_output_passes_the_cap_checks_in_on_the_base_and_skips_auto_fix(self):
+        # #1301 (bar round 8 of 2.0): a passing but verbose suite (Maven's console logging,
+        # `pytest -s`) printing past 20 MB was stopped there, the base check said nothing, and
+        # round 1 and both auto-fix rounds ran on correct code, each told the bug was the change's
+        self.start("t-loud", "ok", "--auto-fix", "2", "--no-self-review", "--test",
+                   "head -c 25000000 /dev/zero | tr '\\0' x; sleep 30; grep -qx 42 answer.txt")
+        st = wait_phase("t-loud", {"review", "stuck", "failed"}, timeout=90)
+        self.assertEqual((st["phase"], st["round"], st.get("auto_fixes", 0)), ("review", 1, 0))
+        self.assertEqual((st["base_check"]["exit"], st["tests"]["exit"]), ("output limit", "output limit"))
+        checkins = [r["text"] for r in store.notices() if r["task"] == "t-loud" and r["kind"] == "checkin"]
+        self.assertEqual(checkins, ["task t-loud: warning: on the base the acceptance command's "
+                                    "output passed 20 MB, where wb stops it, so every round's tests "
+                                    "will stop there too: quiet it (-q, less logging) or narrow it "
+                                    "(wb discard, then start again)"])
+        self.assertEqual(st["last"], "the acceptance command's output passed 20 MB, where wb stops "
+                                     "it: Claude reviews next")
+        review = [r["text"] for r in store.notices() if r["task"] == "t-loud" and r["kind"] == "review"]
+        self.assertTrue(review[0].startswith(
+            "auto-fix skipped: the acceptance command's output passed 20 MB, where wb stops it: "
+            "its failure says nothing about the change; run it in the worktree yourself, or quiet "
+            "it (-q, less logging) or narrow it (wb next --test)"))
+        self.assertFalse(store.Task("t-loud").round_dir(2).exists())
+
+    def test_a_flood_from_a_command_that_passed_on_the_base_goes_back_to_the_agent(self):
+        # #1301: the cap still catches the change's own flood (a print in a retry loop, the
+        # 2026-11-16 audit) when the base check ran the same command to exit 0, under the cap
+        self.start("t-spew", "ok", "--auto-fix", "1", "--no-self-review", "--test",
+                   "if grep -qx 42 answer.txt 2>/dev/null; then yes; fi")
+        st = wait_phase("t-spew", {"review", "stuck", "failed"}, timeout=90)
+        self.assertTrue(st["base_check"]["ok"])
+        self.assertEqual((st["phase"], st["round"], st["auto_fixes"]), ("review", 2, 1))
+        prompt = store.Task("t-spew").round_dir(2).joinpath("prompt.md").read_text()
+        self.assertIn("(exit output limit)", prompt)
+        self.assertIn("the bug is in this change", prompt)
+        self.assertEqual([r["kind"] for r in store.notices() if r["task"] == "t-spew"], ["review"])
+
     @unittest.skipUnless(lane_device(), "needs Landlock and a device node this user may open")
     def test_a_test_run_past_the_limit_that_was_fast_on_the_base_goes_back_to_the_agent_as_a_hang(self):
         # #779 (the second 2026-11-21 audit): every timeout skipped auto-fix and said to raise
@@ -6703,6 +6754,22 @@ class WorktreeSetup(Base):
         wait_phase("t-lack", {"review"})
         out = self.start("t-lack2", "ok", "--setup", "true")  # set up: no note
         self.assertNotIn("node_modules/", out)
+
+    def test_a_repos_entry_that_sets_nothing_up_still_gets_the_ignored_directories_note(self):
+        # #1299 (bar round 8, 2026-11-24): any commands.json entry for the repo silenced the
+        # note, so one holding only local_only or merge left Claude no hint to pass --setup, and
+        # every round ran on a base that couldn't find its node_modules
+        self.ignore("node_modules/")
+        (self.repo / "node_modules" / "leftpad").mkdir(parents=True)
+        conf = Path(os.environ["WB_COMMANDS"])
+        for name, entry, noted in (("t-lo", {"local_only": True}, True),
+                                   ("t-merge", {"merge": "squash", "setup_timeout": 60}, True),
+                                   ("t-optout", {"setup": ""}, False)):  # the explicit opt-out
+            conf.write_text(json.dumps({"repos": {str(self.repo): entry}}))
+            out = self.start(name, "ok", "--no-base-check")
+            self.assertEqual("only committed files, not the checkout's ignored node_modules/" in out,
+                             noted, (entry, out))
+            wait_phase(name, {"review"})
 
     def test_start_names_a_monorepo_packages_ignored_installs_from_the_package(self):
         # #877 (Claude's audit of 1.90.24): only the top level was looked at, so a package's
@@ -8115,6 +8182,26 @@ class Context(Base):
                              capture_output=True, text=True).stdout.splitlines()
         self.assertEqual(log.count("feat: the answer"), 1)
 
+    def test_a_step_an_interrupted_wb_next_committed_is_measured_at_accept(self):
+        # #1302 (bar loop round 8, 2026-11-24): cut off in the session export after its commit,
+        # wb next left the step's commit as HEAD with the status unmoved, and wb accept measured
+        # since HEAD: steps [{files: 0, lines: 0}], and the savings card priced the task at nothing
+        self.start("t-nxm", "ok", "--test", TEST_CMD)
+        wait_phase("t-nxm", {"review"})
+        with mock.patch.object(cli.runner, "fresh_reason", side_effect=KeyboardInterrupt), \
+                mock.patch("sys.stdin", io.StringIO("Now also write question.txt.\n")), \
+                self.assertRaises(KeyboardInterrupt):
+            run_wb("next", "t-nxm", "--spec", "-", "-m", "feat: step one")
+        task = store.Task("t-nxm")
+        self.assertIn("Workbench-Task: t-nxm (step 1)",
+                      gitops.git(task.worktree, "log", "-1", "--format=%B"))
+        self.assertEqual(task.status.get("steps", 1), 1)    # the status never moved
+        run_wb("accept", "t-nxm", "-m", "feat: the answer")
+        row = next(r for r in store.results(trials=True) if r.get("task") == "t-nxm")
+        self.assertEqual(len(row["steps"]), 1)
+        self.assertGreaterEqual(row["steps"][0].get("files", 0), 1)
+        self.assertGreaterEqual(row["diff"]["added"], 1)
+
     def test_wb_next_is_not_reaped_while_it_reads_the_session(self):
         # it set phase queued, then exported the session (up to 30 s) before spawning the runner,
         # and a wb status meanwhile failed the task as dead (the 0.90 review)
@@ -8411,6 +8498,38 @@ class Steering(Base):
             self.assertIn(want, out)
         head, _ = transcript._user_message(note, False)    # how the session shows the note
         self.assertEqual(head, "Claude → agent · INTERRUPT, high priority")
+
+    def test_a_smaller_step_whose_tests_test_the_whole_task_goes_to_review_with_no_auto_fix(self):
+        # #1300 (bar loop round 8, 2026-11-24): after wb steer --step the runner spent both
+        # auto-fix rounds telling the agent "the bug is in this change", onto the rest Claude
+        # said should wait, then reached review as auto-fix 2/2, tests FAIL
+        self.spec.write_text("Write the answer to answer.txt, then write rest.txt.\n")
+        self.start("t-step", "slow", "--test", TEST_CMD + " && test -f rest.txt", "--auto-fix", "2",
+                   "--no-base-check", "--no-self-review")
+        self.wait_session("t-step")
+        run_wb("steer", "t-step", "--now", "--step", "--text", "Only write answer.txt now.")
+        st = wait_phase("t-step", {"review"}, timeout=30)
+        self.assertEqual((st["round"], st.get("auto_fixes", 0), st["step_note"]), (2, 0, True))
+        self.assertFalse(st["tests"]["ok"])
+        self.assertEqual(st["last"], "a smaller step (wb steer --step): Claude reviews next")
+        rows, _ = store.read_jsonl(store.Task("t-step").dir / "events.jsonl")
+        self.assertNotIn("autofix", [r["kind"] for r in rows])
+        self.assertIn("auto-fix skipped: " + runner.STEP_SKIP, run_wb("report", "t-step"))
+        out = run_wb("feedback", "t-step", "--text", "Now write rest.txt.")
+        self.assertIn("it follows a smaller step (wb steer --step), so no review round is counted", out)
+        st = wait_phase("t-step", {"review"}, timeout=30)
+        self.assertEqual((st.get("reviews", 0), st.get("step_note")), (0, None))  # the step ended there
+
+    def test_a_smaller_step_whose_tests_pass_goes_to_review_with_no_self_review(self):
+        # #1300: the step note says stop and report; a self-review round is one more round of it
+        self.start("t-steps", "slow", "--test", TEST_CMD, "--no-base-check", "--self-review")
+        self.wait_session("t-steps")
+        run_wb("steer", "t-steps", "--now", "--step", "--text", "Only write answer.txt now.")
+        st = wait_phase("t-steps", {"review"}, timeout=30)
+        self.assertEqual(st["round"], 2)
+        self.assertTrue(st["tests"]["ok"])
+        rows, _ = store.read_jsonl(store.Task("t-steps").dir / "events.jsonl")
+        self.assertNotIn("self_review", [r["kind"] for r in rows])
 
     def test_a_queued_note_waits_for_the_run_to_end_then_goes_before_the_tests(self):
         os.environ["FAKE_SLEEP"] = "2"
@@ -12650,6 +12769,27 @@ class Lane(Base):
                              capture_output=True, text=True, timeout=20)
         return out.stdout.split() or [out.stderr]
 
+    def test_the_read_lane_lists_no_link_to_wbs_own_output_when_that_goes_to_dev_null(self):
+        # #1308 (2026-11-24): /dev/stderr resolved to /dev/null under `wb verify 2>/dev/null`, so
+        # it was listed beside it, and the child, whose fd 2 is a pipe, had its lane refused
+        task = self.bare_task("t-fds", self.repo)
+        task.worktree.mkdir()
+        for fd in (1, 2):
+            with fd_to_devnull(fd):
+                listed = context.readable(task)
+            self.assertIn("/dev/null", listed)
+            self.assertEqual([p for p in listed if p in context.FD_LINKS
+                              or p.startswith("/dev/fd/")], [], fd)
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_a_read_rule_on_a_pipe_leaves_the_pipe_out_and_still_draws_the_lane(self):
+        # #1308 (2026-11-24): a listed /dev/stderr, a pipe in the child, was EBADFD to
+        # landlock_add_rule, and the whole lane was refused (exit 126)
+        out = subprocess.run(lane.wrap([], [sys.executable, "-c", "print('ran')"],
+                                       [sys.prefix, "/usr", "/lib", "/lib64", "/etc", "/dev/stderr"]),
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=20)
+        self.assertEqual((out.returncode, out.stdout.strip()), (0, "ran"))
+
     @unittest.skipUnless(lane.abi(), "needs Landlock")
     @home_outside_the_lane
     def test_a_config_home_outside_the_dotfiles_stays_readable_but_its_secrets_dont(self):
@@ -13843,6 +13983,79 @@ class Lane(Base):
         out = subprocess.run([sys.executable, "-c", script, str(ROOT)], capture_output=True,
                              text=True, timeout=20)
         self.assertIn("NoNewPrivs:\\t1", out.stdout, out.stderr)
+
+    @staticmethod
+    def mountinfo_marking(path: str, fstype: str, at: str) -> str:
+        """A mount table with one row: `path`'s device mounted as `fstype` (as WSL2 shows drvfs)."""
+        dev = os.stat(path).st_dev
+        Path(at).write_text(f"99 1 {os.major(dev)}:{os.minor(dev)} / {path} rw,noatime shared:1 - "
+                            f"{fstype} C:\\134 rw,aname=drvfs;path=C:\\;uid=1000;gid=1000,mmap\n")
+        return at
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux")
+    def test_a_rule_on_uncached_9p_still_matches_after_the_exec_because_its_fd_stays_open(self):
+        # #1306 (2026-11-24): WSL2's drvfs is 9p without CACHE_META, so a dentry goes at its last
+        # close and the next lookup makes a new inode. Landlock ties a rule to the inode it was
+        # given, so once lane.py closed the fd, the rule on a repo's .git on /mnt/c matched nothing
+        # and every git call in an API task failed. The double: a kernel whose rules hold only
+        # while the fd they were added through is open and survives the exec, as on 9p.
+        d = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        git = os.path.join(d, "proj", ".git")
+        os.makedirs(git)
+        rules = {}
+
+        class Kernel:
+            def prctl(self, *a):
+                return 0
+
+            def syscall(self, nr, *a):
+                if nr == lane.CREATE_RULESET:
+                    return os.open(os.devnull, os.O_RDONLY)
+                if nr == lane.ADD_RULE:
+                    _, pfd = struct.unpack("=Qi", a[2].raw[:12])
+                    rules[os.readlink(f"/proc/self/fd/{pfd}")] = (pfd, os.fstat(pfd).st_ino)
+                return 0
+
+        def matches_after_exec(path):  # the inode the rule is on, still held into the exec
+            pfd, ino = rules[path]
+            try:
+                return (os.get_inheritable(pfd) and os.readlink(f"/proc/self/fd/{pfd}") == path
+                        and os.fstat(pfd).st_ino == ino)
+            except OSError:
+                return False
+
+        table = self.mountinfo_marking(d, "9p", os.path.join(self.tmp.name, "mountinfo"))
+        def unpin():
+            for fd in lane.PINNED:
+                os.close(fd)
+            lane.PINNED.clear()
+        self.addCleanup(unpin)
+        with mock.patch.object(lane, "abi", lambda: 6), mock.patch.object(lane, "_libc", Kernel), \
+                mock.patch.object(lane, "MOUNTINFO", table):
+            self.assertEqual(lane.restrict([d, os.devnull], [git]), 6)
+        self.assertTrue(matches_after_exec(git))
+        self.assertTrue(matches_after_exec(d))
+        self.assertFalse(matches_after_exec(os.devnull))  # not on 9p: its fd closed as before
+        self.assertEqual(len(lane.PINNED), 2)
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_a_lane_rule_on_a_9p_mount_keeps_its_fd_open_in_the_command_it_execs(self):
+        # #1306: the fd must outlive lane.py's execvp into OpenCode (or a --test, --setup, the base
+        # check), which then holds the dentry for as long as it runs; off 9p none is left open
+        d = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        script = ("import os, sys; sys.path.insert(0, sys.argv[1]); from workbench import lane\n"
+                  "lane.MOUNTINFO = sys.argv[2]; lane.main(sys.argv[3:])\n")
+        fds = ("import os\nfor f in os.listdir('/proc/self/fd'):\n    try:\n"
+               "        print(os.readlink('/proc/self/fd/' + f))\n    except OSError:\n        pass\n")
+        for fstype, held in (("9p", True), ("ext4", False)):
+            table = self.mountinfo_marking(d, fstype, os.path.join(self.tmp.name, f"mountinfo-{fstype}"))
+            out = subprocess.run([sys.executable, "-c", script, str(ROOT), table, "--write", d,
+                                  "--", sys.executable, "-c", fds],
+                                 capture_output=True, text=True, timeout=20)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(d in out.stdout.split("\n"), held, (fstype, out.stdout))
 
     def test_doctor_names_what_an_old_landlock_cant_confine(self):
         self.assertEqual(lane.gaps(10), [])
@@ -19868,6 +20081,21 @@ class Try(Base):
         self.assertIn("hidden check, at review: ", out)
         self.assertEqual(store.Task("try-1").status["phase"], "queued")
 
+    def test_a_wb_try_refused_for_a_server_not_up_advises_a_flag_wb_try_accepts(self):
+        # #1297 (bar loop round 8): #1251 fixed the busy-GPU --queue hint only; with Ollama not
+        # started, wb start's refusal says --force queues it anyway, and wb try had no --force
+        down = {"available": False, "why": "ollama is not answering"}
+        with mock.patch.object(cli, "spawn_runner", lambda task: 0), \
+                mock.patch.object(cli.models, "status", lambda *a, **k: dict(down)):
+            with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()) as err:
+                run_wb("try", "--model", "mimo")
+            self.assertEqual(e.exception.code, 3)
+            self.assertIn("--force queues it anyway", err.getvalue())
+            self.assertFalse(list(cli.try_dir().glob("*")))                 # no copy left (#161)
+            out = run_wb("try", "--model", "mimo", "--force")               # the advice, followed
+        self.assertIn("hidden check, at review: ", out)
+        self.assertTrue(store.Task("try-1").exists)
+
     def test_wb_try_refused_by_wb_init_leaves_no_sample_behind(self):
         # #530: with no git identity wb init refused, and try/1, try/2… were left at each retry.
         # useConfigOnly: git makes no identity up from the user and host names, as it does on a
@@ -20094,6 +20322,32 @@ class Verify(Base):
         (self.wt / "calc.py").write_text("def kw(watts):\n    return watts // 1000\n")
         self.assertTrue(verify.last(store.Task("t"))["stale"])     # the candidate moved on since
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock: without it no lane is refused")
+    def test_verify_with_wbs_stderr_or_stdout_on_dev_null_still_proves_the_fix(self):
+        # #1308 (2026-11-24): under `wb verify 2>/dev/null` the lane was refused on both sides
+        # (exit 126) and verify said "the candidate fails it" for a fix whose tests passed
+        from workbench import verify
+        for fd in (2, 1):
+            with fd_to_devnull(fd):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    cli.main(["verify", "t", "--test", "python3 -m unittest tests.test_calc"])
+            r = verify.last(store.Task("t"))
+            self.assertEqual((r["verdict"], r["candidate"]["exit"]), ("proven", 0),
+                             Path(r["dir"], "candidate.txt").read_text())
+            self.assertIn("proven: it fails on the base", buf.getvalue())
+
+    def test_a_run_the_lane_refused_is_inconclusive_never_the_candidate_failing(self):
+        # #1308 (2026-11-24): a refused lane's exit 126 was read as the candidate failing
+        from workbench import verify
+        said = f"{lane.REFUSED} ([Errno 1] landlock_restrict_self); not running /bin/sh\n"
+        with mock.patch.object(runner, "run_in_lane", return_value=(126, said)):
+            out = run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc")
+        self.assertIn("): inconclusive", out)
+        self.assertNotIn("the candidate fails it", out)
+        self.assertIn(f"  no test ran: {said.strip()}", out)
+        self.assertEqual(verify.last(store.Task("t"))["verdict"], "inconclusive")
+
     def test_verify_runs_the_big_text_file_accept_lands_and_proves_nothing_without_a_binary_it_lands(self):
         # #642 (Codex's audit of 1.90.6): the review snapshot's size limit also made verify's
         # candidate, so a 1,100,000-byte text file was left out, verify said proven, and accept
@@ -20199,7 +20453,7 @@ class Verify(Base):
             self.assertIn(f"base {step1[:10]}", shot)
             (self.wt / "tests/test_again.py").unlink()
         task.set_status(step_base=None)  # a task from before the record: the walk back finds it
-        self.assertEqual(verify._review_base(task), step1)
+        self.assertEqual(gitops.step_base(task), step1)
 
     def test_verify_credits_the_step_that_fixed_the_bug(self):
         # #252 (the audit of 1.2): step two's test passed on step one's commit already.
@@ -24008,6 +24262,22 @@ class Projects(Base):
         self.assertIn("CLAUDE.md is gitignored", self.start("t-local", "ok"))
         wait_phase("t-local", {"review"})
 
+    def test_a_gitignored_dot_claude_claude_md_lets_a_start_through_and_is_named(self):
+        # #1298 (2026-11-24): with .claude/ gitignored and the instructions in .claude/CLAUDE.md,
+        # every start was refused as having no CLAUDE.md, and Claude told to write and commit one,
+        # though context.instruction_files hands the agent the checkout's copy
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        g("rm", "-q", "--cached", "CLAUDE.md")
+        (self.repo / ".claude").mkdir()
+        (self.repo / "CLAUDE.md").rename(self.repo / ".claude" / "CLAUDE.md")
+        (self.repo / ".gitignore").write_text(".claude/\n")
+        g("add", ".gitignore")
+        g("commit", "-qm", "private .claude/CLAUDE.md")
+        self.assertEqual(cli.claude_md_status(self.repo), ".claude/CLAUDE.md" + cli.LOCAL_NOTE)
+        self.assertNotIn("next: write CLAUDE.md", run_wb("init", str(self.repo)))
+        self.assertIn("note: .claude/CLAUDE.md is gitignored", self.start("t-dot", "ok"))
+        wait_phase("t-dot", {"review"})
+
     def test_start_wants_a_claude_md(self):
         (self.repo / "CLAUDE.md").unlink()
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qam", "no docs"], check=True)
@@ -24792,6 +25062,44 @@ class Projects(Base):
         tree = g("ls-tree", "-r", "--name-only", "delegate/t-subbuild").stdout.decode()
         self.assertIn("answer.txt", tree)
         self.assertNotIn("lib.o", tree)
+
+    def test_after_a_wb_next_a_step_changed_only_in_a_filled_submodule_is_refused_not_dropped(self):
+        # #1307 (bar loop round 8, 2026-11-24): git status can't see inside a filled submodule,
+        # so once a step was committed (HEAD past the base) wb next said the step "had no
+        # changes" and wb accept exited 0 and removed the worktree, the edit with it; #419's
+        # refusal only fired in commit_all, which neither called
+        lib = Path(self.tmp.name) / "lib"
+        subprocess.run(["git", "init", "-q", str(lib)], check=True)
+        (lib / "lib.c").write_text("lib v1\n")
+        subprocess.run(["git", "-C", str(lib), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(lib), "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "lib"], check=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "vendor/lib")
+        g("commit", "-qm", "a submodule")
+        self.start("t-subnext", "ok", "--test", TEST_CMD)
+        wait_phase("t-subnext", {"review"})
+        with mock.patch("sys.stdin", io.StringIO("Now check it again.\n")):
+            self.assertIn("step 1 of t-subnext committed",
+                          run_wb("next", "t-subnext", "--spec", "-", "-m", "feat: step one"))
+        wait_phase("t-subnext", {"review"})
+        task = store.Task("t-subnext")
+        f = task.worktree / "vendor/lib/lib.c"
+        f.unlink()                                           # as sed -i replaces it
+        f.write_text("lib v2 fixed\n")
+        self.assertEqual(gitops.changed(task.worktree), "")  # the only change: git can't see it
+        for argv in (("next", "t-subnext", "--spec", "-", "-m", "feat: step two"),
+                     ("accept", "t-subnext", "-m", "feat: done")):
+            err = io.StringIO()
+            with mock.patch("sys.stdin", io.StringIO("And again.\n")), \
+                    self.assertRaises(SystemExit), redirect_stderr(err):
+                run_wb(*argv)
+            self.assertIn("not committed: edits in submodule vendor/lib can't land: lib.c",
+                          err.getvalue(), argv[0])
+            st = store.Task("t-subnext").status
+            self.assertEqual((st["phase"], st["steps"]), ("review", 2), argv[0])
+        self.assertEqual(f.read_text(), "lib v2 fixed\n")  # the worktree kept, the edit in it
 
     @unittest.skipUnless(GIT_LFS, "needs git-lfs")
     def test_git_lfs_files_are_data_in_the_scratch_checkouts_and_count_at_their_size(self):
@@ -27363,6 +27671,31 @@ class WebChat(Base):
         self.assertIn('"$HOME/.local/bin/wb" chat serve', agent["ProgramArguments"][-1])
         self.assertTrue(agent["RunAtLoad"] and agent["KeepAlive"])
         self.assertIn("/opt/homebrew/bin", agent["EnvironmentVariables"]["PATH"])  # not the stub python3
+        self.assertIn("/usr/sbin", agent["EnvironmentVariables"]["PATH"].split(":"))  # #1305
+
+    def test_on_macos_the_machine_and_boot_are_read_by_absolute_path_whatever_the_path(self):
+        # #1305 (bar loop round 8): the launchd agent's PATH had no /usr/sbin, so wb chat serve
+        # took the host name for the machine while the mod's wb events sent the hardware UUID,
+        # and a closed session's listener.json read as another machine's claim, still listening
+        def run(argv, **kw):
+            if argv[0] == "/usr/sbin/ioreg":
+                return subprocess.CompletedProcess(argv, 0, '  "IOPlatformUUID" = "5A1B-UUID"\n', "")
+            if argv[0] == "/usr/sbin/sysctl":
+                return subprocess.CompletedProcess(argv, 0, "{ sec = 1732000000, usec = 1 } Wed", "")
+            raise FileNotFoundError(argv[0])                 # by name: not on the agent's PATH
+        real_read = Path.read_text
+        def read(path, *a, **kw):
+            if str(path) in ("/etc/machine-id", "/var/lib/dbus/machine-id",
+                             "/proc/sys/kernel/random/boot_id"):
+                raise FileNotFoundError(path)
+            return real_read(path, *a, **kw)
+        with mock.patch.object(store.sys, "platform", "darwin"), \
+                mock.patch.object(store, "_MACHINE", []), mock.patch.object(store, "_BOOT", []), \
+                mock.patch.object(Path, "read_text", read), \
+                mock.patch("subprocess.run", side_effect=run), \
+                mock.patch.dict(os.environ, {"PATH": "/opt/homebrew/bin:/usr/bin:/bin"}):
+            self.assertEqual(store.machine(), "5A1B-UUID")       # never the host name
+            self.assertEqual(store.boot_id(), "1732000000")
 
     def test_a_chat_on_an_address_that_comes_and_goes_rebinds_in_place_when_it_changes(self):
         # #200 (the 2026-11-19 audit): with bind ["tailscale"] the plan was loopback while the
@@ -27908,6 +28241,30 @@ class WebChat(Base):
             self.assertTrue(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
             self.chat.notice_done(n["id"])
             self.assertFalse(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
+
+    def test_another_sessions_turn_end_leaves_a_wait_on_the_listeners_reply_not_done(self):
+        # #1303: every session's mod records a turn end with no ids once messages.jsonl grew in
+        # its turn, and a wait on the listener's "On it" counted it: ask_claude.py exited 0,
+        # "Claude's turn is done", while the listener still worked on the request
+        tok = self._agent()
+        self._listening()
+        mid = self.call("/api/send", {"text": "fix the parser"}, token=tok)[1]["message"]["id"]
+        run_wb("chat", "ack", mid, "--by", "s1")
+        run_wb("chat", "reply", "--to", mid, "--text", "On it.")
+        ack = self.chat.thread()[-1]
+        self.assertEqual(ack["turn_by"], "s1")
+        self.assertFalse(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["done"])
+        run_wb("chat", "ended", "--by", "s2")                             # another session's turn
+        self.assertFalse(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["done"])
+        run_wb("chat", "ended", mid, "--by", "s1")                        # the listener's
+        self.assertTrue(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["done"])
+        # a row without `turn_by` (an older wb's): any turn ending after it, as before
+        time.sleep(0.01)                                                  # after s1's end
+        old = self.chat.send("Done, from an older wb.", "claude", re=[mid], to=["my-agent"])
+        self.assertNotIn("turn_by", old)
+        self.assertFalse(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["done"])
+        run_wb("chat", "ended", "--by", "s2")
+        self.assertTrue(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["done"])
 
     def test_a_message_with_no_reply_is_done_once_the_turn_that_took_it_ends(self):
         tok = self._agent()
@@ -36957,12 +37314,130 @@ class ApiSpend(Base):
         self.assertEqual((task.status["phase"], task.status["infra"]), ("stuck", "spend"))
         (notice,) = self.notices("t-behind", "stuck")
         self.assertEqual(notice["cause"], "spend")
-        # a stop told before the cap last changed is a new question too: no wait behind it
+        # a cap raised since the stop is a new question too: no wait behind it
         first.set_status(phase="stuck")
         self.assertEqual(runner._cap_told(task), "t-told")
-        time.sleep(0.01)
-        self.cap(5, api=("significant",))
+        self.cap(6, api=("significant",))
         self.assertEqual(runner._cap_told(task), "")
+
+    def test_a_told_cap_stop_still_stands_after_a_routes_json_write_that_leaves_the_cap_where_it_was(self):
+        # #1304 (the bar loop, 2026-11-24): _cap_told read routes.json's mtime, so the stop's own
+        # advice (the role on the GPU), a GPU pin or any other write voided the told stop
+        self.cap(5, api=("significant",))
+        self.spent(5.0)
+        first, task = self.api_task("t-told", SPEND_M, "ok"), self.api_task("t-behind", SPEND_M, "ok")
+        runner.drive(first)
+        self.assertEqual(first.status["cap_told"], 5)
+        for roles in ({"significant": {"via": "gpu", "api": SPEND_M}},
+                      {"significant": {"via": "api", "api": SPEND_M, "gpu": "local/pinned"}}, {}):
+            time.sleep(0.01)
+            store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 5, "roles": roles})
+            self.assertEqual(runner._cap_told(task), "t-told")
+        self.cap(4, api=("significant",))                      # lowered: no new question either
+        self.assertEqual(runner._cap_told(task), "t-told")
+        self.cap(5.5, api=("significant",))
+        self.assertEqual(runner._cap_told(task), "")
+
+    def test_tasks_waiting_behind_a_told_cap_stop_stay_queued_when_the_role_moves_to_the_gpu(self):
+        # #1304: the role moved to the GPU, as the stop's notice offers, released every waiter at
+        # once, each into round 1, the guard and its own spend notice: the ask once per task again
+        self.cap(5, api=("significant",))
+        self.spent(5.0)
+        first, *queued = [self.api_task(f"t-w{i}", SPEND_M, "ok") for i in range(3)]
+        runner.drive(first)
+        waiting = lambda t: str(t.status.get("last") or "").startswith("waiting: the day's API spend cap")  # noqa: E731
+        other = threading.Thread(target=runner.drive, args=(queued[0],), daemon=True)
+        seen = {}
+
+        def then():
+            deadline = time.time() + 10
+            while not waiting(queued[0]) and time.time() < deadline:
+                time.sleep(0.05)
+            store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 5, "roles": {
+                "significant": {"via": "gpu", "api": SPEND_M}}})
+            time.sleep(1)                                     # both woke on the write and looked
+            seen["phases"] = [t.status["phase"] for t in queued]
+            seen["waiting"] = [waiting(t) for t in queued]
+            seen["stops"] = [r["task"] for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
+                             if r["kind"] == "stuck"]
+            self.cap(100)                                     # raised: both go on
+        other.start()
+        self.assertIsNotNone(self.drive_until_waiting(queued[1], then))
+        other.join(30)
+        self.assertEqual(seen, {"phases": ["queued", "queued"], "waiting": [True, True], "stops": ["t-w0"]})
+        self.assertEqual([t.status["phase"] for t in queued], ["review", "review"])
+
+    def test_a_takeover_of_a_told_cap_stop_lets_one_waiter_on_to_its_own_stop_and_the_other_waits_behind_it(self):
+        # #1304's review (2026-11-24): a takeover or discard of the told stop let every waiter go
+        # on at once, on the same look (a routes.json write had woken them together), each into
+        # round 1, the guard and its own spend notice, one ask of the user per queued task again
+        self.cap(5, api=("significant",))
+        self.spent(5.0)
+        first, *queued = [self.api_task(f"t-w{i}", SPEND_M, "ok") for i in range(3)]
+        runner.drive(first)
+        stops = lambda: [r["task"] for r in store.read_jsonl(store.home() / "notify.jsonl")[0]  # noqa: E731
+                         if r["kind"] == "stuck"]
+        waiting = lambda t: str(t.status.get("last") or "").startswith("waiting: the day's API spend cap")  # noqa: E731
+        other = threading.Thread(target=runner.drive, args=(queued[0],), daemon=True)
+        seen, over = {}, threading.Event()
+
+        def then():
+            try:
+                deadline = time.time() + 10
+                while not waiting(queued[0]) and time.time() < deadline:
+                    time.sleep(0.05)
+                store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 5, "roles": {
+                    "significant": {"via": "gpu", "api": SPEND_M}}})  # both wake on it, together
+                time.sleep(1)
+                first.set_status(phase="review", taken_over=True)  # as the notice and the skill say
+                deadline = time.time() + 20
+                while len(stops()) < 2 and time.time() < deadline:
+                    time.sleep(0.05)
+                time.sleep(4.5)                                   # two more looks of the waiter's
+                seen["stops"] = stops()
+                seen["queued"] = [t.name for t in queued if t.status["phase"] == "queued" and waiting(t)]
+                seen["behind"] = [t.status["last"] for t in queued if t.status["phase"] == "queued"]
+                self.cap(100)                                     # raised: the last one goes on
+            finally:
+                over.set()
+        with mock.patch.object(runner.models, "API_WAIT", (0.5, 2.0)):  # a look every 2 s, not 30
+            other.start()
+            self.assertIsNotNone(self.drive_until_waiting(queued[1], then))
+            self.assertTrue(over.wait(60))
+            other.join(30)
+        self.assertEqual(len(seen["stops"]), 2, seen)             # t-w0's, and one waiter's own
+        self.assertEqual(seen["stops"][0], "t-w0")
+        (went,) = {t.name for t in queued} & set(seen["stops"])
+        (stayed,) = seen["queued"]
+        self.assertNotEqual(went, stayed)
+        self.assertIn(f"; {went}'s stop has asked the user: ", seen["behind"][0])
+        self.assertEqual(store.Task(went).status["infra"], "spend")
+        self.assertEqual(store.Task(stayed).status["phase"], "review")
+        self.assertEqual(runner._CAP_GO, {})                      # every turn past the cap let go
+
+    def test_a_task_waiting_behind_a_told_cap_stop_stops_for_agents_switched_to_gpu(self):
+        # #1304: only a raised cap, or a change that frees the task, ends the wait: Agents on GPU
+        # stops it before round 1 with its own stop (_agents_gpu), never into the guard
+        self.cap(5, api=("significant",))
+        self.spent(5.0)
+        first, task = self.api_task("t-ag0", SPEND_M, "ok"), self.api_task("t-ag1", SPEND_M, "ok")
+        runner.drive(first)
+        at = []
+
+        def switch():
+            store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "use": "gpu", "day_usd": 5, "roles": {
+                "significant": {"via": "api", "api": SPEND_M}}})
+            at.append(time.monotonic())
+            # a waiter the switch didn't free would wait to midnight: the told stop's end frees it
+            timer = threading.Timer(20, lambda: first.set_status(phase="review"))
+            self.addCleanup(timer.cancel)
+            timer.start()
+        self.assertIsNotNone(self.drive_until_waiting(task, switch))
+        self.assertLess(time.monotonic() - at[0], 15)          # the switch, not the timer
+        st = task.status
+        self.assertEqual((st["phase"], st["guard"], st["round"]), ("stuck", "agents", 1))
+        ev, _ = store.read_jsonl(task.dir / "events.jsonl")
+        self.assertFalse([e for e in ev if e["kind"] == "step"])  # no round ran
 
     def local_only(self):
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {"local_only": True}}}))

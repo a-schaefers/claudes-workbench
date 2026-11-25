@@ -925,16 +925,19 @@ def _ignored(repo: Path, path: str) -> bool:
                           capture_output=True).returncode == 0
 
 
-def _local_claude_md(repo: Path) -> bool:
-    """A CLAUDE.md kept out of git on purpose: the agents get the checkout's copy
-    (context.instruction_files), so it is never to be committed (the 2026-11-16 audit)."""
-    return (repo / "CLAUDE.md").is_file() and _ignored(repo, "CLAUDE.md")
-
-
 # Where a project's committed instructions may live, as Claude Code reads them (context.ROOT_FILES
 # loads both): a repo with only .claude/CLAUDE.md was refused as having none (the 2026-11-16
 # audit). CLAUDE.local.md is the user's own, rarely committed, so it doesn't count.
 PROJECT_MEMORY = ("CLAUDE.md", ".claude/CLAUDE.md")
+
+
+def _local_claude_md(repo: Path, names: tuple[str, ...] = PROJECT_MEMORY) -> str | None:
+    """The first of ``names`` kept out of git on purpose, or None: the agents get the checkout's
+    copy (context.instruction_files), so it is never to be committed (the 2026-11-16 audit).
+    Only the root CLAUDE.md was looked at, so a repo that gitignores .claude/ and keeps its
+    instructions in .claude/CLAUDE.md had every wb start refused as having none (#1298,
+    2026-11-24). wb init asks for the root's alone: that is the file AGENTS.md links to."""
+    return next((p for p in names if (repo / p).is_file() and _ignored(repo, p)), None)
 
 
 def _claude_md_at(repo: Path, ref: str, under: str = "") -> str | None:
@@ -974,8 +977,8 @@ def _need_claude_md(repo: Path, base: str, a, sub: str | None = None) -> None:
         print(f"note: {sub}'s CLAUDE.md is gitignored: the agent gets your checkout's copy")
     if a.no_claude_md or sub:  # a package's own CLAUDE.md counts
         return
-    if not _claude_md_at(repo, base) and _local_claude_md(repo):
-        print("note: CLAUDE.md is gitignored: the agent gets your checkout's copy")
+    if not _claude_md_at(repo, base) and (md := _local_claude_md(repo)):
+        print(f"note: {md} is gitignored: the agent gets your checkout's copy")
     elif not _claude_md_at(repo, base):
         die(f"{repo} has no CLAUDE.md (or .claude/CLAUDE.md) at {base}: the agent would start "
             "blind. Write it (what the project is, how to build and test it, its conventions), "
@@ -1298,6 +1301,10 @@ def _api_notes(task_name: str, repo: Path, m: models.Model, a, routed: dict) -> 
         notes.append(gap)
     return notes
 
+
+# The commands.json `repos` keys that set a task's worktree up: an entry with none of them still
+# gets wb start's note on the ignored directories the worktree lacks (#1299)
+SETUP_KEYS = frozenset({"setup", "copy", "siblings"})
 
 # What an install makes, at any depth: a monorepo's per-package node_modules or .venv
 INSTALL_DIRS = ("node_modules", ".venv", "venv", "target", "vendor")
@@ -1677,7 +1684,7 @@ def cmd_start(a):
     if a.test and not a.no_base_check:
         print("base check: the runner runs the acceptance command once on the base first; what "
               "it saw comes with the first report (a check-in at once if --test-timeout cuts it "
-              "short or its command isn't found)")  # a base that passes is a note in that report, no wake (#881; #1152)
+              "short, its output passes 20 MB or its command isn't found)")  # a base that passes is a note in that report, no wake (#881; #1152; #1301)
     if dirty:
         print("note: the repo has uncommitted changes; the agent's worktree starts from "
               f"{a.base}, without them")
@@ -1691,7 +1698,10 @@ def cmd_start(a):
                 *([f"runs `{setup['setup']}`"] if setup.get("setup") else [])]
         print(f"setup: the runner sets the worktree up first ({'; '.join(does)}); a failure stops "
               "the task before any round")
-    elif "repos" not in context.commands_conf() or not context.repo_conf(repo, sub):
+    # only an entry that says how the worktree is set up (an explicit "setup": "" is the opt-out)
+    # silences the note: one holding only local_only or merge did, and rounds ran on a base that
+    # couldn't find its node_modules (#1299, bar round 8, 2026-11-24)
+    elif not SETUP_KEYS & context.repo_conf(repo, sub).keys():
         if lack := _missing_dirs(repo, sub):
             print(f"note: the worktree has only committed files, not the checkout's ignored "
                   f"{', '.join(lack[:4])}: --setup '<install command>' sets a task up (--copy "
@@ -1836,6 +1846,11 @@ def cmd_feedback(a):
     outside = stopped_outside(st)
     resumed = bool(outside)
     env = st.get("env_skip")  # set only in review, so never with an unsent round
+    # ... nor the round after a smaller step (status `step_note`, wb steer --step): the agent did
+    # the part it was told, and the rest Claude sends now is the step's plan, not a correction;
+    # counted, a step Claude shrank went badly for the model's slice (#1300, 2026-11-24). Unlike
+    # an env skip it is the new ask round_asks stops at, and the step ends with it.
+    step = bool(st.get("step_note")) and not (resumed or unsent or env)
     # ... and no review for round_asks either: it stopped at this round, so a later handover or
     # wb resume carried only "carry on" and dropped the review feedback the stop interrupted
     # (#1169, 2026-11-24). Unlinked otherwise: a feedback that died before its round was counted
@@ -1848,7 +1863,7 @@ def cmd_feedback(a):
         mark.touch()
     else:
         mark.unlink(missing_ok=True)
-    reviews = st.get("reviews", 0) + (0 if resumed or unsent or env else 1)
+    reviews = st.get("reviews", 0) + (0 if resumed or unsent or env or step else 1)
     handled = store.now()  # everything before the new round; what its runner raises stays news
     # An unsent round keeps its own `context` unless a flag says otherwise: the runner clears it
     # only once the round starts, so wb resume's or wb next --fresh's "fresh" (or a handover's
@@ -1864,6 +1879,7 @@ def cmd_feedback(a):
                     # and after an env skip: no review counted, the pane's "resumed" (#1257)
                     **({} if unsent else {"round_for": "feedback"} if not (resumed or env) else
                        {"round_for": "resume", "self_review_tree": runner.carried_tree(task)}),
+                    **({"step_note": None} if step else {}),  # #1300
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0)
     _credit_turn(task)
@@ -1879,6 +1895,9 @@ def cmd_feedback(a):
     elif env:
         print(f"feedback sent to {a.name} (round {n}): it follows a skipped auto-fix that wasn't "
               f"the code's ({env}), so no review round is counted")
+    elif step:
+        print(f"feedback sent to {a.name} (round {n}): it follows a smaller step (wb steer "
+              "--step), so no review round is counted")
     else:
         print(f"feedback round {reviews} sent to {a.name} (round {n})"
               + ("  — that is past the usual 3 review rounds" if reviews > 3 else ""))
@@ -1976,7 +1995,7 @@ def cmd_next(a):
     # and the spec with the protocol (#1173)
     _model_still_listed(task, nxt + protocol_for(spec), True if a.fresh else None)
     commit = _step_landed(task, step)
-    measured = results.step(task, landed=True, since="HEAD~1" if commit else "HEAD", gaps=a.spec_gap)
+    measured = results.step(task, landed=True, gaps=a.spec_gap)
     if not commit:
         try:
             with _settle_proposals(task, a.take_claude_md):
@@ -1985,7 +2004,7 @@ def cmd_next(a):
                 # Claude's too (#1179), and the agent's shell's (#1210)
                 wrote = runner.accept_writes(task)
                 left = _left_out(task, wrote, a.include)
-                if gitops.changed(task.worktree) or gitops.ignored_files(task.worktree, wrote):
+                if _to_commit(task, wrote):
                     commit = gitops.commit_all(
                         task.worktree, f"{a.message}\n\nWorkbench-Task: {a.name} (step {step})"
                         f"\nOpenCode-Session: {st.get('session')}", a.include, _signed(spec, a), wrote,
@@ -2024,6 +2043,7 @@ def cmd_next(a):
     # the step's own active work and progress checks start here: set against a step's typical
     # length, the chain's total put step 2 past it in its first minutes (#815)
     advance = dict(round=n, round_for="next", steps=step + 1, step_round=n, reviews=0, step_base=approved,
+                   step_note=None,  # a smaller step's note held only the step it came in (#1300)
                    step_active_s=st.get("active_s") or 0, progress_checks=0,
                    step_sizes=(st.get("step_sizes") or []) + [measured],
                    step_tests={**(st.get("step_tests") or {}), str(step + 1): test},  # #941
@@ -2056,15 +2076,15 @@ def cmd_next(a):
     _say(lessons.nudge(task))
 
 
-def _accept_landed(task: store.Task) -> bool:
-    """Whether the worktree's tip is an earlier wb accept's own commit (`Workbench-Task: <task>`,
-    no step) with nothing changed since, as _step_landed for wb next (#879)."""
-    try:
-        body = gitops.git(task.worktree, "log", "-1", "--format=%B", "HEAD")
-        return (f"Workbench-Task: {task.name}" in body.splitlines()
-                and not gitops.changed(task.worktree))
-    except gitops.GitError:
-        return False
+def _to_commit(task: store.Task, wrote=()) -> bool:
+    """Whether the worktree holds something since its last commit that wb next or wb accept
+    commits, or must refuse to (gitops.commit_all): git's changes, the ignored files the agent or
+    Claude wrote (``wrote``), and edits in a filled submodule, which git status can't see (the
+    gitlink hides them). Without those, once a wb next had committed a step, a step whose only
+    change was in a submodule "had no changes", and wb accept exited 0 and removed the worktree,
+    edit and all: #419's refusal only fired with something else to commit (#1307, 2026-11-24)."""
+    return bool(gitops.changed(task.worktree) or gitops.ignored_files(task.worktree, wrote)
+                or gitops.submodule_edits(task.worktree))
 
 
 def _step_landed(task: store.Task, step: int) -> str | None:
@@ -2074,7 +2094,7 @@ def _step_landed(task: store.Task, step: int) -> str | None:
     try:
         body = gitops.git(task.worktree, "log", "-1", "--format=%B", "HEAD")
         if (f"Workbench-Task: {task.name} (step {step})" not in body.splitlines()
-                or gitops.changed(task.worktree)):
+                or _to_commit(task, runner.accept_writes(task))):
             return None
         return gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
     except gitops.GitError:
@@ -2825,7 +2845,8 @@ def _resume(task: store.Task) -> None:
     # runner) goes on here: without its green tree, the resumed session that read on was stopped
     # as stuck on a green change, the step counted against it (#1228, 2026-11-24)
     task.set_status(round=n + 1, context="fresh", phase="queued", last="resumed by the reviewer",
-                    round_for="resume", self_review_tree=runner.carried_tree(task))
+                    round_for="resume", self_review_tree=runner.carried_tree(task),
+                    **runner.step_noted(notes))  # a smaller step's note carried on (#1300)
     task.event({"ts": store.now(), "round": n + 1, "kind": "resumed",
                 "text": "Claude resumed the task in a fresh session"})
     _credit_turn(task)
@@ -2988,7 +3009,7 @@ def cmd_steer(a):
     if not text:
         die("empty note")
     if a.step:  # a smaller step: the agent finishes this part and stops (#95)
-        text = STEP_NOTE + text
+        text = runner.STEP_NOTE + text  # the runner knows a step round by it (#1300)
     store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text, "now": a.now})
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "steer",
                 "now": a.now, "text": text})
@@ -3001,10 +3022,6 @@ def cmd_steer(a):
         print(f"interrupting {a.name}: it stops within a few seconds and continues with your note")
     else:
         print(f"note queued for {a.name}: delivered when its current run ends, before the tests")
-
-
-STEP_NOTE = ("A smaller step: do only this now, then stop and report; the rest of the task waits "
-             "for the next step.\n\n")  # what a smaller step's note says first (#95)
 
 
 def cmd_progress(a):
@@ -3939,11 +3956,11 @@ def cmd_accept(a):
                 f"put it back to that commit (git -C {shlex.quote(str(task.worktree))} status), "
                 f"or keep the changes elsewhere, then wb accept {a.name} again")
     else:
-        # a retry after an accept killed between its commit and `closing` (ENOSPC, a kill):
-        # measured since HEAD, its own commit, the step read as 0 files and 0 lines and the
-        # savings card priced the task at nothing (#879, Claude's audit of 1.90.24)
-        measured = results.step(task, landed=True, gaps=a.spec_gap,  # recorded below (#904)
-                                since="HEAD~1" if _accept_landed(task) else "HEAD")
+        # from where the step began (gitops.step_base), not HEAD: a retry after an accept
+        # killed between its commit and `closing` (#879, Claude's audit of 1.90.24), or a step
+        # an interrupted wb next committed (#1302), read as 0 files and 0 lines, and the savings
+        # card priced the task at nothing
+        measured = results.step(task, landed=True, gaps=a.spec_gap)  # recorded below (#904)
         try:
             commit = _landed(task)
             if not commit:
@@ -3953,8 +3970,7 @@ def cmd_accept(a):
                     # the agent's shell's: its `cat > lib/util.py` was (#1210)
                     wrote = runner.accept_writes(task)
                     left = _left_out(task, wrote, a.include)
-                    if (gitops.changed(task.worktree) or head == spec["base"]
-                            or gitops.ignored_files(task.worktree, wrote)):
+                    if head == spec["base"] or _to_commit(task, wrote):
                         commit = gitops.commit_all(task.worktree, msg, a.include, _signed(spec, a),
                                                    wrote, left)
                     else:  # nothing new: the branch's commits past the base are the work (the
@@ -4071,7 +4087,7 @@ def cmd_accept(a):
     if note:
         print("the repo has no CLAUDE.md: write one (wb init)" if note == "no CLAUDE.md" else
               f"{note}: keep it current (update it if this change alters what it says)"
-              if note == LOCAL_CLAUDE_MD else
+              if note.endswith(LOCAL_NOTE) else
               f"{note}: keep it current (update and commit it if this change alters what it says)")
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
           (f", merged into {close['merge_into']} as {merged}" if merged else
@@ -6054,7 +6070,8 @@ def cmd_model(a):
     print(done)
 
 
-LOCAL_CLAUDE_MD = "CLAUDE.md is gitignored: agents get the checkout's copy"
+LOCAL_NOTE = " is gitignored: agents get the checkout's copy"  # after the file's name
+LOCAL_CLAUDE_MD = "CLAUDE.md" + LOCAL_NOTE
 
 
 def claude_md_status(repo: Path, ref: str = "HEAD", under: str = "") -> str:
@@ -6073,7 +6090,7 @@ def claude_md_status(repo: Path, ref: str = "HEAD", under: str = "") -> str:
                 f"{md} last changed {since} commit(s) before {ref} ({last})")
     md = _claude_md_at(repo, ref)  # CLAUDE.md before .claude/CLAUDE.md: AGENTS.md links to it
     if not md:
-        return LOCAL_CLAUDE_MD if _local_claude_md(repo) else "no CLAUDE.md"
+        return local + LOCAL_NOTE if (local := _local_claude_md(repo)) else "no CLAUDE.md"
     last = gitops.git(repo, "log", "-1", "--format=%h", ref, "--", md).strip()
     since = int(gitops.git(repo, "rev-list", "--count", f"{last}..{ref}", "--", ".",
                            f":!{md}", ":!AGENTS.md").strip() or 0)  # commits that changed code
@@ -6172,7 +6189,7 @@ def cmd_init(a):
         else:
             print("AGENTS.md and CLAUDE.md differ: merge them into CLAUDE.md, delete AGENTS.md, "
                   "and run wb init again")
-    local = _local_claude_md(d)  # kept out of git: a link to it would dangle in every clone
+    local = _local_claude_md(d, ("CLAUDE.md",))  # kept out of git: a link to it would dangle in every clone
     if claude.is_file() and not local and not agents.exists() and not agents.is_symlink():
         agents.symlink_to("CLAUDE.md")
         did.append("AGENTS.md → CLAUDE.md")
@@ -6224,7 +6241,7 @@ def _commit_link(d: Path, head: dict, index: dict, moved: bool, sign: bool = Tru
     user's index and working tree keep their bytes. A path whose index already differed from
     HEAD (a staged change of theirs), or a link whose CLAUDE.md isn't committed, is left to them."""
     import tempfile
-    if moved and _local_claude_md(d):
+    if moved and _local_claude_md(d, ("CLAUDE.md",)):
         # a committed AGENTS.md moved to a gitignored CLAUDE.md, which gets no link: the commit
         # held a link the worktree lacked and force-tracked the CLAUDE.md that is never to be
         # committed (the review of #931). Git sees AGENTS.md deleted: the user's call
@@ -6843,7 +6860,10 @@ def cmd_try(a):
             *(["--model", a.model] if a.model else []),
             # wb start's busy-GPU refusal names --queue, which wb try once refused as an unknown
             # argument: the setup check couldn't wait behind a task or a bench (#1251, 2026-11-24)
-            *(["--queue"] if a.queue else [])]
+            *(["--queue"] if a.queue else []),
+            # and its down-server refusal names --force, which wb try refused the same way: with
+            # Ollama or LM Studio not started, the advised retry died on exit 2 (#1297, 2026-11-24)
+            *(["--force"] if a.force else [])]
     try:
         # the copy and its init inside: wb init refusing (no git identity, a home that is a
         # git repo) left try/<n> behind, one more at each retry (#530)
@@ -8217,6 +8237,8 @@ def parser() -> argparse.ArgumentParser:
                    "never matches one); default: the router's pick for a trivial task")
     s.add_argument("--queue", action="store_true", help="start even when the GPU's holders leave "
                    "no room for its model: it waits behind them (else exit 4)")
+    s.add_argument("--force", action="store_true", help="start even when its model can't run now "
+                   "(its server not started): it waits for it to come up (else exit 3)")
     s.set_defaults(f=cmd_try)
     s = sub.add_parser("remote", help="use the Ollama on another machine (LAN, tailnet): its "
                        "provider, marked local, and its tool-capable models registered")

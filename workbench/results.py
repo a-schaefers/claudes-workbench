@@ -5,21 +5,22 @@ from statistics import median
 from . import context, gitops, meter, skills, spend, stats, store
 
 
-def step(task: store.Task, landed: bool, since: str = "HEAD", gaps=None) -> dict:
+def step(task: store.Task, landed: bool, gaps=None) -> dict:
     """The step closing now (committed by wb next or accept, or dropped): its size and how it
     went. A session compacted (now, or before a fresh one took over) or filled by reading alone,
     an agent stuck, or review rounds the agent caused (`reviews` less the `spec_rounds` Claude
     marked as the spec's) say it was too much; Claude taking over says nothing of its size; a
     handover to a fresh session is the runner's normal way through a big step, counted, not held
-    against it. The router learns each model's slice from these (router.slice). ``since``: where
-    the step began (HEAD~1 once its commit has landed: a retried wb next). ``gaps``: the
+    against it. The router learns each model's slice from these (router.slice). Its size is
+    measured from where the step began (gitops.step_base), whatever commits it holds: wb next's,
+    an interrupted one's or accept's (#1302, #879). ``gaps``: the
     --spec-gap the closing command is about to record (cli._spec_gaps), counted for this round:
     wb next and wb accept measure the step first, and a gap given there was held against the
     agent's slice as its own review round (#904)."""
     st = task.status
     first = st.get("step_round") or 1
     try:
-        size = gitops.footprint(task.worktree, since)  # the step's work is uncommitted until now
+        size = gitops.footprint(task.worktree, gitops.step_base(task))
     except (gitops.GitError, OSError):
         size = {}
     # A `fresh` event at a later step's first round replaced the session the step before left
