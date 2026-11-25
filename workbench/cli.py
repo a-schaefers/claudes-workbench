@@ -2668,9 +2668,9 @@ INTERRUPTED = (RESTARTED, RUNNER_DIED, runner.SIGNAL_STOP, UPDATE_STOP)
 
 def _interrupted(last) -> bool:
     """Whether status `last` says the task was interrupted from outside: one of INTERRUPTED, or
-    runner._updated's (runner.UPDATED, then the task's own `wb resume <name>`), which no exact
-    match could ever hit: after a pull under running tasks, wb resume --all resumed none (#788).
-    And runner.opencode_moved's, OpenCode changed under it (#866)."""
+    what a runner before #1322 left when workbench (runner.UPDATED, then the task's own `wb
+    resume <name>`, which no exact match could ever hit: after a pull under running tasks, wb
+    resume --all resumed none, #788) or OpenCode (runner.OPENCODE_MOVED, #866) changed under it."""
     return last in INTERRUPTED or isinstance(last, str) and last.startswith(
         (runner.UPDATED + ":", runner.OPENCODE_MOVED + " ("))
 

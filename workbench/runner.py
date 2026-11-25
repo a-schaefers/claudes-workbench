@@ -302,7 +302,6 @@ def write_config_layer(task: store.Task) -> Path:
     context and its rules (the user's own OPENCODE_CONFIG_CONTENT permissions, USERS_RULES,
     before them: rules_env), and the ask_reviewer server."""
     path = context.rules_dir(task) / "opencode.json"
-    rules = context.rules_dir(task)
     mine = context.layer(task)
     users = models.users_config_content()
     theirs = users.get("permissions")
