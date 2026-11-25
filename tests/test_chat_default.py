@@ -67,7 +67,7 @@ class ChatDefault(Base):
         self.assertFalse(switch.exists())
         self.assertTrue(chat.is_on())
         run_wb("chat", "off", "--port", str(free_port()))
-        self.assertEqual(store.read_json(switch), {"on": False})
+        self.assertEqual(store.read_json(switch), {"on": False, "v": 2})  # 2.0's own off, marked (#1405)
         self.assertFalse(chat.is_on())                                     # the user's off stays off
         port = free_port()
         self.assertEqual(chat.ensure(port), {"url": chat.url(port), "state": "off"})
