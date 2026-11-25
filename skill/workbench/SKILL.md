@@ -367,7 +367,8 @@ its errors reach the agent as auto-fix rounds, not your review. Only one the pro
 configures, or a syntax-only check, and only when it passes on the base: `reference/checks.md`
 has each language's, the first time a task needs one.
 In a monorepo, `--repo` inside a package with its own committed CLAUDE.md (`package: …` printed)
-runs the agent, the setup and the tests in that package; the diff stays the whole repo's.
+runs the agent, a `--setup` and the tests in that package (a commands.json setup from its own
+key's directory); the diff stays the whole repo's.
 The worktree holds only committed files. When the acceptance command needs what the user
 installed (node_modules, a .venv, a build), add `--setup '<install command>'` (a .venv always: a copy still runs the original) (or `--copy <ignored
 path>`, from a package as the note names it; `--sibling <path>` for a `../<name>` or `../../<path>` the project uses, by that same path): `wb start` names the ignored

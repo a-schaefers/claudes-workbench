@@ -301,7 +301,7 @@ Then:
   act on): the base check's explanation, the spec-gap scorecard, where the model loads on the GPU or
   whom it runs beside, `wb optimize`'s advice (`wb doctor` keeps it), an untested OpenCode
   (`wb doctor`'s alone), an API model's handover note, and the setup Claude passed by flag (only
-  commands.json's: ``setup from commands.json: links ../x; copies a; runs `uv sync` ``,
+  commands.json's: ``setup from commands.json: links ../x; copies a; runs `uv sync` ``, with `(from <dir>)` after a setup run from its key's directory, not the package, #1376;
   `cli._standing_setup`). The dirty-repo note counts tracked files only (`--untracked-files=no`);
   the Windows-drive note comes on the repo's first task only.
 
@@ -1585,7 +1585,9 @@ everywhere). In order:
   again (#1021), a step on every start for what the user had set up (#1322). A sibling local_only marks is
   refused before this, named or standing (`cli.lane_places`, *Privacy for API roles*, #1268). `setup` and GPU
   tasks are unchanged.
-- `setup` (`--setup`), as the tests run, for `setup_limit(spec)`: task.json `setup_timeout`
+- `setup` (`--setup`), as the tests run, in `Task.workdir`, a commands.json one in its key's directory
+  (task.json `setup_dir`, `context.repo_conf_dir`, as its `copy` is read; the start line says `runs `…` (from the
+  repo's top)`): a root entry's `./scripts/bootstrap.sh` ran in a package and failed its every task (#1376), for `setup_limit(spec)`: task.json `setup_timeout`
   (`--setup-timeout`, else commands.json `repos` `setup_timeout`), else `SETUP_SECS` (1800 s), in
   every scratch checkout too (#520). A venv it makes goes first on PATH (`context.own_venv`, *Its
   environment*).
@@ -1816,7 +1818,7 @@ An API provider's header wait is 600 s instead (`API_HEADER_S`, *An API task's w
   from `--repo` up, with a committed `CLAUDE.md`/`.claude/CLAUDE.md` or a gitignored one in the
   checkout, `cli._local_package_md`: `wb start` notes `<package>'s CLAUDE.md is gitignored: the
   agent gets your checkout's copy`; never a `.claude` directory), the package's three the same
-  way. The agent, setup, tests and session export run there (`Task.workdir`); diff and commits
+  way. The agent, setup (a commands.json one from its key's directory, #1376), tests and session export run there (`Task.workdir`); diff and commits
   stay the whole repo's; a plain subdirectory means the top (#375, #606, #785);
 - tracked `.claude/rules/**/*.md` (`project_rules`), and the `.md` under a tracked directory link:
   one resolving outside the worktree and repo is copied to `rules/<task>/project-rules/<path>`
@@ -6988,7 +6990,8 @@ the same way. A key's `copy` paths are read from its directory as a `--copy` fro
 (`context.repo_conf_dir`, `cli._copy_path`): a package key's `node_modules` is the package's (#1346: the root's
 was copied, and every round ran without the package's). Its directory is measured as it matched: by path only when
 the spot is at or under the key, else inside the key's own worktree (a key on `.claude/worktrees/x` is the root's,
-not three parts deep: #1346's review). `--setup`,
+not three parts deep: #1346's review). Its `setup` runs there too (task.json `setup_dir`: a root entry's
+`./scripts/bootstrap.sh` ran in the package, #1376). `--setup`,
 `--setup-timeout` (a positive whole number) replace; `--copy`, `--sibling` add; `merge` is `wb accept --merge`'s way
 (`context.MERGE_AS`; `--merge-as` overrides). `local_only` is read for the whole repo, not the spot: any entry at or
 under the repo's top that says `true` holds for every task of it (`context.repo_entries` `whole`: by real path and
@@ -7038,7 +7041,7 @@ machine is never gone here, `cli._gone`, nor checked by the mod's `noteClaude`: 
 `provider`, `provider_name` (the catalog's), `thinking` (`off`|`on`, the role's, default off), `said` (the role's `said`, or `asked for[, approved in the dialog]` for a `--model`), and `said_ts` (the role's `ts`) (API only, fixed at start as `model` is), `thinking_shown` (what it does: `thinking off`, `thinking at its lowest effort (it can't turn off)`, `thinking as the model's default (it lists no lower setting)`…), `thinking_off` (`wb-off`'s `{settings}` or `{body}`, #1018), `size`, `stack`, `trial`, `backlog`,
 `group` (`--group`: the tasks one request fanned out to, #1048; missing: no group),
 `bench` (`{case, run, label}`), `test_cmd`, `no_base_check`, `unload_for_tests`, `sign` (false: `--no-sign`), `subdir` (a monorepo package), `setup`,
-`setup_timeout`, `copy`, `siblings`, `local_only` (`--local-only`, #1021), `order` (an OpenRouter role's backends, which the keyhole routes to: `routes.resolve` copies the role's row, `cli._routed_keys`; none for a `--model` start or a role with none: OpenRouter's choice of backend), `worktree` (when nested), `checkout` (`"runner"`; missing before #529),
+`setup_dir` (a commands.json setup's key directory when it isn't the package, `.` the top: where it runs, #1376), `setup_timeout`, `copy`, `siblings`, `local_only` (`--local-only`, #1021), `order` (an OpenRouter role's backends, which the keyhole routes to: `routes.resolve` copies the role's row, `cli._routed_keys`; none for a `--model` start or a role with none: OpenRouter's choice of backend), `worktree` (when nested), `checkout` (`"runner"`; missing before #529),
 `checkout_bytes` (wb start's disk-check size, counted as taken until the runner checks out; missing when free space was
 unknown), `auto_fix`, `self_review` (null: learned; false for a writing task unless asked), `ask_budget`, `ask_timeout`, `checkin`, `round_timeout`,
 `silence_timeout`, `think_timeout`, `timeouts_given` (which of `round`, `silence`, `think` a flag gave; the rest
@@ -7170,7 +7173,7 @@ the step included, #904), `stuck`, `took_over`, `claude` (its share, `spend.usag
 **bench/cases/<case>/case.json** (`bench.add`): `name`, `task`, `step`, `repo`, `checkout` (task.json `repo`, which
 `siblings` resolve from lexically, #909), `git_common` (`bench._repo`), `base`, `reference`, `size`, `stack`,
 `test_cmd`, `test_timeout`, `check_cmd`, `hidden` (paths; their files in `hidden/`), `allow`, `paths` (the grants, `grants_kept` once rules are gone), `setup`, `copy`, `siblings`, `setup_timeout`,
-`unload_for_tests`, `subdir` ('' for the top), `skills`, `original` (`model`, `rounds`, `reviews`, `minutes`, `steps`),
+`unload_for_tests`, `subdir` ('' for the top), `setup_dir` (task.json's; a replay's `--setup` gets a `cd` there first, #1376), `skills`, `original` (`model`, `rounds`, `reviews`, `minutes`, `steps`),
 `base_check` (`fails` or `not checked (timed out)`), `created_at`. **bench/runs.jsonl** (`bench.replay`): `ts`, `run`,
 `label`, `rep`, `case`, `model`, `task`, `wb_commit`, `skills`, `outcome` (`passed`, `failed`, `preempted`, `error`:
 not started, or the machine broke it, `<infra>: <last>`), `why`, `phase`, `rounds`, `auto_fixes`, `tok_in`, `tok_out`, `minutes`, `asks_refused`,

@@ -6927,6 +6927,39 @@ class WorktreeSetup(Base):
                          "packages/app/node_modules")
         self.assertEqual(cli._copy_path(self.repo, "../../../x", "packages/app"), "../x")
 
+    def test_a_root_entrys_setup_runs_from_the_root_for_a_package_task(self):
+        # #1376 (2026-11-25): the root key's setup ran in the package, so its
+        # ./scripts/bootstrap.sh failed every package task before round 1 (exit 127), while the
+        # same entry's copy paths were read from the root (#1346)
+        self.ignore(".boot", "where")
+        app = self.repo / "packages" / "app"
+        app.mkdir(parents=True)
+        (app / "CLAUDE.md").write_text("# app\n")
+        (self.repo / "scripts").mkdir()
+        (self.repo / "scripts" / "bootstrap.sh").write_text("#!/bin/sh\necho ok > .boot\n")
+        (self.repo / "scripts" / "bootstrap.sh").chmod(0o755)
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "a package"], check=True)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "setup": "./scripts/bootstrap.sh"}}}))
+        os.environ["FAKE_SCENARIO"] = "ok"
+        start = lambda name, *x: run_wb("start", name, "--spec", str(self.spec), "--repo", str(app),  # noqa
+                                        "--model", "mimo", "--no-base-check", *x)
+        out = start("t-rootsetup")
+        self.assertIn("setup from commands.json: runs `./scripts/bootstrap.sh` (from the repo's top)", out)
+        wait_phase("t-rootsetup", {"review"})
+        t = store.Task("t-rootsetup")
+        self.assertEqual(t.spec["setup_dir"], ".")
+        self.assertTrue((t.worktree / ".boot").is_file())
+        self.assertIn("\nexit: 0\n", (t.dir / "setup.txt").read_text())
+        # a --setup still runs at the spot, the package
+        start("t-spotsetup", "--setup", "pwd > where")
+        wait_phase("t-spotsetup", {"review"})
+        t = store.Task("t-spotsetup")
+        self.assertNotIn("setup_dir", t.spec)
+        self.assertTrue((t.worktree / "packages/app/where").is_file())
+        self.assertFalse((t.worktree / "where").exists())
+
     def test_a_packages_own_commands_json_copy_is_read_from_the_package(self):
         # #1346 (bar round 9, 2026-11-24; #1158 fixed only --copy): a package key's
         # `copy: ["node_modules"]` copied the root's node_modules, so the base check and every

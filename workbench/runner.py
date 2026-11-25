@@ -2364,17 +2364,18 @@ def write_shell_shim(task: store.Task) -> Path:
     return path
 
 
-def run_in_lane(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]:
-    """Run `cmd` in the task's worktree, in the agent's lane and with its environment; the
-    exit code ("timeout" past `limit` seconds, "output limit" past TEST_OUTPUT_CAP bytes) and the
-    decoded output (its head and tail when long)."""
+def run_in_lane(task: store.Task, cmd: str, limit: int,
+                cwd: Path | None = None) -> tuple[int | str, str]:
+    """Run `cmd` in the task's worktree (``cwd``, else Task.workdir), in the agent's lane and
+    with its environment; the exit code ("timeout" past `limit` seconds, "output limit" past
+    TEST_OUTPUT_CAP bytes) and the decoded output (its head and tail when long)."""
     # in the agent's lane, environment and shell: the tests run the agent's code, and must pass
     # or fail as they did when the agent ran them
     sh = test_shell()
     argv = lane.wrap(context.writable(task), [sh, *shell_args(sh), cmd], context.readable(task),
                      context.unix_paths(task))
     run = _issue()  # its own mark: sweep ends what it left, and nothing else (#324)
-    proc = subprocess.Popen(argv, cwd=task.workdir, stdout=subprocess.PIPE,
+    proc = subprocess.Popen(argv, cwd=cwd or task.workdir, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, env=agent_env(task, run),
                             start_new_session=True)  # its own group: a timeout ends all of it
     prev = CURRENT.get("proc")
@@ -2754,7 +2755,9 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
         return "copy failed", str(e)
     if not (cmd := spec.get("setup")):
         return 0, ""
-    return run_in_lane(task, cmd, setup_limit(spec))
+    # a commands.json setup from its key's directory, not the package (task.json `setup_dir`, #1376)
+    at = wt / spec["setup_dir"] if spec.get("setup_dir") else None
+    return run_in_lane(task, cmd, setup_limit(spec), at)
 
 
 # what a test run rewrites in a prepared path without changing what the code is: Python's bytecode,

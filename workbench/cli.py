@@ -1037,6 +1037,10 @@ def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu") -> 
     setup = a.setup if a.setup is not None else conf.get("setup") or ""
     copy, sibs = [], []
     home = context.repo_conf_dir(repo, sub)
+    # a standing setup runs from its key's directory, as its copy paths are read (#1346): a root
+    # entry's ./scripts/bootstrap.sh ran in the package and failed every package task before
+    # round 1 (#1376, 2026-11-25); a --setup still runs at the spot. "." is the top.
+    setup_dir = (home or ".") if a.setup is None and setup and home != (sub or "").strip("/") else ""
     for raw, given in [*((x, False) for x in conf.get("copy", [])), *((x, True) for x in a.copy or [])]:
         # a --copy from a package is read from it (#1158), a commands.json entry from its key's
         # directory (#1346); a standing entry's refusal names the entry, not a flag never given
@@ -1107,8 +1111,8 @@ def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu") -> 
         else conf.get("setup_timeout")
     if limit is not None and limit <= 0:
         die("--setup-timeout is seconds: a positive whole number")
-    return {k: v for k, v in (("setup", setup), ("copy", copy), ("siblings", sibs),
-                              ("setup_timeout", limit if setup else None)) if v}
+    return {k: v for k, v in (("setup", setup), ("setup_dir", setup_dir), ("copy", copy),
+                              ("siblings", sibs), ("setup_timeout", limit if setup else None)) if v}
 
 
 def _copy_path(repo: Path, raw: str, sub: str | None) -> str:
@@ -1261,14 +1265,16 @@ def _standing_setup(conf: dict, a, repo: Path, sub: str | None) -> list[str]:
     """What a start's worktree setup takes from commands.json "repos" (``conf``, the repo's
     entry) rather than its own flags: wb start says only that, as Claude knows what it passed
     (#1322). --setup takes the standing command's place (_worktree_setup). A copy is named by the
-    path it copies, from its key's directory (#1346)."""
+    path it copies, from its key's directory (#1346); a setup run from there, not the package,
+    says where (#1376)."""
     home = context.repo_conf_dir(repo, sub)
     links = conf.get("siblings") or []
     copies = [_copy_path(repo, x, home).rstrip("/") for x in conf.get("copy") or []]
     cmd = conf.get("setup") if a.setup is None else None
+    where = "" if home == (sub or "").strip("/") else " (from " + (home or "the repo's top") + ")"
     return [*(["links " + ", ".join(n if n.startswith("../") else f"../{n}" for n in links)] if links else []),
             *([f"copies {', '.join(copies)}"] if copies else []),
-            *([f"runs `{cmd}`"] if cmd else [])]
+            *([f"runs `{cmd}`{where}"] if cmd else [])]
 
 # The commands.json `repos` keys that set a task's worktree up: an entry with none of them still
 # gets wb start's note on the ignored directories the worktree lacks (#1299)
