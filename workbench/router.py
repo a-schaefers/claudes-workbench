@@ -211,8 +211,8 @@ def record_role(role: str | None) -> str | None:
 
 
 def of_role(row: dict, role: str) -> bool:
-    """Whether a results row is a record of ``role``'s work: its `role`, else its `size` (a row
-    from before the roles). Writing slices like significant work (decision 1 of #1008), but a
+    """Whether a results row is a record of ``role``'s work (tuning.work: writing's own, else the
+    row's `size`). Writing slices like significant work (decision 1 of #1008), but a
     model's prose results moved its coding rank and the other way round: each counts apart (#1025)."""
     return tuning.work(row) == role
 

@@ -40276,9 +40276,10 @@ class Writing(Base):
         self.assertEqual([r for r in store.results() if r.get("task") == "t-row"][-1]["role"], "writing")
 
     def record(self, model, role, outcome, n, minutes=2.0):
-        for _ in range(n):
+        for _ in range(n):  # a trivial task's size is trivial, as wb start records it (#1398)
             store.append_jsonl(store.home() / "results.jsonl", {
-                "model": model, "size": "significant", "outcome": outcome, "ran": True,
+                "model": model, "size": "trivial" if role == "trivial" else "significant",
+                "outcome": outcome, "ran": True,
                 "minutes": minutes, "active_minutes": minutes, **({"role": role} if role else {})})
 
     def test_wb_start_routes_a_writing_task_on_its_writing_record_and_a_coding_one_on_its_coding_one(self):
@@ -40337,6 +40338,21 @@ class Writing(Base):
         self.assertIn("(typically 40m)", transcript.clock_line(task))
         self.assertEqual(runner.typical_now(task)["typical"]["min"], 40.0)
         self.assertIn("(typically 40m)", runner.checkin_text(task, 1, {"texts": []}, since=0, active=0))
+
+    def test_a_coding_task_is_filed_under_the_size_it_was_routed_at_not_its_role(self):
+        # #1398 (2026-11-25): `--role trivial --size significant` ran on the significant pick, and
+        # its result moved the model's trivial record, never the significant one choose() reads
+        from workbench import router, tuning
+        m = cli.models.resolve("mimo")
+        for role, size in (("trivial", "significant"), ("significant", "trivial"),
+                           ("writing", "significant")):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": m.id, "role": role, "size": size, "outcome": "accepted", "ran": True,
+                "active_minutes": 10})
+        self.assertEqual([tuning.work(r) for r in store.results()], ["significant", "trivial", "writing"])
+        self.assertEqual(router.score(m, "significant").tries, 1)
+        self.assertEqual(router.score(m, "trivial").tries, 1)
+        self.assertEqual(router.score(m, "significant", role="writing").tries, 1)
 
     def test_prose_steps_leave_the_coding_rows_speed_reward_alone(self):
         # the review of #1025: tuning.record set each row's speed against the median step of its

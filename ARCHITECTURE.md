@@ -2789,7 +2789,7 @@ guides, release notes, stories, copy) runs under its own rules, not the coding o
   build, a spell or style lint) it runs as any task's test: base check, auto-fix, in the lane. A
   checker that needs the network fails there. wb looks for none: Claude picks it (SKILL.md doesn't say so yet).
 - **The record apart**: results rows carry `role`; `router.score`, `rank`, `choose` and
-  `expected` count a model's rows of the task's role (`router.of_role`: `role`, else `size`), so
+  `expected` count a model's rows of the task's role (`router.of_role`: writing's, else the row's `size`, #1398), so
   prose results never move a coding rank or the other way round. Only a writing task asks by its
   role (`router.record_role`, in `router.choose` from the role `routes.resolve` passes, `progress`, `wb watch`'s clock and the check-in's ETA, #1113): #1016 writes a
   role for every task, and a coding one is ranked and timed on its size's record, as before roles. With none yet, every model starts
@@ -3897,7 +3897,7 @@ one lease. A media engine joins `gpu` when on this GPU (`media.on_gpu`, `media.s
 pool otherwise (`media.boxes`), or none (`"gpu": false`).
 
 **Routing** (`router.rank`, `choose`). Rows: `store.results()` kept by `tuning.judged`, for the
-model, its `lineage` and the role (`router.of_role`: a row's `role`, else its `size`; with no role
+model, its `lineage` and the role (`router.of_role`: writing, else a row's `size`, its `role` with none; with no role
 asked, the size's; *The writing role*). `judged` drops `--spec-gap` discards, rows whose agent never
 ran (`ran` false, `failed_before`; older: not accepted, `tok_out` 0; #581), and discards after a stop
 that wasn't the step's (`tuning.stopped_outside`: the row's `infra`, unless steps were kept; #1245).
