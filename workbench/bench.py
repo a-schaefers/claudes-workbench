@@ -633,6 +633,7 @@ def start(model_ids: list[str], case_names: list[str], skills: list[str], label:
     env.pop("WB_TASK", None)
     env.pop("CLAUDE_CODE_SESSION_ID", None)  # its tasks are no session's
     env.pop("CLAUDE_PID", None)
+    env.pop("OPENCODE_SESSION_ID", None)  # nor an OpenCode driver's (#1309)
     from . import cli  # cli imports this module
     with open(d / "driver.log", "a") as log:  # its own scope, to outlive a logout (#531)
         proc = cli.detach([sys.executable, "-X", "utf8", "-m", "workbench.bench", run], cwd=d,

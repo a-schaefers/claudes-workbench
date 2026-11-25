@@ -390,6 +390,104 @@ def claude_sessions(pid, since: float = 0, start=None) -> list[str]:
     return out
 
 
+# The OpenCode driver (#1309, 2.2): the model with the final say, in the user's own OpenCode. Its
+# identity is OPENCODE_SESSION_ID, which the workbench plugin's tools set on their `wb` child and
+# OpenCode itself sets in every shell, the agents' own shells included: so WB_TASK outranks it
+# (an agent is never a driver). No flag and no variable of the plugin's says "driver": a missing
+# plugin can't open a gate, it can only fail to ask (#1296, the host-shape decision, 2026-11-25).
+DRIVERS = "drivers"           # $WB_HOME/drivers/: the drivers' heartbeats
+HEARTBEAT = "opencode.json"   # the OpenCode service's one heartbeat, the plugin's server part's
+HEARTBEAT_FRESH = 120         # seconds: an older beat is a service gone (the plugin beats every 30)
+SESSION_RE = re.compile(r"[\w-]{1,128}")  # a session id a file may hold, as the Claude ids
+
+
+def opencode_session() -> str:
+    """The OpenCode session this `wb` runs for: OPENCODE_SESSION_ID, unless WB_TASK says this is
+    an agent's call (OpenCode re-sets the id in the agent's own shells, #1310) or Claude Code's
+    Bash runs it (CLAUDECODE, ranked first, exactly as before 2.2). "" for none or a malformed id."""
+    if os.environ.get("CLAUDECODE") == "1" or os.environ.get("WB_TASK"):
+        return ""
+    sid = os.environ.get("OPENCODE_SESSION_ID", "")
+    return sid if SESSION_RE.fullmatch(sid) else ""
+
+
+def under_model() -> bool:
+    """Whether a model's shell runs this `wb`, so a gated change (an API role, an API `--model`,
+    `wb patch send`) needs the user's yes from the host's dialog: Claude Code's Bash (CLAUDECODE=1),
+    or an OpenCode driver's (OPENCODE_SESSION_ID set, WB_TASK not). Before #1309 only CLAUDECODE
+    counted, so an OpenCode driver's `wb route … --api` was taken for the user at a terminal:
+    no dialog, `by: terminal`. Any id at all counts here, a malformed one too: the gate fails closed."""
+    return os.environ.get("CLAUDECODE") == "1" or bool(
+        os.environ.get("OPENCODE_SESSION_ID") and not os.environ.get("WB_TASK"))
+
+
+def caller_kind() -> str:
+    """Who runs this `wb`, for a role's `by`/`gpu_by` and the gates' wording: `claude`,
+    `opencode` (an OpenCode driver: under_model without CLAUDECODE), or `terminal`."""
+    if os.environ.get("CLAUDECODE") == "1":
+        return "claude"
+    return "opencode" if under_model() else "terminal"
+
+
+def heartbeat() -> dict | None:
+    """$WB_HOME/drivers/opencode.json, the OpenCode service's heartbeat, as the plugin's server
+    part writes it: {tool: "opencode", pid?, start?, machine?, ts, sessions: {<id>: {model?,
+    variant?, dir?, ts?}}}, `sessions` the sessions the service has live. None when missing or
+    not that shape."""
+    hb = read_json(home() / DRIVERS / HEARTBEAT)
+    if not isinstance(hb, dict) or hb.get("tool") != "opencode" or not isinstance(hb.get("sessions"), dict):
+        return None
+    ts = hb.get("ts")
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool) or not math.isfinite(ts):
+        return None
+    return hb
+
+
+def driver_state(session, on=None) -> str:
+    """Whether an OpenCode driver session lives, by the heartbeat: `live` (a fresh beat lists it),
+    `gone` (a fresh beat without it, or a beat gone stale or whose service pid has exited: the
+    service went, and its sessions with it), `unknown` (no heartbeat: no plugin to say; or the
+    session or the service on another machine, whose pids and beats aren't this one's to judge,
+    as cli._gone, #922). Only `gone` hands a task to another session: unknown is not gone, as a
+    Claude task with no pid isn't. ``on``: the machine the task recorded (task.json
+    `driver.machine`)."""
+    hb = heartbeat()
+    if hb is None or not isinstance(session, str) or not session:
+        return "unknown"
+    me = machine()
+    if any(isinstance(m, str) and m and m != me for m in (on, hb.get("machine"))):
+        return "unknown"
+    if time.time() - hb["ts"] > HEARTBEAT_FRESH:
+        return "gone"
+    pid = hb.get("pid")
+    if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
+        from . import models  # here: models imports store
+        if not models._alive(pid, hb.get("start") if isinstance(hb.get("start"), str) else None):
+            return "gone"
+    return "live" if session in hb["sessions"] else "gone"
+
+
+def driver_record(session: str) -> dict:
+    """task.json `driver` for a task an OpenCode session starts or adopts: the tool, this machine,
+    and the session's model and variant from the heartbeat when it lists them. The session itself
+    is task.json `session`, which every reader of a task's owner already reads, the Claude Code
+    mod's `mine` included: a session it never had, with no `claude_pid` to die, so it never takes
+    an OpenCode task for its own."""
+    row = ((heartbeat() or {}).get("sessions") or {}).get(session)
+    row = row if isinstance(row, dict) else {}
+    return {"tool": "opencode", "machine": machine(),
+            **{k: row[k] for k in ("model", "variant") if isinstance(row.get(k), str) and row[k]}}
+
+
+def driver_of(spec: dict) -> str | None:
+    """Which driver a task belongs to (task.json): `opencode` (its `driver.tool`), `claude` (a
+    `session` and no `driver`: every task before 2.2's), or None (no session: by directory)."""
+    d = spec.get("driver")
+    if isinstance(d, dict) and d.get("tool") == "opencode":
+        return "opencode"
+    return "claude" if spec.get("session") else None
+
+
 def _start_epoch(start) -> float | None:
     """A process start (models._started) as a Unix time: /proc's clock ticks after boot (btime in
     /proc/stat), or ps's `lstart`; None when it can't be read."""

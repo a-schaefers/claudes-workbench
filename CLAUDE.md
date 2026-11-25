@@ -174,7 +174,8 @@ Environment (each in ARCHITECTURE.md): paths `WB_HOME`, `WB_MODELS`, `WB_SKILLS`
 (the user's file for agents; the tests' own) (relative or `~` allowed: a new
 one joins `store.PATH_VARS`); the mod's `WB_BIN`, `WB_COMPACT_AT`; the agent's `WB_TASK`, `WB_RUN`,
 `WB_USER_PYTHONPATH`; a scheduled fire's `WB_SCHEDULE` (its Claude's `wb accept --merge` refused); `wb shot`'s `WB_SHOT_OUT`, `WB_SHOT_VIEWPORT`; Claude Code's
-`CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID` (whose task it is), `CLAUDECODE` (under it `wb patch send`
+`CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID` (whose task it is), OpenCode's `OPENCODE_SESSION_ID` (an OpenCode
+driver's, under `WB_TASK` never: `store.opencode_session`, gated as `CLAUDECODE` is: `store.under_model`), `CLAUDECODE` (under it `wb patch send`
 sends and `wb route` changes the API side only on the mod's dialog's yes: `send-ok.json`,
 `route-ok.json`; `wb start --model` on an API model the same, `cli.start_gate`). Tests only: `WB_OPENCODE_BIN`,
 `WB_FAKE_MODELS`, `WB_FAKE_GPU_GB`, `WB_FAKE_CATALOG` (the fake's OpenCode catalog), `WB_FAKE_API`

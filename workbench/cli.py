@@ -1811,6 +1811,10 @@ def cmd_start(a):
         **({"claude_pid": int(pid), "claude_start": models._started(int(pid)),
             "claude_machine": store.machine()}
            if (pid := os.environ.get("CLAUDE_PID", "")).isdigit() else {}),
+        # or the OpenCode driver session whose tool or shell ran it (#1309): its id, never a pid
+        # (shells run in OpenCode's long-lived service), and `driver` saying whose it is
+        **({"session": oc, "driver": store.driver_record(oc)}
+           if not sid and (oc := store.opencode_session()) else {}),
         "base_branch": gitops.start_branch(repo, a.base),  # where wb accept --merge lands
         # the weights behind the id: a record on other weights under it isn't this model's (#726)
         **({"weights_id": w} if (w := models.identity(m)) else {}),
@@ -2524,7 +2528,11 @@ def cmd_adopt(a):
     ran `wb start` ended, every live session near the task, and the one resumed with `claude
     --resume`, owned it for good, and both woke for its review. The resumed session (its id is the
     task's `session`) stamps its new process the same way. Refused (exit 1) while the recorded
-    process lives and isn't the claimer."""
+    process lives and isn't the claimer. From an OpenCode driver (#1309): `_adopt_opencode`."""
+    if a.pid is None and store.caller_kind() == "opencode":
+        return _adopt_opencode(a)
+    if not a.session:  # argparse's own words: required under Claude Code, as before #1309
+        die("wb adopt: the following arguments are required: --session", 2)
     task = need(a.name)
     pid = a.pid or (int(p) if (p := os.environ.get("CLAUDE_PID", "")).isdigit() else os.getppid())
     start = models._started(pid)
@@ -2538,13 +2546,47 @@ def cmd_adopt(a):
             return
         if not spec.get("session"):
             die(f"{a.name} records no session: it goes by directory")
-        if not _gone(old, spec.get("claude_start"), spec.get("claude_machine")):
+        if store.driver_of(spec) == "opencode":  # an OpenCode session's: by its heartbeat (#1309)
+            if not _owner_gone(spec):
+                die(f"{a.name} belongs to an OpenCode session ({spec['session']}) not known to be gone")
+            spec.pop("driver")
+        elif not _gone(old, spec.get("claude_start"), spec.get("claude_machine")):
             die(f"{a.name} belongs to a live Claude Code session (pid {old}"
                 + (" on another machine" if store.elsewhere({"machine": spec.get("claude_machine")})
                    else "") + ")")
         if spec.get("session") not in a.session:
             spec["session"] = a.session[0]
         spec.update(claude_pid=pid, claude_start=start, claude_machine=store.machine())
+        store.write_json(task.dir / "task.json", spec)
+    print(f"adopted {a.name}")
+
+
+def _adopt_opencode(a):
+    """`wb adopt <task>` from an OpenCode driver's tool or shell (#1309): the task becomes this
+    session's (`--session`, else OPENCODE_SESSION_ID): task.json `session` and `driver`
+    (store.driver_record), a Claude Code task's `claude_pid`, `claude_start` and `claude_machine`
+    dropped. Refused (exit 1) while the recorded owner may live: an OpenCode session not `gone`
+    by the heartbeat (store.driver_state), a Claude Code process not gone (`_gone`). Unlike the
+    directory rule, it takes a task across drivers: a user who moves a project from Claude Code
+    to OpenCode, or back, hands its tasks over with it."""
+    sid = (a.session or [store.opencode_session()])[0]
+    if not store.SESSION_RE.fullmatch(sid or ""):
+        die("wb adopt: no OpenCode session to give the task to (--session ID)")
+    task = need(a.name)
+    with store.locked(runner.lock_file(a.name, "cmd")):
+        spec = dict(task.spec)
+        if spec.get("session") == sid and store.driver_of(spec) == "opencode":
+            print(f"{a.name} is this session's already")
+            return
+        if not spec.get("session"):
+            die(f"{a.name} records no session: it goes by directory")
+        if not _owner_gone(spec):
+            if store.driver_of(spec) == "opencode":
+                die(f"{a.name} belongs to an OpenCode session ({spec['session']}) not known to be gone")
+            die(f"{a.name} belongs to a live Claude Code session (pid {spec.get('claude_pid')})")
+        for k in ("claude_pid", "claude_start", "claude_machine"):
+            spec.pop(k, None)
+        spec.update(session=sid, driver=store.driver_record(sid))
         store.write_json(task.dir / "task.json", spec)
     print(f"adopted {a.name}")
 
@@ -2584,7 +2626,7 @@ def cmd_wait(a):
     if a.name and (a.repo or a.session or a.all_sessions or getattr(a, "backlog", None)):
         die("--repo, --session, --all-sessions and --backlog go with a bare wb wait")
     batch = getattr(a, "backlog", None)  # one batch's tasks alone: a scheduled run's (#1204)
-    where, sessions = (None, None) if a.name or batch else _caller(a)
+    where, sessions, kind = (None, None, None) if a.name or batch else _caller(a)
     while True:
         for t in [need(a.name)] if a.name else store.all_tasks():
             if t.status.get("phase") in LIVE:
@@ -2594,7 +2636,7 @@ def cmd_wait(a):
         # acknowledged a notice its owner's mod then never woke for (#696)
         theirs = ({t.name for t in store.all_tasks() if t.spec.get("backlog") != batch} if batch
                   else set() if a.name or not (where or sessions) else {
-                      t.name for t in _scope(store.all_tasks(), where, sessions)[1]})
+                      t.name for t in _scope(store.all_tasks(), where, sessions, kind)[1]})
         for row in reversed(rows):
             if a.name and row["task"] != a.name or row["task"] in theirs:
                 continue
@@ -2681,7 +2723,17 @@ def _gone(pid, start=None, machine=None) -> bool:
     return not models._alive(pid, start if isinstance(start, str) else None)
 
 
-def _scope(tasks, where, sessions=None):
+def _owner_gone(spec: dict) -> bool:
+    """Whether the driver session a task records is gone, so the directory rule may hand it on:
+    a Claude Code task's process (`_gone`), an OpenCode task's session by the heartbeat
+    (store.driver_state: only `gone`, never `unknown`, #1309)."""
+    if store.driver_of(spec) == "opencode":
+        d = spec.get("driver") or {}
+        return store.driver_state(spec.get("session"), d.get("machine")) == "gone"
+    return _gone(spec.get("claude_pid"), spec.get("claude_start"), spec.get("claude_machine"))
+
+
+def _scope(tasks, where, sessions=None, kind=None):
     """The tasks of one Claude Code session, as the mod names it: `sessions` (`--session`, every
     id its process has had: /clear starts another) and `where` (`--repo`, its directory). A task
     `wb start` recorded a session for (task.json `session`) is that session's, wherever it ran;
@@ -2696,7 +2748,10 @@ def _scope(tasks, where, sessions=None):
     The others belong to another session, which its mod wakes and its quit commands stop (the
     2026-11-16 audit: two projects at once, one session's /workbench-quit stopped the other's
     agents; the 0.90 review: a task started from ~ belonged to every session under it, and one
-    started after a `cd` elsewhere to none). Returns (mine, others)."""
+    started after a `cd` elsewhere to none). ``kind``: the driver the sessions are (`claude` when
+    None, as the mod's; `opencode`, #1309): a task of the other driver's is never claimed by
+    directory, only by its own id, so the Claude Code mod and an OpenCode session never take each
+    other's tasks, the gone ones included (`wb adopt` hands one across). Returns (mine, others)."""
     if not where and not sessions:
         return list(tasks), []
     # real paths on both sides, in lower case where the file system ignores case (macOS): a
@@ -2720,8 +2775,8 @@ def _scope(tasks, where, sessions=None):
             cwd and cwd.is_relative_to(here)
             or repo and (repo.is_relative_to(here) or here.is_relative_to(spot)))
         if sessions and sid:
-            ok = sid in sessions or near and _gone(t.spec.get("claude_pid"), t.spec.get("claude_start"),
-                                                   t.spec.get("claude_machine"))
+            ok = sid in sessions or near and store.driver_of(t.spec) == (kind or "claude") \
+                and _owner_gone(t.spec)
         elif here is None or (not cwd and not repo):
             ok = True
         else:
@@ -2736,18 +2791,23 @@ def _caller(a) -> tuple:
     every id its process has had (`claude-sessions/<CLAUDE_PID>`, store.claude_sessions) and the
     directory it runs in; `--all-sessions`, or a terminal, every session's. Plain `wb status`,
     which the skill and the compaction note send Claude to, listed every session's open tasks
-    as one, so one session could review, accept or discard another's (#693)."""
+    as one, so one session could review, accept or discard another's (#693). From an OpenCode
+    driver's tool or shell (store.opencode_session), that session's: its one id (an OpenCode
+    session keeps it) and the directory (#1309). The third value is the driver (_scope's `kind`):
+    `--session` given under an OpenCode driver is OpenCode's, else Claude Code's, as the mod's."""
     repo, sessions = getattr(a, "repo", None), getattr(a, "session", None)
+    kind = "opencode" if store.caller_kind() == "opencode" else "claude"
     if repo or sessions or getattr(a, "all_sessions", False):
-        return repo, sessions
+        return repo, sessions, kind
     sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     if not sid:
-        return None, None
+        oc = store.opencode_session()
+        return (os.getcwd(), [oc], "opencode") if oc else (None, None, None)
     pid = os.environ.get("CLAUDE_PID", "")
     # this process's ids only: a dead one's under the same pid were taken for its own (#787)
     ids = list(dict.fromkeys([*(store.claude_sessions(pid, start=models._started(int(pid)))
                                 if pid.isdigit() else []), sid]))
-    return os.getcwd(), ids
+    return os.getcwd(), ids, "claude"
 
 
 def _others_line(others, what):
@@ -3499,7 +3559,12 @@ API_RUNS = True
 
 def gate_refusal(what: str, command: str) -> str:
     """The refusal under Claude Code when the mod's dialog approved none of this (#1014), as
-    patches' for a send (#1005): nothing Claude can type is the user's yes."""
+    patches' for a send (#1005): nothing Claude can type is the user's yes. Under an OpenCode
+    driver (#1309) the same, naming the workbench plugin: nothing the driver types is either."""
+    if store.caller_kind() == "opencode":
+        return (f"in OpenCode {what} only through the workbench plugin's dialog, and the user "
+                f"approved none for this change, so nothing changed (is the plugin loaded?). Or "
+                f"the user runs it in a terminal of their own: {command}")
     return (f"in Claude Code {what} only through the workbench mod's dialog, and the user approved "
             f"none for this change, so nothing changed (is the mod loaded? wb doctor says). Or the "
             f"user runs it in a terminal of their own: {command}")
@@ -3647,9 +3712,9 @@ def start_line(name: str, m: models.Model) -> str:
 
 
 def start_gate(name: str, m: models.Model) -> None:
-    """Under Claude Code an API --model starts only on the mod's dialog's yes (#1014); exit 3
-    otherwise. GPU models pass as before."""
-    if m.kind != "api" or os.environ.get("CLAUDECODE") != "1":
+    """Under Claude Code, or an OpenCode driver (store.under_model, #1309), an API --model starts
+    only on the host's dialog's yes (#1014); exit 3 otherwise. GPU models pass as before."""
+    if m.kind != "api" or not store.under_model():
         return
     if not routes.approved({"start": {"task": name, "model": m.id}, "change": start_line(name, m)}):
         die(gate_refusal("an API model starts", f"wb start {name} … --model {m.id}"), 3)
@@ -3762,7 +3827,7 @@ def _route_show(as_json: bool) -> None:
         made = [(row[t], row.get(b)) for t, b in keys if isinstance(row.get(t), (int, float))]
         if made:
             ts, by = max(made, key=lambda x: x[0])
-            bits.append(f"set by {'Claude' if by == 'claude' else 'you'} {time.strftime('%m-%d', time.localtime(ts))}")
+            bits.append(f"set by {_by_word(by)} {time.strftime('%m-%d', time.localtime(ts))}")
         if fb := row.get("fallback"):  # #1196: where its code goes when its provider is down or out of credit
             bits.append(f"fallback {routes.fallback_name(fb, row['gpu'])}" + (
                 f" ({_who(fb)})" if fb != routes.FALLBACK_GPU else "")
@@ -4075,14 +4140,14 @@ def _route_apply(a, argv: list[str], changed) -> None:
         else:
             print(ch.line or "unchanged")
         return
-    by = "claude" if os.environ.get("CLAUDECODE") == "1" else "terminal"
+    by = store.caller_kind()  # claude, opencode (an OpenCode driver, #1309) or terminal
     try:
         with routes.editing(lenient=True) as held:  # the gate compares the line computed under the lock
             ch = noted(changed(held[0]), held[1])
             if not ch.line:
                 print(f"unchanged: {routes.summary(held[0])}")
                 raise _Unchanged
-            if ch.gated and by == "claude":
+            if ch.gated and by != "terminal":
                 ok = routes.approved({"argv": argv, "change": ch.line})
                 if not ok:
                     die(gate_refusal("a role changes", "wb " + shlex.join(argv)), 3)
@@ -5615,6 +5680,11 @@ SCOUT_API_DAYS = 30    # wb scout: an API model's record, over this many days (#
 SCOUT_SPEND_DAYS = 7   # and the API spend
 
 
+def _by_word(by) -> str:
+    """Who a role's `by`/`gpu_by` says set it: Claude, the OpenCode driver (#1309), else you."""
+    return {"claude": "Claude", "opencode": "the driver"}.get(by, "you")
+
+
 def _role_where(doc: dict, r: str) -> str:
     """A role as wb scout says it: `GPU (router)`, `GPU <id> (pinned)` or `API <id>, set by you
     11-20, thinking off` (what the model does with it: routes.thinking_said, #1263)."""
@@ -5625,7 +5695,7 @@ def _role_where(doc: dict, r: str) -> str:
         return "API: no model (can't start)"
     out = f"API {row['api']}"
     if isinstance(row.get("ts"), (int, float)):
-        out += (f", set by {'Claude' if row.get('by') == 'claude' else 'you'} "
+        out += (f", set by {_by_word(row.get('by'))} "
                 f"{time.strftime('%m-%d', time.localtime(row['ts']))}")
     return out + f", {routes.thinking_said(row)}"
 
@@ -8652,8 +8722,9 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("adopt", help="the mod's: make a task whose Claude Code process is gone "
                        "this session's")
     s.add_argument("name")
-    s.add_argument("--session", action="append", required=True, metavar="ID",
-                   help="this process's session ids, the current one first")
+    s.add_argument("--session", action="append", metavar="ID",
+                   help="this process's session ids, the current one first (required under "
+                   "Claude Code; from an OpenCode driver, default $OPENCODE_SESSION_ID)")
     s.add_argument("--pid", type=int, help="the claiming Claude Code process (default: "
                    "$CLAUDE_PID, else wb's parent)")
     s.set_defaults(f=cmd_adopt)
