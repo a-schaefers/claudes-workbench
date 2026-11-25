@@ -5599,7 +5599,9 @@ else `chat/serve.pid`, else 1337; `--port`, #349; the fragment never leaves the 
   port), then `daemon-reload`, `enable wb-chat` and `start` (`restart` when the drop-in changed).
   On macOS it writes the plist into `~/Library/LaunchAgents/` with `EnvironmentVariables` from
   `service_env` and a comment carrying `cli.SERVICE_MARK` (an absent copy, the shipped file's
-  plain copy or one with the mark is rewritten; one without it is the user's, kept), boots out a
+  plain copy, an earlier release's (`cli.SHIPPED_PLISTS`, sha256s: 1.91's, which its comment said
+  to copy by hand, ran on without the PATH and WB_* variables, #1406) or one with the mark is
+  rewritten; any other is the user's, kept, and the line says `, yours`), boots out a
   loaded agent whose plist changed, and `launchctl bootstrap`s it. Then the service's chat must
   answer on `chat.PORT` within `START_WAIT` (`cli._came_up`): `enable --now` and `bootstrap`
   succeed when the server exits at once, and setup said `ok` over an app left down. One that
@@ -6974,7 +6976,8 @@ $WB_HOME (~/.local/state/workbench)
 ~/.config/systemd/user/wb-chat.service (wb setup's link to systemd/wb-chat.service) and wb-chat.service.d/10-wb-setup.conf
                                  (cli.SERVICE_DROPIN: a comment, [Service], Environment="PATH=…" and each set store.PATH_VARS, cli.service_env;
                                  rewritten by each wb setup, #1342, #1343); macOS: ~/Library/LaunchAgents/workbench.chat.plist (the shipped plist
-                                 with EnvironmentVariables from service_env and a comment with cli.SERVICE_MARK; one without the mark is the user's)
+                                 with EnvironmentVariables from service_env and a comment with cli.SERVICE_MARK; one without the mark,
+                                 nor a shipped copy, cli.SHIPPED_PLISTS, is the user's)
 ~/.config/opencode/opencode.json + .jsonc (layered, under $XDG_CONFIG_HOME; then $OPENCODE_CONFIG; $WB_OPENCODE_CONFIG) the models
 /tmp/wb-run-<uid>-<hash>/        the agent's XDG_RUNTIME_DIR (lane on; context.runtime_dir), 0700, .wb-owner {home, task} (RUNTIME_OWNER);
                                  aside/: where the self-review copies a file aside (runner.self_review_aside, #1085)
@@ -7801,6 +7804,7 @@ doc needs its own `!/` line).
 ## Couplings: change one, change the other
 
 - **The README's bold opening line and the sentence after it** → the GitHub repository's About description, word for word (the owner, 2026-11-24, on #1357: keep the two in sync while iterating). `tests/test_docs.py` pins the README side; the About side is set by hand (`gh repo edit --description`).
+- **`launchd/workbench.chat.plist`, in a release** → the release before's sha256 into `cli.SHIPPED_PLISTS`, or `wb setup` keeps a copy of it as the user's (#1406).
 - **A file a round's children load** (lane, git shim, ask server, their imports) → `runner.CHILD_CODE`, so an update under a running task is caught.
 - **`lane.REFUSED`** (the refused lane's first words) → `verify.run`, which reads a run starting with it as no test run, never the candidate failing (#1308).
 - **An `ALLOWED_COMMANDS` entry spelled with its opt-out** (`REDOCLY_TELEMETRY=off redocly lint`) → the skill's
