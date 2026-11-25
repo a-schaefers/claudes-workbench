@@ -3556,7 +3556,7 @@ read as a wrong id, Claude hunted for the "right" one).
   `OPENCODE_PASSWORD` as HTTP Basic `opencode:<password>`, and ends when its stdin closes; its group is
   killed after): `GET /api/plugin` every `PLUGIN_POLL` (25 ms) until it lists a plugin, then `GET
   /api/model`, both with `location[directory]`, through `_DIRECT` (no proxy; never `_open`'s stored keys), within `CATALOG_TIMEOUT` (past it,
-  `opencode model.list took over 30 s`: never a partial list). Not `opencode api model.list
+  `opencode model.list took over 30 s`: never a partial list; a server that exits before it listens gives its stderr's first line, its exit awaited after its stdout closes, as a loaded runner's lagged: #1370). Not `opencode api model.list
   --standalone`: from OpenCode 2.4.0 the server answers model.list with what has loaded so far, and
   the catalog and every provider are plugins that load after it starts (#63814 upstream), so 2.4.1
   printed no model, or 14 of 93, and wb saw no API model (the opencode workflow, 2026-11-23);
@@ -7182,7 +7182,11 @@ From the repo root: `python3 -m unittest` (`tests/__init__.py` makes `tests` a p
 `PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs`.
 
 **CI.** `check.yml` on every push to main and pull request: `suite` in six shards (`WB_TEST_SHARD=K/6`, `fail-fast`
-off) on Python 3.11, the floor; `mod` with `CLAUDE_CODE_VERSION`; `check`, the required one, `needs` both, runs
+off) on Python 3.11, the floor, each run by `scripts/suite.sh K/6 4` as four `python3 -m unittest` processes at once,
+one per runner CPU (process j runs `WB_TEST_SHARD=K+6(j-1)/24`, so every test of the shard once; each log printed whole,
+headed by its `WB_TEST_SHARD`, as its process ends; every log on a cancel, which reaches it because the step `exec`s it (the step's shell passes no signal on: unexec'd, a cancel SIGKILLed it with no log printed, its review, 2026-11-25); exit 1 if any failed, 64 on bad arguments or a bash older than 5.1, `wait -n -p`: macOS's 3.2, where its two `tests/test_workflows.py` tests skip):
+one process left the CPUs half idle (a local shard 1/6, 404 s wall for 221 s of CPU; 142 s in four), and the slowest
+shard, 6.5 to 10 minutes, was the 9.5 to 10.5 minute check (40 runs to 2026-11-25); `mod` with `CLAUDE_CODE_VERSION`; `check`, the required one, `needs` both, runs
 `always()` (a skipped required check passes) and is green only when both succeeded, so the ruleset waits on one name. A pull request touching only
 `README.md`, `docs/releases/` or images in `docs/` (the `Scope` step, its merge commit against its base) runs only
 `tests.test_docs` and `tests.test_workflows` in shard 1; the suite reads ARCHITECTURE.md, CLAUDE.md, the skill, the
@@ -7196,8 +7200,8 @@ on its commit (`docs/release-checklist.md`; the 2026-11-19 audit: macOS failed u
 outermost `load_tests` (nested, it sharded twice); `python3 -m unittest tests` is sharded too, named modules, classes or
 tests run as named; no test has class or module fixtures.
 The macOS shards run `python3 -X faulthandler -m unittest -v`, each test named in the log as it runs (unnamed, a
-cancelled hour reported nothing, #950). Every suite job sets `WB_TEST_HANG_SECS` (600, via `WSLENV` for
-WSL): `SIGALRM` around each test dumps every thread's stack and fails it with `tests.Hung: <test id> hung past
+cancelled hour reported nothing, #950). The nightlies' and `opencode.yml`'s Linux suites stay one process (off the shipping path, and the plain run a developer makes). Every suite job sets `WB_TEST_HANG_SECS` (600, via `WSLENV` for
+WSL; `check.yml`'s 300: its slowest test takes under 30 s, and a hang held a pull request 10 minutes past its other shards): `SIGALRM` around each test dumps every thread's stack and fails it with `tests.Hung: <test id> hung past
 WB_TEST_HANG_SECS (N s)`, a `BaseException` (as a `TimeoutError` it was swallowed by `socket.getfqdn`'s `except
 OSError`, 2026-11-22). Job limits 60 min, `check.yml`'s shards 30. Linux jobs install `OPENCODE_VERSION` via
 `scripts/install-opencode.sh` against `OPENCODE_SHA256` (2.x isn't on npm), print the Landlock ABI, and `check.yml`'s
@@ -7515,8 +7519,11 @@ doc needs its own `!/` line).
 - **`scripts/ship.sh`**, the one road to main, run only when the user has said to ship (it publishes the branch and opens a pull request as them): from a branch or worktree (a detached HEAD ships as `agent/<worktree>`),
   pushes, opens or finds the pull request, arms auto-merge with `--match-head-commit`, waits or names the failing check;
   refuses main, acts only on this repository's pull request at the commit it pushed. `--title`, `--body-file`,
-  `--squash`, `--no-wait`, `--draft`. A red check leaves auto-merge armed: fix, commit, rerun. Ten failed `gh pr view`s
-  in a row end the wait (exit 2), still armed (2026-11-22).
+  `--squash`, `--no-wait`, `--draft`. A red check leaves auto-merge armed: fix, commit, rerun. It polls every 10 s for
+  up to an hour (360 polls; 20 s until 2026-11-25, when `scripts/suite.sh` was to bring the check to about four minutes: all six shards locally, four CPUs each, 157 to 222 s); ten failed `gh pr
+  view`s in a row, 20 s apart, end the wait (exit 2), still armed (2026-11-22). Its wait is the check's: a pull
+  request merged a median 10.7 minutes after it opened (30 to 2026-11-25), its check 9.5 to 10.5, the merge 2 to 25 s
+  after it.
 - **`scripts/github-settings.sh check|apply`** keeps the settings in git (`check` names drift, `apply` writes, `gh` as admin): the ruleset; Actions may approve pull
   requests, the default token read only; auto-merge, merge commits, delete branch on merge, update branch; only
   GitHub-owned and verified actions, pinned to commits; fork workflows always await approval; secret scanning with push
@@ -7798,7 +7805,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **OpenCode's own prompt size** (re-measured with `capture_llm.py` after an OpenCode update or a `DENIED_TOOLS` change) → `context.OPENCODE_BASE_TOKENS`.
 - **The Python floor** → the launchers' guard, `check.yml`'s and `macos`'s `python-version`, *The tests*, the README's
   *What you need* (a new OpenCode major too).
-- **The merge gate** (`owner-merge.yml`, the ruleset, `check` and its `needs`, the shard count, `WB_TEST_SHARD`) →
+- **The merge gate** (`owner-merge.yml`, the ruleset, `check` and its `needs`, the shard count, `WB_TEST_SHARD`,
+  `scripts/suite.sh`'s process count, which matches the runner's CPUs) →
   `tests/test_workflows.py`, `scripts/github-settings.sh apply`, *Shipping to main*.
 - **`mod/` for users** → nothing: no `version` in plugin.json (*Installing*). **A release** (by hand, when the owner
   calls it) → `__version__` in `workbench/__init__.py` (`wb --version`, `wb_version`, the ask server's `serverInfo`),
