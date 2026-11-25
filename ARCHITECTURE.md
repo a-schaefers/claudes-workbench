@@ -5703,7 +5703,8 @@ client; the server needs no browser.
 
 **Files** (`$WB_HOME/chat/`):
 - `messages.jsonl`: `{id: "<ms>-<6 hex>", ts, from: "user"|"claude"|"notice"|<agent name>, text, cid?, shots?,
-  audio?, about?, files?, role?: "agent", re?: [ids], to?: ["user"|<agent name>], session?, claude_pid?,
+  audio?, about?, files?, role?: "agent", re?: [ids], to?: ["user"|<agent name>], auto?: true (the
+  turn's own answer, which the mod posted: `wb chat reply --turn-answer`, #1352), session?, claude_pid?,
   claude_start?, claude_machine?, turn_by?}` (`claude_pid`: on every `from: claude` row, the Claude Code its
   `wb chat reply`, `listen` or `wb shot --chat` ran under, its `CLAUDE_PID`, stamped in `chat.send`,
   for the owed reply, #1129; none: an older wb's row, or one run outside Claude Code; `session`,
@@ -6404,23 +6405,30 @@ tasks alone. An expired message (claim refuses it) isn't tried again this load
 (`mem.chatExpired`; one toast, #536). Quitting stops delivery and empties listener.json if held.
 
 Each message passed on is owed a chat reply (`mem.chatOwed`, `owedAtTurnEnd`, #767: phone
-questions were answered in the terminal only for two releases): a `wb chat reply`/`listen` or `wb
-shot … --chat` in Bash (with no `--to`, or `--to user`; a `--to <id>` settles the ids it names), a
-`from: claude` row of this Claude Code's to the message's sender (`to`, none: the user;
-`claude_pid` its own, or none: an older wb's row; `chat.send` stamps every one, as another
-session's screenshot still settled it when only `reply` did, the #1129 review) or answering it
-(`re` holds its id), or a typed prompt settles it (any session's row did: another's report kept
-the follow-up from going, #1129). An agent's message (`Owed.agent`, its name) is settled only by a
-row to it or a `--to` naming it, never by a plain reply or the user's return (#1273: the follow-up
-said the user wrote and named a plain `wb chat reply`, which went to the user's phone, and that
-reply settled the agent's debt, so its wait heard nothing). At the end of the main
-turn that had it (`grace` 1 when it was queued behind a running turn or behind a prompt the mod
-submitted that poll, `mem.submitted`, #837) with no reply, one follow-up turn is queued: the user's
-OWED_NOTE, an agent's `AGENT_OWED_NOTE` (`[workbench] Agent <name>'s message <id> has no answer:
-reply with wb chat reply --to <id> --text "…"`), each taken back out of `mem.queued`, and skipped
-by `sendQueued`, once nothing it is for is owed (#837); that turn too
-ending without one, OWED_POSTED (`wb chat reply --text="Claude answered in the terminal; nothing
-was sent here." --to=<id>`) goes to the chat, once per message (`--to`, so an agent's wait gets it, #1042).
+questions were answered in the terminal only for two releases): a `from: claude` row since it was
+given, of this Claude Code's to the message's sender (`to`, none: the user; `claude_pid` its own,
+or none: an older wb's row; `chat.send` stamps every one, as another session's screenshot still
+settled it when only `reply` did, the #1129 review) or answering it (`re` holds its id), or a
+typed prompt settles it (any session's row did: another's report kept the reply from going,
+#1129). An agent's message (`Owed.agent`, its name) is settled only by a row to it or answering
+it, never by a plain reply or the user's return (`userOwedClear`; #1273: a plain `wb chat reply`
+went to the user's phone and settled the agent's debt, so its wait heard nothing). The mod's own
+`auto` post settles only by `re`: it is always this Claude Code's, so the first of two messages
+given in one poll had its answer settle the second's, which never got one (the #1352 review). At
+the end of the main turn that had it
+(`grace` 1 when it was queued behind a running turn or behind a prompt the mod submitted that
+poll, `mem.submitted`, #837) with no reply, the mod posts that turn's own answer (`turn.complete`'s
+`answer`, at most `ANSWER_ARGV` 16,000 characters on the command line) with `wb chat reply
+--turn-answer --text=<answer> --to=<id>…` (one post per answer and sender, `--to` each message of
+that sender's it answers, so an agent's wait gets it, #1042, and never one post to both the user and
+an agent, #1273): an `auto` row, cut to `chat.TURN_ANSWER_MAX` 4,000 characters
+ending `TURN_ANSWER_CUT` (#1352, from #1340 F). It replaced a nudge turn (`OWED_NOTE` or an agent's
+`AGENT_OWED_NOTE`, then the `OWED_POSTED` note, which a regex on Bash, `REPLIES`, settled even when
+the post failed): that cost
+Claude a turn, and a driver that doesn't follow the skill (OpenCode's, #1296) left the phone with
+nothing. A failed post (a toast, once: `chat-owed`), or a turn that said nothing (thinking only, an
+interrupt), leaves the message owed: the next turn's end posts again, the failed post's answer
+first (`Owed.answer`). `turn.complete` awaits the post; the turn-end record below waits on it.
 
 **Agents' messages and the turn-end record** (#1042). A message with `role: "agent"` and a name
 wb makes (`agentOf`: `[a-z0-9-]{1,32}`) is delivered as the user's are but submitted as `[agent
@@ -6432,7 +6440,9 @@ agent <name>` (the user's own message toasts nothing: they just sent it, #1322),
 at 0 are recorded with `wb chat ended <ids> --by <key>`, and with none, a turn in which
 `chat/messages.jsonl` grew (stat at `turn.start`, `chatTurnStart`, a promise the end awaits: a
 turn ending before its stat came back once read the size from the turn before, 2026-11-24; a
-reply, maybe a later report) is recorded with no ids. Nothing while the chat is off.
+reply, maybe a later report) is recorded with no ids. Nothing while the chat is off. The record
+is written after the owed reply's post (`chatTurnEnd`'s `after`, #1352: it ran beside the post,
+so an agent's wait could end before the answer was in the thread); its start size is taken first.
 
 **A question or a plan while away** (#1351): the `tool.call` hook's `awayRefusal`, before any other
 check, denies AskUserQuestion with `AWAY_QUESTION` and ExitPlanMode with `AWAY_PLAN` (`AWAY_REFUSAL`)
@@ -6728,6 +6738,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb audio "<text>"` | `--kind speech\|sfx\|music`, `--n` (3), `--seconds S` (the entry's `seconds`, else `audio.DEFAULT_SECONDS`: 5 sfx, 30 music, 10 otherwise), `--voice NAME` (the entry's first of `voices`), `--ref <clip>…`, `--lyrics FILE\|-`, `--seed`, `--engine`, `--out DIR`, `--no-check`, `--list`, `--default NAME`, `--wait` | *Audio*; `--n` below 1 refused before any lease (exit 2, #592); a clip that isn't audio fails it; GPU as `wb image`; an option the engine lacks is refused. `--default NAME` (no text) sets audio.json's `"default_<its kind>"`; never the listener (*The default engines*). |
 | `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|notice\|token\|ended]` | `listen <clip>… [--text]`, `--port` (`chat/port.json`, else 1337), `--bind`, `--host`, `--text`, `--message <file\|->`, `-n` (10), `ack <id> --by --how`, `claim <id> --by`, `notice --tool --kind permission\|plan\|question\|elicitation --text` (the mod's: the page's one line that Claude waits in the terminal, #1350; its id, or `skipped: …`), `notice --done <id>` (`answered <id>`; exit 1 for no notice); `url --json` (`chat.ensure`'s `{url, state, why}`, exit 0: the mod's); `claim` exit 1: another session's; `reply --to <id>` (`user`: the user's thread; again for more; else what this turn took: `re`, `to`, #1042), `token add <name>` (prints it once), `token list`, `token revoke <name>`, `ended <id>… --by` (the mod's turn end) | The web chat (*The web chat*), on by default; `url` and `on` bring it up (`chat.ensure`); `on` refuses, the switch put back as it was, when something else answers the port (#690); `off` stops only a server `on` started. |
 | `wb try` | `--model <id>` (a GPU model's fragment will do; an API id never matches one), `--queue` (accepted, a no-op: the sample queues behind the GPU's holders as any start does, #1251, #1322), `--force` (passed to wb start: the sample waits for a model whose server isn't up yet, else exit 3 with wb start's can't-run refusal, whose `--force` advice wb try once rejected as an unknown argument, #1297) | A sample trial (#112): `workbench/try/project/` copied to `~/.local/share/workbench/try/<n>` (not the state dir, hidden from the lane, #164), started as `try-<n>` on `workbench/try/spec.md`, `--size trivial --trial` (so the trivial role's model, an API one when the user put it there, #1016) and `--no-sign`, set up by `wb init --no-sign` (a locked key failed it or hung it on a prompt, #1226), its test `sys.executable` (#530); Claude's hidden check `workbench/try/check.py <worktree>`; a refusal removes the copy (#161). An API `--model`: exit 3, `<id> is an API model: wb try runs on GPU models only`, before the copy (#1014). A sample on the trivial role's API model (task.json `via`/`role`, #1016) says so in wb start's model line (#1322: its own line went). |
+| `wb chat reply --turn-answer` | `--text`, `--to <id>` (again for more) | The mod's: a turn's own answer for a web message it didn't reply to (*The web chat listener*, #1352): an `auto` row, cut to `chat.TURN_ANSWER_MAX` 4,000 characters (`chat.turn_answer`). |
 | `wb init <dir>` | `--no-sign` (its commits unsigned, whatever `commit.gpgsign` says; else signed as accept's, `UNLOCK` at once for a locked key, #1226) | git, a first commit, AGENTS.md → CLAUDE.md (#931; nothing while `gitops.under_way`), no hooks run (#1254). Refuses home or above, inside another repo (but a home repo nests, #684), a repo git refuses (`gitops.NotARepo`), no git identity, likely secrets or uncovered installed directories. |
 | `wb setup` | `--force` (only the web app's service unit link pointing elsewhere replaced, which without it is kept and used: wb's own links are replaced without it since #1322), `--no-service` (no service for the web app) | Links `~/.local/bin/wb` and `skills/workbench` (a link pointing elsewhere replaced, `ok <at> → <to> (was <old>)`, #1322; a real file or directory left, `BAD … is already there: left as it is`), removes a dead `skills/delegate` link (the mod runs `wb setup` when it finds only that), exit 1 when something is in the way, PATH advice (`cli.path_advice`), the web app's systemd or launchd service (`cli.install_service`, *The web chat*), the optimize when due, then `first run:` (`cli.first_run`, with the API keys line `cli.api_key_lines`); names no model (*Installing*). |
 | `wb update` | `--check` (`update available: …` or `up to date`; on a marketplace clone with local changes also `patches.CHECK_LINE`, `local changes in the marketplace clone: wb update would refuse (Claude Code re-clones it); wb patch init keeps them`, alone when nothing is new; the mod toasts both; also `cli._mod_behind`), `--if-due` (implies `--check`, #602, #1322: `UPDATE_EVERY`, `update.json`; never with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`), `--stop` (`_stop_for_update`: `last` `UPDATE_STOP`, status `infra` `update`, #1260, one `stuck` notice per `store.owner`, #694) | *Installing*, *Local patches*. A marketplace install first looks for local changes in its clone (`patches.marketplace_refusal`) and, with any, saves them under `rescued/` and refuses before anything else: Claude Code's update re-clones it and would wipe them (#1005); a clone does the same to Claude Code's git marketplace clone when there is one (`cli._marketplace_clone`, #1326). A clone: first `patches.track_upstream` (its line printed after the report, with `--check` too), then a branch still tracking nothing refused, `couldn't check for an update: branch B tracks no upstream: git -C P branch -u origin/main B` (`no_upstream`, #1327); `git pull --ff-only` (uncommitted tracked changes refused); on branch `local`, after the fetch, each pull request `wb patch send` opened (`patches.json` `sent`) is asked of gh, `gh pr view <n> -R <owner/repo> --json state,mergeCommit`, at most `GH_SECS` each (`patches.settle_sent`; never with `--check`, which the mod runs on a timer): merged, its merge commit (when gh names one) in the fetched upstream (else nothing yet: `PENDING`), its local commit (matched by ident) is left out of the rebase and the row marked `merged`; closed, at the end once (`closed_lines`, `closed_said`, the patch's sha as it is after the rebase) `your pull request #<n> was closed without merging: kept the local patch <subject> (wb patch check <sha> tells whether upstream fixed it another way)`; open, nothing; not asked (gh missing, offline, a timeout, any other answer) `couldn't ask GitHub about pull request #<n> (<why, scrubbed>): kept the local patch`, never a failure. These lines, and `couldn't check the pull requests wb patch send opened: …`, come after the `updated …` or `already up to date` line, never ahead of it: the mod's `/workbench-update` reloads the plugin only on output that starts `updated` (#1005, 2026-11-22); a refusal after the fetch prints them first, and a plugin step that fails after the branch moved first prints the merged and landed lines too (said then or never, #1005). Then, diverged and behind or with a merged pull request's patch to leave out, its patches rebased in a scratch worktree (`patches.rebase_patches`, `check_move`) before any task is stopped and the branch moved after (`move_branch`), the report `updated clone a..b (N commit(s))` (N: upstream's news only), then `your pull request #<n> merged: dropped the local patch <subject>` per merged one, `landed upstream, dropped from local: <subject>` per patch upstream has, then `N local patch(es) on top of upstream (local)`; a conflict refuses naming the patch, ending `(wb patch check <sha> first: if upstream fixed it another way, drop it)`, its stdout first saying each pull request closed unmerged (`closed_lines`, HEAD's shas: nothing moved; `closed_said` set, so the next run doesn't repeat it); any other branch diverged is refused; on `local` (not `--check`) it writes `patches.json`. At the end, on any clone, each merged pull request whose local commit is gone from `local` is forgotten and its `pr/<slug>` retired (`retire_sent`: `pull request #<n> merged, removed pr/<slug>, its worktree and its body file`), then each `pr/<slug>` of `wb patch upstream`'s (`patches.held`: its worktree under `upstream/`, or its body file there) that landed upstream (`_landed_pr`) goes, worktree, branch and body: `landed upstream, removed pr/<slug>, its worktree and its body file` (`retire_landed`; a worktree with changes of its own is kept, and said). Then `claude plugin marketplace update workbench` and `claude plugin update workbench@workbench`, each step at most 300 s. Refuses while a runner lives (`cli._running`, `_whose`); every refusing check, a patch's conflict too, runs before `--stop` stops anything (#775). The fetch (`_fetch_origin`, the upstream's remote `branch.<name>.remote`, #875) never prompts: `GIT_TERMINAL_PROMPT=0`, `SSH_ASKPASS_REQUIRE=never`, `FETCH_SECS` 60, the user's `GIT_SSH_COMMAND`/`GIT_SSH`/`core.sshCommand` kept, else `BatchMode`. |
@@ -7967,7 +7978,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   **`wb settings set`'s rule** (on the user's clear ask and yes) → `skill/workbench/SKILL.md`. **`/api/top`'s events** (`top`, `down` `{why, retry}`) → the web app's
   Stats view, docs/chat-api.md.
 - **The turn-end record** (`turns.jsonl`: the mod's `chatTurnEnd`, `wb chat ended`; its `by`, the mod's chat key, is
-  listener.json's `session` and a reply's `turn_by`) → `chat.taken`, `chat.wait_state`, `wb chat reply`'s default `re`; the `[agent <name>] … [message <id>: …]` prompt → `chatPrompt`, `AGENT`, the
+  listener.json's `session` and a reply's `turn_by`) → `chat.taken`, `chat.wait_state`, `wb chat reply`'s default `re`; written after the owed reply's post (`owedAtTurnEnd`, `wb chat reply --turn-answer`;
+  the mod's `ANSWER_ARGV` above `chat.TURN_ANSWER_MAX`, #1352); the `[agent <name>] … [message <id>: …]` prompt → `chatPrompt`, `AGENT`, the
   `prompt.submit` guard, the /workbench skill's *Agents on the web chat*.
 - **A Claude row's session** (`cli._chat_writer`: `session`, `claude_pid`, `claude_start`, `claude_machine`, as
   task.json's) → the mod's `answersTo` and `listen` (whose a user's message is, #1096), `ELSEWHERE_NOTE` ↔ reference/driving.md.

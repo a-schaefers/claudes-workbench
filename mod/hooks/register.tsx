@@ -2562,7 +2562,6 @@ async function checkUpdate($: any) {
 // limit) goes back on the queue and is tried again in a minute: the hand-back's turn was lost
 // after its agents were already stopped (the 2026-11-16 audit).
 async function sendQueued($: any, text: string) {
-  if (isOwedNote(text) && !owedNudged(text)) return // answered, or the user came back, since it was queued (#837)
   mem.submitted = true
   const r = await $.prompt.submit({ text }).catch((err: unknown) => ({ drop: String(err) }))
   if (!r?.drop) return
@@ -2878,13 +2877,13 @@ async function listen($: any, now: number) {
       // the away user went to the agent alone, pushed to no phone (#1212, 2026-11-24).
       if (r.isDelivered) await runWb($, ['chat', 'ack', id, '--by', st.key, '--how', agentOf(m) ? 'into' : 'now'])
       else void sendWeb($, id, text, 'queued', st.key, agentOf(m) ? 'into' : 'now')
-      mem.chatOwed.set(id, { at: now, grace: r.isDelivered ? 0 : 1, nudged: false, agent: agentOf(m) }) // queued: maybe the next turn's
+      mem.chatOwed.set(id, { at: now, grace: r.isDelivered ? 0 : 1, answer: '', agent: agentOf(m) }) // queued: maybe the next turn's
     } else {
       // behind a prompt submitted this poll (a wake, a queued turn, another web message) whose
       // turn hasn't started yet, it enters only the turn after: that turn's end, Claude not yet
       // having seen it, sent the follow-up for a message Claude then answered (#837). An agent's
       // is `now` only with nothing ahead: behind a wake, the wake's report went to it (#1212).
-      mem.chatOwed.set(id, { at: now, grace: mem.submitted ? 1 : 0, nudged: false, agent: agentOf(m) })
+      mem.chatOwed.set(id, { at: now, grace: mem.submitted ? 1 : 0, answer: '', agent: agentOf(m) })
       void sendWeb($, id, text, agentOf(m) && mem.submitted ? 'into' : 'now', st.key)
     }
     mem.chatTurn.set(id, mem.chatOwed.get(id)?.grace ?? 0) // its turn's end goes to turns.jsonl (#1042)
@@ -2942,62 +2941,55 @@ async function sendWeb($: any, id: string, text: string, how: string, by: string
 // say to answer with `wb chat reply`, and nothing checked. For two release cycles the owner wrote
 // "Keep me updated over here" and "Status" from the phone, Claude answered every one in the
 // terminal only, and the phone heard nothing (2026-11-21). At the end of the turn that had it
-// (`grace`: a message queued behind a running turn may only enter the next), no reply yet means
-// one follow-up turn naming `wb chat reply`; that one ending without a reply too, a plain note
-// goes to the chat, so the phone always hears something. A reply is a `wb chat reply` (or
-// `listen`, or `wb shot --chat`) in Bash, or a row of Claude's in messages.jsonl since; a prompt
-// typed in the terminal ends it (the user is back).
-// An agent's message (`agent`, its name) is owed its own reply, `--to` it (#1273, 2026-11-24): the
-// follow-up said the user wrote and named a plain `wb chat reply`, which went to the user's phone,
-// and the agent's wait heard nothing; any reply to the user settled the agent's debt too, so not
-// even OWED_POSTED reached it. Only a reply to it settles it: a `--to` naming it, or a row whose
-// `re` holds its id or whose `to` its name.
-type Owed = { at: number; grace: number; nudged: boolean; agent: string }
-const OWED_NOTE =
-  '[workbench] The user wrote from the web chat and hasn\'t heard back: answer there with ' +
-  '`wb chat reply --text "…"` (the web thread is all they see), briefly. Nothing else to do.'
-const AGENT_OWED = '[workbench] Agent '
-const AGENT_OWED_NOTE = (agent: string, id: string) =>
-  `${AGENT_OWED}${agent}'s message ${id} has no answer: reply with \`wb chat reply --to ${id} --text "…"\` ` +
-  '(a plain reply goes to the user, not the agent), briefly. Nothing else to do.'
-const owedNote = (id: string, o: Owed) => o.agent ? AGENT_OWED_NOTE(o.agent, id) : OWED_NOTE
-const isOwedNote = (text: string) => text === OWED_NOTE || text.startsWith(AGENT_OWED)
-const OWED_POSTED = 'Claude answered in the terminal; nothing was sent here.'
-const REPLIES = /\bwb\b[^\n|;&]*\bchat\s+(reply|listen)\b|\bwb\b[^\n|;&]*\bshot\b[^\n]*--chat\b/
-// The follow-up is owed while a message it was queued for is still unanswered: a reply or the
-// user's return before it went left it in mem.queued, and it went anyway (#837)
-const owedNudged = (text: string) => [...mem.chatOwed].some(([id, o]) => o.nudged && owedNote(id, o) === text)
-function owedSettled() {
-  for (let i = mem.queued.length - 1; i >= 0; i--)
-    if (isOwedNote(mem.queued[i]) && !owedNudged(mem.queued[i])) mem.queued.splice(i, 1)
-}
-// The user's debts only: a plain reply, or the user back at the terminal, answers the user, never an agent (#1273)
+// (`grace`: a message queued behind a running turn may only enter the next, #837), with no reply
+// since, the mod posts that turn's own answer there itself (`wb chat reply --turn-answer`, an
+// `auto` row wb cuts to about 4,000 characters; #1352, from #1340 F). It replaced a nudge turn
+// (OWED_NOTE, then a note), which cost Claude a turn, would leave the phone with nothing on a
+// driver that doesn't follow the skill (OpenCode's, #1296), and was settled by a regex on Bash
+// even when the post failed. A reply is a row of Claude's in messages.jsonl since the message
+// was given; a prompt typed in the terminal ends it (the user is back). A failed post, or a turn
+// that said nothing (thinking only, an interrupt), leaves it owed: the next turn's end tries
+// again, with the failed post's answer, the one that turn gave.
+// An agent's message (`agent`, its name) is owed its own reply, `--to` it (#1273, 2026-11-24):
+// any reply to the user settled the agent's debt too, and the agent's wait heard nothing. Only a
+// reply to it settles it: a row whose `re` holds its id or whose `to` its name; the turn's answer
+// goes to it in a post of its own, never in one to the user's phone.
+type Owed = { at: number; grace: number; answer: string; agent: string }
+// what goes on wb's command line: past wb's cut, under Linux's 128 KiB for one argument
+const ANSWER_ARGV = 16_000
+// The user's debts only: the user back at the terminal is answered there, never an agent (#1273)
 function userOwedClear() {
   for (const [id, o] of [...mem.chatOwed]) if (!o.agent) mem.chatOwed.delete(id)
-  owedSettled()
 }
-async function owedAtTurnEnd($: any) {
-  if (!mem.chatOwed.size) return owedSettled()
+async function owedAtTurnEnd($: any, answer: string) {
+  if (!mem.chatOwed.size) return
   const tail = await readTail($, `${mem.root}/chat/messages.jsonl`, NOTIFY_TAIL)
   // a reply settles it when it answers the message (`re`) or this Claude Code wrote it to the
   // message's sender (`claude_pid`, unknown: yes; `to`, none: the user's): another session's
-  // report, posted meanwhile, read as the answer (#1129); a reply to the user, as an agent's (#1273)
-  const mine = (m: any) => !mem.claudePid || !Number(m.claude_pid ?? 0) || Number(m.claude_pid) === mem.claudePid
+  // report, posted meanwhile, read as the answer (#1129); a reply to the user, as an agent's (#1273).
+  // The mod's own post (`auto`) only by `re`: always this Claude Code's, m1's answer settled m2,
+  // given in the same poll, and m2's answer never went (the #1352 review, 2026-11-25)
+  const mine = (m: any) => !m.auto && (!mem.claudePid || !Number(m.claude_pid ?? 0) || Number(m.claude_pid) === mem.claudePid)
   const toWhom = (m: any, o: Owed) => (Array.isArray(m.to) && m.to.length ? m.to : ['user']).includes(o.agent || 'user')
   const replied = parseLines(tail?.text ?? '').filter(m => m.from === 'claude')
-  const nudge: string[] = []
+  // an answer to post, for one sender → the messages it answers
+  const due = new Map<string, { text: string; ids: string[] }>()
   for (const [id, o] of [...mem.chatOwed]) {
     if (replied.some(m => Number(m.ts ?? 0) * 1000 >= o.at && ((mine(m) && toWhom(m, o)) || (Array.isArray(m.re) && m.re.includes(id))))) {
       mem.chatOwed.delete(id)
       continue
     }
     if (o.grace > 0) { o.grace--; continue }
-    if (!o.nudged) { o.nudged = true; nudge.push(owedNote(id, o)); continue }
-    mem.chatOwed.delete(id)
-    await runWb($, ['chat', 'reply', `--text=${OWED_POSTED}`, `--to=${id}`], 15_000)
+    o.answer ||= answer.trim().slice(0, ANSWER_ARGV)
+    if (!o.answer) continue
+    const key = JSON.stringify([o.agent, o.answer])
+    due.set(key, { text: o.answer, ids: [...due.get(key)?.ids ?? [], id] })
   }
-  for (const note of nudge) if (!mem.queued.includes(note)) mem.queued.push(note)
-  owedSettled()
+  for (const { text, ids } of due.values()) {
+    const { ok, out, aborted } = await runWb($, ['chat', 'reply', '--turn-answer', `--text=${text}`, ...ids.map(id => `--to=${id}`)], 15_000)
+    if (ok) for (const id of ids) mem.chatOwed.delete(id)
+    else if (!aborted) warnOnce($, 'chat-owed', `the turn's answer didn't reach the web chat (${brief(out)}); trying again when the next turn ends`)
+  }
 }
 
 // The turn-end record (#1042): `wb chat ended <ids>` once a main-loop turn ends, the ids the web
@@ -3012,7 +3004,7 @@ function chatTurnStart($: any) {
   mem.chatTurnSize = (async () => webOn(await read($, chat))
     ? (await $.fs.stat(`${mem.root}/chat/messages.jsonl`).catch(() => undefined))?.size ?? 0 : -1)().catch(() => -1)
 }
-async function chatTurnEnd($: any) {
+async function chatTurnEnd($: any, after: Promise<unknown> = Promise.resolve()) {
   const ids: string[] = []
   for (const [id, grace] of [...mem.chatTurn]) {
     if (grace > 0) mem.chatTurn.set(id, grace - 1)
@@ -3021,6 +3013,7 @@ async function chatTurnEnd($: any) {
   const start = mem.chatTurnSize
   mem.chatTurnSize = Promise.resolve(-1)
   const was = await start
+  await after // the turn's answer is posted first (#1352); the start's size was taken above
   const grew = was >= 0 && ((await $.fs.stat(`${mem.root}/chat/messages.jsonl`).catch(() => undefined))?.size ?? 0) > was
   if (!ids.length && !grew) return
   const { ok, out } = await runWb($, ['chat', 'ended', ...ids, '--by', (await read($, chat)).key], 15_000)
@@ -3618,13 +3611,6 @@ export const register: Register = (on, options) => {
     if (delegates(String(e.command ?? ''))) {
       await workbenchMode($, true)
     }
-    // answered in the chat (#767): a plain reply the user, `--to` the messages it names (#1273)
-    if (REPLIES.test(String(e.command ?? ''))) {
-      const to = [...String(e.command).matchAll(/--to[= ]+['"]?([^\s'"]+)/g)].map(x => x[1])
-      if (!to.length || to.includes('user')) userOwedClear()
-      for (const id of to) mem.chatOwed.delete(id)
-      owedSettled()
-    }
     return next(e)
   })
 
@@ -3769,8 +3755,13 @@ export const register: Register = (on, options) => {
       mem.busy = false
       mem.skillTurn = false
       if (mem.chatQueued.size) void readQueued($)
-      void chatTurnEnd($)
-      await owedAtTurnEnd($)
+      // the turn's answer to an owed web message goes first, then the turn-end record: raced, an
+      // agent's wait could end on the record before the answer was in the thread (#1352). The
+      // record takes its start size at once, before a next turn's start replaces it, and the end
+      // waits on the post alone, as it did, not on the record's stat
+      const owed = owedAtTurnEnd($, String(e.answer ?? '')).catch(() => {})
+      void chatTurnEnd($, owed)
+      await owed
       mem.sawTurn = true
       mem.turnEndedAt = await $.clock.now()
       void poll($) // held wakes and chat messages go now, not at the next tick

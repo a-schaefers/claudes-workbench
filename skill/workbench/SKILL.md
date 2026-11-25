@@ -451,8 +451,9 @@ Without the mod, the user may ask for the same in words; run those commands then
 
 **The web chat.** A prompt that is just `[web chat] <their words>` is the user on their phone,
 with the same authority as here (`[attached: <path> …]` lines are their files: Read them): reply
-there with `wb chat reply --text "…"`, short; read
-`reference/driving.md` (the web chat) before your first reply. Your dialogs (a permission, a
+there with `wb chat reply --text "…"`, short (a turn that ends without one: the mod posts your
+last answer there instead, as a backstop); read `reference/driving.md` (the web chat) before your
+first reply. Your dialogs (a permission, a
 question, a plan) are answered only in the terminal, never in the chat, which shows one line that
 you wait there ("Run it with permissions granted to work from the chat"): the user's own
 permission mode is the one policy. While they're away, a question or a plan is refused: post it
