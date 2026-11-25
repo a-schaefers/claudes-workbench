@@ -215,8 +215,8 @@ against the guess, and say the model you passed in your reply. An API model is t
 never yours: never pass `--model <api id>` unless the user named that id for this task (the mod's
 dialog then asks them, and a "not changed" means no), never run `wb route` without the user's words
 in this conversation, and never move a role between GPU and API because one can't run (`wb start` exits 3:
-tell the user the choices it printed). Recommend; the user sets it, in the dialog or the pane's
-Settings tab.
+tell the user the choices it printed). Recommend; the user sets it, in the dialog or the web app's
+Settings.
 
 **Roles are the user's** (`wb route`): which model each kind of work goes to (`significant`,
 `trivial`, `writing`: GPU or API, each side's model, thinking, one day cap). Never pass `--model`
@@ -231,8 +231,10 @@ gpu|api|both`) puts every role on one side, or Both: each role as set. A role th
 there is no fallback, so ask the user and never retry with another `--role` or `--model` to dodge it.
 The one exception is theirs: with **When the GPU is busy** set to the role's API model (`wb route busy
 api`), a start that would wait for the GPU runs on the role's API model, and its output says `GPU busy:
-on the role's API model, as you set`. The user can set all of this in the pane's Settings tab
-(Shared, GPU, API): point them there rather than offering to run `wb route` yourself.
+on the role's API model, as you set`. The terminal is where the work happens; the settings live in
+the web app's Settings (the link on the pane's modeline), and what they say is what wb runs by.
+Point the user there; when they ask you to change a setting, help: run its `wb` command on their
+yes (a role through the dialog, as above).
 Which sizes a model takes is set with `wb model sizes <id> trivial|significant`: set it when you
 add a model you judge fit only for small work, and otherwise change it only when the user asks.
 A newly added model has no record, so the router won't pick it over one with a good record:

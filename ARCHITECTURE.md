@@ -720,7 +720,7 @@ else its last `step` row's in the ledger, the provider's own when its provider s
 catalog's; `meter.model_basis`, which knows only the last two, said `catalog prices` for every
 DeepInfra start once its rows were DeepInfra's own, #1165's review, 2026-11-24), `wb accept`'s `paid`, the round report, `wb savings`,
 `wb stats` (and `paid` `≈$0.12`, with `paid: ≈ is at catalog prices, an estimate` under the table),
-`wb top`, scout, the stop and check-in texts, the pane (`isEst`, `estUsd`, `pricesNote`; a narrow
+`wb top`, scout, the stop and check-in texts, the pane (`isEst`; a narrow
 Tasks row drops the `≈` before its place) and the chat (`apiSaved`). The roles' listing ends an API
 role's row with `catalog prices` or `your prices` (`cli._prices_of(m, ahead=True)`: its next
 figures', `meter.next_basis`, nothing when they are the provider's own), `wb models --api` each
@@ -858,8 +858,7 @@ worktree. Ask the user: a cap of at least $5.13 (wb route cap <usd>) or tomorrow
 `runner._spend_lead` hands it to `stop_text(task, worst)`: read from status alone it was never seen, and
 the notice said the cap was reached with a cap that would not do (#1150's review). Each remedy has its own next step: resume never re-routes, so "the role on
 the GPU … then wb resume" resumed into the same stop (#1095); `wb resume` at the cap is now refused
-before any round (`cli._model_still_listed`, #1118). The mod's `GUARD_WORDS.spend` names it,
-and its wake for a `cause` `spend` notice ends with `SPEND_NEXT` (the same choices, asked of the user;
+before any round (`cli._model_still_listed`, #1118). The mod's wake for a `cause` `spend` notice ends with `SPEND_NEXT` (the same choices, asked of the user;
 `Ask the user for a day cap` when routes.json has none, `readRoutes`; for the next tasks `the route change the
 notice names, if any`, never its own `wb route <role> gpu`, a no-op under Agents API, #1218; with `guard` `agents`, the Agents
 switch's stop, `AGENTS_NEXT`: Agents back to Both or API, then `wb resume`, or takeover or discard, #1213), not the stuck wake's
@@ -2241,7 +2240,7 @@ or 404 on every request. Status says it first (`models.keyhole_refusal`, through
 #1066: only `start` checked, so a Gemini model was listed, routed on the user's yes and started,
 then failed every time), so `wb route`, `wb start`, `wb models` and the pane refuse it, `wb models
 --json` leaves it out, `wb setup` names it on a `--` line and `wb route --json`'s `providers` gives it
-key `none` with that why (the Settings tab's Connected line). The upstream is the catalog's API base (`m.base_url`), never anything
+key `none` with that why (the web app's Settings say it). The upstream is the catalog's API base (`m.base_url`), never anything
 from a request, with what the package appends to it already appended (`mirror_path`: DeepInfra's
 `/openai`). OpenCode gets `layer_options(kh)`:
 `baseURL` the keyhole's `base` and `apiKey` its `token` (`secrets.token_urlsafe(32)`, new each
@@ -2662,7 +2661,7 @@ no check came, and a 1.5-minute typical made every 1.5 minutes a wake). The pane
   `progress.helped(model)` / `helped_by_model(rows)` (over `tuning.judged` rows) count tries and
   landings without a takeover (`tuning.agent_landed`); the next check cites them.
 
-**Stats recording** (`workbench/stats.py`, #404) keeps what only the Stats tab reads. The user's
+**Stats recording** (`workbench/stats.py`, #404) keeps what only the Stats read (the web app's, #1283). The user's
 rule (2026-11-20): a free measurement is on by default, and each can be turned off. On unless
 stats.json says `recording: false`. With it on: a `round_end {secs, how, guard?}` event (`how`:
 `done`, `stuck`, `handover`, `interrupted`, `failed`; `runner._round_end`); the stopping guard named
@@ -2677,8 +2676,8 @@ no reader. What the router, tuning, savings and progress read is outside the set
 **The Stats feed** (`stats.feed`, `wb stats --json`, #405): one object of everything learned. Rows:
 `store.results()` kept by `tuning.judged`, except where Claude's cost is counted (savings, saved
 milestones): every non-trial row. An empty section is left out, never zeros (a new install: `{ts,
-until, settings, tasks: 0}`); `until` is the next local midnight (`_midnight`), when the pane
-re-reads. Keys: `periods` (`week`, `month`, `all`, `savings.PERIODS`: tasks, landed, `accepted_pct`,
+until, settings, tasks: 0}`); `until` is the next local midnight (`_midnight`), when its counts from today go
+stale (#575: the pane re-read at it; since #1283 the pane reads no feed). Keys: `periods` (`week`, `month`, `all`, `savings.PERIODS`: tasks, landed, `accepted_pct`,
 `active_minutes`, `savings` with `score`, `spec_gaps` (one after a stop that wasn't the step's
 counted too, as `results.table` does, #1245), `energy` `{wh, cost?}` from every row's
 `gpu_wh` that measured them, another machine's GPU and API rows left out, #568, #569; `api`, below), `streak` `{current, best,
@@ -2710,12 +2709,8 @@ then as an API one (an Ollama `:cloud` id, #1013) gives two lines; each has `kin
 nothing is none, `results.task_cost`, #1106). The trial-free rows
 (`tuning.judged`) give those lines. Plain `wb stats`' headline adds `api this week: 6 task(s), ≈$1.27
 (deepseek ≈$0.84, anthropic ≈$0.43; catalog prices)`, then `N with no price` and `N on plan usage`
-(`stats.api_week_line`; `N with no figure recorded` apart, `unknown_parts`). The Stats tab: each period adds `API ≈$1.27 (DeepSeek ≈$0.84 · Anthropic
-≈$0.43; catalog prices)` (`apiPeriod`, each provider by its name, `providerWord`; `API plan usage` or `API no price`
-with no known dollars, `apiMoney`), and an API model's line (`API DeepSeek deepseek-flash: …`) says
-`paid ~$0.12/task` in place of its write speed. The footer's API-only
-week reads `this week: API ≈$1.27 on 6 tasks (no GPU task to compare)`, or `this week: 1 API task,
-no price (…)` / `2 API tasks, plan usage (…)` (`apiAlone`).
+(`stats.api_week_line`; `N with no figure recorded` apart, `unknown_parts`), which the web app's Stats show (the
+pane's Stats tab and its footer's saving went there, #1283).
 
 **Taking over.** `wb takeover <task>` stops the agent and sets `review` ("Claude took over"):
 Claude finishes in the worktree uncommitted (accept adds the trailers; a commit made by hand is
@@ -2907,162 +2902,72 @@ and its `routed` line under the task line, and the web chat's strip over the thr
 fix-auth · API deepseek-flash (DeepSeek)`, from `chat.open_tasks`): while away, the chat is all the
 user sees.
 
-- **The pane** (opened by `/workbench`, or once per load when a task runs) has tabs **Tasks**,
-  **Stats**, **Settings** (keys `1`–`3`, at the foot, since the pane follows its end), and under them
-  a modeline: `[•_•] Claude's Workbench` (`FACE.rest`, `MODELINE`) on the theme's `claude` colour
-  with `inverseText`, then `activity` (#976, `mod/hooks/modeline.ts`): `mine` open tasks,
-  `<name>: round <n>, <phase>` (`SAID`), from the polls alone, never a Claude call. Too wide, it
-  scrolls as a ticker: a one-row Raster (key `ticker`) moved every `TICKER_MS` (200 ms) by
-  `$.ui.blit`, `TICKER_GAP` (6) blanks; `syncTicker` runs the timer only while a line scrolls.
+- **The terminal is primary; the web chat is a second lane** (the owner, 2026-11-24: "the terminal
+  stays the primary method of doing things with claude, the chat app only a secondary lane. the
+  settings of the app are authoritative though, but Claude should retain the ability to help the
+  user with the settings when requested"). The work is asked for and reviewed in the terminal; the
+  settings and the Stats are the web app's (*The web chat*), and what the web app's Settings hold is
+  what wb runs by. Claude still helps with a setting when the user asks, through the `wb` command
+  that owns it, on their yes; the API-provider consent dialog stays as it is (*The roles' consent
+  gate*).
+- **The pane** (opened by `/workbench`, or once per load when a task runs) is the Tasks view alone
+  (#1283: no tabs, no `1`-`3` keys, no Stats or Settings). Its last row is the modeline (`modeline`,
+  `mod/hooks/modeline.ts`): `[•_•] Claude's Workbench - <the web app's link>` (`FACE.rest`,
+  `MODELINE`) on the theme's `claude` colour with bold `inverseText`, from the `chat` atom's `link`
+  (`chat-5`): `up` or `started` the link; `checking` `… - starting the web app…`; `off` `… - web app
+  off (wb chat on)`; `blocked` or `failed` `… - web app down: <why>`, the why cut to the room with
+  `…`. The room is the pane's `bodyColumns` less its padding of 1 each side. Too narrow for the whole
+  line it reads `[•_•] <link>`; narrower still the bar says `[•_•] Claude's Workbench` and the link
+  goes on bar-coloured rows of its own under it (key `modeline-url-<n>`), cut by characters, never
+  by words, so it stays one link to copy. The link comes from `chatLink`: `wb chat url --json`
+  (its `state`, `url`, `why`; `linkOf` reads it whole or not at all) at `session.start`, every
+  `CHAT_CHECK_MS` (60 s), at once when chat/switch.json changes (`readSwitch`, a `wb chat on|off`),
+  and again `CHAT_RECHECK_MS` (3 s) after a newly `started`, `failed` or `blocked`, once: one that
+  stays down waits the minute. A url is taken only whole (`/^https?:\/\/\S+#token=\S+$/`), and
+  `off` shows none. A wb older than `--json` (a nonzero exit or output that isn't JSON): plain `wb
+  chat url`, a link read as `up`, anything else `failed` with wb's line. The web chat counts as on
+  (`webOn`: away, the listener, the phone's dialogs) unless the link says `off`.
   **The opening animation** (#963, `mod/hooks/splash.ts`; the owner, 2026-11-21: about five
   seconds, no cost after startup) plays at the `/workbench` that turns the mode on (`skill.prompt`,
   before `showPane`): a body-sized Raster (key `splash`) at `SPLASH_MS` (80 ms), its words landing
-  in the modeline's bar on the row from `pageShape`/`splashTarget` (recomputed each draw), or
-  rising away when no row is exact (`NARROW`), never on a guessed row. A key skips it and still
-  acts; a close, another tab, a small pane, no Raster or a refused blit end it; a resize replans it
-  (ending there killed it in every real session, 2026-11-21). Typing doesn't skip it: a
-  `prompt.edit` hook can't be removed and would slow every keystroke. The `splash` atom
-  (`splash-1`) is set at that `/workbench` and cleared by `workbenchMode` when the mode goes off, so
-  reloads and bring-backs never replay it. Big at 56×24 up, small at 40-55 columns or 20-23 rows,
-  none below. Frames are computed as they play from font tables and apprentice.ts's `pixels(pose,
-  over)`, nothing at module load, no file read;
+  in the modeline's bar on the row from `pageShape`/`splashTarget` (recomputed each draw: the
+  modeline's own row, above the link's rows when it wraps, #1283), or rising away when no row is
+  exact (`NARROW`), never on a guessed row. A key skips it and still acts; a close, a small pane,
+  no Raster or a refused blit end it; a resize replans it (ending there killed it in every real
+  session, 2026-11-21). Typing doesn't skip it: a `prompt.edit` hook can't be removed and would
+  slow every keystroke. The `splash` atom (`splash-1`) is set at that `/workbench` and cleared by
+  `workbenchMode` when the mode goes off, so reloads and bring-backs never replay it. Whether it
+  plays is the web app's Settings' (`splash.json`, `splashOn`; `wb splash on|off`). Big at 56×24
+  up, small at 40-55 columns or 20-23 rows, none below. Frames are computed as they play from font
+  tables and apprentice.ts's `pixels(pose, over)`, nothing at module load, no file read;
   non-apprentice colours go through `atLum` (WCAG luminance 0.105-0.295). It ports forge.py, the
   reference generator, exactly (hash, arithmetic order, half-to-even rounding): the tests hold
   frames 0-41 at 60x26 and 40x22.
-  Closed by the user (mark, Esc), the pane is minimized to a strip above the prompt (`▸ Workbench`,
-  `Tasks`, `Stats`, `Settings`) while workbench mode is on or tasks exist; a press or `/workbench`
-  brings it back, a quit clears it, a reload doesn't reopen it.
-  The Tasks tab lists every task and follows one as a live transcript: the followed one while live,
+  Closed by the user (mark, Esc), the pane is minimized to a strip above the prompt (one
+  `▸ Workbench` Button, key `restore`, and `STRIP_HINT`) while workbench mode is on or tasks exist;
+  a press or `/workbench` brings it back, a quit clears it, a reload doesn't reopen it.
+  The Tasks view lists every task and follows one as a live transcript: the followed one while live,
   else the newest started running/testing/asking, then queued, else the newest waiting for Claude
   (never by latest status write, which flipped on every tool call). At its foot the apprentice
   shows the phase and says what it does and the time left, or who acts next ("Claude reviews
-  next.", #103), as do the transcript's last line and status `last`. Then the week's saving
-  (`savedLine` of `wb savings --json`, read every 10 minutes and when a task closes; no currency
-  sign, #609), then ` · API ≈$1.27` when its `api` has tasks (`apiMoney`; an API-only week: `this
-  week: API ≈$1.27 on 6 tasks (no GPU task to compare)`, #1022; no `≈` at the user's prices, #1135). The web chat's link is on Settings
-  only.
-  The Settings tab (`settingRow`; Buttons, since a Select opened on a click and could pick nothing,
-  2026-11-19): a Button per setting naming its value, capitalized, the default option saying `(default)` (`▸
-  Claude coding: Let Claude decide (default)`, key `coding`); a row wider than the pane is folded
-  to `mem.settingsCols` (the tab's `bodyColumns`) by `hangWords`, its lines after the first two in,
-  under its words, a Text child of the Button (an option's four in; the label stays the control's
-  name; #1048's review: the pane's own wrap went on at the left edge, read as a row of its own); a
-  unit the edge must not split holds a no-break space (`NB`: `GPU 0+1`, `per M`, `61 tok/s`), which
-  `wrapWords` and `wrapParts` keep whole too. Section headings (`heading`: Shared, GPU, API,
-  Experimental, and the Stats tab's Now) are bold in the theme's `claude`; a read-only line
-  (`infoLine`: wake, Connected, Spend today, Optimize, the one-line notes) is dim and padded two
-  (`paddingLeft`), so its wrapped lines align with the rows' words. A press opens its options (keys `coding:only|ask|decide`,
-  `chat:off|on`, `probe:off|on`, the chosen one marked `❯`); picking the current option only folds
-  the row (#578). Below, the sentence of the option the ring is on (`ui.focus`, the `pane` atom), or
-  on hover (`display: "none"` Boxes under the option's hover scope: no hook runs on hover), padded
-  four as the options. **Claude coding** (`CODING_STOPS`, *Claude coding*): `wb
-  coding <mode>`, reading `coding.json` each draw. **Web chat** (`CHAT_STOPS`; off's sentence says
-  what off is): `wb chat on|off`.
-  **Agent code navigation** (`PROBE_STOPS`, *Experiments*; #857): `Off (default)` and `On (large
-  files only)`, on saying `The agent may extract one function of a file over 1,500 lines with
-  probe, instead of reading it whole (github.com/probelabs/probe).` (a copy of
-  `context.PROBE_FILE_LINES`; `tests/test_docs.py` checks both); `wb experiment probe on|off`
-  (`setProbe`), read from `experiments.json` (`probeMode`, as `context.setting`: `on`, `true` or an
-  old level, `PROBE_OLD_LEVELS`, is on). `(recommended)` only when wb's line ends `; on is
-  recommended` (`context.PROBE_RECOMMENDED`). `probeStatus` asks `wb experiment probe` at most every
-  `PROBE_RECHECK_MS` (30 s) and after each pick, so on reads `, working` or `, not set up`
-  (`probeStops`; 2026-11-20); on but not set up queues `PROBE_SETUP_NOTE` once. The Stats rows, each
-  a `wb` command (the mod writes no setting itself): **Stats recording** (`RECORD_STOPS`), **Live view** (`LIVE_STOPS`), **Live
-  refresh** (`EVERY_STOPS`), read from stats.json (`statsSettings`); **Progress checks**
-  (`PROGRESS_STOPS`, `progressSettings`, `progressStops`: `On, after N min` with a kept `after`);
-  **Electricity price per kWh**, an Input (key `price`, its label with no colon: the Input draws
-  one, and `per kWh: : 0.3` said two; `setPrice` via `parsePrice`: one comma or
-  point, a sign or code of up to three characters, decimal digits only; empty runs `--price off`;
-  #609). **Opening animation** (`SPLASH_STOPS`, `splash:on|off`): `wb splash on|off`, `splash.json`
-  (`splashOn`). The ring follows `SETTING_ROWS`. Order: under **Shared** the Agents switch, the busy
-  row, the three roles, Claude coding, Dynamic workflows, the day cap, wake, the Stats rows, the
-  animation, the price; then **GPU**, **API** (*The roles in Settings*), and last under `Experimental ·
-  may change or go away` Web chat and Agent code navigation (the two that may change or go away,
-  2026-11-21). A failed `wb` call toasts its last line.
-  **The roles in Settings** (#1023): read through `rolesNow` (`wb route --json` and `wb models
-  --json`, neither asking a server; kept `ROLES_CACHE_MS` 10 s in `mem.roles`, dropped after a pick).
-  Only wb's answer is kept (`rolesRead`, #1142): the roles, or `wb is older than the mod`; a failed
-  read (routes.json broken) shows wb's line and is read again on the next draw, and an aborted one
-  draws the last good roles (with none, nothing) and is read again too.
-  Shared: **Agents** (`AGENTS_STOPS`, key `agents`: `wb route all gpu|api|both`), **When the GPU is
-  busy** (`BUSY_STOPS`, `busy`: `Wait (default)`, `Use the role's API model`; `wb route busy wait|api`),
-  one row per role by its label (`roleStops`, `role-<role>`: `wb route <role> gpu|api`; api reads
-  `API (<the model's catalog name>)`, as the API group's row names it, else its id; without a model,
-  `API (set its model under API first)`), **Dynamic workflows** (`WORKFLOWS_STOPS`, `workflows`: `wb workflows
-  on|off`, read from workflows.json), **API day cap** (an Input, key `cap`, its label with no colon: `setCap` via `parseUsd`,
-  parsePrice's forms, `wb route cap <usd>`, empty `wb route cap off`), and the read-only line `Wake
-  Claude: on · change it in /plugin → workbench → options` (`mem.wake`; the pane can't write a
-  plugin option). GPU: per role `<label> GPU model` (`gpuStops`, `gpu-<role>`: `Auto (the router
-  picks)` first, then each GPU model with its window and, where `models.card_numbers` knows them,
-  its cards, `· GPU 2+3`; `wb route <role> --gpu <id|auto>`), a sizes row for at most `GPU_ROWS` 6
-  models (pinned first, then by label; `<label> tasks: Any size (default) | Trivial only | Complex
-  only`, the sizes in tasks.ts's `ROLE_WORDS`, never `significant` under "Complex coding";
-  `SIZE_STOPS`, `size-<id>`: `wb model sizes <id> [size]`), then `+N more (wb models)`, and
-  `Optimize: measured N models on 2026-11-20 ·` (the Stats tab's date form) with a **Measure now**
-  Button (`optimize`: `wb optimize start`; the row wraps it under the line when there's no room);
-  last **Image engine**, **Speech engine**, **Sound effects engine**, **Music engine** (#1047, `mediaRows`,
-  `MEDIA_ROWS`, `mediaStops`, keys `media-image|speech|sfx|music`), each only with two or more
-  engines of its kind in `wb models --json`'s `media`, every entry its engine's name (`· off this
-  GPU` for `gpu` false); a pick runs `wb image|audio --default <name>` with no dialog, and a refusal
-  toasts (*The default engines*). API: with no provider whose key is stored (or Ollama cloud's login,
-key `ollama`, #1077) and no role holding an API model, the
-  one line `No API provider connected: /connect in OpenCode adds one; every role runs on the GPU.`
-  (`NO_PROVIDER`); else `Connected: <provider> (key stored) · <provider> (<why>)` (`connectedLine`), per
-  role `<label> API model` (`apiStops`, `api-<role>`: the role's model, the other roles', those
-  tasks ran on, and every runnable one while the list is no longer than `API_MENU` 12, each `<name>
-  · <provider> (<window>) · $in/$out per M` with a free model's data-use mark; then `Other model…`,
-  which opens the Input `api-<role>-other`, an exact id wb checks; `wb route <role> --api <id>`),
-  `<label> thinking` (`thinkStops` over `THINK_STOPS`, `think-<role>`: `wb route <role> --thinking on|off`, for tasks
-  started after it; a stop the role's API model can't keep says what it does instead, from the row's
-  `thinks`: `Off (default): thinking as the model's default (it lists no lower setting)`, `This model
-  can't turn thinking off, so it isn't cheaper; …` (or, at `thinking at its lowest effort`, `This
-  model can't turn thinking off, but its lowest effort is still cheaper than On; …`), or `On: thinking
-  off (the model doesn't reason)`, #1263), and `Spend today: ≈$0.42 of $5 (DeepSeek $0.28 · Anthropic $0.14; catalog prices)`, without a
-  cap `Spend today: ≈$0.42 (DeepSeek $0.42; catalog prices) · no day cap` (`spendLine`, `your prices` and no `≈` at the user's, #1135, its dollars by the Stats
-  tab's `usd`, each provider by its name from `providers`, the Stats tab's ` · `). A press goes
-  through `paneRoute`: `wb route --dry-run --json <args>`, and when it is gated the mod writes its
-  `approval` to route-ok.json with `by: pane` (the press is the user's yes; no dialog, no flag
-  Claude could pass), then runs `wb route <args>`, and a gated change that applied says its line
-  in a toast (`workbench: <change>`: no dialog showed what the press agreed to, #1263); wb's refusal (no day cap, an unknown id, a key wb
-  can't hold) is a toast and the row keeps its value. A wb without `wb route` (or its `--json`)
-  leaves the roles, GPU and API rows out for the one line `wb is older than the mod: wb update`
-  (`OLDER_WB`); one whose routes.json can't be read, wb's line. Each change reaches the conversation
-  as the `[workbench]` echo (*The mod, inside*).
-- **The Stats tab** opens with **Now** (#408): `wb top --json` drawn by `liveLines` (GPU bars and a
-  `BUSY_KEEP` 60-sample sparkline, running tasks, the rack with more than `RACK_FOLD_MIN` 2 models
-  in `RACK_FOLD` folded into one line, each speed with its unit, `writes ~61 tok/s`, the queue;
-  `wrapParts` wraps; an API task's row `▶ <task> API DeepSeek deepseek-flash · …`). One child (`runTop`,
-  `pumpTop`), run by `syncTop` only while the tab is shown, the pane not minimized and Live view on;
-  `stopTop` ends it the moment that stops holding. `syncTop` awaits first, then checks and spawns
-  synchronously, giving up if `mem.topGen` moved; `stopTop` ends every child in `mem.topKids`
-  (#546). A child that ended by itself retries after `TOP_RETRY_MS` 30 s, doubling to
-  `RETRY_MAX_MS` 10 min, and from the second tickless run **Now** says why (#553); one ended as
-  unwanted isn't backed off (#552). `stopTop` clears the `top` atom (`top-1`), so a return never
-  shows the old tick. The tab drawn with no child calls `syncTop` (the engine's re-show says so no
-  other way); `showPane` and `restorePane` call `refreshStats` and `syncTop` once their open resolves
-  (`paneBack`), not before, when the pane could still read as hidden.
-  Below, the history (#406): `wb stats --json` (*The Stats feed*) drawn by `statsLines`, one
-  `Label: text` line a section, its wrapped lines two in (`hangWords`), as Now's. **The words**
-  (#1048's review, seen live): one model or provider goes by one name on every tab, `Names`
-  (`namesNow`: GPU labels from `wb models --json`, wb top's rack and the tasks; provider names from
-  `wb route --json`'s `providers` and task.json's `provider_name`, `mem.provNames`; an id nothing
-  named stays the id). `modelWord` says a GPU model by its label (`qwen3-coder 30B`, as Now and the
-  Tasks view, never `ollama/qwen3-coder:30b` under it) and an API one as the Tasks view's place and
-  model (`API DeepSeek deepseek-flash`), in the model lines, What helps, Bench and Optimized;
-  `providerWord` a provider (`DeepSeek`). `refreshStats` runs `rolesNow` when it reads the feed
-  (kept `ROLES_CACHE_MS`), so the names are there on a first look. By size says `trivial` and
-  `complex` (`ROLE_WORDS`), What stopped agents `the API day cap` (`GUARD_WORDS.spend`, Settings'
-  word), the milestone `~5.0M Claude tokens saved (estimate, 2026-11-20)`. The pane caps model lines at `STATS_SHOWN` 3 itself, since the mod
-  tracks main while `wb` runs from the user's clone (an older wb sends every line, or no
-  `model_lines`); What helps, Bench and Optimized name only the shown lines' models. A feed with no
-  section says to delegate with /workbench (#549). It is read (`refreshStats`) only while the tab is
-  shown: on a tab press; at a poll when the size or mtime of a source changed (`$.fs.stat`:
-  results.jsonl, stats.json, optimize.json, bench/runs.jsonl, speed.json, savings.json
-  `mem.savingsFile`, each `machines/<id>/`'s optimize.json and speed.json; #549, #894); past the
-  feed's `until` (#575); after a Stats pick; once per load (`mem.statsLoaded`). A failed read keeps
-  the last feed, retries after `STATS_RETRY_MS` 60 s doubling to `RETRY_MAX_MS`, and says why
-  (#553: each 1.5 s poll reran a full history read). No timer: hidden it costs nothing, shown a stat
-  a poll. The feed is the `stats` atom (`stats-1`).
+  next.", #103), as do the transcript's last line and status `last`; then the API day cap's line
+  while an API task works (*The Tasks view*), then the modeline. The week's saving and API dollars
+  are the web app's Stats (#1283: the pane runs no `wb savings`, `wb stats` or `wb top`).
+  **Settings changed on the web app** (#1283's addendum). The web app's Settings write wb's own
+  files through wb, and append each change to `$WB_HOME/settings-changes.jsonl` (`{ts, key, label?,
+  from, to, said, help?, by: "web"}`). `settingsTurns` reads its tail (64 KB) at each poll when its
+  size or mtime moved, in the session that listens (chat/listener.json) or any while none does (a claim stands as
+  `listen` reads it, `claimStands`: a session ended in workbench mode leaves its claim), and
+  takes each `by: "web"` row newer than `$.store`'s `settingsSeen` mark (every session's, so a
+  reload or a second session says it never again; no older than `OLDEST_WAKE_MS`). A row with
+  `help` (a setting on but not working yet, such as Agent code navigation with no probe) toasts
+  `workbench: <label> changed on the web app: Claude will offer to set it up` and queues a
+  `[workbench]` turn (`mem.queued`): `The user changed <label> from <from> to <to> on the web app.
+  wb said: <said>`, the help, and `Offer to help with it, and install or change nothing without
+  their yes.` (`SETTING_HELP`, `settingSaid`). One without goes in as one quiet `[workbench]` row
+  (no turn); the roles, the busy row, the cap, Claude coding and Dynamic workflows (`SAID_ELSEWHERE`)
+  are left out of it, as `unsaid` says them already (*The roles in the conversation*, *The rules
+  said later*).
 - **The status line**: `⚒ wb · add-scores running r2 · fix-typo asks · 1 awaiting review · 1 stuck`, or `⚒
   wb · workbench mode`. Outside workbench mode it counts only `mine`, and is empty without one
   (2026-11-17).
@@ -3160,12 +3065,10 @@ the last tick reached, again from the start when the file is replaced or cut; th
 price; `prices`, `results.live_basis`, #1135) and, queued for one of its provider's slots, `waits: "a <provider> slot"`. No live server
 rate (no server of ours: the last call's rate still works). It is never in the rack, which stays
 `discover()`'s GPU models, nor the queue, the lease's waiters: an API task takes no lease. The text
-row ends `  API deepseek · ≈$0.12`; the pane's **Now** row reads `▶ <task> API DeepSeek deepseek-flash ·
-running · round 2 · 3m10s · ≈$0.12`: its place and model first, as the Tasks row (`modelWord`), then
-`apiParts`' spend and wait.
+row ends `  API deepseek · ≈$0.12`.
 
 On a terminal: the alternate screen, redrawn each tick, bars in eighths, the card's short name
-(`top.short`, the pane's `cardName` alike, #576), cbreak stdin for `q`. Ctrl-Z restores the
+(`top.short`, #576), cbreak stdin for `q`. Ctrl-Z restores the
 terminal before stopping and SIGCONT retakes it and redraws (a wake pipe, #607); the handlers write
 straight to the fd (`os.write`), never `sys.stdout` (#950: a reentrant write quit wb top). Too tall,
 it folds idle, `can't run` and `remote` models (`top.FOLD`), then cuts the middle with `… N more
@@ -3409,10 +3312,10 @@ read as a wrong id, Claude hunted for the "right" one).
   `tuning._rows`, `router.expected`. The pane's two (`model_line`, `expected`) pass `cached=True`:
   hosted.json as it is, never rebuilt, so a 5 s poll never waits on OpenCode. With no hosted.json,
   or one that lists no provider with a stored key and is older than `cli.PANE_REREAD_SECS` (60 s),
-  `wb route --json` (the pane's Settings and Tasks tabs) starts one fresh read in the background
+  `wb route --json` (the pane's day-cap line, the web app's Settings) starts one fresh read in the background
   (`cli._read_catalog_later`, at most one per `CATALOG_TIMEOUT` + 10 s, its mark `hosted.reading` in
   the state dir) and a later poll lists the providers: with keys stored and no cache yet, or a cache
-  read before /connect (which changes no stamp), the pane said `NO_PROVIDER` until another command
+  read before /connect (which changes no stamp), the pane's Settings (the web app's since #1283) said no provider until another command
   built one (#1069). A cache listing a stored key is never read again for the pane. `wb setup` reads
   it inline (fresh) when a key `auth list` says is stored isn't stored in the cache, a config that
   doesn't parse skipping it. `transcript._server_live` keeps `discover()`: an API model is
@@ -4196,7 +4099,7 @@ why?}}` from the cached catalog: `key` `stored`, `ollama`, `env`, `oauth` or `no
 stored; a stored key on a package the keyhole can't carry is `none` with `models.unspoken_why`'s
 line, which status says too: it read `Google (key stored)` while nothing could run on it, #1066;
 Ollama's, `ollama` with `signed in through Ollama: its cloud models need no key here`, #1077,
-which the Settings tab counts connected as it does `stored`). While busy is `api` the show adds `When the GPU is busy: a role with an API model starts on
+which the Settings count connected as they do `stored`). While busy is `api` the show adds `When the GPU is busy: a role with an API model starts on
 it (wb route busy wait: queue instead)`.
 The changes (each one exit 3 with one line when refused, writing nothing):
 - `wb route <role> gpu|api` flips the selector; `api` with no API model kept: `<role> has no API
@@ -4301,7 +4204,7 @@ unrelated change (#1263's review).
 model's default (it lists no lower setting) · …`, its `thinks` read from the catalog then,
 `with_thinks` uncached as its lookups, `--json` the cached one's, each role's `thinks` in it),
 `routes.summary` and the mod's `routesSummary` (`thinkingSaid`, the same rule: Couplings), wb
-scout's roles and the pane's thinking row (`thinkStops`). They said `thinking off` for a model that
+scout's roles and the Settings' thinking row (the pane's until #1283). They said `thinking off` for a model that
 can't turn it off, so a user who set it from the pane, where no dialog shows the change line, kept a
 model that thinks.
 
@@ -5147,7 +5050,7 @@ effect's hit came 0.8-1.45 s in (the skill says to trim the lead); ACE-Step peak
 
 ## Claude coding: when Claude writes a task's code
 
-The user chooses (`wb coding`, #92; the pane's Settings row, #93) in `$WB_HOME/coding.json` `{mode,
+The user chooses (`wb coding`, #92; the web app's Settings, #1283) in `$WB_HOME/coding.json` `{mode,
 ts}`, read fresh, default `decide`. The agent always gets the first shot.
 - **Let Claude decide** (`decide`): nothing added, nothing gated.
 - **Ask me first** (`ask`): after helping the agent, Claude may ask for one named edit; the user's
@@ -5166,7 +5069,7 @@ NotebookEdit under `$WB_HOME/tasks/<task>/worktree/` without one (`codingRefusal
 change arriving as a row (`sayRules`, #540). Shell edits aren't seen: the block covers them.
 
 **Dynamic workflows** (#1041). Whether Claude may split one request into several tasks that run at once:
-the user's choice, `wb workflows on|off` (the pane's Settings row, #1023), kept beside the coding choice in `$WB_HOME/workflows.json` `{mode, ts}`
+the user's choice, `wb workflows on|off` (the web app's Settings), kept beside the coding choice in `$WB_HOME/workflows.json` `{mode, ts}`
 (`cli.WORKFLOWS`, `workflows_mode`), read fresh, default `off` (no file, unreadable JSON, an unknown mode). Like
 `wb coding` it is the user's: Claude runs it only on their yes, and wb gates neither (no dialog: nothing it
 starts could not start anyway). **Off**: the skill's rule, one task at a time, as before there was a choice.
@@ -5179,8 +5082,8 @@ acceptance command), one shared name prefix for the group, passed as `wb start -
 `fix-crash` and `fix-menu`), the plan in one line before the starts, each result
 reviewed on its own, merged logic first, then tests, then UI or docs. Each task runs on its own role's model;
 nothing new decides what runs together: the GPU lease (`models.apart` cards together, the rest `--queue`)
-and the provider slots (#1015). No cap on tasks at once (the owner's call, not asked for). The pane's
-Settings row is #1023's.
+and the provider slots (#1015). No cap on tasks at once (the owner's call, not asked for). Its Settings
+row is the web app's (#1283; the pane's until then, #1023).
 
 ## Experiments
 
@@ -5195,7 +5098,8 @@ help, the agent's prompt and rules are exactly those without it.
 symbols`) or extracts one function (`probe extract <file>#<name>`) instead of reading it whole (half
 the measured steps compacted or handed over, 2026-11-20). It needs a probe on the agent's PATH
 (`context.probe_bin`) whose `--help` lists `symbols` (crates.io's 0.6.0 doesn't); `wb experiment`,
-`wb doctor` and the pane say when it's missing (`PROBE_HOME`, `PROBE_RELEASES`, `PROBE_SETUP_NOTE`).
+`wb doctor` and the web app's Settings say when it's missing (`PROBE_HOME`, `PROBE_RELEASES`); turned on there
+without it, the change's `help` row has Claude offer to set it up (*Settings changed on the web app*).
 Off, it isn't run at all (a non-UTF-8 `--help` failed a start, #518; read with `errors="replace"`).
 On:
 - shell rules allow only `context.PROBE_READS` (`symbols`, `extract`, `search`, `grep`, `query`) and
@@ -5340,7 +5244,8 @@ Claude session in workbench mode while the user is away: messages both ways, Cla
 dialogs, push notifications (installable and notifying over https only: `tailscale serve --bg
 1337`). On by default (the owner, 2026-11-24, #1281, reversing 2026-11-19's off until `wb chat
 on`): `chat.ensure` brings it up, `wb setup` installs its service, `wb doctor` says whether it
-answers; `wb chat off` (or the pane's Settings row) turns it off, and that choice is kept.
+answers; `wb chat off` turns it off, and that choice is kept. The pane's modeline shows its link, or
+why it is down (*Seeing what the agent does*).
 
 **Keeping it up.** One `chat._Server` per bound address, binding without HTTPServer's host-name
 lookup (it stalled macOS, #236). `systemd/wb-chat.service`: a user unit, `Restart=always`, no start
@@ -6027,17 +5932,16 @@ imports from the module's own files pass too). The helpers type `$` as `any`, so
 (hooks, calls, env reads, "gating hook without .catch") is the check. Env reads are string
 literals: `HOME`, `WB_HOME`, `WB_BIN`, `CLAUDE_CONFIG_DIR`, `WB_SAVINGS`, `WB_COMPACT_AT`.
 
-**State.** Ten `$.state` atoms survive a module reload; one read under an old shape tag is absent,
+**State.** Seven `$.state` atoms survive a module reload; one read under an old shape tag is absent,
 so change the tag when its type changes: `tasks` (`tasks-11`, WbTask[]: name, phase, round, model,
 label, via, role, provider, routed (#1016), tests, last, createdAt, updatedAt, tokens, recent, repo, cwd, subdir, session, claude_pid,
 claude_start, backlog, parked, allowed, and the Tasks view's (#1048, `viewFacts`): group, cards, tools, tokOut, ctxUsed,
 window, freshAt, autoFixes, autoFixMax, roundFor, reviews, steps, activeS, roundStartedAt, typicalMin, typicalN, lateMin,
 spend, est: the spend at catalog prices, #1135), `live` (`live-1`, {task, lines: {s, t}[]}), `chat`
-(`chat-4`, {key, delegating, url, web}: workbench mode, also kept by session id in `$.store`
-`modes`, #689), `pane` (`pane-1`, {tab, open, focus, minimized}), `sessions` (`sessions-1`,
-string[]: the process's session ids), `savings` (`savings-1`, string: the pane's saving line), `stats` (`stats-1`, {key,
-feed}: `wb stats --json` and its files' stamp), `top` (`top-1`, {snap, busy}: `wb top --json`'s
-newest tick, each GPU's busy %), `said` (`said-3`, WbSaid | null, {notes, wakeOff, coding, routes, workflows}:
+(`chat-5`, {key, delegating, link: {state: up|started|off|blocked|failed|checking, url?, why?}}: workbench mode,
+also kept by session id in `$.store` `modes`, #689, and the web app's link, `checking` until `chatLink` reads it,
+#1283), `pane` (`pane-2`, {open, focus, minimized}), `sessions` (`sessions-1`,
+string[]: the process's session ids), `said` (`said-3`, WbSaid | null, {notes, wakeOff, coding, routes, workflows}:
 an atom since #697 (`routes` since #1014, `workflows` since #1041: a stored `said-1` or `said-2` is declined, read as nothing said), as in `mem` a reload emptied it and `sayRules` waited for good), `splash`
 (`splash-1`, boolean: the opening `/workbench` came, so a reload never replays it; cleared when the mode goes off). Everything else
 is `mem`, reset by a reload. Task facts are re-read from `$WB_HOME`; the mod writes only
@@ -6063,14 +5967,14 @@ ends. Until a hello in this load (`mem.earsOk`), a failure toasts once (`can't r
 (<why>)…: put wb on Claude Code's PATH or set WB_BIN`) and the wait doubles to a minute. A 1.5 s
 timer polls with no events child, a task queued/running/testing/asking, a turn queued, or
 `SAFETY_MS` 30 s since the last poll. A 450 ms timer animates the apprentice. Each poll reads `chat/switch.json` (`readSwitch`: off
-clears the link and ends away, `back`); while on,
-every 10 minutes `wb chat url` refreshes the link (`chatLink`; only a `…#token=…` URL). Limits: `wb`
+clears the link and ends away, `back`); `chatLink`
+runs apart, whatever the switch says (`wb chat url --json` every `CHAT_CHECK_MS` 60 s: *Seeing what the agent does*). Limits: `wb`
 120 s (`wb update` 600 s), `wb watch` and `tail` 30 s, `kill -0` 5 s. `runWb` returns the exit
 status: a failing `wb` is said as a failure (`brief`), never passed on as its answer. A call the
 engine aborted (a plugin reload, a superseding redraw: `isAbort`, `wbThrew`; a bare `aborted` at the
 message's end, never the engine's timeout, `aborted: still running after …ms`, which is wb hung and
-said as a failure, so `wb stats` still backs off) is `aborted`, with no message: not wb failing, so nothing says `could not run wb` (nor `wb status failed`), and a read the pane keeps (the roles,
-the probe row, the saving, the chat link, the Stats feed) keeps its last value and reads again
+said as a failure, #553) is `aborted`, with no message: not wb failing, so nothing says `could not run wb` (nor `wb status failed`), and a read the pane keeps (the roles,
+the chat link) keeps its last value and reads again
 (#1142). Growing files
 are read by `readTail`: whole up to 1 MiB (events 64 KiB), else `tail -c` from a whole line, since
 `$.fs.read` rejects a file over 4 MiB (no wake came again, the 2026-11-16 audit).
@@ -6080,10 +5984,11 @@ are read by `readTail`: whole up to 1 MiB (events 64 KiB), else `tail -c` from a
 read again that load; open ones get their last 4 event lines, `recentEvents`, cached by
 size@mtime, #739); the status line; opens the pane once per load for a queued/running/testing task
 of the session's or the mode on (unasked only on a wide terminal; one the user closed stays
-closed); refreshes the transcript only while the Tasks tab shows (#838; `wb watch <task> --json
+closed); refreshes the transcript only while the pane shows (#838; `wb watch <task> --json
 --last 2000` every `LIVE_EVERY_MS` 5 s while active, #691; `focusOf` sticks to the followed task);
 submits one queued turn when idle (a dropped one waits a minute); the boundary compaction; the
-weekly check, the update check beside it; then `deliver`, `rewake`, `listen`.
+weekly check, the update check beside it; then `deliver`, `rewake`, `listen`, `readSwitch` and
+`settingsTurns` (*Seeing what the agent does*); `chatLink` runs on its own minute's timer.
 
 **Busy.** `mem.busy` is set by `turn.start` (main loop) and by the model's own main-loop
 `tool.call` (`next.origin.plugin === 'engine'`: a module reloaded mid-turn never saw `turn.start`;
@@ -6170,8 +6075,7 @@ the followed task's transcript (lines cut to `LINE_CHARS` 2000,
 within `HISTORY_CHARS` 60,000: Claude Code drops pane text past 100,000), following the newest
 unless scrolled up; the stage (the apprentice as pixels at 20 rows by 40 columns or more, else its
 one-line face; text wrapped by `wrapWords`, as Text's own wrapping beside the raster drew empty
-rows); the saving and the tabs. The Stats and Settings tabs and the strip (`AbovePrompt`): *Seeing
-what the agent does*. The apprentice (`apprentice.ts`): 16×12 pixel art in half blocks into a
+rows); the modeline. The modeline and the strip (`AbovePrompt`): *Seeing what the agent does*. The apprentice (`apprentice.ts`): 16×12 pixel art in half blocks into a
 `Raster` (cells as little-endian u32 triplets, base64), a pose per state (rest, blink, think, work,
 swing, tada, ask, slump, sleep), FACE the one-line faces; the bubble is `speechOf`.
 
@@ -6205,15 +6109,15 @@ a block and drop for the whole block until the widest row fits: line 1 the role,
 stage (`r2`), the long place (`API`), the place; line 2 the tokens, the bar to 5 cells, the tool
 count, the bar (`ctx 56%` stays), the estimate. One row a task (`compactWanted`) in a pane under 20
 rows (the 14-row box below a ~100-column terminal) or when two would leave the transcript, the
-apprentice, the tabs and the modeline under 12 rows. A press on a task's first row (a `plain` Button
+apprentice and the modeline under 12 rows. A press on a task's first row (a `plain` Button
 keyed `task-<name>`) follows it (`followTask`, `mem.picked`, which `focusOf` keeps while the task is
 listed). While an API task works (running, testing or asking: not one queued for its slot, the
 owner's "only while an API task runs"), `API today ≈$0.42 of the $5 day cap  ▉░░░░░░░░░` (no `≈` at the user's prices, #1135) sits above the
-saving (`capRow`: warning from `meter.CHECKIN_SHARE`, error at the cap), from `wb route --json` as
+modeline (`capRow`: warning from `meter.CHECKIN_SHARE`, error at the cap), from `wb route --json` as
 `rolesNow` caches it, read again past `ROLES_CACHE_MS` off the render's path (`capNow`).
 
 **The web chat listener** (`listen`: workbench mode, chat on, an events child). Another session's
-live claim makes this one stand by: its pid alive and, with a `start`, still started then (`alive`,
+live claim makes this one stand by (`claimStands`, which `settingsTurns` asks too): its pid alive and, with a `start`, still started then (`alive`,
 from `/proc/<pid>/stat` or `ps -o lstart=` as wb reads it, UTC then the local zone, #848; when
 neither can say, alive while listener.json is under 15 s old, #700); without a pid, `ts` within
 15 s; asked only of another's claim, at most every `PID_CHECK_MS` 30 s (#839); another `machine`'s
@@ -6419,7 +6323,9 @@ $N`: in what is compared, so a cap changed alone is a row too; it once wasn't, 2
 the default and no cap is set (nothing to tell), `routes.json can't be read (wb route says why)` for a file wb wouldn't read
 (`routesValid`); read in `wanted` while delegating or with a task open. `unsaid` pushes `[workbench] The roles changed:
 <summary>. <ROUTES_RULE>` whenever it differs from what was said (the first time `ROUTES_NOTE`), so any change, the
-dialog's, the pane's, a terminal's or a hand edit, reaches the conversation as one row. `prompt.context` adds the
+dialog's, the web app's, a terminal's or a hand edit, reaches the conversation as one row; when the newest stamp a role
+records (`by`/`ts`, `gpu_by`/`gpu_ts`) is `web`, the summary ends `(the user, on the web app)` (`readRoutes`' `web`,
+#1283). `prompt.context` adds the
 `workbench-routes` block (delegating, or a task open, as `wanted` reads) once any role has an API model (a GPU pin alone
 adds none): `Roles (the user's, wb route): <summary>. Day cap $5. Never pass --model for an API model or change a role without the user's yes (the mod asks them in a dialog);
 recommend only.` (`No day cap yet.` without one). The `/workbench` skill's text carries it the same way (`unsaid`).
@@ -6607,7 +6513,7 @@ $WB_HOME (~/.local/state/workbench)
   splash.json                    the pane's opening (wb splash): {on, ts}; on unless "on": false
   workflows.json                 Dynamic workflows (wb workflows, #1041): {mode: on|off, ts}; none: off
   results.jsonl                  one row per closed task
-  stats.json  stats.lock         the Stats tab's settings
+  stats.json  stats.lock         the Stats' settings (the web app's)
   lessons.jsonl                  what each task taught, open until written into a skill or closed
   notes.md  notes.lock           wb notes
   tuning.json                    optional pins ({"fresh_at": 0.6})
@@ -7319,11 +7225,11 @@ context bar, the estimate and lateness from `late_min` (and only beside `over`),
 untimed API task with no estimate, no day-cap line for a queued API task; register.test.tsx: three
 tasks at once under one header with their cards and spend at 71 columns, two rows a task at 50, one in a 14-row box,
 the status line's `1 stuck` apart from review, a row's press following its task, the day-cap line only while an API
-task runs, and the splash's measured rows. The review of Stats and Settings (#1048, part 2): the history's models and
-providers by the names Now and the Tasks view use (and the ids when nothing named them), sizes in the role words, the
-cap's word, Now's API row; `hangWords` and a no-break space held whole; Settings at 52 columns: the headings as Now's,
-a long row folded under its words, read-only lines padded, no doubled colon, the optimize date, the engine and size rows'
-titles, an option's sentence padded.
+task runs, and the splash's measured rows. The Tasks-only pane (#1283): no tab Button or 1-3 key, the modeline per link
+state at 140, 90 and 60 columns, `wb chat url --json` read whole (the 3 s recheck, the switch, an older wb's plain
+call), no `wb top`, `wb stats` or `wb savings` run, the `pane-2` and `chat-5` defaults, the splash's bar on the
+modeline's row above the link's rows, a web settings row with `help` offered once, others a quiet row, and a role
+changed on the web app echoed once as the user's.
 
 **Real-OpenCode checks** (`RealOpenCode`, `RealOpenCodeSkillFiles`, `RealOpenCodeRun`, `RealOpenCodeAPI`, `ApiHarness`'s
 `test_real_opencode_*`, `ApiSizing`'s and `ApiSpendKeyhole`'s `test_real_opencode_*`; skip without `opencode`, the
@@ -7519,14 +7425,13 @@ doc needs its own `!/` line).
   package manager installs into the project → `context.RUNNER_TOOLS`, npx's other name in `NODE_PACKAGES` (#999); its `ALLOWED_COMMANDS`, `ASK_FIRST`,
   `INSTALL_LISTED` entries follow by themselves.
 - **An experiment** (`context.EXPERIMENTS`) → `shell_rules`, `EXPERIMENT_NOTES`, `EXPERIMENT_PROTOCOL`,
-  `task_experiments`, `cli.experiment_lines`, the pane row (`PROBE_STOPS`, `probeMode`, `probeStatus`, `probeSaid`, which read
-  `experiment_lines`' wording, `PROBE_SETUP_NOTE`), `settings._probe_row` and `PROBE_HELP` (the web app's), *Experiments*. `context.PROBE_FILE_LINES` → `PROBE_STOPS`' `a file over 1,500 lines` and the
-  pane row here (`tests/test_docs.py`). `context.OLD_LEVELS` → `context.setting`, `cmd_experiment`, the mod's
-  `PROBE_OLD_LEVELS`. `context.PROBE_LANGUAGES`, `probe_language_names` → `probe_off`, `long_files`' `kinds`,
+  `task_experiments`, `cli.experiment_lines`, `settings._probe_row` and `PROBE_HELP` (the web app's row and its help, which read
+  `experiment_lines`' wording), *Experiments*. `context.PROBE_FILE_LINES` → `settings.PROBE`'s sentence, which
+  reads it (no copy: `tests/test_docs.py`). `context.OLD_LEVELS` → `context.setting`, `cmd_experiment`. `context.PROBE_LANGUAGES`, `probe_language_names` → `probe_off`, `long_files`' `kinds`,
   `runner.outline_section`, the tests' `SEARCH_HELP`, *Only where probe can help*. What a checkout holds
   (`gitops.sparse_keeps`, `GIT_NO_LAZY_FETCH`) → both `gitops.checkout_size` and `context.probe_off`: one skipping either fetches or counts what the worktree
   won't have (#436).
-  `context.PROBE_RECOMMENDED` → `; on is recommended`, which `probeSaid` reads. What on adds (`runner.output_cap`,
+  What on adds (`runner.output_cap`,
   `RESTATED`, `runner.add_outline`, `OUTLINE_HEAD`/`OUTLINE_MORE`) → ProbeOn's byte-for-byte off check and
   ProbeWhereItHelps.
 - **`context.API_HIDDEN`** and `SECRETS`' comment on what stays readable (the `.npmrc` trade) change together; a file
@@ -7569,7 +7474,6 @@ doc needs its own `!/` line).
 - **`models.BOX_QUIET`, `BOX_WAIT`** (a wb remote box's turns) → OpenCode's 2-minute background move (`BG_GRACE`), which
   bounds the gap between a round's requests, and `router.ROUND_DEFAULT_S`;
   `wb start`'s note; `media.turns` (`box_quiet`).
-- **`progress.DEFAULT_MIN`, `TYPICAL_MIN`** → `PROGRESS_STOPS` in `register.tsx`.
 - **`ask_mcp.NO_ANSWER`'s opening** ("No answer arrived in time.") → the mod's `NO_ANSWER`, which tells one timed out unseen from one answered.
 - **`store.absolute_env`, `home()`** → the mod's `absolutePath` (#454).
 - **A process wb leaves running** (a runner, the bench driver, `wb optimize`, `wb chat on`'s server) → `cli.detach` (own scope where logind kills sessions), `awake=` when unattended
@@ -7670,23 +7574,18 @@ doc needs its own `!/` line).
 - **What OpenCode reads from a project** → `context.PROJECT_SKILL_DIRS`, `agents_files`, `PROJECT_CONFIGS`,
   `project_config_instructions`; RealOpenCode's #994 test; *What the project's own config gave, handed back*.
 - **The roles** (#1014): **routes.json's keys** (`routes.normalize`) → the mod's reader (`readRoutes`, `routesValid`,
-  `routesPath` with `routes.path`) and the pane's rows (#1023); **`routes.summary`** ↔ the mod's `routesSummary` (the
+  `routesPath` with `routes.path`); **`routes.summary`** ↔ the mod's `routesSummary` (the
   context block and the echo say it; `Routes` and register.test.tsx check one fixture each), and
   **`routes.thinking_said`** ↔ the mod's `thinkingSaid` (a role's `thinks`, #1263; `RoleResolution` and
-  register.test.tsx's #1263 test), and `runner.THINKING_LOWEST`'s opening ↔ `thinkStops`' `LOWEST_SAID` and
-  `settings.LOWEST_SAID` (the lowest effort, still cheaper than On); **a Settings row** (the pane's `*_STOPS`,
-  `roleRows`, `mediaRows`) ↔ its entry in `settings.py` (the web app's: same key, choices, sentence and wb call);
-  **`settings.GROUPS` and `KINDS`** ↔ `settings.js`'s `GROUPS` (order and names) and its kinds, and #1280's
-  `/api/settings` shapes ↔ its `load` and `pump` and `e2e_settings.mjs`'s stand-in
-  until #1283 drops the pane's tab; **the change line**
+  register.test.tsx's #1263 test), and `runner.THINKING_LOWEST`'s opening ↔ `settings.LOWEST_SAID` (the
+  lowest effort, still cheaper than On); **`settings.GROUPS` and `KINDS`** ↔ `settings.js`'s `GROUPS` (order and
+  names) and its kinds, and #1280's `/api/settings` shapes ↔ its `load` and `pump` and `e2e_settings.mjs`'s
+  stand-in; **the change line**
   (`routes.change`, `cli.start_line`) → the mod's dialog, which shows what `wb route --dry-run --json` prints (an API
 start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --model` stays refused), and
   `route-ok.json`'s `approval` (`cli._route_argv`) ↔ `routes.approved`; **a `wb route` or `wb start` flag** →
   `routeCalls` (`--m` is `--model`'s only prefix among wb start's flags; a new `--m…` flag there breaks that).
-  **The pane's stop tables** (#1023: `AGENTS_STOPS`, `BUSY_STOPS`, `roleStops`, `gpuStops`, `apiStops`, `THINK_STOPS`,
-  `SIZE_STOPS`; #1047's `mediaStops`) ↔ `wb route`'s and `wb model sizes`' choices (`routes.USES`, `routes.BUSY`, `VIAS`, `THINKING`, `AUTO`,
-  `router.SIZES`); `parseUsd` ↔ `wb route cap`'s parser (the same forms); **`wb route --json`** and **`wb models --json`**
-  → the `WbRoutes`/`WbModels` types (`media`: `WbMedia`, #1047) and `rolesNow`; `routes.BUSY`/`busy` → `routesValid`, `readRoutes`, `routesSummary`.
+  **`wb route --json`** and **`wb models --json`** → the `WbRoutes`/`WbModels` types and `rolesNow` (the day-cap line); `routes.BUSY`/`busy` → `routesValid`, `readRoutes`, `routesSummary`.
 - **The first run for API roles** (#1024): **the router's refusal** (`router.choose`'s `no GPU model…`,
   `api_choice`) ↔ the skill's first-run trigger ("no role can run") and `wb setup`'s API keys line
   (`cli.api_key_lines`, `models.connected`); **SCOUT_NOTE's opening** (`[workbench] The weekly model check is
@@ -7699,29 +7598,32 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `pageParts` (left out of the history, as `meta`) and `pageShape`; **`routes.routed_line`** → `transcript.routed_text`
   and `routes.model_line`; **`routes.USES`/`use`** → the mod's `routesValid` and `routesSummary`; a role's **`order`**
   (#1021) → `routes.summary`, `routesSummary` (`, backends …`) and `routesValid` (#1126).
-- **A `$.state` atom's type** → its tag (`tasks-11`, `live-1`, `chat-4`, `sessions-1`, `savings-1`, `pane-1`,
-  `stats-1`, `top-1`, `said-3`, `splash-1`).
+- **A `$.state` atom's type** → its tag (`tasks-11`, `live-1`, `chat-5`, `sessions-1`, `pane-2`, `said-3`,
+  `splash-1`).
+- **`wb chat url --json`** (`chat.ensure`'s states and keys, #1283) → the mod's `WbChat.link`, `LINK_STATES`, `linkOf`,
+  modeline.ts's words per state. **settings-changes.jsonl's row** (the web app's Settings) → `settingsTurns`,
+  `settingSaid`, `SETTING_HELP`; a setting the conversation hears from `unsaid` → `SAID_ELSEWHERE`. **routes.json's
+  `by` value `web`** → `readRoutes`' `web`.
 - **The Tasks page's layout** → `pageParts`, `pageShape` (#963);
 - **The Tasks view** (#1048): the status keys `round_for`, `typical`, `late_min`, `cards`, `api` and task.json `group` →
   `viewFacts` and tasks.ts; the queued `last` texts (the runner's and `models`' `say`: `waiting for the GPU`, `waiting
   for an API slot`, `checking out`, `setting up`, `checking the acceptance command`, `loading`…) → tasks.ts's `QUEUED`
-  and `transcript.activity`; the role words (`complex`, `trivial`, `writing`) → tasks.ts's `ROLE_WORDS` and
-  Settings' `ROLE_LABELS`, `SIZE_STOPS` and the Stats tab's By size (#1048: a size is said in them); `progress.TYPICAL_MIN` and `meter.CHECKIN_SHARE` → tasks.ts's copies; `savings.usd` → the
-  `usd` the mod passes to `taskLines` and `capRow`; **the modeline's look** (`MODELINE`, `claude`) →
-  splash.ts's `BAR`, modeline.ts's `BAR`, the room `register.tsx` counts; **a task phase** → modeline.ts's `SAID`.
-- **Stats tab folds**: `top.FOLD` → `RACK_FOLD`; `stats.STATS_MODEL_LINES` → `STATS_SHOWN`; `model_lines`'
-  `more`/`older`/`variants` → `statsLines`, `cli.cmd_stats`; each of these, `wb stats --json`'s and `wb top --json`'s
-  keys, and the pane's words (`GUARD_WORDS`, `ROLE_WORDS`, `Names`) → the web app's `stats.js` too (*The Stats view*).
-- **`cli.CODING`** → the mod's `CODING_STOPS`, `CODING_RULES`, the skill's *Claude coding* bullet.
-- **`savings.totals`' keys** → `savedLine`, `drawSaved`; the cost's label (no currency sign) → `wb savings`, the Stats
-  tab, `savedLine`, `drawSaved`.
+  and `transcript.activity`; the role words (`complex`, `trivial`, `writing`) → tasks.ts's `ROLE_WORDS`
+  (#1048: a size is said in them); `progress.TYPICAL_MIN` and `meter.CHECKIN_SHARE` → tasks.ts's copies; `savings.usd` → the
+  `usd` the mod passes to `taskLines` and `capRow`; **the modeline's look and room** (`MODELINE`, `FACE.rest`, `claude`,
+  the ` - ` between, the padding of 1 each side `modeline` takes off the room, the link's rows under it) → splash.ts's
+  `BAR`, `pageShape`'s `head` (the modeline and the link's rows), `splashTarget`, and the render's `modeline` Box.
+- **Stats folds**: `top.FOLD`, `stats.STATS_MODEL_LINES`, `model_lines`' `more`/`older`/`variants`, `wb stats
+  --json`'s and `wb top --json`'s keys → the web app's `stats.js` (`RACK_FOLD`, `STATS_SHOWN`, its `statsLines`;
+  *The Stats view*), and `cli.cmd_stats`.
+- **`cli.CODING`** → the mod's `CODING_RULES`, the skill's *Claude coding* bullet.
+- **`savings.totals`' keys** → `drawSaved`; the cost's label (no currency sign) → `wb savings`, `drawSaved`.
 - **API money** (#1022): `savings.of_row`'s `kind` check is what keeps the score, card, share, milestones and badge
-  GPU-only; `savings.api_totals`' keys → `stats._api_period`, `savings.api_summary`/`api_report`, `stats.api_week_line`, the mod's `apiMoney`,
-  `apiPeriod`, the chat's `apiSaved`; `savings.usd` → the mod's `usd`, `apiSaved`'s; `meter.basis`' values
-  (`catalog`, `yours`, `provider`) and `meter.NOTE`'s words → the mod's `isEst`/`pricesNote`, tasks.ts' `est`, `apiSaved`'s `est`/`note`
+  GPU-only; `savings.api_totals`' keys → `stats._api_period`, `savings.api_summary`/`api_report`, `stats.api_week_line`, the chat's `apiSaved`; `savings.usd` → the mod's `usd`, `apiSaved`'s; `meter.basis`' values
+  (`catalog`, `yours`, `provider`) and `meter.NOTE`'s words → the mod's `isEst`, tasks.ts' `est`, `apiSaved`'s `est`/`note`
   (#1135); the `kind` default (`gpu`) →
   `results.api_row` (a row; `models.is_api` takes an id), `router.same_kind` (score, expected, slice, `tuning._rows`), `stats._energy`. `local tok` → `agent tok` (with an API row shown) in `results.table`, the bench
-  table and the round report's `agent tokens` (an API task's) together. `WbTop`'s type is unchanged (the API fields are optional keys of `running` rows): `top-1` stays.
+  table and the round report's `agent tokens` (an API task's) together.
 - **Which session a task is** → the mod's `mine` and `cli._scope`: the same rule, the home-or-`/` exception included;
   `scope()` passes every id.
 - **A notice kind or its text** → the mod's `HEADLINE`, `NEXT` (a `cause` `provider` notice: `PROVIDER_HEADLINE`, `PROVIDER_NEXT`; `local_only`, `runner.LOCAL_ONLY` ↔ `LOCAL_ONLY_HEADLINE`, `LOCAL_ONLY_NEXT` ↔ `privacy.since_start_line`, #1232; any other `cause` outside `results.THE_STEP` ↔ the mod's `THE_STEP`, `OUTSIDE_HEADLINE`, `OUTSIDE_NEXT`, and its notice's text names its remedy, #1247), both still-true rules (`_ack_all`'s, the mod's), `wb wait`.
@@ -7785,5 +7687,5 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   create v<version> --generate-notes` linking the checklist. **`wb setup`'s links** → README's quickstart, *Installing*.
 - **`runner.thinking_variant`** (`THINKING_OFF`, `OFF_VARIANT`, `DEFAULT_EFFORT`, `_no_off_listed`, `_off_form`, the V2 move in `_as_v2`) → `fake_opencode.py`'s variant check (`layer_variants`: V1 and V2, the layer file and the content), `transcript.model_line` (`thinking_shown`), `routes.thinking_of` (the dialog's thinking clause, `cli.start_line`, `routes.model_line` and `routed_line`, #1237), *Thinking off by default*.
 - **A model name** → never in code or the skill: OpenCode's config, the router, the weekly check.
-- **A runner guard** (`out["guard"]`: `repeat`, `errors`, `no_edit`, `round`, `silence`, `think`, `handovers`, `spend`) → the mod's `GUARD_WORDS` and `stats.js`'s, *Stats recording*'s list.
-- **The spend stop** (#1019): `meter.request_floor` ↔ `Meter.room`'s worst (#1150: the start's refusal and `_go_on`'s look ahead keep room's margin; its input `runner.first_tokens` ↔ what `run_round` sends: status `live_used`, `handoff_prompt`, `PROMPT_ARG_MAX`, #1173) ↔ `meter.stop_reason` ↔ `runner._go_on` (#1017, before each `continue` in `drive`) ↔ `runner._spend_guard` ↔ the keyhole's `close(reason)` and `room` hook (`Meter.hooks()`, which `runner.start_keyhole` passes to `keyhole.start`) ↔ status `api_stop` (the keyhole's `quota` stop writes it too, #1020; `_ProviderWait.stop` consumes it, keeping its `worst` for `runner._spend_lead` ↔ `meter.stop_text(task, worst)`, #1150, and `Meter.begin` clears it at each round's start, whatever its guard). `events.normalize`'s step `cost` ↔ `tests/fake_opencode.py`'s `part.cost` (`FAKE_STEP_COST`) ↔ `meter.step_tokens`. A `spend` notice's `cause` ↔ the mod's `SPEND_NEXT`; its `guard` `agents` (`runner.AGENTS`) ↔ the mod's `AGENTS_NEXT`, and `routes.AGENTS_GPU`/`AGENTS_STOPS` ↔ the mod's `AGENTS_STOPS` text (#1213). The way off API (#1218): `routes.off_api` ↔ `routes.effective_via` and `busy_api` ↔ its users, `meter._ask`, `meter.stop_text`, `privacy.local_only_line`, `privacy.standing_refusal` (#1227), `runner.provider_remedy` and `routes.cant_run` under Agents API: a new remedy that offers the GPU asks it.
+- **A runner guard** (`out["guard"]`: `repeat`, `errors`, `no_edit`, `round`, `silence`, `think`, `handovers`, `spend`) → `stats.js`'s `GUARD_WORDS`, *Stats recording*'s list.
+- **The spend stop** (#1019): `meter.request_floor` ↔ `Meter.room`'s worst (#1150: the start's refusal and `_go_on`'s look ahead keep room's margin; its input `runner.first_tokens` ↔ what `run_round` sends: status `live_used`, `handoff_prompt`, `PROMPT_ARG_MAX`, #1173) ↔ `meter.stop_reason` ↔ `runner._go_on` (#1017, before each `continue` in `drive`) ↔ `runner._spend_guard` ↔ the keyhole's `close(reason)` and `room` hook (`Meter.hooks()`, which `runner.start_keyhole` passes to `keyhole.start`) ↔ status `api_stop` (the keyhole's `quota` stop writes it too, #1020; `_ProviderWait.stop` consumes it, keeping its `worst` for `runner._spend_lead` ↔ `meter.stop_text(task, worst)`, #1150, and `Meter.begin` clears it at each round's start, whatever its guard). `events.normalize`'s step `cost` ↔ `tests/fake_opencode.py`'s `part.cost` (`FAKE_STEP_COST`) ↔ `meter.step_tokens`. A `spend` notice's `cause` ↔ the mod's `SPEND_NEXT`; its `guard` `agents` (`runner.AGENTS`) ↔ the mod's `AGENTS_NEXT`, and `routes.AGENTS_GPU` ↔ `runner._agents_gpu`'s stop, which `routes.AGENTS_STOPS`, the change line's clause (`routes._agents_part`), promises (#1213). The way off API (#1218): `routes.off_api` ↔ `routes.effective_via` and `busy_api` ↔ its users, `meter._ask`, `meter.stop_text`, `privacy.local_only_line`, `privacy.standing_refusal` (#1227), `runner.provider_remedy` and `routes.cant_run` under Agents API: a new remedy that offers the GPU asks it.
