@@ -87,8 +87,8 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
 - `spend.py`, `savings.py`: a task's cost to Claude, and against writing it (the score GPU-only; API dollars apart, `api_totals`). `meter.py`: an API
   task's money (the ledger `spend-api.jsonl`, the day cap, the `spend` guard: *Spend*). `bench.py`,
   `verify.py`, `optimize.py`, `top.py` (API tasks under RUNNING, never in rack or queue), `images.py`, `audio.py` (`media.py`, what those two
-  share): their `wb` commands. `progress.py`, `stats.py`, `lessons.py`: progress checks, the Stats
-  tab, lessons.jsonl. `transcript.py`: `wb watch`, and the runner's session `export`. `watch.py`:
+  share): their `wb` commands. `progress.py`, `stats.py`, `lessons.py`: progress checks, the web
+  app's Stats, lessons.jsonl. `transcript.py`: `wb watch`, and the runner's session `export`. `watch.py`:
   inotify and pidfd waits. `chat.py` + `chat_static/`, `webpush.py`: the web chat; `settings.py`,
   its admin rows and their wb calls (*The admin table (settings.py)*). `try/`:
   `wb try`'s sample.

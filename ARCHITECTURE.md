@@ -538,7 +538,7 @@ so `wb accept`, `wb discard` and `wb backlog` print it. With API rows and no GPU
 task lacks its Claude usage and diff (#1121). `wb savings` adds, when the period has API
 rows, `api: 6 task(s) · ≈$1.27 (deepseek ≈$0.84, anthropic ≈$0.43; catalog prices) + 1 with no price · claude 210K ·
 writing it yourself ~520K (estimate)` (`api_summary`); `--json` gains `api` (api_totals), which the
-pane's footer and the chat read. **`wb savings --api`** (`api_report`, with `--week`/`--month`/`--all`):
+web app's Stats read (`apiSaved`; the pane's footer went with #1283). **`wb savings --api`** (`api_report`, with `--week`/`--month`/`--all`):
 `api, the last 7 days: 6 task(s) closed, ≈$1.27 at catalog prices, 1 with no price (incl. 1 trial)`, then `by provider:`
 (the closed tasks'), then the day ledger's (`savings.spent(since)`: spend-api.jsonl's `step` and
 `reconcile` rows since then, open tasks and bench replays in, each on its own `day`; `today` is
@@ -2238,7 +2238,7 @@ their own paths or headers, none at all) can't run: `start` raises "needs a key 
 outside the lane: <provider> takes its key in a way the keyhole doesn't speak" rather than a 401
 or 404 on every request. Status says it first (`models.keyhole_refusal`, through `models.unspoken`,
 #1066: only `start` checked, so a Gemini model was listed, routed on the user's yes and started,
-then failed every time), so `wb route`, `wb start`, `wb models` and the pane refuse it, `wb models
+then failed every time), so `wb route`, `wb start`, `wb models` and the web app's Settings refuse it, `wb models
 --json` leaves it out, `wb setup` names it on a `--` line and `wb route --json`'s `providers` gives it
 key `none` with that why (the web app's Settings say it). The upstream is the catalog's API base (`m.base_url`), never anything
 from a request, with what the package appends to it already appended (`mirror_path`: DeepInfra's
@@ -2646,8 +2646,8 @@ one regardless; a session that fills up reading is a `reading:` report line.
   median `active_minutes` a step for size and model (`progress.typical`, `progress.threshold`,
   `tuning._step_minutes`, as `router.expected`) once `TYPICAL_MIN` (3) are timed, at least
   `FLOOR_MIN` (10); before that `DEFAULT_MIN` (20 trivial, 45 significant) (#724: with no history
-no check came, and a 1.5-minute typical made every 1.5 minutes a wake). The pane's
-  sentence repeats `DEFAULT_MIN` and `TYPICAL_MIN`: change them together. It is a `checkin` notice
+no check came, and a 1.5-minute typical made every 1.5 minutes a wake). The web app's
+  Progress row (`settings._progress_stops`; the pane's until #1283) repeats `DEFAULT_MIN` and `TYPICAL_MIN`: change them together. It is a `checkin` notice
   (`progress: true`): the digest, then `progress.text` (active minutes vs threshold, files changed
   and whether any since the last check, status `progress_mark`, failed tool calls, last tests) and
   one recommendation: a hint (`wb steer --text`) or a smaller step (`wb steer --now --step --text`,
@@ -3829,7 +3829,7 @@ Linux reads DRM `/sys/class/drm/card*/device` (amdgpu `mem_info_vram_total`/`_us
 is `vddnb`, False with another hwmon, None without (#435). `DISPLAY_ONLY` drivers (BMC, VM, USB
 display) are no GPU (#710, #551); NVIDIA without nvidia-smi is listed from sysfs, VRAM unknown.
 macOS: `system_profiler SPDisplaysDataType -json`. Every size `wb` prints is decimal GB, the unit
-`gpu_gb`/`vram_gb` take (#523; the pane's live view is GiB, labelled); `size` prints `?` only for
+`gpu_gb`/`vram_gb` take (#523; the web app's live Stats are GiB, labelled); `size` prints `?` only for
 None (#717).
 
 `gpu_power_w()` (each task's savings GPU energy; None on macOS): nvidia-smi's `power.draw`, else
@@ -3882,7 +3882,7 @@ each role's API model's record over `SCOUT_API_DAYS` 30 (`cli._api_record`: task
 the spend over `SCOUT_SPEND_DAYS` 7 beside the day cap (the day ledger's, `savings.spent`, as
 `wb savings --api`'s `spent:`, open tasks and bench replays in, per provider: the closed tasks'
 said $3.00 for a week the ledger said $5.00, #1094; then the closed rows' `; task(s) N with no
-price, M with no figure recorded`, `savings.api_totals`, trials included, `unknown_parts`, #1106; its dollars and `~$/task` by `savings.usd`, as `wb savings --api` and the pane say them), and one line per connected provider counting its models with tool calls
+price, M with no figure recorded`, `savings.api_totals`, trials included, `unknown_parts`, #1106; its dollars and `~$/task` by `savings.usd`, as `wb savings --api` and the web app say them), and one line per connected provider counting its models with tool calls
 (free ones, those the catalog doesn't say, a key wb can't hold): never each id, as a provider may list
 hundreds. Only hosted.json's catalog: no network beyond it. Claude researches primary
 sources, recommends keep / add / retire and changes nothing without the user's yes; `wb scout --done
@@ -4049,7 +4049,7 @@ line says so.
 
 **When the GPU is busy** (#1023, the owner's opt-in, off by default): routes.json's `busy`
 (`routes.BUSY`: `wait`, missing, or `api`; any other value a `RoutesError`), set by `wb route busy
-wait|api` and the pane's **When the GPU is busy** row. With `api`, a `wb start` that would wait for
+wait|api` and the web app's **When the GPU is busy** row (`busy`). With `api`, a `wb start` that would wait for
 the GPU (exit 4, or queued with `--queue`) for a role with an API model, no `--model` asked for and
 Agents not GPU (`routes.busy_api`) starts on the role's API model instead (`cli._busy_api`), and says
 `GPU busy: on the role's API model, as you set` (`routes.BUSY_LINE`) under its model line and in
@@ -4217,8 +4217,8 @@ between the dialog and the call is caught). One call consumes it, matching or no
 (`store.take_approval`, shared with `patches._approved`: renamed away, then read). Else exit 3:
 `in Claude Code a role changes only through the workbench mod's dialog, and the user approved none
 for this change, so nothing changed (is the mod loaded? wb doctor says). Or the user runs it in a
-terminal of their own: wb route …`. `by`: `dialog` (the approval's `by` is `pane` for the pane's own
-rows, #1023: `pane`), `terminal` (outside Claude Code), `web` (outside Claude Code with
+terminal of their own: wb route …`. `by`: `dialog` (`pane` when the approval says so: the pane's own rows
+wrote it until #1283, #1023), `terminal` (outside Claude Code), `web` (outside Claude Code with
 `WB_ACTOR=web`: the web app's Settings, whose server runs wb with Claude's variables scrubbed,
 `settings.child_env`, #1279); `gpu_by`: `terminal`, `web`, or `claude` (a change under Claude Code
 that needs no dialog). `CLAUDECODE=1` wins over `WB_ACTOR`, so Claude setting it changes nothing. `wb settings set`
@@ -4254,7 +4254,7 @@ local-only repo off API models, and lets nothing extra leave unasked. No warning
 where-note's wording (`cli._api_notes`). The route dialog shows `wb route … --dry-run --json`'s `change` line
 (`routes.change`), which names the provider (`your code goes to <name>`) and an OpenRouter role's backends, not the
 policy page or the free mark (those reach the user in the note at the repo's first task to the provider, and in the
-pane's model rows, `free_line`). `name` is OpenCode's provider name (`models.provider_name`;
+web app's API model rows, `free_line`). `name` is OpenCode's provider name (`models.provider_name`;
 `ollama.com` for an Ollama cloud model). `policy` is `PRIVACY_PAGES[provider]`, the provider's own data-policy page (URLs
 only, never a claim about the policy; each fetched and its title read 2026-11-23, x.ai's through a headless browser),
 `OLLAMA_PAGE` for a cloud model, else null and the line says `see <name>'s data policy`. The line is `your code goes to
@@ -4722,8 +4722,7 @@ shipped with a model (ComfyUI's custom nodes do).
   listener, for an engine named like the key, and with a prompt (that is `--engine`'s). No dialog:
   nothing spends, nothing leaves the machine. `--list` marks a default the file names (`sd
   (default) (off the GPU): …`, `s2 (speech, CPU, default): …`); without one it lists as before. `wb models --json`'s `media`
-  (`cli._media_json`, `images.choices`, `audio.choices`) feeds the pane's rows (*The roles in
-  Settings*).
+  (`cli._media_json`, `images.choices`, `audio.choices`) feeds the web app's `media-*` rows (*The admin table (settings.py)*).
 - Ready (`ready`; `wb image --list`, `wb scout`): `media.problem` finds no bad type or URL (else
   "not usable: <why>", refused before the lease, #596, #748); the workflow is API-format JSON with
   `{prompt}`; the command is on PATH or a file, or the url answers a GET within 2 s, 401/403 saying
@@ -5663,7 +5662,7 @@ shown and hidden on each switch and on `visibilitychange`; a second registration
 `toast(text)` (3.5 s), `on('state' | 'view', fn)` (each snapshot applied; each switch, its name),
 `current()`. Each view's files are its own, so the two are built apart.
 
-**The Stats view** (#1285; `stats.js`, `stats.css`; it takes over the pane's Stats tab, *Seeing
+**The Stats view** (#1285; `stats.js`, `stats.css`; it took over the pane's Stats tab, *Seeing
 what the agent does*). `WB.view('stats', …)`: `mount` puts two sections in `#stats-body`, Now
 (`.st-now-box`) and the history (`.st-hist-box`), drawn apart so a tick redraws Now alone. `show`
 fetches `GET /api/stats` (`{feed, routes, models}`, the feed `wb stats --json`'s), again every
@@ -5723,10 +5722,10 @@ A change to `chat.py` or `chat_static/` also gets the browser test, in CI (*The 
 
 ### The admin table (settings.py)
 
-2.0 moves the pane's Settings tab to the web app (#1279). The terminal stays where the user works
+2.0 moved the pane's Settings tab to the web app (#1279); the pane has no settings now. The terminal stays where the user works
 with Claude, the web chat a second lane; the web app's Settings are the settings' home, and Claude
 still helps with one when the user asks (the owner, 2026-11-24). Every row the pane had is one
-entry in `workbench/settings.py`, under the pane's key and making the pane's `wb` call, so a new
+entry in `workbench/settings.py`, under the pane's old key and making its old `wb` call, so a new
 setting touches only Python. The chat server draws from it (#1280); nothing in it serves HTTP.
 
 - `GROUPS` (`shared`, `gpu`, `api`, `terminal`, `experimental`: display order), `KINDS`.
@@ -5757,8 +5756,8 @@ routes.json can't be read).
 `other: true` (the `api-<role>` rows) takes any id; `wb route` checks it (a value starting `-` or
 holding a space is refused here, never read as a flag). A row may carry `help`, the note for Claude
 while its setting is on but can't work yet, which `apply` also returns when that value was just
-chosen (`HELP`: `probe` on with no probe set up, `PROBE_HELP` with wb's line, the pane's
-`PROBE_SETUP_NOTE`), for the server to record (#1280) and the mod to turn into a `[workbench]` turn
+chosen (`HELP`: `probe` on with no probe set up, `PROBE_HELP` with wb's line, as the pane's
+`PROBE_SETUP_NOTE` said until #1283), for the server to record (#1280) and the mod to turn into a `[workbench]` turn
 in which Claude offers to set it up and installs nothing without a yes (#1283; #1279's addendum).
 
 **The rows** (the pane's choices and sentences, moved; each `→` its wb call):
@@ -7089,8 +7088,10 @@ every workflow its own permissions, `check` never path-filtered and required fro
 `suite` shard and `mod` are, the shards dealing each test once, the ruleset without bypass, the plugin without
 `version`, `owner-merge.yml` approving only the owner's pull requests without running their code); `test_docs.py`
 (every command and flag in *Every `wb` command*, every module in CLAUDE.md's layout, every `WB_*` variable in CLAUDE.md,
-CLAUDE.md under 25,000 characters); `test_settings.py` (*The admin table (settings.py)*: every row's group and kind,
-each choice applied running the pane's `wb` call through a fake `wb`, a role changed from the web stamped `by: "web"`,
+CLAUDE.md under 25,000 characters; since #1288 the README's quickstart naming the web app's Settings and Stats and its
+link, no Settings or Stats tab in the README or the skill, the terminal primary in the skill, driving.md and here, and
+docs/chat-api.md's agent allow-list holding `chat.AGENT_MAY`); `test_settings.py` (*The admin table (settings.py)*: every row's group and kind,
+each choice applied running its row's `wb` call through a fake `wb`, a role changed from the web stamped `by: "web"`,
 a click under `CLAUDECODE` still written ungated while Claude's own `WB_ACTOR=web` stays gated, `KeyError` for an
 unknown key and `ValueError` for a value off the choices, an API row taking a free id and leaving it to `wb route`,
 wb's refusal passed back, turning probe on without `probe` returning the note that asks Claude's help; and `ClaudeSets`,
@@ -7645,12 +7646,16 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   mod's `unread`/`agentOf`/`chatPrompt` and `owedAtTurnEnd` (`claude` only), docs/chat-api.md.
 - **The web chat's API** (a path, a field, an error, a limit) → docs/chat-api.md (`test_docs` checks the paths),
   `skill/agents/claude-workbench/` (SKILL.md, `ask_claude.py`); a change that breaks a client → `chat.API_VERSION` and
-  the doc's *Versions*. **What an agent token may do** → `chat.AGENT_MAY` (and `AGENT_CANT`'s wording), the doc, the
-  agents' skill; a new endpoint stays out of `AGENT_MAY` unless an agent needs it. **What an agent may read** →
+  the doc's *Versions*. **What an agent token may do** → `chat.AGENT_MAY` (and `AGENT_CANT`'s wording) ↔ the doc's
+  allow-list (`test_docs` checks each path and method), the agents' skill; a new endpoint stays out of `AGENT_MAY` unless an agent needs it. **What an agent may read** →
   `chat.in_view`, `chat.agent_snapshot`, `chat.agent_may_read`, the doc's *An agent's view*.
 - **settings-changes.jsonl's rows** (`settings.record`: `key`, `label`, `from`, `to`, `said`, `help`, `by`) → the mod's
   reader of it (#1283, which delivers `by: "web"` alone), *Files and formats*. **A Settings row's `wb route` call**
   (`settings._argv`) → `settings.dry_run` and the mod's `routeCalls` `--settings` (the dialog's dry run).
+  **settings.py's rows ↔ wb's commands**: each row's call (`_argv`) ↔ that command's arguments and its last line
+  (`said`), and `_build`'s reads ↔ `wb route --json`'s and `wb models --json`'s keys and the in-process readers
+  (`cli.coding_mode`, `stats.settings`, …): a flag, a value or a key renamed in a `wb` command changes its row the
+  same commit (`tests/test_settings.py`), and a new setting is a row there, never a page or a pane of its own.
   **`wb settings set`'s rule** (on the user's clear ask and yes) → `skill/workbench/SKILL.md`. **`/api/top`'s events** (`top`, `down` `{why, retry}`) → the web app's
   Stats view, docs/chat-api.md.
 - **An agent's turn** (`mem.agentTurn`, `agentsFor`) → the `classic.PermissionRequest` hook, `askForArgs`, `wb chat ask

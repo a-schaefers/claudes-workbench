@@ -297,5 +297,45 @@ class DocsFor20(unittest.TestCase):
         self.assertIn("a task from before it has neither, and reads as GPU", keys[:keys.index("`size`")])
 
 
+class DocsForTheWebApp(unittest.TestCase):
+    """#1288: 2.0 moved the pane's Stats and Settings to the web app (#1279), and the owner locked in
+    (2026-11-24) that the terminal stays primary, the web chat a second lane, the web app's Settings
+    the settings' home, with Claude helping on a clear ask."""
+
+    def test_the_readme_quickstart_names_the_web_apps_settings_and_stats_and_its_link(self):
+        readme = (ROOT / "README.md").read_text()
+        quick = readme[readme.index("## Quickstart"):readme.index("## License")]
+        self.assertIn("Settings and Stats live in the web app", quick)
+        self.assertIn("`[•_•] Claude's Workbench - http://localhost:1337/#token=…`", quick)
+        self.assertIn("`bind: tailscale`", quick)
+
+    def test_what_people_and_claude_read_names_no_pane_tab(self):
+        # the pane is Tasks only since #1283: a Settings or Stats tab there no longer exists
+        for path in ("README.md", "skill/workbench/SKILL.md", "skill/workbench/reference/driving.md"):
+            text = (ROOT / path).read_text()
+            for gone in ("Settings tab", "Stats tab"):
+                self.assertNotIn(gone, text, path)
+
+    def test_the_terminal_is_primary_where_claude_and_the_maintainers_read(self):
+        skill = " ".join((ROOT / "skill/workbench/SKILL.md").read_text().split())
+        self.assertIn("The terminal is primary", skill)
+        self.assertIn("the web chat is a second lane", skill)
+        self.assertIn("the settings live in the web app's Settings", skill.replace("The settings", "the settings"))
+        driving = " ".join((ROOT / "skill/workbench/reference/driving.md").read_text().split())
+        self.assertIn("The terminal stays primary; the chat is a second lane", driving)
+        self.assertIn("**The terminal is primary; the web chat is a second lane**", " ".join(ARCH.split()))
+
+    def test_the_agent_tokens_allow_list_in_the_api_reference_is_agent_may(self):
+        # docs/chat-api.md is what another agent is handed: each (method, path) chat.AGENT_MAY lets
+        # an agent token use is on its allow-list line, a trailing / as its <id>
+        from workbench import chat
+        doc = " ".join((ROOT / "docs/chat-api.md").read_text().split())
+        allow = doc[doc.index("It works on an allow-list:"):]
+        allow = allow[:allow.index("Every other path")]
+        for method, path in sorted(chat.AGENT_MAY):
+            self.assertIn(method, allow)
+            self.assertIn(f"{path}<id>`" if path.endswith("/") else f"{path}`", allow, (method, path))
+
+
 if __name__ == "__main__":
     unittest.main()

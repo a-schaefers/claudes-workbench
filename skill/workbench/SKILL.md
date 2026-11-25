@@ -216,7 +216,7 @@ never yours: never pass `--model <api id>` unless the user named that id for thi
 dialog then asks them, and a "not changed" means no), never run `wb route` without the user's words
 in this conversation, and never move a role between GPU and API because one can't run (`wb start` exits 3:
 tell the user the choices it printed). Recommend; the user sets it, in the dialog or the web app's
-Settings.
+Settings (the link on the pane's modeline).
 
 **Roles are the user's** (`wb route`): which model each kind of work goes to (`significant`,
 `trivial`, `writing`: GPU or API, each side's model, thinking, one day cap). Never pass `--model`
@@ -231,8 +231,9 @@ gpu|api|both`) puts every role on one side, or Both: each role as set. A role th
 there is no fallback, so ask the user and never retry with another `--role` or `--model` to dodge it.
 The one exception is theirs: with **When the GPU is busy** set to the role's API model (`wb route busy
 api`), a start that would wait for the GPU runs on the role's API model, and its output says `GPU busy:
-on the role's API model, as you set`. The terminal is where the work happens; the settings live in
-the web app's Settings (the link on the pane's modeline), and what they say is what wb runs by.
+on the role's API model, as you set`. The terminal is primary: the work is asked for and reviewed
+here, and the web chat is a second lane for while the user is away. The settings live in the web
+app's Settings (the link on the pane's modeline), and what they say is what wb runs by.
 Point the user there; when they ask you to change a setting, help: run its `wb` command on their
 yes (a role through the dialog, as above).
 Which sizes a model takes is set with `wb model sizes <id> trivial|significant`: set it when you
@@ -248,7 +249,8 @@ setting that needs more to work, a note: offer what it says, installing nothing 
 yes. One yes covers the change asked for and nothing more. Never change a setting unasked, and
 after a no don't ask again. A role moved to API still goes through the mod's dialog, as `wb
 route` does: a "not changed" is their no. The same holds from the web chat: answer there and
-run the same command.
+run the same command. A `[workbench]` turn saying they turned a setting on in the web app that
+needs more to work is the same note: offer what it says, installing nothing without their yes.
 **API models and privacy.** An API model sends the repo, its spec, the CLAUDE.md files and the
 user's `~/.config/workbench/AGENTS.md` to its provider (never their `~/.claude` files). When you propose an API role, say where the code goes
 (the provider, as `wb route --dry-run`'s line names it; its data-policy page comes in the note
