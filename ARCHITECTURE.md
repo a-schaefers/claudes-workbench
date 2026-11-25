@@ -879,8 +879,14 @@ cap lets it go on, and so does Agents switched to GPU (its own stop, `_agents_gp
 the GPU (the stop's own advice, for the next tasks: a waiter keeps its API model), a GPU pin, a
 thinking, busy or other change leaves it waiting: before #1304 any routes.json write let every waiter
 go at once, each into round 1, the guard and its own notice. That stop
-gone (resumed, taken over, discarded), it goes on, and round 1's own stop is the notice: never a
-wait untold. A backlog queued behind the cap each took its slot, ran round 1 into the guard and
+gone (resumed, taken over, discarded), or none told yet, one waiter goes on and round 1's own stop
+is the notice: never a wait untold. One: `runner._cap_go` takes `locks/cap-wait.lock` (its holder's
+name in it) at that "no told stop, go on", and holds it until its stop is told (`_stop_before`, the
+round's stop, both after the notice), its first request is booked under the cap (`_cap_go_past`) or
+its runner ends (`drive`; a dead runner's flock goes with it); the others wait as queued, `last:
+waiting: <why>; <task> goes on first: …`, then behind its stop. A takeover once let every waiter go
+on the same tick, one notice each (#1304's review: their looks are aligned, since a routes.json
+write wakes them all). A backlog queued behind the cap each took its slot, ran round 1 into the guard and
 woke Claude with the same stop, one ask of the user per task, as #1178's 402 did. Both notices
 (in a round, between rounds) have `cause` `spend`, not the step's own (`results.THE_STEP`), so the slice isn't shrunk, and lead
 with `meter.stop_text`: `<task> stopped: the day's API spend cap is reached (≈$5.02 of $5 today; catalog prices). Its
@@ -6502,6 +6508,7 @@ $WB_HOME (~/.local/state/workbench)
   locks/prepare.json, prepare-<n>.lock   the setups' queue ({pid: {task, since, start, holding}}), PREP_SLOTS turns (runner.prep_turn)
   locks/prepare-check.json, prepare-check-<n>.lock   the base checks' own
   locks/signal-stop.lock         one runner writing a shutdown's one notice (runner._signal_notice)
+  locks/cap-wait.lock            the one API task let past the day cap to its own stop, its name in it (runner._cap_go, #1304)
   locks/skills.lock              one skill-library change at a time, add to commit (skills._library_lock)
   locks/config-<key>.lock        not here: store.config_lock_dir ($XDG_RUNTIME_DIR/workbench, else 0700 workbench-<uid> in the temp dir, else here),
                                  shared by every WB_HOME of the account (#939); never beside the file (a stray in the user's dotfiles, #495)

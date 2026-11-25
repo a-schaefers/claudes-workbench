@@ -36752,6 +36752,54 @@ class ApiSpend(Base):
         self.assertEqual(seen, {"phases": ["queued", "queued"], "waiting": [True, True], "stops": ["t-w0"]})
         self.assertEqual([t.status["phase"] for t in queued], ["review", "review"])
 
+    def test_a_takeover_of_a_told_cap_stop_lets_one_waiter_on_to_its_own_stop_and_the_other_waits_behind_it(self):
+        # #1304's review (2026-11-24): a takeover or discard of the told stop let every waiter go
+        # on at once, on the same look (a routes.json write had woken them together), each into
+        # round 1, the guard and its own spend notice, one ask of the user per queued task again
+        self.cap(5, api=("significant",))
+        self.spent(5.0)
+        first, *queued = [self.api_task(f"t-w{i}", SPEND_M, "ok") for i in range(3)]
+        runner.drive(first)
+        stops = lambda: [r["task"] for r in store.read_jsonl(store.home() / "notify.jsonl")[0]  # noqa: E731
+                         if r["kind"] == "stuck"]
+        waiting = lambda t: str(t.status.get("last") or "").startswith("waiting: the day's API spend cap")  # noqa: E731
+        other = threading.Thread(target=runner.drive, args=(queued[0],), daemon=True)
+        seen, over = {}, threading.Event()
+
+        def then():
+            try:
+                deadline = time.time() + 10
+                while not waiting(queued[0]) and time.time() < deadline:
+                    time.sleep(0.05)
+                store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 5, "roles": {
+                    "significant": {"via": "gpu", "api": SPEND_M}}})  # both wake on it, together
+                time.sleep(1)
+                first.set_status(phase="review", taken_over=True)  # as the notice and the skill say
+                deadline = time.time() + 20
+                while len(stops()) < 2 and time.time() < deadline:
+                    time.sleep(0.05)
+                time.sleep(4.5)                                   # two more looks of the waiter's
+                seen["stops"] = stops()
+                seen["queued"] = [t.name for t in queued if t.status["phase"] == "queued" and waiting(t)]
+                seen["behind"] = [t.status["last"] for t in queued if t.status["phase"] == "queued"]
+                self.cap(100)                                     # raised: the last one goes on
+            finally:
+                over.set()
+        with mock.patch.object(runner.models, "API_WAIT", (0.5, 2.0)):  # a look every 2 s, not 30
+            other.start()
+            self.assertIsNotNone(self.drive_until_waiting(queued[1], then))
+            self.assertTrue(over.wait(60))
+            other.join(30)
+        self.assertEqual(len(seen["stops"]), 2, seen)             # t-w0's, and one waiter's own
+        self.assertEqual(seen["stops"][0], "t-w0")
+        (went,) = {t.name for t in queued} & set(seen["stops"])
+        (stayed,) = seen["queued"]
+        self.assertNotEqual(went, stayed)
+        self.assertIn(f"; {went}'s stop has asked the user: ", seen["behind"][0])
+        self.assertEqual(store.Task(went).status["infra"], "spend")
+        self.assertEqual(store.Task(stayed).status["phase"], "review")
+        self.assertEqual(runner._CAP_GO, {})                      # every turn past the cap let go
+
     def test_a_task_waiting_behind_a_told_cap_stop_stops_for_agents_switched_to_gpu(self):
         # #1304: only a raised cap, or a change that frees the task, ends the wait: Agents on GPU
         # stops it before round 1 with its own stop (_agents_gpu), never into the guard
