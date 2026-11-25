@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/workbench-splash.gif" alt="Claude Code on the left; on the right, the Workbench pane opening after /workbench." width="900"></p>
+<p align="center"><img src="docs/logo.jpg" alt="Claude's Workbench: a warm light directing three little robot craftsmen at a workbench" width="720"></p>
 
 # Claude's Workbench
 
@@ -29,17 +29,6 @@ Claude Code plugin that connects the two inside your normal Claude Code session.
 On bigger coding tasks, once the session is already open, handing the coding off to the
 agents typically costs Claude about half the tokens of writing the code itself.
 
-## Why small local models hold up
-
-| Local agents tend to… | Workbench |
-|---|---|
-| lose the thread on long tasks | sizes each step to the model, and hands over to a fresh session before its context fills |
-| loop or think in circles | guards stop repeats, error streaks and silence; a nudge past the think budget |
-| write code that only looks right | your tests run after every round, failures go back to the agent, then Claude reviews the diff |
-| touch what they shouldn't | their own git worktree, read-only git, and on Linux a Landlock sandbox |
-| cost Claude tokens to babysit | Claude sleeps until a task needs it: no polling |
-| differ from machine to machine | the model choice and time limits are learned from this machine's own results |
-
 ## Quickstart
 
 ### What you need
@@ -65,9 +54,6 @@ claude plugin marketplace add a-schaefers/claudes-workbench
 claude plugin install workbench@workbench
 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/marketplaces/workbench/bin/wb setup   # puts wb on your PATH and /workbench in your skills
 ```
-
-With `CLAUDE_CODE_PLUGIN_CACHE_DIR` set, Claude Code keeps the clone under it instead: run
-`bin/wb setup` in `"$CLAUDE_CODE_PLUGIN_CACHE_DIR"/marketplaces/workbench`.
 
 ### In Claude Code, inside your project
 

@@ -7489,6 +7489,7 @@ doc needs its own `!/` line).
 
 ## Couplings: change one, change the other
 
+- **The README's bold opening line and the sentence after it** → the GitHub repository's About description, word for word (the owner, 2026-11-24, on #1357: keep the two in sync while iterating). `tests/test_docs.py` pins the README side; the About side is set by hand (`gh repo edit --description`).
 - **A file a round's children load** (lane, git shim, ask server, their imports) → `runner.CHILD_CODE`, so an update under a running task is caught.
 - **`lane.REFUSED`** (the refused lane's first words) → `verify.run`, which reads a run starting with it as no test run, never the candidate failing (#1308).
 - **An `ALLOWED_COMMANDS` entry spelled with its opt-out** (`REDOCLY_TELEMETRY=off redocly lint`) → the skill's
