@@ -1676,7 +1676,7 @@ making it checked in falsely, #1209; a name the spec merely gives, `with pytest 
 `-m`, is a tool, as any bare name counted ran #1181's incident again on a machine without pytest,
 #1209's review), the spec alone (`step_spec`), before `runner.PROTOCOL_FOLD`, never the
 protocol's acceptance line, which names --test's own `-m` and so made every dotted one the repo's:
-`python3 -m pkg.newcli` for a step adding `pkg/newcli.py`), which the step may make, as a script, #1181; under a task runner or a package manager's run wrapper, `make test`, `pnpm test`, the line before the runner's own, `RUNNER_TAIL` (one entry of `RUNNER_LINES` per runner: GNU make's `make: *** [Makefile:2: test] Error <n>`, exit 2, a sub-make's `Leaving directory`, `-k`'s `Target … not remade`, just's `Recipe … failed … with exit code <n>`; pnpm's `ELIFECYCLE`, `ERR_PNPM_…` with `-r`'s `<dir>:` and `spawn ENOENT`, and `WARN` lines; yarn 1's `error Command failed with exit code <n>.` and `info Visit https://yarnpkg.com/…`; npm's `npm error` lines in a workspace, `npm error code <n>`, npm 6's `npm ERR!`), at the recipe's exit, the first one up, a sub-make's, or for one that names none (pnpm exits 1) 127 when the line before is a shell's not-found line, #1243; and make's own `make: <name>: No such file or directory` for a recipe it runs without a shell, `MAKE_EXEC`, a name not on PATH, #1229; at any other exit, a wrapper's own (`poetry run`'s 1, a sourced venv's 1 in bash or 2 in dash, uv's), `missing_tool`, one rule for every wrapper, never its wording alone (each wrapper's pattern missed the next one: #1256, #1258, #1262): one of the tail's last `GONE_LINES` (3, not blank) lines says it couldn't start a name, `TOOL_GONE` (`command not found` in any case, `failed to spawn`: Poetry's `Command not found: <name>`, bundler's above its hint; never `no such command`, which names a subcommand the step may add: cargo's for `cargo xtask codegen`, an alias the step adds to `.cargo/config.toml`, Click's or Typer's `No such command '<sub>'.`, #1262's review), and the name, where the acceptance command puts a program (`command_programs`: each simple command's first word, past `X=1` and prefixes such as `env` or `timeout 60`, the word after a wrapper's run verb, `RUN_VERBS`, `poetry run`, `uv run`, `bundle exec`, never cargo's subcommand; never an argument, as `python3 cli.py frobnicate` for a step adding Click's `frobnicate` checked in falsely, #1262's review), doesn't resolve on the agent's PATH (`on_agent_path`: `context.python_env`'s, the worktree's venv first, `context.agent_path`'s; Poetry, uv and pipenv search it too) and isn't the step's own console script (`own_command`; the word after a run verb, `command_programs(cmd, run_only=True)`, even with no venv in the worktree yet: `poetry run` reads `[tool.poetry.scripts]` before PATH and `uv run` installs `[project.scripts]` as it syncs, so Poetry's `Command not found: mycli` on the base for a step adding it checked in falsely and skipped auto-fix, #1256's review); or couldn't open a path, `PATH_GONE` (`No such file or directory`, dash's `cannot open`), in `TOOL_DIRS` and not in the worktree, named by the command or under a task runner (`make test` sourcing `.venv/bin/activate`), worded as at 127; a bare name only a runner's recipe names, or plain `not found`, still needs 127, and a file the tests read (`cat answer.txt`, pytest's `file or directory not found`) is never one; and nothing at all, no tool, path or module, after an install or sync step of the command's own (`installs_before`: `INSTALLS`, `npm ci`/`install`, `pnpm install`, `yarn` and `bundle` bare or with `install`, `bun install`, `poetry`'s, `pdm`'s and `pipenv`'s `install`/`sync`, `uv sync`, `rye sync`, `pixi install`, `go mod download`, `cargo fetch`/`build`, pip's (`pip install`, `uv pip install`, `python3 -m pip install`) with the project or a requirements file, `PIP_PROJECT`, `-e`, `-r`, `--group`, `.[dev]`, `uv pip sync`, and a `uv run` that syncs, which it does unless `UV_NO_SYNC_FLAGS` `--no-sync`, `--no-project` come before its program or `UV_NO_SYNC_VARS` `UV_NO_SYNC`, `UV_NO_PROJECT` are set in the command or the environment), in a simple command before the one naming it, or anywhere for a name the command doesn't give (a recipe's), never the step's own program (`npm ci` with no npm, `python3 -m pip install` with no pip): the lane leaves the network open, so the round that declares the dependency is what installs it, and each review of #1256 found one more form read as missing after one (`poetry install && poetry run ruff`, the shell's own 127 line in `npm ci && npm test`, `poetry install && .venv/bin/pytest`, `pip install -e .[dev] && python3 -m pytest`), each checking in falsely and skipping auto-fix, worse than the missed check-in: one rule, #1256's review; the warning ends `GIVE_TOOL`, a
+`python3 -m pkg.newcli` for a step adding `pkg/newcli.py`), which the step may make, as a script, #1181; under a task runner or a package manager's run wrapper, `make test`, `pnpm test`, the line before the runner's own, `RUNNER_TAIL` (one entry of `RUNNER_LINES` per runner: GNU make's `make: *** [Makefile:2: test] Error <n>`, exit 2, a sub-make's `Leaving directory`, `-k`'s `Target … not remade`, just's `Recipe … failed … with exit code <n>`; pnpm's `ELIFECYCLE`, `ERR_PNPM_…` with `-r`'s `<dir>:` and `spawn ENOENT`, and `WARN` lines; yarn 1's `error Command failed with exit code <n>.` and `info Visit https://yarnpkg.com/…`; npm's `npm error` lines in a workspace, `npm error code <n>`, npm 6's `npm ERR!`), at the recipe's exit, the first one up, a sub-make's, or for one that names none (pnpm exits 1) 127 when the line before is a shell's not-found line, #1243; and make's own `make: <name>: No such file or directory` for a recipe it runs without a shell, `MAKE_EXEC`, a name not on PATH, #1229, read as a 127 at whatever code make's Error line names (macOS's `/usr/bin/make` says it at `Error 1`, nightly run 45577067512); at any other exit, a wrapper's own (`poetry run`'s 1, a sourced venv's 1 in bash or 2 in dash, uv's), `missing_tool`, one rule for every wrapper, never its wording alone (each wrapper's pattern missed the next one: #1256, #1258, #1262): one of the tail's last `GONE_LINES` (3, not blank) lines says it couldn't start a name, `TOOL_GONE` (`command not found` in any case, `failed to spawn`: Poetry's `Command not found: <name>`, bundler's above its hint; never `no such command`, which names a subcommand the step may add: cargo's for `cargo xtask codegen`, an alias the step adds to `.cargo/config.toml`, Click's or Typer's `No such command '<sub>'.`, #1262's review), and the name, where the acceptance command puts a program (`command_programs`: each simple command's first word, past `X=1` and prefixes such as `env` or `timeout 60`, the word after a wrapper's run verb, `RUN_VERBS`, `poetry run`, `uv run`, `bundle exec`, never cargo's subcommand; never an argument, as `python3 cli.py frobnicate` for a step adding Click's `frobnicate` checked in falsely, #1262's review), doesn't resolve on the agent's PATH (`on_agent_path`: `context.python_env`'s, the worktree's venv first, `context.agent_path`'s; Poetry, uv and pipenv search it too) and isn't the step's own console script (`own_command`; the word after a run verb, `command_programs(cmd, run_only=True)`, even with no venv in the worktree yet: `poetry run` reads `[tool.poetry.scripts]` before PATH and `uv run` installs `[project.scripts]` as it syncs, so Poetry's `Command not found: mycli` on the base for a step adding it checked in falsely and skipped auto-fix, #1256's review); or couldn't open a path, `PATH_GONE` (`No such file or directory`, dash's `cannot open`), in `TOOL_DIRS` and not in the worktree, named by the command or under a task runner (`make test` sourcing `.venv/bin/activate`), worded as at 127; a bare name only a runner's recipe names, or plain `not found`, still needs 127, and a file the tests read (`cat answer.txt`, pytest's `file or directory not found`) is never one; and nothing at all, no tool, path or module, after an install or sync step of the command's own (`installs_before`: `INSTALLS`, `npm ci`/`install`, `pnpm install`, `yarn` and `bundle` bare or with `install`, `bun install`, `poetry`'s, `pdm`'s and `pipenv`'s `install`/`sync`, `uv sync`, `rye sync`, `pixi install`, `go mod download`, `cargo fetch`/`build`, pip's (`pip install`, `uv pip install`, `python3 -m pip install`) with the project or a requirements file, `PIP_PROJECT`, `-e`, `-r`, `--group`, `.[dev]`, `uv pip sync`, and a `uv run` that syncs, which it does unless `UV_NO_SYNC_FLAGS` `--no-sync`, `--no-project` come before its program or `UV_NO_SYNC_VARS` `UV_NO_SYNC`, `UV_NO_PROJECT` are set in the command or the environment), in a simple command before the one naming it, or anywhere for a name the command doesn't give (a recipe's), never the step's own program (`npm ci` with no npm, `python3 -m pip install` with no pip): the lane leaves the network open, so the round that declares the dependency is what installs it, and each review of #1256 found one more form read as missing after one (`poetry install && poetry run ruff`, the shell's own 127 line in `npm ci && npm test`, `poetry install && .venv/bin/pytest`, `pip install -e .[dev] && python3 -m pytest`), each checking in falsely and skipping auto-fix, worse than the missed check-in: one rule, #1256's review; the warning ends `GIVE_TOOL`, a
 module's fix the worktree's `.venv`), `not checked, ran past 120s` past its own cap, `not checked, its
 setup failed (<task>/base-tests.txt)` when the checkout's setup failed (one line each since #1322),
 not checked when the checkout was `"filtered"`, else exit and tail. A passing base
@@ -3556,7 +3556,7 @@ read as a wrong id, Claude hunted for the "right" one).
   `OPENCODE_PASSWORD` as HTTP Basic `opencode:<password>`, and ends when its stdin closes; its group is
   killed after): `GET /api/plugin` every `PLUGIN_POLL` (25 ms) until it lists a plugin, then `GET
   /api/model`, both with `location[directory]`, through `_DIRECT` (no proxy; never `_open`'s stored keys), within `CATALOG_TIMEOUT` (past it,
-  `opencode model.list took over 30 s`: never a partial list). Not `opencode api model.list
+  `opencode model.list took over 30 s`: never a partial list; a server that exits before it listens gives its stderr's first line, its exit awaited after its stdout closes, as a loaded runner's lagged: #1370). Not `opencode api model.list
   --standalone`: from OpenCode 2.4.0 the server answers model.list with what has loaded so far, and
   the catalog and every provider are plugins that load after it starts (#63814 upstream), so 2.4.1
   printed no model, or 14 of 93, and wb saw no API model (the opencode workflow, 2026-11-23);
@@ -4552,9 +4552,9 @@ terminal of their own: wb route …`. `by`: `dialog` (the approval's `by` is `pa
 rows, #1023: `pane`), `terminal` (outside Claude Code); `gpu_by`: `terminal`, or `claude` (a change
 under Claude Code that needs no dialog). A flag or an environment variable is no consent, and the
 approval is one-shot, fresh, and bound to the exact command and line. The mod refuses the file tools
-on both files and a Bash command naming `route-ok.json` with the state directory spelled out, but
+on both files and a Bash command that writes `route-ok.json` (`writesTo`, *The consent gate*), but
 that check is a speed bump, like the one on routes.json: a command that builds the path (a
-variable, `os.environ['WB_HOME']` in Python) still writes an approval wb honours, recording `by:
+variable, a Python script file) still writes an approval wb honours, recording `by:
 dialog`, and Claude writing routes.json through Bash (`cat >`, `sed -i`, `python`) gets past them
 too. What catches either is the `[workbench]` echo (*The mod, inside*): every change reaches the
 conversation, and the user's own view of it, as a row.
@@ -6106,8 +6106,12 @@ task's sessions the first to deliver wins (the `acked` write is not locked).
 Bash call running `wb start|next|feedback|steer|answer|resume` (`delegates`, `HANDS_OUT`; not
 `accept` or `takeover`, which a quit's notes ask for). Only a command counts, not text (#409), read
 as bash reads it (`simpleCommands`, #560): quotes undone within a word, comments and heredoc
-bodies dropped (`$(…)` and backticks in unquoted heredocs and double quotes still run), split at
-`;`, `&`, `|`, newlines, `(`, `)`, `$(`, backticks; the command word past `VAR=x`, the reserved
+bodies dropped (`$(…)` and backticks in unquoted heredocs and double quotes still run; a `$(…)` in
+double quotes ends where bash ends it, `closing`: quotes, comments and heredoc bodies skipped, so a
+quoted heredoc's "doesn't (it can't)" or "a)" doesn't close it, #1364's review), a
+redirect's file (`>`, `>>`, `>|`, `&>`, `<`; `2>&1` a descriptor) and a here-string no words of the
+command (#1364: kept beside it, `Shell`: its stdin, its redirects' files, the command piped into
+it), split at `;`, `&`, `|`, newlines, `(`, `)`, `$(`, backticks; the command word past `VAR=x`, the reserved
 words and the wrappers with their options (`PREFIXES`: `env`, `time`, `nohup`, `exec`, `command`,
 `timeout` and its duration, `nice`, `ionice`, `stdbuf`) must be `wb` or end in `/wb`. Syntactic:
 `true || wb steer` counts. Off: either quit. While on: the `workbench-mode`, `user-notes` (and
@@ -6346,9 +6350,18 @@ misread; this is the one place every call passes. Outward (`sendsOut`):
 options, `GIT_VALUED`), and `wb patch send` (`wb` or a path to it, or Python running `…/wb` or `-m workbench`:
 `wbArgs`); command words lowercased (macOS finds `GIT` as git). Read as bash reads it (`simpleCommands`, `commandAt` as
 in `delegates`, past `sudo`, `doas`, `xargs` and the other `PREFIXES`): echo and heredoc text isn't a command, `$(…)`
-and backticks are, and `bash|sh|zsh|dash -c '…'` and `eval` are read inside; a line naming none of `gh`, `git`, `wb`,
-`workbench` isn't parsed. Text a shell or an interpreter in the line runs (`RUNS_CODE`: from a heredoc, a here-string,
-a pipe, `-c`) is matched by its words (`OUTWARD_TEXT`; `bash <<EOF … git push` once went through). Aimed at upstream
+and backticks are, and a shell's `-c '…'` (`STDIN_SHELL`: `bash`, `sh`, `zsh`, `dash`, `ksh`, `ash`, `fish`) and
+`eval` are read inside; a line naming none of `gh`, `git`, `wb`,
+`workbench` isn't parsed. What a program that runs text (`RUNS_CODE`) is handed (`runs`, `codeFed`: a heredoc, a
+here-string, the words and stdin of a command piped into it, an interpreter's `-c`/`-e`, a script the line itself
+wrote by a redirect, `cat > s.sh <<EOF … EOF` then `bash s.sh`; not another script file) counts by
+what runs (#1364): a shell's (`STDIN_SHELL`, `sh -s` too) is read as commands, `bash <<EOF … git push` once went
+through, and a send there is asked about as one inside text another program runs (the dialog shows the line);
+an interpreter's code is text, an outward command in it (`OUTWARD_TEXT`, as a string or a list: `['git', 'push']`)
+counting only when the code runs commands at all (`spawns`: Python's `subprocess`, `os.system`, …, Node's
+`child_process`, `execSync(`, …, Perl's, Ruby's and PHP's `system(`, backticks, …). A heredoc or quoted text any other
+command gets is its data: a Python heredoc editing an issue body that named `wb patch send` was refused as a send three
+times on 2026-11-24, nothing being sent. Aimed at upstream
 (`upstreamAim`): `wb patch send` always; another outward command when the line names a gated directory (as written,
 through `~`, `$HOME` or `$WB_HOME`: `mentions`) or runs in one (`cd`, `cd --` and `pushd` followed from the session's
 directory, git's `-C`; by real path too, a symlinked spelling), or runs in Claude Code's plugins directory in a
@@ -6372,7 +6385,8 @@ page, which cut a long question at `chat.ASK_TEXT` unmarked and left a user back
 start, a long line hid the gh command and its body); for `wb patch send` its `--title` and the body file's first
 `BODY_LINES` 20 lines (`sendQuestion`, `sendArgs`: the last `--title`/`--body-file` given, as argparse takes them; wb
 refuses abbreviations). A send it can't show is refused without asking (`NOT_SHOWN`: no slug, `--title` or
-`--body-file`, a `$` or backtick in either, an unreadable body, or a send inside text another program runs). The
+`--body-file`, a `$` or backtick in either, an unreadable body, or a send inside text another program runs: fed to a
+shell, or in an interpreter's code that runs commands). The
 options `Send it` and `Don't send`. `Send it` lets that one call through, and for `wb patch send` writes
 `$WB_HOME/send-ok.json` (what wb checks under Claude Code: *Sending a patch upstream*); nothing is remembered (a yes to
 one pull request is no yes to the next). Anything else, a failed dialog too, denies: `NOT_SENT`, `workbench: not
@@ -6382,7 +6396,7 @@ of the gate runs the real gh form with a fake gh on PATH: an `echo` of it is tex
 atom.
 
 **The roles' dialog** (`routeRefusal`, beside `sendRefusal` in the same hook, #1014; *Roles*). In Bash and Monitor
-commands, read as above (`runsIn`: `simpleCommands`, `bash -c` and `eval` inside; `wbArgs`), each `wb route …` and each
+commands, read as above (`runs`: `simpleCommands`, `bash -c` and `eval` inside; `wbArgs`), each `wb route …` and each
 `wb start … --m…` (any abbreviation of `--model`) is a call (`routeCalls`); a show (`wb route`, `--json`) and a dry run
 change nothing. For the one call, the mod runs `wb route --dry-run --json <its args>` (a start's as `--start <wb start's
 args>`, parsed there by wb start's own parser: the task's name and an abbreviated `--model` as wb takes them), 60 s,
@@ -6398,11 +6412,18 @@ away, as the send's above. `Allow` writes `$WB_HOME/route-ok.json` (`{...approva
 change}` or `{start: {task, model}, change}`) and lets the call through; anything else denies (`NOT_CHANGED`:
 `workbench: not changed: the user did not approve it in the dialog. Tell them it was not changed; ask again only if
 they ask for it.`). Refused without asking (`ROUTE_OWN`, `run wb route (or wb start --model) as a command of its own`):
-two calls in one line, and one inside text another program runs (`ROUTE_TEXT`, with a `RUNS_CODE` program in the
-line). The file tools (`EDIT_TOOLS`) on routes.json (`routesPath`: `WB_ROUTES`, else `~/.config/workbench/routes.json`,
-by real path too) or `$WB_HOME/route-ok.json` are denied (`routesFileRefusal`, `ROUTES_EDIT`), and so is a command
-naming `route-ok.json` with the state directory (as written, through `~`, or `$WB_HOME`: `ROUTE_OK_OWN`); a `grep` for
-the name in the code passes. A speed bump, not a wall: a command that builds the path gets past it (*Roles*, the gate).
+two calls in one line, and one inside text another program runs: a call a shell is fed, or one in an interpreter's code
+that runs commands (`ROUTE_TEXT`, `spawns`); a heredoc that only says `wb route cap 9` is no call (#1364). The file tools
+(`EDIT_TOOLS`) on routes.json (`routesPath`: `WB_ROUTES`, else `~/.config/workbench/routes.json`, by real path too) or
+`$WB_HOME/route-ok.json` are denied (`routesFileRefusal`, `ROUTES_EDIT`), and so is a command that writes
+`$WB_HOME/route-ok.json` (`writesTo`, `ROUTE_OK_OWN`): a redirect onto it, `tee`, `cp`/`mv`/`install`/`ln`/`rsync`
+onto it or into its directory under its name, `dd of=`, a shell's fed commands too (`cd` and `pushd` followed; the
+path as written, through `~`, `$HOME` or `$WB_HOME`), or an interpreter's code with a write call (`WRITES_CODE`: Python's
+`open(…, 'w')`, its path built inside too, `os.path.join(…)`, `write_text`, Node's `writeFileSync`, …) and the file in a
+string that is a path (quotes; backquotes only in JavaScript: in Python's text they are Markdown's), with `WB_HOME` or the
+state directory in the code or the call run there. A mention is never a write: a `gh issue create` whose heredoc named
+the file was refused as writing it (2026-11-24, #1364), and a `grep` for the name passes; a word the mod can't resolve (another variable, a
+glob) lets the call through. A speed bump, not a wall: a command that builds the path gets past it (*Roles*, the gate).
 
 **The roles in the conversation.** `WbSaid.routes` (the `said-3` atom) is the roles' summary as the mod reads
 routes.json (`readRoutes`, `routesSummary`, which says what `routes.summary` says: Couplings) and the cap (`. Day cap
@@ -7162,7 +7183,11 @@ From the repo root: `python3 -m unittest` (`tests/__init__.py` makes `tests` a p
 `PLAYWRIGHT=…/node_modules/playwright node tests/e2e_chat.mjs`.
 
 **CI.** `check.yml` on every push to main and pull request: `suite` in six shards (`WB_TEST_SHARD=K/6`, `fail-fast`
-off) on Python 3.11, the floor; `mod` with `CLAUDE_CODE_VERSION`; `check`, the required one, `needs` both, runs
+off) on Python 3.11, the floor, each run by `scripts/suite.sh K/6 4` as four `python3 -m unittest` processes at once,
+one per runner CPU (process j runs `WB_TEST_SHARD=K+6(j-1)/24`, so every test of the shard once; each log printed whole,
+headed by its `WB_TEST_SHARD`, as its process ends; every log on a cancel, which reaches it because the step `exec`s it (the step's shell passes no signal on: unexec'd, a cancel SIGKILLed it with no log printed, its review, 2026-11-25); exit 1 if any failed, 64 on bad arguments or a bash older than 5.1, `wait -n -p`: macOS's 3.2, where its two `tests/test_workflows.py` tests skip):
+one process left the CPUs half idle (a local shard 1/6, 404 s wall for 221 s of CPU; 142 s in four), and the slowest
+shard, 6.5 to 10 minutes, was the 9.5 to 10.5 minute check (40 runs to 2026-11-25); `mod` with `CLAUDE_CODE_VERSION`; `check`, the required one, `needs` both, runs
 `always()` (a skipped required check passes) and is green only when both succeeded, so the ruleset waits on one name. A pull request touching only
 `README.md`, `docs/releases/` or images in `docs/` (the `Scope` step, its merge commit against its base) runs only
 `tests.test_docs` and `tests.test_workflows` in shard 1; the suite reads ARCHITECTURE.md, CLAUDE.md, the skill, the
@@ -7176,8 +7201,8 @@ on its commit (`docs/release-checklist.md`; the 2026-11-19 audit: macOS failed u
 outermost `load_tests` (nested, it sharded twice); `python3 -m unittest tests` is sharded too, named modules, classes or
 tests run as named; no test has class or module fixtures.
 The macOS shards run `python3 -X faulthandler -m unittest -v`, each test named in the log as it runs (unnamed, a
-cancelled hour reported nothing, #950). Every suite job sets `WB_TEST_HANG_SECS` (600, via `WSLENV` for
-WSL): `SIGALRM` around each test dumps every thread's stack and fails it with `tests.Hung: <test id> hung past
+cancelled hour reported nothing, #950). The nightlies' and `opencode.yml`'s Linux suites stay one process (off the shipping path, and the plain run a developer makes). Every suite job sets `WB_TEST_HANG_SECS` (600, via `WSLENV` for
+WSL; `check.yml`'s 300: its slowest test takes under 30 s, and a hang held a pull request 10 minutes past its other shards): `SIGALRM` around each test dumps every thread's stack and fails it with `tests.Hung: <test id> hung past
 WB_TEST_HANG_SECS (N s)`, a `BaseException` (as a `TimeoutError` it was swallowed by `socket.getfqdn`'s `except
 OSError`, 2026-11-22). Job limits 60 min, `check.yml`'s shards 30. Linux jobs install `OPENCODE_VERSION` via
 `scripts/install-opencode.sh` against `OPENCODE_SHA256` (2.x isn't on npm), print the Landlock ABI, and `check.yml`'s
@@ -7204,10 +7229,11 @@ every workflow its own permissions, `check` never path-filtered and required fro
 (every command and flag in *Every `wb` command*, every module in CLAUDE.md's layout, every `WB_*` variable in CLAUDE.md,
 CLAUDE.md under 25,000 characters); `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`. The tests' own
 `HTTPServer`/`ThreadingHTTPServer` (`_Listens`, 0.02 s tick) listen at once: http.server's looked the name up first, 35 s
-on macOS runners (#950); not patched suite-wide, so `WebChat` still catches chat.py doing it. `WebChat`'s
-tearDown closes its hub and waits up to 5 s for the hub's open streams to end, then fails by name ("a stream outlived its
-test's closed hub"): one left ran its snapshot in the next test's `WB_HOME`, or between tests in the user's own
-`~/.config/workbench` (nightly run 45577067512).
+on macOS runners (#950), and the fake's `serve --stdio` server too, whose lookup outlasted `model_list`'s 30 s and
+failed every catalog read on macOS (nightly run 45454423406); not patched suite-wide, so `WebChat` still catches
+chat.py doing it. `WebChat`'s tearDown closes its hub and waits up to 5 s for the hub's open streams to end, then fails
+by name ("a stream outlived its test's closed hub"): one left ran its snapshot in the next test's `WB_HOME`, or between
+tests in the user's own `~/.config/workbench` (nightly run 45577067512).
 
 **The fixture** (`Base`): `WB_HOME=<tmp>/state`, `WB_OPENCODE_BIN` (the fake, `shlex`-split), `WB_FAKE_MODELS=1`,
 `WB_OPENCODE_CONFIG` (`ollama` on 127.0.0.1:11434 with `mimo-v2.6:9b-q8_0`, 32K, and `qwen3.8-27b` with no
@@ -7247,7 +7273,7 @@ them, then `ok`'s answer). A new fake behaviour is a new scenario.
 (`models.model_list`'s) prints `{"url"}` and serves `GET /api/plugin` and `GET /api/model` (the same `{location,
 data}`) on 127.0.0.1 behind Basic `opencode:<OPENCODE_PASSWORD>` until its stdin closes; `FAKE_COLD=<n>` plays 2.4's
 cold server (its first n plugin.list reads list none, model.list until then only the first entry), `FAKE_SERVE_PID`
-records its pid; `models` as
+records its pid; its server listens at once, without HTTPServer's name lookup (#950); `models` as
 `<provider>/<id>` lines, refusing a provider argument as 2.3.2 does; `auth list --format json` as `[{id, name,
 connections: [{type: "credential", id, label, method: "key"}]}]` per catalog provider. `run -m <provider>/<id>#<variant>`
 splits at the first `/` and the first `#` after it: a catalog provider's unknown model is `{"type": "error", "error":
@@ -7496,8 +7522,11 @@ doc needs its own `!/` line).
 - **`scripts/ship.sh`**, the one road to main, run only when the user has said to ship (it publishes the branch and opens a pull request as them): from a branch or worktree (a detached HEAD ships as `agent/<worktree>`),
   pushes, opens or finds the pull request, arms auto-merge with `--match-head-commit`, waits or names the failing check;
   refuses main, acts only on this repository's pull request at the commit it pushed. `--title`, `--body-file`,
-  `--squash`, `--no-wait`, `--draft`. A red check leaves auto-merge armed: fix, commit, rerun. Ten failed `gh pr view`s
-  in a row end the wait (exit 2), still armed (2026-11-22).
+  `--squash`, `--no-wait`, `--draft`. A red check leaves auto-merge armed: fix, commit, rerun. It polls every 10 s for
+  up to an hour (360 polls; 20 s until 2026-11-25, when `scripts/suite.sh` was to bring the check to about four minutes: all six shards locally, four CPUs each, 157 to 222 s); ten failed `gh pr
+  view`s in a row, 20 s apart, end the wait (exit 2), still armed (2026-11-22). Its wait is the check's: a pull
+  request merged a median 10.7 minutes after it opened (30 to 2026-11-25), its check 9.5 to 10.5, the merge 2 to 25 s
+  after it.
 - **`scripts/github-settings.sh check|apply`** keeps the settings in git (`check` names drift, `apply` writes, `gh` as admin): the ruleset; Actions may approve pull
   requests, the default token read only; auto-merge, merge commits, delete branch on merge, update branch; only
   GitHub-owned and verified actions, pinned to commits; fork workflows always await approval; secret scanning with push
@@ -7645,6 +7674,8 @@ doc needs its own `!/` line).
   contributing line (never the README: the owner's call), *Sending a patch without GitHub*; the skill names no address ("the address it
   printed"), so a new one never leaves Claude telling a user the old. **What sends** (`wb patch send`'s name, the gh and git commands it
   runs, any new outward command) → `sendsOut`, `GH_WRITES`, `OUTWARD_TEXT`, the gate's tests in `register.test.tsx`.
+  **A program that runs text** (a new shell or interpreter, its code flag) → `RUNS_CODE`, `STDIN_SHELL`, `codeFed`,
+  `spawns`, `WRITES_CODE` in `register.tsx`, together (#1364).
   **`wb patch send`'s flags** → the mod's `sendArgs` (it reads `--title`, `--body-file`, `--draft`, `--anyway` as
   written: keep `allow_abbrev=False`). **`send-ok.json`'s keys** (`slug`, `title`, `body_file`, `body`, `draft`,
   `anyway`, `at`) → the mod's `upstreamRefusal` and `patches._approved`, together. **The `Scope`
@@ -7777,7 +7808,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **OpenCode's own prompt size** (re-measured with `capture_llm.py` after an OpenCode update or a `DENIED_TOOLS` change) → `context.OPENCODE_BASE_TOKENS`.
 - **The Python floor** → the launchers' guard, `check.yml`'s and `macos`'s `python-version`, *The tests*, the README's
   *What you need* (a new OpenCode major too).
-- **The merge gate** (`owner-merge.yml`, the ruleset, `check` and its `needs`, the shard count, `WB_TEST_SHARD`) →
+- **The merge gate** (`owner-merge.yml`, the ruleset, `check` and its `needs`, the shard count, `WB_TEST_SHARD`,
+  `scripts/suite.sh`'s process count, which matches the runner's CPUs) →
   `tests/test_workflows.py`, `scripts/github-settings.sh apply`, *Shipping to main*.
 - **`mod/` for users** → nothing: no `version` in plugin.json (*Installing*). **A release** (by hand, when the owner
   calls it) → `__version__` in `workbench/__init__.py` (`wb --version`, `wb_version`, the ask server's `serverInfo`),
