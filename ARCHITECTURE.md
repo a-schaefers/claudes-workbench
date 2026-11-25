@@ -2675,8 +2675,8 @@ no reader. What the router, tuning, savings and progress read is outside the set
 **The Stats feed** (`stats.feed`, `wb stats --json`, #405): one object of everything learned. Rows:
 `store.results()` kept by `tuning.judged`, except where Claude's cost is counted (savings, saved
 milestones): every non-trial row. An empty section is left out, never zeros (a new install: `{ts,
-until, settings, tasks: 0}`); `until` is the next local midnight (`_midnight`), when the pane
-re-reads. Keys: `periods` (`week`, `month`, `all`, `savings.PERIODS`: tasks, landed, `accepted_pct`,
+until, settings, tasks: 0}`); `until` is the next local midnight (`_midnight`), when its counts from today go
+stale (#575: the pane re-read at it; since #1283 the pane reads no feed). Keys: `periods` (`week`, `month`, `all`, `savings.PERIODS`: tasks, landed, `accepted_pct`,
 `active_minutes`, `savings` with `score`, `spec_gaps` (one after a stop that wasn't the step's
 counted too, as `results.table` does, #1245), `energy` `{wh, cost?}` from every row's
 `gpu_wh` that measured them, another machine's GPU and API rows left out, #568, #569; `api`, below), `streak` `{current, best,
@@ -2955,7 +2955,8 @@ user sees.
   **Settings changed on the web app** (#1283's addendum). The web app's Settings write wb's own
   files through wb, and append each change to `$WB_HOME/settings-changes.jsonl` (`{ts, key, label?,
   from, to, said, help?, by: "web"}`). `settingsTurns` reads its tail (64 KB) at each poll when its
-  size or mtime moved, in the session that listens (chat/listener.json) or any while none does, and
+  size or mtime moved, in the session that listens (chat/listener.json) or any while none does (a claim stands as
+  `listen` reads it, `claimStands`: a session ended in workbench mode leaves its claim), and
   takes each `by: "web"` row newer than `$.store`'s `settingsSeen` mark (every session's, so a
   reload or a second session says it never again; no older than `OLDEST_WAKE_MS`). A row with
   `help` (a setting on but not working yet, such as Agent code navigation with no probe) toasts
@@ -3066,7 +3067,7 @@ rate (no server of ours: the last call's rate still works). It is never in the r
 row ends `  API deepseek · ≈$0.12`.
 
 On a terminal: the alternate screen, redrawn each tick, bars in eighths, the card's short name
-(`top.short`, the pane's `cardName` alike, #576), cbreak stdin for `q`. Ctrl-Z restores the
+(`top.short`, #576), cbreak stdin for `q`. Ctrl-Z restores the
 terminal before stopping and SIGCONT retakes it and redraws (a wake pipe, #607); the handlers write
 straight to the fd (`os.write`), never `sys.stdout` (#950: a reentrant write quit wb top). Too tall,
 it folds idle, `can't run` and `remote` models (`top.FOLD`), then cuts the middle with `… N more
@@ -3313,7 +3314,7 @@ read as a wrong id, Claude hunted for the "right" one).
   `wb route --json` (the pane's day-cap line, the web app's Settings) starts one fresh read in the background
   (`cli._read_catalog_later`, at most one per `CATALOG_TIMEOUT` + 10 s, its mark `hosted.reading` in
   the state dir) and a later poll lists the providers: with keys stored and no cache yet, or a cache
-  read before /connect (which changes no stamp), the pane's Settings said no provider until another command
+  read before /connect (which changes no stamp), the pane's Settings (the web app's since #1283) said no provider until another command
   built one (#1069). A cache listing a stored key is never read again for the pane. `wb setup` reads
   it inline (fresh) when a key `auth list` says is stored isn't stored in the cache, a config that
   doesn't parse skipping it. `transcript._server_live` keeps `discover()`: an API model is
@@ -5076,8 +5077,8 @@ acceptance command), one shared name prefix for the group, passed as `wb start -
 `fix-crash` and `fix-menu`), the plan in one line before the starts, each result
 reviewed on its own, merged logic first, then tests, then UI or docs. Each task runs on its own role's model;
 nothing new decides what runs together: the GPU lease (`models.apart` cards together, the rest `--queue`)
-and the provider slots (#1015). No cap on tasks at once (the owner's call, not asked for). The pane's
-Settings row is #1023's.
+and the provider slots (#1015). No cap on tasks at once (the owner's call, not asked for). Its Settings
+row is the web app's (#1283; the pane's until then, #1023).
 
 ## Experiments
 
@@ -5694,8 +5695,8 @@ every 10 minutes `wb chat url` refreshes the link (`chatLink`; only a `…#token
 status: a failing `wb` is said as a failure (`brief`), never passed on as its answer. A call the
 engine aborted (a plugin reload, a superseding redraw: `isAbort`, `wbThrew`; a bare `aborted` at the
 message's end, never the engine's timeout, `aborted: still running after …ms`, which is wb hung and
-said as a failure, so `wb stats` still backs off) is `aborted`, with no message: not wb failing, so nothing says `could not run wb` (nor `wb status failed`), and a read the pane keeps (the roles,
-the probe row, the saving, the chat link, the Stats feed) keeps its last value and reads again
+said as a failure, #553) is `aborted`, with no message: not wb failing, so nothing says `could not run wb` (nor `wb status failed`), and a read the pane keeps (the roles,
+the chat link) keeps its last value and reads again
 (#1142). Growing files
 are read by `readTail`: whole up to 1 MiB (events 64 KiB), else `tail -c` from a whole line, since
 `$.fs.read` rejects a file over 4 MiB (no wake came again, the 2026-11-16 audit).
@@ -5838,7 +5839,7 @@ modeline (`capRow`: warning from `meter.CHECKIN_SHARE`, error at the cap), from 
 `rolesNow` caches it, read again past `ROLES_CACHE_MS` off the render's path (`capNow`).
 
 **The web chat listener** (`listen`: workbench mode, chat on, an events child). Another session's
-live claim makes this one stand by: its pid alive and, with a `start`, still started then (`alive`,
+live claim makes this one stand by (`claimStands`, which `settingsTurns` asks too): its pid alive and, with a `start`, still started then (`alive`,
 from `/proc/<pid>/stat` or `ps -o lstart=` as wb reads it, UTC then the local zone, #848; when
 neither can say, alive while listener.json is under 15 s old, #700); without a pid, `ts` within
 15 s; asked only of another's claim, at most every `PID_CHECK_MS` 30 s (#839); another `machine`'s
@@ -7274,8 +7275,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **The Tasks view** (#1048): the status keys `round_for`, `typical`, `late_min`, `cards`, `api` and task.json `group` →
   `viewFacts` and tasks.ts; the queued `last` texts (the runner's and `models`' `say`: `waiting for the GPU`, `waiting
   for an API slot`, `checking out`, `setting up`, `checking the acceptance command`, `loading`…) → tasks.ts's `QUEUED`
-  and `transcript.activity`; the role words (`complex`, `trivial`, `writing`) → tasks.ts's `ROLE_WORDS` and
-  `ROLE_LABELS` (#1048: a size is said in them); `progress.TYPICAL_MIN` and `meter.CHECKIN_SHARE` → tasks.ts's copies; `savings.usd` → the
+  and `transcript.activity`; the role words (`complex`, `trivial`, `writing`) → tasks.ts's `ROLE_WORDS`
+  (#1048: a size is said in them); `progress.TYPICAL_MIN` and `meter.CHECKIN_SHARE` → tasks.ts's copies; `savings.usd` → the
   `usd` the mod passes to `taskLines` and `capRow`; **the modeline's look and room** (`MODELINE`, `FACE.rest`, `claude`,
   the ` - ` between, the padding of 1 each side `modeline` takes off the room, the link's rows under it) → splash.ts's
   `BAR`, `pageShape`'s `head` (the modeline and the link's rows), `splashTarget`, and the render's `modeline` Box.

@@ -5558,6 +5558,36 @@ test('#1283: Agent code navigation turned on in the web app without probe makes 
   expect(offers()).toHaveLength(1)
 })
 
+test('#1283: a closed session\'s claim on the listener leaves a web change\'s help to this session', async ($, on) => {
+  // review of #1283, 2026-11-24: a session that ended in workbench mode left chat/listener.json,
+  // read as standing, and no session outside workbench mode offered to set probe up ever after
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  on('ui.toast', () => ({ value: undefined }))
+  const wb = chatWb(files, () => ({ state: 'up', url: LINK }))
+  const asked: string[][] = []
+  on('process.run', (h: any, e: any) => {
+    if (e.argv[0] !== 'kill') return wb(h, e)
+    asked.push(e.argv)
+    return { value: { exitCode: 1, stdout: '', stderr: 'No such process' } }     // its listener ended
+  })
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  files['/wb/chat/listener.json'] = JSON.stringify({ session: 'closed-session', pid: 31337, start: '1', cwd: '/', ts: ts0 - 3000 })
+  delete mtimes['/wb/chat/listener.json']                               // written long ago, its process gone
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  files['/wb/settings-changes.jsonl'] = JSON.stringify({ ts: ts0 + 5, key: 'probe', label: 'Agent code navigation',
+    from: 'off', to: 'on', help: 'Offer to set probe up.', by: 'web' }) + '\n'
+  mtimes['/wb/settings-changes.jsonl'] = 3
+  await clock.advance(31_000)
+  expect(woken.filter(t => t.includes('Agent code navigation'))).toHaveLength(1)
+  expect(asked).toContainEqual(['kill', '-0', '31337'])                // asked, not read as standing
+})
+
 test('#1283: a web change is the listening session\'s; a setting with no help is a row, a role\'s comes as the roles\' own', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}

@@ -2752,7 +2752,7 @@ async function settingsTurns($: any, now: number) {
   if (!key || key === mem.settingsKey) return
   const st = await read($, chat)
   const claim = await readJson($, `${mem.root}/chat/listener.json`)
-  if (claim.session && claim.session !== st.key) return // the listening session's: read again once it is this one's
+  if (await claimStands($, claim, st.key, now)) return // the listening session's: read again once it is this one's
   const got = await readTail($, path, SETTINGS_TAIL)
   if (!got) return
   mem.settingsKey = key
@@ -2812,21 +2812,20 @@ const ELSEWHERE_NOTE = '(This follows another Claude Code session\'s message in 
   'didn\'t take: if it is about that session\'s task (`wb status` lists it as open elsewhere), leave the task ' +
   'to it and tell the user with `wb chat reply` to answer it at that session\'s terminal.) '
 
-async function listen($: any, now: number) {
-  const st = await read($, chat)
-  if (!st.delegating || !webOn(st)) return
-  const dir = `${mem.root}/chat`
-  if (!mem.eventsPid) return // the chat knows a listener by its live `wb events` process
-  const claim = await readJson($, `${dir}/listener.json`)
-  const theirs = claim.session && claim.session !== st.key
+// Whether another session's claim on the chat's listener (chat/listener.json) stands: its process
+// alive, or, whether it lives unknown, the file fresh. Both the listener and settingsTurns ask it:
+// a session that ended in workbench mode leaves its claim, so read as standing, a web change's
+// help reached no session ever after (review of #1283, 2026-11-24).
+async function claimStands($: any, claim: Row, self: string, now: number): Promise<boolean> {
+  if (!claim.session || claim.session === self) return false
   // whether it lives unknown, its claim stands while the file is fresh: read as gone, two
   // sessions took the listener from each other on every poll, each write the other's event (#700).
   // Asked only of another session's claim, and a live one at most every PID_CHECK_MS: on macOS
   // (no /proc) each ask is a `kill` and a `ps`, run on every poll, 80 a minute, even for this
   // session's own claim, whose answer went unused (#839).
   let lives: boolean | null = false
-  if (theirs && claim.pid && elsewhere(claim.machine)) lives = true // can't be asked here (#922)
-  else if (theirs && claim.pid) {
+  if (claim.pid && elsewhere(claim.machine)) lives = true // can't be asked here (#922)
+  else if (claim.pid) {
     const key = `${Number(claim.pid)}@${claim.start ?? ''}`
     if (now - (mem.listenerAt.get(key) ?? -Infinity) < PID_CHECK_MS) lives = true
     else {
@@ -2835,10 +2834,20 @@ async function listen($: any, now: number) {
       if (lives === true) mem.listenerAt.set(key, now)
     }
   }
-  const fresh = async () => now - ((await $.fs.stat(`${dir}/listener.json`).catch(() => undefined))?.mtimeMs ?? 0) < CHAT_STALE_MS
+  const fresh = async () => now - ((await $.fs.stat(`${mem.root}/chat/listener.json`).catch(() => undefined))?.mtimeMs ?? 0) < CHAT_STALE_MS
+  return claim.pid ? lives === true || (lives === null && await fresh())
+    : now - Number(claim.ts ?? 0) * 1000 < CHAT_STALE_MS
+}
+
+async function listen($: any, now: number) {
+  const st = await read($, chat)
+  if (!st.delegating || !webOn(st)) return
+  const dir = `${mem.root}/chat`
+  if (!mem.eventsPid) return // the chat knows a listener by its live `wb events` process
+  const claim = await readJson($, `${dir}/listener.json`)
+  const theirs = claim.session && claim.session !== st.key
   // another session listens: this one stands by, but for the user's answers to its own rows (#1096)
-  const standby = !!theirs && (claim.pid ? lives === true || (lives === null && await fresh())
-    : now - Number(claim.ts ?? 0) * 1000 < CHAT_STALE_MS)
+  const standby = await claimStands($, claim, st.key, now)
   if (!standby) {
     if (!(await $.fs.exists(dir))) await runWb($, ['chat', 'log']) // wb makes the directory
     // parent: this Claude Code process, so `wb chat reply` threads onto this session's messages only
