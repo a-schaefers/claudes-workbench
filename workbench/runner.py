@@ -3617,7 +3617,9 @@ RUNNER_LINES = (
 )
 RUNNER_TAIL = re.compile("|".join(RUNNER_LINES))
 # make's own line for a recipe it runs without a shell (no shell syntax in it) that execvp can't
-# find: a name without a `/` is one not on PATH, the shell's `command not found` (#1229)
+# find: a name without a `/` is one not on PATH, the shell's `command not found` (#1229), at
+# whatever code make's Error line names: GNU make 4's 127, macOS's /usr/bin/make's 1 (nightly run
+# 45577067512, 2026-11-25)
 MAKE_EXEC = re.compile(r"g?make(?:\[\d+\])?: (?P<n>[^:]+): No such file or directory")
 # A wrapper's own words for a program it couldn't start, at its own exit, not the shell's 127
 # (missing_tool): Poetry's `Command not found: <name>` (exit 1, #1256), uv's `Failed to spawn:
@@ -3694,6 +3696,12 @@ def _missing(r: dict, cmd: str | None, task: store.Task | None) -> str | None:
     code = int(inner) if inner else code
     if wrapped and not inner and lines and NOT_FOUND.search(lines[-1]):
         code = 127  # pnpm exits 1 and names no code: the shell's not-found line is its 127 (#1243)
+    if wrapped and inner and lines and MAKE_EXEC.fullmatch(lines[-1].strip()):
+        # make's own exec failure is the shell's 127 whatever code it names: macOS's /usr/bin/make
+        # says `make: <name>: No such file or directory` and `*** [test] Error 1`, so `make test`
+        # read as a recipe's own failure and both auto-fix rounds ran (nightly runs 45454423406,
+        # 45577067512, 2026-11-24/25)
+        code = 127
     if not isinstance(code, int) or not code:
         return None
     line = lines[-1].strip() if lines else ""

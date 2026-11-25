@@ -1116,7 +1116,9 @@ class Lifecycle(Base):
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "make"], check=True)
         self.start("t-mk", "ok", "--test", "make test", "--auto-fix", "2", "--no-self-review")
         st = wait_phase("t-mk", {"review"})
-        self.assertEqual((st["base_check"]["exit"], st["round"]), (2, 1))
+        # the tail said: it failed on macOS with no word of what its make printed (nightly runs
+        # 45454423406, 45577067512)
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (2, 1), st["base_check"].get("tail"))
         task = store.Task("t-mk")
         self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
         checkins = [r["text"] for r in store.notices() if r["task"] == "t-mk" and r["kind"] == "checkin"]
@@ -1145,13 +1147,16 @@ class Lifecycle(Base):
                               "make: Target 'test' not remade because of errors.\n"), "nosuch-tool-1229: command not found")
         self.assertEqual(said(f"make: .venv/bin/pytest: No such file or directory\n{err.format(127)}"),
                          ".venv/bin/pytest: not in the worktree (.venv/ is an install's, never checked out)")
+        # make's own exec line at Error 1 too: macOS's /usr/bin/make says it so (nightly run
+        # 45577067512, 2026-11-25), and only make's exec failure prints it
+        self.assertEqual(said(f"make: nosuch-tool-1229: No such file or directory\n{err.format(1)}"),
+                         "nosuch-tool-1229: command not found")
         self.assertEqual(said(f"/usr/bin/python3: No module named nosuch_mod\n{err.format(1)}"),
                          "/usr/bin/python3: No module named nosuch_mod")
         self.assertEqual(said("sh: 1: nosuch-tool-1229: not found\nerror: Recipe `test` failed on line 2 "
                               "with exit code 127", code=127), "nosuch-tool-1229: command not found")
         for tail in (f"make: ./made-by-the-step.sh: No such file or directory\n{err.format(127)}",
                      f"cat: answer.txt: No such file or directory\n{err.format(1)}",
-                     f"make: nosuch-tool-1229: No such file or directory\n{err.format(1)}",
                      "make: *** No rule to make target 'test'.  Stop.",
                      "python3: No module named x"):
             self.assertIsNone(said(tail), tail)
@@ -1171,6 +1176,18 @@ class Lifecycle(Base):
                          "pytest: command not found")
         # a recipe's own failure, not make's exec, still goes back
         self.assertIsNone(said("make: pytest: Command not found\nmake: *** [test] Error 1"))
+        # macOS's /usr/bin/make (Apple's 3.81) says `No such file or directory` at Error 1 for a
+        # recipe it can't exec, so #1229's test still ran both auto-fix rounds there (nightly
+        # runs 45454423406, 45577067512, 2026-11-24/25): make's own exec line is a 127 at any code
+        self.assertEqual(said("nosuch-tool-1229 --check answer.txt\nmake: nosuch-tool-1229: No such file or "
+                              "directory\nmake: *** [test] Error 1"), "nosuch-tool-1229: command not found")
+        self.assertEqual(said("make[1]: pytest: No such file or directory\nmake[1]: *** [test] Error 1\n"
+                              "make[1]: Leaving directory '/r/sub'\nmake: *** [all] Error 2"),
+                         "pytest: command not found")
+        self.assertEqual(said("make: .venv/bin/pytest: No such file or directory\nmake: *** [test] Error 1"),
+                         ".venv/bin/pytest: not in the worktree (.venv/ is an install's, never checked out)")
+        self.assertIsNone(said("make: ./made-by-the-step.sh: No such file or directory\nmake: *** [test] Error 1"))
+        self.assertIsNone(said("make: *** [test] Error 1"))           # a recipe failing on its own
 
     def test_a_package_managers_run_wrapper_lines_are_read_past_to_the_scripts(self):
         # #1243 (bar round 5 of 2.0): `pnpm test` and `yarn test` with jest not installed ended on
