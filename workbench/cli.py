@@ -1003,12 +1003,14 @@ def _lane_fits(repo: Path, test: str | None, *, off: bool = False) -> None:
     _snap_test(test, "start with --allow-path '*'")
 
 
-def _snap_test(test: str | None, lift: str, *, off: bool = False) -> None:
+def _snap_test(test: str | None, lift: str, *, off: bool = False, kept: str | None = None) -> None:
     """Refuse an acceptance command that is a snap while the lane is on: no-new-privileges, which
     the lane sets, stops snap-confine, so every test round and every auto-fix round would fail
     and tell the agent the bug is its change. wb start's and wb next's --test both (#1271,
     2026-11-24: wb next took one wb start refused). `lift`: how this command turns the lane off
-    for the task."""
+    for the task; `kept`: a local_only mark that keeps an API task's lane on, so no lift is
+    offered (wb allow --path '*' and a standing "*" are refused or stop it: the bar7 merge's
+    review, 2026-11-24, #1268 with #1271)."""
     if off or not context.lane_on():
         return
     try:
@@ -1016,8 +1018,12 @@ def _snap_test(test: str | None, lift: str, *, off: bool = False) -> None:
     except ValueError:
         first = []
     if first and sys.platform.startswith("linux") and context.snaps(first):
-        die(f"{first[0]} is a snap, which can't run in the agent's lane (no-new-privileges stops "
-            f"snap-confine): install it another way, or {lift} (the lane off for this task), or "
+        lead = (f"{first[0]} is a snap, which can't run in the agent's lane (no-new-privileges stops "
+                "snap-confine): install it another way")
+        if kept:
+            die(f"{lead}; the lane stays on for this API task while {privacy.home_path(kept)} is "
+                "local-only (commands.json \"repos\")")
+        die(f"{lead}, or {lift} (the lane off for this task), or "
             'commands.json "paths": ["*"] for every task')
 
 
@@ -1951,7 +1957,8 @@ def cmd_next(a):
         die("the next step's spec is empty")
     if a.test:  # before the commit, as wb start refuses it (#1271)
         _snap_test(a.test, f"wb allow {a.name} --path '*' first",
-                   off="*" in context.lane_paths(task))
+                   off="*" in context.lane_paths(task),
+                   kept=privacy.local_only_place("*") if runner.api_task(task) else None)
     # after the spec, before the commit: the step's first request carries the session's context
     # and the spec with the protocol (#1173)
     _model_still_listed(task, nxt + protocol_for(spec), True if a.fresh else None)

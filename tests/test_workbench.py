@@ -38110,6 +38110,34 @@ class Privacy(_KeyholeTest):
         context.grant(task, "paths", [str(other / "data")])       # a grant made before the mark
         self.assertIn("(wb allow --path), is local-only now", runner.local_only_now(task))
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "snaps are Linux's")
+    def test_a_snap_test_at_next_on_an_api_task_kept_in_its_lane_by_local_only_offers_no_lane_off(self):
+        # #1271 with #1268 (the bar7 merge's review, 2026-11-24): wb next's snap refusal said
+        # `wb allow <task> --path '*'`, which wb allow refuses on an API task while commands.json
+        # marks anything local_only, so the one way out it named was itself refused
+        self.start_api("t-snap-api")
+        task = store.Task("t-snap-api")
+        task.set_status(phase="review")
+        other = self.repo.parent / "privaterepo"
+        subprocess.run(["git", "init", "-q", str(other)], check=True)
+        self.local_only(key=other)                    # not in this task's lane: next goes on to the snap
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Step two.\n")
+        nxt = ("next", "t-snap-api", "--spec", str(step2), "-m", "feat: two", "--test", "go test ./...")
+        with mock.patch.object(context, "snaps", return_value=["go"]), \
+                mock.patch.object(context, "lane_on", return_value=True), \
+                mock.patch.object(cli, "reap"), mock.patch.object(cli, "runner_alive", return_value=False), \
+                mock.patch.object(cli, "_need_worktree"), mock.patch.object(cli, "_opencode_again"):
+            code, err = self.fails(*nxt)
+            self.assertIn("go is a snap", err)
+            self.assertIn(f"the lane stays on for this API task while {cli.privacy.home_path(other)} is "
+                          "local-only", err)
+            self.assertNotIn("--path '*'", err)
+            self.conf.write_text("{}")                # no mark: the lane-off way is offered again
+            code, err = self.fails(*nxt)
+            self.assertIn("wb allow t-snap-api --path '*' first", err)
+        self.assertIsNone(store.Task("t-snap-api").spec.get("test_cmd"))
+
     def test_commands_json_standing_paths_are_named_in_an_api_tasks_where_note_and_a_local_only_one_refuses_it(self):
         # #1269 (the bar loop, 2026-11-24): a standing `paths` entry (wb allow --always) is in
         # every API task's lane, but the note said "the repo, its spec, CLAUDE.md files" alone
