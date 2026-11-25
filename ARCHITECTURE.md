@@ -8385,16 +8385,19 @@ shard, 6.5 to 10 minutes, was the 9.5 to 10.5 minute check (40 runs to 2026-11-2
 `README.md`, `docs/releases/` or images in `docs/` (the `Scope` step, its merge commit against its base) runs only
 `tests.test_docs` and `tests.test_workflows` in shard 1; the suite reads ARCHITECTURE.md, CLAUDE.md, the skill, the
 handbook and the release checklist, so a change to any runs it all, as does every push to main. No path filter on the trigger: a required check must report on every pull request.
-`nightly.yml`, daily: the suite on the newest Claude Code (red: a new Claude Code broke the mod, not main), plus `macos` (Apple silicon, 3.11, OpenCode's `darwin-arm64` zip
+`nightly.yml`, daily: `check`, the suite on the newest Claude Code (red: a new Claude Code broke the mod, not main) in three
+shards, each `scripts/suite.sh K/3 4`, the mod's test in shard 1 only, plus `macos` (Apple silicon, 3.11, OpenCode's `darwin-arm64` zip
 with its own hash, `WB_TEST_SHARD=K/5`) and `wsl` (WSL2's Debian on a Windows runner via `scripts/ci-wsl.sh`: dash as
-`/bin/sh`, non-root, a clone in WSL's FS; no third-party action). Not required, but a release waits for a green nightly
+`/bin/sh`, non-root, a clone in WSL's FS; no third-party action; three shards as `check`'s, `WB_TEST_SHARD` passed in through
+`WSLENV` and sudo's `--preserve-env`). `check` and `wsl` ran the suite in one process until it outgrew their 60 minutes (cancelled in
+the last two runs before 2.1, run 45707953076, 2026-11-25). Not required, but a release waits for a green nightly
 on its commit (`docs/release-checklist.md`; the 2026-11-19 audit: macOS failed unseen, nothing ran WSL).
 `opencode.yml`: the suite daily on the newest OpenCode (the highest release, not GitHub's "Latest"). Sharding:
 `tests/__init__.py`'s `load_tests` deals the i-th test of discovery's sorted order to shard i mod N, once, by the
 outermost `load_tests` (nested, it sharded twice); `python3 -m unittest tests` is sharded too, named modules, classes or
 tests run as named; no test has class or module fixtures.
 The macOS shards run `python3 -X faulthandler -m unittest -v`, each test named in the log as it runs (unnamed, a
-cancelled hour reported nothing, #950). The nightlies' and `opencode.yml`'s Linux suites stay one process (off the shipping path, and the plain run a developer makes). Every suite job sets `WB_TEST_HANG_SECS` (600, via `WSLENV` for
+cancelled hour reported nothing, #950). `opencode.yml`'s suite stays one process (off the shipping path, and the plain run a developer makes). Every suite job sets `WB_TEST_HANG_SECS` (600, via `WSLENV` for
 WSL; `check.yml`'s 300: its slowest test takes under 30 s, and a hang held a pull request 10 minutes past its other shards): `SIGALRM` around each test dumps every thread's stack and fails it with `tests.Hung: <test id> hung past
 WB_TEST_HANG_SECS (N s)`, a `BaseException` (as a `TimeoutError` it was swallowed by `socket.getfqdn`'s `except
 OSError`, 2026-11-22). Job limits 60 min, `check.yml`'s shards 30. Linux jobs install `OPENCODE_VERSION` via
@@ -9200,7 +9203,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **The Python floor** → the launchers' guard, `check.yml`'s and `macos`'s `python-version`, *The tests*, the README's
   *What you need* (a new OpenCode major too).
 - **The merge gate** (`owner-merge.yml`, the ruleset, `check` and its `needs`, the shard count, `WB_TEST_SHARD`,
-  `scripts/suite.sh`'s process count, which matches the runner's CPUs) →
+  `scripts/suite.sh`'s process count, which matches the runner's CPUs; the nightly's `check` and `wsl` shards too) →
   `tests/test_workflows.py`, `scripts/github-settings.sh apply`, *Shipping to main*.
 - **`mod/` for users** → nothing: no `version` in plugin.json (*Installing*). **A release** (by hand, when the owner
   calls it) → `__version__` in `workbench/__init__.py` (`wb --version`, `wb_version`, the ask server's `serverInfo`),
