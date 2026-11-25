@@ -6829,7 +6829,10 @@ def cmd_try(a):
             *(["--model", a.model] if a.model else []),
             # wb start's busy-GPU refusal names --queue, which wb try once refused as an unknown
             # argument: the setup check couldn't wait behind a task or a bench (#1251, 2026-11-24)
-            *(["--queue"] if a.queue else [])]
+            *(["--queue"] if a.queue else []),
+            # and its down-server refusal names --force, which wb try refused the same way: with
+            # Ollama or LM Studio not started, the advised retry died on exit 2 (#1297, 2026-11-24)
+            *(["--force"] if a.force else [])]
     try:
         # the copy and its init inside: wb init refusing (no git identity, a home that is a
         # git repo) left try/<n> behind, one more at each retry (#530)
@@ -8161,6 +8164,8 @@ def parser() -> argparse.ArgumentParser:
                    "never matches one); default: the router's pick for a trivial task")
     s.add_argument("--queue", action="store_true", help="start even when the GPU's holders leave "
                    "no room for its model: it waits behind them (else exit 4)")
+    s.add_argument("--force", action="store_true", help="start even when its model can't run now "
+                   "(its server not started): it waits for it to come up (else exit 3)")
     s.set_defaults(f=cmd_try)
     s = sub.add_parser("remote", help="use the Ollama on another machine (LAN, tailnet): its "
                        "provider, marked local, and its tool-capable models registered")

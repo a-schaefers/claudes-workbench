@@ -19764,6 +19764,21 @@ class Try(Base):
         self.assertIn("hidden check, at review: ", out)
         self.assertEqual(store.Task("try-1").status["phase"], "queued")
 
+    def test_a_wb_try_refused_for_a_server_not_up_advises_a_flag_wb_try_accepts(self):
+        # #1297 (bar loop round 8): #1251 fixed the busy-GPU --queue hint only; with Ollama not
+        # started, wb start's refusal says --force queues it anyway, and wb try had no --force
+        down = {"available": False, "why": "ollama is not answering"}
+        with mock.patch.object(cli, "spawn_runner", lambda task: 0), \
+                mock.patch.object(cli.models, "status", lambda *a, **k: dict(down)):
+            with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()) as err:
+                run_wb("try", "--model", "mimo")
+            self.assertEqual(e.exception.code, 3)
+            self.assertIn("--force queues it anyway", err.getvalue())
+            self.assertFalse(list(cli.try_dir().glob("*")))                 # no copy left (#161)
+            out = run_wb("try", "--model", "mimo", "--force")               # the advice, followed
+        self.assertIn("hidden check, at review: ", out)
+        self.assertTrue(store.Task("try-1").exists)
+
     def test_wb_try_refused_by_wb_init_leaves_no_sample_behind(self):
         # #530: with no git identity wb init refused, and try/1, try/2… were left at each retry.
         # useConfigOnly: git makes no identity up from the user and host names, as it does on a
