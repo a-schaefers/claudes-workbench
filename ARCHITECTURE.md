@@ -1551,7 +1551,17 @@ failed (exit N)", "setting up the worktree failed (copy failed)" or "(timed out 
 `setup_timed_out`), the proxy left out (`runner.proxy_gap`, #380), each lane refusal with its grant
 ("the lane refused <path>: wb allow <task> --path <grant>, if the setup needs it": `lane_refused`,
 `lane_grant`, #824), ending "fix it, then wb resume <task>: it sets the worktree up again (the
-agent never ran)"; status `failed_before` `setup`. A load failure before the agent ran
+agent never ran)"; status `failed_before` `setup`. A setup that exits 0 but leaves paths for git
+to see that the checkout didn't show (`git status --porcelain -z --untracked-files=all
+--no-renames --ignore-submodules=dirty` before and after, `_git_sees`, `_setup_left`: a tracked
+file it changed, a new file git doesn't ignore) fails the same way (`_setup_unclean`): "the setup
+changed files git tracks (Gemfile.lock)" / "wrote files git doesn't ignore (gen/a, … and N more)",
+"the review would show them as the agent's and wb accept would commit them (undone in the
+worktree)", the remedy a setup that leaves the repo as committed (`npm ci`, `BUNDLE_FROZEN=1
+bundle install`, `uv sync --locked`) or a commit of its change or a `.gitignore`, then "wb discard
+<task> and start again". `_undo_setup` checks the tracked ones out from HEAD (no hooks) and
+removes the new ones, so a `wb resume` is told the same again (#1347: a `bundle install`'s
+PLATFORMS was the agent's drift NOTE and was committed under its trailer). A load failure before the agent ran
 (`_load_failed`) sets `load` and adds "the agent never ran: once the model can, wb resume <task>
 starts it". Either way the results row has `ran: false`, which router and tuning skip (#581). A
 load failure after the agent ran (its row has `ran: true`) whose round n never reached it

@@ -359,7 +359,7 @@ runs the agent, the setup and the tests in that package; the diff stays the whol
 The worktree holds only committed files. When the acceptance command needs what the user
 installed (node_modules, a .venv, a build), add `--setup '<install command>'` (a .venv always: a copy still runs the original) (or `--copy <ignored
 path>`, from a package as the note names it; `--sibling <path>` for a `../<name>` or `../../<path>` the project uses, by that same path): `wb start` names the ignored
-directories it lacks, and a failing setup fails the task before any round (so does a checkout
+directories it lacks, and a failing setup fails the task before any round (so does one that changes a tracked file or writes one the repo doesn't ignore: prefer `npm ci`, `uv sync --locked`; so does a checkout
 that fails: the runner makes the worktree, so `wb start` returns at once on any repo). A setup gets 30
 minutes; a first build that needs longer (a big Rust or C++ project, torch over a slow link) takes
 `--setup-timeout <secs>` at start. A note that the
@@ -511,7 +511,7 @@ yours to edit: the coding choice is the user's (`wb coding`), never changed by a
   `wb answer <name> --file <path>`, which sends the file's contents.
 - **stuck / failed** — `wb log <name> -n 30` if the report isn't enough; then feedback that unblocks
   it, or discard. Past step 1, discard drops only this step: the steps `wb next` committed stay on
-  the branch, and the report says how to accept them instead. A failed round's edits so far stay in the worktree (`wb resume` carries on). A setup or load failure before the agent ran: fix it, then `wb resume <name>`; one later ("round N never reached the agent"): fix it, then `wb feedback <name> --text "carry on"`, which sends round N's prompt first.
+  the branch, and the report says how to accept them instead. A failed round's edits so far stay in the worktree (`wb resume` carries on). A setup or load failure before the agent ran: fix it, then `wb resume <name>` (a setup that changed files git sees, as its notice says: `wb discard`, then start again); one later ("round N never reached the agent"): fix it, then `wb feedback <name> --text "carry on"`, which sends round N's prompt first.
   A wake saying `(not its agent's doing)` (a model gone from OpenCode's catalog, a moved repo, a full disk…): do what the notice names; `wb feedback` only when it names it.
   A `rate_limited`, `outage`, `quota`, `auth` or `refused` stop is the API provider's, not the
   agent's (the report says "the provider's stop"): tell the user so, and its remedy (wait, top
