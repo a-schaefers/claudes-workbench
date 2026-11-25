@@ -215,6 +215,8 @@ def _user_message(text: str, verbose: bool) -> tuple[str, list[tuple[str, str]]]
         head = "Claude → agent · next step"
     elif text.startswith(INTERRUPT_HEAD) and "without a tool call. Stop planning" in text:
         head = "workbench → agent · nudge: thinking too long without acting"  # runner.NUDGE
+    elif text.startswith(INTERRUPT_HEAD) and "without changing a file: make the first edit" in text:
+        head = "workbench → agent · nudge: many calls without changing a file"  # runner.EXPLORE_NUDGE
     elif text.startswith(INTERRUPT_HEAD):
         head = "Claude → agent · INTERRUPT, high priority"
     elif text.startswith(NOTE_HEAD):
@@ -588,7 +590,7 @@ def header(task: store.Task, paint: Painter, data: dict | None = None) -> str:
 
 def routed_text(task: store.Task) -> str:
     """How the task's model was chosen (#1016): an API task's `API <id> (<provider>) · trivial
-    role, set by you 11-20 · thinking off` from task.json's keys, a GPU task's the router's why
+    role · thinking off` from task.json's keys, a GPU task's the router's why
     (task.json `route`); '' for neither. wb watch's `routed:` line, and --json's `routed` row."""
     from . import routes
     sp = task.spec

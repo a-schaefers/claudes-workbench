@@ -134,7 +134,7 @@ it that way; the agents never write either.
 - **Keeping it current**: when a task changes something CLAUDE.md describes (a new module,
   command, dependency, convention or decision), edit CLAUDE.md in the task's worktree at review,
   before `wb accept`, so it lands in the same commit as the code (one edit, no commit of its own).
-  `wb accept` prints how many code commits CLAUDE.md is behind. Nothing changed that it describes?
+  Check it yourself at review: nothing changed that it describes?
   Leave it. It says what the project is, never what comes next: keep
   the plan and the next step in your own notes. An agent that loses its task takes up whatever
   CLAUDE.md says is next (seen: a compaction summary that recounted CLAUDE.md, and the agent
@@ -185,8 +185,8 @@ if you can, and start nothing until the plan is approved; then write the first s
   you pick. Each task is a step as above (spec, size, role, acceptance command); give them one
   name prefix (`auth-logic`, `auth-tests`, `auth-docs`), pass `--group <prefix>` (`--group auth`)
   on each `wb start` so the pane draws them under one header, and say the plan in one line before
-  the first `wb start`. The GPU and the provider slots decide what runs together: `--queue` the rest
-  (exit 4). Review each result on its own; accept logic first, then tests, then UI or docs.
+  the first `wb start`. The GPU and the provider slots decide what runs together: the rest queue.
+  Review each result on its own; accept logic first, then tests, then UI or docs.
 - **What stays yours**, marked apart: git, CLAUDE.md, choices and setup only the user can make
   (downloads, licences, public repos), and the checks you run at review (a screenshot to look at,
   tests to break on purpose, a grader).
@@ -225,7 +225,7 @@ for an API model or change a role without the user's yes; recommend only. When t
 change, run it as a command of its own (`wb route trivial <exact provider/model id>`, `wb route
 all gpu|api|both`, `wb route <role> --gpu <id|auto>`): the mod shows them the change in a dialog, and a
 "not changed" means they said no, so say it wasn't changed and don't ask again. The first API role
-needs a day cap: ask them for one (suggest $5), then add `--day-usd N`. Exit 3 names the fix (a
+sets a day cap with it: $5 unless they named one (`--day-usd N`); the dialog shows it. Exit 3 names the fix (a
 key to add with /connect, an exact id). The user's **Agents** switch (`wb route all
 gpu|api|both`) puts every role on one side, or Both: each role as set. A role that can't run
 (no key, no GPU model, Agents on API with no API model for it) exits 3 with one line of choices:
@@ -378,6 +378,9 @@ A suite slower than 15 minutes: `--test-timeout <secs>` above its time, or
 narrow the command; a run past it isn't sent back to the agent (nor one the lane refused a
 device, nor a command or Python module (`python3 -m pytest`, not one of the repo's own, nor one whose file or dotted name the spec gives, nor a package or module the spec makes, as in "make a new package greet", unless your own Python has it; a name the spec only mentions, "with pytest tests", still counts as a tool), or a `.venv/bin/activate` it sources, not found as on the base, which checks in before round 1, or a command a `wb next --test` command itself names), you're woken with `auto-fix skipped:` and the cause, unless the base check ran the same
 command in a quarter of the limit: then it's the change's hang, and auto-fix gets it.
+A suite printing past 20 MB is stopped there, its verdict unknown: woken the same way (and at
+once from the base check when it does so there), quiet it (`-q`, less logging) or narrow it;
+only when the base check passed the same command is the flood the change's, for auto-fix.
 Its own `then wb feedback`, once you've given the tool or the grant, counts no review round.
 Once the tests pass, the agent checks its own change against your review checks in one more
 round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it);
@@ -397,12 +400,11 @@ A model that reads prompts slowly, or one the runner must load first, can spend 
 its first reply. That is normal, not stuck. A task stopped with "no first output" has taught the
 runner how slowly the model reads: a new `wb start` on it waits longer (the stop says how long);
 `--silence-timeout <seconds>` gives it more, or pick a smaller model.
-**Exit 4: the GPU is taken** by another task (often another session's project) or `wb image`,
-which the model can't run beside. Don't wait silently: tell the user who holds it, then either
-do the step yourself or `--queue` it to start when the GPU is free (it may be hours).
-An API model's task needs no GPU and never waits for one; its exit 4 is "3 tasks already run on
-<provider>'s API": workbench runs at most three at once per provider. Do the step yourself, or
-`--queue` it to start when one of those finishes.
+**A start queues when the GPU is taken** by another task (often another session's project) or
+`wb image`, which the model can't run beside: its note names who holds it, and it starts when the
+GPU is free (it may be hours). Tell the user; do the step yourself if it can't wait (wb discard).
+An API task needs no GPU; it queues when 3 tasks already run on its provider's API (workbench
+runs at most three at once per provider), until one of those finishes.
 
 ## Driving a running task
 You are the driver, not a spectator: when a check-in, its log or the user says the agent is
@@ -418,9 +420,9 @@ heading the wrong way, act on it. Notes are instructions, like feedback: concret
 - A `PERMISSION` question (a command or a directory): lean to yes for what the task needs (`wb
   allow <name> "<pattern>"`, `--path <dir>`), no to what reaches outside it.
 Before acting on one of these the first time in a session, read `reference/driving.md` beside
-this file: what each does exactly, the think nudge, undelivered notes, a report that the
-session filled its window reading, the permissions' traps, the web chat, a backlog left to run
-overnight.
+this file: what each does exactly, the think and explore nudges, undelivered notes, a report
+that the session filled its window reading, the permissions' traps, the web chat, a backlog left
+to run overnight.
 
 **The user's two commands.** Only these, never words in a message, stop the delegation and end
 workbench mode; the mod runs them, closes the pane and tells you what it did:
@@ -455,8 +457,10 @@ web page, marked for that agent (the mod does it): never ask the agent to answer
 review. Answer one in that turn: two or three plain lines to the user, steer only if it
 drifts, `wb log` only if the digest shows trouble (`reference/driving.md`). A **progress check**
 (only when the user ran `wb progress on`) recommends a hint or a smaller step: give it with the
-command it names, so whether it helped is learned. Time never makes the task yours to edit: the
-coding choice is the user's (`wb coding`), never changed by a check.
+command it names, so whether it helped is learned. A smaller step comes to review with no
+auto-fix or self-review, even when the `--test` fails because it tests the whole task: review the
+part, then send the rest with `wb feedback` (no review round counted). Time never makes the task
+yours to edit: the coding choice is the user's (`wb coding`), never changed by a check.
 
 ## 4. When woken
 - **review**: the wake carries the report and, when it is small, the whole diff (`wb diff <name>`
@@ -527,7 +531,8 @@ coding choice is the user's (`wb coding`), never changed by a check.
   or `resume` refused at the cap (exit 3) is the same call. API tasks queued behind it send no
   stop of their own: they wait as queued and go on once the cap is raised or at midnight.
   The notice's route change is for the next tasks; this one keeps its API model (resume never
-  re-routes), so `wb takeover` or `wb discard` it. Nothing but the user raises the cap.
+  re-routes), so `wb takeover` or `wb discard` it, and so do those queued behind it: they wait on,
+  but for one, whose own stop is the next notice. Nothing but the user raises the cap.
   With Agents on GPU the same stop says `Agents is GPU, so nothing spends`: API tasks already
   started stop before their next round, and feedback, next, resume and an API `--model` are
   refused. Ask the user (Agents back to Both or API, then `wb resume`), or takeover or discard.
@@ -651,9 +656,9 @@ what you fixed, sent back or flagged, the branch. Report the agent's misses plai
 evidence about the model, and the router learns from accept and discard. For a task on an API
 model, `wb accept` (and `wb discard`) ends its line with what the provider was paid (`paid ≈$0.12`,
 `paid: unknown`, or `plan usage …`): pass that on as a cost, an estimate when it says `≈`, never as
-a saving, and never subtract it from your tokens or the other way round (the live figure while it
-runs is `api.usd` in its `status.json`, under `$WB_HOME/tasks/<name>/`). `wb savings` gives the
-week's saving when the user asks what it's saving (an estimate: call it one); `wb savings --card
+a saving (the live figure while it runs is `api.usd` in its `status.json`, under
+`$WB_HOME/tasks/<name>/`). `wb savings` gives the week's saving when the user asks what it's
+saving (an estimate: call it one); `wb savings --card
 <file>.svg` makes the badge as an image for them to keep or post (made here, nothing sent). The
 saving is the GPU's alone; `wb savings --api` gives what API tasks cost: what was spent (open
 tasks too) by provider and by day, as the day cap counts it, and the tasks closed. Only when the user

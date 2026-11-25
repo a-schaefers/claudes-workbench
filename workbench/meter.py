@@ -159,7 +159,18 @@ def price(m) -> list[dict] | None:
     never 0); every field 0 is a true 0, a free model. Takes the catalog's list
     (`[{input, output, cache{read, write}, tier?}]`) and a config entry's `{input, output,
     cache_read, cache_write}`."""
-    cost = (getattr(m, "config", None) or {}).get("cost")
+    return _prices((getattr(m, "config", None) or {}).get("cost"))
+
+
+def first_tier(cfg: dict) -> int | None:
+    """The context size past which a model entry's price first changes (price's lowest `size`
+    above 0), or None for a flat price or none: models.api_window lifts no window past it, as
+    every request over it is priced at the tier's rate (Haiku's 100K, 5x)."""
+    sizes = [p["size"] for p in _prices(cfg.get("cost")) or () if p["size"] > 0]
+    return int(min(sizes)) if sizes else None
+
+
+def _prices(cost) -> list[dict] | None:
     entries = cost if isinstance(cost, list) else [cost] if isinstance(cost, dict) else []
     out = []
     for e in entries:

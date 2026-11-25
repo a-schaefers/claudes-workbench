@@ -25,8 +25,7 @@ the pane's Settings), else the first; `wb image --default NAME` changes it, only
 url on another host) runs beside tasks. One pinned to a card (`"devices"` or `"beside"` in
 images.json) waits only for tasks on that card. Any other generation needs the GPU to itself: while a task holds it,
 `wb image` refuses and names it; `--wait` (Bash `run_in_background: true`) queues behind it.
-While it runs (or waits), `wb start` refuses a new task (exit 4) unless `--queue`, which waits
-behind it; feedback, next and resume queue behind it. A url engine is a server that keeps its GPU
+While it runs (or waits), a new task, feedback, next and resume queue behind it. A url engine is a server that keeps its GPU
 memory while it runs, unless its entry has an `unload` URL (`(no unload URL)` in the listing says
 it hasn't): then ask the user to stop it before big coding tasks.
 

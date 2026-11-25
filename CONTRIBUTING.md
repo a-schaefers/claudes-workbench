@@ -29,7 +29,11 @@ wb patch init            # a full clone at ~/.local/share/workbench/source (--di
 
 It carries over any changes the marketplace copy had as the first patches, points Claude Code's
 marketplace, `wb` and the `/workbench` skill at the new clone, and refreshes the plugin; then
-`/reload-plugins` in Claude Code. A developer's clone needs no init: `git switch -c local` in it.
+`/reload-plugins` in Claude Code. A developer's clone needs no init: `git switch -c local --track origin/main` in it
+(one made without `--track` gets that upstream from the next `wb update` or `wb patch init`).
+Run from a developer's clone, `wb update` checks Claude Code's git marketplace copy too, if there is
+one, and refuses the same way over its changes (saved first): `git am` takes them into your clone,
+and `claude plugin marketplace add <your clone>` makes it the marketplace, which is never re-cloned.
 
 A patch is a commit on branch `local`, with a scope trailer:
 
@@ -78,8 +82,8 @@ only once committed, through `wb update` (it copies the clone's HEAD into the pl
    ```
    It forks the repository (unless it is yours), pushes `pr/<slug>` to the fork and opens the
    pull request (`--draft` for a draft). It refuses, sending nothing, while the branch has
-   uncommitted changes, the body is empty or still the template, or a commit's trailer is
-   `Scope: me` (`--anyway` overrides that one). A failed step says what is done already; running
+   uncommitted changes, or the body is empty or still the template; a commit whose trailer is
+   `Scope: me` is named in the dialog that asks you. A failed step says what is done already; running
    it again goes on from there. The commit message's body carries `Closes #N`. Once it merges,
    the next `wb update` drops the local patch and removes `pr/<slug>`, its worktree and its body;
    closed unmerged, it keeps the patch and says so once.

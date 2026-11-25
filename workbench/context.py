@@ -38,6 +38,19 @@ ROOT_FILES = ("CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md")
 # lists opencode_worktree_remove; the rule then refuses the call.
 DENIED_TOOLS = ("question", "experimental_image_generate", "execute", "subagent", "websearch",
                 "webfetch", "opencode_*", "*worktree*")  # the network, like curl: Claude's to allow
+# wb's own OpenCode agent, which every `opencode run` names (`--agent`, runner.run_round; a
+# resumed `--session` is switched to it too). Without it OpenCode 2.3.2 took the session's agent
+# from the config's `default_agent`, and the user's global opencode.json is one of those
+# documents: an agent of theirs whose rules allowed webfetch and subagent gave every wb agent
+# both, the layer's denies notwithstanding, as an agent's own rules come after the top-level
+# ones and the last match wins (#1290, 2026-11-24, measured with tests/capture_llm.py). A user's
+# own `wb-code` (their JSON, or agents/wb-code.md) loads before the layer and kept its system,
+# steps and rules, so the layer removes any (`disabled`, AGENT_OFF) and rules_env's content,
+# loaded after the layer, makes it afresh (AGENT_ENTRY): a new agent starts from OpenCode's
+# defaults and takes every top-level rule, the layer's included, as the default `build` agent did.
+AGENT = "wb-code"
+AGENT_OFF = {AGENT: {"disabled": True}}
+AGENT_ENTRY = {AGENT: {"mode": "primary", "description": "Workbench's agent: the task's rules alone"}}
 # A command written `NAME=value cmd`: OpenCode matches each simple command's raw text, so `FOO=1
 # ls` was refused while `ls` and `env FOO=1 ls` ran. It is how CLAUDE.md files and READMEs spell
 # tests (`PYTHONPATH=. pytest`, `CI=1 npm test`), and a small model copying the project's command
@@ -2268,6 +2281,11 @@ HOME_READABLE = ("bin", "go", "R", "perl5")
 # entries, only what is kept (the repo, the lane, a grant) is readable beneath them. /mnt holds
 # the Windows drives on WSL2, /home the other users' homes (the 2026-11-16 audit).
 ONLY_KEPT = ("/dev", "/mnt", "/media", "/run/media", "/run/user", "/home")
+# The links in /dev to the calling process's own descriptors: they name no file. Resolved in wb's
+# process, /dev/stderr was /dev/null under `wb verify 2>/dev/null` and so was listed beside it, and
+# in the lane's child, where fd 2 is a pipe, Landlock refused the rule (EBADFD) and with it the
+# lane: both runs exited 126 and verify said "the candidate fails it" (#1308, 2026-11-24).
+FD_LINKS = ("/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/fd")
 # WSL2's Windows drives (DrvFs, /mnt/<letter> unless wsl.conf moved them): a Windows program there
 # runs through interop as a Windows process, as the user, outside Landlock and no-new-privileges.
 # The read lane let the agent start one: python3 running cmd.exe, or the allowed `npm` resolving to
@@ -2859,6 +2877,8 @@ def readable(task: store.Task) -> list[str] | None:
     out: list[str] = []
 
     def visit(p: str, default: bool) -> None:
+        if p in FD_LINKS:  # the caller's fds, not files: the child's are its own (#1308)
+            return
         real = os.path.realpath(p)
         if real in hidden or any(under(real, h) for h in hidden):
             if real in inner:
@@ -3464,4 +3484,5 @@ def layer(task: store.Task) -> dict:
     rules += [{"action": "edit", "resource": f"{p.rstrip('/')}/*", "effect": "deny"}
               for p in _both([skills.library()])]
     return {"instructions": [str(p) for p in files + ([note] if note else [])],
-            "permissions": rules, "skills": [*handed, *map(str, own)]}
+            "permissions": rules, "skills": [*handed, *map(str, own)],
+            "agents": json.loads(json.dumps(AGENT_OFF))}  # made afresh in the content (AGENT)

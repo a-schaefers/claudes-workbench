@@ -22,7 +22,8 @@ Decide before you offer anything, and tell the user which and why in a line.
    the old copy had (or `wb update` rescued under `$WB_HOME/rescued/`) become the first patches;
    its stashes and other branches' commits are saved there only (it says so).
    Then the user runs `/reload-plugins`. On a clone the user already owns, it says so: work on
-   branch `local` there (`git -C <root> switch -c local`).
+   branch `local` there (`git -C <root> switch -c local --track origin/main`; one made without
+   `--track` gets it from `wb update` or `wb patch init`).
 2. Write the fix yourself, in the clone, imitating the code around it and following its CLAUDE.md
    (docs in the same commit, a test that fails without the fix: it is how `wb patch check` later
    tells whether upstream fixed the same thing). Don't delegate it: a task's
@@ -102,9 +103,8 @@ dialog: tell them there what it would send; it waits until they are back at the 
    the user runs that command in a terminal of their own. `wb patch send` forks (unless the user
    owns upstream), pushes to their fork and opens the pull request; a failed step says what is
    done, and running it again goes on from there (a pull request already open is reported as
-   opened). A `Scope: me` commit is refused unless
-   `--anyway`: it is a sign the patch is theirs, not everybody's. Never `scripts/ship.sh`: it is
-   the owner's.
+   opened). A `Scope: me` commit is the user's own preference: the dialog says so, and their
+   one yes sends it. Never `scripts/ship.sh`: it is the owner's.
 5. Tell the user what happens next: CI waits for the owner to approve the run, the owner reviews
    and merges, and the next `wb update` drops the local patch by itself, however the owner
    reworded or squashed it, and its `pr/<slug>` branch, worktree and body file. If it is closed
@@ -144,5 +144,7 @@ git name and email): they may edit those first. Sending it is theirs; never emai
 ## When `wb update` refuses over the marketplace copy
 It found local changes in Claude Code's clone, which Claude Code's update would wipe (it
 re-clones), and saved them under the `rescued/` path it printed. Tell the user, and offer
-`wb patch init`: it carries the changes over. Never work around the refusal with Claude Code's
+`wb patch init`: it carries the changes over. Run from a developer's clone, the refusal names
+that clone instead: `git am` takes the saved patches into it, and `claude plugin marketplace add
+<that clone>` makes it the marketplace (#1326). Never work around the refusal with Claude Code's
 own `claude plugin marketplace update`.

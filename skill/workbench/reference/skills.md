@@ -8,11 +8,11 @@ agent that needs it, and only to that one, so a growing library never crowds a s
 prompt. You are the only author. Agents may propose a lesson (a `Lesson:` line in their summary),
 but an agent writing its own skills would record its mistakes as rules, so you vet each one.
 
-**Lessons come to you.** `wb feedback`, `next`, `resume`, `accept` and `discard` end with
-`lessons: N from this task` when the task taught something. That covers your numbered corrections,
-guard stops, its questions, a loaded skill that still needed review rounds, and the agent's own
-`Lesson:` lines. Run `wb lessons` then, while it's fresh. The ones seen in more than one task come
-first: the next agent will get those wrong too. Each one ends in a skill
+**Lessons come to you.** Each task's are gathered as it goes: your numbered corrections, guard
+stops, its questions, a loaded skill that still needed review rounds, and the agent's own `Lesson:`
+lines. `wb feedback`, `next`, `resume`, `accept` and `discard` end with `lessons: N seen in other
+tasks too (wb lessons)` when one repeats: run `wb lessons` then. Those come first: the next agent
+will get them wrong too. Each one ends in a skill
 (`wb skill patch|add … --lesson <id>`) or is closed with why (`wb lessons close <id> -m …`).
 
 **What a lesson is.** A rule an agent can follow, plus one clause of why: "Use DrawTextEx with

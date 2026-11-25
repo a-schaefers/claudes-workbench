@@ -300,12 +300,13 @@ def line(x: dict) -> str:
 
 
 def nudge(task: store.Task, outcome: str | None = None) -> str:
-    """The one line `wb feedback|next|resume|accept|discard` ends with when the task taught something."""
+    """The one line `wb feedback|next|resume|accept|discard` ends with when the task taught
+    something seen in other tasks too: a lesson met once is harvested quietly (#1322: the line
+    on every task's lessons was a nudge nobody acted on)."""
     new = harvest(task, outcome)
     if not new:
         return ""
     ids = {x["id"] for x in new}
     open_ = survey(only=ids)  # the new ones only, not a survey of every open lesson (#556)
     again = sum(bool(x["again"]) for x in open_)
-    return (f"lessons: {len(open_)} from this task" + (f", {again} seen in other tasks too" if again else "")
-            + " (wb lessons: write or patch a skill now, while it's fresh)") if open_ else ""
+    return f"lessons: {again} seen in other tasks too (wb lessons)" if again else ""

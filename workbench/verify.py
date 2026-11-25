@@ -21,7 +21,7 @@ import tempfile
 import time
 from pathlib import Path, PurePosixPath
 
-from . import context, gitops, runner, store
+from . import context, gitops, lane, runner, store
 
 LIMIT = 300  # seconds for each run; past it, that run is inconclusive
 
@@ -93,22 +93,6 @@ class _At(store.Task):
     @property
     def worktree(self) -> Path:
         return self._worktree
-
-
-def _review_base(task: store.Task) -> str | None:
-    """The commit this step is compared with: the base for step one, else the last approved
-    step's, which wb next records (status `step_base`). A step with no changes has no commit of
-    its own: from before the record, the newest earlier step that has one, else the base (#652:
-    the step after a clean one died on "cannot find the last approved step's commit")."""
-    step = task.status.get("steps", 1)
-    if step == 1:
-        return task.spec["base"]
-    if at := task.status.get("step_base"):
-        return at
-    for earlier in range(step - 1, 0, -1):
-        if found := gitops.step_commit(task, earlier, step):
-            return found
-    return task.spec["base"]
 
 
 def looks_like_test(path: str) -> bool:
@@ -448,7 +432,7 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
     # the tree accept would commit: a big text file it lands is in it (#642); what accept refuses
     # without --include is left out, and lands with it, so then nothing here is proof (below)
     tree, left = candidate_tree(task)
-    base_rev = _review_base(task)
+    base_rev = gitops.step_base(task)
     if not base_rev:
         raise RuntimeError("cannot find the last approved step's commit for the comparison")
     files = test_files(task, tree, base_rev) if files is None else files
@@ -471,6 +455,12 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
     said = verdict(b_code, b_out, c_code, expect, uncopied)
     if left and said == "proven":  # a candidate missing files accept can land proves nothing (#642)
         said = "inconclusive"
+    # a run the lane refused ran no test: its 126 is no failure of the candidate (#1308, 2026-11-24:
+    # "the candidate fails it" for a change whose tests passed)
+    refused = next((t.splitlines()[0] for c, t in ((b_code, b_out), (c_code, c_out))
+                    if c == 126 and t.startswith(lane.REFUSED)), "")
+    if refused:
+        said = "inconclusive"
     result = {"cmd": cmd, "files": files, "tree": tree, "ts": store.now(),
               "base": {"rev": base_rev, "exit": b_code, "assertion": assertion(b_out)},
               "candidate": {"rev": tree, "exit": c_code, "assertion": assertion(c_out)},
@@ -478,7 +468,8 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
               **({"expect": expect} if expect else {}),
               **({"uncopied": uncopied[:50]} if uncopied else {}),
               **({"removed": removed[:50]} if removed else {}),
-              **({"left_out": left} if left else {})}
+              **({"left_out": left} if left else {}),
+              **({"refused": refused} if refused else {})}
     for code, text in ((b_code, b_out), (c_code, c_out)):  # a checkout unlike the task's (#932)
         if code == "filtered":
             result["filtered"] = text.strip().strip("[]")
@@ -514,6 +505,8 @@ def lines(r: dict) -> list[str]:
         out.append(f"  {side}: exit {x['exit']}" + (f": {x['assertion']}" if x["assertion"] else ""))
     if r.get("filtered"):
         out.append(f"  {r['filtered']}")
+    if r.get("refused"):
+        out.append(f"  no test ran: {r['refused']}")
     if r.get("missing"):
         out.append(f"  the base lacked what the candidate adds: {', '.join(r['missing'])} "
                    "(--files copies what the test reads onto the base)")
@@ -548,7 +541,7 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
     tree, left = candidate_tree(task)
     # after wb next, the last approved step, as wb verify compares: the original base showed the
     # earlier steps' change as this one's (#501, the audit of 1.90)
-    base_rev = _review_base(task)
+    base_rev = gitops.step_base(task)
     if not base_rev:
         raise RuntimeError("cannot find the last approved step's commit for the comparison")
     base, candidate = _checkouts(task, tree, files or [], base_rev,
@@ -652,6 +645,6 @@ def last(task: store.Task) -> dict | None:
         return None
     # Old checks always compared against task.json's original base (#252).
     stale = task.worktree.is_dir() and (
-        r["base"].get("rev", task.spec["base"]) != _review_base(task)
+        r["base"].get("rev", task.spec["base"]) != gitops.step_base(task)
         or candidate_tree(task)[0] != r.get("tree"))
     return {**r, "stale": stale}

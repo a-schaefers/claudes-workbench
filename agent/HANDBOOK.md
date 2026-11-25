@@ -52,7 +52,7 @@ as `<name>.proposed` beside it (`CLAUDE.md.proposed`); otherwise note what is wr
   anywhere else is that limit, so don't keep trying it. Need a directory? Call ask_reviewer with
   `path` set to it (a pty, "out of pty devices": `/dev/pts`; this doesn't use the question
   budget). Don't go looking for plans, notes or other projects elsewhere; if you lose the
-  thread, re-read the task at the start of this conversation, or ask with `ask_reviewer`.
+  thread, read your task's file again ("Your task", below, names it), or ask with `ask_reviewer`.
 - Only non-interactive commands, and none that run forever (servers, watchers): add a timeout.
 - Don't read or print secrets (.env files, keys, tokens). No sudo or system packages: if the
   task needs them, tell Claude.

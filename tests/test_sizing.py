@@ -303,15 +303,17 @@ class ApiSizing(Base):
 
     def test_an_api_models_window_and_output_are_capped_once_for_every_reader(self):
         cfg = self.m.config
-        self.assertEqual(cfg["limit"], {"context": 131072, "output": 32768})
+        # 256K, not 128K: at 128K every DeepSeek run compacted at 72% of it, 4-13 times a run;
+        # at 256K, 0-1 (#1134's E19, 12 runs over 5 cells, 2026-11-24)
+        self.assertEqual(cfg["limit"], {"context": 262144, "output": 32768})
         self.assertEqual(cfg["options"]["max_tokens"], 32768)
         self.assertEqual(self.m.extra["catalog_limit"], {"context": 1048576, "output": 384000})
-        self.assertEqual(runner.compaction_buffer(cfg), 36864)      # 131072 + 32768 - 131072 + 4096
-        self.assertAlmostEqual(runner.compaction_point(cfg), 0.71875)
+        self.assertEqual(runner.compaction_buffer(cfg), 36864)      # 262144 + 32768 - 262144 + 4096
+        self.assertAlmostEqual(runner.compaction_point(cfg), (262144 - 36864) / 262144)   # about 0.86
         self.assertEqual(runner.handover_warning(cfg), "")          # 384K out: "no handover fits"
-        self.assertTrue(0.6 < runner.fresh_ceiling(cfg) < 0.7)      # fresh_at 0.4-0.6 allowed
-        self.assertIn("128K window", router.slice(self.m).line())   # not 1024K
-        self.assertEqual(models.lookup(tw.FLASH, cached=True).config["limit"]["context"], 131072)
+        self.assertTrue(0.8 < runner.fresh_ceiling(cfg) < 0.85)
+        self.assertIn("256K window", router.slice(self.m).line())   # not 1024K
+        self.assertEqual(models.lookup(tw.FLASH, cached=True).config["limit"]["context"], 262144)
         # a smaller catalog keeps its own; an input limit past the capped window is capped too,
         # or usable_input would read the wrong side
         self.assertEqual(models.api_limits({"limit": {"context": 65536, "input": 900000, "output": 8000}}),
@@ -361,11 +363,11 @@ class ApiSizing(Base):
         layer = json.loads(runner.write_config_layer(task).read_text())
         prov = layer["provider"]["deepinfra"]
         self.assertEqual(prov["models"], {"deepseek-ai/DeepSeek-V4.1-Flash-1017": {
-            "limit": {"context": 131072, "output": 32768}, "options": {"max_tokens": 32768}}})
+            "limit": {"context": 262144, "output": 32768}, "options": {"max_tokens": 32768}}})
         self.assertEqual(prov["options"]["headerTimeout"], 600_000)
         self.assertEqual(layer["compaction"]["buffer"], 36864)
         content = json.loads(runner.rules_env(layer)["OPENCODE_CONFIG_CONTENT"])
-        self.assertEqual(content["compaction"]["keep"], {"tokens": 13107})  # restated (#1185)
+        self.assertEqual(content["compaction"]["keep"], {"tokens": 26214})  # restated (#1185)
         self.assertEqual(content["provider"]["deepinfra"]["options"]["headerTimeout"], 600_000)
         self.assertEqual(content["provider"]["deepinfra"]["models"], prov["models"])
         self.assertEqual(runner.provider_timeouts(task)["provider"]["deepinfra"]["options"],
@@ -373,13 +375,13 @@ class ApiSizing(Base):
 
     def test_a_step_an_api_round_records_is_counted_by_the_next_slice_and_tuning(self):
         window = (self.m.config.get("limit") or {}).get("context")   # what drive writes to status
-        self.assertEqual(window, 131072)
+        self.assertEqual(window, 262144)
         row = {"model": tw.FLASH, "kind": "api", "outcome": "accepted", "ran": True, "window": window,  # #1022's kind
                "steps": [{"files": 2, "lines": 90, "window": window, "landed": True,
                           "compacted": False, "stuck": False, "took_over": False}]}
         store.append_jsonl(store.home() / "results.jsonl", row)
-        self.assertIn("128K window; 1 of 1 measured steps went well", router.slice(self.m).line())
-        self.assertEqual(tuning._key(row), (tw.FLASH, 131072))
+        self.assertIn("256K window; 1 of 1 measured steps went well", router.slice(self.m).line())
+        self.assertEqual(tuning._key(row), (tw.FLASH, 262144))
 
     def test_api_budgets_have_no_prefill_term_and_room_for_one_silent_reply(self):
         self.assertEqual(router.budgets(self.m), {"think": 420, "silence": 900, "round": 2400})
@@ -474,7 +476,7 @@ class ApiSizing(Base):
         self.start("t-gpu", "ok")
         wait_phase("t-gpu", {"review"})
         task = self.as_api("t-gpu")
-        self.assertEqual(task.status["api_entry"], {"limit": {"context": 131072, "output": 32768},
+        self.assertEqual(task.status["api_entry"], {"limit": {"context": 262144, "output": 32768},
                                                     "options": {"max_tokens": 32768}})
         before = json.loads(runner.write_config_layer(task).read_text())
         self.fail_catalog()
@@ -485,7 +487,7 @@ class ApiSizing(Base):
         self.assertEqual(layer["provider"]["deepinfra"], before["provider"]["deepinfra"])
         self.assertEqual(layer["provider"]["deepinfra"]["options"]["headerTimeout"], 600_000)
         self.assertEqual(layer["compaction"], {"background": False, "auto": True, "buffer": 36864,
-                                               "keep": {"tokens": 13107}})  # a tenth of 128K (#1185)
+                                               "keep": {"tokens": 26214}})  # a tenth of 256K (#1185)
         content = json.loads(runner.rules_env(layer)["OPENCODE_CONFIG_CONTENT"])
         self.assertEqual(content["provider"]["deepinfra"]["models"],
                          {"deepseek-ai/DeepSeek-V4.1-Flash-1017": task.status["api_entry"]})
@@ -511,7 +513,7 @@ class ApiSizing(Base):
                                                   "opencode_model": tw.FLASH, "via": "api"})
         with mock.patch.object(runner, "checkout", return_value=False):  # stop right after resolve
             runner.drive(store.Task("t-gpu"))
-        self.assertEqual(store.Task("t-gpu").status["api_entry"]["limit"], {"context": 131072, "output": 32768})
+        self.assertEqual(store.Task("t-gpu").status["api_entry"]["limit"], {"context": 262144, "output": 32768})
         self.fail_catalog()
         with mock.patch.object(runner, "checkout", side_effect=AssertionError("ran on")):
             runner.drive(store.Task("t-gpu"))
@@ -530,20 +532,103 @@ class ApiSizing(Base):
             got = router.budgets(self.m)
             self.assertEqual((got["think"], got["silence"], got["round"]), want, write)
 
+    def test_an_api_window_is_capped_at_256k_its_catalogs_own_or_a_price_tier_never_under_128k(self):
+        # #1134's E19 (DeepInfra's DeepSeek V4.1 Flash, 12 runs over 5 cells, 2026-11-24): at 128K
+        # every run compacted 4-13 times, at 72% of the window; at 256K 0-1 times, at about the
+        # same cost and with no new stop. A ceiling only: a smaller catalog window is its own, and
+        # past a price tier every request costs the tier's rate, so it stops there, but never
+        # under the 128K every API task had before
+        from workbench import meter
+        flat = [{"input": 0.2, "output": 0.6}]
+        tiered = lambda size: flat + [{"tier": {"type": "context", "size": size}, "input": 1, "output": 3}]  # noqa: E731
+        for context, cost, want in ((1048576, flat, 262144), (200000, flat, 200000),
+                                    (1048576, tiered(200000), 200000), (131072, flat, 131072),
+                                    (64000, flat, 64000), (1048576, tiered(100000), 131072),
+                                    (1048576, None, 262144)):
+            with self.subTest(context=context, cost=cost):
+                m = models._api_model("deepinfra/m", {"name": "m", "limit": {"context": context, "output": 384000},
+                                                      **({"cost": cost} if cost else {})}, {}, {})
+                self.assertEqual(m.config["limit"]["context"], want)
+                self.assertEqual(m.config["options"]["max_tokens"], min(32768, m.config["limit"]["output"]))
+        haiku = models.hosted()["anthropic/claude-haiku-5-5"]
+        self.assertEqual(meter.first_tier(haiku.config), 100000)
+        self.assertEqual(haiku.config["limit"]["context"], 131072)    # its 5x tier: kept where it was
+
+    def test_a_driven_api_task_runs_in_the_256k_window_in_its_layer_restatement_and_catalog(self):
+        # #1134's E19, its plan's risk 1: the layer, OPENCODE_CONFIG_CONTENT (loaded after it, so
+        # a 128K there would undo the layer's) and the task's catalog.json all say one window
+        from workbench import meter
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {}})
+        os.environ["FAKE_AUTH_EXPORT"] = json.dumps([
+            {"id": "cred_deepinfra", "integrationID": "deepinfra", "label": "main", "active": True,
+             "value": {"type": "key", "key": tw._ApiTask.CANARY}}])
+        self.addCleanup(meter._METERS.clear)
+        with mock.patch.object(tw.cli, "spawn_runner"):
+            self.start("t-wide", "ok", "--no-base-check")
+        task = store.Task("t-wide")
+        store.write_json(task.dir / "task.json", {**task.spec, "model": tw.FLASH,
+                                                  "opencode_model": tw.FLASH, "via": "api"})
+        seen = {}
+
+        def rounds(t, m, say):    # what drive hands the rounds, while the keyhole serves
+            seen["m"] = m
+            seen["layer"] = json.loads(runner.write_config_layer(t).read_text())
+            seen["env"] = runner.agent_env(t)
+            path = runner.catalog_path(t)
+            seen["catalog"] = json.loads(path.read_text()) if path.is_file() else None
+        with mock.patch.object(runner, "_drive", rounds):
+            runner.drive(store.Task("t-wide"))
+        self.assertIn("m", seen, store.Task("t-wide").status.get("last"))
+        entry = {"limit": {"context": 262144, "output": 32768}, "options": {"max_tokens": 32768}}
+        self.assertEqual(store.Task("t-wide").status["api_entry"], entry)
+        cfg = seen["m"].config      # what _drive sets as status `window`, the tuning key, fresh_at's ceiling
+        self.assertEqual(runner.fresh_ceiling(cfg), round((262144 - 36864) / 262144 - 0.05, 6))
+        name = tw.FLASH.split("/", 1)[1]
+        pinned = lambda doc: (lambda e: {"limit": e["limit"], "options": {  # noqa: E731
+            "max_tokens": e["options"]["max_tokens"]}})(doc["provider"]["deepinfra"]["models"][name])
+        self.assertEqual(pinned(seen["layer"]), entry)               # beside the keyhole's base and token
+        self.assertEqual(seen["layer"]["compaction"]["buffer"], 36864)
+        content = json.loads(seen["env"]["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(pinned(content), entry)                     # loaded last: the window holds
+        self.assertEqual(content["compaction"]["buffer"], 36864)
+        self.assertEqual(seen["catalog"]["deepinfra"]["models"][name]["limit"]["context"], 262144)
+
+    def test_a_deepseek_task_whose_off_variant_is_v2_restates_the_256k_window(self):
+        # a body variant (DeepSeek's `thinking`) moves the provider to V2 (runner._as_v2): the
+        # window must reach the restatement there too, or OpenCode reads 128K's again (#1134)
+        self.catalog(tw.THINK_CATALOG)
+        models.hosted(fresh=True)
+        self.models = models
+        task = tw.ApiThinking.start_api(self, "t-v2", "deepseek/deepseek-plain")
+        self.assertEqual(task.spec["opencode_model"], "deepseek/deepseek-plain#wb-off")
+        runner.pin_api(task, models.resolve("deepseek/deepseek-plain"))
+        task = store.Task("t-v2")
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        self.assertEqual(layer["providers"]["deepseek"]["models"]["deepseek-plain"]["limit"]["context"], 262144)
+        content = json.loads(runner.agent_env(task)["OPENCODE_CONFIG_CONTENT"])
+        self.assertNotIn("deepseek", content.get("provider") or {})
+        mine = content["providers"]["deepseek"]["models"]["deepseek-plain"]
+        self.assertEqual((mine["limit"]["context"], mine["settings"]), (262144, {"max_tokens": 32768}))
+
     @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
     def test_real_opencode_compacts_an_api_model_at_the_capped_window_and_asks_32k_out(self):
         # the edge case the issue names: the layer's pins must merge into a catalog model under
-        # V1 `provider`, or OpenCode compacts at 1M again and asks for 256K out (the spike)
+        # V1 `provider`, or OpenCode compacts at 1M again and asks for 256K out (the spike). And
+        # the window is 256K, so OpenCode compacts only past 86% of it, not at 72% of 128K
+        # (#1134's E19: 4-13 compactions a run at 128K, 0-1 at 256K, 2026-11-24)
         entry = self.real_model("deepinfra")
         mid = f"deepinfra/{entry['id']}"
         api = models._api_model(mid, {**entry, "name": entry["id"]}, {}, {})
-        self.assertEqual(api.config["limit"]["context"], min(entry["limit"]["context"], 131072))
+        window = api.config["limit"]["context"]
+        self.assertEqual(window, min(entry["limit"]["context"], models.api_window(api.config)))
         with mock.patch.object(models, "resolve", lambda _: api):
             pins = runner.model_pins(mid)
         buffer = runner.compaction_buffer(api.config)
-        usage = json.dumps({"prompt_tokens": 100_000, "completion_tokens": 1, "total_tokens": 100_001})
+        at = runner.usable_input(api.config["limit"]) - buffer          # OpenCode's compaction point
+        self.assertAlmostEqual(at / window, (window - 36864) / window)
         seen = {}
-        for pinned in (True, False):
+        for pinned, tokens in ((True, at + 5_000), (False, at + 5_000), ("under", at - 20_000)):
+            usage = json.dumps({"prompt_tokens": tokens, "completion_tokens": 1, "total_tokens": tokens + 1})
             port, out, _ = self.capture(f"cap-{pinned}", CAPTURE_USAGE=usage)
             layer = self.layer(port, "deepinfra", compaction={"auto": True, "buffer": buffer})
             if pinned:
@@ -559,9 +644,10 @@ class ApiSizing(Base):
             bodies = [json.loads(x) for x in lines]
             seen[pinned] = ({b.get("max_tokens") for b in bodies if b.get("tools")},
                             any("<template>" in x and "## Objective" in x for x in lines))
-        # pinned: 32K out at most (OpenCode asks less once the window has less room left), and
-        # 100K tokens are past (131072 - 36864): OpenCode compacts
+        # pinned: 32K out at most (OpenCode asks less once the window has less room left), and a
+        # session just past (window - 36864) compacts, and 20K under it (twice 128K's point) not
         self.assertEqual((max(seen[True][0]), seen[True][1]), (32768, True))
+        self.assertFalse(seen["under"][1])
         # unpinned, the catalog's: min(384000, 256000) out, and no compaction under 1M
         self.assertEqual(seen[False], ({min(entry["limit"]["output"], 256000)}, False))
 

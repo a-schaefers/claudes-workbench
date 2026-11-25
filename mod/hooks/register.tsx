@@ -653,7 +653,7 @@ const WORKFLOWS_RULE = 'Dynamic workflows are on (the user\'s choice; `wb workfl
   'role\'s model, never one you pick. Plan the fan-out as a handoff plan (each task its own spec, size, role and ' +
   'acceptance command), name its tasks with one shared prefix and pass it as `--group <prefix>` on each `wb start` ' +
   '(the pane draws them under one header), and say the plan in one line before you start them. ' +
-  'The GPU lease and the provider slots decide what runs together (`--queue` the rest). Review each result on its ' +
+  'The GPU lease and the provider slots decide what runs together (the rest queue). Review each result on its ' +
   'own merits; merge logic first, then tests, then UI or docs.'
 const WORKFLOWS_OFF = 'Dynamic workflows are now off (the user\'s choice; `wb workflows` shows it): run one task ' +
   'at a time again, as the /workbench skill says.'
@@ -1516,6 +1516,21 @@ export function shownCommand(command: string, aim: Aim): string {
 
 type Sending = { question: string; approval?: Row } | { deny: string }
 
+// A commit's `Scope: me` trailer, said in the question: wb patch send refused it unless --anyway,
+// a second yes after this dialog's (#1322). The branch's commits no remote-tracking ref has: those
+// over upstream, as wb patch send counts them.
+const SLUG_RE = /^[a-z0-9][a-z0-9-]*$/
+const PERSONAL = 'A personal patch: a commit\'s Scope trailer is me.'
+async function personal($: any, wt: string): Promise<boolean> {
+  try {
+    const r = await $.process.run(['git', '-C', wt, 'log', '--format=%(trailers:key=Scope,valueonly,separator=%x2C)',
+      'HEAD', '--not', '--remotes', '--'], { timeoutMs: 5000 })
+    return r.exitCode === 0 && String(r.stdout ?? '').split(/[\n,]/).some(x => x.trim().toLowerCase() === 'me')
+  } catch {
+    return false
+  }
+}
+
 // The question: what goes public, word for word. For wb patch send its title and the body's
 // start too, which the command line only names, and what the gate tells wb it approved; one
 // whose title or body it can't read is refused, never asked about (#1005)
@@ -1533,8 +1548,9 @@ async function sendQuestion($: any, command: string, slug: string, aim: Aim, hom
   if (text === undefined) return { deny: NOT_SHOWN(`can't read ${path}`) }
   const lines = text.split('\n')
   const body = lines.slice(0, BODY_LINES).join('\n') + (lines.length > BODY_LINES ? '\n…' : '')
+  const mine = SLUG_RE.test(args.slug) && await personal($, `${mem.root}/upstream/${args.slug}`)
   return {
-    question: `${head}\n\nTitle: ${args.title}\n\nBody:\n${body}\n\nSend it?`,
+    question: `${head}\n\n${mine ? `${PERSONAL}\n\n` : ''}Title: ${args.title}\n\nBody:\n${body}\n\nSend it?`,
     approval: { slug: args.slug, title: args.title, body_file: path, body: text, draft: args.draft, anyway: args.anyway },
   }
 }
@@ -3156,7 +3172,7 @@ async function roleRows(kit: Row, $: any, view: WbPane, role: PaneRoles) {
   ]
   const cap = [
     <kit.Input key="cap" label="▸ API day cap" value={r.day_usd != null ? String(r.day_usd) : ''}
-      placeholder="not set (needed before an API role; $5 suggested)" submitLabel="set" onSubmit={(v: string) => { void setCap($, v) }} />,
+      placeholder="not set: $5 when the first role goes to API" submitLabel="set" onSubmit={(v: string) => { void setCap($, v) }} />,
   ]
   const gpu: any[] = []
   if (!m) gpu.push(dim('gpu-why', OLDER_WB))

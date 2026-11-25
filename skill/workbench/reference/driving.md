@@ -101,6 +101,9 @@ You are the driver, not a spectator. When something tells you the agent is headi
   budget with no tool call (7 minutes from its first output; `--think-timeout` overrides),
   and that round's report says `nudged once`; a round that stalls again right after is stopped. Two nudges on one
   task mean the spec is too big for one step: split it, or name the first file to write.
+  The same once a session when it makes 40 tool calls without changing a file (an API model's
+  more, by its window): "make the first edit now … or finish"; a second time in that session is
+  stopped, "…, even after a nudge", and so is a fresh session's first if no file changed since.
 - A note the runner never delivered (the round stopped first) is in the stuck report. `wb resume`
   carries it; `wb feedback` and `wb next` drop it and say so: put it in the feedback if it still
   matters.
@@ -137,7 +140,7 @@ run it as a backlog. Each task still gets the same review it would by day.
 - Spec everything up front, before the first start, while you have the user's intent fresh.
   Bundle trivial items into one task. When the user names GitHub issues, read each one (`gh issue
   view`) and spec from it.
-- Start each with `wb start … --queue --backlog <name>`, a fresh, dated name for each batch
+- Start each with `wb start … --backlog <name>`, a fresh, dated name for each batch
   (`overnight-2026-11-21`: `wb start` refuses an earlier batch's). They take the GPU in the order you
   started them, and a task you send back goes ahead of the rest; an API provider's slot (3 tasks at
   once) goes to whichever waiting task looks first, in no set order. Their setups and base checks
