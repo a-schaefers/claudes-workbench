@@ -1287,6 +1287,10 @@ def _api_notes(task_name: str, repo: Path, m: models.Model, a, routed: dict) -> 
     return notes
 
 
+# The commands.json `repos` keys that set a task's worktree up: an entry with none of them still
+# gets wb start's note on the ignored directories the worktree lacks (#1299)
+SETUP_KEYS = frozenset({"setup", "copy", "siblings"})
+
 # What an install makes, at any depth: a monorepo's per-package node_modules or .venv
 INSTALL_DIRS = ("node_modules", ".venv", "venv", "target", "vendor")
 
@@ -1678,7 +1682,10 @@ def cmd_start(a):
                 *([f"runs `{setup['setup']}`"] if setup.get("setup") else [])]
         print(f"setup: the runner sets the worktree up first ({'; '.join(does)}); a failure stops "
               "the task before any round")
-    elif "repos" not in context.commands_conf() or not context.repo_conf(repo, sub):
+    # only an entry that says how the worktree is set up (an explicit "setup": "" is the opt-out)
+    # silences the note: one holding only local_only or merge did, and rounds ran on a base that
+    # couldn't find its node_modules (#1299, bar round 8, 2026-11-24)
+    elif not SETUP_KEYS & context.repo_conf(repo, sub).keys():
         if lack := _missing_dirs(repo, sub):
             print(f"note: the worktree has only committed files, not the checkout's ignored "
                   f"{', '.join(lack[:4])}: --setup '<install command>' sets a task up (--copy "

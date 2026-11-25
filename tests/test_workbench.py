@@ -6703,6 +6703,22 @@ class WorktreeSetup(Base):
         out = self.start("t-lack2", "ok", "--setup", "true")  # set up: no note
         self.assertNotIn("node_modules/", out)
 
+    def test_a_repos_entry_that_sets_nothing_up_still_gets_the_ignored_directories_note(self):
+        # #1299 (bar round 8, 2026-11-24): any commands.json entry for the repo silenced the
+        # note, so one holding only local_only or merge left Claude no hint to pass --setup, and
+        # every round ran on a base that couldn't find its node_modules
+        self.ignore("node_modules/")
+        (self.repo / "node_modules" / "leftpad").mkdir(parents=True)
+        conf = Path(os.environ["WB_COMMANDS"])
+        for name, entry, noted in (("t-lo", {"local_only": True}, True),
+                                   ("t-merge", {"merge": "squash", "setup_timeout": 60}, True),
+                                   ("t-optout", {"setup": ""}, False)):  # the explicit opt-out
+            conf.write_text(json.dumps({"repos": {str(self.repo): entry}}))
+            out = self.start(name, "ok", "--no-base-check")
+            self.assertEqual("only committed files, not the checkout's ignored node_modules/" in out,
+                             noted, (entry, out))
+            wait_phase(name, {"review"})
+
     def test_start_names_a_monorepo_packages_ignored_installs_from_the_package(self):
         # #877 (Claude's audit of 1.90.24): only the top level was looked at, so a package's
         # .venv and another's node_modules got no note, and the rounds ran against a base that
