@@ -1567,8 +1567,10 @@ everywhere). In order:
   a linked worktree (`claude --worktree`) matches the main checkout's entry by git dir and has none of its
   installs, and every start there exited 1 with no flag past it (#1377); a missing `--copy` is still refused.
 - For an API task, a standing `copy` entry of commands.json's `repos` that holds a credential
-  (`privacy.copy_holds_credential`: a file if it is text under `CREDENTIAL_MAX` and the matcher flags it, so a
-  binary `test.db` or a big `.csv` goes along; a directory by its dotfiles, the files under a dot-directory,
+  (`privacy.copy_holds_credential`: a file, whatever its name, if it is text under `CREDENTIAL_MAX`, so a
+  binary `test.db` or a big `.csv` goes along, by the strong signal below plus an XML element whose tag ends in a
+  secret's name (Maven's `<password>hunter2</password>`, `privacy._copy_file_holds`) or a Bundler host's login: the
+  token-file matcher refused every API start for an `llm.json`'s `max_tokens` or `TOKENIZERS_PARALLELISM=false`, #1381; a directory by its dotfiles, the files under a dot-directory,
   `COPY_CREDENTIAL_NAMES` (`credentials`, `.git-credentials`, `web.config`, `app.config`) and
   `COPY_CONFIG_SUFFIXES` files (`.env`, `.ini`, `.yml`, `.yaml`, `.toml`, `.properties`, `.netrc`, `.json`,
   `.pem`, `.key`) outside `COPY_SKIP_DIRS` such as `node_modules` or `deps`, whose code is full of

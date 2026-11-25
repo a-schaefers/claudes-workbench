@@ -39600,6 +39600,37 @@ class Privacy(_KeyholeTest):
             json.dumps({"bos_token": "<s>", "mask_token": "[MASK]"}))
         self.start_api("t-cpr-ok")
 
+    def test_a_copied_config_file_with_only_settings_named_like_tokens_does_not_refuse_an_api_start(self):
+        # #1381 (2026-11-25): a single copied file was judged by the token-file matcher, whose bare
+        # keyword refused every API start for settings, while the same file in a copied directory
+        # went along
+        d = Path(self.tmp.name) / "copied"
+        d.mkdir()
+        def holds(name, text):
+            (d / name).write_text(text)
+            return cli.privacy.copy_holds_credential(d / name)
+        for name, text in ((".env", "TOKENIZERS_PARALLELISM=false\nDEBUG=1\n"),
+                           ("llm.json", json.dumps({"model": "local", "max_tokens": 4096})),
+                           ("app.env", "PASSWORD_MIN_LENGTH=8\nSESSION_TIMEOUT=30\n"),
+                           ("settings.ini", "[auth]\npassword_reset_ttl = 3600\n")):
+            self.assertFalse(holds(name, text), name)
+        for name, text in ((".env", "OPENAI_API_KEY=sk-abcdef1234567890\n"),
+                           ("db.env", "DB_PASSWORD=hunter2\n"),
+                           (".npmrc", "//registry.npmjs.org/:_authToken=npm_abcdefghijklmnop\n"),
+                           ("settings.xml", "<server><id>x</id><password>hunter2</password></server>\n"),
+                           ("config", 'BUNDLE_GEMS__EXAMPLE__COM: "user:pass"\n')):
+            self.assertTrue(holds(name, text), name)
+        # end to end (a .env is never copied: cli.SECRET_FILES)
+        (self.repo / ".gitignore").write_text("llm.json\napp.env\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
+        (self.repo / "llm.json").write_text(json.dumps({"model": "local", "max_tokens": 4096}))
+        (self.repo / "app.env").write_text("TOKENIZERS_PARALLELISM=false\nPASSWORD_MIN_LENGTH=8\n")
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"copy": ["llm.json", "app.env"]}}}))
+        self.role(via="api", api=FLASH)
+        self.start_api("t-cpenv")
+        self.assertEqual(store.Task("t-cpenv").spec["copy"], ["llm.json", "app.env"])
+
     def test_an_api_task_takes_a_standing_sibling_and_a_big_copied_directory_as_configured(self):
         # #1322; a copied directory's package trees aren't read for a credential
         # (privacy.COPY_SKIP_DIRS): their code is full of `token = …`, which would refuse every

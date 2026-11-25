@@ -1153,8 +1153,9 @@ def _standing_gap(conf: dict, repo: Path, sub: str | None, advice: bool = True) 
     dry run's (_route_start), so the dialog never asks for a start wb start then refuses (#1227).
     An entry is the path from its key's directory, as _worktree_setup copies it
     (context.repo_conf_dir, _copy_path, #1346): from the root, a package key's node_modules was
-    the root's. A file is read if it is text under the cap, a directory's config files outside
-    its package trees for a strong signal only (privacy.copy_holds_credential): only files were,
+    the root's. A file is read if it is text under the cap, as a directory's config files outside
+    its package trees are, for a strong signal only (privacy.copy_holds_credential; a file's by
+    the token-file matcher refused an llm.json's max_tokens, #1381): only files were,
     by holds_credential, which refused a binary test.db and let config/local/ go unread (#1322's
     review), and its matcher refused a models/ copy for tokenizer_config.json's bos_token. Naming
     the entry once let it through, which every start then repeated (#1322)."""
