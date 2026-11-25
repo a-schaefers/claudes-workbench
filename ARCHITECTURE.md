@@ -8656,7 +8656,7 @@ message (#1138).
 `AgentMcp` runs the agents' MCP server as a subprocess on stdio against its own
 chat server (`initialize`, `tools/list`, each tool, the loopback refusal, a redirect never followed, a request
 answered to the user alone staying done in a bounded number of waits, an expired one with a listener up, every call
-on `/api/v1/` with a key's replay, its 422 and the chat's 410 each said as such, a chat without `/api/v1/` refused), and, with
+on `/api/v1/` with a key's replay, its 422 and the chat's 410 each said as such, a chat without `/api/v1/` refused, 2.0's 403 and an older one's 404 alike), and, with
 `opencode` on PATH, real OpenCode with the docs' config line, `capture_llm.py` making the tool calls (#1138).
 
 **Rate limits** (`RateLimits`, #1020): the runner in-process (`runner.drive`) on a task written as `wb start --role`

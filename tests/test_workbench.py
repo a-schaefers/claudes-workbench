@@ -31243,10 +31243,14 @@ class AgentMcp(Base):
         self.assertLess(time.monotonic() - began, 4)
         self.assertGreaterEqual(set(asked), {"/api/v1/health", "/api/v1/send", "/api/v1/wait", "/api/v1/state"})
         self.assertEqual([p for p in asked if not p.startswith("/api/v1/")], [])
-        with mock.patch.object(handler, "_versioned", lambda h: None):   # a chat from before 2.1
-            r = rpc.tool("ask_claude", text="hello")
-        self.assertTrue(r["isError"])
-        self.assertIn("no /api/v1/", r["content"][0]["text"])
+        # a chat from before 2.1: 2.0's allow-list answers /api/v1/ 403 (it was "the token was
+        # refused", the merge of 2.0), an older chat 404
+        for may in (self.chat.agent_may, lambda m, p: True):
+            with mock.patch.object(handler, "_versioned", lambda h: None), \
+                    mock.patch.object(self.chat, "agent_may", may):
+                r = rpc.tool("ask_claude", text="hello")
+            self.assertTrue(r["isError"])
+            self.assertIn("no /api/v1/", r["content"][0]["text"])
         self.assertEqual(len(self.chat.thread()), 1)                       # nothing sent
 
     def test_get_reply_stays_done_for_a_request_answered_to_the_user_alone_without_polling_the_chat(self):

@@ -40,6 +40,8 @@ VERSION = "1"  # the agent chat API's version it speaks (`api` in /api/v1/health
 # the versioned paths (docs/chat-api.yaml), new with this server in workbench 2.1; ask_claude.py
 # keeps /api/ so it works with an older chat, and a chat without /api/v1/ is said so here (#1138)
 API = "/api/v1"
+# a chat before 2.0 answers it 404; 2.0's agent allow-list, 403 "agent tokens can't use /api/v1/…"
+NO_V1 = "this chat has no /api/v1/ (workbench before 2.1): the user updates it with `wb update`. Nothing was sent"
 WAIT_DEFAULT, WAIT_MOST = 20, 300  # get_reply's hold: many MCP clients cut a tool call at 60 s
 SEND_TRIES = 3  # a send cut by the chat restarting is sent again, under the same key
 KEY = re.compile(r"[A-Za-z0-9._:-]{1,64}")  # a cid's room (1 to 64), in plain characters
@@ -125,6 +127,8 @@ def call(method: str, path: str, body=None, headers=None, timeout: float = 30, a
     try:
         return ask_claude.call(method, API + path, body, headers, timeout, answered)
     except ask_claude.Refused as e:
+        if str(e).startswith(f"agent tokens can't use {API}/"):  # a 2.0 chat: /api/v1/ is off its allow-list
+            raise Refusal(NO_V1) from None
         raise Refusal(f"the token was refused: {e}") from None
 
 
@@ -142,9 +146,8 @@ def ask(text: str, key: str = "") -> dict:
         raise Refusal("key is 1 to 64 of A-Z a-z 0-9 . _ : -")
     key = key or str(uuid.uuid4())
     code, health = call("GET", "/health")
-    if code == 404:
-        raise Refusal("this chat has no /api/v1/ (workbench before 2.1): the user updates it with "
-                      "`wb update`. Nothing was sent")
+    if code == 404:  # a chat before 2.0
+        raise Refusal(NO_V1)
     if code != 200:
         raise Refusal(f"the chat answered {_error(health, code)}")
     if not health.get("listening"):
