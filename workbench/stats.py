@@ -4,7 +4,6 @@ a measurement that costs nothing is on by default, and every one can be turned o
 everything workbench has learned, for the tab's history (`wb stats --json`, #405)."""
 import time
 from collections import Counter, defaultdict
-from datetime import date, timedelta
 from statistics import median
 
 from . import store
@@ -66,11 +65,12 @@ def line() -> str:
             f"{'on' if s['live'] else 'off'} · every {s['every']} s")
 
 
-# The feed (#405): everything workbench has learned, as one object for the Stats tab (`wb stats
+# The feed (#405): what workbench has learned, as one object for the Stats tab (`wb stats
 # --json`). Built from what already computes it; a section with no data is left out, never a
-# zero, and the savings are the estimate savings.py labels as one.
+# zero. The score, the savings estimate, the streak, the work absorbed, the questions, spec-gap
+# discards, the energy and its cost and the 30 days' line were in it too: precision nobody acted
+# on (#1322); `wb savings` still says the saving.
 MILESTONES_LANDED = (1, 10, 25, 50, 100, 250, 500, 1000)
-MILESTONES_SAVED = (100_000, 1_000_000, 10_000_000, 100_000_000)  # Claude tokens, estimated
 TREND_MIN = 6  # speed samples (tasks) before a model's trend is given
 
 
@@ -79,9 +79,8 @@ def _day(ts: float | None) -> str | None:
 
 
 def _midnight(now: float) -> float:
-    """The next local midnight after ``now``: the feed holds until then (its streak, its 7 and 30
-    days and its periods are counted from today), so the pane reads it again once it passes, files
-    unchanged or not (#575)."""
+    """The next local midnight after ``now``: the feed holds until then (its periods are counted
+    from today), so the pane reads it again once it passes, files unchanged or not (#575)."""
     t = time.localtime(now)
     return time.mktime((t.tm_year, t.tm_mon, t.tm_mday + 1, 0, 0, 0, 0, 0, -1))
 
@@ -93,26 +92,6 @@ def _landed(r: dict) -> bool:
 def _mean(xs: list) -> float | None:
     xs = [x for x in xs if isinstance(x, (int, float))]
     return round(sum(xs) / len(xs), 1) if xs else None
-
-
-def _streak(rows: list[dict], now: float) -> dict | None:
-    """Days in a row with a task landed: the current run (ending today, or yesterday while today
-    has none yet) and the best."""
-    days = sorted({_day(r["ts"]) for r in rows if _landed(r) and r.get("ts")})
-    if not days:
-        return None
-    best = run = 1
-    gap = lambda a, b: (date.fromisoformat(b) - date.fromisoformat(a)).days  # noqa: E731
-    for a, b in zip(days, days[1:]):
-        run = run + 1 if gap(a, b) == 1 else 1
-        best = max(best, run)
-    current = 0
-    today = date.fromtimestamp(now)  # dates, not now - 86400: a 23- or 25-hour day skipped one (#563)
-    if days[-1] in (today.isoformat(), (today - timedelta(days=1)).isoformat()):
-        current, i = 1, len(days) - 1
-        while i > 0 and gap(days[i - 1], days[i]) == 1:
-            current, i = current + 1, i - 1
-    return {"current": current, "best": best, "days": len(days)}
 
 
 def _bests(rows: list[dict]) -> dict:
@@ -138,43 +117,16 @@ def _bests(rows: list[dict]) -> dict:
 
 
 def _milestones(rows: list[dict]) -> list[dict]:
-    """Each milestone reached, with its day: tasks landed, and Claude tokens saved (estimate),
-    the saving over the same rows as savings.totals, spec-gap discards and all: over the judged
-    rows alone it reached 100K that the all-time saving never did (#569)."""
-    from . import savings
-    out, landed, saved = [], 0, 0
-    marks_l, marks_s = list(MILESTONES_LANDED), list(MILESTONES_SAVED)
+    """Each milestone of tasks landed reached, with its day (Claude tokens saved were one too,
+    #1322)."""
+    out, landed = [], 0
+    marks = list(MILESTONES_LANDED)
     for r in sorted(rows, key=lambda r: r.get("ts") or 0):
         if _landed(r):
             landed += 1
-            while marks_l and landed >= marks_l[0]:
-                out.append({"kind": "landed", "n": marks_l.pop(0), "day": _day(r.get("ts"))})
-        if (p := savings.of_row(r)) is not None:
-            saved += p["saved"]
-            while marks_s and saved >= marks_s[0]:
-                out.append({"kind": "saved", "n": marks_s.pop(0), "day": _day(r.get("ts"))})
+            while marks and landed >= marks[0]:
+                out.append({"kind": "landed", "n": marks.pop(0), "day": _day(r.get("ts"))})
     return out
-
-
-def _absorbed(rows: list[dict]) -> dict:
-    """Work that never reached Claude: auto-fix rounds (attempts, whatever came of them) and the
-    tasks whose tests then passed, and handovers in tasks that went on to land. A question isn't
-    here: its notice wakes Claude (#562)."""
-    fixed = [r for r in rows if (r.get("auto_fixes") or 0) > 0]
-    out = {"auto_fixes": sum(r["auto_fixes"] for r in fixed),
-           "auto_fixed_tasks": sum(1 for r in fixed if r.get("tests_ok")),
-           "handovers_landed": sum(1 for r in rows if _landed(r)
-                                   and any((s.get("handovers") or 0) > 0 for s in r.get("steps") or []))}
-    return {k: v for k, v in out.items() if v}
-
-
-def _questions(rows: list[dict]) -> dict:
-    """The agents' ask_reviewer questions: asked, and answered by `wb answer` (a row before
-    `answered` was recorded counts as asked only: never more answered than known, #562)."""
-    asks = [r.get("asks") or {} for r in rows]
-    out = {"asked": sum(a.get("questions", 0) for a in asks),
-           "answered": sum(a.get("answered", 0) for a in asks)}
-    return {k: v for k, v in out.items() if v}
 
 
 def _models(rows: list[dict]) -> dict:
@@ -256,16 +208,14 @@ def _renames(over: dict, model_id: str) -> list[str]:
 
 def _model_stats(model: str, rs: list[dict]) -> dict:
     """One model's record over ``rs``; its speeds (router.speed) are ``model``'s."""
-    from . import router, spend
+    from . import router
     n, landed = len(rs), sum(map(_landed, rs))
-    claude = [spend.weighted(r["claude"]) for r in rs if isinstance(r.get("claude"), dict)]
     m = {"tasks": n, "landed": landed, "accepted_pct": round(100 * landed / n),
          "rounds": _mean([r.get("rounds") for r in rs]),
          "auto_fixes": _mean([r.get("auto_fixes") for r in rs]),
          "reviews": _mean([r.get("reviews") for r in rs]),
          "minutes": _mean([r.get("minutes") for r in rs]),
          "local_tokens": round(sum((r.get("tok_in") or 0) + (r.get("tok_out") or 0) for r in rs) / n),
-         **({"claude": round(sum(claude) / len(claude))} if claude else {}),
          **({"speed": sp} if (sp := router.speed(model)) else {}),
          **_kind_stats(rs)}
     trend = [[r["ts"], r["speed"]["write"]] for r in sorted(rs, key=lambda r: r.get("ts") or 0)
@@ -306,18 +256,6 @@ def _by(rows: list[dict], key) -> dict:
             by[k].append(r)
     return {k: {"tasks": len(rs), "accepted_pct": round(100 * sum(map(_landed, rs)) / len(rs))}
             for k, rs in by.items()}
-
-
-def _days(rows: list[dict], now: float, n: int = 30) -> list[dict]:
-    today = date.fromtimestamp(now)  # local dates: now - i * 86400 skipped or repeated a day at DST (#563)
-    want = [(today - timedelta(days=i)).isoformat() for i in range(n - 1, -1, -1)]
-    tasks, landed = defaultdict(int), defaultdict(int)
-    for r in rows:
-        if r.get("ts"):
-            d = _day(r["ts"])
-            tasks[d] += 1
-            landed[d] += _landed(r)
-    return [{"day": d, "tasks": tasks[d], "landed": landed[d]} for d in want]
 
 
 def _bench() -> dict:
@@ -378,70 +316,39 @@ def _helps(rows: list[dict]) -> dict:
             if m and any(n for _, n in h.values())}
 
 
-def _energy(rows: list[dict], price: float | None) -> dict | None:
-    """A period's GPU energy: every row that measured it (`gpu_wh`; another machine's GPU,
-    `remote_gpu`, measured nothing here), compared by savings or not. savings.totals sums only
-    the rows it can compare, so a period's tasks run outside a session lost their watt-hours
-    (#568). The cost with a price set."""
-    whs = [r["gpu_wh"] for r in rows if isinstance(r.get("gpu_wh"), (int, float))
-           and not isinstance(r["gpu_wh"], bool) and not r.get("remote_gpu")
-           and r.get("kind") != "api"]  # an API task ran on no GPU of ours (#1022)
-    if not whs:
-        return None
-    wh = round(sum(whs), 1)
-    return {"wh": wh, **({"cost": round(wh / 1000 * price, 2)} if price is not None else {})}
-
-
-SUMMARY = ("periods", "streak", "absorbed", "questions", "guards")  # what `wb stats` shows of the feed
+SUMMARY = ("periods", "guards")  # what `wb stats` shows of the feed
 
 
 def feed(now: float | None = None, only: tuple | None = None) -> dict:
     """`wb stats --json`: the Stats tab's history (#405). results.jsonl is read once and that
-    snapshot passed down: each period's savings and each model's helps read it again, 16 reads
-    of a 4,800-row history per feed (#565). ``only``: these sections alone (`wb stats`)."""
+    snapshot passed down: each model's helps read it again, 16 reads of a 4,800-row history per
+    feed (#565). ``only``: these sections alone (`wb stats`)."""
     from . import savings, tuning
     now = store.now() if now is None else now
     every = store.results()
     rows = [r for r in every if tuning.judged(r)]  # trials and spec-gap discards out
     out: dict = {"ts": now, "until": _midnight(now), "settings": settings(), "tasks": len(rows)}
-    price = savings.price()
     paid_rows = store.results(trials=True)  # the money counts trials: money spent is spent (#1022)
     periods = {}
     for name, span in savings.PERIODS.items():
         since = now - span if span else 0
         rs = [r for r in rows if (r.get("ts") or 0) >= since]
-        t = savings.totals(every, since=since)
-        # in the saving (Claude's tokens were spent) but not the task count: said beside it (#569)
-        # a discard after a stop from outside the step isn't the spec's (#1245), unless Claude
-        # put it down to the spec all the same: results.table's rule, so wb stats agrees with itself
-        gaps = sum(1 for r in every if (r.get("ts") or 0) >= since and not tuning.judged(r)
-                   and not (tuning.stopped_outside(r) and not r.get("spec_gaps")))
-        energy = _energy([r for r in every if (r.get("ts") or 0) >= since], price)
         api = _api_period(savings.api_totals(paid_rows, since))
-        if rs or t["tasks"] or gaps or energy or api:
+        if rs or api:
             landed = sum(map(_landed, rs))
             periods[name] = {"tasks": len(rs), "landed": landed,
                              **({"accepted_pct": round(100 * landed / len(rs))} if rs else {}),
-                             **({"spec_gaps": gaps} if gaps else {}),
-                             **({"energy": energy} if energy else {}),
-                             # nothing to compare: no savings, rather than a row of zeros
-                             **({"savings": t, "score": savings.score(t)} if t["tasks"] else {}),
                              **({"active_minutes": am} if (am := round(sum(r.get("active_minutes") or 0
                                                                            for r in rs), 1)) else {}),
                              **({"api": api} if api else {})}
     sections = {
         "periods": lambda: periods,
-        "streak": lambda: _streak(rows, now),
         "bests": lambda: _bests(rows),
-        # every row: a spec-gap discard still cost Claude, as in each period's saving (#569)
-        "milestones": lambda: _milestones(every),
-        "absorbed": lambda: _absorbed(rows),
-        "questions": lambda: _questions(rows),
+        "milestones": lambda: _milestones(rows),
         "models": lambda: _models(rows),
         "model_lines": lambda: _model_lines(rows, now),
         "sizes": lambda: _by(rows, lambda r: [r["size"]] if r.get("size") else []),
         "stacks": lambda: _by(rows, lambda r: r.get("stack") or []),
-        "days": lambda: _days(rows, now) if rows else None,
         "guards": lambda: dict(sum((Counter(r.get("guards") or {}) for r in rows), Counter())),
         "helps": lambda: _helps(rows),
         "bench": _bench,
@@ -461,27 +368,10 @@ def summary(f: dict) -> list[str]:
         p = f.get("periods", {}).get(name)
         if not p:
             continue
-        s, saved = p.get("score"), (p.get("savings") or {}).get("saved", 0)
-        said = (f"saved ~{saved / 1000:.0f}K" if saved >= 0 else f"cost ~{-saved / 1000:.0f}K more")
         lines.append(f"{'this week' if name == 'week' else 'all time'}: {p['tasks']} task(s), "
-                     f"{p['landed']} landed" + (f" ({p['accepted_pct']}%)" if "accepted_pct" in p else "")
-                     + (f", and {p['spec_gaps']} discard(s) put down to the spec" if p.get("spec_gaps") else "")
-                     + (f" · {said} Claude tokens (estimate) · score {s['score']}/100" if s else ""))
+                     f"{p['landed']} landed" + (f" ({p['accepted_pct']}%)" if "accepted_pct" in p else ""))
     if api := (f.get("periods", {}).get("week") or {}).get("api"):
         lines.append(api_week_line(api))
-    if st := f.get("streak"):  # a run that ended isn't mentioned: only the best (the plan's rule)
-        lines.append(f"streak: {st['current']} day(s) in a row with a task landed · best {st['best']}"
-                     if st["current"] else f"best streak: {st['best']} day(s) in a row with a task landed")
-    if ab := f.get("absorbed"):
-        parts = []
-        if ab.get("auto_fixes"):
-            parts.append(f"{ab['auto_fixes']} auto-fix round(s), {ab.get('auto_fixed_tasks', 0)} task(s) then green")
-        if ab.get("handovers_landed"):
-            parts.append(f"{ab['handovers_landed']} landed after a handover")
-        lines.append("without waking Claude: " + " · ".join(parts))
-    if q := f.get("questions"):
-        lines.append(f"questions: {q.get('asked', 0)} asked mid-task"
-                     + (f", {q['answered']} answered" if q.get("answered") else ""))
     if g := f.get("guards"):
         lines.append("what stopped agents: " + " · ".join(f"{k} {v}" for k, v in
                                                         sorted(g.items(), key=lambda kv: -kv[1])))

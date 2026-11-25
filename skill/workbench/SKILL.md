@@ -100,8 +100,9 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
   a one-line fix in review or `wb takeover` alike. "Let Claude decide" (the default) is this
   skill as written. Otherwise a `claude-coding` context block gives the rule: "Ask me first", or
   "Only when I say"; a later change comes as a `[workbench]` note with the new rule. It covers
-  shell edits too; the mod refuses your file edits in a task's worktree, and `wb takeover`,
-  until the user's yes is recorded (`wb coding allow`). The user
+  shell edits too. Under "Ask me first" your first file edit in a task's worktree asks the user in
+  a dialog, and their Allow is recorded; `wb takeover` needs `wb coding allow <task>` on their
+  yes. Under "Only when I say" the mod refuses those edits until it is recorded. The user
   may grant one task an exception ahead (`--when "<condition>"`): show them the task, the
   condition and the exact edit first; once used, `wb coding used <task> --did "…"`, then hand
   the testing back with `wb feedback`.
@@ -252,7 +253,7 @@ and its tool works; with no lane, as on macOS, none is hidden and there's no not
 `wb start`'s note says a tool stops on every run there (Maven, Gradle, dotnet, Bundler…), that
 repo's task won't build on API: tell the user, and offer the GPU role.
 Model servers (none runnable, which server, a model on another machine), updating workbench, and
-**the weekly model check** (the mod asks once a week; `/workbench-models`): read
+**the weekly model check** (a toast says when it is due; `/workbench-models`): read
 `reference/models.md` beside this file first.
 When the user asks you to optimize or tune their setup (in any words): run `wb optimize
 estimate` (`--bench` too if they want models compared overnight), tell them how long it holds
