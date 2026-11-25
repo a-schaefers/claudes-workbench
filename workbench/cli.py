@@ -4001,7 +4001,7 @@ def cmd_accept(a):
         # card priced the task at nothing
         measured = results.step(task, landed=True, gaps=a.spec_gap)  # recorded below (#904)
         try:
-            commit = _landed(task)
+            commit, reused = _landed(task), False
             if not commit:
                 head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
                 with _settle_proposals(task, a.take_claude_md):  # kept if the commit fails (#507)
@@ -4015,6 +4015,7 @@ def cmd_accept(a):
                     else:  # nothing new: the branch's commits past the base are the work (the
                         # steps wb next committed, or Claude's own after a takeover: the audit)
                         commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
+                        reused = True
                     if left:  # kept before the worktree goes (#1179's review)
                         print(_keep_left(task, left))
             # the branch must hold it before the worktree goes: on a detached HEAD the commit was
@@ -4033,6 +4034,8 @@ def cmd_accept(a):
             into = gitops.current_branch(repo)
         close = {"commit": commit, "step": measured, "merge": bool(a.merge), "merge_into": into,
                  "merge_as": a.merge_as or "merge", "sign": _signed(spec, a)}
+        if reused:  # no commit of accept's: its message for a squash, and said unused otherwise (#1393)
+            close["message"] = msg
         task.set_status(closing=close, tip=tip,  # before anything is removed
                         last=f"being accepted: wb accept {a.name} finishes it if this stops")  # #878
         _spec_gaps(task, a.spec_gap)
@@ -4062,7 +4065,7 @@ def cmd_accept(a):
         if into and into != "HEAD" and gitops.contains(repo, f"refs/heads/{into}", tip):
             merged = gitops.git(repo, "rev-parse", "--short", f"refs/heads/{into}").strip()  # made already
         elif into and into != "HEAD" and (merged := gitops.squashed(
-                repo, into, close.get("merge_from"), tip)):
+                repo, into, close.get("merge_from"), tip, close.get("message"))):
             pass  # a squash made already: it never holds the tip, so the retry squashed again (#432)
         else:
             try:
@@ -4086,6 +4089,7 @@ def cmd_accept(a):
                     merged = gitops.merge(repo, a.name, into, spec["base"], tip=tip,
                                           how=close.get("merge_as", "merge"),
                                           sign=close.get("sign", True) and _signed(spec, a),
+                                          message=close.get("message"),
                                           started=lambda pid: task.set_status(closing={
                                               **close, "merge_git": [pid, models._started(pid)]}))
             except gitops.GitError as e:
@@ -4127,6 +4131,10 @@ def cmd_accept(a):
         print("the repo has no CLAUDE.md: write one (wb init)")
     # an API task's money on its line; the savings estimate isn't said on every close (#1322)
     paid = f" · {p}" if (p := savings.paid(row)) else ""
+    # the branch ends on a commit that isn't accept's (a step's, Claude's own): -m went nowhere
+    # but a squash, and nothing said so (#1393, 2026-11-25)
+    if close.get("message") and not (merged and close.get("merge_as") == "squash"):
+        paid += f" (-m unused: nothing changed since {commit})"
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
           (f", merged into {close['merge_into']} as {merged}{paid}" if merged else
            f"{paid}\n" + _merge_line(repo, spec, close, a)))

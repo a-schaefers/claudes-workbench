@@ -8221,6 +8221,29 @@ class Context(Base):
         self.assertTrue(subprocess.run(["git", "-C", str(self.repo), "rev-parse", "delegate/t-n"],
                                        capture_output=True).returncode == 0)
 
+    def test_an_accept_whose_last_step_changed_nothing_squashes_under_its_own_message_or_says_m_went_unused(self):
+        # #1393 (2026-11-25): the squash on main took step 1's subject and `(step 1)` trailer for
+        # the whole task, and a plain accept dropped -m and its provenance line without a word
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Check the answer again.\n")
+        main = lambda: subprocess.run(["git", "-C", str(self.repo), "log", "-1", "--format=%B", "main"],  # noqa
+                                      capture_output=True, text=True, check=True).stdout
+        for name, merge in (("t-pl", ()), ("t-sq", ("--merge-as", "squash"))):  # main unmoved first
+            self.start(name, "ok", "--test", TEST_CMD)
+            wait_phase(name, {"review"})
+            run_wb("next", name, "--spec", str(step2), "-m", "feat: step one")
+            wait_phase(name, {"review"})                       # step 2 rewrote the same answer
+            out = run_wb("accept", name, "-m", "feat: both steps", *merge)
+            if merge:
+                self.assertNotIn("-m unused", out)
+                body = main()
+                self.assertTrue(body.startswith("feat: both steps\n"), body)
+                self.assertIn(f"\nWorkbench-Task: {name}\n", body)
+                self.assertNotIn("(step", body)
+                self.assertIn("Delegated to ", body)
+            else:
+                self.assertRegex(out, r"\(-m unused: nothing changed since [0-9a-f]+\)")
+
     def test_after_wb_next_the_review_notices_diffstat_is_the_steps_as_wb_diff_says(self):
         # #1404 (2026-11-25): the stat line was the task's since its base, "2 files changed" beside
         # a files list and a diff "(all of it)" that held step 2's one file
