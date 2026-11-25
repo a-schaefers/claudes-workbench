@@ -868,11 +868,17 @@ round a runner sends** (`runner._cap_wait`, after the lease's load and `_agents_
 API task that `stop_reason(task, ahead=True, tokens)` stops (at the cap or within that request of it,
 `STOP` or `NEAR`; never no cap or no price) while another task's spend stop has told Claude so
 (`runner._cap_told`: phase `stuck`, `infra` `spend`, not `guard` `agents`, its `noticed` since local
-midnight and since routes.json's mtime: a cap changed since is a new question) waits as `phase:
+midnight, and the cap now no higher than its status `cap_told`, the cap it stopped at: a raised cap is
+a new question, any other routes.json write is none, #1304; a stop without `cap_told`, from before it,
+counts while its `noticed` is since routes.json's mtime) waits as `phase:
 queued`, `last: waiting: <why>; <task>'s stop has asked the user: it goes on once the cap is raised
 (wb route cap <usd>) or at local midnight (wb stop gives up)`, its provider slot let go and taken
 again after (then the lease's load once more, the credit wait, and `_agents_gpu` again), on a watch
-of routes.json's directory, looking again at most every `API_WAIT`'s 30 s and at midnight. That stop
+of routes.json's directory, looking again at most every `API_WAIT`'s 30 s and at midnight. A raised
+cap lets it go on, and so does Agents switched to GPU (its own stop, `_agents_gpu`); a role moved to
+the GPU (the stop's own advice, for the next tasks: a waiter keeps its API model), a GPU pin, a
+thinking, busy or other change leaves it waiting: before #1304 any routes.json write let every waiter
+go at once, each into round 1, the guard and its own notice. That stop
 gone (resumed, taken over, discarded), it goes on, and round 1's own stop is the notice: never a
 wait untold. A backlog queued behind the cap each took its slot, ran round 1 into the guard and
 woke Claude with the same stop, one ask of the user per task, as #1178's 402 did. Both notices
@@ -6703,6 +6709,7 @@ off), not `wb start`'s.
 | `ratelimit_until`, `ratelimit` | the keyhole's hold or queue (#1020): epoch seconds, at least 60 s ahead; `{kind: rate_limited\|outage\|queued, provider, code, since, retry_after, why?}`; cleared at the first data, at each round's start and end |
 | `api` | an API task's spend (#1019, *Spend*): `{usd (the task's ledger total; null for a plan), metered, at_catalog (that total as OpenCode's figure prices it, a provider's own row at its `metered`, a `usage.cost` one as booked: what `results.api_usage` compares the export with, #1165, #1234; none for a plan), source (the last row's), tok {in, out, cache_read, cache_write, reasoning}, prices, plan?}`, per ledger row |
 | `api_stop` | `{guard, text}` (`spend`'s with `worst`, the refused request's at its worst, which the round's stop carries on to `meter.stop_text`, #1150): stop the round now: the keyhole's `quota` (#1020) or `setup` (a certificate or proxy of this machine's, #1080), or `spend` (`Meter.room` refused a request, #1019); consumed by the runner's stop (`_ProviderWait.stop`, whose `stopped_by` makes `spend` its own cause), and cleared, whatever its guard, as each round begins (`Meter.begin`) |
+| `cap_told` | a spend stop's day cap when it stopped (`runner._stop_before`, or the round's): the tasks waiting behind the stop go on only once the cap is above it (`runner._cap_told`, #1304) |
 | `guard` | `spend` when `runner._go_on` stopped the task before a round (the day cap, or within one worst request of it, #1150), `agents` when Agents on GPU did (`runner._agents_gpu`, #1213); with `infra` `spend`. With `infra` `provider`, the round's guard that stopped it (`rate_limited`, `outage`, `quota`, `auth`, `setup`, `refused`): `models.held_told` finds a told rate limit or outage by it (#1277) |
 | `updated_at` | every write |
 

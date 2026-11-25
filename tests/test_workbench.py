@@ -36699,12 +36699,82 @@ class ApiSpend(Base):
         self.assertEqual((task.status["phase"], task.status["infra"]), ("stuck", "spend"))
         (notice,) = self.notices("t-behind", "stuck")
         self.assertEqual(notice["cause"], "spend")
-        # a stop told before the cap last changed is a new question too: no wait behind it
+        # a cap raised since the stop is a new question too: no wait behind it
         first.set_status(phase="stuck")
         self.assertEqual(runner._cap_told(task), "t-told")
-        time.sleep(0.01)
-        self.cap(5, api=("significant",))
+        self.cap(6, api=("significant",))
         self.assertEqual(runner._cap_told(task), "")
+
+    def test_a_told_cap_stop_still_stands_after_a_routes_json_write_that_leaves_the_cap_where_it_was(self):
+        # #1304 (the bar loop, 2026-11-24): _cap_told read routes.json's mtime, so the stop's own
+        # advice (the role on the GPU), a GPU pin or any other write voided the told stop
+        self.cap(5, api=("significant",))
+        self.spent(5.0)
+        first, task = self.api_task("t-told", SPEND_M, "ok"), self.api_task("t-behind", SPEND_M, "ok")
+        runner.drive(first)
+        self.assertEqual(first.status["cap_told"], 5)
+        for roles in ({"significant": {"via": "gpu", "api": SPEND_M}},
+                      {"significant": {"via": "api", "api": SPEND_M, "gpu": "local/pinned"}}, {}):
+            time.sleep(0.01)
+            store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 5, "roles": roles})
+            self.assertEqual(runner._cap_told(task), "t-told")
+        self.cap(4, api=("significant",))                      # lowered: no new question either
+        self.assertEqual(runner._cap_told(task), "t-told")
+        self.cap(5.5, api=("significant",))
+        self.assertEqual(runner._cap_told(task), "")
+
+    def test_tasks_waiting_behind_a_told_cap_stop_stay_queued_when_the_role_moves_to_the_gpu(self):
+        # #1304: the role moved to the GPU, as the stop's notice offers, released every waiter at
+        # once, each into round 1, the guard and its own spend notice: the ask once per task again
+        self.cap(5, api=("significant",))
+        self.spent(5.0)
+        first, *queued = [self.api_task(f"t-w{i}", SPEND_M, "ok") for i in range(3)]
+        runner.drive(first)
+        waiting = lambda t: str(t.status.get("last") or "").startswith("waiting: the day's API spend cap")  # noqa: E731
+        other = threading.Thread(target=runner.drive, args=(queued[0],), daemon=True)
+        seen = {}
+
+        def then():
+            deadline = time.time() + 10
+            while not waiting(queued[0]) and time.time() < deadline:
+                time.sleep(0.05)
+            store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 5, "roles": {
+                "significant": {"via": "gpu", "api": SPEND_M}}})
+            time.sleep(1)                                     # both woke on the write and looked
+            seen["phases"] = [t.status["phase"] for t in queued]
+            seen["waiting"] = [waiting(t) for t in queued]
+            seen["stops"] = [r["task"] for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
+                             if r["kind"] == "stuck"]
+            self.cap(100)                                     # raised: both go on
+        other.start()
+        self.assertIsNotNone(self.drive_until_waiting(queued[1], then))
+        other.join(30)
+        self.assertEqual(seen, {"phases": ["queued", "queued"], "waiting": [True, True], "stops": ["t-w0"]})
+        self.assertEqual([t.status["phase"] for t in queued], ["review", "review"])
+
+    def test_a_task_waiting_behind_a_told_cap_stop_stops_for_agents_switched_to_gpu(self):
+        # #1304: only a raised cap, or a change that frees the task, ends the wait: Agents on GPU
+        # stops it before round 1 with its own stop (_agents_gpu), never into the guard
+        self.cap(5, api=("significant",))
+        self.spent(5.0)
+        first, task = self.api_task("t-ag0", SPEND_M, "ok"), self.api_task("t-ag1", SPEND_M, "ok")
+        runner.drive(first)
+        at = []
+
+        def switch():
+            store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "use": "gpu", "day_usd": 5, "roles": {
+                "significant": {"via": "api", "api": SPEND_M}}})
+            at.append(time.monotonic())
+            # a waiter the switch didn't free would wait to midnight: the told stop's end frees it
+            timer = threading.Timer(20, lambda: first.set_status(phase="review"))
+            self.addCleanup(timer.cancel)
+            timer.start()
+        self.assertIsNotNone(self.drive_until_waiting(task, switch))
+        self.assertLess(time.monotonic() - at[0], 15)          # the switch, not the timer
+        st = task.status
+        self.assertEqual((st["phase"], st["guard"], st["round"]), ("stuck", "agents", 1))
+        ev, _ = store.read_jsonl(task.dir / "events.jsonl")
+        self.assertFalse([e for e in ev if e["kind"] == "step"])  # no round ran
 
     def local_only(self):
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {"local_only": True}}}))
