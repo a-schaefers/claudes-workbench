@@ -2975,6 +2975,8 @@ def cmd_progress(a):
     the threshold of checks already on (it was ignored, and "on: …" printed as if saved: #602)."""
     if a.after is not None and a.state == "off":
         die("--after goes with on: wb progress on --after MIN")
+    if a.after is not None and a.after != 0 and progress.user_after({"after": a.after}) is None:
+        die("--after is minutes of active work: a positive number, or 0 to clear it")  # #1401
     if a.after is not None and not a.state:
         if not progress.settings().get("on"):
             die("progress checks are off: wb progress on --after MIN")
@@ -2982,7 +2984,8 @@ def cmd_progress(a):
     if a.state:
         progress.set_enabled(a.state == "on", a.after)  # --after kept unless given (0 clears it, #578)
     s = progress.settings()
-    print("progress checks: " + (f"on: a task past {s['after']:g} min of active work" if s.get("after")
+    after = progress.user_after(s)
+    print("progress checks: " + (f"on: a task past {after:g} min of active work" if after
                                   else "on: a task past its typical length of active work (until a model "
                                   f"and size have {progress.TYPICAL_MIN} timed tasks: "
                                   + ", ".join(f"{m} min {k}" for k, m in progress.DEFAULT_MIN.items()) + ")")

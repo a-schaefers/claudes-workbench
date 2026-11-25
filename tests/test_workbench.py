@@ -21918,6 +21918,21 @@ class Progress(Base):
         self.assertIn("past its typical length", run_wb("progress", "on", "--after", "0"))
         self.assertNotIn("after", progress.settings())
 
+    def test_an_after_that_is_negative_or_not_finite_is_refused_and_a_stored_one_is_ignored(self):
+        # #1401 (2026-11-25): -5 and inf said "on" and no check ever came; NaN crashed every round
+        run_wb("progress", "on", "--after", "30")
+        before = progress.path().read_text()
+        for bad in ("-5", "nan", "inf"):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), mock.patch("sys.stderr", err):
+                run_wb("progress", "on", "--after", bad)
+            self.assertIn("a positive number, or 0 to clear it", err.getvalue())
+            self.assertEqual(progress.path().read_text(), before)
+        progress.path().write_text('{"on": true, "after": -5}')   # written by hand
+        self.assertEqual(progress.typical({"size": "trivial"}),
+                         (float(progress.DEFAULT_MIN["trivial"]), "default"))
+        self.assertIn("past its typical length", run_wb("progress"))
+
     def test_a_check_recommends_and_a_steer_that_answers_it_is_learned_from(self):
         run_wb("coding", "only")
         self.assertIn("on: a task past 0.05 min of active work", run_wb("progress", "on", "--after", "0.05"))
