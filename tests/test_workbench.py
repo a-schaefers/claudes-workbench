@@ -2739,6 +2739,38 @@ class Lifecycle(Base):
         st = wait_phase("t-bgwait", {"review", "stuck"}, timeout=40)
         self.assertEqual((st["phase"], st.get("nudges", 0), st["round"]), ("review", 0, 1))
 
+    def test_a_command_running_in_the_foreground_is_neither_thinking_nor_silence(self):
+        # #1386 (2026-11-25): a suite the agent ran in the foreground with a long `timeout`
+        # printed nothing until it ended; the think nudge killed it, and the next round's run
+        # was stopped "even after a nudge"
+        self.start("t-fg", "fgcmd", "--test", TEST_CMD, "--think-timeout", "2",
+                   "--silence-timeout", "4")
+        st = wait_phase("t-fg", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st.get("nudges", 0), st["round"]), ("review", 0, 1),
+                         st.get("last"))
+        self.assertTrue(st["tests"]["ok"])
+        evs = store.read_jsonl(store.Task("t-fg").dir / "events.jsonl")[0]
+        self.assertFalse([e for e in evs if e.get("kind") == "stopped"])
+        self.assertIn("make test", [e.get("brief", "") for e in evs if e.get("kind") == "tool"][0])
+
+    def test_a_command_running_in_the_foreground_still_meets_the_rounds_wall(self):
+        # #1386: the command waits out the nudge and silence, never the round's limit
+        os.environ["FAKE_FG"] = "60"
+        self.start("t-fgwall", "fgcmd", "--test", TEST_CMD, "--think-timeout", "2",
+                   "--silence-timeout", "4", "--round-timeout", "8")
+        st = wait_phase("t-fgwall", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual(st["phase"], "stuck")
+        self.assertIn("limit", st["last"])
+        self.assertEqual(st.get("guards"), {"round": 1})
+
+    def test_a_job_left_in_the_background_spares_a_thinking_model_no_nudge(self):
+        # #1386's fix waits on a command in the foreground only: one a shell call left running
+        # (a dev server) is no wait, and the model thinking beside it is nudged, then stopped
+        self.start("t-bgthink", "bgthink", "--think-timeout", "2", "--silence-timeout", "120")
+        st = wait_phase("t-bgthink", {"stuck"}, timeout=40)
+        self.assertIn("even after a nudge", st["last"])
+        self.assertEqual((st["nudges"], st["round"]), (1, 2))
+
     def test_a_round_waiting_on_a_background_job_keeps_its_model_loaded(self):
         # #864 (the third 2026-11-21 audit): a test run past Ollama's 5-minute keep-alive (each
         # of OpenCode's requests sets it again) unloaded the model mid-round, and the next request
@@ -6457,6 +6489,19 @@ class WorktreeSetup(Base):
         self.assertFalse((t.worktree / "gen").exists())        # removed, its directories too
         self.assertEqual(gitops.changed(t.worktree), "")
 
+    def test_a_setup_that_writes_an_uncommitted_lockfile_is_told_to_commit_it_or_write_none(self):
+        # #1379 (2026-11-25): `uv sync` in a project with no committed uv.lock writes one; the
+        # notice's remedy, `uv sync --locked`, then failed for want of a lockfile
+        self.start("t-uvlock", "ok", "--test", TEST_CMD, "--setup", "echo 'version = 1' > uv.lock")
+        wait_phase("t-uvlock", {"failed"})
+        note = [r for r in store.notices() if r["task"] == "t-uvlock"][-1]
+        self.assertIn("task t-uvlock: the setup wrote a lockfile the repo doesn't commit (uv.lock), "
+                      "before any round", note["text"])
+        self.assertIn("Commit the lockfile (and the setup may freeze to it: uv sync --locked, npm ci), "
+                      "or have the setup write none (python3 -m venv .venv && .venv/bin/pip install -e .); "
+                      "then wb discard t-uvlock and start again", note["text"])
+        self.assertFalse((store.Task("t-uvlock").worktree / "uv.lock").exists())
+
     def test_a_setup_that_writes_files_then_fails_has_them_undone_so_the_resume_is_told(self):
         # #1347's review (2026-11-24): only a setup that exited 0 was undone; a codegen then a
         # failed install left gen/ and its Gemfile.lock edit, the resume the notice advises
@@ -6587,6 +6632,22 @@ class WorktreeSetup(Base):
         wait_phase("t-build", {"review"}, timeout=60)
         lines = log.read_text().split()                       # (the round's tests log too)
         self.assertLess(lines.index("check-done"), lines.index("build-done"), lines)
+
+    def test_fanned_out_tasks_run_their_round_tests_one_at_a_time(self):
+        # #1378 (2026-11-25): two tasks of a fan-out ran their round tests at once, and a suite
+        # on a fixed port failed EADDRINUSE in all but one: a FAIL and an auto-fix for correct
+        # code. The directory stands in for the port: taken while one suite runs.
+        held = Path(self.tmp.name) / "port-3000"
+        suite = f"mkdir {held} || exit 98; sleep 2; rmdir {held}; {TEST_CMD}"
+        for who in ("a", "b"):
+            self.start(f"t-fan{who}", "ok", "--no-self-review", "--no-base-check", "--auto-fix", "0",
+                       "--test", suite)
+        for who in ("a", "b"):
+            wait_phase(f"t-fan{who}", {"review"}, timeout=60)
+            st = store.Task(f"t-fan{who}").status
+            self.assertTrue(st["tests"]["ok"], st["tests"])
+            self.assertEqual(st.get("auto_fixes", 0), 0)
+        self.assertEqual(json.loads((store.home() / "locks" / "prepare-check.json").read_text()), {})
 
     def test_a_task_whose_setup_failed_is_resumed_and_discarded_never_counts_against_its_model(self):
         # #581, the audit of 1.90: three discards of a lockfile problem scored the model 0/3 and
@@ -6927,6 +6988,65 @@ class WorktreeSetup(Base):
                          "packages/app/node_modules")
         self.assertEqual(cli._copy_path(self.repo, "../../../x", "packages/app"), "../x")
 
+    def test_a_root_entrys_setup_runs_from_the_root_for_a_package_task(self):
+        # #1376 (2026-11-25): the root key's setup ran in the package, so its
+        # ./scripts/bootstrap.sh failed every package task before round 1 (exit 127), while the
+        # same entry's copy paths were read from the root (#1346)
+        self.ignore(".boot", "where")
+        app = self.repo / "packages" / "app"
+        app.mkdir(parents=True)
+        (app / "CLAUDE.md").write_text("# app\n")
+        (self.repo / "scripts").mkdir()
+        (self.repo / "scripts" / "bootstrap.sh").write_text("#!/bin/sh\necho ok > .boot\n")
+        (self.repo / "scripts" / "bootstrap.sh").chmod(0o755)
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "a package"], check=True)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "setup": "./scripts/bootstrap.sh"}}}))
+        os.environ["FAKE_SCENARIO"] = "ok"
+        start = lambda name, *x: run_wb("start", name, "--spec", str(self.spec), "--repo", str(app),  # noqa
+                                        "--model", "mimo", "--no-base-check", *x)
+        out = start("t-rootsetup")
+        self.assertIn("setup from commands.json: runs `./scripts/bootstrap.sh` (from the repo's top)", out)
+        wait_phase("t-rootsetup", {"review"})
+        t = store.Task("t-rootsetup")
+        self.assertEqual(t.spec["setup_dir"], ".")
+        self.assertTrue((t.worktree / ".boot").is_file())
+        self.assertIn("\nexit: 0\n", (t.dir / "setup.txt").read_text())
+        # a --setup still runs at the spot, the package
+        start("t-spotsetup", "--setup", "pwd > where")
+        wait_phase("t-spotsetup", {"review"})
+        t = store.Task("t-spotsetup")
+        self.assertNotIn("setup_dir", t.spec)
+        self.assertTrue((t.worktree / "packages/app/where").is_file())
+        self.assertFalse((t.worktree / "where").exists())
+
+    def test_a_standing_copy_missing_in_a_linked_worktree_is_skipped_with_a_note(self):
+        # #1377 (2026-11-25): the main checkout's entry matches a linked worktree by git dir
+        # (#498), which has no node_modules of its own: every start there exited 1, and no flag
+        # got past it. A --copy Claude passed itself is still refused.
+        self.ignore("node_modules/", ".claude/")
+        (self.repo / "node_modules" / "x").mkdir(parents=True)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "copy": ["node_modules"]}}}))
+        feat = self.repo / ".claude" / "worktrees" / "feat"
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "-q", "-b", "feat", str(feat)],
+                       check=True, capture_output=True)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        start = lambda name, *x: run_wb("start", name, "--spec", str(self.spec), "--repo", str(feat),  # noqa
+                                        "--model", "mimo", "--no-base-check", *x)
+        out = start("t-lw1")
+        self.assertIn(f'note: commands.json "repos" copy node_modules: no node_modules in {feat}, so '
+                      "the task goes without it; --setup '<install command>' sets it up", out)
+        self.assertNotIn("copies node_modules", out)
+        self.assertNotIn("copy", store.Task("t-lw1").spec)
+        wait_phase("t-lw1", {"review"})
+        with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
+            start("t-lw2", "--copy", "node_modules")
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn(f"--copy node_modules: no node_modules in {feat}", err.getvalue())
+        self.assertFalse(store.Task("t-lw2").dir.exists())
+
     def test_a_packages_own_commands_json_copy_is_read_from_the_package(self):
         # #1346 (bar round 9, 2026-11-24; #1158 fixed only --copy): a package key's
         # `copy: ["node_modules"]` copied the root's node_modules, so the base check and every
@@ -6963,12 +7083,13 @@ class WorktreeSetup(Base):
         conf.write_text(json.dumps({"repos": {str(app): {"copy": ["localconf"]}}}))
         self.assertEqual(cli._standing_gap(context.repo_conf(self.repo, "packages/app"), self.repo,
                                            "packages/app"), "")
-        # a refused standing entry names commands.json, not a flag never given
+        # a missing standing entry's note names commands.json, not a flag never given (a note
+        # since #1377, not a refusal)
         conf.write_text(json.dumps({"repos": {str(app): {"copy": ["dist"]}}}))
-        with self.assertRaises(SystemExit), redirect_stderr(err := io.StringIO()):
-            run_wb("start", "t-nodist", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo")
-        self.assertIn('commands.json "repos" copy dist: no packages/app/dist in', err.getvalue())
-        self.assertNotIn("--copy", err.getvalue())
+        out = run_wb("start", "t-nodist", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo")
+        self.assertIn('note: commands.json "repos" copy dist: no packages/app/dist in', out)
+        self.assertNotIn("--copy", out)
+        wait_phase("t-nodist", {"review"})
         # #1346's review (2026-11-24): a key on a linked worktree nested in the repo (Claude
         # Code's .claude/worktrees/x) is the main checkout's root by git dir, but its depth was
         # measured from the main top, three parts: the package's node_modules was read for the root's
@@ -11840,10 +11961,12 @@ class RealOpenCodeRun(Base):
                         steps)                                     # step_finish: part.tokens
         self.assertIn("ok", [r["text"] for r in rows if r.get("kind") == "text"])
         msgs = transcript.export(st["session"], task=task).get("messages", [])  # its home (#1010)
-        # --agent (#1290) records an agent switch ahead of each round's prompt, to the agent the
-        # session already had too; every reader goes by a message's type, never its place
-        self.assertEqual([(m["type"], m.get("agent")) for m in msgs][:2],
-                         [("agent-switched", context.AGENT), ("user", None)])
+        # --agent (#1290) records an agent switch ahead of each round's prompt on 2.3, to the agent
+        # the session already had too; 2.4.1 records none (the opencode workflow, 2026-11-25):
+        # every reader goes by a message's type, never its place
+        kinds = [(m["type"], m.get("agent")) for m in msgs]
+        self.assertIn(kinds[:2], ([("agent-switched", context.AGENT), ("user", None)],
+                                  [("user", None), ("assistant", context.AGENT)]))
         self.assertEqual({m.get("agent") for m in msgs if m["type"] == "assistant"}, {context.AGENT})
         self.assertTrue(runner.context_state(task)["used"])        # an assistant message's tokens
         self.assertEqual(transcript.find_session(task), st["session"])  # session list, by title
@@ -11946,7 +12069,8 @@ class RealOpenCodeRun(Base):
         self.assertIs(st["opencode_home"], True)
         self.assertTrue((task.dir / "opencode/share/opencode/opencode.db").is_file())
         got = transcript.export(st["session"], task=task)
-        self.assertEqual([m["type"] for m in got.get("messages", [])][:2], ["agent-switched", "user"])
+        self.assertEqual([m["type"] for m in got.get("messages", []) if m["type"] != "agent-switched"][:1],
+                         ["user"])                                 # 2.3's switch first, 2.4.1 none
         self.assertTrue(runner.context_state(task)["used"])
         task.set_status(session=None)
         self.assertEqual(transcript.find_session(task), st["session"])  # by title, there
@@ -13033,6 +13157,100 @@ class Lane(Base):
         self.assertEqual(self.reads_in_lane(task, [conf / "opencode" / "opencode.json", conf / "git" / "config",
                                                    conf / "gh" / "hosts.yml", home / "letters" / "a.txt"]),
                          ["read", "read", "refused", "refused"])
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_a_handed_skill_is_readable_wherever_the_library_is_kept_and_the_rest_isnt(self):
+        # #1375 (2026-11-25): with WB_SKILLS=~/skills, or the default path linked into ~/src,
+        # the lane refused the handed skill, OpenCode dropped it without a word, and wb skill
+        # list advised retiring a skill that worked
+        home = self.fake_home()
+        default = home / ".local" / "share" / "workbench" / "skills"
+        default.parent.mkdir(parents=True)
+        (home / "src" / "wb-skills").mkdir(parents=True)
+        default.symlink_to(home / "src" / "wb-skills")
+        for i, lib in enumerate((home / "skills", default)):
+            for name in ("pydoc", "other"):
+                (lib / name).mkdir(parents=True)
+                (lib / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n")
+            if lib == default:
+                os.environ.pop("WB_SKILLS")
+            else:
+                os.environ["WB_SKILLS"] = str(lib)
+            task = self.bare_task(f"t-skill-{i}", self.repo)
+            task.set_status(skills=["pydoc"])
+            handed = Path(context.layer(task)["skills"][0])
+            self.assertEqual(handed, lib / "pydoc")
+            self.assertEqual(self.reads_in_lane(task, [handed / "SKILL.md", lib / "other" / "SKILL.md"]),
+                             ["read", "refused"], lib)
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_git_config_included_from_outside_the_dotfiles_is_read_in_the_lane_but_a_secret_isnt(self):
+        # #1382 (2026-11-25): the user's [includeIf "gitdir:~/work/"] path = ~/work/.gitconfig,
+        # a repo's include.path beside its checkout, or GIT_CONFIG_GLOBAL in ~/dotfiles was
+        # unreadable, and every git call in the lane died "bad config line", GPU and API
+        home = self.fake_home()
+        repo = home / "work" / "proj"
+        repo.mkdir(parents=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True,  # noqa: E731
+                                      capture_output=True)
+        g("init", "-q", "-b", "main")
+        g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init")
+        (home / "work" / ".gitconfig").write_text("[user]\n\temail = me@work\n")
+        (home / "work" / "team.gitconfig").write_text("[alias]\n\tlg = log\n")
+        (home / ".gitconfig").write_text('[includeIf "gitdir:~/work/"]\n\tpath = ~/work/.gitconfig\n')
+        g("config", "include.path", str(home / "work" / "team.gitconfig"))
+        script = ("import subprocess, sys\nfor k in ('user.email', 'alias.lg'):\n"
+                  "    r = subprocess.run(['git', '-C', sys.argv[1], 'config', k], capture_output=True, text=True)\n"
+                  "    print(r.stdout.strip() or r.stderr.replace(chr(10), ' '))\n")
+        for via in ("gpu", "api"):
+            task = store.Task(f"t-inc-{via}")
+            task.dir.mkdir(parents=True)
+            (task.dir / "task.json").write_text(json.dumps({"name": task.name, "repo": str(repo), "via": via}))
+            g("worktree", "add", "-q", "-b", f"delegate/{task.name}", str(task.worktree))
+            out = subprocess.run(lane.wrap(context.writable(task), [sys.executable, "-c", script, str(task.worktree)],
+                                           context.readable(task)), capture_output=True, text=True, timeout=20)
+            self.assertEqual(out.stdout.split("\n")[:2], ["me@work", "log"], (via, out.stderr))
+        (home / "dotfiles").mkdir()
+        (home / "dotfiles" / "gitconfig").write_text("[user]\n\temail = me@dotfiles\n")
+        os.environ["GIT_CONFIG_GLOBAL"] = str(home / "dotfiles" / "gitconfig")
+        out = subprocess.run(lane.wrap(context.writable(task), [sys.executable, "-c", script, str(task.worktree)],
+                                       context.readable(task)), capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.stdout.split("\n")[:2], ["me@dotfiles", "log"], out.stderr)
+        (home / ".ssh").mkdir()                                        # a secret stays hidden
+        (home / ".ssh" / "gitconfig").write_text("[user]\n\tname = x\n")
+        g("config", "--add", "include.path", str(home / ".ssh" / "gitconfig"))
+        self.assertNotIn(str(home / ".ssh" / "gitconfig"), context.read_repo_dirs(task))
+        self.assertFalse([p for p in context.readable(task) if p.startswith(str(home / ".ssh"))])
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_a_repo_that_borrows_its_objects_has_git_work_in_the_lane(self):
+        # #1383 (2026-11-25): a `git clone --shared` of a mirror, or a repo whose objects/ is a
+        # link out of its git dir, had every agent git call fail "unable to open loose object"
+        home = self.fake_home()
+        mirror = home / "mirror"
+        run = lambda *a: subprocess.run(["git", *a], check=True, capture_output=True)  # noqa: E731
+        run("init", "-q", "-b", "main", str(mirror))
+        run("-C", str(mirror), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
+            "--allow-empty", "-m", "one")
+        run("clone", "-q", "--shared", str(mirror), str(home / "work" / "shared"))
+        run("clone", "-q", str(mirror), str(home / "work" / "linked"))
+        objects = home / "work" / "linked" / ".git" / "objects"
+        shutil.move(objects, home / "objstore")
+        objects.symlink_to(home / "objstore")
+        for name in ("shared", "linked"):
+            repo = home / "work" / name
+            for via in ("gpu", "api"):
+                task = store.Task(f"t-alt-{name}-{via}")
+                task.dir.mkdir(parents=True)
+                (task.dir / "task.json").write_text(json.dumps({"name": task.name, "repo": str(repo), "via": via}))
+                run("-C", str(repo), "worktree", "add", "-q", "-b", f"delegate/{task.name}", str(task.worktree))
+                out = subprocess.run(lane.wrap(context.writable(task),
+                                               ["git", "-C", str(task.worktree), "log", "-1", "--format=%s"],
+                                               context.readable(task)), capture_output=True, text=True, timeout=20)
+                self.assertEqual((out.returncode, out.stdout.strip()), (0, "one"), (name, via, out.stderr))
 
     @home_outside_the_lane
     def test_toolchain_bins_user_site_and_a_repo_under_gopath_stay_out_of_the_lane(self):
@@ -14491,8 +14709,8 @@ class CheckoutVenv(Base):
         bins = self.repo / "node_modules" / ".bin"
         os.environ["PATH"] = f"{os.environ['PATH']}{os.pathsep}{bins}"  # a direnv PATH_add
         out = self.start("t-novenv", "ok", "--test", self.TEST, "--auto-fix", "0", "--no-base-check")
-        self.assertIn(f"note: the agent leaves out your active venv ({user}): --setup 'uv sync' (or the "
-                      "project's install) gives the worktree its own\n", out)
+        self.assertIn(f"note: the agent leaves out your active venv ({user}): --setup 'python3 -m venv .venv "
+                      "&& .venv/bin/pip install -e .' (or the project's install) gives the worktree its own\n", out)
         st = wait_phase("t-novenv", {"review"})
         task = store.Task("t-novenv")
         said = task.round_dir(1).joinpath("tests.txt").read_text()
@@ -14511,6 +14729,21 @@ class CheckoutVenv(Base):
         self.assertEqual(Permission.verdict(rules, "pipenv install"), "allow")
         with mock.patch.object(lane, "abi", return_value=0):
             self.assertEqual(Permission.verdict(context.shell_rules(task), "pipenv install"), "allow")
+
+    def test_the_venv_note_advises_uv_sync_locked_only_where_the_base_commits_a_uv_lock(self):
+        # #1379 (2026-11-25): the note said `uv sync`, which writes an uncommitted uv.lock and
+        # fails the task before any round (#1347), and `uv sync --locked` fails with no lockfile
+        task = store.Task("t-uvnote")
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": "t-uvnote", "repo": str(self.repo),
+                                                        "base": "HEAD", "subdir": "pkg"}))
+        self.assertEqual(context.venv_setup(task), "python3 -m venv .venv && .venv/bin/pip install -e .")
+        (self.repo / "pkg").mkdir()
+        (self.repo / "pkg" / "uv.lock").write_text("version = 1\n")
+        self.assertEqual(context.venv_setup(task), context.VENV_SETUP)     # not committed yet
+        subprocess.run(["git", "-C", str(self.repo), "add", "pkg/uv.lock"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "lock"], check=True)
+        self.assertEqual(context.venv_setup(task), "uv sync --locked")
 
     def test_a_venv_the_missing_directories_note_names_gets_no_note_of_its_own(self):
         # #1322: the checkout's ignored .venv drew both notes, each with the same advice
@@ -26808,22 +27041,45 @@ class WebChat(Base):
         # the terminal, neither shown on the phone nor allowed
         chat, tok = self.chat, self.chat.token()
         d = chat.chat_dir()
-        self.assertEqual(self.call("/api/active", {})[0], 401)
-        self.assertEqual(self.call("/api/active", {"x": 1}, token=tok)[0], 400)
-        self.assertEqual(self.call("/api/active", {}, token=tok), (200, {}))
-        self.assertAlmostEqual(store.read_json(d / "page.json")["at"], store.now(), delta=5)
-        self.assertTrue((d / "away.json").exists())        # on by default (#1281): away
-        (d / "away.json").unlink()
-        chat.set_on(False)
-        self.assertEqual(self.call("/api/active", {}, token=tok), (200, {}))
-        self.assertFalse((d / "away.json").exists())       # the chat off: no session sends it a dialog
-        chat.set_on(True)
-        store.write_json(d / "away.json", {"at": 0})        # the user typed in the terminal (the mod's back)
-        before = store.now()
-        self.assertEqual(self.call("/api/active", {}, token=tok)[0], 200)
-        away = store.read_json(d / "away.json")
-        self.assertEqual(away["by"], "page")
-        self.assertGreaterEqual(away["at"], before)          # newer than the terminal's: away
+        me = {"ip": "100.64.0.9", "names": {"box", "box.tail1234.ts.net"}, "dns": "box.tail1234.ts.net"}
+        with mock.patch.object(chat, "_tailnet", {"at": float("-inf"), "name": ""}), \
+                mock.patch.object(chat, "tailscale", return_value=me):
+            phone = "box.tail1234.ts.net"  # a phone through `tailscale serve`: from loopback, not localhost (#1374)
+            self.assertEqual(self.call("/api/active", {}, host=phone)[0], 401)
+            self.assertEqual(self.call("/api/active", {"x": 1}, token=tok, host=phone)[0], 400)
+            self.assertEqual(self.call("/api/active", {}, token=tok, host=phone), (200, {}))
+            self.assertAlmostEqual(store.read_json(d / "page.json")["at"], store.now(), delta=5)
+            self.assertTrue((d / "away.json").exists())        # on by default (#1281): away
+            (d / "away.json").unlink()
+            chat.set_on(False)
+            self.assertEqual(self.call("/api/active", {}, token=tok, host=phone), (200, {}))
+            self.assertFalse((d / "away.json").exists())       # the chat off: no session sends it a dialog
+            chat.set_on(True)
+            store.write_json(d / "away.json", {"at": 0})        # the user typed in the terminal (the mod's back)
+            before = store.now()
+            self.assertEqual(self.call("/api/active", {}, token=tok, host=phone)[0], 200)
+            away = store.read_json(d / "away.json")
+            self.assertEqual(away["by"], "page")
+            self.assertGreaterEqual(away["at"], before)          # newer than the terminal's: away
+
+    def test_the_page_used_on_this_machine_by_its_localhost_link_never_marks_the_user_away_1374(self):
+        # #1374: the web app is the desk's admin too (Settings, Stats, from the modeline's
+        # localhost link), and using it there made the user at the terminal away, their next plan
+        # or question refused into the chat. Every request here comes from loopback, as a phone's
+        # through `tailscale serve` does: the Host tells them apart, never the peer
+        chat, tok = self.chat, self.chat.token()
+        d = chat.chat_dir()
+        store.write_json(d / "away.json", {"at": 0})            # the user typed in the terminal
+        for host in ("localhost", "127.0.0.1", "[::1]"):
+            before = store.now()
+            self.assertEqual(self.call("/api/active", {}, token=tok, host=host), (200, {}), host)
+            self.assertGreaterEqual(store.read_json(d / "page.json")["at"], before, host)  # a chat user still
+            self.assertEqual(store.read_json(d / "away.json"), {"at": 0}, host)             # not away
+        me = {"ip": "100.64.0.9", "names": {"box", "box.tail1234.ts.net"}, "dns": "box.tail1234.ts.net"}
+        with mock.patch.object(chat, "_tailnet", {"at": float("-inf"), "name": ""}), \
+                mock.patch.object(chat, "tailscale", return_value=me):
+            self.assertEqual(self.call("/api/active", {}, token=tok, host="box.tail1234.ts.net")[0], 200)
+        self.assertEqual(store.read_json(d / "away.json")["by"], "page")  # the phone's, from loopback too: away
 
     def test_a_dialog_at_the_terminal_is_one_waiting_line_on_the_phone_only_for_a_user_of_the_chat_959_1350(self):
         # #959: at the terminal the prompt stays there, and the phone is told one waits, as a
@@ -30949,6 +31205,36 @@ class Keyhole(_KeyholeTest):
         self.assertAlmostEqual(seen[2][2], now + 60, delta=5)          # no Retry-After: 60 s
         self.assertAlmostEqual(seen[3][2], now + 120, delta=5)
 
+    def test_a_429_saying_the_request_is_too_large_for_the_tpm_limit_is_passed_on_at_once_not_held(self):
+        # #1380 (2026-11-25): OpenAI tier 1's 429 for one request over the TPM limit was held as a
+        # rate limit, sent again and again, and the round failed ~20 minutes on as "rate-limited"
+        seen = []
+        kh = self.keyhole(on_health=lambda *a: seen.append(a), hold=30)
+        self.up.mode, self.up.status, self.up.retry_after = "status", 429, "1"
+        self.up.message = ("Request too large for gpt-up-1101 in organization org-x on tokens per min "
+                           "(TPM): Limit 30000, Requested 45210. The input or output tokens must be reduced.")
+        began = time.monotonic()
+        code, _, text = self.post(kh)
+        self.assertEqual(code, 400, text)                                # OpenCode won't retry a 400
+        self.assertLess(time.monotonic() - began, 5)                     # never the hold
+        self.assertEqual(len(self.up.seen), 1)
+        stop = self.task.status["api_stop"]
+        self.assertEqual(stop["guard"], "refused")
+        self.assertEqual(stop["text"], "deepinfra refused the request (HTTP 429): " + self.up.message)
+        self.assertIn("the round stops", json.loads(text)["error"]["message"])
+        self.assertEqual(seen, [])                                       # no cooldown for other tasks
+        # "Limit N, Requested M" alone says it only when M > N: an ordinary TPM 429 is still held
+        self.task.set_status(api_stop=None)
+        kh = self.keyhole(on_health=lambda *a: seen.append(a), hold=0)
+        for message in ("Rate limit reached on tokens per min (TPM): Limit 30000, Used 29000, Requested 2000.",
+                        "Rate limit on tokens per min: Limit 30000, Requested 20000."):
+            self.up.message = message
+            self.assertEqual(self.post(kh)[0], 429)
+        self.assertEqual([s[0] for s in seen], ["rate_limited", "rate_limited"])
+        self.up.message = "Rate limit on tokens per min: Limit 6,000, Requested 8,000."
+        self.assertEqual(self.post(kh)[0], 400)
+        self.assertEqual(self.task.status["api_stop"]["guard"], "refused")
+
     def test_an_unreachable_upstream_is_a_502_that_says_so(self):
         seen = []
         m = self.model()
@@ -31111,6 +31397,67 @@ class Keyhole(_KeyholeTest):
                       text)
         self.assertIn("the round stops", text)                           # a 400: OpenCode won't retry
         self.assertEqual(self.task.status["api_stop"]["guard"], "setup")
+
+    def test_a_ca_without_critical_basic_constraints_or_trusted_through_node_extra_ca_certs_verifies_as_opencode_would(self):
+        # #1385 (2026-11-25): Python 3.13's default VERIFY_X509_STRICT failed every request on a
+        # chain OpenCode, curl and node accept (a TLS-inspecting proxy's CA, basicConstraints not
+        # critical, no key identifiers), and a CA trusted for OpenCode through NODE_EXTRA_CA_CERTS
+        # alone never verified, on any Python. The strict flag is set here as 3.13's default does.
+        import ssl
+        from workbench import webpush
+        if not shutil.which("openssl"):
+            self.skipTest("needs openssl")
+        tmp = Path(self.tmp.name)
+        ca, ca_key, key, cert, csr, ext = (tmp / n for n in ("ca.pem", "ca-k.pem", "k.pem", "c.pem",
+                                                              "c.csr", "ext"))
+        ext.write_text("subjectAltName=DNS:localhost,IP:127.0.0.1\n")
+        ec = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-config", os.devnull]
+        for argv in (["req", "-x509", *ec, "-keyout", ca_key, "-out", ca, "-days", "1", "-subj", "/CN=wb-ca",
+                      "-addext", "basicConstraints=CA:TRUE", "-addext", "keyUsage=keyCertSign"],
+                     ["req", *ec, "-keyout", key, "-out", csr, "-subj", "/CN=localhost"],
+                     ["x509", "-req", "-in", csr, "-CA", ca, "-CAkey", ca_key, "-CAcreateserial",
+                      "-out", cert, "-days", "1", "-extfile", ext]):
+            subprocess.run(["openssl", *argv], check=True, capture_output=True)
+        up = _QuietUpstream(("127.0.0.1", 0), _Upstream)
+        up.daemon_threads = True
+        up.seen, up.mode, up.status, up.message = [], "ok", 200, ""
+        up.retry_after, up.chunks, up.gap = None, 1, 0
+        up.served, up.by, up.ctype, up.pieces = "served-model", None, "application/json", []
+        served = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        served.load_cert_chain(cert, key)
+        up.socket = served.wrap_socket(up.socket, server_side=True)
+        threading.Thread(target=up.serve_forever, daemon=True).start()
+        self.addCleanup(up.server_close)
+        self.addCleanup(up.shutdown)
+        (tmp / "no-cas.pem").write_text("")
+        (tmp / "no-cas").mkdir()
+        made = ssl.create_default_context
+
+        def strict(*a, **kw):
+            ctx = made(*a, **kw)
+            ctx.verify_flags |= ssl.VERIFY_X509_STRICT
+            return ctx
+
+        m = self.model()
+        base = f"https://localhost:{up.server_port}/v1/openai"
+        for env, want in (({"SSL_CERT_FILE": str(ca)}, 200),              # the CA in Python's store
+                          ({"NODE_EXTRA_CA_CERTS": str(ca)}, 200),        # trusted for OpenCode alone
+                          ({}, 400)):                                     # trusted nowhere: the CA check stays
+            os.environ.update(SSL_CERT_FILE=str(tmp / "no-cas.pem"), SSL_CERT_DIR=str(tmp / "no-cas"))
+            os.environ.pop("NODE_EXTRA_CA_CERTS", None)
+            os.environ.update(env)
+            with mock.patch.object(webpush, "_ctx", []), mock.patch.object(webpush, "MAC_CAS", str(tmp / "none.pem")), \
+                    mock.patch.object(ssl, "create_default_context", strict):
+                kh = self.kh_mod.Keyhole(self.task, m, self.kh_mod.Key(m.provider, self.CANARY), base,
+                                         "bearer", log=self.lines.append)
+                self.addCleanup(kh.close)
+                code, _, text = self.post(kh)
+                ctx = webpush.tls()
+            self.assertEqual(code, want, (env, text))
+            self.assertTrue(ctx.check_hostname)
+            self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+        self.assertIn("its certificate didn't verify", text)
+        self.assertEqual(len(up.seen), 2)
 
     def test_anthropics_cache_writes_are_metered_when_its_message_delta_names_thinking_tokens(self):
         # #1081 (2026-11-23): Anthropic's message_delta now carries output_tokens_details
@@ -34754,6 +35101,23 @@ class Routes(Base):
             cli.main(["models", "--api", "haiku"])
         self.assertIn("anthropic/claude-haiku-5-5", out.getvalue())
 
+    def test_a_key_stored_after_the_catalog_read_an_oauth_or_env_one_routes_on_the_first_retry(self):
+        # #1388, 2026-11-25: only an empty cached key was asked again, so after the /connect wb
+        # advised, wb route kept saying "OAuth" or "from the environment" for HOSTED_TTL
+        runner.models.hosted(fresh=True)
+        for mid in ("xenv/grok-9", "oauthco/chat-1"):
+            code, _, err = self.route("trivial", mid, "--day-usd", "1", "--dry-run")
+            self.assertEqual(code, 3)
+            self.assertIn("store an API key with /connect", err)
+        self.catalog(ROUTES_CATALOG, [key_row(r["id"], r["name"], STORED) if r["id"] in ("xenv", "oauthco")
+                                      else r for r in ROUTES_AUTH])  # /connect: no stamp changes
+        runner.models._AUTH_FRESH.clear()                           # a retry past AUTH_FRESH_SECS
+        for mid in ("xenv/grok-9", "oauthco/chat-1"):
+            code, _, err = self.route("trivial", mid, "--day-usd", "1", "--dry-run")
+            self.assertEqual(code, 0, err)
+        provs = json.loads(self.route("--json")[1])["providers"]
+        self.assertEqual((provs["xenv"]["key"], provs["oauthco"]["key"]), ("stored", "stored"))
+
     def test_a_stored_key_on_a_package_the_keyhole_cant_speak_is_refused_before_the_dialog(self):
         # #1066: only keyhole.start checked the package, so a Gemini model was listed, offered,
         # routed with the user's yes and started, then failed every time
@@ -34786,6 +35150,40 @@ class Routes(Base):
         self.assertEqual(provs["google"], {"name": "Google", "key": "none", "why": st["why"]})
         self.assertEqual(provs["deepseek"]["key"], "stored")
         self.assertTrue(runner.models.status(runner.models.hosted()["deepseek/deepseek-flash"])["available"])
+
+    def test_a_providers_models_each_keep_their_own_package_and_base_not_its_first_ones(self):
+        # #1387 (2026-11-25): OpenCode Zen lists openai-compatible, anthropic and google models at
+        # different bases; every one took the first entry's, so its Claude models posted /messages
+        # to …/openai/v1 with a bearer key (a 404 every request) and its Gemini ones read ready
+        from workbench import keyhole
+        base = "https://opencode.test/zen"
+        zen = [api_entry("opencode", "big-pickle", settings={"baseURL": f"{base}/openai/v1"},
+                         package="@opencode/ai/providers/openai-compatible"),
+               api_entry("opencode", "claude-x-5", settings={"baseURL": f"{base}/anthropic/v1"},
+                         package="@opencode/ai/providers/anthropic"),
+               api_entry("opencode", "gemini-x-4", settings={"baseURL": f"{base}/google/v1beta"},
+                         package="@opencode/ai/providers/google")]
+        rest = [e for e in ROUTES_CATALOG if e["providerID"] != "opencode"]
+        self.catalog([*rest, *zen], [*ROUTES_AUTH, key_row("opencode", "OpenCode Zen", STORED)])
+        hosted = runner.models.hosted(fresh=True)
+        pickle, claude, gemini = (hosted[f"opencode/{n}"] for n in ("big-pickle", "claude-x-5", "gemini-x-4"))
+        self.assertEqual((pickle.package, pickle.base_url),
+                         ("@opencode/ai/providers/openai-compatible", f"{base}/openai/v1"))
+        self.assertEqual((claude.package, claude.base_url),
+                         ("@opencode/ai/providers/anthropic", f"{base}/anthropic/v1"))
+        self.assertEqual(keyhole.protocol_of(claude.package), "anthropic")
+        self.assertEqual(runner.models.keyhole_refusal(claude), "")
+        self.assertIn("the keyhole doesn't speak", runner.models.keyhole_refusal(gemini))
+        self.assertFalse(runner.models.status(gemini)["available"])
+        code, _, err = self.route("trivial", "opencode/gemini-x-4", "--day-usd", "1")
+        self.assertEqual(code, 3, err)
+        self.assertIn("the keyhole doesn't speak", err)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.main(["models", "--json"])
+        api = [x["id"] for x in json.loads(out.getvalue())["api"]]
+        self.assertIn("opencode/claude-x-5", api)
+        self.assertNotIn("opencode/gemini-x-4", api)
 
     def test_a_role_out_of_credit_runs_again_once_the_recheck_time_has_passed(self):
         # #1068: no_credit had no `until` and only a 2xx cleared it, which only a running task
@@ -35924,6 +36322,24 @@ class ApiTasks(_ApiTask, _KeyholeTest):
                                  "message": "API key not valid. Please pass a valid API key."}})
         self.assertEqual(wait.stop(time.time()), ("auth", "deepinfra refused the API key (HTTP 400)"))
 
+    def test_an_ollama_cloud_task_whose_login_is_refused_says_ollama_signin_not_connect(self):
+        # #1389, 2026-11-25: the 401 stop said "store ollama's API key again with /connect", which
+        # Ollama never reads: this machine's Ollama holds the ollama.com login
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"] = {"ollama": {"options": {"baseURL": "http://127.0.0.1:11434/v1"},
+                                      "models": {"gpt-oss:120b-cloud": {"limit": {"context": 131072}}}}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        mid = "ollama/gpt-oss:120b-cloud"
+        os.environ["WB_FAKE_API"] = f"{mid}=auth"
+        self.start_api("t-ocloud", "ok", model=mid, spawn=False)
+        self.drive_here("t-ocloud")
+        st = store.Task("t-ocloud").status
+        self.assertEqual((st["phase"], st["last"]), ("stuck", "ollama refused this machine's ollama.com login (HTTP 401)"))
+        note = [r for r in store.notices() if r.get("task") == "t-ocloud"][-1]
+        self.assertIn("sign this machine's Ollama in to ollama.com again (ollama signin); then wb feedback "
+                      't-ocloud --text "carry on" resumes it', note["text"])
+        self.assertNotIn("/connect", note["text"])
+
     def test_a_proxy_in_the_agents_env_doesnt_catch_the_keyhole(self):
         self.local_api_model()
         os.environ["http_proxy"] = "http://127.0.0.1:9"              # nothing listens there
@@ -36905,6 +37321,28 @@ class RateLimits(Base):
                                  "message": "max_tokens: billing tier allows at most 8192"}})
         self.assertEqual(wait.fatal, ("refused", "deepseek refused the request (HTTP 400): "
                                                  "max_tokens: billing tier allows at most 8192"))
+
+    def test_a_tpm_too_large_stop_tells_claude_the_providers_words(self):
+        # #1380 (2026-11-25): a 429 for one request over the TPM limit was held 10 minutes, revived
+        # once, and stopped as "rate-limited … (HTTP 429)" with advice to carry on later
+        said = ("Request too large for deepseek-flash on tokens per min (TPM): Limit 30000, "
+                "Requested 45210. The input or output tokens must be reduced.")
+        task = self.api_task("t-tpm", "api", "--silence-timeout", "30")
+        self.up.rate_until, self.up.code, self.up.after, self.up.body = float("inf"), 429, "1", said
+        self.keyhole(task, hold=60)
+        began = time.monotonic()
+        runner.drive(task)
+        self.assertLess(time.monotonic() - began, 30)               # never the hold or the revive
+        st = task.status
+        self.assertEqual((st["phase"], st["last"], st.get("infra")),
+                         ("stuck", f"deepseek refused the request (HTTP 429): {said}", "provider"))
+        self.assertEqual(len(self.up.seen), 1)
+        self.assertFalse(self.events(task, "load"))                 # never revived
+        n = self.notice(task)
+        self.assertEqual(n["cause"], "provider")
+        self.assertIn(said, n["text"])
+        self.assertIn("once what deepseek said is fixed", n["text"])
+        self.assertIsNone(self.models.api_health("deepseek"))      # no cooldown for its other tasks
 
     def test_a_certificate_that_doesnt_verify_stops_the_round_at_once_as_this_machines(self):
         # #1080 (2026-11-23): the keyhole's 502 was retried, read as the provider's outage for
@@ -39539,6 +39977,37 @@ class Privacy(_KeyholeTest):
         (self.repo / "local" / "special_tokens_map.json").write_text(
             json.dumps({"bos_token": "<s>", "mask_token": "[MASK]"}))
         self.start_api("t-cpr-ok")
+
+    def test_a_copied_config_file_with_only_settings_named_like_tokens_does_not_refuse_an_api_start(self):
+        # #1381 (2026-11-25): a single copied file was judged by the token-file matcher, whose bare
+        # keyword refused every API start for settings, while the same file in a copied directory
+        # went along
+        d = Path(self.tmp.name) / "copied"
+        d.mkdir()
+        def holds(name, text):
+            (d / name).write_text(text)
+            return cli.privacy.copy_holds_credential(d / name)
+        for name, text in ((".env", "TOKENIZERS_PARALLELISM=false\nDEBUG=1\n"),
+                           ("llm.json", json.dumps({"model": "local", "max_tokens": 4096})),
+                           ("app.env", "PASSWORD_MIN_LENGTH=8\nSESSION_TIMEOUT=30\n"),
+                           ("settings.ini", "[auth]\npassword_reset_ttl = 3600\n")):
+            self.assertFalse(holds(name, text), name)
+        for name, text in ((".env", "OPENAI_API_KEY=sk-abcdef1234567890\n"),
+                           ("db.env", "DB_PASSWORD=hunter2\n"),
+                           (".npmrc", "//registry.npmjs.org/:_authToken=npm_abcdefghijklmnop\n"),
+                           ("settings.xml", "<server><id>x</id><password>hunter2</password></server>\n"),
+                           ("config", 'BUNDLE_GEMS__EXAMPLE__COM: "user:pass"\n')):
+            self.assertTrue(holds(name, text), name)
+        # end to end (a .env is never copied: cli.SECRET_FILES)
+        (self.repo / ".gitignore").write_text("llm.json\napp.env\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
+        (self.repo / "llm.json").write_text(json.dumps({"model": "local", "max_tokens": 4096}))
+        (self.repo / "app.env").write_text("TOKENIZERS_PARALLELISM=false\nPASSWORD_MIN_LENGTH=8\n")
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"copy": ["llm.json", "app.env"]}}}))
+        self.role(via="api", api=FLASH)
+        self.start_api("t-cpenv")
+        self.assertEqual(store.Task("t-cpenv").spec["copy"], ["llm.json", "app.env"])
 
     def test_an_api_task_takes_a_standing_sibling_and_a_big_copied_directory_as_configured(self):
         # #1322; a copied directory's package trees aren't read for a credential

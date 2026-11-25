@@ -107,6 +107,9 @@ class ChatDefault(Base):
         self.assertEqual(cli.chat_line(), (True, f"web app answers on localhost:{port} (started by wb)"))
         self.assertIn("stopped the server it started", run_wb("chat", "off", "--port", str(port)))
         self.assertEqual(self.url_json(), {"url": chat.url(port), "state": "off"})
+        # the port is kept without the pid: once the server had exited, off's link named 1337
+        # (the macOS nightly, 2026-11-25; Linux passed only while the server was a zombie)
+        self.assertEqual(store.read_json(chat.chat_dir() / "serve.pid"), {"port": port})
 
     def test_a_foreign_listener_blocks_the_web_app_and_doctor_says_why(self):
         class Other(BaseHTTPRequestHandler):

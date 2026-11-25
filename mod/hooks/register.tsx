@@ -3336,21 +3336,14 @@ async function deliver($: any, now: number) {
           ? status.phase === 'asking' && await asking($, name, String(row.id))
           : status.phase === (row.kind === 'question' ? 'asking' : row.kind)
       const batch = batchOf(row)
-      const headline = batch ? (batch.length > 1 ? `and ${batch.length - 1} more were interrupted`
-        : 'was interrupted') : row.cause === 'provider' ? PROVIDER_HEADLINE
-        : row.cause === 'local_only' ? LOCAL_ONLY_HEADLINE
-        : (outsideTheStep(row) ? OUTSIDE_HEADLINE[row.kind] : undefined) ?? HEADLINE[row.kind] ?? row.kind
+      const headline = headlineOf(row)
       const key = `${name}:${row.ts}`
       if (current && !mem.toasted.has(key)) {
         mem.toasted.add(key)
         $.ui.toast(`workbench: ${name} ${headline}`)
       }
       if (!own || !mem.wake) continue // the toast only: the notice stays for its session or wb wait
-      // a batch's wake ends with its resume, not the failure's next step (#544)
-      const next = batch ? BATCH_NEXT(batch) : row.cause === 'spend' ? (row.guard === 'agents' ? AGENTS_NEXT(name) : SPEND_NEXT(name, (await readRoutes($)).cap !== null))
-        : row.cause === 'local_only' ? OUTSIDE_REMEDY
-        : row.cause === 'provider' || (outsideTheStep(row) && OUTSIDE_HEADLINE[row.kind]) ? OUTSIDE_NEXT(name)
-        : (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined, String(row.text ?? ''))
+      const next = await nextOf($, row, name)
       const who = batch && batch.length > 1 ? `Tasks ${batch.map(n => `\`${n}\``).join(', ')} were interrupted`
         : `Task \`${name}\` ${headline}`
       const text = `[workbench] ${who}.\n\n${row.text}\n\n${next}`
@@ -3389,6 +3382,24 @@ async function deliver($: any, now: number) {
     }
   }
   if (!held) mem.lastNotify = file.key
+}
+
+// A notice's headline and next step, by its kind and cause: deliver's and rewake's (#1384)
+function headlineOf(row: Row): string {
+  const batch = batchOf(row)
+  return batch ? (batch.length > 1 ? `and ${batch.length - 1} more were interrupted`
+    : 'was interrupted') : row.cause === 'provider' ? PROVIDER_HEADLINE
+    : row.cause === 'local_only' ? LOCAL_ONLY_HEADLINE
+    : (outsideTheStep(row) ? OUTSIDE_HEADLINE[row.kind] : undefined) ?? HEADLINE[row.kind] ?? row.kind
+}
+
+async function nextOf($: any, row: Row, name: string): Promise<string> {
+  const batch = batchOf(row)
+  // a batch's wake ends with its resume, not the failure's next step (#544)
+  return batch ? BATCH_NEXT(batch) : row.cause === 'spend' ? (row.guard === 'agents' ? AGENTS_NEXT(name) : SPEND_NEXT(name, (await readRoutes($)).cap !== null))
+    : row.cause === 'local_only' ? OUTSIDE_REMEDY
+    : row.cause === 'provider' || (outsideTheStep(row) && OUTSIDE_HEADLINE[row.kind]) ? OUTSIDE_NEXT(name)
+    : (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined, String(row.text ?? ''))
 }
 
 // A notice taken for this session's wake, under wb's lock (`wb ack`, a compare-and-set shared with
@@ -3474,9 +3485,15 @@ async function rewake($: any, now: number, list: WbTask[]) {
     if (noticed !== undefined ? acked >= noticed : acked * 1000 >= t.updatedAt) continue
     await $.fs.write(ackPath, String(now / 1000))
     const kind = t.phase === 'asking' ? 'question' : t.phase
-    void wake($, t.name, `[workbench] Task \`${t.name}\` ${HEADLINE[kind] ?? kind}, ${ago(now - t.updatedAt)} ago, ` +
-      `and no notice reached Claude. \`wb report ${t.name}\` shows where it is.\n\n` +
-      (NEXT[kind] ?? NEXT.failed)(t.name), acked, now / 1000)
+    // its newest notice says why it stopped, as deliver's wake would have: from the phase alone a
+    // provider's, the day cap's, a local-only or an Agents-GPU stop woke as "got stuck … Steer it
+    // with wb feedback", which wb refuses or which runs a round on an agent that wasn't stuck
+    // (#1384, 2026-11-25). One of a batch is its own resume; none in the tail: the phase's.
+    const found = mem.notifyRows.rows.filter(r => r.task === t.name || batchOf(r)?.includes(t.name)).at(-1)
+    const row = found?.kind === kind ? (batchOf(found) ? { ...found, tasks: [t.name] } : found) : null
+    void wake($, t.name, `[workbench] Task \`${t.name}\` ${row ? headlineOf(row) : HEADLINE[kind] ?? kind}, ` +
+      `${ago(now - t.updatedAt)} ago, and no notice reached Claude. \`wb report ${t.name}\` shows where it is.\n\n` +
+      (row ? await nextOf($, row, t.name) : (NEXT[kind] ?? NEXT.failed)(t.name)), acked, now / 1000)
   }
 }
 

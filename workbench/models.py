@@ -1516,13 +1516,18 @@ def _api_model(mid: str, entry: dict, prov: dict, extra: dict) -> Model:
         over = {**over, "catalog_cost": config.get("cost"), "cost": mine}
         config = {**config, "cost": mine}
     config = api_limits(config)
+    # the model's own package and base before its provider's, which is the catalog's first entry:
+    # OpenCode Zen's Claude models (anthropic, …/anthropic/v1) went out as its first one's
+    # (openai-compatible, …/openai/v1), every request a 404, and its Gemini ones read ready
+    # (#1387, 2026-11-25)
+    own = lambda k: entry[k] if isinstance(entry.get(k), str) and entry[k] else prov.get(k)  # noqa: E731
     return Model(id=mid, provider=pid, name=str(entry.get("name") or mid.split("/", 1)[1]),
-                 base_url=str(prov.get("api") or ""), engine="api",
+                 base_url=str(own("api") or ""), engine="api",
                  label=over.get("label") or (OLLAMA_CLOUD if cloud else f"{prov.get('name') or pid} (API)"),
                  extra=over, config=config, remote=True, cloud=cloud, kind="api",
                  key=str(prov.get("key") or ("none" if entry.get("free") else "")),
                  free=bool(entry.get("free")),
-                 package=str(prov.get("package") or ""))
+                 package=str(own("package") or ""))
 
 
 PRICE_KEYS = ("input", "output")  # per million tokens; cache read and write go in `cache`
@@ -1925,7 +1930,10 @@ def _api_status(m: Model, down=frozenset()) -> dict:
     if why := keyhole_refusal(m):  # before the key: /connect can't fix it
         return _no(why)
     key = m.key
-    if not key:
+    # any key a task can't run with is asked again, not only none: /connect changes no stamp, so
+    # a cached OAuth or environment key stood for HOSTED_TTL after the user stored one (#1388,
+    # 2026-11-25; #1076 was ids missing from the cache)
+    if key not in ("stored", "ollama", "none"):
         key, who = _fresh_key(m)
     if not key:
         return _no(f"no key for {who}: run /connect in OpenCode and add it")
