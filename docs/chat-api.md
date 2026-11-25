@@ -43,10 +43,11 @@ does the whole flow below with the standard library alone.
       seen (`/api/active`, `/api/seen`); nor read a dialog (`/api/ask/<id>`), a push's summary
       (`/api/latest`), a screenshot (`/api/shot`) or an audio take (`/api/audio`). Each is `403
       {"error": "agent tokens can't …"}`.
-    - It works only from this machine: a request with an agent token from any other address
-      (a tailnet or LAN peer, when the chat is bound there for the user's phone) is `403
-      {"error": "agent tokens work only from this machine (localhost)"}`. The user's token is
-      unaffected.
+    - It works only from this machine: a request with an agent token from any other machine
+      (a tailnet or LAN peer, when the chat is bound there for the user's phone) is ``403
+      {"error": "agent tokens work only from this machine, at the address `wb chat url`
+      prints"}``. On a chat bound only to the tailnet or a LAN IP, an agent here uses that address
+      (localhost isn't served). The user's token is unaffected.
     - Its sends are limited to `AGENT_SENDS_PER_MIN` (30) a minute, then `429 {"error",
       "retry_after": <seconds>}`.
     - `wb chat token list` names the agents; `wb chat token revoke <name>` ends one at once
