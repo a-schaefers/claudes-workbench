@@ -270,8 +270,9 @@ async function run(engine, device) {
     await goTo('settings')                                 // where the last check left it
     await until(async () => await page.locator('#settings').isVisible())
     const said = await page.textContent('#away-when')
-    for (const want of ['use this page (open it or send a message here) after using the terminal',
-                        'until you type or answer a prompt in the terminal again'])
+    for (const want of ['use the chat on another device (open it or send a message here) after using the terminal',
+                        'until you type or answer a prompt in the terminal again',
+                        "Stats and Settings don't count, nor this page opened on the computer itself"])  // #1374
       if (!said.includes(want)) throw new Error(said)
     const prompts = await page.textContent('#away-prompts')
     for (const want of ['are answered in the terminal, never here', 'Run Claude with permissions granted to work from the chat.'])
@@ -299,10 +300,10 @@ async function run(engine, device) {
       await page.evaluate(() => { document.hasFocus = document._hasFocus })
       await show(true); await show(false)                        // back on screen, in use
       await until(() => at() > was)
-      // the server writes page.json, then away.json: read at once, it was missing or the last
-      // report's on a slow runner (#1223)
+      // this page is the computer's own (its Host is localhost): in use, never away (#1374); a
+      // phone's Host is another, the server's tests' (WebChat)
       const away = () => existsSync(join(home, 'state/chat/away.json')) ? JSON.parse(readFileSync(join(home, 'state/chat/away.json'), 'utf8')) : {}
-      await until(() => away().by === 'page' && away().at === at())
+      if (away().by === 'page') throw new Error('a localhost page made the user away: ' + JSON.stringify(away()))
       was = at()
       await show(true)
       await page.evaluate(() => { Object.defineProperty(document, 'hidden', { value: false, configurable: true }) })
@@ -337,6 +338,33 @@ async function run(engine, device) {
       if (await tries() !== 1) throw new Error(`tried ${await tries()} times with no use`)
       await page.locator('.thread').click({ position: { x: 5, y: 5 } })  // used again: at once
       await until(async () => await tries() === 2)
+    } finally {
+      await page.evaluate(() => { window.fetch = window._fetch })
+    }
+  })
+  await check('a click in Stats or Settings, or a tap on the nav leaving the chat, does not tell the computer the page is in use; back on Chat does (#1374)', async () => {
+    // #1374: the web app is the desk's admin too, and a click in Settings made the user at the
+    // terminal away, their next plan or question refused into the chat
+    await page.evaluate(() => {
+      window._fetch = window.fetch; window._active = []
+      window.fetch = (u, o) => {
+        if (String(u).includes('/api/active')) { window._active.push(document.body.dataset.view); return Promise.reject(new TypeError('Load failed')) }
+        return window._fetch(u, o)
+      }
+    })
+    const posted = () => page.evaluate(() => window._active)
+    try {
+      // each post refused, so none holds back the next for 30 s (ACTIVE_MS): the last check's wasn't either
+      await goTo('settings')                                     // a tap on the nav, from the chat
+      await page.locator('#view-settings').click({ position: { x: 5, y: 5 } })
+      await page.keyboard.press('Shift')
+      await goTo('stats')
+      await page.locator('#view-stats').click({ position: { x: 5, y: 5 } })
+      await page.evaluate(() => dispatchEvent(new Event('focus')))
+      await sleep(1500)                                          // a claim that none was made
+      if ((await posted()).length) throw new Error('posted from ' + (await posted()).join())
+      await goTo('chat')                                         // the chat shown: in use
+      await until(async () => { const p = await posted(); return p.length && p.every(v => v === 'chat') })
     } finally {
       await page.evaluate(() => { window.fetch = window._fetch })
     }

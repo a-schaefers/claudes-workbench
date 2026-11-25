@@ -247,7 +247,8 @@ One take of a `wb chat listen` shortlist, as its audio type (at most 64 MiB). 40
 
 ### `POST /api/active` (user only)
 `{}`: a page is in use on this device, so the user is away from the terminal while the chat is
-on → `{}`.
+on → `{}`. A request whose Host is `localhost`, `127.*` or `::1` (a page on the computer itself)
+records only that a page is in use, never away (#1374).
 
 ### `POST /api/seen` (user only)
 `{ids: [up to 200 ids], endpoint?: this device's push URL}`: what a page showed, so no push is

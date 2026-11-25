@@ -1362,7 +1362,11 @@
   // reports at once instead.
   const ACTIVE_MS = 30_000
   let activeAt = 0
-  function reportActive() {
+  // Only on the Chat view, and not a tap on the nav leaving it: Stats and Settings are the desk's
+  // admin too, and a click there made the user at the terminal away, their next plan or question
+  // refused into the chat (#1374, 2026-11-25). The server also leaves a localhost page out
+  function reportActive(e) {
+    if (curView !== 'chat' || (e && e.target && e.target.closest && e.target.closest('#tabbar'))) return
     if (document.hidden || !document.hasFocus() || !token) return
     if (Date.now() - activeAt < ACTIVE_MS) return
     activeAt = Date.now()
@@ -1421,6 +1425,7 @@
       // shown again: at the newest line if it was following, else where the reader left it
       if (follow) toEnd(true)
       else { scroller.scrollTop = chatTop; lastTop = scroller.scrollTop; lastHeight = scroller.scrollHeight; jump.hidden = nearEnd() }
+      reportActive()                             // the chat in use, as a tap in it is (#1374)
     }
     drawBadge()
     drawShown()

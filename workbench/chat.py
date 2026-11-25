@@ -1134,7 +1134,8 @@ ASK_TEXT = 2000
 # brought them back. The owner typed in the terminal, then picked up the phone with the chat open;
 # a permission prompt came up in the terminal and never reached the phone (2026-11-21, #959).
 # So using the page counts as using the phone: a page
-# on screen and in use posts /api/active, and that marks the user away as a web message does
+# on screen and in use, on its Chat view, posts /api/active, and from another device than this
+# one (a Host that isn't localhost, #1374) that marks the user away as a web message does
 # (chat/away.json's `at`, which the mod reads), until they type in the terminal again or answer a
 # dialog there (the mod's `back`). chat/page.json `{at}`: when a page was last in use, so a dialog
 # at the terminal is announced only to a user who uses the chat: a page in use within
@@ -1147,13 +1148,14 @@ WAITING = "Claude is waiting for you in the terminal."
 WAITING_GRANT = " Run it with permissions granted to work from the chat."
 
 
-def active() -> float:
+def active(desk: bool = False) -> float:
     """A chat page is in use now: recorded in page.json, and, with the chat on, in away.json, as
     a web message would be. Off, no session sends a dialog here, and turning it off cleared away:
-    a page used meanwhile doesn't make the user away once it is turned on again."""
+    a page used meanwhile doesn't make the user away once it is turned on again. `desk`: the page
+    is this machine's own (its Host is localhost, the modeline's link), so page.json alone."""
     now = store.now()
     store.write_json(chat_dir() / "page.json", {"at": now})
-    if is_on():
+    if is_on() and not desk:
         store.write_json(chat_dir() / "away.json", {"at": now, "by": "page"})
     return now
 
@@ -2054,12 +2056,24 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, code: int, obj) -> None:
         self._send(code, json.dumps(obj).encode(), "application/json")
 
-    def _allowed(self) -> bool:
+    def _host(self) -> str:
+        """The Host header's name, lowercased, without its port or a v6 address's brackets."""
         host = (self.headers.get("Host") or "").strip().lower()
         if host.startswith("["):  # [v6] or [v6]:port
             host = host[1:host.find("]")] if "]" in host else host
         elif host.count(":") == 1:
             host = host.rsplit(":", 1)[0]
+        return host
+
+    def _desk(self) -> bool:
+        """Whether the page was opened as this machine's own, by a loopback Host (the modeline's
+        localhost link). Never by the peer: `tailscale serve` proxies a phone from 127.0.0.1, and
+        passes its tailnet name as the Host (#1374)."""
+        host = self._host()
+        return host in ("localhost", "::1") or host.startswith("127.")
+
+    def _allowed(self) -> bool:
+        host = self._host()
         if (self.hosts is not None and host not in self.hosts and not (host and host.split("%")[0] == self._local())
                 and not (host and host == tailnet_name())):
             self._json(403, {"error": f"unknown host {host[:100]}: add it to chat.json's hosts"})
@@ -2482,7 +2496,10 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/active":  # a page on screen and in use: the user is on this device (#959)
             if body:
                 return self._json(400, {"error": "active is {}"})
-            active()
+            # the web app is the desk's admin too (Settings and Stats, from the modeline's link):
+            # used there, the user at the terminal was made away, their next plan or question
+            # refused into the chat (#1374, 2026-11-25)
+            active(desk=self._desk())
             return self._json(200, {})
         if self.path == "/api/push":  # this device's notifications: on, off, or a test
             if body.get("test") is True:

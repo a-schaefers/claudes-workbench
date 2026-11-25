@@ -26808,22 +26808,45 @@ class WebChat(Base):
         # the terminal, neither shown on the phone nor allowed
         chat, tok = self.chat, self.chat.token()
         d = chat.chat_dir()
-        self.assertEqual(self.call("/api/active", {})[0], 401)
-        self.assertEqual(self.call("/api/active", {"x": 1}, token=tok)[0], 400)
-        self.assertEqual(self.call("/api/active", {}, token=tok), (200, {}))
-        self.assertAlmostEqual(store.read_json(d / "page.json")["at"], store.now(), delta=5)
-        self.assertTrue((d / "away.json").exists())        # on by default (#1281): away
-        (d / "away.json").unlink()
-        chat.set_on(False)
-        self.assertEqual(self.call("/api/active", {}, token=tok), (200, {}))
-        self.assertFalse((d / "away.json").exists())       # the chat off: no session sends it a dialog
-        chat.set_on(True)
-        store.write_json(d / "away.json", {"at": 0})        # the user typed in the terminal (the mod's back)
-        before = store.now()
-        self.assertEqual(self.call("/api/active", {}, token=tok)[0], 200)
-        away = store.read_json(d / "away.json")
-        self.assertEqual(away["by"], "page")
-        self.assertGreaterEqual(away["at"], before)          # newer than the terminal's: away
+        me = {"ip": "100.64.0.9", "names": {"box", "box.tail1234.ts.net"}, "dns": "box.tail1234.ts.net"}
+        with mock.patch.object(chat, "_tailnet", {"at": float("-inf"), "name": ""}), \
+                mock.patch.object(chat, "tailscale", return_value=me):
+            phone = "box.tail1234.ts.net"  # a phone through `tailscale serve`: from loopback, not localhost (#1374)
+            self.assertEqual(self.call("/api/active", {}, host=phone)[0], 401)
+            self.assertEqual(self.call("/api/active", {"x": 1}, token=tok, host=phone)[0], 400)
+            self.assertEqual(self.call("/api/active", {}, token=tok, host=phone), (200, {}))
+            self.assertAlmostEqual(store.read_json(d / "page.json")["at"], store.now(), delta=5)
+            self.assertTrue((d / "away.json").exists())        # on by default (#1281): away
+            (d / "away.json").unlink()
+            chat.set_on(False)
+            self.assertEqual(self.call("/api/active", {}, token=tok, host=phone), (200, {}))
+            self.assertFalse((d / "away.json").exists())       # the chat off: no session sends it a dialog
+            chat.set_on(True)
+            store.write_json(d / "away.json", {"at": 0})        # the user typed in the terminal (the mod's back)
+            before = store.now()
+            self.assertEqual(self.call("/api/active", {}, token=tok, host=phone)[0], 200)
+            away = store.read_json(d / "away.json")
+            self.assertEqual(away["by"], "page")
+            self.assertGreaterEqual(away["at"], before)          # newer than the terminal's: away
+
+    def test_the_page_used_on_this_machine_by_its_localhost_link_never_marks_the_user_away_1374(self):
+        # #1374: the web app is the desk's admin too (Settings, Stats, from the modeline's
+        # localhost link), and using it there made the user at the terminal away, their next plan
+        # or question refused into the chat. Every request here comes from loopback, as a phone's
+        # through `tailscale serve` does: the Host tells them apart, never the peer
+        chat, tok = self.chat, self.chat.token()
+        d = chat.chat_dir()
+        store.write_json(d / "away.json", {"at": 0})            # the user typed in the terminal
+        for host in ("localhost", "127.0.0.1", "[::1]"):
+            before = store.now()
+            self.assertEqual(self.call("/api/active", {}, token=tok, host=host), (200, {}), host)
+            self.assertGreaterEqual(store.read_json(d / "page.json")["at"], before, host)  # a chat user still
+            self.assertEqual(store.read_json(d / "away.json"), {"at": 0}, host)             # not away
+        me = {"ip": "100.64.0.9", "names": {"box", "box.tail1234.ts.net"}, "dns": "box.tail1234.ts.net"}
+        with mock.patch.object(chat, "_tailnet", {"at": float("-inf"), "name": ""}), \
+                mock.patch.object(chat, "tailscale", return_value=me):
+            self.assertEqual(self.call("/api/active", {}, token=tok, host="box.tail1234.ts.net")[0], 200)
+        self.assertEqual(store.read_json(d / "away.json")["by"], "page")  # the phone's, from loopback too: away
 
     def test_a_dialog_at_the_terminal_is_one_waiting_line_on_the_phone_only_for_a_user_of_the_chat_959_1350(self):
         # #959: at the terminal the prompt stays there, and the phone is told one waits, as a

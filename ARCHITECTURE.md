@@ -5615,7 +5615,11 @@ else `chat/serve.pid`, else 1337; `--port`, #349; the fragment never leaves the 
   reply there, briefly; a yes there answers only a question asked there; nothing hard to undo on an
   ambiguous OK; while away, report there what finishes or needs them.
 - **Away is the device the user last used** (#959). Away once they use the chat after last typing
-  in the terminal (a web message, or a page shown, focused and in use: `POST /api/active`), until
+  in the terminal (a web message, or a page shown, focused and in use on its Chat view: `POST
+  /api/active`; never a click in Stats or Settings, or a tap on the nav leaving the chat, and a
+  request whose Host is localhost, 127.* or ::1, the modeline's link on this machine, writes
+  `page.json` alone: the web app is the desk's admin too, #1374; told by the Host, never the peer,
+  since `tailscale serve` proxies a phone from loopback under its tailnet name), until
   they type or answer a dialog in the terminal (answering counts: a tapped notice made the user away
   and the answer submitted no prompt); at most 6 h after that use, longer while one of this
   session's `--backlog` tasks is open (#110). `chat/away.json` holds it, the user's, not one
@@ -5763,7 +5767,8 @@ client; the server needs no browser.
   expired one `<id> expired: over 6 hours unread, so not passed to Claude; the page offers to send
   it again`.
 - `away.json`: `{at, by}` (seconds), by the mod's listener on a web message (`by` its key) or the
-  server on page use while on (`by: "page"`); `{at: 0}` on a prompt typed in any session, a terminal
+  server on page use while on, from another device than this one (`by: "page"`; never a localhost
+  Host, #1374); `{at: 0}` on a prompt typed in any session, a terminal
   dialog settled there, or the chat off.
 - `page.json`: `{at}`, the last page use, chat on or not (for `PAGE_RECENT`).
 - `listener.json`: `{session, cwd, pid, start, machine, parent, busy}` (from the `wb events` hello;
@@ -5870,7 +5875,7 @@ address (#534).
   `application/octet-stream` as an attachment, so no upload renders as a page; cached for a year
   (`FILE_CACHE`, `Vary: Authorization`: an upload never changes under its id, #754).
 - The user's token only, as the admin endpoints: `POST /api/active` `{}` (`chat.active`: `page.json`, and `away.json`
-  while on); `POST /api/seen` `{ids: ≤ 200, endpoint?}`; `POST /api/push` `{endpoint, on}` (only
+  while on and the Host isn't localhost, 127.* or ::1: `Handler._desk`, #1374); `POST /api/seen` `{ids: ≤ 200, endpoint?}`; `POST /api/push` `{endpoint, on}` (only
   `https`:443 at `webpush.PUSH_HOSTS`, so the token can't make this machine post anywhere) or
   `{test: true}` → `{sent, ok, hint, reasons}`.
 
@@ -5894,7 +5899,8 @@ reader (WebKit keeps the socket); back on screen after `AWAY_MS` 3 s, or from th
 reloads (`reloadOnce`, once a minute). The thread follows the newest line (`follow`) until a wheel, a finger or a scroll up
 releases it; a scroll that came with the thread's height changing is the layout's (`lastHeight`: images loading
 after a reload had read as the reader going up, and the server's thread was drawn mid-thread, #1223). Use counts (`reportActive`, #959): on screen or a
-`pointerdown`/`keydown`, only while `!document.hidden` and `document.hasFocus()`, at most every
+`pointerdown`/`keydown`, only while `!document.hidden` and `document.hasFocus()`, on the Chat view
+(and on switching to it; never a press on `#tabbar`, #1374), at most every
 `ACTIVE_MS` 30 s, never retried on a timer (#959 review). Attachments: chips (`drawTray`) in
 `wb-chat-files`, bytes in IndexedDB (`wb-chat`, `files`) until the message lands; `pump` uploads one
 at a time (XHR; `STALL_MS` 30 s without progress retries the same id); edit restores the files, the
@@ -7664,7 +7670,7 @@ the click still runs the real wb. What the chat is for (#1341): the empty state'
 thread the hint shows, dismisses, and stays dismissed after a reload, and where every storage call throws it still
 shows and dismisses with no page error. Sends land exactly once through
 outages, reloads and a SIGSTOP past the 40 s watchdog; settings (no away setting, its old endpoint 404), install over https, `/api/seen` and
-`/api/active` only while in use, the waiting line (one line, no buttons, no answer card, cleared once settled, #1350), shot pairs, listen's shortlist, the keyboard, uploads, an agent's message
+`/api/active` only while in use and on the Chat view (none from a click in Settings or Stats, #1374), the waiting line (one line, no buttons, no answer card, cleared once settled, #1350), shot pairs, listen's shortlist, the keyboard, uploads, an agent's message
 shown with its name and its reply through `/api/wait`, that reply named `Claude to <agent>` and
 never counted unread (#1128), its state without the user's, a 25-task backlog's strip at most three lines on a phone, the queued counted apart
 (#1097); and `sw.js` in a node `vm` (`swSays`) for a push's text, and for a notification's click (to the chat). Each wait is `until` on its condition
@@ -8058,7 +8064,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `prompt.submit` guard, the /workbench skill's *Agents on the web chat*.
 - **A Claude row's session** (`cli._chat_writer`: `session`, `claude_pid`, `claude_start`, `claude_machine`, as
   task.json's) → the mod's `answersTo` and `listen` (whose a user's message is, #1096), `ELSEWHERE_NOTE` ↔ reference/driving.md.
-- **What makes the user away** (`chat/away.json`: `listen`, `back`, `termDialogDone`, `chat.active`) → `awayNow`,
+- **What makes the user away** (`chat/away.json`: `listen`, `back`, `termDialogDone`, `chat.active`, `Handler._desk`, `reportActive`) → `awayNow`,
   AWAY_NOTE, `#away-when`, *The web chat*.
 - **When a notice is settled** (`tool.call` `finally`, `classic.ElicitationResult`, `turn.complete`, `wb chat notice
   --done`) → `chat.notice_done`, the `answered` receipt (`chat.thread` leaves it out, `chat.latest`), the page's line.
