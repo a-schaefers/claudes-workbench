@@ -62,7 +62,7 @@ you work; take them on board and carry on.
   spec. You can write only there, in the temp directory and in build caches; anywhere else is
   refused ("Permission denied"). Need a directory? Call ask_reviewer with `path` (a pty, "out
   of pty devices": `/dev/pts`). Don't go looking for plans, notes or other projects elsewhere; if you lose the thread,
-  re-read the task at the start of this conversation, or ask with `ask_reviewer`.
+  read your task's file again ("Your task", below, names it), or ask with `ask_reviewer`.
 - Only non-interactive commands, and none that run forever (servers, watchers): add a timeout.
 - Do not read or print secrets (.env files, keys, tokens); the places keys live, and the user's
   own files outside the project, can't be read ("Permission denied"). Need to read a directory?

@@ -36,13 +36,22 @@ from . import meter
 from . import privacy
 from .runner import PKG_ROOT
 
+# `{spec}`: the file this prompt is written to, rounds/<n>/prompt.md (wb start, wb next). In the
+# user's message, not the system prompt alone (context.spec_note's `## Your task`): OpenCode 2.3.2's
+# compaction template keeps exact paths, so a compacted agent's checkpoint still names the file.
+# E11 of #1134: 6 of the 16 asks on record were an agent asking Claude for its spec again after a
+# compaction; on the GPU (3 pairs, 2026-11-24) naming it here cut tokens x0.40 (3/3 lower) and
+# minutes x0.81.
 PROTOCOL = """
 
 ---
 How to work (workbench protocol):
 - You are in a git worktree on branch {branch}. Git is read-only for you; leave the changes
   uncommitted. Claude commits, pushes and deploys.
-{test_line}{experiment_protocol}- If the spec is genuinely ambiguous, you may call the `ask_reviewer` tool ({budget} \
+{test_line}{experiment_protocol}- This step's full text, this message as it was sent, is saved in `{spec}`. If your
+  session is compacted and only a summary of the task is left, read that file again before
+  you go on; don't ask for it.
+- If the spec is genuinely ambiguous, you may call the `ask_reviewer` tool ({budget} \
 question(s) for this task). Otherwise make reasonable choices and say what you assumed.
 - Stay inside the scope of the spec. No unrelated refactors, no new dependencies unless asked.
 - You can write only in this worktree, the temp directory and build caches: "Permission denied"
@@ -57,7 +66,7 @@ question(s) for this task). Otherwise make reasonable choices and say what you a
 """
 
 # The writing role's protocol (#1025): prose under its own rules, not the coding ones. Its fold
-# and first bullet, `{test_line}`, the ask_reviewer, lane and `.proposed` bullets, and the
+# and first bullet, `{test_line}`, the `{spec}`, ask_reviewer, lane and `.proposed` bullets, and the
 # `Lesson: <the rule, and why>` line are PROTOCOL's word for word: bench.FOLD and bench.TEST_LINE,
 # transcript's fold and runner.outline_section's split read them, lessons.LESSON the summary's
 # `Lesson:` lines. Its summary bullet is its own (the [TK] gaps, the check's result).
@@ -67,7 +76,10 @@ WRITING_PROTOCOL = """
 How to work (workbench protocol):
 - You are in a git worktree on branch {branch}. Git is read-only for you; leave the changes
   uncommitted. Claude commits, pushes and deploys.
-{test_line}{experiment_protocol}- If the spec is genuinely ambiguous, you may call the `ask_reviewer` tool ({budget} \
+{test_line}{experiment_protocol}- This step's full text, this message as it was sent, is saved in `{spec}`. If your
+  session is compacted and only a summary of the task is left, read that file again before
+  you go on; don't ask for it.
+- If the spec is genuinely ambiguous, you may call the `ask_reviewer` tool ({budget} \
 question(s) for this task). Otherwise make reasonable choices and say what you assumed.
 - This is a writing task: change only the prose the brief names, or clearly means. No code,
   config or dependency changes.
@@ -1590,7 +1602,8 @@ def cmd_start(a):
     prompt = spec_text.rstrip() + protocol_for({"role": role}).format(branch=gitops.branch_name(a.name),
                                                   test_line=test_line(a.test), budget=budget,
                                                   experiment_protocol=context.experiment_protocol(
-                                                      experiments=exps))
+                                                      experiments=exps),
+                                                  spec=task.round_dir(1) / "prompt.md")
     task.round_dir(1).mkdir(parents=True)
     task.round_dir(1).joinpath("prompt.md").write_text(prompt, encoding="utf-8")
     # from the model's measured speed on this machine, else defaults; its identity (cached:
@@ -2000,7 +2013,8 @@ def cmd_next(a):
         "The next step:\n\n"
         + nxt.rstrip()
         + protocol_for(spec).format(branch=spec["branch"], test_line=test_line(test), budget=budget,
-                          experiment_protocol=context.experiment_protocol(task)),
+                          experiment_protocol=context.experiment_protocol(task),
+                          spec=task.round_dir(n) / "prompt.md"),
         encoding="utf-8")
     handled = store.now()
     # the next step's comparison base, whether this step committed or not: found by its trailer

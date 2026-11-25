@@ -288,7 +288,8 @@ Then:
   commands.json `repos`: *Setting the worktree up*), then the base check (*The base check*), so a
   slow suite can't strand a task (2026-11-16).
 - It writes `task.json`, round 1's prompt (the spec plus `cli.PROTOCOL`: git read-only,
-  `cli.test_line` (never weaken a test, not the whole suite unless asked: #127), the
+  `cli.test_line` (never weaken a test, not the whole suite unless asked: #127), the file the
+  prompt is saved in, to read again after a compaction (`{spec}`, *What the agent knows*), the
   `ask_reviewer` budget, scope, the writable places, a closing summary and `Lesson:` lines), the
   status, `rules/<task>/grants.json` (`--allow`, `--allow-path`), spawns the runner, and prints
   the model and why, the slice, the spec record, skills and `next: wb wait <task>`.
@@ -1657,7 +1658,7 @@ text appended, not an opening: keep it after the protocol, where the fold cuts.
 `PROTOCOL` (`cli.protocol_for`, at `wb start` and `wb next`; *The writing role*). It keeps
 `PROTOCOL`'s fold and first bullet word for word (`\n\n---\nHow to work (workbench protocol):\n-
 You are in a git worktree on branch {branch}.`), its `{test_line}` (`bench.TEST_LINE` reads the
-acceptance command back), its `ask_reviewer`, lane and `.proposed` bullets and its `Lesson:` line,
+acceptance command back), its `{spec}`, `ask_reviewer`, lane and `.proposed` bullets and its `Lesson:` line,
 and takes the same `.format` fields. Only the code bullets differ: prose only, no invented facts
 (`[TK: …]`), no reflowing. So every reader above treats a writing prompt as any other.
 
@@ -1684,7 +1685,16 @@ An API provider's header wait is 600 s instead (`API_HEADER_S`, *An API task's w
   `context.spec_note`, `## Your task`: the step's spec file (`store.round_prompt` of `step_round`,
   readable in the lane) to read again when the context holds only a summary: OpenCode's mid-round
   compaction keeps the system prompt and drops the spec, which a session that only read never got
-  back (#1071); then any experiment's note;
+  back (#1071); then any experiment's note. The handbook's "if you lose the thread" line sends the
+  agent to that file ("Your task", below), not to "the task at the start of this conversation",
+  which after a compaction is only the summary. Every round's protocol names the file too
+  (`cli.PROTOCOL`'s `{spec}`: `rounds/1/prompt.md` at `wb start`, `rounds/<n>/prompt.md` at
+  `wb next`), in the user's message, since OpenCode 2.3.2's compaction template keeps exact paths
+  (`## Relevant Files`) and its checkpoint is what a compacted agent reads next. E11 of #1134: 6 of
+  the 16 asks on record were an agent asking Claude for its spec again after a compaction; on the
+  GPU (3 pairs, 2026-11-24) the pointer cut tokens ×0.40 (3/3 lower) and minutes ×0.81. Always
+  on, no switch (`SpecFile`; the lane read: `RealOpenCode`'s
+  `test_the_prompt_file_the_protocol_names_is_one_the_agent_reads_in_its_lane`);
 - the user's own file for agents, `~/.config/workbench/AGENTS.md` (`context.USER_AGENTS_MD`,
   `user_agents_md`; `$WB_AGENTS_MD` moves it, which `Base` points at the test's own, #1102), when it exists: copied to `rules/<task>/AGENTS.md` (the lane can't read the
   config directory), as bytes (#784), its imports followed, counted in `fixed_prompt` as
@@ -7394,7 +7404,7 @@ doc needs its own `!/` line).
   `isCompactSummary`, `message.id`, `message.usage`, a Bash `tool_use`'s `command`, `timestamp`, `subagents/`, the line
   before a plugin's message) → `spend.py` (`WAKE`, `_prompt`, `calls`), the ClaudeSpend rows.
 - **`next_step`'s `ts` or the row's `steps` count** → `spend.usage_by_step`, `results.record`, `bench.handoff_cost`.
-- **`cli.PROTOCOL`** → the fold marker `\n---\nHow to work`, the `Lesson:` parser, the handbook, every prefill; `cli.WRITING_PROTOCOL` shares its fold, first bullet, `{test_line}`, ask, lane and `.proposed` bullets and `Lesson:` line (change them together; the Writing tests); `agent/WRITING.md`: every writing prompt, under 3,000 bytes (`tests/test_docs.py`).
+- **`cli.PROTOCOL`** → the fold marker `\n---\nHow to work`, the `Lesson:` parser, the handbook, every prefill; `cli.WRITING_PROTOCOL` shares its fold, first bullet, `{test_line}`, `{spec}`, ask, lane and `.proposed` bullets and `Lesson:` line (change them together; the Writing tests); `agent/WRITING.md`: every writing prompt, under 3,000 bytes (`tests/test_docs.py`).
 - **`agent/HANDBOOK.md`** → every agent prompt; each token costs prefill.
 - **How OpenCode is invoked or read** (`run_round`'s argv, `normalize`'s fields and `run_round`'s `state.output`, the export fields `context_state`,
   `measure_speed`, `transcript` read) → `tests/fake_opencode.py` in the same commit, `RealOpenCodeRun` for a new field,
