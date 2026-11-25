@@ -537,7 +537,6 @@ class Lifecycle(Base):
         self.assertIn("merged", out)
         # #269 (the audit of 1.2): read at the deleted branch, every merged accept said this
         self.assertNotIn("no CLAUDE.md", out)
-        self.assertRegex(out, r"CLAUDE\.md (is current with|last changed \d+ commit\(s\) before) [0-9a-f]{7}")
         self.assertEqual((self.repo / "answer.txt").read_text(), "42\n")
         log = subprocess.run(["git", "-C", str(self.repo), "log", "--format=%B", "-n1",
                               store.Task("t-ok").status["tip"]], capture_output=True, text=True).stdout
@@ -5800,7 +5799,6 @@ class Lifecycle(Base):
         self.start("t-sig", "ok")
         wait_phase("t-sig", {"review"})
         out = run_wb("accept", "t-sig", "-m", "feat: answer")
-        self.assertIn("CLAUDE.md last changed 1 commit(s) before", out)
         self.assertIn("accepted t-sig", out)
         self.assertIn("CLAUDE.md is current", run_wb("init", str(self.repo)))
 
@@ -19195,9 +19193,8 @@ class ClaudeSpend(Base):
         from workbench import spend
         self.assertIsNone(spend.usage(self.task("t-none", session=None)))
         self.assertIsNone(spend.usage(self.task("t-gone")))         # Claude Code cleaned it up
-        self.assertIsNone(spend.line(None))
 
-    def test_accept_records_and_reports_what_the_task_cost_claude(self):
+    def test_accept_records_what_the_task_cost_claude_and_says_none_of_it(self):
         os.environ["CLAUDE_CODE_SESSION_ID"] = self.SID
         self.start("t-cost", "ok")
         wait_phase("t-cost", {"review"})
@@ -19206,8 +19203,9 @@ class ClaudeSpend(Base):
                          _turn("[workbench] Task `t-cost` is ready for review.", "2026-11-17T10:09:00Z"),
                          *_call("m2", "2026-11-17T10:09:01Z", 700, "wb accept t-cost -m x")])
         out = run_wb("accept", "t-cost", "-m", "feat: answer")
-        # beside the estimate of writing it; no GPU part: a fake model's energy isn't measured
-        self.assertIn("claude: 7K · writing it yourself: ~5K (estimate) · cost ~2K more\n", out)
+        # recorded for wb stats and wb savings; the line at every accept went (#1322)
+        self.assertNotIn("claude:", out)
+        self.assertNotIn("writing it yourself", out)
         row = store.results()[-1]
         self.assertEqual(row["claude"]["cache_read"], 20000)
         stats = run_wb("stats")
@@ -21461,10 +21459,10 @@ class Progress(Base):
         self.assertIn("recommended: a smaller step: wb steer t --now --step --text", c["text"])  # nothing moved
         self.assertIn("the coding choice stays as the user set it", c["text"])
         out = run_wb("steer", "t", "--now", "--step", "--text", "write answer.txt only")
-        self.assertIn("recorded as the answer to the progress check", out)
-        self.assertNotIn("recorded", run_wb("steer", "t", "--text", "and nothing else"))  # once a check
+        self.assertNotIn("recorded", out)              # recorded, unsaid (#1322)
+        run_wb("steer", "t", "--text", "and nothing else")
         wait_phase("t", {"review"})
-        self.assertEqual([i["kind"] for i in store.Task("t").status["interventions"]], ["smaller"])
+        self.assertEqual([i["kind"] for i in store.Task("t").status["interventions"]], ["smaller"])  # once a check
         self.assertIn("Only when I say", run_wb("coding"))                # time made nothing Claude's
         self.assertFalse((store.Task("t").dir / "coding.json").exists())
         steer = store.read_jsonl(store.Task("t").dir / "steer.jsonl")[0][0]["text"]
@@ -24106,8 +24104,9 @@ class Projects(Base):
         run_wb("start", "t-pk", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo")
         wait_phase("t-pk", {"review"})
         out = run_wb("accept", "t-pk", "-m", "feat: answer")
-        self.assertNotIn("no CLAUDE.md", out)
-        self.assertIn("packages/app/CLAUDE.md last changed 1 commit(s) before", out)   # the task's
+        self.assertNotIn("no CLAUDE.md", out)                       # the package's own (#783)
+        self.assertIn("packages/app/CLAUDE.md last changed 1 commit(s) before",
+                      cli.claude_md_status(self.repo, "delegate/t-pk", "packages/app"))   # the task's
         self.assertIn("packages/app/CLAUDE.md is current with HEAD~1",
                       cli.claude_md_status(self.repo, "HEAD~1", "packages/app"))
         self.assertEqual(cli.claude_md_status(self.repo, "HEAD"), "no CLAUDE.md")    # the root's
@@ -24221,7 +24220,7 @@ class Projects(Base):
         self.start("t-dot", "ok")
         wait_phase("t-dot", {"review"})
         out = run_wb("accept", "t-dot", "-m", "feat: answer")
-        self.assertIn(".claude/CLAUDE.md last changed 1 commit(s) before", out)
+        self.assertIn(".claude/CLAUDE.md last changed 1 commit(s) before", cli.claude_md_status(self.repo, "delegate/t-dot"))
         self.assertNotIn("no CLAUDE.md", out)
         self.assertIn(f"git -C {shlex.quote(str(self.repo))} merge", out)
 
@@ -24622,11 +24621,17 @@ class Projects(Base):
         self.assertEqual((store.Task("t-lfs").worktree / "data.bin").stat().st_size, 10**6 + 4)
         self.assertIs(st["tests"]["ok"], True)
 
-    def test_accept_says_whether_claude_md_kept_up(self):
+    def test_accept_says_only_that_a_repo_has_no_claude_md(self):
+        # how current it is and "keep it current" came at every accept, which Claude knows (#1322)
         self.start("t-ok", "ok", "--test", TEST_CMD)
         wait_phase("t-ok", {"review"})
         out = run_wb("accept", "t-ok", "-m", "feat: answer")
-        self.assertIn("CLAUDE.md last changed 1 commit(s) before", out)
+        self.assertNotIn("CLAUDE.md", out)
+        (self.repo / "CLAUDE.md").unlink()
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qam", "no docs"], check=True)
+        self.start("t-none", "ok", "--no-claude-md")
+        wait_phase("t-none", {"review"})
+        self.assertIn("the repo has no CLAUDE.md: write one (wb init)", run_wb("accept", "t-none", "-m", "feat: x"))
 
 
 class ModelSet(Base):
@@ -29871,13 +29876,15 @@ class SkillLearning(Base):
         self.assertLessEqual(len(shown), 2500 + 80)
 
     def test_a_task_leaves_its_lessons_and_a_repeated_one_stands_out(self):
+        from workbench import lessons
         os.environ["FAKE_LESSON"] = "the answer file needs a trailing newline, or grep -x misses it"
         out = self.start("t-l1", "fix", "--auto-fix", "0", "--test", TEST_CMD)
         self.assertIn("Lesson: <the rule, and why>", store.Task("t-l1").round_dir(1).joinpath("prompt.md").read_text())
         wait_phase("t-l1", {"review"})
         out = run_wb("feedback", "t-l1", "--text", "1. Write the answer as the number 42 in answer.txt, never 41: the acceptance test greps for it.\n"
                      "2. Keep the answer file to the single number and its newline.")
-        self.assertIn("lessons: 3 from this task", out)          # two corrections, the agent's own
+        self.assertNotIn("lessons:", out)            # three new, none seen before: harvested quietly (#1322)
+        self.assertEqual(len([x for x in lessons.survey() if x["task"] == "t-l1"]), 3)   # two corrections, the agent's own
         wait_phase("t-l1", {"review"})
         run_wb("accept", "t-l1", "-m", "feat: answer")
         listed = run_wb("lessons")
@@ -29887,10 +29894,9 @@ class SkillLearning(Base):
         self.start("t-l2", "fix", "--auto-fix", "0", "--test", TEST_CMD)
         wait_phase("t-l2", {"review"})
         out = run_wb("feedback", "t-l2", "--text", "1. Write the number 42 in answer.txt, not 41: the acceptance test greps for it.")
-        self.assertIn("seen in other tasks too", out)
+        self.assertIn("lessons: 1 seen in other tasks too (wb lessons)", out)
         wait_phase("t-l2", {"review"})
         out = run_wb("discard", "t-l2", "--reason", "enough")
-        from workbench import lessons
         top = lessons.survey()[0]
         self.assertEqual((top["kind"], top["again"][0][0]), ("feedback", "t-l1"))
         draft = self.draft("answers", "Use when writing answer files.", "Write 42, never 41.\n")
@@ -29970,7 +29976,7 @@ class SkillLearning(Base):
         with mock.patch.object(lessons, "_id", same):
             out = run_wb("feedback", "t-ids", "--text", "1. Name the answer file answer.txt always.\n"
                          "2. Keep the number on a single line of its own.")
-        self.assertIn("lessons: 2 from this task", out)
+        self.assertNotIn("lessons:", out)
         wait_phase("t-ids", {"review"})
         ids = [x["id"] for x in lessons.survey() if x["task"] == "t-ids"]
         self.assertEqual(sorted(len(i) for i in ids), [6, 8])
@@ -39310,6 +39316,10 @@ class ApiStats(Base):
                          "claude: 56K · writing it yourself: ~59K (estimate) · paid: unknown (no price for this model)")
         self.assertEqual(savings.line(self.api_row()), "claude: 56K · writing it yourself: ~59K (estimate) · "
                                                       "paid deepseek ≈$0.42 (deepseek/flash, catalog prices)")
+        # wb accept's and wb discard's: the money alone, short (#1322)
+        self.assertEqual(savings.paid(self.api_row()), "paid deepseek ≈$0.42")
+        self.assertEqual(savings.paid(self.api_row(cost=None, source="unknown")),
+                         "paid: unknown (no price for this model)")
 
     def test_wb_savings_api_says_the_week_by_provider_and_day_with_trials_and_bench_replays_in(self):
         from workbench import bench

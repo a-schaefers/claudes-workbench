@@ -2966,9 +2966,7 @@ def cmd_steer(a):
     store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text, "now": a.now})
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "steer",
                 "now": a.now, "text": text})
-    if progress.record(task, "smaller" if a.step else "hint"):
-        print("recorded as the answer to the progress check: whether it helped is learned at "
-              "accept or discard")
+    progress.record(task, "smaller" if a.step else "hint")  # recorded, unsaid (#1322)
     if phase in ("testing", "queued"):
         print(f"note queued for {a.name}: " + _when_delivered(task, phase, ""))
     elif a.now:
@@ -4040,15 +4038,13 @@ def cmd_accept(a):
                                 spec.get("subdir") or "")  # the package's own (#783)
     except (gitops.GitError, OSError, ValueError):
         note = None
-    if note:
-        print("the repo has no CLAUDE.md: write one (wb init)" if note == "no CLAUDE.md" else
-              f"{note}: keep it current (update it if this change alters what it says)"
-              if note == LOCAL_CLAUDE_MD else
-              f"{note}: keep it current (update and commit it if this change alters what it says)")
+    if note == "no CLAUDE.md":  # how current it is, and "keep it current", went (#1322)
+        print("the repo has no CLAUDE.md: write one (wb init)")
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
           (f", merged into {close['merge_into']} as {merged}" if merged else
            "\n" + _merge_line(repo, spec, close, a)))
-    _say(savings.line(row) or spend.line(row.get("claude")))
+    # an API task's money, short; the Claude-token estimate went (#1322): nobody acted on it
+    _say(savings.paid(row) if row.get("kind") == "api" else "")
     _say(checked)
     _say(lessons.nudge(task, "accepted"))
     if refused:  # accepted, not merged: a script or Claude reading 0 went on as if main had it
@@ -4619,7 +4615,7 @@ def cmd_discard(a):
     _ack_all(task)
     _closed(task)
     print(f"discarded {a.name}{said}")
-    _say(savings.line(row) or spend.line(row.get("claude")))
+    _say(savings.paid(row) if row.get("kind") == "api" else "")  # money only (#1322)
     _say(lessons.nudge(task, "discarded"))
 
 

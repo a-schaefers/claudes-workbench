@@ -343,9 +343,3 @@ def weighted(u: dict) -> int:
     """One number for a usage: input-equivalent tokens (WEIGHTS)."""
     return round(sum(WEIGHTS[k] * (u.get(k) or 0) for k in KINDS))
 
-
-def line(u: dict | None) -> str | None:
-    if not u:
-        return None
-    return (f"claude: ~{weighted(u) / 1000:.0f}K input-equivalent tokens over {u['turns']} "
-            f"turn(s) ({u['output']} output)")

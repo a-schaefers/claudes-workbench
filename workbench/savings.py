@@ -435,7 +435,14 @@ def api_totals(rows: list[dict], since: float = 0) -> dict:
     return out
 
 
-def _paid(row: dict) -> str:
+def paid(row: dict) -> str:
+    """What an API task's provider was paid, short, as wb accept and wb discard end with it:
+    `paid DeepSeek ≈$0.12`, `paid: unknown (…)` or `plan usage (…)` (#1322: the Claude-token
+    estimate beside it went)."""
+    return _paid(row, short=True)
+
+
+def _paid(row: dict, short: bool = False) -> str:
     from .results import row_cost
     api = row.get("api") if isinstance(row.get("api"), dict) else {}
     pid = str(row.get("provider") or "?")
@@ -447,6 +454,8 @@ def _paid(row: dict) -> str:
                 else "paid: unknown (no price for this model)")
     from .results import row_basis
     b = row_basis(row)  # ≈ and "catalog prices" unless the user set the model's (#1135)
+    if short:
+        return f"paid {provider_label(pid)} {money(cost, b)}"
     return f"paid {provider_label(pid)} {money(cost, b)} ({row.get('model')}{NOTE_IN[b] if cost else ''})"
 
 

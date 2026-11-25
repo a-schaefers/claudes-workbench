@@ -496,8 +496,8 @@ session's tasks:
 Charging whole turns was wrong (2026-11-17: 5.5M cached tokens of other work on one task). The
 row keeps `input`, `cache_write_5m`, `cache_write_1h`, `cache_read`, `output`, `turns`, `calls`;
 `spend.weighted` gives input-equivalent tokens (`WEIGHTS`: output 5, cache write 1.25 or 2 for an
-hour, read 0.1), which `wb accept`/`discard` (beside the estimate, `savings.line`), `wb stats`
-and the router (`_cheaper`) use. Nothing
+hour, read 0.1), which `wb stats`, `wb savings`, `wb backlog` (`savings.line`) and the router
+(`_cheaper`) use; `wb accept`/`discard` print none of it (#1322: a line nobody acted on). Nothing
 to read: the row has no `claude`, never a zero (#718: zeros skewed `_cheaper`).
 
 **Each step's share** (`spend.usage_by_step`, #558): `steps[i].claude`, so a one-step bench case
@@ -562,7 +562,9 @@ usage`. `line(row)` gives an API row `api_line`: `claude: 56K · writing it your
 `provider_labels`; `$0.12 (…, your prices)` at the user's own, *Estimates or your prices*;
 `· paid: unknown (no price for this model)` (`unrecorded`: `· paid: unknown
 (no figure recorded)`, #1106) or `· plan usage (opencode-go)`;
-so `wb accept`, `wb discard` and `wb backlog` print it. With API rows and no GPU one to compare,
+so `wb backlog` prints it. `wb accept` and `wb discard` print only an API task's money, short
+(`savings.paid`: `paid DeepSeek ≈$0.12`, `paid: unknown (…)` or `plan usage (…)`), and nothing for
+a GPU task (#1322). With API rows and no GPU one to compare,
 `summary` says `no GPU task to compare (API tasks are below, apart from the score)`, not that a
 task lacks its Claude usage and diff (#1121). `wb savings` adds, when the period has API
 rows, `api: 6 task(s) · ≈$1.27 (deepseek ≈$0.84, anthropic ≈$0.43; catalog prices) + 1 with no price · claude 210K ·
@@ -2719,8 +2721,8 @@ no check came, and a 1.5-minute typical made every 1.5 minutes a wake). The pane
   hint.
 - It never authorizes an edit: nothing in it touches `coding.json`.
 - **Learning**: the first `wb steer` after a check (status `progress_open`) goes in status
-  `interventions` `[{kind: hint|smaller, ts, round, step}]` and the results row;
-  `progress.helped(model)` / `helped_by_model(rows)` (over `tuning.judged` rows) count tries and
+  `interventions` `[{kind: hint|smaller, ts, round, step}]` and the results row, without a line
+  of its own in `wb steer`'s output (#1322); `progress.helped(model)` / `helped_by_model(rows)` (over `tuning.judged` rows) count tries and
   landings without a takeover (`tuning.agent_landed`); the next check cites them.
 
 **Stats recording** (`workbench/stats.py`, #404) keeps what only the Stats tab reads. The user's
@@ -4777,8 +4779,8 @@ knowledge doesn't spread unnoticed.
 
 `workbench/lessons.py` gathers what each task taught into `$WB_HOME/lessons.jsonl`, for Claude to
 turn into skills. `wb feedback`, `next`, `resume`, `accept` and `discard` call `harvest` and end
-with one `nudge` line: `lessons: N from this task[, M seen in other tasks too] (wb lessons: write or
-patch a skill now, while it's fresh)`. A `trial` task gathers nothing; `wb trial` closes its open
+with one `nudge` line only when one is seen in other tasks too: `lessons: M seen in other tasks too
+(wb lessons)` (#1322: a line for every task's lessons was a nudge nobody acted on). A `trial` task gathers nothing; `wb trial` closes its open
 lessons. Kinds: `feedback` (each numbered item, `N.` or `N)`, of a round prompt, or
 `instructions.md` after a handover, opening `FEEDBACK_HEAD`, "Review feedback from the senior
 reviewer.", ≤600 characters; `lessons.feedback` reads each `FEEDBACK_HEAD` paragraph's body on its
@@ -5220,9 +5222,11 @@ effect's hit came 0.8-1.45 s in (the skill says to trim the lead); ACE-Step peak
   a scratch index from HEAD, `_md_entries`, no hooks), leaving the user's edits (#931), and nothing
   ("not committed: …") for an already-staged path, an uncommitted `CLAUDE.md`, a gitignored target,
   or an operation under way (`gitops.under_way`, `UNDER_WAY`: it once consumed `MERGE_HEAD`).
-- **CLAUDE.md stays true.** It goes into every prompt, so `wb accept` prints how many code commits
-  it's behind (`cli.claude_md_status`, at `tip`, #269; a `subdir` task's package CLAUDE.md first,
-  against the package's commits, the root's only when it has none, #783), and the skill has Claude update it after an accepted task that changes what it describes.
+- **CLAUDE.md stays true.** It goes into every prompt, so the skill has Claude update it after an
+  accepted task that changes what it describes. `wb accept` says only when the repo has none
+  (`the repo has no CLAUDE.md: write one (wb init)`, `cli.claude_md_status` at `tip`, #269; a
+  `subdir` task's package CLAUDE.md first, #783); how many code commits it is behind went (#1322:
+  every accept said it, and "keep it current"); `wb init` still says it.
 
 ## Claude coding: when Claude writes a task's code
 
