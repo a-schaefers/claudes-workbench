@@ -1441,12 +1441,21 @@ def _count(v) -> int | None:
     return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
 
 
+def api_window(cfg: dict) -> int:
+    """The window an API model's entry is capped at (api_limits): API_WINDOW_LIFT, or the first
+    context tier of its price (meter.first_tier) when that is smaller, never under API_WINDOW. Past
+    a tier every request is priced at its rate: Haiku's rises 5x past 100K, so it keeps the 128K
+    it had before the lift (#1134's E19, 2026-11-24)."""
+    from . import meter  # meter imports this module
+    return max(API_WINDOW, min(API_WINDOW_LIFT, meter.first_tier(cfg) or API_WINDOW_LIFT))
+
+
 def api_limits(cfg: dict) -> dict:
     """An API model's entry with its window and output capped (#1017): `limit.context` at most
-    API_WINDOW, `limit.input` at most that, and `limit.output` and `options.max_tokens` both the
-    smallest of the entry's own two and API_OUTPUT (API_OUTPUT when it gives neither), and at
-    most _api_output_fit of the window (#1073). Written
-    once here, so the layer's pins (runner.model_pins), OpenCode's compaction
+    api_window (256K, or 128K for a price tier under that), `limit.input` at most that, and
+    `limit.output` and `options.max_tokens` both the smallest of the entry's own two and
+    API_OUTPUT (API_OUTPUT when it gives neither), and at most _api_output_fit of the window
+    (#1073). Written once here, so the layer's pins (runner.model_pins), OpenCode's compaction
     (runner.compaction_buffer), the slice, status `window`, the steps and the tuning keys all read
     one window. A catalog's 1M window let a session that only reads carry up to 1M tokens a
     request, and its 384K output put the compaction point below zero. The user's own entries (a
@@ -1457,7 +1466,7 @@ def api_limits(cfg: dict) -> dict:
     if not (context := _count(lim.get("context"))):
         return cfg
     opts = cfg.get("options") if isinstance(cfg.get("options"), dict) else {}
-    context = min(context, API_WINDOW)
+    context = min(context, api_window(cfg))
     cap = min(v for v in (_count(lim.get("output")), _count(opts.get("max_tokens")), API_OUTPUT) if v)
     # and at most what keeps the latest handover at or past the earliest fresh_at: a 32K window
     # with a 32K output put OpenCode's compaction below zero, and the note told the user to
@@ -4962,7 +4971,15 @@ def is_api(model_id: str) -> bool:
     return bool(m and m.kind == "api")
 
 
-API_WINDOW = 131072   # the effective window an API task plans to (#1017; decision 10)
+# An API model's window is capped at API_WINDOW_LIFT (api_window): at 128K (API_WINDOW, #1017's
+# decision 10) every DeepSeek size-* and mid-xl-scout run on record compacted at 72% of it, one
+# large read jumping past fresh_at straight to OpenCode's own summary; at 256K, with the output
+# still API_OUTPUT, the buffer stays 36864 and OpenCode compacts at 86% (225K tokens). Measured on
+# DeepInfra's DeepSeek V4.1 Flash, 12 runs over 5 cells: 0-1 compactions a run instead of 4-13, at
+# about the same cost and with no new stop (#1134's E19, 2026-11-24). API_WINDOW stays the floor:
+# a price tier under 256K (Haiku's 100K) keeps the window it had.
+API_WINDOW = 131072
+API_WINDOW_LIFT = 262144
 API_OUTPUT = 32768    # output pinned for API tasks (#1017)
 
 

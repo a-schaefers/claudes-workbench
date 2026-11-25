@@ -676,7 +676,8 @@ input token at the cache-miss rate; with a 100K cached context that metered 50 t
 cost, and OpenCode's own figure is this same catalog estimate (unless the usage says its own
 `cost`: then that, #1234), so the meter prices as it does.
 Never under where the split is unknown: a usage that doesn't name its cache reads prices them as
-input, and a missing cache price is the input price.
+input, and a missing cache price is the input price. `meter.first_tier(cfg)`: an entry's lowest
+tier `size` above 0, None for a flat price; `models.api_window` lifts no API window past it.
 
 **Two views, the higher kept.** The keyhole's (`Meter.on_usage`, from the keyhole's thread): each
 upstream response's `usage`, merged into one per response (`keyhole._merged`: Anthropic's
@@ -1388,7 +1389,7 @@ window, as OpenCode compacts at usable − buffer; never context − output, #67
 sits `STEP_GROWTH` (or `tuning.CEILING_MARGIN`, if more) before it, the tuner's limit: the runner
 checks at a step's end, OpenCode before the next request with its tool results in (#644). Both
 count reasoning tokens. `keep.tokens` (`compaction_keep`) is the tail OpenCode keeps verbatim beside its
-summary, restated with the rest of `compaction`: `KEEP_SHARE` 0.10 of usable, at least `KEEP_MIN` 2048 (4096 on 40K, 13107 on 128K). OpenCode's
+summary, restated with the rest of `compaction`: `KEEP_SHARE` 0.10 of usable, at least `KEEP_MIN` 2048 (4096 on 40K, 13107 on 128K, 26214 on an API task's 256K). OpenCode's
 default is 15,000 whatever the window; 2.3.2 starts the tail only at a user message after the first
 (a one-prompt round kept none), 2.4.1 at any message, so a 32–40K session came back from a compaction
 at about 64%, next to the point again (109 of 242 40K compactions offline; about 41% at a tenth: #1185,
@@ -1403,16 +1404,24 @@ won't register it, `wb doctor` marks it. At 16K no handover fits (`runner.handov
 ceiling below every candidate is the value (`tuning.allowed`).
 
 **An API task's window, output and header wait** (#1017). Its model's entry comes capped from
-`models.api_limits` (*Models: found, loaded, chosen*: 131072 window, 32768 out), and the layer
+`models.api_limits` (*Models: found, loaded, chosen*: a 262144 window, 32768 out), and the layer
 file itself carries those pins under `provider.<pid>.models.<name>` (`runner.api_pins`, the
 `model_pins` overlay): a catalog model has no entry in any config the agent's OpenCode loads, and
 the catalog's own numbers would compact at 1M and ask for 256K out (OpenCode caps `max_tokens` at
 `min(limit.output, 256000)`; it asks less as the window's room runs out). `rules_env` restates
-them, as it does a GPU model's. So the buffer is 131072 + 32768 − 131072 + 4096 = 36864, the
-compaction point 71.9% (about 94K tokens, the backstop for a session that only reads, which never
-hands over mid-round: the handbook copy's `## Your task` names its spec's file, #1071), `fresh_ceiling` 66.9% (`fresh_at` 0.4–0.6 allowed, 0.7 and 0.8 not), and
-`handover_warning` says nothing. The real-OpenCode check: `ApiSizing`'s `test_real_opencode_*`,
-which sees 32768 out and a compaction at 100K tokens only with the pins. The header wait: an API
+them, as it does a GPU model's (`model_pins` resolves the same capped entry: a 128K there,
+loaded after the layer, would undo it). So the buffer is 262144 + 32768 − 262144 + 4096 = 36864,
+the compaction point 85.9% (about 225K tokens, the backstop for a session that only reads, which
+never hands over mid-round: the handbook copy's `## Your task` names its spec's file, #1071),
+`fresh_ceiling` 80.9% (every `fresh_at` 0.4–0.8 allowed), and `handover_warning` says nothing.
+At 128K (before #1134's E19) the point was 71.9% (94K): every DeepSeek size-* and mid-xl-scout run
+compacted there, one large read jumping past `fresh_at` straight to OpenCode's own summary; at
+256K, on DeepInfra's DeepSeek V4.1 Flash, 12 runs over 5 cells compacted 0–1 times instead of
+4–13, at about the same cost and with no new stop (2026-11-24). The real-OpenCode check:
+`ApiSizing`'s `test_real_opencode_*`, which sees 32768 out and a compaction just past the point
+only with the pins, and none 20K under it; `test_a_driven_api_task_runs_in_the_256k_window_*`
+and `test_a_deepseek_task_whose_off_variant_is_v2_*` check the layer, the restatement (V1 and
+V2) and the task's `catalog.json`. The header wait: an API
 provider's `headerTimeout` is `runner.API_HEADER_S` (600 s) instead of `false`, since an API reads
 no long prompt here and DeepSeek closes a request not started within 10 minutes; `chunkTimeout`
 stays the larger of 900 s and silence + 60 s. All of it is decided from the task, not the catalog:
@@ -3456,9 +3465,14 @@ read as a wrong id, Claude hunted for the "right" one).
   `ollama`; else `""` (`_key_source`, the provider's); a keyless free model is `none`, its own: a
   provider holds free and paid models alike, and one source per provider made every sibling `none`.
 - *Its window and output* (`api_limits`, #1017; decision 10 of #1008). `config.limit` is capped once
-  here: `context` `min(catalog, API_WINDOW)` (131072, the slice's saturation point, `GUESS_MAX` ×
-  `BASE_WINDOW`: past it the slice grows only from steps that fit, and every request of a fuller
-  window is paid for, up to 1M tokens a request in a session that only reads); `input` at most that
+  here: `context` `min(catalog, api_window(cfg))`: `API_WINDOW_LIFT` 262144, or the first context
+  tier of the entry's price (`meter.first_tier`) when smaller, never under `API_WINDOW` 131072
+  (Haiku's price rises 5x past 100K: it keeps 128K). A ceiling: every request of a fuller window
+  is paid for, up to 1M tokens a request in a session that only reads, and 262144 keeps OpenCode's
+  compaction at 86% (*An API task's window, output and header wait*, #1134). The slice's guess
+  saturates at 131072 already (`GUESS_MAX` × `BASE_WINDOW`), so past it the slice grows only from
+  steps that fit, and steps count only at the window they ran in (a 128K step from before the lift
+  isn't a 256K one's); `input` at most that
   when the catalog has one (`usable_input` reads the smaller); `output` `min(catalog, API_OUTPUT)`
   (32768; `API_OUTPUT` when none), and at most `_api_output_fit(window)`, the largest that keeps
   `runner.fresh_ceiling` at or above the lowest `fresh_at` (`window × (1 − lo − max(STEP_GROWTH /
@@ -7365,7 +7379,7 @@ doc needs its own `!/` line).
   `RealOpenCodeAPI.test_the_tasks_own_catalog_*` on each OpenCode bump, and the fake's `OPENCODE_MODELS_PATH` listing.
 - **`models.API_PARALLEL`** → `cli._slots_full` and `_slot_note`'s text, `NoLease`'s queued `last`, SKILL.md's
   dispatch line, reference/driving.md's backlog line.
-- **An API model's window and output** (`models.api_limits`, `API_WINDOW`, `API_OUTPUT`, `_api_output_fit`) are the one source for `runner.model_pins`/`api_pins` (the layer), `compaction_buffer`, `router.slice`, status `window` (the steps, `tuning._key`): read them from `m.config` (each round of an API task: status `api_entry`, `runner.pin_api`), never the catalog's `extra["catalog_limit"]` (#1017), which only `wb models --api` shows.
+- **An API model's window and output** (`models.api_limits`, `api_window`, `API_WINDOW`, `API_WINDOW_LIFT`, `meter.first_tier`, `API_OUTPUT`, `_api_output_fit`) are the one source for `runner.model_pins`/`api_pins` (the layer), `compaction_buffer`, `router.slice`, status `window` (the steps, `tuning._key`): read them from `m.config` (each round of an API task: status `api_entry`, `runner.pin_api`), never the catalog's `extra["catalog_limit"]` (#1017), which only `wb models --api` shows.
 - **What a handoff costs Claude, measured** → the README's sentence.
 - **Anything a reader looks up** → this file, CLAUDE.md if it names it, the skill if Claude uses it; README only for the
   quickstart (CLAUDE.md's *Keeping the docs true*).

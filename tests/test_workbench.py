@@ -32989,7 +32989,7 @@ class ApiDiscovery(Base):
     def test_a_connected_model_is_an_api_model_with_its_catalog_window(self):
         m = self.models.hosted()["acme/coder-flash"]
         self.assertEqual((m.kind, m.key, m.engine, m.name, m.provider), ("api", "stored", "api", "coder-flash", "acme"))
-        self.assertEqual(m.config["limit"]["context"], 131072)                # capped (#1017)
+        self.assertEqual(m.config["limit"]["context"], 200000)                # its own, under 256K (#1134)
         self.assertEqual(m.extra["catalog_limit"]["context"], 200000)        # the catalog's
         self.assertEqual((m.base_url, m.package, m.label),
                          ("https://api.acme.test/v1", "@opencode/ai/providers/openai-compatible", "Acme (API)"))
@@ -35111,7 +35111,7 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.start_api("t-explore", "explore", spawn=False)
         self.drive_here("t-explore")
         st = store.Task("t-explore").status
-        self.assertEqual((st["window"], st["phase"]), (131072, "review"), st.get("last"))
+        self.assertEqual((st["window"], st["phase"]), (262144, "review"), st.get("last"))
         # the GPU tasks are stopped at the 40th read, so the fake waits as long as it takes: its
         # 2 s were too short for a loaded macOS runner, which read the 40th read after the write
         # and lifted the guard for the edit (as it should, for an edit made through the shell),
@@ -35478,7 +35478,7 @@ class ApiThinking(Base):
         self.assertEqual(json.loads(runner.write_config_layer(task).read_text())["small_model"],
                          "deepseek/deepseek-flash#none")
         out = transcript.model_line(store.Task("t-flash"), {})
-        self.assertEqual(out, "deepseek/deepseek-flash (deepseek, API) · thinking off · 128K context")   # task.json's (#1078), no variant; #1017's window
+        self.assertEqual(out, "deepseek/deepseek-flash (deepseek, API) · thinking off · 256K context")   # task.json's (#1078), no variant; #1134's window
         from workbench import results
         row = results.record(task, "discarded")
         self.assertEqual(row["thinking"], "off")                  # the weekly check's evidence
@@ -41695,7 +41695,7 @@ class ApiCompat(Base):
         want = self.models.hosted()["acme/coder-flash"]
         role = out.index("  trivial      acme/coder-flash  ready")
         self.assertEqual(out[role:].splitlines()[1], f"  {'':12} slice: {cli.router.slice(want).line()}")
-        self.assertIn("a guess from its 128K window", out[role:].splitlines()[1])
+        self.assertIn("a guess from its 195K window", out[role:].splitlines()[1])   # its own 200000
         self.assertEqual(out.count("slice: "), 1)                   # none for a model not in the catalog
         skill = (Path(cli.__file__).resolve().parent.parent / "skill/workbench/SKILL.md").read_text()
         first = " ".join(skill[skill.index("  2. **No GPU model"):skill.index("  3. **No GPU model")].split())

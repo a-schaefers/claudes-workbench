@@ -4859,7 +4859,7 @@ def _api_list(text: str) -> None:
         basis = _prices_of(m)
         price = f" · ${rate.get('input') or 0:g}/${rate.get('output') or 0:g} per 1M in/out" \
             + (f", {basis}" if basis else "") if rate and not m.free else ""
-        # the catalog's own window, the model's fact (#1017 plans every API task to API_WINDOW)
+        # the catalog's own window, the model's fact (an API task runs capped: models.api_window)
         own = (m.extra.get("catalog_limit") or m.config.get("limit") or {}).get("context")
         print(f"{m.id}  {_window(own)}{price}"
               + (f" · free: {FREE_NOTE}" if m.free else ""))
