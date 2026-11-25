@@ -6946,11 +6946,42 @@ def _install_kind() -> str:
     where Claude Code keeps the marketplace clone when it is set: read there as the user's own,
     wb update skipped the rescue and Claude Code's re-clone wiped the local commits (#1099,
     2026-11-23)."""
+    here = PKG_ROOT.resolve()
+    return "marketplace" if any(here.is_relative_to((r / "marketplaces").resolve()) for r in _plugin_roots()) else "clone"
+
+
+def _plugin_roots() -> list[Path]:
     roots = [context.claude_home() / "plugins"]
     if cache := os.environ.get("CLAUDE_CODE_PLUGIN_CACHE_DIR"):
         roots.append(Path(os.path.expanduser(cache)))
-    here = PKG_ROOT.resolve()
-    return "marketplace" if any(here.is_relative_to((r / "marketplaces").resolve()) for r in roots) else "clone"
+    return roots
+
+
+def _marketplace_clone() -> Path | None:
+    """The git clone Claude Code's marketplace update re-clones: this copy on a marketplace
+    install; from any other, known_marketplaces.json's `workbench` installLocation (or the usual
+    place) when it is a git clone under a plugins root's marketplaces/. A developer clone's wb
+    update rescued only itself, and the re-clone wiped that clone's commits, exit 0, nothing in
+    rescued/ (#1326, 2026-11-24). A directory marketplace is never re-cloned, so it isn't one."""
+    if _install_kind() == "marketplace":
+        return PKG_ROOT
+    roots, here = _plugin_roots(), PKG_ROOT.resolve()
+    found = []
+    for r in roots:
+        try:
+            at = store.read_json(r / "known_marketplaces.json", {}).get("workbench", {}).get("installLocation")
+        except (OSError, ValueError, AttributeError):
+            at = None
+        found += [Path(os.path.expanduser(at))] if isinstance(at, str) and at else []
+    for d in [*found, *(r / "marketplaces" / "workbench" for r in roots)]:
+        d = d.resolve()
+        if d == here or not d.is_dir() or not any(d.is_relative_to((r / "marketplaces").resolve()) for r in roots):
+            continue
+        top = subprocess.run(["git", "-C", str(d), "rev-parse", "--show-toplevel"], capture_output=True,
+                             text=True, stdin=subprocess.DEVNULL)
+        if top.returncode == 0 and Path(top.stdout.strip()).resolve() == d:
+            return d
+    return None
 
 
 def _running(live, a) -> str:
@@ -6971,6 +7002,11 @@ def cmd_update(a):
     last = store.read_json(path, {})
     if a.if_due and not a.check:  # it pulled and updated at once, weekly or not (#602)
         die("--if-due goes with --check: wb update --check --if-due")
+    # a `local` made with a plain `git switch -c local`, as the texts said, tracked nothing: both
+    # paths died raw, "fatal: no upstream configured" (#1327, 2026-11-24). Set, else named
+    tracked = patches.track_upstream(PKG_ROOT) if kind == "clone" else None
+    if kind == "clone" and (fix := patches.no_upstream(PKG_ROOT)):
+        die(f"couldn't check for an update: {fix}")
     if a.check:
         quiet = os.environ.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
         if a.if_due and (quiet or time.time() - last.get("checked_at", 0) < UPDATE_EVERY):
@@ -6995,7 +7031,10 @@ def cmd_update(a):
         news = (f"update available: {behind} new commit(s); /workbench-update (or wb update) installs it"
                 if behind else f"update available: Claude Code runs the mod as of {stale}, older than "
                 "this clone's; /workbench-update (or wb update) installs it" if stale else None)
+        # the news first: the mod toasts only output that starts "update available"
         print("\n".join(x for x in (news, patches.CHECK_LINE if mine else None) if x) or "up to date")
+        if tracked:
+            print(tracked)
         return
     # every check that can refuse comes before any task is stopped: --stop stopped every
     # session's tasks, then died on a dirty clone, a missing claude, a failed fetch, or found
@@ -7007,17 +7046,18 @@ def cmd_update(a):
     settled = patches.Settled(set(), [], [], [])  # what became of the pull requests wb patch send opened
     # what wb update says of them once the update is said: the mod reloads the plugin only on output
     # that starts "updated", and these lines first hid that (#1005, 2026-11-22)
-    later = []
+    later = [tracked] if tracked else []
 
     def say_later():  # before a refusal too, so a line isn't lost to it
         if later:
             print("\n".join(later))
         later.clear()
 
-    if kind == "clone":  # a clone is its own marketplace: pull, then let Claude Code re-read it
+    if kind == "clone":  # a clone: pull, then let Claude Code re-read its marketplace
         if gitops.git(PKG_ROOT, "status", "--porcelain", "--untracked-files=no").strip():
             die(f"{PKG_ROOT} has uncommitted changes: commit or stash them, then wb update")
-    elif refusal := patches.marketplace_refusal(PKG_ROOT):  # saved first, then refused (#1005)
+    if (market := _marketplace_clone()) and (refusal := patches.marketplace_refusal(  # saved first,
+            market, None if market == PKG_ROOT else PKG_ROOT)):  # then refused (#1005, #1326)
         die(refusal)
     if not shutil.which("claude"):  # before the pull: a clone once pulled, then died (the audit)
         die("claude isn't on PATH: wb update refreshes the plugin through it (run /workbench-update "
@@ -7140,6 +7180,8 @@ def cmd_patch(a):
     if a.action == "init":
         if kind == "clone":
             print(patches.clone_note(PKG_ROOT))
+            if line := patches.track_upstream(PKG_ROOT):  # a plain switch -c local tracks nothing (#1327)
+                print(line)
             return
         if not shutil.which("claude"):
             die("claude isn't on PATH: wb patch init switches Claude Code's marketplace through it "
