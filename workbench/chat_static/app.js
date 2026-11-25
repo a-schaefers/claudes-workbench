@@ -87,6 +87,7 @@
   const nodes = new Map()                       // key → row element
   const flows = new Map()                       // message id → {text, shown, el}
   let unread = 0
+  let curView = null                            // the view shown (#1284): 'chat', 'stats' or 'settings'
 
   const now = () => Date.now() / 1000 + skew
   const reduced = matchMedia('(prefers-reduced-motion: reduce)')
@@ -115,6 +116,8 @@
     touchY = y
   }, { passive: true })
   const toEnd = force => {
+    // another view shown: the thread has no box to scroll, so it is put at its end on return (#1284)
+    if (curView && curView !== 'chat') { if (force) follow = true; return }
     if (force || follow) { scroller.scrollTop = scroller.scrollHeight; lastTop = scroller.scrollTop; lastHeight = scroller.scrollHeight; follow = true; jump.hidden = true }
   }
   jump.addEventListener('click', () => scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' }))
@@ -649,13 +652,15 @@
     if (!quiet) save(K.thread, (s.messages || []).slice(-50))  // a patch without messages: no rewrite (#755)
     state = { messages: s.messages || [], asks: s.asks || [], prefs: s.prefs || {}, push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null, tasks: s.tasks || [] }
     drawTasks()
-    if (!sheet.hidden) drawSettings()
+    drawShown()
     if (state.push.key && !pushSynced) { pushSynced = true; syncPush() }
     reportSeen()
     const onServer = new Set(state.messages.map(m => m.cid).filter(Boolean))
     for (const o of outItems()) if (onServer.has(o.cid)) { forgetFiles(o); drop(o.cid) }
     render()
     nearAgain()
+    drawBadge()
+    emit('state', state)
   }
   // A patch (chat.patch, #755): for messages and asks, `put` (rows new or changed, by id: replaced
   // where they are, else added at the end, as the server's lists grow) and `drop` (ids gone); every
@@ -806,6 +811,7 @@
   // the worker's push: news this page hasn't shown, so its line is likely dead
   if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => {
     if (e.data && e.data.kind === 'push' && !document.hidden && token) reconnectNow()
+    if (e.data && e.data.kind === 'view') go(e.data.view)   // a notification's click: the thread (#1284)
   })
   const comeBack = () => {
     if (document.hidden || !token) return
@@ -1292,12 +1298,8 @@
     drawPresence()
   }
 
-  // ---- settings: the gear's sheet ----
-  const gear = $('gear'), sheet = $('settings')
-  const showSettings = on => { sheet.hidden = !on; gear.setAttribute('aria-expanded', String(on)); if (on) drawSettings() }
-  gear.onclick = () => showSettings(sheet.hidden)
-  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !sheet.hidden) showSettings(false) })
-  document.addEventListener('pointerdown', e => { if (!sheet.hidden && !sheet.contains(e.target) && !gear.contains(e.target)) showSettings(false) })
+  // ---- settings: what the gear's sheet held, now cards in the Settings view; What it saved in Stats (#1284) ----
+  const sheet = $('settings')
   const AWAY_NOTE = {
     ask: 'Permission prompts come here for Allow or Deny. Unanswered for 30 minutes, they wait in the terminal.',
     allow: "Claude runs what it would have asked about, and each one is listed here. Your deny rules still hold, and plans and questions still come to you.",
@@ -1345,7 +1347,7 @@
     return `API models: ${a.tasks} task${a.tasks === 1 ? '' : 's'}, ${parts.join(', ')}.`
   }
   function drawSettings() {
-    drawApp(); drawNotify(); drawSaved()
+    drawApp(); drawNotify()
     const away = (state.prefs && state.prefs.away) || 'ask'
     sheet.querySelectorAll('[data-away]').forEach(b => b.setAttribute('aria-checked', String(b.dataset.away === away)))
     $('away-note').textContent = AWAY_NOTE[away]
@@ -1364,7 +1366,7 @@
   })
   $('forget').onclick = async () => {
     if (pushOn) await setPush(false)  // a device without the key can't read what a push is about
-    showSettings(false); save(K.token, ''); save(K.thread, []); keyless('', true); keepKey(); keyManifest()
+    go('chat'); save(K.token, ''); save(K.thread, []); keyless('', true); keepKey(); keyManifest()
   }
 
   // ---- the app: installing it, and notifications (sw.js; webpush.py on the computer) ----
@@ -1373,8 +1375,8 @@
   const iosSafari = ios && !/CriOS|FxiOS|EdgiOS|OPiOS/.test(navigator.userAgent)
   const canPush = window.isSecureContext && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window
   let installEvt = null, swReg = null, pushOn = false, pushEndpoint = '', pushBusy = false, pushNote = '', pushSynced = false
-  addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; if (!sheet.hidden) drawSettings() })
-  addEventListener('appinstalled', () => { installEvt = null; if (!sheet.hidden) drawSettings() })
+  addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; drawShown() })
+  addEventListener('appinstalled', () => { installEvt = null; drawShown() })
   if (window.isSecureContext && 'serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).then(r => { swReg = r; syncPush() }).catch(() => {})
   }
@@ -1403,7 +1405,7 @@
       pushEndpoint = pushOn ? sub.endpoint : ''
       if (sub) await post('/api/push', { endpoint: sub.endpoint, on: true })
     } catch {}
-    if (!sheet.hidden) drawSettings()
+    drawShown()
   }
   async function setPush(on) {
     pushBusy = true; pushNote = ''; drawSettings()
@@ -1521,6 +1523,100 @@
   addEventListener('pageshow', reportActive)
   for (const ev of ['pointerdown', 'keydown'])
     addEventListener(ev, reportActive, { capture: true, passive: true })
+
+  // ---- the shell (#1284): Chat, Stats and Settings, one shown, picked by the address's hash ----
+  // The owner (2026-11-24): the bottom bar of merecatholicity.com on a phone; a left rail from
+  // 601px. The hash is the route, so Back walks the views; anything but #stats or #settings is
+  // the chat, and the key's own fragment was taken and dropped above, before any of this.
+  const VIEWS = ['chat', 'stats', 'settings']
+  const ROOTS = { stats: 'stats-body', settings: 'settings-rows' }
+  const tabs = [...document.querySelectorAll('#tabbar .tab')]
+  const chatTab = tabs.find(b => b.dataset.view === 'chat'), tabBadge = chatTab.querySelector('.tab-badge')
+  const mods = new Map()                         // name → {mod, shown}: stats.js, settings.js (WB.view)
+  const handlers = { state: new Set(), view: new Set() }
+  const emit = (ev, arg) => { for (const fn of handlers[ev] || []) try { fn(arg) } catch (e) { console.error(e) } }
+  const call = (v, fn, ...a) => { try { v.mod[fn] && v.mod[fn](...a) } catch (e) { console.error(e) } }
+  const modShow = name => { const v = mods.get(name); if (v && !v.shown && !document.hidden) { v.shown = true; call(v, 'show') } }
+  const modHide = name => { const v = mods.get(name); if (v && v.shown) { v.shown = false; call(v, 'hide') } }
+  function drawShown() {  // what the old sheet drew while open, for the view that shows it
+    if (curView === 'settings') drawSettings()
+    else if (curView === 'stats') drawSaved()
+  }
+  // The Chat tab's badge: Claude's messages (and notices) and open asks newer than the moment the
+  // thread was left, in the server's clock; held until a live state gives that clock when the
+  // page opened on another view
+  let leftAt = null
+  function drawBadge() {
+    if (curView !== 'chat' && leftAt === null && live) leftAt = stamp
+    let n = 0
+    if (curView !== 'chat' && leftAt !== null) {
+      for (const m of state.messages) if ((m.from === 'claude' || m.from === 'notice') && m.role !== 'agent' && forUser(m) && m.ts > leftAt) n++
+      for (const a of state.asks) if (!a.answer && !a.stale && a.ts > leftAt) n++
+    }
+    tabBadge.hidden = !n
+    tabBadge.textContent = n > 99 ? '99+' : String(n)
+    chatTab.setAttribute('aria-label', n ? `Chat, ${n > 99 ? '99+' : n} new` : 'Chat')
+  }
+  let chatTop = 0
+  function setView(name) {
+    if (!VIEWS.includes(name)) name = 'chat'
+    if (name === curView) return
+    const was = curView
+    if (was === 'chat') { chatTop = scroller.scrollTop; leftAt = live ? now() : null }
+    if (was) modHide(was)
+    curView = name
+    document.body.dataset.view = name
+    for (const b of tabs) b.dataset.view === name ? b.setAttribute('aria-current', 'true') : b.removeAttribute('aria-current')
+    if (name === 'chat') {
+      leftAt = null
+      // shown again: at the newest line if it was following, else where the reader left it
+      if (follow) toEnd(true)
+      else { scroller.scrollTop = chatTop; lastTop = scroller.scrollTop; lastHeight = scroller.scrollHeight; jump.hidden = nearEnd() }
+    }
+    drawBadge()
+    drawShown()
+    modShow(name)
+    emit('view', name)
+  }
+  const go = name => {  // through the hash, so Back comes here again
+    name = VIEWS.includes(name) ? name : 'chat'
+    if (location.hash !== '#' + name) location.hash = name
+    else setView(name)
+  }
+  for (const b of tabs) b.addEventListener('click', () => go(b.dataset.view))
+  addEventListener('hashchange', () => setView(location.hash.slice(1)))
+  document.addEventListener('visibilitychange', () => { if (document.hidden) modHide(curView); else modShow(curView) })
+  let toastTimer = 0
+  function toast(text) {
+    const t = $('toast')
+    t.textContent = String(text); t.hidden = false
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true }, 3500)
+  }
+  // The view-module API: stats.js and settings.js build against exactly this (#1284)
+  window.WB = Object.freeze({
+    token: () => token,
+    api: (path, init = {}) => {
+      const headers = new Headers(init.headers || {})
+      if (token) headers.set('Authorization', 'Bearer ' + token)
+      let body = init.body
+      const plain = body != null && typeof body === 'object' && !(body instanceof Blob) && !(body instanceof FormData) &&
+        !(body instanceof URLSearchParams) && !(body instanceof ArrayBuffer) && !ArrayBuffer.isView(body) && !(body instanceof ReadableStream)
+      if (plain) body = JSON.stringify(body)
+      if ((plain || typeof body === 'string') && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+      return fetch(path, { ...init, headers, body, cache: 'no-store' })
+    },
+    view: (name, mod) => {  // mounted once, at once; shown and hidden with its view and the page
+      if (!ROOTS[name] || mods.has(name) || !mod) return
+      const v = { mod, shown: false }
+      mods.set(name, v)
+      call(v, 'mount', $(ROOTS[name]))
+      if (curView === name) modShow(name)
+    },
+    toast,
+    on: (event, fn) => { if (handlers[event] && typeof fn === 'function') handlers[event].add(fn) },
+    current: () => curView || 'chat',
+  })
+  setView(location.hash.slice(1))
 
   async function firstState() {  // at once, without waiting for a stream slot to free up
     try {
