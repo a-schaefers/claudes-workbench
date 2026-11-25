@@ -26231,8 +26231,17 @@ class WebChat(Base):
     def tearDown(self):
         self.srv.shutdown()
         self.srv.server_close()
-        self.srv.RequestHandlerClass.hub.close()  # or it outlives the test (#134)
+        hub = self.srv.RequestHandlerClass.hub
+        hub.close()  # or it outlives the test (#134)
+        # and its streams end before the next test's environment: one that outlived its test
+        # made a snapshot in the next one's WB_HOME, and the push key it cached there failed
+        # test_an_empty_or_broken_vapid_key_file_is_replaced… (nightly run 45577067512)
+        deadline = time.monotonic() + 5
+        while hub.open and time.monotonic() < deadline:
+            time.sleep(0.01)
+        left = len(hub.open)
         super().tearDown()
+        self.assertEqual(left, 0, "a stream outlived its test's closed hub")
 
     def test_the_server_binds_without_looking_its_host_name_up(self):
         # #236: HTTPServer's bind asks socket.getfqdn, which stalled on macOS past wb chat on's wait
@@ -27801,6 +27810,25 @@ class WebChat(Base):
         self.assertEqual([m["text"] for m in json.loads(second[1][6:])["messages"]["put"]], ["On it."])
         c.close()
         self.assertEqual(self.call("/api/stream")[0], 401)
+
+    def test_a_stream_ends_at_its_hubs_close_without_another_snapshot(self):
+        # nightly run 45577067512 (2026-11-25): woken by tearDown's hub.close, a test's stream made
+        # one more snapshot, by then in the next test's WB_HOME: the push key it cached there was
+        # the key test_an_empty_or_broken_vapid_key_file_is_replaced… expected to be None
+        hub = self.srv.RequestHandlerClass.hub
+        page = self._held_wait("/api/stream", self.chat.token())
+        got = b""
+        while b"event: state" not in got:
+            got += page.recv(1 << 20) or self.fail("the stream ended before its first state")
+        self.addCleanup(page.close)
+        made = []
+        with mock.patch.object(self.chat, "snapshot", side_effect=lambda: made.append(1) or {}):
+            hub.close()
+            deadline = time.monotonic() + 5
+            while hub.open and time.monotonic() < deadline:
+                time.sleep(0.01)
+        self.assertEqual(hub.open, [])                 # ended, not at its next ping's failed write
+        self.assertEqual(made, [])
 
     def test_after_its_first_state_the_stream_sends_only_what_changed(self):
         # #755 (the 2026-11-21 audit, finding 102): every receipt and busy flip sent the whole
