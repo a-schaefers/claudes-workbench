@@ -3613,6 +3613,12 @@ class Lifecycle(Base):
         runner._hands_on(t)
         self.assertEqual(t.status.get("hand_left"), [])
         self.assertLess(len((t.dir / "status.json").read_bytes()), before + 200)
+        # _hands_on stands for a runner's start, so accept's _stop_runner marks hands_off_at
+        # anew: what changed within CLOCK_SLACK before it is scanned again. Nightly run
+        # 45577067512 (2026-11-25) wrote the packages slower than that, so only the last 7 fell
+        # in the window, under BUILD_FILES, and were named as left out; a real runner's rounds
+        # outlast the slack
+        time.sleep(gitops.CLOCK_SLACK * 2)
         out = run_wb("accept", "t-pyc", "-m", "feat: one", "--merge")
         self.assertIn("accepted t-pyc", out)
         self.assertNotIn("note: git ignores", out)
