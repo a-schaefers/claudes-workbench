@@ -3414,11 +3414,15 @@ def _prepare_now(task: store.Task) -> bool:
     task.set_status(last="setting up the worktree"
                     + (f": {spec['setup']}" if spec.get("setup") else ""))
     began, at = time.monotonic(), time.time()
+    before = _git_sees(task.worktree) if spec.get("setup") else None
     code, output = prepare(task)
     _ran_wrote(task, at)
     secs = round(time.monotonic() - began, 1)
     task.dir.joinpath("setup.txt").write_text(
         f"$ {spec.get('setup') or ''}\nexit: {code}\nseconds: {secs}\nshell: {test_shell()}\n\n{output}")
+    left = _setup_left(task, before) if before is not None else {}
+    if code == 0 and left:
+        return _setup_unclean(task, left)
     if code == 0:
         try:
             made = _ignored_paths(task.worktree)  # what the scratch checkouts copy (#249)
@@ -3442,11 +3446,80 @@ def _prepare_now(task: store.Task) -> bool:
                      f"\nthe lane refused {shlex.quote(n)}: wb allow {task.name} --path "
                      f"{shlex.quote(lane_grant(n, task) or n)}, if the setup needs it"
                      for n in lane_refused(task, output))
+    # Undone too when the setup failed or timed out: kept, the resume the notice advises took them
+    # as the checkout's (a fresh `before`), the task passed, and the review listed a codegen's
+    # gen/ before a failed install as the agent's, for wb accept to commit (#1347's review, 2026-11-24)
+    if left:
+        _undo_setup(task.worktree, left)
     task.set_status(phase="failed", last=what, infra="setup", failed_before="setup")  # #508
     # resume, not discard and start again: the agent never ran, and wb resume sets up again (#581)
     task.notify("failed", f"task {task.name}: {what} before any round "
                 f"({task.dir / 'setup.txt'}):\n{tail}{proxy}\nfix it, then wb resume {task.name}: "
                 "it sets the worktree up again (the agent never ran)", cause="setup")  # #1247
+    return False
+
+
+def _git_sees(wt: Path) -> dict[str, str] | None:
+    """What `git status` shows in the worktree, ignored files aside: {path: XY}, a nested
+    repository as `dir/`; None when git can't say. A submodule's own dirt is left out: wb accept
+    never commits it."""
+    try:
+        out = gitops.git(wt, "status", "--porcelain", "-z", "--untracked-files=all", "--no-renames",
+                         "--ignore-submodules=dirty")
+    except gitops.GitError:
+        return None
+    return {e[3:]: e[:2] for e in out.split("\0") if len(e) > 3}
+
+
+def _setup_left(task: store.Task, before: dict[str, str]) -> dict[str, str]:
+    """The paths the setup left for git to see: tracked files it changed, new files git doesn't
+    ignore. What the checkout already showed (a CRLF file git renormalizes) isn't the setup's."""
+    after = _git_sees(task.worktree)
+    return {p: xy for p, xy in (after or {}).items() if p not in before}
+
+
+def _undo_setup(wt: Path, left: dict[str, str]) -> None:
+    """Put back what _setup_left found: the tracked files as committed, the new ones removed, so
+    a wb resume sets up from the checkout again and is told the same, not handed the edit as
+    the checkout's."""
+    tracked = [p for p, xy in left.items() if xy != "??"]
+    for i in range(0, len(tracked), COPY_BATCH):
+        gitops.git(wt, *gitops.NO_HOOKS, "--literal-pathspecs", "checkout", "HEAD", "--",
+                   *tracked[i:i + COPY_BATCH], check=False)
+    for p in (p for p, xy in left.items() if xy == "??"):
+        at = wt / p.rstrip("/")
+        try:
+            if at.is_dir() and not at.is_symlink():
+                shutil.rmtree(at)
+            else:
+                at.unlink()
+            for up in at.parents:  # the directories it made, emptied
+                if up == wt or wt not in up.parents:
+                    break
+                up.rmdir()
+        except OSError:
+            pass
+
+
+def _setup_unclean(task: store.Task, left: dict[str, str]) -> bool:
+    """Fail the task before any round: the setup changed what git sees. The review showed a
+    `bundle install`'s PLATFORMS in Gemfile.lock as the agent's drift, and wb accept committed it
+    under the agent's "Delegated to" trailer; a codegen's gen/ the project doesn't ignore the same
+    (#1347, bar loop round 9, 2026-11-24)."""
+    def few(paths):
+        return ", ".join(paths[:3]) + (f" and {len(paths) - 3:,} more" if len(paths) > 3 else "")
+    tracked = sorted(p for p, xy in left.items() if xy != "??")
+    loose = sorted(p for p, xy in left.items() if xy == "??")
+    what = "the setup " + " and ".join(
+        ([f"changed files git tracks ({few(tracked)})"] if tracked else [])
+        + ([f"wrote files git doesn't ignore ({few(loose)})"] if loose else []))
+    _undo_setup(task.worktree, left)
+    task.set_status(phase="failed", last=what[:200], infra="setup", failed_before="setup")
+    task.notify("failed", f"task {task.name}: {what}, before any round: the review would show them "
+                "as the agent's and wb accept would commit them (undone in the worktree). Have "
+                "the setup leave the repo as committed (npm ci, BUNDLE_FROZEN=1 bundle install, uv "
+                "sync --locked), or commit its change or a .gitignore for what it writes; then wb "
+                f"discard {task.name} and start again (the agent never ran)", cause="setup")
     return False
 
 

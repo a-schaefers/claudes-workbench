@@ -1867,6 +1867,11 @@ class Lifecycle(Base):
         # base check ran its scratch checkout's .venv/bin/python3 and the rounds the worktree's, so
         # the no-module lines never matched: one check-in, yet round 1 and both auto-fix rounds
         # ran on correct code, the issue's symptom again
+        # .venv ignored, as a project's is: a venv before Python 3.13's writes no .gitignore of its
+        # own, and a setup that leaves files git sees fails the task (#1347)
+        (self.repo / ".gitignore").write_text(".venv/\n")
+        for a in (("add", ".gitignore"), ("commit", "-qm", "ignore")):
+            subprocess.run(["git", "-C", str(self.repo), *a], check=True, capture_output=True)
         self.start("t-venv", "ok", "--setup", "python3 -m venv --without-pip .venv",
                    "--test", "python3 -m nosuch_module_1181v -q", "--auto-fix", "2", "--no-self-review")
         st = wait_phase("t-venv", {"review"}, timeout=120)
@@ -6388,6 +6393,73 @@ class WorktreeSetup(Base):
         self.assertEqual(note["cause"], "setup")
         self.assertNotIn(note["cause"], cli.results.THE_STEP)
         self.assertIn("NO-NETWORK", (t.dir / "setup.txt").read_text())
+
+    def test_a_setup_that_changes_a_tracked_file_fails_the_task_before_any_round_and_is_undone(self):
+        # #1347 (bar loop round 9, 2026-11-24): a setup's PLATFORMS in Gemfile.lock showed as the
+        # agent's drift in the review, and wb accept committed it under the agent's trailer
+        (self.repo / "Gemfile.lock").write_text("GEM\n  pkg (1.0)\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "Gemfile.lock"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "lock"], check=True)
+        self.start("t-lock", "ok", "--test", TEST_CMD, "--setup",
+                   "printf 'PLATFORMS\\n  x86_64-linux\\n' >> Gemfile.lock")
+        st = wait_phase("t-lock", {"failed"})
+        t = store.Task("t-lock")
+        self.assertIsNone(st.get("session"))                  # the agent never ran
+        self.assertNotIn("base_check", st)
+        self.assertFalse(st.get("prepared"))
+        self.assertEqual((st["infra"], st["failed_before"]), ("setup", "setup"))
+        note = [r for r in store.notices() if r["task"] == "t-lock"][-1]
+        self.assertEqual((note["kind"], note["cause"]), ("failed", "setup"))
+        self.assertIn("task t-lock: the setup changed files git tracks (Gemfile.lock), before any "
+                      "round: the review would show them as the agent's", note["text"])
+        self.assertIn("wb discard t-lock and start again", note["text"])
+        self.assertEqual((t.worktree / "Gemfile.lock").read_text(), "GEM\n  pkg (1.0)\n")  # undone
+        self.assertEqual(gitops.changed(t.worktree), "")
+        # undone, so a resume sets up from the checkout and is told the same, not let through
+        run_wb("resume", "t-lock")
+        wait_phase("t-lock", {"failed"})
+        notes = [r for r in store.notices() if r["task"] == "t-lock" and "Gemfile.lock" in r["text"]]
+        self.assertEqual(len(notes), 2)
+
+    def test_a_setup_that_writes_files_git_doesnt_ignore_fails_the_task_and_they_are_removed(self):
+        # #1347: a codegen's gen/ the project doesn't ignore was listed as the agent's new files
+        self.start("t-gen", "ok", "--test", TEST_CMD, "--setup",
+                   "mkdir -p gen/sub && for i in 1 2 3 4 5; do echo x > gen/sub/f$i; done")
+        wait_phase("t-gen", {"failed"})
+        t = store.Task("t-gen")
+        note = [r for r in store.notices() if r["task"] == "t-gen"][-1]
+        self.assertIn("the setup wrote files git doesn't ignore (gen/sub/f1, gen/sub/f2, gen/sub/f3 "
+                      "and 2 more), before any round", note["text"])
+        self.assertFalse((t.worktree / "gen").exists())        # removed, its directories too
+        self.assertEqual(gitops.changed(t.worktree), "")
+
+    def test_a_setup_that_writes_files_then_fails_has_them_undone_so_the_resume_is_told(self):
+        # #1347's review (2026-11-24): only a setup that exited 0 was undone; a codegen then a
+        # failed install left gen/ and its Gemfile.lock edit, the resume the notice advises
+        # snapshotted them as the checkout's, the task passed, and the review listed gen/f1 as
+        # the agent's beside its answer.txt
+        (self.repo / "Gemfile.lock").write_text("GEM\n  pkg (1.0)\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "Gemfile.lock"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "lock"], check=True)
+        flag = Path(self.tmp.name) / "online"
+        self.start("t-gen2", "ok", "--test", TEST_CMD, "--setup",
+                   "mkdir -p gen && echo x > gen/f1 && printf 'PLATFORMS\\n' >> Gemfile.lock && "
+                   f"test -e {shlex.quote(str(flag))}")
+        wait_phase("t-gen2", {"failed"})
+        t = store.Task("t-gen2")
+        note = [r for r in store.notices() if r["task"] == "t-gen2"][-1]
+        self.assertIn("the setup command failed (exit 1)", note["text"])
+        self.assertFalse((t.worktree / "gen").exists())        # undone, though the setup failed
+        self.assertEqual((t.worktree / "Gemfile.lock").read_text(), "GEM\n  pkg (1.0)\n")
+        self.assertEqual(gitops.changed(t.worktree), "")
+        flag.touch()                                           # fixed, as the notice says
+        run_wb("resume", "t-gen2")
+        st = wait_phase("t-gen2", {"failed", "review"})
+        self.assertEqual(st["phase"], "failed", st)            # not let through to the review
+        note = [r for r in store.notices() if r["task"] == "t-gen2"][-1]
+        self.assertIn("the setup changed files git tracks (Gemfile.lock) and wrote files git "
+                      "doesn't ignore (gen/f1), before any round", note["text"])
+        self.assertEqual(gitops.changed(t.worktree), "")
 
     @unittest.skipUnless(lane.abi(), "needs Landlock: without it nothing is the lane's (#773)")
     def test_a_setup_the_lane_refused_says_the_grant_that_reaches_it(self):
