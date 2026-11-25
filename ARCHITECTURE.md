@@ -1561,7 +1561,11 @@ everywhere). In order:
   repo-relative (`cli._copy_path`; it copied the root's node_modules for the package's, #1158). commands.json's
   `copy` is read the same way from its key's directory (`context.repo_conf_dir`): a root key's paths stay
   repo-relative, a package key's are the package's (#1346), and the start's `setup:` line names the path it
-  copies; a refused one names `commands.json "repos" copy <path>`, never a `--copy` not given.
+  copies; a refused one names `commands.json "repos" copy <path>`, never a `--copy` not given. A standing
+  entry the checkout lacks is left out with a note (`note: commands.json "repos" copy node_modules: no
+  node_modules in <repo>, so the task goes without it; --setup '<install command>' sets it up`), not refused:
+  a linked worktree (`claude --worktree`) matches the main checkout's entry by git dir and has none of its
+  installs, and every start there exited 1 with no flag past it (#1377); a missing `--copy` is still refused.
 - For an API task, a standing `copy` entry of commands.json's `repos` that holds a credential
   (`privacy.copy_holds_credential`: a file if it is text under `CREDENTIAL_MAX` and the matcher flags it, so a
   binary `test.db` or a big `.csv` goes along; a directory by its dotfiles, the files under a dot-directory,

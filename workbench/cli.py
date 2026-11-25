@@ -1054,7 +1054,14 @@ def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu") -> 
             die(f"{what}: looks like a secret or a user's setting "
                 f"({', '.join(SECRET_FILES[:4])}…), which stays out of the agent's worktree")
         if not os.path.lexists(repo / p):
-            die(f"{what}: no {p} in {repo}")
+            if given:
+                die(f"{what}: no {p} in {repo}")
+            # a standing entry matches a linked worktree by git dir (#498), which has none of the
+            # main checkout's installs: its refusal blocked every start there, and no flag got
+            # past it (#1377, 2026-11-25); the task goes without it, the note says how to set it up
+            print(f"note: {what}: no {p} in {repo}, so the task goes without it; --setup "
+                  "'<install command>' sets it up")
+            continue
         # a virtualenv can't move: its activate and its scripts' shebangs name the checkout, so a
         # copied .venv ran the developer's environment, and its writes left the lane (#260, the
         # audit of 1.2)
@@ -1269,7 +1276,8 @@ def _standing_setup(conf: dict, a, repo: Path, sub: str | None) -> list[str]:
     says where (#1376)."""
     home = context.repo_conf_dir(repo, sub)
     links = conf.get("siblings") or []
-    copies = [_copy_path(repo, x, home).rstrip("/") for x in conf.get("copy") or []]
+    copies = [p for x in conf.get("copy") or []  # but one the checkout lacks (#1377)
+              if os.path.lexists(repo / (p := _copy_path(repo, x, home).rstrip("/")))]
     cmd = conf.get("setup") if a.setup is None else None
     where = "" if home == (sub or "").strip("/") else " (from " + (home or "the repo's top") + ")"
     return [*(["links " + ", ".join(n if n.startswith("../") else f"../{n}" for n in links)] if links else []),

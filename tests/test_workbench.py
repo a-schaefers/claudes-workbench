@@ -6960,6 +6960,32 @@ class WorktreeSetup(Base):
         self.assertTrue((t.worktree / "packages/app/where").is_file())
         self.assertFalse((t.worktree / "where").exists())
 
+    def test_a_standing_copy_missing_in_a_linked_worktree_is_skipped_with_a_note(self):
+        # #1377 (2026-11-25): the main checkout's entry matches a linked worktree by git dir
+        # (#498), which has no node_modules of its own: every start there exited 1, and no flag
+        # got past it. A --copy Claude passed itself is still refused.
+        self.ignore("node_modules/", ".claude/")
+        (self.repo / "node_modules" / "x").mkdir(parents=True)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "copy": ["node_modules"]}}}))
+        feat = self.repo / ".claude" / "worktrees" / "feat"
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "-q", "-b", "feat", str(feat)],
+                       check=True, capture_output=True)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        start = lambda name, *x: run_wb("start", name, "--spec", str(self.spec), "--repo", str(feat),  # noqa
+                                        "--model", "mimo", "--no-base-check", *x)
+        out = start("t-lw1")
+        self.assertIn(f'note: commands.json "repos" copy node_modules: no node_modules in {feat}, so '
+                      "the task goes without it; --setup '<install command>' sets it up", out)
+        self.assertNotIn("copies node_modules", out)
+        self.assertNotIn("copy", store.Task("t-lw1").spec)
+        wait_phase("t-lw1", {"review"})
+        with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
+            start("t-lw2", "--copy", "node_modules")
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn(f"--copy node_modules: no node_modules in {feat}", err.getvalue())
+        self.assertFalse(store.Task("t-lw2").dir.exists())
+
     def test_a_packages_own_commands_json_copy_is_read_from_the_package(self):
         # #1346 (bar round 9, 2026-11-24; #1158 fixed only --copy): a package key's
         # `copy: ["node_modules"]` copied the root's node_modules, so the base check and every
@@ -6996,12 +7022,13 @@ class WorktreeSetup(Base):
         conf.write_text(json.dumps({"repos": {str(app): {"copy": ["localconf"]}}}))
         self.assertEqual(cli._standing_gap(context.repo_conf(self.repo, "packages/app"), self.repo,
                                            "packages/app"), "")
-        # a refused standing entry names commands.json, not a flag never given
+        # a missing standing entry's note names commands.json, not a flag never given (a note
+        # since #1377, not a refusal)
         conf.write_text(json.dumps({"repos": {str(app): {"copy": ["dist"]}}}))
-        with self.assertRaises(SystemExit), redirect_stderr(err := io.StringIO()):
-            run_wb("start", "t-nodist", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo")
-        self.assertIn('commands.json "repos" copy dist: no packages/app/dist in', err.getvalue())
-        self.assertNotIn("--copy", err.getvalue())
+        out = run_wb("start", "t-nodist", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo")
+        self.assertIn('note: commands.json "repos" copy dist: no packages/app/dist in', out)
+        self.assertNotIn("--copy", out)
+        wait_phase("t-nodist", {"review"})
         # #1346's review (2026-11-24): a key on a linked worktree nested in the repo (Claude
         # Code's .claude/worktrees/x) is the main checkout's root by git dir, but its depth was
         # measured from the main top, three parts: the package's node_modules was read for the root's
