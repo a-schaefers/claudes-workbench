@@ -434,9 +434,10 @@ Not `runner._go_on`'s stop before a round: the self-review never ran)
 outside: an update before it ran, `wb stop`, a signal, a reaped runner, #1228) with the
 tree its tests passed on (status `self_review_tree`, `gitops.mark` as it was queued;
 `runner.green_tree`), the round ends as the agent's finish, not stuck and no guard
-counted (`settled` recorded, not `died`; a `settled {text}` event; the report's `self-review: N
-tool calls without changing a file in the task, the tree its tests passed on; stopped as its
-finish`, or the guard's own words: `no tool call or word for 7 minutes` for the nudge), then the tests and review: a green change woke Claude as stuck and its step was
+counted (`settled` recorded, not `died`; a `settled {text}` event, which `wb watch` shows:
+`self-review: N tool calls without changing a file in the task, the tree its tests passed on:
+stopped as its finish`, the guard's own words in it, `no tool call or word for 7 minutes` for
+the nudge; the report has no line for it, #1322), then the tests and review: a green change woke Claude as stuck and its step was
 recorded stuck (#1168). A tree it changed is stopped as before, and so is a fresh, steered or
 resumed session's tree as the round before left it, a check maybe still commented out (#1188).
 On by default because a feedback round costs a whole wake (2026-11-18); a model it doesn't help
