@@ -321,6 +321,8 @@ def write_config_layer(task: store.Task) -> Path:
     except KeyError:
         cfg = {}
     buffer = compaction_buffer(cfg)
+    model = task.spec.get("opencode_model") or task.spec["model"]
+    mine["agents"] = {**(mine.get("agents") or {}), **system_agents(model)}
     store.write_json(path, thinking_layer({  # an API task's own thinking variant (#1018)
         "$schema": "https://opencode.ai/config.json",
         # the keyhole's base and token last: they are the provider's way out (#1012); an API
@@ -335,7 +337,7 @@ def write_config_layer(task: store.Task) -> Path:
         # auth.json holds, sent the task's text; an update mid-task could move OpenCode past
         # OPENCODE_TESTED (#353, the audit of 1.4)
         # with the task's variant: the title request would otherwise think by default (#1018)
-        "small_model": task.spec.get("opencode_model") or task.spec["model"],
+        "small_model": model,
         "autoupdate": False,
         # background: OpenCode 2.3.2's summary written ahead (on by default; 2.3.0 ignores the
         # key) is a full-context request on the agent's own server, below the handover point,
@@ -460,6 +462,21 @@ CONFIG_CONTENT_MAX = 120_000
 # the project's config despite the switch, these still hold (RealOpenCodeRun plants one, #519).
 RESTATED = ("small_model", "autoupdate", "compaction", "tool_output")
 
+# OpenCode's hidden agents that send the session, or part of it, to a model of their own: the
+# compaction summary (the whole session), the summary and the title. small_model pins only the
+# title's, so a user's global `agent.compaction.model` (or `agents.`, or summary's) on a cloud
+# model got every compaction of a wb task, spec, CLAUDE.md and code read so far, a local_only repo
+# included, and an API task's past the keyhole, the meter and the day cap (#1345, 2026-11-24,
+# measured on OpenCode 2.3.2 with tests/capture_llm.py). The layer pins each to the task's model,
+# variant and all (an agent's `model` takes `#<variant>`), and rules_env says it again; OpenCode
+# merges an agent's entry onto an earlier one, so only the model changes.
+SYSTEM_AGENTS = ("compaction", "summary", "title")
+
+
+def system_agents(model: str) -> dict:
+    """The layer's `agents` entries for SYSTEM_AGENTS: each on ``model``, the task's."""
+    return {name: {"model": model} for name in SYSTEM_AGENTS}
+
 
 def model_pins(model_id) -> dict:
     """The task's model entry's `limit` and `options.max_tokens`, as a `provider` overlay: what
@@ -537,9 +554,9 @@ def fixed_knobs(task: store.Task, m: models.Model) -> dict:
 # is left to the layer: loaded last, the user's `compaction` would undo the handover's backstop,
 # and their `skills` or `instructions` replace the task's. But `provider`, which the layer always
 # sets now (its timeouts, #491): the user's providers stay, and the layer's timeouts go on top of
-# them here too, so their content doesn't put the 300 s header wait back. The RESTATED keys and the
-# task model's pins (model_pins; the layer's small_model is the task's model) are said again here,
-# on top (#519).
+# them here too, so their content doesn't put the 300 s header wait back. The RESTATED keys, the
+# hidden agents' models (SYSTEM_AGENTS, #1345) and the task model's pins (model_pins; the layer's
+# small_model is the task's model) are said again here, on top (#519).
 USERS_RULES = ("permissions", "permission")
 
 
@@ -558,8 +575,11 @@ def rules_env(layer: dict, keyhole_over: dict | None = None) -> dict:
                 if isinstance(v, dict) and isinstance(v.get("options"), dict)
                 and any(k in v["options"] for k in PROVIDER_TIMEOUTS)}
     # wb's agent, made here, after the layer removed any of the user's by its name (context.AGENT)
+    # and the hidden agents' models, the task's (SYSTEM_AGENTS, #1345)
+    agents = layer.get("agents") if isinstance(layer.get("agents"), dict) else {}
     ours = {"share": "disabled", **{k: layer[k] for k in RESTATED if k in layer},
-            "agents": json.loads(json.dumps(context.AGENT_ENTRY))}
+            "agents": {**json.loads(json.dumps(context.AGENT_ENTRY)),
+                       **{a: dict(agents[a]) for a in SYSTEM_AGENTS if isinstance(agents.get(a), dict)}}}
     pins = model_pins(layer.get("small_model")) or _own_pins(layer)  # an API task's: its record (#1017)
     over = models._merge(timeouts, pins.get("provider") or {})
     if over := models._merge(over, (keyhole_over or {}).get("provider") or {}):

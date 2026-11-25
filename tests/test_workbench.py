@@ -6911,12 +6911,33 @@ class Context(Base):
                   "agent": {context.AGENT: {"prompt": "theirs"}}, "theme": "dark"}
         with mock.patch.object(runner.models, "users_config_content", return_value=theirs):
             env = runner.agent_env(store.Task("t-agent"))
-        self.assertEqual(json.loads(Path(env["OPENCODE_CONFIG"]).read_text())["agents"],
-                         {context.AGENT: {"disabled": True}})
+        self.assertEqual(json.loads(Path(env["OPENCODE_CONFIG"]).read_text())["agents"][context.AGENT],
+                         {"disabled": True})
         content = json.loads(env["OPENCODE_CONFIG_CONTENT"])
-        self.assertEqual(content["agents"], context.AGENT_ENTRY)  # theirs by that name never merged
+        self.assertEqual(content["agents"][context.AGENT],  # theirs by that name never merged
+                         context.AGENT_ENTRY[context.AGENT])
         self.assertNotIn("agent", content)
         self.assertEqual(content["theme"], "dark")
+
+    def test_the_users_compaction_summary_and_title_models_give_way_to_the_tasks_model(self):
+        # #1345 (2026-11-24, OpenCode 2.3.2): a user's global `agent.compaction.model` on a cloud
+        # model got every compaction of a wb task, the whole session; small_model pinned only the
+        # title's. The layer pins all three hidden agents to the task's model and the content,
+        # loaded last, says it again; the user's own content's agents never come back
+        self.start("t-sys", "ok")
+        wait_phase("t-sys", {"review"})
+        task = store.Task("t-sys")
+        cloud = {a: {"model": "cloud/big"} for a in runner.SYSTEM_AGENTS}
+        theirs = {"agent": cloud, "agents": cloud}
+        with mock.patch.object(runner.models, "users_config_content", return_value=theirs):
+            env = runner.agent_env(task)
+        mine = {a: {"model": task.spec["model"]} for a in ("compaction", "summary", "title")}
+        layer = json.loads(Path(env["OPENCODE_CONFIG"]).read_text())
+        content = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+        for doc in (layer, content):
+            self.assertEqual({a: doc["agents"][a] for a in mine}, mine)
+        self.assertNotIn("agent", content)
+        self.assertNotIn("cloud/big", env["OPENCODE_CONFIG_CONTENT"])
 
     def test_a_session_filling_mid_round_hands_over_at_once(self):
         """The runner, not OpenCode's own summary, decides what a filling session keeps. The
@@ -11973,6 +11994,40 @@ class RealOpenCodeRun(Base):
         sent = [json.loads(x).get("model") for x in self.requests.read_text().splitlines()[before:]]
         self.assertTrue(sent)
         self.assertEqual(set(sent), {"cap"})                       # not the project's small_model
+
+    def test_the_users_own_compaction_summary_and_title_models_get_no_request_of_a_wb_task(self):
+        # #1345 (2026-11-24, OpenCode 2.3.2): `agent.compaction.model` (and summary's) in the
+        # user's global opencode.json, on a second provider, got every compaction of a wb task,
+        # the whole session with the spec and CLAUDE.md; small_model pinned only the title's.
+        # The layer pins the hidden agents to the task's model; their server hears nothing
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        elsewhere = Path(self.tmp.name) / "elsewhere.jsonl"
+        other = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"),
+                                  str(port), str(elsewhere), "[]", "1"])
+        self.addCleanup(other.kill)
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        cfg = json.loads(conf.read_text())
+        cfg["provider"]["cloud"] = {**cfg["provider"]["cap"], "models": {"big": cfg["provider"]["cap"]["models"]["cap"]},
+                                    "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"}}
+        cfg["agent"] = {a: {"model": "cloud/big"} for a in ("compaction", "summary", "title")}
+        conf.write_text(json.dumps(cfg))
+        task, st = self.answered([WRITE_42])
+        self.server.kill()
+        self.server.wait()
+        self.serve([], read=31_000)                                # every request fills 32K
+        env = {**runner.opencode_env(task), "PWD": str(task.worktree)}
+        def turn(text, *session):
+            subprocess.run(lane.wrap(context.writable(task), [
+                "opencode", "run", "--standalone", "-m", "cap/cap", "--format", "json",
+                *session, text]), cwd=task.worktree, env=env, capture_output=True, timeout=180)
+        turn("Go on.", "--session", st["session"])
+        turn("Go on again.", "--session", st["session"])           # OpenCode compacts first
+        turn("A new session, so a title.")
+        self.assertEqual(runner.context_state(task)["compactions"], 1)
+        heard = elsewhere.read_text().splitlines() if elsewhere.exists() else []
+        self.assertEqual(len(heard), 0, "requests to the user's own compaction model")
 
 
 class OpenCodeHome(Base):
@@ -35598,6 +35653,9 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         # titles on the task's model, with its thinking variant (#1018): the catalog's own `none`
         self.assertEqual(layer["small_model"], task.spec["opencode_model"])
         self.assertEqual(layer["small_model"], f"{FLASH}#none")
+        # and compaction's and the summary's, which small_model left to the user's (#1345)
+        self.assertEqual(layer["agents"]["compaction"], {"model": f"{FLASH}#none"})
+        self.assertEqual(json.loads(row["content"])["agents"]["summary"], {"model": f"{FLASH}#none"})
         self.assert_no_canary(json.dumps(layer), (rules / "catalog.json").read_text(),
                               self.all_files(task.dir))
         self.assertNotIn("listed-key", (rules / "catalog.json").read_text())
