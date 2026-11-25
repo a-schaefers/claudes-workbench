@@ -1797,9 +1797,10 @@ def held_mark(pid: str) -> dict | None:
     return row if isinstance(row, dict) and row.get("state") in HELD_MARKS else None
 
 
-def held_told(pid: str, task: str = "") -> str:
+def held_told(pid: str, task: str = "", guards: tuple = HELD_STOPS) -> str:
     """Another task whose stop for ``pid``'s rate limit or outage has told Claude, still standing,
-    else '': phase `stuck`, status `infra` `provider` and `guard` one of HELD_STOPS, its provider
+    else '': phase `stuck`, status `infra` `provider` and `guard` one of ``guards`` (HELD_STOPS;
+    drive's told-stop claim asks ("quota",) for a 402, #1344), its provider
     ``pid`` (task.json `provider`, else its model's prefix: runner.provider_of) and a `noticed`."""
     with contextlib.suppress(OSError):
         for d in sorted(store.tasks_dir().iterdir()):
@@ -1808,7 +1809,7 @@ def held_told(pid: str, task: str = "") -> str:
             try:  # one task's damaged files hold no other back
                 t = store.Task(d.name)
                 st = t.status
-                if st.get("phase") != "stuck" or st.get("infra") != "provider" or st.get("guard") not in HELD_STOPS:
+                if st.get("phase") != "stuck" or st.get("infra") != "provider" or st.get("guard") not in guards:
                     continue
                 spec = t.spec
                 if str(spec.get("provider") or str(spec.get("model") or "").partition("/")[0]) != pid:

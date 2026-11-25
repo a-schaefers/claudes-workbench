@@ -1867,6 +1867,11 @@ class Lifecycle(Base):
         # base check ran its scratch checkout's .venv/bin/python3 and the rounds the worktree's, so
         # the no-module lines never matched: one check-in, yet round 1 and both auto-fix rounds
         # ran on correct code, the issue's symptom again
+        # .venv ignored, as a project's is: a venv before Python 3.13's writes no .gitignore of its
+        # own, and a setup that leaves files git sees fails the task (#1347)
+        (self.repo / ".gitignore").write_text(".venv/\n")
+        for a in (("add", ".gitignore"), ("commit", "-qm", "ignore")):
+            subprocess.run(["git", "-C", str(self.repo), *a], check=True, capture_output=True)
         self.start("t-venv", "ok", "--setup", "python3 -m venv --without-pip .venv",
                    "--test", "python3 -m nosuch_module_1181v -q", "--auto-fix", "2", "--no-self-review")
         st = wait_phase("t-venv", {"review"}, timeout=120)
@@ -6389,6 +6394,73 @@ class WorktreeSetup(Base):
         self.assertNotIn(note["cause"], cli.results.THE_STEP)
         self.assertIn("NO-NETWORK", (t.dir / "setup.txt").read_text())
 
+    def test_a_setup_that_changes_a_tracked_file_fails_the_task_before_any_round_and_is_undone(self):
+        # #1347 (bar loop round 9, 2026-11-24): a setup's PLATFORMS in Gemfile.lock showed as the
+        # agent's drift in the review, and wb accept committed it under the agent's trailer
+        (self.repo / "Gemfile.lock").write_text("GEM\n  pkg (1.0)\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "Gemfile.lock"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "lock"], check=True)
+        self.start("t-lock", "ok", "--test", TEST_CMD, "--setup",
+                   "printf 'PLATFORMS\\n  x86_64-linux\\n' >> Gemfile.lock")
+        st = wait_phase("t-lock", {"failed"})
+        t = store.Task("t-lock")
+        self.assertIsNone(st.get("session"))                  # the agent never ran
+        self.assertNotIn("base_check", st)
+        self.assertFalse(st.get("prepared"))
+        self.assertEqual((st["infra"], st["failed_before"]), ("setup", "setup"))
+        note = [r for r in store.notices() if r["task"] == "t-lock"][-1]
+        self.assertEqual((note["kind"], note["cause"]), ("failed", "setup"))
+        self.assertIn("task t-lock: the setup changed files git tracks (Gemfile.lock), before any "
+                      "round: the review would show them as the agent's", note["text"])
+        self.assertIn("wb discard t-lock and start again", note["text"])
+        self.assertEqual((t.worktree / "Gemfile.lock").read_text(), "GEM\n  pkg (1.0)\n")  # undone
+        self.assertEqual(gitops.changed(t.worktree), "")
+        # undone, so a resume sets up from the checkout and is told the same, not let through
+        run_wb("resume", "t-lock")
+        wait_phase("t-lock", {"failed"})
+        notes = [r for r in store.notices() if r["task"] == "t-lock" and "Gemfile.lock" in r["text"]]
+        self.assertEqual(len(notes), 2)
+
+    def test_a_setup_that_writes_files_git_doesnt_ignore_fails_the_task_and_they_are_removed(self):
+        # #1347: a codegen's gen/ the project doesn't ignore was listed as the agent's new files
+        self.start("t-gen", "ok", "--test", TEST_CMD, "--setup",
+                   "mkdir -p gen/sub && for i in 1 2 3 4 5; do echo x > gen/sub/f$i; done")
+        wait_phase("t-gen", {"failed"})
+        t = store.Task("t-gen")
+        note = [r for r in store.notices() if r["task"] == "t-gen"][-1]
+        self.assertIn("the setup wrote files git doesn't ignore (gen/sub/f1, gen/sub/f2, gen/sub/f3 "
+                      "and 2 more), before any round", note["text"])
+        self.assertFalse((t.worktree / "gen").exists())        # removed, its directories too
+        self.assertEqual(gitops.changed(t.worktree), "")
+
+    def test_a_setup_that_writes_files_then_fails_has_them_undone_so_the_resume_is_told(self):
+        # #1347's review (2026-11-24): only a setup that exited 0 was undone; a codegen then a
+        # failed install left gen/ and its Gemfile.lock edit, the resume the notice advises
+        # snapshotted them as the checkout's, the task passed, and the review listed gen/f1 as
+        # the agent's beside its answer.txt
+        (self.repo / "Gemfile.lock").write_text("GEM\n  pkg (1.0)\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "Gemfile.lock"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "lock"], check=True)
+        flag = Path(self.tmp.name) / "online"
+        self.start("t-gen2", "ok", "--test", TEST_CMD, "--setup",
+                   "mkdir -p gen && echo x > gen/f1 && printf 'PLATFORMS\\n' >> Gemfile.lock && "
+                   f"test -e {shlex.quote(str(flag))}")
+        wait_phase("t-gen2", {"failed"})
+        t = store.Task("t-gen2")
+        note = [r for r in store.notices() if r["task"] == "t-gen2"][-1]
+        self.assertIn("the setup command failed (exit 1)", note["text"])
+        self.assertFalse((t.worktree / "gen").exists())        # undone, though the setup failed
+        self.assertEqual((t.worktree / "Gemfile.lock").read_text(), "GEM\n  pkg (1.0)\n")
+        self.assertEqual(gitops.changed(t.worktree), "")
+        flag.touch()                                           # fixed, as the notice says
+        run_wb("resume", "t-gen2")
+        st = wait_phase("t-gen2", {"failed", "review"})
+        self.assertEqual(st["phase"], "failed", st)            # not let through to the review
+        note = [r for r in store.notices() if r["task"] == "t-gen2"][-1]
+        self.assertIn("the setup changed files git tracks (Gemfile.lock) and wrote files git "
+                      "doesn't ignore (gen/f1), before any round", note["text"])
+        self.assertEqual(gitops.changed(t.worktree), "")
+
     @unittest.skipUnless(lane.abi(), "needs Landlock: without it nothing is the lane's (#773)")
     def test_a_setup_the_lane_refused_says_the_grant_that_reaches_it(self):
         # #824 (the second 2026-11-21 audit): a first `npm ci` refused ~/.npm, and the failed
@@ -6831,6 +6903,59 @@ class WorktreeSetup(Base):
                          "packages/app/node_modules")
         self.assertEqual(cli._copy_path(self.repo, "../../../x", "packages/app"), "../x")
 
+    def test_a_packages_own_commands_json_copy_is_read_from_the_package(self):
+        # #1346 (bar round 9, 2026-11-24; #1158 fixed only --copy): a package key's
+        # `copy: ["node_modules"]` copied the root's node_modules, so the base check and every
+        # auto-fix round ran without the package's; with no root node_modules the start died
+        # naming a --copy never given
+        self.ignore("node_modules/")
+        app = self.repo / "packages" / "app"
+        (self.repo / "node_modules" / "rootdep").mkdir(parents=True)
+        (app / "node_modules" / "appdep").mkdir(parents=True)
+        (app / "node_modules" / "appdep" / "index.js").write_text("42\n")
+        (app / "CLAUDE.md").write_text("# app\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "a package"], check=True)
+        conf = Path(os.environ["WB_COMMANDS"])
+        conf.write_text(json.dumps({"repos": {str(app): {"copy": ["node_modules"]}}}))
+        self.assertEqual(context.repo_conf_dir(self.repo, "packages/app/src"), "packages/app")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = run_wb("start", "t-pkgown", "--spec", str(self.spec), "--repo", str(app), "--model",
+                     "mimo", "--test", "test -f node_modules/appdep/index.js")
+        self.assertIn("copies packages/app/node_modules", out)
+        st = wait_phase("t-pkgown", {"review"})
+        wt = store.Task("t-pkgown").worktree
+        self.assertEqual(store.Task("t-pkgown").spec["copy"], ["packages/app/node_modules"])
+        self.assertTrue((wt / "packages/app/node_modules/appdep/index.js").is_file())
+        self.assertFalse((wt / "node_modules").exists())               # not the root's
+        self.assertIs(st["tests"]["ok"], True)
+        # an API start's consent check reads the entry the same way: the package's --copy names it
+        named = types.SimpleNamespace(copy=["node_modules"], sibling=None)
+        self.assertEqual(cli._standing_gap(context.repo_conf(self.repo, "packages/app"), named,
+                                           "DeepInfra", self.repo, "packages/app"), "")
+        # a refused standing entry names commands.json, not a flag never given
+        conf.write_text(json.dumps({"repos": {str(app): {"copy": ["dist"]}}}))
+        with self.assertRaises(SystemExit), redirect_stderr(err := io.StringIO()):
+            run_wb("start", "t-nodist", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo")
+        self.assertIn('commands.json "repos" copy dist: no packages/app/dist in', err.getvalue())
+        self.assertNotIn("--copy", err.getvalue())
+        # #1346's review (2026-11-24): a key on a linked worktree nested in the repo (Claude
+        # Code's .claude/worktrees/x) is the main checkout's root by git dir, but its depth was
+        # measured from the main top, three parts: the package's node_modules was read for the root's
+        wtx = self.repo / ".claude" / "worktrees" / "x"
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "-q", str(wtx)],
+                       check=True, capture_output=True)
+        conf.write_text(json.dumps({"repos": {str(wtx): {"copy": ["node_modules"]}}}))
+        self.assertEqual(context.repo_entries(self.repo, "packages/app")[0][0], str(wtx))
+        self.assertEqual(context.repo_conf_dir(self.repo, "packages/app"), "")
+        root_copy = types.SimpleNamespace(copy=["../../node_modules"], sibling=None)
+        self.assertEqual(cli._standing_gap(context.repo_conf(self.repo, "packages/app"), root_copy,
+                                           "DeepInfra", self.repo, "packages/app"), "")
+        why = cli._standing_gap(context.repo_conf(self.repo, "packages/app"), named, "DeepInfra",
+                                self.repo, "packages/app")
+        self.assertIn("copies node_modules into every task", why)
+        self.assertIn("--copy ../../node_modules", why)
+
     def test_a_repo_on_a_windows_drive_gets_a_note(self):
         # #201's finding 30: git is much slower on WSL's /mnt/c, and wb checks the worktree every step
         with mock.patch.object(context, "on_windows", return_value=True):
@@ -6911,12 +7036,33 @@ class Context(Base):
                   "agent": {context.AGENT: {"prompt": "theirs"}}, "theme": "dark"}
         with mock.patch.object(runner.models, "users_config_content", return_value=theirs):
             env = runner.agent_env(store.Task("t-agent"))
-        self.assertEqual(json.loads(Path(env["OPENCODE_CONFIG"]).read_text())["agents"],
-                         {context.AGENT: {"disabled": True}})
+        self.assertEqual(json.loads(Path(env["OPENCODE_CONFIG"]).read_text())["agents"][context.AGENT],
+                         {"disabled": True})
         content = json.loads(env["OPENCODE_CONFIG_CONTENT"])
-        self.assertEqual(content["agents"], context.AGENT_ENTRY)  # theirs by that name never merged
+        self.assertEqual(content["agents"][context.AGENT],  # theirs by that name never merged
+                         context.AGENT_ENTRY[context.AGENT])
         self.assertNotIn("agent", content)
         self.assertEqual(content["theme"], "dark")
+
+    def test_the_users_compaction_summary_and_title_models_give_way_to_the_tasks_model(self):
+        # #1345 (2026-11-24, OpenCode 2.3.2): a user's global `agent.compaction.model` on a cloud
+        # model got every compaction of a wb task, the whole session; small_model pinned only the
+        # title's. The layer pins all three hidden agents to the task's model and the content,
+        # loaded last, says it again; the user's own content's agents never come back
+        self.start("t-sys", "ok")
+        wait_phase("t-sys", {"review"})
+        task = store.Task("t-sys")
+        cloud = {a: {"model": "cloud/big"} for a in runner.SYSTEM_AGENTS}
+        theirs = {"agent": cloud, "agents": cloud}
+        with mock.patch.object(runner.models, "users_config_content", return_value=theirs):
+            env = runner.agent_env(task)
+        mine = {a: {"model": task.spec["model"]} for a in ("compaction", "summary", "title")}
+        layer = json.loads(Path(env["OPENCODE_CONFIG"]).read_text())
+        content = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+        for doc in (layer, content):
+            self.assertEqual({a: doc["agents"][a] for a in mine}, mine)
+        self.assertNotIn("agent", content)
+        self.assertNotIn("cloud/big", env["OPENCODE_CONFIG_CONTENT"])
 
     def test_a_session_filling_mid_round_hands_over_at_once(self):
         """The runner, not OpenCode's own summary, decides what a filling session keeps. The
@@ -10881,6 +11027,26 @@ class SkillLibrary(Base):
         task.set_status(skills_told=None)                                # what _start_fresh does
         self.assertIn("`alpha`", r.skills_note(task, 2))
 
+    def test_a_skill_handed_after_the_last_run_is_not_recorded_as_offered(self):
+        # #1348: wb start's hint is followed once round 1 is under way; the task passed on that
+        # run and was accepted, and the skill no agent saw counted as offered, so three such
+        # tasks made wb skill list say rewrite or retire it (bar loop round 9, 2026-11-24)
+        from workbench import skills
+        run_wb("skill", "add", "alpha", "--from", str(self.draft("alpha", "Use when ALPHA.")), "-m", "a")
+        run_wb("skill", "add", "beta", "--from", str(self.draft("beta", "Use when BETA.")), "-m", "b")
+        for t in ("t-h1", "t-h2", "t-h3"):
+            self.start(t, "ok", "--skill", "beta")
+            wait_phase(t, {"review"})
+            self.assertIn("is told from its next run", run_wb("skill", "hand", t, "alpha"))
+            run_wb("accept", t, "-m", "feat: answer")
+        rows = store.read_jsonl(store.home() / "results.jsonl")[0][-3:]
+        self.assertEqual([r["skills_offered"] for r in rows], [["beta"]] * 3)  # told in round 1
+        use = skills.usage()
+        self.assertNotIn("alpha", use)
+        self.assertEqual(skills.advice(use.get("alpha"), store.now()), "never offered yet")
+        self.assertIn("alpha: Use when ALPHA.\n  offered 0 · loaded 0 · never offered yet",
+                      run_wb("skill", "list"))
+
     def test_the_record_says_which_skills_earn_their_place(self):
         from workbench import skills
         row = events.normalize({"type": "tool_use", "part": {"tool": "skill", "state": {
@@ -11973,6 +12139,40 @@ class RealOpenCodeRun(Base):
         sent = [json.loads(x).get("model") for x in self.requests.read_text().splitlines()[before:]]
         self.assertTrue(sent)
         self.assertEqual(set(sent), {"cap"})                       # not the project's small_model
+
+    def test_the_users_own_compaction_summary_and_title_models_get_no_request_of_a_wb_task(self):
+        # #1345 (2026-11-24, OpenCode 2.3.2): `agent.compaction.model` (and summary's) in the
+        # user's global opencode.json, on a second provider, got every compaction of a wb task,
+        # the whole session with the spec and CLAUDE.md; small_model pinned only the title's.
+        # The layer pins the hidden agents to the task's model; their server hears nothing
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        elsewhere = Path(self.tmp.name) / "elsewhere.jsonl"
+        other = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"),
+                                  str(port), str(elsewhere), "[]", "1"])
+        self.addCleanup(other.kill)
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        cfg = json.loads(conf.read_text())
+        cfg["provider"]["cloud"] = {**cfg["provider"]["cap"], "models": {"big": cfg["provider"]["cap"]["models"]["cap"]},
+                                    "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"}}
+        cfg["agent"] = {a: {"model": "cloud/big"} for a in ("compaction", "summary", "title")}
+        conf.write_text(json.dumps(cfg))
+        task, st = self.answered([WRITE_42])
+        self.server.kill()
+        self.server.wait()
+        self.serve([], read=31_000)                                # every request fills 32K
+        env = {**runner.opencode_env(task), "PWD": str(task.worktree)}
+        def turn(text, *session):
+            subprocess.run(lane.wrap(context.writable(task), [
+                "opencode", "run", "--standalone", "-m", "cap/cap", "--format", "json",
+                *session, text]), cwd=task.worktree, env=env, capture_output=True, timeout=180)
+        turn("Go on.", "--session", st["session"])
+        turn("Go on again.", "--session", st["session"])           # OpenCode compacts first
+        turn("A new session, so a title.")
+        self.assertEqual(runner.context_state(task)["compactions"], 1)
+        heard = elsewhere.read_text().splitlines() if elsewhere.exists() else []
+        self.assertEqual(len(heard), 0, "requests to the user's own compaction model")
 
 
 class OpenCodeHome(Base):
@@ -30656,8 +30856,8 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
     its server's `seen` and answers as its server's `mode` says: "ok" (an OpenAI SSE answer,
     or Anthropic's for /messages), "status" (`status`, a body echoing part of the key the way
     OpenAI's 401 does, `retry_after`), "chunks" (`chunks` SSE pieces `gap` s apart; the
-    Responses API's events for /responses), "raw" (`status`, `ctype`, then `pieces` sent as they
-    are, one chunk each, the end `tail` s later), with `served` (the response's model) and `by` (OpenRouter's
+    Responses API's events for /responses), "raw" (the head `head` s late, `status`, `ctype`,
+    then `pieces` sent as they are, one chunk each, the end `tail` s later), with `served` (the response's model) and `by` (OpenRouter's
     provider)."""
     protocol_version = "HTTP/1.1"
 
@@ -30677,6 +30877,7 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
         s.seen.append({"method": "POST", "path": self.path, "headers": dict(self.headers),
                        "body": json.loads(raw)})
         if s.mode == "raw":
+            time.sleep(getattr(s, "head", 0))  # the provider still thinking (#1349)
             self.send_response(s.status)
             self.send_header("Content-Type", s.ctype)
             self.send_header("Transfer-Encoding", "chunked")
@@ -35518,6 +35719,157 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual(fresh.load(), 0.0)
         self.assertFalse(fresh.recheck)
 
+    def test_a_running_task_that_meets_the_402_another_tasks_stop_told_waits_as_queued_with_no_stop_of_its_own(self):
+        # #1344 (the bar loop, 2026-11-24): #1178's wait held only the queued tasks; each task of
+        # a fan-out already running when its provider ran out of credit met its own 402 and woke
+        # Claude with the same stop. One stop tells; the others wait as queued until the top-up
+        self.local_api_model()
+        self.up.mode, self.up.status, self.up.message = "status", 402, "Insufficient balance"
+        self.start_api("t-paid", "http", spawn=False)
+        self.start_api("t-running", "http", spawn=False)
+        self.drive_here("t-paid")
+        self.assertEqual(store.Task("t-paid").status.get("infra"), "provider")
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")     # lets a hung wait go
+        self.models.note_api("deepinfra", "ok")  # its round already sent, past the lease's load
+        task = store.Task("t-running")
+        driver = threading.Thread(target=self.drive_here, args=("t-running",), daemon=True)
+        driver.start()
+        self.addCleanup(driver.join, 60)
+        deadline = time.time() + 30
+        while not (task.status.get("phase") == "queued"
+                   and (task.status.get("last") or "").startswith("waiting: deepinfra is out of credit")):
+            self.assertLess(time.time(), deadline, task.status)
+            self.assertTrue(driver.is_alive(), task.status)
+            time.sleep(POLL)
+        self.assertEqual(len(self.up.seen), 2)                        # each one's 402
+        self.assertIn("deepinfra stopped the round, as t-paid's stop told the user: the task waits as queued",
+                      [e.get("text") for e in store.read_jsonl(task.dir / "events.jsonl")[0]])
+        self.up.mode, self.up.status = "ok", 200                      # the user tops up
+        self.models.note_api("deepinfra", "ok")                       # t-paid's resume, answered
+        driver.join(60)
+        self.assertFalse(driver.is_alive(), task.status)
+        self.assertEqual(task.status["phase"], "review", task.status)
+        self.assertEqual([(r["task"], r["kind"], r.get("cause")) for r in store.notices() if r["kind"] != "review"],
+                         [("t-paid", "stuck", "provider")])
+
+    def test_a_running_task_that_meets_an_outage_another_tasks_stop_told_after_its_revive_waits_with_no_stop_of_its_own(self):
+        # #1344: a fan-out's running tasks revive a held outage together, and each looked for a
+        # told stop before any was told: every one stopped and woke Claude with the same stop
+        told, task = self.held_outage()
+        self.models.note_api("deepinfra", "ok")  # t-b's round already sent, past the lease's load
+        real, calls = runner.run_round, []
+
+        def told_meanwhile(t, n, keep=False):
+            calls.append(n)
+            if len(calls) == 2:                  # its revive under way: t-a's stop told by then
+                told.set_status(phase="stuck")
+                told.notify("stuck", "STOPPED: deepinfra didn't answer", cause="provider")
+            return real(t, n, keep)
+        p = mock.patch.object(runner, "run_round", told_meanwhile)
+        p.start()
+        self.addCleanup(p.stop)
+        told.set_status(phase="review")          # none told yet when t-b's round began
+        driver = threading.Thread(target=self.drive_here, args=("t-b",), daemon=True)
+        driver.start()
+        self.addCleanup(driver.join, 60)
+        self.until_waiting(task, driver, "waiting: deepinfra isn't answering")
+        self.assertIn(", as t-a's stop told the user: ", task.status["last"])
+        self.assertIn("deepinfra stopped the round, as t-a's stop told the user: the task waits as queued",
+                      [e.get("text") for e in store.read_jsonl(task.dir / "events.jsonl")[0]])
+        self.up.mode, self.up.status = "ok", 200                      # the provider is back
+        self.models.note_api("deepinfra", "ok")
+        driver.join(60)
+        self.assertFalse(driver.is_alive(), task.status)
+        self.assertEqual(task.status["phase"], "review", task.status)
+        self.assertEqual([r["task"] for r in store.notices() if r["kind"] != "review"], ["t-a", "t-a"])
+
+    def test_a_running_task_whose_outage_left_no_held_mark_stops_with_its_own_notice_behind_a_told_stop(self):
+        # #1344's review (2026-11-24): the told path ran the round again for the lease's next load
+        # to wait in, but an outage whose answers were 2xx (a queue held past QUEUE_WAIT_S, answers
+        # cut short) leaves no held mark, the keyhole's `ok` having cleared it: the load returned at
+        # once and the round met the same stop, 58 rounds in 20 s, `running`, a slot held, no notice
+        told, task = self.held_outage()
+        self.models.note_api("deepinfra", "ok")  # t-b's round already sent, past the lease's load
+        real, calls = runner.run_round, []
+
+        def answered_2xx(t, n, keep=False):
+            calls.append(n)
+            try:
+                return real(t, n, keep)
+            finally:  # what a 2xx's `ok` leaves: the stop, and no mark for a load to wait on
+                self.models.note_api("deepinfra", "ok")
+        p = mock.patch.object(runner, "run_round", answered_2xx)
+        p.start()
+        self.addCleanup(p.stop)
+        driver = threading.Thread(target=self.drive_here, args=("t-b",), daemon=True)
+        driver.start()
+        driver.join(30)
+        self.assertFalse(driver.is_alive(), (len(calls), task.status))
+        self.assertEqual(calls, [1, 1])                               # the round and its one revive
+        self.assertEqual((task.status["phase"], task.status.get("infra"), task.status.get("guard")),
+                         ("stuck", "provider", "outage"), task.status)
+        self.assertEqual([(r["task"], r["kind"]) for r in store.notices() if r["task"] == "t-b"],
+                         [("t-b", "stuck")])
+        self.assertNotIn("deepinfra stopped the round, as t-a's stop told the user: the task waits as queued",
+                         [e.get("text") for e in store.read_jsonl(task.dir / "events.jsonl")[0]])
+
+    def test_a_told_stop_holds_a_running_task_only_while_its_next_load_has_a_mark_to_wait_on(self):
+        # #1344's review (2026-11-24): a told stop counted with no mark sent the round into the
+        # same stop again and again; a 402's wait is its `no_credit` mark, an outage's its held mark
+        m = self.local_api_model()
+        for name in ("t-told", "t-run"):
+            t = store.Task(name)
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"model": m.id, "provider": "deepinfra", "via": "api"})
+        told, task = store.Task("t-told"), store.Task("t-run")
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")
+        for guard, mark in (("quota", "no_credit"), ("outage", "unreachable")):
+            self.models.note_api("deepinfra", "ok")
+            told.set_status(phase="stuck", infra="provider", guard=guard)
+            told.notify("stuck", f"t-told stopped: {guard}", cause="provider")
+            rnd = {"stuck": guard, "guard": guard}
+            with runner._told_stop(task, rnd) as found:
+                self.assertEqual(found, "", guard)                    # no mark: it stops and tells
+            self.models.note_api("deepinfra", mark, "the provider's")
+            with runner._told_stop(task, rnd) as found:
+                self.assertEqual(found, "t-told", guard)              # the load waits on it
+        self.models.note_api("deepinfra", "no_credit", "402")
+        self.assertTrue(self.models.credit_ask("deepinfra", "t-run"))  # its own turn to ask: no wait
+        told.set_status(guard="quota")
+        with runner._told_stop(task, {"stuck": "quota", "guard": "quota"}) as found:
+            self.assertEqual(found, "")
+
+    def test_two_rounds_stopped_by_the_same_402_at_once_tell_claude_once(self):
+        # #1344: the stops land in the same second, so a look for a told stop alone found none
+        # for each; the claim is taken under the provider's lock, held through the notice
+        m = self.local_api_model()
+        tasks = []
+        for name in ("t-one", "t-two"):
+            t = store.Task(name)
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"model": m.id, "provider": "deepinfra", "via": "api"})
+            tasks.append(t)
+        self.models.note_api("deepinfra", "no_credit", "402 Insufficient balance")  # the keyhole's, at the 402
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")
+        found = {}
+
+        def stop(t):
+            with runner._told_stop(t, {"stuck": "out of credit", "guard": "quota"}) as told:
+                found[t.name] = told
+                if not told:
+                    time.sleep(0.3)              # the other's look comes meanwhile
+                    t.set_status(phase="stuck", infra="provider", guard="quota")
+                    t.notify("stuck", f"{t.name} stopped: out of credit", cause="provider")
+        threads = [threading.Thread(target=stop, args=(t,)) for t in tasks]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(10)
+        self.assertEqual(sorted(found.values()), ["", next(n for n, v in found.items() if not v)], found)
+        self.assertEqual(len([r for r in store.notices() if r["kind"] == "stuck"]), 1)
+        with runner._told_stop(tasks[0], {"stuck": "x", "guard": "outage"}) as other:
+            self.assertEqual(other, "")          # a 402's told stop holds no outage's
+
     def test_a_waiter_past_a_held_mark_while_another_asks_looks_every_two_seconds_not_in_a_loop(self):
         # the review of #1277 (2026-11-24): credit_recheck opened api-health.json's lock file to
         # look past an expired outage's mark, and its close woke the waiter's own watch on
@@ -35598,6 +35950,9 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         # titles on the task's model, with its thinking variant (#1018): the catalog's own `none`
         self.assertEqual(layer["small_model"], task.spec["opencode_model"])
         self.assertEqual(layer["small_model"], f"{FLASH}#none")
+        # and compaction's and the summary's, which small_model left to the user's (#1345)
+        self.assertEqual(layer["agents"]["compaction"], {"model": f"{FLASH}#none"})
+        self.assertEqual(json.loads(row["content"])["agents"]["summary"], {"model": f"{FLASH}#none"})
         self.assert_no_canary(json.dumps(layer), (rules / "catalog.json").read_text(),
                               self.all_files(task.dir))
         self.assertNotIn("listed-key", (rules / "catalog.json").read_text())
@@ -36720,7 +37075,10 @@ class RateLimits(Base):
         self.assertEqual(n["cause"], "provider")
         self.assertIn("top up your deepseek account, or wait for the plan's reset", n["text"])
         self.assertEqual(self.models.api_health("deepseek")["state"], "no_credit")
-        # OpenCode's own provider.quota (no keyhole between): the same stop
+        # OpenCode's own provider.quota (no keyhole between): the same stop. The credit comes
+        # back first: with t-402's told stop still standing, t-402b would wait behind it as
+        # queued with no stop of its own (#1344), and this test hung in CI (2026-11-24)
+        self.models.note_api("deepseek", "ok")
         fake = self.api_task("t-402b", "quota", "--silence-timeout", "30")
         runner.drive(fake)
         self.assertEqual((fake.status["phase"], self.notice(fake)["cause"]), ("stuck", "provider"))
@@ -37365,7 +37723,9 @@ class ApiSpend(Base):
         self.assertIsNotNone(self.drive_until_waiting(queued[1], then))
         other.join(30)
         self.assertEqual(seen, {"phases": ["queued", "queued"], "waiting": [True, True], "stops": ["t-w0"]})
-        self.assertEqual([t.status["phase"] for t in queued], ["review", "review"])
+        self.assertEqual([t.status["phase"] for t in queued], ["review", "review"],
+                         [(t.status.get("last"), (t.dir / "runner.log").read_text()[-1500:]
+                           if (t.dir / "runner.log").exists() else "") for t in queued])
 
     def test_a_takeover_of_a_told_cap_stop_lets_one_waiter_on_to_its_own_stop_and_the_other_waits_behind_it(self):
         # #1304's review (2026-11-24): a takeover or discard of the told stop let every waiter go
@@ -37438,6 +37798,86 @@ class ApiSpend(Base):
         self.assertEqual((st["phase"], st["guard"], st["round"]), ("stuck", "agents", 1))
         ev, _ = store.read_jsonl(task.dir / "events.jsonl")
         self.assertFalse([e for e in ev if e["kind"] == "step"])  # no round ran
+
+    def told_cap_stop(self, told, cap):
+        """``told``'s spend stop at ``cap``, told to Claude: what a fan-out's first stop leaves."""
+        told.set_status(phase="stuck", infra="spend", guard="spend", cap_told=cap)
+        told.notify("stuck", f"{told.name} stopped: the day's API spend cap is reached", cause="spend")
+
+    def test_a_running_task_whose_round_meets_the_cap_another_stop_told_waits_as_queued_and_runs_again_once_raised(self):
+        # #1344 (the bar loop, 2026-11-24): #1249's wait held only the tasks yet to send round 1:
+        # each task of a fan-out running when the cap was reached stopped in its round and woke
+        # Claude with the same ask, one wake per running task
+        self.cap(100, api=("significant",))
+        told = self.api_task("t-told", SPEND_M, "ok")
+        task = self.api_task("t-run", SPEND_M, "spend", FAKE_STEP_IN="100", FAKE_STEPS="5",
+                             FAKE_STEP_EVERY="0.3")
+        real, calls = runner.run_round, []
+
+        def round_meets_the_cap(t, n, keep=False):
+            calls.append(n)
+            if len(calls) == 1:                                   # mid-fan-out: another's stop, told
+                self.told_cap_stop(told, 100)
+                self.spent(150.0)
+            return real(t, n, keep)
+        waiting = lambda: str(task.status.get("last") or "").startswith(  # noqa: E731
+            "waiting: the day's API spend cap is reached")
+        seen = {}
+
+        def then():
+            seen["last"] = task.status["last"]
+            seen["phase"] = task.status["phase"]
+            seen["stops"] = self.notices("t-run", "stuck")
+            self.cap(1000, api=("significant",))                   # the user's answer to t-told's ask
+        with mock.patch.object(runner, "run_round", round_meets_the_cap):
+            done = threading.Event()
+
+            def meanwhile():
+                while not done.wait(POLL):
+                    if waiting():
+                        return then()
+            threading.Thread(target=meanwhile, daemon=True).start()
+            try:
+                runner.drive(task)
+            finally:
+                done.set()
+        self.assertEqual(seen["phase"], "queued", seen)
+        self.assertIn("; t-told's stop has asked the user: it goes on once the cap is raised", seen["last"])
+        self.assertEqual(seen["stops"], [])                       # no stop of its own while it waited
+        self.assertEqual(calls, [1, 1])                           # the round ran again once raised
+        self.assertEqual(task.status["phase"], "review", task.status)
+        self.assertEqual(self.notices("t-run", "stuck"), [])
+        ev, _ = store.read_jsonl(task.dir / "events.jsonl")
+        self.assertIn("the day cap stopped the round, as another task's stop told the user: the round runs again",
+                      [e.get("text") for e in ev])
+
+    def test_a_running_task_at_the_cap_before_its_next_round_waits_behind_a_told_stop_and_goes_on_once_raised(self):
+        # #1344: _go_on (auto-fix, self-review, a handover, Claude's note) stopped each running
+        # task at the cap with its own notice, though another task's stop had asked the user
+        self.cap(100, api=("significant",))
+        told = self.api_task("t-told", SPEND_M, "ok")
+        task = self.api_task("t-next", SPEND_M, "ok", FAKE_STEP_IN="100")
+        runner.drive(task)
+        self.told_cap_stop(told, 100)
+        self.spent(150.0)
+        lease, went = mock.MagicMock(), []
+        driver = threading.Thread(target=lambda: went.append(runner._go_on(task, 2, "auto-fix", lease)),
+                                  daemon=True)
+        driver.start()
+        self.addCleanup(driver.join, 30)
+        deadline = time.time() + 20
+        while not str(task.status.get("last") or "").startswith("waiting: the day's API spend cap"):
+            self.assertLess(time.time(), deadline, task.status)
+            time.sleep(POLL)
+        self.assertEqual(task.status["phase"], "queued")
+        self.assertIn("; t-told's stop has asked the user: ", task.status["last"])
+        lease.__exit__.assert_called_once()                       # its provider slot let go
+        self.cap(1000, api=("significant",))
+        driver.join(30)
+        self.assertEqual(went, [True])
+        lease.__enter__.assert_called_once()                      # and taken again
+        self.assertEqual(self.notices("t-next", "stuck"), [])
+        self.assertEqual(runner._CAP_GO, {})
 
     def local_only(self):
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {"local_only": True}}}))
@@ -38451,6 +38891,57 @@ class ApiSpendKeyhole(_KeyholeTest):
             self.cut(kh, read=20)
             time.sleep(1.5)
         self.assertEqual(usage, [])
+
+    def test_a_response_cut_while_the_provider_is_silent_is_booked_once_when_the_keyhole_closes(self):
+        # #1349 (bar loop round 9, 2026-11-24): #1276's cut was booked only when a write to
+        # OpenCode failed, which waits for the provider's next chunk; DeepInfra sends none while
+        # it writes a tool call, so wb stop, wb discard and wb stop --all closed the keyhole and
+        # the runner exited with the request never booked: the day cap and `paid` under the bill
+        from workbench import meter
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {}})
+        m = self.model()
+        m.config = {"cost": [{"input": 3, "output": 15}]}
+        mt = meter.Meter(self.task, m)
+        mt.begin(1)
+        usage = []
+        kh = self.keyhole(m, on_usage=lambda u: (mt.on_usage(u), usage.append(u)))
+        delta = {"model": m.name, "choices": [{"index": 0, "delta": {"content": "x" * 40}}]}
+        self.up.mode, self.up.status, self.up.ctype = "raw", 200, "text/event-stream"
+        self.up.pieces, self.up.tail = [f"data: {json.dumps(delta)}\n\n".encode()], 2
+        size = self.cut(kh, read=20)                             # one chunk, then silence
+        time.sleep(0.5)
+        self.assertEqual(usage, [])                              # its handler waits on the provider
+        kh.close()                                               # drive's finally, then the exit
+        (u,) = usage
+        self.assertEqual((u["prompt_tokens"], u["cut"]), (-(-size // 4), True))
+        self.assertGreaterEqual(u["completion_tokens"], 10)      # the delta's 40 characters
+        time.sleep(2.5)                                          # the provider's end, OpenCode gone
+        self.assertEqual(len(usage), 1)                          # once
+        rows = store.read_jsonl(meter.ledger_path())[0]
+        self.assertEqual([(r["kind"], r["cut"]) for r in rows], [("step", True)])
+
+    def test_a_request_the_provider_hasnt_answered_when_the_keyhole_closes_is_booked_as_its_input(self):
+        # #1349: a request sent on and still waiting for its answer's head (the provider
+        # thinking) when the runner exits is billed its input all the same
+        usage = []
+        kh = self.keyhole(on_usage=usage.append)
+        self.up.mode, self.up.status, self.up.ctype = "raw", 200, "text/event-stream"
+        self.up.head, self.up.pieces = 2, [b"data: [DONE]\n\n"]
+        body = json.dumps({"model": kh.model.name, "stream": True}).encode()
+        conn = http.client.HTTPConnection("127.0.0.1", kh.port, timeout=30)
+        self.addCleanup(conn.close)
+        conn.request("POST", urllib.parse.urlsplit(kh.base).path + "/chat/completions", body=body,
+                     headers={"Authorization": f"Bearer {kh.token}",
+                              "Content-Type": "application/json"})
+        deadline = time.monotonic() + 10
+        while not self.up.seen and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(len(self.up.seen), 1)
+        kh.close()
+        self.assertEqual(usage, [{"prompt_tokens": -(-len(body) // 4), "completion_tokens": 0,
+                                  "cut": True}])
+        time.sleep(2.5)                                          # its answer, after the close
+        self.assertEqual(len(usage), 1)
 
     def test_a_whole_answer_whose_last_byte_finds_opencode_gone_is_booked_once_and_not_as_cut(self):
         # #1276's estimate is booked when a write fails before the end: the end's own last write

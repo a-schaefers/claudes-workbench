@@ -359,7 +359,7 @@ runs the agent, the setup and the tests in that package; the diff stays the whol
 The worktree holds only committed files. When the acceptance command needs what the user
 installed (node_modules, a .venv, a build), add `--setup '<install command>'` (a .venv always: a copy still runs the original) (or `--copy <ignored
 path>`, from a package as the note names it; `--sibling <path>` for a `../<name>` or `../../<path>` the project uses, by that same path): `wb start` names the ignored
-directories it lacks, and a failing setup fails the task before any round (so does a checkout
+directories it lacks, and a failing setup fails the task before any round (so does one that changes a tracked file or writes one the repo doesn't ignore: prefer `npm ci`, `uv sync --locked`; so does a checkout
 that fails: the runner makes the worktree, so `wb start` returns at once on any repo). A setup gets 30
 minutes; a first build that needs longer (a big Rust or C++ project, torch over a slow link) takes
 `--setup-timeout <secs>` at start. A note that the
@@ -511,12 +511,12 @@ yours to edit: the coding choice is the user's (`wb coding`), never changed by a
   `wb answer <name> --file <path>`, which sends the file's contents.
 - **stuck / failed** — `wb log <name> -n 30` if the report isn't enough; then feedback that unblocks
   it, or discard. Past step 1, discard drops only this step: the steps `wb next` committed stay on
-  the branch, and the report says how to accept them instead. A failed round's edits so far stay in the worktree (`wb resume` carries on). A setup or load failure before the agent ran: fix it, then `wb resume <name>`; one later ("round N never reached the agent"): fix it, then `wb feedback <name> --text "carry on"`, which sends round N's prompt first.
+  the branch, and the report says how to accept them instead. A failed round's edits so far stay in the worktree (`wb resume` carries on). A setup or load failure before the agent ran: fix it, then `wb resume <name>` (a setup that changed files git sees, as its notice says: `wb discard`, then start again); one later ("round N never reached the agent"): fix it, then `wb feedback <name> --text "carry on"`, which sends round N's prompt first.
   A wake saying `(not its agent's doing)` (a model gone from OpenCode's catalog, a moved repo, a full disk…): do what the notice names; `wb feedback` only when it names it.
   A `rate_limited`, `outage`, `quota`, `auth` or `refused` stop is the API provider's, not the
   agent's (the report says "the provider's stop"): tell the user so, and its remedy (wait, top
   up, or /connect the key again), then `wb feedback <name> --text "carry on"` once it allows (no review round counted);
-  the tasks queued behind a `quota` stop wait as queued, with no stop of their own, and go on once credit is back (resumed, the stopped task asks the provider at once, and its 2xx lets them go); behind a `rate_limited` or `outage` one too, one of them asking again now and then, and going on at the provider's first 2xx: one stop to tell the user, not one per task. A
+  the tasks queued or running behind a `quota` stop wait as queued, with no stop of their own, and go on once credit is back (resumed, the stopped task asks the provider at once, and its 2xx lets them go); behind a `rate_limited` or `outage` one too, one of them asking again now and then, and going on at the provider's first 2xx: one stop to tell the user, not one per task (but an outage whose answers came through, held in the provider's queue or cut short, stops each running task: one cause, one answer). A
   `refused` one (the provider turned the request down: a moderation flag, a schema, a model gone)
   quotes what it said: fix that, then `wb feedback`; on an HTTP 404 the model is gone, so `wb
   takeover` or `wb discard`. Never switch the task's model or role yourself: a route change
@@ -529,8 +529,8 @@ yours to edit: the coding choice is the user's (`wb coding`), never changed by a
   A `spend` stop (cause `spend`: the day's API spend cap is reached, or too near it for the next
   request) is the user's call, never a retry: ask them, as the notice says (it names a cap that
   would do). A higher cap or tomorrow: `wb resume <name>` once it allows. `wb feedback`, `next`
-  or `resume` refused at the cap (exit 3) is the same call. API tasks queued behind it send no
-  stop of their own: they wait as queued and go on once the cap is raised or at midnight.
+  or `resume` refused at the cap (exit 3) is the same call. API tasks queued or running behind it
+  send no stop of their own: they wait as queued and go on once the cap is raised or at midnight.
   The notice's route change is for the next tasks; this one keeps its API model (resume never
   re-routes), so `wb takeover` or `wb discard` it, and so do those queued behind it: they wait on,
   but for one, whose own stop is the next notice. Nothing but the user raises the cap.
