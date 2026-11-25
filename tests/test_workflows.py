@@ -58,21 +58,33 @@ class RequiredCheck(unittest.TestCase):
         checks = rules["required_status_checks"]["required_status_checks"]
         self.assertIn({"context": "check", "integration_id": GITHUB_ACTIONS_APP}, checks)
 
-    def test_check_is_green_only_when_every_shard_and_the_mod_are(self):
+    def test_check_is_green_only_when_every_shard_the_mod_and_the_kernel_are(self):
         # check.yml's suite in six shards (2026-11-21: 28 to 32 minutes in one job): a matrix job
         # reports as `suite (1)`…, so `check` is the one name the ruleset waits for. Skipped
-        # passes a required check, so it runs always() and fails unless both succeeded
+        # passes a required check, so it runs always() and fails unless all three succeeded
         gate = job("check.yml", "check")
-        self.assertIn("needs: [suite, mod]", gate)
+        self.assertIn("needs: [suite, mod, kernel]", gate)
         self.assertIn("if: always()", gate)
-        for want in ("${{ needs.suite.result }}", "${{ needs.mod.result }}", '[ "$SUITE" = success ]',
-                     '[ "$MOD" = success ]'):
+        for want in ("${{ needs.suite.result }}", "${{ needs.mod.result }}", "${{ needs.kernel.result }}",
+                     '[ "$SUITE" = success ]', '[ "$MOD" = success ]', '[ "$KERNEL" = success ]'):
             self.assertIn(want, gate)
         self.assertNotIn("continue-on-error", text("check.yml"))
         suite = job("check.yml", "suite")
         for want in ("fail-fast: false", "WB_TEST_SHARD: ${{ matrix.shard }}/6", "run: python3 -m unittest\n"):
             self.assertIn(want, suite)
         self.assertIn("claude plugin validate mod && claude plugin test mod", job("check.yml", "mod"))
+
+    def test_the_kernel_job_rebuilds_against_the_commit_and_runs_the_goldens_under_bun(self):
+        # #1356: the committed mod/hooks/kernel.js must be what kernel/src builds with the pinned
+        # toolchain, and the goldens must hold under OpenCode's Bun as under Claude Code
+        kernel = job("check.yml", "kernel")
+        steps = ["scripts/install-opencode.sh", "actions/cache@", "python3 scripts/kernel.py fetch",
+                 "python3 scripts/kernel.py check", "BUN_BE_BUN=1 opencode test opencode-plugin/test"]
+        at = [kernel.find(s) for s in steps]
+        self.assertNotIn(-1, at, steps)
+        self.assertEqual(at, sorted(at), "in this order: Bun, the cache, fetch, check, the Bun goldens")
+        self.assertIn("hashFiles('kernel/toolchain.json', 'kernel/spago.lock')", kernel)
+        self.assertNotIn("paths:", kernel)
 
 
 def job(workflow: str, name: str) -> str:
