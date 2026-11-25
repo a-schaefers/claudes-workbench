@@ -9178,6 +9178,37 @@ class Watch(Base):
                 run_wb("watch", "t-handed", "--json")
         self.assertEqual(sorted(exported), ["ses_new"] * 3 + ["ses_old1", "ses_old2"])
 
+    def test_an_agent_switch_in_the_export_is_no_message_to_any_reader(self):
+        # #1290 (2026-11-24, OpenCode 2.3.2): every round's `--agent wb-code` puts an
+        # `agent-switched` message ahead of its prompt, the session's first and one per later
+        # round, with no tokens, text or cost; each reader goes by type, so none counts it
+        from workbench import results, router
+        t = store.Task("t-switch")
+        store.write_json(t.dir / "task.json", {"name": "t-switch", "created_at": store.now()})
+        t.set_status(phase="review", round=2, session="ses_s", window=32768)
+        switch = lambda at: {"type": "agent-switched", "id": f"m{at}", "time": {"created": at},  # noqa: E731
+                             "agent": context.AGENT, "previous": context.AGENT}
+        said = lambda at, text, n: {"type": "assistant", "id": f"a{at}", "agent": context.AGENT,  # noqa: E731
+                                    "finish": "stop", "cost": 0.5,
+                                    "time": {"created": at, "firstToken": at + 600, "completed": at + 2000},
+                                    "tokens": {"input": n, "output": 200, "reasoning": 0,
+                                               "cache": {"read": 0, "write": 0}},
+                                    "content": [{"type": "text", "text": text}]}
+        data = {"info": {"id": "ses_s"}, "messages": [
+            switch(1000), {"type": "user", "id": "u1", "time": {"created": 1100}, "text": "Round one."},
+            said(1200, "First.", 2000), {"type": "idle", "id": "i1", "time": {"created": 3300}},
+            switch(4000), {"type": "user", "id": "u2", "time": {"created": 4100}, "text": "Round two."},
+            said(4200, "Second.", 3000), {"type": "idle", "id": "i2", "time": {"created": 6300}}]}
+        with mock.patch.object(transcript, "export", lambda sid, strict=False, task=None: data):
+            self.assertEqual(runner.last_words(t, "ses_s"), "Second.")  # a handover's last words
+            self.assertEqual(runner.context_state(t)["used"], 3200)     # the last step's context
+        self.assertEqual(transcript.context_fill(data), 3200)
+        self.assertEqual(results._session_cost(data), 1.0)
+        self.assertEqual(router.speed_samples(data["messages"])["ttft"], [0.6, 0.6])
+        shown = transcript.session_entries(data, "", False)
+        self.assertEqual([e.key for e in shown if not e.key.startswith("a")], ["u1", "u2"])
+        self.assertNotIn("agent-switched", json.dumps([e.lines for e in shown]))
+
     def test_every_event_kind_with_readable_text_shows_in_wb_watch(self):
         # #846: reading_full, resumed, spec_gap and coding had no branch in task_entries, so a
         # session growing into compaction, a resume or the user's allowance left no line
@@ -11487,7 +11518,11 @@ class RealOpenCodeRun(Base):
                         steps)                                     # step_finish: part.tokens
         self.assertIn("ok", [r["text"] for r in rows if r.get("kind") == "text"])
         msgs = transcript.export(st["session"], task=task).get("messages", [])  # its home (#1010)
-        self.assertEqual([m["type"] for m in msgs][:1], ["user"])
+        # --agent (#1290) records an agent switch ahead of each round's prompt, to the agent the
+        # session already had too; every reader goes by a message's type, never its place
+        self.assertEqual([(m["type"], m.get("agent")) for m in msgs][:2],
+                         [("agent-switched", context.AGENT), ("user", None)])
+        self.assertEqual({m.get("agent") for m in msgs if m["type"] == "assistant"}, {context.AGENT})
         self.assertTrue(runner.context_state(task)["used"])        # an assistant message's tokens
         self.assertEqual(transcript.find_session(task), st["session"])  # session list, by title
         task.set_status(session=None)
@@ -11589,7 +11624,7 @@ class RealOpenCodeRun(Base):
         self.assertIs(st["opencode_home"], True)
         self.assertTrue((task.dir / "opencode/share/opencode/opencode.db").is_file())
         got = transcript.export(st["session"], task=task)
-        self.assertEqual([m["type"] for m in got.get("messages", [])][:1], ["user"])
+        self.assertEqual([m["type"] for m in got.get("messages", [])][:2], ["agent-switched", "user"])
         self.assertTrue(runner.context_state(task)["used"])
         task.set_status(session=None)
         self.assertEqual(transcript.find_session(task), st["session"])  # by title, there

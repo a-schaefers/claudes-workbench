@@ -139,7 +139,8 @@ provider's unknown model is `nokey`'s error, its unknown variant (the catalog's 
 unavailable for <id>: <v>`, exit 1. Every `step_finish` carries `part.cost` (USD, from the
 catalog's first price, its context tier past `size`; FAKE_COST for a model with none, else 0) and
 `part.tokens{input, output, reasoning, cache{read, write}}`; `session export` gives each assistant
-message `cost` (FAKE_COST, else 0) and `tokens`, and `info.cost`, `info.tokens` their sums.
+message `cost` (FAKE_COST, else 0) and `tokens`, and `info.cost`, `info.tokens` their sums; its
+first message is the `agent-switched` one each `run --agent` records (`agent`, `previous`).
 FAKE_STEP_IN sets a step's input tokens (120), so a test prices it; FAKE_STEP_COST plays
 OpenCode's figure (a number, or `none`: no `part.cost`); scenario `spend` (#1019): a read and a
 priced `step_finish` every FAKE_STEP_EVERY seconds (0.3), FAKE_STEPS of them (50), then `ok`'s
@@ -321,10 +322,14 @@ if args[:2] == ["session", "export"]:  # `wb watch`: one finished step, as OpenC
     compacted = [{"type": "compaction", "id": f"{sid}-c", "status": "completed", "reason": "auto",
                   "summary": "Earlier: read answer.txt.", "time": {"created": 1500}}] \
         if os.environ.get("FAKE_COMPACTED") else []
-    exported = {"info": {"id": sid, "home": db_path()}, "messages": [
+    # each round's `--agent wb-code` puts an `agent-switched` message before its prompt, even to
+    # the agent the session had (2.3.2, #1290): readers go by a message's type, never its place
+    exported = {"info": {"id": sid, "home": db_path(), "agent": "wb-code"}, "messages": [
+        {"type": "agent-switched", "id": f"{sid}-m0", "time": {"created": 900}, "agent": "wb-code",
+         "previous": "wb-code"},
         {"type": "user", "id": f"{sid}-m1", "time": {"created": 1000}, "text": "Write the answer."},
         *compacted,
-        {"type": "assistant", "id": f"{sid}-m2", "finish": "stop",
+        {"type": "assistant", "id": f"{sid}-m2", "agent": "wb-code", "finish": "stop",
          "time": {"created": 2000, "firstToken": 3000, "streamed": 5000, "completed": 5000},
          "cost": float(os.environ.get("FAKE_COST") or 0),
          "tokens": {"input": int(os.environ.get("FAKE_FILL", 1200)), "output": 80, "reasoning": 0,

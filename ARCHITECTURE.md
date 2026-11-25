@@ -2492,7 +2492,12 @@ merges onto an earlier one of that name, so a user's own `wb-code` would keep it
 defaults (allow, `.env` reads ask) and takes every top-level rule, as the default `build` agent did (its
 own `question: allow` the layer denies anyway). The user's content loses `agents` (the layer sets it)
 and its 1.x `agent`. Titles go to the hidden `title` agent and `small_model` as before (wb passes
-`--title`, so a round makes none). `RealOpenCodeRun.test_neither_the_users_default_agent_nor_their_own_wb_code_lifts_a_deny_in_any_round`;
+`--title`, so a round makes none). Each `--agent` run records an `agent-switched` message (`{type,
+agent, previous}`, no text, tokens or cost) in the session ahead of its prompt, even to the agent it
+had, so a session's export starts with one and has one per round; the `run --format json` events carry
+none. Every reader of the export goes by a message's `type` (`user`, `assistant`, `compaction`), never
+its place, and skips it (`Watch.test_an_agent_switch_in_the_export_is_no_message_to_any_reader`).
+`RealOpenCodeRun.test_neither_the_users_default_agent_nor_their_own_wb_code_lifts_a_deny_in_any_round`;
 the fake refuses an agent the config never made (*The tests*).
 
 **Project config can't lift the rules.** OpenCode loads a project's `opencode.json` (worktree,
@@ -7057,7 +7062,7 @@ an agent 2.3.2 has built in or the config makes (`agents.<id>` in `OPENCODE_CONF
 the output rate; `FAKE_COST` for an unpriced model, else 0; `FAKE_STEP_COST` plays OpenCode's figure, a number or
 `none` for no `part.cost`) and `part.tokens{input, output, reasoning, cache{read, write}}` (`FAKE_STEP_IN` the input,
 120); `session export` gives the assistant message `cost` (`FAKE_COST`, else 0) and `info.cost`/`info.tokens`
-their sums. The API scenarios: `ratelimit` (`step_start`, then `retry` events, attempts 2 to `FAKE_RETRIES`+1, 10 by
+their sums, its first message the `agent-switched` one each `run --agent` records (#1290). The API scenarios: `ratelimit` (`step_start`, then `retry` events, attempts 2 to `FAKE_RETRIES`+1, 10 by
 default, `FAKE_RETRY_EVERY` apart, each `{type: "retry", attempt, nextRetryAt, messageID, error: {type:
 "provider.rate-limit", message, status: 429, response: {body}, retryAfterMs}}`, `retryAfterMs` only with
 `FAKE_RETRY_AFTER`; then that error, exit 1; with `FAKE_RETRY_OK` the retries end in an answer, as `ok`), `down`
@@ -7169,7 +7174,8 @@ listener and no agent's shell, and passed by commands.json `env` it does, its un
 runner on real OpenCode (`wb start --model cap`): argv, `run --format json` events (a `tool_use`'s `state.output`, #1086; the shell tool's `workdir` in `state.input`, #1210's third review), `session export`
 (`context_state`), `session list` (`find_session`), `--session`, a real compaction (and the tail it keeps, `compaction.keep`, #1185), the task's own OpenCode home
 (no credentials in it, the user's store given no session, its commands seeing the user's `XDG_DATA_HOME`, #1010),
-wb's agent (a user's `default_agent` and own `wb-code` lift no deny, in either round, #1290)
+wb's agent (a user's `default_agent` and own `wb-code` lift no deny, in either round; the export's
+`agent-switched` message ahead of the prompt and its assistant messages' `agent`, #1290)
 (CLAUDE.md's *OpenCode quirks* points here). They are the only checks of the quirks, interop and lane: a skip is not a pass.
 `ApiThinking`'s `test_real_opencode_*` is one too (#1018): a `wb-off` body variant and the catalog's `none` reach a DeepSeek-shaped server as `thinking: {type: disabled}` in the agent's request, and the npm provider's V1 `wb-off`.
 
@@ -7458,7 +7464,9 @@ doc needs its own `!/` line).
   commands do; OpenCode picks its flags by the name, which `runner.shell_args` restates for the runner's own commands).
 - **wb's agent** (`context.AGENT`, #1290) → `run_round`'s `--agent`, the layer's `AGENT_OFF` (`context.layer`),
   `rules_env`'s `AGENT_ENTRY` (loaded after the layer: one without the other leaves a user's `wb-code` merged in, or
-  no agent at all, which OpenCode refuses), the fake's `--agent` check, `RealOpenCode.run_calls`' argv.
+  no agent at all, which OpenCode refuses), the fake's `--agent` check, `RealOpenCode.run_calls`' argv; the
+  `agent-switched` message it puts in the export ↔ every export reader going by `type` (`session_entries`,
+  `context_state`, `context_fill`, `last_words`, `speed_samples`, `_session_cost`) and the fake's export.
 - **The layer's `permissions`** → the layer file alone, the project's config shut out (`rules_env`,
   `PROJECT_CONFIG_OFF`, #994); never `OPENCODE_CONFIG_CONTENT` (`CONFIG_CONTENT_MAX`); the user's own (`USERS_RULES`)
   before them. A key a project config mustn't change → `RESTATED`.
