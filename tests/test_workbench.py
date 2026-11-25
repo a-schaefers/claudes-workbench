@@ -11961,10 +11961,12 @@ class RealOpenCodeRun(Base):
                         steps)                                     # step_finish: part.tokens
         self.assertIn("ok", [r["text"] for r in rows if r.get("kind") == "text"])
         msgs = transcript.export(st["session"], task=task).get("messages", [])  # its home (#1010)
-        # --agent (#1290) records an agent switch ahead of each round's prompt, to the agent the
-        # session already had too; every reader goes by a message's type, never its place
-        self.assertEqual([(m["type"], m.get("agent")) for m in msgs][:2],
-                         [("agent-switched", context.AGENT), ("user", None)])
+        # --agent (#1290) records an agent switch ahead of each round's prompt on 2.3, to the agent
+        # the session already had too; 2.4.1 records none (the opencode workflow, 2026-11-25):
+        # every reader goes by a message's type, never its place
+        kinds = [(m["type"], m.get("agent")) for m in msgs]
+        self.assertIn(kinds[:2], ([("agent-switched", context.AGENT), ("user", None)],
+                                  [("user", None), ("assistant", context.AGENT)]))
         self.assertEqual({m.get("agent") for m in msgs if m["type"] == "assistant"}, {context.AGENT})
         self.assertTrue(runner.context_state(task)["used"])        # an assistant message's tokens
         self.assertEqual(transcript.find_session(task), st["session"])  # session list, by title
@@ -12067,7 +12069,8 @@ class RealOpenCodeRun(Base):
         self.assertIs(st["opencode_home"], True)
         self.assertTrue((task.dir / "opencode/share/opencode/opencode.db").is_file())
         got = transcript.export(st["session"], task=task)
-        self.assertEqual([m["type"] for m in got.get("messages", [])][:2], ["agent-switched", "user"])
+        self.assertEqual([m["type"] for m in got.get("messages", []) if m["type"] != "agent-switched"][:1],
+                         ["user"])                                 # 2.3's switch first, 2.4.1 none
         self.assertTrue(runner.context_state(task)["used"])
         task.set_status(session=None)
         self.assertEqual(transcript.find_session(task), st["session"])  # by title, there

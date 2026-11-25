@@ -2697,9 +2697,9 @@ only the title's, so a user's global `agent.compaction.model` on a cloud model g
 compaction of a wb task, the spec, CLAUDE.md and the code read so far, a `local_only` repo's too,
 and an API task's past the keyhole, the meter and the day cap (#1345, 2026-11-24, checked on
 2.3.2: a layer's V2 entry overrides a global V1 `agent.<name>.model` or V2 one, the rest of the
-user's entry merged; `test_the_users_own_compaction_summary_and_title_models_get_no_request_of_a_wb_task`). Each `--agent` run records an `agent-switched` message (`{type,
+user's entry merged; `test_the_users_own_compaction_summary_and_title_models_get_no_request_of_a_wb_task`). On 2.3 each `--agent` run records an `agent-switched` message (`{type,
 agent, previous}`, no text, tokens or cost) in the session ahead of its prompt, even to the agent it
-had, so a session's export starts with one and has one per round; the `run --format json` events carry
+had, so a session's export starts with one and has one per round (2.4.1 records none: the readers go by type either way); the `run --format json` events carry
 none. Every reader of the export goes by a message's `type` (`user`, `assistant`, `compaction`), never
 its place, and skips it (`Watch.test_an_agent_switch_in_the_export_is_no_message_to_any_reader`).
 `RealOpenCodeRun.test_neither_the_users_default_agent_nor_their_own_wb_code_lifts_a_deny_in_any_round`;
@@ -7705,7 +7705,7 @@ runner on real OpenCode (`wb start --model cap`): argv, `run --format json` even
 (`context_state`), `session list` (`find_session`), `--session`, a real compaction (and the tail it keeps, `compaction.keep`, #1185), the task's own OpenCode home
 (no credentials in it, the user's store given no session, its commands seeing the user's `XDG_DATA_HOME`, #1010),
 wb's agent (a user's `default_agent` and own `wb-code` lift no deny, in either round; the export's
-`agent-switched` message ahead of the prompt and its assistant messages' `agent`, #1290), the
+`agent-switched` message ahead of the prompt where the OpenCode records one, 2.3 but not 2.4.1, and its assistant messages' `agent`, #1290), the
 user's own compaction, summary and title models given no request (#1345)
 (CLAUDE.md's *OpenCode quirks* points here). They are the only checks of the quirks, interop and lane: a skip is not a pass.
 `ApiThinking`'s `test_real_opencode_*` is one too (#1018): a `wb-off` body variant and the catalog's `none` reach a DeepSeek-shaped server as `thinking: {type: disabled}` in the agent's request, and the npm provider's V1 `wb-off`.
