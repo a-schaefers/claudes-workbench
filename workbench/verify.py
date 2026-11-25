@@ -21,7 +21,7 @@ import tempfile
 import time
 from pathlib import Path, PurePosixPath
 
-from . import context, gitops, runner, store
+from . import context, gitops, lane, runner, store
 
 LIMIT = 300  # seconds for each run; past it, that run is inconclusive
 
@@ -455,6 +455,12 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
     said = verdict(b_code, b_out, c_code, expect, uncopied)
     if left and said == "proven":  # a candidate missing files accept can land proves nothing (#642)
         said = "inconclusive"
+    # a run the lane refused ran no test: its 126 is no failure of the candidate (#1308, 2026-11-24:
+    # "the candidate fails it" for a change whose tests passed)
+    refused = next((t.splitlines()[0] for c, t in ((b_code, b_out), (c_code, c_out))
+                    if c == 126 and t.startswith(lane.REFUSED)), "")
+    if refused:
+        said = "inconclusive"
     result = {"cmd": cmd, "files": files, "tree": tree, "ts": store.now(),
               "base": {"rev": base_rev, "exit": b_code, "assertion": assertion(b_out)},
               "candidate": {"rev": tree, "exit": c_code, "assertion": assertion(c_out)},
@@ -462,7 +468,8 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
               **({"expect": expect} if expect else {}),
               **({"uncopied": uncopied[:50]} if uncopied else {}),
               **({"removed": removed[:50]} if removed else {}),
-              **({"left_out": left} if left else {})}
+              **({"left_out": left} if left else {}),
+              **({"refused": refused} if refused else {})}
     for code, text in ((b_code, b_out), (c_code, c_out)):  # a checkout unlike the task's (#932)
         if code == "filtered":
             result["filtered"] = text.strip().strip("[]")
@@ -498,6 +505,8 @@ def lines(r: dict) -> list[str]:
         out.append(f"  {side}: exit {x['exit']}" + (f": {x['assertion']}" if x["assertion"] else ""))
     if r.get("filtered"):
         out.append(f"  {r['filtered']}")
+    if r.get("refused"):
+        out.append(f"  no test ran: {r['refused']}")
     if r.get("missing"):
         out.append(f"  the base lacked what the candidate adds: {', '.join(r['missing'])} "
                    "(--files copies what the test reads onto the base)")

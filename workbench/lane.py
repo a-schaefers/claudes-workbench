@@ -22,6 +22,7 @@ library here: it runs before every round.
 from __future__ import annotations
 
 import ctypes
+import errno
 import os
 import platform
 import signal
@@ -150,7 +151,13 @@ def restrict(writable: list[str], readable: list[str] | None = None,
                 rule = ctypes.create_string_buffer(struct.pack("=Qi", rights, pfd))  # packed
                 if libc.syscall(ADD_RULE, fd, RULE_PATH_BENEATH, rule,
                                 ctypes.c_uint32(0)) < 0:
-                    raise OSError(ctypes.get_errno(), f"landlock_add_rule {path}")
+                    err = ctypes.get_errno()
+                    # a file that is no file here (a pipe or socket a /dev/std* link reached):
+                    # no rule grants it, so leaving it out takes nothing; refusing the whole lane
+                    # failed every check run with its output piped (#1308, 2026-11-24)
+                    if err == errno.EBADFD and not os.path.isdir(path):
+                        continue  # pin is still False: the finally closes its fd
+                    raise OSError(err, f"landlock_add_rule {path}")
                 pin = os.fstat(pfd).st_dev in unstable
             finally:
                 if pin:  # O_PATH: it reads and writes nothing, and the rules still hold through it
@@ -211,6 +218,10 @@ def die_with_parent() -> None:
         sys.exit(1)
 
 
+# how a refused lane's output starts, which wb verify reads as no evidence (#1308)
+REFUSED = "workbench lane: the kernel refused the lane"
+
+
 def main(argv: list[str]) -> None:
     die_with_parent()
     sep = argv.index("--")
@@ -219,7 +230,7 @@ def main(argv: list[str]) -> None:
     try:
         restrict(pick("--write"), readable, pick("--unix"))
     except OSError as e:  # Landlock is there but refused the lane: don't run outside it
-        print(f"workbench lane: the kernel refused the lane ({e}); not running "
+        print(f"{REFUSED} ({e}); not running "
               f"{argv[sep + 1]}", file=sys.stderr)
         sys.exit(126)
     try:

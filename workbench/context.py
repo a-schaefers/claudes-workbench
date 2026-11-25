@@ -2255,6 +2255,11 @@ HOME_READABLE = ("bin", "go", "R", "perl5")
 # entries, only what is kept (the repo, the lane, a grant) is readable beneath them. /mnt holds
 # the Windows drives on WSL2, /home the other users' homes (the 2026-11-16 audit).
 ONLY_KEPT = ("/dev", "/mnt", "/media", "/run/media", "/run/user", "/home")
+# The links in /dev to the calling process's own descriptors: they name no file. Resolved in wb's
+# process, /dev/stderr was /dev/null under `wb verify 2>/dev/null` and so was listed beside it, and
+# in the lane's child, where fd 2 is a pipe, Landlock refused the rule (EBADFD) and with it the
+# lane: both runs exited 126 and verify said "the candidate fails it" (#1308, 2026-11-24).
+FD_LINKS = ("/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/fd")
 # WSL2's Windows drives (DrvFs, /mnt/<letter> unless wsl.conf moved them): a Windows program there
 # runs through interop as a Windows process, as the user, outside Landlock and no-new-privileges.
 # The read lane let the agent start one: python3 running cmd.exe, or the allowed `npm` resolving to
@@ -2852,6 +2857,8 @@ def readable(task: store.Task) -> list[str] | None:
     out: list[str] = []
 
     def visit(p: str, default: bool) -> None:
+        if p in FD_LINKS:  # the caller's fds, not files: the child's are its own (#1308)
+            return
         real = os.path.realpath(p)
         if real in hidden or any(under(real, h) for h in hidden):
             if real in inner:
