@@ -37312,6 +37312,39 @@ SPEND_CATALOG = [
                      (SPEND_FLASH, {"cost": [{"input": 0.2, "output": 0.6, "cache": {"read": 0.006, "write": 0}}]}))]
 
 
+class _PerThread:
+    """A dict or set of runner's per-process state, each thread its own (ApiSpend.runners_on_threads)."""
+
+    def __init__(self, make):
+        self._make, self._local = make, threading.local()
+
+    def _own(self):
+        if not hasattr(self._local, "v"):
+            self._local.v = self._make()
+        return self._local.v
+
+    def __getattr__(self, name):
+        return getattr(self._own(), name)
+
+    def __getitem__(self, key):
+        return self._own()[key]
+
+    def __setitem__(self, key, value):
+        self._own()[key] = value
+
+    def __delitem__(self, key):
+        del self._own()[key]
+
+    def __contains__(self, key):
+        return key in self._own()
+
+    def __iter__(self):
+        return iter(self._own())
+
+    def __len__(self):
+        return len(self._own())
+
+
 class ApiSpend(Base):
     """What an API task costs (#1019): the meter, the day's ledger, the cap at start, the spend
     guard in and between rounds, the one check-in a day, plans, and the keyhole's part."""
@@ -37625,6 +37658,18 @@ class ApiSpend(Base):
         self.cap(100)                                           # the user raised it: a GPU-like go on
         self.assertTrue(runner._go_on(task, 2, "auto-fix"))
 
+    def runners_on_threads(self):
+        """runner.CURRENT and runner.ISSUED one per thread from here to the test's end, so two
+        runners driven on threads of this process each keep their own round's proc, run and
+        keyhole, as real runners do, one per process. Shared, the first round to end popped the
+        other's proc from CURRENT and stopped it (_end_agent): "opencode exited -15" and that task
+        `failed`, about 3 runs in 10 under load (#1353's CI, 2026-11-24); its sweep took the
+        other's run, and its drive closed the other's keyhole."""
+        for name, make in (("CURRENT", dict), ("ISSUED", set)):
+            patch = mock.patch.object(runner, name, _PerThread(make))
+            patch.start()
+            self.addCleanup(patch.stop)
+
     def drive_until_waiting(self, task, then):
         """drive(task), calling ``then`` once its runner waits at the cap as queued (#1249), with
         its provider's free slots then; the slots, or None when it never waited."""
@@ -37699,6 +37744,7 @@ class ApiSpend(Base):
     def test_tasks_waiting_behind_a_told_cap_stop_stay_queued_when_the_role_moves_to_the_gpu(self):
         # #1304: the role moved to the GPU, as the stop's notice offers, released every waiter at
         # once, each into round 1, the guard and its own spend notice: the ask once per task again
+        self.runners_on_threads()  # two runners in this process, each with its own CURRENT
         self.cap(5, api=("significant",))
         self.spent(5.0)
         first, *queued = [self.api_task(f"t-w{i}", SPEND_M, "ok") for i in range(3)]
@@ -37731,6 +37777,7 @@ class ApiSpend(Base):
         # #1304's review (2026-11-24): a takeover or discard of the told stop let every waiter go
         # on at once, on the same look (a routes.json write had woken them together), each into
         # round 1, the guard and its own spend notice, one ask of the user per queued task again
+        self.runners_on_threads()  # two runners in this process, each with its own CURRENT
         self.cap(5, api=("significant",))
         self.spent(5.0)
         first, *queued = [self.api_task(f"t-w{i}", SPEND_M, "ok") for i in range(3)]
