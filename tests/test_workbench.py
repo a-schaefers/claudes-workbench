@@ -8080,6 +8080,26 @@ class Context(Base):
                              capture_output=True, text=True).stdout.splitlines()
         self.assertEqual(log.count("feat: the answer"), 1)
 
+    def test_a_step_an_interrupted_wb_next_committed_is_measured_at_accept(self):
+        # #1302 (bar loop round 8, 2026-11-24): cut off in the session export after its commit,
+        # wb next left the step's commit as HEAD with the status unmoved, and wb accept measured
+        # since HEAD: steps [{files: 0, lines: 0}], and the savings card priced the task at nothing
+        self.start("t-nxm", "ok", "--test", TEST_CMD)
+        wait_phase("t-nxm", {"review"})
+        with mock.patch.object(cli.runner, "fresh_reason", side_effect=KeyboardInterrupt), \
+                mock.patch("sys.stdin", io.StringIO("Now also write question.txt.\n")), \
+                self.assertRaises(KeyboardInterrupt):
+            run_wb("next", "t-nxm", "--spec", "-", "-m", "feat: step one")
+        task = store.Task("t-nxm")
+        self.assertIn("Workbench-Task: t-nxm (step 1)",
+                      gitops.git(task.worktree, "log", "-1", "--format=%B"))
+        self.assertEqual(task.status.get("steps", 1), 1)    # the status never moved
+        run_wb("accept", "t-nxm", "-m", "feat: the answer")
+        row = next(r for r in store.results(trials=True) if r.get("task") == "t-nxm")
+        self.assertEqual(len(row["steps"]), 1)
+        self.assertGreaterEqual(row["steps"][0].get("files", 0), 1)
+        self.assertGreaterEqual(row["diff"]["added"], 1)
+
     def test_wb_next_is_not_reaped_while_it_reads_the_session(self):
         # it set phase queued, then exported the session (up to 30 s) before spawning the runner,
         # and a wb status meanwhile failed the task as dead (the 0.90 review)
@@ -20095,7 +20115,7 @@ class Verify(Base):
             self.assertIn(f"base {step1[:10]}", shot)
             (self.wt / "tests/test_again.py").unlink()
         task.set_status(step_base=None)  # a task from before the record: the walk back finds it
-        self.assertEqual(verify._review_base(task), step1)
+        self.assertEqual(gitops.step_base(task), step1)
 
     def test_verify_credits_the_step_that_fixed_the_bug(self):
         # #252 (the audit of 1.2): step two's test passed on step one's commit already.
@@ -24594,6 +24614,44 @@ class Projects(Base):
         tree = g("ls-tree", "-r", "--name-only", "delegate/t-subbuild").stdout.decode()
         self.assertIn("answer.txt", tree)
         self.assertNotIn("lib.o", tree)
+
+    def test_after_a_wb_next_a_step_changed_only_in_a_filled_submodule_is_refused_not_dropped(self):
+        # #1307 (bar loop round 8, 2026-11-24): git status can't see inside a filled submodule,
+        # so once a step was committed (HEAD past the base) wb next said the step "had no
+        # changes" and wb accept exited 0 and removed the worktree, the edit with it; #419's
+        # refusal only fired in commit_all, which neither called
+        lib = Path(self.tmp.name) / "lib"
+        subprocess.run(["git", "init", "-q", str(lib)], check=True)
+        (lib / "lib.c").write_text("lib v1\n")
+        subprocess.run(["git", "-C", str(lib), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(lib), "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "lib"], check=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True,  # noqa
+                                      capture_output=True)
+        g("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "vendor/lib")
+        g("commit", "-qm", "a submodule")
+        self.start("t-subnext", "ok", "--test", TEST_CMD)
+        wait_phase("t-subnext", {"review"})
+        with mock.patch("sys.stdin", io.StringIO("Now check it again.\n")):
+            self.assertIn("step 1 of t-subnext committed",
+                          run_wb("next", "t-subnext", "--spec", "-", "-m", "feat: step one"))
+        wait_phase("t-subnext", {"review"})
+        task = store.Task("t-subnext")
+        f = task.worktree / "vendor/lib/lib.c"
+        f.unlink()                                           # as sed -i replaces it
+        f.write_text("lib v2 fixed\n")
+        self.assertEqual(gitops.changed(task.worktree), "")  # the only change: git can't see it
+        for argv in (("next", "t-subnext", "--spec", "-", "-m", "feat: step two"),
+                     ("accept", "t-subnext", "-m", "feat: done")):
+            err = io.StringIO()
+            with mock.patch("sys.stdin", io.StringIO("And again.\n")), \
+                    self.assertRaises(SystemExit), redirect_stderr(err):
+                run_wb(*argv)
+            self.assertIn("not committed: edits in submodule vendor/lib can't land: lib.c",
+                          err.getvalue(), argv[0])
+            st = store.Task("t-subnext").status
+            self.assertEqual((st["phase"], st["steps"]), ("review", 2), argv[0])
+        self.assertEqual(f.read_text(), "lib v2 fixed\n")  # the worktree kept, the edit in it
 
     @unittest.skipUnless(GIT_LFS, "needs git-lfs")
     def test_git_lfs_files_are_data_in_the_scratch_checkouts_and_count_at_their_size(self):
