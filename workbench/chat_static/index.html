@@ -14,110 +14,133 @@
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/icon-180.png">
 <link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/stats.css">
+<link rel="stylesheet" href="/settings.css">
 <title>Workbench</title>
 </head>
-<body>
+<body data-view="chat">
 <header class="top">
   <div class="mark" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="/icon.svg#spark"/></svg></div>
   <div class="who">
     <div class="name">Workbench</div>
     <div class="presence" id="presence"><span class="dot"></span><span id="presence-text">connecting…</span></div>
   </div>
-  <button class="gear" id="gear" type="button" aria-label="Settings" aria-expanded="false" aria-controls="settings">
-    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
-  </button>
 </header>
-<section class="settings" id="settings" hidden aria-label="Settings">
-  <div class="set">
-    <h3>Tool permissions while you're away</h3>
-    <p class="small" id="away-when">You're away from the moment you use this page (open it or send a message here) after using the terminal, until you type or answer a prompt in the terminal again. Away ends by itself 6 hours after you last used this page, unless a night's batch is still running. While you're at the terminal, prompts stay there, and one still waiting after half a minute is told here.</p>
-    <div class="seg" role="radiogroup" aria-label="Tool permissions while you're away">
-      <button type="button" role="radio" data-away="ask">Ask me here</button>
-      <button type="button" role="radio" data-away="allow">Let Claude go ahead</button>
-    </div>
-    <p class="small" id="away-note"></p>
-  </div>
-  <div class="set">
-    <h3>Notifications</h3>
-    <div id="notify"></div>
-  </div>
-  <div class="set">
-    <h3>What it saved</h3>
-    <div class="badge" id="badge" hidden>
-      <div class="badge-q">How much Claude did my GPU save me?</div>
-      <div class="badge-n" id="badge-n"></div>
-      <div class="badge-s" id="badge-s"></div>
-    </div>
-    <p id="saved"></p>
-  </div>
-  <div class="set">
-    <h3 id="app-h">The app</h3>
-    <div id="app"></div>
-  </div>
-  <div class="set">
-    <h3>This chat</h3>
-    <p>A second lane to Claude, not a copy of the terminal. What you send here reaches the Claude Code
-    session running <code>/workbench</code> on your computer; Claude answers here with what matters:
-    results, questions, its plans and permission prompts. The terminal's full output stays on
-    the computer. Ask Claude to keep you posted here, and it will.</p>
-  </div>
-  <div class="set">
-    <h3>This device</h3>
-    <button type="button" class="plain" id="forget">Forget the key on this device</button>
-    <p class="small">Open the link from <code>wb chat url</code> again to come back.</p>
-  </div>
-</section>
 <div class="net" id="net" hidden></div>
-<div class="tasks" id="tasks" role="button" tabindex="0" aria-expanded="false" aria-controls="task-sheet" hidden></div>
-<section class="tasksheet" id="task-sheet" hidden aria-label="Tasks">
-  <div class="ts-list" id="ts-list"></div>
-  <div class="ts-one" id="ts-one" hidden>
-    <div class="ts-head">
-      <button type="button" id="ts-back">‹ All tasks</button>
-      <b id="ts-name"></b>
-      <button type="button" id="ts-refresh">Refresh</button>
+<section class="view" id="view-chat" aria-label="Chat">
+  <div class="tasks" id="tasks" role="button" tabindex="0" aria-expanded="false" aria-controls="task-sheet" hidden></div>
+  <section class="tasksheet" id="task-sheet" hidden aria-label="Tasks">
+    <div class="ts-list" id="ts-list"></div>
+    <div class="ts-one" id="ts-one" hidden>
+      <div class="ts-head">
+        <button type="button" id="ts-back">‹ All tasks</button>
+        <b id="ts-name"></b>
+        <button type="button" id="ts-refresh">Refresh</button>
+      </div>
+      <div class="seg ts-tabs" id="ts-tabs" role="tablist" aria-label="What to show">
+        <button type="button" role="tab" data-part="summary">Summary</button>
+        <button type="button" role="tab" data-part="diff">Diff</button>
+        <button type="button" role="tab" data-part="log">Log</button>
+      </div>
+      <div class="ts-body" id="ts-body" role="tabpanel"></div>
+      <button type="button" class="ts-reply" id="ts-reply">Reply about this task</button>
     </div>
-    <div class="seg ts-tabs" id="ts-tabs" role="tablist" aria-label="What to show">
-      <button type="button" role="tab" data-part="summary">Summary</button>
-      <button type="button" role="tab" data-part="diff">Diff</button>
-      <button type="button" role="tab" data-part="log">Log</button>
+  </section>
+  <div class="purpose" id="hint" hidden>
+    <p id="hint-text"></p>
+    <button id="hint-x" type="button" aria-label="Dismiss this hint">✕</button>
+  </div>
+  <main id="scroll">
+    <div class="thread" id="thread">
+      <div class="intro" id="intro">
+        <div class="intro-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="/icon.svg#spark"/></svg></div>
+        <p>Message your driver from anywhere: most work can run from here. A prompt the driver raises
+        waits in its terminal (<code>ssh</code> + <code>tmux</code>); run the driver with permissions granted to skip those.
+        Your settings live here too.</p>
+        <div class="chips"><button class="chip" type="button">Status?</button><button class="chip" type="button">What needs me?</button><button class="chip" type="button">What are you working on?</button></div>
+      </div>
     </div>
-    <div class="ts-body" id="ts-body" role="tabpanel"></div>
-    <button type="button" class="ts-reply" id="ts-reply">Reply about this task</button>
+  </main>
+  <button class="jump" id="jump" hidden aria-label="Jump to the newest message">
+    <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+  </button>
+  <div class="about" id="about" hidden>
+    <span id="about-text"></span>
+    <button id="about-x" type="button" aria-label="Not about this">✕</button>
+  </div>
+  <div class="tray" id="tray" hidden aria-label="Attached"></div>
+  <form class="composer" id="composer" autocomplete="off">
+    <button id="attach" class="attach" type="button" aria-label="Attach a photo or file">
+      <svg viewBox="0 0 24 24"><path d="M21 11.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.6-8.6a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.6a1.8 1.8 0 0 1-2.6-2.6l7.9-7.9"/></svg>
+    </button>
+    <input id="pick" type="file" multiple hidden>
+    <button id="mic" class="attach mic" type="button" aria-label="Dictate" hidden>
+      <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+    </button>
+    <input id="pick-voice" type="file" accept="audio/*" capture hidden>
+    <textarea id="input" rows="1" placeholder="Message Claude" enterkeyhint="send" aria-label="Message"></textarea>
+    <button id="send" type="submit" aria-label="Send" disabled>
+      <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    </button>
+  </form>
+</section>
+<section class="view" id="view-stats" aria-label="Stats">
+  <div class="view-in">
+    <div id="stats-body"></div>
+    <div class="cards">
+      <div class="card" id="saved-card">
+        <h3>What it saved</h3>
+        <div class="badge" id="badge" hidden>
+          <div class="badge-q">How much Claude did my GPU save me?</div>
+          <div class="badge-n" id="badge-n"></div>
+          <div class="badge-s" id="badge-s"></div>
+        </div>
+        <p id="saved"></p>
+      </div>
+    </div>
   </div>
 </section>
-<main id="scroll" aria-live="polite" aria-relevant="additions">
-  <div class="thread" id="thread">
-    <div class="intro" id="intro">
-      <div class="intro-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="/icon.svg#spark"/></svg></div>
-      <p>A second lane to Claude in your terminal, while <code>/workbench</code> runs there: what you send
-      reaches it, and it answers here with what matters, including what it needs from you while you're away.</p>
-      <div class="chips"><button class="chip" type="button">Status?</button><button class="chip" type="button">What needs me?</button><button class="chip" type="button">What are you working on?</button></div>
+<section class="view" id="view-settings" aria-label="Settings">
+  <div class="view-in">
+    <div id="settings-rows"></div>
+    <div class="cards" id="settings">
+      <div class="card">
+        <h3>While away</h3>
+        <p class="small" id="away-when">You're away from the moment you use the chat on another device (open it or send a message here) after using the terminal, until you type or answer a prompt in the terminal again. Stats and Settings don't count, nor this page opened on the computer itself (its localhost link) unless you send a message. Away ends by itself 6 hours after you last used the chat, unless a night's batch is still running.</p>
+        <p class="small" id="away-prompts">Claude's prompts (a permission, a question, a plan) are answered in the terminal, never here. While one waits, a line here says so: at once while you're away, after half a minute while you're at the terminal. Run Claude with permissions granted to work from the chat.</p>
+      </div>
+      <div class="card">
+        <h3>Notifications</h3>
+        <div id="notify"></div>
+      </div>
+      <div class="card">
+        <h3 id="app-h">The app</h3>
+        <div id="app"></div>
+      </div>
+      <div class="card">
+        <h3>This chat</h3>
+        <p>A second lane to Claude, not a copy of the terminal. What you send here reaches the Claude Code
+        session running <code>/workbench</code> on your computer; Claude answers here with what matters:
+        results, questions, its plans and permission prompts. The terminal's full output stays on
+        the computer. Ask Claude to keep you posted here, and it will.</p>
+      </div>
+      <div class="card">
+        <h3>This device</h3>
+        <button type="button" class="plain" id="forget">Forget the key on this device</button>
+        <p class="small">Open the link from <code>wb chat url</code> again to come back.</p>
+      </div>
     </div>
   </div>
-</main>
-<button class="jump" id="jump" hidden aria-label="Jump to the newest message">
-  <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
-</button>
-<div class="about" id="about" hidden>
-  <span id="about-text"></span>
-  <button id="about-x" type="button" aria-label="Not about this">✕</button>
-</div>
-<div class="tray" id="tray" hidden aria-label="Attached"></div>
-<form class="composer" id="composer" autocomplete="off">
-  <button id="attach" class="attach" type="button" aria-label="Attach a photo or file">
-    <svg viewBox="0 0 24 24"><path d="M21 11.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l8.6-8.6a3.7 3.7 0 0 1 5.2 5.2l-8.6 8.6a1.8 1.8 0 0 1-2.6-2.6l7.9-7.9"/></svg>
-  </button>
-  <input id="pick" type="file" multiple hidden>
-  <button id="mic" class="attach mic" type="button" aria-label="Dictate" hidden>
-    <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
-  </button>
-  <input id="pick-voice" type="file" accept="audio/*" capture hidden>
-  <textarea id="input" rows="1" placeholder="Message Claude" enterkeyhint="send" aria-label="Message"></textarea>
-  <button id="send" type="submit" aria-label="Send" disabled>
-    <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
-  </button>
-</form>
+</section>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<div class="sr-only" id="say" role="log" aria-live="polite"></div>
+<nav id="tabbar" aria-label="Primary">
+  <button type="button" class="tab" data-view="chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 11.5a8 8 0 0 1-11.7 7.1L4 20l1.4-4.6a8 8 0 1 1 15.1-3.9z"/></svg><span class="tab-lbl">Chat</span><span class="tab-badge" aria-hidden="true" hidden></span></button>
+  <button type="button" class="tab" data-view="stats"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16M7 16.5V11M12 16.5V5.5M17 16.5V8.5"/></svg><span class="tab-lbl">Stats</span></button>
+  <button type="button" class="tab" data-view="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span class="tab-lbl">Settings</span></button>
+</nav>
 <script src="/app.js"></script>
+<script src="/stats.js" defer></script>
+<script src="/settings.js" defer></script>
 </body>
 </html>

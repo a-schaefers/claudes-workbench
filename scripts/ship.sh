@@ -113,9 +113,11 @@ esac
 echo "waiting for #$n: the check, an approval, then the merge"
 # A gh call that fails (the API's hiccup, a dropped connection: an empty reply crashed the wait
 # under set -e with a JSONDecodeError, 2026-11-22, though the PR was open and armed) is retried;
-# ten in a row end the wait, auto-merge still armed.
+# ten in a row end the wait, auto-merge still armed. It polls every 10 s, not 20: a merge or a
+# red check is seen half a poll late on average, and the check is to take about four minutes
+# (scripts/suite.sh, 2026-11-25); an hour of polls is 360 of the 5,000 calls an hour gh may make.
 misses=0
-for _ in $(seq 1 180); do
+for _ in $(seq 1 360); do
   if ! view=$(gh pr view "$n" --json state,mergeCommit,statusCheckRollup,reviewDecision 2>/dev/null) \
      || [ -z "$view" ]; then
     misses=$((misses + 1))
@@ -123,7 +125,7 @@ for _ in $(seq 1 180); do
       echo "ship.sh: gh pr view $n failed 10 times in a row; auto-merge stays armed (gh pr checks $n)" >&2
       exit 2
     fi
-    sleep 20
+    sleep 20  # a failed call: ten of them still span 200 s
     continue
   fi
   misses=0
@@ -154,7 +156,7 @@ else:
              echo "auto-merge stays armed: fix, commit, run scripts/ship.sh again (same branch, same PR)" >&2
              exit 1 ;;
   esac
-  sleep 20
+  sleep 10
 done
 echo "#$n has not merged in an hour (${verdict#pending }); auto-merge stays armed (gh pr checks $n)" >&2
 exit 2

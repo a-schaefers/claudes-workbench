@@ -11,13 +11,19 @@ import json
 import os
 import re
 import subprocess
+import shutil
+import signal
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
+# scripts/suite.sh's wait -n -p; macOS's bash is 3.2 (the nightly runs this file there)
+_bash_51 = bool(shutil.which("bash")) and subprocess.run(
+    ["bash", "-c", "((BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 501))"]).returncode == 0
 WORKFLOWS = ROOT / ".github" / "workflows"
 RULESET = ROOT / ".github" / "rulesets" / "main.json"
 OWNER_ID = "26800291"  # a-schaefers
@@ -70,7 +76,8 @@ class RequiredCheck(unittest.TestCase):
             self.assertIn(want, gate)
         self.assertNotIn("continue-on-error", text("check.yml"))
         suite = job("check.yml", "suite")
-        for want in ("fail-fast: false", "WB_TEST_SHARD: ${{ matrix.shard }}/6", "run: python3 -m unittest\n"):
+        for want in ("fail-fast: false", "WB_TEST_SHARD: ${{ matrix.shard }}/6",
+                     'run: exec scripts/suite.sh "$WB_TEST_SHARD" 4\n'):
             self.assertIn(want, suite)
         self.assertIn("claude plugin validate mod && claude plugin test mod", job("check.yml", "mod"))
 
@@ -114,7 +121,7 @@ class ReleaseGates(unittest.TestCase):
         self.assertEqual(re.search(r"OPENCODE_SHA256: '(\w+)'", wsl)[1],
                          re.search(r"OPENCODE_SHA256: '(\w+)'", text("check.yml"))[1])  # Linux x64's
         script = (ROOT / "scripts" / "ci-wsl.sh").read_text()
-        for want in ("sudo -u ci", "install-opencode.sh", "python3 -m unittest"):
+        for want in ("sudo -u ci", "install-opencode.sh", 'exec scripts/suite.sh "$WB_TEST_SHARD" 4'):
             self.assertIn(want, script)
 
     def test_the_macos_nightly_is_sharded_names_each_test_and_every_suite_job_fails_a_hang(self):
@@ -131,6 +138,24 @@ class ReleaseGates(unittest.TestCase):
                 self.assertIn("WB_TEST_HANG_SECS:", job(workflow, name))
         self.assertIn("WB_TEST_HANG_SECS", job("nightly.yml", "wsl").split("WSLENV:")[1].split("\n")[0])
         self.assertIn("WB_TEST_HANG_SECS", (ROOT / "scripts" / "ci-wsl.sh").read_text())
+
+    def test_the_nightlys_linux_and_wsl_suites_run_in_shards_of_four_processes(self):
+        # both ran the suite in one process and were cancelled at their 60 minutes in the last two
+        # runs before 2.1 (run 45707953076, 2026-11-25)
+        for name in ("check", "wsl"):
+            with self.subTest(job=name):
+                got = job("nightly.yml", name)
+                for want in ("shard: [1, 2, 3]", "fail-fast: false", "WB_TEST_SHARD: ${{ matrix.shard }}/3"):
+                    self.assertIn(want, got)
+        self.assertIn('run: exec scripts/suite.sh "$WB_TEST_SHARD" 4\n', job("nightly.yml", "check"))
+        self.assertNotIn("python3 -m unittest", job("nightly.yml", "check"))
+        # the mod's test once, not once a shard
+        self.assertEqual(job("nightly.yml", "check").count("if: matrix.shard == 1\n"), 3)
+        self.assertIn("claude plugin validate mod && claude plugin test mod", job("nightly.yml", "check"))
+        self.assertIn("WB_TEST_SHARD", job("nightly.yml", "wsl").split("WSLENV:")[1].split("\n")[0])
+        script = (ROOT / "scripts" / "ci-wsl.sh").read_text()
+        self.assertIn("WB_TEST_SHARD", script.split("--preserve-env=")[1].split(" ")[0])
+        self.assertNotIn("python3 -m unittest", script)
 
     def test_the_release_checklist_names_each_platform_and_the_nightly(self):
         checklist = (ROOT / "docs" / "release-checklist.md").read_text()
@@ -281,3 +306,96 @@ class SuiteHooks(unittest.TestCase):
                 for k, part in zip(range(1, n + 1), parts):
                     self.assertEqual(sorted(ids(f"{k}/{n}", named=True)), sorted(part))
         self.assertEqual(sorted(ids(named=True)), sorted(whole))
+
+    @unittest.skipUnless(_bash_51, "scripts/suite.sh needs bash 5.1 (wait -n -p): check.yml's Linux has it")
+    def test_suite_sh_runs_each_test_of_its_shard_once_across_its_processes_and_fails_with_any(self):
+        # check.yml's shards in four processes each (2026-11-25: one process left its runner's
+        # CPUs half idle, and the slowest shard was every pull request's 10-minute wait)
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / "tests").mkdir()
+        shutil.copy(ROOT / "tests" / "__init__.py", tmp / "tests" / "__init__.py")
+        (tmp / "ran").mkdir()
+        body = "".join(f"    def test_{i:02}(self):\n        ran(self)\n" for i in range(24))
+        (tmp / "tests" / "test_many.py").write_text(
+            "import os, unittest\n"
+            "def ran(test):\n"
+            "    name = test.id().rsplit('.', 1)[1]\n"
+            "    os.close(os.open(os.path.join('ran', name), os.O_CREAT | os.O_EXCL))  # twice: raises\n"
+            "    if os.path.exists(os.path.join('fail', name)):\n"
+            "        test.fail('told to fail: ' + name)\n"
+            "class Many(unittest.TestCase):\n" + body)
+        script = str(ROOT / "scripts" / "suite.sh")
+        env = {k: v for k, v in os.environ.items() if k != "WB_TEST_SHARD"}
+        r = subprocess.run(["bash", script, "2/3", "4"], cwd=tmp, env=env, capture_output=True,
+                           text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(sorted(p.name for p in (tmp / "ran").iterdir()),
+                         [f"test_{i:02}" for i in range(24) if i % 3 == 1])  # shard 2/3's, once each
+        for sub in ("2/12", "5/12", "8/12", "11/12"):
+            self.assertIn(f"=== WB_TEST_SHARD={sub}: exit 0", r.stdout)
+        # one process failing fails the shard, its log printed under its own shard
+        shutil.rmtree(tmp / "ran")
+        (tmp / "ran").mkdir()
+        (tmp / "fail").mkdir()
+        (tmp / "fail" / "test_04").touch()  # index 4: 4 mod 12 = 4, so 5/12's
+        r = subprocess.run(["bash", script, "2/3", "4"], cwd=tmp, env=env, capture_output=True,
+                           text=True, timeout=120)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        failed = r.stdout.split("=== WB_TEST_SHARD=5/12: exit 1\n", 1)[1].split("=== ", 1)[0]
+        self.assertIn("told to fail: test_04", failed)
+        self.assertEqual(len(list((tmp / "ran").iterdir())), 8)  # the others still ran
+        self.assertEqual(subprocess.run(["bash", script, "4/3", "4"], cwd=tmp, env=env,
+                                        capture_output=True).returncode, 64)
+
+    @unittest.skipUnless(_bash_51, "scripts/suite.sh needs bash 5.1 (wait -n -p): check.yml's Linux has it")
+    def test_suite_sh_cancelled_prints_every_log_so_far_and_stops_its_processes(self):
+        # a cancel's signal reaches suite.sh only through check.yml's exec: the step's shell never
+        # passes SIGINT or SIGTERM on, and suite.sh was SIGKILLed with no log printed (its review,
+        # 2026-11-25)
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / "tests").mkdir()
+        shutil.copy(ROOT / "tests" / "__init__.py", tmp / "tests" / "__init__.py")
+        (tmp / "tests" / "test_slow.py").write_text(
+            "import os, sys, time, unittest\n"
+            "class Slow(unittest.TestCase):\n" + "".join(
+                f"    def test_{i}(self):\n"
+                f"        print('started {i}', os.getpid(), file=sys.stderr, flush=True)\n"
+                "        open(os.path.join('pids', str(os.getpid())), 'w').close()\n"
+                "        time.sleep(120)\n" for i in range(2)))
+        (tmp / "pids").mkdir()
+        env = {k: v for k, v in os.environ.items() if k != "WB_TEST_SHARD"}
+        # SIGINT back to its default first: run by suite.sh itself in CI, this test is a background
+        # job's child, and a background job ignores SIGINT, which a shell started with it ignored
+        # can't trap (#1370's CI, 2026-11-25: the cancel never reached suite.sh, timed out at 30 s).
+        # The runner's step shell is no background job, so its suite.sh gets SIGINT as here.
+        step = subprocess.Popen(["bash", "-c", f"exec {ROOT / 'scripts' / 'suite.sh'} 1/1 2"], cwd=tmp,
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+        self.addCleanup(lambda: step.poll() is None and step.kill())
+        deadline = time.monotonic() + 60
+        while len(list((tmp / "pids").iterdir())) < 2 and time.monotonic() < deadline:
+            time.sleep(0.1)
+        pids = [int(p.name) for p in (tmp / "pids").iterdir()]
+        self.assertEqual(len(pids), 2)
+        step.send_signal(signal.SIGINT)  # the runner's cancel: the step's process alone
+        out, _ = step.communicate(timeout=30)
+        self.assertEqual(step.returncode, 1, out)
+        for sub, i in (("1/2", 0), ("2/2", 1)):
+            self.assertIn(f"=== WB_TEST_SHARD={sub}: cancelled\nstarted {i}", out)
+        deadline = time.monotonic() + 10
+        while any(_alive(p) for p in pids) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertFalse([p for p in pids if _alive(p)], "suite.sh left its processes running")
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:  # a zombie is dead, waiting on its reaper
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1][:1] != "Z"
+    except OSError:
+        return not Path("/proc/self").exists()

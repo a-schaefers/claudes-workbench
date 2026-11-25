@@ -12,10 +12,12 @@ three apart: a skip is not a pass. A release may ship with a skip only when its 
       Claude Code and OpenCode).
 - [ ] `nightly` green on the commit: `gh workflow run nightly.yml --ref main`, then
       `gh run watch`. Its three jobs:
-  - [ ] `check`: the newest Claude Code, the runner's newer Python.
+  - [ ] `check`: the newest Claude Code, the runner's newer Python, its three shards each
+        finished (the mod's test in shard 1).
   - [ ] `macos`: Apple silicon, Python 3.11, OpenCode (no /proc, no inotify, no Landlock), its
         five shards each finished (not cancelled), every failure fixed or with an issue.
-  - [ ] `wsl`: WSL2's Debian, dash, a user who isn't root, OpenCode.
+  - [ ] `wsl`: WSL2's Debian, dash, a user who isn't root, OpenCode, its three shards each
+        finished.
 - [ ] `opencode`: the newest OpenCode, or the break it found has an issue.
 - [ ] `chat`, when the web chat changed since the last release.
 
@@ -66,7 +68,7 @@ On at least one of them:
 
 The mod in each Claude Code host at hand (#1200): its tests check each surface's tree and hooks,
 not how the host paints them. With a task through review on the user-scope install: the pane's
-Tasks, Stats and Settings tabs, a wake once the task is done, and a role change's dialog answered
+Tasks view and its modeline's web app link, a wake once the task is done, and a role change's dialog answered
 `Don't` (nothing changed) and dismissed (the toast says where it shows).
 
 | Where | Result | Notes |

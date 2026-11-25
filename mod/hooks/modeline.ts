@@ -1,57 +1,42 @@
-// The modeline's activity (#976; the owner, 2026-11-21: "[roobot-guy] Claude's Workbench - [current
-// thing we are doing one liner here scrolls animated like a leaderboard ...]"). The line comes from
-// the tasks the pane already polls, never from Claude: a tool call re-reads Claude's whole
-// context, so a line Claude wrote at each dispatch would cost more than it says. A line wider than
-// the bar's room scrolls like a ticker in a one-row Raster repainted by $.ui.blit, as the
-// apprentice is: no pane redraw per step.
-import type { WbTask } from '../types'
-import { base64 } from './apprentice'
-import { BAR } from './splash'
+// The modeline (#1283, the owner, 2026-11-24): the pane's last row, `[•_•] Claude's Workbench - <the
+// web app's link>`, always. Stats and Settings moved to the web app, so the link is how the user
+// gets there; the tasks' news stays in the Tasks view, the status line and the notices (the
+// ticker the modeline carried before, #976, went with it). `wb chat url --json` (chat.ensure)
+// says how the web app stands: its link while up, why not otherwise.
+import type { WbChat } from '../types'
+import { FACE } from './apprentice'
 
-/** What each phase says on the modeline. */
-export const SAID: Record<string, string> = {
-  queued: 'queued', running: 'writing', testing: 'testing', asking: 'asking Claude',
-  review: 'awaiting review', stuck: 'stuck', failed: 'failed',
-}
+export const MODELINE = "Claude's Workbench"
 
-/** The ticker's step: a column every TICKER_MS. */
-export const TICKER_MS = 200
-/** The blank columns between the line's end and its next start as it loops. */
-export const TICKER_GAP = 6
+/** The link a modeline shows: `wb chat url --json` as the mod last read it (WbChat's `link`). */
+export type Link = WbChat['link']
 
-/** The text after the name: each open task's name, round and phase, the oldest first; '' with none. */
-export function activity(open: WbTask[]): string {
-  return [...open]
-    .filter(t => SAID[t.phase] && !t.parked)
-    .sort((a, b) => a.createdAt - b.createdAt)
-    .map(t => `${t.name}: ${t.round > 0 ? `round ${t.round}, ` : ''}${SAID[t.phase]}`)
-    .join('  ·  ')
-}
-
-// On the bar's coral (splash.ts's BAR, the theme's `claude`), the dark theme's `inverseText`: a
-// Raster's cells take colours, not theme keys. Black on the coral is 6.7:1. The engine keeps a
-// Raster's colours at four bits a channel, so BAR is drawn rgb(221,119,85) beside the theme's
-// (215,119,87): as near as a Raster gets, not told apart by eye (checked in truecolor, 2026-11-21).
-const INK = 0x000000
-
-/** One column a character for sure, as the Raster's grid needs: anything else is drawn as '?'. */
-const glyph = (ch: string) => (/^[\x20-\x7e -ɏ·]$/.test(ch) ? ch.codePointAt(0)! : 0x3f)
+const width = (s: string) => [...s].length
+// cut to n columns, an ellipsis last when cut (every character the modeline draws is one column)
+const cut = (s: string, n: number) => (width(s) <= n ? s : n <= 0 ? '' : [...s].slice(0, n - 1).join('') + '…')
 
 /**
- * The ticker's `width` cells at `offset`: the line, then TICKER_GAP blanks, looping. Row-major
- * [codePoint, fg, bg] words, packed as a Raster takes them.
+ * What the modeline draws in a pane `cols` wide: `bar`, its bar row's text (in from each edge by
+ * the bar's padding), and `rows`, the link's own rows under it when not even `[•_•] <url>` fits
+ * there: the link cut by characters, `cols` a row and never at a word, so it stays one link.
  */
-export function tickerCells(line: string, offset: number, width: number): string {
-  const loop = [...line, ...' '.repeat(TICKER_GAP)]
-  const view = new DataView(new ArrayBuffer(width * 12))
-  for (let col = 0; col < width; col++) {
-    const ch = loop[(offset + col) % loop.length]!
-    view.setUint32(col * 12, glyph(ch), true)
-    view.setUint32(col * 12 + 4, INK, true)
-    view.setUint32(col * 12 + 8, BAR, true)
+export function modeline(link: Link, cols: number): { bar: string; rows: string[] } {
+  const room = Math.max(1, cols - 2) // paddingX 1
+  const head = `${FACE.rest} ${MODELINE}`
+  const url = link.url ?? ''
+  if ((link.state === 'up' || link.state === 'started') && url) {
+    const whole = `${head} - ${url}`
+    if (width(whole) <= room) return { bar: whole, rows: [] }
+    const short = `${FACE.rest} ${url}`
+    if (width(short) <= room) return { bar: short, rows: [] }
+    const chars = [...url], rows: string[] = []
+    const n = Math.max(1, cols)
+    for (let i = 0; i < chars.length; i += n) rows.push(chars.slice(i, i + n).join(''))
+    return { bar: cut(head, room), rows }
   }
-  return base64(new Uint8Array(view.buffer))
+  const said = link.state === 'checking' ? 'starting the web app…'
+    : link.state === 'off' ? 'web app off (wb chat on)'
+    : link.state === 'blocked' || link.state === 'failed' ? `web app down: ${link.why || link.state}`
+    : '' // up with no link wb would give: the name alone
+  return { bar: cut(said ? `${head} - ${said}` : head, room), rows: [] }
 }
-
-/** The steps one loop takes: the line and its gap. */
-export const loopLength = (line: string) => [...line].length + TICKER_GAP

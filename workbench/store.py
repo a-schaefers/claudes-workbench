@@ -401,8 +401,9 @@ DRIVERS = "drivers"           # $WB_HOME/drivers/: the drivers' heartbeats
 # keyhole._opencode, the runner's export) each load the user's global plugin, and with one shared
 # file any of them, beating its own pid and none of the service's sessions, made a live session
 # read as gone: another session in its directory took its tasks, its notices and `wb adopt` (the
-# #1309 review, 2026-11-25; #693/#696's kind). So `opencode-<machine_tag>-<pid>.json`, and a task
-# is judged against the server it recorded (task.json `driver.pid`/`start`), never another's.
+# #1309 review, 2026-11-25; #693/#696's kind). So `opencode-<machine_tag>-<pid>.json`, each naming
+# the store it lists (`store`, the server's database: every session in it), and a task is gone
+# only by a fresh beat of the store it recorded (task.json `driver.store`), never another's.
 BEAT_RE = re.compile(r"opencode-([0-9a-f]{8})-([1-9][0-9]{0,9})\.json")
 HEARTBEAT_FRESH = 120         # seconds: an older beat says nothing (the plugin beats every 30)
 SESSION_RE = re.compile(r"[\w-]{1,128}")  # a session id a file may hold, as the Claude ids
@@ -454,11 +455,14 @@ def beat_path(pid: int) -> Path:
 
 def heartbeats() -> list[dict]:
     """This machine's OpenCode servers' heartbeats, `$WB_HOME/drivers/opencode-<machine_tag>-<pid>.json`,
-    each as the plugin's server part writes its own: {tool: "opencode", pid, machine?, ts,
-    sessions: {<id>: {model?, variant?, dir?}}}, `pid` the file name's, `sessions` the sessions
-    the server serves that still exist (ARCHITECTURE.md, *The heartbeat*). A file of another
-    machine's (its tag, or its `machine`) is left out: its pids aren't this one's to judge (#922),
-    and so is one not of that shape."""
+    each as the plugin's server part writes its own: {tool: "opencode", pid, machine?, store?, ts,
+    sessions: {<id>: {model?, variant?, dir?}}}, `pid` the file name's; with `store` (the server's
+    database), `sessions` every session in it when the listing began, at `ts` (ARCHITECTURE.md,
+    *The heartbeat*). A file of another machine's (its tag, or its `machine`) is left out: its
+    pids aren't this one's to judge (#922), and so is one not of that shape. A file of this
+    machine's whose server has exited is removed: nothing else does, and each of wb's own
+    --standalone helpers, which load the global plugin, left one behind (the #1309 re-review)."""
+    from . import models  # here: models imports store
     try:
         paths = sorted((home() / DRIVERS).iterdir())
     except OSError:
@@ -469,12 +473,17 @@ def heartbeats() -> list[dict]:
         if not m or m.group(1) != tag:
             continue
         hb = read_json(p)
+        mach = hb.get("machine") if isinstance(hb, dict) else None
+        if isinstance(mach, str) and mach and mach != me:
+            continue
+        if not models._alive(int(m.group(2))):
+            p.unlink(missing_ok=True)
+            continue
         if not isinstance(hb, dict) or hb.get("tool") != "opencode" or not isinstance(hb.get("sessions"), dict):
             continue
-        ts, mach = hb.get("ts"), hb.get("machine")
+        ts = hb.get("ts")
         if not isinstance(ts, (int, float)) or isinstance(ts, bool) or not math.isfinite(ts) \
-                or hb.get("pid") != int(m.group(2)) or isinstance(hb.get("pid"), bool) \
-                or isinstance(mach, str) and mach and mach != me:
+                or hb.get("pid") != int(m.group(2)) or isinstance(hb.get("pid"), bool):
             continue
         out.append(hb)
     return out
@@ -486,37 +495,40 @@ def _beating(hb: dict) -> bool:
     return time.time() - hb["ts"] <= HEARTBEAT_FRESH and models._alive(hb["pid"])
 
 
+def _store_of(hb_or_driver: dict) -> str:
+    """The OpenCode store a beat lists or a task recorded (`store`: the server's database, an
+    absolute path), as a real path so a link and its target are one store; "" for none."""
+    st = hb_or_driver.get("store")
+    return os.path.realpath(st) if isinstance(st, str) and os.path.isabs(st) else ""
+
+
 def driver_server(session, driver=None) -> tuple[str, dict | None]:
-    """Whether an OpenCode driver session lives, and the beat that says so: (`live`, its server's
-    beat) when a fresh beat of a running server lists it, the one it recorded or another (the
-    service restarted, the session reopened in it); else (`gone`, None) when the server the task
-    recorded (``driver``, task.json `driver`: `pid`, `start`) has exited, or its fresh beat leaves
-    the session out; else (`unknown`, None): no server recorded (no plugin beat at `wb start`), its
-    process running with no beat or a stale one, or the task another machine's (#922). Another
-    server's beat never makes a task gone (the #1309 review, 2026-11-25), nor does a stale beat
-    of a server still running (the #1309 re-review, 2026-11-25: a laptop's sleep, a stopped or
-    busy service, a stalled timer read as gone, and another session nearby took its tasks, their
-    notices and `wb adopt`): only positive evidence makes a task gone, as `cli._gone` never says
-    gone while Claude Code's process lives. Only `gone` hands a task to another session: unknown
-    is not gone, as a Claude task with no pid isn't."""
+    """Whether an OpenCode driver session lives, and the beat that says so: (`live`, a beat) when
+    a fresh beat of a running server lists it, the server the task recorded (``driver``, task.json
+    `driver`: `pid`) first, else the newest; else (`gone`, None) when a fresh beat of a running
+    server of the store the task recorded (`store`) leaves the session out, its listing begun after
+    the task last saw the session there (`seen`): deleted; else (`unknown`, None): no store
+    recorded (no plugin beat at `wb start`), no fresh beat of that store (a laptop asleep, a
+    stopped, restarting or busy service, a stalled timer), or the task another machine's (#922).
+    Only positive evidence makes a task gone, as `cli._gone` never says gone while Claude Code's
+    process lives: never another store's beat, a stale beat, or a server's exit, since a session
+    outlives its server (the #1309 reviews, 2026-11-25: each read as gone, and another session
+    nearby took its tasks, their notices and `wb adopt`; the third, a service restart whose new
+    beat didn't list the session yet). Only `gone` hands a task to another session: unknown is
+    not gone, as a Claude task with no pid isn't."""
     d = driver if isinstance(driver, dict) else {}
     on = d.get("machine")
     if not isinstance(session, str) or not session or isinstance(on, str) and on and on != machine():
         return "unknown", None
-    beats = heartbeats()
-    live = [hb for hb in beats if session in hb["sessions"] and _beating(hb)]
+    beats = [hb for hb in heartbeats() if _beating(hb)]
+    live = [hb for hb in beats if session in hb["sessions"]]
     if live:
-        return "live", max(live, key=lambda hb: hb["ts"])
-    pid, start = d.get("pid"), d.get("start")
-    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-        return "unknown", None
-    from . import models  # here: models imports store
-    if not models._alive(pid, start if isinstance(start, str) else None):
-        return "gone", None  # the server exited: its file may be left, or removed on exit
-    own = next((hb for hb in beats if hb["pid"] == pid), None)
-    if own is None or not _beating(own):
-        return "unknown", None  # running, its beat missing or stale: it says nothing of the session
-    return "gone", None  # its fresh beat leaves the session out (live was checked above): deleted
+        return "live", max(live, key=lambda hb: (hb["pid"] == d.get("pid"), hb["ts"]))
+    st, seen = _store_of(d), d.get("seen")
+    if st and isinstance(seen, (int, float)) and not isinstance(seen, bool) \
+            and any(_store_of(hb) == st and hb["ts"] > seen for hb in beats):
+        return "gone", None
+    return "unknown", None
 
 
 def driver_state(session, driver=None) -> str:
@@ -524,23 +536,82 @@ def driver_state(session, driver=None) -> str:
     return driver_server(session, driver)[0]
 
 
+def _lineage() -> list[int]:
+    """This process and its ancestors, nearest first: /proc, else ps (macOS)."""
+    out, pid = [], os.getpid()
+    while pid > 1 and pid not in out and len(out) < 64:
+        out.append(pid)
+        try:
+            pid = int(Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()[1])
+        except (OSError, IndexError, ValueError):
+            import subprocess
+            try:
+                pid = int(subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True,
+                                         text=True, timeout=5).stdout.strip() or 0)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                break
+    return out
+
+
 def driver_record(session: str) -> dict:
     """task.json `driver` for a task an OpenCode session starts or adopts: the tool, this machine,
-    the server whose fresh beat lists the session (`pid`, and `start` as wb reads it,
-    models._started, never the plugin's: a stamp of another format would read as a recycled pid),
-    and the session's model and variant from that beat. No beat lists it (no plugin): no `pid`,
-    and driver_server says `unknown` until one does. The session itself is task.json `session`,
-    which every reader of a task's owner already reads, the Claude Code mod's `mine` included: a
-    session it never had, with no `claude_pid` to die, so it never takes an OpenCode task."""
-    _, hb = driver_server(session)
-    row = (hb or {}).get("sessions", {}).get(session)
+    and the session's server: the OpenCode server this `wb` runs under (its tool's child, or its
+    shell's), whose store holds the session whether or not its last listing caught it, `seen`
+    now; else the running server whose beat lists the session, fresh first, a stale one too (a
+    busy service: the #1309 re-review, its task otherwise unknown for good), `seen` that beat's
+    `ts`. From that beat: `store`, `pid` (and `start` as wb reads it, models._started, never the
+    plugin's: a stamp of another format would read as a recycled pid), the session's model and
+    variant. No beat (no plugin): none of those, and driver_server says `unknown`. The session
+    itself is task.json `session`, which every reader of a task's owner already reads, the Claude
+    Code mod's `mine` included: a session it never had, with no `claude_pid` to die, so it never
+    takes an OpenCode task."""
+    from . import models  # here: models imports store
+    beats = heartbeats()
+    mine = {hb["pid"]: hb for hb in beats}
+    hb = next((mine[p] for p in _lineage() if p in mine), None)
+    seen = time.time()
+    if hb is None:
+        listed = [b for b in beats if session in b["sessions"]]
+        hb = max(listed, key=lambda b: (_beating(b), b["ts"])) if listed else None
+        seen = hb["ts"] if hb else seen
+    if not hb:
+        return {"tool": "opencode", "machine": machine()}
+    row = hb["sessions"].get(session)
     row = row if isinstance(row, dict) else {}
-    server = {}
-    if hb:
-        from . import models  # here: models imports store
-        server = {"pid": hb["pid"], **({"start": st} if (st := models._started(hb["pid"])) else {})}
-    return {"tool": "opencode", "machine": machine(), **server,
+    return {"tool": "opencode", "machine": machine(), "pid": hb["pid"],
+            **({"start": st} if (st := models._started(hb["pid"])) else {}),
+            **({"store": st, "seen": seen} if (st := _store_of(hb)) else {}),
             **{k: row[k] for k in ("model", "variant") if isinstance(row.get(k), str) and row[k]}}
+
+
+def driver_fill(task) -> None:
+    """Fill in an OpenCode task's server later (task.json `driver`: `pid`, `start`, `store`,
+    `seen`) when it recorded no store, from the fresh beat that lists its session now: a task
+    started or adopted with no beat to read (the plugin not yet loaded, a stalled service) read
+    `unknown` for good, so no session could ever take it, its own deleted (the #1309 re-review).
+    Under the task's command lock, never waited for: a command that holds it fills it next time."""
+    from . import models  # here: models imports store
+    spec = task.spec
+    d = spec.get("driver")
+    if driver_of(spec) != "opencode" or not isinstance(d, dict) or _store_of(d):
+        return
+    state, hb = driver_server(spec.get("session"), d)
+    if state != "live" or not (st := _store_of(hb)):
+        return
+    try:
+        with locked(task_lock(task.name, "cmd"), blocking=False):
+            spec = dict(task.spec)
+            if spec.get("driver") != d:
+                return
+            row = hb["sessions"].get(spec.get("session"))
+            row = {k: row[k] for k in ("model", "variant")
+                   if isinstance(row, dict) and isinstance(row.get(k), str) and row[k]}
+            new = {k: v for k, v in d.items() if k != "start"}  # a start of another pid's misleads
+            spec["driver"] = {**row, **new, "pid": hb["pid"], "store": st, "seen": hb["ts"],
+                              **({"start": s} if (s := models._started(hb["pid"])) else {})}
+            write_json(task.dir / "task.json", spec)
+    except BlockingIOError:
+        pass
 
 
 def driver_of(spec: dict) -> str | None:
