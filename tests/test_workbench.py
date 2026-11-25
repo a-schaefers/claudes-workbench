@@ -24707,8 +24707,8 @@ class Setup(Base):
 
     def test_a_wb_in_opencodes_package_cache_says_opencode_updates_it_never_a_git_error(self):
         # #1311's third review (2026-11-25): wb run from OpenCode's Git install, no clone: wb update
-        # --check died "fatal: not a git repository", doctor said "which git can't read", and wb
-        # patch read a branch there is none of
+        # --check died "fatal: not a git repository", doctor said "which git can't read", wb patch
+        # read a branch there is none of, and wb setup would link a directory OpenCode replaces
         from workbench import ocplugin
         home = self.opencode_home()
         pkg = (home / ".cache/opencode/npm" / ocplugin._git_key(ocplugin.GIT_SPEC) / "1" / "node_modules"
@@ -24727,6 +24727,14 @@ class Setup(Base):
                 self.assertEqual(self.setup("list", cmd="patch")[0], 1)
             self.assertIn(f"wb patch works on a clone of workbench: this wb is OpenCode's install at {pkg}",
                           err.getvalue())
+            # nor links or options naming a directory OpenCode replaces on update, pinning an old wb
+            before = Path(os.environ["WB_OPENCODE_CONFIG"]).read_text()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(self.setup("--opencode")[0], 1)
+                self.assertEqual(self.setup()[0], 1)
+            self.assertIn(f"wb setup links nothing to OpenCode's install at {pkg}", err.getvalue())
+            self.assertFalse(os.path.lexists(home / ".local/bin/wb"))
+            self.assertEqual(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text(), before)
         self.assertFalse(ocplugin.runs_from_cache())             # this clone isn't
         self.assertIn("ok  install: developer clone at", self.setup(cmd="doctor")[1])
 

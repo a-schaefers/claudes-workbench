@@ -7348,6 +7348,13 @@ def cmd_setup(a):
     OpenCode path's fallback (#1311): the wb link and the OpenCode plugin's entry
     (ocplugin.install), never Claude Code's skill link, which OpenCode would also list (it scans
     ~/.claude/skills: #1296, row 8)."""
+    if _install_kind() == "opencode":
+        # a generation directory OpenCode replaces on its next update and later removes: links, a
+        # service unit and options naming it would outlive it, and pin the plugin to an old wb
+        die(f"wb setup links nothing to OpenCode's install at {PKG_ROOT}: OpenCode replaces that "
+            f"directory when it updates, and its plugin runs the wb it brings as it is. For wb in "
+            f"your own terminal, a clone: git clone https://github.com/{ocplugin.REPO}, then bin/wb "
+            f"setup --opencode there")
     links = [(Path.home() / ".local/bin/wb", PKG_ROOT / "bin/wb")]
     if not a.opencode:
         links.append((context.claude_home() / "skills/workbench", PKG_ROOT / "skill/workbench"))
