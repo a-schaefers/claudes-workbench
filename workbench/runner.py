@@ -1316,7 +1316,7 @@ class _Clock:
 # provider's and not the step's, and runs again once (drive).
 RATE_WAIT_S = 600
 RETRY_PAUSE_S = 60   # an API `retry` line pauses the clocks this long: OpenCode's own backoff
-HELD = ("rate_limited", "outage")
+HELD = models.HELD_STOPS  # ("rate_limited", "outage"): what NoLease.load waits behind, told (#1277)
 # stops that are the provider's (cause "provider"); `setup` is this machine's way to it (a
 # certificate, a proxy: the keyhole's api_stop, #1080), never the agent's either, and not revived.
 # `refused`: a request the provider turned down for a reason no retry or key fixes (a 404 for a
@@ -5148,8 +5148,18 @@ def provider_remedy(task: store.Task, guard: str, said: str = "") -> str:
     if guard == "setup":  # #1080: no route change or wait mends this machine's own setup
         return (f"this machine's stop, not the agent's or {p}'s: mend what the line above says; "
                 f"then {resume} resumes it")
+    # the 429's Retry-After, and the tasks queued behind the stop, which wait for p with no stop
+    # of their own (models.NoLease._held_turn, #1277, 2026-11-24)
+    try:
+        mark = models.held_mark(p) or {}
+    except Exception:  # an unreadable file: no time to give
+        mark = {}
+    until = mark.get("until") if mark.get("state") == "rate_limited" else None
+    asked = (f"; {p} asked for a wait until {time.strftime('%H:%M', time.localtime(until))}"
+             if isinstance(until, (int, float)) and until > time.time() + 60 else "")
     return (f"the provider's stop, not the agent's: {resume} resumes it once {p} allows"
-            + route)
+            + route + asked + f"; {p}'s other tasks wait for it before their next round, with no "
+            "stop of their own")
 
 
 def _provider_revive(task: store.Task, n: int, rnd: dict, lease) -> bool:
@@ -5632,6 +5642,18 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 if not _go_on(task, n, "Claude's note"):
                     return
                 continue
+            if rnd["guard"] in HELD and getattr(lease, "recheck", "") == "held" and not rnd["answered"]:
+                # it asked again for the tasks waiting behind a rate limit or outage another task's
+                # stop told Claude of, and met it again: no revive, and no stop of its own. Each
+                # task queued behind an outage ran into it, revived it and woke Claude with the
+                # same stop (#1277, 2026-11-24); back to waiting instead, until an `ok` or the next turn
+                task.event({"ts": store.now(), "round": n, "kind": "load",
+                            "text": f"{provider_of(task)} still isn't answering: the task waits "
+                                    "as queued again"})
+                _run_again(task, n, rnd)
+                if not _go_on(task, n, "the round again"):
+                    return
+                continue
             if rnd["guard"] in HELD and revived != n:  # the provider's rate limit or outage: once (#1020)
                 revived = n
                 if not _provider_revive(task, n, rnd, lease):
@@ -5641,7 +5663,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 if not _go_on(task, n, "the round again"):  # the day cap holds here too (#1019)
                     return
                 continue
-            if rnd["guard"] == "quota" and getattr(lease, "recheck", False) and not rnd["answered"]:
+            if rnd["guard"] == "quota" and getattr(lease, "recheck", "") == "quota" and not rnd["answered"]:
                 # it asked again past the 402's mark for the tasks waiting behind it, and met the
                 # 402 again: the stop Claude was told of already. Stopped, each waiter woke Claude
                 # in turn, 900 s apart, with the same "out of credit" (#1216, 2026-11-24); back to
@@ -5700,8 +5722,11 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                     last = f"{last}: {said[-1]}"[:200]
                 # the provider's or the spend cap's, not the step's (#1020, #1019)
                 ours = None if server else stopped_by(rnd["guard"])
+                # its guard with a provider's: a rate limit's or outage's told stop holds the
+                # tasks queued behind it (models.held_told, #1277)
                 task.set_status(phase=phase, last=last,
-                                **({"infra": "model"} if server else {"infra": ours} if ours else {}))
+                                **({"infra": "model"} if server else {"infra": ours} if ours else {}),
+                                **({"guard": rnd["guard"]} if ours == "provider" else {}))
                 # what stopped it, for results.step: a guard or the agent's own exit (#582)
                 task.notify(phase, text, round=n, cause="server" if server else ours
                             or ("guard" if rnd["stuck"] else "agent"))

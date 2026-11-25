@@ -245,7 +245,8 @@ Then:
   rate-limited or unreachable (api-health.json, `cli.TRANSIENT`) refuses no API start, a role's
   or a `--model`: it goes on with `note: <why>: the round waits for it (held 10 min, it stops as
   rate_limited or outage)`, the keyhole waiting it out inside the round (#1088: one 503 blocked
-  every start of the role, `--queue` and `--force` too).
+  every start of the role, `--queue` and `--force` too); behind another task's told stop for it,
+  the runner waits before the round instead (`NoLease._held_turn`, #1277).
 - **Two projects, one GPU**: when a holder (a task, `wb image`, `wb audio`) leaves the model no
   room (`models.admits`, the lease's rule), exit 4 naming each holder and `--queue` (2026-11-16:
   it queued silently for hours; `wb try` passes its own `--queue` through, #1251). Holders: gpu.json's live entries plus live runners whose status
@@ -329,7 +330,7 @@ gives up)`, on a watch of `$WB_HOME` (an `ok` or the keyhole's next mark wakes i
 most every `API_WAIT`'s 30 s; past the mark's `until` one runner asks (the mark held
 `CREDIT_RECHECK_SECS` more under its lock, `asked_by` that task) and the others wait for its
 answer. That runner's round (`models.credit_recheck` says this load, after it waited, made it the
-one to ask: `NoLease.recheck`) that meets the 402 again before any answer (`quota`, not
+one to ask: `NoLease.recheck` `quota`) that meets the 402 again before any answer (`quota`, not
 `answered`) goes back to waiting in `drive`, the 402's new mark held, with no stop or notice of its
 own: stopped, each waiter in turn woke Claude, 900 s apart, with the same stop (#1216). A turn
 handed with no wait first (a new `wb start`, or a running task's next round, past an expired mark)
@@ -340,7 +341,28 @@ feedback` or `wb resume` of a task its provider stopped (status `infra: provider
 hands it the turn first (`cli._credit_turn`, `models.credit_ask`: `asked_by` it, `until` moved
 `CREDIT_RECHECK_SECS` on), so the top-up's "carry on" asks at once and the waiters go on at its `ok`;
 the resumed runner met the mark its own 402 had just written and waited out its 900 s, told to top
-up again (the review of #1178). It never
+up again (the review of #1178). A rate limit or outage is waited behind the same way, once
+Claude was told of it (`NoLease._held_turn`, #1277): the provider's `rate_limited` or
+`unreachable` mark (`models.held_mark`: past its `until` too, since only an `ok` says the
+provider answers; a mark lasts `DOWN_SECS` past the last 5xx, a round and its revive far longer)
+while another task's stop for it stands told (`models.held_told`: phase `stuck`, `infra`
+`provider`, status `guard` `rate_limited` or `outage`, its provider this one, a `noticed`) waits
+as `phase: queued`, `last: waiting: <provider> isn't answering (<why>)` (or `rate-limits its
+requests`) `, as <task>'s stop told the user: wb asks it again at HH:MM, or goes on once it
+answers another task (wb stop gives up)`, its slot let go, until the mark's `until` (a 429's
+Retry-After, hours on too) or an `ok`, looking every `API_WAIT`'s 2 s past the `until` while
+another asks (`credit_recheck` takes `api-health.json.lock` only for an expired `no_credit` row:
+opened `a+` for every look, its close woke each waiter's watch, 30 looks a second behind a hanging
+probe round, the review of #1277). Past it one runner at a time asks (`$WB_HOME/api/<provider>.probe.lock`, flocked
+`LOCK_NB` from the load to the next load or the lease's end; a runner that goes into a mark with no
+told stop holds it too, so the waiters wait for its answer), and that turn is a recheck (`NoLease.recheck`
+`held`; a 402 it meets is no quota recheck, and stops it with its notice): its round
+meeting the stop again waits again in `drive`, with no revive and no stop of its own. A lease once behind a told
+stop (`NoLease.behind`) stays behind it until the `ok`: the stop resumed meanwhile let its
+waiters go at once, each to its own stop. With no told stop the round goes on into the mark (a
+brief 503 or 429 holds no start, #1088), and its own stop is the notice. A backlog queued behind
+an outage each took its slot, ran round 1 into it, revived it and woke Claude with the same stop
+(#1277). It never
 appears in gpu.json, unloads nothing, has no `short_window` check and no server-down
 wait (`runner._down` is False), runs no `_Power` sampler and no keep-warm thread, and its first
 status says `last: starting`, not `waiting for the GPU`, and so does the base check's after it (#1112) (`runner._gpu_side`: from the config
@@ -1212,9 +1234,15 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   lease stepped aside, a wait to the provider's `api-health.json` `until`, else `RATE_LIMIT_SECS`,
   at most `RATE_WAIT_S`, a steer note ending it into `_steer_round`, `wb stop` ending the runner),
   continuing the session: one revive a round, as a revive re-sends the whole context, which costs
-  money. A quota stop of a recheck (`NoLease.recheck`: a turn handed after a wait, the round never `answered`) waits as
+  money. A quota stop of a recheck (`NoLease.recheck` `quota`: a turn handed after a wait, the round never `answered`) waits as
   queued again, a `load` event "<provider> is still out of credit: the task waits as queued
-  again" and no notice (#1216). Before either runs the round again, and a server's revive
+  again" and no notice (#1216); a `rate_limited`/`outage` stop of a held turn's recheck (`NoLease.recheck` `held`, *A task,
+  start to finish*, #1277) the same, before any revive, "<provider> still isn't answering: the task waits as queued
+  again". The stop's status has `guard` (`rate_limited`, `outage`, … with `infra` `provider`),
+  which `models.held_told` reads, and its remedy (`provider_remedy`) "… resumes it once
+  <provider> allows[; or <the way off API>][; <provider> asked for a wait until HH:MM]; <provider>'s
+  other tasks wait for it before their next round, with no stop of their own" (the wait named
+  when the provider's `rate_limited` mark holds over a minute on: a 429's Retry-After). Before either runs the round again, and a server's revive
   (#657), `_run_again`: OpenCode keeps a failed run's message in its session, so prompt.md sent
   again with `--session` put the spec and protocol there once a try, and a night of 402
   rechecks billed dozens of copies at the top-up (#1235). A session the try began (`run_round`'s
@@ -6403,9 +6431,13 @@ $WB_HOME (~/.local/state/workbench)
                                  unreachable, until (epoch; a null from before #1068 reads as ts + CREDIT_RECHECK_SECS), why (redacted), ts,
                                  asked_by (a no_credit mark past its until that a waiting runner asks again, or one a
                                  provider-stopped task's wb feedback or wb resume asks at once: its task,
-                                 until moved CREDIT_RECHECK_SECS on, models.credit_turn, models.credit_ask, #1178; the keyhole's next 402 drops it)}}; ok removes it; past until reads as ok; the provider's cooldown every keyhole waits out, and the revive's wait (#1020)
+                                 until moved CREDIT_RECHECK_SECS on, models.credit_turn, models.credit_ask, #1178; the keyhole's next 402 drops it)}}; ok removes it; past until reads as ok; the provider's cooldown every keyhole waits out, and the revive's wait (#1020);
+                                 a rate_limited or unreachable entry past its until is still models.held_mark's, which the
+                                 runners behind a told stop wait on until ok (#1277)
   api/<provider>.<i>.lock        an API provider's task slots (models.NoLease, #1015): API_PARALLEL (3) files, each flocked by the
                                  runner holding it, its task's name inside (models.api_holders); never in gpu.json
+  api/<provider>.probe.lock      empty: flocked by the one runner asking the provider again past a held mark, or going into one,
+                                 from its load to the next (NoLease._probe, #1277); the waiters behind a told stop wait for its answer
   spend-api.jsonl  .lock .checkin.lock  the API ledger (meter.py, #1019; *Spend*), one row each, every row {ts, day (local
                                  %Y-%m-%d)}: step {task, round, provider, model, usd (null: a plan or unpriced), metered,
                                  source (keyhole|provider (the provider's own usage.cost or estimated_cost, #1165)|opencode|metered|metered (opencode said 0)), own? (a provider row's field:
@@ -6669,7 +6701,7 @@ off), not `wb start`'s.
 | `ratelimit_until`, `ratelimit` | the keyhole's hold or queue (#1020): epoch seconds, at least 60 s ahead; `{kind: rate_limited\|outage\|queued, provider, code, since, retry_after, why?}`; cleared at the first data, at each round's start and end |
 | `api` | an API task's spend (#1019, *Spend*): `{usd (the task's ledger total; null for a plan), metered, at_catalog (that total as OpenCode's figure prices it, a provider's own row at its `metered`, a `usage.cost` one as booked: what `results.api_usage` compares the export with, #1165, #1234; none for a plan), source (the last row's), tok {in, out, cache_read, cache_write, reasoning}, prices, plan?}`, per ledger row |
 | `api_stop` | `{guard, text}` (`spend`'s with `worst`, the refused request's at its worst, which the round's stop carries on to `meter.stop_text`, #1150): stop the round now: the keyhole's `quota` (#1020) or `setup` (a certificate or proxy of this machine's, #1080), or `spend` (`Meter.room` refused a request, #1019); consumed by the runner's stop (`_ProviderWait.stop`, whose `stopped_by` makes `spend` its own cause), and cleared, whatever its guard, as each round begins (`Meter.begin`) |
-| `guard` | `spend` when `runner._go_on` stopped the task before a round (the day cap, or within one worst request of it, #1150), `agents` when Agents on GPU did (`runner._agents_gpu`, #1213); with `infra` `spend` |
+| `guard` | `spend` when `runner._go_on` stopped the task before a round (the day cap, or within one worst request of it, #1150), `agents` when Agents on GPU did (`runner._agents_gpu`, #1213); with `infra` `spend`. With `infra` `provider`, the round's guard that stopped it (`rate_limited`, `outage`, `quota`, `auth`, `setup`, `refused`): `models.held_told` finds a told rate limit or outage by it (#1277) |
 | `updated_at` | every write |
 
 **events.jsonl** rows are `{ts, round, kind, …}`. From OpenCode (`events.normalize`): `tool {tool, brief, ok, error?, path?, paths?, programs?, names?, workdir?}`
@@ -7354,7 +7386,9 @@ doc needs its own `!/` line).
   `spend` cause (`runner.stopped_by`, also status `infra`, the `stopped` event's `by`, `bench.replay`'s `error`), both
   outside `results.THE_STEP`; `api_stop` is shared with #1019's spend stop (guard `spend`); `HOLD_CODES`/`QUOTA`/`CREDIT` → `note_api`'s states and
   `_ProviderWait.on_retry`/`on_error`'s reading of OpenCode's `retry` and `error` (`REFUSED_CODES`, `REFUSED_KINDS`,
-  `KEY_WORDS`, `CONTEXT_WORDS`: OpenCode's error types and the providers' words).
+  `KEY_WORDS`, `CONTEXT_WORDS`: OpenCode's error types and the providers' words). `runner.HELD` is `models.HELD_STOPS`,
+  the status `guard` `drive` writes with `infra` `provider` ↔ `models.held_told`; the keyhole's `rate_limited`/`unreachable`
+  marks (`models.HELD_MARKS`) ↔ `models.held_mark` ↔ `NoLease._held_turn` and its probe flock ↔ `drive`'s held recheck (#1277).
 - **A model server's API fields** (`models.server_facts`, `ollama_served_context`, `weights`) → `test_portable.py`'s
   `Real` tests, *Running your own server*.
 - **What `wb top` reads** (`live_used`, `window`, `round`, `round_started_at`, `load_secs`, `last`; a `step` row's

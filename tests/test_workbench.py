@@ -34737,6 +34737,160 @@ class ApiTasks(_ApiTask, _KeyholeTest):
                           for r in store.read_jsonl(store.home() / "notify.jsonl")[0]],
                          [("t-new", "stuck", "provider")])
 
+    def held_outage(self, retry_after=None):
+        """#1277's setup: an upstream answering 503 (or, with ``retry_after``, 429 with that
+        Retry-After) forever, and t-a stopped by it, its stop told; t-b queued behind it. The
+        keyhole's hold and the revive's wait cut to a second each."""
+        self.local_api_model()
+        if retry_after:
+            self.up.mode, self.up.status, self.up.message = "status", 429, "Rate limit reached"
+            self.up.retry_after = retry_after
+        else:
+            self.up.mode, self.up.status, self.up.message = "status", 503, "Service Unavailable"
+        for obj, name, value in ((self.kh_mod, "RATE_HOLD_S", 1), (runner, "RATE_WAIT_S", 1)):
+            p = mock.patch.object(obj, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.start_api("t-a", "http", spawn=False)
+        self.start_api("t-b", "http", "--queue", spawn=False)
+        self.drive_here("t-a")
+        told = store.Task("t-a")
+        self.assertEqual((told.status["phase"], told.status.get("infra"), told.status.get("guard")),
+                         ("stuck", "provider", "rate_limited" if retry_after else "outage"), told.status)
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")     # lets a hung wait go
+        return told, store.Task("t-b")
+
+    def until_waiting(self, task, driver, said, events=0):
+        deadline = time.time() + 30
+        while not (task.status.get("phase") == "queued" and (task.status.get("last") or "").startswith(said)
+                   and sum("still isn't answering" in (e.get("text") or "")
+                           for e in store.read_jsonl(task.dir / "events.jsonl")[0]) == events):
+            self.assertLess(time.time(), deadline, task.status)
+            self.assertTrue(driver.is_alive(), task.status)
+            time.sleep(POLL)
+
+    def test_a_task_queued_behind_an_outage_whose_stop_told_claude_waits_for_it_with_no_stop_of_its_own(self):
+        # #1277 (bar loop round 7, 2026-11-24): with a provider down, each queued API task took its
+        # slot, ran round 1 into the outage, revived it and woke Claude with its own stop, the same
+        # one, though api-health.json had it. It waits as queued now, its slot let go; past the
+        # mark one waiter asks again, meets the outage and waits again; at the provider's 2xx it runs
+        told, task = self.held_outage()
+        sent = len(self.up.seen)
+        self.assertIn("deepinfra's other tasks wait for it before their next round, with no stop of their own",
+                      [r for r in store.notices() if r["task"] == "t-a"][-1]["text"])
+        mark = self.models.held_mark("deepinfra")
+        self.assertEqual(mark["state"], "unreachable")
+        driver = threading.Thread(target=self.drive_here, args=("t-b",), daemon=True)
+        driver.start()
+        self.addCleanup(driver.join, 60)
+        self.until_waiting(task, driver, "waiting: deepinfra isn't answering (503 ")
+        self.assertIn("Service Unavailable", task.status["last"])
+        self.assertIn("), as t-a's stop told the user: wb asks it again at ", task.status["last"])
+        self.assertEqual(len(self.up.seen), sent)                     # nothing sent while it holds
+        self.assertEqual(self.models.api_holders("deepinfra"), [])   # its slot let go
+        path = self.models.api_health_path()
+
+        def mark_ends():                                              # DOWN_SECS run out
+            with store.locked(path.with_name(path.name + ".lock")):
+                doc = store.read_json(path, {})
+                doc["deepinfra"]["until"] = time.time() - 1
+                store.write_json(path, doc)
+        mark_ends()
+        self.until_waiting(task, driver, "waiting: deepinfra isn't answering", events=1)
+        self.assertGreater(len(self.up.seen), sent)                   # it asked again, and waits again
+        self.up.mode, self.up.status = "ok", 200                      # the provider is back
+        mark_ends()
+        driver.join(60)
+        self.assertFalse(driver.is_alive(), task.status)
+        self.assertEqual(task.status["phase"], "review", task.status)
+        self.assertIsNone(self.models.held_mark("deepinfra"))
+        self.assertEqual([(r["task"], r["kind"], r.get("cause")) for r in store.notices()
+                          if r["kind"] != "review"], [("t-a", "stuck", "provider")])
+
+    def test_a_429_whose_retry_after_is_hours_away_holds_the_queue_until_then_and_its_stop_says_when(self):
+        # #1277: a 429 whose Retry-After is hours away isn't a quota, and the revive waits at most
+        # RATE_WAIT_S: each queued task ran into it in turn and woke Claude. The stop names the
+        # time, and the next task waits for it, or for a 2xx
+        told, task = self.held_outage(retry_after="7200")
+        sent = len(self.up.seen)
+        until = self.models.held_mark("deepinfra")["until"]
+        self.assertGreater(until, time.time() + 7000)
+        at = time.strftime("%H:%M", time.localtime(until))
+        self.assertIn(f"; deepinfra asked for a wait until {at}; deepinfra's other tasks wait",
+                      [r for r in store.notices() if r["task"] == "t-a"][-1]["text"])
+        driver = threading.Thread(target=self.drive_here, args=("t-b",), daemon=True)
+        driver.start()
+        self.addCleanup(driver.join, 60)
+        self.until_waiting(task, driver, "waiting: deepinfra rate-limits its requests (")
+        self.assertIn(f"wb asks it again at {at}, or goes on once it answers another task", task.status["last"])
+        time.sleep(1)
+        self.assertEqual(len(self.up.seen), sent)
+        self.up.mode, self.up.status = "ok", 200
+        self.models.note_api("deepinfra", "ok")                       # another task's 2xx
+        driver.join(60)
+        self.assertFalse(driver.is_alive(), task.status)
+        self.assertEqual(task.status["phase"], "review", task.status)
+        self.assertEqual([r["task"] for r in store.notices() if r["kind"] != "review"], ["t-a"])
+
+    def test_past_a_held_mark_one_waiter_at_a_time_asks_the_provider_again(self):
+        # #1277: past the mark's `until` every waiter would go on at once, each to its own stop;
+        # the provider's probe flock lets one ask, the rest wait for its answer
+        m = self.local_api_model()
+        told = store.Task("t-told")
+        told.dir.mkdir(parents=True)
+        store.write_json(told.dir / "task.json", {"model": m.id, "provider": "deepinfra", "via": "api"})
+        told.set_status(phase="stuck", infra="provider", guard="outage")
+        told.notify("stuck", "STOPPED: deepinfra didn't answer", cause="provider")
+        self.models.note_api("deepinfra", "unreachable", "503", until=time.time() - 1)
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")
+        asks = self.models.NoLease(m, "t-one", say=lambda msg: None)
+        self.addCleanup(asks.__exit__, None, None, None)
+        self.assertEqual(asks.load(), 0.0)
+        self.assertEqual(asks.recheck, "held")                        # its meeting the outage waits again
+        said, went = [], threading.Event()
+        behind = self.models.NoLease(m, "t-two", say=said.append)
+        self.addCleanup(behind.__exit__, None, None, None)
+        threading.Thread(target=lambda: (behind.load(), went.set()), daemon=True).start()
+        self.assertFalse(went.wait(1))                                # t-one's turn to ask
+        self.assertRegex(said[0], r"^waiting: deepinfra isn't answering \(503\), as t-told's stop told the user")
+        self.models.note_api("deepinfra", "ok")                       # t-one's 2xx
+        self.assertTrue(went.wait(30))
+        self.assertFalse(behind.recheck)
+        told.set_status(phase="review")                               # no told stop: a 503 never holds
+        self.models.note_api("deepinfra", "unreachable", "503")
+        fresh = self.models.NoLease(m, "t-three", say=lambda msg: None)
+        self.addCleanup(fresh.__exit__, None, None, None)
+        self.assertEqual(fresh.load(), 0.0)
+        self.assertFalse(fresh.recheck)
+
+    def test_a_waiter_past_a_held_mark_while_another_asks_looks_every_two_seconds_not_in_a_loop(self):
+        # the review of #1277 (2026-11-24): credit_recheck opened api-health.json's lock file to
+        # look past an expired outage's mark, and its close woke the waiter's own watch on
+        # $WB_HOME: 149 looks in 5 s, not one every API_WAIT's 2 s, behind a probe round that hangs
+        m = self.local_api_model()
+        told = store.Task("t-told")
+        told.dir.mkdir(parents=True)
+        store.write_json(told.dir / "task.json", {"model": m.id, "provider": "deepinfra", "via": "api"})
+        told.set_status(phase="stuck", infra="provider", guard="outage")
+        told.notify("stuck", "STOPPED: deepinfra didn't answer", cause="provider")
+        self.models.note_api("deepinfra", "unreachable", "503", until=time.time() - 1)
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")     # lets the wait go
+        probe = self.models.api_dir() / f"{self.models._slot_name('deepinfra')}.probe.lock"
+        probe.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(probe, os.O_RDONLY | os.O_CREAT)                 # another runner's turn to ask
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        looks, real = [], self.models.credit_recheck
+        p = mock.patch.object(self.models, "credit_recheck", lambda *a, **k: (looks.append(1), real(*a, **k))[1])
+        p.start()
+        self.addCleanup(p.stop)
+        behind = self.models.NoLease(m, "t-wait", say=lambda msg: None)
+        self.addCleanup(behind.__exit__, None, None, None)
+        went = threading.Event()
+        threading.Thread(target=lambda: (behind.load(), went.set()), daemon=True).start()
+        self.assertFalse(went.wait(3))
+        self.assertLessEqual(len(looks), 3, len(looks))               # the first look, then one each 2 s
+
     def test_with_unload_for_tests_an_api_tasks_tests_run_under_this_machines_pool(self):
         from workbench import verify
         used = []
@@ -39952,7 +40106,8 @@ class RoleResolution(Base):
         stop, remedy = meter.stop_text(task), runner.provider_remedy(task, "rate_limited")
         self.assertIn("then wb resume t-run; or Agents on GPU (wb route all gpu) for the next tasks, with wb "
                       "takeover t-run or wb discard t-run for this one (resume keeps its API model).", stop)
-        self.assertTrue(remedy.endswith("; or wb route all gpu (the user's yes) for the next tasks"), remedy)
+        self.assertIn("; or wb route all gpu (the user's yes) for the next tasks; deepseek's other tasks wait "
+                      "for it", remedy)  # the queue's wait follows the offer (#1277)
         for line in (cap, lo, stop, remedy):
             self.assertNotIn("wb route trivial gpu", line)
         self.set_role("all", "gpu")                                      # the advice, taken
@@ -39980,8 +40135,8 @@ class RoleResolution(Base):
         self.routes.write_text(json.dumps({**doc, "use": "both", "busy": "api"}))  # the busy opt-in's task
         self.assertIn("; or waiting for a busy GPU (wb route busy wait) for the next tasks, with wb takeover "
                       "t-busy", meter.stop_text(task))
-        self.assertTrue(runner.provider_remedy(task, "outage").endswith(
-            "; or wb route busy wait (the user's yes) for the next tasks"))
+        self.assertIn("; or wb route busy wait (the user's yes) for the next tasks; deepseek's other tasks "
+                      "wait for it", runner.provider_remedy(task, "outage"))  # the queue's wait after it (#1277)
         self.routes.write_text("{")                                      # unreadable: the role's own, as before
         self.assertEqual(routes.off_api("trivial")[2], "wb route trivial gpu")
 
