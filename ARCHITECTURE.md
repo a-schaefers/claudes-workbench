@@ -5838,6 +5838,47 @@ the user's own terminal, and wb stamps a role change `by: "web"` (*Roles*, the g
 from Claude's Bash carries `CLAUDECODE=1`; `child_env` is what keeps the user's click from being
 gated as Claude's. `tests/test_settings.py` covers it.
 
+### The Settings view (settings.js)
+
+The web app's Settings view (#1286) draws the admin rows (*The admin table (settings.py)*: which
+rows there are and what each runs) and sends the owner's changes. It takes over the pane's
+Settings and roles sections. `settings.js` and `settings.css` are its own, built on `window.WB`
+alone, and a generic renderer: a new setting touches only Python.
+
+- **Read.** `WB.view('settings', …)`; each `show` (the tab, or the page back on screen) runs `GET
+  /api/settings` (`{rows, ts}`, #1280) into `#settings-rows`, above the device cards. A failed read
+  keeps the last rows, or says `Settings couldn't load: <why>` with none yet. A read that left
+  before a write ended is dropped (`reads`, `wrote`), since the write's own rows are newer.
+- **Groups** are `.card`s (`.set-card[data-group]`, an `h3` each) in a `.cards` grid, in `GROUPS`
+  order with their names: `shared` "Agents and roles", `gpu` "GPU", `api` "API", `terminal`
+  "Terminal", `experimental` "Experimental"; a group the table adds later follows, under its key. A
+  `note` row stands where its group's rows would be; a group with no rows has no card.
+- **Each kind** (`.set-row[data-key][data-kind]`, its `label` over the control, the current value's
+  `says` under it):
+  - `choice`: a segmented control (`.seg.set-seg`, radios, one column per choice) up to `SEG_MAX` 4
+    choices, a `<select>` past it or with `other`. Such a select ends with "Other model…", which opens
+    a text input (`input[data-other]`); Enter sends the typed id, Escape puts the row back. A value
+    off the list (none, for an API role without a model) is the select's first option.
+  - `number`: a text input (`inputmode=decimal`) with its unit (`usd` `$` … `/day`, `per_kwh`
+    `per kWh`) and an Off button (`.set-off`, pressed while the value is null). Enter or blur sends
+    a changed value; an empty box sends nothing, since Off is the button's.
+  - `action`: its `text`, then a button per choice, disabled while its click waits.
+  - `info`: its `text` as a muted line.
+- **The owner's click is the yes** (the owner, 2026-11-24: "We trust Claude"; the server runs wb as
+  the user, ungated, as at the terminal). No confirm step, no warning. The choice lights at once (its
+  `says` too), then `POST /api/settings` `{key, value}`. On `ok`, `WB.toast(said)` and a redraw from
+  the answer's `rows`. When the answer carries `help` (the value needs Claude's help to work, such
+  as Agent code navigation on with no probe), the toast adds "Claude will offer to set it up." (the
+  pane's words), and the terminal's Claude offers (#1283). On a refusal (400, 409), `WB.toast(error)`
+  and a redraw from the answer's rows, else the last ones, which puts the control back. With no
+  answer at all, the same, then a fresh read once nothing waits, since the change may have landed.
+- **One request at a time** (`queue`, `pump`): a click made meanwhile lights at once and waits; a
+  row clicked again while its first click still waits sends only its newest value. A redraw keeps
+  an id or a number being typed in another row, and its focus. A blur caused by the redraw itself
+  sends nothing (`drawing`).
+
+`tests/e2e_settings.mjs` checks it once per device (*The tests*).
+
 ## Stopping everything
 
 Only the user's two slash commands stop the delegation, never words in a message:
@@ -7194,13 +7235,25 @@ runner on real OpenCode (`wb start --model cap`): argv, `run --format json` even
 (CLAUDE.md's *OpenCode quirks* points here). They are the only checks of the quirks, interop and lane: a skip is not a pass.
 `ApiThinking`'s `test_real_opencode_*` is one too (#1018): a `wb-off` body variant and the catalog's `none` reach a DeepSeek-shaped server as `thinking: {type: disabled}` in the agent's request, and the npm provider's V1 `wb-off`.
 
-**The browser test** (`e2e_chat.mjs`): the real `bin/wb chat serve` on 13371 (`WB_E2E_PORT`), WebKit as an iPhone 13
+**The browser test** (`e2e_chat.mjs`): the real `bin/wb chat serve` on 13371 (`WB_E2E_PORT`), on a temp home
+whose roles, OpenCode config and OpenCode are its own too (`WB_ROUTES`, `WB_OPENCODE_CONFIG`, `WB_OPENCODE_BIN`
+`false`: the Settings rows read `wb route --json` and `wb models --json`, and the user's catalog, read into its
+hosted.json, renamed the Stats check's providers, #1286), WebKit as an iPhone 13
 and Chromium (`$CHROMIUM`, `/usr/bin/chromium`, else Playwright's) as a Pixel 7, then at a desktop's 1280×800
 (`DESKTOP`: the checks through Settings', then the shell's alone). The shell (`shell`, #1284): the bar at the foot
 on a phone and the rail on the desktop, the hash and Back, the Chat tab's badge, the bar hidden with the keyboard
 (a visual viewport made short by hand), the cards' styles kept out of the chat (a plan card's `<p>`
 and `<code>`, the intro's `<code>`), `window.WB`, and the gear's old checks from Settings and Stats (`goTo`);
-then each view's own, `e2e_stats.mjs` and `e2e_settings.mjs` (`check(page, ctx)`, once per device). Sends land exactly once through
+then each view's own, `e2e_stats.mjs` and `e2e_settings.mjs` (`check(page, ctx)`, once per device). The Settings
+view's (#1286): the groups in order, "Agents and roles" first, above the device cards (the gear's old cards are
+`#settings`'s alone); Claude coding → "Ask me first" lit at once, then `coding.json` and `wb coding` say `ask`; a
+409 puts the control back and toasts, with a second click waiting for the first; "Other model…" and Enter send the
+typed id; a number's Enter and Off; `help`'s toast; the layout at the phone's width, and on the desktop at 1280 px
+(two columns) and 390 px (one), nothing past the view's edge. Its calls to `/api/settings` go through a page-side
+`fetch` wrapper to a binding (`__wbSettings`), never `page.route`: the page is its service worker's client, and
+WebKit sends such a page's fetches past Playwright's routes. While the server answers that path 404, a stand-in
+answers from `settings.rows()` and `settings.apply()` on the run's `WB_HOME`, with #1280's shapes and statuses, so
+the click still runs the real wb. Sends land exactly once through
 outages, reloads and a SIGSTOP past the 40 s watchdog; cards, plans, settings, install over https, `/api/seen` and
 `/api/active` only while in use, notices, shot pairs, listen's shortlist, the keyboard, uploads, an agent's message
 shown with its name and its reply through `/api/wait`, that reply named `Claude to <agent>` and
@@ -7489,7 +7542,9 @@ doc needs its own `!/` line).
   **`routes.thinking_said`** ↔ the mod's `thinkingSaid` (a role's `thinks`, #1263; `RoleResolution` and
   register.test.tsx's #1263 test), and `runner.THINKING_LOWEST`'s opening ↔ `thinkStops`' `LOWEST_SAID` and
   `settings.LOWEST_SAID` (the lowest effort, still cheaper than On); **a Settings row** (the pane's `*_STOPS`,
-  `roleRows`, `mediaRows`) ↔ its entry in `settings.py` (the web app's: same key, choices, sentence and wb call)
+  `roleRows`, `mediaRows`) ↔ its entry in `settings.py` (the web app's: same key, choices, sentence and wb call);
+  **`settings.GROUPS` and `KINDS`** ↔ `settings.js`'s `GROUPS` (order and names) and its kinds, and #1280's
+  `/api/settings` shapes ↔ its `load` and `pump` and `e2e_settings.mjs`'s stand-in
   until #1283 drops the pane's tab; **the change line**
   (`routes.change`, `cli.start_line`) → the mod's dialog, which shows what `wb route --dry-run --json` prints (an API
 start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --model` stays refused), and

@@ -1,1 +1,28 @@
-/* The Settings view (#1284): its own styles, after app.css */
+/* The Settings view (#1286): the admin rows' cards, one per group, above the device cards; after
+   app.css, whose .card, .seg, .plain and .small these build on */
+#settings-rows .set-card { display: flex; flex-direction: column; }
+/* overflow clipped: WebKit counted a select's longest option past the view, though the select fit */
+.set-row { padding: 10px 0; min-width: 0; overflow-x: clip; }
+.set-row + .set-row { border-top: 1px solid var(--line); }
+.set-row:last-child { padding-bottom: 0; }
+.set-card h3 + .set-row { padding-top: 4px; }
+.set-label { font: 600 14.5px/1.3 var(--sans); margin-bottom: 6px; overflow-wrap: anywhere; }
+.view-in .card p.set-says, .view-in .card p.set-info, .view-in .card p.set-note { margin: 0; overflow-wrap: anywhere; }
+.set-row .set-says { margin-top: 2px; }
+/* as many columns as choices; a long label wraps inside its segment, never past the card */
+.seg.set-seg { grid-template-columns: repeat(var(--n, 2), minmax(0, 1fr)); margin: 0 0 6px; }
+.seg.set-seg button { min-width: 0; padding: 6px 8px; line-height: 1.25; overflow-wrap: anywhere; }
+.seg.set-seg button:focus-visible, .set-select:focus-visible, .set-text:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.set-select, .set-text { box-sizing: border-box; min-height: 44px; min-width: 0; max-width: 100%; padding: 0 12px;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--bg); color: var(--fg); font: inherit; font-size: 16px; }
+.set-select { display: block; width: 100%; margin: 0 0 6px; text-overflow: ellipsis; }
+.set-row > .set-text { display: block; width: 100%; margin: 0 0 6px; }
+.set-num { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 6px; }
+.set-num .set-text { width: 9em; flex: 0 1 9em; }
+.set-unit { color: var(--dim); font-size: 14.5px; }
+.view-in .plain.set-off { min-width: 64px; }
+.view-in .plain.set-off[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.set-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.view-in .set-actions .plain:disabled { opacity: .55; cursor: default; }
+/* a group's name over its rows' names: the serif of the page's own title */
+.view-in .set-card > h3 { margin-bottom: 2px; font: 600 16px/1.3 var(--serif); letter-spacing: .01em; }
