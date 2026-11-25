@@ -191,17 +191,89 @@ def _json_holds(node, secret: bool) -> bool:
 
 # local_only (commands.json `repos.<path>.local_only`, wb start --local-only)
 
-def local_only(repo, sub: str | None = None) -> str | None:
+def _marks() -> list[str]:
+    """commands.json's `repos` keys that say `local_only: true`."""
+    from . import context
+    return [k for k, v in (context.commands_conf().get("repos") or {}).items()
+            if v.get("local_only") is True]
+
+
+def local_only(repo, sub: str | None = None, base: str | None = None) -> str | None:
     """The commands.json key that keeps this repo's tasks off API models, or None: any entry at
     or under the repo's top that says `local_only: true` (context.repo_entries ``whole``: by
     real path and by git dir), the spot's nearest first. A task's checkout holds the whole repo,
     whichever directory it starts in, so a package marked alone once went to the API model with
     every task started at the root, or in it when it had no CLAUDE.md of its own (#1255, the bar
-    loop, 2026-11-24); a `false` lifts no other entry's `true` for the same reason."""
-    from . import context
-    for key, v in context.repo_entries(repo, sub, whole=True):
-        if v.get("local_only") is True:
+    loop, 2026-11-24); a `false` lifts no other entry's `true` for the same reason. Its
+    submodules' too (gitops.submodule_sources at ``base``, else HEAD), which fill_submodules
+    puts in every task's worktree, and an entry at or above the repo in each repo it is a
+    submodule of: repo_entries leaves a repo of its own out, so a marked submodule went to the
+    API model with every task of the superproject, and a marked superproject's submodule with
+    every task started in it (#1267, the bar loop, 2026-11-24)."""
+    from . import context, gitops
+    if not _marks():
+        return None
+    for top in [repo, *gitops.submodule_sources(Path(repo), base or "HEAD")]:
+        for key, v in context.repo_entries(top, sub if top is repo else None, whole=True):
+            if v.get("local_only") is True:
+                return key
+    at = repo
+    while (sup := gitops.superproject(at)) is not None:
+        rel = os.path.relpath(os.path.realpath(at), os.path.realpath(sup))
+        for key, v in context.repo_entries(sup, rel):
+            if v.get("local_only") is True:
+                return key
+        at = sup
+    return None
+
+
+def local_only_place(path) -> str | None:
+    """The commands.json key whose `local_only: true` covers a directory an agent's lane reads
+    whole beyond its checkout (a sibling, a `wb allow --path` grant, a standing `paths` entry;
+    "*", the lane off, reads them all), or None: a key the directory is in or holds, by real
+    path (in lower case where the file system ignores case, as repo_entries), then the repo it
+    is in: local_only's whole marks when it is that repo's top, else an entry at or above it."""
+    from . import context, gitops
+    if not (marks := _marks()):
+        return None
+    if path == "*":
+        return marks[0]
+    path = Path(path).expanduser()
+    fold = store.folds_case(path)
+    real = lambda p: os.path.realpath(Path(p).expanduser()).lower() if fold \
+        else os.path.realpath(Path(p).expanduser())  # noqa: E731
+    place = real(path)
+
+    def within(p: str, d: str) -> bool:
+        return p == d or p.startswith(d.rstrip(os.sep) + os.sep)
+    for key in marks:
+        if within(place, real(key)) or within(real(key), place):
             return key
+    try:
+        top = gitops.toplevel(path)
+    except gitops.GitError:
+        return None
+    if real(top) == place:
+        return local_only(top)
+    rel = os.path.relpath(place, real(top))
+    return next((k for k, v in context.repo_entries(top, rel) if v.get("local_only") is True), None)
+
+
+def local_only_reach(repo, sub: str | None = None, base: str | None = None,
+                     places=()) -> tuple[str, str] | None:
+    """The one check of what an API task may read (#1267, #1268, #1269, the bar loop,
+    2026-11-24): the first local-only mark on anything its lane holds, as (key, how), or None.
+    ``how`` is '' for its checkout (the repo, its submodules, its superprojects: local_only),
+    else the word of the ``places`` entry, (path, how), that reaches it: its siblings, its
+    `--allow-path`/`wb allow --path` grants, commands.json's standing `paths`. Only the repo was
+    asked, so a local-only repo linked as a sibling or granted by path went to the provider.
+    wb start, its busy opt-in and the mod's dry run (cli.lane_places), and the runner before
+    every round (runner.local_only_now) ask this."""
+    if key := local_only(repo, sub, base):
+        return key, ""
+    for path, how in places:
+        if key := local_only_place(path):
+            return key, how
     return None
 
 
@@ -212,11 +284,14 @@ def home_path(p) -> str:
     return "~" + p[len(home):] if p == home or p.startswith(home.rstrip("/") + "/") else p
 
 
-def local_only_line(where_: str, why: str, role: str | None, model_id: str, asked: bool) -> str:
+def local_only_line(where_: str, why: str, role: str | None, model_id: str, asked: bool,
+                    how: str = "") -> str:
     """wb start's exit-3 line for an API model in a local-only spot: the repo, why it is
     local-only, the role (or the --model), and the choices. Never a GPU model instead (#1008's
     decision 2). The role's way off API is routes.off_api's: `wb route <role> gpu` under Agents
-    API changed nothing, and the retry was refused the same way (#1218, 2026-11-24)."""
+    API changed nothing, and the retry was refused the same way (#1218, 2026-11-24). ``how``: a
+    place beyond the repo the task's lane would read it by (local_only_reach), and one more
+    choice when that is this command line's flag (#1268)."""
     from . import routes  # routes imports this module
     if asked:
         what = f"the task's model is API ({model_id}, --model)"
@@ -226,15 +301,22 @@ def local_only_line(where_: str, why: str, role: str | None, model_id: str, aske
         off = routes.off_api(role) or routes.off_api(None)  # a start on API: never None
         fix = f"{off[1]} ({off[2]}, the user's yes)"
     lift = ("the user drops --local-only for this task" if why == "--local-only"
+            else "the user lifts local_only there" if how
             else "the user lifts local_only for this repo")
+    if how:
+        where_ += f", which the task's lane reads ({how}),"
+        if how.startswith("--"):
+            fix += f", without {how}"
     return f"{where_} is local-only ({why}): {what}. Choices: {fix}, or {lift}."
 
 
-def since_start_line(task) -> str:
+def since_start_line(task, key: str = "", how: str = "") -> str:
     """wb next/feedback/resume's exit-3 line for an API task whose repo became local-only after
-    it started: its model is fixed per task, so there is nothing to switch to."""
+    it started: its model is fixed per task, so there is nothing to switch to. ``how``: what
+    beyond the repo its lane reads the marked ``key`` by (local_only_reach, #1268)."""
     pid = task.spec.get("provider") or str(task.spec.get("model") or "").split("/", 1)[0]
-    return (f"this repo is local-only now; the task's model is API ({pid}): "
+    what = f"{home_path(key)}, which its lane reads ({how}), is" if how else "this repo is"
+    return (f"{what} local-only now; the task's model is API ({pid}): "
             f"wb takeover {task.name} or wb discard {task.name}")
 
 
@@ -262,12 +344,16 @@ def _provider_of(row: dict) -> str:
     return str(row.get("provider") or str(row.get("model") or "").split("/", 1)[0])
 
 
-def where_note(info: dict, rules: bool, named: list[str], whose: str = "") -> str:
+def where_note(info: dict, rules: bool, named: list[str], whose: str = "",
+               submodules: bool = False) -> str:
     """The start's note on a repo's first API task: what goes and to whom. ``rules``: the user
     has a ~/.config/workbench/AGENTS.md the agent is handed (never Claude's files, #1061);
-    ``named``: the copies and siblings named on the command line, which go too; ``whose``: whose
+    ``named``: everything else the lane reads, which goes too: the copies and siblings named on
+    the command line, its `--allow-path` and commands.json's standing `paths` (those once went
+    unsaid, #1269); ``submodules``: the repo's, filled in its worktree (#1267); ``whose``: whose
     choice the model is (`the trivial role's model`, `asked for`, #1016)."""
-    what = "the repo, its spec, CLAUDE.md files" + (" and your workbench AGENTS.md" if rules else "")
+    what = ("the repo with its submodules" if submodules else "the repo") + ", its spec, CLAUDE.md files" \
+        + (" and your workbench AGENTS.md" if rules else "")
     if named:
         what = what.replace(" and your", ", your") + " and " + ", ".join(named)
     policy = f"data policy: {info['policy']}" if info.get("policy") else f"see {info['name']}'s data policy"

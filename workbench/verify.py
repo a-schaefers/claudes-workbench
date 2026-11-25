@@ -1,7 +1,7 @@
 """wb verify: one regression test run on the base and on the candidate, each in a scratch
 checkout under the task's own lane and environment, so review can tell a proven fix from a test
 that already passed before the change (#96). Neither run touches the user's checkout or the
-worktree under review: the candidate is read through a snapshot of it (gitops.snapshot), and the
+worktree under review: the candidate is read through a snapshot of it (candidate_tree), and the
 base gets the candidate's test files copied in, which is what makes a test separable.
 
 A base failure proves the fix only when the test failed on an assertion: a missing module, a
@@ -430,13 +430,24 @@ def verdict(base: int | str, base_out: str, cand: int | str, expect: str = "",
     return "proven" if assertion(base_out) else "inconclusive"
 
 
+def candidate_tree(task: store.Task) -> tuple[str, list[str]]:
+    """The tree wb accept would commit, and what it leaves out (gitops.snapshot_left, landing):
+    wb verify's and wb shot's candidate, and what verify.last calls a check stale against. With
+    the ignored files the agent wrote, which accept commits with --include and refuses without
+    (runner.ignored_to_commit, as the review diff since #1259): left out, verify said "the
+    candidate fails it" (ModuleNotFoundError: lib) for an agent's lib/util.py under
+    Python.gitignore's lib/ that passed in the worktree, and an edit to it left the last check
+    fresh, so --include landed code no check ran on (#1275, 2026-11-24)."""
+    return gitops.snapshot_left(task.worktree, landing=True, force=runner.ignored_to_commit(task))
+
+
 def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int = LIMIT,
         expect: str = "", setup: bool = False) -> dict:
     """Run ``cmd`` on the base (with the candidate's test files) and on the candidate; the
     result, also kept in tasks/<task>/verify/<n>/ with both outputs."""
     # the tree accept would commit: a big text file it lands is in it (#642); what accept refuses
     # without --include is left out, and lands with it, so then nothing here is proof (below)
-    tree, left = gitops.snapshot_left(task.worktree, landing=True)
+    tree, left = candidate_tree(task)
     base_rev = _review_base(task)
     if not base_rev:
         raise RuntimeError("cannot find the last approved step's commit for the comparison")
@@ -534,7 +545,7 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
     # what accept would land, as verify (#642); what it refuses without --include (a new binary
     # of 1 MiB or more, a directory past NEW_FILES_MAX) is said: a new photo missing from the
     # candidate showed as a broken image, with nothing said (#836)
-    tree, left = gitops.snapshot_left(task.worktree, landing=True)
+    tree, left = candidate_tree(task)
     # after wb next, the last approved step, as wb verify compares: the original base showed the
     # earlier steps' change as this one's (#501, the audit of 1.90)
     base_rev = _review_base(task)
@@ -642,5 +653,5 @@ def last(task: store.Task) -> dict | None:
     # Old checks always compared against task.json's original base (#252).
     stale = task.worktree.is_dir() and (
         r["base"].get("rev", task.spec["base"]) != _review_base(task)
-        or gitops.snapshot(task.worktree, landing=True) != r.get("tree"))
+        or candidate_tree(task)[0] != r.get("tree"))
     return {**r, "stale": stale}

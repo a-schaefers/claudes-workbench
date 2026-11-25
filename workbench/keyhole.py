@@ -423,7 +423,8 @@ class Keyhole:
     ("bearer" or "anthropic"). It serves at once, from a daemon thread, on 127.0.0.1 (never
     localhost, which may be ::1 first). ``on_usage(usage)`` gets each response's usage, once,
     before its end marker (`[DONE]`, `message_stop`, `response.completed`) or else its last byte
-    goes to OpenCode (the meter, #1019, #1114); ``on_health(state, why, until)``
+    goes to OpenCode (the meter, #1019, #1114), and a response cut before its end an estimate
+    marked `cut` (_cut_usage, #1276); ``on_health(state, why, until)``
     each outcome (ok, no_credit, rate_limited, unreachable); ``room(body, size)`` is asked before
     each request is sent on (the meter's spend room: negative is refused); ``log`` the start and
     refusal lines (runner.log: the runner's stdout)."""
@@ -953,7 +954,7 @@ def _handler(kh: Keyhole):
                         return self.send_json(502, f"keyhole: can't send this request on "
                                                    f"({type(e).__name__})", etype="api_error")
                     if 200 <= resp.status < 300:
-                        return self.stream(resp)
+                        return self.stream(resp, size or len(raw))
                     # without Retry-After, the provider's cooldown is the backoff this keyhole
                     # waits itself, not RATE_LIMIT_SECS: its own next pass reads it back (cooldown)
                     status, sent, text, kind = self.read_error(
@@ -1043,22 +1044,20 @@ def _handler(kh: Keyhole):
             self.end_headers()
             self.wfile.write(out)
 
-        def stream(self, resp):
+        def stream(self, resp, size: int = 0):
+            """A 2xx answer on to OpenCode, its usage to kh.usage once. ``size``: the request's
+            body length, the input of a response cut short (_cut_usage, #1276)."""
             kh.health("ok")
-            self.send_response(resp.status)
-            for k, v in resp.getheaders():
-                lk = k.lower()
-                if lk in HOP or lk in ("content-length", "connection"):
-                    continue
-                self.send_header(k, v)
-            self.send_header("Transfer-Encoding", "chunked")
-            self.end_headers()
             sse = "event-stream" in (resp.getheader("Content-Type") or "")
             self.used = {}  # this response's usage, merged: kh.usage once, before its end (#1114)
+            self.ended = False  # its end marker seen, its usage booked there
+            self.said = self.deltas = 0  # its output streamed so far: characters, events
             key = kh._key.value.encode()
             hold = bytearray()  # SSE: a partial line; else the last len(key) - 1 bytes
             whole = bytearray()
+            streamed = 0  # a body that isn't SSE: its bytes so far
             started, marked = False, time.monotonic()  # the first data; the queue's last mark
+            queued = False  # keep-alives alone past QUEUED_AFTER_S: in the provider's queue
 
             def send(data: bytes):
                 if data:
@@ -1066,11 +1065,22 @@ def _handler(kh: Keyhole):
                     self.wfile.flush()
 
             try:
+                # the head inside the try: OpenCode stopped while the provider was still
+                # thinking fails here, and the request's input is billed all the same (#1276)
+                self.send_response(resp.status)
+                for k, v in resp.getheaders():
+                    lk = k.lower()
+                    if lk in HOP or lk in ("content-length", "connection"):
+                        continue
+                    self.send_header(k, v)
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
                 while True:
                     piece = resp.read1(65536)
                     if not piece:
                         break
                     hold += piece
+                    streamed += len(piece)
                     if sse:  # whole lines on: an error event's line goes through redact
                         *done, rest = bytes(hold).split(b"\n")
                         if len(rest) > SNIFF_CAP:  # no line end in sight: pass it on, key out
@@ -1082,7 +1092,7 @@ def _handler(kh: Keyhole):
                             started = True  # an event, not a keep-alive comment: it has begun
                             kh.answered()
                         elif not started and time.monotonic() - marked >= QUEUED_AFTER_S:
-                            marked = time.monotonic()  # keep-alives only: the provider's queue
+                            marked, queued = time.monotonic(), True  # keep-alives only: its queue
                             kh.held("queued", resp.status, None)
                     else:  # the key never passes, even split across two pieces
                         if not started:
@@ -1106,11 +1116,19 @@ def _handler(kh: Keyhole):
                         pass
                 # usage that came after the end's marker, or with none (a non-SSE body): booked
                 # before the last byte (#1019); with a marker it went at the marker (data_line)
+                self.ended = True  # a last write that fails is no cut: the whole answer came
                 self.flush_usage()
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
             except (OSError, http.client.HTTPException):
                 self.close_connection = True  # the client or the upstream went away mid-answer
+                if not self.ended and not (queued and not started):
+                    # cut before its end, where Chat Completions and the Responses API put their
+                    # usage: wb stopping OpenCode (the think nudge, steer --now, wb stop, a guard,
+                    # the spend stop) booked $0 for a request the provider bills (#1276, 2026-11-24);
+                    # one still in the provider's queue never ran, so it isn't billed
+                    out = max(self.deltas, -(-self.said // 4)) if sse else -(-streamed // 4)
+                    self.used = _cut_usage(self.used, -(-size // 4), out)
                 self.flush_usage()  # what the provider counted so far is still spent
                 return
 
@@ -1133,6 +1151,7 @@ def _handler(kh: Keyhole):
                 # when it reads [DONE], not at the body's last byte, and a provider sending its
                 # last byte late had the response booked twice, OpenCode's row and then ours
                 # (#1114, 2026-11-23; checked on 2.3.2: Anthropic's waits for the last byte)
+                self.ended = True
                 self.flush_usage()
             if not payload or payload == b"[DONE]":
                 return safe
@@ -1141,7 +1160,10 @@ def _handler(kh: Keyhole):
             except ValueError:
                 return safe
             self.sniff(obj)
+            if n := _said(obj):
+                self.said, self.deltas = getattr(self, "said", 0) + n, getattr(self, "deltas", 0) + 1
             if isinstance(obj, dict) and obj.get("type") in ("message_stop", "response.completed"):
+                self.ended = True
                 self.flush_usage()  # the end of Anthropic's and the Responses API's stream (#1114)
             if isinstance(obj, dict) and "error" in obj:
                 return kh.redact(ln.decode("utf-8", "surrogateescape")).encode(
@@ -1166,6 +1188,41 @@ def _handler(kh: Keyhole):
                 self.used = _merged(getattr(self, "used", None) or {}, usage)
 
     return Handler
+
+
+def _said(obj, under: bool = False) -> int:
+    """The characters of the model's output one stream event carries: every string under a
+    `delta` (Chat Completions' choices[].delta, Anthropic's content_block_delta, the Responses
+    API's string `delta`), text, reasoning and tool arguments alike."""
+    if isinstance(obj, str):
+        return len(obj) if under else 0
+    if isinstance(obj, dict):
+        return sum(_said(v, under or k == "delta") for k, v in obj.items())
+    if isinstance(obj, list):
+        return sum(_said(v, under) for v in obj)
+    return 0
+
+
+def _count(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+
+
+def _cut_usage(used: dict, inp: int, out: int) -> dict:
+    """A response cut short (OpenCode stopped mid-stream, the provider gone) as the usage it is
+    billed at least (#1276): what its stream said, its input at least ``inp`` (the body's length
+    / 4, as the meter's room reckons a request) and its output at least ``out`` (what was
+    streamed: its deltas' characters / 4), marked `cut`. Anthropic's message_start gives the
+    input (and its cache); Chat Completions and the Responses API give nothing before their end,
+    so the estimate is in Chat Completions' names, which the meter reads for any protocol."""
+    u = dict(used or {})
+    chat = not u or "prompt_tokens" in u or "completion_tokens" in u
+    i, o = ("prompt_tokens", "completion_tokens") if chat else ("input_tokens", "output_tokens")
+    if not (_count(u.get(i)) or _count(u.get("cache_read_input_tokens"))
+            or _count(u.get("cache_creation_input_tokens"))):
+        u[i] = inp
+    u[o] = max(u[o] if _count(u.get(o)) else 0, out)
+    u["cut"] = True
+    return u
 
 
 def _merged(a: dict, b: dict) -> dict:

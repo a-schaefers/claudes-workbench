@@ -1316,7 +1316,7 @@ class _Clock:
 # provider's and not the step's, and runs again once (drive).
 RATE_WAIT_S = 600
 RETRY_PAUSE_S = 60   # an API `retry` line pauses the clocks this long: OpenCode's own backoff
-HELD = ("rate_limited", "outage")
+HELD = models.HELD_STOPS  # ("rate_limited", "outage"): what NoLease.load waits behind, told (#1277)
 # stops that are the provider's (cause "provider"); `setup` is this machine's way to it (a
 # certificate, a proxy: the keyhole's api_stop, #1080), never the agent's either, and not revived.
 # `refused`: a request the provider turned down for a reason no retry or key fixes (a 404 for a
@@ -1680,7 +1680,8 @@ def settle(task: store.Task, n: int, out: dict, began: str | None, why: str | No
     explore guard (#1168), then the repeat and error guards (#1250), then the think nudge (a
     needless check-in), silence and the round's wall (#1261, 2026-11-24), each fixed alone. So
     every stop goes through here: run_round's guards, the provider's (in the round or at
-    OpenCode's exit), the spend cap's in the round, and drive's handover limit. A tree the
+    OpenCode's exit), the spend cap's in the round, drive's handover limit, and OpenCode's own
+    non-zero exit that no server revive took (#1270). A tree the
     self-review left changed, or any other round: False, nothing changed, stopped as before."""
     why = out.get("stuck") or why
     if not why or gitops.mark(task.worktree) != green_tree(task, began):
@@ -2849,8 +2850,13 @@ def _by_hand(task: store.Task) -> tuple[list[str], list[str]]:
 
 # rules/<task>/claude-calls/<id>.json: the mod's row of each of Claude's own tool calls in the
 # task's worktree (a Bash command that names the task's directory or runs in it, an edit tool's
-# file there), {tool, at, end (epoch seconds), command and cwd, or path} (#1211)
+# file there), {tool, at, end (epoch seconds; null while the call runs), command and cwd, or path,
+# denied (a call that never ran)} (#1211, #1272)
 CLAUDE_CALLS = "claude-calls"
+# A row still running (end null) as wb reads it ends now, at most this long after it began: a
+# Bash call's limit in Claude Code is 10 minutes, and a session that died in a call never ends
+# its row (#1272)
+CALL_RUNS = 600.0
 CLAUDE_EDIT_TOOLS = ("Edit", "MultiEdit", "Write", "NotebookEdit")
 # A file's times may be whole seconds (HFS+, a FAT or 9p mount): what a call wrote can read up to
 # that much before the call began
@@ -2860,16 +2866,24 @@ CALL_NAMES = 5000  # words of a Claude command read for names: a heredoc of a mo
 
 def claude_calls(task: store.Task) -> list[dict]:
     """The mod's rows of Claude's own tool calls in the worktree (CLAUDE_CALLS); [] without the
-    mod, or before it kept them."""
+    mod, or before it kept them. A row still running (`end` null) ends now, at most CALL_RUNS
+    after it began: a build and `wb accept` in one Bash call, as the skill says, is that call's
+    own row while accept reads it, and the build's dist/ was refused as files written by hand
+    while the mod wrote rows only once a call was over (#1272, 2026-11-24). A denied call's
+    is none."""
     d = context.rules_dir(task) / CLAUDE_CALLS
     try:
         names = sorted(os.listdir(d))
     except OSError:
         return []
-    out = []
+    out, now = [], time.time()
     for n in names:
         r = store.read_json(d / n) if n.endswith(".json") else None
-        if isinstance(r, dict) and all(isinstance(r.get(k), (int, float)) for k in ("at", "end")):
+        if not isinstance(r, dict) or r.get("denied") or not isinstance(r.get("at"), (int, float)):
+            continue
+        if "end" in r and r["end"] is None:
+            r["end"] = max(r["at"], min(now, r["at"] + CALL_RUNS))
+        if isinstance(r.get("end"), (int, float)):
             out.append(r)
     return out
 
@@ -5134,8 +5148,18 @@ def provider_remedy(task: store.Task, guard: str, said: str = "") -> str:
     if guard == "setup":  # #1080: no route change or wait mends this machine's own setup
         return (f"this machine's stop, not the agent's or {p}'s: mend what the line above says; "
                 f"then {resume} resumes it")
+    # the 429's Retry-After, and the tasks queued behind the stop, which wait for p with no stop
+    # of their own (models.NoLease._held_turn, #1277, 2026-11-24)
+    try:
+        mark = models.held_mark(p) or {}
+    except Exception:  # an unreadable file: no time to give
+        mark = {}
+    until = mark.get("until") if mark.get("state") == "rate_limited" else None
+    asked = (f"; {p} asked for a wait until {time.strftime('%H:%M', time.localtime(until))}"
+             if isinstance(until, (int, float)) and until > time.time() + 60 else "")
     return (f"the provider's stop, not the agent's: {resume} resumes it once {p} allows"
-            + route)
+            + route + asked + f"; {p}'s other tasks wait for it before their next round, with no "
+            "stop of their own")
 
 
 def _provider_revive(task: store.Task, n: int, rnd: dict, lease) -> bool:
@@ -5409,9 +5433,20 @@ def local_only_now(task: store.Task) -> str:
     """For an API task whose repo is local-only now, the line the runner stops it with and wb
     next, feedback and resume refuse it with (its model is fixed per task: takeover or discard),
     else ''. api_task: a task from before #1016 on an API model has no `via` until its runner
-    writes one (settle_via), and its first round after the upgrade went too (#1111)."""
-    if api_task(task) and privacy.local_only(task.spec["repo"], task.spec.get("subdir")):
-        return privacy.since_start_line(task)
+    writes one (settle_via), and its first round after the upgrade went too (#1111). Anything
+    its lane reads counts (privacy.local_only_reach): its submodules at its base, its siblings,
+    its grants and commands.json's standing `paths`; only the repo was asked, so a sibling or a
+    `wb allow --path` grant marked local-only went on to the provider every round (#1267,
+    #1268, the bar loop, 2026-11-24)."""
+    if not api_task(task):
+        return ""
+    granted = set(context.grants(task).get("paths") or [])
+    places = [(s, f"--sibling {n}") for s, n in zip(context.siblings(task), task.spec.get("siblings") or ())]
+    places += [(p, ("wb allow --path" if p in granted else 'commands.json "paths"')
+                + (' "*"' if p == "*" else "")) for p in context.lane_paths(task)]
+    if hit := privacy.local_only_reach(task.spec["repo"], task.spec.get("subdir"),
+                                       task.spec.get("base"), places):
+        return privacy.since_start_line(task, *hit)
     return ""
 
 
@@ -5607,6 +5642,18 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 if not _go_on(task, n, "Claude's note"):
                     return
                 continue
+            if rnd["guard"] in HELD and getattr(lease, "recheck", "") == "held" and not rnd["answered"]:
+                # it asked again for the tasks waiting behind a rate limit or outage another task's
+                # stop told Claude of, and met it again: no revive, and no stop of its own. Each
+                # task queued behind an outage ran into it, revived it and woke Claude with the
+                # same stop (#1277, 2026-11-24); back to waiting instead, until an `ok` or the next turn
+                task.event({"ts": store.now(), "round": n, "kind": "load",
+                            "text": f"{provider_of(task)} still isn't answering: the task waits "
+                                    "as queued again"})
+                _run_again(task, n, rnd)
+                if not _go_on(task, n, "the round again"):
+                    return
+                continue
             if rnd["guard"] in HELD and revived != n:  # the provider's rate limit or outage: once (#1020)
                 revived = n
                 if not _provider_revive(task, n, rnd, lease):
@@ -5616,7 +5663,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 if not _go_on(task, n, "the round again"):  # the day cap holds here too (#1019)
                     return
                 continue
-            if rnd["guard"] == "quota" and getattr(lease, "recheck", False) and not rnd["answered"]:
+            if rnd["guard"] == "quota" and getattr(lease, "recheck", "") == "quota" and not rnd["answered"]:
                 # it asked again past the 402's mark for the tasks waiting behind it, and met the
                 # 402 again: the stop Claude was told of already. Stopped, each waiter woke Claude
                 # in turn, 900 s apart, with the same "out of credit" (#1216, 2026-11-24); back to
@@ -5653,6 +5700,13 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 if not _go_on(task, n, "the round again"):
                     return
                 continue
+            if died(rnd) and not rnd["stuck"]:
+                # OpenCode's own exit, not a revived server's: a self-review's on its green tree is
+                # its finish too. A GPU server's 500 (Ollama's runner out of memory) or 400 (past
+                # llama-server's context) leaves the server up, so no revive, and the round failed
+                # with no tests line, the step recorded stuck, accept refused without --force
+                # (#1270, bar loop round 7, 2026-11-24)
+                settle(task, n, rnd, rnd.get("began"), f"opencode exited {rnd['exit']}")
             if rnd["stuck"] or died(rnd):
                 text = _spend_lead(task, rnd) + summary_text(task, n, rnd, None) + _undelivered(task)
                 write_report(task, n, rnd, text)
@@ -5668,8 +5722,11 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                     last = f"{last}: {said[-1]}"[:200]
                 # the provider's or the spend cap's, not the step's (#1020, #1019)
                 ours = None if server else stopped_by(rnd["guard"])
+                # its guard with a provider's: a rate limit's or outage's told stop holds the
+                # tasks queued behind it (models.held_told, #1277)
                 task.set_status(phase=phase, last=last,
-                                **({"infra": "model"} if server else {"infra": ours} if ours else {}))
+                                **({"infra": "model"} if server else {"infra": ours} if ours else {}),
+                                **({"guard": rnd["guard"]} if ours == "provider" else {}))
                 # what stopped it, for results.step: a guard or the agent's own exit (#582)
                 task.notify(phase, text, round=n, cause="server" if server else ours
                             or ("guard" if rnd["stuck"] else "agent"))
