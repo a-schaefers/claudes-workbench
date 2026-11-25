@@ -4835,26 +4835,6 @@ def _api_list(text: str) -> None:
         print(f"and {len(hits) - API_LIST_MAX} more: a longer text narrows it")
 
 
-def _try_api_line(task: store.Task) -> str:
-    """wb try's one line when its sample went to the trivial role's API model (#1026), from the
-    task.json keys wb start --role writes (`via`, `role`, #1016): a GPU task, or one from before
-    them (read as GPU), says nothing, and its output is unchanged."""
-    spec = task.spec
-    if spec.get("via", "gpu") != "api" or spec.get("role") != "trivial":
-        return ""
-    mid = str(spec.get("model") or "")
-    m = models.lookup(mid, cached=True)
-    who = models.provider_name(m) if m else str(spec.get("provider") or mid.split("/", 1)[0])
-    try:
-        cap = routes.read().get("day_usd")
-    except routes.RoutesError:
-        cap = None
-    toward = f"today's ${cap:g} cap" if isinstance(cap, (int, float)) and not isinstance(cap, bool) \
-        else "today's API spend"
-    return (f"wb try: the trivial role is API ({mid}, {who}): the sample's code goes there, and its "
-            f"cost counts toward {toward}")
-
-
 def cmd_stats(a):
     """Results by model and size; `wb stats set KEY VALUE` changes what the Stats tab records
     and shows (stats.py)."""
@@ -6541,19 +6521,6 @@ def path_advice() -> str:
             "(the desktop app or an IDE too: each reads PATH only when it starts)")
 
 
-def agents_md_note() -> str:
-    """wb setup's and wb doctor's line while the user has Claude's global files and no
-    ~/.config/workbench/AGENTS.md: agents got ~/.claude/CLAUDE.md and ~/.claude/rules until
-    #1061 (2026-11-23), so what they followed from there needs its new place."""
-    claude = context.claude_home()
-    if context.user_agents_md().is_file() or not (
-            (claude / "CLAUDE.md").is_file() or (claude / "rules").is_dir()):
-        return ""
-    where = privacy.home_path(claude)
-    return (f"note: agents no longer get your {where}/CLAUDE.md or {where}/rules/: what they should "
-            f"follow in every project goes in {privacy.home_path(context.user_agents_md())}")
-
-
 def cmd_setup(a):
     """Link `wb` onto PATH and /workbench into Claude Code's skills, from wherever this copy lives:
     the marketplace's clone (~/.claude/plugins/marketplaces/workbench) for users, a git clone for
@@ -6565,16 +6532,18 @@ def cmd_setup(a):
         if at.is_symlink() and at.resolve() == to.resolve():
             print(f"ok  {at} → {to}")
             continue
-        if at.is_symlink() and a.force:
+        # a link to another copy is replaced: its refusal's --force was always the answer (#1322);
+        # a real file or directory is the user's, left as it is
+        was = os.readlink(at) if at.is_symlink() else None
+        if was is not None:
             at.unlink()
-        elif at.is_symlink() or at.exists():
+        elif at.exists():
             bad = True
-            print(f"BAD {at} is already {'a link to ' + os.readlink(at) if at.is_symlink() else 'there'}: "
-                  f"left as it is{' (--force replaces a link)' if at.is_symlink() else ''}")
+            print(f"BAD {at} is already there: left as it is")
             continue
         at.parent.mkdir(parents=True, exist_ok=True)
         at.symlink_to(to)
-        print(f"ok  {at} → {to} (made)")
+        print(f"ok  {at} → {to} " + (f"(was {was})" if was is not None else "(made)"))
     old = context.claude_home() / "skills/delegate"  # /delegate became /workbench (2026-11-17)
     if old.is_symlink() and not old.exists() and os.readlink(old).rstrip("/").endswith("skill/delegate"):
         old.unlink()
@@ -6591,8 +6560,6 @@ def cmd_setup(a):
     print("first run:")  # what a working setup still needs, each with its fix (#111)
     for line in first_run():
         print(line)
-    if note := agents_md_note():
-        print(note)
     print("next: wb doctor")
     sys.exit(1 if bad else 0)
 
@@ -6823,8 +6790,6 @@ def cmd_try(a):
         if not store.Task(name).exists:
             shutil.rmtree(d, ignore_errors=True)
         raise
-    if line := _try_api_line(store.Task(name)):
-        print(line)
     print(f"the sample project: {d}")
     print(f"hidden check, at review: {py} {shlex.quote(str(TRY / 'check.py'))} "
           f"{shlex.quote(str(store.Task(name).worktree))}")
@@ -6948,8 +6913,8 @@ def cmd_update(a):
         patches.note_install(PKG_ROOT)  # the mod reads which clone holds the patches (#1005)
     path = store.home() / "update.json"
     last = store.read_json(path, {})
-    if a.if_due and not a.check:  # it pulled and updated at once, weekly or not (#602)
-        die("--if-due goes with --check: wb update --check --if-due")
+    if a.if_due:  # it pulled and updated at once, weekly or not (#602): it only checks (#1322)
+        a.check = True
     if a.check:
         quiet = os.environ.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
         if a.if_due and (quiet or time.time() - last.get("checked_at", 0) < UPDATE_EVERY):
@@ -7478,9 +7443,6 @@ def cmd_doctor(a):
               "needs the room unloads it (after it goes idle). If others use this Ollama, "
               f"{models.overrides_path().name}'s keep_loaded lists models wb never unloads, and "
               "gpu_gb (when the GPU budget is unknown) lets a model that fits beside them leave them loaded")
-        if not models.lease_shared():
-            print("--  if another account on this machine runs wb on this Ollama, one GPU lease for "
-                  f"all of them: sudo install -d -m 2775 -g <their group> {models.SHARED_GPU} (#393)")
     if models.lease_shared():
         print(f"--  the GPU lease is shared at {models.lease_dir()}: every account using it takes turns")
         if closed := models.unshared_lease_files():  # made under a umask 077 before #802
@@ -7503,16 +7465,12 @@ def cmd_doctor(a):
                     and not (Path(out) / "x").exists())
         line(held, f"agents write only in their lane (Landlock ABI {v})" if held else
              f"the lane didn't hold a write outside it: {r.stderr.strip()[-200:] or 'the write went through'}")
-        for gap in lane.gaps(v):  # what this kernel's Landlock can't confine (the 2026-11-16 audit)
+        for gap in lane.gaps(v):  # what this kernel's Landlock breaks (the 2026-11-16 audit)
             print(f"--  Landlock ABI {v}: {gap}")
         if gap := context.interop_gap():  # WSL: a Windows program escapes it (the 0.90 review)
             print(f"--  {gap}")
         if gap := context.home_gap():
             print(f"--  {gap}")
-        # what TCP reaches past the lane (#993, 2026-11-22): a warning, the user's own daemon
-        for port in context.listening_daemons():
-            print(f"--  port {port} listens here ({context.DAEMON_PORTS[port]}): the lane doesn't "
-                  "stop TCP, so an agent can reach it")
     else:
         print("--  agents' writes outside their lane and reads of credentials aren't refused here "
               "(no Landlock): only OpenCode's file tools keep to it; " +
@@ -7534,8 +7492,6 @@ def cmd_doctor(a):
     line(skill.exists(), f"/workbench skill at {skill.parent}" if skill.exists() else
          f"/workbench isn't in {skill.parent.parent}: wb setup links it")
     elsewhere("/workbench", skill.parent, PKG_ROOT / "skill/workbench")
-    if note := agents_md_note():
-        print(note)
     try:  # information only: a mod loaded another way (--plugin-dir, a dev mod) isn't listed here
         listed = any(k.startswith("workbench@") for k in json.loads(
             (context.claude_home() / "plugins/installed_plugins.json").read_text()).get("plugins", {}))
@@ -8221,11 +8177,12 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_trial)
     s = sub.add_parser("setup", help="link wb onto PATH and /workbench into Claude Code's skills, "
                                      "from this copy")
-    s.add_argument("--force", action="store_true", help="replace links that point elsewhere")
+    # a link that points elsewhere is replaced by default (#1322); kept for old callers
+    s.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
     s.set_defaults(f=cmd_setup)
     s = sub.add_parser("update", help="update workbench (wb, the skill and the mod) from its origin")
     s.add_argument("--check", action="store_true", help="only say whether there is an update")
-    s.add_argument("--if-due", action="store_true", help="with --check: ask origin at most weekly")
+    s.add_argument("--if-due", action="store_true", help="check (as --check), asking origin at most weekly")
     s.add_argument("--stop", action="store_true", help="stop the running tasks first; each one's "
                    "session is told to wb resume it")
     s.set_defaults(f=cmd_update)
@@ -8252,7 +8209,9 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--title", required=True, help="the pull request's title")
     x.add_argument("--body-file", required=True, help="its body: .github/pull_request_template.md, filled in")
     x.add_argument("--draft", action="store_true", help="open it as a draft")
-    x.add_argument("--anyway", action="store_true", help="send a commit whose Scope trailer is me")
+    # no refusal needs it since #1322 (a Scope: me commit is the dialog's to say); kept for old
+    # callers, and the dialog's approval still matches it (patches._approved)
+    x.add_argument("--anyway", action="store_true", help=argparse.SUPPRESS)
     x = ss.add_parser("check", help="run one patch's own tests on plain upstream: has upstream fixed it "
                       "another way? (drops nothing)", allow_abbrev=False)
     x.add_argument("commit", help="one of branch local's patches")

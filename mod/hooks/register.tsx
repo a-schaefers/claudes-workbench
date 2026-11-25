@@ -1549,6 +1549,21 @@ export function shownCommand(command: string, aim: Aim): string {
 
 type Sending = { question: string; approval?: Row } | { deny: string }
 
+// A commit's `Scope: me` trailer, said in the question: wb patch send refused it unless --anyway,
+// a second yes after this dialog's (#1322). The branch's commits no remote-tracking ref has: those
+// over upstream, as wb patch send counts them.
+const SLUG_RE = /^[a-z0-9][a-z0-9-]*$/
+const PERSONAL = 'A personal patch: a commit\'s Scope trailer is me.'
+async function personal($: any, wt: string): Promise<boolean> {
+  try {
+    const r = await $.process.run(['git', '-C', wt, 'log', '--format=%(trailers:key=Scope,valueonly,separator=%x2C)',
+      'HEAD', '--not', '--remotes', '--'], { timeoutMs: 5000 })
+    return r.exitCode === 0 && String(r.stdout ?? '').split(/[\n,]/).some(x => x.trim().toLowerCase() === 'me')
+  } catch {
+    return false
+  }
+}
+
 // The question: what goes public, word for word. For wb patch send its title and the body's
 // start too, which the command line only names, and what the gate tells wb it approved; one
 // whose title or body it can't read is refused, never asked about (#1005)
@@ -1566,8 +1581,9 @@ async function sendQuestion($: any, command: string, slug: string, aim: Aim, hom
   if (text === undefined) return { deny: NOT_SHOWN(`can't read ${path}`) }
   const lines = text.split('\n')
   const body = lines.slice(0, BODY_LINES).join('\n') + (lines.length > BODY_LINES ? '\n…' : '')
+  const mine = SLUG_RE.test(args.slug) && await personal($, `${mem.root}/upstream/${args.slug}`)
   return {
-    question: `${head}\n\nTitle: ${args.title}\n\nBody:\n${body}\n\nSend it?`,
+    question: `${head}\n\n${mine ? `${PERSONAL}\n\n` : ''}Title: ${args.title}\n\nBody:\n${body}\n\nSend it?`,
     approval: { slug: args.slug, title: args.title, body_file: path, body: text, draft: args.draft, anyway: args.anyway },
   }
 }

@@ -3980,6 +3980,8 @@ test('Claude\'s own calls in a task\'s worktree are kept for wb as they begin, e
 const SLUG = 'a-schaefers/claudes-workbench'
 const SOURCE = '/home/u/.local/share/workbench/source'
 const MARKET = '/home/u/.claude/plugins/marketplaces/workbench'
+const GIT_LOG = '/test/git-log'  // what upstreamWorld's `git -C <dir> log` prints
+
 function upstreamWorld(on: any, files: Record<string, string>) {
   const w = { cwd: SOURCE, answer: "Don't send" as string | null, asked: [] as string[], options: [] as unknown[], gits: [] as string[] }
   files['/wb/patches.json'] = JSON.stringify({ source: SOURCE, upstream: SLUG })
@@ -3994,6 +3996,8 @@ function upstreamWorld(on: any, files: Record<string, string>) {
   on('session.cwd', () => ({ value: w.cwd }))
   on('ui.toast', () => ({ value: undefined }))
   on('process.run', (_: any, e: any) => {
+    // the Scope trailers of a send's branch (#1322): a test sets them, else none
+    if (e.argv[0] === 'git' && e.argv[3] === 'log') return { value: { exitCode: 0, stdout: files[GIT_LOG] ?? '', stderr: '' } }
     if (e.argv[0] === 'git' && e.argv[3] === 'remote') {
       w.gits.push(e.argv[2])
       const url = origins[e.argv[2]]
@@ -4270,6 +4274,19 @@ test('#1005: "Send it" on wb patch send tells wb what was approved, and nothing 
   expect((await bash(send, '/home/u/project')).deny).toBeUndefined()
   expect(JSON.parse(files['/wb/send-ok.json']!)).toEqual({ slug: 'fix-push', title: 'Fix the push', body_file: '/home/u/pr.md',
     body: 'line one\nline two\n', draft: true, anyway: false, at: expect.any(Number) })
+  await clock.advance(1000)
+})
+
+test('#1322: a Scope: me commit on the branch wb patch send sends is said in its one dialog', async ($, on) => {
+  // wb patch send refused it unless --anyway, a second yes after the dialog's: now the dialog says it
+  const { clock, bash, files } = await gateProbe($, on)
+  files['/home/u/pr.md'] = 'the body\n'
+  files[GIT_LOG] = 'everybody\nme\n'
+  const send = 'wb patch send fix-push --title "Fix the push" --body-file ../pr.md'
+  const mine = await bash(send)
+  expect([mine.asked, mine.question]).toEqual([1, expect.stringContaining("A personal patch: a commit's Scope trailer is me.\n\nTitle: Fix the push")])
+  files[GIT_LOG] = 'everybody\n\n'
+  expect((await bash(send)).question).not.toContain('personal patch')
   await clock.advance(1000)
 })
 

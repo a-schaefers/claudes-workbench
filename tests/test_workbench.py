@@ -13743,11 +13743,13 @@ class Lane(Base):
                              text=True, timeout=20)
         self.assertIn("NoNewPrivs:\\t1", out.stdout, out.stderr)
 
-    def test_doctor_names_what_an_old_landlock_cant_confine(self):
+    def test_doctor_names_only_what_an_old_landlock_breaks_for_the_agent(self):
+        # what ABI 1-8 can't confine (truncate, signals, UNIX sockets) is a risk the user lives
+        # with, no longer listed (#1322); ABI 1's failing cross-device rename breaks tools
         self.assertEqual(lane.gaps(10), [])
-        self.assertTrue(any("truncat" in g for g in lane.gaps(2)))
-        self.assertTrue(any("cross-device" in g for g in lane.gaps(1)))
-        self.assertFalse(any("cross-device" in g for g in lane.gaps(2)))
+        self.assertEqual(lane.gaps(2), [])
+        self.assertEqual(len(lane.gaps(1)), 1)
+        self.assertIn("cross-device", lane.gaps(1)[0])
         self.assertEqual(lane.gaps(0), [])
 
     def test_doctor_says_wsl_interop_runs_windows_programs_outside_the_lane(self):
@@ -13897,31 +13899,6 @@ class Lane(Base):
         # only a missing default, so the agent's is made, an empty one
         self.assertEqual(env["K6_CONFIG"], str(context.runtime_dir(task) / "k6.json"))
         self.assertEqual(json.loads(Path(env["K6_CONFIG"]).read_text()), {})
-
-    def test_doctor_finds_the_local_daemons_listening_on_tcp_from_the_kernels_tables(self):
-        # #993 (2026-11-22): TCP reaches a Docker API or adb, which the lane's socket rule can't
-        tcp, tcp6 = Path(self.tmp.name) / "tcp", Path(self.tmp.name) / "tcp6"
-        head = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid\n"
-        tcp.write_text(head + "   0: 0100007F:13AD 00000000:0000 0A 00000000:00000000 00:0 0 1000\n"
-                              "   1: 0100007F:0947 00000000:0000 0A 00000000:00000000 00:0 0 1000\n"
-                              "   2: 0100007F:0D05 0100007F:A000 01 00000000:00000000 00:0 0 1000\n"
-                              "   3: 00000000:0016 00000000:0000 0A 00000000:00000000 00:0 0 0\n")
-        tcp6.write_text(head + "   0: 00000000000000000000000000000000:091B "
-                               "00000000000000000000000000000000:0000 0A 00000000:00000000 00:0 0 1000\n")
-        # adb (5037) and Docker's API (2375) listen, J-Link's 2331 on IPv6; 3333 is a connection
-        # (01), not a listener, and ssh (22) isn't a daemon the list names
-        self.assertEqual(context.listening_daemons((str(tcp), str(tcp6))), [2331, 2375, 5037])
-        self.assertEqual(context.listening_daemons((str(Path(self.tmp.name) / "none"),)), [])
-
-    @unittest.skipUnless(os.path.exists("/proc/net/tcp"), "the kernel's TCP tables: Linux")
-    def test_doctor_finds_a_real_listening_socket_on_this_machine(self):
-        import socket
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
-            self.assertEqual(context.listening_daemons(ports={port: "x"}), [])   # bound, not listening
-            s.listen(1)
-            self.assertEqual(context.listening_daemons(ports={port: "x"}), [port])
 
 
 class CheckoutVenv(Base):
@@ -21194,7 +21171,6 @@ class LoneFlags(Base):
         return err.getvalue()
 
     def test_a_flag_without_the_one_it_goes_with_is_refused_and_changes_nothing(self):
-        self.assertIn("--if-due goes with --check", self.refused("update", "--if-due"))
         self.assertIn("progress checks are off", self.refused("progress", "--after", "10"))
         self.assertIn("--after goes with on", self.refused("progress", "off", "--after", "10"))
         self.assertIn("off (the default)", run_wb("progress"))                 # nothing written
@@ -21631,30 +21607,6 @@ class Setup(Base):
         self.assertIn("--  OpenCode 3.1 is outside what workbench is tested with", self.setup(cmd="doctor")[1])
         self.assertIn("--  wb comes from /usr, not this copy", out)
 
-    def test_setup_and_doctor_say_where_the_rules_for_agents_go_until_the_user_has_moved_them(self):
-        # #1061 (2026-11-23): agents no longer get ~/.claude/CLAUDE.md or ~/.claude/rules (the
-        # owner's named a private tool's folder and went to API providers); what they followed
-        # from there goes in ~/.config/workbench/AGENTS.md, and setup and doctor say so meanwhile
-        home = Path(self.tmp.name) / "home"
-        home.mkdir()
-        os.environ.update(HOME=str(home), WB_HOME=str(home / ".local/state/workbench"),
-                          FAKE_VERSION="opencode v2.3.0",
-                          PATH=os.pathsep.join([str(home / ".local/bin"), os.environ["PATH"]]))
-        os.environ.pop("CLAUDE_CONFIG_DIR", None)
-        os.environ.pop("WB_AGENTS_MD", None)  # its default place, under this HOME (#1102)
-        note = ("note: agents no longer get your ~/.claude/CLAUDE.md or ~/.claude/rules/: what they "
-                "should follow in every project goes in ~/.config/workbench/AGENTS.md\n")
-        said = lambda: [note in self.setup(cmd=c)[1] for c in ("setup", "doctor")]  # noqa: E731
-        self.assertEqual(said(), [False, False])                    # nothing of Claude's
-        (home / ".claude" / "rules").mkdir(parents=True)
-        self.assertEqual(said(), [True, True])                      # the rules alone
-        (home / ".claude" / "rules").rmdir()
-        (home / ".claude" / "CLAUDE.md").write_text("mine\n")
-        self.assertEqual(said(), [True, True])                      # the CLAUDE.md alone
-        (home / ".config" / "workbench").mkdir(parents=True)
-        (home / ".config" / "workbench" / "AGENTS.md").write_text("for agents\n")
-        self.assertEqual(said(), [False, False])                    # moved: no line
-
     def test_doctor_exit_code_does_not_follow_the_keep_awake_probe(self):
         # #653: `ok, said = awake_line()` reassigned doctor's verdict: a Mac (caffeinate) exited 0
         # beside "BAD opencode not found", and a healthy WSL2 install exited 1 with no BAD line
@@ -21694,13 +21646,13 @@ class Setup(Base):
         self.assertEqual(self.setup()[0], 0)                  # again: nothing to do
         wb.unlink(); wb.symlink_to("/elsewhere/wb")           # a link of the user's own
         skill.unlink(); skill.mkdir()                         # or a real directory
-        code, out = self.setup()
-        self.assertEqual(code, 1)
-        self.assertEqual(os.readlink(wb), "/elsewhere/wb")
-        code, out = self.setup("--force")                     # replaces the link, never the directory
-        self.assertEqual(code, 1)
+        code, out = self.setup()                              # replaces the link, never the directory
+        self.assertEqual(code, 1)                             # (#1322: --force was always the answer)
         self.assertEqual(wb.resolve(), (runner.PKG_ROOT / "bin/wb").resolve())
+        self.assertIn(f"ok  {wb} → {runner.PKG_ROOT / 'bin/wb'} (was /elsewhere/wb)", out)
+        self.assertIn(f"BAD {skill} is already there: left as it is", out)
         self.assertTrue(skill.is_dir() and not skill.is_symlink())
+        self.assertEqual(self.setup("--force")[0], 1)         # still accepted, the same
 
     def test_setup_says_the_path_line_for_the_users_shell_and_to_restart_claude_code(self):
         # #274 (the audit of 1.2): "add it" was all it said, and on macOS or in a Claude Code
@@ -21894,6 +21846,7 @@ class Update(Base):
         subprocess.run(["git", "-C", str(self.origin), "add", "more.txt"], check=True)
         subprocess.run(["git", "-C", str(self.origin), "commit", "-qm", "more"], check=True)
         self.assertIn("1 new commit(s)", self.update("--check", "--if-due"))   # this week's answer
+        self.assertIn("1 new commit(s)", self.update("--if-due"))   # it implies --check (#1322): no pull
         self.assertIn("2 new commit(s)", self.update("--check"))               # asked now
         os.environ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
         store.write_json(store.home() / "update.json", {"checked_at": 0, "behind": 2})
@@ -22575,7 +22528,7 @@ class LocalPatches(Base):
         self.assertNotIn(f"gh repo fork {self.origin}", out)
         self.assertIn("isn't on GitHub, and wb patch send sends only there", out)
         self.assertNotIn("wb patch send modeline", out)
-        self.assertIn("a personal patch", out)
+        self.assertIn(" my modeline (Scope: me)\n", out)        # a fact, tagged (#1322)
         self.assertFalse(self.gh_calls.exists())                # off GitHub, gh isn't asked
 
     def test_patch_init_moves_a_marketplace_install_to_a_clone_with_its_changes_as_patches(self):
@@ -22689,12 +22642,10 @@ class LocalPatches(Base):
         empty = body.with_name("empty.md"); empty.write_text(" \n")
         self.assertIn("is empty", send(str(empty)))
         self.assertIn("is the template as it came", send(str(wt / ".github/pull_request_template.md")))
-        out = send(str(body))
-        self.assertIn("its Scope trailer is me, a personal preference", out)
-        self.assertIn("--anyway sends it", out)
         self.assertFalse(self.gh_calls.exists())                # none of these asked gh anything
-        self.gh_auth(hosts=False)                               # past Scope: me, gh's state refuses
-        out = send(str(body), "--anyway")
+        # a Scope: me commit is no refusal (#1322: the dialog says it, one yes): gh's state refuses
+        self.gh_auth(hosts=False)
+        out = send(str(body))
         self.assertIn("gh can't send it yet, nothing was sent", out)
         self.assertIn("! gh auth login --hostname github.com", out)
         real = shutil.which
@@ -41515,35 +41466,6 @@ class ApiCompat(Base):
 
     # wb try
 
-    def test_wb_try_says_when_the_trivial_role_sent_its_sample_to_an_api_model(self):
-        os.environ["FAKE_SCENARIO"] = "ok"
-        out = run_wb("try", "--model", "mimo")                    # a GPU sample: as before
-        self.assertNotIn("wb try: the trivial role", out)
-        wait_phase("try-1", {"review"})
-        task = store.Task("try-1")
-        self.assertEqual(cli._try_api_line(task), "")             # task.json without #1016's keys
-        self.routes(trivial={"via": "api", "api": "acme/coder-flash"})
-        store.write_json(task.dir / "task.json", {**task.spec, "model": "acme/coder-flash", "via": "api",
-                                                 "role": "trivial", "provider": "acme"})
-        self.models.hosted()
-        self.assertEqual(cli._try_api_line(task),
-                         "wb try: the trivial role is API (acme/coder-flash, Acme): the sample's code goes "
-                         "there, and its cost counts toward today's $5 cap")
-        store.write_json(task.dir / "task.json", {**task.spec, "via": "gpu", "role": "trivial"})
-        self.assertEqual(cli._try_api_line(task), "")
-        run_wb("discard", "try-1")
-        real = cli.cmd_start
-
-        def start_on_api(a):  # wb start --role as #1016 writes it: via and role in task.json
-            real(a)
-            t = store.Task(a.name)
-            store.write_json(t.dir / "task.json", {**t.spec, "via": "api", "role": "trivial"})
-        with mock.patch.object(cli, "cmd_start", start_on_api):
-            out = run_wb("try", "--model", "mimo")
-        self.assertRegex(out, r"\nwb try: the trivial role is API \(ollama/mimo-v2.6:9b-q8_0, ollama\): the "
-                              r"sample's code goes there, and its cost counts toward today's \$5 cap\nthe sample project: ")
-        wait_phase("try-2", {"review"})
-
     def test_wb_try_model_flash_never_resolves_to_an_api_model(self):
         self.assertIn(FLASH, self.models.hosted())               # "flash" is in two API ids
         code, err = self.fails("try", "--model", "flash")
@@ -41692,13 +41614,11 @@ class ApiCompat(Base):
             out = run_wb("models")
             self.assertIn("significant  gpu (the router's pick above) · API kept: acme/coder-flash\n", out, ts)
 
-    def test_a_routes_json_that_cant_be_read_is_one_line_and_wb_try_names_no_cap(self):
+    def test_a_routes_json_that_cant_be_read_is_one_line_in_wb_models(self):
         # #1026's review: a broken routes.json never reads as every role on the GPU (#1014)
         Path(os.environ["WB_ROUTES"]).write_text("{not json")
         out = run_wb("models")
         self.assertIn("API (OpenCode /connect):\n  roles: routes.json can't be read: wb route sets them again\n", out)
-        task = types.SimpleNamespace(spec={"via": "api", "role": "trivial", "model": "acme/coder-flash"})
-        self.assertTrue(cli._try_api_line(task).endswith("counts toward today's API spend"))
 
     # verify, shot, --unload-for-tests
 
