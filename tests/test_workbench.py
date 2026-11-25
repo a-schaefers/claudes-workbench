@@ -30856,8 +30856,8 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
     its server's `seen` and answers as its server's `mode` says: "ok" (an OpenAI SSE answer,
     or Anthropic's for /messages), "status" (`status`, a body echoing part of the key the way
     OpenAI's 401 does, `retry_after`), "chunks" (`chunks` SSE pieces `gap` s apart; the
-    Responses API's events for /responses), "raw" (`status`, `ctype`, then `pieces` sent as they
-    are, one chunk each, the end `tail` s later), with `served` (the response's model) and `by` (OpenRouter's
+    Responses API's events for /responses), "raw" (the head `head` s late, `status`, `ctype`,
+    then `pieces` sent as they are, one chunk each, the end `tail` s later), with `served` (the response's model) and `by` (OpenRouter's
     provider)."""
     protocol_version = "HTTP/1.1"
 
@@ -30877,6 +30877,7 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
         s.seen.append({"method": "POST", "path": self.path, "headers": dict(self.headers),
                        "body": json.loads(raw)})
         if s.mode == "raw":
+            time.sleep(getattr(s, "head", 0))  # the provider still thinking (#1349)
             self.send_response(s.status)
             self.send_header("Content-Type", s.ctype)
             self.send_header("Transfer-Encoding", "chunked")
@@ -38885,6 +38886,57 @@ class ApiSpendKeyhole(_KeyholeTest):
             self.cut(kh, read=20)
             time.sleep(1.5)
         self.assertEqual(usage, [])
+
+    def test_a_response_cut_while_the_provider_is_silent_is_booked_once_when_the_keyhole_closes(self):
+        # #1349 (bar loop round 9, 2026-11-24): #1276's cut was booked only when a write to
+        # OpenCode failed, which waits for the provider's next chunk; DeepInfra sends none while
+        # it writes a tool call, so wb stop, wb discard and wb stop --all closed the keyhole and
+        # the runner exited with the request never booked: the day cap and `paid` under the bill
+        from workbench import meter
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {}})
+        m = self.model()
+        m.config = {"cost": [{"input": 3, "output": 15}]}
+        mt = meter.Meter(self.task, m)
+        mt.begin(1)
+        usage = []
+        kh = self.keyhole(m, on_usage=lambda u: (mt.on_usage(u), usage.append(u)))
+        delta = {"model": m.name, "choices": [{"index": 0, "delta": {"content": "x" * 40}}]}
+        self.up.mode, self.up.status, self.up.ctype = "raw", 200, "text/event-stream"
+        self.up.pieces, self.up.tail = [f"data: {json.dumps(delta)}\n\n".encode()], 2
+        size = self.cut(kh, read=20)                             # one chunk, then silence
+        time.sleep(0.5)
+        self.assertEqual(usage, [])                              # its handler waits on the provider
+        kh.close()                                               # drive's finally, then the exit
+        (u,) = usage
+        self.assertEqual((u["prompt_tokens"], u["cut"]), (-(-size // 4), True))
+        self.assertGreaterEqual(u["completion_tokens"], 10)      # the delta's 40 characters
+        time.sleep(2.5)                                          # the provider's end, OpenCode gone
+        self.assertEqual(len(usage), 1)                          # once
+        rows = store.read_jsonl(meter.ledger_path())[0]
+        self.assertEqual([(r["kind"], r["cut"]) for r in rows], [("step", True)])
+
+    def test_a_request_the_provider_hasnt_answered_when_the_keyhole_closes_is_booked_as_its_input(self):
+        # #1349: a request sent on and still waiting for its answer's head (the provider
+        # thinking) when the runner exits is billed its input all the same
+        usage = []
+        kh = self.keyhole(on_usage=usage.append)
+        self.up.mode, self.up.status, self.up.ctype = "raw", 200, "text/event-stream"
+        self.up.head, self.up.pieces = 2, [b"data: [DONE]\n\n"]
+        body = json.dumps({"model": kh.model.name, "stream": True}).encode()
+        conn = http.client.HTTPConnection("127.0.0.1", kh.port, timeout=30)
+        self.addCleanup(conn.close)
+        conn.request("POST", urllib.parse.urlsplit(kh.base).path + "/chat/completions", body=body,
+                     headers={"Authorization": f"Bearer {kh.token}",
+                              "Content-Type": "application/json"})
+        deadline = time.monotonic() + 10
+        while not self.up.seen and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(len(self.up.seen), 1)
+        kh.close()
+        self.assertEqual(usage, [{"prompt_tokens": -(-len(body) // 4), "completion_tokens": 0,
+                                  "cut": True}])
+        time.sleep(2.5)                                          # its answer, after the close
+        self.assertEqual(len(usage), 1)
 
     def test_a_whole_answer_whose_last_byte_finds_opencode_gone_is_booked_once_and_not_as_cut(self):
         # #1276's estimate is booked when a write fails before the end: the end's own last write

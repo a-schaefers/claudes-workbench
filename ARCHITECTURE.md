@@ -764,7 +764,15 @@ cache kept where it came), the output at least what streamed (the characters und
 running provider figure in it is partial, so never that), shown `≈`. Erring high: every input token
 at the input price, cache reads too. The end's own last write failing is no cut (its usage was
 booked just before), and a request still in the provider's queue (keep-alives only, `queued`) never
-ran, so books nothing.
+ran, so books nothing. **Cut by the runner's exit** (#1349, 2026-11-24): a handler writes to
+OpenCode only when the provider's next chunk comes, and DeepInfra sends none while it writes a tool
+call, so on `wb stop`, `wb discard` and `wb stop --all` the runner closed the keyhole and exited
+(the handlers are daemon threads) with that request never booked. Now each request is in flight
+(`Handler.lift`, `Keyhole._flying`) from before it is sent until its answer ends or is an error
+(`land`), and `Keyhole.close()` with no reason (drive's `finally`, before the runner exits) books
+each one still in flight through the same `Handler.book_cut`: what streamed, or a request still
+waiting for its answer's head as its input; once, under `Keyhole._booking`, so the handler's own
+booking never lands too, and nothing of it is booked after. A request after the close isn't sent.
 Without the keyhole's view (a model `runner.needs_keyhole` starts none for: an Ollama cloud
 model, a keyless free one), OpenCode's compaction requests count only as far as its `info.cost` does. A catalog price below a backend's
 (an OpenRouter endpoint priced over its listing, without `usage.cost`) meters under. The day cap's
@@ -883,7 +891,8 @@ cap is reached: ≈$5.02 of $5 today`; never within one `request_floor` of it he
 `stop_reason(task, ahead=True)`, `_go_on`'s, stops: a request the room let out is never cut, #1150; or no cap at all, `meter.no_cap()`: `NO_CAP`, or `UNREADABLE`
 for a routes.json that can't be read; or no price, `<id>: NO_PRICE`). It calls `CURRENT["keyhole"].close(why)` first, so every
 request from then on gets a 400 with `{"error": {"message": "workbench: <why>"}}`, nothing sent
-upstream (`keyhole.Keyhole.close(reason)`; with no reason it shuts the server down as before),
+upstream (`keyhole.Keyhole.close(reason)`; with no reason it shuts the server down and books each
+request still in flight as cut, #1349, above),
 then sets `out["stuck"]`/`out["guard"]` and `_stop`s OpenCode, which ends a response still
 streaming: the round stops within one tick of the crossing step, never at the silence limit.
 OpenCode 2.3.2 doesn't retry that 400 (`provider.invalid-request`, exit 1 at once, through the
@@ -7276,7 +7285,7 @@ naming its role and model (the runners are the test's: the leases taken as a run
 `spawn_runner` patched, task.json then naming the API model) and runs `runner.drive` in the test's process, the keyhole `drive`
 starts (#1015) recording each `close` told a reason (`record_closes`); `ApiSpendKeyhole` drives the keyhole's `close(reason)`, `room` and one usage per
 response against `_KeyholeTest`'s upstream (a stream OpenCode drops mid-answer, `cut`: its estimate in the
-ledger and status `api`, Anthropic's `message_start` input kept, none for a queued one or a whole answer's last write, #1276; DeepInfra's own stream shape too, from a real request on
+ledger and status `api`, Anthropic's `message_start` input kept, none for a queued one or a whole answer's last write, #1276; one still in flight when the keyhole closes, a silent provider's (the upstream's `tail`) or one still waiting for its head (`head`), booked once by the close, #1349; DeepInfra's own stream shape too, from a real request on
 2026-11-24: `usage: null` until a last `choices: []` chunk with `estimated_cost`, its raw `pieces`
 into a real `Meter`, then OpenCode's catalog figure booking no top-up, #1165; then the review's: a
 `step_finish` ahead of its response's usage leaving `paid` at the meter, a second `Meter` for round
