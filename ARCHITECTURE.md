@@ -5227,7 +5227,7 @@ asks before `wb start` runs, from `wb route --dry-run --start <its args>` (`cli.
 place of a dialog line, so the user is never asked to approve a start that would be refused; so it does for
 Agents on GPU (`routes.agents_gpu()`, exit 3, wb start's own line, #1213), `meter.refusal`, a model that can't run (`cli._cant_run`, a rate limit or outage passing), a `--base` naming no
 commit (`cli._no_base`, exit 1), a standing commands.json `copy` that holds a credential (`cli._standing_gap`, exit 3, #1227, #1322) (#1104);
-wb start's first refusals, the same code (`cli._start_refusals`: a taken or malformed name, the backlog and group, not a repo or a task's worktree,
+wb start's first refusals, the same code (`cli._start_refusals`: a taken or malformed name, the backlog and group, a report's or run item's flags (`_report_args`, whose card's role the dialog's role then is, `_run_item`, #1278), a run's name, not a repo or a task's worktree,
 the lane, a missing, non-UTF-8 or empty spec, OpenCode missing or 1.x, noexec; stdin's spec is left to wb start), no git identity (`cli.NO_IDENTITY`)
 and no instructions file (`cli._need_claude_md`, its notes kept off the JSON) (#1395); the provider's slots full only queue the start (#1322). A linked worktree of a local-only repo is that repo
 (the git-dir match). `wb next`, `wb feedback` and `wb resume` on an API task whose repo became local-only since it started
