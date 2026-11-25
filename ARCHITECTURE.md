@@ -7761,7 +7761,9 @@ on a phone and the rail on the desktop (and with an iPhone's sideways insets, ap
 `env()`, each tab 44 px or wider, #1413), the hash and Back, the Chat tab's badge, the bar hidden with the keyboard
 (a visual viewport made short by hand; on the Pixel the whole page too, #1414), the cards' styles kept out of the chat (the intro's `<code>`), `window.WB`, and the gear's old checks from Settings and Stats (`goTo`);
 then each view's own, `e2e_stats.mjs` and `e2e_settings.mjs` (`check(page, ctx)`, once per device). `e2e_stats.mjs` (#1285): a fixture
-results.jsonl's task count under This week, the labels in `statsLines`' order and none of the rows
+results.jsonl's task count under This week (waited for whole, `3 tasks · 2 landed (67%)`: shown again the view
+draws its last read at once, and the savings check's feed said `3 tasks` too, so a wait on that ended before the new
+read came, #1418), the labels in `statsLines`' order and none of the rows
 #1322 took (Streak, Last 30 days, Bests, Milestone, Questions, a score or estimate); `/api/top` opened on showing Stats with Live view on, let go on leaving it, never opened
 with Live view off; Now from fixed ticks (the GPU and RAM cards, the running rows, the rack folded,
 the queue); shown out of reach, `Not updated` with Try again, read again at the `online` event with no tab switch

@@ -85,7 +85,9 @@ export async function check(page, { desktop, home, wb, until, check, sleep, goTo
 
     await check('Stats: with tasks in results.jsonl, This week says how many, and the history keeps the pane\'s labels and order', async () => {
       await again()
-      await until(async () => (await rows()).some(r => r.label === 'This week' && /\b3 tasks\b/.test(r.text)))
+      // waited for in full: shown again, the view draws its last read at once, and the savings
+      // check's feed said "3 tasks" too, so the wait ended before this read came (#1418, 2026-11-25)
+      await until(async () => (await rows()).some(r => r.label === 'This week' && /^3 tasks · 2 landed \(67%\)/.test(r.text)))
         .catch(async () => { throw new Error(JSON.stringify(await rows()) + ' ' + await history()) })
       const got = await rows()
       const say = () => JSON.stringify(got)
