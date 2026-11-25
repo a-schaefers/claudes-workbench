@@ -7,9 +7,9 @@ on). Kept in ~/.config/workbench/routes.json (`$WB_ROUTES`), with one day cap (`
 missing file or role is the GPU, exactly as before roles; a file that can't be read is an error,
 never "all GPU": that would move the user off their API choice without a word.
 
-Claude never changes the API side on its own: under Claude Code (CLAUDECODE=1), or an OpenCode
-driver (store.under_model, #1309), `wb route` applies such a change only when the host's dialog
-approved exactly it (`approved`, route-ok.json in
+Claude never changes the API side on its own: under Claude Code (CLAUDECODE=1), an OpenCode
+driver (#1309) or in an agent's shell (WB_TASK, #1310; store.under_model), `wb route` applies such
+a change only when the host's dialog approved exactly it (`approved`, route-ok.json in
 $WB_HOME, one-shot, fresh for ROUTE_OK_SECS). A GPU model pin needs no dialog; the mod echoes
 every change as a [workbench] row. A role's `said`/`by`/`ts` record its last gated change (who
 sent its code where), `gpu_by`/`gpu_ts` its last change that needed no yes: a pin never rewrites
@@ -61,8 +61,9 @@ BUSY = ("wait", "api")
 BUSY_LINE = "GPU busy: on the role's API model, as you set"  # wb start's line when it applies
 THINKING = ("off", "on")
 AUTO = "auto"  # the GPU model the router picks: today's behaviour, the default
-# who made a role's last change (`by`, `gpu_by`): `opencode`, an OpenCode driver's (#1309)
-BY = ("dialog", "pane", "terminal", "claude", "opencode")
+# who made a role's last change (`by`, `gpu_by`): `opencode`, an OpenCode driver's (#1309);
+# `agent`, an agent's own call on the dialog's yes (#1310)
+BY = ("dialog", "pane", "terminal", "claude", "opencode", "agent")
 STAMPS = ("said", "by", "ts", "gpu_by", "gpu_ts")  # a role's record of its changes (stamp)
 CAP_OFF = "off"  # `wb route cap off`: no day cap (#1023), refused while anything can spend
 DAY_USD_SUGGEST = 5  # the cap the first API role takes unless --day-usd gives one (#1322)
@@ -994,7 +995,7 @@ def resolve(role: str, size: str, wanted: str | None, stack=(), name: str | None
             gate(m)
         if why := meter.refusal(m, tokens=first, asked=True):  # before the dialog: never ask for a start that is refused
             raise Refused(why)
-        approved = store.under_model()  # the gate above asked (cli.start_gate)
+        approved = store.under_model()  # the gate above asked (cli.start_gate), an agent's call too (#1310)
         return m, models.status(m), "asked for", {
             "via": "api", "role": role, "provider": m.provider, "provider_name": models.provider_name(m),
             "thinking": "off", "thinking_shown": thinking_of(m, "off"),

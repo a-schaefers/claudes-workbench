@@ -688,6 +688,18 @@ REMOTE_CACHES_OFF = {"NX_SKIP_REMOTE_CACHE": "true", "PANTS_REMOTE_CACHE_WRITE":
 # user's personal skills from the agent by its own rules (context.denied_skills), which are made
 # for OpenCode's default.
 CLAUDE_CODE_OFF = ("OPENCODE_DISABLE_CLAUDE_CODE", "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS")
+# And the driver's own marks (#1310, 2026-11-25): `wb start` run from an OpenCode session's shell
+# carries what OpenCode 2.4.1's shell tool sets on every command (core/src/tool/plugin/shell.ts:
+# AGENT=1, OPENCODE=1, AI_AGENT, OPENCODE_SESSION_ID; core/src/shell.ts: OPENCODE_TERMINAL=1), and
+# every agent then had the driver's session as its own, its tests too. The agent's OpenCode sets
+# each again for the agent's own session, but AI_AGENT only when unset (`||=`): Claude Code's
+# (`claude-code_…`) named every agent's shell Claude Code's. `WB_DRIVER` is the plugin's mark in
+# #1296's first design: dropped too, should a plugin set it. The rest of what a driver's shell
+# adds stays: TERM (OpenCode's own shell sets it again), NO_PROXY with the loopback hosts (the
+# agent's OpenCode adds the same), and the server password, never there (OpenCode's Env.session
+# leaves it out, its server deletes it) and SECRET_ENV's (PASSW) if it were. Who runs a wb call
+# is store.caller_kind's, WB_TASK first: the agent's own shell has an OPENCODE_SESSION_ID again.
+DRIVER_ENV = ("OPENCODE_SESSION_ID", "OPENCODE", "AGENT", "AI_AGENT", "OPENCODE_TERMINAL", "WB_DRIVER")
 
 
 def env_kept(name: str, value: str, through: set) -> bool:
@@ -761,7 +773,8 @@ def agent_env(task: store.Task, run: str = "") -> dict:
     """The agent's environment: its config layer, and git read-only (gitguard.py). ``run``: the
     one run it is for (WB_RUN), which sweep can then end alone."""
     through = set(context.commands_conf().get("env", []))
-    keep = {k: v for k, v in os.environ.items() if env_kept(k, v, through) and k not in CLAUDE_CODE_OFF}
+    keep = {k: v for k, v in os.environ.items()
+            if env_kept(k, v, through) and k not in CLAUDE_CODE_OFF and k not in DRIVER_ENV}
     layer = write_config_layer(task)
     env = {**keep, "PWD": str(task.workdir),  # opencode finds the project from $PWD
            "OPENCODE_CONFIG": str(layer),

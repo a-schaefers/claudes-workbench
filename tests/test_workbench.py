@@ -373,7 +373,11 @@ class Base(unittest.TestCase):
         os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
         os.environ.pop("CLAUDE_PID", None)
         os.environ.pop("CLAUDECODE", None)  # wb patch send asks for the mod's yes under it (#1005)
-        os.environ.pop("OPENCODE_SESSION_ID", None)  # or OpenCode's shell: its driver's id (#1309)
+        # nor OpenCode's shell (its driver's id, #1309), nor an agent's (#1310): run in an agent's
+        # shell (workbench delegating to itself), WB_TASK made every call an agent's, its gates
+        # asking for a yes
+        for k in runner.DRIVER_ENV + ("WB_TASK",):
+            os.environ.pop(k, None)
         # the state directory before WB_HOME names it: a thread the last test left running (its
         # chat server) wrote there in between, and mkdir found it made (seen on WSL, 2026-11-20)
         (tmp / "state").mkdir()
@@ -8409,6 +8413,50 @@ class Context(Base):
         self.assertIn("step 3 of t-ne committed", out)
         self.assertIn("feat: step three", log())
 
+    # what a `wb start` run from an OpenCode session's shell carries (OpenCode 2.4.1's shell
+    # tool, read and run on 2026-11-25), Claude Code's AI_AGENT, and the server's passwords
+    DRIVER_SHELL = {"OPENCODE_SESSION_ID": "ses_driver1310", "OPENCODE": "1", "AGENT": "1",
+                    "AI_AGENT": "claude-code_2-1_agent", "OPENCODE_TERMINAL": "1", "WB_DRIVER": "opencode",
+                    "OPENCODE_PASSWORD": "CANARY-1310-PW", "OPENCODE_SERVER_PASSWORD": "CANARY-1310-PW"}
+
+    def test_the_drivers_session_and_marks_reach_neither_the_agent_nor_its_tests(self):
+        # #1310 (2026-11-25): a `wb start` from an OpenCode driver's shell handed every agent the
+        # driver's OPENCODE_SESSION_ID and marks (env_kept keeps what isn't a credential); its own
+        # OpenCode sets them again for its own session, AI_AGENT only when unset
+        probe = ('test -z "$OPENCODE_SESSION_ID$OPENCODE$AGENT$AI_AGENT$OPENCODE_TERMINAL$WB_DRIVER'
+                 '$OPENCODE_PASSWORD$OPENCODE_SERVER_PASSWORD" && ' + TEST_CMD)
+        with mock.patch.dict(os.environ, self.DRIVER_SHELL):
+            self.start("t-drv", "ok", "--test", probe)
+            st = wait_phase("t-drv", {"review", "stuck", "failed"})
+        self.assertEqual(st["phase"], "review", (store.Task("t-drv").dir / "runner.log").read_text())
+        self.assertTrue(st["tests"]["ok"], st["tests"])                # the tests' environment too
+        run, = self.runs()
+        self.assertFalse(set(self.DRIVER_SHELL) & set(run["env_names"]), run["env_names"])
+        self.assertEqual(run["shell_marks"], {          # the agent's own shell: its own session
+            "OPENCODE_SESSION_ID": st["session"], "OPENCODE": "1", "AGENT": "1", "AI_AGENT": "opencode",
+            "OPENCODE_TERMINAL": "1", "WB_DRIVER": None, "WB_TASK": "t-drv"})
+        self.assertNotEqual(st["session"], "ses_driver1310")
+        # the passwords fall to SECRET_ENV by their names, whatever DRIVER_ENV says
+        self.assertTrue(all(runner.SECRET_ENV.search(k) for k in ("OPENCODE_PASSWORD", "OPENCODE_SERVER_PASSWORD")))
+
+    def test_a_wb_call_from_an_agents_shell_is_the_agents_though_opencode_gave_it_a_driver_session(self):
+        # #1310: OpenCode's shell tool sets OPENCODE_SESSION_ID and OPENCODE=1 on the agent's own
+        # commands, and Claude Code's CLAUDECODE=1 reaches its agents: WB_TASK ranks first
+        agents = {"WB_TASK": "t-x", "OPENCODE_SESSION_ID": "ses_agent", "OPENCODE": "1", "AGENT": "1"}
+        for env, kind in ((agents, "agent"), ({**agents, "CLAUDECODE": "1"}, "agent"),
+                          ({"CLAUDECODE": "1"}, "claude"), ({"OPENCODE_SESSION_ID": "ses_d"}, "opencode"),
+                          ({}, "terminal")):
+            with self.subTest(env=env), mock.patch.dict(os.environ, env):
+                self.assertEqual(store.caller_kind(), kind)
+                self.assertEqual(store.under_model(), kind != "terminal")
+        api = runner.models.Model(id="acme/coder", provider="acme", name="coder", base_url="",
+                                  engine="api", label="coder", kind="api")
+        with mock.patch.dict(os.environ, agents):                     # wb start's API gate asks
+            with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()):
+                cli.start_gate("t-x", api)
+            self.assertEqual(e.exception.code, 3)
+        cli.start_gate("t-x", api)                                    # a terminal's: no gate
+
 
 class StartChecks(Base):
     """What wb start and the first report say about the setup itself: an OpenCode outside the
@@ -12243,6 +12291,50 @@ class RealOpenCodeRun(Base):
         text = json.dumps(agent["messages"])
         self.assertIn("Write the answer to answer.txt", text)
         self.assertIn("Now say done.", text)
+
+    def test_a_task_started_from_an_opencode_drivers_shell_gives_its_agent_its_own_session_only(self):
+        # #1310 (2026-11-25, OpenCode 2.4.1): `wb start` run by a driver's shell tool carries the
+        # driver's OPENCODE_SESSION_ID, OPENCODE, AGENT and AI_AGENT; agent_env drops them, and the
+        # agent's own OpenCode sets them again in its shells, for its own session: so a wb call
+        # from there is told by WB_TASK, never by them (store.caller_kind)
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            dport = sock.getsockname()[1]
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        cfg = json.loads(conf.read_text())
+        cfg["provider"]["drv"] = {**cfg["provider"]["cap"], "options": {
+            "baseURL": f"http://127.0.0.1:{dport}/v1", "apiKey": "x"}, "models": {"drv": {
+                "name": "driver", "tool_call": True, "limit": {"context": 32768, "output": 1024}}}}
+        conf.write_text(json.dumps(cfg))
+        probe = 'test -z "$OPENCODE_SESSION_ID$OPENCODE$AGENT$AI_AGENT$OPENCODE_TERMINAL" && ' + TEST_CMD
+        start = shlex.join([sys.executable, str(ROOT / "bin" / "wb"), "start", "t-drv", "--spec", str(self.spec),
+                            "--repo", str(self.repo), "--model", "cap", "--trial", "--test", probe])
+        drequests = Path(self.tmp.name) / "driver-requests.jsonl"
+        driver = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"), str(dport),
+                                   str(drequests), json.dumps([{"name": "shell", "arguments": {
+                                       "command": start, "workdir": str(self.repo)}}])])
+        self.addCleanup(driver.kill)
+        marks = "printenv OPENCODE_SESSION_ID AI_AGENT WB_TASK; echo driver=${WB_DRIVER-none}"
+        self.serve([{"name": "shell", "arguments": {"command": marks}}, WRITE_42])
+        ran = subprocess.run(["opencode", "run", "--standalone", "-m", "drv/drv", "--auto", "--format", "json",
+                              "start the task"], cwd=self.repo, env={**os.environ, "PWD": str(self.repo)},
+                             capture_output=True, text=True, timeout=180)
+        ids = {json.loads(l).get("sessionID") for l in ran.stdout.splitlines() if l.startswith("{")} - {None}
+        self.assertEqual(len(ids), 1, ran.stdout + ran.stderr)          # the driver's session
+        said = json.dumps([json.loads(l) for l in drequests.read_text().splitlines()])
+        self.assertIn("started t-drv", said, said[-2000:])              # its shell ran wb start
+        st = wait_phase("t-drv", {"review", "stuck", "failed"}, timeout=180)
+        task = store.Task("t-drv")
+        self.assertEqual(st["phase"], "review", (task.dir / "runner.log").read_text())
+        self.assertTrue(st["tests"]["ok"], st["tests"])                  # nor its tests' environment
+        reqs = [json.loads(l) for l in self.requests.read_text().splitlines()]
+        last = max(reqs, key=lambda r: len(r.get("messages", [])))
+        shell = next(json.dumps(m["content"]) for m in last["messages"] if m.get("role") == "tool")
+        self.assertIn(st["session"], shell)                              # the agent's own session
+        self.assertNotIn(ids.pop(), shell)                               # never the driver's
+        self.assertIn("opencode\\nt-drv\\ndriver=none", shell)
+        with mock.patch.dict(os.environ, {"WB_TASK": "t-drv", "OPENCODE_SESSION_ID": st["session"], "OPENCODE": "1"}):
+            self.assertEqual(store.caller_kind(), "agent")
 
     def test_neither_the_users_default_agent_nor_their_own_wb_code_lifts_a_deny_in_any_round(self):
         # #1290 (2026-11-24, OpenCode 2.3.2): with no --agent, `opencode run` took the agent from
@@ -37273,6 +37365,22 @@ class Routes(Base):
         self.assertEqual(self.doc()["roles"]["trivial"]["by"], "dialog")
         self.assertEqual(self.route("trivial", "gpu")[0], 3)      # the next change asks again
 
+    def test_an_agents_wb_route_needs_the_dialogs_yes_though_its_shell_has_no_claude_code(self):
+        # #1310 (2026-11-25): on a task started from a terminal or an OpenCode session the agent
+        # has no CLAUDECODE, and its shell's OPENCODE_SESSION_ID is its own: WB_TASK, ranked first
+        # (store.caller_kind), makes its call a model's, never the user's at a terminal
+        with mock.patch.dict(os.environ, {"WB_TASK": "t-x", "OPENCODE_SESSION_ID": "ses_agent", "OPENCODE": "1"}):
+            code, out, err = self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+            pinned = self.route("significant", "--gpu", "qwen")[0]              # no yes needed: by the agent
+        self.assertEqual((code, out), (3, ""), err)
+        self.assertIn("in an agent's shell a role changes only on the user's yes in the driver's dialog", err)
+        self.assertIn("ask_reviewer", err)
+        self.assertEqual(pinned, 0)
+        self.assertEqual(self.doc()["roles"]["significant"]["gpu_by"], "agent")   # #1309's claude/opencode/terminal kin
+        self.assertNotIn("trivial", self.doc()["roles"])
+        self.assertIn("set by an agent", self.route()[1])
+        self.assertEqual(self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)  # the user's
+
     def test_a_gpu_model_pin_needs_no_dialog_and_survives_the_flips(self):
         os.environ["CLAUDECODE"] = "1"
         asked = self.dry("significant", "--gpu", "qwen")
@@ -38041,9 +38149,11 @@ class OpenCodeDriver(Base):
 
     def test_an_agents_call_is_never_the_drivers_though_opencode_sets_its_session_id(self):
         # #1310: OpenCode re-sets OPENCODE_SESSION_ID in the agent's own shells, so WB_TASK outranks it
+        # and its call is an agent's, gated as a model's (#1310's review, 2026-11-25: read as the
+        # terminal's, an unlaned agent's `wb route … --api` went through as the user's own)
         os.environ.update(WB_TASK="t-agent", OPENCODE_SESSION_ID="ses_agent")
-        self.assertFalse(store.under_model())
-        self.assertEqual((store.opencode_session(), store.caller_kind()), ("", "terminal"))
+        self.assertTrue(store.under_model())
+        self.assertEqual((store.opencode_session(), store.caller_kind()), ("", "agent"))
         self.assertEqual(cli._caller(argparse.Namespace()), (None, None, None))
         os.environ.pop("WB_TASK")
         self.assertEqual((store.opencode_session(), store.caller_kind()), ("ses_agent", "opencode"))

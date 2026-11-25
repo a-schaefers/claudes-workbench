@@ -1181,11 +1181,17 @@ def send(root, kind, slug, title, body_file, draft=False, anyway=False) -> None:
         raise PatchError(f"{pr} changes .github/workflows/, and GitHub refuses that push over https without "
                          "the token's workflow scope, so nothing was sent: the user runs "
                          "! gh auth refresh -h github.com -s workflow")
-    # an OpenCode driver's shell too (store.under_model, #1309): it sent with no one asked
+    # an OpenCode driver's shell too (#1309), and an agent's (#1310): store.under_model. Each
+    # sent with no one asked
     if store.under_model() and not _approved(slug, title, body_file, draft, anyway):
         again = " ".join(["wb patch send", slug, "--title", _quote(title), "--body-file",
                           shlex.quote(os.path.abspath(body_file)), *(["--draft"] if draft else []),
                           *(["--anyway"] if anyway else [])])
+        if store.caller_kind() == "agent":  # its reviewer or the user decides (#1310)
+            raise PatchError("in an agent's shell wb patch send goes only on the user's yes in the driver's "
+                             "dialog, and the user approved none for this send, so nothing was sent. Ask "
+                             "the reviewer (ask_reviewer); or the user runs it in a terminal of their own: "
+                             f"{again}")
         if store.caller_kind() == "opencode":
             raise PatchError("in OpenCode wb patch send goes only through the workbench plugin's dialog, "
                              "and the user approved none for this send, so nothing was sent (is the plugin "

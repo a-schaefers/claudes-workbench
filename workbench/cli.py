@@ -3561,7 +3561,12 @@ API_RUNS = True
 def gate_refusal(what: str, command: str) -> str:
     """The refusal under Claude Code when the mod's dialog approved none of this (#1014), as
     patches' for a send (#1005): nothing Claude can type is the user's yes. Under an OpenCode
-    driver (#1309) the same, naming the workbench plugin: nothing the driver types is either."""
+    driver (#1309) the same, naming the workbench plugin: nothing the driver types is either. In an
+    agent's shell (WB_TASK, #1310) no dialog is the agent's: its reviewer or the user decides."""
+    if store.caller_kind() == "agent":
+        return (f"in an agent's shell {what} only on the user's yes in the driver's dialog, and the "
+                f"user approved none for this change, so nothing changed. Ask the reviewer "
+                f"(ask_reviewer); or the user runs it in a terminal of their own: {command}")
     if store.caller_kind() == "opencode":
         return (f"in OpenCode {what} only through the workbench plugin's dialog, and the user "
                 f"approved none for this change, so nothing changed (is the plugin loaded?). Or "
@@ -3713,8 +3718,9 @@ def start_line(name: str, m: models.Model) -> str:
 
 
 def start_gate(name: str, m: models.Model) -> None:
-    """Under Claude Code, or an OpenCode driver (store.under_model, #1309), an API --model starts
-    only on the host's dialog's yes (#1014); exit 3 otherwise. GPU models pass as before."""
+    """Under Claude Code, an OpenCode driver or an agent's shell (store.under_model: #1309,
+    #1310), an API --model starts only on the host's dialog's yes (#1014); exit 3 otherwise. GPU
+    models pass as before."""
     if m.kind != "api" or not store.under_model():
         return
     if not routes.approved({"start": {"task": name, "model": m.id}, "change": start_line(name, m)}):
@@ -4141,7 +4147,7 @@ def _route_apply(a, argv: list[str], changed) -> None:
         else:
             print(ch.line or "unchanged")
         return
-    by = store.caller_kind()  # claude, opencode (an OpenCode driver, #1309) or terminal
+    by = store.caller_kind()  # agent (#1310), claude, opencode (an OpenCode driver, #1309) or terminal
     try:
         with routes.editing(lenient=True) as held:  # the gate compares the line computed under the lock
             ch = noted(changed(held[0]), held[1])
@@ -5682,8 +5688,9 @@ SCOUT_SPEND_DAYS = 7   # and the API spend
 
 
 def _by_word(by) -> str:
-    """Who a role's `by`/`gpu_by` says set it: Claude, the OpenCode driver (#1309), else you."""
-    return {"claude": "Claude", "opencode": "the driver"}.get(by, "you")
+    """Who a role's `by`/`gpu_by` says set it: Claude, the OpenCode driver (#1309), an agent
+    (#1310), else you."""
+    return {"claude": "Claude", "opencode": "the driver", "agent": "an agent"}.get(by, "you")
 
 
 def _role_where(doc: dict, r: str) -> str:

@@ -420,20 +420,31 @@ def opencode_session() -> str:
 
 def under_model() -> bool:
     """Whether a model's shell runs this `wb`, so a gated change (an API role, an API `--model`,
-    `wb patch send`) needs the user's yes from the host's dialog: Claude Code's Bash (CLAUDECODE=1),
-    or an OpenCode driver's (OPENCODE_SESSION_ID set, WB_TASK not). Before #1309 only CLAUDECODE
-    counted, so an OpenCode driver's `wb route … --api` was taken for the user at a terminal:
-    no dialog, `by: terminal`. Any id at all counts here, a malformed one too: the gate fails closed."""
-    return os.environ.get("CLAUDECODE") == "1" or bool(
-        os.environ.get("OPENCODE_SESSION_ID") and not os.environ.get("WB_TASK"))
+    `wb patch send`) needs the user's yes from the host's dialog: an agent's (WB_TASK, #1310),
+    Claude Code's Bash (CLAUDECODE=1), or an OpenCode driver's (OPENCODE_SESSION_ID). Before #1309
+    only CLAUDECODE counted, so an OpenCode driver's `wb route … --api` was taken for the user at
+    a terminal: no dialog, `by: terminal`. Any id at all counts here, a malformed one too: the
+    gate fails closed."""
+    return caller_kind() != "terminal"
 
 
+# Who runs a wb call, WB_TASK first (#1310, 2026-11-25): OpenCode 2.4.1's shell tool sets
+# OPENCODE=1, AGENT=1 and OPENCODE_SESSION_ID on every command it runs, an agent's own included
+# (core/src/tool/plugin/shell.ts), whatever runner.agent_env dropped (runner.DRIVER_ENV); and a
+# Claude Code session's CLAUDECODE=1 reaches every agent it started. So no driver's mark proves a
+# driver: a call with WB_TASK (which only agent_env sets) is an agent's, and an agent's is a
+# model's at the gates. #1309's first rule read an agent's call as the terminal's (WB_TASK hid the
+# session id and nothing else counted): on a task wb started from a terminal, `wb route … --api`
+# from an unlaned agent's shell went through as the user's own (the #1310 review, 2026-11-25).
 def caller_kind() -> str:
-    """Who runs this `wb`, for a role's `by`/`gpu_by` and the gates' wording: `claude`,
-    `opencode` (an OpenCode driver: under_model without CLAUDECODE), or `terminal`."""
+    """Who runs this `wb`, for the gates (under_model), their wording and a role's `by`/`gpu_by`:
+    `agent` (WB_TASK set, whatever else is: ranked first), `claude` (CLAUDECODE=1), `opencode`
+    (an OpenCode driver: OPENCODE_SESSION_ID set), or `terminal`."""
+    if os.environ.get("WB_TASK"):
+        return "agent"
     if os.environ.get("CLAUDECODE") == "1":
         return "claude"
-    return "opencode" if under_model() else "terminal"
+    return "opencode" if os.environ.get("OPENCODE_SESSION_ID") else "terminal"
 
 
 def beat_path(pid: int) -> Path:
