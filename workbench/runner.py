@@ -1680,7 +1680,8 @@ def settle(task: store.Task, n: int, out: dict, began: str | None, why: str | No
     explore guard (#1168), then the repeat and error guards (#1250), then the think nudge (a
     needless check-in), silence and the round's wall (#1261, 2026-11-24), each fixed alone. So
     every stop goes through here: run_round's guards, the provider's (in the round or at
-    OpenCode's exit), the spend cap's in the round, and drive's handover limit. A tree the
+    OpenCode's exit), the spend cap's in the round, drive's handover limit, and OpenCode's own
+    non-zero exit that no server revive took (#1270). A tree the
     self-review left changed, or any other round: False, nothing changed, stopped as before."""
     why = out.get("stuck") or why
     if not why or gitops.mark(task.worktree) != green_tree(task, began):
@@ -5664,6 +5665,13 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 if not _go_on(task, n, "the round again"):
                     return
                 continue
+            if died(rnd) and not rnd["stuck"]:
+                # OpenCode's own exit, not a revived server's: a self-review's on its green tree is
+                # its finish too. A GPU server's 500 (Ollama's runner out of memory) or 400 (past
+                # llama-server's context) leaves the server up, so no revive, and the round failed
+                # with no tests line, the step recorded stuck, accept refused without --force
+                # (#1270, bar loop round 7, 2026-11-24)
+                settle(task, n, rnd, rnd.get("began"), f"opencode exited {rnd['exit']}")
             if rnd["stuck"] or died(rnd):
                 text = _spend_lead(task, rnd) + summary_text(task, n, rnd, None) + _undelivered(task)
                 write_report(task, n, rnd, text)

@@ -402,7 +402,9 @@ Such a round reads, runs and thinks by design: when any guard comes due in it, o
 edit, #1168, the same call in a row or failing calls in a row, #1250: a 9B ran the acceptance
 command four times over on its green tree and was stopped as stuck; then the think nudge, a
 needless check-in, the stop after it, silence and the round's wall, #1261; the provider's stop,
-in the round or at OpenCode's exit, the in-round spend guard and drive's handover limit too.
+in the round or at OpenCode's exit, the in-round spend guard and drive's handover limit too;
+and OpenCode's own non-zero exit that no server revive took, `opencode exited N`: a GPU server's
+500 or 400 leaves it up, and a green change woke Claude as failed, #1270.
 Not `runner._go_on`'s stop before a round: the self-review never ran)
 (status `round_for` `self_review`, or a round carrying it on, `runner.SELF_REVIEW_ROUNDS`:
 `fresh` past a full window, #1188, `steer` after the think nudge or Claude's note, #1207,
@@ -998,6 +1000,8 @@ Feedback, next and resume refuse 1.x (exit 3) and note one outside `OPENCODE_TES
      (#657) → a `load` event, the wait (*Waiting for a server that is down*), the round again,
      once a round, same session (`_run_again`: never its prompt.md twice in one session, #1235). A server wb starts (models.json `start`) that stopped
      (`_stopped`) is restarted by the load (#579). Gone again: `infra` `model`, `cause` `server`.
+   - a `died` round not stuck goes through `runner.settle` first (`opencode exited N`): a
+     self-review's on the tree its tests passed on is its finish, `settled`, on to the tests (#1270).
    - stuck, or `died` (any non-zero exit, whatever it printed, #427; not `lingered`, `left_bg` or `settled`) → the report
      without tests (plus "NOTE: not delivered, the round stopped first: …", `_undelivered`),
      `stuck`/`failed`, a notice, exit; edits stay.
@@ -1531,7 +1535,7 @@ is a note, not a check-in (that cost a restart in one task of two, 2026-11-17). 
    in the worktree (see …)`. Stopped by the runner once the agent was done (`left_bg`; `lingered`, #83's too;
    `settled`): `the agent left `<job>` running in the background when its turn ended; stopped`, `OpenCode
    was still open after the agent's output ended; stopped` (#1160), or `self-review: … the tree its
-   tests passed on; stopped as its finish` (#1168, #1250, #1261). `OpenCode resent N request(s) to the model's server: …` (#491).
+   tests passed on; stopped as its finish` (#1168, #1250, #1261, #1270). `OpenCode resent N request(s) to the model's server: …` (#491).
 4. `tests: PASS|FAIL (`cmd`, exit N)`, 25 lines on a failure; `base check: …` while on the first
    step with no review round; `auto-fix rounds used: a/b`.
 5. `tools: name×n …`, up to four `tool error:` lines.
@@ -6945,7 +6949,7 @@ else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
 `FAKE_LESSON`, `FAKE_PAD` (that many characters before the Lesson line, #1186), `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
 `ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `shellwrite` (lib/util.py through a `bash` row's `cat > util.py <<X` with `workdir` lib/, main.py and answer.txt with `write`: #1210, its third review; a continued session adds a line to lib/util.py: #1259), `buildout` (dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names neither, then answer.txt: #1210's review), `pkgbuild` (a `bash` row `grep -n answer pkg/a.py`, then build/lib/pkg/{__init__,a,b}.py behind one `python -m build`, then answer.txt: #1210's second review), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
-`read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087), `selfreads` (ok, then a self-review, told by its prompt, that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168; `FAKE_SELF_RERUN`: those calls rerun the acceptance command, `FAKE_SELF_MISS`: the reads fail, #1250; `FAKE_SELF_FILL`: its first session breaks it and fills 76%, the fresh one restores it, or with `FAKE_SELF_KEEP` only reads: #1188; `FAKE_SELF_STALL`: it breaks it and goes silent, the run after a nudge or a note restores it: #1207; `FAKE_READS` 0: it restores it and goes quiet, the think, silence and wall guards' case; `FAKE_SELF_API` `ratelimit` or `down`: its run plays that API scenario on the green tree, the provider's stop at OpenCode's exit; `FAKE_SELF_REFILL`: each of its sessions breaks or restores it, by turns, and fills 76%, the last past `HANDOVER_MAX` on the green tree: #1261), `floor` (`HANDOVER_ROOM`), `think` (a long think in a step's output, then a prompt that grew: no compaction, #1219), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151; `FAKE_COMPACT_KEPT`: the step after at 34%, over half, a kept tail: #1185), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
+`read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087), `selfreads` (ok, then a self-review, told by its prompt, that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168; `FAKE_SELF_RERUN`: those calls rerun the acceptance command, `FAKE_SELF_MISS`: the reads fail, #1250; `FAKE_SELF_FILL`: its first session breaks it and fills 76%, the fresh one restores it, or with `FAKE_SELF_KEEP` only reads: #1188; `FAKE_SELF_STALL`: it breaks it and goes silent, the run after a nudge or a note restores it: #1207; `FAKE_READS` 0: it restores it and goes quiet, the think, silence and wall guards' case; `FAKE_SELF_API` `ratelimit` or `down`: its run plays that API scenario on the green tree, the provider's stop at OpenCode's exit; `FAKE_SELF_REFILL`: each of its sessions breaks or restores it, by turns, and fills 76%, the last past `HANDOVER_MAX` on the green tree: #1261; `FAKE_SELF_CRASH`: after its reads, a provider.http 500 and exit 1, the server still up: #1270), `floor` (`HANDOVER_ROOM`), `think` (a long think in a step's output, then a prompt that grew: no compaction, #1219), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151; `FAKE_COMPACT_KEPT`: the step after at 34%, over half, a kept tail: #1185), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
 2.3's `{"type": "error", …, "error": {"type": "compaction.failed", "message": "Compaction produced no summary"}}`;
 `FAKE_COMPACT_MSG`, `FAKE_COMPACT_EXIT`, `FAKE_COMPACT_EDIT`, `FAKE_REFAIL`), `bgwait` (`FAKE_BGWAIT`), `toolhang`,
 `retry` (`FAKE_RETRY_EVERY`), `say`, `stay` (as `ok`, then open and silent: #1160), `spend` (#1019: a read and a priced step every `FAKE_STEP_EVERY` s, `FAKE_STEPS` of
