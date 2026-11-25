@@ -37,6 +37,19 @@ ROOT_FILES = ("CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md")
 # lists opencode_worktree_remove; the rule then refuses the call.
 DENIED_TOOLS = ("question", "experimental_image_generate", "execute", "subagent", "websearch",
                 "webfetch", "opencode_*", "*worktree*")  # the network, like curl: Claude's to allow
+# wb's own OpenCode agent, which every `opencode run` names (`--agent`, runner.run_round; a
+# resumed `--session` is switched to it too). Without it OpenCode 2.3.2 took the session's agent
+# from the config's `default_agent`, and the user's global opencode.json is one of those
+# documents: an agent of theirs whose rules allowed webfetch and subagent gave every wb agent
+# both, the layer's denies notwithstanding, as an agent's own rules come after the top-level
+# ones and the last match wins (#1290, 2026-11-24, measured with tests/capture_llm.py). A user's
+# own `wb-code` (their JSON, or agents/wb-code.md) loads before the layer and kept its system,
+# steps and rules, so the layer removes any (`disabled`, AGENT_OFF) and rules_env's content,
+# loaded after the layer, makes it afresh (AGENT_ENTRY): a new agent starts from OpenCode's
+# defaults and takes every top-level rule, the layer's included, as the default `build` agent did.
+AGENT = "wb-code"
+AGENT_OFF = {AGENT: {"disabled": True}}
+AGENT_ENTRY = {AGENT: {"mode": "primary", "description": "Workbench's agent: the task's rules alone"}}
 # A command written `NAME=value cmd`: OpenCode matches each simple command's raw text, so `FOO=1
 # ls` was refused while `ls` and `env FOO=1 ls` ran. It is how CLAUDE.md files and READMEs spell
 # tests (`PYTHONPATH=. pytest`, `CI=1 npm test`), and a small model copying the project's command
@@ -3457,4 +3470,5 @@ def layer(task: store.Task) -> dict:
     rules += [{"action": "edit", "resource": f"{p.rstrip('/')}/*", "effect": "deny"}
               for p in _both([skills.library()])]
     return {"instructions": [str(p) for p in files + ([note] if note else [])],
-            "permissions": rules, "skills": [*handed, *map(str, own)]}
+            "permissions": rules, "skills": [*handed, *map(str, own)],
+            "agents": json.loads(json.dumps(AGENT_OFF))}  # made afresh in the content (AGENT)

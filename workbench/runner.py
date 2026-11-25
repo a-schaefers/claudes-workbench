@@ -551,13 +551,15 @@ def rules_env(layer: dict, keyhole_over: dict | None = None) -> dict:
     provider's real endpoint, past the keyhole (#1012). A V2 `providers.<pid>` of theirs gets it
     too (keyhole_v2), since it replaces the V1 entry beside it."""
     users = models.users_config_content()
-    users = {k: v for k, v in users.items()
-             if (k == "provider" or k not in layer) and k not in ("mcp", *USERS_RULES)}
+    users = {k: v for k, v in users.items()  # `agent`: their 1.x agents, beside wb's (#1290)
+             if (k == "provider" or k not in layer) and k not in ("mcp", "agent", *USERS_RULES)}
     timeouts = {pid: {"options": {k: v["options"][k] for k in PROVIDER_TIMEOUTS if k in v["options"]}}
                 for pid, v in (layer.get("provider") or {}).items()
                 if isinstance(v, dict) and isinstance(v.get("options"), dict)
                 and any(k in v["options"] for k in PROVIDER_TIMEOUTS)}
-    ours = {"share": "disabled", **{k: layer[k] for k in RESTATED if k in layer}}
+    # wb's agent, made here, after the layer removed any of the user's by its name (context.AGENT)
+    ours = {"share": "disabled", **{k: layer[k] for k in RESTATED if k in layer},
+            "agents": json.loads(json.dumps(context.AGENT_ENTRY))}
     pins = model_pins(layer.get("small_model")) or _own_pins(layer)  # an API task's: its record (#1017)
     over = models._merge(timeouts, pins.get("provider") or {})
     if over := models._merge(over, (keyhole_over or {}).get("provider") or {}):
@@ -1721,8 +1723,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     --keep-context), so the round never hands over mid-way."""
     spec, st = task.spec, task.status
     prompt = task.round_dir(n).joinpath("prompt.md").read_text()
-    cmd = opencode_bin() + ["run", "--standalone", "-m", spec["opencode_model"], "--auto",
-                            "--format", "json", "--title", f"wb: {task.name}"]
+    # --agent: wb's own, never the user's default_agent (context.AGENT, #1290)
+    cmd = opencode_bin() + ["run", "--standalone", "--agent", context.AGENT, "-m", spec["opencode_model"],
+                            "--auto", "--format", "json", "--title", f"wb: {task.name}"]
     began = gitops.mark(task.worktree)  # the tree as the round began
     marks = {began}  # and as the session began
     new_session = not st.get("session")
