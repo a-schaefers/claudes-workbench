@@ -7408,6 +7408,29 @@ class Context(Base):
         self.assertEqual((st["phase"], st["round"]), ("stuck", 2))
         self.assertIn("the same call 4 times in a row", st["last"])
 
+    def test_a_self_review_whose_opencode_exits_on_its_servers_error_on_the_green_tree_goes_to_review(self):
+        # #1270 (bar loop round 7, 2026-11-24): a GPU server's 500 in the self-review (Ollama's
+        # runner killed out of memory) left the server up, so no revive; OpenCode's exit 1 was
+        # `died`, never settled, and a green change woke Claude as failed with no tests line, its
+        # step recorded stuck and wb accept refused without --force
+        os.environ.update(FAKE_SELF_CRASH="1", FAKE_READS="1")
+        self.start("t-src", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-src", {"review", "stuck", "failed"}, timeout=60)
+        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-src"]
+        self.assert_settled("t-src", st, rows, "opencode exited 1")
+        self.assertEqual(st["last"], "tests passed: Claude reviews next")
+        self.assertIn("self-review: opencode exited 1, the tree its tests passed on: stopped as its finish",
+                      run_wb("watch", "t-src", "--once", "--no-color"))
+
+    def test_a_self_review_whose_opencode_exits_on_a_changed_tree_still_fails(self):
+        # #1270's finish is for the green tree, as every settle is: one left changed failed mid-edit
+        os.environ.update(FAKE_SELF_CRASH="1", FAKE_READS="1", FAKE_SELF_KEEP="1")
+        self.start("t-srck", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-srck", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"], st["last"]), ("failed", 2, "opencode exited 1"))
+        self.assertFalse([e for e in store.read_jsonl(store.Task("t-srck").dir / "events.jsonl")[0]
+                          if e["kind"] == "settled"])
+
     def quiet_self_review(self, name, *flags, **env):
         """A self-review that breaks the check, copies it back and goes quiet (FAKE_READS 0):
         the green tree, no tool call or word after it (#1261)."""
