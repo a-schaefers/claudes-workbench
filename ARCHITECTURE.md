@@ -6000,7 +6000,10 @@ id="tabbar" aria-label="Primary">` holds three `button.tab[data-view]`, each a 2
 over an 11 px `.tab-lbl`; the current one has `aria-current="true"`, colour and a 1 px lift. On a
 phone (≤600 px) it is the body's last flex child, under the composer, `56px` plus the safe area
 tall (the composer drops its own safe-area pad, `#jump` sits 56 px higher), hidden under
-`body.kb-open` so the composer sits on the keyboard (`fit`'s visualViewport check), `user-select:
+`body.kb-open` so the composer sits on the keyboard (`fit`: the visual viewport 120 px short of
+the layout one, as on iOS, or, while typing on a touch screen, of the tallest the page has been at
+this width, `full`, since Android's Chrome shrinks both under `interactive-widget=resizes-content`,
+#1414), `user-select:
 none` under `hover: none`. From 601 px the body is a grid: a 76 px left rail (and the left safe-area
 inset beside it, which the header, the thread, the composer and the views then don't pad for: inside
 76 px an iPhone held sideways had 16 px tabs and labels cut to 'C.', #1413), the header, banner and
@@ -7752,7 +7755,7 @@ and Chromium (`$CHROMIUM`, `/usr/bin/chromium`, else Playwright's) as a Pixel 7,
 (`DESKTOP`: the checks through Settings', then the shell's alone). The shell (`shell`, #1284): the bar at the foot
 on a phone and the rail on the desktop (and with an iPhone's sideways insets, app.css with them written in for
 `env()`, each tab 44 px or wider, #1413), the hash and Back, the Chat tab's badge, the bar hidden with the keyboard
-(a visual viewport made short by hand), the cards' styles kept out of the chat (the intro's `<code>`), `window.WB`, and the gear's old checks from Settings and Stats (`goTo`);
+(a visual viewport made short by hand; on the Pixel the whole page too, #1414), the cards' styles kept out of the chat (the intro's `<code>`), `window.WB`, and the gear's old checks from Settings and Stats (`goTo`);
 then each view's own, `e2e_stats.mjs` and `e2e_settings.mjs` (`check(page, ctx)`, once per device). `e2e_stats.mjs` (#1285): a fixture
 results.jsonl's task count under This week, the labels in `statsLines`' order and none of the rows
 #1322 took (Streak, Last 30 days, Bests, Milestone, Questions, a score or estimate); `/api/top` opened on showing Stats with Live view on, let go on leaving it, never opened

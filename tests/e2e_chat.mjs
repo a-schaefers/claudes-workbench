@@ -1357,6 +1357,22 @@ async function run(engine, device) {
       } finally { await kb(false) }
       await until(async () => { const a = await at(); return !a.kb && a.nav !== 'none' })
     })
+    if (!desktop && engine === 'chromium') await check('on Android, where the whole page shrinks with the keyboard, the bar steps aside too (#1414)', async () => {
+      // #1414 (2026-11-25): under interactive-widget=resizes-content Android's Chrome shrinks the
+      // layout viewport with the visual one, so their difference never said a keyboard was up, and
+      // the bar stayed between the composer and the keyboard. The page made short, as it does
+      const vp = page.viewportSize()
+      const at = () => page.evaluate(() => ({ kb: document.body.classList.contains('kb-open'), h: innerHeight,
+        nav: getComputedStyle(document.getElementById('tabbar')).display, foot: document.getElementById('composer').getBoundingClientRect().bottom }))
+      await page.focus('#input')
+      try {
+        await page.setViewportSize({ width: vp.width, height: vp.height - 300 })
+        await until(async () => { const a = await at(); return a.kb && a.nav === 'none' && Math.abs(a.foot - a.h) <= 2 })
+          .catch(async () => { throw new Error(JSON.stringify(await at())) })
+      } finally { await page.setViewportSize(vp) }
+      await page.evaluate(() => document.getElementById('input').blur())
+      await until(async () => { const a = await at(); return !a.kb && a.nav !== 'none' })
+    })
     await check('window.WB gives the views the key, the API, the view and its changes, the state and a toast', async () => {
       const got = await page.evaluate(async () => {
         const seen = []

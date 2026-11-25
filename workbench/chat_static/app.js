@@ -717,9 +717,17 @@
   const vv = window.visualViewport
   const typing = () => document.activeElement === input
   let kbOpen = false
+  // The page's height with no keyboard: the tallest seen at this width. Android's Chrome, under the
+  // page's interactive-widget=resizes-content, shrinks innerHeight with the keyboard as well as the
+  // visual viewport, so their difference never said it was up and the nav stayed over it (#1414,
+  // 2026-11-25). Only while typing on a touch screen: a desktop window made shorter isn't a keyboard
+  let full = innerHeight, fullW = innerWidth
   function fit() {
     if (!vv) return
+    if (innerWidth !== fullW) { full = innerHeight; fullW = innerWidth }   // turned: another height
+    full = Math.max(full, innerHeight)
     kbOpen = innerHeight - vv.height > 120     // a keyboard is tall; a toolbar showing is not
+      || (touch && typing() && full - vv.height > 120)
     if (kbOpen) {
       // the body is the visible part of the page: pageTop counts iOS's own scroll of the document
       // on focus as well as the visual viewport's, where offsetTop alone left the composer
