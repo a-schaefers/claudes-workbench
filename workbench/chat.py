@@ -2243,7 +2243,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._stream()
         if path == "/api/settings":  # the web app's Settings view: settings.py's rows (#1280)
             from . import settings as admin
-            return self._json(200, {"rows": admin.rows(), "ts": store.now()})
+            # read afresh: the cache knows only this server's writes, so a change made at the
+            # terminal within ROWS_CACHE_S was drawn as it had been (#1392, 2026-11-25)
+            return self._json(200, {"rows": admin.rows(fresh=True), "ts": store.now()})
         if path == "/api/stats":  # the Stats view: wb stats --json in-process, and the names' reads
             from . import settings as admin, stats
             return self._json(200, {"feed": stats.feed(), **admin.reads()})

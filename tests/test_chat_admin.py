@@ -113,6 +113,13 @@ class ChatAdmin(Base):
         self.assertEqual(self.call("/api/settings", {"key": "coding", "value": True}, token=self.user)[0], 400)
         self.assertEqual(len(store.read_jsonl(chat.changes_path())[0]), 1)
 
+    def test_a_change_made_at_the_terminal_shows_on_the_next_read_not_the_cached_rows_1392(self):
+        # #1392: Settings beside the terminal drew the rows cached before `wb coding ask` ran there,
+        # and a click to put the shown value back sent nothing
+        self.assertEqual(self.row(self.call("/api/settings", token=self.user)[1]["rows"], "coding")["value"], "decide")
+        run_wb("coding", "ask")
+        self.assertEqual(self.row(self.call("/api/settings", token=self.user)[1]["rows"], "coding")["value"], "ask")
+
     def test_agent_code_navigation_turned_on_without_probe_carries_claudes_help_into_the_record(self):
         # #1280's addendum (the owner, 2026-11-24: "the terminal still offers to help"): the mod
         # turns the row into a [workbench] turn where Claude offers to set probe up (#1283)

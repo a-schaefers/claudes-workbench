@@ -6108,7 +6108,8 @@ deny by default), and its lane writes none of `$WB_HOME`'s settings files.
 
 The chat server's side of the web app's Stats and Settings views, the user's token alone (outside
 `AGENT_MAY`; docs/chat-api.md has the shapes):
-- `GET /api/settings`: `{rows: settings.rows(), ts}`. `POST /api/settings` `{key, value}` (a
+- `GET /api/settings`: `{rows: settings.rows(fresh=True), ts}` (read afresh: the cache knows only
+  this server's writes, and a change made at the terminal was drawn as it had been, #1392). `POST /api/settings` `{key, value}` (a
   string, a number or null; JSON only, 415 otherwise) → `chat.admin_set` → `settings.apply`: 200
   `{ok: true, said, rows, help?}`; 400 `no such setting` (a `KeyError`) or `not one of its choices`
   (a `ValueError`, or a value neither string, number nor null); 409 `{ok: false, error: <wb's line>,
@@ -6147,7 +6148,8 @@ rows there are and what each runs) and sends the owner's changes. It takes over 
 Settings and roles sections. `settings.js` and `settings.css` are its own, built on `window.WB`
 alone, and a generic renderer: a new setting touches only Python.
 
-- **Read.** `WB.view('settings', …)`; each `show` (the tab, or the page back on screen) runs `GET
+- **Read.** `WB.view('settings', …)`; each `show` (the tab, or the page back on screen), and the
+  window's `focus` while shown (beside the terminal it stays shown, #1392), runs `GET
   /api/settings` (`{rows, ts}`, #1280) into `#settings-rows`, above the device cards. A failed read
   keeps the last rows, or says `Settings couldn't load: <why>` with none yet. A read that left
   before a write ended is dropped (`reads`, `wrote`), since the write's own rows are newer.
@@ -6165,12 +6167,14 @@ alone, and a generic renderer: a new setting touches only Python.
     select shows the row's value again. A value off the list (none, for an API role without a model)
     is the select's first option.
   - `number`: a text input (`inputmode=decimal`) with its unit (`usd` `$` … `/day`) and an Off
-    button (`.set-off`, pressed while the value is null). Enter or blur sends
-    a changed value; an empty box sends nothing, since Off is the button's.
+    button (`.set-off`, pressed while the value is null). Enter sends the value, blur a changed
+    one; an empty box sends nothing, since Off is the button's.
   - `action`: its `text`, then a button per choice, disabled while its click waits.
   - `info`: its `text` as a muted line.
 - **The owner's click is the yes** (the owner, 2026-11-24: "We trust Claude"; the server runs wb as
-  the user, ungated, as at the terminal). No confirm step, no warning. The choice lights at once (its
+  the user, ungated, as at the terminal). No confirm step, no warning. A click sends even the value
+  lit, and Off even when off: what's shown may be stale, and a click to put back a value changed at
+  the terminal sent nothing (#1392). The choice lights at once (its
   `says` too), then `POST /api/settings` `{key, value}`. On `ok`, `WB.toast(said)` and a redraw from
   the answer's `rows`. When the answer carries `help` (the value needs Claude's help to work, such
   as Agent code navigation on with no probe), the toast adds "Claude will offer to set it up." (the
@@ -7664,7 +7668,8 @@ real `wb stats --json` of the run's `WB_HOME`; a held stream): Playwright's rout
 requests once the worker registers (#1223). The Settings
 view's (#1286): the groups in order, "Agents and roles" first, above the device cards (the gear's old cards are
 `#settings`'s alone); Claude coding → "Ask me first" lit at once, then `coding.json` and `wb coding` say `ask`; a
-409 puts the control back and toasts, with a second click waiting for the first; a POST that never answers given
+409 puts the control back and toasts, with a second click waiting for the first; a change made outside drawn at
+the window's `focus`, and a click on the value shown still sent (#1392); a POST that never answers given
 up after `POST_MS`, the next change sent (the wrapper rejects at the signal's abort, as a real fetch, #1391); "Other model…": Escape closes
 the input, the select back on the row's value, and Enter sends the typed id; a note drawn beside a choice in its
 group; a number's Enter and Off; `help`'s toast; the layout at the phone's width, and on the desktop at 1280 px

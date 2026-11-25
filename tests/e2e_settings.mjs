@@ -203,6 +203,31 @@ export async function check(page, ctx) {
       } finally { if (release) release() }
     })
 
+    await ctx.check('a change made outside the page is drawn once the page takes the focus, and a click on the value shown still sends (#1392)', async () => {
+      // #1392: Settings beside the terminal kept a value changed there, and a click on it to put
+      // it back sent nothing, the setting left as the terminal made it
+      let rows = MOCK_ROWS
+      const posts = []
+      unmock()
+      mock(async (method, body) => {
+        if (method !== 'POST') return answer(200, { rows, ts: 1 })
+        posts.push(body)
+        rows = rows.map(x => x.key === body.key ? { ...x, value: body.value } : x)
+        return answer(200, { ok: true, said: 'Claude coding: as you chose.', rows })
+      })
+      const lit = async () => await row('coding').locator('[aria-checked="true"]').getAttribute('data-value')
+      await reshow()
+      await until(async () => await lit() === 'decide')
+      rows = rows.map(x => x.key === 'coding' ? { ...x, value: 'ask' } : x)   // `wb coding ask` at the terminal
+      await page.evaluate(() => dispatchEvent(new Event('focus')))             // back to the page
+      await until(async () => await lit() === 'ask')
+      rows = rows.map(x => x.key === 'coding' ? { ...x, value: 'only' } : x)  // again, not drawn yet
+      await row('coding').locator('[data-value="ask"]').click()                // the value shown, put back
+      await until(() => posts.length === 1)
+      if (JSON.stringify(posts) !== JSON.stringify([{ key: 'coding', value: 'ask' }])) throw new Error(JSON.stringify(posts))
+      await until(async () => await lit() === 'ask')
+    })
+
     await ctx.check('"Other model…" opens a text input, Escape closes it, Enter sends the typed id; a note is a line beside its group\'s rows, an info row a line', async () => {
       let sent = null
       unmock()
