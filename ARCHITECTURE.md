@@ -6105,7 +6105,9 @@ task's sessions the first to deliver wins (the `acked` write is not locked).
 Bash call running `wb start|next|feedback|steer|answer|resume` (`delegates`, `HANDS_OUT`; not
 `accept` or `takeover`, which a quit's notes ask for). Only a command counts, not text (#409), read
 as bash reads it (`simpleCommands`, #560): quotes undone within a word, comments and heredoc
-bodies dropped (`$(…)` and backticks in unquoted heredocs and double quotes still run), a
+bodies dropped (`$(…)` and backticks in unquoted heredocs and double quotes still run; a `$(…)` in
+double quotes ends where bash ends it, `closing`: quotes, comments and heredoc bodies skipped, so a
+quoted heredoc's "doesn't (it can't)" or "a)" doesn't close it, #1364's review), a
 redirect's file (`>`, `>>`, `>|`, `&>`, `<`; `2>&1` a descriptor) and a here-string no words of the
 command (#1364: kept beside it, `Shell`: its stdin, its redirects' files, the command piped into
 it), split at `;`, `&`, `|`, newlines, `(`, `)`, `$(`, backticks; the command word past `VAR=x`, the reserved
@@ -6347,9 +6349,11 @@ misread; this is the one place every call passes. Outward (`sendsOut`):
 options, `GIT_VALUED`), and `wb patch send` (`wb` or a path to it, or Python running `…/wb` or `-m workbench`:
 `wbArgs`); command words lowercased (macOS finds `GIT` as git). Read as bash reads it (`simpleCommands`, `commandAt` as
 in `delegates`, past `sudo`, `doas`, `xargs` and the other `PREFIXES`): echo and heredoc text isn't a command, `$(…)`
-and backticks are, and `bash|sh|zsh|dash -c '…'` and `eval` are read inside; a line naming none of `gh`, `git`, `wb`,
+and backticks are, and a shell's `-c '…'` (`STDIN_SHELL`: `bash`, `sh`, `zsh`, `dash`, `ksh`, `ash`, `fish`) and
+`eval` are read inside; a line naming none of `gh`, `git`, `wb`,
 `workbench` isn't parsed. What a program that runs text (`RUNS_CODE`) is handed (`runs`, `codeFed`: a heredoc, a
-here-string, the words and stdin of a command piped into it, an interpreter's `-c`/`-e`; not a script file) counts by
+here-string, the words and stdin of a command piped into it, an interpreter's `-c`/`-e`, a script the line itself
+wrote by a redirect, `cat > s.sh <<EOF … EOF` then `bash s.sh`; not another script file) counts by
 what runs (#1364): a shell's (`STDIN_SHELL`, `sh -s` too) is read as commands, `bash <<EOF … git push` once went
 through, and a send there is asked about as one inside text another program runs (the dialog shows the line);
 an interpreter's code is text, an outward command in it (`OUTWARD_TEXT`, as a string or a list: `['git', 'push']`)
@@ -6414,7 +6418,8 @@ that runs commands (`ROUTE_TEXT`, `spawns`); a heredoc that only says `wb route 
 `$WB_HOME/route-ok.json` (`writesTo`, `ROUTE_OK_OWN`): a redirect onto it, `tee`, `cp`/`mv`/`install`/`ln`/`rsync`
 onto it or into its directory under its name, `dd of=`, a shell's fed commands too (`cd` and `pushd` followed; the
 path as written, through `~`, `$HOME` or `$WB_HOME`), or an interpreter's code with a write call (`WRITES_CODE`: Python's
-`open(…, 'w')`, `write_text`, Node's `writeFileSync`, …) and the file in a string that is a path, with `WB_HOME` or the
+`open(…, 'w')`, its path built inside too, `os.path.join(…)`, `write_text`, Node's `writeFileSync`, …) and the file in a
+string that is a path (quotes; backquotes only in JavaScript: in Python's text they are Markdown's), with `WB_HOME` or the
 state directory in the code or the call run there. A mention is never a write: a `gh issue create` whose heredoc named
 the file was refused as writing it (2026-11-24, #1364), and a `grep` for the name passes; a word the mod can't resolve (another variable, a
 glob) lets the call through. A speed bump, not a wall: a command that builds the path gets past it (*Roles*, the gate).

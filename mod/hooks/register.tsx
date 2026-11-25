@@ -1126,14 +1126,47 @@ const PREFIXES: Record<string, [string[], number]> = {
     '--max-chars', '--delimiter', '--arg-file', '--eof', '--replace', '--process-slot-var'], 0],
 }
 
-// Where the `(` at `open` closes, quotes skipped (the end when it never does)
+// Where the `(` at `open` closes (the end when it never does), as bash finds it: quotes, comments
+// and heredoc bodies skipped. A `gh issue create --body "$(cat <<'EOF' …)"` whose body said
+// "doesn't (it can't)" or "a)" closed there, and the body's backquoted `wb patch send` after it
+// was read as a send (the review of #1364, 2026-11-25).
 function closing(src: string, open: number): number {
   let depth = 0
+  const tags: { tag: string; strip: boolean }[] = []
   for (let i = open; i < src.length; i++) {
     const c = src[i]
     if (c === '\\') i++
     else if (c === "'") { const j = src.indexOf("'", i + 1); i = j < 0 ? src.length : j }
-    else if (c === '(') depth++
+    else if (c === '"') {
+      let j = i + 1
+      while (j < src.length && src[j] !== '"') {
+        if (src[j] === '\\') j += 2
+        else if (src[j] === '$' && src[j + 1] === '(') j = closing(src, j + 1) + 1
+        else j++
+      }
+      i = j
+    } else if (c === '#' && /[\s;&|()]/.test(src[i - 1] ?? ' ')) { const j = src.indexOf('\n', i); i = j < 0 ? src.length : j - 1 }
+    else if (c === '<' && src[i + 1] === '<' && src[i + 2] !== '<') {
+      let j = i + 2
+      const strip = src[j] === '-'
+      if (strip) j++
+      while (src[j] === ' ' || src[j] === '\t') j++
+      const m = /^(?:'([^']*)'|"([^"]*)"|\\?([^\s;&|<>()'"]+))/.exec(src.slice(j))
+      if (m) tags.push({ tag: m[1] ?? m[2] ?? m[3]!, strip })
+      i = j + (m ? m[0].length : 0) - 1
+    } else if (c === '\n' && tags.length) { // the bodies, up to each tag's line
+      let p = i + 1
+      for (const h of tags) {
+        while (p < src.length) {
+          const e = src.indexOf('\n', p)
+          const line = src.slice(p, e < 0 ? src.length : e)
+          p = e < 0 ? src.length : e + 1
+          if ((h.strip ? line.replace(/^\t+/, '') : line) === h.tag) break
+        }
+      }
+      tags.length = 0
+      i = p - 1
+    } else if (c === '(') depth++
     else if (c === ')' && --depth === 0) return i
   }
   return src.length
@@ -1351,7 +1384,6 @@ const GH_WRITES: Record<string, Set<string>> = {
   label: new Set(['create', 'edit', 'delete', 'clone']),
 }
 const GIT_VALUED = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env'])
-const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash'])
 const PYTHON = /^python[\d.]*$/
 // what runs code it is handed as text (stdin, -c, -e); a shell's (STDIN_SHELL) is read as commands
 const RUNS_CODE = /^(?:bash|sh|zsh|dash|ksh|ash|fish|python[\d.]*|node|perl|ruby|php|deno|bun)$/
@@ -1374,7 +1406,9 @@ function spawns(cmd: string, code: string): boolean {
 // The code a program that runs text is handed: an interpreter's -c/-e argument, else, when it
 // names no script (none, `-`, a shell's -s), its stdin: a heredoc, a here-string, or the words and
 // stdin of the command piped into it (both as one line and a word to a line: echo's and printf's).
-// undefined: none, or a script file the mod doesn't read.
+// A script the line itself wrote by a redirect (`cat > s.sh <<EOF … EOF` then `bash s.sh`) is what
+// that command printed: the old backstop caught it, and #1364's first cut let it through (its
+// review, 2026-11-25). undefined: none, or a script file the mod doesn't read.
 function codeFed(words: string[], i: number, cmd: string, info: Shell): string | undefined {
   if (!RUNS_CODE.test(cmd)) return undefined
   const flag = PYTHON.test(cmd) ? /^-[a-zA-Z]*c$/ : /^(?:node|bun)$/.test(cmd) ? /^(?:-e|--eval|-p|--print)$/
@@ -1391,13 +1425,18 @@ function codeFed(words: string[], i: number, cmd: string, info: Shell): string |
     break
   }
   if (code.length) return code.join('\n')
-  if (script !== undefined && script !== '-' && !(STDIN_SHELL.test(cmd) && args.includes('-s'))) return undefined
+  const printed = (from: string[]) => {
+    const said = from.slice(commandAt(from) + 1)
+    return `${said.join(' ')}\n${said.join('\n')}\n${info.stdin.get(from) ?? ''}`
+  }
+  if (script !== undefined && script !== '-' && !(STDIN_SHELL.test(cmd) && args.includes('-s'))) {
+    const writer = [...info.writes].find(([, to]) => to.includes(script!))
+    return writer ? printed(writer[0]) : undefined
+  }
   const stdin = info.stdin.get(words)
   if (stdin !== undefined) return stdin
   const from = info.piped.get(words)
-  if (!from) return undefined
-  const said = from.slice(commandAt(from) + 1)
-  return `${said.join(' ')}\n${said.join('\n')}\n${info.stdin.get(from) ?? ''}`
+  return from ? printed(from) : undefined
 }
 
 // A line's simple commands as bash runs them, `bash -c '…'` and `eval` read inside, and what a
@@ -1411,7 +1450,8 @@ function runs(src: string, fed = false, info: Shell = newShell()): Run[] {
     const i = commandAt(words)
     const cmd = wordOf(words[i])
     const c = words.findIndex((w, j) => j > i && /^-[a-z]*c$/.test(w))
-    if (SHELLS.has(cmd) && c > 0 && words[c + 1] !== undefined) return [run, ...runs(words[c + 1]!, fed, info)]
+    // every shell's -c (fish's, ksh's too: the old backstop caught them; the review of #1364)
+    if (STDIN_SHELL.test(cmd) && c > 0 && words[c + 1] !== undefined) return [run, ...runs(words[c + 1]!, fed, info)]
     if (cmd === 'eval') return [run, ...runs(words.slice(i + 1).join(' '), fed, info)]
     const given = codeFed(words, i, cmd, info)
     if (given === undefined) return [run]
@@ -1864,7 +1904,9 @@ const COPIES = new Set(['cp', 'mv', 'install', 'ln', 'rsync'])
 const COPY_VALUED = new Set(['-S', '--suffix', '-m', '--mode', '-o', '--owner', '-g', '--group'])
 // An interpreter's code that writes a file: Python's, Node's, Perl's, Ruby's, PHP's usual calls
 const WRITES_CODE = new RegExp([
-  String.raw`\bopen\s*\([^)]*['"][wax+]`, String.raw`\.write_(?:text|bytes)\s*\(`, String.raw`\bjson\.dump\s*\(`,
+  // open(…, 'w') with the path built inside (`os.path.join(…)`, two levels deep), the mode a string
+  // of its own: `open(os.path.join(home, NAME), 'w')` went through (the review of #1364)
+  String.raw`\bopen\s*\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*?['"][rbt]*[wax+][rbtwax+]*['"]`, String.raw`\.write_(?:text|bytes)\s*\(`, String.raw`\bjson\.dump\s*\(`,
   String.raw`\bshutil\.(?:copy\w*|move)\s*\(`, String.raw`\bos\.(?:rename|replace|link|symlink)\s*\(`,
   String.raw`\.(?:rename|symlink_to|hardlink_to|touch)\s*\(`, String.raw`\b(?:writeFile|appendFile|copyFile|rename)(?:Sync)?\s*\(`,
   String.raw`\bcreateWriteStream\s*\(`, String.raw`\bDeno\.write\w*`, String.raw`\bBun\.write\b`, String.raw`\bFile\.(?:write|open)\b`,
@@ -1914,7 +1956,10 @@ export function writesTo(command: string, file: string, cwd: string, home: strin
   }
   const base = (w: string) => w.replace(/\/+$/, '').split('/').pop()
   const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const literal = new RegExp(`['"\`][^'"\`\\s]*\\b${esc}['"\`]`)
+  // backquotes are strings only in JavaScript: in Python's text they are Markdown's (a docs edit
+  // writing "`$WB_HOME/<the file>`" was refused as writing it: the review of #1364, 2026-11-25)
+  const literal = (cmd: string) => new RegExp(/^(?:node|deno|bun)$/.test(cmd)
+    ? `['"\`][^'"\`\\s]*\\b${esc}['"\`]` : `['"][^'"\\s]*\\b${esc}['"]`)
   let here = cwd
   let fedHere = cwd
   for (const run of runs(command)) {
@@ -1933,7 +1978,7 @@ export function writesTo(command: string, file: string, cwd: string, home: strin
       const p = resolve(t.to, at)
       if (p === file || (p === dir && t.names.some(n => base(n) === name))) return true
     }
-    if (run.code !== undefined && literal.test(run.code) && WRITES_CODE.test(run.code) &&
+    if (run.code !== undefined && literal(cmd).test(run.code) && WRITES_CODE.test(run.code) &&
       (mentions(run.code, dir, home, root) || (dir === root && /\bWB_HOME\b/.test(run.code)) || at === dir)) return true
   }
   return false

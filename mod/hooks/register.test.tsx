@@ -4331,6 +4331,35 @@ test('#1364: a heredoc or quoted text that only names a send is no send, and a s
   await clock.advance(1000)
 })
 
+test('#1364\'s review: a heredoc body inside $(…) ends at its tag, not at a ) or an apostrophe in its prose', async ($, on) => {
+  // the review of #1364, 2026-11-25: `$(…)` closed at the body's first unbalanced `)` (a list's
+  // "a)", or one an apostrophe pair skipped past), and the backquoted `wb patch send` after it was
+  // read as a send in double quotes, refused as one the dialog can't show
+  const { clock, bash } = await gateProbe($, on)
+  for (const body of ['Two cases:\na) a heredoc\nb) a body naming `wb patch send`', "The gate doesn't (it can't) see `wb patch send` here"])
+    expect(await bash(`gh issue create --title t --body "$(cat <<'EOF'\n${body}\nEOF\n)"`))
+      .toEqual({ deny: undefined, asked: 0, question: '' })
+  // what follows the $(…) still runs
+  expect((await bash("x=$(cat <<'EOF'\nit's (a) thing\nEOF\n) && git push", SOURCE)).asked).toBe(1)
+  await clock.advance(1000)
+})
+
+test('#1364\'s review: a send in a script the line writes and then runs, or in fish\'s or ksh\'s -c, still asks', async ($, on) => {
+  // the old backstop asked about these (a shell or interpreter in the line, a send's words in it);
+  // #1364's first cut read only what a program is handed on its stdin or -c, and let them through
+  const { clock, bash } = await gateProbe($, on)
+  for (const command of [
+    "cat > /home/u/s.sh <<'EOF'\ngit push\nEOF\nbash /home/u/s.sh",
+    "echo 'git push' > s.sh && sh s.sh",
+    "cat > /home/u/s.py <<'EOF'\nimport subprocess\nsubprocess.run(['git', 'push'])\nEOF\npython3 /home/u/s.py",
+    "fish -c 'git push'", "ksh -c 'git push'",
+  ]) expect([command, (await bash(command, SOURCE)).asked]).toEqual([command, 1])
+  // a script that only prints the words is text
+  expect(await bash("cat > /home/u/s.py <<'EOF'\nprint('git push is the send')\nEOF\npython3 /home/u/s.py", SOURCE))
+    .toEqual({ deny: undefined, asked: 0, question: '' })
+  await clock.advance(1000)
+})
+
 test('#1005: "Send it" on wb patch send tells wb what was approved, and nothing else does', async ($, on) => {
   // the review of #1005, 2026-11-22: without the mod nothing asked, and Claude's Bash sent; wb
   // now refuses under Claude Code unless this file says the user approved that very send
@@ -6059,6 +6088,25 @@ test('#1364: text naming route-ok.json or a route change is no write and no chan
   const r = await bash("python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['wb', 'route', 'cap', '9'])\nEOF")
   expect([r.asked, r.deny]).toEqual([0, expect.stringContaining('run wb route (or wb start --model) as a command of its own')])
   expect(routeCalls("cat <<'EOF' > notes.md\nwb route cap 9\nEOF")).toEqual({ calls: [], hidden: false, at: [] })
+  await clock.advance(1000)
+})
+
+test('#1364\'s review: Markdown backquotes in Python text are no path, and open() of a path built by os.path.join is a write', async ($, on) => {
+  // the review of #1364, 2026-11-25: a docs edit writing "`$WB_HOME/route-ok.json`" was refused as
+  // writing the file, while `open(os.path.join(…), 'w')` (its parentheses) wasn't seen as a write;
+  // a heredoc body's "doesn't (it can't)" closed its $(…) early, and the text after was read as commands
+  const { clock, bash } = await routeProbe($, on)
+  for (const command of [
+    "python3 - <<'EOF'\np = '/home/u/ARCHITECTURE.md'\ns = open(p).read().replace('x', 'the dialog writes `$WB_HOME/route-ok.json`')\nopen(p, 'w').write(s)\nEOF",
+    "python3 - <<'EOF'\nimport os\nprint(open(os.path.join(os.environ['WB_HOME'], 'route-ok.json')).read())\nEOF",
+    `gh issue create --title t --body "$(cat <<'EOF'\nIt doesn't (it can't) run \`wb route cap 9\` here\nEOF\n)"`,
+    `gh issue create --title t --body "$(cat <<'EOF'\nIt doesn't (it can't) say \`echo x > /wb/route-ok.json\` here\nEOF\n)"`,
+  ]) expect([command, await bash(command)]).toEqual([command, { deny: undefined, asked: 0, question: '', dry: [] }])
+  for (const command of [
+    "python3 - <<'EOF'\nimport os\nwith open(os.path.join(os.environ['WB_HOME'], 'route-ok.json'), 'w') as f:\n    f.write('{}')\nEOF",
+    "cat > /home/u/s.py <<'EOF'\nimport os\nopen(os.environ['WB_HOME'] + '/route-ok.json', 'w').write('{}')\nEOF\npython3 /home/u/s.py",
+  ]) expect([command, (await bash(command)).deny]).toEqual([command, expect.stringContaining("route-ok.json is the mod's dialog's to write")])
+  expect((await bash("ksh -c 'wb route cap 9'")).dry).toEqual([['route', '--dry-run', '--json', 'cap', '9']])
   await clock.advance(1000)
 })
 
