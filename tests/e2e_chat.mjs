@@ -268,6 +268,18 @@ async function run(engine, device) {
     const said = await page.evaluate(() => [...document.querySelectorAll('#say p')].map(p => p.textContent).filter(t => t.includes('Said')))
     if (JSON.stringify(said) !== JSON.stringify(['Said once.\n\n- whole at the end'])) throw new Error(JSON.stringify(said))
   })
+  await check("a message's copy button keeps the focus through an update (#1409)", async () => {
+    // #1409 (2026-11-25): each update made every row's line anew, and the focus on its button fell to the page
+    await page.locator('.row.claude').last().locator('.meta button').focus()
+    const on = () => page.evaluate(() => { const a = document.activeElement; return !!(a && a.textContent === 'copy' && a.closest('.row.claude')) })
+    if (!(await on())) throw new Error('not focused to begin with')
+    listen(true)
+    await until(async () => (await page.textContent('#presence-text')).includes('working in'))
+    listen(false)
+    await until(async () => (await page.textContent('#presence-text')).includes('listening in'))
+    if (!(await on())) throw new Error('the focus went to ' + await page.evaluate(() => document.activeElement && document.activeElement.tagName))
+    await page.evaluate(() => document.activeElement.blur())
+  })
   // the shell's views (#1284): a tap on the nav (the rail on a desktop), then the body shows it
   const goTo = async name => {
     await page.click(`#tabbar .tab[data-view="${name}"]`)

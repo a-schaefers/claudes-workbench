@@ -228,6 +228,32 @@ export async function check(page, ctx) {
       await until(async () => await lit() === 'ask')
     })
 
+    await ctx.check('a choice made by keyboard keeps the focus on its control, and a number sent with Enter keeps its box (#1409)', async () => {
+      // #1409 (2026-11-25): the redraw took the focused radio away, the focus fell to the page,
+      // and the next Tab began again at the first row
+      let rows = MOCK_ROWS
+      unmock()
+      mock(async (method, body) => {
+        if (method !== 'POST') return answer(200, { rows, ts: 1 })
+        rows = rows.map(x => x.key === body.key ? { ...x, value: body.value } : x)
+        return answer(200, { ok: true, said: `${body.key}: ${body.value}`, rows })
+      })
+      const at = () => page.evaluate(() => { const a = document.activeElement, r = a && a.closest('.set-row')
+        return r ? `${r.dataset.key}:${a.tagName}:${a.dataset.value || ''}:${a.getAttribute('aria-checked') || ''}` : String(a && a.tagName) })
+      await reshow()
+      await until(async () => (await row('splash').locator('[aria-checked="true"]').getAttribute('data-value')) === 'on')
+      await row('splash').locator('[data-value="off"]').focus()
+      await page.keyboard.press('Space')
+      if (await at() !== 'splash:BUTTON:off:true') throw new Error('after the press: ' + await at())
+      await until(async () => (await toast()) === 'splash: off')
+      if (await at() !== 'splash:BUTTON:off:true') throw new Error('after the answer: ' + await at())
+      await row('cap').locator('input').fill('6')
+      await row('cap').locator('input').press('Enter')
+      await until(async () => (await toast()) === 'cap: 6')
+      if (await at() !== 'cap:INPUT::') throw new Error('after Enter: ' + await at())
+      await page.evaluate(() => document.activeElement.blur())
+    })
+
     await ctx.check('"Other model…" opens a text input, Escape closes it, Enter sends the typed id; a note is a line beside its group\'s rows, an info row a line', async () => {
       let sent = null
       unmock()

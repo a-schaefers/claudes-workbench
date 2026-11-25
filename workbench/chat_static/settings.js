@@ -195,12 +195,20 @@
     return box
   }
 
+  let refocus = null                    // a control the last redraw couldn't focus (disabled while it waits)
   function draw() {
     if (!root) return
     // an id being typed elsewhere survives the redraw: only the row it was sent for is drawn anew
     const a = document.activeElement
     const typing = a && root.contains(a) && a.tagName === 'INPUT' && !pending(a.dataset.key)
       ? { key: a.dataset.key, other: a.dataset.other, value: a.value, at: a.selectionStart } : null
+    // and any other control keeps the focus, found again by its row and value: the redraw took it,
+    // a choice made by keyboard left the focus on the page, and the next Tab began again at the
+    // first row (#1409, 2026-11-25)
+    const row = !typing && a && root.contains(a) && a.closest('.set-row')
+    const held = row ? { key: row.dataset.key, tag: a.tagName, value: a.dataset.value }
+      : !a || a === document.body ? refocus : null
+    refocus = null
     const out = el('div', 'cards set-cards')
     if (!rows) {
       if (why) { const c = el('div', 'card set-card'); c.append(el('p', 'small', `Settings couldn't load: ${why}`)); out.append(c) }
@@ -226,6 +234,13 @@
         if (sel) { sel.value = OTHER; sel.dispatchEvent(new Event('change')); input = sel.nextElementSibling }
       }
       if (input) { input.value = typing.value; input.focus(); try { input.setSelectionRange(typing.at, typing.at) } catch {} }
+    }
+    if (held) {
+      const box = root.querySelector(`.set-row[data-key="${CSS.escape(held.key)}"]`)
+      const to = box && ((held.value != null && box.querySelector(`${held.tag}[data-value="${CSS.escape(held.value)}"]`))
+        || box.querySelector(held.tag) || box.querySelector('button, select, input'))
+      if (to) to.focus({ preventScroll: true })
+      if (to && document.activeElement !== to) refocus = held
     }
   }
 

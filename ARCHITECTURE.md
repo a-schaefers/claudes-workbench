@@ -6261,8 +6261,11 @@ alone, and a generic renderer: a new setting touches only Python.
   fresh read once nothing waits, since the change may have landed.
 - **One request at a time** (`queue`, `pump`): a click made meanwhile lights at once and waits; a
   row clicked again while its first click still waits sends only its newest value. A redraw keeps
-  an id or a number being typed in another row, and its focus. A blur caused by the redraw itself
-  sends nothing (`drawing`).
+  an id or a number being typed in another row, and its focus. Any other control keeps the focus
+  too, found again by its row's key and `data-value`, else the row's control of its tag (one
+  disabled while its click waits gets it at the next redraw, `refocus`): a choice made by keyboard
+  left the focus on the page, and the next Tab began again at the first row (#1409). A blur caused
+  by the redraw itself sends nothing (`drawing`).
 
 `tests/e2e_settings.mjs` checks it once per device (*The tests*).
 
@@ -7751,7 +7754,8 @@ view's (#1286): the groups in order, "Agents and roles" first, above the device 
 `#settings`'s alone); Claude coding → "Ask me first" lit at once, then `coding.json` and `wb coding` say `ask`; a
 409 puts the control back and toasts, with a second click waiting for the first; a change made outside drawn at
 the window's `focus`, and a click on the value shown still sent (#1392); a POST that never answers given
-up after `POST_MS`, the next change sent (the wrapper rejects at the signal's abort, as a real fetch, #1391); "Other model…": Escape closes
+up after `POST_MS`, the next change sent (the wrapper rejects at the signal's abort, as a real fetch, #1391); a choice
+made with Space keeping the focus on its radio, and a number sent with Enter on its box (#1409); "Other model…": Escape closes
 the input, the select back on the row's value, and Enter sends the typed id; a note drawn beside a choice in its
 group; a number's Enter and Off; `help`'s toast; the layout at the phone's width, and on the desktop at 1280 px
 (two columns) and 390 px (one), nothing past the view's edge. Its calls to `/api/settings` go through a page-side
@@ -7763,7 +7767,8 @@ thread the hint shows, dismisses, and stays dismissed after a reload, and where 
 shows and dismisses with no page error. Sends land exactly once through
 outages, reloads and a SIGSTOP past the 40 s watchdog; settings (no away setting, its old endpoint 404), install over https, `/api/seen` and
 `/api/active` only while in use and on the Chat view (none from a click in Settings or Stats, #1374), the thread
-in no live region (a presence change re-adds no row's line; a reply said once, whole, in `#say`, #1408), the waiting line (one line, no buttons, no answer card, cleared once settled, #1350), shot pairs, listen's shortlist, the keyboard, uploads (an upload check that never answers given up, #1390), an agent's message
+in no live region (a presence change re-adds no row's line, and a focused `copy` keeps the focus; a reply said once,
+whole, in `#say`, #1408, #1409), the waiting line (one line, no buttons, no answer card, cleared once settled, #1350), shot pairs, listen's shortlist, the keyboard, uploads (an upload check that never answers given up, #1390), an agent's message
 shown with its name and its reply through `/api/wait`, that reply named `Claude to <agent>` and
 never counted unread (#1128), its state without the user's, a 25-task backlog's strip at most three lines on a phone, the queued counted apart
 (#1097); and `sw.js` in a node `vm` (`swSays`) for a push's text, and for a notification's click (to the chat). Each wait is `until` on its condition
