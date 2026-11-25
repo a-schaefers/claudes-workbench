@@ -111,6 +111,7 @@ too (an unsupported method, a malformed request line):
 | 411 | `length_required` | an upload without its `Content-Length` |
 | 413 | `too_large` | a body, file or message over its limit (or a request line or headers too long) |
 | 415 | `json_only` | a `POST` that isn't `application/json` |
+| 415 | `not_audio` | an upload to transcribe that isn't a voice clip |
 | 422 | `idempotency_key_reused` | an `Idempotency-Key` sent with another request in the last 24 hours |
 | 429 | `rate_limited` | an agent over its sends a minute: try again after `retry_after` seconds |
 | 500 | `server_error` | the disk or the server failed (`"final": true`: trying again can't help) |

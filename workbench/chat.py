@@ -2149,13 +2149,15 @@ def message(msg_id: str) -> dict | None:
 # "error" stays the text, as before: the page (chat_static/app.js) and ask_claude.py show it as is,
 # so moving it would have broken both; a client branches on "code". A code by status unless the
 # answer names its own (ERRORS_SAID: a revoked token, an agent token from another machine, an
-# unknown host, what an agent may not do (outside AGENT_MAY), a malformed Idempotency-Key).
+# unknown host, what an agent may not do (outside AGENT_MAY), a malformed Idempotency-Key, an
+# upload to transcribe that isn't a voice clip).
 ERROR_CODES = {400: "bad_request", 401: "bad_token", 403: "forbidden", 404: "not_found",
                409: "conflict", 410: "expired", 411: "length_required", 413: "too_large",
                414: "too_large", 415: "json_only", 422: "idempotency_key_reused",
                429: "rate_limited", 431: "too_large", 500: "server_error", 501: "not_implemented",
                502: "bad_gateway", 503: "busy", 507: "disk_full"}
-ERRORS_SAID = ("token_revoked", "not_local", "unknown_host", "agent_forbidden", "bad_idempotency_key")
+ERRORS_SAID = ("token_revoked", "not_local", "unknown_host", "agent_forbidden", "bad_idempotency_key",
+               "not_audio")
 API_V1 = "/api/v1/"  # every /api/<x> is also /api/v1/<x>, the same handler (#1138)
 # Every API route, by method (#1138): docs/chat-api.yaml describes exactly these, under /api/v1/,
 # and a test checks it both ways and that each is a branch of its do_<method>; a route ending in
@@ -2844,8 +2846,8 @@ class Handler(BaseHTTPRequestHandler):
         from . import audio
         try:
             return self._json(200, {"text": transcribe_upload(uid)})
-        except UploadError as e:
-            return self._json(e.code, {"error": e.why})
+        except UploadError as e:  # a 415 here is the upload's type, not the request's (json_only)
+            return self._json(e.code, {"error": e.why, **({"code": "not_audio"} if e.code == 415 else {})})
         except audio.Busy as e:
             return self._json(409, {"error": "the GPU is busy with a task", "busy": True, "why": str(e)})
         except audio.Down as e:

@@ -608,7 +608,7 @@ paths:
         "409":
           $ref: "#/components/responses/Conflict"
         "415":
-          $ref: "#/components/responses/JsonOnly"
+          $ref: "#/components/responses/NotAudio"
         "502":
           $ref: "#/components/responses/BadGateway"
         "503":
@@ -817,6 +817,12 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    NotAudio:
+      description: a POST that isn't application/json (json_only), or an upload that isn't a voice clip (not_audio)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     KeyReused:
       description: an Idempotency-Key sent with another request in the last 24 hours (idempotency_key_reused)
       content:
@@ -867,7 +873,7 @@ components:
         code:
           type: string
           description: a stable code, for a program
-          enum: [bad_request, bad_idempotency_key, bad_token, token_revoked, not_local, agent_forbidden, unknown_host, forbidden, not_found, conflict, expired, length_required, too_large, json_only, idempotency_key_reused, rate_limited, server_error, not_implemented, bad_gateway, busy, disk_full]
+          enum: [bad_request, bad_idempotency_key, bad_token, token_revoked, not_local, agent_forbidden, unknown_host, forbidden, not_found, conflict, expired, length_required, too_large, json_only, idempotency_key_reused, not_audio, rate_limited, server_error, not_implemented, bad_gateway, busy, disk_full]
         retry_after:
           type: number
           description: with rate_limited, seconds to wait

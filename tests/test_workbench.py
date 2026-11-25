@@ -31732,7 +31732,7 @@ class ChatUploads(Base):
         self.assertEqual(self.chat.thread(), [])                            # nothing sent: the words go to the box
         # a file that isn't audio, an upload that isn't there, and an agent's token are refused
         self.put("tttttttt-1", b"notes", name="notes.txt", ctype="text/plain")
-        self.assertEqual(self.transcribe("tttttttt-1"), (415, {"error": "not a voice clip (text/plain)", "code": "json_only"}))
+        self.assertEqual(self.transcribe("tttttttt-1"), (415, {"error": "not a voice clip (text/plain)", "code": "not_audio"}))
         self.assertEqual(self.transcribe("nnnnnnnn-1"), (404, {"error": "no such upload", "code": "not_found"}))
         with contextlib.redirect_stderr(io.StringIO()):
             agent = run_wb("chat", "token", "add", "my-agent").strip()

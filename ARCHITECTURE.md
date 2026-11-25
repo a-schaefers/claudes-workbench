@@ -6405,7 +6405,8 @@ client; the server needs no browser.
   `ERRORS_SAID`, or `x-user-only` against every route outside `AGENT_MAY` (`chat.agent_may`). Every error answer is
   `{error, code, …}` (`Handler._json` adds `code` from `ERROR_CODES` by status unless the answer
   names its own: `token_revoked`, `not_local`, `unknown_host`, `agent_forbidden`,
-  `bad_idempotency_key`, `ERRORS_SAID`); `error` stays the text, as `app.js` and `ask_claude.py`
+  `bad_idempotency_key`, and `not_audio` for `/api/transcribe/`'s 415 (the upload's type, not the
+  request's), `ERRORS_SAID`); `error` stays the text, as `app.js` and `ask_claude.py`
   show it as is. `Handler.send_error` answers http.server's own refusals (501 for another method,
   a malformed request line) in that shape: they were HTML. A revoked agent token's sha256 moves to
   `chat-agents.json`'s `revoked` (the newest `REVOKED_KEPT` 200; `chat.token_revoked`), so its
