@@ -69,7 +69,7 @@ wb-python` against a second hand-over; with none, exit 78 and one line (the chat
 | Process | Started by | How it finds `workbench` |
 |---|---|---|
 | `wb` | the user, Claude, the mod | `bin/wb` puts its real path's repo root on `sys.path` (symlinks work) |
-| the runner | `cli.spawn_runner` | `python -X utf8 -m workbench.runner <task>`, cwd and `PYTHONPATH` the repo root (the caller's in `WB_USER_PYTHONPATH`: `context.detached_env`), own session and, where logind kills at logout, own systemd scope (`cli.detach`, `cli.runner_scope`, #351), output to `runner.log` |
+| the runner | `cli.spawn_runner` | `python -X utf8 -m workbench.runner <task>`, cwd and `PYTHONPATH` the repo root (the caller's in `WB_USER_PYTHONPATH`: `context.detached_env`), own session and, where logind kills at logout or started from a service, own systemd scope (`cli.detach`, `cli.runner_scope`, #351, #1407), output to `runner.log` |
 | the ask server | OpenCode, the layer's `mcp.servers.workbench` | `[sys.executable, <root>/bin/wb-ask-mcp]` |
 | the git shim | the agent's shell (`<rules>/bin/git`) | a `/bin/sh` wrapper exec'ing `<python> -I -c` (quoted: a shebang splits at a space) with `sys.path.insert` |
 | the lane | the runner | `python -I lane.py …`, standard library only |
@@ -5523,7 +5523,10 @@ place, so the unit sees no exit (#200). Where logind's `KillUserProcesses=yes` w
 leaves running (`cli.kills_sessions`, via `loginctl show-session`), each runner, the bench driver
 (`bench.start`), `wb optimize` (`optimize.start`) and the server `wb chat on` starts (`chat.start`)
 runs in its own scope (`cli.detach`, `cli.runner_scope`: `systemd-run --user --scope --quiet
---collect`, which execs, so the pid is the command's; #531); `wb doctor` warns when that scope
+--collect`, which execs, so the pid is the command's; #531). So does all `cli.detach` starts from
+a service's own cgroup (`cli.in_service`, `/proc/self/cgroup` ending in `.service`; not
+`INVOCATION_ID`, which terminals pass on): the web app's Measure now ran `wb optimize` in
+wb-chat.service's, and wb setup's restart of the unit killed it (#1407); `wb doctor` warns when that scope
 can't be had (`cli.logout_stops`), and `wb chat on`/`wb doctor` say when logind reports
 `Linger=no`. macOS: `launchd/workbench.chat.plist` (`RunAtLoad`, `KeepAlive`, `exec
 "$HOME/.local/bin/wb" chat serve` through `/bin/sh`, Homebrew's `python3` first, `/usr/sbin:/sbin`
