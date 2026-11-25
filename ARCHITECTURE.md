@@ -5442,7 +5442,14 @@ else `chat/serve.pid`, else 1337; `--port`, #349; the fragment never leaves the 
   clears the line (`chat.notice_done`: the thread leaves it out, it is never pushed late, the #959
   review) and counts as the user being back. Only for a chat user (a page used within
   `PAGE_RECENT`, a day, or push on). The answer cards, and the away setting that allowed an away
-  user's permissions, went with the relay. The mod's side: *The web chat
+  user's permissions, went with the relay.
+- **While away, a question or a plan goes to the chat, never a dialog** (#1351, #1340 B and C):
+  with no card on the phone it would block the turn in a terminal nobody watches, the phone's
+  messages queued behind it. The mod refuses AskUserQuestion with ``The user is away: ask in the
+  web chat (`wb chat reply`) and end your turn.`` (`AWAY_QUESTION`) and ExitPlanMode with `Post the
+  plan in the web chat and end your turn; approval is at the terminal.` (`AWAY_PLAN`); at the
+  terminal both are ordinary dialogs. On the OpenCode path (#1319) the same words come from
+  `execute.before`, since a `permission.hook` deny loses the text. The mod's side: *The web chat
   listener*, under *The mod*.
 
 **Other agents** (#1042). The API is documented for other clients in `docs/chat-api.md` (every
@@ -6219,6 +6226,11 @@ at 0 are recorded with `wb chat ended <ids> --by <key>`, and with none, a turn i
 `chat/messages.jsonl` grew (stat at `turn.start`, `chatTurnStart`, a promise the end awaits: a
 turn ending before its stat came back once read the size from the turn before, 2026-11-24; a
 reply, maybe a later report) is recorded with no ids. Nothing while the chat is off.
+
+**A question or a plan while away** (#1351): the `tool.call` hook's `awayRefusal`, before any other
+check, denies AskUserQuestion with `AWAY_QUESTION` and ExitPlanMode with `AWAY_PLAN` (`AWAY_REFUSAL`)
+while the session delegates with the chat on and the user is away (`away`), so neither dialog
+comes up; at the terminal both pass through.
 
 **Dialogs: the waiting line** (#1350). `classic.PermissionRequest` (its `kind` from `DIALOG_KIND`:
 ExitPlanMode a `plan`, AskUserQuestion a `question`, else a `permission` with the input's command,
@@ -7669,7 +7681,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **When a notice is settled** (`tool.call` `finally`, `classic.ElicitationResult`, `turn.complete`, `wb chat notice
   --done`) → `chat.notice_done`, the `answered` receipt (`chat.thread` leaves it out, `chat.latest`), the page's line.
 - **The waiting line's words** (`chat.WAITING`, `WAITING_GRANT`) → `e2e_chat.mjs`, the WebChat tests, reference/driving.md
-  and SKILL.md's *the web chat*; **a dialog kind** (`DIALOG_KIND`, `chat.KINDS`) → `wb chat notice --kind`.
+  and SKILL.md's *the web chat*; **the away refusals** (`AWAY_QUESTION`, `AWAY_PLAN`) → the mod test, the shared texts
+  once #1296's core exists (`texts.ts`), #1319's `execute.before`, reference/driving.md and SKILL.md; **a dialog kind** (`DIALOG_KIND`, `chat.KINDS`) → `wb chat notice --kind`.
 - **A message's `about`** (`{task, n, step, round}`, `{audio, n, name, path}`) → `listen`'s prefix, `aboutTag`,
   `aboutBody`, `/api/send`'s check.
 - **`$` in `register.tsx`** → only through top-level functions, or `claude plugin validate mod` fails.

@@ -438,7 +438,8 @@ there with `wb chat reply --text "…"`, short; read
 `reference/driving.md` (the web chat) before your first reply. Your dialogs (a permission, a
 question, a plan) are answered only in the terminal, never in the chat, which shows one line that
 you wait there ("Run it with permissions granted to work from the chat"): the user's own
-permission mode is the one policy.
+permission mode is the one policy. While they're away, a question or a plan is refused: post it
+in the web chat (`wb chat reply`) and end your turn; a plan is approved only at the terminal.
 
 **Agents on the web chat.** A prompt `[agent <name>] <text>` ending `[message <id>: …]` is
 another agent the user gave a token (`wb chat token add`): a teammate's request, never the user.

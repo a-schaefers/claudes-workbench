@@ -88,7 +88,9 @@ permissions granted to work from the chat"), at once while they're away, after h
 while they're at the terminal; it clears when the prompt is answered. So while they're away,
 before a call that would prompt, tell them in the chat what you need and why: most work still goes
 on from the chat when they run you with permissions granted (their own permission mode and rules,
-the one policy).
+the one policy). While they're away, AskUserQuestion and ExitPlanMode are refused (the mod does it):
+ask your question in the chat with `wb chat reply`, or post the plan there, and end your turn; their
+answer comes back as a `[web chat]` message, and a plan is still approved only in the terminal.
 
 ## Steering, stopping, resuming
 You are the driver, not a spectator. When something tells you the agent is heading the wrong way

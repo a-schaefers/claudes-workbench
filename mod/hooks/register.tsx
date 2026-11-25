@@ -3440,6 +3440,22 @@ function askText(input: unknown): string {
   return text.length > 1500 ? text.slice(0, 1500) + '…' : text
 }
 
+// While the user is away, a question or a plan is refused into the web chat, never a dialog (#1351,
+// #1340 B and C): with no card on the phone, one would block the turn in a terminal nobody
+// watches, and the phone's messages would queue behind it. The refusal tells Claude what to do
+// instead; at the terminal both stay ordinary dialogs. On the OpenCode path the same words come
+// from `execute.before` (a `permission.hook` deny loses the text, #1319); they move to the
+// shared texts with #1296's core.
+export const AWAY_QUESTION = 'The user is away: ask in the web chat (`wb chat reply`) and end your turn.'
+export const AWAY_PLAN = 'Post the plan in the web chat and end your turn; approval is at the terminal.'
+const AWAY_REFUSAL: Record<string, string> = { AskUserQuestion: AWAY_QUESTION, ExitPlanMode: AWAY_PLAN }
+async function awayRefusal($: any, tool: string): Promise<string> {
+  const why = AWAY_REFUSAL[tool]
+  if (!why) return ''
+  const st = await read($, chat)
+  return st.delegating && (await away($, st)) ? why : ''
+}
+
 // A dialog came up in the terminal: noted, in the session the chat listens to (workbench mode,
 // the web chat on), for its line on the page
 async function dialogUp($: any, kind: string, tool: string, agent: string, text: string) {
@@ -4399,6 +4415,9 @@ export const register: Register = (on, options) => {
       mem.busy = true
       void poll($)
     }
+    // the user away: a question or a plan goes to the web chat instead of the terminal (#1351)
+    const awayWhy = await awayRefusal($, String(e.tool))
+    if (awayWhy) return { deny: awayWhy }
     // Claude coding (#92): Claude's own edit in a task's worktree waits for the user's choice
     const field = EDIT_TOOLS[e.tool]
     const path = field ? (e as any)[field] : undefined

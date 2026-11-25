@@ -2534,6 +2534,57 @@ test('#1350: in an agent\'s turn a dialog is the same waiting line for the human
   await clock.settle()
 })
 
+test('#1351: while the user is away a question or a plan is refused into the web chat, and at the terminal both are ordinary dialogs', async ($, on) => {
+  // #1340 B and C: with no card on the phone (#1350), a question or plan raised while the user is
+  // away would block the turn in a terminal nobody watches, the phone's messages queued behind it
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  let ran: string[] = []
+  on('tool.call', (_: any, e: any) => { ran.push(e.tool); return { result: { stdout: '' }, text: '' } })  // the engine's tool
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  const call = (tool: string, input: Record<string, unknown> = {}) => $.tool.call({ tool, ...input } as any) as Promise<any>
+  const questions = [{ question: 'Which DB?', header: 'DB', options: [{ label: 'SQLite' }, { label: 'Postgres' }], multiSelect: false }]
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+
+  // at the terminal: both go on to their dialogs
+  expect((await call('AskUserQuestion', { questions })).deny).toBeUndefined()
+  expect((await call('ExitPlanMode', { plan: '1. Read' })).deny).toBeUndefined()
+  expect(ran).toEqual(['AskUserQuestion', 'ExitPlanMode'])
+
+  // away (the page in use since the terminal's last input): refused, with what to do instead
+  files['/wb/chat/away.json'] = JSON.stringify({ at: clock.now() / 1000, by: 'page' })
+  ran = []
+  expect((await call('AskUserQuestion', { questions })).deny)
+    .toBe('The user is away: ask in the web chat (`wb chat reply`) and end your turn.')
+  expect((await call('ExitPlanMode', { plan: '1. Read' })).deny)
+    .toBe('Post the plan in the web chat and end your turn; approval is at the terminal.')
+  expect(ran).toEqual([])                                           // neither dialog came up
+  expect((await call('Bash', { command: 'ls' })).deny).toBeUndefined()  // other tools as ever
+  expect(ran).toEqual(['Bash'])
+
+  // back at the terminal: dialogs again
+  await $.prompt.submit({ text: 'back now' } as any)
+  ran = []
+  expect((await call('AskUserQuestion', { questions })).deny).toBeUndefined()
+  expect(ran).toEqual(['AskUserQuestion'])
+
+  // the chat off: never away, never refused
+  await $.turn.complete(endTurn('t0'))                            // the calls' turn over: the poll reads the switch
+  files['/wb/chat/away.json'] = JSON.stringify({ at: clock.now() / 1000, by: 'page' })
+  files['/wb/chat/switch.json'] = JSON.stringify({ on: false })
+  await clock.advance(31_000)
+  expect((await call('ExitPlanMode', { plan: '1. Read' })).deny).toBeUndefined()
+  await clock.settle()
+})
+
 test('a session that isn\'t listening treats the user as away too, posting its dialogs\' line at once and saying so in its wakes (#688)', async ($, on) => {
   // #688: only the listening session set its own `webAt`, so another session's overnight backlog
   // left its permission dialogs in the empty terminal (#110 again) and its wakes never said
