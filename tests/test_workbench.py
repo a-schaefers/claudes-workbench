@@ -34548,6 +34548,31 @@ class Routes(Base):
         self.assertFalse(self.ok.exists())
         self.assertEqual(store.Task("t-api").spec["said"], "asked for, approved in the dialog")
 
+    def test_the_start_dry_run_gives_no_dialog_for_a_taken_name_a_missing_spec_or_a_repo_with_no_claude_md(self):
+        # #1395 (2026-11-25): the dry run behind the dialog gated each of these, wb start then
+        # refused it, and the corrected retry asked the user again
+        store.write_json(self.path, {"v": 1, "day_usd": 5, "roles": {}})
+        os.environ["CLAUDECODE"] = "1"
+        m = runner.models.resolve("acme/coder-flash")
+        store.Task("t-old").dir.mkdir(parents=True)
+        store.write_json(store.Task("t-old").dir / "task.json", {"repo": str(self.repo)})
+        bare = Path(self.tmp.name) / "bare"
+        subprocess.run(["git", "init", "-q", str(bare)], check=True)
+        subprocess.run(["git", "-C", str(bare), "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+        spec, missing = str(self.spec), str(Path(self.tmp.name) / "nope.md")
+        for name, spec_at, repo, says in (
+                ("t-old", spec, self.repo, "task 't-old' exists"),
+                ("BAD_NAME", spec, self.repo, "a task name is lowercase letters"),
+                ("t-nospec", missing, self.repo, "nope.md"),
+                ("t-bare", spec, bare, "has no CLAUDE.md")):
+            argv = [name, "--spec", spec_at, "--repo", str(repo), "--model", m.id]
+            code, out, err = self.route("--dry-run", "--json", "--start", *argv)
+            self.assertEqual((code, out), (1, ""), name)
+            self.assertIn(says, err, name)
+            self.assertFalse(self.ok.exists())
+        self.assertTrue(self.dry("--start", "t-new", "--spec", spec, "--repo", str(self.repo),
+                                 "--model", m.id)["gate"])
+
     def test_wb_try_on_an_api_model_is_refused_plainly_before_any_sample_is_made(self):
         # 2026-11-23 review: it reached start_gate as try-<n>, a name no dialog could show, and
         # the refusal pointed at a dialog that never came
