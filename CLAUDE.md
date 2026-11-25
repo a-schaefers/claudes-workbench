@@ -179,8 +179,9 @@ is the agent's, `store.caller_kind`, #1310), `WB_RUN`,
 driver's, under `WB_TASK` never: `store.opencode_session`, gated as `CLAUDECODE` is: `store.under_model`), `CLAUDECODE` (under it `wb patch send`
 sends and `wb route` changes the API side only on the mod's dialog's yes: `send-ok.json`,
 `route-ok.json`; `wb start --model` on an API model the same, `cli.start_gate`; an agent's call too:
-`store.under_model`). A driver's `OPENCODE_SESSION_ID`, `OPENCODE`, `AGENT`, `AI_AGENT`, `OPENCODE_TERMINAL`
-and `WB_DRIVER` never reach an agent (`runner.DRIVER_ENV`). Tests only: `WB_OPENCODE_BIN`,
+`store.under_model`). A driver's `OPENCODE_SESSION_ID`, `OPENCODE`, `AGENT`, `AI_AGENT`, `OPENCODE_TERMINAL`,
+`WB_DRIVER`, `OPENCODE_CLIENT` and `OPENCODE_PRINT_LOGS` never reach an agent (`runner.DRIVER_ENV`); Desktop's
+`OPENCODE_EXPERIMENTAL_ICON_DISCOVERY`/`_FILEWATCHER` do (2.4.1 reads neither). Tests only: `WB_OPENCODE_BIN`,
 `WB_FAKE_MODELS`, `WB_FAKE_GPU_GB`, `WB_FAKE_CATALOG` (the fake's OpenCode catalog), `WB_FAKE_API`
 (an API model's state in the fake: `nokey`, `auth`, `quota`, `ratelimit`, `down`), `WB_TEST_SHARD`,
 `WB_TEST_HANG_SECS`.

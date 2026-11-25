@@ -8414,9 +8414,12 @@ class Context(Base):
         self.assertIn("feat: step three", log())
 
     # what a `wb start` run from an OpenCode session's shell carries (OpenCode 2.4.1's shell
-    # tool, read and run on 2026-11-25), Claude Code's AI_AGENT, and the server's passwords
+    # tool, read and run on 2026-11-25), Claude Code's AI_AGENT, the server's passwords, and
+    # what other drivers put in process.env (the #1310 review: `opencode acp`'s and Desktop's
+    # OPENCODE_CLIENT, a --print-logs driver's OPENCODE_PRINT_LOGS)
     DRIVER_SHELL = {"OPENCODE_SESSION_ID": "ses_driver1310", "OPENCODE": "1", "AGENT": "1",
                     "AI_AGENT": "claude-code_2-1_agent", "OPENCODE_TERMINAL": "1", "WB_DRIVER": "opencode",
+                    "OPENCODE_CLIENT": "acp", "OPENCODE_PRINT_LOGS": "1",
                     "OPENCODE_PASSWORD": "CANARY-1310-PW", "OPENCODE_SERVER_PASSWORD": "CANARY-1310-PW"}
 
     def test_the_drivers_session_and_marks_reach_neither_the_agent_nor_its_tests(self):
@@ -8424,7 +8427,7 @@ class Context(Base):
         # driver's OPENCODE_SESSION_ID and marks (env_kept keeps what isn't a credential); its own
         # OpenCode sets them again for its own session, AI_AGENT only when unset
         probe = ('test -z "$OPENCODE_SESSION_ID$OPENCODE$AGENT$AI_AGENT$OPENCODE_TERMINAL$WB_DRIVER'
-                 '$OPENCODE_PASSWORD$OPENCODE_SERVER_PASSWORD" && ' + TEST_CMD)
+                 '$OPENCODE_PASSWORD$OPENCODE_SERVER_PASSWORD$OPENCODE_CLIENT$OPENCODE_PRINT_LOGS" && ' + TEST_CMD)
         with mock.patch.dict(os.environ, self.DRIVER_SHELL):
             self.start("t-drv", "ok", "--test", probe)
             st = wait_phase("t-drv", {"review", "stuck", "failed"})

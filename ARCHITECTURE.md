@@ -2555,7 +2555,12 @@ deliberately hostile process.
 design's plugin mark: a `wb start` from an OpenCode session's shell handed every agent and its tests
 the driver's session; the agent's own OpenCode sets each again in its shells for its own session,
 `AI_AGENT` only when unset, so Claude Code's `claude-code_…` named the agents' shells Claude Code's;
-kept: `TERM`, and `NO_PROXY` with the loopback hosts, which OpenCode adds to its own; the server's
+and what other drivers put in `process.env`, the shell tool's base: `OPENCODE_CLIENT` (`opencode acp`'s
+`acp`, Desktop's `desktop`, which the agent's OpenCode took as its app name, in its User-Agent to providers)
+and `OPENCODE_PRINT_LOGS` (a `--print-logs` driver's: the agent's `run --standalone` then wrote its server's
+whole log, the round's prompt in it, to `runner.log` every round);
+kept: Desktop's `OPENCODE_EXPERIMENTAL_ICON_DISCOVERY` and `OPENCODE_EXPERIMENTAL_FILEWATCHER`, which 2.4.1
+reads neither of (flags come through `OPENCODE_FLAGS`), `TERM`, and `NO_PROXY` with the loopback hosts, which OpenCode adds to its own; the server's
 `OPENCODE_PASSWORD` and `OPENCODE_SERVER_PASSWORD` never reach a shell, OpenCode's `Env.session`
 leaving them out, and fall to `SECRET_ENV` by name), the runner's own
 `PYTHONPATH` (`python_path`, below) and credentials: `SECRET_ENV` (names holding `TOKEN`,
@@ -8608,7 +8613,9 @@ doc needs its own `!/` line).
   source on each OpenCode bump, and RealOpenCode's OTel test.
 - **`runner.DRIVER_ENV`** ↔ what OpenCode's shell tool sets on every command (2.4.1: `AGENT`, `OPENCODE`,
   `AI_AGENT`, `OPENCODE_SESSION_ID` in core/src/tool/plugin/shell.ts, `OPENCODE_TERMINAL` in core/src/shell.ts)
-  → the fake's `shell_marks` (tests/fake_opencode.py), `store.caller_kind` (WB_TASK first), and RealOpenCodeRun's
+  and what a driver process puts in `process.env` (`opencode acp`'s and Desktop's `OPENCODE_CLIENT`, `--print-logs`'s
+  `OPENCODE_PRINT_LOGS`: dropped; Desktop's `OPENCODE_EXPERIMENTAL_ICON_DISCOVERY` and `_FILEWATCHER`: kept, read by
+  nothing in 2.4.1) → the fake's `shell_marks` (tests/fake_opencode.py), `store.caller_kind` (WB_TASK first), and RealOpenCodeRun's
   driver test (#1310): re-check on each OpenCode bump.
 - **The user's MCP servers** (commands.json `mcp`, `context.mcp_refusal`, `mcp_servers`, `mcp_roots`, the `<name>_*`
   allow between `MCP_RULES` and `DENIED_TOOLS`) → `UsersMcpServers`, RealOpenCode's #1202 test (its `run_calls(…,

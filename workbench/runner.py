@@ -694,12 +694,21 @@ CLAUDE_CODE_OFF = ("OPENCODE_DISABLE_CLAUDE_CODE", "OPENCODE_DISABLE_CLAUDE_CODE
 # every agent then had the driver's session as its own, its tests too. The agent's OpenCode sets
 # each again for the agent's own session, but AI_AGENT only when unset (`||=`): Claude Code's
 # (`claude-code_…`) named every agent's shell Claude Code's. `WB_DRIVER` is the plugin's mark in
-# #1296's first design: dropped too, should a plugin set it. The rest of what a driver's shell
-# adds stays: TERM (OpenCode's own shell sets it again), NO_PROXY with the loopback hosts (the
-# agent's OpenCode adds the same), and the server password, never there (OpenCode's Env.session
-# leaves it out, its server deletes it) and SECRET_ENV's (PASSW) if it were. Who runs a wb call
-# is store.caller_kind's, WB_TASK first: the agent's own shell has an OPENCODE_SESSION_ID again.
-DRIVER_ENV = ("OPENCODE_SESSION_ID", "OPENCODE", "AGENT", "AI_AGENT", "OPENCODE_TERMINAL", "WB_DRIVER")
+# #1296's first design: dropped too, should a plugin set it. Other drivers put theirs in
+# process.env, which the shell tool's base environment is (core/src/shell.ts), so they reached
+# agents too (the #1310 review, 2026-11-25): OPENCODE_CLIENT (`opencode acp`'s `acp`, Desktop's
+# `desktop`: the agent's OpenCode took it as its app name, in its User-Agent to providers and its
+# observability tag) and OPENCODE_PRINT_LOGS (a driver's --print-logs: the agent's `run
+# --standalone` passed its server's whole log into runner.log every round, each "cli starting"
+# line with the round's prompt) describe the driver's process, so both drop. Desktop's
+# OPENCODE_EXPERIMENTAL_ICON_DISCOVERY and OPENCODE_EXPERIMENTAL_FILEWATCHER stay: 2.4.1's core and
+# CLI read neither (flags come through OPENCODE_FLAGS). The rest of what a driver's shell adds
+# stays: TERM (OpenCode's own shell sets it again), NO_PROXY with the loopback hosts (the agent's
+# OpenCode adds the same), and the server password, never there (OpenCode's Env.session leaves it
+# out, its server deletes it) and SECRET_ENV's (PASSW) if it were. Who runs a wb call is
+# store.caller_kind's, WB_TASK first: the agent's own shell has an OPENCODE_SESSION_ID again.
+DRIVER_ENV = ("OPENCODE_SESSION_ID", "OPENCODE", "AGENT", "AI_AGENT", "OPENCODE_TERMINAL", "WB_DRIVER",
+              "OPENCODE_CLIENT", "OPENCODE_PRINT_LOGS")
 
 
 def env_kept(name: str, value: str, through: set) -> bool:
