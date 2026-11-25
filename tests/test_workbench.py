@@ -41941,7 +41941,7 @@ class BusyGpu(Base):
             "ts": time.time(), "day": cli.meter.day(), "kind": "step", "task": "other", "round": 1,
             "provider": "deepseek", "model": "deepseek/deepseek-flash", "usd": 5.0, "source": "opencode"})
         code, out, err = self.begin("t-capped", "--role", "trivial")
-        self.assertEqual(code, 4, err)
+        self.assertEqual(code, 0, err)                               # queued on the GPU (#1322)
         self.assertIn("note: the GPU is busy, and the trivial role's API model deepseek/deepseek-flash can't "
                       "take it: trivial role: API spend today is ≈$5 of the $5 day cap (it resets at local "
                       "midnight)\n", out)

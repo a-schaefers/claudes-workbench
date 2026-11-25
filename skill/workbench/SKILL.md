@@ -133,7 +133,7 @@ it that way; the agents never write either.
 - **Keeping it current**: when a task changes something CLAUDE.md describes (a new module,
   command, dependency, convention or decision), edit CLAUDE.md in the task's worktree at review,
   before `wb accept`, so it lands in the same commit as the code (one edit, no commit of its own).
-  `wb accept` prints how many code commits CLAUDE.md is behind. Nothing changed that it describes?
+  Check it yourself at review: nothing changed that it describes?
   Leave it. It says what the project is, never what comes next: keep
   the plan and the next step in your own notes. An agent that loses its task takes up whatever
   CLAUDE.md says is next (seen: a compaction summary that recounted CLAUDE.md, and the agent
