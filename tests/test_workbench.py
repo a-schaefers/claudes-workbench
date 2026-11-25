@@ -25581,6 +25581,25 @@ class LocalPatches(Base):
         self.assertIn("opened https://github.com/a-schaefers/workbench/pull/7", self.send(body))
         self.assertFalse(ok.exists())                           # one yes, one send
 
+    def test_from_an_agents_shell_patch_send_sends_only_what_the_dialog_approved_without_claude_code(self):
+        # #1310 (2026-11-25, its review): on a task started from a terminal the agent has no
+        # CLAUDECODE, and its shell's OPENCODE_SESSION_ID is its own, which #1309 left ungated
+        # under WB_TASK: an unlaned agent's shell ran the fork, push and pull request unasked
+        wt, body = self.prepared()
+        self.to_fork()
+        os.environ.update(WB_TASK="t-agent", OPENCODE_SESSION_ID="ses_agent", OPENCODE="1")
+        ok = store.home() / "send-ok.json"
+        out = self.send(body)
+        self.assertIn("in an agent's shell wb patch send goes only on the user's yes in the driver's dialog", out)
+        self.assertIn(f'ask_reviewer); or the user runs it in a terminal of their own: wb patch send fix-thing '
+                      f'--title "Fix it" --body-file {body}', out)
+        self.assertEqual(self.gh_argv(), [])
+        self.assertFalse(self.sent())
+        store.write_json(ok, {"slug": "fix-thing", "title": "Fix it", "body_file": str(body),
+                              "body": body.read_text(), "draft": False, "anyway": False, "at": time.time()})
+        self.assertIn("opened https://github.com/a-schaefers/workbench/pull/7", self.send(body))
+        self.assertFalse(ok.exists())                           # one yes, one send
+
     def test_an_insteadof_rule_forcing_https_is_not_taken_for_ssh(self):
         # #1005, 2026-11-22 (the review): the rule's value names git@github.com:, its target is
         # https; the user, with no ssh key, was told to log gh in over ssh
@@ -37380,9 +37399,21 @@ class Routes(Base):
         self.assertIn("ask_reviewer", err)
         self.assertEqual(pinned, 0)
         self.assertEqual(self.doc()["roles"]["significant"]["gpu_by"], "agent")   # #1309's claude/opencode/terminal kin
-        self.assertNotIn("trivial", self.doc()["roles"])
+        self.assertEqual(self.doc()["roles"]["trivial"]["via"], "gpu")       # the API change never applied
         self.assertIn("set by an agent", self.route()[1])
         self.assertEqual(self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)  # the user's
+
+    def test_an_agents_api_model_start_records_the_dialogs_yes_its_gate_asked_for(self):
+        # #1310 (2026-11-25): the gate asks the dialog in an agent's shell (cli.start_gate), so the
+        # start says it was approved there, as under Claude Code; a terminal's start says only asked
+        self.assertEqual(self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)  # a day cap
+        asked = []
+        for env, said in (({"WB_TASK": "t-x", "OPENCODE_SESSION_ID": "ses_agent"}, "asked for, approved in the dialog"),
+                          ({}, "asked for")):
+            with self.subTest(env=env), mock.patch.dict(os.environ, env):
+                m, _, _, routed = routes.resolve("trivial", "trivial", "deepseek/deepseek-flash", gate=asked.append)
+                self.assertEqual((m.id, routed["via"], routed["said"]), ("deepseek/deepseek-flash", "api", said))
+        self.assertEqual(len(asked), 2)                    # the gate itself decides who it asks
 
     def test_a_gpu_model_pin_needs_no_dialog_and_survives_the_flips(self):
         os.environ["CLAUDECODE"] = "1"
