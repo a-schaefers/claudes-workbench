@@ -28,7 +28,7 @@ from types import SimpleNamespace
 from urllib.parse import urlparse
 
 from . import (__version__, ask_mcp, audio, bench, chat, context, gitops, hardware, images, lane, lessons,
-               media, models, optimize, patches, progress, results, router, routes, savings, scan, skills, spend, stats, store,
+               media, models, optimize, patches, progress, results, router, routes, savings, scan, skills, stats, store,
                transcript, tuning, verify, webpush)
 from .watch import Watcher, wait_exit
 from . import runner
