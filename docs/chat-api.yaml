@@ -1,0 +1,1068 @@
+# OpenAPI 3.1 description of workbench's web chat API (#1138). The prose reference, with the
+# whole agent flow, is docs/chat-api.md beside it. tests/test_docs.py checks that these paths are
+# exactly the routes workbench/chat.py serves (chat.ROUTES), so a route added to one and not the
+# other fails. It is read there by a small parser of the YAML it is written in: block mappings and
+# lists, one-line scalars (plain, or double-quoted when they hold ": " or " #"), flow lists, {}
+# and folded ">-" blocks. Keep to that.
+openapi: 3.1.0
+info:
+  title: workbench web chat API
+  version: "1"
+  summary: The user's own local agents asking the user's own Claude Code session for help.
+  description: >-
+    The HTTP API of `wb chat serve`: the chat page's, and local agents' (each with a token of its
+    own, `wb chat token add <name>`). It is for the user's own agents on this machine talking to the
+    user's own Claude Code session: it listens on localhost by default, an agent token from any other
+    address is refused (`not_local`), and it is no model endpoint. Every path is served under
+    `/api/v1/` and, for the page and clients older than workbench 2.1, under `/api/` too, by the
+    same handler. `info.version` is the API's version, `api` in /health and /state. Nobody listening
+    is not an error: `/health` says `listening: false` and a sent message waits (unread past 6 hours,
+    a wait on it is `410 expired`). The terms for automated use of Claude differ by how Claude Code
+    is signed in (https://www.anthropic.com/legal): each user decides for their own setup.
+  license:
+    name: MIT
+servers:
+  - url: http://localhost:1337
+    description: the default (`wb chat serve --port`; `wb chat url` prints the page's link)
+security:
+  - bearer: []
+tags:
+  - name: agent
+    description: what an agent token may call (each with an agent's view of its own conversation)
+  - name: user
+    description: the user's token only; an agent token gets 403 agent_forbidden
+paths:
+  /api/v1/health:
+    get:
+      operationId: health
+      tags: [agent, user]
+      summary: Is a Claude Code session listening? An agent's first call.
+      responses:
+        "200":
+          description: the API's version, and whether a session in workbench mode listens with the chat on
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/v1/state:
+    get:
+      operationId: state
+      tags: [agent, user]
+      summary: The whole state the page draws (an agent's token gets its own view).
+      responses:
+        "200":
+          description: the state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/State"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/v1/stream:
+    get:
+      operationId: stream
+      tags: [agent, user]
+      summary: Server-sent events, the whole state first, then what changed.
+      description: >-
+        `event: state` with the whole state on connect (a reconnect is a resync), then `event: patch`
+        with what changed (`messages` as `{put, drop}`, every other field whole), and a
+        `: ping` comment after 15 s of silence. At most 16 are open; a 17th makes the oldest give
+        way (an agent's is 503 at once). Send the bearer header: use fetch, not EventSource.
+      responses:
+        "200":
+          description: the event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Busy"
+  /api/v1/wait:
+    get:
+      operationId: wait
+      tags: [agent, user]
+      summary: A long poll for Claude's replies after a message.
+      description: >-
+        Returns at the first reply, once `done` (with `until=done`), when nobody listens, at the
+        timeout, or when Claude comes to wait on the user. A wait cut by the server restarting (a
+        reset, or 502 to 504 from a proxy) is asked again with the same `after`.
+      parameters:
+        - name: after
+          in: query
+          required: true
+          description: a message's or a reply's id
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+        - name: timeout
+          in: query
+          description: seconds to hold
+          schema:
+            type: number
+            minimum: 0
+            maximum: 600
+            default: 300
+        - name: until
+          in: query
+          description: done returns at a reply or the turn's end; reply only at a new reply
+          schema:
+            type: string
+            enum: [done, reply]
+            default: done
+      responses:
+        "200":
+          description: the replies so far and where the turn stands
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Wait"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          $ref: "#/components/responses/Expired"
+        "503":
+          $ref: "#/components/responses/Busy"
+  /api/v1/send:
+    post:
+      operationId: send
+      tags: [agent, user]
+      summary: Send one message to Claude.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendRequest"
+      responses:
+        "200":
+          description: >-
+            the message sent, or, for an Idempotency-Key this token sent within 24 hours with the
+            same body, the message that first send made (nothing sent again)
+          headers:
+            Idempotent-Replayed:
+              description: "true when this is the first send's answer again"
+              schema:
+                type: string
+                enum: ["true"]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "415":
+          $ref: "#/components/responses/JsonOnly"
+        "422":
+          $ref: "#/components/responses/KeyReused"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /api/v1/upload/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UploadId"
+    get:
+      operationId: uploadMeta
+      tags: [agent, user]
+      summary: Whether an upload is stored, so a client asks before it sends a byte again.
+      responses:
+        "200":
+          description: the upload
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [upload]
+                properties:
+                  upload:
+                    $ref: "#/components/schemas/Upload"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      operationId: upload
+      tags: [agent, user]
+      summary: Store a file under an id of yours, once (the same id again answers with the first).
+      parameters:
+        - name: Content-Length
+          in: header
+          required: true
+          schema:
+            type: integer
+            minimum: 0
+        - name: X-File-Name
+          in: header
+          description: the file's name, URI-encoded
+          schema:
+            type: string
+      requestBody:
+        required: true
+        description: the file's bytes; its type in Content-Type
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              contentMediaType: application/octet-stream
+      responses:
+        "200":
+          description: stored, or stored already under that id
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [upload, new]
+                properties:
+                  upload:
+                    $ref: "#/components/schemas/Upload"
+                  new:
+                    type: boolean
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "411":
+          $ref: "#/components/responses/LengthRequired"
+        "413":
+          $ref: "#/components/responses/TooLarge"
+        "500":
+          $ref: "#/components/responses/ServerError"
+        "507":
+          $ref: "#/components/responses/DiskFull"
+  /api/v1/file/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UploadId"
+    get:
+      operationId: file
+      tags: [agent, user]
+      summary: An upload's bytes, an image as itself and anything else as an attachment.
+      responses:
+        "200":
+          description: the file (cached for a year, as an id's bytes never change)
+          content:
+            image/*:
+              schema:
+                type: string
+                contentMediaType: image/*
+            application/octet-stream:
+              schema:
+                type: string
+                contentMediaType: application/octet-stream
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/latest:
+    get:
+      operationId: latest
+      tags: [user]
+      x-user-only: true
+      summary: What a push notification shows.
+      responses:
+        "200":
+          description: Claude's last message for the user, or an open notice
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  now:
+                    type: number
+                  messages:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Message"
+                  push:
+                    type: object
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/v1/shot:
+    get:
+      operationId: shot
+      tags: [user]
+      x-user-only: true
+      summary: One side of a `wb shot` pair, as a PNG.
+      parameters:
+        - name: task
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: n
+          in: query
+          required: true
+          schema:
+            type: integer
+        - name: side
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [base, candidate]
+      responses:
+        "200":
+          description: the screenshot
+          content:
+            image/png:
+              schema:
+                type: string
+                contentMediaType: image/png
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "410":
+          $ref: "#/components/responses/Expired"
+  /api/v1/audio:
+    get:
+      operationId: audio
+      tags: [user]
+      x-user-only: true
+      summary: One take of a `wb chat listen` shortlist, as its audio type.
+      parameters:
+        - name: batch
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: n
+          in: query
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: the take
+          content:
+            audio/*:
+              schema:
+                type: string
+                contentMediaType: audio/*
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/task:
+    get:
+      operationId: task
+      tags: [user]
+      x-user-only: true
+      summary: One open task's summary, diff or log, as the page's task sheet shows it.
+      description: >-
+        Read only, from the task's files and its worktree; only a task the state's `tasks` strip
+        lists. Every answer is `{task, part, ..., now}` (docs/chat-api.md has each part's fields).
+      parameters:
+        - name: name
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: part
+          in: query
+          schema:
+            type: string
+            enum: [summary, diff, log]
+            default: summary
+        - name: full
+          in: query
+          description: with part=diff, the whole diff instead of the stat
+          schema:
+            type: string
+            enum: ["1"]
+        - name: path
+          in: query
+          description: with full=1, one file of the diff
+          schema:
+            type: string
+        - name: n
+          in: query
+          description: with part=log, how many rows
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        "200":
+          description: the part asked for
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [task, part, now]
+                properties:
+                  task:
+                    type: string
+                  part:
+                    type: string
+                    enum: [summary, diff, log]
+                  now:
+                    type: number
+                additionalProperties: true
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /api/v1/settings:
+    get:
+      operationId: settings
+      tags: [user]
+      x-user-only: true
+      summary: The web app's Settings, as rows.
+      responses:
+        "200":
+          description: the rows, read afresh
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rows, ts]
+                properties:
+                  rows:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SettingRow"
+                  ts:
+                    type: number
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      operationId: setSetting
+      tags: [user]
+      x-user-only: true
+      summary: Change one setting, through its wb command, run as the user.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, value]
+              properties:
+                key:
+                  type: string
+                value:
+                  type: [string, number, "null"]
+      responses:
+        "200":
+          description: "done: wb's line, the rows after, and help when the value needs Claude's help to work"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, said, rows]
+                properties:
+                  ok:
+                    const: true
+                  said:
+                    type: string
+                  rows:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SettingRow"
+                  help:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "415":
+          $ref: "#/components/responses/JsonOnly"
+  /api/v1/stats:
+    get:
+      operationId: stats
+      tags: [user]
+      x-user-only: true
+      summary: The Stats view's history.
+      responses:
+        "200":
+          description: "wb stats --json, and wb route --json and wb models --json (null when unread)"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [feed, routes, models]
+                properties:
+                  feed:
+                    type: object
+                  routes:
+                    type: [object, "null"]
+                  models:
+                    type: [object, "null"]
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/v1/top:
+    get:
+      operationId: top
+      tags: [user]
+      x-user-only: true
+      summary: The Stats view's live part, as server-sent events.
+      description: >-
+        `event: top` with one `wb top --json` object verbatim, the newest at once then each tick;
+        `event: down` with `{why, retry}` when the server's `wb top` ended (tried again after
+        `retry` seconds); a `: ping` comment after 15 s of silence. At most 4 are open. Send the
+        bearer header: use fetch, not EventSource.
+      responses:
+        "200":
+          description: the event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Busy"
+  /api/v1/transcribe/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UploadId"
+    post:
+      operationId: transcribe
+      tags: [user]
+      x-user-only: true
+      summary: The words of an uploaded voice clip, heard by the computer's listener, for the user to edit and send.
+      description: >-
+        The words are kept with the upload, so asking again never transcribes twice. It answers once
+        the listener is done: give it minutes. 409 (with busy true) while a task holds the GPU a GPU
+        listener needs, and 503 (with retry true) while a url listener doesn't answer: ask again
+        later. 502 when the listener ran and failed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              maxProperties: 0
+      responses:
+        "200":
+          description: the words
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [text]
+                properties:
+                  text:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "415":
+          $ref: "#/components/responses/NotAudio"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Busy"
+  /api/v1/active:
+    post:
+      operationId: active
+      tags: [user]
+      x-user-only: true
+      summary: A page is in use on this device, so the user is away from the terminal (never from a localhost Host).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              maxProperties: 0
+      responses:
+        "200":
+          $ref: "#/components/responses/Empty"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "415":
+          $ref: "#/components/responses/JsonOnly"
+  /api/v1/seen:
+    post:
+      operationId: seen
+      tags: [user]
+      x-user-only: true
+      summary: What a page showed, so no push is sent for it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  maxItems: 200
+                  items:
+                    type: string
+                    minLength: 1
+                    maxLength: 64
+                endpoint:
+                  type: string
+                  description: this device's push URL, to spare it alone
+      responses:
+        "200":
+          $ref: "#/components/responses/Empty"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "415":
+          $ref: "#/components/responses/JsonOnly"
+  /api/v1/push:
+    post:
+      operationId: push
+      tags: [user]
+      x-user-only: true
+      summary: This device's notifications on or off, or a test push to every device.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  required: [endpoint, "on"]
+                  properties:
+                    endpoint:
+                      type: string
+                      description: a push service's https URL
+                    "on":
+                      type: boolean
+                - type: object
+                  required: [test]
+                  properties:
+                    test:
+                      const: true
+      responses:
+        "200":
+          description: "{on} for a subscription, {sent, ok, hint, reasons} for a test"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  "on":
+                    type: boolean
+                  sent:
+                    type: integer
+                  ok:
+                    type: integer
+                  hint:
+                    type: string
+                    enum: ["", cert, clock, unreached, refused]
+                  reasons:
+                    type: array
+                    items:
+                      type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "415":
+          $ref: "#/components/responses/JsonOnly"
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: >-
+        The user's token (chat-token), or an agent's (`wb chat token add <name>`, `wba-…`), which
+        works only from this machine and sees only its own conversation.
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: >-
+        A key of yours per request, say a fresh UUID. The same key from the same token within 24
+        hours answers with the message the first send made and sends nothing; on another body it is
+        422 idempotency_key_reused. Only a send that landed is remembered.
+      schema:
+        type: string
+        pattern: "^[!-~]{1,255}$"
+    UploadId:
+      name: id
+      in: path
+      required: true
+      description: an id of the uploader's own (crypto.randomUUID() fits)
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9-]{8,64}$"
+  responses:
+    Empty:
+      description: done
+      content:
+        application/json:
+          schema:
+            type: object
+            maxProperties: 0
+    BadRequest:
+      description: the request is malformed (bad_request), or its Idempotency-Key is (bad_idempotency_key)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: no token or not one the chat knows (bad_token), or an agent token the user revoked (token_revoked)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: >-
+        an agent token from another machine (not_local), the user's alone (agent_forbidden), a Host
+        the chat doesn't answer to (unknown_host), or refused otherwise (forbidden)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: no such path, message, upload, file, screenshot, take, open task or listener; for an agent, also one not in its view (not_found)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: another sender's cid or upload id, something else where an upload goes, wb refusing a setting, or the GPU busy with a task (conflict)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Expired:
+      description: a message never passed to Claude, unread past 6 hours (send it again), or a screenshot pruned with its task (expired)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    LengthRequired:
+      description: an upload without its Content-Length (length_required)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    TooLarge:
+      description: a body, file or message over its limit (too_large)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    JsonOnly:
+      description: a POST that isn't application/json (json_only)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotAudio:
+      description: a POST that isn't application/json (json_only), or an upload that isn't a voice clip (not_audio)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    KeyReused:
+      description: an Idempotency-Key sent with another request in the last 24 hours (idempotency_key_reused)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RateLimited:
+      description: "an agent over its sends a minute (rate_limited): try again after retry_after seconds"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ServerError:
+      description: the disk or the server failed (server_error); final true when trying again can't help
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    BadGateway:
+      description: the listener failed a transcription (bad_gateway)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Busy:
+      description: "too many waits or streams open, or a listener not answering (busy): try again in a moment"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    DiskFull:
+      description: no room to store an upload (disk_full)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Error:
+      type: object
+      description: >-
+        Every error answer, on every path, the server's own refusals too (an unsupported method is
+        501 not_implemented). Branch on code; error's wording may change.
+      required: [error, code]
+      properties:
+        error:
+          type: string
+          description: a plain line, for a person
+        code:
+          type: string
+          description: a stable code, for a program
+          enum: [bad_request, bad_idempotency_key, bad_token, token_revoked, not_local, agent_forbidden, unknown_host, forbidden, not_found, conflict, expired, length_required, too_large, json_only, idempotency_key_reused, not_audio, rate_limited, server_error, not_implemented, bad_gateway, busy, disk_full]
+        retry_after:
+          type: number
+          description: with rate_limited, seconds to wait
+        final:
+          type: boolean
+          description: true when trying again can't help
+    Health:
+      type: object
+      required: [api, listening]
+      properties:
+        api:
+          type: integer
+          description: this API's version
+        listening:
+          type: boolean
+          description: a Claude Code session in workbench mode, with the web chat on, is listening
+    Listener:
+      type: [object, "null"]
+      description: the listening session, or null when nobody listens
+      properties:
+        session:
+          type: string
+        cwd:
+          type: string
+        pid:
+          type: integer
+        start:
+          type: number
+        machine:
+          type: string
+        parent:
+          type: integer
+        busy:
+          type: boolean
+    Upload:
+      type: object
+      required: [id, name, size, type, path]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        size:
+          type: integer
+        type:
+          type: string
+        path:
+          type: string
+    Message:
+      type: object
+      description: a row of the thread (docs/chat-api.md, Rows)
+      required: [id, ts, from]
+      properties:
+        id:
+          type: string
+          description: "<ms>-<6 hex>"
+        ts:
+          type: number
+        text:
+          type: string
+        from:
+          type: string
+          description: user, claude, notice, or an agent's name (with role agent)
+        role:
+          type: string
+          enum: [agent]
+        cid:
+          type: string
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/Upload"
+        about:
+          type: object
+        received:
+          type: [object, "null"]
+          description: Claude's receipt of a message to it
+        expired:
+          type: boolean
+        re:
+          type: array
+          description: on Claude's reply, the message ids it answers
+          items:
+            type: string
+        to:
+          type: array
+          description: on Claude's reply, whose those messages are (absent means the user's)
+          items:
+            type: string
+      additionalProperties: true
+    SettingRow:
+      type: object
+      description: one row of the Settings view (docs/chat-api.md, GET /api/settings)
+      required: [key, group, label, kind]
+      properties:
+        key:
+          type: string
+        group:
+          type: string
+          enum: [shared, gpu, api, terminal, experimental]
+        label:
+          type: string
+        kind:
+          type: string
+          enum: [choice, number, info, action, note]
+        help:
+          type: string
+      additionalProperties: true
+    State:
+      type: object
+      description: >-
+        The state the page draws; an agent's view holds only api, messages (its own and Claude's
+        rows to it), listener, uploads, expire and now.
+      required: [api, messages, listener]
+      properties:
+        api:
+          type: integer
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+        listener:
+          $ref: "#/components/schemas/Listener"
+        push:
+          type: object
+        savings:
+          type: object
+        uploads:
+          type: object
+        build:
+          type: string
+        tasks:
+          type: array
+          items:
+            type: object
+        dictate:
+          type: boolean
+          description: the computer has a listener for /transcribe
+        expire:
+          type: number
+          description: seconds a message waits before it is never passed on (21600)
+        now:
+          type: number
+      additionalProperties: true
+    Wait:
+      type: object
+      required: [replies, done, listener, waiting_on_user]
+      properties:
+        replies:
+          type: array
+          description: Claude's rows after `after` that are for the caller
+          items:
+            $ref: "#/components/schemas/Message"
+        done:
+          type: boolean
+          description: a turn has ended since the newest reply returned, else since `after`
+        listener:
+          $ref: "#/components/schemas/Listener"
+        waiting_on_user:
+          type: boolean
+          description: Claude is paused on the user's yes, not stuck
+    SendRequest:
+      type: object
+      properties:
+        text:
+          type: string
+          maxLength: 8000
+          description: 1 to 8,000 characters (may be empty with files)
+        cid:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: your id for this send; the same again returns that message
+        files:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+          description: upload ids, uploaded first
+        about:
+          type: object
+          description: the user's only, what it answers (a pair of screenshots, an audio take, or {task})
+    SendResponse:
+      type: object
+      required: [message, listener, state]
+      properties:
+        message:
+          $ref: "#/components/schemas/Message"
+        listener:
+          $ref: "#/components/schemas/Listener"
+        state:
+          $ref: "#/components/schemas/State"

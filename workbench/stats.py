@@ -72,7 +72,7 @@ def _day(ts: float | None) -> str | None:
 
 def _midnight(now: float) -> float:
     """The next local midnight after ``now``: the feed holds until then (its periods are counted
-    from today), so the pane reads it again once it passes, files unchanged or not (#575)."""
+    from today), so a reader reads it again once it passes, files unchanged or not (#575)."""
     t = time.localtime(now)
     return time.mktime((t.tm_year, t.tm_mon, t.tm_mday + 1, 0, 0, 0, 0, 0, -1))
 

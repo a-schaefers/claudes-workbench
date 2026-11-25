@@ -428,6 +428,9 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
                 # the package the task ran in (#375), where each replay runs, sets up and is
                 # graded: from the root, an answer written there passed a package's check (#425)
                 "subdir": spec.get("subdir") or "",
+                # where a commands.json setup ran, its key's directory (#1376), which a replay's
+                # --setup, run in the package, reaches by a cd
+                **({"setup_dir": spec["setup_dir"]} if spec.get("setup_dir") else {}),
                 "original": {"model": spec.get("model"), "rounds": row.get("rounds"),
                              "reviews": step_row.get("reviews", row.get("reviews")),
                              "minutes": row.get("minutes"), "steps": steps},
@@ -733,7 +736,11 @@ def _start_task(case: dict, model: str, name: str, repo: Path, skills: list[str]
     for pat in case.get("allow") or []:
         argv += ["--allow", pat]
     if case.get("setup"):
-        argv += ["--setup", case["setup"]]
+        cmd = case["setup"]
+        if at := case.get("setup_dir"):
+            up = os.path.relpath("/" + at.strip("/"), "/" + (subdir(case) or "").strip("/"))
+            cmd = f"cd {up} && {cmd}"
+        argv += ["--setup", cmd]
         if isinstance(secs := _kept(case, "setup_timeout"), int) and secs > 0:  # #735
             argv += ["--setup-timeout", str(secs)]
     if _kept(case, "unload_for_tests"):

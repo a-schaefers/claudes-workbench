@@ -6,14 +6,14 @@ Description=workbench web chat (wb chat serve): reach Claude's /workbench sessio
 StartLimitIntervalSec=0
 
 [Service]
-# localhost, or the addresses in ~/.config/workbench/chat.json (`bind`). The install's link
-# (README): bin/wb finds the package from its real path, wherever the clone is.
-# bin/wb runs `/usr/bin/env python3` with the user manager's PATH (/usr/local/bin:/usr/bin), not
-# your shell's, and without the WB_* variables you export. If your Python 3.11+ comes from pyenv,
-# uv or conda, or you set WB_HOME or WB_CHAT_*: `systemctl --user edit wb-chat` and add
-#   [Service]
-#   Environment=PATH=/path/to/your/python/bin:/usr/local/bin:/usr/bin
-#   Environment=WB_HOME=...
+# localhost, or the addresses in ~/.config/workbench/chat.json (`bind`). `wb setup` links this
+# file into ~/.config/systemd/user/, then enables and starts wb-chat (--no-service skips it);
+# bin/wb finds the package from its real path, wherever the clone is.
+# The user manager's PATH (/usr/local/bin:/usr/bin) has none of your shell's: a Python 3.11+ from
+# pyenv, uv or conda, OpenCode in ~/.opencode/bin, probe in ~/.local/bin. So `wb setup` writes the
+# PATH and WB_* variables it runs with into wb-chat.service.d/10-wb-setup.conf beside this link
+# (#1342, #1343), and runs again to refresh it; `systemctl --user edit wb-chat` (override.conf,
+# read after it) wins over it.
 ExecStart=%h/.local/bin/wb chat serve
 Restart=always
 # The delay grows from 10 s to 5 min (systemd 254+; older systemd ignores these two lines and

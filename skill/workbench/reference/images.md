@@ -21,7 +21,7 @@ asset at review), and make it once the GPU is free.
    and no alpha channel is needed.
 Mind the engine's `notes` in `wb image --list`: an image model's licence can restrict where and
 how its output may be used. Without `--engine` it runs the one listed `(default)` (the user's pick in
-the pane's Settings), else the first; `wb image --default NAME` changes it, only when the user asks. An engine listed `(off the GPU)` (`"gpu": false` in images.json, or a
+the web app's Settings), else the first; `wb image --default NAME` changes it, only when the user asks. An engine listed `(off the GPU)` (`"gpu": false` in images.json, or a
 url on another host) runs beside tasks. One pinned to a card (`"devices"` or `"beside"` in
 images.json) waits only for tasks on that card. Any other generation needs the GPU to itself: while a task holds it,
 `wb image` refuses and names it; `--wait` (Bash `run_in_background: true`) queues behind it.
