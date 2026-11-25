@@ -40,6 +40,11 @@ PR and arms auto-merge as you, so run it only when the user has said to ship, in
 (it waits for the merge: ARCHITECTURE.md, *Shipping to main*). Never push, open a PR or an issue,
 or comment without the user's yes for it.
 - The docs match the change; the tests the change adds or edits, alone; CI runs the rest.
+- Educated guesses are fine (the owner, 2026-11-24). Workbench adapts and improves itself
+  across its users (tuning, the router, skill records), and any user can patch locally and PR
+  upstream (`wb patch`), so a sound default ships without exhaustive local testing or long local
+  GPU benches. Measure when the answer is unclear and cheap to get; otherwise decide, ship and let
+  real use correct it.
 - Versions are cut by hand: the last number runs .1, .2, .3 at most, then the next minor (1.91,
   1.91.1, 1.91.2, 1.91.3, then 1.92, never 1.91.4); 2.0 only for a change big enough.
 - `chat.py`, `webpush.py`, `chat_static/`: CI's `chat.yml` runs the browser test (Playwright isn't a dependency).
@@ -110,7 +115,8 @@ Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change mus
 2. The runner holds the GPU (`GpuLease`) and loads the model before every round, or for an API
    model holds a provider slot (`NoLease`, never in gpu.json) and starts the keyhole (the key stays
    there, outside the lane); it runs
-   `opencode run … -- <prompt>` in the worktree through `lane.wrap`, with the layer
+   `opencode run --agent wb-code … -- <prompt>` (wb's agent, never the user's `default_agent`:
+   #1290) in the worktree through `lane.wrap`, with the layer
    `rules/<task>/opencode.json`. Guards stop a stuck agent (an API task at the day cap too:
    `spend`, in the round and before each next one); an API provider's rate limit,
    outage or queue pauses their clocks, and held 10 minutes stops the round as `rate_limited`
