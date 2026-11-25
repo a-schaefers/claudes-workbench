@@ -8206,15 +8206,13 @@ class StartChecks(Base):
         self.assertIn("a task name is", err.getvalue())
         run_wb("stop", "t-name")
 
-    def test_start_says_when_opencode_is_outside_the_tested_range(self):
-        # the 2026-11-19 audit (finding 26): only wb doctor looked, and only for 2.x or newer
+    def test_an_opencode_outside_the_tested_range_is_wb_doctors_to_say_not_every_starts(self):
+        # the 2026-11-19 audit (finding 26) put it on every start, feedback, next and resume too;
+        # #1322 (2026-11-24) left it where it is learned, wb doctor (Setup's doctor test)
         os.environ["FAKE_VERSION"] = "opencode v3.1.0"
         out = self.start("t-v", "ok")
-        self.assertIn("note: OpenCode 3.1 is outside what workbench is tested with (2.3 up to 3.0)", out)
-        self.assertNotIn("before its first step", out)
+        self.assertNotIn("outside what", out)
         wait_phase("t-v", {"review"})
-        os.environ["FAKE_VERSION"] = "opencode v2.3.0"
-        self.assertNotIn("outside what", self.start("t-ok", "ok"))
         self.assertTrue(runner.untested((2, 2)))
         self.assertEqual(runner.untested((2, 9)), "")
 
@@ -16659,7 +16657,7 @@ class Routing(Base):
         self.assertIn("no unmarked results", run_wb("trial", "e2e-a"))       # once is enough
         self.assertEqual(router.choose("significant")[0].model.id, "strata/strata")  # 1/1 once the trials are out
         self.assertEqual(len(store.results(trials=True)), 5)                  # nothing is lost
-        self.assertIn("(4 trial runs left out)", run_wb("stats"))
+        self.assertIn("left out: 4 trials", run_wb("stats"))
         os.environ["FAKE_LESSON"] = "a trial teaches the agents nothing"
         self.start("t-trial", "ok", "--trial")
         wait_phase("t-trial", {"review"})
@@ -20798,12 +20796,12 @@ class Stats(Base):
         add(mimo, outcome="discarded", ran=False)
         out = results.table({mimo})
         self.assertNotIn("put down to the spec", out)
-        self.assertIn("(1 task whose agent never ran left out)", out)
+        self.assertTrue(out.endswith("\nleft out: 1 never ran"), out)   # one line, nonzero counts (#1322)
         add(mimo, outcome="discarded", spec_gaps=["the spec said 41"])
         add("gone/model", outcome="discarded", spec_gaps=["not shown"])
         out = results.table({mimo})
-        self.assertIn("(1 discard put down to the spec left out)", out)
-        self.assertIn("(2 discards put down to the spec left out)", results.table())
+        self.assertIn("left out: 1 spec gaps, 1 never ran", out)
+        self.assertIn("2 spec gaps", results.table())
 
     def test_a_spec_gap_discard_after_a_stop_from_outside_counts_as_a_spec_gap_in_both_views(self):
         # #1245 (2026-11-24): a wb discard --spec-gap taken after the day cap stopped the task was
@@ -20813,7 +20811,7 @@ class Stats(Base):
         self.rows({"ts": time.time(), "outcome": "accepted", "ran": True},
                   {"ts": time.time(), "outcome": "discarded", "ran": True, "spec_gaps": ["x"],
                    "infra": "spend"})
-        self.assertTrue(results.table().endswith("(1 discard put down to the spec left out)"))
+        self.assertTrue(results.table().endswith("left out: 1 spec gaps"))
         self.assertEqual(stats.feed()["periods"]["all"].get("spec_gaps"), 1)
 
     def test_two_settings_changed_at_once_both_stay(self):
@@ -21440,11 +21438,12 @@ class Progress(Base):
             time.sleep(0.2)
         [c] = self.checks()
         self.assertEqual(c["kind"], "checkin")
-        self.assertIn("progress check (on: wb progress): ", c["text"])
-        self.assertIn("past the 3 s the user set (waits for the GPU and for answers left out)", c["text"])
-        self.assertIn("evidence: 0 file(s) changed, none since the last check", c["text"])
+        # two lines (#1322): the caveats, the record and the coding reminder went
+        self.assertIn("\nprogress check: ", c["text"])
+        self.assertIn("past the 3 s the user set; 0 file(s) changed, none since the last check", c["text"])
         self.assertIn("recommended: a smaller step: wb steer t --now --step --text", c["text"])  # nothing moved
-        self.assertIn("the coding choice stays as the user set it", c["text"])
+        self.assertNotIn("left out", c["text"])
+        self.assertNotIn("the coding choice stays as the user set it", c["text"])
         out = run_wb("steer", "t", "--now", "--step", "--text", "write answer.txt only")
         self.assertIn("recorded as the answer to the progress check", out)
         self.assertNotIn("recorded", run_wb("steer", "t", "--text", "and nothing else"))  # once a check
@@ -29966,7 +29965,7 @@ class SkillLearning(Base):
         self.assertEqual(lessons.items(listed), ["Close the file. - it leaks on error",
                                                  "Check the return value of read."])
 
-    def test_a_round_the_spec_cost_is_claudes_record_shown_at_the_next_start(self):
+    def test_a_round_the_spec_cost_is_recorded_and_the_next_start_prints_no_record_line(self):
         self.start("t-g1", "ok", "--test", TEST_CMD)
         wait_phase("t-g1", {"review"})
         run_wb("feedback", "t-g1", "--text", "1. Reject a blank row.",
@@ -29976,12 +29975,8 @@ class SkillLearning(Base):
         row = store.read_jsonl(store.home() / "results.jsonl")[0][-1]
         self.assertEqual(row["spec_gaps"], ["named a rule (one trailing newline) but no test for it"])
         self.assertIn("spec (t-g1 round 1): the spec missed: named a rule", run_wb("lessons"))
-        out = self.start("t-g2", "ok", "--test", TEST_CMD)
-        self.assertIn("your specs: 1 of the last 1 task(s) needed a round for a spec gap; "
-                      "last: named a rule (one trailing newline)", out)
-        wait_phase("t-g2", {"review"})
-        run_wb("accept", "t-g2", "-m", "feat: answer")
-        self.assertIn("your specs: 1 of the last 2 task(s)", self.start("t-g3", "ok", "--test", TEST_CMD))
+        # the record stays for wb stats and the Stats tab; wb start's `your specs:` line went (#1322)
+        self.assertNotIn("your specs:", self.start("t-g2", "ok", "--test", TEST_CMD))
 
     def test_an_agents_lesson_from_a_discarded_task_is_not_kept(self):
         from workbench import lessons
@@ -36562,7 +36557,7 @@ class ApiSpend(Base):
         m = models.lookup(SPEND_M)
         up = {"available": True, "resident": False, "why": ""}
         self.assertEqual(router.score(m, "significant", state=up, role="significant").tries, 0)
-        self.assertIn("(1 discard after a stop that wasn't the agent's left out)", results.table())
+        self.assertIn("1 outside stops", results.table())
         self.assertNotIn("spec_gaps", stats.feed()["periods"].get("all", {}))  # nor the spec's
         # a shutdown's signal set no `infra` before #1260: the discard reads the stop it left (#1245)
         other = self.api_task("t-sig", SPEND_M, "ok")
