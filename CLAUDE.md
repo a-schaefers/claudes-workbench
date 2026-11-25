@@ -101,6 +101,9 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
   the writing role's, in its place in every writing prompt: keep it short too (under 3,000 bytes).
 - `skill/workbench/`: the `/workbench` procedure; `skill/agents/`: other agents' skill for the chat's API. `mod/`: the plugin (`hooks/register.tsx`, with
   the consent gates on sends to upstream and on the roles; `plugin.json` has no version, so installs track main).
+  `kernel/`: the PureScript kernel (`BOUNDARY.md`, its contract), built by `scripts/kernel.py` (its toolchain
+  fetched by hash into `~/.cache/workbench/kernel`) into the committed `mod/hooks/kernel.js`, imported only by
+  `mod/hooks/core.ts`; a change to a value its Tables copy needs `python3 scripts/kernel.py build` (ARCHITECTURE.md, *The kernel*).
   `bin/`: the launchers. `tests/`: ARCHITECTURE.md's *The tests*. `.github/`, `scripts/`: CI and `ship.sh` (*Shipping to main*).
   `systemd/`, `launchd/`: keep the chat up. `docs/`: images (a replaced one gets a new name, for
   GitHub's cache), the release checklist and notes, `chat-api.md` (the chat's HTTP API).

@@ -8,3 +8,6 @@ mod/.claude-plugin/types/
 !/CLAUDE.md
 !/ARCHITECTURE.md
 !/CONTRIBUTING.md
+# a purs or spago run by hand in kernel/ (scripts/kernel.py builds in a temp directory)
+/kernel/output*/
+/kernel/.spago/

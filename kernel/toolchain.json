@@ -1,0 +1,60 @@
+{
+ "_note": "The kernel's toolchain, pinned by hash (#1356). scripts/kernel.py fetch downloads this platform's archive from the url, checks it against sha256 (purs: the GitHub release's digest) or sha512 (esbuild: npm's integrity), reads the one member out of it (nothing the archive says about paths is obeyed), checks that binary against bin_sha256 and keeps it in the per-user cache, ${XDG_CACHE_HOME:-~/.cache}/workbench/kernel/<pin>/, where every later run checks it again without the network. The PureScript packages are spago.lock's, from the registry below, each tarball checked against its lock integrity. spago is used only to re-lock (kernel.py relock). A version bump edits this file, re-runs fetch and build, and nothing else.",
+ "purs": {
+  "version": "0.15.16",
+  "member": "purescript/purs",
+  "assets": {
+   "linux-x64": {
+    "url": "https://github.com/purescript/purescript/releases/download/v0.15.16/linux64.tar.gz",
+    "sha256": "44da9efb8a4e14519e8fd5350acc377a4b981e42351a78c53e9f84045bf38e22",
+    "bin_sha256": "8b7eb6529363b88d3d9ed913fbd969399290a29c65a394aead433b12d74a0932"
+   },
+   "linux-arm64": {
+    "url": "https://github.com/purescript/purescript/releases/download/v0.15.16/linux-arm64.tar.gz",
+    "sha256": "b8d153c5c6e0d8c9618a90824eb342b5818e14a92b0b6cdff753d9b353a927f3",
+    "bin_sha256": "04526e9e3d917390fa2ad859c83254eaa625064ee81635514fa4e2c4f679b05c"
+   },
+   "darwin-x64": {
+    "url": "https://github.com/purescript/purescript/releases/download/v0.15.16/macos.tar.gz",
+    "sha256": "9f5bfdb7a468241c7106660bc6bd0209ce3f19ad197516ccdcd5c17df81958b6",
+    "bin_sha256": "4640a8b5ab8f045802c2c4604604dfbf55fdfb8ba17a58afd553382fcb44661e"
+   },
+   "darwin-arm64": {
+    "url": "https://github.com/purescript/purescript/releases/download/v0.15.16/macos-arm64.tar.gz",
+    "sha256": "63f15a13e226efc260fb025c4a4ad7f66429b6685da607040b7bcc209332fcc4",
+    "bin_sha256": "ae313bebeb0c150dd71d94a95e6654966806e4911602dfc1e5b6329162aaa9b9"
+   }
+  }
+ },
+ "esbuild": {
+  "version": "0.28.2",
+  "member": "package/bin/esbuild",
+  "flags": ["--bundle", "--format=esm", "--charset=utf8"],
+  "assets": {
+   "linux-x64": {
+    "url": "https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.28.2.tgz",
+    "sha512": "sha512-4xTZr1FUmSoQW4XIWmit3tzQrUTZM+N3P0XV8xROKYF50XfI7xeO90+1bZvNwxIufQ9hDQVRJH5YhgPVF8A/HQ==",
+    "bin_sha256": "e1698a3d5c6c0798fee4fd3b5cc816651f460c63d390a7a26ea4beb0b1884100"
+   },
+   "linux-arm64": {
+    "url": "https://registry.npmjs.org/@esbuild/linux-arm64/-/linux-arm64-0.28.2.tgz",
+    "sha512": "sha512-pW4AC0P3it8c7do9MVM4p51FzHzdM/TZrerurgRcHJ2WTa1VQ1CIq18xncfpBJw4ojkiZZrKW2yIBWBP92j6Ug==",
+    "bin_sha256": "90bd269553d258e80b19e3ccab4f98f0831f87442a2f056510ce24fd1b425fc2"
+   },
+   "darwin-x64": {
+    "url": "https://registry.npmjs.org/@esbuild/darwin-x64/-/darwin-x64-0.28.2.tgz",
+    "sha512": "sha512-uq6suIWYP37qzGddBKPw5QEQPi6HiLGsO7UmkpfyaYNQ3D+rN6w6WfwH+nuqcGXWvawGwxOEroO4YGnFh95azw==",
+    "bin_sha256": "7fe5c9c905fff0a05d92db98929434ab4d3b6dd92d7a7688922db74380c75df3"
+   },
+   "darwin-arm64": {
+    "url": "https://registry.npmjs.org/@esbuild/darwin-arm64/-/darwin-arm64-0.28.2.tgz",
+    "sha512": "sha512-n4KqkOQrraxHJcgjM1RvwbigfQKIKJVpM7xp+KsxiyUSrRdIXnt73VhrPAx0fV44hgfmIVKjxMN9J1t5jySVkw==",
+    "bin_sha256": "10b6243df618d374bb2d5c9cfbe7052e1405f6aa4e53a6164f11a91b9f2e1384"
+   }
+  }
+ },
+ "spago": {
+  "version": "1.0.4"
+ },
+ "registry": "https://packages.registry.purescript.org/"
+}

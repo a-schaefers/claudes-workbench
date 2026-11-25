@@ -1,0 +1,12 @@
+# The kernel (kernel/BOUNDARY.md): the pure decisions both hosts make the same way, compiled by
+# scripts/kernel.py into the committed mod/hooks/kernel.js. spago is used only to re-lock
+# (`python3 scripts/kernel.py relock`, which writes spago.lock); builds read spago.lock alone.
+package:
+  name: workbench-kernel
+  dependencies:
+    - prelude
+    - arrays
+workspace:
+  packageSet:
+    registry: 80.2.0
+  extraPackages: {}
