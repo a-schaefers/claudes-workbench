@@ -3828,6 +3828,28 @@ class Lifecycle(Base):
         self.assertIn("+# changed in round 2", run_wb("diff", "t-fb"))  # wb diff's "all of it" too
         self.assertIn("since your last review: (no changes)", runner.review_diff(t))
 
+    def test_wb_verify_and_wb_shot_run_the_candidate_with_the_ignored_files_accept_commits(self):
+        # #1275 (the 2.0 bar loop, 2026-11-24): #1259 put the agent's lib/util.py, under
+        # Python.gitignore's lib/, in the review diff but not in verify's candidate: wb verify
+        # said "the candidate fails it" (ModuleNotFoundError: lib) for a change that passed in
+        # the worktree, wb shot's candidate lacked it, and an edit to it left the check fresh
+        from workbench import verify
+        self.ignore_lib()
+        self.start("t-v", "shellwrite", "--test", TEST_CMD)
+        wait_phase("t-v", {"review"})
+        t = store.Task("t-v")
+        test = "python3 main.py | grep -qx 42 && grep -qx 42 answer.txt"
+        out = run_wb("verify", "t-v", "--test", test, "--files", "answer.txt")
+        self.assertNotIn("the candidate fails it", out)
+        r = verify.last(t)
+        self.assertEqual(r["candidate"]["exit"], 0, Path(r["dir"], "candidate.txt").read_text())
+        self.assertFalse(r["stale"])
+        (t.worktree / "lib" / "util.py").write_text("def answer():\n    return 41\n")
+        self.assertTrue(verify.last(t)["stale"])                  # the ignored file it ran on moved
+        shot = verify.shot(t, "test -f lib/util.py", ["answer.txt"])
+        self.assertEqual(shot["candidate"]["exit"], 0)            # wb shot's candidate holds it too
+        self.assertNotEqual(shot["base"]["exit"], 0)              # and the base doesn't
+
     def test_what_the_runners_test_run_writes_under_an_ignored_path_is_not_taken_for_the_agents(self):
         # #1210 (2026-11-24): read since the agent's first round, a Maven run's surefire report
         # (.xml, a kind pom.xml makes the repo's) would refuse every accept of such a task
