@@ -397,12 +397,12 @@ def _opencode(*args: str) -> subprocess.CompletedProcess:
     directory with the project config shut out. Without `--standalone` the first API task started
     OpenCode's background service with the runner's environment (PYTHONPATH, CLAUDECODE=1), left
     running for the user's own OpenCode to attach to, and where another home's service held its
-    port the export exited 1 and the task failed at start (#1070, 2026-11-23)."""
-    from . import runner
+    port the export exited 1 and the task failed at start (#1070, 2026-11-23). Its environment is
+    models._opencode_env's, the OpenCode plugin removed: its setup ran here at every API task's
+    start (#1311's third review, 2026-11-25)."""
+    from . import models, runner
     from .media import run_group  # its group killed whole on a timeout, as _opencode_json's
-    where = store.home()
-    where.mkdir(parents=True, exist_ok=True)
-    env = {**os.environ, "PWD": str(where), "OPENCODE_DISABLE_PROJECT_CONFIG": "1"}
+    where, env = models._opencode_env()
     try:
         return run_group([*runner.opencode_bin(), *args, "--standalone"], 60, stdout=subprocess.PIPE,
                          stderr=subprocess.PIPE, text=True, cwd=where, env=env,

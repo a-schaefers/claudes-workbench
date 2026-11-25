@@ -830,10 +830,12 @@ def _exported_key(pid: str) -> str:
     2026-11-22); only `key` rows (V1's `api`), the active one first, never an OAuth token:
     refreshing a copy would log the user's own OpenCode out. Run outside the lane, with the
     user's environment, --standalone (the background service isn't needed, and one on another
-    home holds its port); parsed in memory, never printed."""
+    home holds its port), as every wb call to OpenCode runs (_opencode_env: the OpenCode plugin
+    removed, #1311's third review); parsed in memory, never printed."""
     from .runner import opencode_bin  # runner imports this module
+    where, env = _opencode_env()
     try:
-        r = subprocess.run([*opencode_bin(), "auth", "export", pid, "--standalone"],
+        r = subprocess.run([*opencode_bin(), "auth", "export", pid, "--standalone"], cwd=where, env=env,
                            capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         _auth_failed("timed out")
@@ -1089,12 +1091,20 @@ def _opencode_env() -> tuple[Path, dict]:
     env = {**os.environ, "PWD": str(where), "OPENCODE_DISABLE_PROJECT_CONFIG": "1"}
     if os.environ.get("WB_OPENCODE_CONFIG"):
         env["OPENCODE_CONFIG"] = os.environ["WB_OPENCODE_CONFIG"]
-    # and the OpenCode plugin removed, as in every task's layer: these servers load the user's
-    # global `plugins`, so its setup ran in each, and model_list waits for plugins to load (#1311's
-    # review, 2026-11-25). Last in the content, which loads after every file; content that
-    # doesn't parse is left for OpenCode to refuse
+    return where, plugin_off(env)
+
+
+def plugin_off(env) -> dict:
+    """``env`` (an environment for one of wb's own OpenCode calls) with the OpenCode plugin
+    removed, as in every task's layer: each such call starts a private server that loads the
+    user's global `plugins`, so the plugin's setup ran in model_list's, in `auth export` and `auth
+    list` at every API task's start and in wb start, doctor and route (#1311's reviews,
+    2026-11-25), and model_list waits for plugins to load. "-workbench" goes last in
+    OPENCODE_CONFIG_CONTENT, which loads after every file, after the user's own content `plugins`
+    (kept); content that doesn't parse is left for OpenCode to refuse."""
     from .ocplugin import PLUGIN_OFF  # ocplugin imports this module
-    raw = os.environ.get("OPENCODE_CONFIG_CONTENT")
+    env = dict(env)
+    raw = env.get("OPENCODE_CONFIG_CONTENT")
     try:
         content = json.loads(_strip_jsonc(raw)) if raw else {}
     except ValueError:
@@ -1103,7 +1113,7 @@ def _opencode_env() -> tuple[Path, dict]:
         theirs = content.get("plugins")
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(
             {**content, "plugins": [*(theirs if isinstance(theirs, list) else []), PLUGIN_OFF]})
-    return where, env
+    return env
 
 
 def _opencode_json(*args: str):

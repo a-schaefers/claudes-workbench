@@ -33277,6 +33277,26 @@ class RealOpenCodePlugin(Base):
         self.assertTrue((where / "canary-other").exists(), list(where.iterdir()))
         self.assertFalse((where / f"canary-{ocplugin.PLUGIN_ID}").exists())
 
+    def test_wbs_own_auth_export_and_auth_list_never_run_the_plugins_setup(self):
+        # #1311's third review (2026-11-25): `auth export --standalone` (models._exported_key: wb
+        # start, doctor, route) and the keyhole's `auth export` and `auth list` (every API task's
+        # start) each start a private server that loaded the user's global plugins, the OpenCode
+        # plugin's setup with them; another plugin still runs there
+        from workbench import keyhole, models, ocplugin
+        ours, other = canary_plugin(self.root, ocplugin.PLUGIN_ID), canary_plugin(self.root, "other")
+        self.conf.write_text(json.dumps({"plugins": [str(ours), str(other)]}))
+        for var in ("WB_OPENCODE_CONFIG", "WB_OPENCODE_BIN", "OPENCODE_CONFIG_CONTENT"):
+            os.environ.pop(var, None)
+        where = store.home()
+        for call in (lambda: models._exported_key("deepinfra"),
+                     lambda: keyhole._opencode("auth", "export", "deepinfra"),
+                     lambda: keyhole._opencode("auth", "list", "--format", "json")):
+            for f in where.glob("canary-*"):
+                f.unlink()
+            call()
+            self.assertTrue((where / "canary-other").exists(), list(where.iterdir()))
+            self.assertFalse((where / f"canary-{ocplugin.PLUGIN_ID}").exists())
+
     def test_a_removal_after_the_users_global_entry_keeps_the_plugins_setup_from_running(self):
         # the host-shape decision's risk, "-workbench loses to a later add": the user's global
         # config adds it, the task's layer (OPENCODE_CONFIG, loaded after the global files)

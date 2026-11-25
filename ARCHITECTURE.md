@@ -7269,11 +7269,16 @@ pane, the notices, the gates and the agent come in #1312 to #1316.
   OpenCode imports and runs. The Git install's wb runs from its generation's directory: a new
   commit is a new directory, and OpenCode removes a generation only when two newer ones exist
   and it is over a week old (`npm.ts` `collect`).
-- **Never in wb's own OpenCode calls.** `models._opencode_env` (`model_list`'s `opencode serve
-  --stdio`, `_opencode_json`'s commands) puts `"-workbench"` last in `OPENCODE_CONFIG_CONTENT`,
-  after the user's own content `plugins` (kept; content that doesn't parse is left for OpenCode
-  to refuse): those servers load the user's global plugins, and `model_list` waits for them
-  (#1311's review).
+- **Never in wb's own OpenCode calls.** `models.plugin_off` puts `"-workbench"` last in
+  `OPENCODE_CONFIG_CONTENT`, after the user's own content `plugins` (kept; content that doesn't
+  parse is left for OpenCode to refuse), in every one of them: through `models._opencode_env`,
+  `model_list`'s `opencode serve --stdio` (`_list_catalog`), `_opencode_json`'s commands,
+  `models._exported_key`'s `auth export <pid> --standalone` (wb start, doctor, route) and
+  `keyhole._opencode`'s `auth export` and `auth list` (every API task's start); directly,
+  `transcript.export`'s `session export` and `find_session`'s `session list` (2.4.1's session
+  commands run no plugin's setup; said anyway). Each starts a private server that loads the
+  user's global plugins, and `model_list` waits for them (#1311's reviews). Not `opencode
+  --version` (no server), and not the agent's `opencode run`, whose layer removes it.
 - **What `wb doctor` says** (`ocplugin.doctor_lines`, after the Claude Code mod's line): one line
   per install, in OpenCode's load order (the global `plugins/` directory's copies, then each config
   file's entries, then `OPENCODE_CONFIG_CONTENT`'s): `ok  the OpenCode plugin <spec> (<how>, in
@@ -7314,7 +7319,8 @@ pane, the notices, the gates and the agent come in #1312 to #1316.
   `bin/wb`, `workbench/`, `agent/` and `skill/`, that wb runs, and the RPC names it, `from:
   package`, with no options; a layer's `"-workbench"` after the global entry leaves a canary of
   its id unrun while another plugin runs, and the same entry without the layer runs it; wb's own
-  `model_list` server leaves it unrun) and `RealOpenCodeRun`'s
+  `model_list` server, `_exported_key`'s `auth export --standalone` and the keyhole's `auth export`
+  and `auth list` leave it unrun) and `RealOpenCodeRun`'s
   `test_the_opencode_plugin_never_runs_inside_an_agents_round_though_the_users_others_do` (a real
   round: the canary of id `workbench` in the user's global `plugins` never runs, another runs in
   the worktree with `WB_TASK` set) and

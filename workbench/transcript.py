@@ -59,6 +59,8 @@ class Painter:
 # background service an export needs its fixed port (49374), so another user's service there, or
 # one started with other XDG dirs, made every export fail and left the runner's context checks,
 # its speed learning and `wb watch` silently empty (the 2026-11-16 audit).
+# The OpenCode plugin removed (models.plugin_off), as in every wb call to OpenCode: 2.4.1's session
+# commands don't run plugins' setup (#1311's third review), a later release's might.
 _said: set[str] = set()
 
 
@@ -101,7 +103,8 @@ def export(session: str, strict: bool = False, task: store.Task | None = None) -
     for env, wrap in stores(task):
         try:
             r = subprocess.run(wrap(opencode_bin() + ["session", "export", session, "--standalone"]),
-                               capture_output=True, text=True, timeout=30, cwd="/", env=env)
+                               capture_output=True, text=True, timeout=30, cwd="/",
+                               env=models.plugin_off(os.environ if env is None else env))
             if r.returncode == 0 and r.stdout.strip():
                 return store.loads(r.stdout)  # its strings written out again (#438)
             if failed is None or "not found" in (failed.stderr or "").lower():
@@ -143,7 +146,8 @@ def find_session(task: store.Task) -> str | None:
         try:
             r = subprocess.run(wrap(opencode_bin() + ["session", "list", "--standalone"]),
                                capture_output=True, text=True, cwd=task.workdir,
-                               env={**(os.environ if env is None else env), "PWD": str(task.workdir)},
+                               env=models.plugin_off({**(os.environ if env is None else env),
+                                                      "PWD": str(task.workdir)}),
                                timeout=30)
         except (OSError, subprocess.TimeoutExpired):
             continue
