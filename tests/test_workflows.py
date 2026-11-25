@@ -336,8 +336,13 @@ class SuiteHooks(unittest.TestCase):
                 "        time.sleep(120)\n" for i in range(2)))
         (tmp / "pids").mkdir()
         env = {k: v for k, v in os.environ.items() if k != "WB_TEST_SHARD"}
+        # SIGINT back to its default first: run by suite.sh itself in CI, this test is a background
+        # job's child, and a background job ignores SIGINT, which a shell started with it ignored
+        # can't trap (#1370's CI, 2026-11-25: the cancel never reached suite.sh, timed out at 30 s).
+        # The runner's step shell is no background job, so its suite.sh gets SIGINT as here.
         step = subprocess.Popen(["bash", "-c", f"exec {ROOT / 'scripts' / 'suite.sh'} 1/1 2"], cwd=tmp,
-                                env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
         self.addCleanup(lambda: step.poll() is None and step.kill())
         deadline = time.monotonic() + 60
         while len(list((tmp / "pids").iterdir())) < 2 and time.monotonic() < deadline:
