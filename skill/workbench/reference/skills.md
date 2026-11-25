@@ -57,9 +57,10 @@ seems to need; it's a hint, so hand one only if it fits (`wb skill hand <task> <
 `loaded so far only in <repo>` was written from another project: read it first, and if it is that
 project's alone, move it there and retire it from the library.
 
-**Keep it honest.** Results record which skills each task was offered, which the agent loaded,
-and the version of each it held. `wb skill list` shows each skill's tasks against the same repos'
-tasks without it, and the tasks since its last edit, and says what to do:
+**Keep it honest.** Results record which skills each task's agent was told of (one handed after
+its last run counts nowhere), which it loaded, and the version of each it held. `wb skill list`
+shows each skill's tasks against the same repos' tasks without it, and the tasks since its last
+edit, and says what to do:
 - loaded and the agent still made its mistake → patch it
 - offered and never loaded → its description is wrong
 - no better than without it → sharpen it or retire it

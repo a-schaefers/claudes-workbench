@@ -317,6 +317,8 @@ def write_config_layer(task: store.Task) -> Path:
     except KeyError:
         cfg = {}
     buffer = compaction_buffer(cfg)
+    model = task.spec.get("opencode_model") or task.spec["model"]
+    mine["agents"] = {**(mine.get("agents") or {}), **system_agents(model)}
     store.write_json(path, thinking_layer({  # an API task's own thinking variant (#1018)
         "$schema": "https://opencode.ai/config.json",
         # the keyhole's base and token last: they are the provider's way out (#1012); an API
@@ -331,7 +333,7 @@ def write_config_layer(task: store.Task) -> Path:
         # auth.json holds, sent the task's text; an update mid-task could move OpenCode past
         # OPENCODE_TESTED (#353, the audit of 1.4)
         # with the task's variant: the title request would otherwise think by default (#1018)
-        "small_model": task.spec.get("opencode_model") or task.spec["model"],
+        "small_model": model,
         "autoupdate": False,
         # background: OpenCode 2.3.2's summary written ahead (on by default; 2.3.0 ignores the
         # key) is a full-context request on the agent's own server, below the handover point,
@@ -456,6 +458,21 @@ CONFIG_CONTENT_MAX = 120_000
 # the project's config despite the switch, these still hold (RealOpenCodeRun plants one, #519).
 RESTATED = ("small_model", "autoupdate", "compaction", "tool_output")
 
+# OpenCode's hidden agents that send the session, or part of it, to a model of their own: the
+# compaction summary (the whole session), the summary and the title. small_model pins only the
+# title's, so a user's global `agent.compaction.model` (or `agents.`, or summary's) on a cloud
+# model got every compaction of a wb task, spec, CLAUDE.md and code read so far, a local_only repo
+# included, and an API task's past the keyhole, the meter and the day cap (#1345, 2026-11-24,
+# measured on OpenCode 2.3.2 with tests/capture_llm.py). The layer pins each to the task's model,
+# variant and all (an agent's `model` takes `#<variant>`), and rules_env says it again; OpenCode
+# merges an agent's entry onto an earlier one, so only the model changes.
+SYSTEM_AGENTS = ("compaction", "summary", "title")
+
+
+def system_agents(model: str) -> dict:
+    """The layer's `agents` entries for SYSTEM_AGENTS: each on ``model``, the task's."""
+    return {name: {"model": model} for name in SYSTEM_AGENTS}
+
 
 def model_pins(model_id) -> dict:
     """The task's model entry's `limit` and `options.max_tokens`, as a `provider` overlay: what
@@ -533,9 +550,9 @@ def fixed_knobs(task: store.Task, m: models.Model) -> dict:
 # is left to the layer: loaded last, the user's `compaction` would undo the handover's backstop,
 # and their `skills` or `instructions` replace the task's. But `provider`, which the layer always
 # sets now (its timeouts, #491): the user's providers stay, and the layer's timeouts go on top of
-# them here too, so their content doesn't put the 300 s header wait back. The RESTATED keys and the
-# task model's pins (model_pins; the layer's small_model is the task's model) are said again here,
-# on top (#519).
+# them here too, so their content doesn't put the 300 s header wait back. The RESTATED keys, the
+# hidden agents' models (SYSTEM_AGENTS, #1345) and the task model's pins (model_pins; the layer's
+# small_model is the task's model) are said again here, on top (#519).
 USERS_RULES = ("permissions", "permission")
 
 
@@ -554,8 +571,11 @@ def rules_env(layer: dict, keyhole_over: dict | None = None) -> dict:
                 if isinstance(v, dict) and isinstance(v.get("options"), dict)
                 and any(k in v["options"] for k in PROVIDER_TIMEOUTS)}
     # wb's agent, made here, after the layer removed any of the user's by its name (context.AGENT)
+    # and the hidden agents' models, the task's (SYSTEM_AGENTS, #1345)
+    agents = layer.get("agents") if isinstance(layer.get("agents"), dict) else {}
     ours = {"share": "disabled", **{k: layer[k] for k in RESTATED if k in layer},
-            "agents": json.loads(json.dumps(context.AGENT_ENTRY))}
+            "agents": {**json.loads(json.dumps(context.AGENT_ENTRY)),
+                       **{a: dict(agents[a]) for a in SYSTEM_AGENTS if isinstance(agents.get(a), dict)}}}
     pins = model_pins(layer.get("small_model")) or _own_pins(layer)  # an API task's: its record (#1017)
     over = models._merge(timeouts, pins.get("provider") or {})
     if over := models._merge(over, (keyhole_over or {}).get("provider") or {}):
@@ -3374,11 +3394,15 @@ def _prepare_now(task: store.Task) -> bool:
     task.set_status(last="setting up the worktree"
                     + (f": {spec['setup']}" if spec.get("setup") else ""))
     began, at = time.monotonic(), time.time()
+    before = _git_sees(task.worktree) if spec.get("setup") else None
     code, output = prepare(task)
     _ran_wrote(task, at)
     secs = round(time.monotonic() - began, 1)
     task.dir.joinpath("setup.txt").write_text(
         f"$ {spec.get('setup') or ''}\nexit: {code}\nseconds: {secs}\nshell: {test_shell()}\n\n{output}")
+    left = _setup_left(task, before) if before is not None else {}
+    if code == 0 and left:
+        return _setup_unclean(task, left)
     if code == 0:
         try:
             made = _ignored_paths(task.worktree)  # what the scratch checkouts copy (#249)
@@ -3402,11 +3426,80 @@ def _prepare_now(task: store.Task) -> bool:
                      f"\nthe lane refused {shlex.quote(n)}: wb allow {task.name} --path "
                      f"{shlex.quote(lane_grant(n, task) or n)}, if the setup needs it"
                      for n in lane_refused(task, output))
+    # Undone too when the setup failed or timed out: kept, the resume the notice advises took them
+    # as the checkout's (a fresh `before`), the task passed, and the review listed a codegen's
+    # gen/ before a failed install as the agent's, for wb accept to commit (#1347's review, 2026-11-24)
+    if left:
+        _undo_setup(task.worktree, left)
     task.set_status(phase="failed", last=what, infra="setup", failed_before="setup")  # #508
     # resume, not discard and start again: the agent never ran, and wb resume sets up again (#581)
     task.notify("failed", f"task {task.name}: {what} before any round "
                 f"({task.dir / 'setup.txt'}):\n{tail}{proxy}\nfix it, then wb resume {task.name}: "
                 "it sets the worktree up again (the agent never ran)", cause="setup")  # #1247
+    return False
+
+
+def _git_sees(wt: Path) -> dict[str, str] | None:
+    """What `git status` shows in the worktree, ignored files aside: {path: XY}, a nested
+    repository as `dir/`; None when git can't say. A submodule's own dirt is left out: wb accept
+    never commits it."""
+    try:
+        out = gitops.git(wt, "status", "--porcelain", "-z", "--untracked-files=all", "--no-renames",
+                         "--ignore-submodules=dirty")
+    except gitops.GitError:
+        return None
+    return {e[3:]: e[:2] for e in out.split("\0") if len(e) > 3}
+
+
+def _setup_left(task: store.Task, before: dict[str, str]) -> dict[str, str]:
+    """The paths the setup left for git to see: tracked files it changed, new files git doesn't
+    ignore. What the checkout already showed (a CRLF file git renormalizes) isn't the setup's."""
+    after = _git_sees(task.worktree)
+    return {p: xy for p, xy in (after or {}).items() if p not in before}
+
+
+def _undo_setup(wt: Path, left: dict[str, str]) -> None:
+    """Put back what _setup_left found: the tracked files as committed, the new ones removed, so
+    a wb resume sets up from the checkout again and is told the same, not handed the edit as
+    the checkout's."""
+    tracked = [p for p, xy in left.items() if xy != "??"]
+    for i in range(0, len(tracked), COPY_BATCH):
+        gitops.git(wt, *gitops.NO_HOOKS, "--literal-pathspecs", "checkout", "HEAD", "--",
+                   *tracked[i:i + COPY_BATCH], check=False)
+    for p in (p for p, xy in left.items() if xy == "??"):
+        at = wt / p.rstrip("/")
+        try:
+            if at.is_dir() and not at.is_symlink():
+                shutil.rmtree(at)
+            else:
+                at.unlink()
+            for up in at.parents:  # the directories it made, emptied
+                if up == wt or wt not in up.parents:
+                    break
+                up.rmdir()
+        except OSError:
+            pass
+
+
+def _setup_unclean(task: store.Task, left: dict[str, str]) -> bool:
+    """Fail the task before any round: the setup changed what git sees. The review showed a
+    `bundle install`'s PLATFORMS in Gemfile.lock as the agent's drift, and wb accept committed it
+    under the agent's "Delegated to" trailer; a codegen's gen/ the project doesn't ignore the same
+    (#1347, bar loop round 9, 2026-11-24)."""
+    def few(paths):
+        return ", ".join(paths[:3]) + (f" and {len(paths) - 3:,} more" if len(paths) > 3 else "")
+    tracked = sorted(p for p, xy in left.items() if xy != "??")
+    loose = sorted(p for p, xy in left.items() if xy == "??")
+    what = "the setup " + " and ".join(
+        ([f"changed files git tracks ({few(tracked)})"] if tracked else [])
+        + ([f"wrote files git doesn't ignore ({few(loose)})"] if loose else []))
+    _undo_setup(task.worktree, left)
+    task.set_status(phase="failed", last=what[:200], infra="setup", failed_before="setup")
+    task.notify("failed", f"task {task.name}: {what}, before any round: the review would show them "
+                "as the agent's and wb accept would commit them (undone in the worktree). Have "
+                "the setup leave the repo as committed (npm ci, BUNDLE_FROZEN=1 bundle install, uv "
+                "sync --locked), or commit its change or a .gitignore for what it writes; then wb "
+                f"discard {task.name} and start again (the agent never ran)", cause="setup")
     return False
 
 
@@ -4608,7 +4701,13 @@ def skills_note(task: store.Task, n: int) -> str:
     if gone:
         lines.append("Claude took back: " + ", ".join(f"`{x}`" for x in gone)
                      + ". They no longer apply to this work; don't follow them.")
-    task.set_status(skills_told=list(now))
+    # skills_shown, what any of its sessions was ever told, is results' skills_offered: a skill
+    # handed after the last run (wb start's hint lands once round 1 is under way) reached no
+    # agent, yet as offered it made wb skill list say rewrite or retire a good skill (#1348,
+    # 2026-11-24)
+    shown = st.get("skills_shown") or []
+    task.set_status(skills_told=list(now),
+                    skills_shown=[*shown, *(x for x in now if x in have and x not in shown)])
     if not lines:
         return ""
     task.event({"ts": store.now(), "round": n, "kind": "skills", "text": "\n".join(lines)})
@@ -5250,6 +5349,48 @@ def _run_again(task: store.Task, n: int, rnd: dict) -> None:
         task.set_status(unanswered={"round": n, "session": sid, "at": len(sent)})
 
 
+# #1344 (the bar loop, 2026-11-24): a 402 or a held outage that met a fan-out's running tasks
+# stopped each, one wake per task with the same ask; #1178's and #1277's waits held only the
+# queued ones. The told-stop families: a stop waits behind a told one of its own kind
+TOLD_STOPS = {"quota": ("quota",), **{g: HELD for g in HELD}}
+
+
+@contextlib.contextmanager
+def _told_stop(task: store.Task, rnd: dict):
+    """For a round its provider stopped (quota, rate_limited, outage): another task's stop of the
+    same kind for the same provider that told Claude already (models.held_told), else '', under
+    locks/provider-stop-<provider>.lock, held through the caller's own notice: the stops land in
+    the same second, and a look alone let each find none told yet (#1344). A told one found, the
+    round waits as queued instead, in the lease's next load (NoLease.load), with no stop of its
+    own. Any other round: '' and no lock. A told stop counts only while that load has a mark to
+    wait on (_load_waits): with none it returns at once and the round ran into the same stop
+    again, round after round, `running` with a slot held and no notice (#1344's review)."""
+    family = TOLD_STOPS.get(rnd.get("guard")) if rnd.get("stuck") else None
+    if not family:
+        yield ""
+        return
+    p = provider_of(task)
+    with store.locked(store.home() / "locks" / f"provider-stop-{models._slot_name(p)}.lock"):
+        told = models.held_told(p, task.name, family)
+        yield told if told and _load_waits(task, p, rnd["guard"]) else ""
+
+
+def _load_waits(task: store.Task, p: str, guard: str) -> bool:
+    """Whether the lease's next load (NoLease.load) waits after a round ``guard`` stopped: for a
+    402 the provider's `no_credit` mark (models.api_health, not this task's own turn to ask,
+    credit_recheck's), for a rate limit or outage its held mark (models.held_mark, which
+    _held_turn waits on). An outage whose answers were 2xx (a queue held past QUEUE_WAIT_S, answers
+    cut short) leaves none, the keyhole's `ok` having cleared it: behind a told stop the round
+    ran again into it with no end, paying for each cut answer (#1344's review, 2026-11-24)."""
+    try:
+        if guard == "quota":
+            row = models.api_health(p)
+            return bool(row) and row.get("state") == "no_credit" and row.get("asked_by") != task.name
+        return models.held_mark(p) is not None
+    except Exception:  # an unreadable file: no wait to count on, so the stop tells
+        return False
+
+
 def _rejoin(task: store.Task, lease) -> None:
     """Back on the GPU before a round, after the tests or a server's wait let it go (#257):
     queued, in its first-come place, when the GPU is someone else's meanwhile."""
@@ -5351,20 +5492,26 @@ def first_tokens(task: store.Task | None = None, prompt: str | None = None,
     return base + -(-min(size, PROMPT_ARG_MAX) // 4)
 
 
-def _go_on(task: store.Task, n: int, what: str) -> bool:
+def _go_on(task: store.Task, n: int, what: str, lease=None) -> bool:
     """Before each `continue` in drive (#1017, #1019): for an API task, Agents not on GPU
     (_agents_gpu, #1213), then today's spend under the
     cap by at least one request at its worst (meter.request_floor, #1150), its input the next
     round's first request's (first_tokens, #1173). Short of that, the task stops before
     ``what`` runs: phase `stuck`, status `guard` `spend`, a `stuck` notice with cause `spend`
-    (not the step's own: results.THE_STEP). A GPU task always goes on, for nothing."""
+    (not the step's own: results.THE_STEP); behind another task's told spend stop it waits as
+    queued instead, ``lease`` let go meanwhile (_cap_wait), and looks again once the wait ends:
+    each running task of a fan-out at the cap stopped and woke Claude with the same ask (#1344,
+    2026-11-24). A GPU task always goes on, for nothing."""
     if meter.for_task(task) is None:
         return True
-    if _agents_gpu(task, n, what):
-        return False
-    tokens = first_tokens(task)
-    if not (why := meter.stop_reason(task, ahead=True, tokens=tokens)):
-        return True
+    while True:
+        if _agents_gpu(task, n, what):
+            return False
+        tokens = first_tokens(task)
+        if not (why := meter.stop_reason(task, ahead=True, tokens=tokens)):
+            return True
+        if lease is None or not _cap_wait(task, lease):
+            break
     _stop_before(task, n, what, why, meter.stop_text(task, tokens=tokens))
     return False
 
@@ -5501,16 +5648,18 @@ def _cap_go_past(task: store.Task) -> None:
 
 
 def _cap_wait(task: store.Task, lease) -> bool:
-    """Before the first round this runner sends (#1249, 2026-11-24): an API task at the day cap,
+    """Before the first round this runner sends (#1249, 2026-11-24), and at a running task's spend
+    stop, in the round or before the next (drive, _go_on: #1344): an API task at the day cap,
     or within its first request of it, while another task's spend stop has told Claude so
     (_cap_told), waits as queued, its provider slot let go (taken again after), until the cap is
     raised or Agents is switched to GPU (a watch on routes.json's directory; the switch's stop is
     drive's next look, _agents_gpu: any other route change leaves it waiting, #1304), local
     midnight or that stop no longer stands (looked at every API_WAIT's 30 s). A backlog queued behind the cap each took its slot, ran
     round 1 into the guard and woke Claude with the same stop, one ask of the user per task, as
-    #1178's 402. With no such stop one waiter goes on (_cap_go: the rest wait behind it as behind
-    a told stop, #1304), and its own stop is the notice Claude gets: never a wait untold. True
-    when it waited (the caller looks again)."""
+    #1178's 402; so did each task of a fan-out running when the cap was reached (#1344). With no
+    such stop one waiter goes on (_cap_go: the rest wait behind it as behind a told stop, #1304),
+    and its own stop is the notice Claude gets: never a wait untold. True when it waited (the
+    caller looks again), the keyhole serving again: the round's spend stop closed it."""
     if meter.for_task(task) is None:
         return False
     waited, said = False, None
@@ -5533,6 +5682,8 @@ def _cap_wait(task: store.Task, lease) -> bool:
             w.wait(min(max(_midnight(after=True) - time.time(), 0.1), models.API_WAIT[1]))
     if waited:
         lease.__enter__()
+        if (kh := CURRENT.get("keyhole")) is not None:
+            kh.reopen()
     return waited
 
 
@@ -5736,7 +5887,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 if handed <= HANDOVER_MAX:
                     _round_end(task, n, rnd, began)
                     _full_round(task, n, rnd, handed)
-                    if not _go_on(task, n, "the handover"):
+                    if not _go_on(task, n, "the handover", lease):
                         return
                     continue
                 # a self-review's, on its green tree, is its finish, as any guard's is (#1261)
@@ -5754,7 +5905,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
             _round_end(task, n, rnd, began)
             if rnd["interrupted"] or (pending_steer(task) and not rnd["stuck"]):
                 _steer_round(task, n, rnd["interrupted"])
-                if not _go_on(task, n, "Claude's note"):
+                if not _go_on(task, n, "Claude's note", lease):
                     return
                 continue
             if rnd["guard"] in HELD and getattr(lease, "recheck", "") == "held" and not rnd["answered"]:
@@ -5766,7 +5917,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                             "text": f"{provider_of(task)} still isn't answering: the task waits "
                                     "as queued again"})
                 _run_again(task, n, rnd)
-                if not _go_on(task, n, "the round again"):
+                if not _go_on(task, n, "the round again", lease):
                     return
                 continue
             if rnd["guard"] in HELD and revived != n:  # the provider's rate limit or outage: once (#1020)
@@ -5775,7 +5926,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                     _steer_round(task, n, False)
                 else:
                     _run_again(task, n, rnd)
-                if not _go_on(task, n, "the round again"):  # the day cap holds here too (#1019)
+                if not _go_on(task, n, "the round again", lease):  # the day cap holds here too (#1019)
                     return
                 continue
             if rnd["guard"] == "quota" and getattr(lease, "recheck", "") == "quota" and not rnd["answered"]:
@@ -5787,7 +5938,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                             "text": f"{provider_of(task)} is still out of credit: the task waits "
                                     "as queued again"})
                 _run_again(task, n, rnd)
-                if not _go_on(task, n, "the round again"):
+                if not _go_on(task, n, "the round again", lease):
                     return
                 continue
             crashed = not rnd["stuck"] and rnd["exit"] not in (0, None)
@@ -5812,7 +5963,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                     except RuntimeError as e:
                         return _load_failed(task, e)
                 _run_again(task, n, rnd)
-                if not _go_on(task, n, "the round again"):
+                if not _go_on(task, n, "the round again", lease):
                     return
                 continue
             if died(rnd) and not rnd["stuck"]:
@@ -5823,33 +5974,58 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 # (#1270, bar loop round 7, 2026-11-24)
                 settle(task, n, rnd, rnd.get("began"), f"opencode exited {rnd['exit']}")
             if rnd["stuck"] or died(rnd):
-                text = _spend_lead(task, rnd) + summary_text(task, n, rnd, None) + _undelivered(task)
-                write_report(task, n, rnd, text)
-                phase = "stuck" if rnd["stuck"] else "failed"
-                # its server gone again after the round's one revive: the machine's, not the
-                # step's, so the model's slice isn't shrunk for it (#657)
-                server = (crashed or hushed) and revived == n and (_down(m) or _stopped(m))
-                last = rnd["stuck"] or f"opencode exited {rnd['exit']}"
-                said = [e[len("opencode: "):] for e in rnd["errors"] if e.startswith("opencode: ")]
-                if not rnd["stuck"] and CURRENT.get("api") and said:
-                    # the provider's error, as the keyhole redacted it (an auth or quota error
-                    # ends the run at once): what Claude needs to know, not only the exit (#1012)
-                    last = f"{last}: {said[-1]}"[:200]
-                # the provider's or the spend cap's, not the step's (#1020, #1019)
-                ours = None if server else stopped_by(rnd["guard"])
-                # its guard with a provider's: a rate limit's or outage's told stop holds the
-                # tasks queued behind it (models.held_told, #1277)
-                # and a spend stop's cap, which the tasks waiting behind it go on past only
-                # once raised (_cap_told, #1304)
-                task.set_status(phase=phase, last=last,
-                                **({"infra": "model"} if server else {"infra": ours} if ours else {}),
-                                **({"guard": rnd["guard"]} if ours == "provider" else {}),
-                                **({"cap_told": meter.cap()} if ours == SPEND else {}))
-                # what stopped it, for results.step: a guard or the agent's own exit (#582)
-                task.notify(phase, text, round=n, cause="server" if server else ours
-                            or ("guard" if rnd["stuck"] else "agent"))
-                _cap_go_done(task)  # told (cap_told above): the waiters wait behind it (#1304)
-                return
+                if rnd["stuck"] and rnd["guard"] == SPEND and _cap_wait(task, lease):
+                    # another task's spend stop told Claude of the cap: this round waited as
+                    # queued behind it, with no stop of its own, until the cap was raised or
+                    # midnight passed; each running task of a fan-out at the cap woke Claude with
+                    # the same ask (#1344, 2026-11-24)
+                    task.event({"ts": store.now(), "round": n, "kind": "load",
+                                "text": "the day cap stopped the round, as another task's stop told "
+                                        "the user: the round runs again"})
+                    _run_again(task, n, rnd)
+                    if not _go_on(task, n, "the round again", lease):
+                        return
+                    continue
+                with _told_stop(task, rnd) as told:
+                    if not told:
+                        text = _spend_lead(task, rnd) + summary_text(task, n, rnd, None) + _undelivered(task)
+                        write_report(task, n, rnd, text)
+                        phase = "stuck" if rnd["stuck"] else "failed"
+                        # its server gone again after the round's one revive: the machine's, not the
+                        # step's, so the model's slice isn't shrunk for it (#657)
+                        server = (crashed or hushed) and revived == n and (_down(m) or _stopped(m))
+                        last = rnd["stuck"] or f"opencode exited {rnd['exit']}"
+                        said = [e[len("opencode: "):] for e in rnd["errors"] if e.startswith("opencode: ")]
+                        if not rnd["stuck"] and CURRENT.get("api") and said:
+                            # the provider's error, as the keyhole redacted it (an auth or quota error
+                            # ends the run at once): what Claude needs to know, not only the exit (#1012)
+                            last = f"{last}: {said[-1]}"[:200]
+                        # the provider's or the spend cap's, not the step's (#1020, #1019)
+                        ours = None if server else stopped_by(rnd["guard"])
+                        # its guard with a provider's: a rate limit's or outage's told stop holds the
+                        # tasks queued behind it (models.held_told, #1277)
+                        # and a spend stop's cap, which the tasks waiting behind it go on past only
+                        # once raised (_cap_told, #1304)
+                        task.set_status(phase=phase, last=last,
+                                        **({"infra": "model"} if server else {"infra": ours} if ours else {}),
+                                        **({"guard": rnd["guard"]} if ours == "provider" else {}),
+                                        **({"cap_told": meter.cap()} if ours == SPEND else {}))
+                        # what stopped it, for results.step: a guard or the agent's own exit (#582)
+                        task.notify(phase, text, round=n, cause="server" if server else ours
+                                    or ("guard" if rnd["stuck"] else "agent"))
+                        _cap_go_done(task)  # told (cap_told above): the waiters wait behind it (#1304)
+                        return
+                    # its provider's stop of the same kind told Claude already: back to waiting
+                    # as queued in the lease's next load (NoLease.load), as a recheck does, with
+                    # no stop of its own; each running task of a fan-out met the 402 or the
+                    # outage and woke Claude with the same stop (#1344, 2026-11-24)
+                    task.event({"ts": store.now(), "round": n, "kind": "load",
+                                "text": f"{provider_of(task)} stopped the round, as {told}'s stop told "
+                                        "the user: the task waits as queued"})
+                    _run_again(task, n, rnd)
+                if not _go_on(task, n, "the round again", lease):
+                    return
+                continue
             # the tests need no model: the GPU is the queue's, or theirs (--unload-for-tests), #257.
             # Theirs is waited for (a peer's round, up to its timeout; this machine's pool for a
             # remote model): queued meanwhile, as _rejoin is, since left `running`, wb steer --now
@@ -5862,7 +6038,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 tests = run_tests(task, n)
             if pending_steer(task):  # a note that came in while the tests ran
                 _steer_round(task, n, False)
-                if not _go_on(task, n, "Claude's note"):
+                if not _go_on(task, n, "Claude's note", lease):
                     return
                 continue
             text = summary_text(task, n, rnd, tests)
@@ -5872,7 +6048,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 text = f"auto-fix skipped: {skip}\n" + text  # first: what Claude must do about it
             if pending_steer(task):  # a note that came in while the report was written
                 _steer_round(task, n, False)
-                if not _go_on(task, n, "Claude's note"):
+                if not _go_on(task, n, "Claude's note", lease):
                     return
                 continue
             write_report(task, n, rnd, text)
@@ -5884,7 +6060,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 task.set_status(round=n + 1, auto_fixes=used + 1, tests=tests, round_for="fix")
                 task.event({"ts": store.now(), "round": n, "kind": "autofix",
                             "text": "tests failed; sent the output back to the agent"})
-                if not _go_on(task, n, "auto-fix"):
+                if not _go_on(task, n, "auto-fix", lease):
                     return
                 continue
             if tests and tests["ok"] and not task.status.get("self_review_due"):
@@ -5901,7 +6077,7 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                                 self_review_tree=gitops.mark(task.worktree))  # #1188: the green tree
                 task.event({"ts": store.now(), "round": n, "kind": "self_review",
                             "text": "tests pass; the agent reviews its own change first"})
-                if not _go_on(task, n, "self-review"):
+                if not _go_on(task, n, "self-review", lease):
                     return
                 continue
             task.set_status(phase="review", tests=tests,

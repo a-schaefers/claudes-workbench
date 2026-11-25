@@ -105,7 +105,11 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            "tok_in": st.get("tok_in", 0), "tok_out": st.get("tok_out", 0),
            "ran": (went := ran(task)),
            **({"failed_before": st["failed_before"]} if not went and st.get("failed_before") else {}),
-           "skills_offered": st.get("skills_ever") or [], "skills_loaded": skills.loaded(task),
+           # what an agent was told (runner.skills_note), not every skill ever handed: one
+           # handed after the last run reached no agent (#1348); skills_told for a task begun
+           # before skills_shown was kept
+           "skills_offered": st["skills_shown"] if "skills_shown" in st else st.get("skills_told") or [],
+           "skills_loaded": skills.loaded(task),
            "skills_rev": st.get("skills_rev") or {},  # the version handed: judges each edit
            "steps": steps,
            **({"landed_steps": landed} if landed else {}),

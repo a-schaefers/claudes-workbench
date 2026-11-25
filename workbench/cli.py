@@ -747,7 +747,7 @@ def _busy_api(role: str, a, repo: Path, sub: str | None, tokens: int | None = No
         why = (f"{privacy.home_path(kept[0])}, which the task's lane reads ({kept[1]}), is kept local"
                if kept[1] else f"{repo.name} is kept local ({kept[0]})")
     if why is None:  # commands.json's standing copy that holds a credential, as an API start's
-        why = _standing_gap(context.repo_conf(repo, sub), repo, advice=False) or None
+        why = _standing_gap(context.repo_conf(repo, sub), repo, sub, advice=False) or None
     if why is None:  # no price, or today at the day cap (#1019), without an API start's advice:
         # the role is on the GPU and this start only waits for it (wave 2's merge)
         why = meter.refusal(m, role, advice=False,  # round 1's input too (#1173)
@@ -1032,31 +1032,34 @@ def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu") -> 
     the repo the lane may read."""
     conf = context.repo_conf(repo, sub)  # the package's entry, not the repo's first (#778)
     if via == "api":  # no standing copy that holds a credential (#1021, #1322)
-        _standing_refusal(conf, repo)
+        _standing_refusal(conf, repo, sub)
     setup = a.setup if a.setup is not None else conf.get("setup") or ""
     copy, sibs = [], []
+    home = context.repo_conf_dir(repo, sub)
     for raw, given in [*((x, False) for x in conf.get("copy", [])), *((x, True) for x in a.copy or [])]:
-        # commands.json's paths stay the repo's; a --copy from a package is read from it (#1158)
-        p = (_copy_path(repo, raw, sub) if given else os.path.normpath(raw.strip())).rstrip("/")
+        # a --copy from a package is read from it (#1158), a commands.json entry from its key's
+        # directory (#1346); a standing entry's refusal names the entry, not a flag never given
+        p = _copy_path(repo, raw, sub if given else home).rstrip("/")
+        what = f"--copy {raw}" if given else f'commands.json "repos" copy {raw}'
         if os.path.isabs(p) or p == ".." or p.startswith("../") or p in (".", ""):
-            die(f"--copy {raw}: a path inside the repo, ignored there (e.g. node_modules)")
+            die(f"{what}: a path inside the repo, ignored there (e.g. node_modules)")
         parts = p.split("/")
         if any(x not in NOT_SECRET and any(fnmatch.fnmatch(x, pat) for pat in SECRET_FILES)
                for x in parts):
-            die(f"--copy {raw}: looks like a secret or a user's setting "
+            die(f"{what}: looks like a secret or a user's setting "
                 f"({', '.join(SECRET_FILES[:4])}…), which stays out of the agent's worktree")
         if not os.path.lexists(repo / p):
-            die(f"--copy {raw}: no {p} in {repo}")
+            die(f"{what}: no {p} in {repo}")
         # a virtualenv can't move: its activate and its scripts' shebangs name the checkout, so a
         # copied .venv ran the developer's environment, and its writes left the lane (#260, the
         # audit of 1.2)
         if venv := runner.venv_in(repo / p):
-            die(f"--copy {raw}: {venv.relative_to(repo)} is a Python virtualenv, which still runs "
+            die(f"{what}: {venv.relative_to(repo)} is a Python virtualenv, which still runs "
                 f"from {repo} once copied; recreate it with --setup instead, e.g. --setup "
                 f"'python3 -m venv {venv.relative_to(repo)} && {venv.relative_to(repo)}/bin/pip "
                 "install -r requirements.txt' or --setup 'uv sync'")
         if not gitops.ignored(repo, p):
-            die(f"--copy {raw}: not ignored in {repo}, so a copy would show in the review diff; "
+            die(f"{what}: not ignored in {repo}, so a copy would show in the review diff; "
                 "a tracked file is in the worktree already")
         # ignored in the checkout isn't untracked where the task starts: a tag given as --base
         # tracked generated/config, the developer's local copy went over it, and it reached the
@@ -1065,7 +1068,7 @@ def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu") -> 
         held = [x for x in gitops.git(repo, "ls-tree", "-r", "--name-only", "-z", base, "--", p).split("\0")
                 + gitops.git(repo, "ls-files", "-z", "--", p).split("\0") if x]
         if held:
-            die(f"--copy {raw}: {held[0]} under it is tracked (at {a.base} or in the checkout's "
+            die(f"{what}: {held[0]} under it is tracked (at {a.base} or in the checkout's "
                 "index), and the copy would replace it in the task's worktree and its commit; "
                 "copy only the ignored files inside")
         if p not in copy:
@@ -1108,8 +1111,9 @@ def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu") -> 
 
 
 def _copy_path(repo: Path, raw: str, sub: str | None) -> str:
-    """A --copy path as the repo-relative path it names. From a package (`sub`), read from the
-    package, where wb start's note names the ignored directories from and the setup runs: from
+    """A --copy path as the repo-relative path it names; a commands.json `copy` entry's too, with
+    ``sub`` its key's directory (context.repo_conf_dir, #1346). From a package (`sub`), read from
+    the package, where wb start's note names the ignored directories from and the setup runs: from
     packages/app, `--copy node_modules` copied the root's node_modules/, the package's stayed
     missing and every round ran against a worktree that couldn't pass, and the note's
     `../../node_modules` was refused (#1158, 2026-11-24). A path only the root has is still the
@@ -1124,24 +1128,27 @@ def _copy_path(repo: Path, raw: str, sub: str | None) -> str:
     return p
 
 
-def _standing_refusal(conf: dict, repo: Path) -> None:
+def _standing_refusal(conf: dict, repo: Path, sub: str | None) -> None:
     """An API task takes commands.json's standing `copy` and `siblings` as configured (the setup
     line says so), but a copied file that holds a credential: exit 3 (#1021, #1322)."""
-    if why := _standing_gap(conf, repo):
+    if why := _standing_gap(conf, repo, sub):
         die(why, 3)
 
 
-def _standing_gap(conf: dict, repo: Path, advice: bool = True) -> str:
+def _standing_gap(conf: dict, repo: Path, sub: str | None, advice: bool = True) -> str:
     """_standing_refusal's line, or '': also the busy opt-in's (#1023), which moves a GPU start to
     an API model after _worktree_setup checked it as a GPU one (wave 2's merge), and the mod's
     dry run's (_route_start), so the dialog never asks for a start wb start then refuses (#1227).
-    A file is read if it is text under the cap, a directory's config files outside its package
-    trees for a strong signal only (privacy.copy_holds_credential): only files were, by
-    holds_credential, which refused a binary test.db and let config/local/ go unread (#1322's
-    review), and its matcher refused a models/ copy for tokenizer_config.json's bos_token. Naming the entry
-    once let it through, which every start then repeated (#1322)."""
+    An entry is the path from its key's directory, as _worktree_setup copies it
+    (context.repo_conf_dir, _copy_path, #1346): from the root, a package key's node_modules was
+    the root's. A file is read if it is text under the cap, a directory's config files outside
+    its package trees for a strong signal only (privacy.copy_holds_credential): only files were,
+    by holds_credential, which refused a binary test.db and let config/local/ go unread (#1322's
+    review), and its matcher refused a models/ copy for tokenizer_config.json's bos_token. Naming
+    the entry once let it through, which every start then repeated (#1322)."""
+    home = context.repo_conf_dir(repo, sub)
     for raw in conf.get("copy", []):
-        entry = os.path.normpath(raw.strip()).rstrip("/")
+        entry = _copy_path(repo, raw, home).rstrip("/")
         if privacy.copy_holds_credential(repo / entry):
             return privacy.standing_refusal(entry, advice)
     return ""
@@ -1249,11 +1256,14 @@ def _api_notes(task_name: str, repo: Path) -> list[str]:
     return notes
 
 
-def _standing_setup(conf: dict, a) -> list[str]:
+def _standing_setup(conf: dict, a, repo: Path, sub: str | None) -> list[str]:
     """What a start's worktree setup takes from commands.json "repos" (``conf``, the repo's
     entry) rather than its own flags: wb start says only that, as Claude knows what it passed
-    (#1322). --setup takes the standing command's place (_worktree_setup)."""
-    links, copies = conf.get("siblings") or [], conf.get("copy") or []
+    (#1322). --setup takes the standing command's place (_worktree_setup). A copy is named by the
+    path it copies, from its key's directory (#1346)."""
+    home = context.repo_conf_dir(repo, sub)
+    links = conf.get("siblings") or []
+    copies = [_copy_path(repo, x, home).rstrip("/") for x in conf.get("copy") or []]
     cmd = conf.get("setup") if a.setup is None else None
     return [*(["links " + ", ".join(n if n.startswith("../") else f"../{n}" for n in links)] if links else []),
             *([f"copies {', '.join(copies)}"] if copies else []),
@@ -1643,7 +1653,7 @@ def cmd_start(a):
               "checkout lacks them at the base's commit): a build or test that needs them fails there")
     lack: list[str] = []  # the missing-dirs note's, which the venv note defers to
     if setup:  # what Claude didn't pass itself: commands.json's standing setup (#1322)
-        if does := _standing_setup(context.repo_conf(repo, sub), a):
+        if does := _standing_setup(context.repo_conf(repo, sub), a, repo, sub):
             print(f"setup from commands.json: {'; '.join(does)}")
     # only an entry that says how the worktree is set up (an explicit "setup": "" is the opt-out)
     # silences the note: one holding only local_only or merge did, and rounds ran on a base that
@@ -3306,7 +3316,7 @@ def _route_start(a) -> None:
         die(why)
     # commands.json's standing copy that holds a credential: wb start's exit 3, here before
     # the dialog, which had the user approve a start wb start then refused (#1227)
-    if repo is not None and (why := _standing_gap(context.repo_conf(repo, sub), repo)):
+    if repo is not None and (why := _standing_gap(context.repo_conf(repo, sub), repo, sub)):
         die(why, 3)
     line = start_line(ns.name, m)
     print(json.dumps({"change": line, "gate": True,
