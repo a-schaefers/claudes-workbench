@@ -371,7 +371,11 @@ class Base(unittest.TestCase):
                           # the user's file for agents (#1102, 2026-11-23): theirs went into the
                           # tests' prompts, and in an agent's lane, which hides it, every test
                           # that started a task failed on its read
-                          WB_AGENTS_MD=str(tmp / "wb-config" / "AGENTS.md"))
+                          WB_AGENTS_MD=str(tmp / "wb-config" / "AGENTS.md"),
+                          # the web app's token and settings (#1281's review, 2026-11-24): on by
+                          # default, every doctor test read the user's token, or made one in HOME
+                          WB_CHAT_TOKEN=str(tmp / "chat-token"),
+                          WB_CHAT_CONFIG=str(tmp / "chat.json"))
         (tmp / "opencode.json").write_text(json.dumps(OPENCODE_CONFIG))
         runner.models._AUTH.clear()  # OpenCode's stored keys, per process (models.auth_key)
         runner.models._STORED.clear()
@@ -25226,8 +25230,9 @@ class LogoutStops(Base):
         self.assertIn("wb bench and wb optimize runs and a chat wb chat on started", said[0])
 
     def test_doctor_names_the_chats_linger_only_with_the_chat_on(self):
-        # most desktops linger off, and the chat is off until turned on: no warning for that
+        # most desktops linger off: no warning for that while the user has turned the chat off
         from workbench import chat
+        chat.set_on(False)                                    # on by default (#1281)
         def doctor():
             buf = io.StringIO()
             with redirect_stdout(buf), self.fake_loginctl("no", "no"):
@@ -25520,10 +25525,11 @@ class WebChat(Base):
                                     "machine": store.machine()})
         self.assertIsNone(self.chat.listener())                       # this machine's: asked here
 
-    def test_the_web_chat_is_off_until_turned_on_and_stays_as_left(self):
-        # The user, 2026-11-19: off by default, a switch in the pane, remembered across /workbench runs.
-        # On starts a server when none answers; off stops only one wb started, and nobody listens.
-        self.assertFalse(self.chat.is_on())
+    def test_the_web_chat_is_on_until_turned_off_and_stays_as_left(self):
+        # The owner, 2026-11-24 (#1281): on by default, reversing 2026-11-19's off until turned on;
+        # the user's off is remembered across /workbench runs. On starts a server when none
+        # answers; off stops only one wb started, and nobody listens.
+        self.assertTrue(self.chat.is_on())                             # no switch.json: on
         out = run_wb("chat", "on", "--port", str(self.port))           # one runs already: kept
         self.assertIn(f"web chat on: http://localhost:{self.port}/#token=", out)
         self.assertTrue(self.chat.is_on())
@@ -26062,6 +26068,10 @@ class WebChat(Base):
         self.assertEqual(self.call("/api/active", {"x": 1}, token=tok)[0], 400)
         self.assertEqual(self.call("/api/active", {}, token=tok), (200, {}))
         self.assertAlmostEqual(store.read_json(d / "page.json")["at"], store.now(), delta=5)
+        self.assertTrue((d / "away.json").exists())        # on by default (#1281): away
+        (d / "away.json").unlink()
+        chat.set_on(False)
+        self.assertEqual(self.call("/api/active", {}, token=tok), (200, {}))
         self.assertFalse((d / "away.json").exists())       # the chat off: no session sends it a dialog
         chat.set_on(True)
         store.write_json(d / "away.json", {"at": 0})        # the user typed in the terminal (the mod's back)
@@ -26855,6 +26865,13 @@ class WebChat(Base):
             run_wb("chat", "on", "--port", str(port))
         self.assertIn(f"another account's chat", err.getvalue())
         self.assertFalse((self.chat.chat_dir() / "serve.pid").exists())           # nothing started
+        # on by default (#1281): a failed `wb chat on` puts the switch back as it was, on
+        self.assertIn("web chat not up: another account's chat", err.getvalue())
+        self.assertTrue(self.chat.is_on())
+        self.chat.set_on(False)
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            run_wb("chat", "on", "--port", str(port))
         # #690: the switch stayed on when it died, so the pane read On and pinned a dead link
         self.assertIn("web chat left off", err.getvalue())
         self.assertFalse(self.chat.is_on())
@@ -26908,7 +26925,8 @@ class WebChat(Base):
 
     def test_a_chat_wb_chat_on_started_comes_back_after_a_reboot_or_a_crash(self):
         # #449 (the 2026-11-20 audit): the switch stayed on and the pane showed the link, but nothing
-        # started the server again, so the phone said "Can't reach the computer" for good
+        # started the server again, so the phone said "Can't reach the computer" for good; since
+        # #1281 `wb chat url` runs chat.ensure, which revive was
         from workbench import cli
         chat = self.chat
         with socket.socket() as sk:
@@ -26916,14 +26934,12 @@ class WebChat(Base):
             free = sk.getsockname()[1]
         dead = subprocess.Popen([sys.executable, "-c", "pass"])
         dead.wait()
-        chat.set_on(True)
         store.write_json(chat.chat_dir() / "serve.pid", {"pid": dead.pid, "port": free})  # it died
-        self.assertIn(f"no server answers on port {free}: wb chat on starts one", cli.chat_gap())
-        with mock.patch.object(chat, "_unit_keeps_it", return_value=True):   # systemd's to restart
-            self.assertIsNone(chat.revive())
+        self.assertEqual(cli.chat_line(), (False, f"web app down: no server answers on port {free} (wb chat on)"))
         chat.set_on(False)
-        self.assertIsNone(chat.revive())                                       # off: left off
-        self.assertIsNone(cli.chat_gap())
+        self.assertEqual(chat.ensure(free)["state"], "off")                    # off: left off
+        self.assertEqual(cli.chat_line(), (None, "web app off (wb chat on)"))
+        self.assertEqual(store.read_json(chat.chat_dir() / "serve.pid")["pid"], dead.pid)
         chat.set_on(True)
         with mock.patch.object(chat, "_unit_keeps_it", return_value=False):
             out = run_wb("chat", "url")
@@ -26931,12 +26947,10 @@ class WebChat(Base):
         pid = store.read_json(chat.chat_dir() / "serve.pid")["pid"]
         self.assertNotEqual(pid, dead.pid)
         try:
-            deadline = time.time() + 10
-            while not chat.running(free) and time.time() < deadline:
-                time.sleep(0.1)
-            self.assertTrue(chat.running(free))
-            self.assertIsNone(cli.chat_gap())
-            self.assertIsNone(chat.revive())                                   # up: not a second
+            self.assertTrue(chat.running(free))                                # ensure waited for it
+            with mock.patch.object(chat, "_unit_keeps_it", return_value=False):
+                self.assertEqual(cli.chat_line(), (True, f"web app answers on localhost:{free} (started by wb)"))
+            self.assertEqual(chat.ensure(free)["state"], "up")                 # up: not a second
             run_wb("chat", "off", "--port", str(free))
             deadline = time.time() + 10
             while os.waitpid(pid, os.WNOHANG) == (0, 0) and time.time() < deadline:

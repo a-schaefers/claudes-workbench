@@ -304,14 +304,15 @@ def runner_scope() -> tuple[str, ...]:
     return argv if ok else ()
 
 
-def detach(argv: list[str], awake: str = "", **kw) -> subprocess.Popen:
+def detach(argv: list[str], awake: str = "", env: dict | None = None, **kw) -> subprocess.Popen:
     """Start what outlives this command: a runner, the bench driver, wb optimize, the chat `wb
     chat on` starts. Its own session, stdin from /dev/null, and its own scope where logind kills
     a session's processes at logout (runner_scope): the runners alone had one, so the others
     still died there (#531). With ``awake`` (why, for the inhibitor's list), the machine is kept
-    from idle-sleeping while it runs (keep_awake)."""
+    from idle-sleeping while it runs (keep_awake). ``env``: its whole environment, else this
+    one's (the chat's has no Claude Code variables, #1281)."""
     proc = subprocess.Popen([*runner_scope(), *argv], stdin=subprocess.DEVNULL,
-                            start_new_session=True, **kw)
+                            start_new_session=True, env=env, **kw)
     if awake:
         keep_awake(proc.pid, awake)
     return proc
@@ -6263,6 +6264,14 @@ def cmd_top(a):
 TOP_EVERY = (0.2, 3600)  # wb top --every's range, in seconds (NaN and inf fail the comparison)
 
 
+def _chat_started() -> str:
+    """Who started the chat `wb chat on` just brought up: the service, or wb's own server."""
+    rec = store.read_json(chat.chat_dir() / "serve.pid", None) or {}
+    if isinstance(rec, dict) and rec.get("pid") and chat._alive(rec["pid"], rec.get("start")):
+        return f"pid {rec['pid']}, {chat.chat_dir() / 'serve.log'}"
+    return chat.service_name()
+
+
 def _chat_writer() -> dict:
     """The Claude Code session writing a `wb chat reply`, as task.json records it (`session`,
     `claude_pid`, `claude_start`, `claude_machine`): the user's answer to the row is that
@@ -6279,7 +6288,6 @@ def cmd_chat(a):
     """The web chat: the user's side door to Claude while away from the terminal."""
     if a.more and a.action not in ("listen", "ended"):
         die(f"wb chat {a.action}: too many arguments")
-    named = a.port is not None
     if a.port is None:  # named: that port; else the running server's, else the default (#349)
         a.port = chat.PORT if a.action == "serve" else chat.port()
     if a.action == "serve":
@@ -6288,30 +6296,28 @@ def cmd_chat(a):
         except chat.ConfigError as e:  # 78 (EX_CONFIG): wb-chat.service stops, no retry fixes it
             die(str(e), 78)
     elif a.action == "url":  # silent but for the link: the mod reads it whole
-        back = chat.revive()  # a chat wb chat on started, gone after a reboot or a crash (#449)
-        print(chat.url(a.port if named or not back else back))  # the token is the key: keep it private
-    elif a.action == "on":  # the pane's switch, kept: the link shows and a session listens
-        # the switch goes on only with a server of ours answering: turned on first and left on
-        # when this died, the pane's row read On and pinned a link that gave a 401 or nothing,
-        # its reason never shown (#690)
-        who = chat.who_answers(a.port)
-        if who == "workbench":
-            chat.set_on(True)
-            print(f"web chat on: {chat.url(a.port)}")
-        elif who == "other":  # its link would open someone else's page (#200), or 401 (#554)
-            chat.set_on(False)
-            die(f"web chat left off: another account's chat (or another program, or a server still "
-                f"on a replaced token) answers on port {a.port}: wb chat on --port <free port> (and "
-                "the same --port in chat.json's service, if any)")
+        got = chat.ensure(a.port)  # up unless turned off: a reboot, a crash, no service (#449, #1281)
+        if a.json:
+            print(json.dumps(got))
+        elif not got["url"]:  # chat.json it can't follow
+            die(f"wb chat url: {got['why']}")
         else:
-            pid = chat.start(a.port)
-            log = chat.chat_dir() / "serve.log"
-            if not chat.wait_up(a.port, pid):
-                chat.set_on(False)
-                tail = (log.read_text(errors="replace").strip().splitlines() or ["(nothing)"])[-1]
-                die(f"web chat left off: its server didn't start: {tail} ({log})")
-            chat.set_on(True)
-            print(f"web chat on: started its server (pid {pid}, {log}): {chat.url(a.port)}")
+            print(got["url"])  # the token is the key: keep it private
+    elif a.action == "on":  # the switch, kept: the link shows and a session listens
+        # a failure puts the switch back as it was: turned on and left on when this died, the
+        # pane's row read On and pinned a link that gave a 401 or nothing (#690); left off, an
+        # on-by-default chat (#1281) stayed off after a port taken once
+        was = chat.is_on()
+        chat.set_on(True)
+        got = chat.ensure(a.port)
+        if got["state"] not in ("up", "started"):
+            chat.set_on(was)
+            said, why = "left off" if not was else "not up", got["why"]
+            if got["state"] == "failed" and not why.startswith(chat.service_name()):
+                why = f"its server didn't start: {why} ({chat.chat_dir() / 'serve.log'})"
+            die(f"web chat {said}: {why}")
+        print(f"web chat on: {got['url']}" if got["state"] == "up" else
+              f"web chat on: started its server ({_chat_started()}): {got['url']}")
         for why in logout_stops():  # its unit is a user service: a logout stops it (#351)
             print(f"--  {why}")
     elif a.action == "off":
@@ -6441,22 +6447,27 @@ def chat_token(what: str | None, name: str | None) -> None:
         die("wb chat token add <name> | list | revoke <name>")
 
 
-def chat_gap() -> str | None:
-    """With the switch on, what keeps the chat from answering: the pane shows its link whatever
-    runs, and a chat gone after a reboot or a crash went unnoticed (#449)."""
+def chat_line() -> tuple[bool | None, str]:
+    """wb doctor's one line on the web app, never its token (#1281): (True, "web app answers on
+    localhost:<port> (<who keeps it>)"), (None, "web app off (wb chat on)") for the user's off,
+    (False, "web app down: <why> (wb chat on)"). Doctor only looks: `wb chat url` and the mod
+    start it. A chat gone after a reboot or a crash once went unnoticed (#449). No token file
+    means no server of ours ever ran: who_answers would make one, and doctor made the user's
+    ~/.config/workbench/chat-token (and the tests' HOME's) just by looking (#1281's review)."""
     if not chat.is_on():
-        return None
-    port = chat.port()
+        return None, "web app off (wb chat on)"
     try:
+        port = chat.port()
+        if not chat.token_path().exists():
+            return False, f"web app down: no server answers on port {port} (wb chat on)"
         who = chat.who_answers(port)
     except RuntimeError as e:  # chat.json it can't follow
-        return f"the web chat is on, but {e}"
+        return False, f"web app down: {e} (wb chat on)"
     if who == "workbench":
-        return None
-    if who == "other":
-        return (f"the web chat is on, but something else answers on port {port} (another account's "
-                "chat, or another program): wb chat on --port <free port>")
-    return f"the web chat is on, but no server answers on port {port}: wb chat on starts one"
+        return True, (f"web app answers on localhost:{port} "
+                      f"({chat.service_name() if chat._unit_keeps_it() else 'started by wb'})")
+    why = chat.blocked_why(port) if who == "other" else f"no server answers on port {port}"
+    return False, f"web app down: {why} (wb chat on)"
 
 
 def logout_stops() -> list[str]:
@@ -6512,10 +6523,91 @@ def agents_md_note() -> str:
             f"follow in every project goes in {privacy.home_path(context.user_agents_md())}")
 
 
+def _service_run(argv: list[str]) -> tuple[bool, str]:
+    """A service manager's command: whether it worked, and what it printed."""
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+    return r.returncode == 0, (r.stdout + r.stderr).strip()
+
+
+def _failed(argv: list[str], said: str) -> str:
+    return f"--  web app service: {' '.join(argv)} failed: {(said.splitlines() or ['(nothing)'])[-1]}"
+
+
+def install_service(force: bool = False) -> str | None:
+    """wb setup's service for the web app (#1281), so it is up after a reboot with no Claude
+    session open: on Linux, where `systemctl --user` answers, systemd/wb-chat.service linked into
+    the user manager's unit directory, then daemon-reload and enable --now; on macOS the launchd
+    agent copied into ~/Library/LaunchAgents and bootstrapped. First the server `wb chat on`
+    started is stopped (chat.stop_started), so the unit gets the port. Its one line, or None where
+    neither manager serves this HOME (WSL without systemd, a container, a HOME not the manager's:
+    a test's, or sudo's), which the mod's `wb chat url` covers. Safe to run again. The user's off
+    stays off: nothing is installed while the switch is."""
+    if not chat.is_on():
+        return "--  web app off: no service installed (wb chat on, then wb setup)"
+    if chat._macos():
+        return _install_launchd()
+    if not shutil.which("systemctl"):
+        return None
+    good, said = _service_run(["systemctl", "--user", "show-environment"])
+    if not good:
+        return None
+    env = dict(x.split("=", 1) for x in said.splitlines() if "=" in x)
+    if Path(env.get("HOME") or Path.home()).resolve() != Path.home().resolve():
+        return None  # it would never read a unit linked under this HOME
+    at = Path(env.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "systemd/user/wb-chat.service"
+    to = PKG_ROOT / "systemd/wb-chat.service"
+    made, theirs = "", False
+    if at.is_symlink() and at.resolve() == to.resolve():
+        pass
+    elif at.is_symlink() and force:
+        at.unlink()
+    elif at.is_symlink() or at.exists():
+        theirs = True  # the user's own unit (a copy they edited): kept, and used
+    if not theirs and not at.is_symlink():
+        at.parent.mkdir(parents=True, exist_ok=True)
+        at.symlink_to(to)
+        made = " (linked)"
+    stopped = chat.stop_started()
+    for argv in (["systemctl", "--user", "daemon-reload"], ["systemctl", "--user", "enable", "--now", "wb-chat"]):
+        good, said = _service_run(argv)
+        if not good:
+            if stopped:  # not left down by setup
+                chat.ensure(chat.port())
+            return _failed(argv, said)
+    return f"ok  web app kept up by systemd's wb-chat ({at}{', yours' if theirs else ' → ' + str(to)}{made})"
+
+
+def _install_launchd() -> str | None:
+    import pwd  # only here: Unix's, and wb setup's alone
+    if not shutil.which("launchctl"):
+        return None
+    if Path(pwd.getpwuid(os.getuid()).pw_dir).resolve() != Path.home().resolve():
+        return None  # launchd's agents run in the account's own home
+    at = Path.home() / "Library/LaunchAgents" / f"{chat.LAUNCHD_LABEL}.plist"
+    made = ""
+    if not at.exists():  # a copy there is the user's to edit (WB_HOME, PATH): kept
+        at.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(PKG_ROOT / "launchd/workbench.chat.plist", at)
+        made = " (copied)"
+    stopped = chat.stop_started()
+    if not chat._unit_keeps_it():
+        argv = ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(at)]
+        good, said = _service_run(argv)
+        if not good:
+            if stopped:
+                chat.ensure(chat.port())
+            return _failed(argv, said)
+    return f"ok  web app kept up by launchd's {chat.LAUNCHD_LABEL} ({at}{made})"
+
+
 def cmd_setup(a):
     """Link `wb` onto PATH and /workbench into Claude Code's skills, from wherever this copy lives:
     the marketplace's clone (~/.claude/plugins/marketplaces/workbench) for users, a git clone for
-    development (2026-11-16: the plugin install copies only mod/, so these two come from here)."""
+    development (2026-11-16: the plugin install copies only mod/, so these two come from here);
+    then the web app's service (install_service), unless --no-service."""
     links = [(Path.home() / ".local/bin/wb", PKG_ROOT / "bin/wb"),
              (context.claude_home() / "skills/workbench", PKG_ROOT / "skill/workbench")]
     bad = False
@@ -6541,6 +6633,8 @@ def cmd_setup(a):
     if bindir not in os.environ.get("PATH", "").split(os.pathsep):
         print(f"--  {bindir} isn't on PATH: Claude and the mod run wb by name (WB_BIN moves only "
               f"the mod's calls). {path_advice()}")
+    if not a.no_service and (said := install_service(a.force)):
+        print(said)
     try:  # a minute or two, said up front; a task started meanwhile goes first
         for line in optimize.start(if_due=True):
             print(f"--  {line}")
@@ -7273,8 +7367,11 @@ def cmd_doctor(a):
     for why in logout_stops():
         if chat.is_on() or "wb-chat" not in why or "runners" in why:
             print(f"--  {why}")
-    if gap := chat_gap():
-        print(f"--  {gap}")
+    good, said = chat_line()
+    if good is None:
+        print(f"--  {said}")
+    else:
+        line(good, said)
     # #516: a warning, not BAD: a server or a desktop that never sleeps is fine. Its own name: once
     # it reassigned `ok`, forgetting every BAD above it and failing a healthy WSL2 install (#653)
     awake, said = awake_line()
@@ -8068,7 +8165,8 @@ def parser() -> argparse.ArgumentParser:
                    "away setting doesn't answer it")
     s.add_argument("--note", help="answer: words to pass on with it")
     s.add_argument("--timeout", type=float, default=30, help="wait: seconds")
-    s.add_argument("--json", action="store_true", help="wait: the whole ask, answered or not")
+    s.add_argument("--json", action="store_true", help="wait: the whole ask, answered or not; url: "
+                   "{url, state: up|started|off|blocked|failed, why} (the mod's)")
     s.add_argument("--port", type=int, help=f"default: the running server's (chat/port.json), "
                    f"else {chat.PORT}")
     s.add_argument("--bind", action="append", help="serve: an address to listen on, `tailscale` "
@@ -8180,8 +8278,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("names", nargs="+")
     s.set_defaults(f=cmd_trial)
     s = sub.add_parser("setup", help="link wb onto PATH and /workbench into Claude Code's skills, "
-                                     "from this copy")
+                                     "from this copy, and keep the web app up (its systemd or launchd service)")
     s.add_argument("--force", action="store_true", help="replace links that point elsewhere")
+    s.add_argument("--no-service", action="store_true", help="install no service for the web app")
     s.set_defaults(f=cmd_setup)
     s = sub.add_parser("update", help="update workbench (wb, the skill and the mod) from its origin")
     s.add_argument("--check", action="store_true", help="only say whether there is an update")

@@ -11,8 +11,8 @@ with a token of your own. The full API reference is `docs/chat-api.md` in the wo
 repository.
 
 ## Setup (the user does this once)
-- The user turns the chat on (`wb chat on`) and makes you a token: `wb chat token add <your
-  name>`, which prints it once.
+- The chat is on by default (`wb chat on` again after a `wb chat off`); the user makes you a
+  token: `wb chat token add <your name>`, which prints it once.
 - You get two environment variables:
   - `CLAUDE_WB_URL`: the chat's address, for instance `http://localhost:1337`.
   - `CLAUDE_WB_TOKEN`: your token (it starts `wba-`). Keep it secret; it is revoked with `wb chat

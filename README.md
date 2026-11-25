@@ -69,6 +69,8 @@ claude plugin install workbench@workbench
 With `CLAUDE_CODE_PLUGIN_CACHE_DIR` set, Claude Code keeps the clone under it instead: run
 `bin/wb setup` in `"$CLAUDE_CODE_PLUGIN_CACHE_DIR"/marketplaces/workbench`.
 
+`wb setup` also starts the web app; its link is on the pane's modeline.
+
 ### In Claude Code, inside your project
 
 ```
