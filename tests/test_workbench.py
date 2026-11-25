@@ -1120,7 +1120,9 @@ class Lifecycle(Base):
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "make"], check=True)
         self.start("t-mk", "ok", "--test", "make test", "--auto-fix", "2", "--no-self-review")
         st = wait_phase("t-mk", {"review"})
-        self.assertEqual((st["base_check"]["exit"], st["round"]), (2, 1))
+        # the tail said: it failed on macOS with no word of what its make printed (nightly runs
+        # 45454423406, 45577067512)
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (2, 1), st["base_check"].get("tail"))
         task = store.Task("t-mk")
         self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
         checkins = [r["text"] for r in store.notices() if r["task"] == "t-mk" and r["kind"] == "checkin"]
@@ -1149,13 +1151,16 @@ class Lifecycle(Base):
                               "make: Target 'test' not remade because of errors.\n"), "nosuch-tool-1229: command not found")
         self.assertEqual(said(f"make: .venv/bin/pytest: No such file or directory\n{err.format(127)}"),
                          ".venv/bin/pytest: not in the worktree (.venv/ is an install's, never checked out)")
+        # make's own exec line at Error 1 too: macOS's /usr/bin/make says it so (nightly run
+        # 45577067512, 2026-11-25), and only make's exec failure prints it
+        self.assertEqual(said(f"make: nosuch-tool-1229: No such file or directory\n{err.format(1)}"),
+                         "nosuch-tool-1229: command not found")
         self.assertEqual(said(f"/usr/bin/python3: No module named nosuch_mod\n{err.format(1)}"),
                          "/usr/bin/python3: No module named nosuch_mod")
         self.assertEqual(said("sh: 1: nosuch-tool-1229: not found\nerror: Recipe `test` failed on line 2 "
                               "with exit code 127", code=127), "nosuch-tool-1229: command not found")
         for tail in (f"make: ./made-by-the-step.sh: No such file or directory\n{err.format(127)}",
                      f"cat: answer.txt: No such file or directory\n{err.format(1)}",
-                     f"make: nosuch-tool-1229: No such file or directory\n{err.format(1)}",
                      "make: *** No rule to make target 'test'.  Stop.",
                      "python3: No module named x"):
             self.assertIsNone(said(tail), tail)
@@ -1175,6 +1180,18 @@ class Lifecycle(Base):
                          "pytest: command not found")
         # a recipe's own failure, not make's exec, still goes back
         self.assertIsNone(said("make: pytest: Command not found\nmake: *** [test] Error 1"))
+        # macOS's /usr/bin/make (Apple's 3.81) says `No such file or directory` at Error 1 for a
+        # recipe it can't exec, so #1229's test still ran both auto-fix rounds there (nightly
+        # runs 45454423406, 45577067512, 2026-11-24/25): make's own exec line is a 127 at any code
+        self.assertEqual(said("nosuch-tool-1229 --check answer.txt\nmake: nosuch-tool-1229: No such file or "
+                              "directory\nmake: *** [test] Error 1"), "nosuch-tool-1229: command not found")
+        self.assertEqual(said("make[1]: pytest: No such file or directory\nmake[1]: *** [test] Error 1\n"
+                              "make[1]: Leaving directory '/r/sub'\nmake: *** [all] Error 2"),
+                         "pytest: command not found")
+        self.assertEqual(said("make: .venv/bin/pytest: No such file or directory\nmake: *** [test] Error 1"),
+                         ".venv/bin/pytest: not in the worktree (.venv/ is an install's, never checked out)")
+        self.assertIsNone(said("make: ./made-by-the-step.sh: No such file or directory\nmake: *** [test] Error 1"))
+        self.assertIsNone(said("make: *** [test] Error 1"))           # a recipe failing on its own
 
     def test_a_package_managers_run_wrapper_lines_are_read_past_to_the_scripts(self):
         # #1243 (bar round 5 of 2.0): `pnpm test` and `yarn test` with jest not installed ended on
@@ -11383,7 +11400,7 @@ class RealOpenCode(Base):
 
             def log_message(self, *a):
                 pass
-        collector = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Collector)
+        collector = ThreadingHTTPServer(("127.0.0.1", 0), Collector)  # listens at once (#950)
         threading.Thread(target=collector.serve_forever, daemon=True).start()
         self.addCleanup(collector.server_close)
         self.addCleanup(collector.shutdown)
@@ -33574,6 +33591,23 @@ class ApiDiscovery(Base):
         with self.assertRaises(ProcessLookupError):                         # its server ended
             os.kill(int(Path(os.environ["FAKE_SERVE_PID"]).read_text()), 0)
 
+    def test_the_fakes_catalog_server_listens_without_looking_its_address_up(self):
+        # nightly run 45454423406 (2026-11-24): the fake's `serve --stdio` bound with HTTPServer's
+        # own server_bind, whose socket.getfqdn took 35 s on GitHub's macOS runners, past
+        # model_list's 30 s: every catalog read there failed and some 40 API tests per shard with
+        # it. The macOS lookup played here: one that fails the fake if it is asked at all
+        hang = ("import runpy, socket, sys\n"
+                "def looked_up(*a):\n"
+                "    raise SystemExit('socket.getfqdn asked: 35 s on the macOS runners')\n"
+                "socket.getfqdn = looked_up\n"
+                f"runpy.run_path({str(ROOT / 'tests' / 'fake_opencode.py')!r}, run_name='__main__')\n")
+        where, env = self.models._opencode_env()
+        began = time.monotonic()
+        doc, why = self.models.model_list(env, where, timeout=10, cmd=[sys.executable, "-c", hang])
+        self.assertEqual(why, "")
+        self.assertIn("acme/coder-flash", {f"{e['providerID']}/{e['id']}" for e in doc["data"]})
+        self.assertLess(time.monotonic() - began, 10)
+
     def test_a_failed_catalog_read_leaves_gpu_starts_alone(self):
         os.environ["FAKE_CATALOG_FAIL"] = "1"
         self.assertEqual(self.models.hosted(), {})
@@ -41824,12 +41858,17 @@ class FirstRunApi(Base):
         self.catalog(ROUTES_CATALOG[-3:], [key_row("deepseek", "DeepSeek", STORED)])
         runner.models.hosted(fresh=True)
         self.assertEqual(self.wb("route", "trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)
+        from workbench import meter
         now = store.now()
+        # every row on today's local day: two hours back crossed midnight between 00:00 and 02:00
+        # and read "(≈$2.00 today)" (run while checking nightly run 45454423406, 01:39 MST,
+        # 2026-11-25)
+        since = now - time.mktime(time.strptime(meter.day(now), "%Y-%m-%d"))
         store.append_jsonl(store.home() / "results.jsonl", {
-            "ts": now - 3600, "task": "closed", "outcome": "accepted", "model": "deepseek/deepseek-flash",
+            "ts": now - since / 2, "task": "closed", "outcome": "accepted", "model": "deepseek/deepseek-flash",
             "kind": "api", "role": "trivial", "provider": "deepseek", "api": {"cost": 3.0, "source": "opencode"}})
-        _ledger_step(3.0, now - 7200, "closed")
-        _ledger_step(2.0, now - 60, "open-one")
+        _ledger_step(3.0, now - since * 3 / 4, "closed")
+        _ledger_step(2.0, now - since / 4, "open-one")
         self.assertIn("api spend, the last 7 days: ≈$5.00 of $5/day at most (deepseek $5.00)",
                       cli.scout_api_lines())
         self.assertIn("api, the last 7 days: ≈$5.00 (≈$5.00 today)", run_wb("savings", "--api"))

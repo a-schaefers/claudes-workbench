@@ -4146,6 +4146,59 @@ test('#1005: the dialog shows the outward command whole, and a send whose title 
   await clock.advance(1000)
 })
 
+test('#1364: a heredoc or quoted text that only names a send is no send, and a send a shell is fed or code runs still asks', async ($, on) => {
+  // 2026-11-24, three times: a Python heredoc editing an issue body that named wb patch send was
+  // refused as "a send inside text another program runs"; nothing was being sent
+  const { clock, bash, files } = await gateProbe($, on)
+  for (const [command, cwd] of [
+    ["python3 - <<'EOF'\np = '/home/u/issue.md'\nt = open(p).read().replace('Then', 'Then wb patch send fix-push --title T --body-file pr.md')\nopen(p, 'w').write(t)\nEOF", '/home/u/project'],
+    ["python3 <<'EOF'\nopen('/home/u/body.md', 'a').write('Run `wb patch send` once the system checks pass; git push is its send.\\n')\nEOF", SOURCE],
+    [`gh issue create --title t --body "$(cat <<'EOF'\nwb patch send asks first, as do git push and gh pr create.\nEOF\n)"`, '/home/u/project'],
+    ["node -e \"require('fs').writeFileSync('notes.md', 'wb patch send, then git push')\"", SOURCE],
+  ]) expect([command, await bash(command!, cwd)]).toEqual([command, { deny: undefined, asked: 0, question: '' }])
+  files['/home/u/pr.md'] = 'the body\n'
+  for (const [command, cwd] of [
+    ['wb patch send fix-push --title T --body-file /home/u/pr.md', '/home/u/project'],
+    [`gh pr create -R ${SLUG} --fill`, '/home/u/project'],
+    ["python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['git', 'push'])\nEOF", SOURCE],
+    ['bash <<< "git push"', SOURCE],
+    ["printf '%s\\n' 'git push' | sh", SOURCE],
+  ]) expect([command, (await bash(command!, cwd)).asked]).toEqual([command, 1])
+  // a send fed to a shell is still one it can't show
+  expect((await bash('sh <<EOF\nwb patch send fix-push --title T --body-file /home/u/pr.md\nEOF')).deny)
+    .toContain('it is inside text another program runs')
+  await clock.advance(1000)
+})
+
+test('#1364\'s review: a heredoc body inside $(…) ends at its tag, not at a ) or an apostrophe in its prose', async ($, on) => {
+  // the review of #1364, 2026-11-25: `$(…)` closed at the body's first unbalanced `)` (a list's
+  // "a)", or one an apostrophe pair skipped past), and the backquoted `wb patch send` after it was
+  // read as a send in double quotes, refused as one the dialog can't show
+  const { clock, bash } = await gateProbe($, on)
+  for (const body of ['Two cases:\na) a heredoc\nb) a body naming `wb patch send`', "The gate doesn't (it can't) see `wb patch send` here"])
+    expect(await bash(`gh issue create --title t --body "$(cat <<'EOF'\n${body}\nEOF\n)"`))
+      .toEqual({ deny: undefined, asked: 0, question: '' })
+  // what follows the $(…) still runs
+  expect((await bash("x=$(cat <<'EOF'\nit's (a) thing\nEOF\n) && git push", SOURCE)).asked).toBe(1)
+  await clock.advance(1000)
+})
+
+test('#1364\'s review: a send in a script the line writes and then runs, or in fish\'s or ksh\'s -c, still asks', async ($, on) => {
+  // the old backstop asked about these (a shell or interpreter in the line, a send's words in it);
+  // #1364's first cut read only what a program is handed on its stdin or -c, and let them through
+  const { clock, bash } = await gateProbe($, on)
+  for (const command of [
+    "cat > /home/u/s.sh <<'EOF'\ngit push\nEOF\nbash /home/u/s.sh",
+    "echo 'git push' > s.sh && sh s.sh",
+    "cat > /home/u/s.py <<'EOF'\nimport subprocess\nsubprocess.run(['git', 'push'])\nEOF\npython3 /home/u/s.py",
+    "fish -c 'git push'", "ksh -c 'git push'",
+  ]) expect([command, (await bash(command, SOURCE)).asked]).toEqual([command, 1])
+  // a script that only prints the words is text
+  expect(await bash("cat > /home/u/s.py <<'EOF'\nprint('git push is the send')\nEOF\npython3 /home/u/s.py", SOURCE))
+    .toEqual({ deny: undefined, asked: 0, question: '' })
+  await clock.advance(1000)
+})
+
 test('#1005: "Send it" on wb patch send tells wb what was approved, and nothing else does', async ($, on) => {
   // the review of #1005, 2026-11-22: without the mod nothing asked, and Claude's Bash sent; wb
   // now refuses under Claude Code unless this file says the user approved that very send
@@ -4994,6 +5047,74 @@ test('#1014: routes.json and route-ok.json are never Claude\'s to edit, and no c
   }
   expect((await bash('grep -rn route-ok.json workbench/')).deny).toBeUndefined()  // the code that names it
   expect((await call({ tool: 'Write', file_path: '/home/u/project/notes.md', content: 'x' })).deny).toBeUndefined()
+  await clock.advance(1000)
+})
+
+test('#1364: text naming route-ok.json or a route change is no write and no change; a real write, or a change code runs, still is', async ($, on) => {
+  // 2026-11-24: a gh issue create whose heredoc named the approval file was refused as writing it,
+  // and a heredoc saying "wb route cap 9" as a route change hidden in text
+  const { clock, bash } = await routeProbe($, on)
+  for (const command of [
+    `gh issue create --title t --body "$(cat <<'EOF'\nThe dialog writes $WB_HOME/route-ok.json on the user's yes; echo x > /wb/route-ok.json is refused.\nEOF\n)"`,
+    "python3 - <<'EOF'\nopen('/home/u/notes.md', 'a').write('Raise the cap with wb route cap 9.\\n')\nEOF",
+    "cat <<'EOF' | python3 -c 'import sys; print(sys.stdin.read())'\nwb route cap 9\nEOF",
+    "python3 - <<'EOF'\np = '/home/u/issue.md'\nopen(p, 'w').write(open(p).read().replace('it', 'the approval, $WB_HOME/route-ok.json'))\nEOF",
+    "cat > /home/u/notes.md <<'EOF'\necho '{}' > /wb/route-ok.json && wb route cap 9\nEOF",
+  ]) expect([command, await bash(command)]).toEqual([command, { deny: undefined, asked: 0, question: '', dry: [] }])
+  for (const command of [
+    "python3 - <<'EOF'\nimport json, os\nopen(os.environ['WB_HOME'] + '/route-ok.json', 'w').write(json.dumps({'argv': ['route']}))\nEOF",
+    "node -e \"require('fs').writeFileSync('/wb/route-ok.json', '{}')\"",
+    "bash <<'EOF'\necho '{}' > /wb/route-ok.json\nEOF",
+    'cp /home/u/route-ok.json /wb/', 'echo x 2>/dev/null | tee -a /wb/route-ok.json', 'cat x &>> $WB_HOME/route-ok.json',
+    'cat x 2>&1 >& /wb/route-ok.json',
+  ]) expect([command, (await bash(command)).deny]).toEqual([command, expect.stringContaining("route-ok.json is the mod's dialog's to write")])
+  const r = await bash("python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['wb', 'route', 'cap', '9'])\nEOF")
+  expect([r.asked, r.deny]).toEqual([0, expect.stringContaining('run wb route (or wb start --model) as a command of its own')])
+  expect(routeCalls("cat <<'EOF' > notes.md\nwb route cap 9\nEOF")).toEqual({ calls: [], hidden: false, at: [] })
+  await clock.advance(1000)
+})
+
+test('#1364\'s review: Markdown backquotes in Python text are no path, and open() of a path built by os.path.join is a write', async ($, on) => {
+  // the review of #1364, 2026-11-25: a docs edit writing "`$WB_HOME/route-ok.json`" was refused as
+  // writing the file, while `open(os.path.join(…), 'w')` (its parentheses) wasn't seen as a write;
+  // a heredoc body's "doesn't (it can't)" closed its $(…) early, and the text after was read as commands
+  const { clock, bash } = await routeProbe($, on)
+  for (const command of [
+    "python3 - <<'EOF'\np = '/home/u/ARCHITECTURE.md'\ns = open(p).read().replace('x', 'the dialog writes `$WB_HOME/route-ok.json`')\nopen(p, 'w').write(s)\nEOF",
+    "python3 - <<'EOF'\nimport os\nprint(open(os.path.join(os.environ['WB_HOME'], 'route-ok.json')).read())\nEOF",
+    `gh issue create --title t --body "$(cat <<'EOF'\nIt doesn't (it can't) run \`wb route cap 9\` here\nEOF\n)"`,
+    `gh issue create --title t --body "$(cat <<'EOF'\nIt doesn't (it can't) say \`echo x > /wb/route-ok.json\` here\nEOF\n)"`,
+  ]) expect([command, await bash(command)]).toEqual([command, { deny: undefined, asked: 0, question: '', dry: [] }])
+  for (const command of [
+    "python3 - <<'EOF'\nimport os\nwith open(os.path.join(os.environ['WB_HOME'], 'route-ok.json'), 'w') as f:\n    f.write('{}')\nEOF",
+    "cat > /home/u/s.py <<'EOF'\nimport os\nopen(os.environ['WB_HOME'] + '/route-ok.json', 'w').write('{}')\nEOF\npython3 /home/u/s.py",
+  ]) expect([command, (await bash(command)).deny]).toEqual([command, expect.stringContaining("route-ok.json is the mod's dialog's to write")])
+  expect((await bash("ksh -c 'wb route cap 9'")).dry).toEqual([['route', '--dry-run', '--json', 'cap', '9']])
+  await clock.advance(1000)
+})
+
+test('#1364 with #1287: a wb settings set a heredoc or quoted text only names is no call; one a shell is fed or code runs is', async ($, on) => {
+  // the merge of #1364 into the web app's Settings rows (2026-11-25): a mention of `wb settings set`
+  // in an issue body or a note is no call, as a mention of `wb route` isn't; one fed to a shell, or
+  // run by an interpreter's code, can't be shown, and one a -c's words run is dry-run as typed
+  const { clock, bash, w } = await routeProbe($, on)
+  w.answer = 'Allow'
+  for (const command of [
+    "cat <<'EOF' > /home/u/notes.md\nwb settings set role-significant api\nEOF",
+    `gh issue create --title t --body "$(cat <<'EOF'\nIt doesn't (it can't) run \`wb settings set cap 9\` here\nEOF\n)"`,
+    "echo 'wb settings set cap 9' > /home/u/notes.md",
+    "python3 -c \"print('wb settings set cap 9')\"",
+  ]) expect([command, await bash(command)]).toEqual([command, { deny: undefined, asked: 0, question: '', dry: [] }])
+  expect(routeCalls("cat <<'EOF' > notes.md\nwb settings set cap 9\nEOF")).toEqual({ calls: [], hidden: false, at: [] })
+  for (const command of [
+    "bash <<'EOF'\nwb settings set cap 9\nEOF",
+    "echo 'wb settings set cap 9' | sh",
+    "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['wb', 'settings', 'set', 'cap', '9'])\nEOF",
+  ]) {
+    const r = await bash(command)
+    expect([command, r.asked, r.dry, r.deny]).toEqual([command, 0, [], expect.stringContaining('as a command of its own')])
+  }
+  expect((await bash("bash -c 'wb settings set cap 9'")).dry).toEqual([['settings', 'set', 'cap', '9', '--dry-run', '--json']])
   await clock.advance(1000)
 })
 

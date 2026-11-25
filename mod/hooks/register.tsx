@@ -644,46 +644,103 @@ const PREFIXES: Record<string, [string[], number]> = {
     '--max-chars', '--delimiter', '--arg-file', '--eof', '--replace', '--process-slot-var'], 0],
 }
 
-// Where the `(` at `open` closes, quotes skipped (the end when it never does)
+// Where the `(` at `open` closes (the end when it never does), as bash finds it: quotes, comments
+// and heredoc bodies skipped. A `gh issue create --body "$(cat <<'EOF' …)"` whose body said
+// "doesn't (it can't)" or "a)" closed there, and the body's backquoted `wb patch send` after it
+// was read as a send (the review of #1364, 2026-11-25).
 function closing(src: string, open: number): number {
   let depth = 0
+  const tags: { tag: string; strip: boolean }[] = []
   for (let i = open; i < src.length; i++) {
     const c = src[i]
     if (c === '\\') i++
     else if (c === "'") { const j = src.indexOf("'", i + 1); i = j < 0 ? src.length : j }
-    else if (c === '(') depth++
+    else if (c === '"') {
+      let j = i + 1
+      while (j < src.length && src[j] !== '"') {
+        if (src[j] === '\\') j += 2
+        else if (src[j] === '$' && src[j + 1] === '(') j = closing(src, j + 1) + 1
+        else j++
+      }
+      i = j
+    } else if (c === '#' && /[\s;&|()]/.test(src[i - 1] ?? ' ')) { const j = src.indexOf('\n', i); i = j < 0 ? src.length : j - 1 }
+    else if (c === '<' && src[i + 1] === '<' && src[i + 2] !== '<') {
+      let j = i + 2
+      const strip = src[j] === '-'
+      if (strip) j++
+      while (src[j] === ' ' || src[j] === '\t') j++
+      const m = /^(?:'([^']*)'|"([^"]*)"|\\?([^\s;&|<>()'"]+))/.exec(src.slice(j))
+      if (m) tags.push({ tag: m[1] ?? m[2] ?? m[3]!, strip })
+      i = j + (m ? m[0].length : 0) - 1
+    } else if (c === '\n' && tags.length) { // the bodies, up to each tag's line
+      let p = i + 1
+      for (const h of tags) {
+        while (p < src.length) {
+          const e = src.indexOf('\n', p)
+          const line = src.slice(p, e < 0 ? src.length : e)
+          p = e < 0 ? src.length : e + 1
+          if ((h.strip ? line.replace(/^\t+/, '') : line) === h.tag) break
+        }
+      }
+      tags.length = 0
+      i = p - 1
+    } else if (c === '(') depth++
     else if (c === ')' && --depth === 0) return i
   }
   return src.length
 }
 
 // The commands an unquoted heredoc's body runs: its `$(…)` and backticks (`\\` escapes)
-function expansions(body: string): string[][] {
+function expansions(body: string, info: Shell): string[][] {
   const out: string[][] = []
   for (let j = 0; j < body.length; j++) {
     if (body[j] === '\\') j++
     else if (body[j] === '$' && body[j + 1] === '(') {
       const k = closing(body, j + 1)
-      out.push(...simpleCommands(body.slice(j + 2, k)))
+      out.push(...simpleCommands(body.slice(j + 2, k), info))
       j = k
     } else if (body[j] === '`') {
       const k = body.indexOf('`', j + 1)
       const end = k < 0 ? body.length : k
-      out.push(...simpleCommands(body.slice(j + 1, end)))
+      out.push(...simpleCommands(body.slice(j + 1, end), info))
       j = end
     }
   }
   return out
 }
 
+// What the parser saw beside a command's words (#1364), keyed by its words: its stdin's text (a
+// heredoc's body, a here-string), the files its redirects write (`>`, `>>`, `>|`, `&>`), and the
+// command a pipe feeds it from. A redirect's target and a here-string are no words of the command:
+// `python3 - > out.txt <<EOF` runs its heredoc, not a script named out.txt.
+type Shell = { stdin: Map<string[], string>; writes: Map<string[], string[]>; piped: Map<string[], string[]> }
+const newShell = (): Shell => ({ stdin: new Map(), writes: new Map(), piped: new Map() })
+
 // The simple commands a bash command line runs, each as its words (quotes undone)
-function simpleCommands(src: string): string[][] {
+function simpleCommands(src: string, info: Shell = newShell()): string[][] {
   const out: string[][] = []
   let words: string[] = []
   let word: string | null = null // null: between words
-  const heredocs: { tag: string; strip: boolean; quoted: boolean }[] = []
-  const endWord = () => { if (word !== null) words.push(word); word = null }
-  const endCommand = () => { endWord(); if (words.length) out.push(words); words = [] }
+  let redirect: '' | 'write' | 'read' | 'here' = '' // what the next word is
+  let pipeFrom: string[] | null = null
+  const heredocs: { tag: string; strip: boolean; quoted: boolean; owner: string[] }[] = []
+  const endWord = () => {
+    if (word !== null) {
+      if (redirect === 'write') info.writes.set(words, [...(info.writes.get(words) ?? []), word])
+      else if (redirect === 'here') info.stdin.set(words, `${word}\n`)
+      else if (redirect !== 'read') words.push(word)
+      redirect = ''
+    }
+    word = null
+  }
+  const endCommand = () => {
+    endWord()
+    const done = words
+    if (done.length) { if (pipeFrom) info.piped.set(done, pipeFrom); out.push(done); pipeFrom = null }
+    words = []
+    redirect = ''
+    return done
+  }
   const n = src.length
   let i = 0
   while (i < n) {
@@ -703,12 +760,12 @@ function simpleCommands(src: string): string[][] {
         if (src[j] === '\\') { text += src[j + 1] ?? ''; j += 2 }
         else if (src[j] === '$' && src[j + 1] === '(') {
           const k = closing(src, j + 1)
-          out.push(...simpleCommands(src.slice(j + 2, k)))
+          out.push(...simpleCommands(src.slice(j + 2, k), info))
           j = k + 1
         } else if (src[j] === '`') {
           const k = src.indexOf('`', j + 1)
           const end = k < 0 ? n : k
-          out.push(...simpleCommands(src.slice(j + 1, end)))
+          out.push(...simpleCommands(src.slice(j + 1, end), info))
           j = end + 1
         } else text += src[j++]
       }
@@ -729,11 +786,13 @@ function simpleCommands(src: string): string[][] {
           if ((h.strip ? line.replace(/^\t+/, '') : line) === h.tag) break
           body += `${line}\n`
         }
-        if (!h.quoted) out.push(...expansions(body)) // text, but `$(…)` in it runs
+        info.stdin.set(h.owner, body)
+        if (!h.quoted) out.push(...expansions(body, info)) // text, but `$(…)` in it runs
       }
       heredocs.length = 0
     } else if (c === '<' && src.startsWith('<<<', i)) { // a here-string: its word follows
       endWord()
+      redirect = 'here'
       i += 3
     } else if (c === '<' && src[i + 1] === '<') { // a heredoc: its tag, quotes undone
       endWord()
@@ -742,7 +801,7 @@ function simpleCommands(src: string): string[][] {
       if (strip) j++
       while (src[j] === ' ' || src[j] === '\t') j++
       const m = /^(?:'([^']*)'|"([^"]*)"|\\?([^\s;&|<>()'"]+))/.exec(src.slice(j))
-      if (m) heredocs.push({ tag: m[1] ?? m[2] ?? m[3]!, strip, quoted: m[3] === undefined || m[0].startsWith('\\') })
+      if (m) heredocs.push({ tag: m[1] ?? m[2] ?? m[3]!, strip, quoted: m[3] === undefined || m[0].startsWith('\\'), owner: words })
       i = j + (m ? m[0].length : 0)
     } else if (c === '$' && src[i + 1] === '{') { // ${…}: part of the word
       const j = src.indexOf('}', i)
@@ -752,10 +811,27 @@ function simpleCommands(src: string): string[][] {
     } else if (c === '$' && src[i + 1] === '(') { // $(…): the commands inside are commands too
       endCommand()
       i += 2
+    } else if (c === '>' || c === '<' || (c === '&' && src[i + 1] === '>')) { // a redirect: its file follows
+      if (c !== '&' && word !== null && /^\d+$/.test(word)) word = null // `2>`: a descriptor, no word
+      endWord()
+      let j = i + 1
+      if (c === '&' || (c === '>' && (src[j] === '>' || src[j] === '|'))) j++
+      if (c === '&' && src[j] === '>') j++
+      const dup = c !== '&' && src[j] === '&' && /[\d-]/.test(src[j + 1] ?? '') // `2>&1`, `<&0`: a descriptor, no file
+      if (c !== '&' && src[j] === '&') j++ // `>&file` is `&>file`
+      redirect = c === '>' || c === '&' ? (dup ? 'read' : 'write') : 'read'
+      i = j
+    } else if (c === '|' && src[i + 1] === '|') {
+      endCommand()
+      i += 2
+    } else if (c === '|') { // a pipe: what the command before it prints is the next one's stdin
+      const done = endCommand()
+      if (done.length) pipeFrom = done
+      i += src[i + 1] === '&' ? 2 : 1
     } else if (';&|()`'.includes(c)) {
       endCommand()
       i++
-    } else if (c === ' ' || c === '\t' || c === '<' || c === '>') {
+    } else if (c === ' ' || c === '\t') {
       endWord()
       i++
     } else {
@@ -805,9 +881,12 @@ export function delegates(command: string): boolean {
 // to the next). What sends: these gh forms, a gh api call that writes, a git push, and wb patch
 // send (the turnkey path's one send, whose single dialog shows its title and body). Read as bash
 // reads it (simpleCommands, as `delegates`), so an echo's or a heredoc's text doesn't count, and
-// `bash -c '…'` and `eval` are read inside; text a shell or an interpreter runs from a heredoc,
-// a here-string, a pipe or -c is caught by its words (OUTWARD_TEXT): `bash <<EOF … git push` once
-// went through (the review of #1005).
+// `bash -c '…'` and `eval` are read inside, and so is what a shell is fed on its stdin (a heredoc,
+// a here-string, a pipe): `bash <<EOF … git push` once went through (the review of #1005). An
+// interpreter's code (-c, -e, its stdin) is text: a send in it counts only when that code runs
+// commands (`spawns`, OUTWARD_TEXT). A heredoc or quoted text any other command is handed is its
+// data: a Python heredoc editing an issue body that named wb patch send was refused as a send
+// three times on 2026-11-24 (#1364).
 const UPSTREAM = 'a-schaefers/workbench' // the GitHub home; patches.json's upstream when it has one (Couplings)
 // Its names before: the repo was renamed from claudes-workbench (the owner, 2026-11-24) and GitHub
 // redirects the old name, so a send naming it, or a clone whose origin and patches.json still say
@@ -823,13 +902,81 @@ const GH_WRITES: Record<string, Set<string>> = {
   label: new Set(['create', 'edit', 'delete', 'clone']),
 }
 const GIT_VALUED = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env'])
-const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash'])
 const PYTHON = /^python[\d.]*$/
-// what runs code it is handed as text (stdin, -c, -e): its text is read for an outward command
+// what runs code it is handed as text (stdin, -c, -e); a shell's (STDIN_SHELL) is read as commands
 const RUNS_CODE = /^(?:bash|sh|zsh|dash|ksh|ash|fish|python[\d.]*|node|perl|ruby|php|deno|bun)$/
-const SEND_TEXT = /(?:\bwb|-m\s*workbench[\w.]*)\s+patch\s+send\b/i
-const OUTWARD_TEXT = new RegExp(String.raw`\bgit\b[^\n]*\bpush\b|\bgh\s+(?:pr|issue|repo|api|release|workflow|run|label)\b|` +
+const STDIN_SHELL = /^(?:bash|sh|zsh|dash|ksh|ash|fish)$/
+// An outward command in an interpreter's code, as a string or a list (`"git push"`, `['gh', 'pr']`)
+const W = String.raw`[\s'",]+`
+const SEND_TEXT = new RegExp(String.raw`(?:\bwb|-m${W}workbench[\w.]*)${W}patch${W}send\b`, 'i')
+const OUTWARD_TEXT = new RegExp(String.raw`\bgit\b[^\n]*\bpush\b|\bgh${W}(?:pr|issue|repo|api|release|workflow|run|label)\b|` +
   SEND_TEXT.source, 'i')
+
+// Whether an interpreter's code runs commands at all (#1364): only then can a command named in its
+// text run. Calls, not words: an issue body's "the system" or "spawns" is prose.
+function spawns(cmd: string, code: string): boolean {
+  if (PYTHON.test(cmd)) return /\b(?:subprocess|os\.(?:system|popen|exec\w*|spawn\w*|posix_spawn\w*)|pty\.spawn|create_subprocess_\w+)\b/.test(code)
+  if (/^(?:node|deno|bun)$/.test(cmd))
+    return /\bchild_process\b|\b(?:exec|execFile|spawn)(?:Sync)?\s*\(|\bDeno\.(?:run|Command)\b|\bBun\.(?:spawn\w*|\$)|\$`/.test(code)
+  return /\b(?:system|exec|popen|spawn|shell_exec|passthru|proc_open)\s*[('"]|\bqx\b|\bOpen3\b|`|%x/.test(code) // perl, ruby, php
+}
+
+// The code a program that runs text is handed: an interpreter's -c/-e argument, else, when it
+// names no script (none, `-`, a shell's -s), its stdin: a heredoc, a here-string, or the words and
+// stdin of the command piped into it (both as one line and a word to a line: echo's and printf's).
+// A script the line itself wrote by a redirect (`cat > s.sh <<EOF … EOF` then `bash s.sh`) is what
+// that command printed: the old backstop caught it, and #1364's first cut let it through (its
+// review, 2026-11-25). undefined: none, or a script file the mod doesn't read.
+function codeFed(words: string[], i: number, cmd: string, info: Shell): string | undefined {
+  if (!RUNS_CODE.test(cmd)) return undefined
+  const flag = PYTHON.test(cmd) ? /^-[a-zA-Z]*c$/ : /^(?:node|bun)$/.test(cmd) ? /^(?:-e|--eval|-p|--print)$/
+    : /^(?:perl|ruby)$/.test(cmd) ? /^-[a-zA-Z]*[eE]$/ : cmd === 'php' ? /^-r$/ : null
+  const args = words.slice(i + 1)
+  const code: string[] = []
+  let script: string | undefined
+  for (let j = 0; j < args.length; j++) {
+    const a = args[j]!
+    if (flag?.test(a)) { if (j + 1 < args.length) code.push(args[++j]!); continue }
+    if (cmd === 'deno' && a === 'eval') { code.push(args[j + 1] ?? ''); break }
+    if (a.startsWith('-') && a !== '-') continue
+    script = a
+    break
+  }
+  if (code.length) return code.join('\n')
+  const printed = (from: string[]) => {
+    const said = from.slice(commandAt(from) + 1)
+    return `${said.join(' ')}\n${said.join('\n')}\n${info.stdin.get(from) ?? ''}`
+  }
+  if (script !== undefined && script !== '-' && !(STDIN_SHELL.test(cmd) && args.includes('-s'))) {
+    const writer = [...info.writes].find(([, to]) => to.includes(script!))
+    return writer ? printed(writer[0]) : undefined
+  }
+  const stdin = info.stdin.get(words)
+  if (stdin !== undefined) return stdin
+  const from = info.piped.get(words)
+  return from ? printed(from) : undefined
+}
+
+// A line's simple commands as bash runs them, `bash -c '…'` and `eval` read inside, and what a
+// program that runs text is handed (#1364): a shell's stdin read as commands too (`fed`: inside
+// text another program runs), an interpreter's code kept as text (`code`). `writes`: the files its
+// redirects write. Shared by upstreamAim, routeCalls and writesTo.
+type Run = { words: string[]; fed: boolean; code?: string; writes: string[] }
+function runs(src: string, fed = false, info: Shell = newShell()): Run[] {
+  return simpleCommands(src, info).flatMap(words => {
+    const run: Run = { words, fed, writes: info.writes.get(words) ?? [] }
+    const i = commandAt(words)
+    const cmd = wordOf(words[i])
+    const c = words.findIndex((w, j) => j > i && /^-[a-z]*c$/.test(w))
+    // every shell's -c (fish's, ksh's too: the old backstop caught them; the review of #1364)
+    if (STDIN_SHELL.test(cmd) && c > 0 && words[c + 1] !== undefined) return [run, ...runs(words[c + 1]!, fed, info)]
+    if (cmd === 'eval') return [run, ...runs(words.slice(i + 1).join(' '), fed, info)]
+    const given = codeFed(words, i, cmd, info)
+    if (given === undefined) return [run]
+    if (STDIN_SHELL.test(cmd)) return [run, ...runs(given, true, info)]
+    return [{ ...run, code: given }]
+  })
+}
 const SEND_ASK = 'Send it'
 // Said after a no: it once read "Show them exactly what it sends and ask", and Claude opened a
 // dialog of its own pleading for the yes the user had just refused (the review of #1005)
@@ -956,46 +1103,52 @@ export type Aim = { why: '' | 'send' | 'dir' | 'plugin' | 'slug'; at: string; wo
 export function upstreamAim(command: string, cwd: string, home: string, slug: string | string[], dirs: string[], root = '',
   plugins: string[] = []): Aim {
   let here = cwd
-  const lines = (src: string): string[][] => simpleCommands(src).flatMap(words => {
-    const i = commandAt(words)
-    const cmd = wordOf(words[i])
-    const c = words.findIndex((w, j) => j > i && /^-[a-z]*c$/.test(w))
-    if (SHELLS.has(cmd) && c > 0 && words[c + 1] !== undefined) return [words, ...lines(words[c + 1]!)]
-    if (cmd === 'eval') return [words, ...lines(words.slice(i + 1).join(' '))]
-    return [words]
-  })
+  let fedHere = cwd // a fed shell's cd stays in it
   const textNames = dirs.some(d => mentions(command, d, home, root))
   const named = (Array.isArray(slug) ? slug : [slug]).some(s => command.toLowerCase().includes(s.toLowerCase()))
   const outAt: string[] = []
   const inPlugins = (ps: string[]) => ps.find(p => plugins.some(d => inside(p, d)))
   let found: Aim | null = null
   let runner = ''
-  for (const words of lines(command)) {
+  const codes: string[] = []
+  for (const run of runs(command)) {
+    const { words } = run
+    if (!run.fed) fedHere = here
     const i = commandAt(words)
     const cmd = wordOf(words[i])
     if (cmd === 'cd' || cmd === 'pushd') {
       const to = cdTarget(words, i)
-      if (to !== '-') here = absolutePath(to ?? (home || '/'), home, here)
+      if (to === '-') continue
+      const p = absolutePath(to ?? (home || '/'), home, run.fed ? fedHere : here)
+      if (run.fed) fedHere = p
+      else here = p
       continue
     }
-    if (!runner && RUNS_CODE.test(cmd)) runner = here
+    const now = run.fed ? fedHere : here
+    if (run.code !== undefined && spawns(cmd, run.code) && OUTWARD_TEXT.test(run.code)) {
+      runner ||= now
+      codes.push(run.code)
+    }
     const { kind, dirs: viaC } = sendsOut(words)
     if (!kind) continue
-    if (kind === 'send') return { why: 'send', at: here, words, named, outAt }
-    const at = [here, ...viaC.map(d => absolutePath(d, home, here))]
+    // fed to a shell: it runs, but the dialog shows the line, not this command of its own
+    const own = run.fed ? { words: [] as string[], shown: words.map(quoted).join(' ') } : { words }
+    if (kind === 'send') return { why: 'send', at: now, named, outAt, ...own }
+    const at = [now, ...viaC.map(d => absolutePath(d, home, now))]
     outAt.push(...at)
-    if (textNames || at.some(p => dirs.some(d => inside(p, d)))) return { why: 'dir', at: here, words, named, outAt }
+    if (textNames || at.some(p => dirs.some(d => inside(p, d)))) return { why: 'dir', at: now, named, outAt, ...own }
     const plugin = inPlugins(at)
-    if (!found && plugin) found = { why: 'plugin', at: plugin, words, named, outAt }
-    if (!found && named) found = { why: 'slug', at: here, words, named, outAt }
+    if (!found && plugin) found = { why: 'plugin', at: plugin, named, outAt, ...own }
+    if (!found && named) found = { why: 'slug', at: now, named, outAt, ...own }
   }
   if (found) return { ...found, outAt }
-  // the backstop: text a shell or an interpreter in the line runs, which isn't parsed as commands
-  if (runner && OUTWARD_TEXT.test(command)) {
+  // the backstop: an interpreter's code that runs commands and names an outward one
+  if (runner) {
     outAt.push(runner)
-    const shown = command.split('\n').filter(l => OUTWARD_TEXT.test(l)).join('\n')
+    const code = codes.join('\n')
+    const shown = code.split('\n').filter(l => OUTWARD_TEXT.test(l)).join('\n')
     const aim = (why: Aim['why'], at = runner): Aim => ({ why, at, words: [], named, outAt, shown })
-    if (SEND_TEXT.test(command)) return aim('send')
+    if (SEND_TEXT.test(code)) return aim('send')
     if (textNames || dirs.some(d => inside(runner, d))) return aim('dir')
     if (inPlugins([runner])) return aim('plugin')
     if (named) return aim('slug')
@@ -1217,31 +1370,23 @@ const ROUTE_OK_OWN = `workbench: not run: ${ROUTE_OK} is the mod's dialog's to w
   'no command writes it.'
 const ROUTES_EDIT = 'workbench: not edited: the roles change only through wb route, on the user\'s yes in the ' +
   'mod\'s dialog (wb route shows them).'
-// text a shell or an interpreter runs, not parsed as commands: a route change hidden in it is refused
-const ROUTE_TEXT = /(?:\bwb|-m\s*workbench[\w.]*)\s+(?:route\b|settings\s+set\b|start\b[^\n]*\s--m)/i
+// a route change (a role's `wb settings set` row too, #1287) in an interpreter's code that runs
+// commands (`spawns`): refused, as one can't be shown
+const ROUTE_TEXT = new RegExp(String.raw`(?:\bwb|-m${W}workbench[\w.]*)${W}(?:route\b|settings${W}set\b|start\b[^\n]*[\s'",]--m)`, 'i')
 // Said with the roles. Roles are settings, and Claude never changes one unasked (the owner's locked
 // rule, 2026-11-24): #1322 tried "Run it when it is the right call", and it went back
 const ROUTES_RULE = 'Never pass --model for an API model or change a role without the user\'s yes (the mod ' +
   'asks them in a dialog); recommend only.'
 
-// The simple commands a line runs, `bash -c '…'` and `eval`'s inside, as upstreamAim reads them
-function runsIn(src: string): string[][] {
-  return simpleCommands(src).flatMap(words => {
-    const i = commandAt(words)
-    const cmd = wordOf(words[i])
-    const c = words.findIndex((w, j) => j > i && /^-[a-z]*c$/.test(w))
-    if (SHELLS.has(cmd) && c > 0 && words[c + 1] !== undefined) return [words, ...runsIn(words[c + 1]!)]
-    if (cmd === 'eval') return [words, ...runsIn(words.slice(i + 1).join(' '))]
-    return [words]
-  })
-}
-
 // Each wb route and each wb start with a --model (any abbreviation: --m…) in a command line, as
 // the arguments `wb route --dry-run --json` takes for it: a route's own, or `--start` and the
 // start's (parsed there by wb start's own parser); and each `wb settings set` (#1287), as
-// `--settings` and its own, whose dry run is `wb settings set … --dry-run --json`. `hidden`: a route or such a start inside text
-// another program runs, which can't be shown. `at`: the directory each call runs in, `cd` and
-// pushd followed from ``cwd`` as upstreamAim follows them: the dry run ran in the session's
+// `--settings` and its own, whose dry run is `wb settings set … --dry-run --json`. `hidden`: a
+// route, a settings set or such a start inside text a shell is fed, or in an interpreter's code
+// that runs commands, which can't be shown; a heredoc's or a quoted argument's text naming one is
+// no call (#1364). `at`: the directory each call runs in, `cd` and
+// pushd followed from ``cwd`` as upstreamAim follows them (a shell's fed ones aren't: those are
+// hidden, #1364): the dry run ran in the session's
 // directory, so `cd other && wb start … --model <API id>` (--repo defaults to `.`) was judged
 // local-only, or not, by the wrong repo (#1125, 2026-11-23). '' where the mod can't say: without
 // a ``cwd``, and after a cd to a word with `$` or a backquote in it (`cd "$REPO"`), to none (an
@@ -1260,28 +1405,114 @@ export function routeCalls(command: string, cwd = '', home = ''): { calls: strin
   const calls: string[][] = []
   const at: string[] = []
   let here = cwd
-  let runner = false
-  for (const words of runsIn(command)) {
+  let hidden = false
+  for (const { words, fed, code } of runs(command)) {
     const i = commandAt(words)
     const cmd = wordOf(words[i])
     if (cmd === 'cd' || cmd === 'pushd') {
+      if (fed) continue
       const to = cdTarget(words, i)
       if (!to || to === '-' || /[$`]/.test(to)) here = ''
       else if (here || to.startsWith('/')) here = absolutePath(to, home, here)
       continue
     }
-    if (RUNS_CODE.test(cmd)) runner = true
+    if (code !== undefined && spawns(cmd, code) && ROUTE_TEXT.test(code)) hidden = true
     const wb = wbArgs(cmd, words.slice(i + 1))
-    if (wb?.[0] === 'route') calls.push(wb.slice(1))
-    else if (wb?.[0] === 'settings' && settingsSet(wb) > 0) {
-      const s = settingsSet(wb)
-      calls.push(['--settings', ...wb.slice(1, s), ...wb.slice(s + 1)])
-    }
-    else if (wb?.[0] === 'start' && wb.some(w => /^--m/.test(w))) calls.push(['--start', ...wb.slice(1)])
-    else continue
+    const route = wb?.[0] === 'route', start = wb?.[0] === 'start' && wb.some(w => /^--m/.test(w))
+    const set = wb?.[0] === 'settings' ? settingsSet(wb) : -1
+    if (!route && !start && set < 0) continue
+    if (fed) { hidden = true; continue }
+    if (route) calls.push(wb!.slice(1))
+    else if (set > 0) calls.push(['--settings', ...wb!.slice(1, set), ...wb!.slice(set + 1)])
+    else calls.push(['--start', ...wb!.slice(1)])
     at.push(here)
   }
-  return { calls, hidden: !calls.length && runner && ROUTE_TEXT.test(command), at }
+  return { calls, hidden, at }
+}
+
+// Copy-like commands: they write their last operand, or -t's directory (a file of each source's name)
+const COPIES = new Set(['cp', 'mv', 'install', 'ln', 'rsync'])
+const COPY_VALUED = new Set(['-S', '--suffix', '-m', '--mode', '-o', '--owner', '-g', '--group'])
+// An interpreter's code that writes a file: Python's, Node's, Perl's, Ruby's, PHP's usual calls
+const WRITES_CODE = new RegExp([
+  // open(…, 'w') with the path built inside (`os.path.join(…)`, two levels deep), the mode a string
+  // of its own: `open(os.path.join(home, NAME), 'w')` went through (the review of #1364)
+  String.raw`\bopen\s*\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*?['"][rbt]*[wax+][rbtwax+]*['"]`, String.raw`\.write_(?:text|bytes)\s*\(`, String.raw`\bjson\.dump\s*\(`,
+  String.raw`\bshutil\.(?:copy\w*|move)\s*\(`, String.raw`\bos\.(?:rename|replace|link|symlink)\s*\(`,
+  String.raw`\.(?:rename|symlink_to|hardlink_to|touch)\s*\(`, String.raw`\b(?:writeFile|appendFile|copyFile|rename)(?:Sync)?\s*\(`,
+  String.raw`\bcreateWriteStream\s*\(`, String.raw`\bDeno\.write\w*`, String.raw`\bBun\.write\b`, String.raw`\bFile\.(?:write|open)\b`,
+  String.raw`\bIO\.write\b`, String.raw`\bfile_put_contents\b`, String.raw`\bfopen\s*\([^)]*['"][wax]`,
+  String.raw`\bopen\s*\(?\s*(?:my\s+)?\$?\w*\s*,\s*['"]\+?>`,
+].join('|'))
+
+// What one command writes: its redirects' files, tee's, a copy's destination (`names`: the sources,
+// whose names it takes in a directory), dd's of=
+function targets(run: Run): { to: string; names: string[] }[] {
+  const out = run.writes.map(to => ({ to, names: [] as string[] }))
+  const i = commandAt(run.words)
+  const cmd = wordOf(run.words[i])
+  const args = run.words.slice(i + 1)
+  if (cmd === 'tee') out.push(...args.filter(a => !a.startsWith('-')).map(to => ({ to, names: [] })))
+  else if (cmd === 'dd') out.push(...args.filter(a => a.startsWith('of=')).map(a => ({ to: a.slice(3), names: [] })))
+  else if (COPIES.has(cmd)) {
+    const ops: string[] = []
+    let dir: string | undefined
+    for (let j = 0; j < args.length; j++) {
+      const a = args[j]!
+      if (a === '--') { ops.push(...args.slice(j + 1)); break }
+      if (a === '-t' || a === '--target-directory') dir = args[++j]
+      else if (a.startsWith('--target-directory=')) dir = a.slice('--target-directory='.length)
+      else if (COPY_VALUED.has(a)) j++
+      else if (!a.startsWith('-')) ops.push(a)
+    }
+    if (dir !== undefined) out.push({ to: dir, names: ops })
+    else if (ops.length > 1) out.push({ to: ops[ops.length - 1]!, names: ops.slice(0, -1) })
+  }
+  return out
+}
+
+// Whether a command line writes ``file`` (#1364): a redirect's target, tee's file, a copy's
+// destination (its directory with a source of its name too) or dd's of=, a shell's fed commands'
+// too; or an interpreter's code with a write call (WRITES_CODE) and the file in a string that is
+// a path, the file's directory named (as written, `~`, $WB_HOME, `WB_HOME`) or the one it runs in.
+// A word the mod can't resolve (another variable, a glob) is no write, and a mention never is: a
+// gh issue create whose heredoc named route-ok.json was refused as writing it (2026-11-24).
+export function writesTo(command: string, file: string, cwd: string, home: string, root: string): boolean {
+  const name = file.slice(file.lastIndexOf('/') + 1)
+  const dir = file.slice(0, file.lastIndexOf('/')) || '/'
+  const resolve = (w: string, at: string): string => {
+    const v = w.replace(/^\$(?:\{WB_HOME\}|WB_HOME\b)/, root).replace(/^\$(?:\{HOME\}|HOME\b)/, home)
+    if (/[$`*?[]/.test(v) || (v.startsWith('~') && !home) || (!/^[/~]/.test(v) && !at)) return ''
+    return absolutePath(v, home, at)
+  }
+  const base = (w: string) => w.replace(/\/+$/, '').split('/').pop()
+  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  // backquotes are strings only in JavaScript: in Python's text they are Markdown's (a docs edit
+  // writing "`$WB_HOME/<the file>`" was refused as writing it: the review of #1364, 2026-11-25)
+  const literal = (cmd: string) => new RegExp(/^(?:node|deno|bun)$/.test(cmd)
+    ? `['"\`][^'"\`\\s]*\\b${esc}['"\`]` : `['"][^'"\\s]*\\b${esc}['"]`)
+  let here = cwd
+  let fedHere = cwd
+  for (const run of runs(command)) {
+    if (!run.fed) fedHere = here
+    const at = run.fed ? fedHere : here
+    const i = commandAt(run.words)
+    const cmd = wordOf(run.words[i])
+    if (cmd === 'cd' || cmd === 'pushd') {
+      const to = cdTarget(run.words, i)
+      const p = to === undefined ? home : to === '-' ? '' : resolve(to, at)
+      if (run.fed) fedHere = p
+      else here = p
+      continue
+    }
+    for (const t of targets(run)) {
+      const p = resolve(t.to, at)
+      if (p === file || (p === dir && t.names.some(n => base(n) === name))) return true
+    }
+    if (run.code !== undefined && literal(cmd).test(run.code) && WRITES_CODE.test(run.code) &&
+      (mentions(run.code, dir, home, root) || (dir === root && /\bWB_HOME\b/.test(run.code)) || at === dir)) return true
+  }
+  return false
 }
 
 const routesHome = async ($: any) => (await $.env.get('HOME').catch(() => '')) || mem.home
@@ -1422,9 +1653,9 @@ async function routeRefusal($: any, e: Row): Promise<string> {
   if ((tool !== 'Bash' && tool !== 'Monitor') || typeof e.command !== 'string') return ''
   const command = e.command
   if (!/\b(?:route|start|settings)\b|route-ok\.json/i.test(command)) return '' // most calls: no parse
-  if (command.includes(ROUTE_OK) && (mentions(command, mem.root, await routesHome($)) ||
-    /\$\{?WB_HOME\b/.test(command))) return ROUTE_OK_OWN
-  const { calls, hidden, at } = routeCalls(command, (await $.session.cwd().catch(() => '')) || mem.cwd, await routesHome($))
+  const cwd = (await $.session.cwd().catch(() => '')) || mem.cwd
+  if (command.includes(ROUTE_OK) && writesTo(command, `${mem.root}/${ROUTE_OK}`, cwd, await routesHome($), mem.root)) return ROUTE_OK_OWN
+  const { calls, hidden, at } = routeCalls(command, cwd, await routesHome($))
   if (hidden) return ROUTE_OWN
   // a show (`wb route`, `--json`) and a dry run change nothing
   const live = calls.flatMap((c, i) => !c.includes('--dry-run') && (c[0] === '--start' || c.some(a => a !== '--json'))
