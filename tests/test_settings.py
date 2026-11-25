@@ -27,6 +27,7 @@ def expected(key: str, value) -> list[str]:
         return fixed[key]
     return {"role": ["route", rest, value], "gpu": ["route", rest, "--gpu", value],
             "api": ["route", rest, "--api", value], "think": ["route", rest, "--thinking", value],
+            "review": ["route", rest, "--thinking-review", value],  # #1059
             "size": ["model", "sizes", rest, *([] if value == "all" else [value])],
             "media": ["image" if rest == "image" else "audio", "--default", value]}[head]
 
@@ -77,8 +78,9 @@ class Settings(Rows):
         json.dumps(rows)  # JSON-safe
         for want in ("agents", "busy", "role-significant", "coding", "workflows", "cap",
                      "progress", "gpu-trivial", "optimize", "api-connected", "api-writing",
-                     "think-trivial", "api-spend", "splash", "probe"):
+                     "think-trivial", "review-trivial", "api-spend", "splash", "probe"):
             self.assertIn(want, keys)
+        self.assertNotIn("review-writing", keys)  # only a role with an API model (#1059)
         self.assertNotIn("chat", keys)   # the web app is always on now
         self.assertNotIn("wake", keys)   # a plugin option, set with /plugin
         for gone in ("record", "live", "every", "price"):  # the pane's Settings dropped them (#1322)

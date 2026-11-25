@@ -408,7 +408,9 @@ no GPU work (`bench._idle`, `bench.api_task`).
 **4. The agent works a round**: `opencode run --standalone --agent wb-code -m <model> --auto --format json
 --title "wb: <task>" [--session <id>] [-f <image>…] -- <prompt>` (`context.AGENT`: wb's own agent, never the user's
 `default_agent`; *The user's agents can't lift the rules*, #1290) in the worktree, in the lane, `$PWD` the
-worktree, `OPENCODE_CONFIG` the layer. Later rounds continue the session until a handover.
+worktree, `OPENCODE_CONFIG` the layer. Later rounds continue the session until a handover. `<model>` is
+`runner.round_model`'s: task.json `opencode_model`, or for an API task's self-review its `review_model`
+(*Thinking for the self-review only*, #1059), the variant changed in the same session.
 **Images** (`--image`, #1199): `runner.attachments` gives each image in status `images` to a round
 that starts a session (round 1, a handover, a resume), and on a continued session only the round's
 own (a feedback's or a next step's): resent, the session would carry and bill it twice. OpenCode's
@@ -517,7 +519,8 @@ the nudge; the report has no line for it, #1322), then the tests and review: a g
 recorded stuck (#1168). A tree it changed is the guards' as before (the explore guard's first
 trip in a session a nudge, *Guards*, #1134), and so is a fresh, steered or resumed session's tree as the round before left it, a check maybe still commented out (#1188).
 On by default because a feedback round costs a whole wake (2026-11-18); a model it doesn't help
-learns it off.
+learns it off. On an API task it is off (*API self-review*), unless the role's `thinking_review`
+runs it on the thinking variant (*Thinking for the self-review only*).
 
 **7. Claude is woken** with `runner.summary_text` (*The round report*) and a notice; the runner
 exits.
@@ -3511,7 +3514,8 @@ read it with `tuning.value(task, name)`.
 **API self-review** (#1017). Without `--self-review`/`--no-self-review`, an API task's
 `self_review` is fixed 0 (`runner.fixed_knobs`, passed as `tune`'s `fixed`): a round Claude never
 sees costs money there, so neither the record nor the explore turns it on. `--self-review` is
-Claude's word and runs it.
+Claude's word and runs it, and so does a task.json `review_model` (fixed 1: the role's
+`thinking_review`, #1059), which `--no-self-review` still turns off.
 
 **Claude's.** `wb` holds the delegation state. Whenever Claude's conversation compacts with this
 session's tasks open in a session that delegated, the mod tells the summary to keep goals,
@@ -4194,6 +4198,32 @@ from the role's `thinks` (`routes.thinking_said`, *Roles*, #1263); results rows 
 `significant`, in chat only, never set). `wb-off` is reserved: a user's own variant of that name
 loses to wb's in the layer.
 
+**Thinking for the self-review only** (#1059, off by default). A role's `thinking_review: on`
+(routes.json; `wb route <role> --thinking-review on|off`, or the web app's `review-<role>` row) is
+copied to an API task's task.json (`routes.resolve`, `busy_routed`, `fallback_routed`,
+`cli._routed_keys`; never a GPU task's, which ignores it as it ignores `thinking`).
+`runner.review_variant(m, thinking, review)` gives the self-review round's `-m` only where the coding
+rounds really don't think (`thinking off`, exactly) and the thinking variant (`_thinking(m, "on")`, a
+listed effort since #1056) does and differs: `with_thinking` writes it as `review_model`
+(`<id>#high` on DeepInfra's Flash) and `thinking_shown` as `thinking: review only (effort high)`
+(`routes.REVIEW_ONLY`). Elsewhere it changes nothing: with thinking on every round thinks already,
+and a model that doesn't reason or can't turn thinking off keeps its line. With a `review_model`,
+`fixed_knobs` runs the self-review round #1017 turned off for API (`self_review` 1), and
+`runner.round_model(task)` gives that round (status `round_for` `self_review`, or a round carrying
+it on: `carried_tree`) `review_model` as its `-m`, every other round `opencode_model`; the layer's
+`small_model` stays the off one. The variant changes in place, in the session the coding rounds
+began: the paid check (2026-11-25, OpenCode 2.4.1, the user's DeepInfra DeepSeek V4.1 Flash, one
+session, about $0.004 in all): a round at `#none` with a `read` call, then `--session` at `#high`
+with a `read` call (accepted, a `reasoning` part, OpenCode's `model-switched` row), then `#none`
+again (accepted). DeepSeek's own API wants earlier `reasoning_content` sent back with tools, and
+these turns had none to send; that API itself was not checked. The switch costs the provider's
+prompt cache past the system prompt for the round (6,953 of 10,281 input tokens uncached there),
+and the next coding round read the cache as before (10,112 cached). The start line, `wb route`,
+`wb scout`, `routes.summary` and the mod's `routesSummary` say `thinking: review only`
+(`routes.role_thinks`, through `routes.thinking_said`). Measured on real tasks before it is ever
+recommended (fewer Claude review rounds than with self-review off, at a stated cost per task):
+until then the user's choice alone.
+
 `wb remote HOST` (`models.add_remote`, #114): checks `/api/version`, writes provider `ollama-<host>`
 (`remote_pid`; WSL2's Windows host `ollama-windows`, `wsl_host: true`, or the provider already
 marked so, repointed rather than refused when only the address moved, #1159; `remote_root` brackets IPv6, zone `%25`, read back as discovery reads it, #707)
@@ -4797,7 +4827,9 @@ Three fixed roles (`routes.ROLES`, #1014): `significant` (complex coding), `triv
 (`routes.LABELS`); files and commands keep the role names. Each role stores both sides and the
 selector between them, so flipping never loses the other side's model: `via` (`gpu` or `api`), `gpu`
 (a GPU model's id, or `auto`: the router picks, the default), `api` (an API model's exact OpenCode
-id, kept while the role is on the GPU) and `thinking` (`off`, the default, or `on`). One spend cap
+id, kept while the role is on the GPU), `thinking` (`off`, the default, or `on`) and `thinking_review`
+(`on`: an API task's self-review round alone thinks, *Thinking for the self-review only*, #1059;
+missing is off, and `wb route` writes none for off). One spend cap
 for the day, `day_usd`, set when the first role goes to API: `--day-usd N`, else `DAY_USD_SUGGEST`
 $5 in that change's own line (`cap $5/day`), so the dialog's one yes sets both (#1322: no cap was a
 refusal, `NO_CAP`, whose answer was always `--day-usd 5`); there is no cap before it. Kept in `~/.config/workbench/routes.json` (`$WB_ROUTES`,
@@ -4916,7 +4948,7 @@ doesn't apply).
 
 **Unset is the GPU, exactly as before.** A missing file or role reads as `{via: gpu, gpu: auto,
 thinking: off}` (`routes.read`, or `routes.load`, the same; `normalize`). A file that can't be read or isn't what wb writes (not
-JSON, an unknown role, a `via` or `thinking` outside its values, a role on API with no `api`, a cap
+JSON, an unknown role, a `via`, `thinking` or `thinking_review` outside its values, a role on API with no `api`, a cap
 that isn't a positive number) raises `RoutesError`, never reads as all GPU: that would move the user
 off their API choice without a word. `wb start` exits 3 on one (`<path> can't be read (<why>): fix
 it, or wb route <role> … sets it again`, before the model is picked), `wb route` (show) the same,
@@ -4930,7 +4962,7 @@ the pin matched by its exact id in `discover()`, as `wb route`'s listing finds i
 longer found exits 3, never the router's other pick nor a model its id is a fragment of, #1214).
 
 **`wb route`** (`cli.cmd_route`): shows each role (`GPU (the router picks)`, `GPU <id> (pinned)`,
-`API <id> (<provider>) · thinking off` (what the model does with it: `routes.thinking_said`, *What a role's thinking does*), `API kept: <id>`, `set by you|Claude MM-DD`: on API from
+`API <id> (<provider>) · thinking off` (what the model does with it: `routes.thinking_said`, *What a role's thinking does*; `thinking: review only` with `thinking_review` on, #1059, also after a GPU role's `API kept`), `API kept: <id>`, `set by you|Claude MM-DD`: on API from
 `by`/`ts`, who sent its code there, which a GPU pin since never replaces; on the GPU the newer of
 `by`/`ts` and `gpu_by`/`gpu_ts`,
 `(not in OpenCode's catalog now)` for an API model the catalog no longer lists; no prices note after it, #1322) and the cap,
@@ -4956,10 +4988,13 @@ The changes (each one exit 3 with one line when refused, writing nothing):
   model yet: wb route <role> <provider/model>`.
 - `wb route <role> <provider/model>` sets the API model and goes to API; `--api <id>` sets it and
   leaves the selector; `--gpu <id|auto>` sets the GPU model (a fragment will do, as `--model`
-  takes one: `models.resolve`; its exact id is what is stored; an API id refused); `--thinking on|off`; `--day-usd N`.
+  takes one: `models.resolve`; its exact id is what is stored; an API id refused); `--thinking on|off`;
+  `--thinking-review on|off` (#1059: `self-review thinking off → on (thinking: review only (effort high): the
+  agent reviews its own change in one more round before Claude)`, gated as `--thinking` is); `--day-usd N`.
 - `wb route all gpu|api|both` sets the Agents switch (`use`), no role's own selector; `api` with no
   role holding an API model: `no role has an API model yet`; a role with none then can't start, and
-  the line says so. `wb route all --thinking on|off` sets every role's thinking.
+  the line says so. `wb route all --thinking on|off` sets every role's thinking, `--thinking-review
+  on|off` every role's `thinking_review`.
 - `wb route cap <usd>` sets the cap; `wb route cap off` clears it (#1023), refused while a role runs
   on API or the busy opt-in could send one there (`the day cap stays while <roles> can spend on API`).
 - `wb route busy wait|api` sets the busy opt-in (*When the GPU is busy*).
@@ -6881,7 +6916,8 @@ in which Claude offers to set it up and installs nothing without a yes (#1283; #
   `wb route --json`'s `catalog_error` set, `CATALOG_FAILED` naming it instead, #1342):
   `api-connected` (info); `api-<role>` (the role's model, the others', those used, then the
   catalog by provider, `API_MENU` 12 at most) → `wb route <role> --api <id>`; `think-<role>` (the
-  pane's `thinkStops`) → `wb route <role> --thinking on|off`; `api-spend` (info).
+  pane's `thinkStops`) → `wb route <role> --thinking on|off`; `review-<role>`, only for a role with an
+  API model (`REVIEW`, #1059) → `wb route <role> --thinking-review on|off`; `api-spend` (info).
 - *terminal*: `splash` → `wb splash on|off`. *experimental*: `probe` → `wb experiment probe on|off`.
 
 Dropped: the pane's web chat switch (the web app is always on) and Wake Claude (a plugin option, set
@@ -7640,7 +7676,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb model rename <old id> <new id>` | | models.json `renamed_from` (#818); refused while the old id is configured, or for an API id. |
 | `wb model price <exact id>` | `--input X`, `--output Y`, `--cache-read Z`, `--cache-write W`, `--clear` | An API model's own prices per M (models.json `cost`, *Estimates or your prices*, #1135): its figures are plain, no `≈`, from the model's next task; `--clear` the catalog's again. Needs `--input` and `--output`; a cache price left out is the catalog's ratio to input, printed (`models.own_cache`, #1155); refused for an id not in the catalog, a plan, a free model, one `models.catalog_doc` can't carry, prices all 0 (free, outside the cap); another action's flag refused. |
 | `wb model sizes <id> [trivial] [significant]` | | The sizes it's routed; another action's flag refused (#602); an API id refused: `sizes are for GPU models; API models run by role`. |
-| `wb route [<role> gpu\|api\|<provider/model>] [<role> <choice>…]` (several roles, one change, #1024) / `wb route all gpu\|api\|both` (the Agents switch, `use`) / `wb route cap <usd>\|off` / `wb route busy wait\|api` (#1023) / `wb route <role> fallback <provider/model>\|gpu\|none` (#1196) | `--gpu ID\|auto`, `--api ID`, `--thinking on\|off`, `--day-usd N`, `--order NAME[,NAME]` (an OpenRouter role's backends, `privacy.parse_order`, #1021; without them the dialog says `via OpenRouter to its choice of backend`, #1322), `--json` (show: the roles, `busy`, `summary`, each API model's `api_status`, `spend_today`, `providers`, `catalog_error` (`models.hosted_error`, `""` when the last read worked, #1342); with `--dry-run`: `{change, gate, approval}`), `--dry-run` (the change line, nothing written, no approval needed), `--start ARGS` (with `--dry-run`: the dialog line for `wb start ARGS` on an API `--model`, the mod's; exit 3 with `API_NOT_YET` while `cli.API_RUNS` is off) | *Roles*. No role: shows them. A change prints `changed: <line>` (`unchanged: <summary>` for none); exit 3 for an API id not in the catalog, a GPU id, one with no key wb can hold, `api` with none kept, the first API role with no cap, an API fallback with no cap or one `routes._fallback_check` refuses, and under Claude Code a gated change the mod's dialog didn't approve (`route-ok.json`). A GPU pin, a `gpu` fallback and `none` need no dialog. |
+| `wb route [<role> gpu\|api\|<provider/model>] [<role> <choice>…]` (several roles, one change, #1024) / `wb route all gpu\|api\|both` (the Agents switch, `use`) / `wb route cap <usd>\|off` / `wb route busy wait\|api` (#1023) / `wb route <role> fallback <provider/model>\|gpu\|none` (#1196) | `--gpu ID\|auto`, `--api ID`, `--thinking on\|off`, `--thinking-review on\|off` (the self-review alone thinks on API, #1059), `--day-usd N`, `--order NAME[,NAME]` (an OpenRouter role's backends, `privacy.parse_order`, #1021; without them the dialog says `via OpenRouter to its choice of backend`, #1322), `--json` (show: the roles, `busy`, `summary`, each API model's `api_status`, `spend_today`, `providers`, `catalog_error` (`models.hosted_error`, `""` when the last read worked, #1342); with `--dry-run`: `{change, gate, approval}`), `--dry-run` (the change line, nothing written, no approval needed), `--start ARGS` (with `--dry-run`: the dialog line for `wb start ARGS` on an API `--model`, the mod's; exit 3 with `API_NOT_YET` while `cli.API_RUNS` is off) | *Roles*. No role: shows them. A change prints `changed: <line>` (`unchanged: <summary>` for none); exit 3 for an API id not in the catalog, a GPU id, one with no key wb can hold, `api` with none kept, the first API role with no cap, an API fallback with no cap or one `routes._fallback_check` refuses, and under Claude Code a gated change the mod's dialog didn't approve (`route-ok.json`). A GPU pin, a `gpu` fallback and `none` need no dialog. |
 | `wb scout` | `--done [--notes "…"]` (`--notes` alone refused, #602), `--due` (7 days), `--watch "…"`, `--unwatch N` (1-based) | The weekly facts: `cli.gpu_line`, `cli.ollama_line`, `cli.server_lines` (`models.SERVER_COMMANDS`, `models.SERVER_PORTS`, `NEEDS_KEY`, `models.WSL_NAT`, `models.server_key`), `audio.coverage`, `cli.image_server_lines`; the API section (`cli.scout_api_lines`: roles, API records, spend, a count per provider, #1024). |
 | `wb skill list \| show <n> \| scan <n\|path>` | | The library, a skill's history, the scan. |
 | `wb skill add <n> --from <src> -m "…"` | `--source "<origin>, <license>"`, `--lesson ID…`, `--reviewed RULE…` (never `scan.UNREVIEWABLE`) | Check, scan, copy, commit. |
@@ -7854,6 +7890,7 @@ $WB_HOME (~/.local/state/workbench)
   routes.json ($WB_ROUTES)       the roles (*Roles*, #1014): {"v": 1, "use": "gpu"|"api"|"both" (the Agents switch, #1016; missing: both),
                                  "busy": "wait"|"api" (when the GPU is busy, #1023; missing: wait), "day_usd": N|null, "roles": {"significant"|"trivial"|"writing":
                                  {"via": "gpu"|"api", "gpu": "<id>"|"auto", "api": "<exact id>" (kept on the GPU), "thinking": "off"|"on",
+                                 "thinking_review": "on" (missing: off; the self-review alone thinks, #1059),
                                  "said": the gated change's line, "by": "dialog"|"pane"|"terminal"|"web", "ts", "gpu_by": "terminal"|"web"|"claude", "gpu_ts"
                                  (a change that needed no yes: routes.stamp), "order": [backend…] (an OpenRouter role's, wb route --order,
                                  #1021), "thinks": {"api": "<id>", "off": "<line>", "on": "<line>"} (what that API model does with each
@@ -7941,7 +7978,7 @@ machine is never gone here, `cli._gone`, nor checked by the mod's `noteClaude`: 
 #922), `base` (full sha), `base_ref`, `base_branch` (where `--merge` lands: `HEAD`'s branch, or `--base` naming a local one; null on a detached HEAD, tag or commit),
 `branch`, `model`, `model_label` (`models.task_label`: an API model's names its id, #1078), `opencode_model` (`<id>#<variant>` for an API task's thinking, `runner.with_thinking`), `weights_id` (`models.identity`), `route` (the router's why; an API task's routing line), `via` (`gpu`|`api`) and `role` (#1016, always; `writing`: *The writing role*; a task from before it has neither, and reads as GPU until its next runner writes `via` from its model, `runner.settle_via`, #1111),
 `fallback` (true: on the role's fallback, from the start or moved mid-task, #1196) and `fallback_from` (the role's API model it stands in for),
-`provider`, `provider_name` (the catalog's), `thinking` (`off`|`on`, the role's, default off), `said` (the role's `said`, or `asked for[, approved in the dialog]` for a `--model`), and `said_ts` (the role's `ts`) (API only, fixed at start as `model` is), `thinking_shown` (what it does: `thinking off`, `thinking at its lowest effort (it can't turn off)`, `thinking as the model's default (it lists no lower setting)`…), `thinking_off` (`wb-off`'s `{settings}` or `{body}`, #1018), `size`, `stack`, `trial`, `backlog`,
+`provider`, `provider_name` (the catalog's), `thinking` (`off`|`on`, the role's, default off), `said` (the role's `said`, or `asked for[, approved in the dialog]` for a `--model`), and `said_ts` (the role's `ts`) (API only, fixed at start as `model` is), `thinking_shown` (what it does: `thinking off`, `thinking at its lowest effort (it can't turn off)`, `thinking as the model's default (it lists no lower setting)`…), `thinking_off` (`wb-off`'s `{settings}` or `{body}`, #1018), `thinking_review` (`on`, the role's, #1059) and `review_model` (the self-review round's `-m`, `runner.round_model`; missing: every round on `opencode_model`), `size`, `stack`, `trial`, `backlog`,
 `group` (`--group`: the tasks one request fanned out to, #1048; missing: no group),
 `not_before` (`--after`: epoch seconds the runner holds the task, queued, until: `runner.hold`, `runner.held_until`, #1204; missing: none),
 `bench` (`{case, run, label}`), `test_cmd`, `no_base_check`, `unload_for_tests`, `sign` (false: `--no-sign`), `subdir` (a monorepo package), `setup`,
@@ -8060,7 +8097,7 @@ export failed: judged by `live_used`), `stopped {by: "signal"|"provider"|"spend"
 `stack`, `subdir`, `rounds`, `auto_fixes`, `reviews`, `spec_rounds`, `tests_ok`, `minutes` (wall clock, queueing and review included), `tok_in`, `tok_out`, `ran` (`results.ran`: a session
 began or a token was written),
 `failed_before`, `skills_offered`, `skills_loaded`, `skills_rev`, `experiments`, `steps`, `window`, `weights_id`,
-`thinking` (an API task's, `off`|`on`, #1018), `tuned`, `explored`, `tuned_max`, `peak_share`, `self_review_due`, `spec_gaps`, `claude` (`spend.usage`: `{turns,
+`thinking` (an API task's, `off`|`on`, #1018), `thinking_review` (`on`: its self-review ran on the thinking variant, task.json `review_model`, #1059), `tuned`, `explored`, `tuned_max`, `peak_share`, `self_review_due`, `spec_gaps`, `claude` (`spend.usage`: `{turns,
 calls, input, cache_write_5m, cache_write_1h, cache_read, output}`), `gpu_wh`, `remote_gpu`, `active_minutes`
 (status `active_s`), `interventions`, `diff` (accepted: `{files, added, removed, generated?, deleted?}`, `gitops.footprint`),
 `landed_steps` (discarded: the steps `wb next` committed and the discard kept; `steps_dropped` after `--drop-steps`),
@@ -8432,7 +8469,7 @@ records sessions one it doesn't hold is "Session not found", exit 1), `session l
 and `auth` commands fail without `--standalone` (#1070); `auth export <provider>` prints `FAKE_AUTH_EXPORT`'s rows for it (2.3.2's shape),
 else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `text`, `step_finish` with tokens). Live tool names are 1.x-style (`bash`, `filePath`; 2.x `shell`,
-`path`: `events._brief` reads both). Records `FAKE_PROMPTS`, `FAKE_RUNS` (each run's `session`, `prompt`, `cwd`,
+`path`: `events._brief` reads both). Records `FAKE_PROMPTS`, `FAKE_RUNS` (each run's `session`, `prompt`, `model` (its `-m`, #1059), `cwd`,
 `pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), `env_names` (every variable's name, never a value: #1189), `shell_sees`: what a `$SHELL -c` command gets, and `connect`: with `FAKE_CONNECT` a TCP connect to that port from inside the round, `ok` or its errno, #1197, and `files`: each `run -f` it attached, `{name, bytes}`, opened in the lane as OpenCode's client does, one it can't open `File not found`, exit 1, #1199); knobs `FAKE_LATE`, `FAKE_SLEEP`,
 `FAKE_LESSON`, `FAKE_PAD` (that many characters before the Lesson line, #1186), `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
 `ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `shellwrite` (lib/util.py through a `bash` row's `cat > util.py <<X` with `workdir` lib/, main.py and answer.txt with `write`: #1210, its third review; a continued session adds a line to lib/util.py: #1259), `buildout` (dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names neither, then answer.txt: #1210's review), `pkgbuild` (a `bash` row `grep -n answer pkg/a.py`, then build/lib/pkg/{__init__,a,b}.py behind one `python -m build`, then answer.txt: #1210's second review), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
@@ -9066,7 +9103,9 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `gitops.diff_base`/`diff_tip`, `transcript.log_body`/`LOG_KINDS` (#1201); **the `routed` watch kind** → the mod's
   `pageParts` (left out of the history, as `meta`) and `pageShape`; **`routes.routed_line`** → `transcript.routed_text`
   and `routes.model_line`; **`routes.USES`/`use`** → the mod's `routesValid` and `routesSummary`; a role's **`order`**
-  (#1021) → `routes.summary`, `routesSummary` (`, backends …`) and `routesValid` (#1126).
+  (#1021) → `routes.summary`, `routesSummary` (`, backends …`) and `routesValid` (#1126); a role's
+  **`thinking_review`** (#1059) → `routes.role_thinks` (`REVIEW_ONLY`), the mod's `thinkingSaid`
+  (`REVIEW_ONLY`), `routesSummary`, `routesValid` and `readRoutes`' all-default check.
 - **A `$.state` atom's type** → its tag (`tasks-11`, `live-1`, `chat-5`, `sessions-1`, `pane-2`, `said-3`,
   `splash-1`).
 - **`wb chat url --json`** (`chat.ensure`'s states and keys, #1283) → the mod's `WbChat.link`, `LINK_STATES`, `linkOf`,

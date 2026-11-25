@@ -1607,11 +1607,17 @@ const money = (v: number) => Number.isInteger(v) ? `$${v}` : `$${v.toFixed(2)}`
 
 // What a role's thinking does on its API model, as routes.thinking_said says it: the row's `thinks`
 // (wb writes it with every change, from the catalog) for the setting, else the setting. `thinking off`
-// was said for a model that can't turn it off (#1263, 2026-11-24)
+// was said for a model that can't turn it off (#1263, 2026-11-24). A role's `thinking_review` on (#1059):
+// REVIEW_ONLY, with the thinking variant's effort, where its coding rounds don't think (routes.role_thinks)
+const REVIEW_ONLY = 'thinking: review only'
 export function thinkingSaid(row: Row): string {
   const thinking = row.thinking === 'on' ? 'on' : 'off'
   const t = row.thinks
-  return t && typeof t === 'object' && t.api === row.api && typeof t[thinking] === 'string' ? t[thinking] : `thinking ${thinking}`
+  const said = (k: string) => t && typeof t === 'object' && t.api === row.api && typeof t[k] === 'string' ? t[k] : `thinking ${k}`
+  const text = said(thinking)
+  if (row.thinking_review === 'on' && text === 'thinking off' && said('on').startsWith('thinking on'))
+    return REVIEW_ONLY + said('on').slice('thinking on'.length)
+  return text
 }
 
 // The roles in one line, as routes.summary says it (Couplings: the two read alike)
@@ -1630,6 +1636,7 @@ export function routesSummary(doc: Row): string {
     let text = `${r} GPU ${gpu === 'auto' ? '(the router picks)' : gpu}`
     if (row.api) text += `, API kept: ${row.api}${backends}`
     if (thinking === 'on') text += ', thinking on'
+    else if (row.thinking_review === 'on') text += `, ${REVIEW_ONLY}`
     return text + fallback
   })
   // the Agents switch (#1016): routes.json `use`, over each role's own while it isn't Both
@@ -1650,7 +1657,8 @@ function routesValid(doc: unknown): doc is Row {
   if (!d.roles || typeof d.roles !== 'object' || Array.isArray(d.roles)) return false
   return Object.entries(d.roles as Row).every(([r, row]: [string, any]) => (ROLES as readonly string[]).includes(r) &&
     row && typeof row === 'object' && [undefined, 'gpu', 'api'].includes(row.via) &&
-    [undefined, 'off', 'on'].includes(row.thinking) && (row.via !== 'api' || (typeof row.api === 'string' && !!row.api)) &&
+    [undefined, 'off', 'on'].includes(row.thinking) && [undefined, 'off', 'on'].includes(row.thinking_review) &&
+    (row.via !== 'api' || (typeof row.api === 'string' && !!row.api)) &&
     (row.order == null || (Array.isArray(row.order) && row.order.every((b: unknown) => typeof b === 'string' && !!b.trim()))) &&
     (row.fallback == null || (typeof row.fallback === 'string' && !!row.fallback.trim() && row.fallback !== 'none')))
 }
@@ -1676,7 +1684,7 @@ async function readRoutes($: any): Promise<Routes> {
   const rows = Object.values((doc.roles ?? {}) as Record<string, Row>)
   const cap = typeof doc.day_usd === 'number' ? doc.day_usd : null
   const plain = cap === null && (doc.use ?? 'both') === 'both' && (doc.busy ?? 'wait') === 'wait' && rows.every(r => (r.via ?? 'gpu') === 'gpu' && (r.gpu ?? 'auto') === 'auto' &&
-    !r.api && (r.thinking ?? 'off') === 'off' && !r.fallback)
+    !r.api && (r.thinking ?? 'off') === 'off' && (r.thinking_review ?? 'off') === 'off' && !r.fallback)
   let newest = -Infinity, by = ''
   for (const r of rows) {
     for (const [ts, who] of [[r.ts, r.by], [r.gpu_ts, r.gpu_by]]) {

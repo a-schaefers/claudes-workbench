@@ -118,6 +118,8 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            # an API task's thinking, off or on (the weekly check's evidence, #1018); a GPU task
            # thinks as its OpenCode entry says, so it has none
            **({"thinking": spec["thinking"]} if spec.get("thinking_shown") and spec.get("thinking") else {}),
+           # its self-review on the thinking variant: the evidence #1059 asks before recommending it
+           **({"thinking_review": "on"} if spec.get("review_model") else {}),
            "tuned": st.get("tuned") or {}, "explored": st.get("explored") or [],  # tuning.py
            "tuned_max": st.get("tuned_max") or {},
            **({"peak_share": st["peak_share"]} if "peak_share" in st else {}),  # tuning (#721)
