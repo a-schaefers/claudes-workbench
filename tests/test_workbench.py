@@ -12334,6 +12334,15 @@ class GitGuard(unittest.TestCase):
 class Lane(Base):
     """Where the agent may write: its worktree, the temp directory and build caches; Claude
     adds a directory with `wb allow --path`, the user turns the lane off with `"paths": ["*"]`."""
+    def test_doctor_names_only_what_an_old_landlock_breaks_for_the_agent(self):
+        # what ABI 1-8 can't confine (truncate, signals, UNIX sockets) is a risk the user lives
+        # with, no longer listed (#1322); ABI 1's failing cross-device rename breaks tools
+        self.assertEqual(lane.gaps(10), [])
+        self.assertEqual(lane.gaps(2), [])
+        self.assertEqual(len(lane.gaps(1)), 1)
+        self.assertIn("cross-device", lane.gaps(1)[0])
+        self.assertEqual(lane.gaps(0), [])
+
     def test_a_home_inside_a_temp_root_is_said_since_the_lane_writes_it_whole(self):
         # the 2026-11-19 audit: with the profile under /tmp, the agent read its credentials
         tmp = os.path.realpath(tempfile.gettempdir())

@@ -7462,6 +7462,8 @@ def cmd_doctor(a):
                     and not (Path(out) / "x").exists())
         line(held, f"agents write only in their lane (Landlock ABI {v})" if held else
              f"the lane didn't hold a write outside it: {r.stderr.strip()[-200:] or 'the write went through'}")
+        for gap in lane.gaps(v):  # what this kernel's Landlock breaks for the agent's tools
+            print(f"--  Landlock ABI {v}: {gap}")
         if gap := context.interop_gap():  # WSL: a Windows program escapes it (the 0.90 review)
             print(f"--  {gap}")
         if gap := context.home_gap():  # doctor's alone: wb start said it on every task (#1322)

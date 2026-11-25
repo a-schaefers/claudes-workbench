@@ -2212,8 +2212,9 @@ deliberately hostile process.
   cross-directory moves and links even inside (EXDEV); before 6 signals, before 9 sockets aren't
   scoped. `wb doctor` draws a real lane and tries a write outside it (`ok agents write only in their
   lane (Landlock ABI N)` or `BAD the lane didn't hold a write outside it: …`), then a line for WSL
-  interop; what an older ABI can't confine, or breaks (`lane.gaps`, ABI 1's cross-device rename),
-  went from doctor in #1322 (a risk the user lives with, nothing to act on but a newer kernel).
+  interop; what an older ABI can't confine went from doctor in #1322 (a risk the user lives with,
+  nothing to act on but a newer kernel), but what it breaks for the agent's tools stays, one `--`
+  line each (`lane.gaps`: ABI 1's failing cross-device rename or link).
 - *What TCP reaches* (#993, 2026-11-22). Landlock's TCP rule (ABI 4) allows ports, never an
   address, so it can't keep the agent from instance metadata (`169.254.169.254`, the machine's role
   credentials over plain HTTP) or a local daemon. The environment turns the SDKs' metadata lookups

@@ -172,6 +172,19 @@ def restrict(writable: list[str], readable: list[str] | None = None,
     return version
 
 
+def gaps(version: int) -> list[str]:
+    """What this Landlock version breaks for the agent's tools, for `wb doctor` (the 2026-11-16
+    audit: ABI 1 kernels, such as Debian 12's). What an older ABI can't confine (truncate before
+    3, signals before 6, UNIX sockets before 9) is a risk the user lives with, which doctor no
+    longer lists (#1322); a tool that fails is a different thing, and the merge of #1322's areas
+    dropped this line with them (2026-11-24)."""
+    if version == 1:
+        return ["moving or hard-linking a file between directories fails even inside the lane "
+                "(\"Invalid cross-device link\"; most tools fall back to a copy) before ABI 2 "
+                "(Linux 5.19)"]
+    return []
+
+
 def wrap(writable: list[str] | None, cmd: list[str],
          readable: list[str] | None = None, unix: list[str] | None = None) -> list[str]:
     """The command that runs `cmd` inside the lane; `cmd` itself when there is no lane."""
