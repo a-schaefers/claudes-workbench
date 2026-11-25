@@ -58,6 +58,21 @@ const MOCK_ROWS = [
     choices: [{ value: 'on', label: 'Enabled (default)', says: 'An animation.' }, { value: 'off', label: 'Off', says: 'At once.' }] },
 ]
 
+// In the page, of a focused element: whether its ring shows (:focus-visible, an outline) and the
+// ring's contrast against what is under it, its own fill or the nearest one behind it (WCAG's
+// ratio); `outside`, a ring drawn outside the element: the fill behind the element
+export function ringContrast(el, outside = false) {
+  const rgb = s => { const n = (s.match(/[\d.]+/g) || []).map(Number); return s.startsWith('color(') ? n.map(x => x * 255) : n }
+  const lum = c => { const [r, g, b] = c.slice(0, 3).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4 }); return 0.2126 * r + 0.7152 * g + 0.0722 * b }
+  const cs = getComputedStyle(el)
+  let under = outside ? el.parentElement : el
+  while (under && (rgb(getComputedStyle(under).backgroundColor)[3] ?? 1) === 0) under = under.parentElement
+  const a = lum(rgb(cs.outlineColor)), b = lum(rgb(getComputedStyle(under || document.body).backgroundColor))
+  return { visible: el.matches(':focus-visible') && cs.outlineStyle !== 'none' && parseFloat(cs.outlineWidth) >= 2,
+    ratio: Math.round((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05) * 100) / 100, ring: cs.outlineColor,
+    under: getComputedStyle(under || document.body).backgroundColor }
+}
+
 export async function check(page, ctx) {
   const { base, token, env, home, until, goTo, desktop } = ctx
   const view = () => page.locator('#settings-rows')
@@ -226,6 +241,66 @@ export async function check(page, ctx) {
       await until(() => posts.length === 1)
       if (JSON.stringify(posts) !== JSON.stringify([{ key: 'coding', value: 'ask' }])) throw new Error(JSON.stringify(posts))
       await until(async () => await lit() === 'ask')
+    })
+
+    await ctx.check('a choice made by keyboard keeps the focus on its control, and a number sent with Enter keeps its box (#1409)', async () => {
+      // #1409 (2026-11-25): the redraw took the focused radio away, the focus fell to the page,
+      // and the next Tab began again at the first row
+      let rows = MOCK_ROWS
+      unmock()
+      mock(async (method, body) => {
+        if (method !== 'POST') return answer(200, { rows, ts: 1 })
+        rows = rows.map(x => x.key === body.key ? { ...x, value: body.value } : x)
+        return answer(200, { ok: true, said: `${body.key}: ${body.value}`, rows })
+      })
+      const at = () => page.evaluate(() => { const a = document.activeElement, r = a && a.closest('.set-row')
+        return r ? `${r.dataset.key}:${a.tagName}:${a.dataset.value || ''}:${a.getAttribute('aria-checked') || ''}` : String(a && a.tagName) })
+      await reshow()
+      await until(async () => (await row('splash').locator('[aria-checked="true"]').getAttribute('data-value')) === 'on')
+      await row('splash').locator('[data-value="off"]').focus()
+      await page.keyboard.press('Space')
+      if (await at() !== 'splash:BUTTON:off:true') throw new Error('after the press: ' + await at())
+      await until(async () => (await toast()) === 'splash: off')
+      if (await at() !== 'splash:BUTTON:off:true') throw new Error('after the answer: ' + await at())
+      await row('cap').locator('input').fill('6')
+      await row('cap').locator('input').press('Enter')
+      await until(async () => (await toast()) === 'cap: 6')
+      if (await at() !== 'cap:INPUT::') throw new Error('after Enter: ' + await at())
+      await page.evaluate(() => document.activeElement.blur())
+    })
+
+    await ctx.check('the focus ring on a Settings choice, lit or not, stands 3:1 or more against what is under it (#1410)', async () => {
+      // #1410 (2026-11-25): the ring was the accent, drawn on the lit choice's own accent fill, and
+      // 2.99:1 on the panel
+      for (const v of ['off', 'on']) {                     // splash is off since the last check: lit, then not
+        const b = row('splash').locator(`[data-value="${v}"]`)
+        await b.focus()
+        await page.keyboard.press('ArrowRight')            // a key: the focus is the keyboard's
+        const got = await b.evaluate(ringContrast)
+        if (!got.visible || got.ratio < 3) throw new Error(`${v}: ${JSON.stringify(got)}`)
+      }
+      await page.evaluate(() => document.activeElement.blur())
+    })
+
+    await ctx.check('Settings opened while the computer is out of reach offers Try again, and draws its rows once the line is back, with no tab switch (#1412)', async () => {
+      // #1412 (2026-11-25): opened before the line was back, as a phone waking, it said it
+      // couldn't load until a tab switch. A page of its own: this one's rows are drawn already
+      const p = await ctx.context.newPage()
+      await p.addInitScript(() => {
+        window.e2eDown = true
+        const real = window.fetch
+        window.fetch = (u, o) => window.e2eDown && /^\/api\/(settings|state|stream)$/.test(new URL(String(u), location.href).pathname)
+          ? Promise.reject(new TypeError('Failed to fetch')) : real(u, o)
+      })
+      try {
+        await p.goto(base + '#settings')
+        await until(async () => (await p.textContent('#settings-rows')).includes("Settings couldn't load: the computer can't be reached"))
+        if (!(await p.locator('#settings-rows .set-retry').isVisible())) throw new Error('no Try again')
+        await p.evaluate(() => { window.e2eDown = false })   // the stream's next try gets through
+        await until(async () => (await p.locator('#settings-rows .set-card[data-group]').count()) > 0)
+          .catch(async () => { throw new Error(await p.textContent('#settings-rows')) })
+        if (await p.evaluate(() => document.body.dataset.view) !== 'settings') throw new Error('the view changed')
+      } finally { await p.close() }
     })
 
     await ctx.check('"Other model…" opens a text input, Escape closes it, Enter sends the typed id; a note is a line beside its group\'s rows, an info row a line', async () => {

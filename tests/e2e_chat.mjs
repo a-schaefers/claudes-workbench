@@ -219,6 +219,18 @@ async function run(engine, device) {
     await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('Back again.'), 20000)
     await until(async () => await page.locator('#net').isHidden())
   })
+  await check('while the computer can\'t be reached the header says so, never listening, and says listening again once it is back (#1415)', async () => {
+    // #1415 (2026-11-25): the banner said "Can't reach the computer", the header under it "Claude ·
+    // listening in …" with its green dot, the whole time
+    const said = () => page.evaluate(() => ({ text: document.getElementById('presence-text').textContent, cls: document.getElementById('presence').className }))
+    await stopServer()
+    try {
+      await until(async () => { const s = await said(); return s.text === 'computer unreachable · messages wait' && !/listening|working/.test(s.cls) })
+        .catch(async () => { throw new Error(JSON.stringify(await said())) })
+    } finally { startServer() }
+    await until(async () => (await said()).text.includes('listening in ~/project'), 40000)
+    await until(async () => await page.locator('#net').isHidden())
+  })
   await check('a reload shows the same thread, nothing doubled, still keyed', async () => {
     await page.reload()
     await until(async () => (await page.locator('.row').count()) === 4)
@@ -247,6 +259,55 @@ async function run(engine, device) {
     if (!(await page.textContent('#presence-text')).includes('connecting')) throw new Error(await page.textContent('#presence-text'))
     await ctx.unroute('**/api/**')
     await until(async () => (await page.textContent('#presence-text')).includes('listening'), 40000)
+  })
+  await check('an update that changes no row re-adds none of their lines, and a new reply is said once, whole, outside the thread (#1408)', async () => {
+    // #1408 (2026-11-25): the thread was the live region, and each update re-added every row's
+    // time and `copy`, and a reply's reveal each growing fragment, for a screen reader to read out
+    await page.evaluate(() => {
+      window._metas = []
+      new MutationObserver(ms => { for (const m of ms) for (const n of m.addedNodes) if (n.nodeType === 1 && n.closest('.meta')) window._metas.push(n.textContent) })
+        .observe(document.getElementById('thread'), { childList: true, subtree: true })
+    })
+    if (await page.evaluate(() => !!document.getElementById('thread').closest('[aria-live]'))) throw new Error('the thread is in a live region')
+    listen(true)                                           // the presence alone changes
+    await until(async () => (await page.textContent('#presence-text')).includes('working in'))
+    listen(false)
+    await until(async () => (await page.textContent('#presence-text')).includes('listening in'))
+    const metas = await page.evaluate(() => window._metas)
+    if (metas.length) throw new Error('lines made again: ' + JSON.stringify(metas))
+    wb('chat', 'reply', '--text', 'Said once.\n\n- **whole** at the end')
+    await until(async () => (await page.locator('.row.claude .bubble strong').last().textContent()) === 'whole')
+    const said = await page.evaluate(() => [...document.querySelectorAll('#say p')].map(p => p.textContent).filter(t => t.includes('Said')))
+    if (JSON.stringify(said) !== JSON.stringify(['Said once.\n\n- whole at the end'])) throw new Error(JSON.stringify(said))
+  })
+  await check("a message's copy button keeps the focus through an update (#1409)", async () => {
+    // #1409 (2026-11-25): each update made every row's line anew, and the focus on its button fell to the page
+    await page.locator('.row.claude').last().locator('.meta button').focus()
+    const on = () => page.evaluate(() => { const a = document.activeElement; return !!(a && a.textContent === 'copy' && a.closest('.row.claude')) })
+    if (!(await on())) throw new Error('not focused to begin with')
+    listen(true)
+    await until(async () => (await page.textContent('#presence-text')).includes('working in'))
+    listen(false)
+    await until(async () => (await page.textContent('#presence-text')).includes('listening in'))
+    if (!(await on())) throw new Error('the focus went to ' + await page.evaluate(() => document.activeElement && document.activeElement.tagName))
+    await page.evaluate(() => document.activeElement.blur())
+  })
+  await check('the message box, focused, shows a ring at 3:1 or more against the page (#1411)', async () => {
+    // #1411 (2026-11-25): outline none, and the border's tint alone, 1.6:1 against the unfocused one
+    await page.focus('#input')
+    const got = await page.locator('#input').evaluate(settingsView.ringContrast, true)
+    await page.evaluate(() => document.getElementById('input').blur())
+    if (!got.visible || got.ratio < 3) throw new Error(JSON.stringify(got))
+  })
+  await check("a reply's lead-in line, its bullets with no blank line between and a line after them show as a paragraph, a list and a paragraph (#1416)", async () => {
+    // #1416 (2026-11-25): a block was a list only when every line was a bullet, so Claude's usual
+    // lead-in and bullets showed as one paragraph of '- ' lines
+    wb('chat', 'reply', '--text', 'Two tasks done, one failed:\n- **config-loader** waits\n- **parser-fix** failed\nBoth wait for you.')
+    const bubble = page.locator('.row.claude .bubble').last()
+    await until(async () => (await bubble.textContent()).includes('Both wait for you.') && !(await bubble.getAttribute('class')).includes('flowing'))
+    const got = await bubble.evaluate(b => ({ kids: [...b.children].map(c => c.tagName).join(), items: [...b.querySelectorAll('li')].map(l => l.textContent),
+      dashes: [...b.querySelectorAll('p')].some(p => /(^|\n)- /.test(p.innerText)) }))
+    if (got.kids !== 'P,UL,P' || got.items.join('|') !== 'config-loader waits|parser-fix failed' || got.dashes) throw new Error(JSON.stringify(got))
   })
   // the shell's views (#1284): a tap on the nav (the rail on a desktop), then the body shows it
   const goTo = async name => {
@@ -947,6 +1008,15 @@ async function run(engine, device) {
     if (JSON.stringify(again.about) !== JSON.stringify(about)) throw new Error('about lost: ' + JSON.stringify(again.about))
     await until(async () => (await page.locator('.row.user', { hasText: 'run the backlog overnight' }).last().locator('.meta').textContent()).includes('Delivered'))
   })
+  await check('once the copy it sent has landed, "send again" can be pressed again, and sends another (the #1408 review)', async () => {
+    // the #1408 review (2026-11-25): a row's line kept while its words stay the same kept the
+    // pressed button disabled too, until a reload
+    const again = page.locator('.row.user', { hasText: 'run the backlog overnight' }).first().locator('.meta button', { hasText: 'send again' })
+    await until(async () => !(await again.isDisabled())).catch(() => { throw new Error('still disabled after the copy landed') })
+    await again.click()
+    await until(() => messages().filter(m => m.text === 'run the backlog overnight').length === 3)
+    await until(async () => !(await again.isDisabled()))
+  })
   await check('a refused message about a pair of screenshots, edited, is still about them (#843)', async () => {
     // #843: edit put the words and files back in the box but not what they were about. The pair
     // again, newest: the first one may have left the thread's newest 200 by now
@@ -1216,6 +1286,25 @@ async function run(engine, device) {
         if (g.tabs.some(t => !near(t.w, g.w / 3))) throw new Error('unequal tabs: ' + say())
       }
     })
+    if (desktop) await check('an iPhone held sideways, its notch on the left: the rail takes the inset beside its 76 px, each tab wide enough for its label, and the views pad for it no more (#1413)', async () => {
+      // #1413 (2026-11-25): inside a 76 px rail padded 59 px each tab was 16 px wide, its icon past
+      // the rail's edge, its label cut to 'C.'. No browser here has a notch: app.css with an
+      // iPhone's sideways insets written in for env()
+      const css = readFileSync(join(ROOT, 'workbench/chat_static/app.css'), 'utf8')
+        .replace(/env\(safe-area-inset-(left|right)\)/g, '59px').replace(/env\(safe-area-inset-bottom\)/g, '21px').replace(/env\(safe-area-inset-top\)/g, '0px')
+      const sc = await browser.newContext({ viewport: { width: 844, height: 390 }, serviceWorkers: 'block' })
+      await sc.route('**/app.css', r => r.fulfill({ contentType: 'text/css', body: css }))
+      const p = await sc.newPage()
+      try {
+        await p.goto(base + '#token=' + token)
+        await until(async () => await p.evaluate(() => getComputedStyle(document.body).display === 'grid'))
+        const g = await p.evaluate(() => ({ rail: document.getElementById('tabbar').getBoundingClientRect().right,
+          tabs: [...document.querySelectorAll('#tabbar .tab')].map(t => { const l = t.querySelector('.tab-lbl')
+            return { w: Math.round(t.getBoundingClientRect().width), cut: l.scrollWidth > l.clientWidth, icon: t.querySelector('svg').getBoundingClientRect().right } }),
+          pads: ['.top', '#thread', '#composer'].map(s => getComputedStyle(document.querySelector(s)).paddingLeft) }))
+        if (g.tabs.some(t => t.w < 44 || t.cut || t.icon > g.rail) || g.pads.join() !== '16px,16px,12px') throw new Error(JSON.stringify(g))
+      } finally { await sc.close() }
+    })
     await check('the card views\' styles stay out of the chat: a plan card\'s text and code, and the intro\'s code, as before', async () => {
       // the #1284 review: `.view .card p` and `.view code` matched #view-chat, a .view too, and
       // shrank a plan's <p> (its margins 0 and 8px) and code, and the intro's code, to 13px
@@ -1297,6 +1386,22 @@ async function run(engine, device) {
         await until(async () => { const a = await at(); return a.kb && a.nav === 'none' && Math.abs(a.foot - a.h) <= 2 })
           .catch(async () => { throw new Error(JSON.stringify(await at())) })
       } finally { await kb(false) }
+      await until(async () => { const a = await at(); return !a.kb && a.nav !== 'none' })
+    })
+    if (!desktop && engine === 'chromium') await check('on Android, where the whole page shrinks with the keyboard, the bar steps aside too (#1414)', async () => {
+      // #1414 (2026-11-25): under interactive-widget=resizes-content Android's Chrome shrinks the
+      // layout viewport with the visual one, so their difference never said a keyboard was up, and
+      // the bar stayed between the composer and the keyboard. The page made short, as it does
+      const vp = page.viewportSize()
+      const at = () => page.evaluate(() => ({ kb: document.body.classList.contains('kb-open'), h: innerHeight,
+        nav: getComputedStyle(document.getElementById('tabbar')).display, foot: document.getElementById('composer').getBoundingClientRect().bottom }))
+      await page.focus('#input')
+      try {
+        await page.setViewportSize({ width: vp.width, height: vp.height - 300 })
+        await until(async () => { const a = await at(); return a.kb && a.nav === 'none' && Math.abs(a.foot - a.h) <= 2 })
+          .catch(async () => { throw new Error(JSON.stringify(await at())) })
+      } finally { await page.setViewportSize(vp) }
+      await page.evaluate(() => document.getElementById('input').blur())
       await until(async () => { const a = await at(); return !a.kb && a.nav !== 'none' })
     })
     await check('window.WB gives the views the key, the API, the view and its changes, the state and a toast', async () => {

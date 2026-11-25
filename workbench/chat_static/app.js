@@ -66,6 +66,10 @@
   // Until the first live state, the thread this page last had, so a reload shows it at once
   let state = { messages: token ? load(K.thread, []) : [], push: {}, listener: null }
   let live = false
+  // the computer answering: not while the stream fails past its first tries, or offline. Without
+  // it the header said "Claude · listening" in green under "Can't reach the computer" (#1415,
+  // 2026-11-25); apart from `live`, which says only that a state came once
+  let reachable = true
   let skew = 0                                  // server clock − ours, seconds
   // The outbox: one localStorage key per message (OUT + its cid), read afresh whenever it is
   // used. A single shared array was each tab's own copy saved over the others': two tabs offline,
@@ -151,19 +155,37 @@
       if (n % 2) { const pre = document.createElement('pre'), c = document.createElement('code'); c.textContent = part.replace(/\n$/, ''); pre.append(c); el.append(pre); return }
       for (const block of part.split(/\n{2,}/)) {
         if (!block.trim()) continue
+        // each run of bullet lines a list, each run of others a paragraph: a block was a list only
+        // when every line was a bullet, so Claude's usual lead-in line, then its bullets with no
+        // blank line between, showed as one paragraph of '- ' lines (#1416, 2026-11-25)
         const lines = block.split('\n')
         const bullet = /^\s*(?:[-*•]|\d+[.)])\s+/
-        if (lines.every(l => bullet.test(l))) {
-          const list = document.createElement(/^\s*\d/.test(lines[0]) ? 'ol' : 'ul')
-          for (const l of lines) { const li = document.createElement('li'); inline(li, l.replace(bullet, '')); list.append(li) }
-          el.append(list)
-        } else {
-          const p = document.createElement('p')
-          lines.forEach((l, j) => { if (j) p.append(document.createElement('br')); inline(p, l) })
-          el.append(p)
+        for (let i = 0; i < lines.length;) {
+          const listed = bullet.test(lines[i])
+          let j = i
+          while (j < lines.length && bullet.test(lines[j]) === listed) j++
+          const run = lines.slice(i, j); i = j
+          if (listed) {
+            const list = document.createElement(/^\s*\d/.test(run[0]) ? 'ol' : 'ul')
+            for (const l of run) { const li = document.createElement('li'); inline(li, l.replace(bullet, '')); list.append(li) }
+            el.append(list)
+          } else {
+            const p = document.createElement('p')
+            run.forEach((l, k) => { if (k) p.append(document.createElement('br')); inline(p, l) })
+            el.append(p)
+          }
         }
       }
     })
+  }
+
+  // What a screen reader hears of the thread: each new message from Claude once, whole. The
+  // thread was the live region, and every update read out each row's time and `copy` again, and
+  // a reply in its reveal's growing fragments (#1408, 2026-11-25)
+  function say(text) {
+    const log = $('say')
+    log.append(Object.assign(document.createElement('p'), { textContent: text.replace(/\*\*|`/g, '') }))
+    while (log.childElementCount > 20) log.firstElementChild.remove()
   }
 
   // ---- the paced reveal ----
@@ -187,6 +209,7 @@
     flows.delete(id)
     f.el.classList.remove('flowing')
     rich(f.el, f.text)
+    say(f.text)
     seen.add(id); save(K.seen, [...seen].slice(-500))
   }
   const finishAll = () => { for (const id of [...flows.keys()]) finishFlow(id); toEnd() }
@@ -279,7 +302,7 @@
       const h = Math.round((state.expire || 21600) / 3600)
       meta.append(span('', `Not passed to Claude (over ${h} h old) · ` + clock(m.ts) + ' · '))
       const b = document.createElement('button'); b.textContent = 'send again'
-      b.onclick = () => { b.disabled = true; resend(m) }
+      b.onclick = () => { b.disabled = true; b.dataset.cid = newId(); resend(m, b.dataset.cid) }
       meta.append(b)
     } else meta.append(span('tick', '✓'), span('', (state.listener ? 'Delivered · ' : 'Waiting for a Claude session · ')
       + clock(m.ts)))
@@ -354,7 +377,13 @@
       }
       if (w.m) {
         el.className = `row ${w.m.role === 'agent' ? 'agent' : w.m.from}${w.m.from === 'claude' && !forUser(w.m) ? ' to-agent' : ''}${w.same ? ' same' : ''}${w.m.local ? ' pending' : ''}${w.m.error ? ' failed' : ''}`
-        el.querySelector('.meta').replaceWith(metaFor(w.m))
+        // a row's line made anew only when it says something new: one made on every update was
+        // read out again and took the focus from its buttons (#1408, #1409)
+        const meta = metaFor(w.m), was = el.querySelector('.meta'), key = meta.textContent + '\n' + (w.m.text || '')
+        // and once a "send again" it waits on has settled (landed, or deleted): kept, its button
+        // stayed disabled until a reload (the #1408 review)
+        const waits = was.querySelector('button[data-cid]:disabled')
+        if (was.dataset.said !== key || (waits && !outbox.some(o => o.cid === waits.dataset.cid))) { meta.dataset.said = key; was.replaceWith(meta) }
       }
       if (anchor.nextSibling !== el) anchor.after(el)
       anchor = el
@@ -446,6 +475,7 @@
     const b = document.createElement('div'); b.className = 'bubble'
     b.append(span('notice-text', m.text))
     if (m.what) { const c = document.createElement('code'); c.className = 'notice-what'; c.textContent = m.what; b.append(c) }
+    if (!seen.has(m.id) && !firstVisit) say(m.text + (m.what ? ' ' + m.what : ''))
     if (document.hidden && !seen.has(m.id) && !firstVisit) { unread++; document.title = `(${unread}) Workbench` }
     seen.add(m.id); save(K.seen, [...seen].slice(-500))
     row.append(b, document.createElement('div'))
@@ -462,7 +492,9 @@
     if (m.from === 'user' || m.role === 'agent') b.textContent = m.text
     else if (seen.has(m.id) || firstVisit || document.hidden || reduced.matches) {
       if (!seen.has(m.id) && !firstVisit && document.hidden && forUser(m)) { unread++; document.title = `(${unread}) Workbench` }
-      rich(b, m.text); seen.add(m.id); save(K.seen, [...seen].slice(-500))
+      rich(b, m.text)
+      if (!seen.has(m.id) && !firstVisit) say(m.text)
+      seen.add(m.id); save(K.seen, [...seen].slice(-500))
     } else {
       b.classList.add('flowing'); flows.set(m.id, { text: m.text, shown: 0, el: b })
       if (!flowTimer) flowTimer = setInterval(flowTick, FLOW_MS)
@@ -486,6 +518,7 @@
       const dots = document.createElement('span'); dots.className = 'dots'; dots.append(document.createElement('i'), document.createElement('i'), document.createElement('i'))
       working.append(dots, span('', ''))
       workTimer = setInterval(() => { if (working) working.lastChild.textContent = 'Claude is on it · ' + since(Number(working.dataset.from)) }, 1000)
+      say('Claude is on it')  // once, not its count each second (#1408)
     }
     working.dataset.from = last.received.ts
     working.lastChild.textContent = 'Claude is on it · ' + since(last.received.ts)
@@ -495,8 +528,9 @@
   function drawPresence() {
     const l = state.listener
     const where = l ? l.cwd.replace(/^\/home\/[^/]+/, '~') : ''
-    presence.className = 'presence ' + (!l ? 'away' : l.busy ? 'working' : 'listening')
-    presenceText.textContent = !token ? 'not connected' : !live ? 'connecting…' : !l ? 'no session listening · messages wait' :
+    presence.className = 'presence ' + (live && !reachable ? 'down' : !l ? 'away' : l.busy ? 'working' : 'listening')
+    presenceText.textContent = !token ? 'not connected' : !live ? 'connecting…' : !reachable ? 'computer unreachable · messages wait'
+      : !l ? 'no session listening · messages wait' :
       // the app's name above, whom you talk to here (#103: a notification opened on "Claude")
       'Claude · ' + (l.busy ? 'working in ' : 'listening in ') + where
   }
@@ -519,7 +553,7 @@
     if (typeof s.now === 'number') { skew = s.now - Date.now() / 1000; stamp = Math.max(stamp, s.now) }
     if (s.build && build && s.build !== build && reloadOnce()) return  // updated: the new page
     if (s.build) build = s.build
-    live = true
+    live = true; reachable = true
     if (!quiet) save(K.thread, (s.messages || []).slice(-50))  // a patch without messages: no rewrite (#755)
     state = { messages: s.messages || [], push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null, tasks: s.tasks || [] }
     drawTasks()
@@ -626,7 +660,7 @@
           }
           if ((event === 'state' || event === 'patch') && data) {
             try { event === 'state' ? apply(JSON.parse(data)) : applyPatch(JSON.parse(data)) } catch {}
-            if (failures) { failures = 0; banner('') }
+            if (failures) { failures = 0; banner(''); reshowView() }
             flush()
           }
         }
@@ -643,6 +677,7 @@
     const wait = Math.round(base * (0.8 + Math.random() * 0.4))
     if (!online) banner('Offline. Messages will send when the connection is back.', true)
     else if (failures > 2) banner(`Can't reach the computer. Trying again in ${Math.ceil(wait / 1000)}s…`, true)
+    if (reachable && (!online || failures > 2)) { reachable = false; drawPresence() }
     retryTimer = setTimeout(connect, wait)
   }
   const reconnectNow = () => { if (conn) { conn.abort(); conn = null } failures = Math.min(failures, 1); connect() }
@@ -663,8 +698,8 @@
   }
   // another tab queued, sent or dropped a message: show it, and send it if this tab can
   addEventListener('storage', e => { if (e.key === null || e.key.startsWith(OUT)) { outbox = outItems(); render(); flush(true) } })
-  addEventListener('online', () => { online = true; banner(''); reconnectNow(); flush(true); render() })
-  addEventListener('offline', () => { online = false; banner('Offline. Messages will send when the connection is back.', true); render() })
+  addEventListener('online', () => { online = true; banner(''); reconnectNow(); flush(true); render(); reshowView() })
+  addEventListener('offline', () => { online = false; reachable = false; banner('Offline. Messages will send when the connection is back.', true); render() })
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
       finishAll()
@@ -700,9 +735,17 @@
   const vv = window.visualViewport
   const typing = () => document.activeElement === input
   let kbOpen = false
+  // The page's height with no keyboard: the tallest seen at this width. Android's Chrome, under the
+  // page's interactive-widget=resizes-content, shrinks innerHeight with the keyboard as well as the
+  // visual viewport, so their difference never said it was up and the nav stayed over it (#1414,
+  // 2026-11-25). Only while typing on a touch screen: a desktop window made shorter isn't a keyboard
+  let full = innerHeight, fullW = innerWidth
   function fit() {
     if (!vv) return
+    if (innerWidth !== fullW) { full = innerHeight; fullW = innerWidth }   // turned: another height
+    full = Math.max(full, innerHeight)
     kbOpen = innerHeight - vv.height > 120     // a keyboard is tall; a toolbar showing is not
+      || (touch && typing() && full - vv.height > 120)
     if (kbOpen) {
       // the body is the visible part of the page: pageTop counts iOS's own scroll of the document
       // on focus as well as the visual viewport's, where offsetTop alone left the composer
@@ -1117,10 +1160,10 @@
   // an expired message, sent again as a new one through the outbox (its own cid), with its files:
   // already on the computer, so not a byte again (#623); and what it was about, a pair of
   // screenshots or a kept take: without it Claude got the words with no task or take (#843)
-  function resend(m) {
+  function resend(m, cid = newId()) {
     if (!token) return
     const files = (m.files || []).map(({ id, name, size, type }) => ({ id, name, size, type }))
-    const o = { cid: newId(), text: m.text, ts: now(), ...(m.about ? { about: m.about } : {}), ...(files.length ? { files } : {}) }
+    const o = { cid, text: m.text, ts: now(), ...(m.about ? { about: m.about } : {}), ...(files.length ? { files } : {}) }
     if (!save(OUT + o.cid, o)) { banner('Not sent: this browser keeps no outbox here. Copy it into the box.', true); return }
     outbox = outItems()
     render(); toEnd(true); flush(true)
@@ -1397,6 +1440,10 @@
   const call = (v, fn, ...a) => { try { v.mod[fn] && v.mod[fn](...a) } catch (e) { console.error(e) } }
   const modShow = name => { const v = mods.get(name); if (v && !v.shown && !document.hidden) { v.shown = true; call(v, 'show') } }
   const modHide = name => { const v = mods.get(name); if (v && v.shown) { v.shown = false; call(v, 'hide') } }
+  // The view shown read again once the line is back (the network, or the stream after a failure):
+  // Settings or Stats opened before it was, as a phone waking does, said it couldn't load until a
+  // tab switch (#1412, 2026-11-25)
+  function reshowView() { const v = mods.get(curView); if (v && v.shown) call(v, 'show') }
   function drawShown() {  // what the old sheet drew while open, for the view that shows it
     if (curView === 'settings') drawSettings()
     else if (curView === 'stats') drawSaved()

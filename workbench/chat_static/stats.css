@@ -3,6 +3,7 @@
 #stats-body { min-width: 0; }
 .st-h { margin: 4px 2px 8px; font: 600 12px/1.3 var(--sans); letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
 .st-hist-box .st-h { margin-top: 16px; }
+.view-in .st-retry { margin: 0 0 8px; }
 .st-now-box[hidden] + .st-hist-box .st-h { margin-top: 4px; }
 .st-dim, .view-in .dim { color: var(--dim); }
 .view-in .ok { color: var(--ok); }

@@ -5978,9 +5978,19 @@ the composer until the server has it (#245). A 4xx but 401 marks it not sent, ex
 `DEAD_MS` 40 s watchdog counts as a failure (jittered backoff 0.5–30 s); an abort cancels the body's
 reader (WebKit keeps the socket); back on screen after `AWAY_MS` 3 s, or from the bfcache silent for
 `STALE_MS` 20 s, or on the worker's `{kind: "push"}`, it dials at once (2026-11-20); a new `build`
-reloads (`reloadOnce`, once a minute). The thread follows the newest line (`follow`) until a wheel, a finger or a scroll up
+reloads (`reloadOnce`, once a minute). While the stream fails past its first two tries (the banner's `Can't reach
+the computer`) or the page is offline, the header says `computer unreachable · messages wait` with a grey dot
+(`reachable`, set again by the next state), never the last listener's green `listening` (#1415). The thread follows the newest line (`follow`) until a wheel, a finger or a scroll up
 releases it; a scroll that came with the thread's height changing is the layout's (`lastHeight`: images loading
-after a reload had read as the reader going up, and the server's thread was drawn mid-thread, #1223). Use counts (`reportActive`, #959): on screen or a
+after a reload had read as the reader going up, and the server's thread was drawn mid-thread, #1223). A screen reader
+hears the thread through `#say` (`role=log`, `.sr-only`), outside it: each new message from Claude and each waiting line once,
+whole (`say`, after the reveal), and "Claude is on it" once; the thread was the live region, and every update read
+each row's time and `copy` out again, a reply in its reveal's fragments (#1408). A row's `.meta` is made anew only
+when its words change (`dataset.said`), so its buttons keep the focus (#1409), or once the copy a pressed
+*send again* sent (its `data-cid`) has left the outbox, landed or deleted, so the button is pressable again. The message box, focused, has a
+2 px ring, the accent toward `--fg` (3:1 on the page in light; the border's tint alone was 1.6:1, #1411). Claude's words are built as DOM, never HTML (`rich`): code fences,
+`code`, `**bold**`, links, and in each block every run of bullet lines a list, every run of other lines a paragraph
+(a lead-in line, then bullets with no blank line between, was one paragraph of '- ' lines, #1416). Use counts (`reportActive`, #959): on screen or a
 `pointerdown`/`keydown`, only while `!document.hidden` and `document.hasFocus()`, on the Chat view
 (and on switching to it; never a press on `#tabbar`, #1374), at most every
 `ACTIVE_MS` 30 s, never retried on a timer (#959 review). Attachments: chips (`drawTray`) in
@@ -6005,8 +6015,13 @@ id="tabbar" aria-label="Primary">` holds three `button.tab[data-view]`, each a 2
 over an 11 px `.tab-lbl`; the current one has `aria-current="true"`, colour and a 1 px lift. On a
 phone (≤600 px) it is the body's last flex child, under the composer, `56px` plus the safe area
 tall (the composer drops its own safe-area pad, `#jump` sits 56 px higher), hidden under
-`body.kb-open` so the composer sits on the keyboard (`fit`'s visualViewport check), `user-select:
-none` under `hover: none`. From 601 px the body is a grid: a 76 px left rail, the header, banner and
+`body.kb-open` so the composer sits on the keyboard (`fit`: the visual viewport 120 px short of
+the layout one, as on iOS, or, while typing on a touch screen, of the tallest the page has been at
+this width, `full`, since Android's Chrome shrinks both under `interactive-widget=resizes-content`,
+#1414), `user-select:
+none` under `hover: none`. From 601 px the body is a grid: a 76 px left rail (and the left safe-area
+inset beside it, which the header, the thread, the composer and the views then don't pad for: inside
+76 px an iPhone held sideways had 16 px tabs and labels cut to 'C.', #1413), the header, banner and
 view beside it; the chat a 760 px column, Stats and Settings `.view-in` 1040 px of `.card`s, two
 columns (`.cards`) from 1100 px. The cards' type (`h3`, `p`, `code`, `.small`, `.plain`) is scoped
 to `.view-in`, never `.view`: `#view-chat` is a `.view` too, and its rows and the
@@ -6030,7 +6045,9 @@ sent as JSON, and a JSON or string body gets `Content-Type: application/json`), 
 (`app.js`'s `post`: JSON, the key, given up after `POST_MS` of silence; a `{ok, status, headers,
 json()}`, #1391), `view(name, {mount(root),
 show(), hide()})` (`stats` gets `#stats-body`, `settings` `#settings-rows`; mounted once, at once,
-shown and hidden on each switch and on `visibilitychange`; a second registration is ignored),
+shown and hidden on each switch and on `visibilitychange`, and the view shown is shown again,
+`reshowView`, when the network comes back (`online`) or the stream does after a failure, #1412; a
+second registration is ignored),
 `toast(text)` (3.5 s), `on('state' | 'view', fn)` (each snapshot applied; each switch, its name),
 `current()`. Each view's files are its own, so the two are built apart.
 
@@ -6039,7 +6056,8 @@ what the agent does*). `WB.view('stats', …)`: `mount` puts two sections in `#s
 (`.st-now-box`) and the history (`.st-hist-box`), drawn apart so a tick redraws Now alone. `show`
 fetches `GET /api/stats` (`{feed, routes, models}`, the feed `wb stats --json`'s), again every
 `REFETCH_MS` 60 s and once `feed.until` (the next local midnight) passes; a failure says `History
-unavailable: <why> (wb stats --json)`, or `Not updated: …` over the last feed. With
+unavailable: <why> (wb stats --json)`, or `Not updated: …` over the last feed, each with a Try again
+button (`.st-retry`), and is read again once the line is back (`reshowView`, #1412). With
 `feed.settings.live` on it opens `GET /api/top` (a `fetch` with the bearer header, read as SSE like
 `/api/stream`): each `event: top` is one `wb top --json` snapshot, and `event: down` (`{why,
 retry}`) says `This machine can't be read: <why>; trying again in <retry>s (wb top --json)`; a
@@ -6233,7 +6251,9 @@ alone, and a generic renderer: a new setting touches only Python.
 - **Read.** `WB.view('settings', …)`; each `show` (the tab, or the page back on screen), and the
   window's `focus` while shown (beside the terminal it stays shown, #1392), runs `GET
   /api/settings` (`{rows, ts}`, #1280) into `#settings-rows`, above the device cards. A failed read
-  keeps the last rows, or says `Settings couldn't load: <why>` with none yet. A read that left
+  keeps the last rows, or says `Settings couldn't load: <why>` with none yet, and a Try again button
+  (`.set-retry`); the view shown is read again once the line is back (`reshowView`, *The views'
+  API*), so one opened before it was, as a phone waking, no longer waits for a tab switch (#1412). A read that left
   before a write ended is dropped (`reads`, `wrote`), since the write's own rows are newer.
 - **Groups** are `.card`s (`.set-card[data-group]`, an `h3` each) in a `.cards` grid, in `GROUPS`
   order with their names: `shared` "Agents and roles", `gpu` "GPU", `api` "API", `terminal`
@@ -6247,7 +6267,9 @@ alone, and a generic renderer: a new setting touches only Python.
     choices, a `<select>` past it or with `other`. Such a select ends with "Other model…", which opens
     a text input (`input[data-other]`); Enter sends the typed id, Escape closes the input and the
     select shows the row's value again. A value off the list (none, for an API role without a model)
-    is the select's first option.
+    is the select's first option. The focus ring (choices, selects, text boxes; the nav's tabs too)
+    is the text's colour, `--fg`, and on a lit choice `--accent-fg`: the accent was unseen on the lit
+    choice's own fill and under 3:1 on the panel (#1410).
   - `number`: a text input (`inputmode=decimal`) with its unit (`usd` `$` … `/day`) and an Off
     button (`.set-off`, pressed while the value is null). Enter sends the value, blur a changed
     one; an empty box sends nothing, since Off is the button's.
@@ -6267,8 +6289,11 @@ alone, and a generic renderer: a new setting touches only Python.
   fresh read once nothing waits, since the change may have landed.
 - **One request at a time** (`queue`, `pump`): a click made meanwhile lights at once and waits; a
   row clicked again while its first click still waits sends only its newest value. A redraw keeps
-  an id or a number being typed in another row, and its focus. A blur caused by the redraw itself
-  sends nothing (`drawing`).
+  an id or a number being typed in another row, and its focus. Any other control keeps the focus
+  too, found again by its row's key and `data-value`, else the row's control of its tag (one
+  disabled while its click waits gets it at the next redraw, `refocus`): a choice made by keyboard
+  left the focus on the page, and the next Tab began again at the first row (#1409). A blur caused
+  by the redraw itself sends nothing (`drawing`).
 
 `tests/e2e_settings.mjs` checks it once per device (*The tests*).
 
@@ -7744,13 +7769,17 @@ whose roles, OpenCode config and OpenCode are its own too (`WB_ROUTES`, `WB_OPEN
 hosted.json, renamed the Stats check's providers, #1286), WebKit as an iPhone 13
 and Chromium (`$CHROMIUM`, `/usr/bin/chromium`, else Playwright's) as a Pixel 7, then at a desktop's 1280×800
 (`DESKTOP`: the checks through Settings', then the shell's alone). The shell (`shell`, #1284): the bar at the foot
-on a phone and the rail on the desktop, the hash and Back, the Chat tab's badge, the bar hidden with the keyboard
-(a visual viewport made short by hand), the cards' styles kept out of the chat (the intro's `<code>`), `window.WB`, and the gear's old checks from Settings and Stats (`goTo`);
+on a phone and the rail on the desktop (and with an iPhone's sideways insets, app.css with them written in for
+`env()`, each tab 44 px or wider, #1413), the hash and Back, the Chat tab's badge, the bar hidden with the keyboard
+(a visual viewport made short by hand; on the Pixel the whole page too, #1414), the cards' styles kept out of the chat (the intro's `<code>`), `window.WB`, and the gear's old checks from Settings and Stats (`goTo`);
 then each view's own, `e2e_stats.mjs` and `e2e_settings.mjs` (`check(page, ctx)`, once per device). `e2e_stats.mjs` (#1285): a fixture
-results.jsonl's task count under This week, the labels in `statsLines`' order and none of the rows
+results.jsonl's task count under This week (waited for whole, `3 tasks · 2 landed (67%)`: shown again the view
+draws its last read at once, and the savings check's feed said `3 tasks` too, so a wait on that ended before the new
+read came, #1418), the labels in `statsLines`' order and none of the rows
 #1322 took (Streak, Last 30 days, Bests, Milestone, Questions, a score or estimate); `/api/top` opened on showing Stats with Live view on, let go on leaving it, never opened
 with Live view off; Now from fixed ticks (the GPU and RAM cards, the running rows, the rack folded,
-the queue); no sideways scroll at a phone's width and at 1280 px (two columns); the empty state.
+the queue); shown out of reach, `Not updated` with Try again, read again at the `online` event with no tab switch
+(#1412); no sideways scroll at a phone's width and at 1280 px (two columns); the empty state.
 Where the server answers neither `/api/stats` nor `/api/top`, the page's `fetch` stands in (the
 real `wb stats --json` of the run's `WB_HOME`; a held stream): Playwright's routes stop holding
 requests once the worker registers (#1223). The Settings
@@ -7758,7 +7787,10 @@ view's (#1286): the groups in order, "Agents and roles" first, above the device 
 `#settings`'s alone); Claude coding → "Ask me first" lit at once, then `coding.json` and `wb coding` say `ask`; a
 409 puts the control back and toasts, with a second click waiting for the first; a change made outside drawn at
 the window's `focus`, and a click on the value shown still sent (#1392); a POST that never answers given
-up after `POST_MS`, the next change sent (the wrapper rejects at the signal's abort, as a real fetch, #1391); "Other model…": Escape closes
+up after `POST_MS`, the next change sent (the wrapper rejects at the signal's abort, as a real fetch, #1391); opened with the
+computer out of reach, Try again shown and the rows drawn once the stream gets through, with no tab switch (#1412); a choice
+made with Space keeping the focus on its radio, and a number sent with Enter on its box (#1409); the focus ring
+on a lit and an unlit choice at 3:1 or more against what is under it (`ringContrast`, #1410); "Other model…": Escape closes
 the input, the select back on the row's value, and Enter sends the typed id; a note drawn beside a choice in its
 group; a number's Enter and Off; `help`'s toast; the layout at the phone's width, and on the desktop at 1280 px
 (two columns) and 390 px (one), nothing past the view's edge. Its calls to `/api/settings` go through a page-side
@@ -7769,7 +7801,11 @@ the click still runs the real wb. What the chat is for (#1341): the empty state'
 thread the hint shows, dismisses, and stays dismissed after a reload, and where every storage call throws it still
 shows and dismisses with no page error. Sends land exactly once through
 outages, reloads and a SIGSTOP past the 40 s watchdog; settings (no away setting, its old endpoint 404), install over https, `/api/seen` and
-`/api/active` only while in use and on the Chat view (none from a click in Settings or Stats, #1374), the waiting line (one line, no buttons, no answer card, cleared once settled, #1350), shot pairs, listen's shortlist, the keyboard, uploads (an upload check that never answers given up, #1390), an agent's message
+`/api/active` only while in use and on the Chat view (none from a click in Settings or Stats, #1374), the header's
+`computer unreachable` while the server is down, `listening` once it is back (#1415), the thread
+in no live region (a presence change re-adds no row's line, and a focused `copy` keeps the focus; a reply said once,
+whole, in `#say`, #1408, #1409; *send again* pressable again once its copy landed), the message box's focus ring at 3:1 on the page (#1411), a lead-in line and its bullets as a paragraph and a list
+(#1416), the waiting line (one line, no buttons, no answer card, cleared once settled, #1350), shot pairs, listen's shortlist, the keyboard, uploads (an upload check that never answers given up, #1390), an agent's message
 shown with its name and its reply through `/api/wait`, that reply named `Claude to <agent>` and
 never counted unread (#1128), its state without the user's, a 25-task backlog's strip at most three lines on a phone, the queued counted apart
 (#1097); and `sw.js` in a node `vm` (`swSays`) for a push's text, and for a notification's click (to the chat). Each wait is `until` on its condition
