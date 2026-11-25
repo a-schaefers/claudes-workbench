@@ -7,7 +7,7 @@ by kind: a `choice` its `value`, `choices` [{value, label, says}] and `says` (th
 current value), with `other: true` where any model id goes (the role command checks it); a
 `number` its `value` (a float, or None for off) and `unit` (`usd` or `per_kwh`); an `info` its
 `text`; an `action` its `text` and its `choices`, which are buttons; a `note` one line for the group
-(NO_PROVIDER, OLDER_WB or wb's own reason), drawn in its place beside the group's other rows. A row may
+(NO_PROVIDER or CATALOG_FAILED, OLDER_WB or wb's own reason), drawn in its place beside the group's other rows. A row may
 carry `help`: the note for Claude while the setting is on but can't work yet (probe not set up),
 which apply() also returns when that value was just chosen; the chat server records it, and the
 mod turns it into a [workbench] turn where Claude offers to help (#1279's addendum, the owner,
@@ -46,6 +46,9 @@ API_MENU = 12  # an API row lists at most this many models, the ones in use firs
 
 OLDER_WB = "wb is older than the mod: wb update"
 NO_PROVIDER = "No API provider connected: /connect in OpenCode adds one; every role runs on the GPU."
+# in NO_PROVIDER's place when OpenCode's catalog couldn't be read: /connect was no fix for a
+# server that couldn't find OpenCode, whose keys were stored (#1342)
+CATALOG_FAILED = "OpenCode's catalog couldn't be read, so no API provider shows: {why}"
 NO_GPU = "No GPU model found (wb models)"
 
 _WRITE = threading.Lock()  # one write at a time: two clicks never interleave their wb calls
@@ -382,7 +385,8 @@ def _build() -> dict:
         provs = r.get("providers") or {}
         stored = any(p.get("key") in ("stored", "ollama") for p in provs.values() if isinstance(p, dict))
         if not stored and not any(row.get("api") for _, _, row in roles):
-            out.append(_note("api-none", "api", NO_PROVIDER))
+            err = r.get("catalog_error")
+            out.append(_note("api-none", "api", CATALOG_FAILED.format(why=err) if err else NO_PROVIDER))
         else:
             if provs:
                 out.append(_info("api-connected", "api", "Connected", _connected_line(r)))

@@ -3398,7 +3398,10 @@ read as a wrong id, Claude hunted for the "right" one).
   `store.read_json(…, {})`; trusted for nothing but listing). A failed
   read (OpenCode missing, exit not 0, `CATALOG_TIMEOUT` 30 s; each read runs in a session of its own,
   `media.run_group`, killed whole, so a wrapper's OpenCode never outlives it) is cached for `DOWN_SECS`: `hosted()`
-  is `{}` and `hosted_error()` the first stderr line, redacted. Writes are `store.write_json`
+  is `{}` and `hosted_error()` the first stderr line, redacted; but a failed read by a process
+  that finds no OpenCode binary (its `stamp.opencode` empty) never replaces a good document, which
+  it answers unwritten (#1342: the web app's service, on the manager's PATH, overwrote the
+  terminal's catalog with `opencode not found`). Writes are `store.write_json`
   (atomic: two rebuilding at once, the last wins). Parsed once per change of the file a process
   (`_HOSTED`). `hosted()` never runs on a GPU path: `resolve` asks only after the GPU side misses,
   `lookup` only for an id `discover()` lacks, both only for one `gpu_side` says isn't the GPU side's.
@@ -5398,15 +5401,32 @@ else `chat/serve.pid`, else 1337; `--port`, #349; the fragment never leaves the 
   --user is-enabled`, on macOS `launchctl print`, #756), it starts the unit (`chat._start_unit`:
   `systemctl --user start wb-chat`, `launchctl kickstart gui/<uid>/workbench.chat`), else
   `chat.start` (unless serve.pid's server is still starting), then `wait_up`: `started`, or
-  `failed` (`why`: serve.log's last line, or that the service didn't answer). One at a time
+  `failed` (`why`: serve.log's last line). A unit that doesn't answer is followed by `chat.start`
+  once (#1343: one that exits 78, stopped for good, left the app down, as only the unit was ever
+  started again): `started` with `why` naming the unit, or `failed`. One at a time
   (`chat/ensure.lock`). `wb chat url` runs it and prints the link alone (the mod reads it whole);
   `wb chat url --json` prints the dict, exit 0, for the mod. **`wb setup`** installs the service
   (`cli.install_service`; `--no-service` skips it): on Linux, where `systemctl --user
   show-environment` answers with this HOME, it links `systemd/wb-chat.service` into
   `~/.config/systemd/user/` (a unit there of the user's own is kept and used; `--force` replaces a
-  link elsewhere), stops the server `wb chat on` started (`chat.stop_started`, so the unit gets
-  the port), then `daemon-reload` and `enable --now wb-chat`; on macOS it copies the plist into
-  `~/Library/LaunchAgents/` (a copy there is kept) and `launchctl bootstrap`s it. One line: `ok
+  link elsewhere) and writes the drop-in `wb-chat.service.d/10-wb-setup.conf` (`cli.SERVICE_DROPIN`)
+  with `cli.service_env`: `PATH` (the directory of the Python running setup, then setup's PATH,
+  then the manager's) and each set `store.PATH_VARS`, made absolute. The manager's PATH has none
+  of the shell's, so a pyenv, conda or uv Python 3.11+ was missing and the unit exited 78 (#1343),
+  and OpenCode in `~/.opencode/bin` or probe in `~/.local/bin` were missing, so the web Settings
+  said OpenCode isn't installed (#1342); a `systemctl --user edit` override.conf sorts after it
+  and wins. It stops the server `wb chat on` started (`chat.stop_started`, so the unit gets the
+  port), then `daemon-reload`, `enable wb-chat` and `start` (`restart` when the drop-in changed).
+  On macOS it writes the plist into `~/Library/LaunchAgents/` with `EnvironmentVariables` from
+  `service_env` and a comment carrying `cli.SERVICE_MARK` (an absent copy, the shipped file's
+  plain copy or one with the mark is rewritten; one without it is the user's, kept), boots out a
+  loaded agent whose plist changed, and `launchctl bootstrap`s it. Then the service's chat must
+  answer on `chat.PORT` within `START_WAIT` (`cli._came_up`): `enable --now` and `bootstrap`
+  succeed when the server exits at once, and setup said `ok` over an app left down. One that
+  doesn't is stopped (`systemctl --user disable --now wb-chat`, `launchctl bootout`), wb's own
+  server started (`chat.ensure`), and the line is `--  web app service: <service> didn't answer
+  within 10 s, so setup stopped it (…) and wb started its own server instead; <journalctl --user
+  -u wb-chat | launchctl print …> says why, then wb setup again`. One line: `ok
   web app kept up by systemd's wb-chat (<link> → <unit>)`, a `--` line for a failed step, `--  web
   app off: no service installed (wb chat on, then wb setup)` with the switch off, nothing where
   neither manager serves this HOME (WSL without systemd, a container, a test's or sudo's HOME):
@@ -5837,7 +5857,7 @@ setting touches only Python. The chat server draws from it (#1280); nothing in i
 `[{value, label, says}]`, `says` for the current value, `other`); `number` (`value` a float or null
 for off, `unit` `usd` or `per_kwh`; `off`, `""` and null clear it); `info` (`text`); `action`
 (`text` and its `choices`, buttons); `note` (`text`: one line for its group, drawn in its place
-beside the group's other rows: `NO_PROVIDER`, `OLDER_WB`, `NO_GPU`, or wb's own reason when
+beside the group's other rows: `NO_PROVIDER`, `CATALOG_FAILED`, `OLDER_WB`, `NO_GPU`, or wb's own reason when
 routes.json can't be read).
 `other: true` (the `api-<role>` rows) takes any id; `wb route` checks it (a value starting `-` or
 holding a space is refused here, never read as a flag). A row may carry `help`, the note for Claude
@@ -5857,7 +5877,8 @@ in which Claude offers to set it up and installs nothing without a yes (#1283; #
   (no six-row cap) → `wb model sizes <id> [size]`; `optimize`, an action (`start`) beside its
   status line → `wb optimize start`; `media-image|speech|sfx|music`, each only with two or more
   engines → `wb image|audio --default <name>`.
-- *api* (one `api-none` note, `NO_PROVIDER`, with no stored key and no role's API model):
+- *api* (one `api-none` note, `NO_PROVIDER`, with no stored key and no role's API model; with
+  `wb route --json`'s `catalog_error` set, `CATALOG_FAILED` naming it instead, #1342):
   `api-connected` (info); `api-<role>` (the role's model, the others', those used, then the
   catalog by provider, `API_MENU` 12 at most) → `wb route <role> --api <id>`; `think-<role>` (the
   pane's `thinkStops`) → `wb route <role> --thinking on|off`; `api-spend` (info).
@@ -6517,7 +6538,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb model rename <old id> <new id>` | | models.json `renamed_from` (#818); refused while the old id is configured, or for an API id. |
 | `wb model price <exact id>` | `--input X`, `--output Y`, `--cache-read Z`, `--cache-write W`, `--clear` | An API model's own prices per M (models.json `cost`, *Estimates or your prices*, #1135): its figures say `your prices`, no `≈`; `--clear` the catalog's again. Needs `--input` and `--output`; a cache price left out is the catalog's ratio to input, printed (`models.own_cache`, #1155); refused for an id not in the catalog, a plan, a free model, one `models.catalog_doc` can't carry, prices all 0 (free, outside the cap); another action's flag refused. |
 | `wb model sizes <id> [trivial] [significant]` | | The sizes it's routed; another action's flag refused (#602); an API id refused: `sizes are for GPU models; API models run by role`. |
-| `wb route [<role> gpu\|api\|<provider/model>] [<role> <choice>…]` (several roles, one change, #1024) / `wb route all gpu\|api\|both` (the Agents switch, `use`) / `wb route cap <usd>\|off` / `wb route busy wait\|api` (#1023) | `--gpu ID\|auto`, `--api ID`, `--thinking on\|off`, `--day-usd N`, `--order NAME[,NAME]` (an OpenRouter role's backends, `privacy.parse_order`; an OpenRouter model set or switched to without them exits 3, `privacy.order_refusal`, #1021), `--json` (show: the roles, `busy`, `summary`, each API model's `api_status`, `spend_today`, `providers`; with `--dry-run`: `{change, gate, approval}`), `--dry-run` (the change line, nothing written, no approval needed), `--start ARGS` (with `--dry-run`: the dialog line for `wb start ARGS` on an API `--model`, the mod's; exit 3 with `API_NOT_YET` while `cli.API_RUNS` is off) | *Roles*. No role: shows them. A change prints `changed: <line>` (`unchanged: <summary>` for none); exit 3 for an API id not in the catalog, a GPU id, one with no key wb can hold, `api` with none kept, the first API role with no cap, and under Claude Code a gated change the mod's dialog didn't approve (`route-ok.json`). A GPU pin needs no dialog. |
+| `wb route [<role> gpu\|api\|<provider/model>] [<role> <choice>…]` (several roles, one change, #1024) / `wb route all gpu\|api\|both` (the Agents switch, `use`) / `wb route cap <usd>\|off` / `wb route busy wait\|api` (#1023) | `--gpu ID\|auto`, `--api ID`, `--thinking on\|off`, `--day-usd N`, `--order NAME[,NAME]` (an OpenRouter role's backends, `privacy.parse_order`; an OpenRouter model set or switched to without them exits 3, `privacy.order_refusal`, #1021), `--json` (show: the roles, `busy`, `summary`, each API model's `api_status`, `spend_today`, `providers`, `catalog_error` (`models.hosted_error`, `""` when the last read worked, #1342); with `--dry-run`: `{change, gate, approval}`), `--dry-run` (the change line, nothing written, no approval needed), `--start ARGS` (with `--dry-run`: the dialog line for `wb start ARGS` on an API `--model`, the mod's; exit 3 with `API_NOT_YET` while `cli.API_RUNS` is off) | *Roles*. No role: shows them. A change prints `changed: <line>` (`unchanged: <summary>` for none); exit 3 for an API id not in the catalog, a GPU id, one with no key wb can hold, `api` with none kept, the first API role with no cap, and under Claude Code a gated change the mod's dialog didn't approve (`route-ok.json`). A GPU pin needs no dialog. |
 | `wb scout` | `--done [--notes "…"]` (`--notes` alone refused, #602), `--due` (7 days), `--watch "…"`, `--unwatch N` (1-based) | The weekly facts: `cli.gpu_line`, `cli.ollama_line`, `cli.server_lines` (`models.SERVER_COMMANDS`, `models.SERVER_PORTS`, `NEEDS_KEY`, `models.WSL_NAT`, `models.server_key`), `audio.coverage`, `cli.image_server_lines`; the API section (`cli.scout_api_lines`: roles, API records, spend, a count per provider, #1024). |
 | `wb skill list \| show <n> \| scan <n\|path>` | | The library, a skill's history, the scan. |
 | `wb skill add <n> --from <src> -m "…"` | `--source "<origin>, <license>"`, `--lesson ID…`, `--reviewed RULE…` (never `scan.UNREVIEWABLE`) | Check, scan, copy, commit. |
@@ -6705,6 +6726,10 @@ $WB_HOME (~/.local/state/workbench)
                                  thinking setting, routes.with_thinks on every change; said only while "api" is that id, #1263)}}}; a missing role is the GPU's
                                  default; wb route writes it (store.edit_config), the mod reads it (readRoutes); its "day_usd" is the API day
                                  cap the meter keeps (*Spend*, #1019)
+~/.config/systemd/user/wb-chat.service (wb setup's link to systemd/wb-chat.service) and wb-chat.service.d/10-wb-setup.conf
+                                 (cli.SERVICE_DROPIN: a comment, [Service], Environment="PATH=…" and each set store.PATH_VARS, cli.service_env;
+                                 rewritten by each wb setup, #1342, #1343); macOS: ~/Library/LaunchAgents/workbench.chat.plist (the shipped plist
+                                 with EnvironmentVariables from service_env and a comment with cli.SERVICE_MARK; one without the mark is the user's)
 ~/.config/opencode/opencode.json + .jsonc (layered, under $XDG_CONFIG_HOME; then $OPENCODE_CONFIG; $WB_OPENCODE_CONFIG) the models
 /tmp/wb-run-<uid>-<hash>/        the agent's XDG_RUNTIME_DIR (lane on; context.runtime_dir), 0700, .wb-owner {home, task} (RUNTIME_OWNER);
                                  aside/: where the self-review copies a file aside (runner.self_review_aside, #1085)
@@ -7138,7 +7163,7 @@ fallbacks for `merge-tree --write-tree`, 2.38, and `GIT_NO_LAZY_FETCH`, 2.44; `w
 
 **Files.** `test_workbench.py` (end to end, one class per feature); `test_gpu.py` (sharing, `can_share`, the budget);
 `test_portable.py` (discovery against real HTTP servers on port 0, `ServerAway`, the polling watcher, the launchers);
-`test_chat_default.py` (the web app on by default: the switch, `chat.ensure`, `wb setup`'s service, #1281);
+`test_chat_default.py` (the web app on by default: the switch, `chat.ensure`, `wb setup`'s service and its environment, systemd and launchd, #1281, #1342, #1343);
 `test_chat_admin.py` (*The admin endpoints*, a real `wb chat serve` on a temp `WB_HOME`: GET and POST /api/settings
 round-tripping a `coding` change and its settings-changes.jsonl row, probe turned on without `probe` carrying `help`,
 415 without the JSON type, /api/stats' feed, an agent token 403 on the four and on every path and method outside

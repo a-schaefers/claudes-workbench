@@ -3392,7 +3392,8 @@ def _read_catalog_later() -> None:
 
 def _route_pane() -> dict:
     """`wb route --json`'s keys for the pane's Settings tab (#1023): `spend_today` (the day
-    ledger's, spend-api.jsonl: {usd, prices, by_provider}) and `providers` ({id: {name, key, why}}, key
+    ledger's, spend-api.jsonl: {usd, prices, by_provider}), `catalog_error` (models.hosted_error,
+    "" when the last read worked, #1342) and `providers` ({id: {name, key, why}}, key
     stored, ollama (Ollama cloud's login), env, oauth or none, from the cached catalog: never a
     network probe or OpenCode run inline; with no cache, or one past PANE_REREAD_SECS that lists no
     stored key, one read in the background, _read_catalog_later)."""
@@ -3418,7 +3419,7 @@ def _route_pane() -> dict:
                          if raw == "ollama" else
                          {"why": f"can't run: needs a key wb can hold outside the lane ({held})" if raw
                           else "no key: /connect in OpenCode adds one"})}
-    return {"spend_today": _spend_today(), "providers": provs}
+    return {"spend_today": _spend_today(), "providers": provs, "catalog_error": models.hosted_error()}
 
 
 def _spend_today() -> dict:
@@ -6536,15 +6537,91 @@ def _failed(argv: list[str], said: str) -> str:
     return f"--  web app service: {' '.join(argv)} failed: {(said.splitlines() or ['(nothing)'])[-1]}"
 
 
+# The service manager's PATH (systemd's /usr/local/bin:/usr/bin, the plist's Homebrew one) has
+# none of the user's shell: a Python 3.11+ from pyenv, conda or uv was missing, so bin/wb exited 78
+# and the unit stayed down for good (#1343); OpenCode from its own installer (~/.opencode/bin) and a
+# probe in ~/.local/bin were missing, so the web Settings said OpenCode isn't installed (#1342). wb
+# setup writes what it runs with into the service: this drop-in on Linux (a `systemctl --user
+# edit`'s override.conf sorts after it and wins), the plist's EnvironmentVariables on macOS.
+SERVICE_DROPIN = "wb-chat.service.d/10-wb-setup.conf"
+SERVICE_MARK = "Written by `wb setup`"  # a plist that says so is wb's to rewrite; any other the user's
+
+
+def service_env(manager_path: str = "") -> dict[str, str]:
+    """The environment wb setup gives the web app's service (#1342, #1343): PATH with the
+    directory of the Python running setup first (bin/wb re-execs into a 3.11+, so it is one), then
+    setup's own PATH, then the manager's; and every set store.PATH_VARS (WB_HOME, WB_CHAT_TOKEN, ...),
+    made absolute. A value with a newline is left out: neither file could carry it."""
+    dirs = [os.path.dirname(sys.executable), *os.environ.get("PATH", "").split(os.pathsep),
+            *manager_path.split(os.pathsep)]
+    env = {"PATH": os.pathsep.join(dict.fromkeys(d for d in dirs if os.path.isabs(d)))}
+    for var in store.PATH_VARS:
+        if os.environ.get(var):
+            env[var] = os.path.abspath(os.path.expanduser(os.environ[var]))
+    return {k: v for k, v in env.items() if "\n" not in v}
+
+
+def _systemd_dropin(env: dict[str, str]) -> str:
+    def quoted(v: str) -> str:  # systemd's quoting; % is a specifier
+        return v.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    return (f"# {SERVICE_MARK} (#1342, #1343): the PATH and WB_* variables it ran with, so the web\n"
+            "# app runs the same Python, OpenCode and probe as your shell. wb setup rewrites it; your own\n"
+            "# `systemctl --user edit wb-chat` (override.conf) loads after it and wins.\n[Service]\n"
+            + "".join(f'Environment="{k}={quoted(v)}"\n' for k, v in env.items()))
+
+
+def _launchd_plist(env: dict[str, str]) -> bytes:
+    import plistlib  # only here: wb setup's on macOS
+    with open(PKG_ROOT / "launchd/workbench.chat.plist", "rb") as f:
+        agent = plistlib.load(f)
+    agent["EnvironmentVariables"] = env
+    note = (f"<!-- {SERVICE_MARK} from launchd/workbench.chat.plist (#1342, #1343), with the PATH and "
+            "WB_* variables it ran with. wb setup rewrites it; remove this line to keep your edits. -->\n")
+    return plistlib.dumps(agent).replace(b"<plist ", note.encode() + b"<plist ", 1)
+
+
+def _write_if_changed(at: Path, body: bytes) -> bool:
+    try:
+        if at.read_bytes() == body:
+            return False
+    except OSError:
+        pass
+    at.parent.mkdir(parents=True, exist_ok=True)
+    tmp = at.with_name(at.name + ".tmp")
+    tmp.write_bytes(body)
+    os.replace(tmp, at)
+    return True
+
+
+def _came_up(stop: list[str]) -> str | None:
+    """None when the service's chat answers within chat.START_WAIT, else wb setup's `--` line, the
+    service stopped with ``stop`` and wb's own server started (chat.ensure): enable --now and
+    bootstrap succeed when the server exits at once (exit 78: a Python 3.11+ not on the unit's
+    PATH), and setup said `ok  kept up` over a web app left down for good (#1343)."""
+    if chat.wait_up(chat.PORT, None):
+        return None
+    _service_run(stop)
+    got = chat.ensure(chat.port())
+    kept = ("wb started its own server instead" if got["state"] in ("up", "started")
+            else f"and wb's own server didn't start either: {got.get('why')}")
+    why = ("journalctl --user -u wb-chat" if not chat._macos()
+           else f"launchctl print gui/$(id -u)/{chat.LAUNCHD_LABEL}")
+    return (f"--  web app service: {chat.service_name()} didn't answer within {chat.START_WAIT} s, so "
+            f"setup stopped it ({' '.join(stop)}) and {kept}; {why} says why, then wb setup again")
+
+
 def install_service(force: bool = False) -> str | None:
     """wb setup's service for the web app (#1281), so it is up after a reboot with no Claude
     session open: on Linux, where `systemctl --user` answers, systemd/wb-chat.service linked into
-    the user manager's unit directory, then daemon-reload and enable --now; on macOS the launchd
-    agent copied into ~/Library/LaunchAgents and bootstrapped. First the server `wb chat on`
-    started is stopped (chat.stop_started), so the unit gets the port. Its one line, or None where
-    neither manager serves this HOME (WSL without systemd, a container, a HOME not the manager's:
-    a test's, or sudo's), which the mod's `wb chat url` covers. Safe to run again. The user's off
-    stays off: nothing is installed while the switch is."""
+    the user manager's unit directory with setup's environment in a drop-in (service_env,
+    SERVICE_DROPIN), then daemon-reload, enable, and start (restart when the drop-in changed); on
+    macOS the launchd agent written into ~/Library/LaunchAgents with that environment and
+    bootstrapped. First the server `wb chat on` started is stopped (chat.stop_started), so the unit
+    gets the port; a service whose chat doesn't answer then is stopped again and wb's own server
+    started (_came_up). Its one line, or None where neither manager serves this HOME (WSL without
+    systemd, a container, a HOME not the manager's: a test's, or sudo's), which the mod's `wb chat
+    url` covers. Safe to run again. The user's off stays off: nothing is installed while the
+    switch is."""
     if not chat.is_on():
         return "--  web app off: no service installed (wb chat on, then wb setup)"
     if chat._macos():
@@ -6557,8 +6634,8 @@ def install_service(force: bool = False) -> str | None:
     env = dict(x.split("=", 1) for x in said.splitlines() if "=" in x)
     if Path(env.get("HOME") or Path.home()).resolve() != Path.home().resolve():
         return None  # it would never read a unit linked under this HOME
-    at = Path(env.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "systemd/user/wb-chat.service"
-    to = PKG_ROOT / "systemd/wb-chat.service"
+    units = Path(env.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "systemd/user"
+    at, to = units / "wb-chat.service", PKG_ROOT / "systemd/wb-chat.service"
     made, theirs = "", False
     if at.is_symlink() and at.resolve() == to.resolve():
         pass
@@ -6570,13 +6647,17 @@ def install_service(force: bool = False) -> str | None:
         at.parent.mkdir(parents=True, exist_ok=True)
         at.symlink_to(to)
         made = " (linked)"
+    changed = _write_if_changed(units / SERVICE_DROPIN, _systemd_dropin(service_env(env.get("PATH", ""))).encode())
     stopped = chat.stop_started()
-    for argv in (["systemctl", "--user", "daemon-reload"], ["systemctl", "--user", "enable", "--now", "wb-chat"]):
+    for argv in (["systemctl", "--user", "daemon-reload"], ["systemctl", "--user", "enable", "wb-chat"],
+                 ["systemctl", "--user", "restart" if changed else "start", "wb-chat"]):
         good, said = _service_run(argv)
         if not good:
             if stopped:  # not left down by setup
                 chat.ensure(chat.port())
             return _failed(argv, said)
+    if down := _came_up(["systemctl", "--user", "disable", "--now", "wb-chat"]):
+        return down
     return f"ok  web app kept up by systemd's wb-chat ({at}{', yours' if theirs else ' → ' + str(to)}{made})"
 
 
@@ -6587,19 +6668,35 @@ def _install_launchd() -> str | None:
     if Path(pwd.getpwuid(os.getuid()).pw_dir).resolve() != Path.home().resolve():
         return None  # launchd's agents run in the account's own home
     at = Path.home() / "Library/LaunchAgents" / f"{chat.LAUNCHD_LABEL}.plist"
-    made = ""
-    if not at.exists():  # a copy there is the user's to edit (WB_HOME, PATH): kept
-        at.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(PKG_ROOT / "launchd/workbench.chat.plist", at)
-        made = " (copied)"
+    shipped = PKG_ROOT / "launchd/workbench.chat.plist"
+    made, changed = "", False
+    try:
+        was = at.read_bytes()
+    except OSError:
+        was = None
+    # an earlier setup's plain copy, or its own written one, is wb's to rewrite; a copy the user
+    # edited (and took the mark off) is theirs: kept
+    if was is None or was == shipped.read_bytes() or SERVICE_MARK.encode() in was:
+        import plistlib
+        with open(shipped, "rb") as f:
+            base = plistlib.load(f).get("EnvironmentVariables", {}).get("PATH", "")
+        changed = _write_if_changed(at, _launchd_plist(service_env(base)))
+        made = " (written)" if changed else ""
+    target = f"gui/{os.getuid()}/{chat.LAUNCHD_LABEL}"
     stopped = chat.stop_started()
-    if not chat._unit_keeps_it():
+    loaded = chat._unit_keeps_it()
+    if loaded and changed:  # launchd reads a plist when it is bootstrapped
+        _service_run(["launchctl", "bootout", target])
+        loaded = False
+    if not loaded:
         argv = ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(at)]
         good, said = _service_run(argv)
         if not good:
             if stopped:
                 chat.ensure(chat.port())
             return _failed(argv, said)
+    if down := _came_up(["launchctl", "bootout", target]):
+        return down
     return f"ok  web app kept up by launchd's {chat.LAUNCHD_LABEL} ({at}{made})"
 
 

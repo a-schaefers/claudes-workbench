@@ -1414,13 +1414,20 @@ def _read_hosted() -> dict:
 def hosted_doc(fresh: bool = False) -> dict:
     """hosted.json's document, rebuilt when missing, foreign, past HOSTED_TTL (a failed read
     past DOWN_SECS), its stamp changed, or ``fresh``. Two processes rebuilding at once both
-    write atomically: the last wins, equally fresh."""
+    write atomically: the last wins, equally fresh. A failed read by a process that finds no
+    OpenCode binary never replaces a good document: that one is answered (#1342)."""
     doc = _read_hosted()
     ts = doc.get("ts")
     ttl = DOWN_SECS if doc.get("error") else HOSTED_TTL
     if fresh or not isinstance(ts, (int, float)) or not 0 <= time.time() - ts < ttl \
             or doc.get("stamp") != _stamp():
-        doc = _build_hosted()
+        new = _build_hosted()
+        # a process with no OpenCode on its PATH (the web app's service under the manager's PATH)
+        # overwrote the terminal's good catalog with "opencode not found", and every read after
+        # it, the web Settings' too, failed (#1342): it keeps the good one, unwritten
+        if new.get("error") and not new["stamp"]["opencode"] and doc.get("models") and not doc.get("error"):
+            return doc
+        doc = new
         try:
             store.write_json(hosted_path(), doc)
         except OSError:  # a read-only state directory: still answer

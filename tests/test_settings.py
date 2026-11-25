@@ -155,6 +155,37 @@ class Settings(tw.Base):
         self.assertEqual(got["said"], "wb: not in OpenCode's catalog: wb models lists the API models")
         self.assertNotIn("api", json.loads(self.routes.read_text())["roles"].get("significant", {}))
 
+    def test_a_server_with_no_opencode_on_its_path_keeps_the_good_catalog_and_sets_an_api_model(self):
+        # #1342 (bar round 9): the web app's service ran on the manager's PATH, without OpenCode's
+        # own install dir, so its read overwrote the terminal's hosted.json with "opencode not
+        # found" and every API pick in Settings failed, said OpenCode isn't installed
+        empty = Path(self.tmp.name) / "no-opencode"
+        empty.mkdir()
+        hosted = models.hosted_path()
+        good = hosted.read_bytes()
+        with mock.patch.dict(os.environ, {"PATH": str(empty)}):  # wb runs by its full path
+            os.environ.pop("WB_OPENCODE_BIN")
+            self.assertIn("deepseek/deepseek-flash", models.hosted_doc(fresh=True)["models"])
+            self.assertEqual(hosted.read_bytes(), good)
+            got = settings.apply("api-writing", "deepseek/deepseek-flash")
+        self.assertTrue(got["ok"], got)
+        self.assertEqual(json.loads(self.routes.read_text())["roles"]["writing"]["api"], "deepseek/deepseek-flash")
+        self.assertEqual(hosted.read_bytes(), good)
+
+    def test_with_no_catalog_read_the_api_group_says_why_not_connect(self):
+        # #1342: with keys stored, a catalog OpenCode couldn't read said "No API provider
+        # connected: /connect in OpenCode adds one", and the user connected again
+        self.routes.write_text(json.dumps({"v": 1, "day_usd": 5, "roles": {}}))
+        empty = Path(self.tmp.name) / "no-opencode"
+        empty.mkdir()
+        models.hosted_path().unlink()
+        with mock.patch.dict(os.environ, {"PATH": str(empty)}):
+            os.environ.pop("WB_OPENCODE_BIN")
+            models.hosted_doc(fresh=True)                       # no good one to keep: the error written
+            note = next(r for r in settings.rows(fresh=True) if r["key"] == "api-none")
+        self.assertEqual(note["text"], settings.CATALOG_FAILED.format(
+            why="opencode not found (OpenCode isn't installed)"))
+
     def test_turning_probe_on_without_probe_returns_the_note_for_claude(self):
         # #1279's addendum (the owner, 2026-11-24): the terminal still offers to help
         empty = Path(self.tmp.name) / "no-probe"

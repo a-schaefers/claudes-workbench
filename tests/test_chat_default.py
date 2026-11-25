@@ -151,10 +151,29 @@ class ChatDefault(Base):
             self.assertEqual(cli.chat_line(), (True, f"web app answers on localhost:{port} ({chat.service_name()})"))
         other = free_port()
         with mock.patch.object(chat, "PORT", other), mock.patch.object(chat, "_unit_keeps_it", return_value=True), \
-                mock.patch.object(chat, "_start_unit"), mock.patch.object(chat, "wait_up", return_value=False):
+                mock.patch.object(chat, "_start_unit"), mock.patch.object(chat, "wait_up", return_value=False), \
+                mock.patch.object(chat, "start", return_value=4242) as fell:
             got = chat.ensure(other)
         self.assertEqual(got["state"], "failed")
         self.assertTrue(got["why"].startswith(f"{chat.service_name()} didn't answer within"), got)
+        self.assertIn("nor did wb's own server", got["why"])
+        fell.assert_called_once_with(other)
+
+    def test_ensure_starts_wbs_own_server_once_when_the_unit_never_answers(self):
+        # #1343 (bar round 9): a unit that exits 78 (a Python 3.11+ not on systemd's PATH) is
+        # stopped for good but still enabled, and ensure only ever started it again, so `wb chat
+        # url`, `wb chat on` and the mod's poll left the web app down for good
+        port = free_port()
+        with mock.patch.object(chat, "PORT", port), mock.patch.object(chat, "_unit_keeps_it", return_value=True), \
+                mock.patch.object(chat, "_start_unit") as unit, \
+                mock.patch.object(chat, "wait_up", side_effect=[False, True]) as waited, \
+                mock.patch.object(chat, "start", return_value=4242) as fell:
+            got = chat.ensure(port)
+        self.assertEqual(got["state"], "started", got)
+        self.assertEqual(got["why"], f"{chat.service_name()} didn't answer within {chat.START_WAIT} s "
+                                     f"({chat.service_hint('status')}): wb started its own server")
+        self.assertEqual((unit.call_count, fell.call_count), (1, 1))
+        self.assertEqual([c.args for c in waited.call_args_list], [(port, None), (port, 4242)])
 
 
 class SetupService(Base):
@@ -193,6 +212,12 @@ class SetupService(Base):
     def ran(self) -> list[str]:
         return self.calls.read_text().splitlines() if self.calls.exists() else []
 
+    def answers(self, up: bool):
+        """Whether the service's chat answers once started: the fake systemctl starts nothing."""
+        patch = mock.patch.object(chat, "wait_up", return_value=up)
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def test_setup_with_no_service_touches_no_unit_directory(self):
         code, out = self.setup("--no-service")
         self.assertEqual(code, 0, out)
@@ -206,12 +231,13 @@ class SetupService(Base):
         fake = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "chat", "serve"])
         self.addCleanup(lambda: (fake.kill(), fake.wait()))
         store.write_json(chat.chat_dir() / "serve.pid", {"pid": fake.pid, "port": 1, "start": chat._started(fake.pid)})
+        self.answers(True)
         code, out = self.setup()
         self.assertEqual(code, 0, out)
         unit = self.home / ".config/systemd/user/wb-chat.service"
         self.assertTrue(unit.is_symlink())
         self.assertEqual(unit.resolve(), (ROOT / "systemd/wb-chat.service").resolve())
-        self.assertEqual(self.ran()[-2:], ["--user daemon-reload", "--user enable --now wb-chat"])
+        self.assertEqual(self.ran()[-3:], ["--user daemon-reload", "--user enable wb-chat", "--user restart wb-chat"])
         lines = [x for x in out.splitlines() if "web app" in x]
         self.assertEqual(lines, [f"ok  web app kept up by systemd's wb-chat ({unit} → "
                                  f"{ROOT / 'systemd/wb-chat.service'} (linked))"])
@@ -220,7 +246,46 @@ class SetupService(Base):
         self.assertEqual(code, 0, out)
         self.assertEqual([x for x in out.splitlines() if "web app" in x],
                          [f"ok  web app kept up by systemd's wb-chat ({unit} → {ROOT / 'systemd/wb-chat.service'})"])
-        self.assertEqual(self.ran().count("--user enable --now wb-chat"), 2)
+        self.assertEqual(self.ran().count("--user enable wb-chat"), 2)
+        self.assertEqual(self.ran()[-1], "--user start wb-chat")          # the drop-in unchanged: no restart
+
+    def test_setup_gives_the_unit_its_own_python_path_and_wb_variables(self):
+        # #1342 and #1343 (bar round 9): the unit ran with the user manager's PATH, so a pyenv,
+        # conda or uv Python 3.11+ was missing (bin/wb exited 78, the unit down for good) and so
+        # were OpenCode in ~/.opencode/bin and probe in ~/.local/bin (the web Settings said
+        # OpenCode isn't installed); nor did it get the WB_* variables the user exports
+        self.answers(True)
+        shell = Path(self.tmp.name) / "shell 100%"
+        os.environ["PATH"] = os.pathsep.join([str(self.bin), str(shell), "relative/bin", os.environ["PATH"]])
+        code, out = self.setup()
+        self.assertEqual(code, 0, out)
+        dropin = self.home / ".config/systemd/user" / cli.SERVICE_DROPIN
+        text = dropin.read_text()
+        self.assertTrue(text.startswith(f"# {cli.SERVICE_MARK}"), text)
+        env = cli.service_env("/usr/bin")
+        self.assertEqual(env["PATH"].split(os.pathsep)[:3], [os.path.dirname(sys.executable), str(self.bin), str(shell)])
+        self.assertNotIn("relative/bin", env["PATH"].split(os.pathsep))
+        self.assertIn("/usr/bin", env["PATH"].split(os.pathsep))
+        self.assertEqual(env["WB_HOME"], str(store.home()))
+        self.assertIn(f'Environment="PATH={os.path.dirname(sys.executable)}{os.pathsep}{self.bin}{os.pathsep}'
+                      f'{str(shell).replace("%", "%%")}{os.pathsep}', text)       # % is systemd's specifier
+        self.assertIn(f'Environment="WB_HOME={store.home()}"', text)
+        self.assertIn(f'Environment="WB_ROUTES={os.environ["WB_ROUTES"]}"', text)
+        self.assertNotIn("CLAUDE", text.replace("CLAUDE_CONFIG_DIR", ""))   # never Claude Code's session
+
+    def test_setup_stops_a_unit_that_never_answers_and_starts_wbs_own_server(self):
+        # #1343 (bar round 9): enable --now returns 0 when ExecStart exits at once (78), and
+        # setup said "ok  web app kept up" over a web app it had just taken down for good
+        self.answers(False)
+        with mock.patch.object(chat, "ensure", return_value={"state": "started", "url": "u"}) as ensured:
+            code, out = self.setup()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.ran()[-1], "--user disable --now wb-chat")
+        ensured.assert_called_once_with(chat.port())
+        self.assertEqual([x for x in out.splitlines() if "web app" in x],
+                         [f"--  web app service: systemd's wb-chat didn't answer within {chat.START_WAIT} s, so setup "
+                          "stopped it (systemctl --user disable --now wb-chat) and wb started its own server "
+                          "instead; journalctl --user -u wb-chat says why, then wb setup again"])
 
     def test_setup_leaves_a_manager_of_another_home_and_the_users_off_alone(self):
         self.manager.write_text("/elsewhere")                    # a test's HOME, or sudo's
@@ -234,6 +299,70 @@ class SetupService(Base):
         code, out = self.setup()
         self.assertIn("--  web app off: no service installed (wb chat on, then wb setup)", out)
         self.assertFalse((self.home / ".config/systemd").exists())
+
+
+class SetupLaunchd(Base):
+    """wb setup on macOS writes the launchd agent with setup's environment (#1342, #1343)."""
+    def setUp(self):
+        super().setUp()
+        self.home = Path(self.tmp.name) / "home"
+        self.home.mkdir()
+        fakebin = Path(self.tmp.name) / "fakebin"
+        fakebin.mkdir()
+        self.calls = Path(self.tmp.name) / "launchctl.calls"
+        self.loaded = Path(self.tmp.name) / "loaded"
+        (fakebin / "launchctl").write_text(
+            "#!/bin/sh\n"
+            f'echo "$1" >> "{self.calls}"\n'
+            f'[ "$1" = print ] && {{ [ -e "{self.loaded}" ]; exit; }}\n'
+            f'[ "$1" = bootstrap ] && touch "{self.loaded}"\n'
+            f'[ "$1" = bootout ] && rm -f "{self.loaded}"\n'
+            "exit 0\n")
+        (fakebin / "launchctl").chmod(0o755)
+        os.environ.update(HOME=str(self.home), PATH=os.pathsep.join([str(fakebin), os.environ["PATH"]]))
+        import pwd
+        me = pwd.getpwuid(os.getuid())
+        for patch in (mock.patch.object(chat, "_macos", return_value=True),
+                      mock.patch("pwd.getpwuid", return_value=mock.Mock(pw_dir=str(self.home), pw_name=me.pw_name)),
+                      mock.patch.object(chat, "wait_up", return_value=True)):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.plist = self.home / "Library/LaunchAgents/workbench.chat.plist"
+
+    def ran(self) -> list[str]:
+        return self.calls.read_text().splitlines() if self.calls.exists() else []
+
+    def test_setup_writes_the_agent_with_its_python_first_and_rewrites_only_its_own(self):
+        import plistlib
+        self.assertEqual(cli.install_service(), f"ok  web app kept up by launchd's workbench.chat ({self.plist} (written))")
+        agent = plistlib.loads(self.plist.read_bytes())
+        env = agent["EnvironmentVariables"]
+        self.assertEqual(env["PATH"].split(os.pathsep)[0], os.path.dirname(sys.executable))
+        self.assertIn("/opt/homebrew/bin", env["PATH"].split(os.pathsep))     # the shipped PATH still on it
+        self.assertEqual(env["WB_HOME"], str(store.home()))
+        self.assertIn(cli.SERVICE_MARK.encode(), self.plist.read_bytes())
+        self.assertEqual(self.ran(), ["print", "bootstrap"])
+        self.assertEqual(cli.install_service(), f"ok  web app kept up by launchd's workbench.chat ({self.plist})")
+        self.assertEqual(self.ran()[2:], ["print"])                          # unchanged and loaded: left as it is
+        os.environ["WB_SKILLS"] = str(Path(self.tmp.name) / "skills-moved")  # setup's environment changed
+        cli.install_service()
+        self.assertEqual(self.ran()[3:], ["print", "bootout", "bootstrap"])  # launchd reads it only when bootstrapped
+        self.assertEqual(plistlib.loads(self.plist.read_bytes())["EnvironmentVariables"]["WB_SKILLS"],
+                         os.environ["WB_SKILLS"])
+        mine = self.plist.read_bytes().replace(cli.SERVICE_MARK.encode(), b"Mine")  # the user's own copy
+        self.plist.write_bytes(mine)
+        os.environ["WB_SKILLS"] = str(Path(self.tmp.name) / "other")
+        cli.install_service()
+        self.assertEqual(self.plist.read_bytes(), mine)
+
+    def test_an_agent_that_never_answers_is_booted_out_and_wbs_own_server_started(self):
+        # #1343: KeepAlive retried a bin/wb that exits 78 every 10 s, and setup said ok
+        with mock.patch.object(chat, "wait_up", return_value=False), \
+                mock.patch.object(chat, "ensure", return_value={"state": "started", "url": "u"}):
+            said = cli.install_service()
+        self.assertEqual(self.ran()[-1], "bootout")
+        self.assertTrue(said.startswith("--  web app service: launchd's workbench.chat didn't answer within"), said)
+        self.assertIn(f"launchctl bootout gui/{os.getuid()}/workbench.chat", said)
 
 
 if __name__ == "__main__":
