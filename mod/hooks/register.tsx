@@ -2164,12 +2164,20 @@ async function callRows($: any, e: Row): Promise<{ tasks: string[]; row: Row }> 
   return { tasks: found, row }
 }
 
-// The row callRows made, with when the call began (`at`, ms) and now that it is over, written
-// one file a call: a row in a shared file would be lost to a parallel call's write
-async function noteCall($: any, tasks: string[], row: Row, at: number, id: string) {
-  const end = await $.clock.now()
-  const name = `${Math.round(at)}-${id.replace(/[^A-Za-z0-9_-]/g, '') || Math.random().toString(36).slice(2)}.json`
-  const text = JSON.stringify({ ...row, at: at / 1000, end: end / 1000 })
+// The file of a call's row: one file a call, as a row in a shared file would be lost to a
+// parallel call's write
+function callFile(at: number, id: string): string {
+  return `${Math.round(at)}-${id.replace(/[^A-Za-z0-9_-]/g, '') || Math.random().toString(36).slice(2)}.json`
+}
+
+// The row callRows made, with when the call began (`at`, ms) and when it ended: written as it
+// begins with `end` null (running), then again once it is over, with `end`, or `denied` if it
+// never ran. A build and `wb accept` in one Bash call, as the skill says, had no row while accept
+// read them, and the build's dist/ was refused as files written by hand (#1272, 2026-11-24)
+async function noteCall($: any, tasks: string[], row: Row, at: number, name: string,
+                        how: 'begun' | 'over' | 'denied') {
+  const end = how === 'begun' ? null : (await $.clock.now()) / 1000
+  const text = JSON.stringify({ ...row, at: at / 1000, end, ...(how === 'denied' ? { denied: true } : {}) })
   for (const t of tasks) await $.fs.write(`${mem.root}/rules/${t}/claude-calls/${name}`, text).catch(() => {})
 }
 
@@ -3659,7 +3667,7 @@ async function checkUpdate($: any) {
 // limit) goes back on the queue and is tried again in a minute: the hand-back's turn was lost
 // after its agents were already stopped (the 2026-11-16 audit).
 async function sendQueued($: any, text: string) {
-  if (text === OWED_NOTE && !owedNudged()) return // answered, or the user came back, since it was queued (#837)
+  if (isOwedNote(text) && !owedNudged(text)) return // answered, or the user came back, since it was queued (#837)
   mem.submitted = true
   const r = await $.prompt.submit({ text }).catch((err: unknown) => ({ drop: String(err) }))
   if (!r?.drop) return
@@ -3873,13 +3881,13 @@ async function listen($: any, now: number) {
       // the away user went to the agent alone, pushed to no phone (#1212, 2026-11-24).
       if (r.isDelivered) await runWb($, ['chat', 'ack', id, '--by', st.key, '--how', agentOf(m) ? 'into' : 'now'])
       else void sendWeb($, id, text, 'queued', st.key, agentOf(m) ? 'into' : 'now')
-      mem.chatOwed.set(id, { at: now, grace: r.isDelivered ? 0 : 1, nudged: false }) // queued: maybe the next turn's
+      mem.chatOwed.set(id, { at: now, grace: r.isDelivered ? 0 : 1, nudged: false, agent: agentOf(m) }) // queued: maybe the next turn's
     } else {
       // behind a prompt submitted this poll (a wake, a queued turn, another web message) whose
       // turn hasn't started yet, it enters only the turn after: that turn's end, Claude not yet
       // having seen it, sent the follow-up for a message Claude then answered (#837). An agent's
       // is `now` only with nothing ahead: behind a wake, the wake's report went to it (#1212).
-      mem.chatOwed.set(id, { at: now, grace: mem.submitted ? 1 : 0, nudged: false })
+      mem.chatOwed.set(id, { at: now, grace: mem.submitted ? 1 : 0, nudged: false, agent: agentOf(m) })
       void sendWeb($, id, text, agentOf(m) && mem.submitted ? 'into' : 'now', st.key)
     }
     mem.chatTurn.set(id, mem.chatOwed.get(id)?.grace ?? 0) // its turn's end goes to turns.jsonl (#1042)
@@ -3942,38 +3950,56 @@ async function sendWeb($: any, id: string, text: string, how: string, by: string
 // goes to the chat, so the phone always hears something. A reply is a `wb chat reply` (or
 // `listen`, or `wb shot --chat`) in Bash, or a row of Claude's in messages.jsonl since; a prompt
 // typed in the terminal ends it (the user is back).
-type Owed = { at: number; grace: number; nudged: boolean }
+// An agent's message (`agent`, its name) is owed its own reply, `--to` it (#1273, 2026-11-24): the
+// follow-up said the user wrote and named a plain `wb chat reply`, which went to the user's phone,
+// and the agent's wait heard nothing; any reply to the user settled the agent's debt too, so not
+// even OWED_POSTED reached it. Only a reply to it settles it: a `--to` naming it, or a row whose
+// `re` holds its id or whose `to` its name.
+type Owed = { at: number; grace: number; nudged: boolean; agent: string }
 const OWED_NOTE =
   '[workbench] The user wrote from the web chat and hasn\'t heard back: answer there with ' +
   '`wb chat reply --text "…"` (the web thread is all they see), briefly. Nothing else to do.'
+const AGENT_OWED = '[workbench] Agent '
+const AGENT_OWED_NOTE = (agent: string, id: string) =>
+  `${AGENT_OWED}${agent}'s message ${id} has no answer: reply with \`wb chat reply --to ${id} --text "…"\` ` +
+  '(a plain reply goes to the user, not the agent), briefly. Nothing else to do.'
+const owedNote = (id: string, o: Owed) => o.agent ? AGENT_OWED_NOTE(o.agent, id) : OWED_NOTE
+const isOwedNote = (text: string) => text === OWED_NOTE || text.startsWith(AGENT_OWED)
 const OWED_POSTED = 'Claude answered in the terminal; nothing was sent here.'
 const REPLIES = /\bwb\b[^\n|;&]*\bchat\s+(reply|listen)\b|\bwb\b[^\n|;&]*\bshot\b[^\n]*--chat\b/
 // The follow-up is owed while a message it was queued for is still unanswered: a reply or the
 // user's return before it went left it in mem.queued, and it went anyway (#837)
-const owedNudged = () => [...mem.chatOwed.values()].some(o => o.nudged)
+const owedNudged = (text: string) => [...mem.chatOwed].some(([id, o]) => o.nudged && owedNote(id, o) === text)
 function owedSettled() {
-  if (owedNudged()) return
-  for (let i = mem.queued.indexOf(OWED_NOTE); i >= 0; i = mem.queued.indexOf(OWED_NOTE)) mem.queued.splice(i, 1)
+  for (let i = mem.queued.length - 1; i >= 0; i--)
+    if (isOwedNote(mem.queued[i]) && !owedNudged(mem.queued[i])) mem.queued.splice(i, 1)
+}
+// The user's debts only: a plain reply, or the user back at the terminal, answers the user, never an agent (#1273)
+function userOwedClear() {
+  for (const [id, o] of [...mem.chatOwed]) if (!o.agent) mem.chatOwed.delete(id)
+  owedSettled()
 }
 async function owedAtTurnEnd($: any) {
   if (!mem.chatOwed.size) return owedSettled()
   const tail = await readTail($, `${mem.root}/chat/messages.jsonl`, NOTIFY_TAIL)
-  // a reply settles it when it answers the message (`re`) or this Claude Code wrote it (`claude_pid`,
-  // unknown: yes): another session's report, posted meanwhile, read as the answer (#1129)
+  // a reply settles it when it answers the message (`re`) or this Claude Code wrote it to the
+  // message's sender (`claude_pid`, unknown: yes; `to`, none: the user's): another session's
+  // report, posted meanwhile, read as the answer (#1129); a reply to the user, as an agent's (#1273)
   const mine = (m: any) => !mem.claudePid || !Number(m.claude_pid ?? 0) || Number(m.claude_pid) === mem.claudePid
+  const toWhom = (m: any, o: Owed) => (Array.isArray(m.to) && m.to.length ? m.to : ['user']).includes(o.agent || 'user')
   const replied = parseLines(tail?.text ?? '').filter(m => m.from === 'claude')
-  let nudge = false
+  const nudge: string[] = []
   for (const [id, o] of [...mem.chatOwed]) {
-    if (replied.some(m => Number(m.ts ?? 0) * 1000 >= o.at && (mine(m) || (Array.isArray(m.re) && m.re.includes(id))))) {
+    if (replied.some(m => Number(m.ts ?? 0) * 1000 >= o.at && ((mine(m) && toWhom(m, o)) || (Array.isArray(m.re) && m.re.includes(id))))) {
       mem.chatOwed.delete(id)
       continue
     }
     if (o.grace > 0) { o.grace--; continue }
-    if (!o.nudged) { o.nudged = true; nudge = true; continue }
+    if (!o.nudged) { o.nudged = true; nudge.push(owedNote(id, o)); continue }
     mem.chatOwed.delete(id)
     await runWb($, ['chat', 'reply', `--text=${OWED_POSTED}`, `--to=${id}`], 15_000)
   }
-  if (nudge && !mem.queued.includes(OWED_NOTE)) mem.queued.push(OWED_NOTE)
+  for (const note of nudge) if (!mem.queued.includes(note)) mem.queued.push(note)
   owedSettled()
 }
 
@@ -4578,15 +4604,17 @@ export const register: Register = (on, options) => {
     // the dialog (#1014, routeRefusal): anyone's call alike
     const routing = await routeRefusal($, e as Row)
     if (routing) return { deny: routing }
-    // Claude's own call in a task's worktree is kept for wb once it is over, unless refused
-    // (callRows, #1211): anyone's alike, a subagent's or another plugin's
+    // Claude's own call in a task's worktree is kept for wb as it begins and once it is over,
+    // marked if refused (callRows, #1211, noteCall, #1272): anyone's alike, a subagent's or
+    // another plugin's
     const kept = await callRows($, e as Row)
     const at = kept.tasks.length ? await $.clock.now() : 0
-    const id = String((e as Row).tool_use_id ?? '')
+    const name = kept.tasks.length ? callFile(at, String((e as Row).tool_use_id ?? '')) : ''
+    if (kept.tasks.length) await noteCall($, kept.tasks, kept.row, at, name, 'begun').catch(() => {})
     if (next.origin.plugin !== 'engine') {
       if (!kept.tasks.length) return next(e)
       const r = await next(e)
-      if (!(r as Row)?.deny) await noteCall($, kept.tasks, kept.row, at, id).catch(() => {})
+      await noteCall($, kept.tasks, kept.row, at, name, (r as Row)?.deny ? 'denied' : 'over').catch(() => {})
       return r
     }
     // The engine's call settles its permission check, a dialog included, before it resolves: one
@@ -4598,7 +4626,7 @@ export const register: Register = (on, options) => {
       denied = !!(r as Row)?.deny
       return r
     } finally {
-      if (kept.tasks.length && !denied) await noteCall($, kept.tasks, kept.row, at, id).catch(() => {})
+      if (kept.tasks.length) await noteCall($, kept.tasks, kept.row, at, name, denied ? 'denied' : 'over').catch(() => {})
       const agent = e.agentId ?? ''
       const d = mem.termDialogs.find(d => d.tool === e.tool && d.agent === agent)
       if (d) await termDialogDone($, d)
@@ -4633,8 +4661,11 @@ export const register: Register = (on, options) => {
     if (delegates(String(e.command ?? ''))) {
       await workbenchMode($, true)
     }
+    // answered in the chat (#767): a plain reply the user, `--to` the messages it names (#1273)
     if (REPLIES.test(String(e.command ?? ''))) {
-      mem.chatOwed.clear() // answered in the chat (#767)
+      const to = [...String(e.command).matchAll(/--to[= ]+['"]?([^\s'"]+)/g)].map(x => x[1])
+      if (!to.length || to.includes('user')) userOwedClear()
+      for (const id of to) mem.chatOwed.delete(id)
       owedSettled()
     }
     return next(e)
@@ -4667,8 +4698,7 @@ export const register: Register = (on, options) => {
   on('prompt.submit', async ($, e, next) => {
     if (byUser(e) && !e.text.startsWith(WEB) && !e.text.startsWith(AGENT) && !e.text.startsWith('[workbench]')) {
       await back($)
-      mem.chatOwed.clear() // back at the terminal: an answer there reaches them (#767)
-      owedSettled()
+      userOwedClear() // back at the terminal: an answer there reaches them (#767), never an agent (#1273)
     }
     return next(e)
   })

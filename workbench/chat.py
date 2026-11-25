@@ -2046,13 +2046,22 @@ class Handler(BaseHTTPRequestHandler):
             return ""
         return addr.lower().removeprefix("::ffff:").split("%")[0]
 
-    def _from_loopback(self) -> bool:
-        """Whether the request came from this machine: the peer is a loopback address."""
+    def _peer(self) -> str:
+        """The address the request came from, normalised as `_local` is."""
         try:
-            peer = str(self.client_address[0]).lower().removeprefix("::ffff:").split("%")[0]
+            return str(self.client_address[0]).lower().removeprefix("::ffff:").split("%")[0]
         except (AttributeError, IndexError, TypeError):
-            return False
-        return peer == "::1" or peer.startswith("127.")
+            return ""
+
+    def _from_this_machine(self) -> bool:
+        """Whether the request came from this machine: the peer is a loopback address, or the very
+        address it connected to. A process reaching this machine's own LAN or tailnet IP comes
+        from that IP, not 127.*, so a chat bound only there (`bind: ["tailscale"]`, which serves
+        no localhost) refused every agent token, its own machine's too (#1274, 2026-11-24). No
+        other machine can come from it: a connection is TCP's, whose handshake answers the source
+        address, and the kernel drops an outside packet that claims one of its own."""
+        peer = self._peer()
+        return peer == "::1" or peer.startswith("127.") or bool(peer) and peer == self._local()
 
     def _authed(self) -> str | None:
         """Who calls: "user" for the user's token, "agent <name>" for an agent's (and ``agent``
@@ -2063,11 +2072,13 @@ class Handler(BaseHTTPRequestHandler):
         if self.secret and got and hmac.compare_digest(got.encode(), self.secret.encode()):
             return "user"
         if got and (name := agent_for(got)):
-            if not self._from_loopback():
+            if not self._from_this_machine():
                 # agents are this machine's own (owner, 2026-11-23): an agent token sent from
                 # another machine (a tailnet or LAN peer of a chat bound for the user's phone) is
-                # refused, whatever the bind; the user's own token is unaffected
-                self._json(403, {"error": "agent tokens work only from this machine (localhost)"})
+                # refused, whatever the bind; the user's own token is unaffected. It named
+                # localhost, which a chat bound only to the tailnet doesn't serve (#1274)
+                self._json(403, {"error": "agent tokens work only from this machine, at the address"
+                                          " `wb chat url` prints"})
                 return None
             self.agent, self.agent_token = name, got
             return f"agent {name}"

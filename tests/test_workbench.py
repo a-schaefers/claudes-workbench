@@ -3828,6 +3828,28 @@ class Lifecycle(Base):
         self.assertIn("+# changed in round 2", run_wb("diff", "t-fb"))  # wb diff's "all of it" too
         self.assertIn("since your last review: (no changes)", runner.review_diff(t))
 
+    def test_wb_verify_and_wb_shot_run_the_candidate_with_the_ignored_files_accept_commits(self):
+        # #1275 (the 2.0 bar loop, 2026-11-24): #1259 put the agent's lib/util.py, under
+        # Python.gitignore's lib/, in the review diff but not in verify's candidate: wb verify
+        # said "the candidate fails it" (ModuleNotFoundError: lib) for a change that passed in
+        # the worktree, wb shot's candidate lacked it, and an edit to it left the check fresh
+        from workbench import verify
+        self.ignore_lib()
+        self.start("t-v", "shellwrite", "--test", TEST_CMD)
+        wait_phase("t-v", {"review"})
+        t = store.Task("t-v")
+        test = "python3 main.py | grep -qx 42 && grep -qx 42 answer.txt"
+        out = run_wb("verify", "t-v", "--test", test, "--files", "answer.txt")
+        self.assertNotIn("the candidate fails it", out)
+        r = verify.last(t)
+        self.assertEqual(r["candidate"]["exit"], 0, Path(r["dir"], "candidate.txt").read_text())
+        self.assertFalse(r["stale"])
+        (t.worktree / "lib" / "util.py").write_text("def answer():\n    return 41\n")
+        self.assertTrue(verify.last(t)["stale"])                  # the ignored file it ran on moved
+        shot = verify.shot(t, "test -f lib/util.py", ["answer.txt"])
+        self.assertEqual(shot["candidate"]["exit"], 0)            # wb shot's candidate holds it too
+        self.assertNotEqual(shot["base"]["exit"], 0)              # and the base doesn't
+
     def test_what_the_runners_test_run_writes_under_an_ignored_path_is_not_taken_for_the_agents(self):
         # #1210 (2026-11-24): read since the agent's first round, a Maven run's surefire report
         # (.xml, a kind pom.xml makes the repo's) would refuse every accept of such a task
@@ -4132,6 +4154,46 @@ class Lifecycle(Base):
                               capture_output=True, text=True).stdout.split()
         self.assertIn("answer.txt", tree)
         self.assertFalse([p for p in tree if p.startswith("target/")], tree)
+
+    def test_a_build_and_an_accept_in_one_claude_call_leave_the_builds_output_out(self):
+        # #1272 (bar round 7 of 2.0, 2026-11-24): Claude ran `npm run build` and wb accept in one
+        # Bash call, as the skill says, and accept refused dist/index.js as a file written by
+        # hand: the mod wrote the call's row only once the call was over, so accept saw none.
+        # It writes it as the call begins, with end null, which wb reads as running until now
+        (self.repo / ".gitignore").write_text("dist/\n")
+        (self.repo / "package.json").write_text('{"scripts": {"build": "tsc"}}\n')
+        (self.repo / "src").mkdir()
+        (self.repo / "src" / "index.js").write_text("module.exports = 42\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "js"], check=True)
+        self.start("t-one", "ok", "--test", TEST_CMD)
+        wait_phase("t-one", {"review"})
+        t = store.Task("t-one")
+        d = context.rules_dir(t) / runner.CLAUDE_CALLS
+        d.mkdir(parents=True, exist_ok=True)
+        at = time.time()
+        (d / f"{int(at * 1000)}-toolu_1.json").write_text(json.dumps(
+            {"tool": "Bash", "cwd": str(self.repo), "at": at, "end": None,
+             "command": f"cd {t.worktree} && npm run build && cd {self.repo} && wb accept t-one -m 'feat: one'"}))
+        # a call refused at its dialog never ran; one a dead session left running ends at CALL_RUNS
+        (d / "1-toolu_2.json").write_text(json.dumps(
+            {"tool": "Write", "path": str(t.worktree / "dist" / "x.js"), "at": at, "end": at, "denied": True}))
+        (d / "2-toolu_3.json").write_text(json.dumps({"tool": "Bash", "command": "make", "at": 1.0, "end": None}))
+        (t.worktree / "dist").mkdir()
+        (t.worktree / "dist" / "index.js").write_text("module.exports = 42\n")   # the build, in the call
+        (t.worktree / "dist" / "index.d.ts").write_text("export {}\n")
+        build, stale = runner.claude_calls(t)
+        self.assertIn("npm run build", build["command"])
+        self.assertTrue(at <= build["end"] <= time.time())
+        self.assertEqual((stale["command"], stale["end"]), ("make", 1.0 + runner.CALL_RUNS))
+        self.assertEqual(runner.hand_wrote(t), [])
+        out = run_wb("accept", "t-one", "-m", "feat: one", "--merge")
+        self.assertIn("accepted t-one", out)
+        self.assertIn("which the commit leaves out as build or test output (dist/index.d.ts, dist/index.js): "
+                      "a copy is in ", out)
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "--name-only", "main"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertFalse([p for p in tree if p.startswith("dist/")], tree)
 
     def test_a_file_claude_writes_by_hand_beside_a_build_it_runs_is_still_refused(self):
         # #1211 (2026-11-24): telling a build's output from Claude's own files must never drop a
@@ -7431,6 +7493,29 @@ class Context(Base):
         st = wait_phase("t-srx", {"review", "stuck", "failed"}, timeout=60)
         self.assertEqual((st["phase"], st["round"]), ("stuck", 2))
         self.assertIn("the same call 4 times in a row", st["last"])
+
+    def test_a_self_review_whose_opencode_exits_on_its_servers_error_on_the_green_tree_goes_to_review(self):
+        # #1270 (bar loop round 7, 2026-11-24): a GPU server's 500 in the self-review (Ollama's
+        # runner killed out of memory) left the server up, so no revive; OpenCode's exit 1 was
+        # `died`, never settled, and a green change woke Claude as failed with no tests line, its
+        # step recorded stuck and wb accept refused without --force
+        os.environ.update(FAKE_SELF_CRASH="1", FAKE_READS="1")
+        self.start("t-src", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-src", {"review", "stuck", "failed"}, timeout=60)
+        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-src"]
+        self.assert_settled("t-src", st, rows, "opencode exited 1")
+        self.assertEqual(st["last"], "tests passed: Claude reviews next")
+        self.assertIn("self-review: opencode exited 1, the tree its tests passed on: stopped as its finish",
+                      run_wb("watch", "t-src", "--once", "--no-color"))
+
+    def test_a_self_review_whose_opencode_exits_on_a_changed_tree_still_fails(self):
+        # #1270's finish is for the green tree, as every settle is: one left changed failed mid-edit
+        os.environ.update(FAKE_SELF_CRASH="1", FAKE_READS="1", FAKE_SELF_KEEP="1")
+        self.start("t-srck", "selfreads", "--test", TEST_CMD, "--self-review")
+        st = wait_phase("t-srck", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"], st["last"]), ("failed", 2, "opencode exited 1"))
+        self.assertFalse([e for e in store.read_jsonl(store.Task("t-srck").dir / "events.jsonl")[0]
+                          if e["kind"] == "settled"])
 
     def quiet_self_review(self, name, *flags, **env):
         """A self-review that breaks the check, copies it back and goes quiet (FAKE_READS 0):
@@ -13105,6 +13190,32 @@ class Lane(Base):
         with mock.patch.object(context, "snaps", return_value=["go"]):
             self.start("t-snap-off", "ok", "--test", "go test ./...", "--allow-path", "*")
         self.assertEqual(context.grants(store.Task("t-snap-off"))["paths"], ["*"])
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "snaps are Linux's")
+    def test_a_snap_acceptance_command_is_refused_at_next_with_the_step_left_uncommitted(self):
+        # #1271 (bar loop round 7, 2026-11-24): wb next --test took a snap wb start refused, and
+        # every test round and auto-fix round of the step failed in the lane on snap-confine
+        self.start("t-snap-next", "ok")
+        wait_phase("t-snap-next", {"review"})
+        task = store.Task("t-snap-next")
+        head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Step two.\n")
+        nxt = ("next", "t-snap-next", "--spec", str(step2), "-m", "feat: two", "--test", "go test ./...")
+        with mock.patch.object(context, "snaps", return_value=["go"]):
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit):
+                run_wb(*nxt)
+            self.assertIn("go is a snap", err.getvalue())
+            self.assertIn("wb allow t-snap-next --path '*'", err.getvalue())
+            task = store.Task("t-snap-next")
+            self.assertEqual((task.status["phase"], task.status.get("steps", 1)), ("review", 1))
+            self.assertIsNone(task.spec.get("test_cmd"))
+            self.assertEqual(gitops.git(task.worktree, "rev-parse", "HEAD").strip(), head)
+            run_wb("allow", "t-snap-next", "--path", "*")  # the lane off for this task: taken
+            run_wb(*nxt)
+        task = store.Task("t-snap-next")
+        self.assertEqual((task.spec["test_cmd"], task.status["steps"]), ("go test ./...", 2))
 
     def test_the_users_devices_mounts_and_runtime_directory_stay_out_of_the_lane(self):
         self.start("t-dev", "ok")
@@ -27234,11 +27345,27 @@ class WebChat(Base):
         # user's phone answered an agent token from any peer on it
         tok = self._agent()
         self.assertEqual(self.call("/api/state", token=tok)[0], 200)
-        with mock.patch.object(self.chat.Handler, "_from_loopback", lambda self: False):
+        with mock.patch.object(self.chat.Handler, "_peer", lambda self: "100.64.0.7"):   # the tailnet peer
             code, r = self.call("/api/state", token=tok)
-            self.assertEqual((code, r["error"]), (403, "agent tokens work only from this machine (localhost)"))
+            self.assertEqual((code, r["error"]),
+                             (403, "agent tokens work only from this machine, at the address `wb chat url` prints"))
             self.assertEqual(self.call("/api/send", {"text": "hi"}, token=tok)[0], 403)
             self.assertEqual(self.call("/api/state", token=self.chat.token())[0], 200)  # the user's phone
+
+    def test_an_agent_token_from_this_machine_works_on_a_chat_bound_only_to_its_tailnet_or_lan_address(self):
+        # #1274 (2026-11-24): with `bind: ["tailscale"]` (no localhost served) an agent on this
+        # machine reaches the chat from the tailnet IP itself, not 127.*, and every agent token
+        # was refused with a 403 that sent it to localhost, which wasn't served
+        tok = self._agent()
+        with mock.patch.object(self.chat.Handler, "_peer", lambda self: "100.64.0.1"), \
+                mock.patch.object(self.chat.Handler, "_local", lambda self: "100.64.0.1"):
+            self.assertEqual(self.call("/api/health", token=tok), (200, {"api": 1, "listening": False}))
+        with mock.patch.object(self.chat.Handler, "_peer", lambda self: "100.64.0.7"), \
+                mock.patch.object(self.chat.Handler, "_local", lambda self: "100.64.0.1"):
+            self.assertEqual(self.call("/api/health", token=tok)[0], 403)        # another machine on it
+        with mock.patch.object(self.chat.Handler, "_peer", lambda self: ""), \
+                mock.patch.object(self.chat.Handler, "_local", lambda self: ""):
+            self.assertEqual(self.call("/api/health", token=tok)[0], 403)        # neither known: not here
 
     def test_a_revoked_agent_token_gets_401_and_names_are_checked(self):
         tok = self._agent()
@@ -34659,6 +34786,160 @@ class ApiTasks(_ApiTask, _KeyholeTest):
                           for r in store.read_jsonl(store.home() / "notify.jsonl")[0]],
                          [("t-new", "stuck", "provider")])
 
+    def held_outage(self, retry_after=None):
+        """#1277's setup: an upstream answering 503 (or, with ``retry_after``, 429 with that
+        Retry-After) forever, and t-a stopped by it, its stop told; t-b queued behind it. The
+        keyhole's hold and the revive's wait cut to a second each."""
+        self.local_api_model()
+        if retry_after:
+            self.up.mode, self.up.status, self.up.message = "status", 429, "Rate limit reached"
+            self.up.retry_after = retry_after
+        else:
+            self.up.mode, self.up.status, self.up.message = "status", 503, "Service Unavailable"
+        for obj, name, value in ((self.kh_mod, "RATE_HOLD_S", 1), (runner, "RATE_WAIT_S", 1)):
+            p = mock.patch.object(obj, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.start_api("t-a", "http", spawn=False)
+        self.start_api("t-b", "http", "--queue", spawn=False)
+        self.drive_here("t-a")
+        told = store.Task("t-a")
+        self.assertEqual((told.status["phase"], told.status.get("infra"), told.status.get("guard")),
+                         ("stuck", "provider", "rate_limited" if retry_after else "outage"), told.status)
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")     # lets a hung wait go
+        return told, store.Task("t-b")
+
+    def until_waiting(self, task, driver, said, events=0):
+        deadline = time.time() + 30
+        while not (task.status.get("phase") == "queued" and (task.status.get("last") or "").startswith(said)
+                   and sum("still isn't answering" in (e.get("text") or "")
+                           for e in store.read_jsonl(task.dir / "events.jsonl")[0]) == events):
+            self.assertLess(time.time(), deadline, task.status)
+            self.assertTrue(driver.is_alive(), task.status)
+            time.sleep(POLL)
+
+    def test_a_task_queued_behind_an_outage_whose_stop_told_claude_waits_for_it_with_no_stop_of_its_own(self):
+        # #1277 (bar loop round 7, 2026-11-24): with a provider down, each queued API task took its
+        # slot, ran round 1 into the outage, revived it and woke Claude with its own stop, the same
+        # one, though api-health.json had it. It waits as queued now, its slot let go; past the
+        # mark one waiter asks again, meets the outage and waits again; at the provider's 2xx it runs
+        told, task = self.held_outage()
+        sent = len(self.up.seen)
+        self.assertIn("deepinfra's other tasks wait for it before their next round, with no stop of their own",
+                      [r for r in store.notices() if r["task"] == "t-a"][-1]["text"])
+        mark = self.models.held_mark("deepinfra")
+        self.assertEqual(mark["state"], "unreachable")
+        driver = threading.Thread(target=self.drive_here, args=("t-b",), daemon=True)
+        driver.start()
+        self.addCleanup(driver.join, 60)
+        self.until_waiting(task, driver, "waiting: deepinfra isn't answering (503 ")
+        self.assertIn("Service Unavailable", task.status["last"])
+        self.assertIn("), as t-a's stop told the user: wb asks it again at ", task.status["last"])
+        self.assertEqual(len(self.up.seen), sent)                     # nothing sent while it holds
+        self.assertEqual(self.models.api_holders("deepinfra"), [])   # its slot let go
+        path = self.models.api_health_path()
+
+        def mark_ends():                                              # DOWN_SECS run out
+            with store.locked(path.with_name(path.name + ".lock")):
+                doc = store.read_json(path, {})
+                doc["deepinfra"]["until"] = time.time() - 1
+                store.write_json(path, doc)
+        mark_ends()
+        self.until_waiting(task, driver, "waiting: deepinfra isn't answering", events=1)
+        self.assertGreater(len(self.up.seen), sent)                   # it asked again, and waits again
+        self.up.mode, self.up.status = "ok", 200                      # the provider is back
+        mark_ends()
+        driver.join(60)
+        self.assertFalse(driver.is_alive(), task.status)
+        self.assertEqual(task.status["phase"], "review", task.status)
+        self.assertIsNone(self.models.held_mark("deepinfra"))
+        self.assertEqual([(r["task"], r["kind"], r.get("cause")) for r in store.notices()
+                          if r["kind"] != "review"], [("t-a", "stuck", "provider")])
+
+    def test_a_429_whose_retry_after_is_hours_away_holds_the_queue_until_then_and_its_stop_says_when(self):
+        # #1277: a 429 whose Retry-After is hours away isn't a quota, and the revive waits at most
+        # RATE_WAIT_S: each queued task ran into it in turn and woke Claude. The stop names the
+        # time, and the next task waits for it, or for a 2xx
+        told, task = self.held_outage(retry_after="7200")
+        sent = len(self.up.seen)
+        until = self.models.held_mark("deepinfra")["until"]
+        self.assertGreater(until, time.time() + 7000)
+        at = time.strftime("%H:%M", time.localtime(until))
+        self.assertIn(f"; deepinfra asked for a wait until {at}; deepinfra's other tasks wait",
+                      [r for r in store.notices() if r["task"] == "t-a"][-1]["text"])
+        driver = threading.Thread(target=self.drive_here, args=("t-b",), daemon=True)
+        driver.start()
+        self.addCleanup(driver.join, 60)
+        self.until_waiting(task, driver, "waiting: deepinfra rate-limits its requests (")
+        self.assertIn(f"wb asks it again at {at}, or goes on once it answers another task", task.status["last"])
+        time.sleep(1)
+        self.assertEqual(len(self.up.seen), sent)
+        self.up.mode, self.up.status = "ok", 200
+        self.models.note_api("deepinfra", "ok")                       # another task's 2xx
+        driver.join(60)
+        self.assertFalse(driver.is_alive(), task.status)
+        self.assertEqual(task.status["phase"], "review", task.status)
+        self.assertEqual([r["task"] for r in store.notices() if r["kind"] != "review"], ["t-a"])
+
+    def test_past_a_held_mark_one_waiter_at_a_time_asks_the_provider_again(self):
+        # #1277: past the mark's `until` every waiter would go on at once, each to its own stop;
+        # the provider's probe flock lets one ask, the rest wait for its answer
+        m = self.local_api_model()
+        told = store.Task("t-told")
+        told.dir.mkdir(parents=True)
+        store.write_json(told.dir / "task.json", {"model": m.id, "provider": "deepinfra", "via": "api"})
+        told.set_status(phase="stuck", infra="provider", guard="outage")
+        told.notify("stuck", "STOPPED: deepinfra didn't answer", cause="provider")
+        self.models.note_api("deepinfra", "unreachable", "503", until=time.time() - 1)
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")
+        asks = self.models.NoLease(m, "t-one", say=lambda msg: None)
+        self.addCleanup(asks.__exit__, None, None, None)
+        self.assertEqual(asks.load(), 0.0)
+        self.assertEqual(asks.recheck, "held")                        # its meeting the outage waits again
+        said, went = [], threading.Event()
+        behind = self.models.NoLease(m, "t-two", say=said.append)
+        self.addCleanup(behind.__exit__, None, None, None)
+        threading.Thread(target=lambda: (behind.load(), went.set()), daemon=True).start()
+        self.assertFalse(went.wait(1))                                # t-one's turn to ask
+        self.assertRegex(said[0], r"^waiting: deepinfra isn't answering \(503\), as t-told's stop told the user")
+        self.models.note_api("deepinfra", "ok")                       # t-one's 2xx
+        self.assertTrue(went.wait(30))
+        self.assertFalse(behind.recheck)
+        told.set_status(phase="review")                               # no told stop: a 503 never holds
+        self.models.note_api("deepinfra", "unreachable", "503")
+        fresh = self.models.NoLease(m, "t-three", say=lambda msg: None)
+        self.addCleanup(fresh.__exit__, None, None, None)
+        self.assertEqual(fresh.load(), 0.0)
+        self.assertFalse(fresh.recheck)
+
+    def test_a_waiter_past_a_held_mark_while_another_asks_looks_every_two_seconds_not_in_a_loop(self):
+        # the review of #1277 (2026-11-24): credit_recheck opened api-health.json's lock file to
+        # look past an expired outage's mark, and its close woke the waiter's own watch on
+        # $WB_HOME: 149 looks in 5 s, not one every API_WAIT's 2 s, behind a probe round that hangs
+        m = self.local_api_model()
+        told = store.Task("t-told")
+        told.dir.mkdir(parents=True)
+        store.write_json(told.dir / "task.json", {"model": m.id, "provider": "deepinfra", "via": "api"})
+        told.set_status(phase="stuck", infra="provider", guard="outage")
+        told.notify("stuck", "STOPPED: deepinfra didn't answer", cause="provider")
+        self.models.note_api("deepinfra", "unreachable", "503", until=time.time() - 1)
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")     # lets the wait go
+        probe = self.models.api_dir() / f"{self.models._slot_name('deepinfra')}.probe.lock"
+        probe.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(probe, os.O_RDONLY | os.O_CREAT)                 # another runner's turn to ask
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        looks, real = [], self.models.credit_recheck
+        p = mock.patch.object(self.models, "credit_recheck", lambda *a, **k: (looks.append(1), real(*a, **k))[1])
+        p.start()
+        self.addCleanup(p.stop)
+        behind = self.models.NoLease(m, "t-wait", say=lambda msg: None)
+        self.addCleanup(behind.__exit__, None, None, None)
+        went = threading.Event()
+        threading.Thread(target=lambda: (behind.load(), went.set()), daemon=True).start()
+        self.assertFalse(went.wait(3))
+        self.assertLessEqual(len(looks), 3, len(looks))               # the first look, then one each 2 s
+
     def test_with_unload_for_tests_an_api_tasks_tests_run_under_this_machines_pool(self):
         from workbench import verify
         used = []
@@ -37311,6 +37592,112 @@ class ApiSpendKeyhole(_KeyholeTest):
         self.post(kh)                                           # a running total in every chunk
         self.assertEqual(usage, [{"prompt_tokens": 9, "completion_tokens": 3}])
 
+    def cut(self, kh, path="/chat/completions", read=120):
+        """A streamed request that OpenCode drops after ``read`` bytes of the answer, as wb's
+        _stop does mid-stream; its body's length back."""
+        body = json.dumps({"model": kh.model.name, "stream": True}).encode()
+        conn = http.client.HTTPConnection("127.0.0.1", kh.port, timeout=30)
+        conn.request("POST", urllib.parse.urlsplit(kh.base).path + path, body=body,
+                     headers={"Authorization": f"Bearer {kh.token}", "Content-Type": "application/json"})
+        r = conn.getresponse()
+        self.assertEqual(r.status, 200)
+        r.read1(read)
+        conn.sock.shutdown(socket.SHUT_RDWR)
+        conn.close()
+        return len(body)
+
+    def booked(self, usage, n=1):
+        deadline = time.monotonic() + 15
+        while len(usage) < n and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return usage
+
+    def test_a_response_cut_before_its_usage_is_booked_from_its_body_and_what_streamed(self):
+        # #1276 (bar loop round 7, 2026-11-24): Chat Completions and the Responses API send their
+        # usage only at the end, so a response wb cut mid-stream (the think nudge, steer --now,
+        # wb stop, a guard, the spend stop) booked $0, and OpenCode's step_finish and export said
+        # nothing either: the day cap and `paid` left out a request the provider bills
+        from workbench import meter
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {}})
+        m = self.model()
+        m.config = {"cost": [{"input": 3, "output": 15}]}
+        mt = meter.Meter(self.task, m)
+        mt.begin(1)
+        usage = []
+        kh = self.keyhole(m, on_usage=lambda u: (mt.on_usage(u), usage.append(u)))  # booked, then seen
+        self.up.chunks, self.up.gap = 60, 0.05                  # usage in the 60th chunk alone
+        size = self.cut(kh)
+        (u,) = self.booked(usage)
+        self.assertEqual((u["prompt_tokens"], u["cut"]), (-(-size // 4), True))
+        self.assertGreater(u["completion_tokens"], 0)           # what streamed before the cut
+        (row,) = store.read_jsonl(meter.ledger_path())[0]
+        self.assertEqual((row["kind"], row["source"], row["cut"]), ("step", "keyhole", True))
+        self.assertGreater(row["usd"], 0)
+        self.assertEqual(self.task.status["api"]["usd"], round(row["usd"], 6))
+        self.assertEqual(self.task.status["api"]["prices"], "catalog")      # shown as ≈
+        time.sleep(0.5)
+        self.assertEqual(len(usage), 1)                         # once
+        mt.end_round({"s1": {"info": {"cost": 0}}})             # OpenCode's export said 0
+        self.assertEqual(len(store.read_jsonl(meter.ledger_path())[0]), 1)
+        # a running provider figure in a cut stream is partial: the estimate is booked instead
+        mt.on_usage({"prompt_tokens": 1_000_000, "completion_tokens": 0, "cost": 0.01, "cut": True})
+        row = store.read_jsonl(meter.ledger_path())[0][-1]
+        self.assertEqual((row["usd"], row["source"], row["cut"]), (3.0, "keyhole", True))
+
+    def test_an_anthropic_response_cut_keeps_message_starts_input_and_adds_what_streamed(self):
+        # #1276: message_start's usage was all a cut Anthropic response booked, its output 1
+        usage = []
+        kh = self.keyhole(self.model("anthropic", "claude-haiku-5-5", "/v1", "anthropic"),
+                          on_usage=usage.append)
+        start = {"type": "message_start", "message": {"model": "served-model", "usage": {
+            "input_tokens": 7, "cache_read_input_tokens": 90_000, "output_tokens": 1}}}
+        delta = {"type": "content_block_delta", "index": 0,
+                 "delta": {"type": "text_delta", "text": "x" * 40}}
+        self.up.mode, self.up.status, self.up.ctype = "raw", 200, "text/event-stream"
+        self.up.pieces = [f"event: message_start\ndata: {json.dumps(start)}\n\n".encode()] + [
+            f"event: content_block_delta\ndata: {json.dumps(delta)}\n\n".encode()] * 60
+        self.cut(kh, "/messages", read=200)
+        (u,) = self.booked(usage)
+        self.assertEqual({k: u[k] for k in ("input_tokens", "cache_read_input_tokens", "cut")},
+                         {"input_tokens": 7, "cache_read_input_tokens": 90_000, "cut": True})
+        self.assertGreaterEqual(u["output_tokens"], 10)         # a delta's 40 characters at least
+        self.assertNotIn("prompt_tokens", u)
+
+    def test_a_request_cut_while_still_in_the_providers_queue_books_nothing(self):
+        # #1276's estimate is for a request the provider ran: keep-alives alone past
+        # QUEUED_AFTER_S are its queue (#1083), where nothing has run yet
+        usage = []
+        kh = self.keyhole(on_usage=usage.append)
+        self.up.mode, self.up.status, self.up.ctype = "raw", 200, "text/event-stream"
+        self.up.pieces = [b": keep-alive\n\n"] * 60
+        with mock.patch.object(self.kh_mod, "QUEUED_AFTER_S", 0):
+            self.cut(kh, read=20)
+            time.sleep(1.5)
+        self.assertEqual(usage, [])
+
+    def test_a_whole_answer_whose_last_byte_finds_opencode_gone_is_booked_once_and_not_as_cut(self):
+        # #1276's estimate is booked when a write fails before the end: the end's own last write
+        # failing (a body with no end marker, its usage booked just before) is no cut
+        usage = []
+        kh = self.keyhole(on_usage=usage.append)
+        self.up.mode, self.up.status, self.up.ctype = "raw", 200, "application/json"
+        self.up.pieces = [json.dumps({"model": "m", "usage": {"prompt_tokens": 9,
+                                                              "completion_tokens": 3}}).encode()]
+        handler = kh._server.RequestHandlerClass
+        real = handler.flush_usage
+
+        def flush_then_hang_up(h):
+            real(h)
+            if usage and not h.connection._closed:
+                h.connection.shutdown(socket.SHUT_WR)           # the last write now fails
+        with mock.patch.object(handler, "flush_usage", flush_then_hang_up):
+            try:
+                self.post(kh)
+            except (http.client.HTTPException, OSError):
+                pass
+        time.sleep(0.5)
+        self.assertEqual(usage, [{"prompt_tokens": 9, "completion_tokens": 3}])
+
     def test_deepinfras_own_estimated_cost_is_booked_and_opencodes_catalog_figure_tops_nothing_up(self):
         # #1165 (2026-11-24): DeepInfra sends its own cost as usage.estimated_cost, in a last
         # `choices: []` chunk (checked with one real request that day: 10 in, 2 out, 1.568e-6, its
@@ -37675,13 +38062,151 @@ class Privacy(_KeyholeTest):
 
     def test_a_repo_of_its_own_nested_in_a_local_only_marks_nothing_for_the_repo_around_it(self):
         # #1255's review: the whole repo's entries are what its checkout holds, and a nested
-        # repo's files are in no checkout of the repo around it
+        # repo that isn't a submodule is in no checkout of the repo around it (a submodule is:
+        # fill_submodules fills it, #1267)
         inner = self.repo / "vendor" / "inner"
         inner.mkdir(parents=True)
         subprocess.run(["git", "init", "-q", str(inner)], check=True)
         self.local_only(key=inner)
         self.assertIsNone(cli.privacy.local_only(self.repo))
         self.assertEqual(cli.privacy.local_only(inner), str(inner))
+
+    def submodule(self) -> Path:
+        """vendor/lib, a submodule of the repo holding secret.py, committed; its checkout."""
+        lib = Path(self.tmp.name) / "lib-src"
+        subprocess.run(["git", "init", "-q", str(lib)], check=True)
+        (lib / "secret.py").write_text("KEY = 1\n")
+        subprocess.run(["git", "-C", str(lib), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(lib), "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "lib"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "-c", "protocol.file.allow=always", "submodule",
+                        "add", "-q", str(lib), "vendor/lib"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "a submodule"], check=True)
+        return self.repo / "vendor" / "lib"
+
+    def test_a_local_only_submodule_refuses_an_api_start_in_its_superproject_and_a_local_only_superproject_one_in_its_submodule(self):
+        # #1267 (the bar loop, 2026-11-24): repo_entries leaves a repo of its own out, every
+        # submodule among them, yet fill_submodules fills it in every task's worktree, so the
+        # submodule's code went to the API model with each superproject task; and nothing walked
+        # up, so a task started in a marked superproject's submodule went too
+        sub = self.submodule()
+        self.role(via="api", api=FLASH)
+        for key, at, name in ((sub, self.repo, "t-super"), (self.repo, sub, "t-in-sub")):
+            self.local_only(key=key)
+            self.assertEqual(cli.privacy.local_only(at), str(key), name)
+            code, err = self.fails("start", name, "--spec", str(self.spec), "--repo", str(at))
+            self.assertEqual(code, 3, name)
+            self.assertIn(f'{cli.privacy.home_path(key)} is local-only (commands.json "repos"): the '
+                          "significant role is on API", err)
+            self.assertFalse(store.Task(name).exists)
+        # and the where-note says the submodules go with the repo
+        self.conf.write_text("{}")
+        self.assertIn("note: this task sends the repo with its submodules, its spec, CLAUDE.md files "
+                      "to DeepInfra", self.start_api("t-subs"))
+        # the runner's check before every round asks the base's submodules the same
+        self.local_only(key=sub)
+        self.assertIn("this repo is local-only now; the task's model is API (deepinfra)",
+                      runner.local_only_now(store.Task("t-subs")))
+
+    def test_a_local_only_sibling_or_path_refuses_an_api_start_its_dry_run_wb_allow_and_the_next_round(self):
+        # #1268 (the bar loop, 2026-11-24): only the task's repo was asked, so a local-only repo
+        # linked with --sibling, granted with --allow-path or `wb allow --path`, went into the API
+        # agent's lane and on to the provider, every round
+        secret = self.repo.parent / "secretlib"
+        subprocess.run(["git", "init", "-q", str(secret)], check=True)
+        self.role(via="api", api=FLASH)
+        self.local_only(key=secret)
+        at = cli.privacy.home_path(secret)
+        for how in (("--sibling", "../secretlib"), ("--allow-path", str(secret))):
+            code, err = self.fails("start", "t-sib", "--spec", str(self.spec), "--repo", str(self.repo), *how)
+            self.assertEqual(code, 3, how)
+            self.assertIn(f"{at}, which the task's lane reads ({' '.join(how)}), is local-only "
+                          f'(commands.json "repos"): the significant role is on API ({FLASH}). Choices: '
+                          "put significant on the GPU (wb route significant gpu, the user's yes), "
+                          f"without {' '.join(how)}, or the user lifts local_only there.", err)
+            self.assertFalse(store.Task("t-sib").exists)
+        # a standing sibling: this refusal, never the standing one's "name it (--sibling …)"
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"siblings": ["secretlib"]},
+                                                   str(secret): {"local_only": True}}}))
+        code, err = self.fails("start", "t-sib", "--spec", str(self.spec), "--repo", str(self.repo))
+        self.assertEqual(code, 3)
+        self.assertIn('which the task\'s lane reads (commands.json "repos" siblings), is local-only', err)
+        self.assertNotIn("name it", err)
+        # the mod's dry run for an API --model start says the same in place of a dialog line
+        ApiHarness.catalog(self)
+        self.local_only(key=secret)
+        code, err = self.fails("route", "--dry-run", "--json", "--start", "t-sib", "--spec", str(self.spec),
+                               "--repo", str(self.repo), "--model", FLASH, "--sibling", "../secretlib")
+        self.assertEqual(code, 3)
+        self.assertIn("which the task's lane reads (--sibling ../secretlib), is local-only", err)
+        # marked after an API task started: wb allow --path is refused, and the next round stops
+        self.conf.write_text("{}")
+        self.start_api("t-allow", None, "--sibling", "../secretlib")
+        task = store.Task("t-allow")
+        self.assertEqual(runner.local_only_now(task), "")
+        self.local_only(key=secret)
+        self.assertIn(f"{at}, which its lane reads (--sibling secretlib), is local-only now; the task's "
+                      "model is API (deepinfra): wb takeover t-allow or wb discard t-allow",
+                      runner.local_only_now(task))
+        other = self.repo.parent / "privaterepo"
+        subprocess.run(["git", "init", "-q", str(other)], check=True)
+        self.local_only(key=other)
+        code, err = self.fails("allow", "t-allow", "--path", str(other))
+        self.assertEqual(code, 3)
+        self.assertIn(f"{cli.privacy.home_path(other)} is local-only (commands.json \"repos\") and "
+                      "t-allow is on API (deepinfra), whose lane never reads it", err)
+        self.assertNotIn("paths", context.grants(task))
+        context.grant(task, "paths", [str(other / "data")])       # a grant made before the mark
+        self.assertIn("(wb allow --path), is local-only now", runner.local_only_now(task))
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "snaps are Linux's")
+    def test_a_snap_test_at_next_on_an_api_task_kept_in_its_lane_by_local_only_offers_no_lane_off(self):
+        # #1271 with #1268 (the bar7 merge's review, 2026-11-24): wb next's snap refusal said
+        # `wb allow <task> --path '*'`, which wb allow refuses on an API task while commands.json
+        # marks anything local_only, so the one way out it named was itself refused
+        self.start_api("t-snap-api")
+        task = store.Task("t-snap-api")
+        task.set_status(phase="review")
+        other = self.repo.parent / "privaterepo"
+        subprocess.run(["git", "init", "-q", str(other)], check=True)
+        self.local_only(key=other)                    # not in this task's lane: next goes on to the snap
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Step two.\n")
+        nxt = ("next", "t-snap-api", "--spec", str(step2), "-m", "feat: two", "--test", "go test ./...")
+        with mock.patch.object(context, "snaps", return_value=["go"]), \
+                mock.patch.object(context, "lane_on", return_value=True), \
+                mock.patch.object(cli, "reap"), mock.patch.object(cli, "runner_alive", return_value=False), \
+                mock.patch.object(cli, "_need_worktree"), mock.patch.object(cli, "_opencode_again"):
+            code, err = self.fails(*nxt)
+            self.assertIn("go is a snap", err)
+            self.assertIn(f"the lane stays on for this API task while {cli.privacy.home_path(other)} is "
+                          "local-only", err)
+            self.assertNotIn("--path '*'", err)
+            self.conf.write_text("{}")                # no mark: the lane-off way is offered again
+            code, err = self.fails(*nxt)
+            self.assertIn("wb allow t-snap-api --path '*' first", err)
+        self.assertIsNone(store.Task("t-snap-api").spec.get("test_cmd"))
+
+    def test_commands_json_standing_paths_are_named_in_an_api_tasks_where_note_and_a_local_only_one_refuses_it(self):
+        # #1269 (the bar loop, 2026-11-24): a standing `paths` entry (wb allow --always) is in
+        # every API task's lane, but the note said "the repo, its spec, CLAUDE.md files" alone
+        notes = Path(self.tmp.name) / "private-notes"
+        notes.mkdir()
+        (notes / "n.txt").write_text("mine\n")
+        self.conf.write_text(json.dumps({"paths": [str(notes)]}))
+        want = (f'note: this task sends the repo, its spec, CLAUDE.md files and {cli.privacy.home_path(notes)} '
+                '(commands.json "paths") to DeepInfra')
+        self.assertIn(want, self.start_api("t-paths"))
+        self.assertIn(want, self.start_api("t-paths2"))          # not the repo's first: it goes too
+        self.role(via="api", api=FLASH)
+        for paths in ([str(notes)], ["*"]):                      # "*": the lane off reads it too
+            self.conf.write_text(json.dumps({"paths": paths, "repos": {str(notes): {"local_only": True}}}))
+            code, err = self.fails("start", "t-paths4", "--spec", str(self.spec), "--repo", str(self.repo))
+            self.assertEqual(code, 3, paths)
+            self.assertIn(f"{cli.privacy.home_path(notes) if paths != ['*'] else ''}, which the task's "
+                          'lane reads (commands.json "paths"' + (' "*")' if paths == ["*"] else ")"), err)
+        self.assertIn('(commands.json "paths" "*"), is local-only now',
+                      runner.local_only_now(store.Task("t-paths")))
 
     def test_a_directory_marked_local_only_holds_for_a_linked_worktree_of_its_repo(self):
         # #1255: by git dir too, so a start in another checkout of the repo is refused alike
@@ -39658,7 +40183,8 @@ class RoleResolution(Base):
         stop, remedy = meter.stop_text(task), runner.provider_remedy(task, "rate_limited")
         self.assertIn("then wb resume t-run; or Agents on GPU (wb route all gpu) for the next tasks, with wb "
                       "takeover t-run or wb discard t-run for this one (resume keeps its API model).", stop)
-        self.assertTrue(remedy.endswith("; or wb route all gpu (the user's yes) for the next tasks"), remedy)
+        self.assertIn("; or wb route all gpu (the user's yes) for the next tasks; deepseek's other tasks wait "
+                      "for it", remedy)  # the queue's wait follows the offer (#1277)
         for line in (cap, lo, stop, remedy):
             self.assertNotIn("wb route trivial gpu", line)
         self.set_role("all", "gpu")                                      # the advice, taken
@@ -39686,8 +40212,8 @@ class RoleResolution(Base):
         self.routes.write_text(json.dumps({**doc, "use": "both", "busy": "api"}))  # the busy opt-in's task
         self.assertIn("; or waiting for a busy GPU (wb route busy wait) for the next tasks, with wb takeover "
                       "t-busy", meter.stop_text(task))
-        self.assertTrue(runner.provider_remedy(task, "outage").endswith(
-            "; or wb route busy wait (the user's yes) for the next tasks"))
+        self.assertIn("; or wb route busy wait (the user's yes) for the next tasks; deepseek's other tasks "
+                      "wait for it", runner.provider_remedy(task, "outage"))  # the queue's wait after it (#1277)
         self.routes.write_text("{")                                      # unreadable: the role's own, as before
         self.assertEqual(routes.off_api("trivial")[2], "wb route trivial gpu")
 
@@ -40637,7 +41163,7 @@ class BusyGpu(Base):
         self.assertGreater(first, cli.meter.FIRST_TOKENS)
         self.assertEqual(seen[:2], [40_123, cli.meter.FIRST_TOKENS])
         self.assertIn(first, seen[2:])                       # the busy start's, its spec in it
-        with mock.patch.object(cli.privacy, "local_only", lambda repo, sub: str(repo)):
+        with mock.patch.object(cli.privacy, "local_only", lambda repo, sub, base=None: str(repo)):
             self.assertEqual(cli._busy_api("trivial", asked, self.repo, None),
                              why + f"{self.repo.name} is kept local ({self.repo})")
             code, out, err = self.begin("t-local", "--role", "trivial")

@@ -239,11 +239,13 @@ A newly added model has no record, so the router won't pick it over one with a g
 replay the bench on it first (`wb bench run --model <id>`, §6), then give it its first few
 real tasks with `--model` (ones you'd review closely anyway).
 **API models and privacy.** An API model sends the repo, its spec, the CLAUDE.md files and the
-user's `~/.config/workbench/AGENTS.md` to its provider (never their `~/.claude` files). When you propose an API role, say where the code goes
+user's `~/.config/workbench/AGENTS.md` to its provider (never their `~/.claude` files), and
+whatever else its lane reads (submodules, siblings, granted paths: the start's note names them). When you propose an API role, say where the code goes
 (the provider, as `wb route --dry-run`'s line names it; its data-policy page comes in the note
 of the repo's first task there). Never remove a `local_only`
-from commands.json (a repo the user keeps off API models: `wb start` exits 3 with the choices,
-and a task already on API stops before its next round: wb takeover or wb discard; ask the user). Never name a free model first (the provider may keep or train on the code), and
+from commands.json (a repo the user keeps off API models, nor may an API task's sibling or
+granted path be one: `wb start` and `wb allow --path` exit 3 with the choices, and a task
+already on API stops before its next round: wb takeover or wb discard; ask the user). Never name a free model first (the provider may keep or train on the code), and
 never pick an OpenRouter backend (`--order`) for the user: ask which. An API task's lane hides
 each registry config that holds a credential (a token, password, key; one without stays readable
 and its tool works; with no lane, as on macOS, none is hidden and there's no note); when
@@ -509,7 +511,7 @@ coding choice is the user's (`wb coding`), never changed by a check.
   A `rate_limited`, `outage`, `quota`, `auth` or `refused` stop is the API provider's, not the
   agent's (the report says "the provider's stop"): tell the user so, and its remedy (wait, top
   up, or /connect the key again), then `wb feedback <name> --text "carry on"` once it allows (no review round counted);
-  the tasks queued behind a `quota` stop wait as queued, with no stop of their own, and go on once credit is back (resumed, the stopped task asks the provider at once, and its 2xx lets them go). A
+  the tasks queued behind a `quota` stop wait as queued, with no stop of their own, and go on once credit is back (resumed, the stopped task asks the provider at once, and its 2xx lets them go); behind a `rate_limited` or `outage` one too, one of them asking again now and then, and going on at the provider's first 2xx: one stop to tell the user, not one per task. A
   `refused` one (the provider turned the request down: a moderation flag, a schema, a model gone)
   quotes what it said: fix that, then `wb feedback`; on an HTTP 404 the model is gone, so `wb
   takeover` or `wb discard`. Never switch the task's model or role yourself: a route change
