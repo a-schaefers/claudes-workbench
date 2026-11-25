@@ -21,7 +21,6 @@ import hashlib
 import hmac
 import http.client
 import json
-import mmap
 import os
 import re
 import secrets
@@ -146,11 +145,9 @@ AGENT_MAY = {("GET", "/api/health"), ("GET", "/api/wait"), ("GET", "/api/state")
              ("GET", "/api/upload/"), ("PUT", "/api/upload/"), ("GET", "/api/file/"), ("POST", "/api/send")}
 # Only the wording of a refusal, kept from the deny-lists for the paths they named ("agent tokens
 # can't <this>"); any other path is "agent tokens can't use <path>". AGENT_MAY alone decides.
-AGENT_CANT = {"/api/answer": "answer Claude Code's dialogs", "/api/prefs": "change the user's settings",
-              "/api/push": "change notifications", "/api/active": "mark the user away",
+AGENT_CANT = {"/api/push": "change notifications", "/api/active": "mark the user away",
               "/api/seen": "mark what the user has seen", "/api/latest": "read the user's notifications",
-              "/api/ask/": "read Claude Code's dialogs", "/api/shot": "read screenshots",
-              "/api/audio": "read audio takes"}
+              "/api/shot": "read screenshots", "/api/audio": "read audio takes"}
 
 
 def _covers(rule: str, path: str) -> bool:
@@ -538,11 +535,11 @@ def ack(msg_id: str, by: str, how: str = "now") -> None:
 
 
 # Work still waiting, kept apart from the files the page reads by their tails: an unread message
-# behind 540 long replies, and an open question behind 120 plan cards, fell out of the 4 MiB
-# tails, so `wb chat pending` lost the one and the other could no longer be answered (#329, the
-# audit of 1.4). chat/open.json, {messages: {id: row}, asks: {id: row}}: the user's messages
-# without a receipt and the asks without an answer, kept under open.lock by send and ack, ask and
-# answer, and built from the whole files once where it is missing (an older wb's state).
+# behind 540 long replies fell out of the 4 MiB tails, so `wb chat pending` lost it (#329, the
+# audit of 1.4). chat/open.json, {messages: {id: row}}: the user's messages without a receipt,
+# kept under open.lock by send and ack, and built from the whole file once where it is missing
+# (an older wb's state). An older wb's `asks` and `answered` there are dropped: the chat no longer
+# answers Claude Code's dialogs (#1350).
 def _open_path() -> Path:
     return chat_dir() / "open.json"
 
@@ -551,15 +548,7 @@ def _open_rebuild() -> dict:
     got = {r.get("id") for r in store.read_jsonl(chat_dir() / "receipts.jsonl")[0]}
     msgs = {r["id"]: r for r in store.read_jsonl(chat_dir() / "messages.jsonl")[0]
             if _inbound(r) and r.get("id") and r["id"] not in got}
-    open_asks: dict = {}
-    answered: dict = {}
-    for r in store.read_jsonl(chat_dir() / "asks.jsonl")[0]:
-        if "answer" in r:
-            if r.get("answer") in ANSWERS and (a := open_asks.pop(r.get("id"), None)):
-                _settle(answered, a, r)
-        elif "tool" in r and r.get("id"):
-            open_asks[r["id"]] = {"kind": "permission", **r}
-    return {"messages": msgs, "asks": open_asks, "answered": answered}
+    return {"messages": msgs}
 
 
 def _received(msg_id: str) -> bool:
@@ -584,20 +573,20 @@ def _reopen(work: dict, row: dict) -> None:
 def _open_update(change) -> dict:
     with store.locked(chat_dir() / "open.lock"):
         cur = store.read_json(_open_path(), None)
-        if not (isinstance(cur, dict) and isinstance(cur.get("messages"), dict)
-                and isinstance(cur.get("asks"), dict)):
+        if not (isinstance(cur, dict) and isinstance(cur.get("messages"), dict)):
             cur = _open_rebuild()
-        cur.setdefault("answered", {})  # an older wb's index has none
+        for gone in ("asks", "answered"):  # an older wb's (#1350)
+            cur.pop(gone, None)
         change(cur)
         store.write_json(_open_path(), cur)
         return cur
 
 
 def open_work() -> dict:
-    """What still waits: {messages, asks}, each {id: row}. A message past MESSAGE_EXPIRE leaves
-    it here (`_retire`)."""
+    """What still waits: {messages: {id: row}}. A message past MESSAGE_EXPIRE leaves it here
+    (`_retire`)."""
     cur = store.read_json(_open_path(), None)
-    if not (isinstance(cur, dict) and isinstance(cur.get("messages"), dict) and isinstance(cur.get("asks"), dict)):
+    if not (isinstance(cur, dict) and isinstance(cur.get("messages"), dict)):
         cur = _open_update(lambda w: None)
     now = store.now()
     if any(isinstance(r, dict) and _expired(r, now) for r in cur["messages"].values()):
@@ -634,8 +623,9 @@ THREAD_BYTES = 4 << 20  # the last 200 messages fit with room to spare (a reply 
 
 def thread(limit: int = 200, keep=None) -> list[dict]:
     """The latest messages, each of the user's with its receipt (or None: not read yet), and
-    `expired` once unread past MESSAGE_EXPIRE: no session will be given it (#536). ``keep``: only
-    the rows it passes (an agent's view, #1042)."""
+    `expired` once unread past MESSAGE_EXPIRE: no session will be given it (#536). A notice whose
+    dialog settled in the terminal is left out: the page's waiting line clears (#1350). ``keep``:
+    only the rows it passes (an agent's view, #1042)."""
     # bounded reads: the whole history was parsed on every poll (the 2026-11-19 audit: 56 ms at
     # 20,000 rows); a receipt comes after its message, so the newest ones cover the thread
     rows = [r for r in store.read_jsonl_tail(chat_dir() / "messages.jsonl", THREAD_BYTES)
@@ -648,16 +638,16 @@ def thread(limit: int = 200, keep=None) -> list[dict]:
             got = receipts.get(r["id"])
             gone = got.get("how") == "expired" if got else _expired(r, now)  # retired (#741)
             r = {**r, "received": None if gone else got, **({"expired": True} if gone else {})}
-        elif r["from"] == "notice" and r["id"] in receipts:  # its dialog answered in the terminal (#959)
-            r = {**r, "answered": receipts[r["id"]].get("ts")}
+        elif r["from"] == "notice" and r["id"] in receipts:  # its dialog settled in the terminal
+            continue
         out.append(r)
     return out
 
 
-# Work still waiting is kept apart from what the page shows: an open question vanished from the
-# page's list behind 20 newer answered ones, and `wb chat pending` lost an unread message behind
-# 200 newer replies (#265, the audit of 1.2). An ask open past ASK_STALE is marked `stale` (the
-# mod waits 30 minutes on one). A message of the user's unread past MESSAGE_EXPIRE is `expired`:
+# Work still waiting is kept apart from what the page shows: `wb chat pending` lost an unread
+# message behind 200 newer replies (#265, the audit of 1.2). A notice open past ASK_STALE no
+# longer counts as Claude waiting on the user (a session that died with its dialog up never
+# settled it). A message of the user's unread past MESSAGE_EXPIRE is `expired`:
 # `wb chat claim` refuses it, so no session springs it on Claude, and the page says so and offers
 # to send it again. The mod skipped it on its own clock, and the page said "Delivered" for good (#536).
 ASK_STALE = 3600
@@ -768,11 +758,9 @@ def reply(text: str, to: list[str] | None = None, **extra) -> dict:
 
 
 def waiting_on_user() -> bool:
-    """Whether Claude is paused on the user: a dialog open in the chat (an ask) or one the
-    terminal shows that the phone was told of (a notice not yet answered), under ASK_STALE old."""
+    """Whether Claude is paused on the user: a dialog the terminal shows that the phone was told
+    of (a notice not yet settled), under ASK_STALE old."""
     now = store.now()
-    if any(a.get("answer") is None and not a.get("stale") for a in asks()):
-        return True
     rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", LATEST_BYTES)
     done = {r.get("id") for r in store.read_jsonl_tail(chat_dir() / "receipts.jsonl", LATEST_BYTES)
             if isinstance(r, dict) and r.get("how") == "answered"}
@@ -803,10 +791,10 @@ def wait_state(after: str, caller: str) -> dict | None:
 
 # ---- an agent's view (#1042): its own conversation, nothing of the user's ----
 # Round one let an agent token read the whole state and stream: the user's own messages, Claude's
-# replies to the user, Claude Code's dialogs, the settings. An agent reads only its own messages
-# and Claude's rows whose `to` names it (`in_view`), the listener, the upload limits and the
-# clock; files only of its own uploads (`by`) or attached to rows in its view; never an ask, a
-# screenshot, an audio take or a push's summary (outside AGENT_MAY, 403).
+# replies to the user, the settings. An agent reads only its own messages and Claude's rows whose
+# `to` names it (`in_view`), the listener, the upload limits and the clock; files only of its own
+# uploads (`by`) or attached to rows in its view; never a screenshot, an audio take or a push's
+# summary (outside AGENT_MAY, 403).
 
 
 def in_view(row: dict, agent: str) -> bool:
@@ -832,26 +820,6 @@ def agent_may_read(uid: str, agent: str) -> bool:
                for r in store.read_jsonl_tail(chat_dir() / "messages.jsonl", THREAD_BYTES))
 
 
-# The page's state is sent over and over, so a settled ask travels without its bulk: an answered
-# (or stale) plan as its first PLAN_PREVIEW characters with `cut`, the rest fetched from GET
-# /api/ask/<id> when the user unfolds it; a settled question as its questions' text, all the page
-# shows of it. Thirty answered plans were most of a 922 KB state (#755).
-PLAN_PREVIEW = 1200
-
-
-def page_ask(a: dict) -> dict:
-    """``a`` as the page's state carries it: an open one whole, a settled one lean."""
-    d = a.get("detail")
-    if not isinstance(d, dict) or (a.get("answer") is None and not a.get("stale")):
-        return a
-    lean = dict(d)
-    if isinstance(d.get("plan"), str) and len(d["plan"]) > PLAN_PREVIEW:
-        lean.update(plan=d["plan"][:PLAN_PREVIEW], cut=True)
-    if isinstance(d.get("questions"), list):
-        lean["questions"] = [{"question": q.get("question")} for q in d["questions"] if isinstance(q, dict)]
-    return {**a, "detail": lean}
-
-
 def _push_key_or_none() -> str | None:
     """push_key, or None when the key can't be had (a full disk, a broken file): a broken push key
     took every snapshot with it, so the whole chat said "Can't reach the computer" (#924)."""
@@ -868,7 +836,7 @@ _no_key: set[str] = set()
 
 
 def snapshot() -> dict:
-    return {"api": API_VERSION, "messages": thread(), "asks": [page_ask(a) for a in asks()], "listener": listener(), "prefs": prefs(),
+    return {"api": API_VERSION, "messages": thread(), "listener": listener(),
             "push": {"key": _push_key_or_none(), "test": (store.read_json(chat_dir() / "push-test.json", None)
                                                  or {}).get("ts")},
             "savings": week_saved(), "uploads": upload_limits(), "build": build(), "expire": MESSAGE_EXPIRE,
@@ -898,30 +866,25 @@ NEWS = ("claude", "notice")
 
 
 def latest() -> dict:
-    """What a push shows, for the service worker (GET /api/latest): the newest open ask (a plan's
-    text left out: the notification says only that one is ready) and Claude's last message, in
-    the snapshot's shape. It fetched the whole /api/state, the thread and 20 asks with their
-    plans, up to a megabyte, within the time iOS gives a push handler (#755)."""
-    open_ = [a for a in asks() if a.get("answer") is None and not a.get("stale")]
-    ask = max(open_, key=lambda a: a.get("ts", 0), default=None)
-    if ask and ask.get("kind") == "plan":
-        ask = {k: v for k, v in ask.items() if k != "detail"}
+    """What a push shows, for the service worker (GET /api/latest): Claude's last message, or a
+    notice still open, in the snapshot's shape. It fetched the whole /api/state, up to a
+    megabyte, within the time iOS gives a push handler (#755)."""
     rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", LATEST_BYTES)
-    # a notice whose dialog was answered in the terminal is no news (#959)
+    # a notice whose dialog settled in the terminal is no news (#959)
     answered = {r.get("id") for r in store.read_jsonl_tail(chat_dir() / "receipts.jsonl", LATEST_BYTES)
                 if r.get("how") == "answered"}
     last = next((r for r in reversed(rows) if r.get("from") in NEWS and _for_user(r) and r.get("id") not in answered), None)
-    return {"now": store.now(), "asks": [ask] if ask else [], "messages": [last] if last else [],
+    return {"now": store.now(), "messages": [last] if last else [],
             "push": {"test": (store.read_json(chat_dir() / "push-test.json", None) or {}).get("ts")}}
 
 
-LISTS = ("messages", "asks")  # what a patch sends row by row; the rest, small, it sends whole
+LISTS = ("messages",)  # what a patch sends row by row; the rest, small, it sends whole
 
 
 def patch(sent: dict, snap: dict) -> dict | None:
-    """What a stream sends after its first state (#755): the rows of `messages` and `asks` new or
-    changed since the state ``sent`` records (updated in place) as `{put, drop}` (the ids gone),
-    and every other field whole (a kilobyte: the listener's busy, the prefs, the push key...), or
+    """What a stream sends after its first state (#755): the rows of `messages` new or changed
+    since the state ``sent`` records (updated in place) as `{put, drop}` (the ids gone), and
+    every other field whole (a kilobyte: the listener's busy, the push key...), or
     None when nothing but `now` changed. The whole state went out on every receipt and every busy
     flip, five times an exchange: 4.6 MB per open device with a long thread and plan mode. The
     small fields go whole so a page that took an older state from a POST's reply can't keep it:
@@ -960,7 +923,7 @@ def _week_api(since: float) -> dict:
 # ---- notifications: web push with no payload (webpush.py) ----
 # The page reports what it showed while visible (/api/seen); news no page showed within
 # PUSH_DELAY gets one push to every subscribed device, whose service worker then fetches `/api/latest`
-# and shows the newest open ask, else Claude's latest message. seen.jsonl: {id, ts, by: page|push,
+# and shows Claude's latest message (or a notice that it waits in the terminal). seen.jsonl: {id, ts, by: page|push,
 # endpoint (push: the device that took it)}.
 
 _keys: dict[str, str] = {}
@@ -1055,19 +1018,18 @@ def mark_seen(ids, by: str, endpoint: str | None = None) -> None:
 
 
 def news(now: float | None = None) -> list[str]:
-    """Ids of Claude's messages and open asks old enough to push and recent enough to matter,
+    """Ids of Claude's messages and open notices old enough to push and recent enough to matter,
     not yet shown or pushed."""
     now = now or store.now()
     done = _seen()
     items = [(m["id"], m["ts"]) for m in thread() if m.get("from") in NEWS and _for_user(m)]
-    items += [(a["id"], a["ts"]) for a in asks() if a["answer"] is None]
     return [i for i, ts in items if now - PUSH_WINDOW < ts <= now - PUSH_DELAY and i not in done]
 
 
 class Pusher:
     """Sends the pushes: woken by the hub, and every PUSH_DELAY/2 so news ripens on time. Each
     device is counted on its own: every due push was marked sent whatever the services said, so a
-    phone whose service was down for seconds missed a permission prompt (the 2026-11-18 audit,
+    phone whose service was down for seconds missed a permission prompt's card (the 2026-11-18 audit,
     #86). One that failed for now is tried again after PUSH_RETRY, within PUSH_WINDOW."""
 
     def __init__(self, hub: "Hub", send=None):
@@ -1136,223 +1098,27 @@ def build() -> str:
     return format(zlib.crc32(repr(files).encode()), "x")  # not hash(): it differs per process
 
 
-# ---- asks: permission prompts, plans, questions ----
-# While the user is away on the web chat, the mod puts Claude Code's dialogs here: the terminal's
-# would wait for nobody (the user, 2026-11-18). A `permission` (allow or deny the tool), a `plan`
-# (ExitPlanMode: approve it, or keep planning with a note), a `question` (AskUserQuestion: the
-# chosen options, `answers` keyed by question). asks.jsonl holds an ask row {id, ts, tool, text,
-# kind, detail?}, then answer rows {id, ts, answer, by, note?, answers?}; the first answer row
-# wins, so the page's answer and the mod's expiry, written by two processes, can't both stand.
-ANSWERS = ("allow", "deny", "expired")
-KINDS = ("permission", "plan", "question")
+# The kinds of dialog a notice may name (`wb chat notice --kind`), and the most of its `what` kept
+KINDS = ("permission", "plan", "question", "elicitation")
 ASK_TEXT = 2000
-DETAIL_MAX = 40_000   # bytes of JSON as stored (UTF-8): a plan or four questions with previews
-CUT_NOTE = " (cut: the rest is in the terminal)"
-NOTE_MAX = 2000
-AWAY = ("ask", "allow")  # prefs.json `away`: ask the user here, or let Claude go ahead
-
-
-def ask(tool: str, text: str, kind: str = "permission", detail: dict | None = None,
-        pid: int | None = None, for_: list[str] | None = None, here: bool = False) -> dict:
-    """A new ask. A permission while the user's setting says `allow` is answered at once, by
-    `setting`, and stays in the thread so they see what ran. ``pid``: the asking session's `wb
-    events` process, which lives exactly as long as the session; once it is gone the ask expires.
-    ``for_``: the agents whose request Claude is working on (#1042: the page says "for <name>");
-    ``here``: the user is at the terminal, so their away setting doesn't answer it."""
-    if kind not in KINDS:
-        raise ValueError(kind)
-    names = list(dict.fromkeys(for_ or []))
-    if not all(isinstance(n, str) and AGENT_NAME.fullmatch(n) for n in names):
-        raise ValueError("--for is an agent's name")
-    row = {"id": f"ask-{int(time.time() * 1000)}-{secrets.token_hex(4)}", "ts": store.now(),
-           "tool": tool[:200], "text": text[:ASK_TEXT], "kind": kind}
-    if detail is not None:
-        row["detail"] = fit_detail(detail)
-    if pid:
-        row["pid"] = int(pid)
-    if names:
-        row["for"] = names
-    store.append_jsonl(chat_dir() / "asks.jsonl", row)
-    _open_update(lambda w: w["asks"].__setitem__(row["id"], row))
-    if kind == "permission" and prefs()["away"] == "allow" and not here:
-        return answer(row["id"], "allow", "setting")
-    return {**row, "answer": None}
-
-
-def _stored(d) -> int:
-    return len(json.dumps(d, ensure_ascii=False).encode())
-
-
-def fit_detail(detail: dict) -> dict:
-    """``detail`` within DETAIL_MAX as stored: a plan, else the questions' previews, else their
-    options' descriptions, cut (each to one length, the longest first) and marked CUT_NOTE.
-    Measured as json.dumps' ASCII escapes, a 7,700-character Japanese plan was six bytes a
-    character and refused, and the dialog sat in the terminal with the phone told nothing (#535).
-    ValueError when even the questions themselves don't fit."""
-    if _stored(detail) <= DETAIL_MAX:
-        return detail
-    d = json.loads(json.dumps(detail))
-    opts = [o for q in d.get("questions") or [] if isinstance(q, dict)
-            for o in q.get("options") or [] if isinstance(o, dict)]
-    for spots in ([(d, "plan")], [(o, "preview") for o in opts], [(o, "description") for o in opts]):
-        spots = [(h, k, h[k]) for h, k in spots if isinstance(h.get(k), str) and h[k]]
-        if not spots:
-            continue
-        def cap(n):
-            for h, k, text in spots:
-                h[k] = text if len(text) <= n else text[:n].rstrip() + CUT_NOTE
-        lo, hi = 0, max(len(t) for _, _, t in spots)
-        while lo < hi:  # the longest length every text may keep
-            mid = (lo + hi + 1) // 2
-            cap(mid)
-            lo, hi = (mid, hi) if _stored(d) <= DETAIL_MAX else (lo, mid - 1)
-        cap(lo)
-        if _stored(d) <= DETAIL_MAX:
-            return d
-    raise ValueError("detail too long")
-
-
-def asks(limit: int = 20) -> list[dict]:
-    """The latest asks, and every open one older than those, each with its answer (None while
-    open; `stale` once open past ASK_STALE), `answered`, `by`, and the answer's `note` and
-    `answers` when it has them."""
-    seen: dict[str, dict] = {}
-    for r in store.read_jsonl_tail(chat_dir() / "asks.jsonl", THREAD_BYTES):  # an answer follows its ask
-        a = seen.get(r.get("id"))
-        if "answer" in r:
-            if a and a["answer"] is None and r["answer"] in ANSWERS:
-                a.update(answer=r["answer"], answered=r["ts"], by=r.get("by"))
-                a.update({k: r[k] for k in ("note", "answers") if k in r})
-        elif "tool" in r and r.get("id"):
-            seen[r["id"]] = {"kind": "permission", **r, "answer": None}
-    # an open ask older than the tail is still open (#329)
-    older = sorted(({**a, "answer": None} for i, a in open_work()["asks"].items() if i not in seen),
-                   key=lambda a: (a.get("ts", 0), a.get("id", "")))
-    rows, now = list(seen.values()), store.now()
-    out = older + [a for a in rows[:max(0, len(rows) - limit)] if a["answer"] is None] + rows[-limit:]
-    for a in out:
-        if a["answer"] is None and a.get("pid") and not _alive(a["pid"]):
-            _orphaned(a)
-    return [{**a, "stale": True} if a["answer"] is None and now - a["ts"] > ASK_STALE else a
-            for a in out]
-
-
-def _orphaned(a: dict) -> None:
-    """Expire an open ask whose session is gone (its pid), by `interrupted`, in place. A Bash card
-    left by a crashed or closed session stayed open for good: answerable for an hour though nobody
-    waited, then "it waits in the terminal", and every later push showed it (#538)."""
-    row = {"id": a["id"], "ts": store.now(), "answer": "expired", "by": "interrupted"}
-    store.append_jsonl(chat_dir() / "asks.jsonl", row)
-    _answered({k: v for k, v in a.items() if k not in ("answer", "stale")}, row)
-    a.update(answer="expired", answered=row["ts"], by="interrupted")
-
-
-def find_ask(ask_id: str) -> dict | None:
-    """The ask as it stands, answered or not. One answered after its row left the asks' tail is
-    in open.json's `answered`: answering took it out of the open index, and its waiter then got
-    "no such ask" for an answer just given (#447)."""
-    return (next((a for a in reversed(asks(10_000)) if a["id"] == ask_id), None)
-            or (open_work().get("answered") or {}).get(ask_id))
-
-
-ANSWER_KEPT = 86400  # seconds an answer stays in open.json for its waiter (the mod waits 30 minutes)
-
-
-def _settle(answered: dict, ask_row: dict, ans: dict) -> None:
-    """Keep the ask with its answer (the first one stands), and drop those kept past ANSWER_KEPT."""
-    answered.setdefault(ask_row["id"], {"kind": "permission", **ask_row, "answer": ans["answer"],
-                                        "answered": ans["ts"], "by": ans.get("by"),
-                                        **{k: ans[k] for k in ("note", "answers") if k in ans}})
-    cut = store.now() - ANSWER_KEPT
-    for k in [k for k, a in answered.items() if a.get("answered", 0) < cut]:
-        del answered[k]
-
-
-def _answered(ask_row: dict, ans: dict) -> None:
-    def change(w):
-        w["asks"].pop(ask_row["id"], None)
-        _settle(w["answered"], ask_row, ans)
-    _open_update(change)
-
-
-def answer(ask_id: str, verdict: str, by: str, note: str | None = None,
-           answers: dict | None = None) -> dict | None:
-    """Answer an open ask (a later answer changes nothing). The ask as it now stands, None when
-    there is no such ask. `answers` only for a question, and only its own questions."""
-    if verdict not in ANSWERS:
-        raise ValueError(verdict)
-    cur = find_ask(ask_id)
-    if cur and cur["answer"] is None:
-        row = {"id": ask_id, "ts": store.now(), "answer": verdict, "by": by}
-        if note:
-            row["note"] = note[:NOTE_MAX]
-        if answers is not None:
-            asked = {q.get("question") for q in (cur.get("detail") or {}).get("questions") or []}
-            if cur["kind"] != "question" or verdict != "allow" or not answers \
-                    or not set(answers) <= asked or not all(isinstance(v, str) and 0 < len(v) <= NOTE_MAX
-                                                            for v in answers.values()):
-                raise ValueError("answers")
-            row["answers"] = answers
-        elif cur["kind"] == "question" and verdict == "allow":
-            raise ValueError("answers")  # a question is answered with its answers
-        store.append_jsonl(chat_dir() / "asks.jsonl", row)
-        _answered({k: v for k, v in cur.items() if k not in ("answer", "stale")}, row)
-        cur = find_ask(ask_id) or {**cur, "answer": verdict, "answered": row["ts"], "by": by}
-    return cur
-
-
-def session_plan(session: str | None, plan_file: str | None = None) -> str:
-    """The plan this session wrote: the file ExitPlanMode's input names, else the last plan file
-    its transcript names, else "". The newest file in the plans directory was any project's: with
-    two planning, one session's card showed the other's plan, and the user sent revisions against
-    it (#253, the audit of 1.2)."""
-    from . import context, spend  # context imports this module
-    d = (context.claude_home().expanduser() / "plans").resolve()
-    f = None
-    if plan_file:
-        f = Path(plan_file).expanduser()
-    elif session and (transcript := spend.transcript_paths(session)[0]):
-        pat = re.compile(re.escape(str(d).encode()) + rb"/[A-Za-z0-9._-]+\.md")
-        try:
-            with open(transcript, "rb") as fh, mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-                f = next((Path(m.group().decode()) for m in reversed(list(pat.finditer(mm)))), None)
-        except (OSError, ValueError):  # gone, or empty (mmap refuses an empty file)
-            f = None
-    try:
-        if f is None or f.resolve().parent != d or f.suffix != ".md" or not f.resolve().is_file():
-            return ""
-        return f.read_text(errors="replace")[:DETAIL_MAX + 1]  # ask cuts it, marked (#535)
-    except OSError:
-        return ""
-
-
-def prefs() -> dict:
-    """The user's choices on the page: {"away": "ask"|"allow"} (chat/prefs.json)."""
-    p = store.read_json(chat_dir() / "prefs.json", None) or {}
-    return {"away": p.get("away") if p.get("away") in AWAY else "ask"}
-
-
-def set_prefs(**changes) -> dict:
-    with store.locked(chat_dir() / "prefs.lock"):
-        p = {**prefs(), **changes}
-        if p["away"] not in AWAY:
-            raise ValueError("away")
-        store.write_json(chat_dir() / "prefs.json", p)
-    return p
 
 
 # ---- which device the user last used (#959) ----
 # Away was where the user last typed: a web message made them away, typing in the terminal
-# brought them back. The owner typed in the terminal, then picked up the phone with the chat open
-# and "Let Claude go ahead" set; a permission prompt came up in the terminal, never reached the
-# phone and wasn't allowed (2026-11-21, #959). So using the page counts as using the phone: a page
+# brought them back. The owner typed in the terminal, then picked up the phone with the chat open;
+# a permission prompt came up in the terminal and never reached the phone (2026-11-21, #959).
+# So using the page counts as using the phone: a page
 # on screen and in use posts /api/active, and that marks the user away as a web message does
 # (chat/away.json's `at`, which the mod reads), until they type in the terminal again or answer a
 # dialog there (the mod's `back`). chat/page.json `{at}`: when a page was last in use, so a dialog
 # at the terminal is announced only to a user who uses the chat: a page in use within
 # PAGE_RECENT, or push on.
 PAGE_RECENT = 86400
-NOTICE_WHAT = {"permission": "a permission", "plan": "a plan", "question": "a question"}
+# The waiting line (#1350, from #1340's decision): no dialog is answered on the phone, only said
+# to wait, on either driver. A permission names the way out: the driver run with permissions
+# granted (its own mode and rules), so most work goes on from the chat (the owner, #1350).
+WAITING = "Claude is waiting for you in the terminal."
+WAITING_GRANT = " Run it with permissions granted to work from the chat."
 
 
 def active() -> float:
@@ -1375,24 +1141,25 @@ def page_used() -> float:
 
 
 def notice(tool: str, what: str, kind: str = "permission") -> dict | None:
-    """Tell the phone that a dialog waits in the terminal while the user isn't away (#959): a
-    `notice` row in the thread, with no buttons (only the terminal can answer it), pushed as
-    Claude's messages are. None, and nothing written, for a user who doesn't use the chat: no
-    page in use within PAGE_RECENT and no device with push on."""
+    """Tell the phone that a dialog waits in the terminal (#959, #1350): a `notice` row in the
+    thread, one line with no buttons (only the terminal can answer it), pushed as Claude's
+    messages are, until notice_done clears it. Every kind, away or not. None, and nothing
+    written, for a user who doesn't use the chat: no page in use within PAGE_RECENT and no device
+    with push on."""
     if kind not in KINDS:
         raise ValueError(kind)
     if not webpush.subscriptions() and store.now() - page_used() > PAGE_RECENT:
         return None
-    return send(f"Claude is waiting on {NOTICE_WHAT[kind]} in the terminal", "notice",
-                tool=tool[:200], what=what[:ASK_TEXT])
+    return send(WAITING + (WAITING_GRANT if kind == "permission" else ""), "notice",
+                tool=tool[:200], kind=kind, what=what[:ASK_TEXT])
 
 
 def notice_done(msg_id: str) -> bool:
-    """The notice's dialog was answered in the terminal (#959): no push is owed for it (one not yet
-    due is never sent), and the thread shows it answered (a receipt `{id, ts, by: "terminal", how:
-    "answered"}`). Unsettled, every prompt approved at the terminal in two seconds still buzzed
-    the phone ten seconds later, saying it waited (the #959 review). False for an id that is no
-    notice in the thread."""
+    """The notice's dialog settled in the terminal (#959): no push is owed for it (one not yet due
+    is never sent), and the thread leaves it out (a receipt `{id, ts, by: "terminal", how:
+    "answered"}`): the waiting line clears (#1350). Unsettled, every prompt approved at the
+    terminal in two seconds still buzzed the phone ten seconds later, saying it waited (the #959
+    review). False for an id that is no notice in the thread."""
     if not any(r.get("id") == msg_id and r.get("from") == "notice"
                for r in store.read_jsonl_tail(chat_dir() / "messages.jsonl", LATEST_BYTES)):
         return False
@@ -1627,26 +1394,6 @@ def stop_started() -> bool:
     except OSError:
         return False
     return True
-
-
-def wait_answer(ask_id: str, timeout: float) -> str | None:
-    """Block until the ask is answered (its answer) or the timeout passes (None), woken by the
-    file's change; KeyError when there is no such ask."""
-    deadline = time.monotonic() + timeout
-    w = Watcher(chat_dir())  # before the first look, so an answer between the two isn't missed
-    try:
-        while True:
-            cur = find_ask(ask_id)
-            if cur is None:
-                raise KeyError(ask_id)
-            if cur["answer"]:
-                return cur["answer"]
-            left = deadline - time.monotonic()
-            if left <= 0:
-                return None
-            w.wait(min(left, 5))
-    finally:
-        w.close()
 
 
 def _started(pid: int) -> str | None:
@@ -2433,10 +2180,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"api": API_VERSION, "listening": listener() is not None})
         if path == "/api/wait":  # send, then wait for the answer (#1042)
             return self._wait()
-        if path.startswith("/api/ask/"):  # a settled plan's whole text, when it is unfolded (#755)
-            ask_id = path[len("/api/ask/"):]
-            got = find_ask(ask_id) if 0 < len(ask_id) <= 64 else None
-            return self._json(404, {"error": "no such prompt"}) if got is None else self._json(200, {"ask": got})
         if path == "/api/latest":  # the service worker's, at a push (#755)
             return self._json(200, latest())
         if path == "/api/stream":
@@ -2663,8 +2406,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._allowed() or not self._gate("POST", self.path.split("?")[0]):
             return
-        if self.path not in ("/api/send", "/api/answer", "/api/prefs", "/api/seen", "/api/push", "/api/active",
-                             "/api/settings"):
+        if self.path not in ("/api/send", "/api/seen", "/api/push", "/api/active", "/api/settings"):
             return self._json(404, {"error": "not found"})
         if self.agent and self.path == "/api/send" and (wait := self.sends.hit(self.agent)):
             return self._json(429, {"error": f"over {AGENT_SENDS_PER_MIN} sends a minute", "retry_after": wait})
@@ -2683,20 +2425,6 @@ class Handler(BaseHTTPRequestHandler):
             text, cid = str(body.get("text", "")).strip(), body.get("cid")
         except (ValueError, AttributeError):
             return self._json(400, {"error": "bad json"})
-        if self.path == "/api/answer":  # an ask: allow or deny, a note, a question's answers
-            ask_id, verdict = body.get("id"), body.get("answer")
-            note, answers = body.get("note"), body.get("answers")
-            if not (isinstance(ask_id, str) and 0 < len(ask_id) <= 64) or verdict not in ("allow", "deny") \
-                    or not (note is None or isinstance(note, str) and len(note) <= NOTE_MAX) \
-                    or not (answers is None or isinstance(answers, dict) and len(answers) <= 4):
-                return self._json(400, {"error": "an answer is {id, answer: allow|deny, note?, answers?}"})
-            try:
-                cur = answer(ask_id, verdict, "web", note=note or None, answers=answers)
-            except ValueError:
-                return self._json(400, {"error": "those answers don't fit the question"})
-            if cur is None:
-                return self._json(404, {"error": "no such prompt"})
-            return self._json(200, {"ask": cur, "state": snapshot()})
         if self.path == "/api/seen":  # what the page showed: no push for it (endpoint: to it alone)
             ids, endpoint = body.get("ids"), body.get("endpoint")
             if not (isinstance(ids, list) and len(ids) <= 200
@@ -2724,11 +2452,6 @@ class Handler(BaseHTTPRequestHandler):
             (webpush.subscribe(endpoint, self.headers.get("User-Agent") or "") if on
              else webpush.unsubscribe(endpoint))
             return self._json(200, {"on": on})
-        if self.path == "/api/prefs":  # the page's settings
-            if set(body) - {"away"} or body.get("away") not in AWAY:
-                return self._json(400, {"error": "prefs are {away: ask|allow}"})
-            set_prefs(**body)
-            return self._json(200, {"state": snapshot()})
         if self.path == "/api/settings":  # one of the web app's Settings, through its wb command
             return self._json(*admin_set(body.get("key"), body.get("value")))
         if self.agent and body.get("about") is not None:  # what it answers is the user's (#1042)

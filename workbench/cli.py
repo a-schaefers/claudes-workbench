@@ -6362,55 +6362,16 @@ def cmd_chat(a):
     elif a.action == "pending":
         for r in chat.pending():
             print(json.dumps(r))
-    elif a.action == "ask":  # the mod: a dialog for the away user; prints its id and its state
-        if not a.tool or a.kind not in chat.KINDS:
-            die("wb chat ask needs --tool, and --kind permission|plan|question")
-        try:
-            detail = json.loads(a.detail) if a.detail else None
-        except ValueError:
-            die("--detail is JSON")
-        unknown = False
-        if a.kind == "plan" and not (detail or {}).get("plan"):  # the input may hold only its file
-            detail = {"plan": chat.session_plan(a.session, (detail or {}).get("plan_file"))}
-            if unknown := not detail["plan"]:  # not another project's newest plan (#253)
-                detail["project"] = Path(a.repo).name if a.repo else ""
-        if not (a.text or a.kind != "permission"):
-            die("wb chat ask --kind permission needs --text")
-        try:
-            row = chat.ask(a.tool, a.text or "", a.kind, detail, pid=a.pid, for_=a.for_, here=a.here)
-            if unknown:  # nothing to answer on the page: the dialog comes up in its terminal
-                row = chat.answer(row["id"], "expired", "terminal")
-        except ValueError as e:
-            die(f"wb chat ask: {e}")
-        print(row["id"], row["answer"] or "open")
-    elif a.action == "notice":  # the mod: a dialog waits in the terminal, the user not away (#959)
-        if a.done:  # and was answered there: no push for it, the page says so
+    elif a.action == "notice":  # the mod: a dialog waits in the terminal (#959, #1350)
+        if a.done:  # and settled there: no push for it, and the page's line clears
             if not chat.notice_done(a.done):
                 die(f"wb chat notice --done: no notice {a.done} in the thread")
             print("answered", a.done)
             return
         if not a.tool or a.kind not in chat.KINDS:
-            die("wb chat notice needs --tool, and --kind permission|plan|question")
+            die("wb chat notice needs --tool, and --kind permission|plan|question|elicitation")
         row = chat.notice(a.tool, a.text or "", a.kind)
         print(row["id"] if row else "skipped: no chat page in use in a day, and no device with push on")
-    elif a.action == "wait":  # the mod: the answer once there is one; open at the timeout
-        if not a.id:
-            die("wb chat wait <ask id>")
-        try:
-            got = chat.wait_answer(a.id, a.timeout)
-        except KeyError:
-            die(f"no permission prompt {a.id}")
-        print(json.dumps(chat.find_ask(a.id)) if a.json else got or "open")
-    elif a.action == "answer":
-        if not a.id or a.verdict not in chat.ANSWERS:
-            die("wb chat answer <ask id> allow|deny|expired")
-        try:
-            cur = chat.answer(a.id, a.verdict, a.by or "cli", note=a.note)
-        except ValueError:
-            die("a question is answered on the page, with its choices")
-        if cur is None:
-            die(f"no permission prompt {a.id}")
-        print(cur["answer"])
     else:  # log
         for r in chat.thread()[-a.n:]:
             who = (f"agent {r['from']}" if r.get("role") == "agent"
@@ -8134,45 +8095,32 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("chat", help="the web chat: turn it on or off (on starts a server; kept as "
                        "left), serve it, its link, reply to the user there, takes for the user "
                        "to pick by ear (listen), "
-                       "the thread (log), receipts (ack, claim), what waits (pending), permission "
-                       "prompts for the away user (ask, wait, answer: the mod's), a notice "
-                       "that one waits in the terminal (notice: the mod's), other agents' tokens "
+                       "the thread (log), receipts (ack, claim), what waits (pending), the line "
+                       "that a dialog waits in the terminal (notice: the mod's), other agents' tokens "
                        "(token add|list|revoke), and a turn's end (ended: the mod's)")
     s.add_argument("action", choices=["serve", "url", "on", "off", "reply", "listen", "log", "ack",
-                                      "claim", "pending", "ask", "notice", "wait", "answer", "token",
-                                      "ended"], nargs="?",
+                                      "claim", "pending", "notice", "token", "ended"], nargs="?",
                    default="log")
-    s.add_argument("id", nargs="?", help="ack, claim: the message id; wait, answer: the prompt's "
-                   "id; listen: the clips (wb audio's takes, up to 8); token: add, list or revoke; "
-                   "ended: the messages the turn took")
-    s.add_argument("verdict", nargs="?", help="answer: allow, deny or expired; token: the agent's name")
+    s.add_argument("id", nargs="?", help="ack, claim: the message id; listen: the clips (wb "
+                   "audio's takes, up to 8); token: add, list or revoke; ended: the messages the "
+                   "turn took")
+    s.add_argument("verdict", nargs="?", help="token: the agent's name")
     s.add_argument("more", nargs="*", help=argparse.SUPPRESS)  # listen's further clips
-    s.add_argument("--tool", help="ask, notice: the tool asking")
-    s.add_argument("--kind", default="permission", help="ask, notice: permission, plan or question")
+    s.add_argument("--tool", help="notice: the tool asking")
+    s.add_argument("--kind", default="permission", help="notice: permission, plan, question or "
+                   "elicitation")
     # --done takes the id itself: an optional positional after a flag (`notice --done <id>`) is
     # left unparsed before Python 3.12, so the mod's call failed on 3.11 (CI, 2026-11-21)
-    s.add_argument("--done", metavar="ID", help="notice: the notice whose dialog was answered in "
-                   "the terminal (no push for it)")
-    s.add_argument("--detail", help="ask: JSON, a question's {questions} or a plan's {plan} "
-                   "or {plan_file}")
-    s.add_argument("--session", help="ask: the Claude Code session asking (its plan file)")
-    s.add_argument("--repo", help="ask: the session's directory (named when its plan is unknown)")
-    s.add_argument("--pid", type=int, help="ask: the asking session's `wb events` process: once it "
-                   "is gone, the ask expires")
-    s.add_argument("--for", dest="for_", action="append", metavar="AGENT", help="ask: the agent whose "
-                   "request Claude is working on (again for more): the page says so (#1042)")
-    s.add_argument("--here", action="store_true", help="ask: the user is at the terminal, so their "
-                   "away setting doesn't answer it")
-    s.add_argument("--note", help="answer: words to pass on with it")
-    s.add_argument("--timeout", type=float, default=30, help="wait: seconds")
-    s.add_argument("--json", action="store_true", help="wait: the whole ask, answered or not; url: "
-                   "{url, state: up|started|off|blocked|failed, why} (the mod's)")
+    s.add_argument("--done", metavar="ID", help="notice: the notice whose dialog settled in the "
+                   "terminal (no push for it; the page's line clears)")
+    s.add_argument("--json", action="store_true", help="url: {url, state: "
+                   "up|started|off|blocked|failed, why} (the mod's)")
     s.add_argument("--port", type=int, help=f"default: the running server's (chat/port.json), "
                    f"else {chat.PORT}")
     s.add_argument("--bind", action="append", help="serve: an address to listen on, `tailscale` "
                    "or 0.0.0.0 (default: chat.json's `bind`, else localhost)")
     s.add_argument("--host", action="append", help="serve: another host name to answer to (* any)")
-    s.add_argument("--text", help="reply, ask, notice, listen: the text"); s.add_argument("--message", help="reply: file, or -")
+    s.add_argument("--text", help="reply, notice, listen: the text"); s.add_argument("--message", help="reply: file, or -")
     s.add_argument("--to", action="append", metavar="ID", help="reply: the message it answers (again "
                    "for more; `user`: the user's thread; default: those this turn took, the user's alone if any)")
     s.add_argument("--by", help=argparse.SUPPRESS); s.add_argument("-n", type=int, default=10)

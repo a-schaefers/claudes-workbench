@@ -26007,63 +26007,9 @@ class WebChat(Base):
         for path in ("/../chat.py", "/chat.py", "/nope.js", "/%2e%2e/store.py"):
             self.assertEqual(self.call(path)[0], 404, path)
 
-    def test_a_permission_prompt_is_answered_once_from_the_page_with_the_token(self):
-        # the mod puts Claude Code's prompts here while the user is away (the user, 2026-11-18)
-        chat, tok = self.chat, self.chat.token()
-        a = chat.ask("Bash", "git push origin main")
-        st = self.call("/api/state", token=tok)[1]
-        self.assertEqual([(x["id"], x["tool"], x["answer"]) for x in st["asks"]], [(a["id"], "Bash", None)])
-        self.assertEqual(self.call("/api/answer", {"id": a["id"], "answer": "allow"})[0], 401)
-        self.assertEqual(self.call("/api/answer", {"id": a["id"], "answer": "allow"}, token=tok,
-                                   host="evil.example")[0], 403)
-        self.assertEqual(self.call("/api/answer", {"id": a["id"], "answer": "maybe"}, token=tok)[0], 400)
-        self.assertEqual(self.call("/api/answer", {"id": a["id"], "answer": "expired"}, token=tok)[0], 400)
-        self.assertEqual(self.call("/api/answer", {"id": "ask-nope", "answer": "allow"}, token=tok)[0], 404)
-        code, r = self.call("/api/answer", {"id": a["id"], "answer": "deny"}, token=tok)
-        self.assertEqual((code, r["ask"]["answer"], r["ask"]["by"]), (200, "deny", "web"))
-        self.assertEqual(r["state"]["asks"][0]["answer"], "deny")
-        # the first answer stands: a late tap, or the mod's expiry, changes nothing
-        self.assertEqual(self.call("/api/answer", {"id": a["id"], "answer": "allow"}, token=tok)[1]["ask"]["answer"], "deny")
-        self.assertEqual(chat.answer(a["id"], "expired", "timeout")["answer"], "deny")
-        self.assertEqual(chat.wait_answer(a["id"], 0), "deny")
-
-    def test_a_plan_and_a_question_are_answered_from_the_page(self):
-        chat, tok = self.chat, self.chat.token()
-        plan = chat.ask("ExitPlanMode", "", "plan", {"plan": "1. Read\n2. Write"})
-        code, r = self.call("/api/answer", {"id": plan["id"], "answer": "deny", "note": "split step 2"}, token=tok)
-        self.assertEqual((code, r["ask"]["answer"], r["ask"]["note"]), (200, "deny", "split step 2"))
-        qs = [{"question": "Which DB?", "header": "DB", "multiSelect": False,
-               "options": [{"label": "SQLite", "description": ""}, {"label": "Postgres", "description": ""}]}]
-        q = chat.ask("AskUserQuestion", "", "question", {"questions": qs})
-        for bad in ({"id": q["id"], "answer": "allow"},                               # no answers
-                    {"id": q["id"], "answer": "allow", "answers": {"Other?": "x"}},     # not its question
-                    {"id": q["id"], "answer": "allow", "answers": {"Which DB?": ""}},   # empty
-                    {"id": q["id"], "answer": "allow", "answers": {"Which DB?": 7}}):
-            self.assertEqual(self.call("/api/answer", bad, token=tok)[0], 400, bad)
-        perm = chat.ask("Bash", "ls")
-        self.assertEqual(self.call("/api/answer", {"id": perm["id"], "answer": "allow",
-                                                   "answers": {"Which DB?": "SQLite"}}, token=tok)[0], 400)
-        code, r = self.call("/api/answer", {"id": q["id"], "answer": "allow",
-                                            "answers": {"Which DB?": "SQLite"}}, token=tok)
-        self.assertEqual((code, r["ask"]["answers"]), (200, {"Which DB?": "SQLite"}))
-        got = json.loads(run_wb("chat", "wait", q["id"], "--timeout", "0", "--json"))
-        self.assertEqual((got["kind"], got["answer"], got["answers"]), ("question", "allow", {"Which DB?": "SQLite"}))
-
-    def test_go_ahead_while_away_allows_permissions_at_once_and_still_asks_plans(self):
-        chat, tok = self.chat, self.chat.token()
-        self.assertEqual(self.call("/api/state", token=tok)[1]["prefs"], {"away": "ask"})
-        self.assertEqual(self.call("/api/prefs", {"away": "always"}, token=tok)[0], 400)
-        self.assertEqual(self.call("/api/prefs", {"away": "allow", "x": 1}, token=tok)[0], 400)
-        self.assertEqual(self.call("/api/prefs", {"away": "allow"})[0], 401)
-        self.assertEqual(self.call("/api/prefs", {"away": "allow"}, token=tok)[1]["state"]["prefs"], {"away": "allow"})
-        self.assertEqual(run_wb("chat", "ask", "--tool", "Bash", "--text", "make").split()[1], "allow")
-        self.assertEqual(chat.asks()[-1]["by"], "setting")           # listed, so the user sees what ran
-        self.assertEqual(run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan",
-                                "--detail", '{"plan": "x"}').split()[1], "open")
-
     def test_using_the_page_marks_the_user_away_as_a_web_message_does_959(self):
         # #959: the owner typed in the terminal, then picked up the phone with the chat open and
-        # "Let Claude go ahead" set; only a web message made them away, so the prompt stayed in
+        # its away setting on; only a web message made them away, so the prompt stayed in
         # the terminal, neither shown on the phone nor allowed
         chat, tok = self.chat, self.chat.token()
         d = chat.chat_dir()
@@ -26084,9 +26030,10 @@ class WebChat(Base):
         self.assertEqual(away["by"], "page")
         self.assertGreaterEqual(away["at"], before)          # newer than the terminal's: away
 
-    def test_a_dialog_at_the_terminal_is_a_notice_on_the_phone_only_for_a_user_of_the_chat_959(self):
+    def test_a_dialog_at_the_terminal_is_one_waiting_line_on_the_phone_only_for_a_user_of_the_chat_959_1350(self):
         # #959: at the terminal the prompt stays there, and the phone is told one waits, as a
-        # notice with no buttons (only the terminal can answer it), pushed as Claude's messages
+        # notice with no buttons (only the terminal can answer it), pushed as Claude's messages;
+        # #1350: one line for every kind, a permission's naming the way out (permissions granted)
         chat, tok = self.chat, self.chat.token()
         from workbench import webpush as wp
         never = run_wb("chat", "notice", "--tool=Bash", "--text=rm -rf runs/*")
@@ -26097,13 +26044,17 @@ class WebChat(Base):
         self.assertEqual(self.call("/api/active", {}, token=tok)[0], 200)   # a page in use today
         nid = run_wb("chat", "notice", "--tool=Bash", "--text=rm -rf runs/*").strip()
         row = chat.thread()[-1]
-        self.assertEqual((row["id"], row["from"], row["text"], row["tool"], row["what"]),
-                         (nid, "notice", "Claude is waiting on a permission in the terminal", "Bash", "rm -rf runs/*"))
-        self.assertEqual(chat.asks(), [])                     # not a card to answer
-        self.assertIn("notice: Claude is waiting on a permission in the terminal", run_wb("chat", "log"))
+        line = "Claude is waiting for you in the terminal. Run it with permissions granted to work from the chat."
+        self.assertEqual((row["id"], row["from"], row["text"], row["tool"], row["kind"], row["what"]),
+                         (nid, "notice", line, "Bash", "permission", "rm -rf runs/*"))
+        self.assertNotIn("asks", chat.snapshot())             # no card to answer (#1350)
+        self.assertIn("notice: " + line, run_wb("chat", "log"))
         self.assertEqual(chat.latest()["messages"][-1]["id"], nid)  # what the push shows
-        plan = chat.notice("ExitPlanMode", "", "plan")
-        self.assertEqual((plan["text"], "what" in plan), ("Claude is waiting on a plan in the terminal", False))
+        for kind, tool in (("plan", "ExitPlanMode"), ("question", "AskUserQuestion"), ("elicitation", "mcp:tracker")):
+            other = chat.notice(tool, "", kind)
+            self.assertEqual((other["text"], other["kind"]), ("Claude is waiting for you in the terminal.", kind))
+        self.assertRegex(run_wb("chat", "notice", "--tool=mcp:tracker", "--kind=elicitation", "--text=Sign in").strip(),
+                         r"^\d+-[0-9a-f]+$")
         with self.assertRaises(ValueError):
             chat.notice("Bash", "ls", "nonsense")
         # push on and no page in a day: still told, and pushed once, as news
@@ -26120,10 +26071,10 @@ class WebChat(Base):
         # the mod's owed-reply check reads only Claude's own rows: a notice is no reply (#767)
         self.assertNotIn(pushed["id"], [m["id"] for m in chat.thread() if m["from"] == "claude"])
 
-    def test_a_notice_whose_dialog_was_answered_in_the_terminal_is_never_pushed_and_says_answered_959(self):
+    def test_a_notice_whose_dialog_settled_in_the_terminal_is_never_pushed_and_its_line_clears_959_1350(self):
         # the #959 review: nothing settled a notice when its dialog was answered, so a prompt
         # approved at the terminal in two seconds still buzzed the phone ten seconds later,
-        # saying Claude waited, and the thread said so for good
+        # saying Claude waited, and the thread said so for good; #1350: the line clears
         chat = self.chat
         from workbench import webpush as wp
         wp.subscribe("https://fcm.googleapis.com/fcm/send/abc")
@@ -26135,8 +26086,7 @@ class WebChat(Base):
         pusher = chat.Pusher(hub, send=lambda eps: (sent.append(eps), {e: 201 for e in eps})[1])
         self.assertEqual(pusher.tick(row["ts"] + chat.PUSH_DELAY + 1), [])  # due, but settled: no push
         self.assertEqual(sent, [])
-        got = chat.thread()[-1]
-        self.assertEqual((got["id"], bool(got["answered"])), (row["id"], True))  # the page says answered
+        self.assertNotIn(row["id"], [m["id"] for m in chat.thread()])         # the page's line clears
         self.assertEqual(chat.latest()["messages"], [])                         # and no push shows it
         reply = chat.send("done", "claude")
         self.assertEqual(chat.latest()["messages"][-1]["id"], reply["id"])
@@ -26279,8 +26229,9 @@ class WebChat(Base):
         self.assertEqual(pusher.tick(missed["ts"] + chat.PUSH_DELAY + 1), [missed["id"]])
         self.assertEqual(pusher.tick(missed["ts"] + chat.PUSH_DELAY + 2), [])   # once
         self.assertEqual(len(sent), 1)
-        ask = chat.ask("Bash", "make")
-        self.assertEqual(pusher.tick(ask["ts"] + chat.PUSH_DELAY + 1), [ask["id"]])
+        store.write_json(chat.chat_dir() / "page.json", {"at": store.now()})  # a user of the chat
+        line = chat.notice("Bash", "make")                             # Claude waits in the terminal
+        self.assertEqual(pusher.tick(line["ts"] + chat.PUSH_DELAY + 1), [line["id"]])
         late = chat.send("old news", "claude")
         self.assertEqual(pusher.tick(late["ts"] + chat.PUSH_WINDOW + 1), [])  # never a backlog
 
@@ -26460,84 +26411,9 @@ class WebChat(Base):
         self.assertLess(sum(read), 1000)                                     # then only what was added
         self.assertIn("m59999", chat._seen())
 
-    def test_a_plan_card_shows_its_own_sessions_plan_and_never_another_projects(self):
-        # #253 (the audit of 1.2): with no plan text the card took the newest file in the plans
-        # directory, so with two projects planning, A's card showed B's plan for revisions
-        home = Path(self.tmp.name) / "claude"
-        plans, projects = home / "plans", home / "projects"
-        plans.mkdir(parents=True)
-        (plans / "alpha-plan.md").write_text("# A's plan")
-        (plans / "beta-plan.md").write_text("# B's plan")                      # the newest
-        os.utime(plans / "alpha-plan.md", (time.time() - 60, time.time() - 60))
-        (projects / "-a").mkdir(parents=True)
-        (projects / "-a" / "sess-a.jsonl").write_text(json.dumps({"message": {"content": [
-            {"type": "text", "text": f"A plan file exists from plan mode at: {plans}/alpha-plan.md"}]}}) + "\n")
-        (projects / "-a" / "sess-empty.jsonl").write_text("")
-
-        def card(*args):
-            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(home)}):
-                ask_id, state = run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan", *args).split()
-            return self.chat.find_ask(ask_id)["detail"], state
-
-        self.assertEqual(card("--session", "sess-a"), ({"plan": "# A's plan"}, "open"))    # its transcript
-        self.assertEqual(card("--detail", json.dumps({"plan_file": str(plans / "alpha-plan.md")})),
-                         ({"plan": "# A's plan"}, "open"))                                  # the tool's input
-        outside = Path(self.tmp.name) / "secret.md"
-        outside.write_text("not a plan")
-        for args in ((), ("--session", "sess-gone"), ("--session", "sess-empty"),
-                     ("--detail", json.dumps({"plan_file": str(outside)}))):
-            detail, state = card(*args, "--repo", "/home/u/alpha")
-            self.assertEqual((detail, state), ({"plan": "", "project": "alpha"}, "expired"), args)
-        self.assertEqual(self.chat.asks()[-1]["by"], "terminal")              # answered there
-
-    def test_a_long_or_cjk_plan_reaches_the_page_cut_to_fit_instead_of_refused(self):
-        # #535 (the 2026-11-20 audit, reproduced): the size was json.dumps' ASCII escapes, six bytes
-        # a CJK character, so a 7,700-character Japanese plan was refused, as was an ASCII plan
-        # file of 39,900 characters once its newlines were escaped
+    def test_unread_messages_outlast_the_display_window(self):
+        # #265 (the audit of 1.2): `wb chat pending` lost an unread message behind 200 newer replies
         chat = self.chat
-        stored = lambda a: len(json.dumps(chat.find_ask(a)["detail"], ensure_ascii=False).encode())
-        ja = "計画の手順。\n" * 1100                                          # 7,700 characters
-        a, state = run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan",
-                          "--detail", json.dumps({"plan": ja})).split()
-        self.assertEqual((chat.find_ask(a)["detail"]["plan"], state), (ja, "open"))  # whole
-        huge = "大きな計画。\n" * 10_000
-        a = run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan",
-                   "--detail", json.dumps({"plan": huge})).split()[0]
-        plan = chat.find_ask(a)["detail"]["plan"]
-        self.assertTrue(plan.endswith(chat.CUT_NOTE) and huge.startswith(plan[:-len(chat.CUT_NOTE)]))
-        self.assertLessEqual(stored(a), chat.DETAIL_MAX)
-        self.assertGreater(stored(a), chat.DETAIL_MAX - 100)                  # cut no more than it must
-        home = Path(self.tmp.name) / "claude"                                  # a plan file, newlines and all
-        (home / "plans").mkdir(parents=True)
-        (home / "plans" / "p.md").write_text(("step\n" * 8000)[:39_900])
-        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(home)}):
-            a = run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan", "--detail",
-                       json.dumps({"plan_file": str(home / "plans" / "p.md")})).split()[0]
-        self.assertTrue(chat.find_ask(a)["detail"]["plan"].endswith(chat.CUT_NOTE))
-        self.assertLessEqual(stored(a), chat.DETAIL_MAX)
-        opts = [{"label": f"opt {i}", "description": "d", "preview": "プレビュー" * 3000} for i in range(4)]
-        q = chat.ask("AskUserQuestion", "", "question", {"questions": [{"question": "Which?", "options": opts}]})
-        got = q["detail"]["questions"][0]["options"]
-        self.assertEqual([o["label"] for o in got], [o["label"] for o in opts])  # the choices whole
-        self.assertTrue(all(o["preview"].endswith(chat.CUT_NOTE) for o in got))
-        self.assertLessEqual(stored(q["id"]), chat.DETAIL_MAX)
-        with self.assertRaises(ValueError):                                    # only the questions can't be cut
-            chat.ask("AskUserQuestion", "", "question", {"questions": [{"question": "?" * 50_000}]})
-
-    def test_open_questions_and_unread_messages_outlast_the_display_windows(self):
-        # #265 (the audit of 1.2): an open question vanished from the page behind 20 newer answered
-        # ones, and `wb chat pending` lost an unread message behind 200 newer replies
-        chat = self.chat
-        first = chat.ask("AskUserQuestion", "", "question", {"questions": []})
-        for i in range(25):
-            chat.answer(chat.ask("Bash", f"cmd {i}")["id"], "deny", "web")
-        listed = chat.asks()
-        self.assertEqual(len(listed), 21)
-        self.assertEqual((listed[0]["id"], listed[0]["answer"]), (first["id"], None))
-        self.assertIn(first["id"], [a["id"] for a in chat.snapshot()["asks"]])   # on the page
-        self.assertNotIn("stale", listed[0])
-        with mock.patch.object(chat.store, "now", return_value=store.now() + chat.ASK_STALE + 1):
-            self.assertTrue(chat.asks()[0]["stale"])                                # past the wait
         unread = chat.send("are you there?", "user", "c-1")
         for i in range(205):
             chat.send(f"reply {i}", "claude")
@@ -26572,93 +26448,25 @@ class WebChat(Base):
 
     def test_open_work_outlasts_a_burst_past_the_files_tails(self):
         # #329 (the audit of 1.4, reproduced): 540 replies of 7,900 characters pushed an unread
-        # message out of the 4 MiB tail, and 120 plan cards an open question, which then could
-        # no longer be answered
+        # message out of the 4 MiB tail
         chat = self.chat
         unread = chat.send("are you there?", "user", "c-burst")
-        question = chat.ask("AskUserQuestion", "which?", "question",
-                            {"questions": [{"question": "Which?", "options": []}]})
         for i in range(540):
             chat.send(f"reply {i} " + "x" * 7900, "claude")
-        for i in range(120):
-            chat.ask("ExitPlanMode", f"plan {i}", "plan", {"plan": "p" * 39_000})
         self.assertGreater((chat.chat_dir() / "messages.jsonl").stat().st_size, chat.THREAD_BYTES)
-        self.assertGreater((chat.chat_dir() / "asks.jsonl").stat().st_size, chat.THREAD_BYTES)
         self.assertEqual([m["id"] for m in chat.pending()], [unread["id"]])
-        self.assertEqual(chat.find_ask(question["id"])["answer"], None)
-        self.assertIn(question["id"], [a["id"] for a in chat.asks()])
-        done = chat.answer(question["id"], "allow", "web", answers={"Which?": "this"})
-        self.assertEqual(done["answer"], "allow")
-        self.assertNotIn(question["id"], chat.open_work()["asks"])
         chat.ack(unread["id"], "s-1")
         self.assertEqual(chat.pending(), [])
         # a state directory from before the index: built once from the whole files
         late = chat.send("still there?", "user", "c-late")
         (chat.chat_dir() / "open.json").unlink()
         self.assertEqual([m["id"] for m in chat.pending()], [late["id"]])
-        self.assertEqual(len(chat.open_work()["asks"]), 120)       # the plan cards, still open
-
-    def test_an_old_prompt_answered_past_the_tail_still_gives_its_waiter_the_answer(self):
-        # #447 (the 2026-11-20 audit, reproduced): answering an open ask whose row had left the
-        # 4 MiB tail returned allow, and right after, its waiter got "no such ask"
-        chat = self.chat
-        old = chat.ask("Bash", "rm -rf build")
-        with open(chat.chat_dir() / "asks.jsonl", "a") as f:  # history the tail can't reach back past
-            for i in range(120):
-                f.write(json.dumps({"id": f"ask-{i}", "ts": store.now(), "tool": "Bash", "text": "x" * 39_000,
-                                    "kind": "permission"}) + "\n")
-                f.write(json.dumps({"id": f"ask-{i}", "ts": store.now(), "answer": "deny", "by": "web"}) + "\n")
-        self.assertGreater((chat.chat_dir() / "asks.jsonl").stat().st_size, chat.THREAD_BYTES)
-        self.assertIsNone(chat.find_ask(old["id"])["answer"])
-        self.assertEqual(chat.answer(old["id"], "allow", "web", note="go")["answer"], "allow")
-        got = chat.find_ask(old["id"])
-        self.assertEqual((got["answer"], got["by"], got["note"], got["text"]), ("allow", "web", "go", "rm -rf build"))
-        self.assertEqual(chat.wait_answer(old["id"], 1), "allow")
-        self.assertEqual(json.loads(run_wb("chat", "wait", old["id"], "--json"))["answer"], "allow")  # another process
-        self.assertEqual(chat.answer(old["id"], "deny", "timeout")["answer"], "allow")  # the first stands
-        (chat.chat_dir() / "open.json").unlink()                     # an index built again from the files
-        self.assertEqual(chat.find_ask(old["id"])["answer"], "allow")
-        with mock.patch.object(chat.store, "now", return_value=store.now() + chat.ANSWER_KEPT + 60):
-            chat.answer(chat.ask("Bash", "ls")["id"], "allow", "web")  # a day on, it is let go
-            self.assertNotIn(old["id"], chat.open_work()["answered"])
-
-    def test_a_prompt_whose_session_died_expires_and_takes_no_answer(self):
-        # #538 (the 2026-11-20 audit, reproduced): a Bash card whose session crashed stayed open
-        # for good, took an Allow nobody waited for, and every later push showed it
-        chat = self.chat
-        gone = subprocess.Popen(["true"])
-        gone.wait()
-        dead = run_wb("chat", "ask", "--tool", "Bash", "--text", "rm -rf build", "--pid", str(gone.pid)).split()[0]
-        live = chat.ask("Bash", "make", pid=os.getpid())
-        old = chat.ask("Bash", "ls")                                          # from a wb before the pid
-        listed = {a["id"]: a for a in chat.snapshot()["asks"]}
-        self.assertEqual((listed[dead]["answer"], listed[dead]["by"]), ("expired", "interrupted"))
-        self.assertIsNone(listed[live["id"]]["answer"])
-        self.assertIsNone(listed[old["id"]]["answer"])
-        self.assertEqual(chat.answer(dead, "allow", "web")["answer"], "expired")  # no answer for nobody
-        self.assertEqual(self.call("/api/answer", {"id": dead, "answer": "allow"}, token=chat.token())[1]["ask"]["answer"],
-                         "expired")
-        self.assertEqual(run_wb("chat", "wait", dead, "--timeout", "0.1").strip(), "expired")
-        self.assertNotIn(dead, chat.open_work()["asks"])
-        self.assertEqual(sum(r.get("id") == dead and "answer" in r              # expired once
-                             for r in store.read_jsonl(chat.chat_dir() / "asks.jsonl")[0]), 1)
-
-    def test_wb_chat_wait_blocks_until_the_answer_or_says_open(self):
-        chat = self.chat
-        a = chat.ask("Write", "/etc/hosts")
-        self.assertEqual(run_wb("chat", "wait", a["id"], "--timeout", "0.2").strip(), "open")
-        import threading
-        threading.Timer(0.3, chat.answer, (a["id"], "allow", "web")).start()
-        t0 = time.time()
-        self.assertEqual(run_wb("chat", "wait", a["id"], "--timeout", "20").strip(), "allow")
-        self.assertLess(time.time() - t0, 10)                  # woken by the answer, not the timeout
-        self.assertEqual(run_wb("chat", "answer", a["id"], "expired", "--by", "timeout").strip(), "allow")
-        with self.assertRaises(SystemExit):
-            run_wb("chat", "wait", "ask-nope")
-        b, state = run_wb("chat", "ask", "--tool", "Bash", "--text", "make deploy").split()
-        self.assertEqual(state, "open")
-        self.assertEqual(run_wb("chat", "answer", b, "expired", "--by", "interrupted").strip(), "expired")
-        self.assertEqual(chat.find_ask(b)["by"], "interrupted")
+        # an older wb's index, its asks with it: read, and the asks dropped at the next write (#1350)
+        store.write_json(chat.chat_dir() / "open.json", {"messages": chat.open_work()["messages"],
+                                                         "asks": {"ask-1": {"id": "ask-1"}}, "answered": {}})
+        self.assertEqual([m["id"] for m in chat.pending()], [late["id"]])
+        chat.ack(late["id"], "s-1")
+        self.assertEqual(store.read_json(chat.chat_dir() / "open.json", None), {"messages": {}})
 
     def open_stream(self, tok):
         import http.client
@@ -26880,29 +26688,24 @@ class WebChat(Base):
         self.assertFalse(self.chat.is_on())
         self.assertEqual(run_wb("chat", "off", "--port", str(port)).strip(), "web chat off")  # no unit named
 
-    def test_a_push_fetches_only_the_newest_open_ask_and_claudes_last_word(self):
+    def test_a_push_fetches_only_claudes_last_word_or_its_waiting_line(self):
         # #755 (the 2026-11-21 audit, finding 102): each push made the service worker fetch the
         # whole /api/state (922 KB with 300 messages and 30 plans) to pick one line
         chat = self.chat
-        for i in range(30):
-            done = chat.ask("ExitPlanMode", "", "plan", {"plan": f"plan {i}\n" + "step\n" * 4000})
-            chat.answer(done["id"], "deny", "web")
         for i in range(100):
             chat.send("x" * 1500, "user" if i % 2 else "claude")
         chat.send("Tests pass, ready for review", "claude")
         chat.send("thanks", "user")
-        old = chat.ask("Bash", "rm -rf build")
-        plan = chat.ask("ExitPlanMode", "", "plan", {"plan": "1. Read\n" + "2. Write\n" * 3000})
         got = chat.latest()
-        self.assertEqual([a["id"] for a in got["asks"]], [plan["id"]])        # the newest open one
-        self.assertNotIn("detail", got["asks"][0])                           # not its plan's text
         self.assertEqual([m["text"] for m in got["messages"]], ["Tests pass, ready for review"])
+        self.assertNotIn("asks", got)                                        # no cards (#1350)
         self.assertLess(len(json.dumps(got)), 2000)
         code, body = self.call("/api/latest", token=chat.token())
-        self.assertEqual((code, [a["id"] for a in body["asks"]]), (200, [plan["id"]]))
+        self.assertEqual((code, [m["text"] for m in body["messages"]]), (200, ["Tests pass, ready for review"]))
         self.assertEqual(self.call("/api/latest")[0], 401)
-        chat.answer(plan["id"], "allow", "web")
-        self.assertEqual([a["id"] for a in chat.latest()["asks"]], [old["id"]])
+        store.write_json(chat.chat_dir() / "page.json", {"at": store.now()})
+        line = chat.notice("Bash", "rm -rf build")                           # Claude waits in the terminal
+        self.assertEqual([m["id"] for m in chat.latest()["messages"]], [line["id"]])
         self.assertIn("/api/latest", (chat.STATIC / "sw.js").read_text())
 
     def test_on_macos_the_launchd_agent_is_checked_and_named_instead_of_systemd(self):
@@ -27031,9 +26834,6 @@ class WebChat(Base):
         # state, the thread and 20 asks with their plans: 922 KB each, five times an exchange
         import http.client
         chat, tok = self.chat, self.chat.token()
-        for i in range(10):
-            done = chat.ask("ExitPlanMode", "", "plan", {"plan": f"plan {i}\n" + "step\n" * 4000})
-            chat.answer(done["id"], "deny", "web")
         for i in range(60):
             chat.send("x" * 1500, "user" if i % 2 else "claude")
         mine = chat.send("and the tests?", "user")
@@ -27054,12 +26854,7 @@ class WebChat(Base):
                 lines.append(line)
         kind, first, _ = event()
         self.assertEqual((kind, len(first["messages"])), ("state", 61))       # the whole state first
-        plans = [a for a in first["asks"] if a["kind"] == "plan"]
-        self.assertTrue(all(a["detail"]["cut"] and len(a["detail"]["plan"]) == chat.PLAN_PREVIEW for a in plans))
-        code, whole = self.call(f"/api/ask/{plans[0]['id']}", token=tok)    # unfolded: fetched
-        self.assertEqual((code, len(whole["ask"]["detail"]["plan"])), (200, len("plan 0\n" + "step\n" * 4000)))
-        self.assertEqual(self.call("/api/ask/ask-nope", token=tok)[0], 404)
-        self.assertEqual(self.call(f"/api/ask/{plans[0]['id']}")[0], 401)
+        self.assertEqual(self.call("/api/ask/ask-nope", token=tok)[0], 404)  # no cards to unfold (#1350)
         chat.ack(mine["id"], "s1")                                            # a receipt
         kind, got, size = event()
         self.assertEqual(kind, "patch")
@@ -27070,29 +26865,28 @@ class WebChat(Base):
                          {"session": "s1", "cwd": "/home/u/p", "ts": store.now(), "busy": True})
         kind, got, size = event()                                             # a busy flip
         self.assertEqual((kind, got["listener"]["busy"], "messages" in got), ("patch", True, False))
-        self.assertIn("prefs", got)                                           # the small fields whole
+        self.assertIn("push", got)                                            # the small fields whole
         self.assertLess(size, 3000)
-        open_ = chat.ask("Bash", "make test")
+        store.write_json(chat.chat_dir() / "page.json", {"at": store.now()})
+        line = chat.notice("Bash", "make test")                                # a waiting line comes
         kind, got, _ = event()
-        self.assertEqual([a["id"] for a in got["asks"]["put"]], [open_["id"]])
+        self.assertEqual([m["id"] for m in got["messages"]["put"]], [line["id"]])
+        chat.notice_done(line["id"])                                           # and clears (#1350)
+        kind, got, _ = event()
+        self.assertEqual(got["messages"]["drop"], [line["id"]])
         c.close()
 
     def test_a_patch_names_each_row_that_changed_or_left_and_nothing_when_nothing_did(self):
         # #755: the page merges these by id, so a row the window lost must be named
         chat, had = self.chat, {}
-        snap = {"messages": [{"id": "a", "text": "1"}, {"id": "b", "text": "2"}], "asks": [],
-                "listener": None, "now": 1}
+        snap = {"messages": [{"id": "a", "text": "1"}, {"id": "b", "text": "2"}], "listener": None, "now": 1}
         chat.patch(had, snap)
         self.assertIsNone(chat.patch(had, {**snap, "now": 2}))              # only the clock moved
         got = chat.patch(had, {**snap, "messages": [{"id": "b", "text": "2!"}, {"id": "c", "text": "3"}], "now": 3})
         self.assertEqual(got["messages"], {"put": [{"id": "b", "text": "2!"}, {"id": "c", "text": "3"}], "drop": ["a"]})
-        self.assertEqual((got["now"], got["listener"], "asks" in got), (3, None, False))
+        self.assertEqual((got["now"], got["listener"]), (3, None))
         self.assertEqual(chat.patch(had, {**snap, "messages": got["messages"]["put"], "listener": {"busy": True}})
                          ["listener"], {"busy": True})
-        self.assertNotIn("detail", chat.page_ask({"id": "x", "answer": None}))
-        q = {"id": "q", "answer": "allow", "detail": {"questions": [{"question": "Which?", "options": [{"label": "A", "preview": "p" * 9000}]}]}}
-        self.assertEqual(chat.page_ask(q)["detail"], {"questions": [{"question": "Which?"}]})
-        self.assertEqual(chat.page_ask({**q, "answer": None})["detail"], q["detail"])  # open: whole
 
     def test_without_inotify_the_stream_stays_quiet_between_changes(self):
         # the fallback hub wakes every second; each wake was a ping (the 2026-11-16 audit)
@@ -27188,7 +26982,7 @@ class WebChat(Base):
         store.write_json(self.chat.chat_dir() / "listener.json",
                          {"session": "s1", "cwd": "/home/u/project", "pid": me, "start": models._started(me)})
 
-    def test_an_agent_token_sends_and_reads_but_never_answers_dialogs_or_marks_the_user_away(self):
+    def test_an_agent_token_sends_and_reads_but_never_changes_settings_or_marks_the_user_away(self):
         tok = self._agent()
         self.assertTrue(tok.startswith("wba-"))
         kept = self.chat.agents_path()
@@ -27205,16 +26999,16 @@ class WebChat(Base):
         pending = [json.loads(x) for x in run_wb("chat", "pending").splitlines()]
         self.assertEqual([(m["from"], m["role"]) for m in pending], [("my-agent", "agent")])
         self.assertIn("agent my-agent: refactor the parser", run_wb("chat", "log"))
-        asks = self.chat.ask("Bash", "git push origin main")
-        for path, body in (("/api/answer", {"id": asks["id"], "answer": "allow"}), ("/api/prefs", {"away": "allow"}),
-                           ("/api/push", {"test": True}), ("/api/active", {}), ("/api/seen", {"ids": ["x"]})):
+        for path, body in (("/api/settings", {"key": "coding", "value": "ask"}), ("/api/push", {"test": True}),
+                           ("/api/active", {}), ("/api/seen", {"ids": ["x"]})):
             code, r = self.call(path, body, token=tok)
             self.assertEqual(code, 403, path)
             self.assertTrue(r["error"].startswith("agent tokens can't "), r)
-        self.assertIsNone(self.chat.find_ask(asks["id"])["answer"])      # the dialog still waits
-        self.assertEqual(self.chat.prefs()["away"], "ask")
         self.assertFalse((self.chat.chat_dir() / "away.json").exists())
-        self.assertEqual(self.call("/api/prefs", {"away": "ask"}, token=self.chat.token())[0], 200)  # the user's: all of it
+        self.assertEqual(self.call("/api/active", {}, token=self.chat.token())[0], 200)  # the user's: all of it
+        # #1350: no dialog is answered from the chat, by anyone
+        for path, body in (("/api/answer", {"id": "ask-1", "answer": "allow"}), ("/api/prefs", {"away": "allow"})):
+            self.assertEqual(self.call(path, body, token=self.chat.token())[0], 404, path)
         self.assertIn("my-agent  since ", run_wb("chat", "token", "list"))
 
     def test_an_agent_token_from_another_machine_is_refused_while_the_users_token_still_works(self):
@@ -27505,7 +27299,8 @@ class WebChat(Base):
         t.start()
         time.sleep(0.5)
         self.assertTrue(t.is_alive())
-        a = self.chat.ask("Bash", "git push origin main")                  # a dialog for the user
+        store.write_json(self.chat.chat_dir() / "page.json", {"at": store.now()})
+        a = self.chat.notice("Bash", "git push origin main")               # a dialog waits on the user
         t.join(10)
         self.assertLess(time.monotonic() - began, 8)
         self.assertEqual((got["r"][1]["replies"], got["r"][1]["waiting_on_user"]), ([], True))
@@ -27513,13 +27308,8 @@ class WebChat(Base):
         _, r = self.call(f"/api/wait?after={mid}&timeout=2", token=tok)
         self.assertGreaterEqual(time.monotonic() - began, 1.5)
         self.assertTrue(r["waiting_on_user"])
-        self.chat.answer(a["id"], "deny", "web")
+        self.chat.notice_done(a["id"])                                    # settled in the terminal
         self.assertFalse(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
-        n = self.chat.notice("Bash", "rm -rf build")                       # one in the terminal, told
-        if n:
-            self.assertTrue(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
-            self.chat.notice_done(n["id"])
-            self.assertFalse(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
 
     def test_a_message_with_no_reply_is_done_once_the_turn_that_took_it_ends(self):
         tok = self._agent()
@@ -27653,16 +27443,17 @@ class WebChat(Base):
         self.chat.reply("To my-agent.", [mid])
         self.chat.reply("To both.", [mid, uid])
         self.chat.reply("To other.", [oid])
-        a = self.chat.ask("Bash", "git push origin main")
+        store.write_json(self.chat.chat_dir() / "page.json", {"at": store.now()})
+        a = self.chat.notice("Bash", "git push origin main")               # the user's waiting line
         code, st = self.call("/api/state", token=tok)
         self.assertEqual(code, 200)
         self.assertEqual([m["text"] for m in st["messages"]], ["refactor the parser", "To my-agent.", "To both."])
-        self.assertEqual(sorted(st), ["api", "expire", "listener", "messages", "now", "uploads"])  # no asks, prefs, savings, push
+        self.assertEqual(sorted(st), ["api", "expire", "listener", "messages", "now", "uploads"])  # no savings, push
         self.assertIsNone(st["messages"][0]["received"])
         code, r = self.call("/api/send", {"text": "and the tests"}, token=tok)
         self.assertEqual([m["text"] for m in r["state"]["messages"]][-1], "and the tests")
-        self.assertNotIn("asks", r["state"])
-        self.assertIn("asks", self.call("/api/state", token=user)[1])     # the user's: all of it
+        self.assertNotIn("push", r["state"])
+        self.assertIn("push", self.call("/api/state", token=user)[1])     # the user's: all of it
         # its stream: the same view, and a patch carries none of the user's
         c = self._held_wait("/api/stream", tok)
         c.settimeout(5)
@@ -27671,7 +27462,7 @@ class WebChat(Base):
             got += c.recv(1 << 20)
         first = json.loads(got.split(b"data: ", 1)[1].split(b"\n", 1)[0])
         self.assertEqual(first["messages"], self.call("/api/state", token=tok)[1]["messages"])
-        self.assertNotIn("asks", first)
+        self.assertNotIn("push", first)
         self.call("/api/send", {"text": "a secret of the user's"}, token=user)
         self.chat.reply("Again to my-agent.", [mid])
         while b"Again to my-agent." not in got:
@@ -27680,11 +27471,10 @@ class WebChat(Base):
         self.assertNotIn(b"a secret of the user's", got)
         self.assertNotIn(a["id"].encode(), got)
         # what only the user may read: 403, and the user's own still reads them
-        for path in ("/api/latest", f"/api/ask/{a['id']}", "/api/shot?task=t&n=1&side=base", "/api/audio?batch=b&n=1"):
+        for path in ("/api/latest", "/api/shot?task=t&n=1&side=base", "/api/audio?batch=b&n=1"):
             code, r = self.call(path, token=tok)
             self.assertEqual(code, 403, path)
             self.assertTrue(r["error"].startswith("agent tokens can't "), r)
-        self.assertEqual(self.call(f"/api/ask/{a['id']}", token=user)[0], 200)
         self.assertEqual(self.call("/api/latest", token=user)[0], 200)
         self.assertEqual(self.call("/api/latest")[0], 401)                 # no token: as before
         # a wait on another's message is no message to it; on its own, as before
@@ -27704,31 +27494,6 @@ class WebChat(Base):
         self.assertEqual(self.chat.thread(), [])
         code, r = self.call("/api/send", {"text": "about step 1", "about": {"task": "t", "n": 1}}, token=self.chat.token())
         self.assertEqual((code, r["error"]), (400, "no such screenshots"))  # the user's is read as before
-
-    def test_a_dialog_in_an_agents_turn_is_for_that_agent_and_the_users_away_setting_answers_it_only_while_away(self):
-        tok = self._agent()
-        self._listening()
-        mid = self.call("/api/send", {"text": "ship it"}, token=tok)[1]["message"]["id"]
-        self.call("/api/prefs", {"away": "allow"}, token=self.chat.token())
-        out = run_wb("chat", "ask", "--tool", "Bash", "--text", "git push", "--for", "my-agent", "--here")
-        ask_id, state = out.split()
-        self.assertEqual(state, "open")                                   # at the terminal: the human decides
-        a = self.chat.find_ask(ask_id)
-        self.assertEqual(a["for"], ["my-agent"])
-        self.assertEqual([x["for"] for x in self.call("/api/state", token=self.chat.token())[1]["asks"]], [["my-agent"]])
-        self.assertEqual(self.chat.latest()["asks"][0]["for"], ["my-agent"])  # the push says whose
-        self.assertIn(ask_id, self.chat.news(store.now() + 20))            # and is pushed
-        self.assertTrue(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
-        self.assertEqual(self.call("/api/answer", {"id": ask_id, "answer": "allow"}, token=tok)[0], 403)
-        run_wb("chat", "answer", ask_id, "expired", "--by", "interrupted")   # settled in the terminal
-        self.assertFalse(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
-        self.assertEqual(self.call("/api/answer", {"id": ask_id, "answer": "allow"}, token=self.chat.token())[1]["ask"]["answer"],
-                         "expired")                                       # the page's tap changes nothing
-        out = run_wb("chat", "ask", "--tool", "Bash", "--text", "git push", "--for", "my-agent")
-        self.assertEqual(out.split()[1], "allow")                          # away: their setting stands
-        with self.assertRaises(ValueError):
-            self.chat.ask("Bash", "x", for_=["Not A Name"])
-
 
 FAKE_SMI = """import os, sys, time
 with open(os.environ["FAKE_SMI_LOG"], "a") as f:

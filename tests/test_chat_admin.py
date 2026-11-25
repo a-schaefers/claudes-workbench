@@ -147,7 +147,8 @@ class ChatAdmin(Base):
         self.assertEqual(cli.coding_mode(), "decide")
         # every path the handler answers, by every method it takes: outside AGENT_MAY is 403
         paths = set(re.findall(r'"(/api/[a-z]+/?)', (ROOT / "workbench" / "chat.py").read_text()))
-        self.assertTrue({"/api/settings", "/api/stats", "/api/top", "/api/answer", "/api/ask/"} <= paths)
+        self.assertTrue({"/api/settings", "/api/stats", "/api/top", "/api/push", "/api/upload/"} <= paths)
+        self.assertFalse({"/api/answer", "/api/ask/", "/api/prefs"} & paths)  # no dialog answered from the chat (#1350)
         refused = 0
         for path in sorted(paths):
             at = path + "x1234567" if path.endswith("/") else path
@@ -160,9 +161,9 @@ class ChatAdmin(Base):
                 refused += 1
         self.assertGreater(refused, 30)
         # the old wording where there was one
-        self.assertEqual(self.call("/api/prefs", {"away": "allow"}, token=agent)[1],
-                         {"error": "agent tokens can't change the user's settings"})
-        self.assertEqual(self.call("/api/ask/x", token=agent)[1], {"error": "agent tokens can't read Claude Code's dialogs"})
+        self.assertEqual(self.call("/api/push", {"test": True}, token=agent)[1],
+                         {"error": "agent tokens can't change notifications"})
+        self.assertEqual(self.call("/api/latest", token=agent)[1], {"error": "agent tokens can't read the user's notifications"})
         self.assertEqual(self.call("/api/health", token=agent)[0], 200)   # and its own still work
         self.assertEqual(self.call("/api/send", {"text": "hi"}, token=agent)[0], 200)
 

@@ -80,13 +80,15 @@ there, never one asked in the terminal. A message noted as following another ses
 that session's: leave its task alone and tell the user to answer at that session's terminal. Nothing hard to undo (downloads, deletes) on an ambiguous OK. They are away
 once they use the chat (open it or write there) after they last used the terminal, so a
 `web-chat` block can come with no message from them; a message they type in the terminal, or a
-prompt they answer there, means they are back. While they're at the terminal, a prompt of yours
-stays there, and a permission still waiting after half a minute gets a notice in the chat:
-nothing to answer there. While they're away, your permission prompts go to the
-chat as Allow/Deny cards (or, by their setting, are allowed and listed there); a deny comes back
-saying so, with their words: ask them there what to do instead, don't retry the same call another
-way. Your AskUserQuestion questions reach them as buttons. A plan can be sent back from the chat
-with a note, but only approved in the terminal: when one waits, say so in the chat.
+prompt they answer there, means they are back. Your prompts (a permission, an AskUserQuestion
+question, a plan, an MCP server's form) are answered only in the terminal, never in the chat: the
+terminal is where work gets done, the chat is for a message in a pinch. While one waits, the chat
+shows one line, "Claude is waiting for you in the terminal" (a permission's adds "Run it with
+permissions granted to work from the chat"), at once while they're away, after half a minute
+while they're at the terminal; it clears when the prompt is answered. So while they're away,
+before a call that would prompt, tell them in the chat what you need and why: most work still goes
+on from the chat when they run you with permissions granted (their own permission mode and rules,
+the one policy).
 
 ## Steering, stopping, resuming
 You are the driver, not a spectator. When something tells you the agent is heading the wrong way
