@@ -3493,16 +3493,23 @@ def _setup_unclean(task: store.Task, left: dict[str, str]) -> bool:
         return ", ".join(paths[:3]) + (f" and {len(paths) - 3:,} more" if len(paths) > 3 else "")
     tracked = sorted(p for p, xy in left.items() if xy != "??")
     loose = sorted(p for p, xy in left.items() if xy == "??")
-    what = "the setup " + " and ".join(
-        ([f"changed files git tracks ({few(tracked)})"] if tracked else [])
-        + ([f"wrote files git doesn't ignore ({few(loose)})"] if loose else []))
+    # only a lockfile the repo doesn't commit: a frozen install (uv sync --locked) needs one, so
+    # the remedy was a second failed start; `uv sync` in a project without uv.lock (#1379, 2026-11-25)
+    if loose and not tracked and all(Path(p).name in gitops.LOCKFILES for p in loose):
+        what = f"the setup wrote a lockfile the repo doesn't commit ({few(loose)})"
+        fix = ("Commit the lockfile (and the setup may freeze to it: uv sync --locked, npm ci), or "
+               f"have the setup write none ({context.VENV_SETUP})")
+    else:
+        what = "the setup " + " and ".join(
+            ([f"changed files git tracks ({few(tracked)})"] if tracked else [])
+            + ([f"wrote files git doesn't ignore ({few(loose)})"] if loose else []))
+        fix = ("Have the setup leave the repo as committed (npm ci, BUNDLE_FROZEN=1 bundle install, "
+               "uv sync --locked), or commit its change or a .gitignore for what it writes")
     _undo_setup(task.worktree, left)
     task.set_status(phase="failed", last=what[:200], infra="setup", failed_before="setup")
     task.notify("failed", f"task {task.name}: {what}, before any round: the review would show them "
-                "as the agent's and wb accept would commit them (undone in the worktree). Have "
-                "the setup leave the repo as committed (npm ci, BUNDLE_FROZEN=1 bundle install, uv "
-                "sync --locked), or commit its change or a .gitignore for what it writes; then wb "
-                f"discard {task.name} and start again (the agent never ran)", cause="setup")
+                f"as the agent's and wb accept would commit them (undone in the worktree). {fix}; "
+                f"then wb discard {task.name} and start again (the agent never ran)", cause="setup")
     return False
 
 

@@ -377,8 +377,8 @@ that fails: the runner makes the worktree, so `wb start` returns at once on any 
 minutes; a first build that needs longer (a big Rust or C++ project, torch over a slow link) takes
 `--setup-timeout <secs>` at start. A note that the
 agent leaves out the active venv (it would import the user's checkout, not the worktree): give it
-its own, `--setup 'uv sync' --test 'uv run pytest'` or
-`--setup 'python3 -m venv .venv && .venv/bin/pip install -e .'`; that .venv comes first on the
+its own: where uv.lock is committed, `uv sync --locked` as the setup with `--test 'uv run pytest'`, else
+`--setup 'python3 -m venv .venv && .venv/bin/pip install -e .'` (a plain `uv sync` writes an uncommitted uv.lock, which fails the task); that .venv comes first on the
 agent's and the tests' PATH. A note that the agent's environment leaves out a proxy (it holds a password): a setup or tests that need the
 network fail there; ask the user before naming it in commands.json `env`. Tests that use the
 GPU themselves (CUDA, PyTorch, a game engine): add `--unload-for-tests`, or they run beside the

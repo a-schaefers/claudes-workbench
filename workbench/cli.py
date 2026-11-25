@@ -1069,7 +1069,7 @@ def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu") -> 
             die(f"{what}: {venv.relative_to(repo)} is a Python virtualenv, which still runs "
                 f"from {repo} once copied; recreate it with --setup instead, e.g. --setup "
                 f"'python3 -m venv {venv.relative_to(repo)} && {venv.relative_to(repo)}/bin/pip "
-                "install -r requirements.txt' or --setup 'uv sync'")
+                "install -r requirements.txt' or, with a committed uv.lock, --setup 'uv sync --locked'")
         if not gitops.ignored(repo, p):
             die(f"{what}: not ignored in {repo}, so a copy would show in the review diff; "
                 "a tracked file is in the worktree already")

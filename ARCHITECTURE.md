@@ -301,7 +301,7 @@ Then:
   act on): the base check's explanation, the spec-gap scorecard, where the model loads on the GPU or
   whom it runs beside, `wb optimize`'s advice (`wb doctor` keeps it), an untested OpenCode
   (`wb doctor`'s alone), an API model's handover note, and the setup Claude passed by flag (only
-  commands.json's: ``setup from commands.json: links ../x; copies a; runs `uv sync` ``, with `(from <dir>)` after a setup run from its key's directory, not the package, #1376;
+  commands.json's: ``setup from commands.json: links ../x; copies a; runs `uv sync --locked` ``, with `(from <dir>)` after a setup run from its key's directory, not the package, #1376;
   `cli._standing_setup`). The dirty-repo note counts tracked files only (`--untracked-files=no`);
   the Windows-drive note comes on the repo's first task only.
 
@@ -1614,7 +1614,10 @@ changed files git tracks (Gemfile.lock)" / "wrote files git doesn't ignore (gen/
 "the review would show them as the agent's and wb accept would commit them (undone in the
 worktree)", the remedy a setup that leaves the repo as committed (`npm ci`, `BUNDLE_FROZEN=1
 bundle install`, `uv sync --locked`) or a commit of its change or a `.gitignore`, then "wb discard
-<task> and start again". `_undo_setup` checks the tracked ones out from HEAD (no hooks) and
+<task> and start again". When all it left is new files named in `gitops.LOCKFILES` (`uv sync` in a project
+with no committed uv.lock), it says "the setup wrote a lockfile the repo doesn't commit (uv.lock)" and the
+remedy is to commit the lockfile or a setup that writes none (`context.VENV_SETUP`, `python3 -m venv .venv &&
+.venv/bin/pip install -e .`): `uv sync --locked`, the other remedy, fails with no lockfile (#1379). `_undo_setup` checks the tracked ones out from HEAD (no hooks) and
 removes the new ones, so a `wb resume` is told the same again (#1347: a `bundle install`'s
 PLATFORMS was the agent's drift NOTE and was committed under its trailer). A setup that fails or
 times out has what it left for git to see undone the same way before its notice: kept, the resume
@@ -2388,7 +2391,9 @@ PATH directories in the repo become the worktree's, and the worktree's own venv 
 up without those worktree directories; OpenCode by the runner's PATH (`opencode_bin`). Any other
 active env stays, written by nothing in the lane (step 6). Without `--setup`, `wb start` names each
 one left out and how to give the worktree its own (`venv_line`: `note: the agent leaves out your
-active venv (<root>): --setup 'uv sync' (or the project's install) gives the worktree its own`),
+active venv (<root>): --setup 'python3 -m venv .venv && .venv/bin/pip install -e .' (or the project's install)
+gives the worktree its own`; `venv_setup`: `uv sync --locked` instead where the base commits a uv.lock, the
+package's or the top's, since `uv sync` writes one where none is committed and `_setup_unclean` fails it, #1379),
 unless the missing-directories note named the venv (`.venv/`, `venv/`) already (#1322: the same
 advice twice). Not covered: `pip install
 --user -e .`.

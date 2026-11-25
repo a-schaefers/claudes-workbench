@@ -2445,7 +2445,7 @@ def checkout_envs(task: store.Task, environ=None) -> dict[str, str]:
 
 def own_venv(task: store.Task) -> Path | None:
     """The worktree's own virtualenv (`.venv` or `venv`, in the package or at the top: the
-    setup's `uv sync` or `python3 -m venv .venv`), else None."""
+    setup's `uv sync --locked` or `python3 -m venv .venv`), else None."""
     for d in dict.fromkeys((task.workdir, task.worktree)):
         for name in (".venv", "venv"):
             if (d / name / "pyvenv.cfg").is_file() and not (d / name).is_symlink():
@@ -2572,14 +2572,33 @@ def mise_trusted(task: store.Task, path: str | None = None) -> bool | None:
     return all(said) if said else None
 
 
+# A setup that gives the worktree its own venv without writing a lock the repo doesn't commit:
+# `uv sync` writes uv.lock where none is committed, which fails the task before any round
+# (runner._setup_unclean, #1347), and `uv sync --locked` fails with no lockfile (#1379, 2026-11-25)
+VENV_SETUP = "python3 -m venv .venv && .venv/bin/pip install -e ."
+
+
+def venv_setup(task: store.Task) -> str:
+    """The setup venv_line advises: `uv sync --locked` where the base commits a uv.lock (the
+    package's, or the top's for a uv workspace), else VENV_SETUP."""
+    sub = (task.spec.get("subdir") or "").strip("/")
+    names = [f"{sub}/uv.lock", "uv.lock"] if sub else ["uv.lock"]
+    try:
+        held = gitops.git(task.spec["repo"], "ls-tree", "--name-only", task.spec.get("base") or "HEAD",
+                          "--", *names).strip()
+    except gitops.GitError:
+        held = ""
+    return "uv sync --locked" if held else VENV_SETUP
+
+
 def venv_line(task: store.Task) -> str:
     """For wb start with no --setup: the active environments the agent leaves out, and how to
     give it its own."""
     envs = checkout_envs(task)
     if not envs:
         return ""
-    return (f"the agent leaves out your active venv ({', '.join(envs)}): --setup 'uv sync' (or "
-            "the project's install) gives the worktree its own")
+    return (f"the agent leaves out your active venv ({', '.join(envs)}): --setup "
+            f"'{venv_setup(task)}' (or the project's install) gives the worktree its own")
 
 
 def interop_on() -> bool:

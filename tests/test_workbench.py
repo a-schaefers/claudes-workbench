@@ -6457,6 +6457,19 @@ class WorktreeSetup(Base):
         self.assertFalse((t.worktree / "gen").exists())        # removed, its directories too
         self.assertEqual(gitops.changed(t.worktree), "")
 
+    def test_a_setup_that_writes_an_uncommitted_lockfile_is_told_to_commit_it_or_write_none(self):
+        # #1379 (2026-11-25): `uv sync` in a project with no committed uv.lock writes one; the
+        # notice's remedy, `uv sync --locked`, then failed for want of a lockfile
+        self.start("t-uvlock", "ok", "--test", TEST_CMD, "--setup", "echo 'version = 1' > uv.lock")
+        wait_phase("t-uvlock", {"failed"})
+        note = [r for r in store.notices() if r["task"] == "t-uvlock"][-1]
+        self.assertIn("task t-uvlock: the setup wrote a lockfile the repo doesn't commit (uv.lock), "
+                      "before any round", note["text"])
+        self.assertIn("Commit the lockfile (and the setup may freeze to it: uv sync --locked, npm ci), "
+                      "or have the setup write none (python3 -m venv .venv && .venv/bin/pip install -e .); "
+                      "then wb discard t-uvlock and start again", note["text"])
+        self.assertFalse((store.Task("t-uvlock").worktree / "uv.lock").exists())
+
     def test_a_setup_that_writes_files_then_fails_has_them_undone_so_the_resume_is_told(self):
         # #1347's review (2026-11-24): only a setup that exited 0 was undone; a codegen then a
         # failed install left gen/ and its Gemfile.lock edit, the resume the notice advises
@@ -14551,8 +14564,8 @@ class CheckoutVenv(Base):
         bins = self.repo / "node_modules" / ".bin"
         os.environ["PATH"] = f"{os.environ['PATH']}{os.pathsep}{bins}"  # a direnv PATH_add
         out = self.start("t-novenv", "ok", "--test", self.TEST, "--auto-fix", "0", "--no-base-check")
-        self.assertIn(f"note: the agent leaves out your active venv ({user}): --setup 'uv sync' (or the "
-                      "project's install) gives the worktree its own\n", out)
+        self.assertIn(f"note: the agent leaves out your active venv ({user}): --setup 'python3 -m venv .venv "
+                      "&& .venv/bin/pip install -e .' (or the project's install) gives the worktree its own\n", out)
         st = wait_phase("t-novenv", {"review"})
         task = store.Task("t-novenv")
         said = task.round_dir(1).joinpath("tests.txt").read_text()
@@ -14571,6 +14584,21 @@ class CheckoutVenv(Base):
         self.assertEqual(Permission.verdict(rules, "pipenv install"), "allow")
         with mock.patch.object(lane, "abi", return_value=0):
             self.assertEqual(Permission.verdict(context.shell_rules(task), "pipenv install"), "allow")
+
+    def test_the_venv_note_advises_uv_sync_locked_only_where_the_base_commits_a_uv_lock(self):
+        # #1379 (2026-11-25): the note said `uv sync`, which writes an uncommitted uv.lock and
+        # fails the task before any round (#1347), and `uv sync --locked` fails with no lockfile
+        task = store.Task("t-uvnote")
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": "t-uvnote", "repo": str(self.repo),
+                                                        "base": "HEAD", "subdir": "pkg"}))
+        self.assertEqual(context.venv_setup(task), "python3 -m venv .venv && .venv/bin/pip install -e .")
+        (self.repo / "pkg").mkdir()
+        (self.repo / "pkg" / "uv.lock").write_text("version = 1\n")
+        self.assertEqual(context.venv_setup(task), context.VENV_SETUP)     # not committed yet
+        subprocess.run(["git", "-C", str(self.repo), "add", "pkg/uv.lock"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "lock"], check=True)
+        self.assertEqual(context.venv_setup(task), "uv sync --locked")
 
     def test_a_venv_the_missing_directories_note_names_gets_no_note_of_its_own(self):
         # #1322: the checkout's ignored .venv drew both notes, each with the same advice
