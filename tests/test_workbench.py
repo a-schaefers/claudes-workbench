@@ -34736,6 +34736,34 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual(fresh.load(), 0.0)
         self.assertFalse(fresh.recheck)
 
+    def test_a_waiter_past_a_held_mark_while_another_asks_looks_every_two_seconds_not_in_a_loop(self):
+        # the review of #1277 (2026-11-24): credit_recheck opened api-health.json's lock file to
+        # look past an expired outage's mark, and its close woke the waiter's own watch on
+        # $WB_HOME: 149 looks in 5 s, not one every API_WAIT's 2 s, behind a probe round that hangs
+        m = self.local_api_model()
+        told = store.Task("t-told")
+        told.dir.mkdir(parents=True)
+        store.write_json(told.dir / "task.json", {"model": m.id, "provider": "deepinfra", "via": "api"})
+        told.set_status(phase="stuck", infra="provider", guard="outage")
+        told.notify("stuck", "STOPPED: deepinfra didn't answer", cause="provider")
+        self.models.note_api("deepinfra", "unreachable", "503", until=time.time() - 1)
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")     # lets the wait go
+        probe = self.models.api_dir() / f"{self.models._slot_name('deepinfra')}.probe.lock"
+        probe.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(probe, os.O_RDONLY | os.O_CREAT)                 # another runner's turn to ask
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        looks, real = [], self.models.credit_recheck
+        p = mock.patch.object(self.models, "credit_recheck", lambda *a, **k: (looks.append(1), real(*a, **k))[1])
+        p.start()
+        self.addCleanup(p.stop)
+        behind = self.models.NoLease(m, "t-wait", say=lambda msg: None)
+        self.addCleanup(behind.__exit__, None, None, None)
+        went = threading.Event()
+        threading.Thread(target=lambda: (behind.load(), went.set()), daemon=True).start()
+        self.assertFalse(went.wait(3))
+        self.assertLessEqual(len(looks), 3, len(looks))               # the first look, then one each 2 s
+
     def test_with_unload_for_tests_an_api_tasks_tests_run_under_this_machines_pool(self):
         from workbench import verify
         used = []
@@ -39764,8 +39792,8 @@ class RoleResolution(Base):
         self.routes.write_text(json.dumps({**doc, "use": "both", "busy": "api"}))  # the busy opt-in's task
         self.assertIn("; or waiting for a busy GPU (wb route busy wait) for the next tasks, with wb takeover "
                       "t-busy", meter.stop_text(task))
-        self.assertTrue(runner.provider_remedy(task, "outage").endswith(
-            "; or wb route busy wait (the user's yes) for the next tasks"))
+        self.assertIn("; or wb route busy wait (the user's yes) for the next tasks; deepseek's other tasks "
+                      "wait for it", runner.provider_remedy(task, "outage"))  # the queue's wait after it (#1277)
         self.routes.write_text("{")                                      # unreadable: the role's own, as before
         self.assertEqual(routes.off_api("trivial")[2], "wb route trivial gpu")
 

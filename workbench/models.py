@@ -1742,6 +1742,14 @@ def credit_recheck(pid: str, task: str = "") -> tuple[dict | None, bool]:
     if (row := api_health(pid)) is not None:
         return waits(row), False
     path = api_health_path()
+    # only an expired no_credit mark is taken under the lock: opening the lock file (a+) for any
+    # other closed it written, which woke every waiter's watch on $WB_HOME, so a waiter behind an
+    # expired outage's mark looked 30 times a second, not every API_WAIT's 2 s (the review of
+    # #1277, 2026-11-24). A read leaves the watch asleep
+    peek = store.read_json(path, {})
+    peek = peek.get(pid) if isinstance(peek, dict) else None
+    if not isinstance(peek, dict) or peek.get("state") != "no_credit":
+        return None, False
     with store.locked(path.with_name(path.name + ".lock")):
         doc = store.read_json(path, {})
         row = doc.get(pid) if isinstance(doc, dict) else None

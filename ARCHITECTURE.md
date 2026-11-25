@@ -351,7 +351,9 @@ as `phase: queued`, `last: waiting: <provider> isn't answering (<why>)` (or `rat
 requests`) `, as <task>'s stop told the user: wb asks it again at HH:MM, or goes on once it
 answers another task (wb stop gives up)`, its slot let go, until the mark's `until` (a 429's
 Retry-After, hours on too) or an `ok`, looking every `API_WAIT`'s 2 s past the `until` while
-another asks. Past it one runner at a time asks (`$WB_HOME/api/<provider>.probe.lock`, flocked
+another asks (`credit_recheck` takes `api-health.json.lock` only for an expired `no_credit` row:
+opened `a+` for every look, its close woke each waiter's watch, 30 looks a second behind a hanging
+probe round, the review of #1277). Past it one runner at a time asks (`$WB_HOME/api/<provider>.probe.lock`, flocked
 `LOCK_NB` from the load to the next load or the lease's end; a runner that goes into a mark with no
 told stop holds it too, so the waiters wait for its answer), and that turn is a recheck (`NoLease.recheck`
 `held`; a 402 it meets is no quota recheck, and stops it with its notice): its round
