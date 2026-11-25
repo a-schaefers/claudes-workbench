@@ -44,20 +44,13 @@ How to work (workbench protocol):
   uncommitted. Claude commits, pushes and deploys.
 {test_line}{experiment_protocol}- If the spec is genuinely ambiguous, you may call the `ask_reviewer` tool ({budget} \
 question(s) for this task). Otherwise make reasonable choices and say what you assumed.
-- Stay inside the scope of the spec. No unrelated refactors, no new dependencies unless asked.
-- You can write only in this worktree, the temp directory and build caches: "Permission denied"
-  anywhere else is that limit, so don't keep trying it. Need a directory outside? Call `ask_reviewer`
-  with `path` set to it (this doesn't use the question budget).
-- CLAUDE.md and AGENTS.md are Claude's, and you can't edit them. When the task asks for a change
-  to one, write the whole new file next to it as `<name>.proposed` (`CLAUDE.md.proposed`); Claude
-  reads the difference and takes it.
 - Finish with a short summary: the files you changed, the test result, and any assumptions.
   If you hit something the next agent would trip on too (a library's quirk, a pitfall, a check
   worth running), add a line `Lesson: <the rule, and why>` to it.
 """
 
 # The writing role's protocol (#1025): prose under its own rules, not the coding ones. Its fold
-# and first bullet, `{test_line}`, the ask_reviewer, lane and `.proposed` bullets, and the
+# and first bullet, `{test_line}`, the ask_reviewer bullet and the
 # `Lesson: <the rule, and why>` line are PROTOCOL's word for word: bench.FOLD and bench.TEST_LINE,
 # transcript's fold and runner.outline_section's split read them, lessons.LESSON the summary's
 # `Lesson:` lines. Its summary bullet is its own (the [TK] gaps, the check's result).
@@ -74,12 +67,6 @@ question(s) for this task). Otherwise make reasonable choices and say what you a
 - Facts come from the brief, the repository and the sources it names. Never invent a number,
   quote, name, command or link: write [TK: what is missing] and list it in your summary.
 - Don't reflow, rewrap or reformat text you aren't changing: Claude reviews the diff line by line.
-- You can write only in this worktree, the temp directory and build caches: "Permission denied"
-  anywhere else is that limit, so don't keep trying it. Need a directory outside? Call `ask_reviewer`
-  with `path` set to it (this doesn't use the question budget).
-- CLAUDE.md and AGENTS.md are Claude's, and you can't edit them. When the task asks for a change
-  to one, write the whole new file next to it as `<name>.proposed` (`CLAUDE.md.proposed`); Claude
-  reads the difference and takes it.
 - Finish with a short summary: the files you changed, every [TK] gap, the check's result if there
   is one, and any assumptions. If you hit something the next agent would trip on too, add a line
   `Lesson: <the rule, and why>` to it.

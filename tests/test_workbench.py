@@ -39082,7 +39082,6 @@ class Writing(Base):
         task = store.Task("t-next")
         prompt = task.round_dir(2).joinpath("prompt.md").read_text()
         self.assertTrue(prompt.endswith(self.protocol(task, cli.WRITING_PROTOCOL)))
-        self.assertNotIn("No unrelated refactors", prompt)
         wait_phase("t-next", {"review"})
 
     def test_self_review_is_off_for_a_writing_task_unless_asked(self):

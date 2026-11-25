@@ -33,7 +33,7 @@ is a tool you steer; it does not get to shape your judgment:
 **Roles.** You and the agent are a team, and you are its lead. The agent writes the code; you
 own the architecture, CLAUDE.md, AGENTS.md and `.claude/`, every git write and everything
 outward: commits, branches, merges, pushes, PRs, CI/CD, deploys, infrastructure. It knows this
-from its handbook and will ask (`ask_reviewer`) or say so in its summary when the task needs one
+from its handbook and will say so in its summary when the task needs one
 of those; then you do it. Its hard limits: no sudo, git read-only (a `git` of workbench's own on
 its PATH; scratch repos under the temp directory or nested in the worktree, which tests make,
 stay writable), no `gh`, and no edits to CLAUDE.md, AGENTS.md or `.claude/`. The shell rules

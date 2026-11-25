@@ -1637,7 +1637,7 @@ text appended, not an opening: keep it after the protocol, where the fold cuts.
 `PROTOCOL` (`cli.protocol_for`, at `wb start` and `wb next`; *The writing role*). It keeps
 `PROTOCOL`'s fold and first bullet word for word (`\n\n---\nHow to work (workbench protocol):\n-
 You are in a git worktree on branch {branch}.`), its `{test_line}` (`bench.TEST_LINE` reads the
-acceptance command back), its `ask_reviewer`, lane and `.proposed` bullets and its `Lesson:` line,
+acceptance command back), its `ask_reviewer` bullet and its `Lesson:` line,
 and takes the same `.format` fields. Only the code bullets differ: prose only, no invented facts
 (`[TK: …]`), no reflowing. So every reader above treats a writing prompt as any other.
 
@@ -1659,7 +1659,7 @@ An API provider's header wait is 600 s instead (`API_HEADER_S`, *An API task's w
 - the project's `AGENTS.md` files (`agents_files`), nearest first (*handed back*, below);
 - `agent/HANDBOOK.md`, copied fresh each round to `rules/<task>/HANDBOOK.md` (a path into the
   workbench repo once sent an agent looking for plans). Every prompt carries it: keep it short
-  (about 1.3K tokens). A writing task (task.json `role: writing`) gets `agent/WRITING.md` there
+  (about 1K tokens). A writing task (task.json `role: writing`) gets `agent/WRITING.md` there
   instead, under the same name (`context.handbook_for`, *The writing role*). The copy ends with
   `context.spec_note`, `## Your task`: the step's spec file (`store.round_prompt` of `step_round`,
   readable in the lane) to read again when the context holds only a summary: OpenCode's mid-round
@@ -2543,7 +2543,7 @@ command runs in the agent's lane and environment, so its code gains nothing when
 
 **Claude's files.** The `edit` permission denies `*CLAUDE.md`, `*CLAUDE.local.md`, `*AGENTS.md`,
 `.claude/*`, `*/.claude/*` and the skill library (`<library>/*`); a shell change shows in the round
-report. For a change to CLAUDE.md or AGENTS.md the protocol has the agent write the whole new file
+report. For a change to CLAUDE.md or AGENTS.md the handbook (and `agent/WRITING.md`) has the agent write the whole new file
 as `<name>.proposed` (`runner.PROPOSABLE`, `runner.proposals`: new, untracked at the step's start,
 from `git ls-files --others --exclude-standard`, never a link). One the project tracks is its own
 file (accept once deleted a team's committed draft, #321). The review notice shows each as a diff
@@ -2581,8 +2581,8 @@ are denied and `curl`/`wget` aren't listed; what it needs comes in the spec or a
 rules on its tools, not the network: the lane leaves it open, so what keeps that cheap is that
 credentials stay out (`SECRET_ENV`, `SECRETS`). A browser as a test tool runs in the lane
 (`playwright` listed, browsers in `~/.cache`, `/dev/shm` in `DEV_NODES`; Chrome's own sandbox works
-inside it, checked 2026-11-17 on ABI 10); headless Chromium needs `--user-data-dir=$(mktemp -d)`
-(the handbook). A bare browser isn't listed (it fetches any URL, like `curl`): `wb allow <task>
+inside it, checked 2026-11-17 on ABI 10); headless Chromium run by hand needs
+`--user-data-dir=$(mktemp -d)` (the project's browser tests make their own profile). A bare browser isn't listed (it fetches any URL, like `curl`): `wb allow <task>
 "chromium *" --always` hands every task one. A snap browser can't run.
 
 **The writing role** (#1025; the roles: #1014, `wb start --role`: #1016). Prose (docs, READMEs,
@@ -7374,7 +7374,7 @@ doc needs its own `!/` line).
   `isCompactSummary`, `message.id`, `message.usage`, a Bash `tool_use`'s `command`, `timestamp`, `subagents/`, the line
   before a plugin's message) → `spend.py` (`WAKE`, `_prompt`, `calls`), the ClaudeSpend rows.
 - **`next_step`'s `ts` or the row's `steps` count** → `spend.usage_by_step`, `results.record`, `bench.handoff_cost`.
-- **`cli.PROTOCOL`** → the fold marker `\n---\nHow to work`, the `Lesson:` parser, the handbook, every prefill; `cli.WRITING_PROTOCOL` shares its fold, first bullet, `{test_line}`, ask, lane and `.proposed` bullets and `Lesson:` line (change them together; the Writing tests); `agent/WRITING.md`: every writing prompt, under 3,000 bytes (`tests/test_docs.py`).
+- **`cli.PROTOCOL`** → the fold marker `\n---\nHow to work`, the `Lesson:` parser, the handbook, every prefill; `cli.WRITING_PROTOCOL` shares its fold, first bullet, `{test_line}`, ask bullet and `Lesson:` line (change them together; the Writing tests); `agent/WRITING.md`: every writing prompt, under 3,000 bytes (`tests/test_docs.py`).
 - **`agent/HANDBOOK.md`** → every agent prompt; each token costs prefill.
 - **How OpenCode is invoked or read** (`run_round`'s argv, `normalize`'s fields and `run_round`'s `state.output`, the export fields `context_state`,
   `measure_speed`, `transcript` read) → `tests/fake_opencode.py` in the same commit, `RealOpenCodeRun` for a new field,
@@ -7413,7 +7413,7 @@ doc needs its own `!/` line).
   `OTEL_EXPORTER_OTLP_HEADERS`; packages/util/src/observability) and any telemetry it adds by default: re-check its
   source on each OpenCode bump, and RealOpenCode's OTel test.
 - **The lane** (`context.writable`, `readable`, `SECRETS`, `lane.py`) → the Lane and RealOpenCode tests on Landlock, the
-  protocol's lane line, the handbook. What it leaves writable that runs later outside it (`TOOL_HOMES`, `NOT_WRITABLE`), what WSL's interop
+  the handbook's lane line. What it leaves writable that runs later outside it (`TOOL_HOMES`, `NOT_WRITABLE`), what WSL's interop
   runs outside it (`windows_drives`, `agent_path`, `interop_gap`) → the lane's *Writes* and *Reads*, `wb doctor`. A secret in a `TOOL_HOMES` entry → `SPLIT_MADE`; one a
   tool opens at every start (helm, k6) → its path in `agent_env`.
 - **`wb update`'s flags or output** (`--check --if-due`; `update available…`, `updated …`) → register.tsx's `checkUpdate`
