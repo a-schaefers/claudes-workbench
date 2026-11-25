@@ -76,7 +76,7 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   printed; under Claude Code only on the mod's dialog's yes); `wb patch zip`, the way without
   GitHub (a .zip to email to `UPSTREAM_CONTACT`; local, no dialog). Its git calls run without hooks or a terminal, and it imports everything up front:
   `wb patch init` deletes the copy wb runs from.
-- `privacy.py`: where an API task's code goes (`where`, `PRIVACY_PAGES`, the first-task note),
+- `privacy.py`: an API task's standing copy that holds a credential (`copy_holds_credential`, `standing_refusal`),
   `local_only`, OpenRouter's routing, `holds_credential` (which token files an API lane hides) (ARCHITECTURE.md, *Privacy for API roles*).
 - `results.py`: results.jsonl rows (`kind`, `role`, `provider`; an API task's money, `api_usage`); read them through `store.results()`, which leaves out trials.
 - `router.py`: the model per size, slices, budgets. `tuning.py`: learned knobs (a new one goes in
@@ -109,7 +109,7 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
 Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change must not break:
 1. `wb start` resolves the role (`--role`, else from `--size`; unset: GPU): GPU through the router, API to the
    role's model, never the other side (exit 3). It checks (a committed CLAUDE.md, the model, GPU room, or for an API model a free
-   provider slot of `API_PARALLEL`: exit 4 unless `--queue`),
+   provider slot of `API_PARALLEL`: else it queues),
    writes round 1's prompt (spec plus `PROTOCOL`), spawns the runner and returns at once:
    anything slow (checkout, setup, base check) is the runner's, as Claude's Bash stops at 2 min.
 2. The runner holds the GPU (`GpuLease`) and loads the model before every round, or for an API

@@ -83,24 +83,18 @@ class Sharing(Base):
         run_wb("stop", "t-big")
         wait_phase("t-small", {"review"})            # its turn came when the GPU was free
 
-    def test_a_start_that_cant_run_beside_the_gpus_holder_is_refused_before_any_worktree(self):
+    def test_a_start_that_cant_run_beside_the_gpus_holder_queues_and_names_it(self):
         # two projects, one GPU: the second session's task queued in silence behind the first
-        # (the 2026-11-16 audit); now wb start says who holds the GPU, and --queue waits anyway
+        # (the 2026-11-16 audit); wb start says who holds the GPU. It refused (exit 4) until
+        # #1322, whose answer was always --queue: now it queues by default
         os.environ["WB_FAKE_GPU_GB"] = "24"
         self.start("t-big", "hang", "--model", BIG)
         wait_running("t-big")
         os.environ["FAKE_SCENARIO"] = "ok"
-        argv = ("start", "t-small", "--spec", str(self.spec), "--repo", str(self.repo),
-                "--model", SMALL, "--test", TEST_CMD)
-        said = self.refused(*argv)
-        self.assertTrue(said.startswith("exit 4: "), said)
-        for part in ("task t-big", str(self.repo), BIG, "--queue", "do this step yourself"):
-            self.assertIn(part, said)
-        self.assertFalse(store.Task("t-small").dir.exists())
-        branches = subprocess.run(["git", "-C", str(self.repo), "branch", "--list", "delegate/t-small"],
-                                  capture_output=True, text=True).stdout
-        self.assertEqual(branches, "")
-        run_wb(*argv, "--queue")
+        out = run_wb("start", "t-small", "--spec", str(self.spec), "--repo", str(self.repo),
+                     "--model", SMALL, "--test", TEST_CMD)
+        self.assertIn("note: the GPU is busy with t-big; this task waits as queued until it's free", out)
+        self.assertEqual(store.Task("t-small").status["phase"], "queued")
         self.assertIn("note: the GPU is busy with t-big", cli._gpu_note(store.Task("t-small")))
         run_wb("stop", "t-big")
         wait_phase("t-small", {"review"})
@@ -119,7 +113,7 @@ class Sharing(Base):
         self.assertEqual(cli._gpu_holders(), {})
         os.environ["FAKE_SCENARIO"] = "ok"
         out = run_wb("start", "t-small", "--spec", str(self.spec), "--repo", str(self.repo),
-                     "--model", SMALL, "--test", TEST_CMD)  # no --queue: refused before
+                     "--model", SMALL, "--test", TEST_CMD)  # no wait for it (#805)
         self.assertNotIn("the GPU is busy", out)
         wait_phase("t-small", {"review"})              # while t-big's tests still run
         self.assertEqual(store.Task("t-big").status["phase"], "testing")
@@ -162,7 +156,7 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
 """, "-m", "workbench.optimize"], stdout=subprocess.PIPE, text=True)  # its cmdline names it
         self.addCleanup(holder.kill)
         self.assertEqual(holder.stdout.readline().strip(), "held")
-        out = self.start("t-now", "ok", "--model", SMALL)            # no --queue: no exit 4
+        out = self.start("t-now", "ok", "--model", SMALL)
         self.assertIn("stopped wb optimize", out)
         self.assertIsNotNone(holder.poll())
         wait_phase("t-now", {"review"})
@@ -182,9 +176,8 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         self.assertEqual(models.pool(remote), "gpu-gpu-pc-invalid-11434")
         self.start("t-r1", "hang", "--model", remote.id)
         wait_running("t-r1")
-        self.assertIn("exit 4", self.refused("start", "t-r0", "--spec", str(self.spec), "--repo",
-                                             str(self.repo), "--model", remote.id))   # it would wait
-        self.start("t-r2", "ok", "--model", remote.id, "--queue")
+        self.assertIn("note: the GPU is busy with t-r1",
+                      self.start("t-r2", "ok", "--model", remote.id))   # it waits (#1322: no exit 4)
         self.start("t-here", "ok", "--model", BIG)     # this machine's GPU is free: no wait
         wait_phase("t-here", {"review"})
         deadline = time.time() + 30
@@ -566,10 +559,7 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         argv = ("start", "t-rival", "--spec", str(self.spec), "--repo", str(self.repo),
                 "--model", BIG, "--test", TEST_CMD)
         os.environ["FAKE_SCENARIO"] = "ok"
-        said = self.refused(*argv)
-        self.assertTrue(said.startswith("exit 4: "), said)
-        self.assertIn("task t-gpu", said)
-        run_wb(*argv, "--queue")
+        self.assertIn("note: the GPU is busy with t-gpu", run_wb(*argv))   # queued (#1322: no exit 4)
         # the rival checks its base first (a fixed 2 s sleep lost that race on macOS's runner,
         # nightly of f744898, 2026-11-23): wait for it to reach the GPU's queue
         # the rival checks its base first, then waits ("checking the acceptance command on the
@@ -1300,18 +1290,6 @@ class ApiLease(_ApiTask, Base):
         super().setUp()
         self.api_setup()
 
-    def refused(self, *argv) -> tuple[int, str]:
-        err = io.StringIO()
-        with self.assertRaises(SystemExit) as e, redirect_stderr(err):
-            run_wb(*argv)
-        return e.exception.code, err.getvalue()
-
-    def refused_api(self, name, *extra) -> tuple[int, str]:
-        err = io.StringIO()
-        with self.assertRaises(SystemExit) as e, redirect_stderr(err):
-            self.start_api(name, "ok", *extra)
-        return e.exception.code, err.getvalue()
-
     def no_api_lease_files(self):
         """Only the GPU's own lease files: no pool of an API model's."""
         return sorted(p.name for p in Path(os.environ["WB_GPU_DIR"]).glob("gpu*.json")
@@ -1358,17 +1336,12 @@ class ApiLease(_ApiTask, Base):
         self.assertIsNone(models.pool(models.resolve(FLASH)))
         self.assertEqual(models.pool(None), "gpu")              # an image's lease is still the GPU's
 
-    def test_a_fourth_api_task_on_one_provider_exits_4_and_queued_runs_when_a_slot_frees(self):
+    def test_a_fourth_api_task_on_one_provider_queues_and_runs_when_a_slot_frees(self):
         self.three_running()
-        code, err = self.refused_api("api-4")
-        self.assertEqual(code, 4)
-        self.assertIn("3 tasks already run on deepinfra's API (api-1, api-2, api-3): workbench runs "
-                      "at most 3 at once per provider. --queue starts it anyway, to wait for a "
-                      "slot; or do this step yourself", err)
-        self.assertFalse(store.Task("api-4").exists)
         os.environ["FAKE_SCENARIO"] = "ok"
-        out = self.start_api("api-4", "ok", "--queue", "--test", TEST_CMD)
-        self.assertIn("note: 3 tasks run on deepinfra's API; this task waits as queued for a slot", out)
+        out = self.start_api("api-4", "ok", "--test", TEST_CMD)    # queued by default (#1322)
+        self.assertIn("note: 3 tasks run on deepinfra's API (api-1, api-2, api-3); api-4 waits as queued "
+                      "for a slot", out)
         deadline = time.time() + 30
         while store.Task("api-4").status.get("last") != "waiting for an API slot: 3 tasks run on deepinfra":
             self.assertLess(time.time(), deadline, store.Task("api-4").status)
@@ -1404,7 +1377,8 @@ class ApiLease(_ApiTask, Base):
         self.three_running()
         with mock.patch.object(cli, "spawn_runner", lambda task: 0):
             out = run_wb("feedback", "api-r", "--text", "1. Again.")
-        self.assertIn("note: 3 tasks run on deepinfra's API; api-r waits as queued for a slot", out)
+        self.assertIn("note: 3 tasks run on deepinfra's API (api-1, api-2, api-3); api-r waits as queued "
+                      "for a slot", out)                       # who holds them (#1322)
         self.assertNotIn("GPU", out)
 
     def test_a_runner_killed_with_sigkill_frees_its_slot(self):

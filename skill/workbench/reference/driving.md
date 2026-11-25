@@ -99,7 +99,7 @@ You are the driver, not a spectator. When something tells you the agent is headi
   `wb steer` says so.
   The runner does this by itself once a round when the agent generates past its thinking
   budget with no tool call (7 minutes from its first output; `--think-timeout` overrides),
-  and the check-in says so; a round that stalls again right after is stopped. Two nudges on one
+  and that round's report says `nudged once`; a round that stalls again right after is stopped. Two nudges on one
   task mean the spec is too big for one step: split it, or name the first file to write.
   The same once a session when it makes 40 tool calls without changing a file (an API model's
   more, by its window): "make the first edit now … or finish"; a second time in that session is
@@ -120,16 +120,15 @@ You are the driver, not a spectator. When something tells you the agent is headi
   restart", or a shutdown's signal to several runners, comes as one notice for the batch: `wb resume <a> <b> …`, as it names them, resumes them in the
   order they were started (`wb resume --all` takes every interrupted task in scope, `--backlog <name>` one backlog's); one that never ran a round
   starts round 1 again. A task a guard stopped isn't in `--all`: read its report first.
-- A check-in saying the session "reached N% of its window before it changed a file" (or "had
-  read N% before its first change": a fresh session would have little room after re-reading it):
-  the step needs more reading than the window holds. Let it carry on; next time name fewer files to read,
+- A report whose `agent context:` line ends `N% read before its first edit`: the step needs more
+  reading than the window holds. Let it carry on; next time name fewer files to read,
   or put what it needs (a signature, a constant) in the spec.
 Notes are instructions, like feedback: concrete and short.
 
 ## Check-ins
-A task wakes you on trouble (a nudge, repeated handovers). With `--checkin
-MIN` (off by default: each wake costs your whole context) it also wakes you every MIN minutes with a digest: tools used, errors, tokens, files touched, its latest
-words, time so far and the ETA. Be the captain: give the user two or three plain lines on how it
+A task wakes you on trouble (a stop, a review). With `--checkin
+MIN` (off by default: each wake costs your whole context) it also wakes you every MIN minutes with a digest: time so far and the ETA, failed tool calls, files touched, its latest
+words. Be the captain: give the user two or three plain lines on how it
 is going, and steer only if it is drifting. Say what you see, including "slow but on course".
 Each check-in is a turn that re-reads your context, so answer it in that one turn: no `wb log`
 unless the digest shows trouble, and a `wb note <name> --text "…"` (it shows in `wb watch` and
@@ -141,7 +140,7 @@ run it as a backlog. Each task still gets the same review it would by day.
 - Spec everything up front, before the first start, while you have the user's intent fresh.
   Bundle trivial items into one task. When the user names GitHub issues, read each one (`gh issue
   view`) and spec from it.
-- Start each with `wb start … --queue --backlog <name>`, a fresh, dated name for each batch
+- Start each with `wb start … --backlog <name>`, a fresh, dated name for each batch
   (`overnight-2026-11-21`: `wb start` refuses an earlier batch's). They take the GPU in the order you
   started them, and a task you send back goes ahead of the rest; an API provider's slot (3 tasks at
   once) goes to whichever waiting task looks first, in no set order. Their setups and base checks
@@ -164,11 +163,11 @@ When that session passes its handover point (60% of the window until `wb tune` l
 for that model; less where the output cap leaves less room before OpenCode's compaction, 50% on
 the 32K entry `wb model add` writes, and a model served under 16K can't take tasks), the runner hands the task to a fresh session
 at once, mid-round if need be: the task, the work so far (the diff), the agent's last words and
-the new instructions. The fourth handover in a round is a check-in, and past the fifth the round is
+the new instructions. Past the fifth handover in a round the round is
 stopped as stuck (the step is too big for the window: split it). OpenCode's own compaction (the model summarising itself, which can lose the
 task) is only a backstop past that; when it fails ("Compaction produced no summary") a fresh
 session takes over too, even before any change, so the task isn't failed for it. Reports show `agent context: …` so you see it coming. A
-check-in or report that says `NOTE: the spec doesn't name …` lists files outside the spec: drift
+report line `not in the spec: …` lists files outside the spec: drift
 until you've looked, so read them and steer (`--now`) if the agent left its task. `NOTE: <dir>: a
 git repository of its own` is a nested repo the diff leaves out and `wb accept` refuses: have its
 `.git` removed, or gitignore it. Override per round:

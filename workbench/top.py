@@ -24,7 +24,6 @@ from pathlib import Path
 
 from . import hardware, meter, models, router, stats, store
 from .transcript import plain
-from .savings import money
 
 EVERY = 2          # seconds between ticks without stats.json `every`
 PROBE_EVERY = 5    # seconds between asks of the model servers (/api/ps, /api/tags, /v1/models, /metrics)
@@ -536,7 +535,7 @@ class Top:
     def _state(self, m: models.Model, tags: dict, ps: dict, catalog: dict | None = None) -> dict:
         r = {"model": m.id, "label": m.label}
         if m.remote:
-            r.update(state="remote", why="another machine: no telemetry")
+            r["state"] = "remote"  # another machine's: nothing to read, and nothing said (#1322)
         elif m.engine != "ollama" or models._fake():
             st = models.status(m, catalog=catalog)
             r["state"] = ("resident" if st["resident"] else "idle") if st["available"] else "can't run"
@@ -697,11 +696,9 @@ def _lines(snap: dict, fold: int = 0) -> list[list[tuple[str, str]]]:
             row += [("bad" if frac > 0.95 else "warn" if frac > 0.8 else "ok", bar(frac)),
                     ("", f" {_gb(g['used'])}/{_gb(g['total'])} GB  ")]
         elif g.get("total"):
-            row += [("dim", f"{_gb(g['total'])} GB{' unified' if g.get('unified') else ''}, use not said  ")]
+            row += [("dim", f"{_gb(g['total'])} GB{' unified' if g.get('unified') else ''}  ")]
         if g.get("limit"):  # an Apple GPU: the most of the RAM it may wire (#701)
             row += [("dim", f"GPU may wire {_gb(g['limit'])} GB  ")]
-        if g.get("stale"):
-            row += [("dim", "no reading  ")]
         if g.get("busy") is not None:
             row += [("dim", "busy "), ("warn" if g["busy"] > 80 else "ok", bar(g["busy"] / 100, 8)),
                     ("", f" {g['busy']:>3}%  ")]
@@ -726,7 +723,7 @@ def _lines(snap: dict, fold: int = 0) -> list[list[tuple[str, str]]]:
             row.append(("", ctx))
         if r.get("via") == "api":  # its provider and its spend (#1022): no GPU of ours
             row.append(("", f"  API {p(r.get('provider') or '?')}"
-                        + (f" · {money(r['spend'], r.get('prices', meter.CATALOG))}"
+                        + (f" · {meter.money(r['spend'], r.get('prices', meter.CATALOG))}"
                            if isinstance(r.get("spend"), (int, float)) else "")
                         + (f" · waits for {p(r['waits'])}" if r.get("waits") else "")))
         out.append(row)
@@ -752,13 +749,11 @@ def _lines(snap: dict, fold: int = 0) -> list[list[tuple[str, str]]]:
             row.append(("", f"  server {r['server']['tok_s']:.0f} tok/s live"))
         if r.get("tasks"):
             row.append(("", "  ← " + ", ".join(p(t) for t in r["tasks"])))
-        if r.get("why") and state != "remote":
+        if r.get("why"):
             row.append(("dim", f"  {p(r['why'])}"))
-        elif state == "remote":
-            row.append(("dim", "  another machine: no telemetry"))
         out.append(row)
     if fold:
-        out.append([("dim", f"  +{fold} idle, can't run or remote (a taller terminal shows them)")])
+        out.append([("dim", f"  +{fold} more")])
     elif not snap["rack"]:
         out.append([("dim", "  no models found")])
     out += [[], [("head", "QUEUE")]]

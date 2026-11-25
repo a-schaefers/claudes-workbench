@@ -936,17 +936,16 @@ def upstream(root, kind, commit, slug) -> None:
     url = _out(root, "config", "--get", f"remote.{remote}.url", check=False)
     repo = _owner_repo(url)  # gh takes owner/repo, never a URL (gh repo fork <url> was printed)
     scope = _out(root, "log", "-1", "--format=%(trailers:key=Scope,valueonly,separator=%x2C)", sha).lower()
+    tag = " (Scope: me)" if scope == "me" else ""  # a fact; the dialog says it at the send (#1322)
     if picked.returncode:
-        print(f"{pr} from {remote}'s {up[:7]} in {wt}: {what} conflicts there. Resolve it in that "
+        print(f"{pr} from {remote}'s {up[:7]} in {wt}: {what}{tag} conflicts there. Resolve it in that "
               "worktree, then git cherry-pick --continue, and go on below")
         mod = True
     else:
-        print(f"{pr} from {remote}'s {up[:7]} in {wt}, with {what}")
+        print(f"{pr} from {remote}'s {up[:7]} in {wt}, with {what}{tag}")
         mod = _git(wt, "diff", "--quiet", up, "HEAD", "--", "mod", check=False).returncode != 0
     if not has_test(root, sha):
         print(NO_TEST_SEND)
-    if scope == "me":
-        print("its Scope trailer is me: a personal patch. Offer it upstream only if it helps everybody")
     note_install(root)
     with _noting() as noted:  # the local commit wb update later drops when its pull request merges
         _table(noted, "prepared")[slug] = _ident(root, sha)
@@ -964,8 +963,7 @@ def upstream(root, kind, commit, slug) -> None:
         print(f"  fill in {body} (" + ("a copy of .github/pull_request_template.md" if template.is_file()
                                        else "the pull request's body") + ")")
         print(f"  wb patch send {slug} --title {_quote(what.split(' ', 1)[-1])} --body-file {body}")
-        print(gh_line(gh_state(root)))
-        print("wb patch send forks, pushes and opens the pull request: the user's yes for it first")
+        print(gh_line(gh_state(root)))  # the user's yes is the mod's dialog (#1322: no line for it)
     print(f"once it merges, the next wb update drops the local patch ({what.split()[0]})")
 
 
@@ -1071,8 +1069,9 @@ def _quote(text) -> str:
     return f'"{text}"' if not re.search(r'["$`\\!]', text) else shlex.quote(text)
 
 
-def _refuse_send(root, wt, pr, base, body_file, anyway) -> None:
-    """Every refusal of wb patch send that needs no network, before any is asked (#1005)."""
+def _refuse_send(root, wt, pr, base, body_file) -> None:
+    """Every refusal of wb patch send that needs no network, before any is asked (#1005). A
+    `Scope: me` commit is none: the mod's dialog says it, one yes (#1322: --anyway was a second)."""
     if not (_out(root, "rev-parse", "-q", "--verify", f"refs/heads/{pr}", check=False) and wt.is_dir()
             and branch(wt) == pr):
         raise PatchError(f"no {pr} in {wt}: wb patch upstream <commit> --name {pr.removeprefix('pr/')} "
@@ -1082,9 +1081,7 @@ def _refuse_send(root, wt, pr, base, body_file, anyway) -> None:
     if dirty := _out(wt, "status", "--porcelain", "--untracked-files=normal").splitlines():
         raise PatchError(f"{wt} has uncommitted changes ({', '.join(d.strip() for d in dirty[:5])}): "
                          "commit them on the branch, or remove them")
-    rows = [r.split("\0") for r in _out(wt, "log", "--format=%h%x00%s%x00%(trailers:key=Scope,valueonly,"
-                                        "separator=%x2C)", f"{base}..HEAD", "--").splitlines() if r]
-    if not rows:
+    if not _out(wt, "log", "--format=%h", f"{base}..HEAD", "--"):
         raise PatchError(f"{pr} has no commits over {base.removeprefix('refs/remotes/')}: nothing to send")
     body = Path(body_file)
     try:
@@ -1096,10 +1093,6 @@ def _refuse_send(root, wt, pr, base, body_file, anyway) -> None:
         raise PatchError(f"--body-file {body} is empty: fill it in from {template}")
     if template.is_file() and text == template.read_bytes():
         raise PatchError(f"--body-file {body} is the template as it came: fill in every section first")
-    mine = [f"{sha} {subject}" for sha, subject, scope in rows if scope.strip().lower() == "me"]
-    if mine and not anyway:
-        raise PatchError(f"{', '.join(mine)}: its Scope trailer is me, a personal preference, not a fix for "
-                         "everybody: keep it local, or --anyway sends it")
 
 
 SEND_OK = "send-ok.json"  # $WB_HOME/send-ok.json: the mod's dialog approved this one send
@@ -1172,7 +1165,7 @@ def send(root, kind, slug, title, body_file, draft=False, anyway=False) -> None:
     pr, wt = f"pr/{slug}", store.home() / "upstream" / slug
     remote, target = _tracked(root)
     base = f"refs/remotes/{remote}/{target}"
-    _refuse_send(root, wt, pr, base, body_file, anyway)
+    _refuse_send(root, wt, pr, base, body_file)
     url = _out(root, "config", "--get", f"remote.{remote}.url", check=False)
     repo = _owner_repo(url)
     if not repo:

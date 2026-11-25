@@ -82,8 +82,8 @@ only once committed, through `wb update` (it copies the clone's HEAD into the pl
    ```
    It forks the repository (unless it is yours), pushes `pr/<slug>` to the fork and opens the
    pull request (`--draft` for a draft). It refuses, sending nothing, while the branch has
-   uncommitted changes, the body is empty or still the template, or a commit's trailer is
-   `Scope: me` (`--anyway` overrides that one). A failed step says what is done already; running
+   uncommitted changes, or the body is empty or still the template; a commit whose trailer is
+   `Scope: me` is named in the dialog that asks you. A failed step says what is done already; running
    it again goes on from there. The commit message's body carries `Closes #N`. Once it merges,
    the next `wb update` drops the local patch and removes `pr/<slug>`, its worktree and its body;
    closed unmerged, it keeps the patch and says so once.

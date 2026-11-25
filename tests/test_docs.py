@@ -255,9 +255,9 @@ class DocsFor20(unittest.TestCase):
         said = "\n".join(line for line in pane.splitlines() if not line.lstrip().startswith("//"))
         for words in ("local agent", "work stays local"):
             self.assertNotIn(words, said)
-        # "stays local" lost only its last word: the ask rule still says where the work stays, as
-        # wb takeover's refusal does (cli._coding_gate)
-        self.assertIn("Unanswered, the work stays with the agent.", said)
+        # "stays local" lost only its last word: wb takeover's refusal still says where the work
+        # stays (cli._coding_gate); the mod's ask rule went to a dialog at the edit (#1322)
+        self.assertIn("Unanswered, the work stays with the agent", (ROOT / "workbench/cli.py").read_text())
 
     def test_wb_coding_and_the_pane_say_the_same_sentence_for_each_choice(self):
         # *Couplings*: cli.CODING → the mod's CODING_STOPS (#1027 changed both in one word)

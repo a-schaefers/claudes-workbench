@@ -173,22 +173,16 @@ def restrict(writable: list[str], readable: list[str] | None = None,
 
 
 def gaps(version: int) -> list[str]:
-    """What this Landlock version can't confine, for `wb doctor` (the 2026-11-16 audit: ABI 1-2
-    kernels, Debian 12, Ubuntu 22.04, WSL2's 5.15, were reported as a whole lane)."""
-    out = []
-    if 0 < version < 3:
-        out.append("truncating a file outside the lane (truncate(2)) isn't refused before "
-                   "ABI 3 (Linux 6.2)")
+    """What this Landlock version breaks for the agent's tools, for `wb doctor` (the 2026-11-16
+    audit: ABI 1 kernels, such as Debian 12's). What an older ABI can't confine (truncate before
+    3, signals before 6, UNIX sockets before 9) is a risk the user lives with, which doctor no
+    longer lists (#1322); a tool that fails is a different thing, and the merge of #1322's areas
+    dropped this line with them (2026-11-24)."""
     if version == 1:
-        out.append("moving or hard-linking a file between directories fails even inside the "
-                   "lane (\"Invalid cross-device link\"; most tools fall back to a copy) before "
-                   "ABI 2 (Linux 5.19)")
-    if 0 < version < 6:
-        out.append("the agent can signal the user's other processes before ABI 6 (Linux 6.12)")
-    if 0 < version < 9:
-        out.append("the agent can connect to the user's UNIX sockets (the session bus, so "
-                   "systemd-run; the SSH and GPG agents) before ABI 9")
-    return out
+        return ["moving or hard-linking a file between directories fails even inside the lane "
+                "(\"Invalid cross-device link\"; most tools fall back to a copy) before ABI 2 "
+                "(Linux 5.19)"]
+    return []
 
 
 def wrap(writable: list[str] | None, cmd: list[str],

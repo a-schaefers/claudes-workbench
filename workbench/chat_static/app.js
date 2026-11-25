@@ -1307,41 +1307,38 @@
   function drawSaved() {
     const t = state.savings, s = t && t.score
     $('badge').hidden = !s
+    // the badge's number and one line under it: the sentence and the paragraph said the same
+    // saving twice more (#1322)
     if (s) {
       const n = $('badge-n'); n.className = 'badge-n ' + s.color
       n.textContent = String(s.score); n.append(Object.assign(document.createElement('small'), { textContent: ' / 100' }))
-      $('badge-s').textContent = s.sentence
+      $('badge-s').textContent = t.saved >= 0 ? `~${tokens(t.saved)} Claude tokens saved this week` : `~${tokens(-t.saved)} more Claude tokens this week`
     }
     const api = apiSaved(t && t.api)
     if (!t || !t.tasks) {
       $('saved').textContent = api || 'Nothing to compare yet. Once a delegated task is accepted, this shows what it saved Claude this week.'
       return
     }
-    const saved = t.saved >= 0
-      ? `Saved about ${tokens(t.saved)}${t.self_est > 0 ? ` (${Math.round(100 * t.saved / t.self_est)}%)` : ''}.`
-      : `It cost about ${tokens(-t.saved)} more.`
-    const gpu = t.wh ? ` The GPU used ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}${t.cost != null ? `, cost ${t.cost.toFixed(2)}` : ''}.` : ''  // no currency sign: the price is the user's, in theirs (#845, as #609)
-    $('saved').textContent = `In the last 7 days, ${t.tasks} task${t.tasks === 1 ? '' : 's'}: Claude used ${tokens(t.claude)} tokens where writing them itself would have taken about ${tokens(t.self_est)} (an estimate). ${saved}${gpu}${api ? ' ' + api : ''}`
+    const gpu = t.wh ? `The GPU used ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}${t.cost != null ? `, cost ${t.cost.toFixed(2)}` : ''}.` : ''  // no currency sign: the price is the user's, in theirs (#845, as #609)
+    // no badge (nothing written to compare against, only discards): the saving here instead
+    const saved = s ? '' : t.saved >= 0 ? `~${tokens(t.saved)} Claude tokens saved this week.` : `~${tokens(-t.saved)} more Claude tokens this week.`
+    $('saved').textContent = [saved, gpu, api].filter(Boolean).join(' ')
   }
   // The week's API tasks, apart from the saving (#1022): dollars, OpenCode's unit, so a `$`;
   // a task with no price is counted, never shown as $0
   function apiSaved(a) {
     if (!a || !a.tasks) return ''
-    const usd = x => {  // savings.usd's rule: a cent's fraction to two figures, written out
-      if (x === 0) return '$0'
-      if (Math.abs(x) >= 0.01) return `$${x.toFixed(2)}`
-      const r = Number(x.toPrecision(2))
-      return Math.abs(r) >= 0.01 ? `$${r.toFixed(2)}` : `$${r.toFixed(2 - Math.floor(Math.log10(Math.abs(r)))).replace(/0+$/, '')}`
-    }
-    // ≈: at the catalog's prices, an estimate, unless the user set the model's (wb model price, #1135)
+    // meter.usd's rule: $0.42, `<$0.01` under a cent, $0 for none (#1322)
+    const usd = x => x === 0 ? '$0' : Math.abs(x) < 0.01 ? '<$0.01' : `$${x.toFixed(2)}`
+    // ≈: at the catalog's prices, an estimate, unless the user set the model's (wb model price, #1135);
+    // the `≈` alone says it, no "(catalog prices)" after it (#1322)
     const est = v => ((v.prices || 'catalog') === 'catalog' && v.cost ? '≈' : '') + usd(v.cost)
-    const note = a.cost ? ({ catalog: 'catalog prices', yours: 'your prices' })[a.prices || 'catalog'] : ''
     const provs = Object.entries(a.by_provider || {}).filter(([, v]) => v.tasks > v.unknown + (v.plan || 0))
       .sort((x, y) => y[1].cost - x[1].cost).map(([p, v]) => `${(a.names || {})[p] || p} ${est(v)}`)
     const known = a.tasks - a.unknown - (a.plan || 0)
-    const inside = [provs.join(', '), note].filter(Boolean).join('; ')
+    const inside = provs.join(', ')
     const parts = [known ? `${est(a)}${inside ? ` (${inside})` : ''}` : '',
-      a.unknown ? `${a.unknown} with no price` : '', a.plan ? `${a.plan} on plan usage` : ''].filter(Boolean)
+      a.unknown ? `${a.unknown} with no known cost` : '', a.plan ? `${a.plan} on plan usage` : ''].filter(Boolean)
     return `API models: ${a.tasks} task${a.tasks === 1 ? '' : 's'}, ${parts.join(', ')}.`
   }
   function drawSettings() {

@@ -28,7 +28,7 @@ from types import SimpleNamespace
 from urllib.parse import urlparse
 
 from . import (__version__, ask_mcp, audio, bench, chat, context, gitops, hardware, images, lane, lessons,
-               media, models, optimize, patches, progress, results, router, routes, savings, scan, skills, spend, stats, store,
+               media, models, optimize, patches, progress, results, router, routes, savings, scan, skills, stats, store,
                transcript, tuning, verify, webpush)
 from .watch import Watcher, wait_exit
 from . import runner
@@ -53,20 +53,13 @@ How to work (workbench protocol):
   you go on; don't ask for it.
 - If the spec is genuinely ambiguous, you may call the `ask_reviewer` tool ({budget} \
 question(s) for this task). Otherwise make reasonable choices and say what you assumed.
-- Stay inside the scope of the spec. No unrelated refactors, no new dependencies unless asked.
-- You can write only in this worktree, the temp directory and build caches: "Permission denied"
-  anywhere else is that limit, so don't keep trying it. Need a directory outside? Call `ask_reviewer`
-  with `path` set to it (this doesn't use the question budget).
-- CLAUDE.md and AGENTS.md are Claude's, and you can't edit them. When the task asks for a change
-  to one, write the whole new file next to it as `<name>.proposed` (`CLAUDE.md.proposed`); Claude
-  reads the difference and takes it.
 - Finish with a short summary: the files you changed, the test result, and any assumptions.
   If you hit something the next agent would trip on too (a library's quirk, a pitfall, a check
   worth running), add a line `Lesson: <the rule, and why>` to it.
 """
 
 # The writing role's protocol (#1025): prose under its own rules, not the coding ones. Its fold
-# and first bullet, `{test_line}`, the `{spec}`, ask_reviewer, lane and `.proposed` bullets, and the
+# and first bullet, `{test_line}`, the `{spec}` and ask_reviewer bullets and the
 # `Lesson: <the rule, and why>` line are PROTOCOL's word for word: bench.FOLD and bench.TEST_LINE,
 # transcript's fold and runner.outline_section's split read them, lessons.LESSON the summary's
 # `Lesson:` lines. Its summary bullet is its own (the [TK] gaps, the check's result).
@@ -86,12 +79,6 @@ question(s) for this task). Otherwise make reasonable choices and say what you a
 - Facts come from the brief, the repository and the sources it names. Never invent a number,
   quote, name, command or link: write [TK: what is missing] and list it in your summary.
 - Don't reflow, rewrap or reformat text you aren't changing: Claude reviews the diff line by line.
-- You can write only in this worktree, the temp directory and build caches: "Permission denied"
-  anywhere else is that limit, so don't keep trying it. Need a directory outside? Call `ask_reviewer`
-  with `path` set to it (this doesn't use the question budget).
-- CLAUDE.md and AGENTS.md are Claude's, and you can't edit them. When the task asks for a change
-  to one, write the whole new file next to it as `<name>.proposed` (`CLAUDE.md.proposed`); Claude
-  reads the difference and takes it.
 - Finish with a short summary: the files you changed, every [TK] gap, the check's result if there
   is one, and any assumptions. If you hit something the next agent would trip on too, add a line
   `Lesson: <the rule, and why>` to it.
@@ -161,7 +148,7 @@ def need(name: str) -> store.Task:
 # agent gets the first shot in all three; Claude can always review and advise. Without a saved
 # choice it is "decide", which is how Claude worked before there was a choice.
 CODING = {"only": ("Only when I say", "You tell Claude when to write code."),
-          "ask": ("Ask me first", "Claude can ask to make a specific fix and waits for your yes."),
+          "ask": ("Ask me first", "Claude asks you in a dialog before it edits code in a task."),
           "decide": ("Let Claude decide",
                      "Claude uses its judgment to guide the agent or make a fix itself.")}
 
@@ -244,9 +231,7 @@ def _opencode_again(task: store.Task) -> None:
     if (have := runner.opencode_version()) and have < (2, 0):
         die(f"OpenCode {have[0]}.{have[1]} can't run tasks: workbench needs OpenCode 2.x: "
             f"{runner.OPENCODE_GET}", 3)
-    if have:
-        if drift := runner.untested(have):
-            print(f"note: {drift}")
+    if have:  # outside OPENCODE_TESTED: wb doctor says it, not every command (#1322)
         task.set_status(opencode=f"{have[0]}.{have[1]}")
 
 
@@ -736,7 +721,7 @@ def _routed_keys(routed: dict) -> dict:
 def _busy_api(role: str, a, repo: Path, sub: str | None, tokens: int | None = None):
     """When the GPU is busy and the user opted in (routes.json `busy` api, #1023): the role's API
     model as pick_model gives one, (m, state, why, routed); "" when the opt-in doesn't apply (off,
-    Agents GPU, a --model asked for, a role with no API model: it queues or exits 4 as before); a
+    Agents GPU, a --model asked for, a role with no API model: it queues as before); a
     line saying why the role's API model can't take it now, which never changes the start either.
     Only here, at a start: a running task never moves, and nothing goes from API to the GPU."""
     if a.model:
@@ -761,9 +746,8 @@ def _busy_api(role: str, a, repo: Path, sub: str | None, tokens: int | None = No
                                                          lane_places(repo, sub, a))):
         why = (f"{privacy.home_path(kept[0])}, which the task's lane reads ({kept[1]}), is kept local"
                if kept[1] else f"{repo.name} is kept local ({kept[0]})")
-    if why is None:  # commands.json's standing copy/siblings, unnamed (#1021), as an API start's
-        why = _standing_gap(context.repo_conf(repo, sub), a, models.provider_name(m), repo, sub,
-                            role, advice=False) or None
+    if why is None:  # commands.json's standing copy that holds a credential, as an API start's
+        why = _standing_gap(context.repo_conf(repo, sub), repo, sub, advice=False) or None
     if why is None:  # no price, or today at the day cap (#1019), without an API start's advice:
         # the role is on the GPU and this start only waits for it (wave 2's merge)
         why = meter.refusal(m, role, advice=False,  # round 1's input too (#1173)
@@ -882,21 +866,14 @@ def _api_slots_free(m: models.Model, me: str | None = None) -> int:
     return max(0, models.api_slots_free(models.api_provider(m)) - len(_api_pending(m, me)))
 
 
-def _slots_full(m: models.Model, me: str | None = None) -> str:
-    """wb start's refusal (exit 4) when every one of an API provider's slots is held or claimed
-    by a task on its way to one."""
+def _slot_note(m: models.Model, me: str | None = None) -> str:
+    """An API task started past its provider's limit: it waits as queued for a slot, and the note
+    names who holds them (wb start queues it by default, #1322)."""
     p = models.api_provider(m)
     held = models.api_holders(p) + _api_pending(m, me)
-    return (f"{len(held) or models.API_PARALLEL} tasks already run on {p}'s API"
+    return (f"{models.API_PARALLEL} tasks run on {p}'s API"
             + (f" ({', '.join(held)})" if held else "")
-            + f": workbench runs at most {models.API_PARALLEL} at once per provider. --queue starts "
-            "it anyway, to wait for a slot; or do this step yourself")
-
-
-def _slot_note(m: models.Model, me: str | None = None) -> str:
-    """An API task sent on past its provider's limit: it waits as queued for a slot."""
-    return (f"{models.API_PARALLEL} tasks run on {models.api_provider(m)}'s API; "
-            f"{me or 'this task'} waits as queued for a slot")
+            + f"; {me or 'this task'} waits as queued for a slot")
 
 
 def _gpu_note(task: store.Task) -> str:
@@ -1047,16 +1024,15 @@ CACHE_DIRS = ("__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".to
               ".cache", ".idea", ".vscode")
 
 
-def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu", where: str = "",
-                    role: str | None = None) -> dict:
+def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu") -> dict:
     """The task's `setup`, `copy` and `siblings`: commands.json's `repos` entry for the repo,
     with --setup in its place and --copy/--sibling added, each checked (#201, the 2026-11-19
     audit). A copied path must be ignored in the checkout (else it shows in the review diff) and
     no secret (SECRET_FILES): the user's settings stay theirs. A sibling is a directory beside
     the repo the lane may read."""
     conf = context.repo_conf(repo, sub)  # the package's entry, not the repo's first (#778)
-    if via == "api":  # nothing standing goes to a provider unnamed (#1021)
-        _standing_refusal(conf, a, where, repo, sub, role)
+    if via == "api":  # no standing copy that holds a credential (#1021, #1322)
+        _standing_refusal(conf, repo, sub)
     setup = a.setup if a.setup is not None else conf.get("setup") or ""
     copy, sibs = [], []
     home = context.repo_conf_dir(repo, sub)
@@ -1152,45 +1128,30 @@ def _copy_path(repo: Path, raw: str, sub: str | None) -> str:
     return p
 
 
-def _standing_refusal(conf: dict, a, where: str, repo: Path, sub: str | None,
-                      role: str | None = None) -> None:
-    """An API task takes commands.json's standing `copy` and `siblings` only when this command
-    line names them too: a `.env.local` copied into every worktree, or a `../shared` the lane
-    reads, would reach the provider unasked (#1021). Exit 3, the entry and how to name it."""
-    if why := _standing_gap(conf, a, where, repo, sub, role):
+def _standing_refusal(conf: dict, repo: Path, sub: str | None) -> None:
+    """An API task takes commands.json's standing `copy` and `siblings` as configured (the setup
+    line says so), but a copied file that holds a credential: exit 3 (#1021, #1322)."""
+    if why := _standing_gap(conf, repo, sub):
         die(why, 3)
 
 
-def _standing_gap(conf: dict, a, where: str, repo: Path, sub: str | None,
-                  role: str | None = None, advice: bool = True) -> str:
+def _standing_gap(conf: dict, repo: Path, sub: str | None, advice: bool = True) -> str:
     """_standing_refusal's line, or '': also the busy opt-in's (#1023), which moves a GPU start to
     an API model after _worktree_setup checked it as a GPU one (wave 2's merge), and the mod's
-    dry run's (_route_start). A --copy names the path it copies, from a package the package's
-    (_copy_path, #1158), a standing entry the path from its key's directory (#1346). Its other
-    way out is the role's, or a GPU model for a --model start (privacy.standing_refusal, #1227)."""
-    asked = bool(getattr(a, "model", None))
-    named_copy = {_copy_path(repo, x, sub).rstrip("/") for x in a.copy or []}
-    named_sib = {x.strip().rstrip("/").removeprefix("../") for x in a.sibling or []}
-    home = context.repo_conf_dir(repo, sub)  # read as _worktree_setup reads it (#1346)
+    dry run's (_route_start), so the dialog never asks for a start wb start then refuses (#1227).
+    An entry is the path from its key's directory, as _worktree_setup copies it
+    (context.repo_conf_dir, _copy_path, #1346): from the root, a package key's node_modules was
+    the root's. A file is read if it is text under the cap, a directory's config files outside
+    its package trees for a strong signal only (privacy.copy_holds_credential): only files were,
+    by holds_credential, which refused a binary test.db and let config/local/ go unread (#1322's
+    review), and its matcher refused a models/ copy for tokenizer_config.json's bos_token. Naming
+    the entry once let it through, which every start then repeated (#1322)."""
+    home = context.repo_conf_dir(repo, sub)
     for raw in conf.get("copy", []):
-        if (entry := _copy_path(repo, raw, home).rstrip("/")) not in named_copy:
-            return privacy.standing_refusal("copy", raw, where, _copy_name(repo, entry, sub),
-                                            role, asked, advice)
-    for raw in conf.get("siblings", []):
-        if raw.strip().rstrip("/").removeprefix("../") not in named_sib:
-            return privacy.standing_refusal("siblings", raw, where, None, role, asked, advice)
+        entry = _copy_path(repo, raw, home).rstrip("/")
+        if privacy.copy_holds_credential(repo / entry):
+            return privacy.standing_refusal(entry, advice)
     return ""
-
-
-def _copy_name(repo: Path, entry: str, sub: str | None) -> str:
-    """How to type commands.json's repo-relative `copy` entry as a --copy from the package `sub`,
-    so that _copy_path reads it back as the entry: from packages/app the refusal advised
-    `--copy node_modules`, read as the package's, and refused the same start again and again
-    (#1158's review, 2026-11-24). The entry as written when it already reads back, else the path
-    from the package (`../../node_modules`)."""
-    if not sub or _copy_path(repo, entry, sub).rstrip("/") == entry:
-        return entry
-    return os.path.relpath(entry, sub.strip("/"))
 
 
 def _role(a) -> str:
@@ -1276,36 +1237,37 @@ def _local_only_since(task: store.Task) -> None:
         die(why, 3)
 
 
-def _api_notes(task_name: str, repo: Path, m: models.Model, a, routed: dict) -> list[str]:
-    """An API task's start notes: on the repo's first task to this provider, what goes, to whom
-    and whose choice it was (privacy.where_note, #1016's first-task note with #1021's words), and
-    the token files its lane hides: those holding a credential (#1021), when it has a lane (#1156).
-    ``routed``: what task.json holds (_routed_keys): the backends named are the ones the keyhole
-    routes by, never routes.json's (an `order` the note named once never reached the task: wave
-    2's review). Everything else the lane reads is named too, the start's grants and
-    commands.json's standing `paths` (#1269: "the repo, its spec, CLAUDE.md files" while the
-    lane read and sent ~/notes), and on any task that sends more than the repo, not only the
-    repo's first: a later task's --sibling or a path added since went unsaid."""
+def _api_notes(task_name: str, repo: Path) -> list[str]:
+    """An API task's start notes: the token files its lane hides that this checkout's build
+    reads (context.api_hidden_note, #1021), when it has a lane (#1156), on the repo's first API
+    task, and a token in a remote URL (#1072). Where the code goes is the role's dialog's, said once when the user agreed:
+    a note on every start that named the provider and its policy again guarded nothing (#1322)."""
     notes = []
-    task = store.Task(task_name)
-    granted = set(context.grants(task).get("paths") or [])
-    named = [f"{c} (--copy)" for c in a.copy or []] + [f"{x} (--sibling)" for x in a.sibling or []] \
-        + [("every file your account reads" if p == "*" else privacy.home_path(p))
-           + (" (--allow-path)" if p in granted else ' (commands.json "paths")')
-           for p in dict.fromkeys(context.lane_paths(task))]
-    if privacy.first_for(repo, m.provider, task_name) or named:
-        info = privacy.where(m, routed.get("order"))
-        rules = context.user_agents_md().is_file()  # Claude's own files go to no agent (#1061)
-        whose = ("asked for" if (routed.get("said") or "").startswith("asked for")
-                 else f"the {routed.get('role') or _role(a)} role's model")
-        subs = bool(gitops.submodule_sources(repo, task.spec.get("base") or "HEAD"))  # #1267
-        notes.append(privacy.where_note(info, rules, named, whose, subs))
-    if gap := context.api_hidden_note(task):  # none with no lane (#1156)
+    # none with no lane (#1156); on the repo's first API task only: a refusal of one names it
+    # again, API_HIDDEN_WHY in the report (#1093, #1322)
+    real = os.path.realpath(str(repo))
+    first = not any(t.name != task_name and privacy.is_api_task(t)
+                    and os.path.realpath(t.spec.get("repo") or "") == real
+                    for t in store.all_tasks(archived=True))
+    if first and (gap := context.api_hidden_note(store.Task(task_name))):
         notes.append(gap)
     if gap := context.git_url_note(repo):  # a token in a remote URL (#1072)
         notes.append(gap)
     return notes
 
+
+def _standing_setup(conf: dict, a, repo: Path, sub: str | None) -> list[str]:
+    """What a start's worktree setup takes from commands.json "repos" (``conf``, the repo's
+    entry) rather than its own flags: wb start says only that, as Claude knows what it passed
+    (#1322). --setup takes the standing command's place (_worktree_setup). A copy is named by the
+    path it copies, from its key's directory (#1346)."""
+    home = context.repo_conf_dir(repo, sub)
+    links = conf.get("siblings") or []
+    copies = [_copy_path(repo, x, home).rstrip("/") for x in conf.get("copy") or []]
+    cmd = conf.get("setup") if a.setup is None else None
+    return [*(["links " + ", ".join(n if n.startswith("../") else f"../{n}" for n in links)] if links else []),
+            *([f"copies {', '.join(copies)}"] if copies else []),
+            *([f"runs `{cmd}`"] if cmd else [])]
 
 # The commands.json `repos` keys that set a task's worktree up: an entry with none of them still
 # gets wb start's note on the ignored directories the worktree lacks (#1299)
@@ -1525,7 +1487,8 @@ def cmd_start(a):
         die(line, 3)
     if not state["available"] and not held_up and not a.force:
         die(_cant_run(m, state), 3)
-    dirty = gitops.git(repo, "status", "--porcelain").strip()
+    # tracked files only: an untracked scratch file said so on every start (#1322)
+    dirty = gitops.git(repo, "status", "--porcelain", "--untracked-files=no").strip()
     if nobase := _no_base(repo, a.base):  # first: a typo read as a missing CLAUDE.md (the audit)
         die(nobase)  # `nobase`, not `why`: that is the router's reason, task.json's route
     if not _identity(repo):
@@ -1537,18 +1500,17 @@ def cmd_start(a):
         print(f"package: {sub} (its own CLAUDE.md): the agent, the setup and the tests run there")
     if not a.no_sign:  # said now, not after the whole task at wb accept (#374)
         _say(gitops.sign_problem(repo, a.base))
-    setup = _worktree_setup(repo, a, sub, m.kind, models.provider_name(m), role)
+    setup = _worktree_setup(repo, a, sub, m.kind)
     checkout_bytes = _disk_room(repo, a.base, setup)
     # Two projects, one GPU: a task that can't run beside the GPU's holders used to queue in
-    # silence behind them, maybe for hours (the 2026-11-16 audit). Say so before any worktree.
-    # An API model takes no GPU (#1015): no bench to stop, no holders to wait for, but one of its
-    # provider's slots (models.API_PARALLEL), whose limit is exit 4's other cause.
+    # silence behind them, maybe for hours (the 2026-11-16 audit), so its note names them. It
+    # queues by default: the refusal (exit 4) was always answered with --queue (#1322). An API
+    # model takes no GPU (#1015): no bench to stop, no holders to wait for, but one of its
+    # provider's slots (models.API_PARALLEL), whose note says it waits for one.
     api = m.kind == "api"
     slots_full = api and not _api_slots_free(m, a.name)
     if api:
         held, waits = {}, False
-        if slots_full and not a.queue:
-            die(_slots_full(m, a.name), 4)
     else:
         if not getattr(a, "bench", None):
             _say(_preempt_bench(m, a.name))
@@ -1558,9 +1520,6 @@ def cmd_start(a):
         api, held, waits, slots_full = True, {}, False, False
     elif waits and moved:
         print(f"note: {moved}")
-    if waits and not a.queue:
-        die(models.busy(held, f"{m.id} can't run beside {'it' if len(held) == 1 else 'them'}. "
-                        "--queue starts it anyway, to wait behind; or do this step yourself"), 4)
 
     try:
         task.dir.mkdir(parents=True)
@@ -1686,23 +1645,16 @@ def cmd_start(a):
     spawn_runner(task)
     print(f"started {a.name} on {f'{m.id} (API)' if api else m.label} · branch {gitops.branch_name(a.name)} · "
           f"base {base[:8]}" + (f" · tests `{a.test}`, auto-fix {fixes}" if a.test else ""))
-    if a.test and not a.no_base_check:
-        print("base check: the runner runs the acceptance command once on the base first; what "
-              "it saw comes with the first report (a check-in at once if --test-timeout cuts it "
-              "short, its output passes 20 MB or its command isn't found)")  # a base that passes is a note in that report, no wake (#881; #1152; #1301)
     if dirty:
         print("note: the repo has uncommitted changes; the agent's worktree starts from "
               f"{a.base}, without them")
     if subs:
         print(f"note: submodules ({', '.join(subs[:5])}) are empty in the agent's worktree (your "
               "checkout lacks them at the base's commit): a build or test that needs them fails there")
-    if setup:
-        does = [*(["links " + ", ".join(n if n.startswith("../") else f"../{n}" for n in setup["siblings"])]
-                  if setup.get("siblings") else []),
-                *([f"copies {', '.join(setup['copy'])}"] if setup.get("copy") else []),
-                *([f"runs `{setup['setup']}`"] if setup.get("setup") else [])]
-        print(f"setup: the runner sets the worktree up first ({'; '.join(does)}); a failure stops "
-              "the task before any round")
+    lack: list[str] = []  # the missing-dirs note's, which the venv note defers to
+    if setup:  # what Claude didn't pass itself: commands.json's standing setup (#1322)
+        if does := _standing_setup(context.repo_conf(repo, sub), a, repo, sub):
+            print(f"setup from commands.json: {'; '.join(does)}")
     # only an entry that says how the worktree is set up (an explicit "setup": "" is the opt-out)
     # silences the note: one holding only local_only or merge did, and rounds ran on a base that
     # couldn't find its node_modules (#1299, bar round 8, 2026-11-24)
@@ -1711,11 +1663,11 @@ def cmd_start(a):
             print(f"note: the worktree has only committed files, not the checkout's ignored "
                   f"{', '.join(lack[:4])}: --setup '<install command>' sets a task up (--copy "
                   "<path> copies one in); commands.json \"repos\" for every task")
-    if context.lane_on() and (gap := context.home_gap()):
-        print(f"note: {gap}")
     if proxies := runner.dropped_proxies():  # #380 (the audit of 1.6)
         print(f"note: {runner.proxy_line(proxies)}")
-    if venvs := context.venv_line(task, bool(setup and setup.get("setup"))):  # #490
+    # #490; not beside a --setup, nor when the missing-dirs note named the venv already (#1322)
+    if not (setup and setup.get("setup")) and not any(d.rstrip("/").rsplit("/", 1)[-1] in ("venv", ".venv")
+                                                      for d in lack[:4]) and (venvs := context.venv_line(task)):
         print(f"note: {venvs}")
     if context.mise_trusted(task) is False:  # #674
         print(f"note: mise doesn't trust {repo}'s config (mise trust --show), so it trusts no "
@@ -1724,22 +1676,20 @@ def cmd_start(a):
     if a.backlog and hardware.system() == "wsl" and awake_how() != "windows" and not any(  # #516, #777
             t.spec.get("backlog") == a.backlog for t in store.all_tasks() if t.name != a.name):
         print(f"note: {WSL_SLEEPS}")
-    if context.on_windows(str(repo), context.windows_drives()):  # finding 30 (the 2026-11-19 audit)
+    # finding 30 (the 2026-11-19 audit); on the repo's first task only, not every start (#1322)
+    if context.on_windows(str(repo), context.windows_drives()) and not any(
+            t.name != a.name and t.spec.get("repo") == str(repo) for t in store.all_tasks(archived=True)):
         print("note: the repo is on a Windows drive, where git is many times slower and wb checks "
               "the worktree at every step: a clone in WSL's own filesystem (~/...) runs faster")
     if fixed:
         print(f"note: {fixed}")
-    if drift := runner.untested(have):
-        print(f"note: {drift}")
     # an API task's ends with today's spend against the cap, or its plan's usage (meter.tail, #1019)
     print(routes.model_line(m.id, routed) + meter.tail(m) if api else f"model: {why}" if why != "asked for"
           else f"model: {m.id} (asked for)")
     _say(routes.BUSY_LINE if routed.get("busy") else "")
-    for note in _api_notes(a.name, repo, m, a, routed) if api else ():  # #1016, #1021
+    for note in _api_notes(a.name, repo) if api else ():  # #1016, #1021
         print(f"note: {note}")
     print(f"slice: {router.slice(m).line()}")
-    if gaps := results.spec_gap_line():
-        print(gaps)
     if handed:
         print("skills handed: " + ", ".join(handed))
     elif fits := skills.suggest(spec_text):
@@ -1754,23 +1704,15 @@ def cmd_start(a):
         print(f"note: queued although {state['why']}")
     elif api:  # none of the GPU's notes: it takes no GPU
         if slots_full:
-            print(f"note: {_slot_note(m)}")
-    elif waits:
+            print(f"note: {_slot_note(m, a.name)}")
+    elif waits:  # where it runs beside others or loads first is the runner's to do (#1322)
         print(f"note: the GPU is busy with {holding}; this task waits as queued until it's free")
-    elif held:
-        print(f"note: it runs beside {holding} on the GPU (their models fit together)")
-    elif not state["resident"]:
-        print("note: the runner loads it onto the GPU first, unloading what is there")
     if state["available"] and not api and (others := models.box_others(m)):  # another machine's task on the same box (#812)
         print(f"note: {urlparse(m.root).hostname} has {', '.join(others)} loaded, which no task here "
               f"runs: the runner loads {m.name} once it has gone {models.BOX_QUIET} s without a "
               f"request (up to {models.BOX_WAIT // 60} min); {models.BOX_SHARED}")
-    measured = None if api else (optimize.state().get("models") or {}).get(m.id)
-    if measured and (fit := optimize.advice(m.id, measured)):
-        print(f"note: {fit} (ask the user first: it adds to their OpenCode config)")
-    if gap := runner.handover_warning(m.config, api=api):  # #595; an API model's own words (#1073)
-        print(f"note: {m.id}: {gap}")
-    print(f"next: wb wait {a.name}   (the workbench mod wakes Claude by itself when loaded)")
+    if not os.environ.get("CLAUDECODE"):  # under Claude Code the mod wakes Claude (#1322)
+        print(f"next: wb wait {a.name}")
 
 
 def _elsewhere(name: str, u: dict | None, repo: Path, stack: list[str]) -> str:
@@ -2715,9 +2657,9 @@ INTERRUPTED = (RESTARTED, RUNNER_DIED, runner.SIGNAL_STOP, UPDATE_STOP)
 
 def _interrupted(last) -> bool:
     """Whether status `last` says the task was interrupted from outside: one of INTERRUPTED, or
-    runner._updated's (runner.UPDATED, then the task's own `wb resume <name>`), which no exact
-    match could ever hit: after a pull under running tasks, wb resume --all resumed none (#788).
-    And runner.opencode_moved's, OpenCode changed under it (#866)."""
+    what a runner before #1322 left when workbench (runner.UPDATED, then the task's own `wb
+    resume <name>`, which no exact match could ever hit: after a pull under running tasks, wb
+    resume --all resumed none, #788) or OpenCode (runner.OPENCODE_MOVED, #866) changed under it."""
     return last in INTERRUPTED or isinstance(last, str) and last.startswith(
         (runner.UPDATED + ":", runner.OPENCODE_MOVED + " ("))
 
@@ -3018,9 +2960,7 @@ def cmd_steer(a):
     store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text, "now": a.now})
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "steer",
                 "now": a.now, "text": text})
-    if progress.record(task, "smaller" if a.step else "hint"):
-        print("recorded as the answer to the progress check: whether it helped is learned at "
-              "accept or discard")
+    progress.record(task, "smaller" if a.step else "hint")  # recorded, unsaid (#1322)
     if phase in ("testing", "queued"):
         print(f"note queued for {a.name}: " + _when_delivered(task, phase, ""))
     elif a.now:
@@ -3080,9 +3020,8 @@ def _coding_gate(task: store.Task, user: bool) -> None:
     if mode == "decide" or user or coding_allowed(task):
         return
     if mode == "ask":
-        die(f"Claude coding is {CODING['ask'][0]}: ask the user, naming the exact edit; on their "
-            f"yes, wb coding allow {task.name} --edit \"…\" --said \"<their words>\", then take it "
-            "over. Unanswered, the work stays with the agent", 3)
+        die(f"Claude coding is {CODING['ask'][0]}: ask the user; on their yes, wb coding allow "
+            f"{task.name}, then take it over. Unanswered, the work stays with the agent", 3)
     die(f"Claude coding is {CODING['only'][0]}: report the blocker to the user and keep the work "
         f"with the agent (wb feedback, a smaller step); they say when Claude writes code "
         f"(then wb coding allow {task.name} --edit \"…\" --said \"<their words>\")", 3)
@@ -3286,16 +3225,6 @@ def _route_gpu(wanted: str, role: str) -> str:
     return m.id
 
 
-def _prices_of(m, ahead: bool = False) -> str:
-    """Whose prices an API model's dollars are at (#1135): "your prices" (wb model price), else
-    "catalog prices", an estimate; "" for a plan, a free model or none. ``ahead``: its next
-    dollars' (the roles' listing, meter.next_basis), "" too when its last were the provider's own
-    figure (plain, as every provider figure: #1165's review, 2026-11-24); else the listed rate's."""
-    if m is None or getattr(m, "kind", "gpu") != "api" or meter.is_plan(m) or meter.is_free(m):
-        return ""
-    return meter.NOTE[meter.next_basis(m) if ahead else meter.model_basis(m)].strip(" ()")
-
-
 def _who(mid: str) -> str:
     m = models.lookup(mid)
     return models.provider_name(m) if m is not None and m.kind == "api" else mid.split("/", 1)[0]
@@ -3378,20 +3307,17 @@ def _route_start(a) -> None:
     # no price, no cap, or today at the cap (#1019, #1089): wb start's too
     if why := meter.refusal(m, tokens=runner.first_tokens(prompt=spec_text), asked=True):
         die(why, 3)
-    # wb start's cheap refusals too, in place of a dialog for a start that then exits 1, 3 or 4
-    # (#1104, 2026-11-23): the model can't run, a --base naming no commit, the provider's slots
+    # wb start's cheap refusals too, in place of a dialog for a start that then exits 1 or 3
+    # (#1104, 2026-11-23): the model can't run, a --base naming no commit
     state = models.status(m)
     if not state["available"] and not state["why"].startswith(TRANSIENT) and not ns.force:
         die(_cant_run(m, state), 3)
     if repo is not None and (why := _no_base(repo, ns.base)):
         die(why)
-    # commands.json's standing copy/siblings this start doesn't name: wb start's exit 3, here
-    # before the dialog, which had the user approve a start wb start then refused (#1227)
-    if repo is not None and (why := _standing_gap(context.repo_conf(repo, sub), ns,
-                                                  models.provider_name(m), repo, sub)):
+    # commands.json's standing copy that holds a credential: wb start's exit 3, here before
+    # the dialog, which had the user approve a start wb start then refused (#1227)
+    if repo is not None and (why := _standing_gap(context.repo_conf(repo, sub), repo, sub)):
         die(why, 3)
-    if not ns.queue and not _api_slots_free(m, ns.name):
-        die(_slots_full(m, ns.name), 4)
     line = start_line(ns.name, m)
     print(json.dumps({"change": line, "gate": True,
                       "approval": {"start": {"task": ns.name, "model": m.id}, "change": line}})
@@ -3443,13 +3369,11 @@ def _route_show(as_json: bool) -> None:
         if made:
             ts, by = max(made, key=lambda x: x[0])
             bits.append(f"set by {'Claude' if by == 'claude' else 'you'} {time.strftime('%m-%d', time.localtime(ts))}")
-        if row["via"] == "api" and not gone and (p := _prices_of(models.lookup(row["api"]), ahead=True)):
-            bits.append(p)  # whose prices its dollars are at: the catalog's, an estimate, or yours (#1135)
         print(f"{r:<{width}}" + " · ".join(bits))
     if doc["day_usd"] is not None:
         print(f"day cap {routes.money(doc['day_usd'])}")
     elif routes.any_api(doc):
-        print(f"no day cap yet (asked when the first role goes to API; suggest ${routes.DAY_USD_SUGGEST})")
+        print("no day cap yet: wb route cap <usd> sets one")
 
 
 # a provider's key as the pane says it (#1023): only a stored one runs (the keyhole holds it)
@@ -3632,23 +3556,9 @@ def cmd_route(a):
             if routes.effective_via(ch.doc, r) == "api" and (kept := ch.doc["roles"][r].get("api")) \
                     and kept != api and routes.effective_via(doc, r) != "api":
                 _route_api(kept, r)
-        _order_check(doc, ch.doc)
         return ch
 
     _route_apply(a, argv, changed)
-
-
-def _order_check(doc: dict, new: dict) -> None:
-    """An OpenRouter model run without its backends (#1021): exit 3, no dialog, for a role a
-    change newly sends there, on its own side or the Agents switch, or by the busy opt-in (#1023:
-    `wb route busy api` reached one that no check saw, wave 2's merge)."""
-    busy = routes._busy_newly(doc, new)
-    for r in routes.ROLES:
-        row = new["roles"][r]
-        if (routes.effective_via(new, r) == "api" and (
-                row.get("api") != doc["roles"][r].get("api") or routes.effective_via(doc, r) != "api")
-                or r in busy) and (why := privacy.order_refusal(str(row.get("api") or ""), row.get("order"))):
-            die(why, 3)
 
 
 def _route_pairs(a) -> None:
@@ -3689,7 +3599,6 @@ def _route_pairs(a) -> None:
         for r, via, mid in pairs:  # a kept API model a role newly runs on must still be one it may run
             if mid is None and routes.effective_via(ch.doc, r) == "api" and routes.effective_via(doc, r) != "api":
                 _route_api(ch.doc["roles"][r]["api"], r)
-        _order_check(doc, ch.doc)  # a kept OpenRouter model, put on API with no backends
         return ch
 
     _route_apply(a, argv, changed)
@@ -3762,13 +3671,15 @@ def cmd_coding(a):
               "--message <file> (what you changed, and what it checks next)")
         return
     if a.what == "allow":
-        if not a.task or not a.edit or not a.said:
-            die("wb coding allow <task> --edit \"<the exact edit>\" --said \"<the user's words>\" "
+        # --edit and --said optional (#1322): the mod's dialog records a plain yes for the task
+        if not a.task:
+            die("wb coding allow <task> [--edit \"<the edit>\"] [--said \"<the user's words>\"] "
                 "[--when \"<the condition>\"]")
         task = need(a.task)
         if task.status.get("phase") in store.CLOSED:
             die(f"{a.task} is {task.status.get('phase')}")
-        _allow(task, a.edit, a.said, a.when)
+        a.edit = a.edit or "its code"
+        _allow(task, a.edit, a.said or "", a.when)
         print(f"{a.task}: Claude may make this edit " + (f"once, if {a.when}" if a.when else
               "until it hands the task back") + f": {a.edit}")
         return
@@ -3781,7 +3692,8 @@ def cmd_coding(a):
     for t in store.all_tasks():
         if t.status.get("phase") not in store.CLOSED and (x := coding_allowed(t)):
             print(f"  {t.name}: " + (f"allowed once, if {x['when']}: " if x.get("when") else
-                  "allowed until handed back: ") + f"{x['edit']} (the user: \"{x['said']}\")")
+                  "allowed until handed back: ") + f"{x['edit']}"
+                  + (f" (the user: \"{x['said']}\")" if x.get("said") else ""))
 
 
 # Dynamic workflows (#1041): whether Claude may split one request into several tasks that run at
@@ -4089,15 +4001,13 @@ def cmd_accept(a):
                                 spec.get("subdir") or "")  # the package's own (#783)
     except (gitops.GitError, OSError, ValueError):
         note = None
-    if note:
-        print("the repo has no CLAUDE.md: write one (wb init)" if note == "no CLAUDE.md" else
-              f"{note}: keep it current (update it if this change alters what it says)"
-              if note.endswith(LOCAL_NOTE) else
-              f"{note}: keep it current (update and commit it if this change alters what it says)")
+    if note == "no CLAUDE.md":  # how current it is, and "keep it current", went (#1322)
+        print("the repo has no CLAUDE.md: write one (wb init)")
+    # an API task's money on its line; the savings estimate isn't said on every close (#1322)
+    paid = f" · {p}" if (p := savings.paid(row)) else ""
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
-          (f", merged into {close['merge_into']} as {merged}" if merged else
-           "\n" + _merge_line(repo, spec, close, a)))
-    _say(savings.line(row) or spend.line(row.get("claude")))
+          (f", merged into {close['merge_into']} as {merged}{paid}" if merged else
+           f"{paid}\n" + _merge_line(repo, spec, close, a)))
     _say(checked)
     _say(lessons.nudge(task, "accepted"))
     if refused:  # accepted, not merged: a script or Claude reading 0 went on as if main had it
@@ -4667,8 +4577,7 @@ def cmd_discard(a):
     task.set_status(unrecorded=None)
     _ack_all(task)
     _closed(task)
-    print(f"discarded {a.name}{said}")
-    _say(savings.line(row) or spend.line(row.get("claude")))
+    print(f"discarded {a.name}{said}" + (f" · {p}" if (p := savings.paid(row)) else ""))
     _say(lessons.nudge(task, "discarded"))
 
 
@@ -4875,11 +4784,8 @@ def _api_list(text: str) -> None:
         cost = m.config.get("cost")
         rate = next((c for c in cost if isinstance(c, dict) and not c.get("tier")), None) \
             if isinstance(cost, list) else None
-        # whose prices only when there is a basis to say: a plan or a 0 entry has none, and its
-        # line ended in a bare ", " (#1135's review, 2026-11-23)
-        basis = _prices_of(m)
         price = f" · ${rate.get('input') or 0:g}/${rate.get('output') or 0:g} per 1M in/out" \
-            + (f", {basis}" if basis else "") if rate and not m.free else ""
+            if rate and not m.free else ""
         # the catalog's own window, the model's fact (an API task runs capped: models.api_window)
         own = (m.extra.get("catalog_limit") or m.config.get("limit") or {}).get("context")
         print(f"{m.id}  {_window(own)}{price}"
@@ -4888,32 +4794,12 @@ def _api_list(text: str) -> None:
         print(f"and {len(hits) - API_LIST_MAX} more: a longer text narrows it")
 
 
-def _try_api_line(task: store.Task) -> str:
-    """wb try's one line when its sample went to the trivial role's API model (#1026), from the
-    task.json keys wb start --role writes (`via`, `role`, #1016): a GPU task, or one from before
-    them (read as GPU), says nothing, and its output is unchanged."""
-    spec = task.spec
-    if spec.get("via", "gpu") != "api" or spec.get("role") != "trivial":
-        return ""
-    mid = str(spec.get("model") or "")
-    m = models.lookup(mid, cached=True)
-    who = models.provider_name(m) if m else str(spec.get("provider") or mid.split("/", 1)[0])
-    try:
-        cap = routes.read().get("day_usd")
-    except routes.RoutesError:
-        cap = None
-    toward = f"today's ${cap:g} cap" if isinstance(cap, (int, float)) and not isinstance(cap, bool) \
-        else "today's API spend"
-    return (f"wb try: the trivial role is API ({mid}, {who}): the sample's code goes there, and its "
-            f"cost counts toward {toward}")
-
-
 def cmd_stats(a):
     """Results by model and size; `wb stats set KEY VALUE` changes what the Stats tab records
     and shows (stats.py)."""
     if a.action == "set":
         if not (a.key and a.value):
-            die("wb stats set recording|live on|off, or wb stats set every 1|2|5")
+            die("wb stats set live on|off, or wb stats set every 1|2|5")
         try:
             stats.set_setting(a.key, a.value)
         except ValueError as e:
@@ -4929,12 +4815,9 @@ def cmd_stats(a):
     only = None if a.all or not shown else {v for x in shown.get("lines", []) for v in x["variants"]}
     # the newest stats.STATS_MODEL_LINES of them, the rest counted on one line (2026-11-21)
     more, old = (shown.get("more"), shown.get("older")) if only is not None else (None, None)
-    rest = "; ".join(([f"{more['models']} more model(s) used in the last {stats.OLD_DAYS} days: "
-                       f"{more['tasks']} task(s)"] if more else [])
-                     + ([f"{old['models']} older model(s), retired or idle {stats.OLD_DAYS}+ days: "
-                         f"{old['tasks']} task(s)"] if old else []))
+    rest = (more or {}).get("models", 0) + (old or {}).get("models", 0)
     print("\n".join(head + [""] if head else []) + results.table(only)
-          + (f"\n{rest} (wb stats --all)" if rest else ""))
+          + (f"\n(+{rest} more model{'' if rest == 1 else 's'}: wb stats --all)" if rest else ""))
 
 
 def cmd_savings(a):
@@ -4970,9 +4853,8 @@ def cmd_savings(a):
                           "api": savings.api_totals(store.results(trials=True), since)}))
     else:
         api_t = savings.api_totals(store.results(trials=True), since)
-        print(savings.summary(t, period, api_t["tasks"]))
-        if api := savings.api_summary(api_t):
-            print(api)
+        _say(savings.summary(t, period, api_t["tasks"]))
+        _say(savings.api_summary(api_t))
 
 
 def _api_savings(a, period: str, since: float) -> None:
@@ -4987,8 +4869,8 @@ def _api_savings(a, period: str, since: float) -> None:
 
 
 def cmd_backlog(a):
-    """A batch of tasks started with `--backlog`: each one's phase, rounds, minutes, branch and
-    saving, and the batch's saving (the morning summary). Without a name, the batches."""
+    """A batch of tasks started with `--backlog`: each one's phase, rounds, minutes and branch,
+    and the batch's saving (the morning summary). Without a name, the batches."""
     tasks = [t for t in store.all_tasks(archived=True) if t.spec.get("backlog")]  # #270
     if not a.name:
         names = {}
@@ -5017,8 +4899,7 @@ def cmd_backlog(a):
         since = t.spec.get("created_at") or store.now()
         out.append({"task": t.name, "phase": st.get("phase", "?"), "rounds": st.get("round", 1),
                     "minutes": row.get("minutes") or round((store.now() - since) / 60, 1),
-                    "branch": t.spec.get("branch") if st.get("phase") == "accepted" else None,
-                    "saving": savings.line(row) if row else None})
+                    "branch": t.spec.get("branch") if st.get("phase") == "accepted" else None})
     batch = savings.totals([r for t in tasks if (r := rows.get(t.name)) and not r.get("trial")])
     # the batch's API money, trials in as wb savings counts it: never summed (#1121, 2026-11-23)
     api_t = savings.api_totals([r for t in tasks if (r := rows.get(t.name))])
@@ -5031,11 +4912,9 @@ def cmd_backlog(a):
     print(f"backlog {a.name}: {len(out)} task(s) · "
           + " · ".join(f"{n} {p}" for p, n in phases.items()))
     for o in out:
-        tail = " · ".join(x for x in (o["branch"], o["saving"]) if x)
-        print(f"{o['task']:22} {o['phase']:9} {o['rounds']:>3} {o['minutes']:>5.0f}m  {tail}".rstrip())
-    print(savings.summary(batch, "the batch", api_t["tasks"]))
-    if api := savings.api_summary(api_t):
-        print(api)
+        print(f"{o['task']:22} {o['phase']:9} {o['rounds']:>3} {o['minutes']:>5.0f}m  {o['branch'] or ''}".rstrip())
+    _say(savings.summary(batch, "the batch", api_t["tasks"]))
+    _say(savings.api_summary(api_t))
 
 
 def cmd_tune(a):
@@ -5129,6 +5008,10 @@ def cmd_optimize(a):
 
 
 SCOUT_EVERY_DAYS = 7
+# the media engines' step of the weekly check, printed by wb scout when it lists one (#398, #1322)
+LICENCE_CHECK = ("  for each engine: check its model's licence today against its licence text, not its tag "
+                 "(one audio model went non-commercial mid-2026), keep its notes true, and recommend "
+                 "keep / add / retire as for the coding models")
 
 
 def scout_state() -> dict:
@@ -5177,6 +5060,8 @@ def cmd_scout(a):
     print(f"\nskill library: {len(have)} skill(s)" + (", all pulling their weight" if have and not flagged else ""))
     for n, w in flagged:
         print(f"  {n}: {w}")
+    if flagged:  # the step said here, only when it applies (#1322: it was the weekly prompt's)
+        print("  rewrite or retire (wb skill retire <name>) what is flagged")
     pending = lessons.survey()
     if pending:
         print(f"lessons waiting: {len(pending)}, {sum(bool(x['again']) for x in pending)} seen in "
@@ -5192,6 +5077,8 @@ def cmd_scout(a):
         print("\n".join(said))  # #753: one already running, before any install
     print("\naudio engines (wb audio)")
     print("\n".join(audio.lines()) or f"  none: describe one in {audio.config_path()}")
+    if images.engines() or audio.engines():  # #398's licence check, said only with an engine to check (#1322)
+        print(LICENCE_CHECK)
     if said := audio.coverage():
         print(said)
     provs = models.providers()
@@ -5290,7 +5177,7 @@ def _api_record(mid: str, since: float) -> str:
         return "no real tasks yet"
     out = [f"{len(rows)} task(s)", f"{100 * sum(r.get('outcome') == 'accepted' for r in rows) // len(rows)}% accepted"]
     if paid := [c for r in rows if (c := results.task_cost(r)) is not None]:
-        out.append(f"~{savings.usd(sum(paid) / len(paid))}/task")  # as wb stats' `paid` (#1106)
+        out.append(f"~{meter.usd(sum(paid) / len(paid))}/task")  # as wb stats' `paid` (#1106)
     limited = set()
     for r in rows:
         evs, _ = store.read_jsonl(store.home() / "tasks" / str(r.get("task")) / "events.jsonl")
@@ -5327,12 +5214,12 @@ def scout_api_lines() -> list[str]:
     # tasks with no known cost are the closed rows' (#1022)
     since = now - SCOUT_SPEND_DAYS * 86400
     paid, t = savings.spent(since), savings.api_totals(store.results(trials=True), since)
-    # savings.usd, as wb savings --api and the pane say the same dollars: :.2f said $0.00 for a
+    # meter.usd, as wb savings --api and the pane say the same dollars: :.2f said $0.00 for a
     # task paid a fraction of a cent (wave 2's merge)
-    by = ", ".join(f"{p} {savings.usd(v)}" for p, v in sorted(paid["by_provider"].items(), key=lambda x: -x[1])
+    by = ", ".join(f"{p} {meter.usd(v)}" for p, v in sorted(paid["by_provider"].items(), key=lambda x: -x[1])
                    if v)
-    out.append(f"api spend, the last {SCOUT_SPEND_DAYS} days: {savings.money(paid['usd'], paid['prices'])} of {cap}"
-               + savings.inside(by, savings.note({"cost": paid["usd"], "prices": paid["prices"]}))  # #1135
+    out.append(f"api spend, the last {SCOUT_SPEND_DAYS} days: {meter.money(paid['usd'], paid['prices'])} of {cap}"
+               + (f" ({by})" if by else "")
                + (f"; task(s) {', '.join(u)}" if (u := savings.unknown_parts(t)) else ""))  # #1106
     by_prov: dict[str, list] = {}
     for m in hosted.values():
@@ -5822,7 +5709,7 @@ def _model_price(mid: str, inp, out, read, write, clear: bool = False) -> None:
           + " per 1M tokens"
           + (f" (cache {' and '.join(scaled)} at the catalog's ratio to input: "
              + ", ".join(f"--cache-{k}" for k in scaled) + " to set)" if scaled else "")
-          + "; its costs say \"your prices\" from its next task (--clear: the catalog's)")
+          + "; its costs are plain, no ≈, from its next task (--clear: the catalog's)")
 
 
 def _api_id(model_id: str) -> bool:
@@ -6595,19 +6482,6 @@ def path_advice() -> str:
             "(the desktop app or an IDE too: each reads PATH only when it starts)")
 
 
-def agents_md_note() -> str:
-    """wb setup's and wb doctor's line while the user has Claude's global files and no
-    ~/.config/workbench/AGENTS.md: agents got ~/.claude/CLAUDE.md and ~/.claude/rules until
-    #1061 (2026-11-23), so what they followed from there needs its new place."""
-    claude = context.claude_home()
-    if context.user_agents_md().is_file() or not (
-            (claude / "CLAUDE.md").is_file() or (claude / "rules").is_dir()):
-        return ""
-    where = privacy.home_path(claude)
-    return (f"note: agents no longer get your {where}/CLAUDE.md or {where}/rules/: what they should "
-            f"follow in every project goes in {privacy.home_path(context.user_agents_md())}")
-
-
 def cmd_setup(a):
     """Link `wb` onto PATH and /workbench into Claude Code's skills, from wherever this copy lives:
     the marketplace's clone (~/.claude/plugins/marketplaces/workbench) for users, a git clone for
@@ -6619,16 +6493,18 @@ def cmd_setup(a):
         if at.is_symlink() and at.resolve() == to.resolve():
             print(f"ok  {at} → {to}")
             continue
-        if at.is_symlink() and a.force:
+        # a link to another copy is replaced: its refusal's --force was always the answer (#1322);
+        # a real file or directory is the user's, left as it is
+        was = os.readlink(at) if at.is_symlink() else None
+        if was is not None:
             at.unlink()
-        elif at.is_symlink() or at.exists():
+        elif at.exists():
             bad = True
-            print(f"BAD {at} is already {'a link to ' + os.readlink(at) if at.is_symlink() else 'there'}: "
-                  f"left as it is{' (--force replaces a link)' if at.is_symlink() else ''}")
+            print(f"BAD {at} is already there: left as it is")
             continue
         at.parent.mkdir(parents=True, exist_ok=True)
         at.symlink_to(to)
-        print(f"ok  {at} → {to} (made)")
+        print(f"ok  {at} → {to} " + (f"(was {was})" if was is not None else "(made)"))
     old = context.claude_home() / "skills/delegate"  # /delegate became /workbench (2026-11-17)
     if old.is_symlink() and not old.exists() and os.readlink(old).rstrip("/").endswith("skill/delegate"):
         old.unlink()
@@ -6645,8 +6521,6 @@ def cmd_setup(a):
     print("first run:")  # what a working setup still needs, each with its fix (#111)
     for line in first_run():
         print(line)
-    if note := agents_md_note():
-        print(note)
     print("next: wb doctor")
     sys.exit(1 if bad else 0)
 
@@ -6862,12 +6736,10 @@ def cmd_try(a):
     # unlocking failed wb try at once, or with a terminal (WSL2) hung it on a prompt (#1226)
     argv = ["start", name, "--spec", str(TRY / "spec.md"), "--repo", str(d), "--size", "trivial",
             "--trial", "--no-sign", "--test", f"{py} -m unittest",
-            *(["--model", a.model] if a.model else []),
-            # wb start's busy-GPU refusal names --queue, which wb try once refused as an unknown
-            # argument: the setup check couldn't wait behind a task or a bench (#1251, 2026-11-24)
-            *(["--queue"] if a.queue else []),
-            # and its down-server refusal names --force, which wb try refused the same way: with
-            # Ollama or LM Studio not started, the advised retry died on exit 2 (#1297, 2026-11-24)
+            *(["--model", a.model] if a.model else []),  # it queues behind the GPU's holders (#1322)
+            # wb start's down-server refusal names --force, which wb try once refused as an
+            # unknown argument: with Ollama or LM Studio not started, the advised retry died on
+            # exit 2 (#1297, 2026-11-24)
             *(["--force"] if a.force else [])]
     try:
         # the copy and its init inside: wb init refusing (no git identity, a home that is a
@@ -6883,8 +6755,6 @@ def cmd_try(a):
         if not store.Task(name).exists:
             shutil.rmtree(d, ignore_errors=True)
         raise
-    if line := _try_api_line(store.Task(name)):
-        print(line)
     print(f"the sample project: {d}")
     print(f"hidden check, at review: {py} {shlex.quote(str(TRY / 'check.py'))} "
           f"{shlex.quote(str(store.Task(name).worktree))}")
@@ -7039,8 +6909,8 @@ def cmd_update(a):
         patches.note_install(PKG_ROOT)  # the mod reads which clone holds the patches (#1005)
     path = store.home() / "update.json"
     last = store.read_json(path, {})
-    if a.if_due and not a.check:  # it pulled and updated at once, weekly or not (#602)
-        die("--if-due goes with --check: wb update --check --if-due")
+    if a.if_due:  # it pulled and updated at once, weekly or not (#602): it only checks (#1322)
+        a.check = True
     # a `local` made with a plain `git switch -c local`, as the texts said, tracked nothing: both
     # paths died raw, "fatal: no upstream configured" (#1327, 2026-11-24). Set, else named
     tracked = patches.track_upstream(PKG_ROOT) if kind == "clone" else None
@@ -7580,9 +7450,6 @@ def cmd_doctor(a):
               "needs the room unloads it (after it goes idle). If others use this Ollama, "
               f"{models.overrides_path().name}'s keep_loaded lists models wb never unloads, and "
               "gpu_gb (when the GPU budget is unknown) lets a model that fits beside them leave them loaded")
-        if not models.lease_shared():
-            print("--  if another account on this machine runs wb on this Ollama, one GPU lease for "
-                  f"all of them: sudo install -d -m 2775 -g <their group> {models.SHARED_GPU} (#393)")
     if models.lease_shared():
         print(f"--  the GPU lease is shared at {models.lease_dir()}: every account using it takes turns")
         if closed := models.unshared_lease_files():  # made under a umask 077 before #802
@@ -7605,16 +7472,12 @@ def cmd_doctor(a):
                     and not (Path(out) / "x").exists())
         line(held, f"agents write only in their lane (Landlock ABI {v})" if held else
              f"the lane didn't hold a write outside it: {r.stderr.strip()[-200:] or 'the write went through'}")
-        for gap in lane.gaps(v):  # what this kernel's Landlock can't confine (the 2026-11-16 audit)
+        for gap in lane.gaps(v):  # what this kernel's Landlock breaks for the agent's tools
             print(f"--  Landlock ABI {v}: {gap}")
         if gap := context.interop_gap():  # WSL: a Windows program escapes it (the 0.90 review)
             print(f"--  {gap}")
-        if gap := context.home_gap():
+        if gap := context.home_gap():  # doctor's alone: wb start said it on every task (#1322)
             print(f"--  {gap}")
-        # what TCP reaches past the lane (#993, 2026-11-22): a warning, the user's own daemon
-        for port in context.listening_daemons():
-            print(f"--  port {port} listens here ({context.DAEMON_PORTS[port]}): the lane doesn't "
-                  "stop TCP, so an agent can reach it")
     else:
         print("--  agents' writes outside their lane and reads of credentials aren't refused here "
               "(no Landlock): only OpenCode's file tools keep to it; " +
@@ -7636,8 +7499,6 @@ def cmd_doctor(a):
     line(skill.exists(), f"/workbench skill at {skill.parent}" if skill.exists() else
          f"/workbench isn't in {skill.parent.parent}: wb setup links it")
     elsewhere("/workbench", skill.parent, PKG_ROOT / "skill/workbench")
-    if note := agents_md_note():
-        print(note)
     try:  # information only: a mod loaded another way (--plugin-dir, a dev mod) isn't listed here
         listed = any(k.startswith("workbench@") for k in json.loads(
             (context.claude_home() / "plugins/installed_plugins.json").read_text()).get("plugins", {}))
@@ -7753,8 +7614,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--base", default="HEAD")
     s.add_argument("--force", action="store_true", help="queue the --model asked for even if it "
                    "can't run now")
-    s.add_argument("--queue", action="store_true", help="start even when the GPU's holders leave "
-                   "no room for its model: it waits behind them (else exit 4)")
+    # the default since #1322: a start that can't run yet queues; kept for old callers
+    s.add_argument("--queue", action="store_true", help=argparse.SUPPRESS)
     s.add_argument("--trial", action="store_true", help="a check of workbench itself (a scratch "
                    "repo): its result and lessons don't count as evidence")
     s.add_argument("--local-only", action="store_true", help="this task's code stays on this "
@@ -8045,8 +7906,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--thinking", choices=routes.THINKING, help="the role's thinking (off by default)")
     s.add_argument("--order", metavar="NAME[,NAME]", help="an OpenRouter role's backends, which every "
                    "request goes to alone (the model's Providers tab on openrouter.ai): the user's choice")
-    s.add_argument("--day-usd", type=float, metavar="N", help="the day cap in dollars (asked when "
-                   f"the first role goes to API; suggest {routes.DAY_USD_SUGGEST})")
+    s.add_argument("--day-usd", type=float, metavar="N", help="the day cap in dollars ($"
+                   f"{routes.DAY_USD_SUGGEST:g} when the first role goes to API, unless set)")
     s.add_argument("--json", action="store_true", help="show: the roles as JSON, each API model's "
                    "status; --dry-run: the change, whether it needs the dialog, and its approval")
     s.add_argument("--dry-run", action="store_true", help="print the change line and write nothing "
@@ -8240,8 +8101,7 @@ def parser() -> argparse.ArgumentParser:
                        "started as a trivial trial, and the hidden check to run at review")
     s.add_argument("--model", help="a model id (a GPU model's fragment will do; an API model "
                    "never matches one); default: the router's pick for a trivial task")
-    s.add_argument("--queue", action="store_true", help="start even when the GPU's holders leave "
-                   "no room for its model: it waits behind them (else exit 4)")
+    s.add_argument("--queue", action="store_true", help=argparse.SUPPRESS)  # the default (#1322)
     s.add_argument("--force", action="store_true", help="start even when its model can't run now "
                    "(its server not started): it waits for it to come up (else exit 3)")
     s.set_defaults(f=cmd_try)
@@ -8290,7 +8150,7 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_bench)
     s = sub.add_parser("stats", help="results by model; `set` changes the Stats tab's settings")
     s.add_argument("action", nargs="?", choices=["set"])
-    s.add_argument("key", nargs="?", metavar="KEY", help="recording, live or every")
+    s.add_argument("key", nargs="?", metavar="KEY", help="live or every")
     s.add_argument("value", nargs="?", metavar="VALUE", help="on|off, or 1|2|5 (seconds) for every")
     s.add_argument("--json", action="store_true", help="everything learned, as one object (the Stats tab's feed)")
     s.add_argument("--all", action="store_true",
@@ -8326,11 +8186,12 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_trial)
     s = sub.add_parser("setup", help="link wb onto PATH and /workbench into Claude Code's skills, "
                                      "from this copy")
-    s.add_argument("--force", action="store_true", help="replace links that point elsewhere")
+    # a link that points elsewhere is replaced by default (#1322); kept for old callers
+    s.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
     s.set_defaults(f=cmd_setup)
     s = sub.add_parser("update", help="update workbench (wb, the skill and the mod) from its origin")
     s.add_argument("--check", action="store_true", help="only say whether there is an update")
-    s.add_argument("--if-due", action="store_true", help="with --check: ask origin at most weekly")
+    s.add_argument("--if-due", action="store_true", help="check (as --check), asking origin at most weekly")
     s.add_argument("--stop", action="store_true", help="stop the running tasks first; each one's "
                    "session is told to wb resume it")
     s.set_defaults(f=cmd_update)
@@ -8357,7 +8218,9 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--title", required=True, help="the pull request's title")
     x.add_argument("--body-file", required=True, help="its body: .github/pull_request_template.md, filled in")
     x.add_argument("--draft", action="store_true", help="open it as a draft")
-    x.add_argument("--anyway", action="store_true", help="send a commit whose Scope trailer is me")
+    # no refusal needs it since #1322 (a Scope: me commit is the dialog's to say); kept for old
+    # callers, and the dialog's approval still matches it (patches._approved)
+    x.add_argument("--anyway", action="store_true", help=argparse.SUPPRESS)
     x = ss.add_parser("check", help="run one patch's own tests on plain upstream: has upstream fixed it "
                       "another way? (drops nothing)", allow_abbrev=False)
     x.add_argument("commit", help="one of branch local's patches")

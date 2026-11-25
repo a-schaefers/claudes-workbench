@@ -123,29 +123,18 @@ def text(task: store.Task, active_s: float, typical_min: float, moved: bool, fil
          errors: int) -> str:
     """The check's lines, after the check-in digest."""
     st, model = task.status, task.spec.get("model", "")
-    rates = helped(model)
-    kind = recommend(moved, rates)
+    kind = recommend(moved, helped(model))  # the record is weighed, not printed (#1322)
     tests = st.get("tests")
-    source = typical(task.spec)[1]
-    past = (f"the {_mins(typical_min)} the user set" if source == "user" else
-            f"the typical {_mins(typical_min)} for a {task.spec.get('size')} task on this model"
-            if source == "measured" else
-            f"the default {_mins(typical_min)} for a {task.spec.get('size')} task (fewer than "
-            f"{TYPICAL_MIN} timed on this model)")
-    lines = [f"progress check (on: wb progress): {_mins(active_s / 60)} of active work, past {past} "
-             "(waits for the GPU and for answers left out)",
-             f"evidence: {files} file(s) changed, " + ("some since the last check" if moved else
-                                                        "none since the last check")
-             + f"; {errors} failed tool call(s) this round; last tests: "
-             + ("none yet" if not tests else "passed" if tests.get("ok") else "failed"),
-             "recommended: " + SAY[kind].format(t=task.name)]
-    tried = [f"a {'hint' if k == 'hint' else 'smaller step'} helped {ok} of {n}"
-             for k, (ok, n) in rates.items() if n]
-    if tried:
-        lines.append("on this model before: " + ", ".join(tried))
-    lines.append("time alone never makes it yours to edit: the coding choice stays as the user "
-                 "set it (wb coding)")
-    return "\n".join(lines)
+    past = (f"the {_mins(typical_min)} the user set" if typical(task.spec)[1] == "user" else
+            f"the typical {_mins(typical_min)}")
+    # two lines (#1322, 2026-11-24): the left-out caveat, the default's source, the record "on this
+    # model before" and the reminder that time never makes it Claude's to edit changed nothing
+    return "\n".join([
+        f"progress check: {_mins(active_s / 60)} of active work, past {past}; {files} file(s) changed, "
+        + ("some since the last check" if moved else "none since the last check")
+        + f"; {errors} failed tool call(s) this round; last tests: "
+        + ("none yet" if not tests else "passed" if tests.get("ok") else "failed"),
+        "recommended: " + SAY[kind].format(t=task.name)])
 
 
 def record(task: store.Task, kind: str) -> bool:

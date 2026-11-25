@@ -590,7 +590,7 @@ def header(task: store.Task, paint: Painter, data: dict | None = None) -> str:
 
 def routed_text(task: store.Task) -> str:
     """How the task's model was chosen (#1016): an API task's `API <id> (<provider>) · trivial
-    role, set by you 11-20 · thinking off` from task.json's keys, a GPU task's the router's why
+    role · thinking off` from task.json's keys, a GPU task's the router's why
     (task.json `route`); '' for neither. wb watch's `routed:` line, and --json's `routed` row."""
     from . import routes
     sp = task.spec

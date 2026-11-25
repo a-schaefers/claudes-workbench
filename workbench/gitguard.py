@@ -336,11 +336,8 @@ def filled_submodules(real: str, task_git: str, opts: list[str], rest: list[str]
 
 
 REFUSAL = """\
-workbench: git is read-only for you here, so `git {sub}` was not run.
-Leave your changes uncommitted: Claude reviews the diff and commits it, and handles branches,
-merges, pushes and deploys. Read freely: status, diff, log, show, blame, grep. To undo your own
-edit to a file, edit it back or use `git show HEAD:<path>`. If the task needs a git write, say so
-with ask_reviewer or in your summary.
+workbench: git is read-only for you; `git {sub}` was not run.
+Leave changes uncommitted (Claude commits); to undo an edit: `git show HEAD:<path>`.
 """
 
 
