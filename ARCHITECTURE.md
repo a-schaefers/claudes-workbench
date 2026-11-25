@@ -4552,9 +4552,9 @@ terminal of their own: wb route …`. `by`: `dialog` (the approval's `by` is `pa
 rows, #1023: `pane`), `terminal` (outside Claude Code); `gpu_by`: `terminal`, or `claude` (a change
 under Claude Code that needs no dialog). A flag or an environment variable is no consent, and the
 approval is one-shot, fresh, and bound to the exact command and line. The mod refuses the file tools
-on both files and a Bash command naming `route-ok.json` with the state directory spelled out, but
+on both files and a Bash command that writes `route-ok.json` (`writesTo`, *The consent gate*), but
 that check is a speed bump, like the one on routes.json: a command that builds the path (a
-variable, `os.environ['WB_HOME']` in Python) still writes an approval wb honours, recording `by:
+variable, a Python script file) still writes an approval wb honours, recording `by:
 dialog`, and Claude writing routes.json through Bash (`cat >`, `sed -i`, `python`) gets past them
 too. What catches either is the `[workbench]` echo (*The mod, inside*): every change reaches the
 conversation, and the user's own view of it, as a row.
@@ -6105,8 +6105,10 @@ task's sessions the first to deliver wins (the `acked` write is not locked).
 Bash call running `wb start|next|feedback|steer|answer|resume` (`delegates`, `HANDS_OUT`; not
 `accept` or `takeover`, which a quit's notes ask for). Only a command counts, not text (#409), read
 as bash reads it (`simpleCommands`, #560): quotes undone within a word, comments and heredoc
-bodies dropped (`$(…)` and backticks in unquoted heredocs and double quotes still run), split at
-`;`, `&`, `|`, newlines, `(`, `)`, `$(`, backticks; the command word past `VAR=x`, the reserved
+bodies dropped (`$(…)` and backticks in unquoted heredocs and double quotes still run), a
+redirect's file (`>`, `>>`, `>|`, `&>`, `<`; `2>&1` a descriptor) and a here-string no words of the
+command (#1364: kept beside it, `Shell`: its stdin, its redirects' files, the command piped into
+it), split at `;`, `&`, `|`, newlines, `(`, `)`, `$(`, backticks; the command word past `VAR=x`, the reserved
 words and the wrappers with their options (`PREFIXES`: `env`, `time`, `nohup`, `exec`, `command`,
 `timeout` and its duration, `nice`, `ionice`, `stdbuf`) must be `wb` or end in `/wb`. Syntactic:
 `true || wb steer` counts. Off: either quit. While on: the `workbench-mode`, `user-notes` (and
@@ -6346,8 +6348,15 @@ options, `GIT_VALUED`), and `wb patch send` (`wb` or a path to it, or Python run
 `wbArgs`); command words lowercased (macOS finds `GIT` as git). Read as bash reads it (`simpleCommands`, `commandAt` as
 in `delegates`, past `sudo`, `doas`, `xargs` and the other `PREFIXES`): echo and heredoc text isn't a command, `$(…)`
 and backticks are, and `bash|sh|zsh|dash -c '…'` and `eval` are read inside; a line naming none of `gh`, `git`, `wb`,
-`workbench` isn't parsed. Text a shell or an interpreter in the line runs (`RUNS_CODE`: from a heredoc, a here-string,
-a pipe, `-c`) is matched by its words (`OUTWARD_TEXT`; `bash <<EOF … git push` once went through). Aimed at upstream
+`workbench` isn't parsed. What a program that runs text (`RUNS_CODE`) is handed (`runs`, `codeFed`: a heredoc, a
+here-string, the words and stdin of a command piped into it, an interpreter's `-c`/`-e`; not a script file) counts by
+what runs (#1364): a shell's (`STDIN_SHELL`, `sh -s` too) is read as commands, `bash <<EOF … git push` once went
+through, and a send there is asked about as one inside text another program runs (the dialog shows the line);
+an interpreter's code is text, an outward command in it (`OUTWARD_TEXT`, as a string or a list: `['git', 'push']`)
+counting only when the code runs commands at all (`spawns`: Python's `subprocess`, `os.system`, …, Node's
+`child_process`, `execSync(`, …, Perl's, Ruby's and PHP's `system(`, backticks, …). A heredoc or quoted text any other
+command gets is its data: a Python heredoc editing an issue body that named `wb patch send` was refused as a send three
+times on 2026-11-24, nothing being sent. Aimed at upstream
 (`upstreamAim`): `wb patch send` always; another outward command when the line names a gated directory (as written,
 through `~`, `$HOME` or `$WB_HOME`: `mentions`) or runs in one (`cd`, `cd --` and `pushd` followed from the session's
 directory, git's `-C`; by real path too, a symlinked spelling), or runs in Claude Code's plugins directory in a
@@ -6371,7 +6380,8 @@ page, which cut a long question at `chat.ASK_TEXT` unmarked and left a user back
 start, a long line hid the gh command and its body); for `wb patch send` its `--title` and the body file's first
 `BODY_LINES` 20 lines (`sendQuestion`, `sendArgs`: the last `--title`/`--body-file` given, as argparse takes them; wb
 refuses abbreviations). A send it can't show is refused without asking (`NOT_SHOWN`: no slug, `--title` or
-`--body-file`, a `$` or backtick in either, an unreadable body, or a send inside text another program runs). The
+`--body-file`, a `$` or backtick in either, an unreadable body, or a send inside text another program runs: fed to a
+shell, or in an interpreter's code that runs commands). The
 options `Send it` and `Don't send`. `Send it` lets that one call through, and for `wb patch send` writes
 `$WB_HOME/send-ok.json` (what wb checks under Claude Code: *Sending a patch upstream*); nothing is remembered (a yes to
 one pull request is no yes to the next). Anything else, a failed dialog too, denies: `NOT_SENT`, `workbench: not
@@ -6381,7 +6391,7 @@ of the gate runs the real gh form with a fake gh on PATH: an `echo` of it is tex
 atom.
 
 **The roles' dialog** (`routeRefusal`, beside `sendRefusal` in the same hook, #1014; *Roles*). In Bash and Monitor
-commands, read as above (`runsIn`: `simpleCommands`, `bash -c` and `eval` inside; `wbArgs`), each `wb route …` and each
+commands, read as above (`runs`: `simpleCommands`, `bash -c` and `eval` inside; `wbArgs`), each `wb route …` and each
 `wb start … --m…` (any abbreviation of `--model`) is a call (`routeCalls`); a show (`wb route`, `--json`) and a dry run
 change nothing. For the one call, the mod runs `wb route --dry-run --json <its args>` (a start's as `--start <wb start's
 args>`, parsed there by wb start's own parser: the task's name and an abbreviated `--model` as wb takes them), 60 s,
@@ -6397,11 +6407,17 @@ away, as the send's above. `Allow` writes `$WB_HOME/route-ok.json` (`{...approva
 change}` or `{start: {task, model}, change}`) and lets the call through; anything else denies (`NOT_CHANGED`:
 `workbench: not changed: the user did not approve it in the dialog. Tell them it was not changed; ask again only if
 they ask for it.`). Refused without asking (`ROUTE_OWN`, `run wb route (or wb start --model) as a command of its own`):
-two calls in one line, and one inside text another program runs (`ROUTE_TEXT`, with a `RUNS_CODE` program in the
-line). The file tools (`EDIT_TOOLS`) on routes.json (`routesPath`: `WB_ROUTES`, else `~/.config/workbench/routes.json`,
-by real path too) or `$WB_HOME/route-ok.json` are denied (`routesFileRefusal`, `ROUTES_EDIT`), and so is a command
-naming `route-ok.json` with the state directory (as written, through `~`, or `$WB_HOME`: `ROUTE_OK_OWN`); a `grep` for
-the name in the code passes. A speed bump, not a wall: a command that builds the path gets past it (*Roles*, the gate).
+two calls in one line, and one inside text another program runs: a call a shell is fed, or one in an interpreter's code
+that runs commands (`ROUTE_TEXT`, `spawns`); a heredoc that only says `wb route cap 9` is no call (#1364). The file tools
+(`EDIT_TOOLS`) on routes.json (`routesPath`: `WB_ROUTES`, else `~/.config/workbench/routes.json`, by real path too) or
+`$WB_HOME/route-ok.json` are denied (`routesFileRefusal`, `ROUTES_EDIT`), and so is a command that writes
+`$WB_HOME/route-ok.json` (`writesTo`, `ROUTE_OK_OWN`): a redirect onto it, `tee`, `cp`/`mv`/`install`/`ln`/`rsync`
+onto it or into its directory under its name, `dd of=`, a shell's fed commands too (`cd` and `pushd` followed; the
+path as written, through `~`, `$HOME` or `$WB_HOME`), or an interpreter's code with a write call (`WRITES_CODE`: Python's
+`open(…, 'w')`, `write_text`, Node's `writeFileSync`, …) and the file in a string that is a path, with `WB_HOME` or the
+state directory in the code or the call run there. A mention is never a write: a `gh issue create` whose heredoc named
+the file was refused as writing it (2026-11-24, #1364), and a `grep` for the name passes; a word the mod can't resolve (another variable, a
+glob) lets the call through. A speed bump, not a wall: a command that builds the path gets past it (*Roles*, the gate).
 
 **The roles in the conversation.** `WbSaid.routes` (the `said-3` atom) is the roles' summary as the mod reads
 routes.json (`readRoutes`, `routesSummary`, which says what `routes.summary` says: Couplings) and the cap (`. Day cap
@@ -7641,6 +7657,8 @@ doc needs its own `!/` line).
   contributing line (never the README: the owner's call), *Sending a patch without GitHub*; the skill names no address ("the address it
   printed"), so a new one never leaves Claude telling a user the old. **What sends** (`wb patch send`'s name, the gh and git commands it
   runs, any new outward command) → `sendsOut`, `GH_WRITES`, `OUTWARD_TEXT`, the gate's tests in `register.test.tsx`.
+  **A program that runs text** (a new shell or interpreter, its code flag) → `RUNS_CODE`, `STDIN_SHELL`, `codeFed`,
+  `spawns`, `WRITES_CODE` in `register.tsx`, together (#1364).
   **`wb patch send`'s flags** → the mod's `sendArgs` (it reads `--title`, `--body-file`, `--draft`, `--anyway` as
   written: keep `allow_abbrev=False`). **`send-ok.json`'s keys** (`slug`, `title`, `body_file`, `body`, `draft`,
   `anyway`, `at`) → the mod's `upstreamRefusal` and `patches._approved`, together. **The `Scope`
