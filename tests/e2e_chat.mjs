@@ -270,8 +270,9 @@ async function run(engine, device) {
     await goTo('settings')                                 // where the last check left it
     await until(async () => await page.locator('#settings').isVisible())
     const said = await page.textContent('#away-when')
-    for (const want of ['use this page (open it or send a message here) after using the terminal',
-                        'until you type or answer a prompt in the terminal again'])
+    for (const want of ['use the chat on another device (open it or send a message here) after using the terminal',
+                        'until you type or answer a prompt in the terminal again',
+                        "Stats and Settings don't count, nor this page opened on the computer itself"])  // #1374
       if (!said.includes(want)) throw new Error(said)
     const prompts = await page.textContent('#away-prompts')
     for (const want of ['are answered in the terminal, never here', 'Run Claude with permissions granted to work from the chat.'])
@@ -299,10 +300,10 @@ async function run(engine, device) {
       await page.evaluate(() => { document.hasFocus = document._hasFocus })
       await show(true); await show(false)                        // back on screen, in use
       await until(() => at() > was)
-      // the server writes page.json, then away.json: read at once, it was missing or the last
-      // report's on a slow runner (#1223)
+      // this page is the computer's own (its Host is localhost): in use, never away (#1374); a
+      // phone's Host is another, the server's tests' (WebChat)
       const away = () => existsSync(join(home, 'state/chat/away.json')) ? JSON.parse(readFileSync(join(home, 'state/chat/away.json'), 'utf8')) : {}
-      await until(() => away().by === 'page' && away().at === at())
+      if (away().by === 'page') throw new Error('a localhost page made the user away: ' + JSON.stringify(away()))
       was = at()
       await show(true)
       await page.evaluate(() => { Object.defineProperty(document, 'hidden', { value: false, configurable: true }) })
@@ -337,6 +338,33 @@ async function run(engine, device) {
       if (await tries() !== 1) throw new Error(`tried ${await tries()} times with no use`)
       await page.locator('.thread').click({ position: { x: 5, y: 5 } })  // used again: at once
       await until(async () => await tries() === 2)
+    } finally {
+      await page.evaluate(() => { window.fetch = window._fetch })
+    }
+  })
+  await check('a click in Stats or Settings, or a tap on the nav leaving the chat, does not tell the computer the page is in use; back on Chat does (#1374)', async () => {
+    // #1374: the web app is the desk's admin too, and a click in Settings made the user at the
+    // terminal away, their next plan or question refused into the chat
+    await page.evaluate(() => {
+      window._fetch = window.fetch; window._active = []
+      window.fetch = (u, o) => {
+        if (String(u).includes('/api/active')) { window._active.push(document.body.dataset.view); return Promise.reject(new TypeError('Load failed')) }
+        return window._fetch(u, o)
+      }
+    })
+    const posted = () => page.evaluate(() => window._active)
+    try {
+      // each post refused, so none holds back the next for 30 s (ACTIVE_MS): the last check's wasn't either
+      await goTo('settings')                                     // a tap on the nav, from the chat
+      await page.locator('#view-settings').click({ position: { x: 5, y: 5 } })
+      await page.keyboard.press('Shift')
+      await goTo('stats')
+      await page.locator('#view-stats').click({ position: { x: 5, y: 5 } })
+      await page.evaluate(() => dispatchEvent(new Event('focus')))
+      await sleep(1500)                                          // a claim that none was made
+      if ((await posted()).length) throw new Error('posted from ' + (await posted()).join())
+      await goTo('chat')                                         // the chat shown: in use
+      await until(async () => { const p = await posted(); return p.length && p.every(v => v === 'chat') })
     } finally {
       await page.evaluate(() => { window.fetch = window._fetch })
     }
@@ -1089,6 +1117,32 @@ async function run(engine, device) {
       await until(async () => await page.locator('#tray').isHidden())
     } finally { await page.unroute('**/api/upload/*') }
   })
+  await check('an upload check that never answers is given up after POST_MS and tried again: its message and a plain one after it both land (#1390)', async () => {
+    // #1390: the GET that asks whether the computer has a file had no deadline, so one that never
+    // answered held pump and flush, and every later message sat at Sending… until a reload. Hung
+    // by the page's own fetch (WebKit routes none once the worker is registered), as a dead line
+    // hangs: until its signal aborts it
+    await page.evaluate(() => {
+      window._fetch = window.fetch; window._checks = 0
+      window.fetch = (u, o = {}) => {
+        if (!(/\/api\/upload\//.test(String(u)) && (o.method || 'GET') === 'GET' && !window._checks++)) return window._fetch(u, o)
+        return new Promise((_, rej) => o.signal && o.signal.addEventListener('abort', () => rej(new DOMException('aborted', 'AbortError'))))
+      }
+    })
+    try {
+      await page.setInputFiles('#pick', { name: 'hung.txt', mimeType: 'text/plain', buffer: Buffer.from('hung') })
+      await until(async () => await page.evaluate(() => window._checks) === 1)
+      await page.fill('#input', 'its file was checked on a dead line')
+      await page.click('#send')
+      await page.fill('#input', 'and a plain one after it')
+      await page.click('#send')
+      await until(() => messages().some(m => m.text === 'and a plain one after it'), 60000)
+      await until(() => messages().some(m => m.text === 'its file was checked on a dead line'), 30000)
+      const sent = messages().filter(m => m.text === 'its file was checked on a dead line')
+      if (sent.length !== 1 || !sent[0].files || sent[0].files.length !== 1) throw new Error(JSON.stringify(sent))
+      await until(async () => (await page.locator('.row.user.pending').count()) === 0)
+    } finally { await page.evaluate(() => { window.fetch = window._fetch }) }
+  })
   await check("another agent's message shows with its name, and Claude's reply to it, named and never counted unread, comes back through /api/wait (#1042, #1128)", async () => {
     const agent = wb('chat', 'token', 'add', `e2e-${engine}`).trim()
     const api = (path, body) => fetch(base + path.slice(1), { method: body ? 'POST' : 'GET',
@@ -1254,14 +1308,15 @@ async function run(engine, device) {
         const keys = Object.keys(WB).sort().join()
         const r = await WB.api('/api/state'), state = await r.json()
         const p = await WB.api('/api/seen', { method: 'POST', body: { ids: [] } })   // a JSON body, its type set
+        const q = await WB.post('/api/seen', { ids: [] })                             // under POST_MS (#1391)
         location.hash = 'settings'
         for (let i = 0; i < 100 && WB.current() !== 'settings'; i++) await new Promise(r => setTimeout(r, 50))
         WB.toast('Saved.')
         const t = document.getElementById('toast')
-        return { keys, status: r.status, messages: Array.isArray(state.messages), posted: p.status, cur: WB.current(), seen,
+        return { keys, status: r.status, messages: Array.isArray(state.messages), posted: p.status, timed: [q.status, JSON.stringify(await q.json())], cur: WB.current(), seen,
           token: WB.token().length > 20, toast: !t.hidden && t.textContent }
       })
-      if (JSON.stringify(got) !== JSON.stringify({ keys: 'api,current,on,toast,token,view', status: 200, messages: true, posted: 200,
+      if (JSON.stringify(got) !== JSON.stringify({ keys: 'api,current,on,post,toast,token,view', status: 200, messages: true, posted: 200, timed: [200, '{}'],
         cur: 'settings', seen: ['settings'], token: true, toast: 'Saved.' })) throw new Error(JSON.stringify(got))
       const was = await page.evaluate(() => window._states)
       wb('chat', 'reply', '--text', 'A state for the views.')

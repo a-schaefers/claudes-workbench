@@ -794,7 +794,12 @@
   function upload(f) {  // resolves once the computer has file f ({id, name, size, type})
     if (inflight.has(f.id)) return inflight.get(f.id)
     const p = (async () => {
-      const r = await fetch('/api/upload/' + encodeURIComponent(f.id), { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
+      // the check under post()'s deadline: one that never answered (a phone changing networks)
+      // held this promise, so pump and flush with it, and every later message sat at Sending…
+      // until a reload (#1390, 2026-11-25, as #935 for /api/send). Only its status is read
+      const ctrl = new AbortController(), dog = setTimeout(() => ctrl.abort(), POST_MS)
+      const r = await fetch('/api/upload/' + encodeURIComponent(f.id), { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store', signal: ctrl.signal })
+        .finally(() => clearTimeout(dog))
       if (r.ok) return                                   // already there: not a byte again
       if (r.status === 401) { keyless('That key was not accepted.'); throw new Error('key') }
       if (r.status !== 404) throw new Error('HTTP ' + r.status)
@@ -1362,7 +1367,11 @@
   // reports at once instead.
   const ACTIVE_MS = 30_000
   let activeAt = 0
-  function reportActive() {
+  // Only on the Chat view, and not a tap on the nav leaving it: Stats and Settings are the desk's
+  // admin too, and a click there made the user at the terminal away, their next plan or question
+  // refused into the chat (#1374, 2026-11-25). The server also leaves a localhost page out
+  function reportActive(e) {
+    if (curView !== 'chat' || (e && e.target && e.target.closest && e.target.closest('#tabbar'))) return
     if (document.hidden || !document.hasFocus() || !token) return
     if (Date.now() - activeAt < ACTIVE_MS) return
     activeAt = Date.now()
@@ -1421,6 +1430,7 @@
       // shown again: at the newest line if it was following, else where the reader left it
       if (follow) toEnd(true)
       else { scroller.scrollTop = chatTop; lastTop = scroller.scrollTop; lastHeight = scroller.scrollHeight; jump.hidden = nearEnd() }
+      reportActive()                             // the chat in use, as a tap in it is (#1374)
     }
     drawBadge()
     drawShown()
@@ -1454,6 +1464,9 @@
       if ((plain || typeof body === 'string') && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
       return fetch(path, { ...init, headers, body, cache: 'no-store' })
     },
+    // a JSON POST under post()'s deadline: Settings' through WB.api never gave up, so one that
+    // hung showed as applied and held every later change (#1391, 2026-11-25)
+    post: (path, body) => post(path, body),
     view: (name, mod) => {  // mounted once, at once; shown and hidden with its view and the page
       if (!ROOTS[name] || mods.has(name) || !mod) return
       const v = { mod, shown: false }

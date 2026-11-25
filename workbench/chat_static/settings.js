@@ -57,7 +57,9 @@
     const { key, value } = queue[0]
     let said = '', lost = false
     try {
-      const r = await WB.api('/api/settings', { method: 'POST', body: { key, value } })
+      // given up after the page's POST_MS, into the lost path below: with no deadline a POST that
+      // hung kept its value lit as applied and every later click queued behind it (#1391)
+      const r = await WB.post('/api/settings', { key, value })
       const body = await r.json().catch(() => ({}))
       if (Array.isArray(body.rows)) rows = body.rows
       said = r.ok && body.ok ? body.said || 'Done.' : body.error || body.said || `the server said ${r.status}`
@@ -87,7 +89,9 @@
         b.setAttribute('role', 'radio')
         b.dataset.value = c.value
         b.setAttribute('aria-checked', String(c.value === value))
-        b.addEventListener('click', () => { if (c.value !== shown(row)) send(row.key, c.value) })
+        // sent even when lit: what's shown may be stale (a change made at the terminal), and a
+        // click to put it back sent nothing while the setting stayed changed (#1392, 2026-11-25)
+        b.addEventListener('click', () => send(row.key, c.value))
         seg.append(b)
       }
       box.append(seg)
@@ -139,22 +143,22 @@
     input.placeholder = 'off'
     const was = off ? '' : String(value)
     input.value = was
-    const go = () => {                  // empty sends nothing: off is the Off button's
-      const v = input.value.trim()
-      if (!drawing && v && v !== was) send(row.key, v)
+    const go = asked => {               // empty sends nothing: off is the Off button's
+      const v = input.value.trim()      // Enter sends the value shown too, as a click does (#1392)
+      if (!drawing && v && (asked || v !== was)) send(row.key, v)
     }
     input.addEventListener('keydown', e => {
-      if (e.key === 'Enter') { e.preventDefault(); go() }
+      if (e.key === 'Enter') { e.preventDefault(); go(true) }
       else if (e.key === 'Escape') { input.value = was; input.blur() }
     })
-    input.addEventListener('blur', go)
+    input.addEventListener('blur', () => go(false))
     line.append(input)
     if (post) line.append(el('span', 'set-unit', post))
     const b = el('button', 'plain set-off', 'Off')
     b.type = 'button'
     b.setAttribute('aria-pressed', String(off))
     b.addEventListener('mousedown', e => e.preventDefault())  // the input's blur doesn't send first
-    b.addEventListener('click', () => { if (!off) send(row.key, null) })
+    b.addEventListener('click', () => send(row.key, null))
     line.append(b)
     box.append(line)
     if (row.says) box.append(el('p', 'small set-says', row.says))
@@ -225,9 +229,13 @@
     }
   }
 
+  // read again when the page takes the focus: beside the terminal it stays shown, and a change
+  // made there (by the user or Claude) was never drawn (#1392, 2026-11-25)
+  let showing = false
+  addEventListener('focus', () => { if (showing) load() })
   WB.view('settings', {
     mount(r) { root = r },
-    show() { load() },
-    hide() {},
+    show() { showing = true; load() },
+    hide() { showing = false },
   })
 })()
