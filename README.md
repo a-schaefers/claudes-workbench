@@ -57,6 +57,12 @@ claude plugin install workbench@workbench
 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/marketplaces/workbench/bin/wb setup   # puts wb on your PATH and /workbench in your skills
 ```
 
+After `wb setup` the web app is up, its link on the pane's modeline: `[•_•] Claude's Workbench - http://localhost:1337/#token=…`.
+Settings and Stats live in the web app (or ask Claude to change a setting for you). From its chat
+you message your driver from anywhere, a phone through your tailnet (chat.json `bind: tailscale`),
+and most work runs there; a prompt the driver raises waits in its terminal (ssh + tmux) unless it
+runs with permissions granted.
+
 ### In Claude Code, inside your project
 
 ```

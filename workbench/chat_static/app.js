@@ -11,7 +11,7 @@
      instant resync on return or when the network comes back. */
 (() => {
   'use strict'
-  const K = { token: 'wb-chat-token', seen: 'wb-chat-seen', outbox: 'wb-chat-outbox', draft: 'wb-chat-draft', thread: 'wb-chat-thread', about: 'wb-chat-about' }
+  const K = { token: 'wb-chat-token', seen: 'wb-chat-seen', outbox: 'wb-chat-outbox', draft: 'wb-chat-draft', thread: 'wb-chat-thread', about: 'wb-chat-about', hint: 'wb-chat-hint' }
   const BACKOFF = [500, 1000, 2000, 4000, 8000, 15000, 30000]
   let viewing = null, sweeping = false  // the photo the viewer shows; a sweep of object URLs queued (#746)
   let nearView = null  // loads the thread's thumbnails as they near the view (#754)
@@ -31,6 +31,14 @@
 
   const load = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v) } catch { return d } }
   const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); return true } catch { return false } }
+
+  // what the chat is for (#1341), one wording: the empty state's, and over a thread the same words
+  // as a hint until dismissed on this device. load and save catch a storage that throws: there the
+  // hint shows on each open, and a dismissal holds until the page is left
+  let hintGone = load(K.hint, false) === true
+  $('hint-text').replaceChildren(...$('intro').querySelector('p').cloneNode(true).childNodes)
+  function drawHint() { $('hint').hidden = hintGone || !$('intro').hidden || !!document.querySelector('.keyless') }
+  $('hint-x').onclick = () => { hintGone = true; save(K.hint, true); drawHint() }
 
   // ---- the key ----
   let token = ''
@@ -56,7 +64,7 @@
 
   // ---- state ----
   // Until the first live state, the thread this page last had, so a reload shows it at once
-  let state = { messages: token ? load(K.thread, []) : [], asks: [], prefs: {}, push: {}, listener: null }
+  let state = { messages: token ? load(K.thread, []) : [], push: {}, listener: null }
   let live = false
   let skew = 0                                  // server clock − ours, seconds
   // The outbox: one localStorage key per message (OUT + its cid), read afresh whenever it is
@@ -87,6 +95,7 @@
   const nodes = new Map()                       // key → row element
   const flows = new Map()                       // message id → {text, shown, el}
   let unread = 0
+  let curView = null                            // the view shown (#1284): 'chat', 'stats' or 'settings'
 
   const now = () => Date.now() / 1000 + skew
   const reduced = matchMedia('(prefers-reduced-motion: reduce)')
@@ -115,6 +124,8 @@
     touchY = y
   }, { passive: true })
   const toEnd = force => {
+    // another view shown: the thread has no box to scroll, so it is put at its end on return (#1284)
+    if (curView && curView !== 'chat') { if (force) follow = true; return }
     if (force || follow) { scroller.scrollTop = scroller.scrollHeight; lastTop = scroller.scrollTop; lastHeight = scroller.scrollHeight; follow = true; jump.hidden = true }
   }
   jump.addEventListener('click', () => scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' }))
@@ -211,9 +222,7 @@
     const onServer = new Set(state.messages.map(m => m.cid).filter(Boolean))
     const pending = outbox.filter(o => !onServer.has(o.cid))
       .map(o => ({ id: 'local-' + o.cid, cid: o.cid, from: 'user', text: o.text, ts: o.ts, local: true, error: o.error, about: o.about, files: o.files }))
-    // permission prompts sit in the thread where they were asked
-    const asks = state.asks.map(a => ({ id: a.id, from: 'ask', ts: a.ts, ask: a }))
-    return [...state.messages, ...asks].sort((x, y) => x.ts - y.ts).concat(pending)
+    return [...state.messages].sort((x, y) => x.ts - y.ts).concat(pending)
   }
 
   // A reply Claude wrote to agents alone (`to` without "user", #1042) is no news for the user, as
@@ -223,19 +232,8 @@
 
   function metaFor(m) {
     const meta = document.createElement('div'); meta.className = 'meta'
-    if (m.ask) {
-      const a = m.ask
-      const yes = { plan: 'approved', question: 'you answered' }[a.kind] || (a.by === 'setting' ? 'allowed by your setting' : 'you allowed it')
-      const no = { plan: 'you asked for changes', question: 'you passed' }[a.kind] || 'you said no'
-      meta.append(span('', clock(a.ts) + (a.answer === 'allow' ? ` · ${yes} ` + (a.by === 'setting' ? '' : clock(a.answered))
-        : a.answer === 'deny' ? ` · ${no} ` + clock(a.answered)
-        : a.answer === 'expired' || a.stale ? (a.by === 'interrupted' ? ' · settled in the terminal'
-          : a.by === 'terminal' ? ' · answer it in the terminal' : ' · no answer in time: it waits in the terminal')
-        : ' · Claude is waiting for your answer')))
-      return meta
-    }
-    if (m.from === 'notice') {  // settled once its dialog was answered in the terminal (#959)
-      meta.append(span('', clock(m.ts) + (m.answered ? ' · answered in the terminal ' + clock(m.answered) : ' · answer it in the terminal')))
+    if (m.from === 'notice') {  // the server leaves it out once its dialog settles: the line clears (#1350)
+      meta.append(span('', clock(m.ts)))
       return meta
     }
     if (m.role === 'agent') return agentMeta(meta, m)
@@ -334,12 +332,13 @@
   function render() {
     const list = items()
     $('intro').hidden = list.length > 0
+    drawHint()
     const want = []
     let prev = null
     for (const m of list) {
       const day = dayName(m.ts)
       if (!prev || dayName(prev.ts) !== day) want.push({ key: 'day-' + day, day })
-      want.push({ key: m.ask ? m.id + ':' + (m.ask.answer || 'open') : m.local ? 'local-' + m.cid : (m.cid && nodes.has('local-' + m.cid) ? 'local-' + m.cid : m.id), m,
+      want.push({ key: m.local ? 'local-' + m.cid : (m.cid && nodes.has('local-' + m.cid) ? 'local-' + m.cid : m.id), m,
                   same: prev && prev.from === m.from && m.ts - prev.ts < 120 })
       prev = m
     }
@@ -354,7 +353,7 @@
         nodes.set(w.key, el)
       }
       if (w.m) {
-        el.className = `row ${w.m.role === 'agent' ? 'agent' : w.m.from}${w.m.from === 'claude' && !forUser(w.m) ? ' to-agent' : ''}${w.same ? ' same' : ''}${w.m.local ? ' pending' : ''}${w.m.error ? ' failed' : ''}${w.m.ask && w.m.ask.answer ? ' done' : ''}`
+        el.className = `row ${w.m.role === 'agent' ? 'agent' : w.m.from}${w.m.from === 'claude' && !forUser(w.m) ? ' to-agent' : ''}${w.same ? ' same' : ''}${w.m.local ? ' pending' : ''}${w.m.error ? ' failed' : ''}`
         el.querySelector('.meta').replaceWith(metaFor(w.m))
       }
       if (anchor.nextSibling !== el) anchor.after(el)
@@ -366,130 +365,6 @@
     toEnd()
     if (list.length) firstVisit = false
     drawnAt = performance.now()
-  }
-
-  // An ask: a permission (Allow, Deny), a finished plan (Approve, Keep planning with a note) or
-  // Claude's question (its options, one or several, or the user's own words)
-  function makeAsk(a) {
-    const row = document.createElement('div')
-    const card = document.createElement('div'); card.className = 'card'
-    const head = document.createElement('div'); head.className = 'asks'
-    const open = !a.answer && !a.stale, d = a.detail || {}  // stale: open past the mod's wait (#265)
-    // the decision first, when Claude said what the call is for; the exact command under it (#103)
-    const purpose = typeof d.purpose === 'string' ? d.purpose.trim().replace(/\.$/, '') : ''
-    head.textContent = a.kind === 'plan' ? (open ? "Claude's plan is ready" : "Claude's plan")
-      : a.kind === 'question' ? (open ? 'Claude asks' : 'Claude asked')
-      : purpose ? (open ? 'Allow Claude to ' : 'Claude asked to ') + purpose.charAt(0).toLowerCase() + purpose.slice(1)
-        + (open ? '?' : '') + ' (' + a.tool + ')'
-      : (open ? 'Claude wants to use ' : 'Claude asked to use ') + a.tool
-    card.append(head)
-    // Claude is working on another agent's request (#1042): the human answers, never the agent
-    if (Array.isArray(a.for) && a.for.length) card.append(span('ask-for', 'for ' + a.for.join(', ')))
-    if (a.kind === 'plan') {
-      const body = document.createElement('div'); body.className = 'plan bubble-text'
-      // a plan wb couldn't read is named by its project, never shown as another one (#253)
-      rich(body, d.plan || (d.project ? `Claude in ${d.project} finished a plan, but its text didn't reach the chat: read it and answer in that terminal.`
-        : '(the plan is in the terminal)'))
-      card.append(body)
-      if (d.plan && (d.cut || d.plan.length > 900 || d.plan.split('\n').length > 14)) {  // long: folded, with a way to read it all
-        body.classList.add('folded')
-        const more = document.createElement('button'); more.type = 'button'; more.className = 'more'; more.textContent = 'Show the whole plan'
-        more.onclick = async () => {
-          if (d.cut) {  // a settled plan comes cut, its whole text fetched when asked for (#755)
-            more.disabled = true
-            try {
-              const r = await fetch('/api/ask/' + encodeURIComponent(a.id), { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
-              const j = r.ok ? await r.json() : null
-              const whole = j && j.ask && j.ask.detail && j.ask.detail.plan
-              if (typeof whole !== 'string') throw new Error('HTTP ' + r.status)
-              rich(body, whole)
-            } catch { more.disabled = false; more.textContent = 'Not loaded: try again'; return }
-          }
-          body.classList.remove('folded'); more.remove()
-        }
-        card.append(more)
-      }
-    } else if (a.kind !== 'question') {
-      const what = document.createElement('pre'); what.textContent = a.text; card.append(what)
-    }
-    const said = span('said', '')
-    const answer = async (verdict, extra) => {
-      card.querySelectorAll('button, input, textarea').forEach(b => { b.disabled = true }); said.textContent = ''
-      try {
-        const r = await post('/api/answer', { id: a.id, answer: verdict, ...extra })
-        const j = await r.json().catch(() => ({}))
-        if (r.ok && j.state) return apply(j.state, { reply: true })
-        if (r.status === 401) return keyless('That key was not accepted.')
-        said.textContent = j.error || 'not sent: try again'
-      } catch { said.textContent = 'not sent: try again' }
-      card.querySelectorAll('button, input, textarea').forEach(b => { b.disabled = false })
-    }
-    const button = (cls, text, fn) => { const b = document.createElement('button'); b.type = 'button'; b.className = cls; b.textContent = text; b.onclick = fn; return b }
-    if (a.kind === 'question') {
-      const picks = {}
-      let submit = null
-      for (const q of d.questions || []) {
-        const box = document.createElement('div'); box.className = 'q'
-        const qt = document.createElement('div'); qt.className = 'qt'; qt.textContent = q.question
-        box.append(qt)
-        const done = a.answers && a.answers[q.question]
-        if (!open) { if (done) { const p = document.createElement('div'); p.className = 'picked'; p.textContent = done; box.append(p) } card.append(box); continue }
-        const chosen = new Set()
-        const opts = document.createElement('div'); opts.className = 'opts'
-        const other = document.createElement('input'); other.className = 'other'; other.placeholder = 'Or say something else'
-        const sync = () => {
-          const typed = other.value.trim()
-          picks[q.question] = typed ? typed : [...chosen].join(', ')
-          if (submit) submit.disabled = !(d.questions || []).every(x => picks[x.question])
-        }
-        for (const o of q.options || []) {
-          const b = button('opt', '', () => {
-            if (!q.multiSelect) { chosen.clear(); opts.querySelectorAll('.opt').forEach(x => x.classList.remove('on')) }
-            if (chosen.has(o.label)) { chosen.delete(o.label); b.classList.remove('on') } else { chosen.add(o.label); b.classList.add('on') }
-            other.value = ''; sync()
-          })
-          const l = document.createElement('span'); l.className = 'label'; l.textContent = o.label
-          b.append(l)
-          if (o.description) { const ds = document.createElement('span'); ds.className = 'desc'; ds.textContent = o.description; b.append(ds) }
-          opts.append(b)
-        }
-        other.addEventListener('input', () => {
-          if (other.value.trim()) { chosen.clear(); opts.querySelectorAll('.opt').forEach(x => x.classList.remove('on')) }
-          sync()
-        })
-        box.append(opts, other)
-        card.append(box)
-      }
-      if (open) {
-        submit = button('allow', 'Answer', () => answer('allow', { answers: picks }))
-        submit.disabled = true
-        const choices = document.createElement('div'); choices.className = 'choices'
-        choices.append(button('deny', 'Skip', () => answer('deny')), submit)
-        card.append(choices)
-      }
-    } else if (open && a.kind === 'plan') {
-      const note = document.createElement('textarea'); note.className = 'note'; note.rows = 2
-      note.placeholder = 'What should change? (optional)'; note.hidden = true
-      const back = button('deny', 'Keep planning', () => {
-        if (note.hidden) { note.hidden = false; back.textContent = 'Send back'; note.focus(); return }
-        answer('deny', note.value.trim() ? { note: note.value.trim() } : {})
-      })
-      const choices = document.createElement('div'); choices.className = 'choices'
-      choices.append(back)
-      const where = document.createElement('p'); where.className = 'hint'
-      where.textContent = 'To approve it, choose Yes in the terminal: Claude Code leaves plan mode only from there.'
-      card.append(note, choices, where)
-    } else if (open) {
-      const choices = document.createElement('div'); choices.className = 'choices'
-      choices.append(button('deny', 'Deny', () => answer('deny')), button('allow', 'Allow', () => answer('allow')))
-      card.append(choices)
-    }
-    if (!open && a.note) { const n = document.createElement('div'); n.className = 'picked'; n.textContent = '“' + a.note + '”'; card.append(n) }
-    card.append(said)
-    if (open && document.hidden) document.title = a.kind === 'permission' ? 'Claude asks: allow?' : 'Claude needs you'
-    row.append(card, document.createElement('div'))
-    row.lastChild.className = 'meta'
-    return row
   }
 
   // ---- wb shot's pairs (#99): images behind the token, so fetched with it, shown as blobs ----
@@ -564,8 +439,8 @@
   $('about-x').onclick = () => setAbout(null)
   setAbout(about)
 
-  // a dialog waiting in the terminal while the user was at it (#959): said, with what it would
-  // run, and no buttons, since only the terminal can answer it
+  // Claude waiting on a dialog in the terminal (#959, #1350): one line, with what a permission
+  // would run, and no buttons, since only the terminal answers it (#1340's decision)
   function makeNotice(m) {
     const row = document.createElement('div')
     const b = document.createElement('div'); b.className = 'bubble'
@@ -579,7 +454,6 @@
   }
 
   function makeRow(m) {
-    if (m.ask) return makeAsk(m.ask)
     if (m.from === 'notice') return makeNotice(m)
     const row = document.createElement('div')
     const b = document.createElement('div'); b.className = 'bubble'
@@ -647,17 +521,19 @@
     if (s.build) build = s.build
     live = true
     if (!quiet) save(K.thread, (s.messages || []).slice(-50))  // a patch without messages: no rewrite (#755)
-    state = { messages: s.messages || [], asks: s.asks || [], prefs: s.prefs || {}, push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null, tasks: s.tasks || [] }
+    state = { messages: s.messages || [], push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null, tasks: s.tasks || [] }
     drawTasks()
-    if (!sheet.hidden) drawSettings()
+    drawShown()
     if (state.push.key && !pushSynced) { pushSynced = true; syncPush() }
     reportSeen()
     const onServer = new Set(state.messages.map(m => m.cid).filter(Boolean))
     for (const o of outItems()) if (onServer.has(o.cid)) { forgetFiles(o); drop(o.cid) }
     render()
     nearAgain()
+    drawBadge()
+    emit('state', state)
   }
-  // A patch (chat.patch, #755): for messages and asks, `put` (rows new or changed, by id: replaced
+  // A patch (chat.patch, #755): for messages, `put` (rows new or changed, by id: replaced
   // where they are, else added at the end, as the server's lists grow) and `drop` (ids gone); every
   // other field whole
   const merge = (list, d) => {
@@ -666,7 +542,7 @@
     const out = list.filter(r => !gone.has(r.id)).map(r => { const n = put.get(r.id); put.delete(r.id); return n || r })
     return out.concat([...put.values()])
   }
-  const applyPatch = p => apply({ ...p, messages: merge(state.messages, p.messages), asks: merge(state.asks, p.asks) },
+  const applyPatch = p => apply({ ...p, messages: merge(state.messages, p.messages) },
     { quiet: !p.messages })
   function reloadOnce() {
     // at most once a minute, so a page whose files keep changing can't reload for ever; the draft
@@ -806,6 +682,7 @@
   // the worker's push: news this page hasn't shown, so its line is likely dead
   if ('serviceWorker' in navigator) navigator.serviceWorker.addEventListener('message', e => {
     if (e.data && e.data.kind === 'push' && !document.hidden && token) reconnectNow()
+    if (e.data && e.data.kind === 'view') go(e.data.view)   // a notification's click: the thread (#1284)
   })
   const comeBack = () => {
     if (document.hidden || !token) return
@@ -1289,19 +1166,12 @@
     document.querySelector('.keyless')?.remove()
     thread.append(box)
     $('composer').hidden = true
+    drawHint()
     drawPresence()
   }
 
-  // ---- settings: the gear's sheet ----
-  const gear = $('gear'), sheet = $('settings')
-  const showSettings = on => { sheet.hidden = !on; gear.setAttribute('aria-expanded', String(on)); if (on) drawSettings() }
-  gear.onclick = () => showSettings(sheet.hidden)
-  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !sheet.hidden) showSettings(false) })
-  document.addEventListener('pointerdown', e => { if (!sheet.hidden && !sheet.contains(e.target) && !gear.contains(e.target)) showSettings(false) })
-  const AWAY_NOTE = {
-    ask: 'Permission prompts come here for Allow or Deny. Unanswered for 30 minutes, they wait in the terminal.',
-    allow: "Claude runs what it would have asked about, and each one is listed here. Your deny rules still hold, and plans and questions still come to you.",
-  }
+  // ---- settings: what the gear's sheet held, now cards in the Settings view; What it saved in Stats (#1284) ----
+  const sheet = $('settings')
   // `wb savings` for the week, from the state (chat.week_saved)
   const tokens = n => Math.abs(n) >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : `${Math.round(n / 1e3)}K`
   function drawSaved() {
@@ -1342,26 +1212,11 @@
     return `API models: ${a.tasks} task${a.tasks === 1 ? '' : 's'}, ${parts.join(', ')}.`
   }
   function drawSettings() {
-    drawApp(); drawNotify(); drawSaved()
-    const away = (state.prefs && state.prefs.away) || 'ask'
-    sheet.querySelectorAll('[data-away]').forEach(b => b.setAttribute('aria-checked', String(b.dataset.away === away)))
-    $('away-note').textContent = AWAY_NOTE[away]
+    drawApp(); drawNotify()
   }
-  sheet.querySelectorAll('[data-away]').forEach(b => {
-    b.onclick = async () => {
-      const was = state.prefs
-      state.prefs = { ...state.prefs, away: b.dataset.away }; drawSettings()
-      try {
-        const r = await post('/api/prefs', { away: b.dataset.away })
-        const j = await r.json().catch(() => ({}))
-        if (r.ok && j.state) return apply(j.state, { reply: true })
-      } catch {}
-      state.prefs = was; drawSettings(); $('away-note').textContent = 'Not saved: try again.'
-    }
-  })
   $('forget').onclick = async () => {
     if (pushOn) await setPush(false)  // a device without the key can't read what a push is about
-    showSettings(false); save(K.token, ''); save(K.thread, []); keyless('', true); keepKey(); keyManifest()
+    go('chat'); save(K.token, ''); save(K.thread, []); keyless('', true); keepKey(); keyManifest()
   }
 
   // ---- the app: installing it, and notifications (sw.js; webpush.py on the computer) ----
@@ -1370,8 +1225,8 @@
   const iosSafari = ios && !/CriOS|FxiOS|EdgiOS|OPiOS/.test(navigator.userAgent)
   const canPush = window.isSecureContext && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window
   let installEvt = null, swReg = null, pushOn = false, pushEndpoint = '', pushBusy = false, pushNote = '', pushSynced = false
-  addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; if (!sheet.hidden) drawSettings() })
-  addEventListener('appinstalled', () => { installEvt = null; if (!sheet.hidden) drawSettings() })
+  addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; drawShown() })
+  addEventListener('appinstalled', () => { installEvt = null; drawShown() })
   if (window.isSecureContext && 'serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).then(r => { swReg = r; syncPush() }).catch(() => {})
   }
@@ -1400,7 +1255,7 @@
       pushEndpoint = pushOn ? sub.endpoint : ''
       if (sub) await post('/api/push', { endpoint: sub.endpoint, on: true })
     } catch {}
-    if (!sheet.hidden) drawSettings()
+    drawShown()
   }
   async function setPush(on) {
     pushBusy = true; pushNote = ''; drawSettings()
@@ -1484,8 +1339,8 @@
     const using = document.hasFocus() && Date.now() - lastInput < USING_MS
     if (!using && !pushEndpoint) return
     const how = using ? 'all' : 'own'
-    const ids = [...state.messages.filter(m => m.from === 'claude' || m.from === 'notice').slice(-20).map(m => m.id),
-      ...state.asks.filter(a => !a.answer).map(a => a.id)].filter(i => !reported.has('all:' + i) && !reported.has(how + ':' + i))
+    const ids = state.messages.filter(m => m.from === 'claude' || m.from === 'notice').slice(-20).map(m => m.id)
+      .filter(i => !reported.has('all:' + i) && !reported.has(how + ':' + i))
     if (!ids.length) return
     ids.forEach(i => reported.add(how + ':' + i))
     post('/api/seen', { ids, ...(using ? {} : { endpoint: pushEndpoint }) }).catch(() => ids.forEach(i => reported.delete(how + ':' + i)))
@@ -1518,6 +1373,99 @@
   addEventListener('pageshow', reportActive)
   for (const ev of ['pointerdown', 'keydown'])
     addEventListener(ev, reportActive, { capture: true, passive: true })
+
+  // ---- the shell (#1284): Chat, Stats and Settings, one shown, picked by the address's hash ----
+  // The owner (2026-11-24): the bottom bar of merecatholicity.com on a phone; a left rail from
+  // 601px. The hash is the route, so Back walks the views; anything but #stats or #settings is
+  // the chat, and the key's own fragment was taken and dropped above, before any of this.
+  const VIEWS = ['chat', 'stats', 'settings']
+  const ROOTS = { stats: 'stats-body', settings: 'settings-rows' }
+  const tabs = [...document.querySelectorAll('#tabbar .tab')]
+  const chatTab = tabs.find(b => b.dataset.view === 'chat'), tabBadge = chatTab.querySelector('.tab-badge')
+  const mods = new Map()                         // name → {mod, shown}: stats.js, settings.js (WB.view)
+  const handlers = { state: new Set(), view: new Set() }
+  const emit = (ev, arg) => { for (const fn of handlers[ev] || []) try { fn(arg) } catch (e) { console.error(e) } }
+  const call = (v, fn, ...a) => { try { v.mod[fn] && v.mod[fn](...a) } catch (e) { console.error(e) } }
+  const modShow = name => { const v = mods.get(name); if (v && !v.shown && !document.hidden) { v.shown = true; call(v, 'show') } }
+  const modHide = name => { const v = mods.get(name); if (v && v.shown) { v.shown = false; call(v, 'hide') } }
+  function drawShown() {  // what the old sheet drew while open, for the view that shows it
+    if (curView === 'settings') drawSettings()
+    else if (curView === 'stats') drawSaved()
+  }
+  // The Chat tab's badge: Claude's messages (and waiting lines) newer than the moment the
+  // thread was left, in the server's clock; held until a live state gives that clock when the
+  // page opened on another view
+  let leftAt = null
+  function drawBadge() {
+    if (curView !== 'chat' && leftAt === null && live) leftAt = stamp
+    let n = 0
+    if (curView !== 'chat' && leftAt !== null) {
+      for (const m of state.messages) if ((m.from === 'claude' || m.from === 'notice') && m.role !== 'agent' && forUser(m) && m.ts > leftAt) n++
+    }
+    tabBadge.hidden = !n
+    tabBadge.textContent = n > 99 ? '99+' : String(n)
+    chatTab.setAttribute('aria-label', n ? `Chat, ${n > 99 ? '99+' : n} new` : 'Chat')
+  }
+  let chatTop = 0
+  function setView(name) {
+    if (!VIEWS.includes(name)) name = 'chat'
+    if (name === curView) return
+    const was = curView
+    if (was === 'chat') { chatTop = scroller.scrollTop; leftAt = live ? now() : null }
+    if (was) modHide(was)
+    curView = name
+    document.body.dataset.view = name
+    for (const b of tabs) b.dataset.view === name ? b.setAttribute('aria-current', 'true') : b.removeAttribute('aria-current')
+    if (name === 'chat') {
+      leftAt = null
+      // shown again: at the newest line if it was following, else where the reader left it
+      if (follow) toEnd(true)
+      else { scroller.scrollTop = chatTop; lastTop = scroller.scrollTop; lastHeight = scroller.scrollHeight; jump.hidden = nearEnd() }
+    }
+    drawBadge()
+    drawShown()
+    modShow(name)
+    emit('view', name)
+  }
+  const go = name => {  // through the hash, so Back comes here again
+    name = VIEWS.includes(name) ? name : 'chat'
+    if (location.hash !== '#' + name) location.hash = name
+    else setView(name)
+  }
+  for (const b of tabs) b.addEventListener('click', () => go(b.dataset.view))
+  addEventListener('hashchange', () => setView(location.hash.slice(1)))
+  document.addEventListener('visibilitychange', () => { if (document.hidden) modHide(curView); else modShow(curView) })
+  let toastTimer = 0
+  function toast(text) {
+    const t = $('toast')
+    t.textContent = String(text); t.hidden = false
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true }, 3500)
+  }
+  // The view-module API: stats.js and settings.js build against exactly this (#1284)
+  window.WB = Object.freeze({
+    token: () => token,
+    api: (path, init = {}) => {
+      const headers = new Headers(init.headers || {})
+      if (token) headers.set('Authorization', 'Bearer ' + token)
+      let body = init.body
+      const plain = body != null && typeof body === 'object' && !(body instanceof Blob) && !(body instanceof FormData) &&
+        !(body instanceof URLSearchParams) && !(body instanceof ArrayBuffer) && !ArrayBuffer.isView(body) && !(body instanceof ReadableStream)
+      if (plain) body = JSON.stringify(body)
+      if ((plain || typeof body === 'string') && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+      return fetch(path, { ...init, headers, body, cache: 'no-store' })
+    },
+    view: (name, mod) => {  // mounted once, at once; shown and hidden with its view and the page
+      if (!ROOTS[name] || mods.has(name) || !mod) return
+      const v = { mod, shown: false }
+      mods.set(name, v)
+      call(v, 'mount', $(ROOTS[name]))
+      if (curView === name) modShow(name)
+    },
+    toast,
+    on: (event, fn) => { if (handlers[event] && typeof fn === 'function') handlers[event].add(fn) },
+    current: () => curView || 'chat',
+  })
+  setView(location.hash.slice(1))
 
   async function firstState() {  // at once, without waiting for a stream slot to free up
     try {

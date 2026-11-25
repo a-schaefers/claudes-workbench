@@ -80,7 +80,7 @@ record (tasks, accepted, paid a task, rate-limited rounds) and the week's spend 
 and a count of each connected provider's models. Look up the same providers' newer or cheaper
 models and any price change on the providers' own pages, and whether thinking would pay for
 `significant` from its record. Recommend in chat only: changing a role is the user's, in the
-dialog (on their words, `wb route`) or the pane's Settings tab. Name a free model only when the
+dialog (on their words, `wb route`) or the web app's Settings. Name a free model only when the
 user asks, with what it does with the code (some keep or train on it).
 
 **The audio and image engines** are in the check too, when `wb scout` lists any (speech, sound

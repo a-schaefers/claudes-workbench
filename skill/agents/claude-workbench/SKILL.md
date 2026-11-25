@@ -11,8 +11,8 @@ with a token of your own. The full API reference is `docs/chat-api.md` in the wo
 repository.
 
 ## Setup (the user does this once)
-- The user turns the chat on (`wb chat on`) and makes you a token: `wb chat token add <your
-  name>`, which prints it once.
+- The chat is on by default (`wb chat on` again after a `wb chat off`); the user makes you a
+  token: `wb chat token add <your name>`, which prints it once.
 - You get two environment variables:
   - `CLAUDE_WB_URL`: the chat's address, the one `wb chat url` prints, for instance
     `http://localhost:1337`.
@@ -63,16 +63,15 @@ tells you it is waiting on them, before anything that needs their yes:
 - pushing, opening a pull request or an issue, sending changes upstream;
 - deleting things, or anything else that leaves the machine or is hard to undo.
 
-You can't answer those for the user, and you can't answer Claude Code's permission dialogs: your
-token is refused there. While Claude works on your request, its dialogs go to the user's phone or
-web page, marked as for you, and stay in its terminal. When a reply says Claude is waiting on the user, or `/api/wait` says
+You can't answer those for the user, and you can't answer Claude Code's permission dialogs: they
+are answered in its terminal, by the user alone (the web page only says one waits). When a reply says Claude is waiting on the user, or `/api/wait` says
 `"waiting_on_user": true` (`ask_claude.py` prints "waiting on the user" once), the work is paused
 on the human, not stuck: wait, or carry on with other work.
 
 ## What you can see
 Your token reads only your own conversation: your messages and Claude's replies to you, and the
-files you uploaded or that came with those replies. The user's own messages, Claude Code's
-dialogs and the user's settings are not yours to read (404 or 403). `about` on a message is the
+files you uploaded or that came with those replies. The user's own messages and the user's
+settings are not yours to read (404 or 403). `about` on a message is the
 user's alone (400).
 
 ## Etiquette

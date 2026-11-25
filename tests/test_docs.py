@@ -100,15 +100,13 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertIn(f"{models.MIN_WINDOW // 1024}K at the least", readme)
         self.assertIn("32K context window recommended", readme)
 
-    def test_the_panes_probe_row_names_the_line_count_the_code_holds(self):
-        # the review of #857's off and on (2026-11-22): the pane's "On (large files only)" sentence
-        # copies context.PROBE_FILE_LINES, which it can't import, so a change to one is caught here
-        from workbench import context
-        said = f"one function of a file over {context.PROBE_FILE_LINES:,} lines with probe"
+    def test_the_pane_keeps_no_copy_of_a_setting_wb_owns(self):
+        # the review of #857's off and on (2026-11-22) caught the pane's probe sentence copying
+        # context.PROBE_FILE_LINES; since #1283 (the owner, 2026-11-24) the settings are the web
+        # app's and the pane is Tasks only, so it keeps no copy of a setting's words to fall behind
         pane = (ROOT / "mod/hooks/register.tsx").read_text()
-        stops = pane[pane.index("const PROBE_STOPS"):]
-        self.assertIn(said, stops[:stops.index("]\n")], "the pane's PROBE_STOPS on sentence")
-        self.assertIn(said, " ".join(ARCH.split()), "ARCHITECTURE.md's pane row")
+        for copy in ("const PROBE_STOPS", "const CODING_STOPS", "const SETTING_ROWS", "const TABS"):
+            self.assertNotIn(copy, pane)
 
     def test_wb_start_role_and_the_agents_switch_are_in_the_command_reference(self):
         # #1016: the role Claude picks per task, and the user's Agents switch
@@ -146,6 +144,19 @@ class DocsMatchTheCode(unittest.TestCase):
                       'dialog then asks them, and a "not changed" means no)', choosing)
         self.assertTrue(callable(cli.start_gate))
         self.assertIn("calls.push(['--start'", (ROOT / "mod/hooks/register.tsx").read_text())
+
+    def test_the_skill_changes_a_setting_only_on_the_users_clear_ask_and_yes(self):
+        # #1287 (the owner, 2026-11-24: "it should just require a clear ask and yes from the
+        # user"; "We trust Claude"): the rule wb settings set runs by, in the terminal or the web chat
+        skill = " ".join((ROOT / "skill/workbench/SKILL.md").read_text().split())
+        for said in ("explain it from `wb settings`",
+                     "Change one only when they have clearly asked for that change and said yes: `wb settings set "
+                     "<key> <value>`", "One yes covers the change asked for and nothing more.",
+                     "Never change a setting unasked, and after a no don't ask again.",
+                     "installing nothing without their yes", "A role moved to API still goes through the mod's dialog",
+                     "The same holds from the web chat: answer there and run the same command."):
+            self.assertIn(said, skill)
+        self.assertIn("calls.push(['--settings'", (ROOT / "mod/hooks/register.tsx").read_text())
 
     def test_the_skills_question_bullet_sends_a_files_text_never_a_path_outside_the_lane(self):
         # #1133 (2026-11-23): an answer naming ~/.claude/plans/x.md (hidden from the lane whole)
@@ -259,13 +270,10 @@ class DocsFor20(unittest.TestCase):
         # stays (cli._coding_gate); the mod's ask rule went to a dialog at the edit (#1322)
         self.assertIn("Unanswered, the work stays with the agent", (ROOT / "workbench/cli.py").read_text())
 
-    def test_wb_coding_and_the_pane_say_the_same_sentence_for_each_choice(self):
-        # *Couplings*: cli.CODING → the mod's CODING_STOPS (#1027 changed both in one word)
-        stops = (ROOT / "mod/hooks/register.tsx").read_text()
-        stops = stops[stops.index("const CODING_STOPS"):]
-        stops = stops[:stops.index("]\n")]
+    def test_no_wb_coding_sentence_calls_the_agent_local(self):
+        # #1027 changed cli.CODING and the pane's copy in one word; the copy went with the pane's
+        # Settings (#1283), and the sentences stay free of "local"
         for mode, (_, sentence) in cli.CODING.items():
-            self.assertIn(f"'{sentence}'", stops, mode)
             self.assertNotIn("local", sentence, mode)
 
     def test_architecture_md_defines_the_agent_as_a_gpu_or_an_api_model(self):
@@ -287,6 +295,46 @@ class DocsFor20(unittest.TestCase):
         keys = " ".join(section(ARCH, "## Files and formats").split())
         keys = keys[keys.index("**task.json**"):]
         self.assertIn("a task from before it has neither, and reads as GPU", keys[:keys.index("`size`")])
+
+
+class DocsForTheWebApp(unittest.TestCase):
+    """#1288: 2.0 moved the pane's Stats and Settings to the web app (#1279), and the owner locked in
+    (2026-11-24) that the terminal stays primary, the web chat a second lane, the web app's Settings
+    the settings' home, with Claude helping on a clear ask."""
+
+    def test_the_readme_quickstart_names_the_web_apps_settings_and_stats_and_its_link(self):
+        readme = (ROOT / "README.md").read_text()
+        quick = readme[readme.index("## Quickstart"):readme.index("## License")]
+        self.assertIn("Settings and Stats live in the web app", quick)
+        self.assertIn("`[•_•] Claude's Workbench - http://localhost:1337/#token=…`", quick)
+        self.assertIn("`bind: tailscale`", quick)
+
+    def test_what_people_and_claude_read_names_no_pane_tab(self):
+        # the pane is Tasks only since #1283: a Settings or Stats tab there no longer exists
+        for path in ("README.md", "skill/workbench/SKILL.md", "skill/workbench/reference/driving.md"):
+            text = (ROOT / path).read_text()
+            for gone in ("Settings tab", "Stats tab"):
+                self.assertNotIn(gone, text, path)
+
+    def test_the_terminal_is_primary_where_claude_and_the_maintainers_read(self):
+        skill = " ".join((ROOT / "skill/workbench/SKILL.md").read_text().split())
+        self.assertIn("The terminal is primary", skill)
+        self.assertIn("the web chat is a second lane", skill)
+        self.assertIn("the settings live in the web app's Settings", skill.replace("The settings", "the settings"))
+        driving = " ".join((ROOT / "skill/workbench/reference/driving.md").read_text().split())
+        self.assertIn("The terminal stays primary; the chat is a second lane", driving)
+        self.assertIn("**The terminal is primary; the web chat is a second lane**", " ".join(ARCH.split()))
+
+    def test_the_agent_tokens_allow_list_in_the_api_reference_is_agent_may(self):
+        # docs/chat-api.md is what another agent is handed: each (method, path) chat.AGENT_MAY lets
+        # an agent token use is on its allow-list line, a trailing / as its <id>
+        from workbench import chat
+        doc = " ".join((ROOT / "docs/chat-api.md").read_text().split())
+        allow = doc[doc.index("It works on an allow-list:"):]
+        allow = allow[:allow.index("Every other path")]
+        for method, path in sorted(chat.AGENT_MAY):
+            self.assertIn(method, allow)
+            self.assertIn(f"{path}<id>`" if path.endswith("/") else f"{path}`", allow, (method, path))
 
 
 class ContactInOnePlace(unittest.TestCase):

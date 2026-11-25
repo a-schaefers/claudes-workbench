@@ -21,7 +21,6 @@ import hashlib
 import hmac
 import http.client
 import json
-import mmap
 import os
 import re
 import secrets
@@ -57,6 +56,7 @@ AUDIO_TYPES = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".ogg": "audio/ogg", "
 BATCH_RE = re.compile(r"^[0-9]{13}-[0-9a-f]{6}$")
 MAX_STREAMS = 16        # open /api/stream connections (each holds a thread)
 PING_EVERY = 15         # seconds between keep-alive comments on a stream
+NUDGE_AFTER = 0.05      # seconds after each event to its blank line, which hands WebKit its tail
 TIMEOUT = 30            # seconds a connection may stall (more than PING_EVERY: streams write by then)
 UNACKED_MS = 45_000     # a stream whose writes go unacknowledged this long is dead (Linux)
 RELOAD_EVERY = 10       # seconds between looks at the server's own code
@@ -132,18 +132,37 @@ def token() -> str:
 # Other agents (another harness driving Claude through workbench) get tokens of their own: `wb chat
 # token add <name>` prints one once and keeps only its sha256 in chat-agents.json, beside the
 # user's token file (0600). An agent token reaches what a teammate needs (send, upload, read the
-# state and the stream, wait for replies) and never what only the user may do: Claude Code's
-# dialogs, the page's settings, push, and marking the user away (AGENT_DENIED, 403). Its messages
-# are stored `from: <name>, role: "agent"` and reach Claude as `[agent <name>] …`, never with the
-# user's authority. Revoked, it is 401 at once (the file is read per request).
+# state and the stream, wait for replies) and nothing else: AGENT_MAY is an allow-list, so an
+# endpoint added later is the user's alone until it is named there (#1280: the deny-lists it
+# replaced, AGENT_DENIED and AGENT_UNREAD, left every new endpoint open to agents by default).
+# Its messages are stored `from: <name>, role: "agent"` and reach Claude as `[agent <name>] …`,
+# never with the user's authority. Revoked, it is 401 at once (the file is read per request).
 AGENT_NAME = re.compile(r"[a-z0-9-]{1,32}")
 AGENT_RESERVED = ("user", "claude", "notice", "agent", "wb")  # `from` values the thread already uses
 AGENT_PREFIX = "wba-"  # how an agent token looks, so a leaked one is recognised
-AGENT_DENIED = {"/api/answer": "answer Claude Code's dialogs",
-                "/api/prefs": "change the user's settings",
-                "/api/push": "change notifications",
-                "/api/active": "mark the user away",
-                "/api/seen": "mark what the user has seen"}
+# (method, path) an agent token may call; a path ending in "/" covers what starts with it
+AGENT_MAY = {("GET", "/api/health"), ("GET", "/api/wait"), ("GET", "/api/state"), ("GET", "/api/stream"),
+             ("GET", "/api/upload/"), ("PUT", "/api/upload/"), ("GET", "/api/file/"), ("POST", "/api/send")}
+# Only the wording of a refusal, kept from the deny-lists for the paths they named ("agent tokens
+# can't <this>"); any other path is "agent tokens can't use <path>". AGENT_MAY alone decides.
+AGENT_CANT = {"/api/push": "change notifications", "/api/active": "mark the user away",
+              "/api/seen": "mark what the user has seen", "/api/latest": "read the user's notifications",
+              "/api/shot": "read screenshots", "/api/audio": "read audio takes"}
+
+
+def _covers(rule: str, path: str) -> bool:
+    return path == rule or rule.endswith("/") and path.startswith(rule)
+
+
+def agent_may(method: str, path: str) -> bool:
+    """Whether an agent token may call ``method`` ``path`` (AGENT_MAY)."""
+    return any(m == method and _covers(p, path) for m, p in AGENT_MAY)
+
+
+def agent_refusal(path: str) -> str:
+    """The 403's error for an agent token on a path outside AGENT_MAY."""
+    what = next((v for k, v in AGENT_CANT.items() if _covers(k, path)), None)
+    return f"agent tokens can't {what or 'use ' + path[:100]}"
 
 
 def agents_path() -> Path:
@@ -516,11 +535,11 @@ def ack(msg_id: str, by: str, how: str = "now") -> None:
 
 
 # Work still waiting, kept apart from the files the page reads by their tails: an unread message
-# behind 540 long replies, and an open question behind 120 plan cards, fell out of the 4 MiB
-# tails, so `wb chat pending` lost the one and the other could no longer be answered (#329, the
-# audit of 1.4). chat/open.json, {messages: {id: row}, asks: {id: row}}: the user's messages
-# without a receipt and the asks without an answer, kept under open.lock by send and ack, ask and
-# answer, and built from the whole files once where it is missing (an older wb's state).
+# behind 540 long replies fell out of the 4 MiB tails, so `wb chat pending` lost it (#329, the
+# audit of 1.4). chat/open.json, {messages: {id: row}}: the user's messages without a receipt,
+# kept under open.lock by send and ack, and built from the whole file once where it is missing
+# (an older wb's state). An older wb's `asks` and `answered` there are dropped: the chat no longer
+# answers Claude Code's dialogs (#1350).
 def _open_path() -> Path:
     return chat_dir() / "open.json"
 
@@ -529,15 +548,7 @@ def _open_rebuild() -> dict:
     got = {r.get("id") for r in store.read_jsonl(chat_dir() / "receipts.jsonl")[0]}
     msgs = {r["id"]: r for r in store.read_jsonl(chat_dir() / "messages.jsonl")[0]
             if _inbound(r) and r.get("id") and r["id"] not in got}
-    open_asks: dict = {}
-    answered: dict = {}
-    for r in store.read_jsonl(chat_dir() / "asks.jsonl")[0]:
-        if "answer" in r:
-            if r.get("answer") in ANSWERS and (a := open_asks.pop(r.get("id"), None)):
-                _settle(answered, a, r)
-        elif "tool" in r and r.get("id"):
-            open_asks[r["id"]] = {"kind": "permission", **r}
-    return {"messages": msgs, "asks": open_asks, "answered": answered}
+    return {"messages": msgs}
 
 
 def _received(msg_id: str) -> bool:
@@ -562,20 +573,20 @@ def _reopen(work: dict, row: dict) -> None:
 def _open_update(change) -> dict:
     with store.locked(chat_dir() / "open.lock"):
         cur = store.read_json(_open_path(), None)
-        if not (isinstance(cur, dict) and isinstance(cur.get("messages"), dict)
-                and isinstance(cur.get("asks"), dict)):
+        if not (isinstance(cur, dict) and isinstance(cur.get("messages"), dict)):
             cur = _open_rebuild()
-        cur.setdefault("answered", {})  # an older wb's index has none
+        for gone in ("asks", "answered"):  # an older wb's (#1350)
+            cur.pop(gone, None)
         change(cur)
         store.write_json(_open_path(), cur)
         return cur
 
 
 def open_work() -> dict:
-    """What still waits: {messages, asks}, each {id: row}. A message past MESSAGE_EXPIRE leaves
-    it here (`_retire`)."""
+    """What still waits: {messages: {id: row}}. A message past MESSAGE_EXPIRE leaves it here
+    (`_retire`)."""
     cur = store.read_json(_open_path(), None)
-    if not (isinstance(cur, dict) and isinstance(cur.get("messages"), dict) and isinstance(cur.get("asks"), dict)):
+    if not (isinstance(cur, dict) and isinstance(cur.get("messages"), dict)):
         cur = _open_update(lambda w: None)
     now = store.now()
     if any(isinstance(r, dict) and _expired(r, now) for r in cur["messages"].values()):
@@ -612,8 +623,9 @@ THREAD_BYTES = 4 << 20  # the last 200 messages fit with room to spare (a reply 
 
 def thread(limit: int = 200, keep=None) -> list[dict]:
     """The latest messages, each of the user's with its receipt (or None: not read yet), and
-    `expired` once unread past MESSAGE_EXPIRE: no session will be given it (#536). ``keep``: only
-    the rows it passes (an agent's view, #1042)."""
+    `expired` once unread past MESSAGE_EXPIRE: no session will be given it (#536). A notice whose
+    dialog settled in the terminal is left out: the page's waiting line clears (#1350). ``keep``:
+    only the rows it passes (an agent's view, #1042)."""
     # bounded reads: the whole history was parsed on every poll (the 2026-11-19 audit: 56 ms at
     # 20,000 rows); a receipt comes after its message, so the newest ones cover the thread
     rows = [r for r in store.read_jsonl_tail(chat_dir() / "messages.jsonl", THREAD_BYTES)
@@ -626,16 +638,16 @@ def thread(limit: int = 200, keep=None) -> list[dict]:
             got = receipts.get(r["id"])
             gone = got.get("how") == "expired" if got else _expired(r, now)  # retired (#741)
             r = {**r, "received": None if gone else got, **({"expired": True} if gone else {})}
-        elif r["from"] == "notice" and r["id"] in receipts:  # its dialog answered in the terminal (#959)
-            r = {**r, "answered": receipts[r["id"]].get("ts")}
+        elif r["from"] == "notice" and r["id"] in receipts:  # its dialog settled in the terminal
+            continue
         out.append(r)
     return out
 
 
-# Work still waiting is kept apart from what the page shows: an open question vanished from the
-# page's list behind 20 newer answered ones, and `wb chat pending` lost an unread message behind
-# 200 newer replies (#265, the audit of 1.2). An ask open past ASK_STALE is marked `stale` (the
-# mod waits 30 minutes on one). A message of the user's unread past MESSAGE_EXPIRE is `expired`:
+# Work still waiting is kept apart from what the page shows: `wb chat pending` lost an unread
+# message behind 200 newer replies (#265, the audit of 1.2). A notice open past ASK_STALE no
+# longer counts as Claude waiting on the user (a session that died with its dialog up never
+# settled it). A message of the user's unread past MESSAGE_EXPIRE is `expired`:
 # `wb chat claim` refuses it, so no session springs it on Claude, and the page says so and offers
 # to send it again. The mod skipped it on its own clock, and the page said "Delivered" for good (#536).
 ASK_STALE = 3600
@@ -722,6 +734,23 @@ def caller_listens() -> bool:
     return int(me) == parent
 
 
+# A turn's own answer, which the mod posts when a turn that had a web message ended with no reply
+# to it (`wb chat reply --turn-answer`, an `auto` row; #1352, from #1340 F). The nudge turn it
+# replaced cost Claude a turn, and a driver that doesn't follow the skill (OpenCode's, #1296)
+# would have left the phone with nothing. Cut to about a phone's screenful: the whole answer stays
+# in the terminal.
+TURN_ANSWER_MAX = 4000
+TURN_ANSWER_CUT = "… [cut: the whole answer is in the terminal]"
+
+
+def turn_answer(text: str) -> str:
+    """``text``, at most TURN_ANSWER_MAX characters: cut, it ends with TURN_ANSWER_CUT."""
+    text = text.strip()
+    if len(text) <= TURN_ANSWER_MAX:
+        return text
+    return text[:TURN_ANSWER_MAX - len(TURN_ANSWER_CUT)].rstrip() + TURN_ANSWER_CUT
+
+
 def reply(text: str, to: list[str] | None = None, **extra) -> dict:
     """Claude's reply (`wb chat reply`), with `re` (``to``, else `taken`, for the listening
     session's own calls: `caller_listens`; another's goes to the user) and `to` (whose those
@@ -751,11 +780,9 @@ def reply(text: str, to: list[str] | None = None, **extra) -> dict:
 
 
 def waiting_on_user() -> bool:
-    """Whether Claude is paused on the user: a dialog open in the chat (an ask) or one the
-    terminal shows that the phone was told of (a notice not yet answered), under ASK_STALE old."""
+    """Whether Claude is paused on the user: a dialog the terminal shows that the phone was told
+    of (a notice not yet settled), under ASK_STALE old."""
     now = store.now()
-    if any(a.get("answer") is None and not a.get("stale") for a in asks()):
-        return True
     rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", LATEST_BYTES)
     done = {r.get("id") for r in store.read_jsonl_tail(chat_dir() / "receipts.jsonl", LATEST_BYTES)
             if isinstance(r, dict) and r.get("how") == "answered"}
@@ -790,14 +817,10 @@ def wait_state(after: str, caller: str) -> dict | None:
 
 # ---- an agent's view (#1042): its own conversation, nothing of the user's ----
 # Round one let an agent token read the whole state and stream: the user's own messages, Claude's
-# replies to the user, Claude Code's dialogs, the settings. An agent reads only its own messages
-# and Claude's rows whose `to` names it (`in_view`), the listener, the upload limits and the
-# clock; files only of its own uploads (`by`) or attached to rows in its view; never an ask, a
-# screenshot, an audio take or a push's summary (AGENT_UNREAD, 403).
-AGENT_UNREAD = {"/api/latest": "read the user's notifications",
-                "/api/ask/": "read Claude Code's dialogs",
-                "/api/shot": "read screenshots",
-                "/api/audio": "read audio takes"}
+# replies to the user, the settings. An agent reads only its own messages and Claude's rows whose
+# `to` names it (`in_view`), the listener, the upload limits and the clock; files only of its own
+# uploads (`by`) or attached to rows in its view; never a screenshot, an audio take or a push's
+# summary (outside AGENT_MAY, 403).
 
 
 def in_view(row: dict, agent: str) -> bool:
@@ -823,26 +846,6 @@ def agent_may_read(uid: str, agent: str) -> bool:
                for r in store.read_jsonl_tail(chat_dir() / "messages.jsonl", THREAD_BYTES))
 
 
-# The page's state is sent over and over, so a settled ask travels without its bulk: an answered
-# (or stale) plan as its first PLAN_PREVIEW characters with `cut`, the rest fetched from GET
-# /api/ask/<id> when the user unfolds it; a settled question as its questions' text, all the page
-# shows of it. Thirty answered plans were most of a 922 KB state (#755).
-PLAN_PREVIEW = 1200
-
-
-def page_ask(a: dict) -> dict:
-    """``a`` as the page's state carries it: an open one whole, a settled one lean."""
-    d = a.get("detail")
-    if not isinstance(d, dict) or (a.get("answer") is None and not a.get("stale")):
-        return a
-    lean = dict(d)
-    if isinstance(d.get("plan"), str) and len(d["plan"]) > PLAN_PREVIEW:
-        lean.update(plan=d["plan"][:PLAN_PREVIEW], cut=True)
-    if isinstance(d.get("questions"), list):
-        lean["questions"] = [{"question": q.get("question")} for q in d["questions"] if isinstance(q, dict)]
-    return {**a, "detail": lean}
-
-
 def _push_key_or_none() -> str | None:
     """push_key, or None when the key can't be had (a full disk, a broken file): a broken push key
     took every snapshot with it, so the whole chat said "Can't reach the computer" (#924)."""
@@ -859,7 +862,7 @@ _no_key: set[str] = set()
 
 
 def snapshot() -> dict:
-    return {"api": API_VERSION, "messages": thread(), "asks": [page_ask(a) for a in asks()], "listener": listener(), "prefs": prefs(),
+    return {"api": API_VERSION, "messages": thread(), "listener": listener(),
             "push": {"key": _push_key_or_none(), "test": (store.read_json(chat_dir() / "push-test.json", None)
                                                  or {}).get("ts")},
             "savings": week_saved(), "uploads": upload_limits(), "build": build(), "expire": MESSAGE_EXPIRE,
@@ -889,30 +892,25 @@ NEWS = ("claude", "notice")
 
 
 def latest() -> dict:
-    """What a push shows, for the service worker (GET /api/latest): the newest open ask (a plan's
-    text left out: the notification says only that one is ready) and Claude's last message, in
-    the snapshot's shape. It fetched the whole /api/state, the thread and 20 asks with their
-    plans, up to a megabyte, within the time iOS gives a push handler (#755)."""
-    open_ = [a for a in asks() if a.get("answer") is None and not a.get("stale")]
-    ask = max(open_, key=lambda a: a.get("ts", 0), default=None)
-    if ask and ask.get("kind") == "plan":
-        ask = {k: v for k, v in ask.items() if k != "detail"}
+    """What a push shows, for the service worker (GET /api/latest): Claude's last message, or a
+    notice still open, in the snapshot's shape. It fetched the whole /api/state, up to a
+    megabyte, within the time iOS gives a push handler (#755)."""
     rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", LATEST_BYTES)
-    # a notice whose dialog was answered in the terminal is no news (#959)
+    # a notice whose dialog settled in the terminal is no news (#959)
     answered = {r.get("id") for r in store.read_jsonl_tail(chat_dir() / "receipts.jsonl", LATEST_BYTES)
                 if r.get("how") == "answered"}
     last = next((r for r in reversed(rows) if r.get("from") in NEWS and _for_user(r) and r.get("id") not in answered), None)
-    return {"now": store.now(), "asks": [ask] if ask else [], "messages": [last] if last else [],
+    return {"now": store.now(), "messages": [last] if last else [],
             "push": {"test": (store.read_json(chat_dir() / "push-test.json", None) or {}).get("ts")}}
 
 
-LISTS = ("messages", "asks")  # what a patch sends row by row; the rest, small, it sends whole
+LISTS = ("messages",)  # what a patch sends row by row; the rest, small, it sends whole
 
 
 def patch(sent: dict, snap: dict) -> dict | None:
-    """What a stream sends after its first state (#755): the rows of `messages` and `asks` new or
-    changed since the state ``sent`` records (updated in place) as `{put, drop}` (the ids gone),
-    and every other field whole (a kilobyte: the listener's busy, the prefs, the push key...), or
+    """What a stream sends after its first state (#755): the rows of `messages` new or changed
+    since the state ``sent`` records (updated in place) as `{put, drop}` (the ids gone), and
+    every other field whole (a kilobyte: the listener's busy, the push key...), or
     None when nothing but `now` changed. The whole state went out on every receipt and every busy
     flip, five times an exchange: 4.6 MB per open device with a long thread and plan mode. The
     small fields go whole so a page that took an older state from a POST's reply can't keep it:
@@ -951,7 +949,7 @@ def _week_api(since: float) -> dict:
 # ---- notifications: web push with no payload (webpush.py) ----
 # The page reports what it showed while visible (/api/seen); news no page showed within
 # PUSH_DELAY gets one push to every subscribed device, whose service worker then fetches `/api/latest`
-# and shows the newest open ask, else Claude's latest message. seen.jsonl: {id, ts, by: page|push,
+# and shows Claude's latest message (or a notice that it waits in the terminal). seen.jsonl: {id, ts, by: page|push,
 # endpoint (push: the device that took it)}.
 
 _keys: dict[str, str] = {}
@@ -1046,19 +1044,18 @@ def mark_seen(ids, by: str, endpoint: str | None = None) -> None:
 
 
 def news(now: float | None = None) -> list[str]:
-    """Ids of Claude's messages and open asks old enough to push and recent enough to matter,
+    """Ids of Claude's messages and open notices old enough to push and recent enough to matter,
     not yet shown or pushed."""
     now = now or store.now()
     done = _seen()
     items = [(m["id"], m["ts"]) for m in thread() if m.get("from") in NEWS and _for_user(m)]
-    items += [(a["id"], a["ts"]) for a in asks() if a["answer"] is None]
     return [i for i, ts in items if now - PUSH_WINDOW < ts <= now - PUSH_DELAY and i not in done]
 
 
 class Pusher:
     """Sends the pushes: woken by the hub, and every PUSH_DELAY/2 so news ripens on time. Each
     device is counted on its own: every due push was marked sent whatever the services said, so a
-    phone whose service was down for seconds missed a permission prompt (the 2026-11-18 audit,
+    phone whose service was down for seconds missed a permission prompt's card (the 2026-11-18 audit,
     #86). One that failed for now is tried again after PUSH_RETRY, within PUSH_WINDOW."""
 
     def __init__(self, hub: "Hub", send=None):
@@ -1127,223 +1124,27 @@ def build() -> str:
     return format(zlib.crc32(repr(files).encode()), "x")  # not hash(): it differs per process
 
 
-# ---- asks: permission prompts, plans, questions ----
-# While the user is away on the web chat, the mod puts Claude Code's dialogs here: the terminal's
-# would wait for nobody (the user, 2026-11-18). A `permission` (allow or deny the tool), a `plan`
-# (ExitPlanMode: approve it, or keep planning with a note), a `question` (AskUserQuestion: the
-# chosen options, `answers` keyed by question). asks.jsonl holds an ask row {id, ts, tool, text,
-# kind, detail?}, then answer rows {id, ts, answer, by, note?, answers?}; the first answer row
-# wins, so the page's answer and the mod's expiry, written by two processes, can't both stand.
-ANSWERS = ("allow", "deny", "expired")
-KINDS = ("permission", "plan", "question")
+# The kinds of dialog a notice may name (`wb chat notice --kind`), and the most of its `what` kept
+KINDS = ("permission", "plan", "question", "elicitation")
 ASK_TEXT = 2000
-DETAIL_MAX = 40_000   # bytes of JSON as stored (UTF-8): a plan or four questions with previews
-CUT_NOTE = " (cut: the rest is in the terminal)"
-NOTE_MAX = 2000
-AWAY = ("ask", "allow")  # prefs.json `away`: ask the user here, or let Claude go ahead
-
-
-def ask(tool: str, text: str, kind: str = "permission", detail: dict | None = None,
-        pid: int | None = None, for_: list[str] | None = None, here: bool = False) -> dict:
-    """A new ask. A permission while the user's setting says `allow` is answered at once, by
-    `setting`, and stays in the thread so they see what ran. ``pid``: the asking session's `wb
-    events` process, which lives exactly as long as the session; once it is gone the ask expires.
-    ``for_``: the agents whose request Claude is working on (#1042: the page says "for <name>");
-    ``here``: the user is at the terminal, so their away setting doesn't answer it."""
-    if kind not in KINDS:
-        raise ValueError(kind)
-    names = list(dict.fromkeys(for_ or []))
-    if not all(isinstance(n, str) and AGENT_NAME.fullmatch(n) for n in names):
-        raise ValueError("--for is an agent's name")
-    row = {"id": f"ask-{int(time.time() * 1000)}-{secrets.token_hex(4)}", "ts": store.now(),
-           "tool": tool[:200], "text": text[:ASK_TEXT], "kind": kind}
-    if detail is not None:
-        row["detail"] = fit_detail(detail)
-    if pid:
-        row["pid"] = int(pid)
-    if names:
-        row["for"] = names
-    store.append_jsonl(chat_dir() / "asks.jsonl", row)
-    _open_update(lambda w: w["asks"].__setitem__(row["id"], row))
-    if kind == "permission" and prefs()["away"] == "allow" and not here:
-        return answer(row["id"], "allow", "setting")
-    return {**row, "answer": None}
-
-
-def _stored(d) -> int:
-    return len(json.dumps(d, ensure_ascii=False).encode())
-
-
-def fit_detail(detail: dict) -> dict:
-    """``detail`` within DETAIL_MAX as stored: a plan, else the questions' previews, else their
-    options' descriptions, cut (each to one length, the longest first) and marked CUT_NOTE.
-    Measured as json.dumps' ASCII escapes, a 7,700-character Japanese plan was six bytes a
-    character and refused, and the dialog sat in the terminal with the phone told nothing (#535).
-    ValueError when even the questions themselves don't fit."""
-    if _stored(detail) <= DETAIL_MAX:
-        return detail
-    d = json.loads(json.dumps(detail))
-    opts = [o for q in d.get("questions") or [] if isinstance(q, dict)
-            for o in q.get("options") or [] if isinstance(o, dict)]
-    for spots in ([(d, "plan")], [(o, "preview") for o in opts], [(o, "description") for o in opts]):
-        spots = [(h, k, h[k]) for h, k in spots if isinstance(h.get(k), str) and h[k]]
-        if not spots:
-            continue
-        def cap(n):
-            for h, k, text in spots:
-                h[k] = text if len(text) <= n else text[:n].rstrip() + CUT_NOTE
-        lo, hi = 0, max(len(t) for _, _, t in spots)
-        while lo < hi:  # the longest length every text may keep
-            mid = (lo + hi + 1) // 2
-            cap(mid)
-            lo, hi = (mid, hi) if _stored(d) <= DETAIL_MAX else (lo, mid - 1)
-        cap(lo)
-        if _stored(d) <= DETAIL_MAX:
-            return d
-    raise ValueError("detail too long")
-
-
-def asks(limit: int = 20) -> list[dict]:
-    """The latest asks, and every open one older than those, each with its answer (None while
-    open; `stale` once open past ASK_STALE), `answered`, `by`, and the answer's `note` and
-    `answers` when it has them."""
-    seen: dict[str, dict] = {}
-    for r in store.read_jsonl_tail(chat_dir() / "asks.jsonl", THREAD_BYTES):  # an answer follows its ask
-        a = seen.get(r.get("id"))
-        if "answer" in r:
-            if a and a["answer"] is None and r["answer"] in ANSWERS:
-                a.update(answer=r["answer"], answered=r["ts"], by=r.get("by"))
-                a.update({k: r[k] for k in ("note", "answers") if k in r})
-        elif "tool" in r and r.get("id"):
-            seen[r["id"]] = {"kind": "permission", **r, "answer": None}
-    # an open ask older than the tail is still open (#329)
-    older = sorted(({**a, "answer": None} for i, a in open_work()["asks"].items() if i not in seen),
-                   key=lambda a: (a.get("ts", 0), a.get("id", "")))
-    rows, now = list(seen.values()), store.now()
-    out = older + [a for a in rows[:max(0, len(rows) - limit)] if a["answer"] is None] + rows[-limit:]
-    for a in out:
-        if a["answer"] is None and a.get("pid") and not _alive(a["pid"]):
-            _orphaned(a)
-    return [{**a, "stale": True} if a["answer"] is None and now - a["ts"] > ASK_STALE else a
-            for a in out]
-
-
-def _orphaned(a: dict) -> None:
-    """Expire an open ask whose session is gone (its pid), by `interrupted`, in place. A Bash card
-    left by a crashed or closed session stayed open for good: answerable for an hour though nobody
-    waited, then "it waits in the terminal", and every later push showed it (#538)."""
-    row = {"id": a["id"], "ts": store.now(), "answer": "expired", "by": "interrupted"}
-    store.append_jsonl(chat_dir() / "asks.jsonl", row)
-    _answered({k: v for k, v in a.items() if k not in ("answer", "stale")}, row)
-    a.update(answer="expired", answered=row["ts"], by="interrupted")
-
-
-def find_ask(ask_id: str) -> dict | None:
-    """The ask as it stands, answered or not. One answered after its row left the asks' tail is
-    in open.json's `answered`: answering took it out of the open index, and its waiter then got
-    "no such ask" for an answer just given (#447)."""
-    return (next((a for a in reversed(asks(10_000)) if a["id"] == ask_id), None)
-            or (open_work().get("answered") or {}).get(ask_id))
-
-
-ANSWER_KEPT = 86400  # seconds an answer stays in open.json for its waiter (the mod waits 30 minutes)
-
-
-def _settle(answered: dict, ask_row: dict, ans: dict) -> None:
-    """Keep the ask with its answer (the first one stands), and drop those kept past ANSWER_KEPT."""
-    answered.setdefault(ask_row["id"], {"kind": "permission", **ask_row, "answer": ans["answer"],
-                                        "answered": ans["ts"], "by": ans.get("by"),
-                                        **{k: ans[k] for k in ("note", "answers") if k in ans}})
-    cut = store.now() - ANSWER_KEPT
-    for k in [k for k, a in answered.items() if a.get("answered", 0) < cut]:
-        del answered[k]
-
-
-def _answered(ask_row: dict, ans: dict) -> None:
-    def change(w):
-        w["asks"].pop(ask_row["id"], None)
-        _settle(w["answered"], ask_row, ans)
-    _open_update(change)
-
-
-def answer(ask_id: str, verdict: str, by: str, note: str | None = None,
-           answers: dict | None = None) -> dict | None:
-    """Answer an open ask (a later answer changes nothing). The ask as it now stands, None when
-    there is no such ask. `answers` only for a question, and only its own questions."""
-    if verdict not in ANSWERS:
-        raise ValueError(verdict)
-    cur = find_ask(ask_id)
-    if cur and cur["answer"] is None:
-        row = {"id": ask_id, "ts": store.now(), "answer": verdict, "by": by}
-        if note:
-            row["note"] = note[:NOTE_MAX]
-        if answers is not None:
-            asked = {q.get("question") for q in (cur.get("detail") or {}).get("questions") or []}
-            if cur["kind"] != "question" or verdict != "allow" or not answers \
-                    or not set(answers) <= asked or not all(isinstance(v, str) and 0 < len(v) <= NOTE_MAX
-                                                            for v in answers.values()):
-                raise ValueError("answers")
-            row["answers"] = answers
-        elif cur["kind"] == "question" and verdict == "allow":
-            raise ValueError("answers")  # a question is answered with its answers
-        store.append_jsonl(chat_dir() / "asks.jsonl", row)
-        _answered({k: v for k, v in cur.items() if k not in ("answer", "stale")}, row)
-        cur = find_ask(ask_id) or {**cur, "answer": verdict, "answered": row["ts"], "by": by}
-    return cur
-
-
-def session_plan(session: str | None, plan_file: str | None = None) -> str:
-    """The plan this session wrote: the file ExitPlanMode's input names, else the last plan file
-    its transcript names, else "". The newest file in the plans directory was any project's: with
-    two planning, one session's card showed the other's plan, and the user sent revisions against
-    it (#253, the audit of 1.2)."""
-    from . import context, spend  # context imports this module
-    d = (context.claude_home().expanduser() / "plans").resolve()
-    f = None
-    if plan_file:
-        f = Path(plan_file).expanduser()
-    elif session and (transcript := spend.transcript_paths(session)[0]):
-        pat = re.compile(re.escape(str(d).encode()) + rb"/[A-Za-z0-9._-]+\.md")
-        try:
-            with open(transcript, "rb") as fh, mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-                f = next((Path(m.group().decode()) for m in reversed(list(pat.finditer(mm)))), None)
-        except (OSError, ValueError):  # gone, or empty (mmap refuses an empty file)
-            f = None
-    try:
-        if f is None or f.resolve().parent != d or f.suffix != ".md" or not f.resolve().is_file():
-            return ""
-        return f.read_text(errors="replace")[:DETAIL_MAX + 1]  # ask cuts it, marked (#535)
-    except OSError:
-        return ""
-
-
-def prefs() -> dict:
-    """The user's choices on the page: {"away": "ask"|"allow"} (chat/prefs.json)."""
-    p = store.read_json(chat_dir() / "prefs.json", None) or {}
-    return {"away": p.get("away") if p.get("away") in AWAY else "ask"}
-
-
-def set_prefs(**changes) -> dict:
-    with store.locked(chat_dir() / "prefs.lock"):
-        p = {**prefs(), **changes}
-        if p["away"] not in AWAY:
-            raise ValueError("away")
-        store.write_json(chat_dir() / "prefs.json", p)
-    return p
 
 
 # ---- which device the user last used (#959) ----
 # Away was where the user last typed: a web message made them away, typing in the terminal
-# brought them back. The owner typed in the terminal, then picked up the phone with the chat open
-# and "Let Claude go ahead" set; a permission prompt came up in the terminal, never reached the
-# phone and wasn't allowed (2026-11-21, #959). So using the page counts as using the phone: a page
+# brought them back. The owner typed in the terminal, then picked up the phone with the chat open;
+# a permission prompt came up in the terminal and never reached the phone (2026-11-21, #959).
+# So using the page counts as using the phone: a page
 # on screen and in use posts /api/active, and that marks the user away as a web message does
 # (chat/away.json's `at`, which the mod reads), until they type in the terminal again or answer a
 # dialog there (the mod's `back`). chat/page.json `{at}`: when a page was last in use, so a dialog
 # at the terminal is announced only to a user who uses the chat: a page in use within
 # PAGE_RECENT, or push on.
 PAGE_RECENT = 86400
-NOTICE_WHAT = {"permission": "a permission", "plan": "a plan", "question": "a question"}
+# The waiting line (#1350, from #1340's decision): no dialog is answered on the phone, only said
+# to wait, on either driver. A permission names the way out: the driver run with permissions
+# granted (its own mode and rules), so most work goes on from the chat (the owner, #1350).
+WAITING = "Claude is waiting for you in the terminal."
+WAITING_GRANT = " Run it with permissions granted to work from the chat."
 
 
 def active() -> float:
@@ -1366,24 +1167,25 @@ def page_used() -> float:
 
 
 def notice(tool: str, what: str, kind: str = "permission") -> dict | None:
-    """Tell the phone that a dialog waits in the terminal while the user isn't away (#959): a
-    `notice` row in the thread, with no buttons (only the terminal can answer it), pushed as
-    Claude's messages are. None, and nothing written, for a user who doesn't use the chat: no
-    page in use within PAGE_RECENT and no device with push on."""
+    """Tell the phone that a dialog waits in the terminal (#959, #1350): a `notice` row in the
+    thread, one line with no buttons (only the terminal can answer it), pushed as Claude's
+    messages are, until notice_done clears it. Every kind, away or not. None, and nothing
+    written, for a user who doesn't use the chat: no page in use within PAGE_RECENT and no device
+    with push on."""
     if kind not in KINDS:
         raise ValueError(kind)
     if not webpush.subscriptions() and store.now() - page_used() > PAGE_RECENT:
         return None
-    return send(f"Claude is waiting on {NOTICE_WHAT[kind]} in the terminal", "notice",
-                tool=tool[:200], what=what[:ASK_TEXT])
+    return send(WAITING + (WAITING_GRANT if kind == "permission" else ""), "notice",
+                tool=tool[:200], kind=kind, what=what[:ASK_TEXT])
 
 
 def notice_done(msg_id: str) -> bool:
-    """The notice's dialog was answered in the terminal (#959): no push is owed for it (one not yet
-    due is never sent), and the thread shows it answered (a receipt `{id, ts, by: "terminal", how:
-    "answered"}`). Unsettled, every prompt approved at the terminal in two seconds still buzzed
-    the phone ten seconds later, saying it waited (the #959 review). False for an id that is no
-    notice in the thread."""
+    """The notice's dialog settled in the terminal (#959): no push is owed for it (one not yet due
+    is never sent), and the thread leaves it out (a receipt `{id, ts, by: "terminal", how:
+    "answered"}`): the waiting line clears (#1350). Unsettled, every prompt approved at the
+    terminal in two seconds still buzzed the phone ten seconds later, saying it waited (the #959
+    review). False for an id that is no notice in the thread."""
     if not any(r.get("id") == msg_id and r.get("from") == "notice"
                for r in store.read_jsonl_tail(chat_dir() / "messages.jsonl", LATEST_BYTES)):
         return False
@@ -1393,11 +1195,13 @@ def notice_done(msg_id: str) -> bool:
     return True
 
 
-# The web chat's switch (the user, 2026-11-19): off unless they turn it on, from the pane or `wb chat
-# on`, and kept as they left it. Off, the pane shows no link and no session listens or sends it
-# their prompts; a server already running (systemd's) is left alone, its messages waiting.
+# The web chat's switch: on by default (the owner, 2026-11-24: "just turn on by default", #1281),
+# reversing 2026-11-19's off until `wb chat on`. Only `wb chat off` writes {"on": false}, and that
+# stays as the user left it. Off, the pane shows no link and no session listens or sends it their
+# prompts; a server already running (systemd's) is left alone, its messages waiting.
 def is_on() -> bool:
-    return bool((store.read_json(chat_dir() / "switch.json", None) or {}).get("on"))
+    doc = store.read_json(chat_dir() / "switch.json", None)
+    return not isinstance(doc, dict) or bool(doc.get("on", True))
 
 
 def set_on(on: bool) -> None:
@@ -1461,13 +1265,17 @@ def running(port: int) -> bool:
 START_WAIT = 10  # seconds wb chat on waits for the server it started to answer
 
 
-def wait_up(port: int, pid: int, limit: float = START_WAIT) -> bool:
+def wait_up(port: int, pid: int | None, limit: float = START_WAIT) -> bool:
     """Whether the server started as ``pid`` answers within ``limit`` seconds: it may exit at once
-    (the port taken, an address not here), and a fixed half second said started either way."""
+    (the port taken, an address not here), and a fixed half second said started either way. With
+    no pid (systemd or launchd started it), only the wait."""
     deadline = time.monotonic() + limit
     while time.monotonic() < deadline:
         if running(port):
             return True
+        if pid is None:
+            time.sleep(0.1)
+            continue
         try:
             if os.waitpid(pid, os.WNOHANG)[0]:
                 return False  # it exited: serve.log says why
@@ -1478,21 +1286,29 @@ def wait_up(port: int, pid: int, limit: float = START_WAIT) -> bool:
     return False
 
 
+# Claude Code's variables, which make a wb command Claude's (the mod's dialogs gate it). The server
+# runs commands for the user's clicks, so one started from a Claude session (`wb chat url`, the
+# mod's ensure) must never carry them: it would run wb as Claude (#1281).
+CLAUDE_VARS = ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_CODE_SESSION_ID")
+
+
 def start(port: int) -> int:
     """`wb chat serve` detached, its output in chat/serve.log, its pid in chat/serve.pid: for a
-    machine without the systemd unit, so turning the chat on is enough to reach it."""
+    machine without the systemd unit, so turning the chat on is enough to reach it. Its
+    environment has none of CLAUDE_VARS."""
     from . import cli  # only here: the server never starts one
     root = Path(__file__).resolve().parent.parent
+    env = {k: v for k, v in os.environ.items() if k not in CLAUDE_VARS}
     with open(chat_dir() / "serve.log", "a") as log:  # outlives wb, and a logout (#531)
         proc = cli.detach([sys.executable, "-X", "utf8", str(root / "bin" / "wb"), "chat", "serve",
-                           "--port", str(port)], cwd=root, stdout=log, stderr=log)
+                           "--port", str(port)], cwd=root, stdout=log, stderr=log, env=env)
     store.write_json(chat_dir() / "serve.pid", {"pid": proc.pid, "port": port, "start": _started(proc.pid)})
     return proc.pid
 
 
 # What keeps the chat up: systemd's wb-chat.service on Linux, launchd's workbench.chat agent on
 # macOS (launchd/workbench.chat.plist). Only systemd was known: on a Mac `wb chat off` and the
-# port-taken error gave systemctl advice, and revive ignored the agent (#756).
+# port-taken error gave systemctl advice, and the restart ignored the agent (#756).
 LAUNCHD_LABEL = "workbench.chat"
 
 
@@ -1525,24 +1341,79 @@ def _unit_keeps_it() -> bool:
         return False
 
 
-def revive() -> int | None:
-    """Start again the server `wb chat on` started (chat/serve.pid), when the switch is still on and
-    it is gone and nothing answers on its port; the port it started on, else None. Nothing brought
-    it back after a reboot or a crash, while the switch said on and the pane showed the link, so
-    the phone said "Can't reach the computer" for good (#449). `wb chat url` calls it, which the
-    mod runs at a session's start and every ten minutes while the chat is on. Never for a chat wb
-    didn't start, nor where wb-chat.service is enabled (systemd's to restart)."""
+def blocked_why(port: int) -> str:
+    """Why the chat can't come up on ``port``: something not this account's chat answers there."""
+    return (f"another account's chat (or another program, or a server still on a replaced token) "
+            f"answers on port {port}: wb chat on --port <free port> (and the same --port in "
+            "chat.json's service, if any)")
+
+
+def _start_unit() -> None:
+    """Have systemd or launchd start the chat it keeps (_unit_keeps_it): a stopped unit stays
+    stopped until something starts it, and a second server beside it would take its port."""
+    argv = (["launchctl", "kickstart", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"] if _macos()
+            else ["systemctl", "--user", "start", "wb-chat"])
+    try:
+        subprocess.run(argv, capture_output=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        pass  # wait_up says whether it came up
+
+
+def _log_tail() -> str:
+    try:
+        lines = (chat_dir() / "serve.log").read_text(errors="replace").strip().splitlines()
+    except OSError:
+        lines = []
+    return (lines or ["(nothing)"])[-1]
+
+
+def ensure(port: int) -> dict:
+    """The chat up on ``port`` unless the user turned it off (#1281, replacing revive, #449):
+    {"url", "state", "why"?}. "off": the switch is off. "up": this account's chat answers.
+    "blocked": something else answers there (why: blocked_why). Otherwise it starts the unit that
+    keeps it (_unit_keeps_it), else a detached server (start), unless the one serve.pid names is
+    still starting, and waits START_WAIT: "started", or "failed" (why: serve.log's last line). The
+    unit only for PORT, the one it serves; a unit that doesn't answer then is followed by a
+    detached server once (#1343): "started" with why naming the unit, or "failed".
+    `wb chat url` runs it, which the mod does at session start and every minute: a reboot, a
+    crash, WSL without systemd, an install where setup never ran. One at a time (chat/ensure.lock):
+    two sessions' at once started two servers, the second failing on the port."""
     from . import models  # as in stop_started
-    rec = store.read_json(chat_dir() / "serve.pid", None) or {}
-    pid, port = rec.get("pid"), rec.get("port")
-    if not is_on() or not isinstance(port, int) or not pid:
-        return None
-    if _alive(pid) and models.runs(int(pid), "chat", "serve"):  # up, or still starting
-        return None
-    if who_answers(port) is not None or _unit_keeps_it():
-        return None
-    start(port)
-    return port
+    out = {"url": ""}
+    try:
+        out["url"] = url(port)
+        if not is_on():
+            return {**out, "state": "off"}
+        with store.locked(chat_dir() / "ensure.lock"):
+            who = who_answers(port)
+            if who == "workbench":
+                return {**out, "state": "up"}
+            if who == "other":
+                return {**out, "state": "blocked", "why": blocked_why(port)}
+            rec = store.read_json(chat_dir() / "serve.pid", None) or {}
+            pid = rec.get("pid") if isinstance(rec, dict) else None
+            unit = False
+            if not (pid and rec.get("port") == port and _alive(pid, rec.get("start"))
+                    and models.runs(int(pid), "chat", "serve")):  # else still starting: wait for it
+                if unit := port == PORT and _unit_keeps_it():  # the unit serves PORT alone
+                    _start_unit()
+                    pid = None
+                else:
+                    pid = start(port)
+            if wait_up(port, int(pid) if pid else None):
+                return {**out, "state": "started"}
+            if not unit:
+                return {**out, "state": "failed", "why": _log_tail()}
+            # a unit that never answers (exit 78 on a Python older than 3.11 on its PATH, which
+            # stops it for good) left the app down for good: only the unit was ever started
+            # again, every minute (#1343). wb's own server once; the unit's next try finds the
+            # port taken, and the app is up either way
+            unit_why = f"{service_name()} didn't answer within {START_WAIT} s ({service_hint('status')})"
+            if wait_up(port, start(port)):
+                return {**out, "state": "started", "why": f"{unit_why}: wb started its own server"}
+            return {**out, "state": "failed", "why": f"{unit_why}, nor did wb's own server: {_log_tail()}"}
+    except (RuntimeError, OSError) as e:  # chat.json it can't follow, a state dir it can't write
+        return {**out, "state": "failed", "why": str(e)}
 
 
 def stop_started() -> bool:
@@ -1557,26 +1428,6 @@ def stop_started() -> bool:
     except OSError:
         return False
     return True
-
-
-def wait_answer(ask_id: str, timeout: float) -> str | None:
-    """Block until the ask is answered (its answer) or the timeout passes (None), woken by the
-    file's change; KeyError when there is no such ask."""
-    deadline = time.monotonic() + timeout
-    w = Watcher(chat_dir())  # before the first look, so an answer between the two isn't missed
-    try:
-        while True:
-            cur = find_ask(ask_id)
-            if cur is None:
-                raise KeyError(ask_id)
-            if cur["answer"]:
-                return cur["answer"]
-            left = deadline - time.monotonic()
-            if left <= 0:
-                return None
-            w.wait(min(left, 5))
-    finally:
-        w.close()
 
 
 def _started(pid: int) -> str | None:
@@ -1994,6 +1845,177 @@ def _read_meta_path(d: Path) -> dict | None:
 
 # ---- the server ----
 
+# ---- the web app's admin (#1280): Settings, Stats, the live view; the user's token alone ----
+# A Settings change runs its wb command as a child that isn't Claude (settings.child_env): the
+# user's click is the yes, as a command typed at their terminal is. Each change that went
+# through is recorded in settings-changes.jsonl, for the mod to tell Claude in the terminal
+# (#1283): the terminal stays primary (the owner, 2026-11-24), and a setting that needs Claude's
+# help to work (`help`, settings.HELP: probe not set up) still gets Claude's offer.
+CHANGES = "settings-changes.jsonl"  # under $WB_HOME
+TOP_LINGER_S = 15        # the live view's child outlives its last viewer this long (a tab switched back)
+TOP_STREAMS = 4          # GET /api/top streams open at once (each holds a thread)
+TOP_RETRY_S = 30         # a child that ended by itself is tried again this long after, doubling (the pane's)
+TOP_RETRY_MAX_S = 600    # to this
+TOP_LINE_MAX = 4 << 20   # a child's line longer than this is dropped, not kept growing
+
+
+def changes_path() -> Path:
+    return store.home() / CHANGES
+
+
+def admin_set(key, value) -> tuple[int, dict]:
+    """POST /api/settings: (status, body). 200 {ok, said, rows, help?}; 400 for no such row or a
+    value it doesn't take (nothing runs); 409 {ok: false, error, rows} when wb refused. A change
+    that went through appends {ts, key, label, from, to, said, help?, by: "web"} to CHANGES."""
+    from . import settings as admin
+    if not isinstance(key, str):
+        return 400, {"error": "no such setting"}
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, type(None))):
+        return 400, {"error": "not one of its choices"}
+    before = next((r for r in admin.rows() if r["key"] == key), {})
+    try:
+        done = admin.apply(key, value)
+    except KeyError:
+        return 400, {"error": "no such setting"}
+    except ValueError:
+        return 400, {"error": "not one of its choices"}
+    rows = admin.rows()
+    if not done["ok"]:
+        return 409, {"ok": False, "error": done["said"], "rows": rows}
+    admin.record(before, key, value, done, "web")
+    helps = {"help": done["help"]} if done.get("help") else {}
+    return 200, {"ok": True, "said": done["said"], "rows": rows, **helps}
+
+
+class TopFeed:
+    """GET /api/top's one `wb top --json` child per server, shared by every viewer: started with
+    the first, killed TOP_LINGER_S after the last leaves; one that ends by itself is said
+    (`down`) and tried again after TOP_RETRY_S, doubling to TOP_RETRY_MAX_S, as the pane's was.
+    Its viewers wake on the child's lines, through `cond`, never through the Hub. `event` is the
+    newest: ("top", the line verbatim) or ("down", why); `seq` counts them."""
+
+    def __init__(self):
+        self.cond = threading.Condition()
+        self.slots = threading.BoundedSemaphore(TOP_STREAMS)
+        self.viewers = 0
+        self.left_at = 0.0     # monotonic: when the last viewer left
+        self.driving = False   # a driver thread runs (at most one)
+        self.closed = False
+        self.seq = 0
+        self.event: tuple[str, str] | None = None
+        self.backoff = 0.0
+        self.retry_at = 0.0    # monotonic: no child before then
+        self.pid: int | None = None  # the child's, while one runs
+
+    def join(self) -> None:
+        with self.cond:
+            self.viewers += 1
+            if not self.driving:
+                self.driving = True
+                threading.Thread(target=self._drive, daemon=True, name="wb-top").start()
+
+    def leave(self) -> None:
+        with self.cond:
+            self.viewers -= 1
+            if not self.viewers:
+                self.left_at = time.monotonic()
+            self.cond.notify_all()
+
+    def close(self) -> None:
+        """Ends the driver and its child (a test's server going away)."""
+        with self.cond:
+            self.closed = True
+            self.cond.notify_all()
+
+    def down(self) -> dict:
+        """The `down` event's data: why the child ended, and the seconds until it is tried again."""
+        with self.cond:
+            why = self.event[1] if self.event and self.event[0] == "down" else ""
+            return {"why": why, "retry": max(0, round(self.retry_at - time.monotonic()))}
+
+    def _wanted(self) -> bool:
+        """Under the lock: whether a child should run; False ends the driver, at once (`driving`
+        off), so a viewer who comes next starts the next one."""
+        if not self.closed and (self.viewers or time.monotonic() - self.left_at < TOP_LINGER_S):
+            return True
+        self.driving = False
+        return False
+
+    def _drive(self) -> None:
+        while True:
+            with self.cond:
+                if not self._wanted():
+                    return
+                if (wait := self.retry_at - time.monotonic()) > 0:
+                    self.cond.wait(min(wait, 1.0))
+                    continue
+            if not self._child():
+                return
+
+    def _publish(self, kind: str, data: str) -> None:
+        with self.cond:
+            self.event = (kind, data)
+            self.seq += 1
+            if kind == "top":
+                self.backoff = 0.0
+            else:
+                self.backoff = min(self.backoff * 2 if self.backoff else TOP_RETRY_S, TOP_RETRY_MAX_S)
+                self.retry_at = time.monotonic() + self.backoff
+            self.cond.notify_all()
+
+    def _child(self) -> bool:
+        """One child, until it ends (True: tried again later) or nobody wants it (False: the
+        driver is over, the child killed)."""
+        from . import settings as admin
+        try:
+            proc = subprocess.Popen([sys.executable, "-X", "utf8", str(admin.WB), "top", "--json"],
+                                    env=admin.child_env(), stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except OSError as e:
+            self._publish("down", f"wb couldn't run: {e}")
+            return True
+        self.pid = proc.pid
+        out, err = proc.stdout.fileno(), proc.stderr.fileno()
+        open_fds, buf, tail = [out, err], b"", b""
+        try:
+            while out in open_fds:
+                with self.cond:
+                    if not self._wanted():
+                        return False
+                ready, _, _ = select.select(open_fds, [], [], 1.0)
+                for fd in ready:
+                    chunk = os.read(fd, 1 << 16)
+                    if not chunk:
+                        open_fds.remove(fd)
+                    elif fd == err:
+                        tail = (tail + chunk)[-2000:]  # why it ended, should it
+                    else:
+                        *lines, buf = (buf + chunk).split(b"\n")
+                        buf = buf if len(buf) <= TOP_LINE_MAX else b""
+                        for line in lines:
+                            text = line.decode("utf-8", "replace").strip()
+                            try:
+                                ok = isinstance(json.loads(text), dict)
+                            except ValueError:
+                                ok = False
+                            if ok:
+                                self._publish("top", text)
+        finally:
+            self.pid = None
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            proc.wait()
+            proc.stdout.close()
+            proc.stderr.close()
+        said = next((ln.strip() for ln in reversed(tail.decode("utf-8", "replace").splitlines()) if ln.strip()), "")
+        self._publish("down", said[:300] or f"wb top ended (exit {proc.returncode})")
+        return True
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "wb-chat"
     timeout = TIMEOUT  # an idle or half-open connection holds a thread no longer than this
@@ -2003,6 +2025,7 @@ class Handler(BaseHTTPRequestHandler):
     streams: threading.BoundedSemaphore
     waits: threading.BoundedSemaphore
     sends: RateLimit  # an agent token's sends (#1042)
+    top: TopFeed  # GET /api/top's one child (#1280)
     agent: str | None = None  # the agent calling, by its token; None for the user's own
     agent_token = ""  # that token, so a held wait or stream ends once it is revoked (_revoked)
 
@@ -2104,17 +2127,15 @@ class Handler(BaseHTTPRequestHandler):
         """The state for whoever calls: the whole of it for the user, an agent's own view (#1042)."""
         return agent_snapshot(self.agent) if self.agent else snapshot()
 
-    def _agent_unread(self, path: str) -> bool:
-        """For a path an agent may not read (AGENT_UNREAD): answered here (401, or 403 for an
-        agent) unless the user's token calls. True when answered."""
-        if not (key := next((k for k in AGENT_UNREAD if path == k or k.endswith("/") and path.startswith(k)), None)):
-            return False
+    def _gate(self, method: str, path: str) -> bool:
+        """Every /api/ request, before its path's own handler: the token (401), then for an
+        agent's the allow-list (AGENT_MAY, else 403). True when the request may go on."""
         if not self._authed():
-            return True
-        if self.agent:
-            self._json(403, {"error": f"agent tokens can't {AGENT_UNREAD[key]}"})
-            return True
-        return False
+            return False
+        if self.agent and not agent_may(method, path):
+            self._json(403, {"error": agent_refusal(path)})
+            return False
+        return True
 
     def _wait(self) -> None:
         """GET /api/wait?after=<message id>&timeout=<s>&until=done|reply (#1042): Claude's replies
@@ -2170,7 +2191,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._allowed():
             return
         path = self.path.split("?")[0]
-        if self._agent_unread(path):  # the user's alone (#1042)
+        if path.startswith("/api/") and not self._gate("GET", path):  # the token; agents' allow-list
             return
         if path == "/manifest.webmanifest":  # with the key, it opens the installed app keyed
             k = (parse_qs(urlsplit(self.path).query).get("k") or [""])[0]
@@ -2179,62 +2200,41 @@ class Handler(BaseHTTPRequestHandler):
                 m["start_url"] = f"/?token={k}"
             return self._send(200, json.dumps(m).encode(), TYPES[".webmanifest"])
         if path == "/api/shot":  # one side of wb shot's pair (#99), behind the token like the rest
-            if self._authed():
-                q = parse_qs(urlsplit(self.path).query)
-                n = (q.get("n") or [""])[0]
-                body = shot_png((q.get("task") or [""])[0], int(n) if n.isdigit() else 0,
-                                (q.get("side") or [""])[0])
-                if body is None:  # 410: dropped with its archived task, the message still names it (#821)
-                    pair = shots((q.get("task") or [""])[0], int(n) if n.isdigit() else 0)
-                    side = (pair or {}).get((q.get("side") or [""])[0])
-                    gone = isinstance(side, dict) and side.get("pruned")
-                    self._json(410 if gone else 404, {"error": "expired" if gone else "no such screenshot"})
-                else:
-                    self._send(200, body, "image/png")
-            return
+            q = parse_qs(urlsplit(self.path).query)
+            n = (q.get("n") or [""])[0]
+            body = shot_png((q.get("task") or [""])[0], int(n) if n.isdigit() else 0,
+                            (q.get("side") or [""])[0])
+            if body is None:  # 410: dropped with its archived task, the message still names it (#821)
+                pair = shots((q.get("task") or [""])[0], int(n) if n.isdigit() else 0)
+                side = (pair or {}).get((q.get("side") or [""])[0])
+                gone = isinstance(side, dict) and side.get("pruned")
+                return self._json(410 if gone else 404, {"error": "expired" if gone else "no such screenshot"})
+            return self._send(200, body, "image/png")
         if path == "/api/audio":  # one take of Claude's shortlist (#397), behind the token too
-            if self._authed():
-                q = parse_qs(urlsplit(self.path).query)
-                n = (q.get("n") or [""])[0]
-                got = audio_take((q.get("batch") or [""])[0], int(n) if n.isdigit() else 0)
-                if got is None:
-                    self._json(404, {"error": "no such take"})
-                else:
-                    self._send(200, *got)
-            return
+            q = parse_qs(urlsplit(self.path).query)
+            n = (q.get("n") or [""])[0]
+            got = audio_take((q.get("batch") or [""])[0], int(n) if n.isdigit() else 0)
+            return self._json(404, {"error": "no such take"}) if got is None else self._send(200, *got)
         if path.startswith(("/api/upload/", "/api/file/")):  # an attachment (#623)
-            if self._authed():
-                self._get_upload(path)
-            return
+            return self._get_upload(path)
         if path == "/api/state":
-            if self._authed():
-                self._json(200, self._snap())
-            return
+            return self._json(200, self._snap())
         if path == "/api/health":  # an agent's first call: is anyone listening (#1042)
-            if self._authed():
-                self._json(200, {"api": API_VERSION, "listening": listener() is not None})
-            return
+            return self._json(200, {"api": API_VERSION, "listening": listener() is not None})
         if path == "/api/wait":  # send, then wait for the answer (#1042)
-            if self._authed():
-                self._wait()
-            return
-        if path.startswith("/api/ask/"):  # a settled plan's whole text, when it is unfolded (#755)
-            if self._authed():
-                ask_id = path[len("/api/ask/"):]
-                got = find_ask(ask_id) if 0 < len(ask_id) <= 64 else None
-                if got is None:
-                    self._json(404, {"error": "no such prompt"})
-                else:
-                    self._json(200, {"ask": got})
-            return
+            return self._wait()
         if path == "/api/latest":  # the service worker's, at a push (#755)
-            if self._authed():
-                self._json(200, latest())
-            return
+            return self._json(200, latest())
         if path == "/api/stream":
-            if self._authed():
-                self._stream()
-            return
+            return self._stream()
+        if path == "/api/settings":  # the web app's Settings view: settings.py's rows (#1280)
+            from . import settings as admin
+            return self._json(200, {"rows": admin.rows(), "ts": store.now()})
+        if path == "/api/stats":  # the Stats view: wb stats --json in-process, and the names' reads
+            from . import settings as admin, stats
+            return self._json(200, {"feed": stats.feed(), **admin.reads()})
+        if path == "/api/top":  # the Stats view's live part: wb top --json's ticks (TopFeed)
+            return self._top()
         name = "index.html" if path in ("/", "/index.html") else path.lstrip("/")
         f = STATIC / name
         if "/" in name or f.suffix not in TYPES or not f.is_file():
@@ -2273,11 +2273,18 @@ class Handler(BaseHTTPRequestHandler):
             self._security_headers()
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
-            seen, had, sent = -1, None, time.monotonic()
+            # An event is followed, NUDGE_AFTER later, by a blank line (an empty event, nothing
+            # for a reader). WebKit's network layer (Playwright's on Linux) hands a streamed body
+            # to the page's reader only up to the first 8 KB of what came in one read, the rest
+            # once more bytes come: a state past 8 KB on a reconnect waited for the next ping, 15 s,
+            # and the push's wake showed nothing (the #1284 review, 2026-11-24). Sent with the
+            # event, the byte comes in its read and is held with it, so it goes on its own
+            seen, had, sent, nudge = -1, None, time.monotonic(), False
             while True:
                 with hub.cond:
+                    due = sent + (NUDGE_AFTER if nudge else PING_EVERY)
                     woke = hub.cond.wait_for(lambda: hub.version != seen,
-                                             timeout=max(0.0, PING_EVERY - (time.monotonic() - sent)))
+                                             timeout=max(0.0, due - time.monotonic()))
                     seen = hub.version
                 # revoked: it ends, and its reconnect is 401. A closed hub (Hub.close) ends it before
                 # another snapshot: woken by the close, a test's stream made one in the next test's
@@ -2296,13 +2303,18 @@ class Handler(BaseHTTPRequestHandler):
                     if event:
                         self.wfile.write(event.encode())
                         self.wfile.flush()
-                        sent = time.monotonic()
+                        sent, nudge = time.monotonic(), True
                         continue
-                    if time.monotonic() - sent < PING_EVERY:
+                    if time.monotonic() < due:
                         # Without inotify the hub wakes every second (how a dead listener is
                         # noticed): a ping only after PING_EVERY of silence, not one a second
                         # (the 2026-11-16 audit)
                         continue
+                if nudge:  # the event's tail, out of WebKit's buffer; the ping still PING_EVERY on
+                    self.wfile.write(b"\n")
+                    self.wfile.flush()
+                    nudge = False
+                    continue
                 self.wfile.write(b": ping\n\n")  # keeps the line (and the page's watchdog) alive
                 self.wfile.flush()
                 sent = time.monotonic()
@@ -2312,6 +2324,51 @@ class Handler(BaseHTTPRequestHandler):
             with hub.cond:
                 hub.open.remove(self)
             self.streams.release()
+
+    def _top(self) -> None:
+        """GET /api/top: `event: top` with each of wb top --json's lines verbatim (the newest at
+        once), `event: down` {why, retry} when its child ended, `: ping` after PING_EVERY of
+        silence. A client that hung up is noticed within WAIT_LOOK, so the child's linger starts."""
+        feed = self.top
+        if not feed.slots.acquire(blocking=False):
+            return self._json(503, {"error": "too many live views open"})
+        feed.join()
+        try:
+            if hasattr(socket, "TCP_USER_TIMEOUT"):  # a peer gone silent fails the next write
+                try:
+                    self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, UNACKED_MS)
+                except OSError:
+                    pass
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self._security_headers()
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            self.wfile.flush()
+            seen, sent = -1, time.monotonic()
+            while True:
+                with feed.cond:
+                    feed.cond.wait_for(lambda: feed.seq != seen, timeout=WAIT_LOOK)
+                    changed, seen, event = feed.seq != seen, feed.seq, feed.event
+                if changed and event:
+                    data = event[1] if event[0] == "top" else json.dumps(feed.down())
+                    self.wfile.write(f"event: {event[0]}\ndata: {data}\n\n".encode())
+                    self.wfile.flush()
+                    time.sleep(NUDGE_AFTER)  # the event's tail out of WebKit's buffer, as _stream's
+                    self.wfile.write(b"\n")
+                    self.wfile.flush()
+                    sent = time.monotonic()
+                elif self._gone():
+                    return
+                elif time.monotonic() - sent >= PING_EVERY:
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    sent = time.monotonic()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            feed.leave()
+            feed.slots.release()
 
     def _get_upload(self, path: str) -> None:
         """GET /api/upload/<id>: whether it is stored ({upload}, else 404), so a page asks before it
@@ -2347,12 +2404,10 @@ class Handler(BaseHTTPRequestHandler):
         """PUT /api/upload/<id>: the file's bytes as the body, its name (URI-encoded) in
         X-File-Name, its type in Content-Type. 200 {upload, new}; the same id again stores nothing
         and answers with the first. Refusals say why, for the page's chip (#623)."""
-        if not self._allowed():
+        if not self._allowed() or not self._gate("PUT", self.path.split("?")[0]):
             return
         if not self.path.startswith("/api/upload/"):
             return self._json(404, {"error": "not found"})
-        if not self._authed():
-            return
         try:
             n = int(self.headers.get("Content-Length") or -1)
         except ValueError:
@@ -2395,14 +2450,10 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def do_POST(self):
-        if not self._allowed():
+        if not self._allowed() or not self._gate("POST", self.path.split("?")[0]):
             return
-        if self.path not in ("/api/send", "/api/answer", "/api/prefs", "/api/seen", "/api/push", "/api/active"):
+        if self.path not in ("/api/send", "/api/seen", "/api/push", "/api/active", "/api/settings"):
             return self._json(404, {"error": "not found"})
-        if not self._authed():
-            return
-        if self.agent and self.path in AGENT_DENIED:  # the user's alone (#1042)
-            return self._json(403, {"error": f"agent tokens can't {AGENT_DENIED[self.path]}"})
         if self.agent and self.path == "/api/send" and (wait := self.sends.hit(self.agent)):
             return self._json(429, {"error": f"over {AGENT_SENDS_PER_MIN} sends a minute", "retry_after": wait})
         if (self.headers.get("Content-Type") or "").split(";")[0] != "application/json":
@@ -2420,20 +2471,6 @@ class Handler(BaseHTTPRequestHandler):
             text, cid = str(body.get("text", "")).strip(), body.get("cid")
         except (ValueError, AttributeError):
             return self._json(400, {"error": "bad json"})
-        if self.path == "/api/answer":  # an ask: allow or deny, a note, a question's answers
-            ask_id, verdict = body.get("id"), body.get("answer")
-            note, answers = body.get("note"), body.get("answers")
-            if not (isinstance(ask_id, str) and 0 < len(ask_id) <= 64) or verdict not in ("allow", "deny") \
-                    or not (note is None or isinstance(note, str) and len(note) <= NOTE_MAX) \
-                    or not (answers is None or isinstance(answers, dict) and len(answers) <= 4):
-                return self._json(400, {"error": "an answer is {id, answer: allow|deny, note?, answers?}"})
-            try:
-                cur = answer(ask_id, verdict, "web", note=note or None, answers=answers)
-            except ValueError:
-                return self._json(400, {"error": "those answers don't fit the question"})
-            if cur is None:
-                return self._json(404, {"error": "no such prompt"})
-            return self._json(200, {"ask": cur, "state": snapshot()})
         if self.path == "/api/seen":  # what the page showed: no push for it (endpoint: to it alone)
             ids, endpoint = body.get("ids"), body.get("endpoint")
             if not (isinstance(ids, list) and len(ids) <= 200
@@ -2461,11 +2498,8 @@ class Handler(BaseHTTPRequestHandler):
             (webpush.subscribe(endpoint, self.headers.get("User-Agent") or "") if on
              else webpush.unsubscribe(endpoint))
             return self._json(200, {"on": on})
-        if self.path == "/api/prefs":  # the page's settings
-            if set(body) - {"away"} or body.get("away") not in AWAY:
-                return self._json(400, {"error": "prefs are {away: ask|allow}"})
-            set_prefs(**body)
-            return self._json(200, {"state": snapshot()})
+        if self.path == "/api/settings":  # one of the web app's Settings, through its wb command
+            return self._json(*admin_set(body.get("key"), body.get("value")))
         if self.agent and body.get("about") is not None:  # what it answers is the user's (#1042)
             return self._json(400, {"error": "agent messages can't carry about"})
         files = body.get("files")
@@ -2576,7 +2610,7 @@ def make_servers(port: int, binds: list[str] | None = None,
     handler = type("ChatHandler", (Handler,), {
         "hosts": p["hosts"], "secret": token(), "hub": Hub(),
         "streams": threading.BoundedSemaphore(MAX_STREAMS), "waits": threading.BoundedSemaphore(MAX_WAITS),
-        "sends": RateLimit(AGENT_SENDS_PER_MIN)})
+        "sends": RateLimit(AGENT_SENDS_PER_MIN), "top": TopFeed()})
     servers = []
     for addr in p["binds"]:
         try:

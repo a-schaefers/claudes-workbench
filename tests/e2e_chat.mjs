@@ -1,5 +1,6 @@
-// The web chat end to end, in real browsers (WebKit as an iPhone, and Chromium): the page, the
-// real `wb chat serve`, and `wb chat` on the Claude side. Run: node tests/e2e_chat.mjs
+// The web chat end to end, in real browsers (WebKit as an iPhone, Chromium as a Pixel and at a
+// desktop's 1280×800): the page, the real `wb chat serve`, and `wb chat` on the Claude side.
+// Run: node tests/e2e_chat.mjs
 // Needs Playwright: PLAYWRIGHT=/path/to/node_modules/playwright (it isn't a workbench dependency).
 import { spawn, execFileSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, copyFileSync, readFileSync, readdirSync, existsSync, rmSync, statSync, utimesSync, chmodSync } from 'node:fs'
@@ -9,17 +10,27 @@ import { runInNewContext } from 'node:vm'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import * as statsView from './e2e_stats.mjs'
+import * as settingsView from './e2e_settings.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const pw = createRequire(import.meta.url)(process.env.PLAYWRIGHT || 'playwright')
 const home = mkdtempSync(join(tmpdir(), 'wbchat-'))
+// The user's roles, OpenCode config and OpenCode stay out too (#1286): the Settings rows run `wb
+// route --json` and `wb models --json`, and the user's catalog, read in the background into this
+// WB_HOME's hosted.json, renamed the Stats check's providers on the next engine
 const env = { ...process.env, WB_HOME: join(home, 'state'), WB_CHAT_TOKEN: join(home, 'token'),
-  WB_CHAT_CONFIG: join(home, 'chat.json'), WB_SAVINGS: join(home, 'savings.json') }  // not the user's
+  WB_CHAT_CONFIG: join(home, 'chat.json'), WB_SAVINGS: join(home, 'savings.json'),  // not the user's
+  WB_ROUTES: join(home, 'routes.json'), WB_OPENCODE_CONFIG: join(home, 'opencode.json'), WB_OPENCODE_BIN: 'false' }
 // a system Chromium when there is one (CHROMIUM names another), else Playwright's own
 const CHROMIUM = process.env.CHROMIUM || (existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : '')
 const PORT = Number(process.env.WB_E2E_PORT || 13371)
 const wb = (...args) => execFileSync(join(ROOT, 'bin', 'wb'), args, { env, encoding: 'utf8' })
 const sleep = ms => new Promise(r => setTimeout(r, ms))
+// a phone is one of Playwright's devices; the desktop, Chromium at 1280×800 (#1284)
+const DESKTOP = 'Desktop 1280×800'
+const devices = { [DESKTOP]: { viewport: { width: 1280, height: 800 } } }
+const ctxFor = device => device ? (devices[device] || pw.devices[device]) : {}
 
 let server
 function startServer() {
@@ -54,11 +65,11 @@ const until = async (fn, ms = 20000) => {
 
 async function run(engine, device) {
   console.log(`\n== ${engine}${device ? ' as ' + device : ''}`)
+  const desktop = device === DESKTOP
   wb('chat', 'log')  // makes the chat directory
   wb('chat', 'url')  // and the key
   writeFileSync(join(home, 'state/chat/messages.jsonl'), '')
   writeFileSync(join(home, 'state/chat/receipts.jsonl'), '')
-  writeFileSync(join(home, 'state/chat/asks.jsonl'), '')
   writeFileSync(join(home, 'state/chat/listener.json'), '{}')
   rmSync(join(home, 'state/chat/open.json'), { force: true })  // the last engine's unread, rebuilt from the files
   writeFileSync(join(home, 'state/results.jsonl'), '')
@@ -67,7 +78,7 @@ async function run(engine, device) {
   const base = `http://localhost:${PORT}/`
   await until(async () => (await fetch(base)).status > 0)  // listening: 800 ms was a guess (#1223)
   const browser = await pw[engine].launch(engine === 'chromium' && CHROMIUM ? { executablePath: CHROMIUM } : {})
-  const ctx = await browser.newContext(device ? pw.devices[device] : {})
+  const ctx = await browser.newContext(ctxFor(device))
   const page = await ctx.newPage()
   // the server's thread held back 1.5 s while this tab's sessionStorage says `e2e-hold`, by the
   // page's own fetch: Playwright's routes saw these requests but no longer held them once the
@@ -97,12 +108,47 @@ async function run(engine, device) {
     listen(false)
     await until(async () => (await page.textContent('#presence-text')).includes('listening in ~/project'))
   })
+  // #1341: the chat says what it is for, in the empty state, and over a thread as a hint until dismissed
+  const PURPOSE = 'Message your driver from anywhere: most work can run from here.'
+  await check('the empty state says what the chat is for, and no hint repeats it', async () => {
+    if (!(await page.textContent('#intro p')).replace(/\s+/g, ' ').includes(PURPOSE)) throw new Error(await page.textContent('#intro p'))
+    if (await page.locator('#hint').isVisible()) throw new Error('the hint shows over the empty state')
+  })
   await check('a sent message lands once, with its tick', async () => {
     await page.fill('#input', 'hello from the phone')
     await page.click('#send')
     await until(() => messages().length === 1)
     await until(async () => (await page.locator('.row.user .meta').last().textContent()).includes('Delivered'))
     if (await page.inputValue('#input')) throw new Error('the box was not cleared')
+  })
+  await check('over a thread the hint shows once, dismisses, and stays dismissed after a reload', async () => {
+    await until(async () => await page.locator('#hint').isVisible())
+    const said = (await page.textContent('#hint-text')).replace(/\s+/g, ' ')
+    for (const want of [PURPOSE, 'waits in its terminal', 'permissions granted', 'settings live here'])
+      if (!said.includes(want)) throw new Error(said)
+    await page.click('#hint-x')
+    await until(async () => await page.locator('#hint').isHidden())
+    if (await page.evaluate(() => localStorage.getItem('wb-chat-hint')) !== 'true') throw new Error('the dismissal was not kept')
+    await page.reload()
+    await until(async () => (await page.locator('.row').count()) >= 1)
+    await sleep(500)  // a claim that it does not come back
+    if (await page.locator('#hint').isVisible()) throw new Error('the hint came back after a reload')
+  })
+  await check('where storage throws, the hint still shows and dismisses, and the page still works', async () => {
+    const p = await ctx.newPage()
+    const errs = []
+    p.on('pageerror', e => errs.push(String(e)))
+    await p.addInitScript(() => {
+      for (const f of ['getItem', 'setItem', 'removeItem', 'key']) Storage.prototype[f] = () => { throw new DOMException('denied', 'SecurityError') }
+    })
+    try {
+      await p.goto(base + '#token=' + token)
+      await until(async () => (await p.locator('.row').count()) >= 1)
+      await until(async () => await p.locator('#hint').isVisible())
+      await p.click('#hint-x')
+      await until(async () => await p.locator('#hint').isHidden())
+      if (errs.length) throw new Error(errs.join(' | '))
+    } finally { await p.close() }
   })
   await check('a receipt shows as read', async () => {
     wb('chat', 'ack', messages()[0].id, '--by', 's1')
@@ -182,7 +228,7 @@ async function run(engine, device) {
   await check('the app installs only over https: no manifest over localhost, a keyed one over https', async () => {
     // a localhost install beside the tailnet's left two apps of one name (2026-11-18)
     if (await page.locator('link[rel=manifest]').count()) throw new Error('a manifest over http://localhost')
-    const sec = await browser.newContext(device ? pw.devices[device] : {})
+    const sec = await browser.newContext(ctxFor(device))
     await sec.route('https://chat.test/**', async r => {  // an https origin, served by the real server
       const url = r.request().url().replace('https://chat.test/', base)
       if (url.includes('/api/')) return r.abort()
@@ -202,98 +248,35 @@ async function run(engine, device) {
     await ctx.unroute('**/api/**')
     await until(async () => (await page.textContent('#presence-text')).includes('listening'), 40000)
   })
-  await check('a permission prompt shows Allow and Deny, and a tap answers it once', async () => {
-    const id = wb('chat', 'ask', '--tool', 'Bash', '--text', 'git push origin main').split(' ')[0]
-    await until(async () => (await page.locator('.row.ask .choices button').count()) === 2)
-    const card = await page.locator('.row.ask .card').last().textContent()
-    if (!card.includes('Claude wants to use Bash') || !card.includes('git push origin main')) throw new Error(card)
-    const box = await page.locator('.row.ask .allow').boundingBox()
-    if (box.height < 44) throw new Error(`Allow is ${box.height}px tall: too small to tap`)
-    await page.click('.row.ask .allow')
-    await until(() => wb('chat', 'wait', id, '--timeout', '0').trim() === 'allow')
-    await until(async () => (await page.locator('.row.ask .meta').last().textContent()).includes('you allowed it'))
-    if (await page.locator('.row.ask .choices').count()) throw new Error('the buttons are still there')
-  })
-  await check('a prompt whose purpose Claude gave leads with it, the command under it', async () => {
-    // #103: the tool's name said less than the decision asked
-    const id = wb('chat', 'ask', '--tool', 'Bash', '--text', 'make test-gpu', '--detail',
-      JSON.stringify({ purpose: 'Run the GPU tests.' })).split(' ')[0]
-    await until(async () => (await page.locator('.row.ask .choices').count()) === 1)
-    const head = await page.locator('.row.ask .asks').last().textContent()
-    if (head !== 'Allow Claude to run the GPU tests? (Bash)') throw new Error(head)
-    if (!(await page.locator('.row.ask pre').last().textContent()).includes('make test-gpu')) throw new Error('no command')
-    const [allow, deny] = await Promise.all(['.allow', '.deny'].map(c => page.locator('.row.ask .choices ' + c).last()
-      .evaluate(b => getComputedStyle(b).backgroundColor)))
-    if (allow !== deny) throw new Error(`Allow ${allow} and Deny ${deny} differ`)
-    wb('chat', 'answer', id, 'deny', '--by', 'cli')
-    await until(async () => (await page.locator('.row.ask .choices').count()) === 0)
-  })
-  await check('a prompt left unanswered says it waits in the terminal', async () => {
-    const id = wb('chat', 'ask', '--tool', 'Write', '--text', '/etc/hosts').split(' ')[0]
-    await until(async () => (await page.locator('.row.ask .choices').count()) === 1)
-    wb('chat', 'answer', id, 'expired', '--by', 'timeout')
-    await until(async () => (await page.locator('.row.ask .meta').last().textContent()).includes('waits in the terminal'))
-    if (await page.locator('.row.ask .choices').count()) throw new Error('the buttons are still there')
-  })
-  await check('a plan shows folded, and Keep planning sends a note back', async () => {
-    const plan = '# The plan\n\n' + Array.from({ length: 30 }, (_, i) => `${i + 1}. step ${i + 1}`).join('\n')
-    const id = wb('chat', 'ask', '--tool', 'ExitPlanMode', '--kind', 'plan', '--detail', JSON.stringify({ plan })).split(' ')[0]
-    await until(async () => (await page.locator('.row.ask').last().locator('.plan').count()) === 1)
-    const last = page.locator('.row.ask').last()
-    if (!(await last.locator('.plan.folded').count())) throw new Error('a long plan is not folded')
-    await last.locator('.more').click()
-    await last.locator('.choices .deny').click()            // opens the note
-    await last.locator('.note').fill('split step 2')
-    await last.locator('.choices .deny').click()            // sends it back
-    await until(() => { const a = JSON.parse(wb('chat', 'wait', id, '--timeout', '0', '--json')); return a.answer === 'deny' && a.note === 'split step 2' })
-    await until(async () => (await page.locator('.row.ask .meta').last().textContent()).includes('you asked for changes'))
-  })
-  await check('a settled plan comes cut, and Show the whole plan fetches the rest', async () => {
-    // #755: thirty answered plans were most of a 922 KB state, sent on every change
-    const plan = '# Long\n\n' + Array.from({ length: 400 }, (_, i) => `${i + 1}. step ${i + 1}`).join('\n') + '\n\nTHE END'
-    const id = wb('chat', 'ask', '--tool', 'ExitPlanMode', '--kind', 'plan', '--detail', JSON.stringify({ plan })).split(' ')[0]
-    await until(async () => (await page.locator('.row.ask').last().locator('.choices .deny').count()) === 1)
-    wb('chat', 'answer', id, 'deny', '--by', 'cli')
-    await until(async () => (await page.locator('.row.ask .meta').last().textContent()).includes('you asked for changes'))
-    const last = page.locator('.row.ask').last()
-    if ((await last.locator('.plan').textContent()).includes('THE END')) throw new Error('the whole plan came in the state')
-    await last.locator('.more').click()
-    await until(async () => (await last.locator('.plan').textContent()).includes('THE END'))
-    if (await last.locator('.plan.folded, .more').count()) throw new Error('still folded')
-  })
-  await check("Claude's question: pick an option, answer", async () => {
-    const questions = [{ question: 'Which DB?', header: 'DB', multiSelect: false,
-      options: [{ label: 'SQLite', description: 'one file' }, { label: 'Postgres', description: 'a server' }] }]
-    const id = wb('chat', 'ask', '--tool', 'AskUserQuestion', '--kind', 'question', '--detail', JSON.stringify({ questions })).split(' ')[0]
-    await until(async () => (await page.locator('.row.ask').last().locator('.opt').count()) === 2)
-    const card = page.locator('.row.ask').last()
-    if (!(await card.locator('.choices .allow').isDisabled())) throw new Error('Answer is enabled with nothing picked')
-    await card.locator('.opt', { hasText: 'SQLite' }).click()
-    await card.locator('.choices .allow').click()
-    await until(() => JSON.parse(wb('chat', 'wait', id, '--timeout', '0', '--json')).answers?.['Which DB?'] === 'SQLite')
-    await until(async () => (await page.locator('.row.ask .picked').last().textContent()) === 'SQLite')
-  })
-  await check('the gear opens the settings; "Let Claude go ahead" is saved and allows the next prompt', async () => {
-    await page.click('#gear')
+  // the shell's views (#1284): a tap on the nav (the rail on a desktop), then the body shows it
+  const goTo = async name => {
+    await page.click(`#tabbar .tab[data-view="${name}"]`)
+    await until(() => page.evaluate(n => document.body.dataset.view === n, name))
+  }
+  await check('Settings holds what the gear\'s sheet did, as cards, and no way to answer Claude\'s prompts from here (#1350)', async () => {
+    await goTo('stats')                                    // What it saved went to Stats (#1284)
+    if (!(await page.textContent('#saved')).includes('Nothing to compare yet')) throw new Error('a saving shown with no task')
+    await goTo('settings')
     await until(async () => await page.locator('#settings').isVisible())
     if (!(await page.textContent('#settings')).includes('second lane')) throw new Error('no word on what this chat is')
-    if (!(await page.textContent('#saved')).includes('Nothing to compare yet')) throw new Error('a saving shown with no task')
-    await page.click('[data-away="allow"]')
-    await until(() => JSON.parse(readFileSync(join(home, 'state/chat/prefs.json'), 'utf8')).away === 'allow')
-    if (wb('chat', 'ask', '--tool', 'Bash', '--text', 'make').split(' ')[1].trim() !== 'allow') throw new Error('not allowed at once')
-    await until(async () => (await page.locator('.row.ask .meta').last().textContent()).includes('allowed by your setting'))
-    await page.click('[data-away="ask"]')
-    await until(() => JSON.parse(readFileSync(join(home, 'state/chat/prefs.json'), 'utf8')).away === 'ask')
+    const heads = await page.$$eval('#settings .card h3', h => h.map(x => x.textContent).join(' | '))
+    if (heads !== 'While away | Notifications | Install the app | This chat | This device') throw new Error(heads)
+    if (await page.locator('[data-away]').count()) throw new Error('"Let Claude go ahead" is back')
+    const r = await fetch(base + 'api/prefs', { method: 'POST', headers: { Authorization: 'Bearer ' + token,
+      'Content-Type': 'application/json' }, body: '{"away":"allow"}' })
+    if (r.status !== 404) throw new Error(`/api/prefs answered ${r.status}`)
   })
-  await check('the settings say you are away once you use this page after the terminal, and that the terminal\'s prompts are told here (#959)', async () => {
-    if (await page.locator('#settings').isHidden()) await page.click('#gear')  // the last check left it open
+  await check('the settings say you are away once you use this page after the terminal, and that prompts are answered in the terminal, a line here saying one waits (#959, #1350)', async () => {
+    await goTo('settings')                                 // where the last check left it
     await until(async () => await page.locator('#settings').isVisible())
     const said = await page.textContent('#away-when')
     for (const want of ['use this page (open it or send a message here) after using the terminal',
-                        'until you type or answer a prompt in the terminal again',
-                        "While you're at the terminal, prompts stay there, and one still waiting after half a minute is told here."])
+                        'until you type or answer a prompt in the terminal again'])
       if (!said.includes(want)) throw new Error(said)
-    await page.click('#gear')
+    const prompts = await page.textContent('#away-prompts')
+    for (const want of ['are answered in the terminal, never here', 'Run Claude with permissions granted to work from the chat.'])
+      if (!prompts.includes(want)) throw new Error(prompts)
+    await goTo('chat')
     await until(async () => await page.locator('#settings').isHidden())
   })
   await check('the page coming on screen in use tells the computer, and one hidden or unfocused does not (#959)', async () => {
@@ -358,34 +341,36 @@ async function run(engine, device) {
       await page.evaluate(() => { window.fetch = window._fetch })
     }
   })
-  await check('a prompt waiting in the terminal shows as a notice, with no buttons (#959)', async () => {
+  await check('a prompt waiting in the terminal is one line with no buttons and no answer card, and its settling clears it (#959, #1350)', async () => {
     const id = wb('chat', 'notice', '--tool', 'Bash', '--text', 'rm -rf runs/*').trim()
     if (id.startsWith('skipped')) throw new Error(id)
     const row = page.locator('.row.notice').last()
-    await until(async () => (await row.textContent()).includes('Claude is waiting on a permission in the terminal'))
+    await until(async () => (await row.textContent()).includes('Claude is waiting for you in the terminal. Run it with permissions granted to work from the chat.'))
     if ((await row.locator('.notice-what').textContent()) !== 'rm -rf runs/*') throw new Error(await row.textContent())
     if (await row.locator('button').count()) throw new Error('a notice with buttons')
-    if (!(await row.locator('.meta').textContent()).includes('answer it in the terminal')) throw new Error(await row.textContent())
-    // answered there: settled, so the thread no longer says it waits (the #959 review)
+    if (await page.locator('.row.ask, .card .choices').count()) throw new Error('an answer card on the page')
+    const plan = wb('chat', 'notice', '--tool', 'ExitPlanMode', '--kind', 'plan').trim()
+    await until(async () => (await page.locator('.row.notice').count()) === 2)
+    if ((await page.locator('.row.notice').last().textContent()).includes('permissions granted')) throw new Error('a plan names permissions')
+    // settled there: the line clears
     if (!wb('chat', 'notice', '--done', id).startsWith('answered')) throw new Error('not settled')
-    await until(async () => (await row.locator('.meta').textContent()).includes('answered in the terminal'))
+    if (!wb('chat', 'notice', '--done', plan).startsWith('answered')) throw new Error('not settled')
+    await until(async () => (await page.locator('.row.notice').count()) === 0)
   })
-  await check('the gear shows what the week\'s tasks saved Claude, once: the badge and its one line', async () => {
+  await check('Stats shows what the week\'s tasks saved Claude, once: the badge and its one line', async () => {
     const usage = { turns: 2, calls: 5, input: 1000, cache_write_5m: 0, cache_write_1h: 10000, cache_read: 200000, output: 3000 }
     writeFileSync(join(home, 'state/results.jsonl'), JSON.stringify({ ts: Date.now() / 1000, outcome: 'accepted',
       claude: usage, diff: { files: 4, added: 61, removed: 1 }, gpu_wh: 600 }) + '\n')
     await page.reload()
-    await page.click('#gear')
+    await goTo('stats')
     await until(async () => (await page.textContent('#saved')).includes('The GPU used 600 Wh.'))
     // #1322: the saving is the badge's alone, not said again in the paragraph
     const said = await page.textContent('#saved')
     if (said.includes('3K') || said.includes('estimate')) throw new Error(said)
     // #845: a price in the user's own currency showed as dollars on the phone
     writeFileSync(env.WB_SAVINGS, JSON.stringify({ kwh_price: 0.3 }))
-    await page.click('#gear')
-    await until(async () => await page.locator('#settings').isHidden())
-    await page.reload()
-    await page.click('#gear')
+    await page.reload()                                    // on #stats still: the hash is the view
+    await goTo('stats')
     await until(async () => (await page.textContent('#saved')).includes('The GPU used 600 Wh, cost 0.18.'))
     if ((await page.textContent('#saved')).includes('$')) throw new Error('a currency sign: ' + await page.textContent('#saved'))
     // #1022: an API task's dollars carry a `$` (OpenCode's unit), apart from the saving, while the
@@ -395,10 +380,8 @@ async function run(engine, device) {
     // #1135: at the catalog's prices a figure is an estimate (≈); at the user's own (wb model price) it isn't
     appendFileSync(join(home, 'state/results.jsonl'), JSON.stringify({ ts: Date.now() / 1000, outcome: 'accepted', kind: 'api', provider: 'deepinfra',
         model: 'deepinfra/acme-flash', api: { cost: 0.1, source: 'metered', prices: 'yours' } }) + '\n')
-    await page.click('#gear')
-    await until(async () => await page.locator('#settings').isHidden())
     await page.reload()
-    await page.click('#gear')
+    await goTo('stats')
     await until(async () => (await page.textContent('#saved')).includes('API models: 2 tasks, ≈$0.52 (deepseek ≈$0.42, deepinfra $0.10).'))
     if (!(await page.textContent('#saved')).includes('The GPU used 600 Wh, cost 0.18. API')) throw new Error(await page.textContent('#saved'))
     writeFileSync(env.WB_SAVINGS, '{}')  // no price again, for the next engine
@@ -410,18 +393,21 @@ async function run(engine, device) {
     if (s !== '~3K Claude tokens saved this week') throw new Error(s)
     const box = await page.locator('#badge').boundingBox()
     if (box.width > (await page.evaluate(() => innerWidth))) throw new Error('wider than the phone')
-    await page.click('#gear')
-    await until(async () => await page.locator('#settings').isHidden())
+    await goTo('chat')
+    await until(async () => await page.locator('#saved').isHidden())
   })
-  await check('the app: its worker runs, holds the key, and the gear says how to install it and get notifications', async () => {
+  await check('the app: its worker runs, holds the key, and Settings says how to install it and get notifications', async () => {
+    await goTo('settings')
     await until(() => page.evaluate(async () => !!(await navigator.serviceWorker.getRegistration())))
     await until(() => page.evaluate(async () => (await (await caches.open('wb-chat')).match('/key')) !== undefined))
     if (!(await page.textContent('#app')).includes('installs from the https address')) throw new Error('install offered over http')
     const notify = await page.textContent('#notify')
     if (engine === 'webkit' ? !notify.includes('installed app') : !(await page.locator('#push').count())) throw new Error('notifications: ' + notify)
-    await page.keyboard.press('Escape')
+    await goTo('chat')
     await until(async () => await page.locator('#settings').isHidden())
   })
+  await shell()
+  if (desktop) return finish()   // the desktop: the shell and its views; the thread's checks are the phones'
   await check('what the page showed on screen is reported, so it is not pushed', async () => {
     await page.locator('.thread').click({ position: { x: 5, y: 5 } })  // in use: touched just now
     const shown = JSON.parse(readFileSync(join(home, 'state/chat/messages.jsonl'), 'utf8').trim().split('\n').filter(l => l.includes('"claude"')).at(-1)).id
@@ -662,8 +648,10 @@ async function run(engine, device) {
     await page.evaluate(() => document.getElementById('input').blur())
     // the page fits again on a ladder of timers up to 1.2 s: waited for, not slept past (#1223)
     const at = () => page.evaluate(() => ({ t: document.body.style.transform, h: document.body.style.height,
-      foot: Math.round(document.getElementById('composer').getBoundingClientRect().bottom), vh: innerHeight, y: scrollY }))
-    const down = a => !a.t && !a.h && !a.y && Math.abs(a.foot - a.vh) <= 2
+      foot: Math.round(document.getElementById('composer').getBoundingClientRect().bottom), vh: innerHeight, y: scrollY,
+      nav: document.getElementById('tabbar').getBoundingClientRect().toJSON() }))
+    // the composer on the bar, the bar at the foot (#1284)
+    const down = a => !a.t && !a.h && !a.y && Math.abs(a.foot - a.nav.top) <= 2 && Math.abs(a.nav.bottom - a.vh) <= 2
     await until(async () => down(await at())).catch(async () => { throw new Error(JSON.stringify(await at())) })
   })
   await check('two tabs offline, both closed, reopened: each message lands exactly once', async () => {
@@ -749,7 +737,7 @@ async function run(engine, device) {
     // nothing had reached the server
     // its own context with no service worker: WebKit's routing doesn't see a page's fetches
     // while one is registered
-    const qc = await browser.newContext({ ...(device ? pw.devices[device] : {}), serviceWorkers: 'block' })
+    const qc = await browser.newContext({ ...(ctxFor(device)), serviceWorkers: 'block' })
     const q = await qc.newPage()
     q.on('pageerror', onError)
     await q.goto(base + '#token=' + token)
@@ -824,7 +812,7 @@ async function run(engine, device) {
     // #936 (the review of 1.90.24): every 4xx but 401 was a refusal, so a throttled send waited
     // for a tap on retry; uploads already took 408 and 429 as "try again later". No service
     // worker: WebKit's routing doesn't see a page's fetches while one is registered
-    const tc = await browser.newContext({ ...(device ? pw.devices[device] : {}), serviceWorkers: 'block' })
+    const tc = await browser.newContext({ ...(ctxFor(device)), serviceWorkers: 'block' })
     const t = await tc.newPage()
     t.on('pageerror', onError)
     try {
@@ -1115,10 +1103,10 @@ async function run(engine, device) {
     wb('chat', 'reply', '--to', sent.message.id, '--text', 'Reviewed: two nits.')
     const [, got] = await api(`/api/wait?after=${sent.message.id}&timeout=5`)
     if (got.replies.map(r => r.text).join() !== 'Reviewed: two nits.') throw new Error(JSON.stringify(got))
-    if ((await api('/api/prefs', { away: 'allow' }))[0] !== 403) throw new Error('an agent changed the settings')
-    // its view is its own conversation: none of the user's messages, no dialogs, no settings
+    if ((await api('/api/settings', { key: 'coding', value: 'ask' }))[0] !== 403) throw new Error('an agent changed the settings')
+    // its view is its own conversation: none of the user's messages, no settings
     const [, st] = await api('/api/state')
-    if (st.asks || st.prefs || st.push || st.savings) throw new Error('an agent read the user\'s state: ' + Object.keys(st))
+    if (st.push || st.savings) throw new Error('an agent read the user\'s state: ' + Object.keys(st))
     if (st.messages.some(m => m.from === 'user')) throw new Error('an agent read the user\'s messages')
     // #1128: Claude's reply to the agent alone read as one to the user, and counted in the tab's
     // unread while the page was hidden; it names the agent, and only a reply to the user counts
@@ -1139,20 +1127,152 @@ async function run(engine, device) {
     }
     await until(async () => await page.title() === 'Workbench')
   })
-  await check("a dialog while Claude works on an agent's request says whose it is, on the page and in the push (#1042)", async () => {
-    const id = wb('chat', 'ask', '--tool', 'Bash', '--text', 'git push origin fix', '--for', `e2e-${engine}`, '--here').split(' ')[0]
-    const card = page.locator('.row.ask').last()
-    await until(async () => (await card.locator('.choices button').count()) === 2)
-    if ((await card.locator('.ask-for').textContent()) !== `for e2e-${engine}`) throw new Error(await card.textContent())
-    const said = await swSays({ now: Date.now() / 1000, asks: [{ id, ts: Date.now() / 1000, tool: 'Bash', text: 'git push origin fix', kind: 'permission', answer: null, for: [`e2e-${engine}`] }], messages: [] })
-    if (said.title !== `Claude wants to use Bash (for e2e-${engine})`) throw new Error(JSON.stringify(said))
-    wb('chat', 'answer', id, 'expired', '--by', 'interrupted')        // answered in the terminal first
-    await until(async () => (await page.locator('.row.ask .meta').last().textContent()).includes('settled in the terminal'))
-    if (await page.locator('.row.ask').last().locator('.choices').count()) throw new Error('the buttons are still there')
-  })
-  await check('no script errors', async () => { if (errors.length) throw new Error(errors.join('; ')) })
-  await browser.close()
-  await stopServer()
+  await finish()
+
+  async function finish() {
+    await check('no script errors', async () => { if (errors.length) throw new Error(errors.join('; ')) })
+    await browser.close()
+    await stopServer()
+  }
+
+  // The shell (#1284): the nav, the views by the hash, the Chat tab's badge, the nav and the
+  // keyboard, window.WB; then each view's own checks (e2e_stats.mjs, e2e_settings.mjs)
+  async function shell() {
+    await check(desktop ? 'a left rail of Chat, Stats and Settings, the chat a centred column; no gear'
+                        : 'three tabs at the foot, Chat, Stats and Settings, under the composer; no gear', async () => {
+      await goTo('chat')
+      if (await page.locator('#gear').count()) throw new Error('the gear is still there')
+      const g = await page.evaluate(() => {
+        const r = s => document.querySelector(s).getBoundingClientRect().toJSON()
+        return { nav: r('#tabbar'), chat: r('#view-chat'), composer: r('#composer'), thread: r('#thread'), w: innerWidth, h: innerHeight,
+          tabs: [...document.querySelectorAll('#tabbar .tab')].map(b => ({ view: b.dataset.view, label: b.querySelector('.tab-lbl').textContent,
+            icon: !!b.querySelector('svg'), w: b.getBoundingClientRect().width, current: b.getAttribute('aria-current') })) }
+      })
+      const say = () => JSON.stringify(g)
+      if (g.tabs.map(t => `${t.view}:${t.label}:${t.icon}`).join() !== 'chat:Chat:true,stats:Stats:true,settings:Settings:true') throw new Error(say())
+      if (g.tabs.map(t => t.current).join() !== 'true,,') throw new Error('the current tab: ' + say())
+      const near = (a, b) => Math.abs(a - b) <= 2
+      if (desktop) {
+        if (!near(g.nav.left, 0) || !near(g.nav.width, 76) || !near(g.nav.top, 0) || !near(g.nav.height, g.h)) throw new Error('the rail: ' + say())
+        if (g.chat.left < g.nav.right - 1) throw new Error('the chat under the rail: ' + say())
+        if (g.thread.width > 761 || !near(g.thread.left + g.thread.width / 2, g.chat.left + g.chat.width / 2)) throw new Error('the thread: ' + say())
+      } else {
+        if (!near(g.nav.left, 0) || !near(g.nav.width, g.w) || !near(g.nav.bottom, g.h) || g.nav.height < 56) throw new Error('the bar: ' + say())
+        if (!near(g.composer.bottom, g.nav.top)) throw new Error('the composer is not on the bar: ' + say())
+        if (g.tabs.some(t => !near(t.w, g.w / 3))) throw new Error('unequal tabs: ' + say())
+      }
+    })
+    await check('the card views\' styles stay out of the chat: a plan card\'s text and code, and the intro\'s code, as before', async () => {
+      // the #1284 review: `.view .card p` and `.view code` matched #view-chat, a .view too, and
+      // shrank a plan's <p> (its margins 0 and 8px) and code, and the intro's code, to 13px
+      const got = await page.evaluate(() => {
+        const row = document.createElement('div'); row.className = 'row ask'
+        row.innerHTML = '<div class="card"><div class="plan"><p>Plan <code>x</code></p></div></div>'
+        document.getElementById('thread').append(row)
+        const cs = s => getComputedStyle(row.querySelector(s)), ip = document.querySelector('#intro p')
+        const out = { card: cs('.card').fontSize, p: cs('p').fontSize, margins: cs('p').marginTop + ' ' + cs('p').marginBottom,
+          code: cs('code').fontSize, intro: getComputedStyle(ip).fontSize, introCode: getComputedStyle(ip.querySelector('code')).fontSize }
+        row.remove()
+        return out
+      })
+      if (got.p !== got.card || got.margins !== `${got.p} ${got.p}` || got.code !== got.p || got.introCode !== got.intro) throw new Error(JSON.stringify(got))
+    })
+    if (desktop) await check('Stats and Settings are 1040 px of cards, two columns from 1100 px', async () => {
+      await goTo('settings')
+      const got = await page.evaluate(() => ({ w: document.querySelector('#view-settings .view-in').getBoundingClientRect().width,
+        cols: getComputedStyle(document.getElementById('settings')).gridTemplateColumns.split(' ').length }))
+      if (got.w > 1041 || got.cols !== 2) throw new Error(JSON.stringify(got))
+      await goTo('chat')
+    })
+    await check('the hash picks the view, Back walks back through them, anything else is the chat, and a notification\'s click opens it', async () => {
+      const at = () => page.evaluate(() => ({ view: document.body.dataset.view, hash: location.hash,
+        shown: ['chat', 'stats', 'settings'].filter(v => getComputedStyle(document.getElementById('view-' + v)).display !== 'none'),
+        current: [...document.querySelectorAll('#tabbar .tab[aria-current="true"]')].map(b => b.dataset.view) }))
+      const is = async v => until(async () => { const a = await at(); return a.view === v && a.shown.join() === v && a.current.join() === v })
+        .catch(async () => { throw new Error(JSON.stringify(await at())) })
+      await goTo('stats'); await is('stats')
+      if ((await at()).hash !== '#stats') throw new Error(JSON.stringify(await at()))
+      await goTo('settings'); await is('settings')
+      await page.evaluate(() => history.back()); await is('stats')
+      await page.evaluate(() => history.back()); await is('chat')
+      await page.evaluate(() => { location.hash = 'settings' }); await is('settings')
+      await page.evaluate(() => { location.hash = 'nowhere' }); await is('chat')
+      await page.reload(); await is('chat')                // #nowhere is the chat still
+      await page.evaluate(() => { location.hash = 'stats' }); await is('stats')
+      await page.reload(); await is('stats')               // a reload stays on its view
+      // the worker's message on a notification's click (sw.js: checked in node below)
+      await page.evaluate(() => navigator.serviceWorker.dispatchEvent(new MessageEvent('message', { data: { kind: 'view', view: 'chat' } })))
+      await is('chat')
+      if ((await at()).hash !== '#chat') throw new Error(JSON.stringify(await at()))
+    })
+    await check('the Chat tab counts what Claude sends and the lines that it waits in the terminal while another view is shown, and clears on Chat', async () => {
+      const badge = () => page.evaluate(() => {
+        const b = document.querySelector('#tabbar .tab-badge'), t = b.closest('.tab')
+        return { n: b.hidden ? '' : b.textContent, label: t.getAttribute('aria-label') }
+      })
+      await goTo('stats')
+      wb('chat', 'reply', '--text', 'Badge one.')
+      wb('chat', 'reply', '--text', 'Badge two.')
+      const id = wb('chat', 'notice', '--tool', 'Bash', '--text', 'make badge').trim()
+      await until(async () => (await badge()).n === '3').catch(async () => { throw new Error(JSON.stringify(await badge())) })
+      if ((await badge()).label !== 'Chat, 3 new') throw new Error(JSON.stringify(await badge()))
+      if (!(await page.locator('#tabbar .tab-badge').isVisible())) throw new Error('counted but not shown')
+      await goTo('settings')                               // still away from the thread: still counted
+      if ((await badge()).n !== '3') throw new Error(JSON.stringify(await badge()))
+      await goTo('chat')
+      await until(async () => (await badge()).n === '' && (await badge()).label === 'Chat')
+      await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('Badge two.'))
+      wb('chat', 'notice', '--done', id)                    // settled in the terminal: the line clears
+      await until(async () => (await page.locator('.row.notice').count()) === 0)
+      wb('chat', 'reply', '--text', 'Seen on Chat.')       // shown: no count
+      await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('Seen on Chat.'))
+      if ((await badge()).n !== '') throw new Error('counted on Chat: ' + JSON.stringify(await badge()))
+    })
+    if (!desktop) await check('the bar steps aside while the keyboard is up, so the composer sits on the keyboard', async () => {
+      // no browser here raises a keyboard: the visual viewport made short by hand, as one does
+      const kb = up => page.evaluate(up => {
+        const vv = visualViewport
+        if (up) { const h = innerHeight - 300; Object.defineProperty(vv, 'height', { get: () => h, configurable: true }) }
+        else delete vv.height
+        vv.dispatchEvent(new Event('resize'))
+      }, up)
+      const at = () => page.evaluate(() => ({ kb: document.body.classList.contains('kb-open'), h: innerHeight - 300,
+        nav: getComputedStyle(document.getElementById('tabbar')).display, foot: document.getElementById('composer').getBoundingClientRect().bottom }))
+      try {
+        await kb(true)
+        await until(async () => { const a = await at(); return a.kb && a.nav === 'none' && Math.abs(a.foot - a.h) <= 2 })
+          .catch(async () => { throw new Error(JSON.stringify(await at())) })
+      } finally { await kb(false) }
+      await until(async () => { const a = await at(); return !a.kb && a.nav !== 'none' })
+    })
+    await check('window.WB gives the views the key, the API, the view and its changes, the state and a toast', async () => {
+      const got = await page.evaluate(async () => {
+        const seen = []
+        window._states = 0
+        WB.on('view', v => seen.push(v))
+        WB.on('state', s => { if (Array.isArray(s.messages)) window._states++ })
+        const keys = Object.keys(WB).sort().join()
+        const r = await WB.api('/api/state'), state = await r.json()
+        const p = await WB.api('/api/seen', { method: 'POST', body: { ids: [] } })   // a JSON body, its type set
+        location.hash = 'settings'
+        for (let i = 0; i < 100 && WB.current() !== 'settings'; i++) await new Promise(r => setTimeout(r, 50))
+        WB.toast('Saved.')
+        const t = document.getElementById('toast')
+        return { keys, status: r.status, messages: Array.isArray(state.messages), posted: p.status, cur: WB.current(), seen,
+          token: WB.token().length > 20, toast: !t.hidden && t.textContent }
+      })
+      if (JSON.stringify(got) !== JSON.stringify({ keys: 'api,current,on,toast,token,view', status: 200, messages: true, posted: 200,
+        cur: 'settings', seen: ['settings'], token: true, toast: 'Saved.' })) throw new Error(JSON.stringify(got))
+      const was = await page.evaluate(() => window._states)
+      wb('chat', 'reply', '--text', 'A state for the views.')
+      await until(async () => await page.evaluate(() => window._states) > was)
+      await goTo('chat')
+    })
+    const sh = { engine, device, desktop, base, token, home, env, wb, until, check, sleep, goTo, context: ctx, browser }
+    await statsView.check(page, sh)
+    await settingsView.check(page, sh)
+    await goTo('chat')
+  }
 }
 
 // The worker's notification text, run in node against a given state (no browser shows a push)
@@ -1162,25 +1282,34 @@ async function swSays(state) {
   runInNewContext(readFileSync(join(ROOT, 'workbench/chat_static/sw.js'), 'utf8'), ctx)
   return ctx.what()
 }
-await check("a push shows Claude's newer reply over an older or stale prompt, and an open newer prompt over it", async () => {
-  // #538 (the 2026-11-20 audit): a dead session's card beat every later reply in every push
-  const ask = { id: 'ask-1', ts: 100, tool: 'Bash', text: 'rm -rf build', kind: 'permission', answer: null }
-  const reply = { id: 'r1', ts: 200, from: 'claude', text: 'Tests pass, ready for review' }
-  const said = async s => (await swSays({ now: 300, push: {}, ...s })).body
-  if (await said({ asks: [ask], messages: [reply] }) !== 'Tests pass, ready for review') throw new Error('the older prompt won')
-  if (await said({ asks: [{ ...ask, ts: 250, stale: true }], messages: [reply] }) !== 'Tests pass, ready for review') throw new Error('a stale prompt won')
-  if (await said({ asks: [{ ...ask, ts: 250 }], messages: [reply] }) !== 'rm -rf build') throw new Error('the newer prompt lost')
-})
 await check('a push for a prompt waiting in the terminal says so, with the command as it is (#959)', async () => {
-  const note = { id: 'n1', ts: 250, from: 'notice', tool: 'Bash', what: 'rm -rf runs/*',
-    text: 'Claude is waiting on a permission in the terminal' }
-  const got = await swSays({ now: 300, push: {}, asks: [], messages: [note] })
-  if (got.title !== 'Claude is waiting on a permission in the terminal' || got.body !== 'rm -rf runs/*') throw new Error(JSON.stringify(got))
+  const text = 'Claude is waiting for you in the terminal. Run it with permissions granted to work from the chat.'
+  const note = { id: 'n1', ts: 250, from: 'notice', tool: 'Bash', what: 'rm -rf runs/*', text }
+  const got = await swSays({ now: 300, push: {}, messages: [note] })
+  if (got.title !== text || got.body !== 'rm -rf runs/*') throw new Error(JSON.stringify(got))
+  const reply = await swSays({ now: 300, push: {}, messages: [note, { id: 'r1', ts: 260, from: 'claude', text: 'Tests pass' }] })
+  if (reply.body !== 'Tests pass') throw new Error(JSON.stringify(reply))
+})
+
+await check("a notification's click brings the thread: the open page told to show Chat, else a new one at #chat (#1284)", async () => {
+  const on = {}, sent = [], opened = []
+  let focused = 0
+  const ctx = { self: { addEventListener: (ev, fn) => { on[ev] = fn }, location: { origin: 'http://x' },
+    clients: { matchAll: async () => wins, openWindow: async u => { opened.push(u) } } }, caches: {}, URL, Date, Math, String }
+  let wins = [{ url: 'http://x/#stats', postMessage: m => sent.push(m), focus: async () => { focused++ } }]
+  runInNewContext(readFileSync(join(ROOT, 'workbench/chat_static/sw.js'), 'utf8'), ctx)
+  const click = async () => { let p; on.notificationclick({ notification: { close() {} }, waitUntil: x => { p = x } }); await p }
+  await click()
+  if (JSON.stringify(sent) !== '[{"kind":"view","view":"chat"}]' || focused !== 1 || opened.length) throw new Error(JSON.stringify({ sent, focused, opened }))
+  wins = []
+  await click()
+  if (JSON.stringify(opened) !== '["/#chat"]') throw new Error(JSON.stringify(opened))
 })
 
 try {
   await run('webkit', 'iPhone 13')
   await run('chromium', 'Pixel 7')
+  await run('chromium', DESKTOP)
 } finally {
   if (server && server.exitCode === null) server.kill('SIGTERM')
   rmSync(home, { recursive: true, force: true })

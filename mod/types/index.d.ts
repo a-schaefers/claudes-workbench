@@ -75,19 +75,19 @@ export type WbLine = { s: string; t: string }
 /** The task the pane follows live, and its transcript so far (the newest lines). */
 export type WbLive = { task: string; lines: WbLine[] }
 
-/** This session and the web chat: whether it listens and whether the user has it on (`wb chat
- * on|off`: off, no link and no listening). When the user last wrote from there is chat/away.json,
- * every session's (#688). */
-export type WbChat = { key: string; delegating: boolean; url: string; web: boolean }
+/** This session and the web chat: whether it is in workbench mode (`delegating`), and the web app's
+ * link as `wb chat url --json` (chat.ensure) last said it (#1283): `state` `off` after `wb chat
+ * off` (then no session listens or sends it prompts), `checking` before the first answer, `up` or
+ * `started` with its `url`, `blocked` or `failed` with `why`. When the user last wrote from there is
+ * chat/away.json, every session's (#688). */
+export type WbChat = { key: string; delegating: boolean
+  link: { state: 'up' | 'started' | 'off' | 'blocked' | 'failed' | 'checking'; url?: string; why?: string } }
 
-/** The pane's view: its tab ('tasks', 'stats' or 'settings'), the settings row open ('' none,
- * 'coding', 'chat', 'progress', 'splash', 'probe', and #1023's 'agents', 'busy',
- * 'workflows', 'role-<role>', 'gpu-<role>', 'size-<model id>', 'api-<role>', 'think-<role>'; #1047's
- * 'media-image|speech|sfx|music'), the option the focus ring is on ('' none),
- * so its sentence shows, and whether the user closed it (a strip above the prompt stands in for it). */
-export type WbPane = { tab: string; open: string; focus: string; minimized: boolean }
+/** The pane: Tasks only (#1283: Stats and Settings are the web app's). `open` and `focus` are kept
+ * for the shape; `minimized`, whether the user closed it (a strip above the prompt stands in). */
+export type WbPane = { open: string; focus: string; minimized: boolean }
 
-/** `wb route --json` as the Settings tab reads it (#1023): routes.json normalized (`use` the Agents
+/** `wb route --json` as the Tasks view's day-cap line reads it (#1023, #1048): routes.json normalized (`use` the Agents
  * switch, `busy` the busy-GPU opt-in, the day cap, each role's selector and both models), spend
  * today from the day ledger, and each API provider's key state (only `stored` runs). */
 export type WbRoutes = {
@@ -121,15 +121,6 @@ export type WbModels = {
  * engines in file order, `gpu` false for one off this GPU (media.on_gpu). */
 export type WbMedia = { default: string | null; engines: { name: string; gpu: boolean }[] }
 
-/** The Stats tab's history: `wb stats --json` as last read (null before the first read), and the
- * key of the files it was read from (results.jsonl, stats.json, optimize.json, bench/runs.jsonl,
- * speed.json: size and mtime). */
-export type WbStats = { key: string; feed: Record<string, any> | null }
-
-/** The Stats tab's live view (#408): `wb top --json`'s newest tick (null before the first), and
- * each GPU's busy % since the tab was shown, for its sparkline (memory only: never on disk). */
-export type WbTop = { snap: Record<string, any> | null; busy: Record<string, number[]> }
-
 /** What this conversation was told of the rules that depend on the state (#540): the user's
  * notes, that wakes are off, the Claude-coding rule, the roles (#1014: routes.summary and
  * `. Day cap $N`, '' while every role is the default and no cap is set), Dynamic workflows (#1041:
@@ -140,12 +131,8 @@ declare module 'claude-code' {
   interface PluginState {
     workbench: {
       tasks: Shaped<WbTask[]>; live: Shaped<WbLive>; chat: Shaped<WbChat>; sessions: Shaped<string[]>
-      /** the pane's settings rows (WbPane) */
+      /** the pane (WbPane) */
       pane: Shaped<WbPane>
-      /** the Stats tab's history (WbStats, #406) */
-      stats: Shaped<WbStats>
-      /** the Stats tab's live view (WbTop, #408) */
-      top: Shaped<WbTop>
       /** what the conversation was told of the rules (WbSaid, #540): kept across a reload (#697) */
       said: Shaped<WbSaid | null>
       /** this session's first /workbench has come, and with it the opening animation (#963):
