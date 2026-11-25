@@ -1963,7 +1963,7 @@ def cmd_next(a):
     # and the spec with the protocol (#1173)
     _model_still_listed(task, nxt + protocol_for(spec), True if a.fresh else None)
     commit = _step_landed(task, step)
-    measured = results.step(task, landed=True, since="HEAD~1" if commit else "HEAD", gaps=a.spec_gap)
+    measured = results.step(task, landed=True, gaps=a.spec_gap)
     if not commit:
         try:
             with _settle_proposals(task, a.take_claude_md):
@@ -1972,7 +1972,7 @@ def cmd_next(a):
                 # Claude's too (#1179), and the agent's shell's (#1210)
                 wrote = runner.accept_writes(task)
                 left = _left_out(task, wrote, a.include)
-                if gitops.changed(task.worktree) or gitops.ignored_files(task.worktree, wrote):
+                if _to_commit(task, wrote):
                     commit = gitops.commit_all(
                         task.worktree, f"{a.message}\n\nWorkbench-Task: {a.name} (step {step})"
                         f"\nOpenCode-Session: {st.get('session')}", a.include, _signed(spec, a), wrote,
@@ -2042,15 +2042,15 @@ def cmd_next(a):
     _say(lessons.nudge(task))
 
 
-def _accept_landed(task: store.Task) -> bool:
-    """Whether the worktree's tip is an earlier wb accept's own commit (`Workbench-Task: <task>`,
-    no step) with nothing changed since, as _step_landed for wb next (#879)."""
-    try:
-        body = gitops.git(task.worktree, "log", "-1", "--format=%B", "HEAD")
-        return (f"Workbench-Task: {task.name}" in body.splitlines()
-                and not gitops.changed(task.worktree))
-    except gitops.GitError:
-        return False
+def _to_commit(task: store.Task, wrote=()) -> bool:
+    """Whether the worktree holds something since its last commit that wb next or wb accept
+    commits, or must refuse to (gitops.commit_all): git's changes, the ignored files the agent or
+    Claude wrote (``wrote``), and edits in a filled submodule, which git status can't see (the
+    gitlink hides them). Without those, once a wb next had committed a step, a step whose only
+    change was in a submodule "had no changes", and wb accept exited 0 and removed the worktree,
+    edit and all: #419's refusal only fired with something else to commit (#1307, 2026-11-24)."""
+    return bool(gitops.changed(task.worktree) or gitops.ignored_files(task.worktree, wrote)
+                or gitops.submodule_edits(task.worktree))
 
 
 def _step_landed(task: store.Task, step: int) -> str | None:
@@ -2060,7 +2060,7 @@ def _step_landed(task: store.Task, step: int) -> str | None:
     try:
         body = gitops.git(task.worktree, "log", "-1", "--format=%B", "HEAD")
         if (f"Workbench-Task: {task.name} (step {step})" not in body.splitlines()
-                or gitops.changed(task.worktree)):
+                or _to_commit(task, runner.accept_writes(task))):
             return None
         return gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
     except gitops.GitError:
@@ -3925,11 +3925,11 @@ def cmd_accept(a):
                 f"put it back to that commit (git -C {shlex.quote(str(task.worktree))} status), "
                 f"or keep the changes elsewhere, then wb accept {a.name} again")
     else:
-        # a retry after an accept killed between its commit and `closing` (ENOSPC, a kill):
-        # measured since HEAD, its own commit, the step read as 0 files and 0 lines and the
-        # savings card priced the task at nothing (#879, Claude's audit of 1.90.24)
-        measured = results.step(task, landed=True, gaps=a.spec_gap,  # recorded below (#904)
-                                since="HEAD~1" if _accept_landed(task) else "HEAD")
+        # from where the step began (gitops.step_base), not HEAD: a retry after an accept
+        # killed between its commit and `closing` (#879, Claude's audit of 1.90.24), or a step
+        # an interrupted wb next committed (#1302), read as 0 files and 0 lines, and the savings
+        # card priced the task at nothing
+        measured = results.step(task, landed=True, gaps=a.spec_gap)  # recorded below (#904)
         try:
             commit = _landed(task)
             if not commit:
@@ -3939,8 +3939,7 @@ def cmd_accept(a):
                     # the agent's shell's: its `cat > lib/util.py` was (#1210)
                     wrote = runner.accept_writes(task)
                     left = _left_out(task, wrote, a.include)
-                    if (gitops.changed(task.worktree) or head == spec["base"]
-                            or gitops.ignored_files(task.worktree, wrote)):
+                    if head == spec["base"] or _to_commit(task, wrote):
                         commit = gitops.commit_all(task.worktree, msg, a.include, _signed(spec, a),
                                                    wrote, left)
                     else:  # nothing new: the branch's commits past the base are the work (the
