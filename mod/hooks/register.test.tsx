@@ -3295,6 +3295,82 @@ test('another session\'s report in the chat leaves a web message owed, and this 
   expect(posted.filter(a => a.some(x => x.includes('answered in the terminal')))).toHaveLength(0)
 })
 
+test('#1273: an agent\'s unanswered message gets its own follow-up naming --to, and a reply to the user never settles it', async ($, on) => {
+  // #1273, 2026-11-24: the follow-up said the user wrote and named a plain `wb chat reply`, which
+  // went to the user's phone; that reply settled the agent's debt, so its wait heard nothing at all
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: '', stderr: '' } } })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  const posted = () => runs.filter(r => r[1] === 'chat' && r[2] === 'reply')
+  const userFollowUps = () => asked.filter(a => a.includes("hasn't heard back"))
+  const agentFollowUps = () => asked.filter(a => a.startsWith("[workbench] Agent hermes's message a1 has no answer"))
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  const turn = async (id: string, command?: string, row?: Record<string, any>) => {
+    await $.turn.start({ text: '', turnId: id })
+    if (command) await $.tool.call({ tool: 'Bash', command })
+    if (row) files['/wb/chat/messages.jsonl'] += JSON.stringify({ from: 'claude', ts: 1_800_000_900, ...row }) + '\n'
+    await $.turn.complete(endTurn(id))
+    await clock.advance(3000)
+  }
+  await turn('t0', 'wb start t --spec s.md')                     // workbench mode: the chat listens
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'a1', ts: 1_800_000_000, from: 'hermes', role: 'agent', text: 'please refactor foo' }) + '\n'
+  await clock.advance(31_000)
+  expect(asked.filter(a => a.startsWith('[agent hermes] please refactor foo'))).toHaveLength(1)
+  await turn('t1', 'wb chat reply --text "Done."', { id: 'r1', text: 'Done.', re: [], to: ['user'] })  // the user's, not the agent's
+  expect(userFollowUps()).toHaveLength(0)
+  expect(agentFollowUps()).toHaveLength(1)
+  expect(agentFollowUps()[0]).toContain('wb chat reply --to a1 --text')
+  await $.prompt.submit({ text: 'and the tests?' } as any)       // the user back at the terminal answers no agent
+  await turn('t2')                                               // the follow-up's turn: no reply to it either
+  expect(posted()).toEqual([['wb', 'chat', 'reply', '--text=Claude answered in the terminal; nothing was sent here.', '--to=a1']])
+})
+
+test('#1273: a reply to an agent settles its message only, and the user\'s message is still owed its follow-up', async ($, on) => {
+  // #1273, 2026-11-24: any reply this Claude Code wrote settled every message owed, whoever it went to
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  const runs: string[][] = []
+  on('process.run', (_: any, e: any) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: '', stderr: '' } } })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  const posted = () => runs.filter(r => r[1] === 'chat' && r[2] === 'reply')
+  const userFollowUps = () => asked.filter(a => a.includes("hasn't heard back"))
+  const agentFollowUps = () => asked.filter(a => a.startsWith('[workbench] Agent '))
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  const turn = async (id: string, command?: string, row?: Record<string, any>) => {
+    await $.turn.start({ text: '', turnId: id })
+    if (command) await $.tool.call({ tool: 'Bash', command })
+    if (row) files['/wb/chat/messages.jsonl'] += JSON.stringify({ from: 'claude', ts: 1_800_000_900, ...row }) + '\n'
+    await $.turn.complete(endTurn(id))
+    await clock.advance(3000)
+  }
+  await turn('t0', 'wb start t --spec s.md')                     // workbench mode: the chat listens
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'a1', ts: 1_800_000_000, from: 'hermes', role: 'agent', text: 'please refactor foo' }) + '\n'
+  await clock.advance(31_000)
+  await turn('t1', 'wb chat reply --to a1 --text "Refactored."', { id: 'r1', text: 'Refactored.', re: ['a1'], to: ['hermes'] })
+  expect(agentFollowUps()).toHaveLength(0)                       // answered: no follow-up
+  files['/wb/chat/messages.jsonl'] += JSON.stringify({ id: 'u1', ts: 1_800_000_100, from: 'user', text: 'Status' }) + '\n'
+  await clock.advance(31_000)
+  expect(asked.filter(a => a.startsWith('[web chat] Status'))).toHaveLength(1)
+  await turn('t2', 'wb chat reply --to a1 --text "Also: tests pass."', { id: 'r2', text: 'Also: tests pass.', re: ['a1'], to: ['hermes'] })
+  expect(userFollowUps()).toHaveLength(1)                        // the agent's reply isn't the user's answer
+  expect(agentFollowUps()).toHaveLength(0)
+  expect(posted()).toEqual([])
+})
+
 test('a /loop firing, another plugin\'s prompt or a channel message leaves the user away and the follow-up owed; the user\'s Enter ends it (#835)', async ($, on) => {
   // #835: any prompt that wasn't isMeta counted as the user back at the terminal, so a /loop
   // firing ended away for every session and cancelled the #767 follow-up
