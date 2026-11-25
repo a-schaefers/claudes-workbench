@@ -16,8 +16,12 @@ import * as settingsView from './e2e_settings.mjs'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const pw = createRequire(import.meta.url)(process.env.PLAYWRIGHT || 'playwright')
 const home = mkdtempSync(join(tmpdir(), 'wbchat-'))
+// The user's roles, OpenCode config and OpenCode stay out too (#1286): the Settings rows run `wb
+// route --json` and `wb models --json`, and the user's catalog, read in the background into this
+// WB_HOME's hosted.json, renamed the Stats check's providers on the next engine
 const env = { ...process.env, WB_HOME: join(home, 'state'), WB_CHAT_TOKEN: join(home, 'token'),
-  WB_CHAT_CONFIG: join(home, 'chat.json'), WB_SAVINGS: join(home, 'savings.json') }  // not the user's
+  WB_CHAT_CONFIG: join(home, 'chat.json'), WB_SAVINGS: join(home, 'savings.json'),  // not the user's
+  WB_ROUTES: join(home, 'routes.json'), WB_OPENCODE_CONFIG: join(home, 'opencode.json'), WB_OPENCODE_BIN: 'false' }
 // a system Chromium when there is one (CHROMIUM names another), else Playwright's own
 const CHROMIUM = process.env.CHROMIUM || (existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : '')
 const PORT = Number(process.env.WB_E2E_PORT || 13371)
@@ -292,7 +296,7 @@ async function run(engine, device) {
     await goTo('settings')
     await until(async () => await page.locator('#settings').isVisible())
     if (!(await page.textContent('#settings')).includes('second lane')) throw new Error('no word on what this chat is')
-    const heads = await page.$$eval('#view-settings .card h3', h => h.map(x => x.textContent).join(' | '))
+    const heads = await page.$$eval('#settings .card h3', h => h.map(x => x.textContent).join(' | '))
     if (heads !== 'While away | Notifications | Install the app | This chat | This device') throw new Error(heads)
     await page.click('[data-away="allow"]')
     await until(() => JSON.parse(readFileSync(join(home, 'state/chat/prefs.json'), 'utf8')).away === 'allow')
