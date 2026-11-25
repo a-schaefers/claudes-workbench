@@ -13034,6 +13034,100 @@ class Lane(Base):
                                                    conf / "gh" / "hosts.yml", home / "letters" / "a.txt"]),
                          ["read", "read", "refused", "refused"])
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_a_handed_skill_is_readable_wherever_the_library_is_kept_and_the_rest_isnt(self):
+        # #1375 (2026-11-25): with WB_SKILLS=~/skills, or the default path linked into ~/src,
+        # the lane refused the handed skill, OpenCode dropped it without a word, and wb skill
+        # list advised retiring a skill that worked
+        home = self.fake_home()
+        default = home / ".local" / "share" / "workbench" / "skills"
+        default.parent.mkdir(parents=True)
+        (home / "src" / "wb-skills").mkdir(parents=True)
+        default.symlink_to(home / "src" / "wb-skills")
+        for i, lib in enumerate((home / "skills", default)):
+            for name in ("pydoc", "other"):
+                (lib / name).mkdir(parents=True)
+                (lib / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n")
+            if lib == default:
+                os.environ.pop("WB_SKILLS")
+            else:
+                os.environ["WB_SKILLS"] = str(lib)
+            task = self.bare_task(f"t-skill-{i}", self.repo)
+            task.set_status(skills=["pydoc"])
+            handed = Path(context.layer(task)["skills"][0])
+            self.assertEqual(handed, lib / "pydoc")
+            self.assertEqual(self.reads_in_lane(task, [handed / "SKILL.md", lib / "other" / "SKILL.md"]),
+                             ["read", "refused"], lib)
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_git_config_included_from_outside_the_dotfiles_is_read_in_the_lane_but_a_secret_isnt(self):
+        # #1382 (2026-11-25): the user's [includeIf "gitdir:~/work/"] path = ~/work/.gitconfig,
+        # a repo's include.path beside its checkout, or GIT_CONFIG_GLOBAL in ~/dotfiles was
+        # unreadable, and every git call in the lane died "bad config line", GPU and API
+        home = self.fake_home()
+        repo = home / "work" / "proj"
+        repo.mkdir(parents=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True,  # noqa: E731
+                                      capture_output=True)
+        g("init", "-q", "-b", "main")
+        g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init")
+        (home / "work" / ".gitconfig").write_text("[user]\n\temail = me@work\n")
+        (home / "work" / "team.gitconfig").write_text("[alias]\n\tlg = log\n")
+        (home / ".gitconfig").write_text('[includeIf "gitdir:~/work/"]\n\tpath = ~/work/.gitconfig\n')
+        g("config", "include.path", str(home / "work" / "team.gitconfig"))
+        script = ("import subprocess, sys\nfor k in ('user.email', 'alias.lg'):\n"
+                  "    r = subprocess.run(['git', '-C', sys.argv[1], 'config', k], capture_output=True, text=True)\n"
+                  "    print(r.stdout.strip() or r.stderr.replace(chr(10), ' '))\n")
+        for via in ("gpu", "api"):
+            task = store.Task(f"t-inc-{via}")
+            task.dir.mkdir(parents=True)
+            (task.dir / "task.json").write_text(json.dumps({"name": task.name, "repo": str(repo), "via": via}))
+            g("worktree", "add", "-q", "-b", f"delegate/{task.name}", str(task.worktree))
+            out = subprocess.run(lane.wrap(context.writable(task), [sys.executable, "-c", script, str(task.worktree)],
+                                           context.readable(task)), capture_output=True, text=True, timeout=20)
+            self.assertEqual(out.stdout.split("\n")[:2], ["me@work", "log"], (via, out.stderr))
+        (home / "dotfiles").mkdir()
+        (home / "dotfiles" / "gitconfig").write_text("[user]\n\temail = me@dotfiles\n")
+        os.environ["GIT_CONFIG_GLOBAL"] = str(home / "dotfiles" / "gitconfig")
+        out = subprocess.run(lane.wrap(context.writable(task), [sys.executable, "-c", script, str(task.worktree)],
+                                       context.readable(task)), capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.stdout.split("\n")[:2], ["me@dotfiles", "log"], out.stderr)
+        (home / ".ssh").mkdir()                                        # a secret stays hidden
+        (home / ".ssh" / "gitconfig").write_text("[user]\n\tname = x\n")
+        g("config", "--add", "include.path", str(home / ".ssh" / "gitconfig"))
+        self.assertNotIn(str(home / ".ssh" / "gitconfig"), context.read_repo_dirs(task))
+        self.assertFalse([p for p in context.readable(task) if p.startswith(str(home / ".ssh"))])
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_a_repo_that_borrows_its_objects_has_git_work_in_the_lane(self):
+        # #1383 (2026-11-25): a `git clone --shared` of a mirror, or a repo whose objects/ is a
+        # link out of its git dir, had every agent git call fail "unable to open loose object"
+        home = self.fake_home()
+        mirror = home / "mirror"
+        run = lambda *a: subprocess.run(["git", *a], check=True, capture_output=True)  # noqa: E731
+        run("init", "-q", "-b", "main", str(mirror))
+        run("-C", str(mirror), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
+            "--allow-empty", "-m", "one")
+        run("clone", "-q", "--shared", str(mirror), str(home / "work" / "shared"))
+        run("clone", "-q", str(mirror), str(home / "work" / "linked"))
+        objects = home / "work" / "linked" / ".git" / "objects"
+        shutil.move(objects, home / "objstore")
+        objects.symlink_to(home / "objstore")
+        for name in ("shared", "linked"):
+            repo = home / "work" / name
+            for via in ("gpu", "api"):
+                task = store.Task(f"t-alt-{name}-{via}")
+                task.dir.mkdir(parents=True)
+                (task.dir / "task.json").write_text(json.dumps({"name": task.name, "repo": str(repo), "via": via}))
+                run("-C", str(repo), "worktree", "add", "-q", "-b", f"delegate/{task.name}", str(task.worktree))
+                out = subprocess.run(lane.wrap(context.writable(task),
+                                               ["git", "-C", str(task.worktree), "log", "-1", "--format=%s"],
+                                               context.readable(task)), capture_output=True, text=True, timeout=20)
+                self.assertEqual((out.returncode, out.stdout.strip()), (0, "one"), (name, via, out.stderr))
+
     @home_outside_the_lane
     def test_toolchain_bins_user_site_and_a_repo_under_gopath_stay_out_of_the_lane(self):
         home = self.fake_home()
