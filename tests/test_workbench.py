@@ -2739,6 +2739,38 @@ class Lifecycle(Base):
         st = wait_phase("t-bgwait", {"review", "stuck"}, timeout=40)
         self.assertEqual((st["phase"], st.get("nudges", 0), st["round"]), ("review", 0, 1))
 
+    def test_a_command_running_in_the_foreground_is_neither_thinking_nor_silence(self):
+        # #1386 (2026-11-25): a suite the agent ran in the foreground with a long `timeout`
+        # printed nothing until it ended; the think nudge killed it, and the next round's run
+        # was stopped "even after a nudge"
+        self.start("t-fg", "fgcmd", "--test", TEST_CMD, "--think-timeout", "2",
+                   "--silence-timeout", "4")
+        st = wait_phase("t-fg", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st.get("nudges", 0), st["round"]), ("review", 0, 1),
+                         st.get("last"))
+        self.assertTrue(st["tests"]["ok"])
+        evs = store.read_jsonl(store.Task("t-fg").dir / "events.jsonl")[0]
+        self.assertFalse([e for e in evs if e.get("kind") == "stopped"])
+        self.assertIn("make test", [e.get("brief", "") for e in evs if e.get("kind") == "tool"][0])
+
+    def test_a_command_running_in_the_foreground_still_meets_the_rounds_wall(self):
+        # #1386: the command waits out the nudge and silence, never the round's limit
+        os.environ["FAKE_FG"] = "60"
+        self.start("t-fgwall", "fgcmd", "--test", TEST_CMD, "--think-timeout", "2",
+                   "--silence-timeout", "4", "--round-timeout", "8")
+        st = wait_phase("t-fgwall", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual(st["phase"], "stuck")
+        self.assertIn("limit", st["last"])
+        self.assertEqual(st.get("guards"), {"round": 1})
+
+    def test_a_job_left_in_the_background_spares_a_thinking_model_no_nudge(self):
+        # #1386's fix waits on a command in the foreground only: one a shell call left running
+        # (a dev server) is no wait, and the model thinking beside it is nudged, then stopped
+        self.start("t-bgthink", "bgthink", "--think-timeout", "2", "--silence-timeout", "120")
+        st = wait_phase("t-bgthink", {"stuck"}, timeout=40)
+        self.assertIn("even after a nudge", st["last"])
+        self.assertEqual((st["nudges"], st["round"]), (1, 2))
+
     def test_a_round_waiting_on_a_background_job_keeps_its_model_loaded(self):
         # #864 (the third 2026-11-21 audit): a test run past Ollama's 5-minute keep-alive (each
         # of OpenCode's requests sets it again) unloaded the model mid-round, and the next request
@@ -6600,6 +6632,22 @@ class WorktreeSetup(Base):
         wait_phase("t-build", {"review"}, timeout=60)
         lines = log.read_text().split()                       # (the round's tests log too)
         self.assertLess(lines.index("check-done"), lines.index("build-done"), lines)
+
+    def test_fanned_out_tasks_run_their_round_tests_one_at_a_time(self):
+        # #1378 (2026-11-25): two tasks of a fan-out ran their round tests at once, and a suite
+        # on a fixed port failed EADDRINUSE in all but one: a FAIL and an auto-fix for correct
+        # code. The directory stands in for the port: taken while one suite runs.
+        held = Path(self.tmp.name) / "port-3000"
+        suite = f"mkdir {held} || exit 98; sleep 2; rmdir {held}; {TEST_CMD}"
+        for who in ("a", "b"):
+            self.start(f"t-fan{who}", "ok", "--no-self-review", "--no-base-check", "--auto-fix", "0",
+                       "--test", suite)
+        for who in ("a", "b"):
+            wait_phase(f"t-fan{who}", {"review"}, timeout=60)
+            st = store.Task(f"t-fan{who}").status
+            self.assertTrue(st["tests"]["ok"], st["tests"])
+            self.assertEqual(st.get("auto_fixes", 0), 0)
+        self.assertEqual(json.loads((store.home() / "locks" / "prepare-check.json").read_text()), {})
 
     def test_a_task_whose_setup_failed_is_resumed_and_discarded_never_counts_against_its_model(self):
         # #581, the audit of 1.90: three discards of a lockfile problem scored the model 0/3 and

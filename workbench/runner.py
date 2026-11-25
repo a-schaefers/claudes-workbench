@@ -1008,6 +1008,54 @@ def _sweep_macos(task: store.Task, run: str = "", runs=()) -> int:
     return killed
 
 
+def _procs():
+    """(pid, ppid, environ) of this user's processes: /proc, else ps and KERN_PROCARGS2 (macOS)."""
+    me, uid = os.getpid(), os.getuid()
+    proc = Path("/proc")
+    if proc.joinpath("self").exists():
+        for d in proc.iterdir():
+            if not d.name.isdigit() or int(d.name) == me:
+                continue
+            try:
+                if d.stat().st_uid != uid:
+                    continue
+                ppid = int(d.joinpath("stat").read_text().rpartition(")")[2].split()[1])
+                yield int(d.name), ppid, set(d.joinpath("environ").read_bytes().split(b"\0"))
+            except (OSError, ValueError, IndexError):
+                continue
+        return
+    if sys.platform != "darwin":
+        return
+    try:
+        rows = subprocess.run(["ps", "-U", str(os.getuid()), "-o", "pid=,ppid="], capture_output=True,
+                              check=True, timeout=10).stdout.split(b"\n")
+        buf = ctypes.create_string_buffer(os.sysconf("SC_ARG_MAX"))
+        sysctl = ctypes.CDLL(None).sysctl
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return
+    for row in rows:
+        words = row.split()
+        if len(words) != 2 or not all(w.isdigit() for w in words) or int(words[0]) == me:
+            continue
+        pid = int(words[0])
+        mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2
+        size = ctypes.c_size_t(len(buf))
+        if sysctl(mib, 3, buf, ctypes.byref(size), None, 0) == 0:
+            yield pid, int(words[1]), _mac_environ(buf[:size.value])
+
+
+def agent_commands(task: store.Task, run: str) -> set[int]:
+    """The agent's shell commands running now in the round ``run``, the outermost process of
+    each: its WB_RUN, and a SHELL the shell shim gave back (OpenCode, its MCP and language
+    servers keep the shim's). OpenCode prints a shell call only once it ends, so this is how
+    the runner knows a silent round is waiting on one (#1386)."""
+    shim = os.fsencode(f"SHELL={context.rules_dir(task) / SHELL_SHIM_DIR}/")
+    mark = os.fsencode(f"WB_RUN={run}")
+    ours = {pid: ppid for pid, ppid, env in _procs()
+            if mark in env and not any(e.startswith(shim) for e in env)}
+    return {pid for pid, ppid in ours.items() if ppid not in ours}
+
+
 def _end_agent(task: store.Task) -> None:
     """Nothing a round started outlives it, however the round ended (the 2026-11-16 audit: a
     crash in the runner left the agent editing the worktree after the GPU lease was released):
@@ -1825,11 +1873,18 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                                 **spec.get("stuck", {})},
                              worktree=task.worktree, workdir=task.workdir)
     wall, silence, think = limit(task, "round"), limit(task, "silence"), limit(task, "think")
-    # A shell command OpenCode moved to the background (past 2 minutes it does, and the turn
-    # ends waiting on it) prints nothing until it is done: a long test suite counted as thinking,
-    # was nudged and killed every 7 minutes, and rerun (the 2026-11-16 audit). While it waits
-    # (`background_wait`), no nudge, and silence runs to the test timeout; the round's limit holds.
+    # A shell command OpenCode moved to the background (past its call's `timeout` it does, and
+    # the turn ends waiting on it) prints nothing until it is done: a long test suite counted as
+    # thinking, was nudged and killed every 7 minutes, and rerun (the 2026-11-16 audit). While it
+    # waits (`background_wait`), no nudge, and silence runs to the test timeout; the round's limit
+    # holds. So for one still in the foreground (`agent_commands`): a model that sets a long
+    # `timeout` keeps its suite there, and the nudge killed it at the think budget, the next
+    # round's run too, stopped "even after a nudge" (#1386, 2026-11-25).
     wait_hush = max(silence, float(spec.get("test_timeout") or 900))
+    # what still ran when the last shell call came back: a job OpenCode or the agent moved to
+    # the background, the turn going on without it (a dev server), never the round's wait (#1386)
+    left_running: set[int] = set()
+    look = min(KEEP_WARM_S, silence, think or silence)  # quiet this long: is a command running?
     turn_over = False  # the last step finished with reason `stop`: the agent's turn ended (#658)
     bg_jobs: list[str] = []  # what OpenCode waits on once the turn is over
     nudged = False
@@ -1930,6 +1985,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 out["tools"][row["tool"]] = out["tools"].get(row["tool"], 0) + 1
                 if not row["ok"]:
                     out["errors"].append(f"{row['tool']}: {row.get('error', '')}")
+                if row["tool"] in ("shell", "bash"):
+                    left_running = agent_commands(task, run)
                 st = task.status
                 used = context.experiment_use(task, row)
                 task.set_status(last=f"{row['tool']} {row['brief']}".strip(),
@@ -2056,7 +2113,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             if why:  # on a self-review's green tree, settled below with the other guards' (#1168)
                 out["stuck"], out["guard"] = why, detector.guard
         quiet = clock.quiet(mono)
-        hush = wait_hush if waiting_bg else silence
+        in_cmd = not waiting_bg and quiet > look and bool(agent_commands(task, run) - left_running)
+        hush = wait_hush if waiting_bg or in_cmd else silence
         # The agent's turn is over (its last step's reason `stop`) and OpenCode is still open:
         # past BG_GRACE with a job in the background, or when the round's wall, silence or think
         # guard comes due, the round ends as the agent's finish, never a guard's stop. Only the
@@ -2093,13 +2151,15 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                             "--silence-timeout gives a new task longer")
             if waiting_bg:
                 out["stuck"] += ", waiting on a background job"
+            elif in_cmd:
+                out["stuck"] += ", waiting on a command the agent runs"
         # Generating with nothing to show past the budget: interrupt with a nudge (once a round)
         # (its round's report says so). The nudge starts a new round, and that round stalling again is
         # stopped, whatever it did first: else a model that never answers, or a command that
         # prints nothing for longer than the budget, would be nudged and rerun forever.
         nudge = False
-        if (think and heard and not waiting_bg and not nudged and not out["stuck"] and not asking
-                and quiet > think):
+        if (think and heard and not waiting_bg and not in_cmd and not nudged and not out["stuck"]
+                and not asking and quiet > think):
             mins = int(quiet // 60)
             if renudge:
                 out["guard"] = "think"
@@ -2140,7 +2200,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             _stop(proc)
             break
         # an API model has no keep-alive of ours to renew (#1015)
-        if (waiting_bg or asking) and mono - warmed >= KEEP_WARM_S and not CURRENT.get("api"):
+        if (waiting_bg or in_cmd or asking) and mono - warmed >= KEEP_WARM_S and not CURRENT.get("api"):
             warmed = mono  # off the loop: a server slow to answer holds no clock or steer up
             threading.Thread(target=_keep_warm, args=(task.spec.get("model"),), daemon=True).start()
         every = float(spec.get("checkin") or 0) * 60
@@ -3328,9 +3388,12 @@ def checkout(task: store.Task) -> bool:
 # lane reads: prepare-<n>.lock the slots, prepare.json the queue. Setups and base checks queue
 # apart (prepare-check-<n>.lock, prepare-check.json): one queue made a 5-second base check, held
 # to 120 s, wait out another task's 25-minute build, with the GPU idle (#868). Two base checks
-# (two test suites, a fixed port) still never run together, nor two setups.
+# (two test suites, a fixed port) still never run together, nor two setups. A round's tests take
+# the base checks' turn too: fanned-out tasks ran theirs at once, and a suite on a fixed port
+# failed with EADDRINUSE in all but one, a FAIL and paid auto-fix rounds for correct code
+# (#1378, 2026-11-25).
 PREP_SLOTS = 1
-PREP_KINDS = {"setup": ("prepare", "setup"), "check": ("prepare-check", "base check")}
+PREP_KINDS = {"setup": ("prepare", "setup"), "check": ("prepare-check", "tests")}
 
 
 def _prep_queue(kind: str = "setup") -> Path:
@@ -3339,8 +3402,9 @@ def _prep_queue(kind: str = "setup") -> Path:
 
 @contextlib.contextmanager
 def prep_turn(task: store.Task, kind: str = "setup"):
-    """Hold one of PREP_SLOTS for a setup or (``kind`` "check") a base check, waiting behind the
-    tasks queued for the same before this one (status `last` names the one it waits for). A
+    """Hold one of PREP_SLOTS for a setup or (``kind`` "check") a base check or a round's tests,
+    waiting behind the tasks queued for the same before this one (status `last` names the one it
+    waits for). A
     holder that died lets go: the kernel drops its flock, and its queue entry is passed over
     once its pid is gone."""
     import fcntl
@@ -6067,7 +6131,10 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
             if unload := bool(task.spec.get("unload_for_tests")):
                 task.set_status(phase="queued", last="waiting for the GPU: the tests use it alone")
             lease.step_aside(unload=unload)
-            with _tests_gpu(task, lease):
+            # one task's tests at a time on this machine, after the GPU wait (#1378); their
+            # --test-timeout starts in run_tests, past the wait
+            with _tests_gpu(task, lease), \
+                    prep_turn(task, "check") if task.spec.get("test_cmd") else contextlib.nullcontext():
                 tests = run_tests(task, n)
             if pending_steer(task):  # a note that came in while the tests ran
                 _steer_round(task, n, False)
