@@ -21982,6 +21982,16 @@ class ScheduledRuns(Base):
         # a systemctl that logs each call, exiting FAKE_SYSTEMCTL_EXIT (0): never the user's manager
         (self.bin / "systemctl").write_text('#!/bin/sh\necho "$*" >> "$FAKE_SYSTEMCTL_LOG"\n'
                                             'exit "${FAKE_SYSTEMCTL_EXIT:-0}"\n')
+        # and a launchctl the same, and the systemd side on every OS but in the tests that say
+        # macOS: on the 2.1 macOS nightly (2026-11-25) every add wrote its plist into the runner's
+        # real ~/Library/LaunchAgents and bootstrapped it with the real launchctl, and the
+        # systemd tests found no unit
+        (self.bin / "launchctl").write_text('#!/bin/sh\necho "launchctl $*" >> "$FAKE_SYSTEMCTL_LOG"\n'
+                                            'exit "${FAKE_SYSTEMCTL_EXIT:-0}"\n')
+        from workbench import schedule
+        linux = mock.patch.object(schedule, "_macos", return_value=False)
+        linux.start()
+        self.addCleanup(linux.stop)
         # a claude that records its argv and environment, and prints a result as claude -p does
         (self.bin / "claude").write_text(textwrap.dedent(f"""\
             #!{sys.executable}
@@ -22143,8 +22153,6 @@ class ScheduledRuns(Base):
         import plistlib
         from workbench import schedule
         home = Path(self.tmp.name) / "home"
-        (self.bin / "launchctl").write_text('#!/bin/sh\necho "launchctl $*" >> "$FAKE_SYSTEMCTL_LOG"\n')
-        (self.bin / "launchctl").chmod(0o755)
         with mock.patch.object(schedule, "_macos", return_value=True), \
                 mock.patch.object(Path, "home", return_value=home):
             self.add("night", "Sat,Sun 02:00")
