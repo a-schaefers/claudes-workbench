@@ -5756,6 +5756,39 @@ shown and hidden on each switch and on `visibilitychange`; a second registration
 `toast(text)` (3.5 s), `on('state' | 'view', fn)` (each snapshot applied; each switch, its name),
 `current()`. Each view's files are its own, so the two are built apart.
 
+**The Stats view** (#1285; `stats.js`, `stats.css`; it takes over the pane's Stats tab, *Seeing
+what the agent does*). `WB.view('stats', …)`: `mount` puts two sections in `#stats-body`, Now
+(`.st-now-box`) and the history (`.st-hist-box`), drawn apart so a tick redraws Now alone. `show`
+fetches `GET /api/stats` (`{feed, routes, models}`, the feed `wb stats --json`'s), again every
+`REFETCH_MS` 60 s and once `feed.until` (the next local midnight) passes; a failure says `History
+unavailable: <why> (wb stats --json)`, or `Not updated: …` over the last feed. With
+`feed.settings.live` on it opens `GET /api/top` (a `fetch` with the bearer header, read as SSE like
+`/api/stream`): each `event: top` is one `wb top --json` snapshot, and `event: down` (`{why,
+retry}`) says `This machine can't be read: <why>; trying again in <retry>s (wb top --json)`; a
+stream that ended or was refused with no tick says why and dials again after `TOP_RETRY_MS` (5 s
+doubling to 60 s), one that ticked after 5 s. `hide` (the shell calls it on leaving the view and
+when the page is hidden) aborts both fetches and cancels the stream's reader, so the server stops
+`wb top`, and forgets the tick and the samples: shown again it says `Reading this machine…`, never
+the old tick (#552). With Live view off Now isn't shown and no stream opens. **Now** is `liveLines`
+as cards (`nowCards`): a card per GPU and for RAM (`GPU 0 <card's name>`, `cardName`; a memory bar
+and a busy bar, toned at 80 and 95 % as the pane's, watts, `GPU may wire`, `no reading`) with an
+SVG sparkline of the last `BUSY_KEEP` 60 busy samples, kept here per GPU (`busyKey`: the RAM row
+keeps none); Running (`▶ <task> <model> · phase · round · secs · tok/s · context% · $spend`, an API
+task's model by `modelWord`, `apiParts`, or `Nothing running.`); Models, the rack, the idle, can't-run
+and remote ones folded past `RACK_FOLD_MIN` 2 into `+N more models idle, can't run or remote (wb
+top)`; Queue. **The history** is `statsLines` ported label for label and in its order
+(`statsRows`): This week, All time, Streak, Without waking Claude, Questions, the model lines
+capped at `STATS_SHOWN` 3 (each one's write trend an SVG sparkline), Other models, By size
+(`ROLE_WORDS`), Last 30 days as an SVG bar a day (its landed part in the accent, a `<title>` per
+day, the first and last dates under it), Bests, Milestone, What stopped agents (`GUARD_WORDS`;
+`spend` is `the API day cap`), What helps, Bench, Optimized; with no section, `No finished tasks
+yet: delegate one with /workbench, and how it went shows here.` The names follow the pane's
+`Names` (`modelWord`, `providerWord`, `usd`, `apiPeriod`): GPU labels from `models.gpu` and
+`wb top`'s rack and running rows, provider names from `routes.providers` and `models.api`'s
+`provider_name`. The charts are inline SVG built in `stats.js` (no library, so the CSP holds),
+coloured by the page's tokens (`--accent`, `--accent-soft`, `--line`, `--ok`, `--warn`, `--bad`) in
+light and dark. What it saved (`#saved-card`) stays below, drawn by `app.js`.
+
 **The app and notifications.** The manifest ("Claude's Workbench", `short_name` "Workbench") is offered over https only (`app.js` removes its link
 over http: localhost counts as secure and one computer got two apps). The `badge` is
 `badge-96.png`, white on transparent (Android uses alpha only, #757). `sw.js` (`updateViaCache:
@@ -7250,7 +7283,14 @@ and Chromium (`$CHROMIUM`, `/usr/bin/chromium`, else Playwright's) as a Pixel 7,
 on a phone and the rail on the desktop, the hash and Back, the Chat tab's badge, the bar hidden with the keyboard
 (a visual viewport made short by hand), the cards' styles kept out of the chat (a plan card's `<p>`
 and `<code>`, the intro's `<code>`), `window.WB`, and the gear's old checks from Settings and Stats (`goTo`);
-then each view's own, `e2e_stats.mjs` and `e2e_settings.mjs` (`check(page, ctx)`, once per device). Sends land exactly once through
+then each view's own, `e2e_stats.mjs` and `e2e_settings.mjs` (`check(page, ctx)`, once per device). `e2e_stats.mjs` (#1285): a fixture
+results.jsonl's task count under This week, the labels in `statsLines`' order and Last 30 days as
+30 bars; `/api/top` opened on showing Stats with Live view on, let go on leaving it, never opened
+with Live view off; Now from fixed ticks (the GPU and RAM cards, the running rows, the rack folded,
+the queue); no sideways scroll at a phone's width and at 1280 px (two columns); the empty state.
+Where the server answers neither `/api/stats` nor `/api/top`, the page's `fetch` stands in (the
+real `wb stats --json` of the run's `WB_HOME`; a held stream): Playwright's routes stop holding
+requests once the worker registers (#1223). Sends land exactly once through
 outages, reloads and a SIGSTOP past the 40 s watchdog; cards, plans, settings, install over https, `/api/seen` and
 `/api/active` only while in use, notices, shot pairs, listen's shortlist, the keyboard, uploads, an agent's message
 shown with its name and its reply through `/api/wait`, that reply named `Claude to <agent>` and
@@ -7572,7 +7612,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `usd` the mod passes to `taskLines` and `capRow`; **the modeline's look** (`MODELINE`, `claude`) →
   splash.ts's `BAR`, modeline.ts's `BAR`, the room `register.tsx` counts; **a task phase** → modeline.ts's `SAID`.
 - **Stats tab folds**: `top.FOLD` → `RACK_FOLD`; `stats.STATS_MODEL_LINES` → `STATS_SHOWN`; `model_lines`'
-  `more`/`older`/`variants` → `statsLines`, `cli.cmd_stats`.
+  `more`/`older`/`variants` → `statsLines`, `cli.cmd_stats`; each of these, `wb stats --json`'s and `wb top --json`'s
+  keys, and the pane's words (`GUARD_WORDS`, `ROLE_WORDS`, `Names`) → the web app's `stats.js` too (*The Stats view*).
 - **`cli.CODING`** → the mod's `CODING_STOPS`, `CODING_RULES`, the skill's *Claude coding* bullet.
 - **`savings.totals`' keys** → `savedLine`, `drawSaved`; the cost's label (no currency sign) → `wb savings`, the Stats
   tab, `savedLine`, `drawSaved`.
@@ -7644,5 +7685,5 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   create v<version> --generate-notes` linking the checklist. **`wb setup`'s links** → README's quickstart, *Installing*.
 - **`runner.thinking_variant`** (`THINKING_OFF`, `OFF_VARIANT`, `DEFAULT_EFFORT`, `_no_off_listed`, `_off_form`, the V2 move in `_as_v2`) → `fake_opencode.py`'s variant check (`layer_variants`: V1 and V2, the layer file and the content), `transcript.model_line` (`thinking_shown`), `routes.thinking_of` (the dialog's thinking clause, `cli.start_line`, `routes.model_line` and `routed_line`, #1237), *Thinking off by default*.
 - **A model name** → never in code or the skill: OpenCode's config, the router, the weekly check.
-- **A runner guard** (`out["guard"]`: `repeat`, `errors`, `no_edit`, `round`, `silence`, `think`, `handovers`, `spend`) → the mod's `GUARD_WORDS`, *Stats recording*'s list.
+- **A runner guard** (`out["guard"]`: `repeat`, `errors`, `no_edit`, `round`, `silence`, `think`, `handovers`, `spend`) → the mod's `GUARD_WORDS` and `stats.js`'s, *Stats recording*'s list.
 - **The spend stop** (#1019): `meter.request_floor` ↔ `Meter.room`'s worst (#1150: the start's refusal and `_go_on`'s look ahead keep room's margin; its input `runner.first_tokens` ↔ what `run_round` sends: status `live_used`, `handoff_prompt`, `PROMPT_ARG_MAX`, #1173) ↔ `meter.stop_reason` ↔ `runner._go_on` (#1017, before each `continue` in `drive`) ↔ `runner._spend_guard` ↔ the keyhole's `close(reason)` and `room` hook (`Meter.hooks()`, which `runner.start_keyhole` passes to `keyhole.start`) ↔ status `api_stop` (the keyhole's `quota` stop writes it too, #1020; `_ProviderWait.stop` consumes it, keeping its `worst` for `runner._spend_lead` ↔ `meter.stop_text(task, worst)`, #1150, and `Meter.begin` clears it at each round's start, whatever its guard). `events.normalize`'s step `cost` ↔ `tests/fake_opencode.py`'s `part.cost` (`FAKE_STEP_COST`) ↔ `meter.step_tokens`. A `spend` notice's `cause` ↔ the mod's `SPEND_NEXT`; its `guard` `agents` (`runner.AGENTS`) ↔ the mod's `AGENTS_NEXT`, and `routes.AGENTS_GPU`/`AGENTS_STOPS` ↔ the mod's `AGENTS_STOPS` text (#1213). The way off API (#1218): `routes.off_api` ↔ `routes.effective_via` and `busy_api` ↔ its users, `meter._ask`, `meter.stop_text`, `privacy.local_only_line`, `privacy.standing_refusal` (#1227), `runner.provider_remedy` and `routes.cant_run` under Agents API: a new remedy that offers the GPU asks it.
