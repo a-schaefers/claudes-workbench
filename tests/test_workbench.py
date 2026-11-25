@@ -31142,6 +31142,67 @@ class Keyhole(_KeyholeTest):
         self.assertIn("the round stops", text)                           # a 400: OpenCode won't retry
         self.assertEqual(self.task.status["api_stop"]["guard"], "setup")
 
+    def test_a_ca_without_critical_basic_constraints_or_trusted_through_node_extra_ca_certs_verifies_as_opencode_would(self):
+        # #1385 (2026-11-25): Python 3.13's default VERIFY_X509_STRICT failed every request on a
+        # chain OpenCode, curl and node accept (a TLS-inspecting proxy's CA, basicConstraints not
+        # critical, no key identifiers), and a CA trusted for OpenCode through NODE_EXTRA_CA_CERTS
+        # alone never verified, on any Python. The strict flag is set here as 3.13's default does.
+        import ssl
+        from workbench import webpush
+        if not shutil.which("openssl"):
+            self.skipTest("needs openssl")
+        tmp = Path(self.tmp.name)
+        ca, ca_key, key, cert, csr, ext = (tmp / n for n in ("ca.pem", "ca-k.pem", "k.pem", "c.pem",
+                                                              "c.csr", "ext"))
+        ext.write_text("subjectAltName=DNS:localhost,IP:127.0.0.1\n")
+        ec = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-config", os.devnull]
+        for argv in (["req", "-x509", *ec, "-keyout", ca_key, "-out", ca, "-days", "1", "-subj", "/CN=wb-ca",
+                      "-addext", "basicConstraints=CA:TRUE", "-addext", "keyUsage=keyCertSign"],
+                     ["req", *ec, "-keyout", key, "-out", csr, "-subj", "/CN=localhost"],
+                     ["x509", "-req", "-in", csr, "-CA", ca, "-CAkey", ca_key, "-CAcreateserial",
+                      "-out", cert, "-days", "1", "-extfile", ext]):
+            subprocess.run(["openssl", *argv], check=True, capture_output=True)
+        up = _QuietUpstream(("127.0.0.1", 0), _Upstream)
+        up.daemon_threads = True
+        up.seen, up.mode, up.status, up.message = [], "ok", 200, ""
+        up.retry_after, up.chunks, up.gap = None, 1, 0
+        up.served, up.by, up.ctype, up.pieces = "served-model", None, "application/json", []
+        served = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        served.load_cert_chain(cert, key)
+        up.socket = served.wrap_socket(up.socket, server_side=True)
+        threading.Thread(target=up.serve_forever, daemon=True).start()
+        self.addCleanup(up.server_close)
+        self.addCleanup(up.shutdown)
+        (tmp / "no-cas.pem").write_text("")
+        (tmp / "no-cas").mkdir()
+        made = ssl.create_default_context
+
+        def strict(*a, **kw):
+            ctx = made(*a, **kw)
+            ctx.verify_flags |= ssl.VERIFY_X509_STRICT
+            return ctx
+
+        m = self.model()
+        base = f"https://localhost:{up.server_port}/v1/openai"
+        for env, want in (({"SSL_CERT_FILE": str(ca)}, 200),              # the CA in Python's store
+                          ({"NODE_EXTRA_CA_CERTS": str(ca)}, 200),        # trusted for OpenCode alone
+                          ({}, 400)):                                     # trusted nowhere: the CA check stays
+            os.environ.update(SSL_CERT_FILE=str(tmp / "no-cas.pem"), SSL_CERT_DIR=str(tmp / "no-cas"))
+            os.environ.pop("NODE_EXTRA_CA_CERTS", None)
+            os.environ.update(env)
+            with mock.patch.object(webpush, "_ctx", []), mock.patch.object(webpush, "MAC_CAS", str(tmp / "none.pem")), \
+                    mock.patch.object(ssl, "create_default_context", strict):
+                kh = self.kh_mod.Keyhole(self.task, m, self.kh_mod.Key(m.provider, self.CANARY), base,
+                                         "bearer", log=self.lines.append)
+                self.addCleanup(kh.close)
+                code, _, text = self.post(kh)
+                ctx = webpush.tls()
+            self.assertEqual(code, want, (env, text))
+            self.assertTrue(ctx.check_hostname)
+            self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+        self.assertIn("its certificate didn't verify", text)
+        self.assertEqual(len(up.seen), 2)
+
     def test_anthropics_cache_writes_are_metered_when_its_message_delta_names_thinking_tokens(self):
         # #1081 (2026-11-23): Anthropic's message_delta now carries output_tokens_details
         # {thinking_tokens}, which usage_tokens read as the Responses API: a real Haiku step was

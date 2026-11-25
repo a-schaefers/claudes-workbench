@@ -2491,7 +2491,10 @@ leaves no prefix) and passed through `redact` (the key, its first 8 and last 4 c
 more key characters, each `[key redacted]`, in one pass): OpenCode prints an upstream body
 verbatim. Its TLS context is `webpush.tls()`'s: the default one, plus `MAC_CAS` when Python's
 store is empty (python.org's Python before Install Certificates: the bare default failed every
-request there, #1080). A transport failure is a 502 `keyhole: can't reach <host>: <reason>`, except
+request there, #1080), less Python 3.13's `VERIFY_X509_STRICT` and plus the CAs in
+`NODE_EXTRA_CA_CERTS` when it names a file, as OpenCode honours it (a TLS-inspecting proxy's CA
+without a critical basicConstraints, or trusted only there, failed every request while OpenCode,
+curl and node accepted it, #1385); the CA and hostname checks stay. A transport failure is a 502 `keyhole: can't reach <host>: <reason>`, except
 one that is this machine's setup (`_setup_failure`: a certificate that doesn't verify, on macOS
 naming Python's Install Certificates command; the proxy refusing the tunnel, a 4xx CONNECT reply
 such as 403 or 407, while its 502, 503 or 504 is the provider's host behind it and stays a 502),
@@ -6007,7 +6010,7 @@ device. Transient failures (`_transient`: unreached, 429, 5xx) retry after `PUSH
 404/410 drop the device; other refusals are `by: "refused"` with `status`. `webpush.send` returns
 `(status, reason)`; an uncheckable certificate is `webpush.CERT` (-1), final, not transient; each distinct reason is
 printed once to serve.log (`web chat: a push to <host> failed: <reason>`); `webpush.tls()` adds `MAC_CAS` when the store is empty (python.org's
-Python). A test's `chat.push_hint` (`cert`, `clock` for a 403, `unreached`, `refused`) tells the
+Python) and `NODE_EXTRA_CA_CERTS`'s CAs, and drops `VERIFY_X509_STRICT` (#1385). A test's `chat.push_hint` (`cert`, `clock` for a 403, `unreached`, `refused`) tells the
 page what to say (#539).
 
 A change to `chat.py` or `chat_static/` also gets the browser test, in CI (*The tests*).
