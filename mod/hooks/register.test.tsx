@@ -6345,7 +6345,7 @@ test('#1041: Dynamic workflows reach the conversation: a dynamic-workflows block
   files['/wb/workflows.json'] = JSON.stringify({ mode: 'off' })            // the user turns it off (a terminal, the pane)
   await clock.advance(31_000)
   await clock.advance(31_000)
-  expect(rows.slice(before)).toEqual(['[workbench] Dynamic workflows are now off (the user\'s choice; `wb workflows` shows it): ' +
+  expect(rows.slice(before)).toEqual(['[workbench] Dynamic workflows are now off (the user\'s choice; `wb deepmode` shows it): ' +
     'run one task at a time again, as the /workbench skill says.'])
   files['/wb/workflows.json'] = JSON.stringify({ mode: 'on' })
   await clock.advance(31_000)

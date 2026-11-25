@@ -3,6 +3,8 @@ on the fake OpenCode (tests/fake_opencode.py)."""
 import io
 import json
 import os
+import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -12,9 +14,10 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from workbench import ask_mcp, cards, cli, context, meter, models, runner, runs, schema, store
+from workbench import ask_mcp, cards, cli, context, lane, meter, models, runner, runs, schema, store
 from workbench.watch import wait_exit
-from tests.test_workbench import SPEND_FLASH, SPEND_FREE, SPEND_NONE, Base, run_wb, wait_phase
+from tests import test_workbench  # its Lane's helpers, never its classes here: they would run twice
+from tests.test_workbench import SPEND_FLASH, SPEND_FREE, SPEND_NONE, Base, home_outside_the_lane, run_wb, wait_phase
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -236,6 +239,35 @@ class ReportTasks(Base):
         self.assertIn(str(ask_mcp.ask_dir(task)), lane)
         self.assertIn(f"{task.worktree}/*", [r["resource"] for r in context.external_rules(task)
                                              if r["effect"] == "allow"])
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_the_kernel_refuses_a_report_tasks_writes_to_its_worktree_and_lets_it_read(self):
+        # #1278's phase 3: a lane test where Landlock exists, not only writable()'s list. WB_HOME
+        # outside a temp root, which the lane writes whole (test_workbench.Lane.fake_home)
+        home = test_workbench.Lane.fake_home(self)
+        os.environ["WB_HOME"] = str(home / ".local" / "state" / "workbench")
+        script = ("import sys, pathlib\nw = pathlib.Path(sys.argv[1])\nprint(w.joinpath('a.txt').read_text().strip())\n"
+                  "try:\n    w.joinpath('b.txt').write_text('x')\n    print('wrote')\n"
+                  "except PermissionError:\n    print('refused')\n")
+        said = {}
+        for name, report in (("t-klane", True), ("t-kcode", False)):
+            task = test_workbench.Lane.bare_task(self, name, self.repo)
+            store.write_json(task.dir / "task.json", {**task.spec, **({"report": True} if report else {})})
+            task.worktree.mkdir()
+            (task.worktree / "a.txt").write_text("read\n")
+            out = subprocess.run(lane.wrap(context.writable(task), [sys.executable, "-c", script, str(task.worktree)],
+                                           context.readable(task)), capture_output=True, text=True, timeout=30)
+            said[name] = out.stdout.split() or [out.stderr]
+        self.assertEqual(said, {"t-klane": ["read", "refused"], "t-kcode": ["read", "wrote"]})
+        self.assertFalse((store.Task("t-klane").worktree / "b.txt").exists())
+
+    def test_wb_stats_counts_report_rows_apart_from_trials(self):
+        # the review of #1278 (2026-11-25): store.results' trials=True brought the report rows too
+        from workbench import results
+        for row in ({"task": "t-a", "trial": True}, {"task": "t-b", "report": True}):
+            store.append_jsonl(store.home() / "results.jsonl", {"ts": time.time(), **row})
+        self.assertTrue(results.table().endswith("left out: 1 trials, 1 report tasks"), results.table())
 
     def test_accepting_a_report_commits_nothing_and_its_row_is_kept_from_the_learners(self):
         self.report("t-acc", "--schema", "verdict", env={"FAKE_RESULT": json.dumps(VERDICT)})
@@ -620,6 +652,24 @@ class Runs(Base):
         self.assertEqual(self.wait_run("stp", ("review", "failed", "checkpoint"))["phase"], "review")
         self.assertEqual(runs.report_of("stp")["null"], [])
 
+    def test_a_driver_waiting_on_an_item_sleeps_rewriting_no_status(self):
+        # the review of #1278 (2026-11-25): every pass wrote status.json in the run directory the
+        # driver watches, so each wait returned at once: 20 rewrites a second while an item ran
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Audit area": {"findings": [], "covered": ["README.md"]}})
+        os.environ["FAKE_SLEEP"] = "600"
+        run_wb("run", "start", "calm", "--plan", self.plan({**AUDIT, "name": "calm"}), "--param", "areas=a",
+               "--repo", str(self.repo))
+        self.wait_item("calm-find-1", lambda st: st.get("phase") == "running" and st.get("agent_pid"))
+        time.sleep(1)                                                    # the start's own writes
+        path, seen = runs.run_dir("calm") / "status.json", set()
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            seen.add(store.read_json(path, {}).get("updated_at"))
+            time.sleep(0.02)
+        self.assertLessEqual(len(seen), 2, f"{len(seen)} status writes in 3 s")
+        self.assertTrue(runs.driver_alive(runs.Run("calm")))
+        run_wb("run", "stop", "calm")
+
     def test_attempts_run_an_item_n_times_and_a_batch_hands_a_barrier_its_inputs_as_one_item(self):
         os.environ["FAKE_RESULT_BY"] = json.dumps({
             "Audit area alpha": {"findings": [finding("A1", "claim-one")], "covered": ["README.md"]}})
@@ -813,6 +863,162 @@ class RunsApi(Base):
             self.assertIsNone(runs._room(run, stage, st, m))             # another of the run's: no wait
         flying = {"find": [runs.Item("find", str(i), state="running") for i in range(runs.IN_FLIGHT)]}
         self.assertEqual(runs._room(run, stage, flying, m), f"{runs.IN_FLIGHT} items in flight")
+
+
+    def wait_item(self, name, check, timeout=60):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            t = store.Task(name)
+            if t.exists and check(t.status):
+                return t
+            time.sleep(0.2)
+        self.fail(f"{name}: {store.Task(name).status if store.Task(name).exists else 'never started'}")
+
+    def until_done(self, run, timeout=60):
+        """The passes, as the driver runs them, until the run leaves `running`."""
+        deadline = time.time() + timeout
+        while runs.tick(run) and run.status.get("phase") == "running" and time.time() < deadline:
+            time.sleep(0.3)
+        return run.status
+
+    def stopped_mid_round(self, run, name, **status):
+        """Item ``name`` started and at work, then stopped as ``status`` says, its runner gone."""
+        os.environ["FAKE_SLEEP"] = "600"
+        runs.tick(run)
+        self.wait_item(name, lambda st: st.get("phase") == "running" and st.get("agent_pid"))
+        self.assertIn(f"stopped {name}", run_wb("stop", name))
+        os.environ["FAKE_SLEEP"] = "0"
+        task = store.Task(name)
+        task.set_status(**status)
+        return task
+
+    def test_an_item_its_provider_stopped_is_resumed_where_it_stood_and_its_result_kept(self):
+        # the review of #1278 (2026-11-25): only cli._interrupted stops were held; a provider's
+        # stop (here the fake's 401, WB_FAKE_API) was taken as null, its task discarded
+        os.environ.update(FAKE_SCENARIO="ok", WB_FAKE_API="meterco=auth", FAKE_RESULT_BY=json.dumps(
+            {"Audit area": {"findings": [], "covered": ["README.md"]}}))
+        run, _ = self.start("prov", "--budget-usd", "1")
+        runs.tick(run)
+        task = self.wait_item("prov-find-1", lambda st: st.get("phase") in ("stuck", "failed", "review"))
+        self.assertEqual(cli.stopped_outside(task.status), "provider", task.status)
+        os.environ.pop("WB_FAKE_API")                                    # the key works again
+        runs.tick(run)
+        self.assertEqual([(r["task"], r["by"], r["ok"]) for r in run.journal() if r.get("kind") == "resumed"],
+                         [("prov-find-1", "driver", True)])
+        self.wait_item("prov-find-1", lambda st: st.get("phase") in ("review", "stuck", "failed"))
+        self.assertEqual(self.until_done(run)["phase"], "review", run.journal()[-4:])
+        rep = runs.report_of("prov")
+        self.assertEqual((rep["null"], [f["key"] for f in rep["final"]]), ([], []), rep)  # no findings: none to verify
+        (found,) = runs.state(run)["find"]
+        self.assertEqual((found.state, found.output), ("done", {"findings": [], "covered": ["README.md"]}))
+
+    def test_an_item_the_day_cap_stopped_mid_round_waits_past_midnight_overnight_never_discarded(self):
+        # the review of #1278 (2026-11-25): the cap's stop in a round (infra spend) was null, so
+        # --overnight's promise to go on past midnight failed for whatever was in flight
+        os.environ.update(FAKE_SCENARIO="ok", FAKE_RESULT_BY=json.dumps(
+            {"Audit area": {"findings": [], "covered": ["README.md"]}}))
+        run, _ = self.start("ovn", "--budget-usd", "1", "--overnight")
+        why = f"significant role: API spend today is $5.03 of the $5.00 day cap ({meter.RESETS})"
+        task = self.stopped_mid_round(run, "ovn-find-1", phase="stuck", last=why, infra=runner.SPEND,
+                                      guard=runner.SPEND)
+        self.spent(5.03)                                                 # today at the cap
+        for _ in range(2):
+            runs.tick(run)
+        self.assertEqual(run.status["phase"], "running")
+        self.assertEqual(self.notices("ovn"), [])                        # no wake: tried each pass
+        self.assertEqual([r["kind"] for r in run.journal() if r.get("task") == task.name], ["item", "held"])
+        self.assertEqual((task.status["phase"], runs.state(run)["find"][0].state), ("stuck", "running"))
+        self.roles(SPEND_FLASH, 50)                                      # past midnight: room again
+        runs.tick(run)
+        self.assertEqual([r["by"] for r in run.journal() if r.get("kind") == "resumed"], ["driver"])
+        self.wait_item(task.name, lambda st: st.get("phase") in ("review", "stuck", "failed"))
+        self.assertEqual(self.until_done(run)["phase"], "review", run.journal()[-4:])
+        self.assertEqual(runs.report_of("ovn")["null"], [])
+
+    def test_without_overnight_the_cap_pauses_the_run_and_wb_run_resume_takes_the_item_up(self):
+        os.environ.update(FAKE_SCENARIO="ok", FAKE_RESULT_BY=json.dumps(
+            {"Audit area": {"findings": [], "covered": ["README.md"]}}))
+        run, _ = self.start("cpr", "--budget-usd", "1")
+        why = f"significant role: API spend today is $5.03 of the $5.00 day cap ({meter.RESETS})"
+        task = self.stopped_mid_round(run, "cpr-find-1", phase="stuck", last=why, infra=runner.SPEND)
+        self.spent(5.03)
+        runs.tick(run)
+        self.assertEqual(run.status["phase"], "paused")
+        (told,) = self.notices("cpr")
+        self.assertIn("cpr-find-1 waits where it stopped: wb run resume cpr once that allows", told["text"])
+        self.assertEqual(task.status["phase"], "stuck")                  # kept, never discarded
+        self.roles(SPEND_FLASH, 50)
+        with mock.patch.object(runs, "spawn", return_value=0):
+            self.assertEqual(wb("run", "resume", "cpr")[0], 0)
+        self.assertEqual(runs._resume_items(run), ["cpr-find-1"])        # as the new driver starts
+        self.wait_item(task.name, lambda st: st.get("phase") in ("review", "stuck", "failed"))
+        self.assertEqual(self.until_done(run)["phase"], "review", run.journal()[-4:])
+
+    def test_a_second_stop_from_outside_after_the_drivers_resume_is_claudes_checkpoint_not_a_null(self):
+        run, _ = self.start("twice", "--budget-usd", "1")
+        task = self.stopped_mid_round(run, "twice-find-1", phase="stuck", last="rate_limited: 429",
+                                      infra="provider", guard="rate_limited")
+        run.log(kind="resumed", task=task.name, by="driver", ok=True, why="")  # the first stop's
+        runs.tick(run)
+        st = run.status
+        self.assertEqual(st["phase"], "checkpoint")
+        self.assertIn("twice-find-1 was stopped from outside again (provider", st["why"])
+        self.assertEqual(task.status["phase"], "stuck")                  # its work kept
+        self.assertNotIn("null", [r["kind"] for r in run.journal()])
+
+    def test_wb_run_resume_takes_up_wb_run_stops_items_never_claudes_own_wb_stop(self):
+        # the review of #1278 (2026-11-25): both leave `last` "stopped by the reviewer"
+        run, _ = self.start("own", "--budget-usd", "1")
+        task = self.stopped_mid_round(run, "own-find-1")
+        self.assertEqual(task.status["last"], runs.STOPPED_BY_CLAUDE)
+        self.assertFalse(runs._resumable(run, task.name, task.status))
+        run.log(kind="stopped", task=task.name)                           # as runs.stop journals it
+        self.assertTrue(runs._resumable(run, task.name, task.status))
+        run.log(kind="resumed", task=task.name, by="resume", ok=True, why="")
+        self.assertFalse(runs._resumable(run, task.name, task.status))   # Claude's next stop is Claude's
+
+    def test_a_start_that_timed_out_after_writing_its_task_is_the_items_never_a_null(self):
+        run, _ = self.start("slow", "--budget-usd", "1")
+        stage, it = runs.stages(run.flow)[0], runs.state(run)["find"][0]
+        late = subprocess.CompletedProcess([], 124, "", "wb start timed out")
+        with mock.patch.object(runs, "_wb", return_value=late):
+            self.assertEqual(runs._start(run, stage, it, 1), ("null", "wb start timed out"))
+            t = store.Task("slow-find-1")
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"name": t.name, "run": "slow"})
+            self.assertEqual(runs._start(run, stage, it, 1), ("running", ""))
+
+    def test_a_context_file_that_cant_be_read_is_said_never_a_traceback(self):
+        p = Path(self.tmp.name) / "ctx.json"
+        p.write_text(json.dumps({**AUDIT, "name": "ctx"}))
+        code, _, err = wb("run", "start", "ctx", "--plan", str(p), "--param", "areas=a", "--repo",
+                          str(self.repo), "--context-file", str(Path(self.tmp.name) / "missing.md"))
+        self.assertEqual(code, 1)
+        self.assertIn("wb: --context-file", err)
+        self.assertNotIn("Traceback", err)
+
+
+class Driver(Base):
+    """How the driver runs wb for its items (runs._wb)."""
+
+    def test_an_items_wb_runs_workbenchs_own_package_never_a_workbench_in_the_users_repo(self):
+        # the review of #1278 (2026-11-25): `python -m workbench.cli` with the run's cwd put the
+        # cwd ahead of PYTHONPATH, so a repo's own top-level workbench/cli.py ran for every
+        # item's start, accept and discard, as the user, outside the lane
+        repo = Path(self.tmp.name) / "shadow"
+        (repo / "workbench").mkdir(parents=True)
+        (repo / "workbench" / "__init__.py").write_text("")
+        ran = Path(self.tmp.name) / "the-repos-cli-ran"
+        (repo / "workbench" / "cli.py").write_text(f"open({str(ran)!r}, 'w').write('x')\n")
+        d = runs.run_dir("shad")
+        d.mkdir(parents=True)
+        store.write_json(d / "run.json", {"name": "shad", "cwd": str(repo), "repo": str(repo)})
+        with mock.patch.dict(os.environ):
+            os.environ.pop("PYTHONPATH", None)                           # as from bin/wb, which sets none
+            r = runs._wb(["--version"], runs.Run("shad"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.stdout.startswith("wb "), r.stdout)
+        self.assertFalse(ran.exists())
 
 
 class Wiring(Base):
@@ -1047,6 +1253,74 @@ class Wiring(Base):
         self.assertEqual(runs.archive(30), 1)
         self.assertFalse(run.exists)
         self.assertIn("run names are never reused", runs.taken("old"))
+
+
+@unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+class RealOpenCodeReports(Base):
+    """A report task's round on the real OpenCode (CLAUDE.md: how OpenCode is configured changed,
+    so one real run): the tools the layer's report rules leave the model, and submit_result's
+    round trip from the model's call through OpenCode and ask_mcp to the runner's result.json.
+    The model is tests/capture_llm.py, which records each request and makes the call it is given.
+    The setUp is test_workbench.RealOpenCodeRun's."""
+
+    def setUp(self):
+        super().setUp()
+        tmp = Path(self.tmp.name)
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            self.port = sock.getsockname()[1]
+        conf = tmp / "xdg" / "config" / "opencode"
+        conf.mkdir(parents=True)
+        (conf / "opencode.json").write_text(json.dumps({"provider": {"cap": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": f"http://127.0.0.1:{self.port}/v1", "apiKey": "x"},
+            "models": {"cap": {"name": "capture", "tool_call": True,
+                               "limit": {"context": 32768, "output": 1024}}}}}}))
+        os.environ.update({f"XDG_{d.upper()}_HOME": str(tmp / "xdg" / d) for d in ("config", "data", "state")})
+        os.environ["WB_OPENCODE_CONFIG"] = str(conf / "opencode.json")
+        os.environ.pop("WB_OPENCODE_BIN")
+
+    def report(self, name, result, *extra):
+        """Task ``name``'s one round, the model calling submit_result with ``result``: its state and
+        the tool lists of the requests that offered tools."""
+        out = Path(self.tmp.name) / f"{name}-requests.jsonl"
+        call = {"name": f"workbench_{ask_mcp.SUBMIT}", "arguments": result}
+        server = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"), str(self.port),
+                                   str(out), json.dumps([call])])
+        self.addCleanup(server.kill)
+        time.sleep(0.5)
+        run_wb("start", name, "--spec", str(self.spec), "--repo", str(self.repo), "--model", "cap",
+               "--report", *extra)
+        st = wait_phase(name, {"review", "stuck", "failed"}, timeout=180)
+        server.kill()
+        server.wait()
+        asked = [json.loads(x) for x in out.read_text().splitlines()]
+        return st, [{t["function"]["name"]: t["function"] for t in r["tools"]} for r in asked if r.get("tools")]
+
+    def test_a_read_report_gets_no_edit_tool_and_its_submit_result_reaches_result_json(self):
+        st, offered = self.report("t-rread", VERDICT, "--schema", "verdict")
+        task = store.Task("t-rread")
+        self.assertEqual(st["phase"], "review", (task.dir / "runner.log").read_text()[-3000:])
+        self.assertEqual(json.loads((task.dir / runner.RESULT).read_text()), VERDICT)
+        self.assertTrue(offered)
+        sch = json.loads((ROOT / "agent/schemas/verdict.json").read_text())
+        for tools in offered:
+            self.assertIn("read", tools)
+            self.assertFalse({"edit", "write", "patch", "apply_patch"} & set(tools), sorted(tools))
+            params = tools[f"workbench_{ask_mcp.SUBMIT}"]["parameters"]
+            self.assertEqual({k: params.get(k) for k in ("type", "required", "properties")},
+                             {k: sch[k] for k in ("type", "required", "properties")})
+
+    def test_a_report_with_tools_none_gets_only_skill_and_workbenchs_own_tools(self):
+        judged = {"judgments": [{"id": "F1", "meets_bar": False, "class": "none", "why": "no loss"}]}
+        st, offered = self.report("t-rnone", judged, "--schema", "judgments", "--tools", "none")
+        task = store.Task("t-rnone")
+        self.assertEqual(st["phase"], "review", (task.dir / "runner.log").read_text()[-3000:])
+        self.assertEqual(json.loads((task.dir / runner.RESULT).read_text()), judged)
+        self.assertTrue(offered)
+        for tools in offered:
+            self.assertIn(f"workbench_{ask_mcp.SUBMIT}", tools)
+            self.assertEqual({t for t in tools if not t.startswith("workbench_")} - {"skill"}, set(), sorted(tools))
 
 
 if __name__ == "__main__":  # at the end: partway, a run as a script skipped every class after it

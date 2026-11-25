@@ -658,7 +658,7 @@ const WORKFLOWS_RULE = 'Dynamic workflows are on (the user\'s choice; `wb deepmo
   'yourself: the run starts its items, each on its own role\'s model, never one you pick, and the GPU lease, the ' +
   'provider slots and the day cap decide what runs together. Review each result on its own merits; merge logic ' +
   'first, then tests, then UI or docs.'
-const WORKFLOWS_OFF = 'Dynamic workflows are now off (the user\'s choice; `wb workflows` shows it): run one task ' +
+const WORKFLOWS_OFF = 'Dynamic workflows are now off (the user\'s choice; `wb deepmode` shows it): run one task ' +
   'at a time again, as the /workbench skill says.'
 
 async function workflowsMode($: any): Promise<string> {

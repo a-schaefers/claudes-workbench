@@ -663,11 +663,21 @@ def _live(stage: dict, it: Item) -> tuple[str, str, object]:
 # --- the driver ----------------------------------------------------------------------------------
 
 def _wb(argv: list[str], run: Run, timeout: float = 115) -> subprocess.CompletedProcess:
-    """`wb ARGV` as the user's own command: a subprocess, from where the run was started."""
+    """`wb ARGV` as the user's own command: a subprocess, from where the run was started (the
+    cwd says whose session and repo it is), running this workbench's own package.
+    `-P` (3.11's safe_path): with `-m` Python put the cwd ahead of PYTHONPATH, so a repo holding
+    a top-level `workbench/` package ran its own `cli.py` for every item's start, accept and
+    discard, as the user, outside any lane; a run from a workbench clone on another branch ran
+    that branch's (the review of #1278, 2026-11-25). PYTHONPATH is the package root
+    (context.detached_env): from `bin/wb`, which only inserts it in sys.path, the child found
+    no workbench at all."""
+    from . import context
     cwd = run.spec.get("cwd") or run.spec.get("repo")
+    env = context.detached_env()
+    env.pop("WB_TASK", None)
     try:
-        return subprocess.run([sys.executable, "-X", "utf8", "-m", "workbench.cli", *argv],
-                              cwd=cwd if cwd and os.path.isdir(cwd) else str(PKG_ROOT),
+        return subprocess.run([sys.executable, "-X", "utf8", "-P", "-m", "workbench.cli", *argv],
+                              cwd=cwd if cwd and os.path.isdir(cwd) else str(PKG_ROOT), env=env,
                               capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as e:
         return subprocess.CompletedProcess(e.cmd, 124, e.stdout or "", f"wb {argv[0]} timed out")
@@ -789,6 +799,11 @@ def _start(run: Run, stage: dict, it: Item, n: int) -> tuple[str, str]:
     if r.returncode == 0:
         return "running", ""
     why = _last_line(r)
+    if r.returncode == 124 and store.Task(name).exists:
+        # timed out after writing the task: it may run, its notices this driver's, so it is the
+        # item's (cli.reap fails one whose runner never came, a stop from outside: _held); a
+        # null here left a live task nobody took (the review of #1278, 2026-11-25)
+        return "running", ""
     # the day cap's own refusal, the one that clears at midnight (meter.RESETS, anywhere in what
     # wb start said): no cap, no price or an unreadable routes.json say "day cap" too, and never clear
     if r.returncode == 3 and meter.RESETS in (r.stderr or "") + (r.stdout or ""):
@@ -870,12 +885,30 @@ def _ack_items(run: Run) -> None:
 STOPPED_BY_CLAUDE = "stopped by the reviewer"  # cli.cmd_stop's `last`: wb run stop's items
 
 
-def _resumable(last) -> bool:
-    """Whether an item's `last` is a stop from outside its step: wb run stop's or wb stop --all's
-    (cli.BAIL_OUT), or an interruption (cli._interrupted: a restart, a killed runner, a shutdown's
-    signal, an update)."""
+def _outside(st: dict) -> bool:
+    """Whether a task's stop came from outside its step: an interruption (cli._interrupted: a
+    restart, a killed runner, a shutdown's signal, an update) or any other stop cli.stopped_outside
+    names (the day cap's in a round, a provider's rate limit, outage or refusal, a repo made
+    local-only, `wb stop --all`). Only the first were held: an item the cap or its provider
+    stopped mid-round was taken as null, its paid work discarded, never run again, past midnight
+    under --overnight nor on wb run resume (the review of #1278, 2026-11-25)."""
     from . import cli
-    return last in (STOPPED_BY_CLAUDE, cli.BAIL_OUT) or cli._interrupted(last)
+    return st.get("phase") in ("stuck", "failed") and (
+        cli._interrupted(st.get("last")) or bool(cli.stopped_outside(st)))
+
+
+def _run_stopped(run: Run, name: str) -> bool:
+    """Whether wb run stop stopped task ``name`` (journal `stopped`), not resumed since. Claude's
+    own `wb stop <item>` leaves the same `last`, and wb run resume took that one up too (the
+    review of #1278, 2026-11-25)."""
+    kinds = [r.get("kind") for r in run.journal() if r.get("task") == name and r.get("kind") in ("stopped", "resumed")]
+    return bool(kinds) and kinds[-1] == "stopped"
+
+
+def _resumable(run: Run, name: str, st: dict) -> bool:
+    """Whether wb run resume takes item ``name`` up where it stopped: a stop from outside its step
+    (_outside), or wb run stop's."""
+    return _outside(st) or (st.get("last") == STOPPED_BY_CLAUDE and _run_stopped(run, name))
 
 
 def _resume_items(run: Run) -> list[str]:
@@ -893,7 +926,7 @@ def _resume_items(run: Run) -> list[str]:
         if t.status.get("phase") in cli.LIVE:
             cli.reap(t, quiet=True)  # one notice at most: this resume is the news
         st = t.status
-        if st.get("phase") in ("stuck", "failed") and _resumable(st.get("last")) and not cli.runner_alive(t):
+        if _resumable(run, n, st) and not cli.runner_alive(t):
             r = _wb(["resume", n], run)
             run.log(kind="resumed", task=n, by="resume", ok=r.returncode == 0,
                     why="" if r.returncode == 0 else _last_line(r))
@@ -902,23 +935,43 @@ def _resume_items(run: Run) -> list[str]:
 
 
 def _held(run: Run, it: Item) -> bool:
-    """Whether item ``it``, interrupted from outside (cli._interrupted), goes on rather than being
-    taken as null: `wb resume`d here once while the run runs (a second interruption is its null),
-    held for wb run resume while it doesn't. False for any other item, and for one whose resume
-    was refused (its null, said)."""
-    from . import cli
+    """Whether item ``it``, stopped from outside its step (_outside), goes on rather than being
+    taken as null: `wb resume`d here while the run runs; held for wb run resume while it doesn't.
+    A resume refused with exit 3 (the day cap, which clears at midnight; a repo made local-only,
+    Agents on the GPU: the user's to lift) holds it too, the run paused, or under --overnight
+    tried again each pass while the cap's refusal stands. A second stop from outside after the
+    driver's resume is a checkpoint, Claude's call, never a loop of resumes (a spend stop aside:
+    one a night, each past midnight). False for any other item, and for one whose resume was
+    refused otherwise (its null, said)."""
+    from . import cli, runner
     st = store.Task(it.task).status
-    if st.get("phase") not in ("stuck", "failed") or not cli._interrupted(st.get("last")):
-        return False
-    if any(r.get("kind") == "resumed" and r.get("task") == it.task and r.get("by") == "driver"
-           for r in run.journal()):
+    if not _outside(st):
         return False
     if run.status.get("phase") != "running":
         return True
+    mine = [r for r in run.journal() if r.get("task") == it.task]
+    why_out = cli.stopped_outside(st) or st.get("last") or "stopped"
+    if why_out != runner.SPEND and any(r.get("kind") == "resumed" and r.get("by") == "driver" and r.get("ok")
+                                for r in mine):
+        _checkpoint(run, f"{it.task} was stopped from outside again ({why_out}: {st.get('last') or ''}); "
+                         f"its work is kept: wb run resume {run.name} takes it up again, or wb discard {it.task}")
+        return True
     r = _wb(["resume", it.task], run)
-    run.log(kind="resumed", task=it.task, by="driver", ok=r.returncode == 0,
-            why="" if r.returncode == 0 else _last_line(r))
-    return r.returncode == 0
+    if r.returncode == 0:
+        run.log(kind="resumed", task=it.task, by="driver", ok=True, why="")
+        return True
+    why = _last_line(r)
+    if r.returncode != 3:
+        run.log(kind="resumed", task=it.task, by="driver", ok=False, why=why)
+        return False
+    if not (mine and mine[-1].get("kind") == "held"):
+        run.log(kind="held", task=it.task, why=why)
+    if meter.RESETS in (r.stderr or "") + (r.stdout or "") and run.spec.get("overnight"):
+        return True  # the day cap's: resumed on the first pass past midnight
+    if run.set_status_if(lambda x: x.get("phase") == "running", phase="paused", why=why):
+        run.notify("run_paused", f"paused: {why}. Done work is kept, and {it.task} waits where it stopped: "
+                                 f"wb run resume {run.name} once that allows")
+    return True
 
 
 def _room(run: Run, stage: dict, st: dict, m) -> str | None:
@@ -1048,11 +1101,16 @@ def tick(run: Run) -> bool:
 
 
 def _write_status(run: Run, st: dict) -> None:
+    """The pass's counts and spend in status.json, written only when one changed: the driver
+    watches its run directory, and a write every pass woke it at once, a loop of 20 rewrites a
+    second for as long as an item ran, each pass reading the whole ledger, and every `wb wait
+    <run>` with it (the review of #1278, 2026-11-25)."""
     flow = run.flow
     used = spent(run)
-    run.set_status(stages={s["id"]: _counts(st.get(s["id"])) for s in stages(flow) if not s.get("final")},
-                   spent_usd=used["usd"], gpu_min=used["gpu_min"], budget_usd=run.spec.get("budget_usd"),
-                   budget_min=run.spec.get("budget_min"))
+    fields = {"stages": {s["id"]: _counts(st.get(s["id"])) for s in stages(flow) if not s.get("final")},
+              "spent_usd": used["usd"], "gpu_min": used["gpu_min"], "budget_usd": run.spec.get("budget_usd"),
+              "budget_min": run.spec.get("budget_min")}
+    run.set_status_if(lambda cur: any(cur.get(k) != v for k, v in fields.items()), **fields)
 
 
 def _finish(run: Run) -> bool:
@@ -1406,7 +1464,10 @@ def cmd_start(a) -> None:
     usd_, mins = _budget(flow, a, said)
     ctx = a.context or ""
     if a.context_file:
-        ctx = Path(a.context_file).expanduser().read_text(encoding="utf-8")
+        try:  # said, never a traceback (the review of #1278, 2026-11-25)
+            ctx = Path(a.context_file).expanduser().read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            _die(f"--context-file {a.context_file}: {getattr(e, 'strerror', None) or e}")
     ctx = ctx or flow.get("context") or ""
     est_usd, est_min, later = estimate(flow, params)
     d = run_dir(a.name)
@@ -1557,6 +1618,7 @@ def stop(run: Run, why: str, items: bool = True) -> list[str] | None:
         if t.exists and t.status.get("phase") in store.ACTIVE:
             r = _wb(["stop", n], run)
             if r.returncode == 0:
+                run.log(kind="stopped", task=n)  # wb run resume's to take up (_resumable)
                 out.append(n)
     run.set_status(pid=None)
     return out

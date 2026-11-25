@@ -77,7 +77,7 @@ wb-python` against a second hand-over; with none, exit 78 and one line (the chat
 |---|---|---|
 | `wb` | the user, Claude, the mod | `bin/wb` puts its real path's repo root on `sys.path` (symlinks work); the plugin's `mod/bin/wb` (`sh`) execs a clone's `bin/wb` (#1190) |
 | the runner | `cli.spawn_runner` | `python -X utf8 -m workbench.runner <task>`, cwd and `PYTHONPATH` the repo root (the caller's in `WB_USER_PYTHONPATH`: `context.detached_env`), own session and, where logind kills at logout, own systemd scope (`cli.detach`, `cli.runner_scope`, #351), output to `runner.log` |
-| a run's driver | `runs.spawn` (`wb run start`, `resume`, `feed`) | `python -X utf8 -m workbench.runs drive <run>`, cwd and `PYTHONPATH` the repo root (`context.detached_env`, the session's `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PID` kept: its items are the session's), its own session (`cli.detach`); each item a `wb start` subprocess, `python -X utf8 -m workbench.cli` (`runs._wb`) |
+| a run's driver | `runs.spawn` (`wb run start`, `resume`, `feed`) | `python -X utf8 -m workbench.runs drive <run>`, cwd and `PYTHONPATH` the repo root (`context.detached_env`, the session's `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PID` kept: its items are the session's), its own session (`cli.detach`); each item a `wb start` subprocess, `python -X utf8 -P -m workbench.cli` (`runs._wb`: cwd where the run was started, `PYTHONPATH` the package root, `context.detached_env`; `-P` keeps the cwd off `sys.path`, as a repo's own top-level `workbench/` ran in its place, as the user, outside the lane, the review of #1278) |
 | the ask server | OpenCode, the layer's `mcp.servers.workbench` | `[sys.executable, <root>/bin/wb-ask-mcp]` |
 | the git shim | the agent's shell (`<rules>/bin/git`) | a `/bin/sh` wrapper exec'ing `<python> -I -c` (quoted: a shebang splits at a space) with `sys.path.insert` |
 | the lane | the runner (`context.lane_wrap`) | `python -I lane.py …`, standard library only; on macOS it execs `/usr/bin/sandbox-exec -p <profile> -D… -- …` |
@@ -7279,13 +7279,18 @@ name, and the run a `--group`. A run and a task never share a name (`runs.taken`
 
 **The driver** (`runs.drive`, `python -X utf8 -m workbench.runs drive <run>`, detached by `cli.detach` as
 bench's, under its `drive` lock; `runs.spawn`). Each pass (`runs.tick`, woken by its run directory, at most
-`TICK_S` 30 s): it takes its items' notices (`_ack_items`: an open run's item, its driver alive
+`TICK_S` 30 s; its counts and spend go to `status.json` only when one changed, `_write_status`: a write every
+pass woke the driver itself, 20 passes a second while an item ran): it takes its items' notices (`_ack_items`: an open run's item, its driver alive
 (`runs.item_open`), notifies `runs/<run>/notify.jsonl` with its `noticed` mark, `store.Task.notify`, and the
 driver claims each ack up to it, so neither the mod's wake nor its idle net wakes Claude for one; with the driver
-dead an item's notice is Claude's, a task's as any), reaps dead runners, resumes once an item interrupted from
-outside (`_held`: `cli._interrupted`, a restart, a killed runner, a shutdown's signal, an update; `wb resume`,
-journal `resumed` `by: driver`; a second interruption, or a refused resume, is its null; while the run isn't
-`running` it waits for `wb run resume`), takes each report item that ended (`_take`: its object to `outputs/`,
+dead an item's notice is Claude's, a task's as any), reaps dead runners, resumes an item stopped from outside
+its step (`_held`, `runs._outside`: `cli._interrupted`, a restart, a killed runner, a shutdown's signal, an
+update, or any other `cli.stopped_outside`: the day cap in a round, a provider's rate limit, outage or refusal, a
+repo made local-only, `wb stop --all`; `wb resume`, journal `resumed` `by: driver`). A resume refused with exit 3
+(the cap, local-only, Agents on the GPU) holds the item (journal `held`) and pauses the run, or under
+`--overnight` with the cap's `meter.RESETS` is tried again each pass, so past midnight it goes on; any other
+refusal is its null. A second stop from outside after the driver's resume (a spend stop aside) is a checkpoint,
+Claude's, its work kept; while the run isn't `running` the item waits for `wb run resume`. It takes each report item that ended (`_take`: its object to `outputs/`,
 through `keep`, then `wb accept`; a refix `wb feedback --text` with the `must_fix` list, at most `max`, the review
 `superseded`; a failed one discarded, `null`), raises a checkpoint for a code item stuck or failed, then starts
 what is ready (`runs.state`, rebuilt
@@ -7297,13 +7302,17 @@ a report's with `--report --card --schema --tools --ask-budget 0 --no-self-revie
 (`runs._start`), a subprocess, so refusals are the user's: an exit 3 that is the day cap's own (`meter.RESETS`,
 "it resets at local midnight", anywhere in what wb start said) pauses the run, or under `--overnight` is tried
 again each tick (journal `retry`); any other exit 3 (no cap, no price, an unreadable routes.json, which say "day
-cap" too and never clear) is `not_run`, else `null`. The journal row comes first, so a crash adopts the item.
+cap" too and never clear) is `not_run`; a start that timed out (124) once its task exists is the item's,
+running (a runner that never came is reaped, a stop from outside); else `null`. The journal row comes first, so a
+crash adopts the item.
 
 **Budgets.** Dollars: `--budget-usd`, else the flow's, else today's cap left (said at start); the cap itself
 still checks every start. Before each API start `meter.run_total` (one pass over the ledger for the run's tasks)
 plus `meter.request_floor` past the budget pauses the run (`run_paused`); plan and free models count $0. GPU
 minutes: `--budget-min`, the items' `active_s`. `--overnight` (needs `--budget-usd`) keeps trying past the day
 cap's midnight instead of pausing. A stage on an API role with no cap refuses the start (`meter.no_cap`).
+The run's budgets are checked before each start only: items already running finish their rounds, so a run can
+end past `--budget-usd` by what they spend (the day cap still stops every one).
 The estimate: each card's `est` × `meter.price` for the stages whose items are known (`runs.estimate`).
 
 **Notices** (`runs.Run.notify`; *Waking Claude, exactly once*): `run_checkpoint`, `run_done`, `run_paused`,
@@ -7321,8 +7330,9 @@ it, quietly (`runs.reap(quiet=True)`, journal `reaped`), the items' notice the o
 the drivers of the runs whose items it stops first (`runs.stop`, `items=False`).
 
 **Resume** goes on from the journal by stage and item: valid outputs kept, live runners adopted, and the items a
-stop or an interruption left (`runs._resume_items`: `wb run stop`'s, `wb stop --all`'s, and those failed or stuck
-from outside, `cli._interrupted`; a live runner reaped first, quietly) `wb resume`d, journal `resumed` `by:
+stop or an interruption left (`runs._resume_items`, `_resumable`: `wb run stop`'s, journal `stopped`, and not
+Claude's own `wb stop <item>`, which leaves the same `last`; and those failed or stuck from outside, `_outside`;
+a live runner reaped first, quietly) `wb resume`d, journal `resumed` `by:
 resume`: by the new driver as it starts, alive so their notices are its, or by `_resume` under a live one. A
 closed run, or one at `review`, never goes on (`runs._ended`; `wb run feed` asks before it writes the inbox).
 **Close** refuses while a code item is open. `wb stop --all` stops runs' drivers; `wb gc` archives closed runs.
@@ -7380,7 +7390,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb run start <run> --flow <name> \| --plan <file>` | `--param K=V…`, `--repo DIR` (.), `--base REF` (HEAD), `--budget-usd USD` (the flow's, else today's cap left), `--budget-min MIN`, `--overnight` (needs `--budget-usd`), `--context TEXT`, `--context-file FILE`, `--trial`, `--no-claude-md` | *Deep workflows*: refuses a bad or taken name (`runs.taken`: a run's or a task's, archived too), a flow `runs.validate` refuses, a missing or mistyped param, a stage on an API role with no day cap (`meter.no_cap`), before any file; writes `runs/<run>/`, spawns the driver, prints the stages' roles, the estimate (`runs.estimate`), the budget, `stop: wb run stop <run>` and to wait for its notices with `wb wait <run>` in the background. |
 | `wb run status [<run>]` | `--all`, `--json`, `--all-sessions` (and, suppressed, `--repo DIR`, `--session ID`) | Reaps a dead driver (`runs.reap`: `stopped`, one `run_stopped`); a line per run in the caller's scope (`runs.status_line`). |
 | `wb run report <run>` | `--stage ID`, `--json` | `runs.report_of`: final, filtered, superseded, null, not_run, pending, code, spend; every item accounted for. |
-| `wb run stop <run>`, `wb run resume <run>` | | Stop: phase `stopped`, the driver SIGTERM'd, each running item `wb stop`ped. Resume (refused closed or at `review`, `runs._ended`): phase `running`, the run's notices taken, a driver spawned unless one lives; the items a stop or an interruption left (a restart, a killed runner, a signal, an update) `wb resume`d, by that driver as it starts (`runs._resume_items`). |
+| `wb run stop <run>`, `wb run resume <run>` | | Stop: phase `stopped`, the driver SIGTERM'd, each running item `wb stop`ped (journal `stopped`). Resume (refused closed or at `review`, `runs._ended`): phase `running`, the run's notices taken, a driver spawned unless one lives; the items `wb run stop` stopped or a stop from outside their step left (a restart, a killed runner, a signal, an update, the day cap, a provider's stop) `wb resume`d, by that driver as it starts (`runs._resume_items`). |
 | `wb run amend <run>` | `--budget-usd USD`, `--budget-min MIN`, `--overnight`/`--no-overnight`, `--skip STAGE…` | run.json changed under the status lock; a skipped stage's items are `not_run`. |
 | `wb run feed <run> <stage> --file <json\|->` | | A `claude` checkpoint's merge: a JSON list, `inbox/<stage>-feed`; the run goes on. Refused on a closed run or one at `review`, before the inbox is written. |
 | `wb run close <run>` | | Refused while a code item is open (accept or discard it); stops the driver, discards report items never taken, writes `result.json`, phase `closed`. |
@@ -7443,7 +7453,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb schedule run <name>` | | A fire now, detached (`cli.detach`; its output to `schedules/<name>/fire.log`), refused while one runs. |
 | `wb schedule fire <name>` | | The unit's command (`schedule.fire`): skips while the last fire holds its lock, or for money (`schedule.spend_skip`), each a `skipped` row; else `claude -p` headless on the backlog and one row. Exit 1 on an error row. *Scheduled runs*. |
 | `wb savings` | `--week` \| `--month` \| `--all`, `--json`, `--share`, `--card FILE.svg`, `--price X\|off`, `--api` | `savings.totals`, trials out, then the `api:` line when the period has API tasks; `--json` `{period, tasks, claude, self_est, saved, wh, cost, score, price, api}` (the same totals as the web chat's Savings, `chat.week_saved`); `--api`: the day ledger's spend, today's, by provider and by day, open tasks and bench replays in (`savings.spent`, #1094), and the closed API tasks counted, trials in, `--json` api_totals plus `bench` and `spent` (*What a task saved*, #1022); `--price` (positive, finite, else exit 1) writes savings.json `kwh_price` (`off`: `set_price(None)`, #609). |
-| `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set live on\|off`, `set every 1\|2\|5`, `--json` (*The Stats feed*), `--all` | `set`: stats.json; `wb stats`: `stats.summary`, then results by model, kind and role (a row before roles by size; the model column as wide as the longest id, never cut, the role cut to 11) with columns `tasks`, `accepted`, `rounds`, `autofix`, `reviews`, `min`, `claude`; with an API row shown also `kind`, `role`, `agent tok` and `paid` (mean $ a task over the known costs: `-` GPU, `plan` all plan usage, `?` none known, `~$0.12` some unknown, plan rows and those that sent nothing aside, #1106; `results.paid_cell`), within 120 columns for ids up to 30 (`stats.STATS_MODEL_LINES` 3, #638, #1022); a GPU-only table is as before #1022: `size` (`role` once a writing row shows) and `local tok`; `tune`: the knobs; `trial`: closed tasks' rows marked, lessons dropped (an open task refused: it has no row). Beneath the table one line, `left out: N trials, N spec gaps, N outside stops, N never ran`, each kind counted apart and only the nonzero ones (`results.table`, #817, #1245; one line, no `claude` or `≈` footnote, #1322). |
+| `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set live on\|off`, `set every 1\|2\|5`, `--json` (*The Stats feed*), `--all` | `set`: stats.json; `wb stats`: `stats.summary`, then results by model, kind and role (a row before roles by size; the model column as wide as the longest id, never cut, the role cut to 11) with columns `tasks`, `accepted`, `rounds`, `autofix`, `reviews`, `min`, `claude`; with an API row shown also `kind`, `role`, `agent tok` and `paid` (mean $ a task over the known costs: `-` GPU, `plan` all plan usage, `?` none known, `~$0.12` some unknown, plan rows and those that sent nothing aside, #1106; `results.paid_cell`), within 120 columns for ids up to 30 (`stats.STATS_MODEL_LINES` 3, #638, #1022); a GPU-only table is as before #1022: `size` (`role` once a writing row shows) and `local tok`; `tune`: the knobs; `trial`: closed tasks' rows marked, lessons dropped (an open task refused: it has no row). Beneath the table one line, `left out: N trials, N report tasks, N spec gaps, N outside stops, N never ran` (a report task's row, #1278, never a trial), each kind counted apart and only the nonzero ones (`results.table`, #817, #1245; one line, no `claude` or `≈` footnote, #1322). |
 | `wb gc` | `--days N` (`ARCHIVE_DAYS` 30) | `cli.gc`, writing `gc.json`: archives tasks closed N days (`store.archive`); old handled notices to `notify.old.jsonl` (`_rotate_notices`; `_cap_old_notices` at `NOTIFY_OLD_MAX` 8 MiB); rules of gone tasks (`RULES_GRACE` 1 h); `context.drop_stale_runtime_dirs`; `store.SCRATCH_PREFIXES` scratches (named `<prefix><maker's pid>.<start tag>.<machine tag>-` by `store.scratch`; `wb bench add`'s `.<case>.<pid>.tmp`) `SCRATCH_AGE` old whose maker is gone (`_drop_scratches`, `_maker_alive`: a reused pid with another start is gone, #532; `_scratch_homes`, #589; another machine's after `FAR_SCRATCH_AGE`, as its pid isn't in this process table, #876); half-made starts (`_dead_start`, `_drop_start`: worktree unlocked and removed, and the branch only when `starting.json` says this start made it and it still points at `branch_at`, `delete_branch(at=)`, #416, #376); chat uploads (`chat.drop_old_uploads`); landed `delegate/` branches (`_merged_branches`, `gitops.drop_landed_branch`, never one checked out, `gitops.checked_out_in`, nor one moved past the recorded tip, #930; status `branch_gone`, #686; one squash-merged elsewhere holds commits its target lacks and stays); accepted refs (`_released_refs`, `gitops.drop_accepted`, `accepted_ref_gone`: deleted when the tip is in `base_branch`, else moved into `steps.bundle` first; a `steps.bundle` stays as long as its task, #940); archived tasks past `store.SLIM_DAYS` 90 slimmed (`store.slim_archive`, `SLIM_GLOBS`: logs, test outputs, old exports, shot PNGs with shots.json marked `pruned` first, #821; task.json, status, prompts, summaries, events and asks stay: names stay taken, bench add and the lessons read them); `_drop_leftovers` (old `imports/`, dead `claude-sessions/<pid>`). Then (not in `cli.gc`) `bench.sweep` (#511). Accept and discard run it without the branches once per `GC_EVERY`. Runs closed N days to `runs/.archive/<run>` (`runs.archive`; gc.json `runs`), their names still taken. |
 
 ### Other
