@@ -33471,6 +33471,27 @@ class ApiDiscovery(Base):
         os.environ["WB_FAKE_API"] = "acme=nokey"                  # OpenCode can't authenticate it
         self.assertNotIn("acme/coder-flash", self.models.hosted_doc(fresh=True)["models"])
 
+    def test_a_coding_plans_zero_priced_models_read_as_a_plan_not_free(self):
+        # #1396 (2026-11-25): a paid coding plan lists every price 0, so wb called it free ("may
+        # keep or train on your code") and its start line said "today $0 of $5", never plan usage
+        from workbench import meter, results
+        zero = [{"input": 0, "output": 0, "cache": {"read": 0, "write": 0}}]
+        self.catalog(DISCOVERY_CATALOG + [api_entry("zai-coding-plan", "glm-9", cost=zero),
+                                          api_entry("kimi-code-plan-global", "k-9", cost=zero)],
+                     DISCOVERY_AUTH + [key_row("zai-coding-plan", "Z.AI Coding Plan", STORED)])
+        m = self.models.hosted()["zai-coding-plan/glm-9"]
+        self.assertEqual((m.free, m.key, meter.is_plan(m)), (False, "stored", True))
+        self.assertTrue(meter.tail(m).startswith(" · plan usage ("), meter.tail(m))
+        k = self.models.hosted()["kimi-code-plan-global/k-9"]   # a regional id goes on past it
+        self.assertEqual((k.free, k.key), (False, ""))         # no key stored: never keyless
+        self.assertEqual(results._plan(k.id), "kimi-code-plan-global")
+        self.assertEqual(run_wb("models", "--api", "glm-9").splitlines()[0],
+                         "zai-coding-plan/glm-9  200K · plan usage")
+        out = run_wb("models")
+        self.assertIn("kimi-code-plan-global 1, ", out)
+        self.assertIn("zai-coding-plan 1\n", out)
+        self.assertIn(f"opencode 1 (free: {cli.FREE_NOTE})", out)   # OpenCode's free one still is
+
     def test_discover_never_returns_an_api_model(self):
         # passes before #1013 too: it pins the rule that keeps the GPU paths on the GPU
         cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())

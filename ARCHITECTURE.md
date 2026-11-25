@@ -607,7 +607,7 @@ in front of a catalog estimate. The mod's `usd` and the chat's `apiSaved` follow
 (#1322: `$5` from meter and `$5.00` from savings said one cap two ways); the electricity's cost
 keeps none (#609, #845). A task with no known cost counts as `N with no known cost`, whatever the
 cause (`unknown_parts`; a provider's `unknown`, `unpriced`, #1106, one wording since #1322), never
-`$0.00`; a plan model's (`opencode-go`, an Ollama cloud model) as `on plan usage` (a quota, not
+`$0.00`; a plan model's (`opencode-go`, a coding plan, an Ollama cloud model) as `on plan usage` (a quota, not
 dollars). `paid(row)` is an API task's money at its close, on `wb accept`'s and `wb discard`'s
 line: `· paid ≈$0.12` (plain at the user's prices or the provider's figure, *Estimates or your
 prices*), `· paid: unknown` or `· plan usage (opencode-go)`; "" for a GPU task. `wb savings` adds,
@@ -631,8 +631,8 @@ prices, by_day: {YYYY-MM-DD: $}, by_provider: {p: $}}`); api_totals, each of its
 
 **What an API task cost** (#1022, `results.api_usage`, at its close; `bench.paid` for a replay).
 `kind` is task.json `via` (`results.task_kind`: anything but `"api"` is GPU), `provider` task.json's
-or the id before its first `/`. Plan usage first (`_plan`): a model of `PLAN_PROVIDERS`
-(`opencode-go`, the meter's list, `meter.PLAN_PROVIDERS`) or one the catalog flags `cloud` (an Ollama cloud model, #1013; read through
+or the id before its first `/`. Plan usage first (`_plan`): a model of a plan's provider
+(`meter.plan_provider`: `opencode-go`, `meter.PLAN_PROVIDERS`, or a coding plan's, `PLAN_ID`) or one the catalog flags `cloud` (an Ollama cloud model, #1013; read through
 `models.lookup(id, cached=True)`, never the name: any provider's model may end in `-cloud`) is
 `source: "plan"`, `cost: null`, `plan: <provider>`. Else the sessions, every id in status `sessions`
 plus `session` (handovers, revives and `wb next` each start one), each exported
@@ -995,7 +995,9 @@ No check-in at half the cap: it woke Claude for money with nothing to do, under 
 prompt's "tell the user how it is going" (#1322); the pane's cap row turns warning at half
 (tasks.ts `WARN_SHARE`), which wakes nobody.
 
-**Plans** (`meter.is_plan`: `opencode-go/*`, an Ollama cloud model): a quota, not dollars. Their
+**Plans** (`meter.is_plan`: `opencode-go/*`, an Ollama cloud model, a coding plan's provider: an id
+with a `-coding-plan`, `-code-plan`, `-token-plan` or `-step-plan` segment, `meter.PLAN_ID`, as
+`zai-coding-plan` or `kimi-code-plan-global`, whose catalog prices are all 0, #1396): a quota, not dollars. Their
 rows have `usd: null`, `plan: "<provider>"` and the tokens; they never count against the cap, never
 stop for `spend`, never reconcile, and `today()["plan_tok"]` sums them. Their quota errors are #1013's
 and #1020's.
@@ -3948,12 +3950,12 @@ again`; then `keys:` one per provider with a key source (`stored`, `Ollama's log
 `environment` / `OAuth login` / `in a config file` / `cloud signing`: `can't run, needs a key wb can
 hold outside the lane`); `catalog:` one count per provider, never the ids (OpenRouter alone lists
 300+), a provider's free models noted `free: the provider may keep or train on your code`
-(`FREE_NOTE`, #1021's words). With no role on API (or kept), no key and a routes.json that parses,
+(`FREE_NOTE`, #1021's words; never a plan's, whose prices are all 0 too: `models._is_free`, #1396). With no role on API (or kept), no key and a routes.json that parses,
 the section is two lines: `none set up, every role on the GPU` and the catalog's counts. With no GPU
 model, the GPU part is `no local models: <why_none()>` and the section still prints, exit 0, when a
 role is on API or a key is stored; otherwise it dies as before. `--api TEXT` (`_api_list`) lists the
 catalog ids containing TEXT (any case), sorted, at most `API_LIST_MAX` 30, each with the catalog's own window (`catalog_limit`),
-`$in/$out per 1M in/out` (the catalog's rate, or the user's once `wb model price` set them, #1135; none for a plan or a 0 entry) from its first untiered price and the free note, then `and N more: a longer
+`$in/$out per 1M in/out` (the catalog's rate, or the user's once `wb model price` set them, #1135; none for a 0 entry, `plan usage` for a plan's, #1396) from its first untiered price and the free note, then `and N more: a longer
 text narrows it`; nothing matching reads the catalog again once when `models.miss_rereads()` (as
 `_hosted_exact`: a just-connected provider, #1076); it lists only, never sets a role. `--set-default` stays GPU (`router.choose` over
 `discover()`): never an API model as OpenCode's default.

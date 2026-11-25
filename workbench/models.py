@@ -1286,7 +1286,10 @@ def connected() -> dict[str, dict] | None:
 
 def _is_free(pid: str, entry: dict) -> bool:
     """An OpenCode free model: `opencode/*-free`, or every price 0 (marked only; child 13 warns
-    of its data use)."""
+    of its data use). Never a plan's (a coding plan lists every price 0: #1396)."""
+    from . import meter  # meter imports this module
+    if meter.plan_provider(pid):
+        return False
     if pid == "opencode" and str(entry.get("id") or "").endswith("-free"):
         return True
     cost = entry.get("cost")
