@@ -9,6 +9,7 @@ import hashlib
 import os
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
@@ -18,7 +19,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Callable
 
-from . import store
+from . import models, store
 
 
 class GitError(RuntimeError):
@@ -196,21 +197,75 @@ def _case_folds(d: str) -> bool | None:
 
 
 def _run(cwd, args, env=None, check=True, timeout=None, input=None,
-         detach=False) -> subprocess.CompletedProcess:
+         detach=False, started: Callable[[int], None] | None = None) -> subprocess.CompletedProcess:
     """``detach``: git in a session of its own, with no controlling terminal, for the calls that
     may sign (with NO_TERMINAL): ssh-keygen opens /dev/tty when it can, and on WSL2, where wb has
     one, it prompted there for a passphrase nobody would type, so wb accept waited COMMIT_SECS
-    and wb start SIGN_SECS before refusing (#933). Detached, it fails at once."""
+    and wb start SIGN_SECS before refusing (#933). Detached, it fails at once. And it outlives a
+    SIGKILL of wb, so its output goes to files, not pipes: a signed merge's git whose wb was
+    killed made the commit, then died of SIGPIPE printing it, before removing MERGE_HEAD
+    (#1231). ``started(pid)``, called once it runs, is how a retry finds that git (#1246); a
+    timeout or an interruption ends its whole session (end_session), the signer too."""
+    argv = ["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args]
+    kw = dict(env=_env(env), start_new_session=detach,
+              stdin=subprocess.DEVNULL if timeout and input is None else None)
     try:
-        r = subprocess.run(["git", "-C", str(cwd), *PLAIN, *_pinned(cwd), *args], capture_output=True,
-                           env=_env(env), timeout=timeout, input=input, start_new_session=detach,
-                           stdin=subprocess.DEVNULL if timeout and input is None else None)
+        if not detach:
+            r = subprocess.run(argv, capture_output=True, timeout=timeout, input=input, **kw)
+        else:
+            assert input is None, "a detached git reads nothing"
+            with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+                p = subprocess.Popen(argv, stdout=out, stderr=err, **kw)
+                try:
+                    if started:
+                        started(p.pid)
+                    p.wait(timeout=timeout)
+                except BaseException:
+                    end_session(p.pid, gone=lambda: p.poll() is not None)
+                    p.wait()
+                    raise
+                out.seek(0), err.seek(0)
+                r = subprocess.CompletedProcess(argv, p.returncode, out.read(), err.read())
     except subprocess.TimeoutExpired:
         raise GitError(f"git {' '.join(args)}: no answer in {timeout}s") from None
     if check and r.returncode:
         err = (r.stderr or r.stdout).decode("utf-8", "replace").strip()
         raise GitError(f"git {' '.join(args)}: {err}")
     return r
+
+
+END_SECS = 5  # for a git sent SIGTERM to go before SIGKILL, and for a SIGKILLed one to go
+
+
+def end_session(pid: int, start: str | None = None, gone: Callable[[], bool] | None = None) -> None:
+    """End the detached session git ``pid`` leads (``_run``'s detach: git and its signer), and
+    wait for git to go: SIGTERM first, on which git removes its lock files (a SIGKILLed one's
+    stay, and refuse the next git that takes them), SIGKILL past END_SECS, then SIGKILL for what
+    is left of the group. ``gone`` says when git has gone (our child: polled), else it is
+    models._alive's ``pid`` and ``start``; with neither start nor ``gone``, a pid that may be
+    another's now is left alone. A retry of a SIGKILLed merge backed it out while that git still
+    waited on its signer, which, answered later, landed the merge on the user's branch over the
+    unmerged index and files: every file the task changed staged as reverted, and wb said not
+    merged (#1246, bar round 5)."""
+    if gone is None:
+        if not start:
+            return
+        def gone():
+            return not models._alive(pid, start)
+    if gone():
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            return
+        deadline = time.monotonic() + END_SECS
+        while not gone() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if gone():
+            break
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pid, signal.SIGKILL)  # the signer, if it outlived git
 
 
 def git(cwd, *args, check=True, env=None) -> str:
@@ -681,6 +736,27 @@ def submodules(repo: Path, commit: str) -> list[str]:
     return [rec.split("\n", 1)[1] for rec in out.split("\0") if "\n" in rec]
 
 
+def submodule_sources(repo: Path, commit: str) -> list[Path]:
+    """The user's checkouts fill_submodules fills a worktree of ``commit`` from, nested ones too
+    (each at the commit the one around it records), as _fill finds them: what a task's worktree
+    holds beyond the repo's own files. privacy.local_only reads their marks: a submodule marked
+    local-only went to the API model with every task of the repo around it (#1267, the bar loop,
+    2026-11-24)."""
+    out = []
+    for path in submodules(repo, commit):
+        row = git(repo, "ls-tree", commit, "--", path, check=False).split()
+        src = Path(repo) / path
+        if len(row) >= 3 and row[1] == "commit" and (src / ".git").exists():
+            out += [src, *submodule_sources(src, row[2])]
+    return out
+
+
+def superproject(path) -> Path | None:
+    """The working tree of the repo whose submodule ``path``'s repo is, or None."""
+    out = git(path, "rev-parse", "--show-superproject-working-tree", check=False).strip()
+    return Path(out) if out else None
+
+
 SUBMODULES = "submodules.json"  # rules/<task>/: the submodules filled in its worktree (#419)
 
 
@@ -1029,7 +1105,7 @@ def mark(worktree: Path) -> str:
 
 
 def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None = None,
-                   new: list[bytes] | None = None) -> str | None:
+                   new: list[bytes] | None = None, force=()) -> str | None:
     """`git <args>` with new files counted as changes (intent-to-add), in a scratch index: the
     worktree's own index, and anything a concurrent git command holds, are left alone. The
     scratch index starts as a copy of the worktree's, so sparse-checkout's skip-worktree entries
@@ -1037,7 +1113,10 @@ def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None
     deleted: the 2026-11-16 audit). Nested repositories are left out (nested_repos). ``whole``
     adds new files' contents too, not just their intent (for write-tree: snapshot). ``limit``:
     at most that many characters of output, else None (_bounded). ``new``: only these new files
-    are added, beside the tracked files' changes (snapshot_left)."""
+    are added, beside the tracked files' changes (snapshot_left). ``force``: files git ignores
+    added too (`add -f`), the ones wb accept commits with --include (runner.ignored_to_commit):
+    left out, an agent's feedback-round edit of its lib/util.py read "the diff since your last
+    review: (no changes)" and --include committed code Claude never saw (#1259, 2026-11-24)."""
     # in a private directory of the state dir, not the temp dir: /tmp is in the agent's lane, and
     # an agent process still running could rewrite the index between `add -N` and the diff, so
     # files dropped out of the diff Claude reviews (the 2026-11-16 audit)
@@ -1062,6 +1141,9 @@ def with_new_files(worktree: Path, *args, whole: bool = False, limit: int | None
             skip = [f":(exclude){p}" for p in nested_repos(worktree)]
             add_all(worktree, *([] if whole else ["-N"]), *(["--", ".", *skip] if skip else []),
                     env=env)
+        if force := [p for p in force if os.path.lexists(os.path.join(worktree, p))]:
+            add_all(worktree, "-f", *([] if whole else ["-N"]), "--",
+                    *(":(literal)" + p for p in force), env=env)
         return _bounded(worktree, args, env, limit) if limit else git(worktree, *args, env=env)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
@@ -1114,11 +1196,12 @@ def snapshot(worktree: Path, landing: bool = False) -> str:
 
 def has_tree(cwd: Path, rev: str) -> bool:
     """Whether ``rev`` still names a tree here. A review snapshot (snapshot_left) is reachable from
-    nothing, so git gc prunes it once gc.pruneExpire passes (#795)."""
+    nothing but its REVIEW_REF (#1198), so without one, a review from before then or a ref deleted
+    by hand, git gc prunes it once gc.pruneExpire passes (#795)."""
     return not _run(cwd, ("cat-file", "-e", f"{rev}^{{tree}}"), check=False).returncode
 
 
-def snapshot_left(worktree: Path, landing: bool = False) -> tuple[str, list[str]]:
+def snapshot_left(worktree: Path, landing: bool = False, force=()) -> tuple[str, list[str]]:
     """snapshot's tree, and what it left out ("build/ (400 new files)", "data.bin (3 MB)"; []
     when nothing): a new file of BINARY_MAX or more, the top-level directories with the most new
     files while there are more than NEW_FILES_MAX, then the biggest new files while the rest
@@ -1129,7 +1212,19 @@ def snapshot_left(worktree: Path, landing: bool = False) -> tuple[str, list[str]
     verify's candidate): only what accept refuses without --include is left out, a new binary
     of BINARY_MAX or more and the directories past NEW_FILES_MAX, and a big text file, which
     accept commits, is kept: verify ran without a 1.1 MB text file its test read, said proven,
-    and the test failed on main once accept had landed it (#642, Codex's audit of 1.90.6)."""
+    and the test failed on main once accept had landed it (#642, Codex's audit of 1.90.6).
+    ``force``: ignored files it holds too (with_new_files, #1259)."""
+    return review_snapshot(worktree, landing, force)[:2]
+
+
+KEEP_MAX = 100  # the paths a review tree records as left out (keep) before they go by directory
+
+
+def review_snapshot(worktree: Path, landing: bool = False, force=()) -> tuple[str, list[str], list[str]]:
+    """snapshot_left's tree and lines, and the paths it left out as wb rewind matches them
+    (``keep``: `dir/` for a directory, else a file, as `shown` writes it; past KEEP_MAX by
+    top-level directory): a rewind to the tree leaves them as they are, since the tree has no
+    copy of them to put back (#1198)."""
     files = _new_files(worktree)
     if landing:
         big = [(p, n) for p, n in files if n >= BINARY_MAX and _binary(worktree, p)]
@@ -1137,20 +1232,171 @@ def snapshot_left(worktree: Path, landing: bool = False) -> tuple[str, list[str]
         big = [(p, n) for p, n in files if n >= BINARY_MAX]
     skip = set(big)
     rest = [r for r in files if r not in skip]
-    dirs, count = [], Counter(_top(shown(p)) for p, _ in rest)
+    dirs, count, keep = [], Counter(_top(shown(p)) for p, _ in rest), []
     for d, n in count.most_common():
         if len(rest) <= NEW_FILES_MAX:
             break
         dirs.append(f"{d} ({n:,} new file{'s' if n != 1 else ''})")
+        # "(top level)" is no directory: its files go by name
+        keep += [d] if d.endswith("/") else [shown(p) for p, _ in rest if _top(shown(p)) == d]
         rest = [(p, m) for p, m in rest if _top(shown(p)) != d]
     rest.sort(key=lambda r: r[1])
     while not landing and rest and sum(n for _, n in rest) > SNAPSHOT_MAX:
         big.append(rest.pop())
     if len(rest) == len(files):
-        return with_new_files(worktree, "write-tree", whole=True).strip(), []
-    tree = with_new_files(worktree, "write-tree", whole=True, new=[p for p, _ in rest]).strip()
+        return with_new_files(worktree, "write-tree", whole=True, force=force).strip(), [], []
+    keep += [shown(p) for p, _ in big]
+    if len(keep) > KEEP_MAX:  # bounded in status.json; keeping more only deletes less
+        keep = sorted({_top(k) if "/" in k else k for k in keep})
+    tree = with_new_files(worktree, "write-tree", whole=True, new=[p for p, _ in rest],
+                          force=force).strip()
     return tree, dirs + brief([f"{shown(p)} ({n / (1 << 20):.0f} MB)" if n >= 1 << 20
-                               else f"{shown(p)} ({n >> 10:,} KB)" for p, n in sorted(big)])
+                               else f"{shown(p)} ({n >> 10:,} KB)" for p, n in sorted(big)]), sorted(keep)
+
+
+# Each review tree of a task's step, pinned (#1198): a review snapshot is reachable from nothing,
+# so git gc pruned it (#795), and wb rewind had no tree to go back to. One ref per review round,
+# in the user's repo as ACCEPTED_REF is, deleted at wb next, accept and discard (drop_reviews).
+REVIEW_REF = "refs/workbench/review/{}/{}"
+
+
+def keep_review(cwd: Path, task: str, rnd: int, tree: str) -> bool:
+    """Pin round ``rnd``'s review ``tree`` at REVIEW_REF; whether it took. Never fails a review."""
+    return not _run(cwd, ("update-ref", "-m", "workbench: review", REVIEW_REF.format(task, rnd),
+                          tree), check=False).returncode
+
+
+def drop_reviews(repo: Path, task: str) -> int:
+    """Delete every REVIEW_REF of ``task``, in one transaction; how many there were."""
+    refs = git(repo, "for-each-ref", "--format=%(refname)", REVIEW_REF.format(task, ""),
+               check=False).split()
+    if refs:
+        _run(repo, ("update-ref", "--stdin"), check=False,
+             input="".join(f"delete {r}\n" for r in refs).encode())
+    return len(refs)
+
+
+def _kept(path, keep) -> bool:
+    s = shown(path)
+    return any(s == k or (k.endswith("/") and s.startswith(k)) for k in keep)
+
+
+def _tree_diff(wt: Path, a: str, b: str) -> list[tuple[bytes, bytes]]:
+    """(status, path) for each file that differs from tree ``a`` to ``b``, submodules left out."""
+    raw = git_bytes(wt, "diff-tree", "-r", "-z", "--raw", "--no-renames", a, b).split(b"\0")
+    out = []
+    for meta, path in zip(raw[0::2], raw[1::2]):
+        fields = meta.split()
+        if len(fields) < 5 or b"160000" in (fields[0].lstrip(b":"), fields[1]):
+            continue  # a submodule's commit: its files are in neither tree
+        out.append((fields[4], path))
+    return out
+
+
+def _unlink_in(top: bytes, paths: list[bytes]) -> list[bytes]:
+    """Delete each of ``paths`` under the worktree ``top``, and the directories it empties; the
+    ones deleted."""
+    done = []
+    for path in paths:
+        f = os.path.join(top, path)
+        parent = os.path.realpath(os.path.dirname(f))
+        # never through a link out of the worktree: a parent swapped for one since the snapshot
+        if parent != top and not parent.startswith(top + b"/") or not os.path.lexists(f) \
+                or os.path.isdir(f) and not os.path.islink(f):
+            continue
+        os.unlink(f)
+        done.append(path)
+        d = os.path.dirname(f)
+        while d != top:
+            try:
+                os.rmdir(d)  # only an empty one: git tracks no directory of its own
+            except OSError:
+                break
+            d = os.path.dirname(d)
+    return done
+
+
+def restore_tree(worktree: Path, tree: str, keep=(), now: str | None = None,
+                 now_keep=(), force=()) -> dict:
+    """Put the worktree's files back to ``tree``, a review snapshot (wb rewind, #1198). Only what
+    differs from the worktree now (its own snapshot) is touched: a file the tree has and the
+    worktree lacks or holds otherwise is written from a scratch index (`read-tree` and
+    `checkout-index -f`, as fill_submodules does), and one the worktree has and the tree lacks is
+    deleted, unless ``keep`` (review_snapshot's paths left out of the tree) names it, since the
+    tree holds no copy of it. A file the worktree's own snapshot left out (``now_keep``, its
+    review_snapshot's third value) is never written over either: no tree holds that copy, and a
+    2 MB file the agent grew from round 2's 10 KB got round 2's copy, gone for good, while the
+    rewind said it was left as it was (#1198's review). Ignored files, nested repositories and
+    submodules are in neither tree, and stay, but for ``force``: the ignored files the agent
+    wrote, which the runner's review trees hold (#1259) and both snapshots here take too. The
+    tree's .gitignore, written back, can stop
+    ignoring a file a later round made and ignored (a secret.env wb accept would then have
+    committed, in no round's review): the worktree is snapshotted again, and a file new in it
+    that neither tree has is deleted. Nothing is committed and the worktree's own index is left
+    alone: a `read-tree HEAD` there would drop a sparse checkout's skip-worktree bits, and every
+    file outside the cone would read as deleted. ``now``: the worktree's snapshot, when the
+    caller has just taken it (``now_keep`` then too). {"written", "deleted", "kept", "left",
+    "unignored", "differs"}, the paths as `shown` writes them: "kept" the tree's ``keep`` the
+    worktree has, "left" what ``now_keep`` kept from being written, "unignored" the files deleted
+    after the second snapshot, "differs" what is still not as the tree has it (beside "kept"
+    and "left"): a file a link or a directory kept, or one too big for the second snapshot
+    that the tree lacks (one it has is as it has it: written, or alike in both snapshots)."""
+    wt = Path(worktree)
+    if now is None:
+        now, _, now_keep = review_snapshot(wt, force=force)
+    out = {k: [] for k in ("written", "deleted", "kept", "left", "unignored", "differs")}
+    if now == tree:
+        return out
+    top = os.fsencode(os.path.realpath(wt))
+    write, gone, kept, left = [], [], [], []
+    first = _tree_diff(wt, tree, now)
+    for status, path in first:
+        if status == b"A":
+            (kept if _kept(path, keep) else gone).append(path)
+        elif status == b"D" and _kept(path, now_keep) and os.path.lexists(os.path.join(top, path)):
+            left.append(path)  # the worktree's copy, which its snapshot left out: in no tree
+        else:
+            write.append(path)
+    done = _unlink_in(top, gone)
+    if write:
+        store.home().mkdir(parents=True, exist_ok=True)  # the scratch index: never in the lane
+        with tempfile.TemporaryDirectory(prefix=store.scratch("wb-index-"), dir=store.home()) as scratch:
+            env = {"GIT_INDEX_FILE": os.path.join(scratch, "index")}
+            _run(wt, ("read-tree", tree), env=env)
+            _run(wt, ("checkout-index", "-f", "-z", "--stdin"), env=env,
+                 input=b"".join(p + b"\0" for p in write))
+    after, _, after_keep = review_snapshot(wt, force=force)
+    unignored, differs = [], []
+    if after != tree:
+        seen, expected, new = {p for _, p in first}, set(kept) | set(left), []
+        for status, path in _tree_diff(wt, tree, after):
+            if _kept(path, after_keep):
+                # too big for this snapshot, so missing from it: a.txt, as round 2 had it, was
+                # named as differing once a later round's logs/ unignored pushed the total past
+                # SNAPSHOT_MAX (#1198's review); `gained` below checks the tree has it
+                continue
+            if path in seen:
+                if path not in expected:
+                    differs.append(path)  # a link out, a directory: _unlink_in passed it by
+            elif _kept(path, keep) or _kept(path, now_keep):
+                continue  # left out of a snapshot, not ignored: named as left as it is
+            elif status == b"A":
+                new.append(path)  # in neither tree: ignored until the tree's .gitignore
+            else:
+                differs.append(path)
+        unignored = _unlink_in(top, new)
+        differs += [p for p in new if p not in unignored]
+    # too big for the second snapshot, and left out of neither the tree nor the first snapshot
+    gained = [k for k in after_keep if not _kept(k, keep) and not _kept(k, now_keep)]
+    if gained:  # a file the tree holds, which this snapshot left out of a bigger total, is fine
+        held = set(git_bytes(wt, "ls-tree", "-r", "-z", "--name-only", tree, "--",
+                             *gained).split(b"\0"))
+        differs += [os.fsencode(k) for k in gained if os.fsencode(k) not in held]
+    out.update(written=[shown(p) for p in write], deleted=[shown(p) for p in done],
+               kept=[shown(p) for p in kept], left=[shown(p) for p in left],
+               unignored=[shown(p) for p in unignored],
+               differs=list(dict.fromkeys(shown(p) for p in differs)))
+    return out
 
 
 def left_line(left: list[str]) -> str:
@@ -1159,13 +1405,27 @@ def left_line(left: list[str]) -> str:
             "; the next review's diff shows them again" if left else "")
 
 
+def diff_base(task: store.Task, all_steps: bool = False) -> str:
+    """What `wb diff` compares the worktree with: the task's base, or after `wb next` HEAD (the
+    current step's work alone; ``all_steps``: the whole task). The web chat's task sheet reads
+    it too, so the phone and `wb diff` show the same diff (#1201)."""
+    return "HEAD" if task.status.get("steps", 1) > 1 and not all_steps else task.spec["base"]
+
+
+def diff_tip(task: store.Task) -> str:
+    """The task's work for a diff without its worktree: the accepted commit, else the branch
+    (`--merge` deletes the branch: #477, the audit of 1.8)."""
+    return (task.status.get("tip") or "")[:12] or task.spec["branch"]
+
+
 def diff(worktree: Path, base: str, stat=False, paths=(), numstat=False, stat_count=None,
-         limit: int | None = None) -> str | None:
+         limit: int | None = None, force=()) -> str | None:
     """The diff since ``base``, new files included. ``limit``: None when it is longer than that
-    many characters, never held whole in memory (#348, the audit of 1.4)."""
+    many characters, never held whole in memory (#348, the audit of 1.4). ``force``: ignored
+    files it shows too (with_new_files, #1259)."""
     args = (["diff", "--no-ext-diff", "--no-color", base] + (["--stat"] if stat else []) + (["--numstat"] if numstat else [])
             + ([f"--stat-count={stat_count}"] if stat_count else []) + (["--", *paths] if paths else []))
-    out = with_new_files(worktree, *args, limit=limit)
+    out = with_new_files(worktree, *args, limit=limit, force=force)
     return None if out is None else out.rstrip()
 
 
@@ -1384,6 +1644,26 @@ def name_status(repo: Path, base: str, rev: str, *opts: str) -> list[tuple[str, 
     return [(st, p) for st, p in zip(raw[0::2], raw[1::2]) if p]
 
 
+def step_base(task: store.Task) -> str:
+    """Where the task's step under review began: the base for step one, else the last approved
+    step's commit, which wb next records (status `step_base`). A step with no changes has no
+    commit of its own: from before the record, the newest earlier step that has one, else the
+    base (#652: the step after a clean one died on "cannot find the last approved step's
+    commit"). wb verify and wb shot compare the step with it, and wb next, accept and discard
+    measure it from it (results.step): measured from HEAD, a step whose commit an interrupted
+    wb next (or accept, #879) had made read as 0 files and 0 lines, and the savings card priced
+    the task at nothing (#1302, 2026-11-24)."""
+    step = task.status.get("steps", 1)
+    if step == 1:
+        return task.spec["base"]
+    if at := task.status.get("step_base"):
+        return at
+    for earlier in range(step - 1, 0, -1):
+        if found := step_commit(task, earlier, step):
+            return found
+    return task.spec["base"]
+
+
 def step_commit(task: store.Task, step: int, steps: int) -> str | None:
     """The commit that landed step `step`: `wb next` marks its steps "(step N)", `wb accept` the last."""
     spec = task.spec
@@ -1502,25 +1782,191 @@ def ignored_files(worktree: Path, paths) -> list[str]:
     return sorted({p for p in out.split("\0") if p})
 
 
-def ignored_line(paths: list[str]) -> str:
-    """What the review and a refused commit say of the files the agent wrote that git ignores."""
-    return (f"git ignores files the agent wrote ({', '.join(brief(paths))}), so the diff leaves them "
-            "out and a commit would too, and they'd go with the worktree: read them, then --include "
-            "commits them, or have them moved or deleted")
+CLOCK_SLACK = 0.05  # a file's times come from the kernel's coarse clock, a tick behind time.time()
+
+
+def _kind(path: str) -> str:
+    """A file's suffix, or its whole name when it has none: what hand_written matches on."""
+    name = path.rsplit("/", 1)[-1]
+    return os.path.splitext(name)[1].lower() or name
+
+
+def _marks_cache(d: str) -> bool:
+    """Whether directory ``d`` says it is a cache: a CACHEDIR.TAG (cargo's target/, pytest's), or
+    a .gitignore whose one rule is `*` (pytest's, mypy's, ruff's, a venv's since Python 3.13)."""
+    if os.path.lexists(os.path.join(d, "CACHEDIR.TAG")):
+        return True
+    try:
+        fd = os.open(os.path.join(d, ".gitignore"), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as f:
+            rules = [x.strip() for x in f.read(4096).splitlines()]
+    except OSError:
+        return False
+    return [x for x in rules if x and not x.startswith(b"#")] == [b"*"]
+
+
+def _text(full: str) -> bool:
+    """No NUL in the first 8000 bytes, git's own test for text."""
+    try:
+        fd = os.open(full, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as f:
+            return b"\0" not in f.read(8000)
+    except OSError:
+        return False
+
+
+def _ignored_changed(worktree: Path, since: float):
+    """hand_written's scan: (top, outside, kept, key) for the files git ignores and doesn't track
+    that changed since ``since``: ``outside``, those under no cache; ``kept``, those of them text
+    and of a kind the commit would hold; ``key(p)``, the outermost ignored directory holding p,
+    else p itself. None when nothing changed."""
+    top = os.path.abspath(worktree)
+    changed = []
+    for raw in git_bytes(worktree, "ls-files", "--others", "--ignored", "--exclude-standard",
+                         "-z").split(b"\0"):
+        if not raw:
+            continue
+        p = os.fsdecode(raw)
+        try:
+            st = os.lstat(os.path.join(top, p))
+        except OSError:  # gone mid-scan
+            continue
+        if stat.S_ISREG(st.st_mode) and max(st.st_mtime, st.st_ctime) >= since - CLOCK_SLACK:
+            changed.append(p)
+    if not changed:
+        return None
+    held = git_bytes(worktree, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
+    kinds = {_kind(os.fsdecode(p)) for p in held.split(b"\0") if p}
+    caches: dict[str, bool] = {}
+
+    def in_cache(p: str) -> bool:
+        parts = p.split("/")[:-1]
+        for i in range(1, len(parts) + 1):
+            d = "/".join(parts[:i])
+            if d not in caches:
+                caches[d] = _marks_cache(os.path.join(top, d))
+            if caches[d]:
+                return True
+        return False
+
+    outside = [p for p in changed if not in_cache(p)]
+    kept = [p for p in outside if _kind(p) in kinds and _text(os.path.join(top, p))]
+    dirs = ignored_dirs(worktree)
+
+    def key(p: str) -> str:
+        parts = p.split("/")[:-1]
+        return next((d for i in range(1, len(parts) + 1) if (d := "/".join(parts[:i])) in dirs), p)
+    return top, outside, kept, key
+
+
+def ignored_dirs(worktree: Path) -> set[str]:
+    """The outermost directories git ignores in the worktree (`ls-files --directory`'s), relative."""
+    return {os.fsdecode(d).rstrip("/") for d in git_bytes(
+        worktree, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory",
+        "-z").split(b"\0") if d.endswith(b"/")}
+
+
+def under(p: str, keys) -> bool:
+    """Whether path ``p`` is one of ``keys`` or under one (ran_wrote's directories and files)."""
+    return any(p == k or p.startswith(k + "/") for k in keys)
+
+
+def ran_wrote(worktree: Path, since: float) -> list[str]:
+    """Where the runner's own setup or test run, begun at ``since``, wrote what hand_written
+    would take for Claude's (text, of a kind the commit holds, outside a cache): each such file's
+    outermost ignored directory, else the file itself. A rerun of that command by Claude writes
+    there again, and is no one's work: `mvn test`'s target/surefire-reports, tsc's dist/*.d.ts or
+    jest's coverage/ refused wb accept and wb next as files written by hand, the runner's later
+    runs rewrote them, and every accept after was refused again (#1211, 2026-11-24)."""
+    if not (scan := _ignored_changed(worktree, since)):
+        return []
+    _, _, kept, key = scan
+    return sorted({key(p) for p in kept})
+
+
+def hand_written(worktree: Path, since: float, left: list[str] | None = None,
+                 ran=()) -> list[str]:
+    """The files git ignores and doesn't track that changed in the worktree since ``since`` (a
+    time.time()) and look written by hand, not by a build or a test run: text, named like a file
+    the commit would hold (its suffix, or its whole name when it has none), under no directory
+    that marks itself a cache (_marks_cache), not where the runner's own runs wrote (``ran``,
+    ran_wrote's: Claude's rerun of the acceptance command, #1211), and fewer than BUILD_FILES
+    such files in their ignored directory (an install), else, ignored one by one, their top-level
+    one. A module Claude
+    wrote under Python.gitignore's lib/ after a takeover was left out of wb accept's commit and
+    deleted with the worktree, with no warning: only the agent's edit tools were read (#1179,
+    2026-11-24). A test run's .pyc, .pytest_cache/ and logs, or an npm install, must not refuse
+    the commit (Claude runs the tests there). ``left`` gets the rest that are text outside a
+    cache, fewer than BUILD_FILES such in their group, any suffix: the commit leaves them out,
+    said, never silently dropped (left_out_line, #1179's review). The kind filter alone is
+    waived, for the .csv beside Claude's module: unfiltered, a test run's bytecode was named at
+    every accept, and an npm install's 20,000 paths went into status.json (#1179's review)."""
+    if not (scan := _ignored_changed(worktree, since)):
+        return []
+    top, outside, kept, key = scan
+    kept = [p for p in kept if not under(p, ran)]
+    # Only the files the other filters keep count toward BUILD_FILES: counted before them, the
+    # .pyc of Claude's first test run (agents run without bytecode) in a 60-module app/ cut
+    # app/lib/helper.py, and accept --merge dropped it without a word (#1179, 2026-11-24).
+    # Counted by ignored directory: by top-level one, setuptools' in-tree services/api/build/lib
+    # copies of 60 modules cut services/api/lib/helper.py the same way (#1179's review)
+
+    def group(p: str) -> str:
+        return k if (k := key(p)) != p else _top(p)
+    groups = Counter(group(p) for p in kept if "/" in p)
+    out = sorted(p for p in kept if "/" not in p or groups[group(p)] < BUILD_FILES)
+    if left is not None:
+        keep = set(out)
+        text = [p for p in outside if p not in keep and _text(os.path.join(top, p))]
+        # with `groups` (kept's), every text file of the group: under BUILD_FILES, all its kept
+        # ones are in out, so none is counted twice
+        rest = Counter(group(p) for p in text if "/" in p)
+        left.extend(sorted(p for p in text if "/" not in p
+                           or groups[group(p)] + rest[group(p)] < BUILD_FILES))
+    return out
+
+
+def left_out_line(paths: list[str], worktree: Path, kept: Path | None = None, gone: bool = False) -> str:
+    """The note for the ignored files changed in the worktree that the commit leaves out, as
+    hand_written took them for a build's or a test run's: a .csv beside Claude's module under
+    lib/ was dropped without a word, --include or not (#1179's review, 2026-11-24); the agent's
+    shell's since its first round too, so not "since the agent stopped" (#1210). ``kept``: the
+    copy wb accept keeps of them before the worktree goes; ``gone``: too many to copy; else where
+    `git add -f` stages one."""
+    head = (f"note: git ignores {len(paths)} more file{'s' if len(paths) != 1 else ''} changed "
+            f"in the worktree, which the commit leaves out as build or test output "
+            f"({', '.join(brief(paths))})")
+    if kept is not None:
+        return f"{head}: a copy is in {kept}"
+    if gone:
+        return f"{head}: too many to keep a copy, they go with the worktree"
+    return f"{head}: git -C {shlex.quote(str(worktree))} add -f <file> has the next commit keep one"
+
+
+def ignored_line(paths: list[str], who: str = "the agent wrote") -> str:
+    """What the review and a refused commit say of the files written in the worktree that git
+    ignores: the agent's in the review, the agent's or Claude's in a refused commit (#1179). The
+    review diff and wb diff show them (force=, #1259), so it no longer says the diff leaves them out."""
+    return (f"git ignores files {who} ({', '.join(brief(paths))}): the diff shows them, "
+            "but a commit leaves them out and they'd go with the worktree: read them, then "
+            "--include commits them, or have them moved or deleted")
 
 
 def commit_all(worktree: Path, message: str, include: bool = False, sign: bool = True,
-               written=()) -> str:
+               written=(), left=()) -> str:
     """Commit everything in the worktree, without git hooks (NO_HOOKS; also for a task started
     before its git dir was recorded) but signed if the user signs. Refuses a nested repository: committed, it was a gitlink to
     a commit that exists nowhere else. Refuses, unless ``include``, more than NEW_FILES_MAX new
     files or a large new binary: `add -A` committed a build/ the project didn't ignore (#251).
-    Refuses, unless ``include``, which adds them, any of ``written`` (the files the agent wrote)
-    that git ignores: `add -A` left a module under Python.gitignore's lib/ out of the commit, and
-    it was deleted with the worktree while main imported it (audit round 2 of 1.91)."""
+    Refuses, unless ``include``, which adds them, any of ``written`` (the files the agent wrote,
+    and Claude's, #1179) that git ignores: `add -A` left a module under Python.gitignore's lib/
+    out of the commit, and it was deleted with the worktree while main imported it (audit round 2
+    of 1.91). A refusal names ``left`` too (left_out_line: what the commit leaves out, #1179's review)."""
     ignored = ignored_files(worktree, written)
     if ignored and not include:
-        raise GitError("not committed: " + ignored_line(ignored))
+        rest = sorted(set(left) - set(ignored))
+        raise GitError("not committed: " + ignored_line(ignored, "written in the worktree")
+                       + (f"\n{left_out_line(rest, worktree)}" if rest else ""))
     if nested := nested_repos(worktree):
         raise GitError(f"{', '.join(nested)}: a git repository of its own, so not committed: "
                        "remove its .git or gitignore it, then try again")
@@ -1535,21 +1981,31 @@ def commit_all(worktree: Path, message: str, include: bool = False, sign: bool =
         git(worktree, *NO_HOOKS, "add", "-f", "--", *(":(literal)" + p for p in ignored))
     if not git(worktree, "diff", "--cached", "--name-only").strip():
         raise GitError("nothing to commit: the agent's worktree has no changes")
-    if not sign:  # --no-sign, at start or now: the task's commits go unsigned (#374)
-        git(worktree, *NO_HOOKS, "-c", "commit.gpgsign=false", "commit", "-q", "-m", message)
-    elif signs(worktree):  # no terminal, a time limit, and git's error said plainly (#374)
+    # --no-sign, at start or now: the task's commits go unsigned (#374)
+    commit(worktree, *NO_HOOKS, "commit", "-q", "-m", message, sign=sign)
+    return git(worktree, "rev-parse", "--short", "HEAD").strip()
+
+
+def commit(repo: Path, *args, sign: bool = True, env=None) -> None:
+    """`git <args>`, a commit in the user's repo: unsigned when not ``sign``, else signed as their
+    git says, with no terminal or display, detached, within COMMIT_SECS, and a failure said with
+    how to unlock (#374, #933), not git's raw error. wb init's commits went through plain git: a
+    key with a passphrase failed wb try at once with "incorrect passphrase supplied", and with a
+    terminal (WSL2) it waited on a prompt until Claude's Bash limit killed it (#1226)."""
+    if not sign:
+        git(repo, "-c", "commit.gpgsign=false", *args, env=env)
+    elif signs(repo):
         try:
-            r = _run(worktree, [*NO_HOOKS, "commit", "-q", "-m", message], NO_TERMINAL,
-                     check=False, timeout=COMMIT_SECS, detach=True)
+            r = _run(repo, args, {**NO_TERMINAL, **(env or {})}, check=False, timeout=COMMIT_SECS,
+                     detach=True)
         except GitError as e:  # no answer: a pinentry waiting on an unattended desktop
-            raise GitError(f"not committed: {_unlock(worktree)} ({e})") from None
+            raise GitError(f"not committed: {_unlock(repo)} ({e})") from None
         if r.returncode:
             said = (r.stderr or r.stdout).decode("utf-8", "replace").strip().splitlines()
-            raise GitError(f"not committed: {_unlock(worktree)} "
+            raise GitError(f"not committed: {_unlock(repo)} "
                            f"(git: {said[0] if said else r.returncode})")
     else:
-        git(worktree, *NO_HOOKS, "commit", "-q", "-m", message)
-    return git(worktree, "rev-parse", "--short", "HEAD").strip()
+        git(repo, *args, env=env)
 
 
 def put_on_branch(repo: Path, branch: str, commit: str, worktree: Path) -> None:
@@ -1717,16 +2173,21 @@ def jj_colocated(repo: Path) -> bool:
     return (Path(repo) / ".jj").is_dir() and (Path(repo) / ".git").exists()
 
 
-def merge_by_hand(repo: Path, branch: str, how: str = "merge", sign: bool = True) -> str:
+def merge_by_hand(repo: Path, branch: str, how: str = "merge", sign: bool = True,
+                  into: str | None = None) -> str:
     """The git command that lands ``branch`` as wb accept --merge would: in the repo's mode (the
     --merge-as, else commands.json's `merge`) and unsigned after --no-sign. The line said merge
-    --no-ff whatever the repo kept to (#471, the audit of 1.8)."""
+    --no-ff whatever the repo kept to (#471, the audit of 1.8). With ``into`` (the branch it
+    belongs on) not checked out, or HEAD detached, it switches there first: the line printed
+    after "has feature-x out, not main" merged into feature-x, or onto a detached HEAD the next
+    checkout dropped (#1154, 2026-11-24)."""
     g, nosign = f"git -C {shlex.quote(str(repo))}", "" if sign else " --no-gpg-sign"
+    switch = f"{g} switch {shlex.quote(into)} && " if into and current_branch(repo) != into else ""
     if how == "ff":
-        return f"{g} merge --ff-only {branch}"
+        return f"{switch}{g} merge --ff-only {branch}"
     if how == "squash":
-        return f"{g} merge --squash --ff {branch} && {g} commit{nosign} -C {branch}"
-    return f"{g} merge --no-ff{nosign} {branch}"
+        return f"{switch}{g} merge --squash --ff {branch} && {g} commit{nosign} -C {branch}"
+    return f"{switch}{g} merge --no-ff{nosign} {branch}"
 
 
 def jj_merge(repo: Path, branch: str) -> str:
@@ -1792,7 +2253,8 @@ def merge_lock(repo: Path, say=None):
 
 
 def merge(repo: Path, task: str, into: str | None = None, base: str | None = None,
-          *, tip: str | None = None, how: str = "merge", sign: bool = True) -> str:
+          *, tip: str | None = None, how: str = "merge", sign: bool = True,
+          started: Callable[[int], None] | None = None, message: str | None = None) -> str:
     """Merge the task's branch into ``into`` (the branch it started from: task.json's
     base_branch), which the main checkout must have out, clean and not mid-merge; a conflict, an
     ignored file in the way, or a merge git left unfinished is backed out, leaving the repo as it
@@ -1806,7 +2268,10 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
     user signs, unsigned when ``sign`` is False (--no-sign); a timeout, a failure or an
     interruption (a SIGTERM, raised by the caller) backs the checkout out to where it was: a
     pinentry nobody answered hung accept until it was killed, leaving MERGE_HEAD and the staged
-    merge in the user's checkout, and --no-sign's merge still signed (#420, the audit of 1.8)."""
+    merge in the user's checkout, and --no-sign's merge still signed (#420, the audit of 1.8).
+    ``started(pid)``: the pid of each git that may sign, once it runs, for clear_killed_merge.
+    ``message``: the squash's, in place of the tip's: wb accept's when it made no commit, the tip
+    a step's, whose subject and `(step N)` trailer stood for the whole task on main (#1393)."""
     dirty, submodules = _uncommitted(repo)
     if dirty:
         raise GitError(f"{repo} has uncommitted changes ({_listed(dirty)}); merge "
@@ -1849,7 +2314,8 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
     secs = COMMIT_SECS if signed and how != "ff" else None
 
     def committing(args):  # the step that makes a commit, so may sign
-        r = _run(repo, [*unsigned, *args], NO_TERMINAL, check=False, timeout=secs, detach=signed)
+        r = _run(repo, [*unsigned, *args], NO_TERMINAL, check=False, timeout=secs, detach=signed,
+                 started=started if signed else None)
         if r.returncode:
             said = (r.stderr or r.stdout).decode("utf-8", "replace").strip()
             raise GitError(f"git {' '.join(args)}: {said}")
@@ -1875,7 +2341,8 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
     try:
         if how == "squash":  # no MERGE_HEAD to abort: backed out with reset --merge
             git(repo, *NO_HOOKS, "merge", "--squash", "--ff", "--no-commit", source)
-            committing([*NO_HOOKS, "commit", "--no-verify", "-q", "-C", source])
+            committing([*NO_HOOKS, "commit", "--no-verify", "-q",
+                        *(("--cleanup=verbatim", "-m", message) if message else ("-C", source))])
         elif how == "ff":
             committing([*NO_HOOKS, "merge", "--ff-only", "--no-squash", source])
         else:
@@ -1950,14 +2417,16 @@ def merge_message(repo: Path, task: str, tip: str) -> str:
     return said or f"Merge branch '{b}'"
 
 
-def squashed(repo: Path, into: str, before: str | None, tip: str) -> str | None:
+def squashed(repo: Path, into: str, before: str | None, tip: str,
+             message: str | None = None) -> str | None:
     """The squash of ``tip`` an earlier accept made on ``into``, which stood at ``before`` then:
     a commit of the branch's first-parent line whose parent is ``before`` and whose message is
-    the tip's (commit -C). A squash never holds the tip, so a retry interrupted between it and
-    its record squashed again and recorded it refused (#432, the audit of 1.8)."""
+    the tip's (commit -C), or ``message`` when merge was given one (#1393). A squash never holds
+    the tip, so a retry interrupted between it and its record squashed again and recorded it
+    refused (#432, the audit of 1.8)."""
     if not before:
         return None
-    want = git(repo, "log", "-1", "--format=%B", tip, check=False).strip()
+    want = message.strip() if message else git(repo, "log", "-1", "--format=%B", tip, check=False).strip()
     log = git(repo, "log", "--first-parent", "--format=%H %P%x00%B%x01",
               f"{before}..refs/heads/{into}", check=False)
     for entry in log.split("\x01"):
@@ -1987,6 +2456,35 @@ def _back_out(repo: Path, before: str, source: str | None = None, how: str = "me
     to = before if head == before or not tip or _made_by(repo, head, before, tip, how) else head
     if head != to or git(repo, "status", "--porcelain", "--untracked-files=no", check=False).strip():
         git(repo, "reset", "-q", "--merge", to, check=False)
+
+
+def clear_killed_merge(repo: Path, before: str, tip: str, how: str = "merge",
+                       merge_git: list | None = None) -> None:
+    """What an earlier accept's merge of ``tip`` onto ``before`` left in the user's checkout when
+    it was SIGKILLed, which no handler sees, so merge()'s backout never ran: MERGE_HEAD at the
+    tip, or a staged squash whose SQUASH_MSG names it. A merge whose commit was made (HEAD holds
+    the tip: git committed, then died before removing MERGE_HEAD) is quit, the rest backed out
+    for the retry to merge again. Killed while the signer waited, the retry called wb's own
+    staged merge "uncommitted changes" and closed the task unmerged; with the commit made, it
+    said merged with the checkout still mid-merge, and the user's next commit became a merge
+    (#1231, bar round 4). Anything else, a merge of another tip, is left alone. First the killed
+    try's own git, ``merge_git`` ([pid, start], merge()'s ``started``), detached so it outlived
+    wb, is ended if it still waits on its signer: backed out under it, the merge it landed later
+    left the index and files unmerged (#1246). Only then is what it left read."""
+    if merge_git:
+        end_session(*merge_git)
+    if how == "merge" and _merging(repo):
+        if git(repo, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).strip() != tip:
+            return
+        if contains(repo, "HEAD", tip):
+            git(repo, "merge", "--quit", check=False)
+        else:
+            _back_out(repo, before, tip, how)
+    elif how == "squash" and git(repo, "rev-parse", "HEAD", check=False).strip() == before:
+        msg = Path(repo, git(repo, "rev-parse", "--git-path", "SQUASH_MSG", check=False).strip())
+        with contextlib.suppress(OSError):
+            if f"\ncommit {tip}\n" in msg.read_text(errors="replace"):
+                _back_out(repo, before, tip, how)
 
 
 def _made_by(repo: Path, head: str, before: str, tip: str, how: str) -> bool:

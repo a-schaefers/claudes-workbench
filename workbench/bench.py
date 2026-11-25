@@ -412,6 +412,9 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
                 "test_cmd": test_cmd, "test_timeout": spec.get("test_timeout") or 900,
                 "check_cmd": check, "hidden": picked, "allow": grants.get("allow") or [],
                 "paths": grants.get("paths") or [], "skills": st.get("skills_ever") or [],
+                # its `wb allow --port`s: without them each replay's tests were refused the port
+                # the original's passed with (#1197's review, 2026-11-24)
+                "ports": grants.get("ports") or [],
                 # the worktree's setup (#201), so the reference, the base and each replay are the
                 # project as the task had it: a task whose --setup made an ignored stamp had its
                 # own commit rejected, the scratch clone without it (#250, the audit of 1.2)
@@ -425,6 +428,9 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
                 # the package the task ran in (#375), where each replay runs, sets up and is
                 # graded: from the root, an answer written there passed a package's check (#425)
                 "subdir": spec.get("subdir") or "",
+                # where a commands.json setup ran, its key's directory (#1376), which a replay's
+                # --setup, run in the package, reaches by a cd
+                **({"setup_dir": spec["setup_dir"]} if spec.get("setup_dir") else {}),
                 "original": {"model": spec.get("model"), "rounds": row.get("rounds"),
                              "reviews": step_row.get("reviews", row.get("reviews")),
                              "minutes": row.get("minutes"), "steps": steps},
@@ -730,17 +736,28 @@ def _start_task(case: dict, model: str, name: str, repo: Path, skills: list[str]
     for pat in case.get("allow") or []:
         argv += ["--allow", pat]
     if case.get("setup"):
-        argv += ["--setup", case["setup"]]
+        cmd = case["setup"]
+        if at := case.get("setup_dir"):
+            up = os.path.relpath("/" + at.strip("/"), "/" + (subdir(case) or "").strip("/"))
+            cmd = f"cd {up} && {cmd}"
+        argv += ["--setup", cmd]
         if isinstance(secs := _kept(case, "setup_timeout"), int) and secs > 0:  # #735
             argv += ["--setup-timeout", str(secs)]
     if _kept(case, "unload_for_tests"):
         argv += ["--unload-for-tests"]
+    # a case's copies are repo-relative, and from a package wb start reads a --copy from the
+    # package first (cli._copy_path): named as kept, a case from packages/app that copied both
+    # node_modules/ replayed with the package's twice and never the root's, a false failure
+    # every run; named from the package, each reads back as itself (#1158, 2026-11-24)
+    sub = (subdir(case) or "").strip("/")
     for p in case.get("copy") or []:
-        argv += ["--copy", p]
+        argv += ["--copy", os.path.relpath(f"/{p}", f"/{sub}") if sub else p]  # no cwd read
     for s in case.get("siblings") or []:
         argv += ["--sibling", s]
     for path in case.get("paths") or []:
         argv += ["--allow-path", path]
+    for port in case.get("ports") or []:
+        argv += ["--allow-port", str(port)]
     a = cli.parser().parse_args(argv)
     a.bench = meta
     a.f(a)
@@ -799,9 +816,11 @@ def replay(case: dict, model: str, rep: int, run: str, label: str, skills: list[
                    **paid(task))
         if st.get("last") == PREEMPTED:
             return {**row, "outcome": "preempted"}
-        # the setup, the server, the runner, the disk; or an API provider's or the spend cap's
-        # stop, `stuck` (#1020, #1019)
-        if st.get("infra") and (phase == "failed" or st["infra"] in ("provider", "spend")):
+        # the setup, the server, the runner, the disk; or an API provider's, the spend cap's, an
+        # update's, OpenCode's change's, a repo marked local-only's, wb update --stop's, a
+        # signal's or wb stop --all's stop, `stuck` (#1020, #1019, #1176, #1215, #1260)
+        if st.get("infra") and (phase == "failed" or st["infra"] in (
+                "provider", "spend", "updated", "opencode", "local_only", "update", "signal", "stopped")):
             # the machine's doing, not the model's: an error, run again next time (#508)
             return {**row, "outcome": "error", "why": f"{st['infra']}: {st.get('last') or ''}"[:200]}
         if phase != "review":

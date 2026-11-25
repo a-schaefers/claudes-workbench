@@ -89,13 +89,24 @@ def _key(row: dict) -> tuple:
     return row.get("model"), row.get("window")
 
 
+def stopped_outside(row: dict) -> bool:
+    """A discard taken after a stop that wasn't the step's (the row's `infra`, cli.cmd_discard:
+    the day cap, a repo made local-only, the provider, the model gone, a restart) with no step of
+    it kept. The stop notice offers wb discard as a way out, and the row, judged whole, read
+    "0/1 real tasks accepted" and scored the task's knob values and skills 0 for the user's
+    budget (#1245, 2026-11-24). One with steps kept (`landed_steps`) is judged on those."""
+    return row.get("outcome") == "discarded" and bool(row.get("infra")) \
+        and not row.get("landed_steps")
+
+
 def judged(row: dict) -> bool:
     """Whether a closed task says anything about the model, a knob or a skill: not a discard
     Claude put down to its own spec (--spec-gap), which would score the agent for Claude's miss;
-    nor a task whose agent never ran (`ran` false: its setup or its model's load failed), which
-    scored the model 0/3 for a lockfile problem or a sleeping server and locked it out of routing
-    (#581). A row from before `ran` was recorded: not accepted, and no token written."""
-    if row.get("outcome") == "discarded" and row.get("spec_gaps"):
+    nor one after a stop from outside the step (stopped_outside, #1245); nor a task whose agent
+    never ran (`ran` false: its setup or its model's load failed), which scored the model 0/3 for
+    a lockfile problem or a sleeping server and locked it out of routing (#581). A row from
+    before `ran` was recorded: not accepted, and no token written."""
+    if (row.get("outcome") == "discarded" and row.get("spec_gaps")) or stopped_outside(row):
         return False
     if "ran" in row:
         return bool(row["ran"])
@@ -120,7 +131,9 @@ def credit(row: dict) -> float:
     accepted chain with steps taken over, the share of its steps the agent did (#647); a discard
     whose earlier steps `wb next` committed and the branch kept (results' `landed_steps`), their
     share of its steps; else 0. Counted as a whole rejected task, a chain of four approved steps
-    whose fifth stuck scored the model a failed try and every knob and skill it ran 0 (#722)."""
+    whose fifth stuck scored the model a failed try and every knob and skill it ran 0 (#722). A
+    discard after a stop from outside the step (`infra`) leaves that last step out: it was the
+    user's budget or the provider's, not the agent's (#1245)."""
     steps = [s for s in row.get("steps") or [] if isinstance(s, dict)]
     if row.get("outcome") == "accepted":
         if not took_over(row):
@@ -128,7 +141,7 @@ def credit(row: dict) -> float:
         return sum(not s.get("took_over") for s in steps) / max(1, len(steps))
     landed = row.get("landed_steps")
     if row.get("outcome") == "discarded" and isinstance(landed, int) and landed > 0:
-        return min(1.0, landed / max(1, len(row.get("steps") or [])))
+        return min(1.0, landed / max(1, len(row.get("steps") or []) - bool(row.get("infra"))))
     return 0.0
 
 
@@ -215,9 +228,14 @@ def _rows(model: str, window) -> list[dict]:
 
 
 def work(row: dict) -> str | None:
-    """The kind of work a results row records: its `role`, else its `size` (a row from before the
-    roles). router.of_role ranks on it, record's speed baseline groups by it (#1025)."""
-    return row.get("role") or row.get("size")
+    """The kind of work a results row records: writing for a writing task, else its `size` (its
+    `role` for a row with none). router.of_role ranks on it, record's speed baseline groups by it
+    (#1025). A coding task is routed and sliced at its size (router.record_role), so it is filed
+    there too: `--role trivial --size significant` ran on the significant pick and moved only its
+    trivial record (#1398, 2026-11-25)."""
+    if row.get("role") == "writing":
+        return "writing"
+    return row.get("size") or row.get("role")
 
 
 def record(name: str, model: str, window, ceiling=None) -> dict:

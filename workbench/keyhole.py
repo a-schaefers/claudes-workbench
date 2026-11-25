@@ -8,21 +8,26 @@ gets the keyhole's base URL and a dummy key (the token, new for each runner), an
 forwards only the task's model's requests to the provider, the real key swapped in.
 
 What a request must pass, in order (each refusal a JSON error body):
-1. the path: a POST to the base plus exactly one model path (`chat/completions`, `responses`,
-   `messages`, `messages/count_tokens`: what OpenCode posts), with a plain query; `GET …/models`
-   is answered here with only the task's model; anything else is 404 (a bad query 400);
-2. the token, in `Authorization: Bearer` or `x-api-key` (never the URL: URLs reach OpenCode's
-   error text and runner.log), compared in constant time; 401 without it;
-3. the body's `model`, which must be the task's model's name at its provider, and no fallback
-   list (`models`); 403, an error OpenCode doesn't retry; bodies over 32 MB are 413. The body is
+1. the path: a POST to the base plus exactly one model path of the protocol's (`chat/completions`,
+   `responses`, `messages`, `messages/count_tokens`; Gemini's `models/<id>:streamGenerateContent`;
+   Bedrock Converse's `model/<id>/converse-stream`: what OpenCode posts), with a plain query
+   (Gemini's only `alt=sse`: a `key=` there is a second way in, refused); `GET …/models` is
+   answered here with only the task's model; anything else is 404 (a bad query 400);
+2. the token, in `Authorization: Bearer`, `x-api-key`, `api-key` or `x-goog-api-key` (never the
+   URL: URLs reach OpenCode's error text and runner.log), compared in constant time; 401 without it;
+3. the model, which must be the task's model's name at its provider: the body's `model` (and no
+   fallback list, `models`), or for Gemini and Converse, whose path names it, the path's (and a
+   Converse body's `modelId`, the body naming no `model`); 403, an error OpenCode doesn't retry;
+   bodies over 32 MB are 413. The body is
    UTF-8 JSON with no duplicate key, no NaN, and no top-level key that folds to `model` or
    `models` but isn't `model`: a server reading JSON otherwise (Go's encoding/json matches keys
    case-insensitively; some parsers keep the first duplicate) would route a body that passed.
 Then the body goes on as it is (an OpenRouter body with its `provider` routing set to the role's
 `order` and `allow_fallbacks: false`, whatever OpenCode sent: #1021), the client's auth headers
 dropped and the real one added, and
-the response comes back as it arrives (SSE a whole line at a time), its `data:` lines read on
-the way for the served model (status `served`) and the usage (`on_usage`); the key itself never
+the response comes back as it arrives (SSE a whole line at a time), its `data:` lines (Bedrock's
+event-stream frames) read on the way for the served model (status `served`) and the usage
+(`on_usage`); the key itself never
 passes, and an SSE line with an `error` goes through `redact`. An upstream error is read whole
 (64 KB at most) and passed through `redact` before OpenCode sees it, since OpenCode prints an
 upstream body verbatim (a key-like string in a 401 body reached stdout, #1009).
@@ -30,13 +35,27 @@ upstream body verbatim (a key-like string in a 401 body reached stdout, #1009).
 The path mapping (checked against OpenCode 2.3.2's source, packages/ai/src, and real OpenCode
 in RealOpenCodeAPI): a provider package builds its request URL from the configured baseURL
 alone, as `new URL(trim(baseURL) + path)`, some first rewriting the base by its path (DeepInfra
-appends `/openai` unless the base already ends in it). So the keyhole's base mirrors the
-upstream's path on 127.0.0.1 (`layer_options`; DeepInfra's `/openai` already appended, by
-`mirror_path`): OpenCode then posts to the very path it would have posted to upstream, and the
-keyhole forwards that path, and its query (`?beta=true` for Anthropic), to the upstream's host.
-Only packages known to post there with a bearer or `x-api-key` key run (`PACKAGES`): Google's
-(`x-goog-api-key`, `/models/<id>:streamGenerateContent`), Azure's (`api-key`, and a base rewritten
-by its host), Cohere's native `/chat` and the like can't be served, and `start` says so.
+appends `/openai` unless the base already ends in it) or host (Azure appends `/v1` and
+`?api-version=v1` to an `*.openai.azure.com` base, and to any other host nothing). So the
+keyhole's base mirrors the upstream's path on 127.0.0.1 (`layer_options`; what the package
+appends already appended, by `mirror_path`, and Azure's query added on the way, `upstream_query`):
+OpenCode then posts to the very path it would have posted to upstream, and the keyhole forwards
+that path, and its query (`?beta=true` for Anthropic), to the upstream's host. Only packages
+known to post there with a static key run (`PACKAGES`, #1192): a bearer or `x-api-key` key,
+Google's Gemini (`x-goog-api-key`), Azure OpenAI's `api-key`, and Bedrock's API key (bearer, over
+SigV4, for Converse and Mantle). Cohere's native `/chat`, Google's Interactions route, Vertex and
+SigV4 signing can't be served, and `start` says so.
+
+GitHub Copilot (#1191): its sign-in's token (`expires: 0`, never rotating) is held as a key, the
+upstream is the account's own endpoint (copilot_endpoint) with the catalog base's path (`/v1` for
+its Messages route), and every route gets `Authorization: Bearer`. No credential is planted in the
+agent's OpenCode: its Copilot plugin adds Copilot's headers (X-Initiator, Openai-Intent,
+X-Interaction-Type, X-GitHub-Api-Version) by provider, whatever the credential (checked on 2.3.2,
+RealOpenCodeAPI), and without one it never asks GitHub, nor `/models` or Copilot's Auto router.
+
+OpenCode Zen's free models with no key stored (models.keyless_free, #1193) go through it too, with
+Zen's own `public` as the key (PUBLIC): no secret, so none is loaded and nothing is redacted for
+it, but the hold, the health record, the meter and the pin to the task's model are the same.
 
 Standard library only: it runs in the runner.
 """
@@ -65,22 +84,55 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from . import privacy, store
 
 NEEDS = "needs a key wb can hold outside the lane"
-REMEDY = "store an API key with /connect in OpenCode"
+# OpenCode's own command for a key, one terminal line instead of /connect in its TUI (#1189). It asks
+# for the key on a terminal (2.3.2's auth form: `secret` requires an interactive one), so it can't
+# run from Claude's Bash or `!`: wb names it, the user runs it.
+LOGIN = "opencode auth login {provider}"
+REMEDY = "store an API key with `opencode auth login <provider>` in a terminal (or /connect in OpenCode)"
+
+
+def remedy(provider: str = "") -> str:
+    """REMEDY with the provider's id filled in (#1189)."""
+    return REMEDY.replace("<provider>", provider) if provider else REMEDY
+
+
+def login(provider: str) -> str:
+    """`opencode auth login <provider>`, quoted for a shell when the id needs it."""
+    import shlex
+    return LOGIN.format(provider=shlex.quote(provider))
 # The paths OpenCode 2.3.2 posts a model request to, at the end of the path under the base (the
 # spike, #1009): OpenAI chat and responses, Anthropic's messages and its token count.
 MODEL_PATHS = ("/chat/completions", "/responses", "/messages", "/messages/count_tokens")
-# The provider packages whose model requests the keyhole can carry (OpenCode 2.3.2's
-# packages/ai/src/providers: each LLM route posts the base plus one of MODEL_PATHS, the key in
-# `x-api-key` for Anthropic's, `Authorization: Bearer` for the rest). Any other package (Google's
-# x-goog-api-key, Azure's api-key, Cohere's native /chat, Bedrock, Vertex, gateways with their own
-# paths or headers, media-only packages) can't run: the issue wants that said at start, not a
-# 401 or 404 on every request (the protocol review, 2026-11-23).
-PACKAGES = {"anthropic": "anthropic", "anthropic-compatible": "anthropic",
+# The path-model protocols' (#1192): Gemini's (protocols/gemini.ts: the model in the path, SSE
+# pinned by `?alt=sse`; OpenCode 2.3.2 posts no `:countTokens` nor `:generateContent`, so neither
+# is let through) and Bedrock Converse's (bedrock-converse.ts: `encodeURIComponent(modelId)`).
+# `tunedModels/` matches too, to be refused as another model (403), not a 404.
+GEMINI_PATH = re.compile(r"/(models|tunedModels)/(.+):streamGenerateContent")
+CONVERSE_PATH = re.compile(r"/model/([^/]+)/converse-stream")
+# The provider packages whose model requests the keyhole can carry, by how the key goes
+# (OpenCode 2.3.2's packages/ai/src/providers): "bearer" (`Authorization: Bearer`, each LLM route
+# posting the base plus one of MODEL_PATHS), "anthropic" (`x-api-key`), "google" (Gemini:
+# `x-goog-api-key`, GEMINI_PATH), "api-key" (Azure OpenAI: `api-key`, MODEL_PATHS), "converse"
+# (Bedrock Converse: a Bedrock API key as `Authorization: Bearer`, which amazon-bedrock.ts sends
+# ahead of SigV4; CONVERSE_PATH). Any other package (Cohere's native /chat, Vertex, gateways with
+# their own paths or headers, media-only packages) can't run: the issue wants that said at start,
+# not a 401 or 404 on every request (the protocol review, 2026-11-23).
+PACKAGES = {"anthropic": "anthropic", "anthropic-compatible": "anthropic", "google": "google",
+            "azure": "api-key", "amazon-bedrock": "converse",
             **dict.fromkeys(("alibaba", "cerebras", "cloudflare-workers-ai", "deepinfra",
                              "deepseek", "digitalocean", "fireworks", "groq", "meta", "minimax",
                              "mistral", "moonshot", "openai", "openai-compatible",
                              "openai-compatible-responses", "openrouter", "togetherai", "venice",
                              "xai", "zai", "zai-coding-plan"), "bearer")}
+# A sub-package posting other than its package does, by its path under PACKAGE_PREFIX: Google's
+# Interactions route (`/interactions`, its own events: not served), Bedrock Mantle's (OpenAI
+# Responses or Chat, or Anthropic Messages, each with the Bedrock API key as a bearer:
+# amazon-bedrock-mantle.ts; `amazon-bedrock-mantle` is its old name)
+SUBPACKAGES = {"google/interactions": None, "amazon-bedrock-mantle": "bearer",
+               **dict.fromkeys(("amazon-bedrock/mantle", "amazon-bedrock/mantle/responses",
+                                "amazon-bedrock/mantle/chat", "amazon-bedrock/mantle/messages"),
+                               "bearer")}
+PROTOCOLS = ("bearer", "anthropic", "google", "api-key", "converse")
 PACKAGE_PREFIX = "@opencode/ai/providers/"
 AI_SDK_PREFIX = "@ai-sdk/"  # a config provider's V1 npm (#1137): read as PACKAGE_PREFIX
 BODY_CAP = 32 << 20     # a 131K-token prompt is a few MB of JSON
@@ -111,9 +163,16 @@ QUOTA = re.compile(r"(?i)insufficient[_ ](?:quota|balance|credits?|funds)|exceed
 # task failed as the agent's, no no_credit, no remedy (#1079, 2026-11-23). Only this wording on a
 # 400, never a bare "billing": an ordinary bad request may mention billing.
 CREDIT = re.compile(r"(?i)credit balance is too low|purchase credits|plans (?:&|and) billing")
+# A 429 for one request over the account's per-minute token limit (OpenAI's "Request too large for
+# <model> … on tokens per min (TPM): Limit 30000, Requested 45210", every request on tier 1 under
+# the pinned output cap): the same request never passes, so it was held, run again once and failed
+# after about 20 minutes as "rate-limited" (#1380, 2026-11-25). "Limit N, Requested M" only with
+# M > N: an ordinary TPM 429 says "Limit 30000, Used 29000, Requested 2000".
+TOO_LARGE = re.compile(r"(?i)request too large")
+LIMIT_ASKED = re.compile(r"(?i)\blimit:? ([\d,]+), requested:? ([\d,]+)")
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
        "trailers", "transfer-encoding", "upgrade", "proxy-connection"}
-CLIENT_AUTH = {"authorization", "x-api-key", "api-key"}
+CLIENT_AUTH = {"authorization", "x-api-key", "api-key", "x-goog-api-key"}
 # A query the keyhole forwards: printable ASCII only. A control character made http.client raise
 # InvalidURL (reported as the model unreachable) and a non-ASCII one UnicodeEncodeError (a
 # traceback, the connection dropped): the protocol review, 2026-11-23.
@@ -126,6 +185,16 @@ CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]{1,8}")
 LINE_CAP = 64 << 10     # a chunk-size or trailer line
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 SPEND_REFUSED = "the day's API spend cap is reached"  # meter.STOP too: a refusal OpenCode doesn't retry
+# GitHub Copilot (#1191): its sign-in's token is held as a key (_copilot_key), the upstream is the
+# account's own endpoint (copilot_endpoint), and every Copilot route takes `Authorization: Bearer`
+# (the plugin's applyHeaders sets it on its Messages route too); its plugin in the agent's
+# OpenCode adds the rest of Copilot's headers itself, and no credential of the agent's is needed
+COPILOT = "github-copilot"  # models.COPILOT
+COPILOT_USER_API = "2025-04-01"  # the plugin's userApiVersion
+COPILOT_LOOKUP_S = 5             # the plugin's own timeout for that lookup
+# Copilot's spent premium requests (a 402, or a 403 or 429 saying so): the wording is a guess from
+# Copilot's docs, not seen in a real answer (#1191): no wait helps, as QUOTA's
+COPILOT_QUOTA = re.compile(r"(?i)quota[_ ]exceeded|premium requests?\b|\ballowance\b")
 
 
 class KeyholeError(Exception):
@@ -134,12 +203,21 @@ class KeyholeError(Exception):
 
 class Key:
     """A provider's static API key, held in the runner's memory only. Its repr and str name the
-    provider, never the key."""
-    __slots__ = ("provider", "_value")
+    provider, never the key. ``source``: "" for a stored key, else the variable it was read from
+    (`$DEEPSEEK_API_KEY`, #1189): a name, never the value. ``meta``: what a sign-in's credential
+    says besides its token, never a secret (Copilot's `enterpriseUrl` and `apiEndpoint`, #1191).
+    ``secret`` False: a value that is no secret (PUBLIC, OpenCode Zen's keyless free tier, #1193),
+    which nothing redacts: "public" replaced in every answer turned a model's `public class` into
+    `[key redacted] class`."""
+    __slots__ = ("provider", "_value", "source", "meta", "secret")
 
-    def __init__(self, provider: str, value: str):
+    def __init__(self, provider: str, value: str, source: str = "", meta: dict | None = None,
+                 secret: bool = True):
         self.provider = provider
         self._value = value
+        self.source = source
+        self.meta = dict(meta or {})
+        self.secret = secret
 
     @property
     def value(self) -> str:
@@ -168,49 +246,81 @@ def redact(text: str, key: str | Key = "") -> str:
     """``text`` with the key, its first 8 and last 4 characters, anything key-shaped (KEYLIKE)
     and any bearer credential replaced with [key redacted]. One pass, so a replacement is never
     matched again."""
-    key = key.value if isinstance(key, Key) else (key or "")
+    key = (key.value if key.secret else "") if isinstance(key, Key) else (key or "")
     parts = [re.escape(key)] if key else []
     if len(key) >= 12:  # shorter, its fragments would be most of it, and match everywhere
         parts += [re.escape(key[:8]), re.escape(key[-4:])]
     return re.sub("|".join(parts + list(KEYLIKE)), REDACTED, text)
 
 
-def _package_name(package: str) -> str:
-    """``@opencode/ai/providers/meta/messages`` → ``meta``, ``@ai-sdk/openai-compatible`` →
-    ``openai-compatible``; a bare name stays as it is, and any other scoped package reads as its
-    scope (``@acme``), which PACKAGES never holds."""
+def _package_path(package: str) -> str:
+    """``@opencode/ai/providers/meta/messages`` → ``meta/messages``, ``@ai-sdk/openai-compatible``
+    → ``openai-compatible``; a bare name stays as it is."""
     name = package or ""
     # a config provider's V1 npm, the form OpenCode's docs give a custom provider: read as its
     # scope, `@ai-sdk`, every such provider was refused as one the keyhole can't speak (#1137,
     # 2026-11-23). OpenCode 2.3.2 runs `@ai-sdk/<name>` as its own `@opencode/ai/providers/<name>`
-    # where it has one (`api model.list` prints that); an unknown `@ai-sdk/foo` still reads as
+    # where it has one (model.list prints that); an unknown `@ai-sdk/foo` still reads as
     # None through PACKAGES, and its `aisdk:@ai-sdk/foo` (an npm package OpenCode loads) too.
     for prefix in (PACKAGE_PREFIX, AI_SDK_PREFIX):
         if name.startswith(prefix):
-            name = name[len(prefix):]
-            break
-    return name.split("/")[0]
+            return name[len(prefix):]
+    return name
+
+
+def _package_name(package: str) -> str:
+    """``@opencode/ai/providers/meta/messages`` → ``meta``, ``@ai-sdk/openai-compatible`` →
+    ``openai-compatible``; any other scoped package reads as its scope (``@acme``), which
+    PACKAGES never holds."""
+    return _package_path(package).split("/")[0]
 
 
 def protocol_of(package: str) -> str | None:
-    """How the provider takes its key: "anthropic" (`x-api-key`) or "bearer" (`Authorization:
-    Bearer`), from PACKAGES; None for a package the keyhole can't carry."""
+    """How the provider takes its key and where the model is named (PROTOCOLS), from PACKAGES or
+    SUBPACKAGES; None for a package the keyhole can't carry."""
+    path = _package_path(package)
+    if path in SUBPACKAGES:
+        return SUBPACKAGES[path]
     return PACKAGES.get(_package_name(package))
+
+
+def _azure_openai(package: str, base_url: str) -> bool:
+    """An Azure OpenAI base OpenCode rewrites (azure.ts `endpoint`): the azure package's, its host
+    `*.openai.azure.com`. Any other host OpenCode posts to as it is, and so does the keyhole."""
+    host = (urllib.parse.urlsplit(base_url).hostname or "").lower()
+    return _package_name(package) == "azure" and host.endswith(".openai.azure.com")
 
 
 def mirror_path(package: str, base_url: str) -> str:
     """The upstream base the keyhole mirrors: the catalog's, with what the package appends to it
     already appended, so OpenCode posts the keyhole's base plus a model path exactly (DeepInfra
-    adds `/openai` unless the base ends in it: providers/deepinfra.ts `configure`)."""
+    adds `/openai` unless the base ends in it: providers/deepinfra.ts `configure`; Azure `/v1` to
+    an `*.openai.azure.com` base, which on 127.0.0.1 it wouldn't: azure.ts `endpoint`, #1192)."""
     root = base_url.rstrip("/")
     if _package_name(package) == "deepinfra" and not root.endswith("/openai"):
         return f"{root}/openai"
+    if _azure_openai(package, base_url):
+        return f"{root}/v1"
     return base_url
 
 
+def upstream_query(package: str, base_url: str) -> dict:
+    """What the keyhole adds to each request's query on the way: Azure's `api-version=v1`, which
+    OpenCode adds only for an `*.openai.azure.com` base (azure.ts `endpoint`), never the
+    keyhole's (#1192)."""
+    return {"api-version": "v1"} if _azure_openai(package, base_url) else {}
+
+
 def _signs(provider: str, package: str = "") -> bool:
-    """A provider that signs each request (SigV4, Vertex), which a header swap can't do."""
-    return any(s in f"{provider} {package}" for s in ("amazon-bedrock", "google-vertex", "bedrock"))
+    """A provider that signs each request (Vertex), which a header swap can't do. Bedrock isn't
+    one by name (#1192): OpenCode 2.3.2 sends a Bedrock API key as a bearer ahead of SigV4
+    (amazon-bedrock.ts, amazon-bedrock-mantle.ts), so only Bedrock without a stored key signs
+    (load_key, _bedrock)."""
+    return "google-vertex" in f"{provider} {package}"
+
+
+def _bedrock(provider: str, package: str = "") -> bool:
+    return any(s in f"{provider} {package}" for s in ("amazon-bedrock", "bedrock"))
 
 
 def _lone_env(prov) -> tuple[str, str]:
@@ -230,8 +340,10 @@ def _lone_env(prov) -> tuple[str, str]:
 def _configured_key(provider: str) -> tuple[str | None, str]:
     """(where the user's OpenCode config gives ``provider`` an apiKey the agent could read: a
     file, or OPENCODE_CONFIG_CONTENT (the agent's environment), "env:<VAR>" for a `{env:VAR}` one
-    elsewhere (a header could replace the token); VAR of a lone provider-level `{env:VAR}` apiKey,
-    which a stored key may stand beside, _lone_env)."""
+    elsewhere (a header or V2 `settings`: the agent's OpenCode would expand it and send that over
+    the token, so the keyhole can't stand in for it); VAR of a lone provider-level `{env:VAR}`
+    apiKey, which the layer replaces with the token and a stored key may stand beside, _lone_env:
+    the variable load_key reads when none is stored, #1189)."""
     from . import models
     try:
         layers = [(str(p), layer) for p, layer in models._layers()]
@@ -310,26 +422,85 @@ def _first_line(text: str) -> str:
     return redact(next((ln.strip() for ln in (text or "").splitlines() if ln.strip()), ""))[:200]
 
 
+def _written(provider: str, where: str) -> str:
+    """load_key's refusal of a key the user's config writes where the agent reads it (_configured_key)."""
+    if where.startswith("env:"):
+        # the agent's OpenCode expands `{env:VAR}` in a header or V2 settings itself and sends it
+        # over the token; only a lone provider-level options.apiKey is the layer's to replace
+        return (f"{provider}'s key is read from ${where[4:]} in a header or V2 `settings`, which "
+                f"the keyhole can't stand in for: give it as provider.{provider}.options.apiKey "
+                f"\"{{env:{where[4:]}}}\" instead, or store the key with `{login(provider)}`")
+    # /connect alone changed nothing while the written key stayed (#1075, 2026-11-23)
+    return (f"its key is written in {where}, which agents can read: remove it there, and store "
+            f"the key with `{login(provider)}`")
+
+
+def env_refusal(provider: str, var: str, value: str | None = None) -> str:
+    """Why the keyhole can't take ``provider``'s key from the environment variable ``var`` that
+    OpenCode names for it (#1189), or "" when it can. The runner already carries the environment
+    of the wb command that started it (context.detached_env), so reading the variable there moves
+    the key nowhere new; it must only be one the agent's environment drops (runner.env_kept:
+    SECRET_ENV by its name, and not passed through by commands.json `env`), and set where wb start
+    ran. ``value``: the variable's, read from os.environ when not given. Never names the value."""
+    from . import context, runner
+    value = (os.environ.get(var, "") if value is None else value).strip()
+    if not value:
+        return (f"${var} isn't set where wb start ran: export it, or store the key with "
+                f"`{login(provider)}`")
+    through = set((store.read_json(context.commands_path(), {}) or {}).get("env") or [])
+    if var in through:
+        return f"${var} is passed to agents (commands.json env): remove it there"
+    if runner.env_kept(var, value, through):
+        return (f"agents get ${var} too (wb keeps a variable from them by a key's name, such as "
+                f"*_API_KEY): rename it, or store the key with `{login(provider)}`")
+    if not KEY_CHARS.fullmatch(value):
+        return (f"${var} holds a character an HTTP header can't carry: export it again, or store "
+                f"the key with `{login(provider)}`")
+    return ""
+
+
+def env_source(provider: str, var: str) -> str:
+    """Why ``provider``'s key can't come from ``var`` (env_refusal), with a key the config writes
+    where the agent reads it first (_configured_key: a `{env:VAR}` header or V2 one), or "". What
+    models.status asks of a key whose source is the environment."""
+    try:
+        where, _ = _configured_key(provider)
+    except KeyholeError as e:
+        return str(e)
+    return _written(provider, where) if where else env_refusal(provider, var)
+
+
+def _from_env(provider: str, var: str) -> Key:
+    """``provider``'s key from ``var`` in the runner's own environment (#1189), or KeyholeError."""
+    if why := env_refusal(provider, var):
+        raise KeyholeError(f"{NEEDS}: {why}")
+    return Key(provider, os.environ[var].strip(), source=f"${var}")
+
+
+# The key OpenCode 2.3.2 itself sends for Zen's free models when none is stored (packages/core/
+# src/plugin/provider/opencode.ts: `apiKey: "public"`, the priced models turned off). A keyless
+# free task's keyhole sends it upstream in place of a key (#1193): nothing to load, nothing secret.
+PUBLIC = "public"
+
+
 def load_key(provider: str, package: str = "") -> Key:
-    """``provider``'s static API key from the user's own OpenCode store (`opencode auth export`),
-    run with the runner's environment, outside the lane. Only stdout is read, into memory; a
-    failure's stderr is cut to its first line and redacted, and copied nowhere else. Raises
-    KeyholeError ("needs a key wb can hold outside the lane: <why>") for OAuth, request signing,
-    a key only in the environment, or one written where the agent can read it."""
+    """``provider``'s static API key: from the user's own OpenCode store (`opencode auth export`),
+    run with the runner's environment, outside the lane; else, with none stored, from the
+    variable OpenCode itself names for it (a lone provider-level `{env:VAR}` apiKey, or `auth
+    list`'s `env` connection; wb never guesses a name), read from the runner's environment
+    (_from_env, #1189): the order OpenCode sends them in (models._key_source). Only stdout is read,
+    into memory; a failure's stderr is cut to its first line and redacted, and copied nowhere
+    else. Raises KeyholeError ("needs a key wb can hold outside the lane: <why>") for OAuth,
+    request signing, a variable the agent gets too or that isn't set, or a key written where the
+    agent can read it."""
     if _signs(provider, package):
-        raise KeyholeError(f"{NEEDS}: {provider} signs each request (SigV4 or Vertex)")
+        raise KeyholeError(f"{NEEDS}: {provider} signs each request (Vertex)")
     where, env_var = _configured_key(provider)
     if where:
-        if where.startswith("env:"):
-            raise KeyholeError(f"{NEEDS}: {provider}'s key is only in the environment "
-                               f"(${where[4:]}), which agents don't get")
-        # /connect alone changed nothing while the written key stayed (#1075, 2026-11-23)
-        raise KeyholeError(f"{NEEDS}: its key is written in {where}, which agents can read: "
-                           "remove it there, and store the key with /connect")
+        raise KeyholeError(f"{NEEDS}: {_written(provider, where)}")
     r = _opencode("auth", "export", provider)
-    if r.returncode != 0 and env_var:  # no stored key beside it (OpenCode's "not found"): say why
-        raise KeyholeError(f"{NEEDS}: {provider}'s key is only in the environment (${env_var}), "
-                           "which agents don't get")
+    if r.returncode != 0 and env_var:  # no stored key beside it (OpenCode's "not found")
+        return _from_env(provider, env_var)
     if r.returncode != 0:
         raise KeyholeError(f"can't read {provider}'s key: opencode auth export exited "
                            f"{r.returncode}: {_first_line(r.stderr) or 'no message'}")
@@ -340,6 +511,8 @@ def load_key(provider: str, package: str = "") -> Key:
     rows = [x for x in (rows if isinstance(rows, list) else [rows]) if isinstance(x, dict)
             and x.get("integrationID", provider) == provider and isinstance(x.get("value"), dict)]
     rows.sort(key=lambda x: not x.get("active"))  # the active credential first
+    if provider == COPILOT:
+        return _copilot_key(rows)
     # An OAuth login the user switched to (`opencode auth switch`) over an older key: the key
     # was billed, the login OpenCode itself would use ignored (#1110, 2026-11-23)
     # (a login alone is refused below, as it always was). Any active credential that isn't a
@@ -352,24 +525,121 @@ def load_key(provider: str, package: str = "") -> Key:
                 "is an OAuth login, whose tokens rotate" if active == "oauth" else
                 f"is a {active} credential, not an API key")
         raise KeyholeError(f"{NEEDS}: {provider}'s active credential {what}: `opencode auth "
-                           "switch` to its API key, or store one with /connect")
+                           f"switch` to its API key, or store one with `{login(provider)}`")
     for row in rows:
         v = row["value"]
         if v.get("type") == "key" and isinstance(v.get("key"), str) and v["key"].strip():
             value = v["key"].strip()  # a paste's newline: OpenCode trims on /connect, not a hand edit
             if not KEY_CHARS.fullmatch(value):
                 raise KeyholeError(f"can't use {provider}'s stored key: it holds a character an "
-                                   "HTTP header can't carry; store it again with /connect")
+                                   f"HTTP header can't carry; store it again with `{login(provider)}`")
             return Key(provider, value)
     kinds = {row["value"].get("type") for row in rows}
     if "oauth" in kinds:
+        from . import models
+        if own := models.signin(provider):  # the provider's own cause (#1191)
+            raise KeyholeError(f"{NEEDS}: {provider} is signed in with {own[0]}: {own[1]}; {own[2]}")
         raise KeyholeError(f"{NEEDS}: {provider} is signed in with OAuth, whose tokens rotate")
     if "external" in kinds:
         raise KeyholeError(f"{NEEDS}: {provider}'s credential comes from an external source")
+    # none stored: the variable OpenCode names, from this runner's environment (#1189). It
+    # refused here before ("only in the environment, which agents don't get") and sent the user
+    # to /connect in OpenCode's TUI, though the runner held the variable and the agent never did
     if var := env_var or _env_only(provider):
-        raise KeyholeError(f"{NEEDS}: {provider}'s key is only in the environment (${var}), "
-                           "which agents don't get")
+        return _from_env(provider, var)
+    if _bedrock(provider, package):  # an AWS login or profile: SigV4, which a header swap can't do
+        raise KeyholeError(f"{NEEDS}: {provider} signs each request (SigV4) without a Bedrock "
+                           "API key stored in OpenCode")
     raise KeyholeError(f"{NEEDS}: OpenCode has no key stored for {provider}")
+
+
+def _copilot_key(rows: list) -> Key:
+    """GitHub Copilot's sign-in as a Key (#1191), from ``rows`` (`auth export`'s, the active one
+    first): the credential OpenCode itself would use, the first. An OAuth one is held only with
+    `expires: 0`, OpenCode 2.3.2's device login (`access` = `refresh` = the GitHub token, which
+    `Credential.expiring` never refreshes): a token that rotates would sign the user's own
+    OpenCode out once a copy of it was refreshed. Its `enterpriseUrl` and `apiEndpoint` go with it
+    (copilot_endpoint)."""
+    if not rows:
+        raise KeyholeError(f"{NEEDS}: OpenCode has no GitHub Copilot sign-in: /connect in OpenCode "
+                           "signs in (GitHub Copilot)")
+    v = rows[0]["value"]
+    if v.get("type") == "key" and isinstance(v.get("key"), str) and v["key"].strip():
+        token = v["key"].strip()
+    elif v.get("type") != "oauth":
+        raise KeyholeError(f"{NEEDS}: {COPILOT}'s credential comes from an external source")
+    elif v.get("expires") != 0:
+        raise KeyholeError(f"{NEEDS}: {COPILOT}'s sign-in expires and rotates its token, which "
+                           "OpenCode 2.3's Copilot login never did: /connect in OpenCode signs in "
+                           "again (GitHub Copilot)")
+    else:
+        token = v.get("access") if isinstance(v.get("access"), str) else ""
+        token = token.strip()
+    if not token:
+        raise KeyholeError(f"{NEEDS}: {COPILOT}'s sign-in holds no token: /connect in OpenCode signs "
+                           "in again (GitHub Copilot)")
+    if not KEY_CHARS.fullmatch(token):
+        raise KeyholeError(f"can't use {COPILOT}'s sign-in: its token holds a character an HTTP "
+                           "header can't carry; /connect in OpenCode signs in again")
+    meta = v.get("metadata") if isinstance(v.get("metadata"), dict) else {}
+    return Key(COPILOT, token, meta={k: meta[k] for k in ("enterpriseUrl", "apiEndpoint")
+                                if isinstance(meta.get(k), str) and meta[k].strip()})
+
+
+def copilot_user_url(meta: dict) -> str:
+    """Where GitHub says a Copilot account's own API endpoint (`endpoints.api`): the plugin's
+    userURL, on the enterprise's domain for a GitHub Enterprise sign-in."""
+    ent = str(meta.get("enterpriseUrl") or "").strip()
+    domain = re.sub(r"^https?://", "", ent).rstrip("/")
+    return f"https://{f'api.{domain}' if domain else 'api.github.com'}/copilot_internal/user"
+
+
+def _https_root(url) -> str | None:
+    """``url`` as an API root the keyhole may send the token to: https, a host, no user, query or
+    fragment, without its trailing slash; else None."""
+    if not isinstance(url, str) or not url.strip():
+        return None
+    u = urllib.parse.urlsplit(url.strip())
+    if u.scheme != "https" or not u.hostname or "@" in u.netloc or u.query or u.fragment \
+            or not QUERY.fullmatch(url.strip()):
+        return None
+    return url.strip().rstrip("/")
+
+
+def copilot_endpoint(key: Key) -> str | None:
+    """The Copilot account's own API root, as GitHub says it now (`endpoints.api` of
+    copilot_internal/user, asked with the token, outside the lane, the plugin's lookup on each of
+    its refreshes: the endpoint changes with the plan); else the sign-in's stored `apiEndpoint`;
+    else None (the catalog's base serves). Never from a request. An account GitHub says has no
+    Copilot chat is refused, as OpenCode's own login refuses it."""
+    from .webpush import tls
+    req = urllib.request.Request(copilot_user_url(key.meta), headers={
+        "Accept": "application/json", "Authorization": f"Bearer {key.value}",
+        "User-Agent": "workbench-keyhole", "X-GitHub-Api-Version": COPILOT_USER_API})
+    opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=tls()))
+    user = None
+    try:
+        with opener.open(req, timeout=COPILOT_LOOKUP_S) as r:
+            user = json.loads(r.read(1 << 20))
+    except Exception:  # GitHub's hiccup: the stored endpoint, else the catalog's (never its text)
+        pass
+    if isinstance(user, dict) and user.get("chat_enabled") is False:
+        raise KeyholeError(f"{COPILOT}: GitHub says this account has no Copilot chat (an active "
+                           "Copilot plan, or a seat from an organization, gives it)")
+    api = (user.get("endpoints") or {}).get("api") if isinstance(user, dict) and isinstance(
+        user.get("endpoints"), dict) else None
+    return _https_root(api) or _https_root(key.meta.get("apiEndpoint"))
+
+
+def copilot_upstream(base_url: str, root: str | None) -> str:
+    """The keyhole's upstream for a Copilot model: the account's ``root`` with the catalog base's
+    path (`/v1` for a model on Copilot's Anthropic Messages route, none for its OpenAI ones:
+    github-copilot/models.ts routeFor), or the catalog's base as it is without a root or for a
+    path of another shape."""
+    path = urllib.parse.urlsplit(base_url).path.rstrip("/")
+    if not root or path not in ("", "/v1"):
+        return base_url
+    return root + path
 
 
 def _env_only(provider: str) -> str:
@@ -420,26 +690,30 @@ class _Server(ThreadingHTTPServer):
 class Keyhole:
     """The proxy for one task's model: ``model`` (a models.Model: id, provider, name), ``key``
     (a Key), ``upstream`` (the catalog's API base: never anything from a request), ``protocol``
-    ("bearer" or "anthropic"). It serves at once, from a daemon thread, on 127.0.0.1 (never
-    localhost, which may be ::1 first). ``on_usage(usage)`` gets each response's usage, once,
-    before its end marker (`[DONE]`, `message_stop`, `response.completed`) or else its last byte
-    goes to OpenCode (the meter, #1019, #1114); ``on_health(state, why, until)``
+    (one of PROTOCOLS), ``query`` (what each forwarded query gets set: upstream_query). It serves
+    at once, from a daemon thread, on 127.0.0.1 (never localhost, which may be ::1 first).
+    ``on_usage(usage)`` gets each response's usage, once, before its end marker (`[DONE]`,
+    `message_stop`, `response.completed`) or else its last byte
+    goes to OpenCode (the meter, #1019, #1114), and a response cut before its end an estimate
+    marked `cut` (_cut_usage, #1276), and close() books each still in flight so (#1349);
+    ``on_health(state, why, until)``
     each outcome (ok, no_credit, rate_limited, unreachable); ``room(body, size)`` is asked before
     each request is sent on (the meter's spend room: negative is refused); ``log`` the start and
     refusal lines (runner.log: the runner's stdout)."""
 
     def __init__(self, task, model, key: Key, upstream: str, protocol: str = "bearer", *,
                  timeout: float | None = None, on_usage=None, on_health=None, log=None,
-                 hold: float | None = None, room=None, order=None):
+                 hold: float | None = None, room=None, order=None, query=None):
         if not isinstance(key, Key):
             raise TypeError("key must be a Key")
-        if protocol not in ("bearer", "anthropic"):
+        if protocol not in PROTOCOLS:
             raise KeyholeError(f"{NEEDS}: {model.provider} takes its key in a way the keyhole "
                                "doesn't speak")
         up = urllib.parse.urlsplit(upstream)
         if up.scheme not in ("https", "http") or not up.hostname:
             raise KeyholeError(f"{model.id}'s API base isn't an http(s) URL")
         self.task, self.model, self._key, self.protocol = task, model, key, protocol
+        self.query = {str(k): str(v) for k, v in (query or {}).items()}
         # OpenRouter's backends, as the role chose them (task.json `order`, #1021): every request
         # is routed to them alone, and a response from another is an event and a report line
         self.order = [str(b) for b in order or () if str(b).strip()]
@@ -457,6 +731,10 @@ class Keyhole:
         self._marked = False  # status ratelimit written and not yet cleared
         self._refused: set[str] = set()
         self._lock = threading.Lock()
+        # the requests sent on and not yet answered in full (Handler.lift): close() books each as
+        # cut (#1349); bookings one at a time, so a handler's own and close()'s never both land
+        self._flying: set = set()
+        self._booking = threading.RLock()
         st = task.status if task is not None else {}
         self.served = st.get("served") if isinstance(st.get("served"), dict) else None
         self._server = _Server(("127.0.0.1", 0), _handler(self))
@@ -483,9 +761,23 @@ class Keyhole:
         if reason is not None:
             self.stopped = reason
             return
-        self.closed = True  # a held request stops holding
+        with self._lock:
+            self.closed = True  # a held request stops holding, and none goes out from now on
+            flying = list(self._flying)
         self._server.shutdown()
         self._server.server_close()
+        # a response still in flight dies with the runner, whose finally this is (wb stop, wb
+        # discard, wb stop --all): its handler books its cut only when a write to OpenCode fails,
+        # which waits for the provider's next chunk, and the handler threads are daemons. While
+        # DeepInfra wrote a tool call it doesn't stream, nothing came, and the request was never
+        # booked (#1349, bar loop round 9, 2026-11-24): booked here, before the runner exits
+        for h in flying:
+            h.book_cut(closing=True)
+
+    def reopen(self) -> None:
+        """Serve model requests again after close(reason): a runner that waited behind another
+        task's told spend stop goes on once the cap is raised (runner._cap_wait, #1344)."""
+        self.stopped = None
 
     def __enter__(self):
         return self
@@ -495,8 +787,12 @@ class Keyhole:
 
     # what the handler asks
     def token_ok(self, headers) -> bool:
+        """The token in the header the package sends it in: `Authorization: Bearer`, else
+        `x-api-key`, `api-key` (Azure's) or `x-goog-api-key` (Gemini's, #1192). Every one of them
+        is dropped on the way (CLIENT_AUTH), so which one carried it changes nothing upstream."""
         auth = headers.get("Authorization") or ""
-        given = auth[7:].strip() if auth[:7].lower() == "bearer " else headers.get("x-api-key") or ""
+        given = auth[7:].strip() if auth[:7].lower() == "bearer " else next(
+            (v for h in ("x-api-key", "api-key", "x-goog-api-key") if (v := headers.get(h))), "")
         return hmac.compare_digest(given.encode(), self.token.encode())
 
     def refused(self, name: str) -> None:
@@ -507,12 +803,18 @@ class Keyhole:
         self.log(f"keyhole: refused {_printable(name)} (this task runs {self.model.id})")
 
     def auth_header(self) -> tuple[str, str]:
-        if self.protocol == "anthropic":
-            return "x-api-key", self._key.value
-        return "Authorization", f"Bearer {self._key.value}"
+        header = {"anthropic": "x-api-key", "google": "x-goog-api-key", "api-key": "api-key"}
+        if name := header.get(self.protocol):
+            return name, self._key.value
+        return "Authorization", f"Bearer {self._key.value}"  # bearer, and Bedrock's API key
 
     def redact(self, text: str) -> str:
         return redact(text, self._key)
+
+    def secret_bytes(self) -> bytes:
+        """The key as the answers are scrubbed of it: b"" for one that is no secret (PUBLIC), which
+        is never replaced (bytes.replace(b"", …) would put the mark between every byte)."""
+        return self._key.value.encode() if self._key.secret else b""
 
     def saw(self, model, by) -> None:
         """A response named the model that served it (and OpenRouter its provider): status
@@ -611,6 +913,15 @@ class Keyhole:
             self.task.set_status(api_stop={"guard": "quota", "text": text})
         return text
 
+    def too_large(self, code: int, text: str) -> str:
+        """A request over the per-minute token limit by itself (#1380): `api_stop` with guard
+        `refused`, the provider's words in its text, and the text OpenCode is answered with."""
+        said = _error_said(text)
+        text = f"{self.model.provider} refused the request (HTTP {code})" + (f": {said}" if said else "")
+        if self.task is not None:
+            self.task.set_status(api_stop={"guard": "refused", "text": text})
+        return text
+
     def unreachable(self, why: str) -> str:
         """This machine's setup can't reach the provider (a certificate that doesn't verify, a
         proxy refusing the tunnel): `api_stop` with guard `setup`, so the round stops at once and
@@ -689,6 +1000,27 @@ def _printable(text: str) -> str:
     return redact(re.sub(r"[^\x20-\x7e]", "?", str(text)))[:120]
 
 
+def _too_large(text: str) -> bool:
+    """Whether a 429's body says the request alone is over a per-minute limit (#1380)."""
+    if TOO_LARGE.search(text):
+        return True
+    m = LIMIT_ASKED.search(text)
+    return bool(m) and int(m[2].replace(",", "") or 0) > int(m[1].replace(",", "") or 0)
+
+
+def _error_said(text: str) -> str:
+    """An error body's message (`error.message` or `message` of its JSON), else its first line:
+    redacted, printable, at most 200 characters."""
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        doc = None
+    err = doc.get("error") if isinstance(doc, dict) else None
+    said = err.get("message") if isinstance(err, dict) else doc.get("message") if isinstance(doc, dict) else None
+    said = said if isinstance(said, str) and said.strip() else text
+    return _first_line(re.sub(r"[^\x20-\x7e\n]", "?", said))
+
+
 def _retry_after(value: str | None) -> float:
     """Retry-After (seconds or an HTTP date) as an epoch time; RATE_LIMIT_SECS without one."""
     now = time.time()
@@ -708,6 +1040,20 @@ def _after_secs(value: str | None) -> float | None:
     if not value:
         return None
     return max(0.0, _retry_after(value) - time.time())
+
+
+# Google's rate signals in a 429 body (google.rpc QuotaFailure and RetryInfo): a quota id per
+# minute (`GenerateRequestsPerMinutePerProjectPerModel-FreeTier`), and the wait it asks
+_PER_MINUTE = re.compile(r"PerMinute")
+_RETRY_DELAY = re.compile(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"')
+
+
+def _google_rate(text: str) -> tuple[bool, float | None]:
+    """(a per-minute quota, RetryInfo's retryDelay in seconds or None) of an upstream error's
+    body. Only a per-minute quota is a rate: a daily one waits past any hold, as a spent
+    balance does."""
+    delay = _RETRY_DELAY.search(text or "")
+    return bool(_PER_MINUTE.search(text or "")), float(delay.group(1)) if delay else None
 
 
 def _unreachable_why(kh: Keyhole, e: Exception) -> str:
@@ -760,9 +1106,55 @@ def _handler(kh: Keyhole):
         protocol_version = "HTTP/1.1"
         server_version = "workbench-keyhole"
         sys_version = ""
+        retry_delay = None  # the last upstream error's RetryInfo wait (read_error, Google's)
+
+        # one request's answer (lift): its usage so far, its end marker seen, what streamed
+        flight = False  # sent on and not yet answered in full or with an error: in kh._flying
+        settled = False  # booked by kh.close(): nothing more of it is booked (#1349)
+        used, ended, sse, size = None, False, False, 0
+        said = deltas = streamed = 0
+        started = queued = False
 
         def log_message(self, *args):  # nothing about a request reaches runner.log
             pass
+
+        def lift(self, size: int) -> bool:
+            """A request about to go out, ``size`` its body's length: in flight (kh._flying)
+            until land(); False once the keyhole is closed (it isn't sent)."""
+            with kh._lock:
+                if kh.closed:
+                    return False
+                self.used, self.ended, self.sse, self.size = {}, False, False, size
+                self.said = self.deltas = self.streamed = 0
+                self.started = self.queued = False
+                self.flight = True
+                kh._flying.add(self)
+            return True
+
+        def land(self):
+            """Answered in full, or with an error (no cut to book): out of flight."""
+            with kh._lock:
+                self.flight = False
+                kh._flying.discard(self)
+
+        def book_cut(self, closing: bool = False):
+            """This answer cut before its end booked as the usage it is billed at least (#1276),
+            once: from its own failed write or read, or from kh.close() (``closing``) when the
+            runner exits with it waiting on a silent provider, or on the head of an answer the
+            provider is still thinking over (#1349). One still in the provider's queue never ran,
+            so isn't billed; usage that came after its end marker is booked as it came."""
+            with kh._booking:
+                if self.settled:
+                    return
+                if self.flight and not self.ended and not (self.queued and not self.started):
+                    out = (max(self.deltas, -(-self.said // 4)) if self.sse
+                           else -(-self.streamed // 4))
+                    self.used = _cut_usage(self.used, -(-self.size // 4), out)
+                    self.ended = True  # its cut booked: never a second
+                self.settled = closing
+                used, self.used = self.used, {}
+                if used:
+                    kh.usage(used)
 
         def handle(self):
             try:
@@ -783,20 +1175,39 @@ def _handler(kh: Keyhole):
             self.wfile.write(body)
 
         def route(self, method: str) -> str | None:
-            """The model path under the keyhole's base (exactly the base plus one of MODEL_PATHS,
-            or `/models` for a GET), or None. No segment between: the base mirrors the
+            """The model path under the keyhole's base (exactly the base plus one of the
+            protocol's model paths: MODEL_PATHS, GEMINI_PATH, CONVERSE_PATH; or `/models` for a
+            GET, none for Converse's), or None. No segment between: the base mirrors the
             upstream's, so OpenCode never posts one, and `/v1/threads/<id>/messages` went on with
-            the key (the reviews, 2026-11-23)."""
+            the key (the reviews, 2026-11-23). A path-model one's model is do_POST's to check."""
             path = urllib.parse.urlsplit(self.path).path
             base = kh.upstream_path
             rest = path[len(base):] if path.startswith(base + "/") else ""
-            return rest if rest in (("/models",) if method == "GET" else MODEL_PATHS) else None
+            if method == "GET":
+                return rest if rest == "/models" and kh.protocol != "converse" else None
+            if kh.protocol == "google":
+                return rest if GEMINI_PATH.fullmatch(rest) else None
+            if kh.protocol == "converse":
+                return rest if CONVERSE_PATH.fullmatch(rest) else None
+            return rest if rest in MODEL_PATHS else None
 
         def query_ok(self) -> bool:
-            if QUERY.fullmatch(urllib.parse.urlsplit(self.path).query):
+            query = urllib.parse.urlsplit(self.path).query
+            if not QUERY.fullmatch(query):
+                self.send_json(400, "keyhole: a query that isn't printable ASCII", close=True)
+                return False
+            if kh.protocol != "google" or self.command == "GET" and not query:
                 return True
-            self.send_json(400, "keyhole: a query that isn't printable ASCII", close=True)
-            return False
+            # Gemini takes a key in the query too (`?key=`): a second way in, beside the
+            # header the keyhole swaps; OpenCode 2.3.2 sends `alt=sse` alone (#1192)
+            names = [k.lower() for k, _ in urllib.parse.parse_qsl(query, keep_blank_values=True)]
+            if "key" in names:
+                self.send_json(400, "keyhole: a key in the query is refused", close=True)
+                return False
+            if query != "alt=sse" and self.command == "POST":
+                self.send_json(400, "keyhole: Gemini's model path takes only ?alt=sse", close=True)
+                return False
+            return True
 
         def refuse_path(self):
             path = urllib.parse.urlsplit(self.path).path
@@ -813,6 +1224,9 @@ def _handler(kh: Keyhole):
             if kh.protocol == "anthropic":
                 listing = {"data": [{"type": "model", "id": name, "display_name": name}],
                            "has_more": False, "first_id": name, "last_id": name}
+            elif kh.protocol == "google":  # Google's listing shape (models.list)
+                listing = {"models": [{"name": f"models/{name}", "displayName": name,
+                                       "supportedGenerationMethods": ["streamGenerateContent"]}]}
             else:
                 listing = {"object": "list", "data": [{"id": name, "object": "model",
                                                        "owned_by": kh.model.provider}]}
@@ -842,13 +1256,36 @@ def _handler(kh: Keyhole):
                 return self.send_json(400, "keyhole: the body isn't JSON")
             if not isinstance(body, dict):
                 return self.send_json(400, "keyhole: the body isn't a JSON object")
-            asked = body.get("model")
-            if "models" in body or asked != kh.model.name:  # a fallback list routes elsewhere
-                kh.refused("a fallback list" if "models" in body else str(asked))
+            if (other := self.other_model(body)) is not None:
+                kh.refused(other)
                 return self.send_json(403, f"keyhole: this task may use only {kh.model.id}")
             if why := kh.refusal(body, len(raw)):  # a 400: OpenCode doesn't retry it (#1019)
                 return self.send_json(400, f"workbench: {_printable(why)}")
             self.forward(kh.route_body(body, raw), body, len(raw))
+
+        def other_model(self, body: dict) -> str | None:
+            """What the request names in place of the task's model (logged), or None. The body's
+            `model`, and no fallback list; for Gemini and Converse the path's, as the model is
+            there (#1192): Gemini's only under `models/` (a `tunedModels/` one is another model),
+            Converse's as OpenCode writes it (encodeURIComponent: one written otherwise, or a
+            body's `modelId` other than it, may name another), and a body naming any `model`."""
+            name = kh.model.name
+            if "models" in body:  # a fallback list routes elsewhere
+                return "a fallback list"
+            rest = self.route("POST") or ""
+            if kh.protocol == "google":
+                kind, asked = GEMINI_PATH.fullmatch(rest).groups()
+                if kind != "models" or asked != name:
+                    return f"{kind}/{asked}"
+            elif kh.protocol == "converse":
+                asked = CONVERSE_PATH.fullmatch(rest).group(1)
+                if asked != urllib.parse.quote(name, safe="-_.!~*'()"):
+                    return urllib.parse.unquote(asked)
+                if body.get("modelId", name) != name:
+                    return str(body.get("modelId"))
+            else:
+                return None if body.get("model") == name else str(body.get("model"))
+            return str(body["model"]) if "model" in body else None
 
         def do_PUT(self):
             self.refuse_path()
@@ -909,6 +1346,10 @@ def _handler(kh: Keyhole):
             heads["Accept-Encoding"] = "identity"
             heads["Content-Length"] = str(len(raw))
             query = urllib.parse.urlsplit(self.path).query
+            if kh.query:  # Azure's api-version (upstream_query), over any OpenCode sent
+                pairs = [(k, v) for k, v in urllib.parse.parse_qsl(query, keep_blank_values=True)
+                         if k not in kh.query]
+                query = urllib.parse.urlencode(pairs + list(kh.query.items()))
             target = urllib.parse.urlsplit(self.path).path + (f"?{query}" if query else "")
             deadline = time.monotonic() + kh.hold
             backoff = BACKOFF[0]
@@ -924,12 +1365,15 @@ def _handler(kh: Keyhole):
                     kh.held("rate_limited", 429, cool)
                     if not self.nap(min(cool, left)):
                         return self.drop()
+                if not self.lift(size or len(raw)):  # closed: the runner is going (#1349)
+                    return self.drop()
                 conn = kh.connection()
                 try:
                     try:
                         conn.request("POST", target, body=raw, headers=heads)
                         resp = conn.getresponse()
                     except Exception as e:
+                        self.land()  # nothing answered: nothing billed
                         if isinstance(e, (OSError, http.client.HTTPException)) and not isinstance(
                                 e, http.client.InvalidURL):
                             why = kh.redact(_unreachable_why(kh, e))
@@ -954,14 +1398,19 @@ def _handler(kh: Keyhole):
                                                    f"({type(e).__name__})", etype="api_error")
                     if 200 <= resp.status < 300:
                         return self.stream(resp)
+                    self.land()  # an error answer: not billed
                     # without Retry-After, the provider's cooldown is the backoff this keyhole
                     # waits itself, not RATE_LIMIT_SECS: its own next pass reads it back (cooldown)
                     status, sent, text, kind = self.read_error(
                         resp, backoff if backoff <= deadline - time.monotonic() else None)
                     if kind == "quota":  # no wait helps: the round stops, and OpenCode doesn't retry a 400
                         return self.send_json(400, f"keyhole: {kh.quota(status)}: the round stops")
+                    if kind == "too_large":  # nor here (#1380): never held, sent again or a cooldown
+                        return self.send_json(400, f"keyhole: {kh.too_large(status, text)}: the round stops")
                     if kind in ("rate_limited", "outage"):
                         after = _after_secs(resp.getheader("Retry-After"))
+                        if after is None:
+                            after = self.retry_delay
                         how = self.hold_on(kind, status, backoff if after is None else after, deadline)
                         if how == "again":
                             if after is None:
@@ -971,6 +1420,7 @@ def _handler(kh: Keyhole):
                             return self.drop()
                     return self.send_error(status, sent, text)
                 finally:
+                    self.land()
                     conn.close()
 
         def hold_on(self, kind: str, code, wait: float, deadline: float, why: str = "") -> str:
@@ -1005,11 +1455,14 @@ def _handler(kh: Keyhole):
 
         def read_error(self, resp, wait: float | None = None):
             """(status, headers, redacted body, kind) of an upstream error: kind `quota`,
-            `rate_limited`, `outage` or None (HOLD_CODES, QUOTA, CREDIT), and the provider's health: a
+            `too_large`, `rate_limited`, `outage` or None (HOLD_CODES, QUOTA, CREDIT, _too_large),
+            and the provider's health (none for `too_large`: the account isn't limited): a
             rate limit until Retry-After, else ``wait`` (the hold's backoff) when given, else
             RATE_LIMIT_SECS; any 5xx unreachable, held or not."""
             data = resp.read(ERROR_CAP + 1)
             text = data[:ERROR_CAP].decode("utf-8", "replace")
+            # read before redact, which takes Google's quota ids (52 letters) for a key
+            per_minute, self.retry_delay = _google_rate(text)
             if len(data) > ERROR_CAP:
                 # cut: a key straddling the cut would leave its first characters, which no
                 # pattern knows (7 of a 32-character key passed, the review, 2026-11-23), so drop
@@ -1018,11 +1471,20 @@ def _handler(kh: Keyhole):
             text = kh.redact(text)
             status = resp.status
             kind = ("quota" if status == 402 or (status in (429, 403) and QUOTA.search(text))
-                    or (status in (400, 403, 429) and CREDIT.search(text)) else HOLD_CODES.get(status))
+                    or (status in (400, 403, 429) and CREDIT.search(text))
+                    or (kh.model.provider == COPILOT and status in (403, 429)
+                        and COPILOT_QUOTA.search(text))
+                    else "too_large" if status == 429 and _too_large(text) else HOLD_CODES.get(status))
+            if kind == "quota" and status == 429 and per_minute:
+                # Gemini's per-minute limit says "You exceeded your current quota" as its daily
+                # one does, which read as a spent balance and stopped the round (#1192): a rate
+                kind = "rate_limited"
             if kind == "quota" or "insufficient_quota" in text:
                 kh.health("no_credit", _first_line(text))
             elif kind == "rate_limited":
                 after = resp.getheader("Retry-After")
+                if not after and self.retry_delay is not None:  # Google's RetryInfo, as Retry-After
+                    after = f"{self.retry_delay:g}"
                 # a 429 without Retry-After read back as 60 s held every retry 60 s, never
                 # BACKOFF's 2, 4, 8 (the review of #1020, 2026-11-23)
                 kh.health("rate_limited", _first_line(text),
@@ -1044,21 +1506,19 @@ def _handler(kh: Keyhole):
             self.wfile.write(out)
 
         def stream(self, resp):
+            """A 2xx answer on to OpenCode, its usage to kh.usage once (lift's state: `used`,
+            merged, booked before its end, #1114; `ended`, its end marker seen; `said`, `deltas`,
+            its output so far; `streamed`, a body that isn't SSE, its bytes; `started`, its first
+            data; `queued`, keep-alives alone past QUEUED_AFTER_S, in the provider's queue), or
+            cut short, book_cut's (#1276)."""
             kh.health("ok")
-            self.send_response(resp.status)
-            for k, v in resp.getheaders():
-                lk = k.lower()
-                if lk in HOP or lk in ("content-length", "connection"):
-                    continue
-                self.send_header(k, v)
-            self.send_header("Transfer-Encoding", "chunked")
-            self.end_headers()
-            sse = "event-stream" in (resp.getheader("Content-Type") or "")
-            self.used = {}  # this response's usage, merged: kh.usage once, before its end (#1114)
-            key = kh._key.value.encode()
+            ctype = (resp.getheader("Content-Type") or "").lower()
+            sse = self.sse = "event-stream" in ctype and "amazon.eventstream" not in ctype
+            frames = bytearray() if "amazon.eventstream" in ctype else None  # Bedrock's (#1192)
+            key = kh.secret_bytes()
             hold = bytearray()  # SSE: a partial line; else the last len(key) - 1 bytes
             whole = bytearray()
-            started, marked = False, time.monotonic()  # the first data; the queue's last mark
+            marked = time.monotonic()  # the queue's last mark
 
             def send(data: bytes):
                 if data:
@@ -1066,11 +1526,22 @@ def _handler(kh: Keyhole):
                     self.wfile.flush()
 
             try:
+                # the head inside the try: OpenCode stopped while the provider was still
+                # thinking fails here, and the request's input is billed all the same (#1276)
+                self.send_response(resp.status)
+                for k, v in resp.getheaders():
+                    lk = k.lower()
+                    if lk in HOP or lk in ("content-length", "connection"):
+                        continue
+                    self.send_header(k, v)
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
                 while True:
                     piece = resp.read1(65536)
                     if not piece:
                         break
                     hold += piece
+                    self.streamed += len(piece)
                     if sse:  # whole lines on: an error event's line goes through redact
                         *done, rest = bytes(hold).split(b"\n")
                         if len(rest) > SNIFF_CAP:  # no line end in sight: pass it on, key out
@@ -1078,26 +1549,30 @@ def _handler(kh: Keyhole):
                         hold = bytearray(rest)
                         if done:
                             send(b"\n".join(self.data_line(ln) for ln in done) + b"\n")
-                        if not started and any(ln.strip() and not ln.startswith(b":") for ln in done):
-                            started = True  # an event, not a keep-alive comment: it has begun
+                        if not self.started and any(ln.strip() and not ln.startswith(b":")
+                                                    for ln in done):
+                            self.started = True  # an event, not a keep-alive comment: it has begun
                             kh.answered()
-                        elif not started and time.monotonic() - marked >= QUEUED_AFTER_S:
-                            marked = time.monotonic()  # keep-alives only: the provider's queue
+                        elif not self.started and time.monotonic() - marked >= QUEUED_AFTER_S:
+                            marked, self.queued = time.monotonic(), True  # keep-alives only: its queue
                             kh.held("queued", resp.status, None)
                     else:  # the key never passes, even split across two pieces
-                        if not started:
-                            started = True
+                        if not self.started:
+                            self.started = True
                             kh.answered()
-                        if len(whole) < SNIFF_CAP:
+                        if frames is not None:
+                            rest = self.frames(bytes(frames + piece))
+                            frames = None if rest is None else bytearray(rest)
+                        elif len(whole) < SNIFF_CAP and "eventstream" not in ctype:
                             whole += piece
-                        out = bytes(hold).replace(key, REDACTED.encode())
-                        cut = max(0, len(out) - (len(key) - 1))
+                        out = bytes(hold).replace(key, REDACTED.encode()) if key else bytes(hold)
+                        cut = max(0, len(out) - max(len(key) - 1, 0))
                         send(out[:cut])
                         hold = bytearray(out[cut:])
                 if sse and hold:
                     send(self.data_line(bytes(hold)))
                 elif hold:
-                    send(bytes(hold).replace(key, REDACTED.encode()))
+                    send(bytes(hold).replace(key, REDACTED.encode()) if key else bytes(hold))
                 hold = bytearray()
                 if not sse and whole:
                     try:
@@ -1106,24 +1581,50 @@ def _handler(kh: Keyhole):
                         pass
                 # usage that came after the end's marker, or with none (a non-SSE body): booked
                 # before the last byte (#1019); with a marker it went at the marker (data_line)
+                self.ended = True  # a last write that fails is no cut: the whole answer came
                 self.flush_usage()
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
             except (OSError, http.client.HTTPException):
                 self.close_connection = True  # the client or the upstream went away mid-answer
-                self.flush_usage()  # what the provider counted so far is still spent
+                # cut before its end, where Chat Completions and the Responses API put their
+                # usage: wb stopping OpenCode (the think nudge, steer --now, wb stop, a guard, the
+                # spend stop) booked $0 for a request the provider bills (#1276, 2026-11-24); what
+                # the provider counted so far is still spent
+                self.book_cut()
                 return
 
+        def frames(self, buf: bytes) -> bytes | None:
+            """AWS event-stream frames read for their payload's usage (Converse's `metadata`
+            event: `{"usage": {inputTokens, …}}`): each `[total:4][headers:4][crc:4][headers]
+            [payload][crc:4]`, big-endian; what isn't a whole frame yet is returned. A frame that
+            can't be one (its length past SNIFF_CAP, or under the prelude's) is None: the stream
+            still goes on, unread, and OpenCode's figure books it (Meter.step)."""
+            while len(buf) >= 12:
+                total, heads = int.from_bytes(buf[:4], "big"), int.from_bytes(buf[4:8], "big")
+                if total > SNIFF_CAP or total < 16 + heads:
+                    return None
+                if len(buf) < total:
+                    break
+                try:
+                    self.sniff(json.loads(buf[12 + heads:total - 4]))
+                except ValueError:
+                    pass
+                buf = buf[total:]
+            return buf
+
         def flush_usage(self):
-            used, self.used = getattr(self, "used", None), {}
-            if used:
-                kh.usage(used)
+            with kh._booking:  # never alongside book_cut, nor after kh.close() booked it (#1349)
+                used, self.used = self.used, {}
+                if used and not self.settled:
+                    kh.usage(used)
 
         def data_line(self, ln: bytes) -> bytes:
             """One SSE line read for the model and usage, and as it goes on: with the key out,
             and through redact when it carries an `error` (a mid-stream error arrives inside a
             200: Anthropic's `event: error`, OpenRouter's `data: {"error": …}`)."""
-            safe = ln.replace(kh._key.value.encode(), REDACTED.encode())
+            key = kh.secret_bytes()
+            safe = ln.replace(key, REDACTED.encode()) if key else ln
             s = ln.strip()
             if not s.startswith(b"data:"):
                 return safe
@@ -1133,6 +1634,7 @@ def _handler(kh: Keyhole):
                 # when it reads [DONE], not at the body's last byte, and a provider sending its
                 # last byte late had the response booked twice, OpenCode's row and then ours
                 # (#1114, 2026-11-23; checked on 2.3.2: Anthropic's waits for the last byte)
+                self.ended = True
                 self.flush_usage()
             if not payload or payload == b"[DONE]":
                 return safe
@@ -1141,7 +1643,10 @@ def _handler(kh: Keyhole):
             except ValueError:
                 return safe
             self.sniff(obj)
+            if n := _said(obj):
+                self.said, self.deltas = self.said + n, self.deltas + 1
             if isinstance(obj, dict) and obj.get("type") in ("message_stop", "response.completed"):
+                self.ended = True
                 self.flush_usage()  # the end of Anthropic's and the Responses API's stream (#1114)
             if isinstance(obj, dict) and "error" in obj:
                 return kh.redact(ln.decode("utf-8", "surrogateescape")).encode(
@@ -1155,17 +1660,55 @@ def _handler(kh: Keyhole):
             # the Responses API (OpenAI's package, xAI, OpenRouter): under `response`, in
             # response.created and response.completed
             res = obj.get("response") if isinstance(obj.get("response"), dict) else {}
-            served = (obj.get("model") or res.get("model")
+            # Gemini's (#1192): `modelVersion` and `usageMetadata` in each chunk, the counts a
+            # running total; no `[DONE]` and no end event, so it is booked at the stream's end,
+            # which is where OpenCode ends the step too (gemini.ts: no terminal event, onHalt)
+            served = (obj.get("model") or res.get("model") or obj.get("modelVersion")
                       or (msg.get("model") if obj.get("type") == "message_start" else None))
             if served:
                 kh.saw(served, obj.get("provider"))
-            usage = obj.get("usage") or msg.get("usage") or res.get("usage")
+            usage = obj.get("usage") or msg.get("usage") or res.get("usage") or obj.get("usageMetadata")
             if isinstance(usage, dict) and usage:
                 # one response, one usage: Anthropic's message_start and message_delta each carry
                 # part, and some servers send a running total in every chunk (counts only grow)
-                self.used = _merged(getattr(self, "used", None) or {}, usage)
+                self.used = _merged(self.used or {}, usage)
 
     return Handler
+
+
+def _said(obj, under: bool = False) -> int:
+    """The characters of the model's output one stream event carries: every string under a
+    `delta` (Chat Completions' choices[].delta, Anthropic's content_block_delta, the Responses
+    API's string `delta`), text, reasoning and tool arguments alike."""
+    if isinstance(obj, str):
+        return len(obj) if under else 0
+    if isinstance(obj, dict):
+        return sum(_said(v, under or k == "delta") for k, v in obj.items())
+    if isinstance(obj, list):
+        return sum(_said(v, under) for v in obj)
+    return 0
+
+
+def _count(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+
+
+def _cut_usage(used: dict, inp: int, out: int) -> dict:
+    """A response cut short (OpenCode stopped mid-stream, the provider gone) as the usage it is
+    billed at least (#1276): what its stream said, its input at least ``inp`` (the body's length
+    / 4, as the meter's room reckons a request) and its output at least ``out`` (what was
+    streamed: its deltas' characters / 4), marked `cut`. Anthropic's message_start gives the
+    input (and its cache); Chat Completions and the Responses API give nothing before their end,
+    so the estimate is in Chat Completions' names, which the meter reads for any protocol."""
+    u = dict(used or {})
+    chat = not u or "prompt_tokens" in u or "completion_tokens" in u
+    i, o = ("prompt_tokens", "completion_tokens") if chat else ("input_tokens", "output_tokens")
+    if not (_count(u.get(i)) or _count(u.get("cache_read_input_tokens"))
+            or _count(u.get("cache_creation_input_tokens"))):
+        u[i] = inp
+    u[o] = max(u[o] if _count(u.get(o)) else 0, out)
+    u["cut"] = True
+    return u
 
 
 def _merged(a: dict, b: dict) -> dict:
@@ -1218,21 +1761,35 @@ def _strict_json(raw: bytes):
 
 def start(task, m, *, log=None, on_usage=None, on_health=None, room=None) -> Keyhole:
     """The keyhole for task ``task``'s API model ``m`` (models.Model: id, provider, name,
-    base_url, and the catalog's provider package as ``package``): its key loaded (load_key), its
-    protocol from the package, its upstream the catalog's base. Logs one line, no key and no
-    token. Raises KeyholeError when there is no key wb can hold, or no API base."""
+    base_url, and the catalog's package as ``package``: the model's own, else its provider's,
+    #1387): its key loaded (load_key), its protocol from the package, its upstream the catalog's
+    base. Logs one line, no key and no token. Raises KeyholeError when there is no key wb can hold, or no API base."""
     package = getattr(m, "package", "") or ""
     if _signs(m.provider, package):
-        raise KeyholeError(f"{NEEDS}: {m.provider} signs each request (SigV4 or Vertex)")
+        raise KeyholeError(f"{NEEDS}: {m.provider} signs each request (Vertex)")
     protocol = protocol_of(package)
     if protocol is None:
         raise KeyholeError(f"{NEEDS}: {m.provider} takes its key in a way the keyhole doesn't "
                            f"speak ({_printable(package) or 'no provider package'})")
     if not m.base_url:
         raise KeyholeError(f"{m.id} has no API base in OpenCode's catalog")
-    key = load_key(m.provider, package)
-    kh = Keyhole(task, m, key, mirror_path(package, m.base_url), protocol, log=log,
+    copilot = m.provider == COPILOT
+    if copilot and m.name == "auto":  # models.COPILOT_AUTO: its router picks another model
+        raise KeyholeError(f"{NEEDS}: Copilot's Auto model picks another model each session, and "
+                           "a task keeps to one: pick a Copilot model by name")
+    from . import models
+    # Zen's free tier with no key stored (#1193): OpenCode's own "public", never `auth export`
+    key = Key(m.provider, PUBLIC, secret=False) if models.keyless_free(m) else load_key(m.provider, package)
+    upstream, via = mirror_path(package, m.base_url), ""
+    if copilot:  # the account's own endpoint, asked once per task; Bearer on every route (#1191)
+        root = copilot_endpoint(key)
+        upstream, protocol = copilot_upstream(m.base_url, root), "bearer"
+        via = f" (the account's endpoint, {urllib.parse.urlsplit(upstream).hostname})" if root else ""
+    kh = Keyhole(task, m, key, upstream, protocol, log=log,
                  on_usage=on_usage, on_health=on_health, room=room,
+                 query=upstream_query(package, m.base_url),
                  order=task.spec.get("order") if task is not None else None)  # #1021
-    kh.log(f"keyhole: {m.provider} on 127.0.0.1:{kh.port} for {m.id}")
+    # the variable's name, never its value: where the key came from, for runner.log (#1189)
+    kh.log(f"keyhole: {m.provider} on 127.0.0.1:{kh.port} for {m.id}{via}"
+           + (f" (key from {key.source})" if key.source else ""))
     return kh

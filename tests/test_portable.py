@@ -1,6 +1,7 @@
 """Machines other than the one workbench grew up on: other servers, ports, configs, platforms, speeds."""
 import ctypes
 import ctypes.util
+import dataclasses
 import io
 import json
 import os
@@ -23,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # run as a scri
 
 from unittest import mock
 
-from workbench import context, images, media, models, results, router, store, watch
+from workbench import context, images, media, models, results, router, runner, store, watch
 from tests.test_workbench import Base, FAKE, TEST_CMD, ThreadingHTTPServer, run_wb, wait_phase  # listens at once (#950)
 
 
@@ -155,6 +156,7 @@ class Real(unittest.TestCase):
         models._AUTH.clear()
         models._EMULATORS.clear()
         models._DOWN.clear()
+        models._STAYED.clear()
         models._KEYS.clear()
         models._STORED.clear()
         models._FACTS.clear()
@@ -1394,6 +1396,60 @@ class Real(unittest.TestCase):
         models.make_resident(found["lms/b"], say=lambda *_: None)
         self.assertEqual(loaded, {"a": 32768, "b": 32768})        # keep_loaded is kept
 
+    def test_lm_studio_for_windows_seen_from_wsl_unloads_the_model_a_switch_leaves(self):
+        # #1248 (bar loop round 5, 2026-11-24): LM Studio for Windows at WSL2's Windows host
+        # (`local: true`, so remote, yet same_gpu) was freed only when local, and on_this_gpu kept
+        # only Ollama among same_gpu servers: every switch stacked one more model in VRAM until
+        # LM Studio refused a load. 127.0.0.1 stands for the Windows host, localhost for WSL.
+        for k in ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
+            os.environ.pop(k, None)
+        loaded, posts, said = {}, [], []
+        srv, url = fake_lmstudio(loaded, posts)
+        self.servers.append(srv)
+        win = {"limit": {"context": 32768}}
+        here = mock.patch.object(models, "_this_host", lambda h, dns=True: h == "localhost")
+        here.start()
+        self.addCleanup(here.stop)
+        for same, gateway in ((None, "127.0.0.1"), (True, None), (False, "127.0.0.1")):
+            self.config({"win": {"options": {"baseURL": url + "/v1"}, "models": {"a": win, "b": win}}},
+                        {"win": {"local": True, **({} if same is None else {"same_gpu": same})}})
+            loaded.clear(), posts.clear(), said.clear()
+            with mock.patch.object(models, "windows_host", lambda: gateway):
+                found = models.discover()
+                self.assertTrue(found["win/a"].remote)
+                shared = same is not False
+                self.assertEqual(models.same_gpu(found["win/a"]), shared)
+                models.make_resident(found["win/a"], say=said.append)
+                models.make_resident(found["win/b"], say=said.append)
+                if shared:                                        # a let go before b loads
+                    self.assertEqual(loaded, {"b": 32768})
+                    self.assertEqual([p for p, _ in posts], ["/api/v1/models/load",
+                                                             "/api/v1/models/unload",
+                                                             "/api/v1/models/load"])
+                else:                                             # another machine's GPU: left be
+                    self.assertEqual(loaded, {"a": 32768, "b": 32768})
+                # b, the task's own, already loaded beside a: a let go, b kept (not dropped, to
+                # reload just in time with LM Studio's default window: #645)
+                loaded.update(a=32768, b=32768)
+                posts.clear()
+                models.make_resident(found["win/b"], say=said.append)
+                if shared:
+                    self.assertEqual(loaded, {"b": 32768})
+                    self.assertEqual(posts, [("/api/v1/models/unload", {"instance_id": "a"})])
+                else:
+                    self.assertEqual((loaded, posts), ({"a": 32768, "b": 32768}, []))
+                    # free_gpu itself (a local task's, an image's) leaves another machine's LM
+                    # Studio be: make_resident above never reaches it on a server away from this
+                    # GPU, so dropping _shared_servers' same_gpu filter passed every test (#1248)
+                    models.free_gpu(say=said.append)
+                    self.assertEqual((loaded, posts), ({"a": 32768, "b": 32768}, []))
+                # a, a task's beside it (keep), is ours too: nothing to free, nothing unloaded
+                loaded.update(a=32768, b=32768)
+                posts.clear()
+                self.assertEqual(models.make_resident(found["win/b"], say=said.append, keep=("win/a",)), 0.0)
+                self.assertEqual((loaded, posts), ({"a": 32768, "b": 32768}, []))
+                self.assertFalse([s for s in said if "can't stop" in s])  # never stopped
+
     def test_an_idle_lm_studio_neither_empties_the_gpu_of_ollamas_models_nor_stops_a_respread(self):
         # #808: just in time, LM Studio's /v1/models lists every downloaded model, so with nothing
         # loaded it read as a resident server: every round unloaded the user's Ollama models that
@@ -2029,6 +2085,17 @@ class Real(unittest.TestCase):
             self.assertIsNone(models.ollama_served_context("http://192.168.7.7:11434", "m"))
         show.assert_not_called()
 
+    def test_a_models_num_ctx_is_its_served_window_when_the_environment_lost_its_setting(self):
+        # #1195's review (2026-11-24): a Mac's launchctl setenv is gone after a reboot, so the
+        # skill puts the window in a num_ctx model instead; it must win over an empty or smaller
+        # OLLAMA_CONTEXT_LENGTH, as Ollama itself reads it
+        from workbench import hardware
+        for env in ("", "4096"):
+            with mock.patch.object(models, "_get", return_value={"models": []}), \
+                    mock.patch.object(models, "ollama_show", return_value={"num_ctx": 32768}), \
+                    mock.patch.object(hardware, "ollama_env", return_value={"OLLAMA_CONTEXT_LENGTH": env}):
+                self.assertEqual(models.ollama_served_context("http://127.0.0.1:11434", "m:8b-32k"), 32768)
+
     def test_a_model_that_cant_load_gets_its_next_step_and_never_empties_the_gpu(self):
         # the 2026-11-16 audit: wb start said only why, offered --force for an unpulled model,
         # and the forced task unloaded the GPU before its load failed
@@ -2264,7 +2331,7 @@ class Remote(unittest.TestCase):
         ctx = {"llama.context_length": 131072}
         srv, port = fake_remote_ollama(
             [{"name": "coder:7b"}, {"name": "embed:1b"}, {"name": "big:cloud", "remote_host": "https://ollama.com"}],
-            {"coder:7b": {"capabilities": ["completion", "tools"], "model_info": ctx},
+            {"coder:7b": {"capabilities": ["completion", "tools", "thinking"], "model_info": ctx},
              "embed:1b": {"capabilities": ["embedding"], "model_info": ctx},
              "big:cloud": {"capabilities": ["tools"], "model_info": ctx}})
         self.servers.append(srv)
@@ -2282,6 +2349,7 @@ class Remote(unittest.TestCase):
         entry = prov["models"]["coder:7b"]
         self.assertEqual(entry["limit"]["context"], 32768)
         self.assertIn("max_tokens", entry["options"])                    # an Ollama entry's output cap
+        self.assertEqual(entry["options"]["reasoningEffort"], "none")    # thinking off, as wb model add (#1187)
         self.assertTrue(json.loads(Path(os.environ["WB_MODELS"]).read_text())[pid]["local"])
         self.assertIn(f"{pid}/coder:7b", models.discover())
         self.assertEqual(self.wb("remote", "127.0.0.1", "--port", str(port), "--context", "32768")[0], 0)
@@ -2378,6 +2446,444 @@ class Remote(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("--  ollama-127-0-0-1/coder:7b: Ollama would serve coder:7b its own default context", out)
         self.assertEqual(self.wb("remote", "nowhere", "--remove")[0], 1)
+
+    def test_wb_remote_to_wsls_windows_host_follows_its_new_address_after_a_reboot_as_one_provider(self):
+        # #1159 (2026-11-24): on WSL2's NAT, wb remote <Windows' address> wrote ollama-<address>
+        # with it; a reboot moved the address, every wb start said to start an Ollama that was
+        # running, and wb remote <new address> made a second provider, the model ids new
+        tags = [{"name": "coder:7b"}]
+        shows = {"coder:7b": {"capabilities": ["tools"], "model_info": {"llama.context_length": 131072}}}
+        try:  # Windows before and after the reboot, played by other loopback addresses
+            before, port = fake_remote_ollama(tags, shows, host="127.0.0.2")
+        except OSError:
+            self.skipTest("no 127.0.0.2 here")
+        self.servers.append(before)
+        self.config({}, {})
+        cfg_path, models_path = Path(os.environ["WB_OPENCODE_CONFIG"]), Path(os.environ["WB_MODELS"])
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.2"):
+            code, out = self.wb("remote", "127.0.0.2", "--port", str(port), "--context", "32768")
+        self.assertEqual(code, 0, out)
+        self.assertIn("registered ollama-windows/coder:7b", out)
+        self.assertTrue(json.loads(models_path.read_text())["ollama-windows"]["wsl_host"])
+        before.shutdown()
+        before.server_close()
+        self.servers.remove(before)
+        try:
+            after = ThreadingHTTPServer(("127.0.0.3", port), before.RequestHandlerClass)
+        except OSError:
+            self.skipTest("no 127.0.0.3 here")
+        threading.Thread(target=after.serve_forever, daemon=True).start()
+        self.servers.append(after)
+        err = io.StringIO()
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.3"), redirect_stderr(err):
+            m = models.discover()["ollama-windows/coder:7b"]            # the same id: its history kept
+            self.assertEqual(m.root, f"http://127.0.0.3:{port}")
+            self.assertTrue(models.status(m)["available"], models.status(m))
+            self.assertIn("Windows' address moved from 127.0.0.2 to 127.0.0.3", err.getvalue())
+            models.discover()
+            self.assertEqual(err.getvalue().count("moved"), 1)           # said once, when it moved
+            prov = json.loads(cfg_path.read_text())["provider"]
+            self.assertEqual(list(prov), ["ollama-windows"])
+            self.assertEqual(prov["ollama-windows"]["options"]["baseURL"], f"http://127.0.0.3:{port}/v1")
+            self.assertEqual(json.loads(models_path.read_text())["ollama-windows"]["remote"],
+                             f"http://127.0.0.3:{port}")
+            code, out = self.wb("remote", "127.0.0.3", "--port", str(port), "--context", "32768")
+            self.assertEqual(code, 0, out)                               # no second provider
+            self.assertEqual(list(json.loads(cfg_path.read_text())["provider"]), ["ollama-windows"])
+            code, out = self.wb("remote", "127.0.0.3", "--remove")
+            self.assertEqual(code, 0, out)
+            self.assertNotIn("ollama-windows", json.loads(cfg_path.read_text())["provider"])
+
+    def test_a_remote_ollama_gone_from_an_old_windows_address_is_told_the_new_one_not_to_start_ollama(self):
+        # #1159 (2026-11-24): a provider wb remote made before it followed Windows' address said
+        # "start Ollama at <old address>" after a reboot; wb remote again keeps the old id's models
+        dead = free_port()
+        legacy = models.remote_pid("127.0.0.4")
+        self.config({legacy: {"name": "Ollama on 127.0.0.4", "models": {"coder:7b": {}},
+                              "options": {"baseURL": f"http://127.0.0.4:{dead}/v1"}}},
+                    {legacy: {"local": True, "remote": f"http://127.0.0.4:{dead}"}})
+        m = models.discover()[f"{legacy}/coder:7b"]
+        st = models.status(m)
+        self.assertEqual(st["why"], "ollama is not answering")
+        with mock.patch.object(models, "windows_host", return_value=None):  # off WSL: as it was
+            self.assertTrue(models.remedy(m, st).startswith("start Ollama at"))
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.5"):
+            fix = models.remedy(m, st)
+        self.assertIn("if 127.0.0.4 was Windows' address", fix)
+        # #1159's review (2026-11-24): wb remote <new> makes ollama-windows beside this one, so the
+        # step says so and how to drop this one, never that it repoints it
+        self.assertIn("wb remote 127.0.0.5 adds Windows' Ollama as ollama-windows", fix)
+        self.assertNotIn("points it at", fix)
+        self.assertIn("wb remote 127.0.0.4 --remove drops this one", fix)
+        self.assertIn("networkingMode=mirrored", fix)
+        # still at Windows' address, wb remote adopts the old provider: its models keep their ids
+        try:
+            srv, port = fake_remote_ollama([{"name": "coder:7b"}],
+                                           {"coder:7b": {"capabilities": ["tools"], "model_info": {}}},
+                                           host="127.0.0.4")
+        except OSError:
+            self.skipTest("no 127.0.0.4 here")
+        self.servers.append(srv)
+        self.config({legacy: {"name": "Ollama on 127.0.0.4", "models": {"coder:7b": {}},
+                              "options": {"baseURL": f"http://127.0.0.4:{port}/v1"}}},
+                    {legacy: {"local": True, "remote": f"http://127.0.0.4:{port}"}})
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.4"):
+            code, out = self.wb("remote", "127.0.0.4", "--port", str(port), "--context", "32768")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(list(json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())["provider"]), [legacy])
+        self.assertTrue(json.loads(Path(os.environ["WB_MODELS"]).read_text())[legacy]["wsl_host"])
+
+    def test_an_adopted_old_windows_provider_stays_the_one_provider_after_windows_moves(self):
+        # #1159's review (2026-11-24): wb remote adopted ollama-127-0-0-4 at Windows' address and
+        # discovery repointed it after a reboot, but wb remote <new address> then made a second
+        # provider, ollama-windows, with new model ids, and --remove found nothing to remove
+        tags = [{"name": "coder:7b"}]
+        shows = {"coder:7b": {"capabilities": ["tools"], "model_info": {}}}
+        try:
+            before, port = fake_remote_ollama(tags, shows, host="127.0.0.4")
+        except OSError:
+            self.skipTest("no 127.0.0.4 here")
+        self.servers.append(before)
+        legacy = models.remote_pid("127.0.0.4")
+        self.config({legacy: {"name": "Ollama on 127.0.0.4", "models": {"coder:7b": {}},
+                              "options": {"baseURL": f"http://127.0.0.4:{port}/v1"}}},
+                    {legacy: {"local": True, "remote": f"http://127.0.0.4:{port}"}})
+        cfg_path = Path(os.environ["WB_OPENCODE_CONFIG"])
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.4"):
+            self.assertEqual(self.wb("remote", "127.0.0.4", "--port", str(port), "--context", "32768")[0], 0)
+        before.shutdown()
+        before.server_close()
+        self.servers.remove(before)
+        try:
+            after = ThreadingHTTPServer(("127.0.0.5", port), before.RequestHandlerClass)
+        except OSError:
+            self.skipTest("no 127.0.0.5 here")
+        threading.Thread(target=after.serve_forever, daemon=True).start()
+        self.servers.append(after)
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.5"), redirect_stderr(io.StringIO()):
+            self.assertIn(f"{legacy}/coder:7b", models.discover())         # followed, its id kept
+            code, out = self.wb("remote", "127.0.0.5", "--port", str(port), "--context", "32768")
+            self.assertEqual(code, 0, out)
+            self.assertEqual(list(json.loads(cfg_path.read_text())["provider"]), [legacy])
+            code, out = self.wb("remote", "127.0.0.5", "--remove")
+            self.assertEqual(code, 0, out)
+            self.assertNotIn(legacy, json.loads(cfg_path.read_text()).get("provider") or {})
+
+    def test_wb_remote_at_windows_new_address_repoints_its_provider_before_discovery_has(self):
+        # #1159's review (2026-11-24): add_remote's own repoint, for a wb remote that runs before
+        # any discover() followed the address, was untested (discovery had always repointed first)
+        try:
+            srv, port = fake_remote_ollama([{"name": "coder:7b"}],
+                                           {"coder:7b": {"capabilities": ["tools"], "model_info": {}}},
+                                           host="127.0.0.3")
+        except OSError:
+            self.skipTest("no 127.0.0.3 here")
+        self.servers.append(srv)
+        self.config({models.WSL_PID: {"name": "Ollama on Windows", "models": {"coder:7b": {}},
+                                      "options": {"baseURL": f"http://127.0.0.2:{port}/v1"}}},
+                    {models.WSL_PID: {"local": True, "wsl_host": True, "remote": f"http://127.0.0.2:{port}"}})
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.3"):
+            pid, root, names = models.add_remote("127.0.0.3", port)
+        self.assertEqual((pid, root, names), (models.WSL_PID, f"http://127.0.0.3:{port}", ["coder:7b"]))
+        prov = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())["provider"]
+        self.assertEqual(list(prov), [models.WSL_PID])
+        self.assertEqual(prov[models.WSL_PID]["options"]["baseURL"], f"http://127.0.0.3:{port}/v1")
+        self.assertEqual(json.loads(Path(os.environ["WB_MODELS"]).read_text())[models.WSL_PID]["remote"],
+                         f"http://127.0.0.3:{port}")
+
+    def test_discovery_leaves_a_windows_provider_the_user_repointed_by_hand_alone(self):
+        # #1159's review (2026-11-24), #242: a provider wb remote made for Windows that the user
+        # pointed at another server is theirs; following Windows' address would undo their change
+        dead = free_port()
+        self.config({models.WSL_PID: {"name": "Ollama on Windows", "models": {"coder:7b": {}},
+                                      "options": {"baseURL": f"http://127.0.0.9:{dead}/v1"}}},
+                    {models.WSL_PID: {"local": True, "wsl_host": True, "remote": f"http://127.0.0.2:{dead}"}})
+        err = io.StringIO()
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.3"), redirect_stderr(err):
+            m = models.discover()[f"{models.WSL_PID}/coder:7b"]
+        self.assertEqual(m.root, f"http://127.0.0.9:{dead}")
+        self.assertNotIn("moved", err.getvalue())
+        self.assertEqual(json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+                         ["provider"][models.WSL_PID]["options"]["baseURL"], f"http://127.0.0.9:{dead}/v1")
+
+    def test_discovery_follows_windows_only_when_ollama_left_the_old_address_for_the_new_one(self):
+        # #1159's review (2026-11-24): under networkingMode=mirrored (or a VPN in WSL) the default
+        # gateway is the router, not Windows: discovery rewrote a working ollama-windows to it,
+        # said Windows' address had moved, and every wb start said to start Ollama at the router
+        tags = [{"name": "coder:7b"}]
+        shows = {"coder:7b": {"capabilities": ["tools"], "model_info": {}}}
+        try:
+            old, port = fake_remote_ollama(tags, shows, host="127.0.0.2")
+        except OSError:
+            self.skipTest("no 127.0.0.2 here")
+        self.servers.append(old)
+        self.config({models.WSL_PID: {"name": "Ollama on Windows", "models": {"coder:7b": {}},
+                                      "options": {"baseURL": f"http://127.0.0.2:{port}/v1"}}},
+                    {models.WSL_PID: {"local": True, "wsl_host": True, "remote": f"http://127.0.0.2:{port}"}})
+        files = (Path(os.environ["WB_OPENCODE_CONFIG"]), Path(os.environ["WB_MODELS"]))
+        before = [f.read_bytes() for f in files]
+        err = io.StringIO()
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.6"), redirect_stderr(err):
+            m = models.discover()[f"{models.WSL_PID}/coder:7b"]    # the gateway dead, Windows still up
+            self.assertEqual(m.root, f"http://127.0.0.2:{port}")
+            try:  # something at the gateway too: the old address still answering keeps it
+                gw = ThreadingHTTPServer(("127.0.0.6", port), old.RequestHandlerClass)
+            except OSError:
+                self.skipTest("no 127.0.0.6 here")
+            threading.Thread(target=gw.serve_forever, daemon=True).start()
+            self.servers.append(gw)
+            self.assertEqual(models.discover()[f"{models.WSL_PID}/coder:7b"].root, f"http://127.0.0.2:{port}")
+            gw.shutdown()
+            gw.server_close()
+            self.servers.remove(gw)
+            old.shutdown()
+            old.server_close()
+            self.servers.remove(old)
+            m = models.discover()[f"{models.WSL_PID}/coder:7b"]    # nothing answers anywhere
+            self.assertEqual(m.root, f"http://127.0.0.2:{port}")
+            st = models.status(m)
+            fix = models.remedy(m, st)
+        self.assertNotIn("moved", err.getvalue())
+        self.assertEqual([f.read_bytes() for f in files], before)   # both untouched
+        self.assertEqual(st["why"], "ollama is not answering")
+        self.assertNotIn("start Ollama at http://127.0.0.6", fix)
+        self.assertNotIn("gave Windows a new address", fix)
+        self.assertIn("127.0.0.1", fix)
+
+    def lmstudio_at(self, host: str, port: int = 0) -> ThreadingHTTPServer:
+        """An LM Studio-style /v1/models serving qwen-coder on ``host`` (skipped where that
+        loopback address can't be bound)."""
+        srv, _ = serve({"/v1/models": {"object": "list", "data": [
+            {"id": "qwen-coder", "object": "model", "owned_by": "organization_owner"}]}})
+        srv.shutdown()
+        srv.server_close()
+        try:
+            there = ThreadingHTTPServer((host, port), srv.RequestHandlerClass)
+        except OSError:
+            self.skipTest(f"no {host} here")
+        threading.Thread(target=there.serve_forever, daemon=True).start()
+        self.servers.append(there)
+        return there
+
+    def test_a_server_wb_model_add_put_at_windows_address_follows_it_after_a_reboot(self):
+        # #1167 (2026-11-24): #1159 followed only wb remote's Ollama; LM Studio on Windows, added
+        # as wb setup says (wb model add <p>/<m> --url http://<Windows>:1234/v1), read "not
+        # running: start its server" after a reboot moved Windows' address, every wb start exited
+        # 3, and a --force runner waited 20 minutes on the old address
+        before = self.lmstudio_at("127.0.0.2")
+        port = before.server_address[1]
+        self.config({}, {"lmstudio": {"local": True}})
+        cfg_path, models_path = Path(os.environ["WB_OPENCODE_CONFIG"]), Path(os.environ["WB_MODELS"])
+        old, new = f"http://127.0.0.2:{port}/v1", f"http://127.0.0.3:{port}/v1"
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.2"):
+            code, out = self.wb("model", "add", "lmstudio/qwen-coder", "--url", old, "--context", "32768")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(models_path.read_text())["lmstudio"]["wsl_url"], old)
+        before.shutdown()
+        before.server_close()
+        self.servers.remove(before)
+        err = io.StringIO()
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.3"), redirect_stderr(err):
+            # the reboot, its server not up yet: nothing to follow, and the step isn't "start its
+            # server, or give it a start command" at an address Windows no longer has
+            m = models.discover()["lmstudio/qwen-coder"]
+            self.assertEqual(m.base_url, old)
+            st = models.status(m)
+            self.assertTrue(st["why"].startswith("not running, and no start command"), st)
+            fix = models.remedy(m, st)
+            self.assertIn("start its server on Windows: it answers neither at", fix)
+            self.assertNotIn('"start" command', fix)
+            self.assertTrue(models.may_come_up(st))      # a --force or --queue start waits for it
+
+            passes = []
+
+            def up(secs):  # LM Studio comes up at Windows' new address while the runner waits
+                passes.append(secs)
+                self.assertLess(len(passes), 4, "still waiting on Windows' old address")
+                if not self.servers:
+                    self.lmstudio_at("127.0.0.3", port)
+            task = mock.Mock(status={})
+            with mock.patch.object(runner.time, "sleep", up):
+                m = runner._wait_up(task, m)             # read again each pass, not the old address
+            self.assertEqual((m.id, m.base_url), ("lmstudio/qwen-coder", new))
+            self.assertIn(f"Windows' address moved from 127.0.0.2 to 127.0.0.3 (WSL2's NAT): "
+                          f"lmstudio now points at {new}", err.getvalue())
+            self.assertTrue(models.status(m)["available"], models.status(m))
+            models.discover()
+            self.assertEqual(err.getvalue().count("moved"), 1)           # said once, when it moved
+            self.assertEqual(json.loads(cfg_path.read_text())["provider"]["lmstudio"]["options"]["baseURL"], new)
+            self.assertEqual(json.loads(models_path.read_text())["lmstudio"]["wsl_url"], new)
+            self.assertNotIn("remote", json.loads(models_path.read_text())["lmstudio"])  # not wb remote's
+            code, out = self.wb("model", "add", "lmstudio/qwen-coder", "--url", new, "--context", "32768")
+            self.assertEqual(code, 0, out)                                # the same provider
+            self.assertEqual(list(json.loads(cfg_path.read_text())["provider"]), ["lmstudio"])
+
+    def test_a_server_still_answering_where_it_was_is_probed_once_while_windows_host_stays(self):
+        # #1397 (2026-11-25): under mirrored networking or a VPN windows_host() is another address
+        # for good, and every discover() probed both, a second each where that one drops packets
+        before = self.lmstudio_at("127.0.0.2")
+        port = before.server_address[1]
+        self.config({}, {"lmstudio": {"local": True}})
+        old = f"http://127.0.0.2:{port}/v1"
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.2"):
+            code, out = self.wb("model", "add", "lmstudio/qwen-coder", "--url", old, "--context", "32768")
+        self.assertEqual(code, 0, out)
+        probed = []
+        real = models._answers
+
+        def answers(base):
+            probed.append(base)
+            return real(base)
+        with mock.patch.object(models, "_answers", answers):
+            with mock.patch.object(models, "windows_host", return_value="127.0.0.3"):
+                for _ in range(3):
+                    self.assertEqual(models.discover()["lmstudio/qwen-coder"].base_url, old)
+            self.assertEqual(len(probed), 2, probed)                  # the first discover() only
+            with mock.patch.object(models, "windows_host", return_value="127.0.0.4"):
+                models.discover()
+            self.assertEqual(len(probed), 4, probed)                  # a new address: asked again
+
+    def test_wb_model_add_at_windows_new_address_before_any_discovery_moves_the_provider_there(self):
+        # #1167 (2026-11-24): wb model add runs add_server_provider before discovery, so after a
+        # reboot `wb model add <p>/<m> --url <Windows' new address>` met the provider still at the
+        # old one and refused, "change lmstudio's baseURL ... by hand"; marked `wsl_url`, it moves
+        before = self.lmstudio_at("127.0.0.2")
+        port = before.server_address[1]
+        self.config({}, {"lmstudio": {"local": True}})
+        cfg_path, models_path = Path(os.environ["WB_OPENCODE_CONFIG"]), Path(os.environ["WB_MODELS"])
+        old, new = f"http://127.0.0.2:{port}/v1", f"http://127.0.0.3:{port}/v1"
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.2"):
+            code, out = self.wb("model", "add", "lmstudio/qwen-coder", "--url", old, "--context", "32768")
+        self.assertEqual(code, 0, out)
+        before.shutdown()
+        before.server_close()
+        self.servers.remove(before)
+        self.lmstudio_at("127.0.0.3", port)
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.3"), \
+                redirect_stderr(io.StringIO()):
+            code, out = self.wb("model", "add", "lmstudio/qwen-coder", "--url", new, "--context", "32768")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("by hand", out)
+        self.assertEqual(json.loads(cfg_path.read_text())["provider"]["lmstudio"]["options"]["baseURL"], new)
+        self.assertEqual(json.loads(models_path.read_text())["lmstudio"]["wsl_url"], new)
+        self.assertEqual(list(json.loads(cfg_path.read_text())["provider"]), ["lmstudio"])
+
+    def test_a_runner_waiting_on_a_server_after_a_reboot_leases_and_loads_it_at_windows_new_address(self):
+        # #1167 (2026-11-24): _drive dropped what _wait_up returned, so lease_for and _load kept
+        # the old Model, the server read down at Windows' old address, and _load waited DOWN_WAIT:
+        # the issue's 20-minute --force runner
+        before = self.lmstudio_at("127.0.0.2")
+        port = before.server_address[1]
+        self.config({}, {"lmstudio": {"local": True}})
+        old, new = f"http://127.0.0.2:{port}/v1", f"http://127.0.0.3:{port}/v1"
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.2"):
+            code, out = self.wb("model", "add", "lmstudio/qwen-coder", "--url", old, "--context", "32768")
+        self.assertEqual(code, 0, out)
+        before.shutdown()
+        before.server_close()
+        self.servers.remove(before)
+
+        class Leased(Exception):
+            pass
+        leased, passes = [], []
+
+        def lease_for(m, *a, **k):  # the model the runner takes the GPU and loads for
+            leased.append(m)
+            raise Leased
+
+        def up(secs):  # LM Studio comes up at Windows' new address while the runner waits
+            passes.append(secs)
+            self.assertLess(len(passes), 4, "still waiting on Windows' old address")
+            if not self.servers:
+                self.lmstudio_at("127.0.0.3", port)
+        task = mock.Mock(status={"round": 2})  # round 2: no outline to add
+        task.spec = {}
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.3"), \
+                redirect_stderr(io.StringIO()):
+            m = models.discover()["lmstudio/qwen-coder"]  # wb start's, before the server is up
+            self.assertEqual(m.base_url, old)
+            with mock.patch.object(runner.time, "sleep", up), \
+                    mock.patch.object(runner.gitops, "repo_of", return_value=Path(os.environ["WB_OPENCODE_CONFIG"]).parent), \
+                    mock.patch.object(runner, "checkout", return_value=True), \
+                    mock.patch.object(runner, "_prepare", return_value=True), \
+                    mock.patch.object(runner, "needs_base_check", return_value=False), \
+                    mock.patch.object(runner, "opencode_moved", return_value=False), \
+                    mock.patch.object(runner.models, "lease_for", lease_for), \
+                    self.assertRaises(Leased):
+                runner._drive(task, m, lambda msg: None)
+        self.assertTrue(passes)                                     # it waited for the server
+        self.assertEqual([(x.id, x.base_url) for x in leased], [("lmstudio/qwen-coder", new)])
+
+    def test_a_server_gone_from_an_old_windows_address_is_told_the_new_one_not_to_start_it(self):
+        # #1167 (2026-11-24): a server provider at an address that was Windows' before a reboot,
+        # added by hand (or before wb followed it), said "start its server" at the old address
+        dead = free_port()
+        self.config({"lmstudio": {"models": {"qwen-coder": {}},
+                                  "options": {"baseURL": f"http://127.0.0.4:{dead}/v1"}}},
+                    {"lmstudio": {"local": True, "engine": "server"}})
+        # Windows is another host from WSL (remote), which the loopback address playing it isn't
+        m = dataclasses.replace(models.discover()["lmstudio/qwen-coder"], remote=True)
+        st = models.status(m)
+        with mock.patch.object(models, "windows_host", return_value=None):  # off WSL: as it was
+            self.assertTrue(models.remedy(m, st).startswith("start its server, or give"))
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.5"):
+            fix = models.remedy(m, st)
+        self.assertIn("if 127.0.0.4 was Windows' address", fix)
+        self.assertIn(f"set lmstudio's baseURL to http://127.0.0.5:{dead}/v1", fix)
+        self.assertIn("networkingMode=mirrored", fix)
+        # wb model add --url at that address again, while it is Windows', has wb follow it
+        self.lmstudio_at("127.0.0.4", dead)
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.4"):
+            code, out = self.wb("model", "add", "lmstudio/qwen-coder", "--url",
+                                f"http://127.0.0.4:{dead}/v1", "--context", "32768")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(json.loads(Path(os.environ["WB_MODELS"]).read_text())["lmstudio"]["wsl_url"],
+                         f"http://127.0.0.4:{dead}/v1")
+
+    def test_a_server_added_before_the_mark_is_told_the_step_that_has_wb_follow_it_from_then_on(self):
+        # #1167's review (2026-11-24): a provider wb model add made at Windows' address before the
+        # `wsl_url` mark is never followed, and its step said only to set the baseURL by hand:
+        # still unmarked after that edit, the next reboot broke it again. The step names the
+        # wb model add that marks it, and after it the reboot after is followed
+        srv = self.lmstudio_at("127.0.0.2")
+        port = srv.server_address[1]
+        at = {h: f"http://{h}:{port}/v1" for h in ("127.0.0.2", "127.0.0.3", "127.0.0.4")}
+        self.config({"lmstudio": {"npm": "@ai-sdk/openai-compatible", "name": "lmstudio",   # main's
+                                  "options": {"baseURL": at["127.0.0.2"]},
+                                  "models": {"qwen-coder": {"limit": {"context": 32768, "output": 4096}}}}},
+                    {"lmstudio": {"local": True}})
+        cfg_path, models_path = Path(os.environ["WB_OPENCODE_CONFIG"]), Path(os.environ["WB_MODELS"])
+        here = models._this_host  # .2 to .4 play Windows, another host from WSL
+        other = lambda h, dns=True: h not in at and here(h, dns)
+        srv.shutdown()
+        srv.server_close()
+        self.servers.remove(srv)
+        self.lmstudio_at("127.0.0.3", port)                          # the reboot: Windows at .3
+        with mock.patch.object(models, "_this_host", other), \
+                mock.patch.object(models, "windows_host", return_value="127.0.0.3"), \
+                redirect_stderr(io.StringIO()):
+            m = models.discover()["lmstudio/qwen-coder"]
+            self.assertEqual(m.base_url, at["127.0.0.2"])            # unmarked: not followed
+            fix = models.remedy(m, models.status(m))
+            step = f"wb model add lmstudio/qwen-coder --url {at['127.0.0.3']}"
+            self.assertIn(f"set lmstudio's baseURL to {at['127.0.0.3']}", fix)
+            self.assertIn(f"then {step}, which follows Windows' address from now on", fix)
+            cfg = json.loads(cfg_path.read_text())                   # the user does both
+            cfg["provider"]["lmstudio"]["options"]["baseURL"] = at["127.0.0.3"]
+            cfg_path.write_text(json.dumps(cfg))
+            code, out = self.wb(*step.split()[1:], "--context", "32768")
+            self.assertEqual(code, 0, out)
+            self.assertEqual(json.loads(models_path.read_text())["lmstudio"]["wsl_url"], at["127.0.0.3"])
+        gone = self.servers.pop()
+        gone.shutdown()
+        gone.server_close()
+        self.lmstudio_at("127.0.0.4", port)                          # the next reboot: followed
+        with mock.patch.object(models, "_this_host", other), \
+                mock.patch.object(models, "windows_host", return_value="127.0.0.4"), \
+                redirect_stderr(io.StringIO()):
+            m = models.discover()["lmstudio/qwen-coder"]
+            self.assertEqual(m.base_url, at["127.0.0.4"])
+            self.assertTrue(models.status(m)["available"], models.status(m))
 
 
 class Optimize(unittest.TestCase):
@@ -2823,6 +3329,30 @@ class Optimize(unittest.TestCase):
             self.assertIn("a task you start goes first", out[0])
             self.assertNotIn("--all", detach.call_args[0][0])
 
+    def test_an_ollama_model_add_starts_measuring_its_window_when_due_and_quietly_waits_for_a_task(self):
+        # #1195: pull, register and measure were three yeses on a first run; wb model add now
+        # starts wb optimize itself, as wb setup does, and stays quiet while a task holds the GPU
+        self.ollama(32768)
+        from workbench import cli
+        with mock.patch.object(cli, "detach") as detach, \
+                mock.patch.object(models, "_started", return_value="1"):  # not ps on the fake
+            detach.return_value.pid = os.getpid()
+            with mock.patch.object(models, "holders", lambda *a, **k: {"1": {"task": "t"}}):
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    cli.main(["model", "add", "ollama/m", "--pull", "--context", "32768"])
+                self.assertIn("registered ollama/m", out.getvalue())
+                self.assertNotIn("measuring", out.getvalue())             # busy: the next session
+                detach.assert_not_called()
+            out = io.StringIO()
+            with redirect_stdout(out):
+                cli.main(["model", "add", "ollama/m", "--pull", "--context", "32768"])
+        said = out.getvalue().splitlines()
+        self.assertTrue(said[-3].startswith("registered ollama/m"), said)
+        self.assertIn("--  measuring the GPU for 1 local model(s) (never measured)", said[-2])
+        self.assertTrue(said[-1].startswith("next: wb model sizes ollama/m"), said)
+        self.assertEqual(detach.call_args[0][0][-2:], ["-m", "workbench.optimize"])
+
     def test_a_fit_is_due_again_when_its_models_window_or_weights_change_and_only_that_one(self):
         # #709: the fit was keyed to the GPUs alone: an entry raised from 32K to 64K, or a tag
         # repointed at other weights, kept its old fit and no run was due
@@ -3093,6 +3623,14 @@ class Launchers(unittest.TestCase):
         prevent = [l.split("=", 1)[1].split() for l in unit.splitlines()
                    if l.startswith("RestartPreventExitStatus=")]
         self.assertEqual(prevent, [["78"]])
+
+    def test_the_chat_unit_and_agent_say_wb_setup_installs_them(self):
+        # #1281: wb setup installs the web app's service by default; the unit's comment sent the
+        # user to the README for a link they no longer make by hand
+        unit = (self.ROOT / "systemd" / "wb-chat.service").read_text()
+        self.assertIn("`wb setup` links this", unit)
+        self.assertNotIn("(README)", unit)
+        self.assertIn("`wb setup` installs it as a copy", (self.ROOT / "launchd" / "workbench.chat.plist").read_text())
 
     def test_no_note_says_the_chat_exits_75_since_it_re_execs_in_place(self):
         # #480 (the audit of v1.8): the unit and ARCHITECTURE.md still said chat.py exits 75 to be

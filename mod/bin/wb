@@ -1,0 +1,49 @@
+#!/bin/sh
+# wb for Claude Code's Bash, with no PATH edit (#1190): Claude Code adds each enabled plugin's
+# bin/ to the Bash tool's PATH, after the user's own, so a wb already there (~/.local/bin's link,
+# a developer's or a `wb patch init` clone) still runs first. The plugin install copies only
+# mod/ into its cache, so this runs the marketplace's full clone's bin/wb. Where it looks, in
+# order, is the mod's (`marketplaceClone` in register.tsx), the directories `gateConf` counts:
+# known_marketplaces.json's installLocation (a directory marketplace: a developer's clone, wb
+# patch init's), then the git clone under CLAUDE_CODE_PLUGIN_CACHE_DIR, then under
+# CLAUDE_CONFIG_DIR (else ~/.claude). Plain sh: no bash on every system, and a symlink isn't
+# copied into the cache.
+
+abs() { # a path as Claude Code reads its own: `~` is the home, relative is from here
+    # shellcheck disable=SC2088 # a literal ~, as settings.json's env passes it
+    case $1 in
+        "~") printf '%s\n' "$HOME" ;;
+        "~/"*) printf '%s\n' "$HOME/${1#\~/}" ;;
+        /*) printf '%s\n' "$1" ;;
+        *) printf '%s\n' "$PWD/$1" ;;
+    esac
+}
+
+config=$(abs "${CLAUDE_CONFIG_DIR:-$HOME/.claude}")
+plugins="$config/plugins"
+cache=
+if [ -n "$CLAUDE_CODE_PLUGIN_CACHE_DIR" ]; then
+    cache=$(abs "$CLAUDE_CODE_PLUGIN_CACHE_DIR")
+    plugins=$cache # Claude Code keeps known_marketplaces.json there then
+fi
+
+# JSON wants a parser: any python3 has one (bin/wb needs one anyway); -I so nothing in the
+# current directory is imported
+listed=
+if [ -f "$plugins/known_marketplaces.json" ]; then
+    listed=$(python3 -I -c 'import json, sys
+try:
+    at = json.load(open(sys.argv[1], encoding="utf-8"))["workbench"]["installLocation"]
+    print(at if isinstance(at, str) else "")
+except Exception:
+    pass' "$plugins/known_marketplaces.json" 2>/dev/null)
+fi
+
+for clone in "$listed" "${cache:+$cache/marketplaces/workbench}" "$config/plugins/marketplaces/workbench"; do
+    if [ -n "$clone" ] && [ -x "$clone/bin/wb" ]; then
+        exec "$clone/bin/wb" "$@"
+    fi
+done
+
+echo "wb: workbench's marketplace clone isn't in known_marketplaces.json or at ${cache:-$config/plugins}/marketplaces/workbench: claude plugin marketplace add a-schaefers/workbench" >&2
+exit 127

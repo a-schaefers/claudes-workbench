@@ -28,7 +28,7 @@
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-repo=${REPO:-a-schaefers/claudes-workbench}
+repo=${REPO:-a-schaefers/workbench}
 ruleset=.github/rulesets/main.json
 mode=${1:-}
 case "$mode" in

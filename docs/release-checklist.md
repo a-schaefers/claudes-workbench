@@ -51,7 +51,7 @@ yourself, not only what `wb` reports.
 | Where | Result | Notes |
 |---|---|---|
 | Linux (Debian or Ubuntu) | | |
-| macOS on Apple silicon, natively | | |
+| macOS on Apple silicon, natively (`wb doctor`: `ok  agents write only in their lane (Seatbelt)`) | | |
 | WSL2, the repo in WSL's own file system | | |
 | WSL2, the repo on a Windows drive (`/mnt/c`) | | |
 
@@ -63,6 +63,16 @@ On at least one of them:
 - [ ] A laptop's sleep and wake during a round; and left idle with a task running, it stays
       awake (macOS, Linux: `systemd-inhibit --list` names workbench), or on WSL2 `wb start
       --backlog` says it can't.
+
+The mod in each Claude Code host at hand (#1200): its tests check each surface's tree and hooks,
+not how the host paints them. With a task through review on the user-scope install: the pane's
+Tasks view and its modeline's web app link, a wake once the task is done, and a role change's dialog answered
+`Don't` (nothing changed) and dismissed (the toast says where it shows).
+
+| Where | Result | Notes |
+|---|---|---|
+| The desktop app's Code tab, a local session, started from the GUI (does the mod find `~/.local/bin/wb`?) | | |
+| VS Code's extension | | |
 
 ### The release evidence
 
@@ -104,6 +114,6 @@ rest of this section: a skip is recorded with its reason, never a gate.
 | A remote Ollama (`wb remote`) | | |
 | A server with an API key and several models (`wb model add --url`) | | |
 
-- [ ] More tasks than fit, queued (`--queue`), each run in turn.
+- [ ] More tasks than fit, queued, each run in turn.
 - [ ] A model load interrupted (`wb stop` while it loads), and the next task runs.
 - [ ] The web chat in two tabs, with reconnects and a long history.

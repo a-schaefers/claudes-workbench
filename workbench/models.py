@@ -30,6 +30,7 @@ is not the one it runs on, so it frees nothing here, and nothing here unloads or
 """
 from __future__ import annotations
 
+import base64
 import contextlib
 import fcntl
 import ipaddress
@@ -37,6 +38,8 @@ import json
 import os
 import pwd
 import re
+import secrets
+import select
 import shlex
 import shutil
 import socket
@@ -44,6 +47,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -91,7 +95,8 @@ class Model:
     # For an API model base_url is the catalog's settings.baseURL (the upstream), engine "api",
     # name the id at the provider, config the catalog entry (limit, cost, variants, capabilities).
     kind: str = "gpu"
-    # an API model's key source (never the key): "stored" (/connect saved one), "oauth",
+    # an API model's key source (never the key): "stored" (/connect saved one), "copilot"
+    # (GitHub Copilot's sign-in, whose token never rotates: HELD_KEYS, #1191), "oauth",
     # "env:<NAME>", "config" (an apiKey in a config file or OPENCODE_CONFIG_CONTENT), "signing"
     # (SigV4/Vertex), "ollama" (Ollama's own login), "none" (a keyless free model), "" (no key)
     key: str = ""
@@ -887,6 +892,8 @@ def discover() -> dict[str, Model]:
     (hosted()), so the lease, residency, free_gpu, media and the router, which all read this,
     stay on this machine's GPU (and the boxes opted in) without asking each model its kind."""
     extra, dirs = _overrides(), _provider_dirs()
+    if follow_windows_host(extra):  # the provider now names Windows' new address (#1159)
+        extra = _overrides()
     found: dict[str, Model] = {}
     for pid, prov, url, engine, remote in _local_providers(read_config(), extra, dirs):
         opts = prov.get("options") or prov.get("settings") or {}
@@ -997,6 +1004,34 @@ CATALOG_TIMEOUT = 30     # a read past it fails, cached as one for DOWN_SECS
 OLLAMA_CLOUD = "Ollama cloud (ollama.com)"
 # Providers that sign each request with cloud credentials (SigV4, Vertex): no key wb can hold
 SIGNING = frozenset({"amazon-bedrock", "google-vertex", "google-vertex-anthropic"})
+# of those, the ones whose stored API key OpenCode sends as a bearer ahead of signing (Bedrock's,
+# #1192): "stored", which the keyhole holds; any other login still signs
+KEYED_SIGNING = frozenset({"amazon-bedrock"})
+# GitHub Copilot's sign-in (#1191): OpenCode 2.3.2's device login stores the GitHub token as
+# `access` and `refresh` alike with `expires: 0` (core/src/plugin/provider/github-copilot.ts), a
+# token that never rotates, so the keyhole holds it as it holds a key (Model.key "copilot")
+COPILOT = "github-copilot"
+HELD_KEYS = ("stored", "copilot")  # the key sources a task runs with through the keyhole
+COPILOT_AUTO = "auto"  # the plugin's Auto model (github-copilot/models.ts `auto`)
+COPILOT_AUTO_WHY = ("can't run: Copilot's Auto model picks another model each session, and a task "
+                    "keeps to one: pick a Copilot model by name")
+
+
+def signin(pid: str) -> tuple[str, str, str] | None:
+    """(what, why, fix) of a provider's own OAuth login wb can't hold (#1191), or None for any
+    other (its callers' generic OAuth line): ChatGPT's and the OpenCode Console's rotate their
+    refresh tokens, so a copy wb refreshed would sign the user's own OpenCode out (OpenCode
+    refreshes only inside its own lock, which no command exposes), and the OpenCode Console's
+    models speak SystemOne, which the keyhole doesn't."""
+    if pid == "openai":
+        return ("ChatGPT", "its tokens rotate, and a copy wb refreshed would sign your "
+                "own OpenCode out", "an OpenAI API key through /connect works")
+    if pid in ("opencode", "opencode-go"):
+        return ("the OpenCode Console", "its tokens rotate, and the keyhole doesn't speak "
+                "its API (SystemOne) yet", "a model of another provider can run")
+    return None
+
+
 API_STATES = ("no_credit", "rate_limited", "unreachable")
 RATE_LIMIT_SECS = 60     # a 429 without Retry-After: how long its provider reads rate-limited
 # A 402 or a plan limit with no `until` held forever: only a 2xx cleared it, and wb start refused
@@ -1004,6 +1039,10 @@ RATE_LIMIT_SECS = 60     # a 429 without Retry-After: how long its provider read
 # (#1068, 2026-11-23). Past this the next start asks once (a 402 isn't billed) and the keyhole
 # records it again if it still holds.
 CREDIT_RECHECK_SECS = 900
+# A round's stop for its provider's rate limit or outage (runner.HELD, #1020), and the marks the
+# keyhole writes meanwhile: what NoLease.load waits behind once Claude was told of one (#1277)
+HELD_STOPS = ("rate_limited", "outage")
+HELD_MARKS = ("rate_limited", "unreachable")
 _HOSTED: dict = {}       # the last hosted.json read in this process: {"at": (mtime_ns, size), "doc"}
 _AUTH_FRESH: dict = {}   # state dir -> (monotonic, auth rows): status's no-key check, briefly kept
 AUTH_FRESH_SECS = 5
@@ -1038,18 +1077,24 @@ def _stamp() -> dict:
             "content": zlib.crc32((os.environ.get("OPENCODE_CONFIG_CONTENT") or "").encode())}
 
 
-def _opencode_json(*args: str):
-    """(parsed JSON stdout, "") of an OpenCode command, or (None, why: its first stderr line).
-    `--standalone`: wb's own environment, never the background service's (whose env keys and
-    config may differ), as every workbench call to OpenCode runs. The project config is shut out
-    as the agent's is (OPENCODE_DISABLE_PROJECT_CONFIG), and it runs in the state directory: a
-    repo's opencode.json under the caller's cwd must not add providers to the list."""
-    from . import runner  # runner imports this module
+def _opencode_env() -> tuple[Path, dict]:
+    """(where, environment) of wb's own calls to OpenCode: the state directory, with the project
+    config shut out as the agent's is (OPENCODE_DISABLE_PROJECT_CONFIG): a repo's opencode.json
+    under the caller's cwd must not add providers to the list."""
     where = store.home()
     where.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "PWD": str(where), "OPENCODE_DISABLE_PROJECT_CONFIG": "1"}
     if os.environ.get("WB_OPENCODE_CONFIG"):
         env["OPENCODE_CONFIG"] = os.environ["WB_OPENCODE_CONFIG"]
+    return where, env
+
+
+def _opencode_json(*args: str):
+    """(parsed JSON stdout, "") of an OpenCode command, or (None, why: its first stderr line).
+    `--standalone`: wb's own environment, never the background service's (whose env keys and
+    config may differ), as every workbench call to OpenCode runs (_opencode_env)."""
+    from . import runner  # runner imports this module
+    where, env = _opencode_env()
     from .media import run_group  # media imports this module
     cmd = [*runner.opencode_bin(), *args, "--standalone"]
     try:
@@ -1070,6 +1115,127 @@ def _opencode_json(*args: str):
         return json.loads(r.stdout or "null"), ""
     except ValueError:
         return None, f"opencode {' '.join(args)} printed no JSON"
+
+
+# OpenCode's catalog is read from a server of its own, asked once its plugins have loaded. 2.4.0
+# stopped model.list waiting for them (anomalyco/opencode #63814: the handler in
+# packages/server/src/handlers/model.ts answers with what has loaded so far), and the models.dev
+# catalog and every provider are plugins that load after the server starts. `api model.list
+# --standalone` starts a server, asks at once and exits: 2.4.1 printed no model at all, or 14 of
+# 93, so wb saw no API model and the opencode workflow failed (2026-11-23). OpenCode's own one-shot
+# commands (`models`, `auth`) first wait until plugin.list lists any, as model_list does; 2.3's
+# model.list waited by itself (5 s at most), so the wait costs it nothing (2026-11-24).
+PLUGIN_POLL = 0.025      # seconds between plugin.list reads, as OpenCode's waitForPlugins
+
+
+def _list_catalog() -> tuple[dict | None, str]:
+    """model.list's document in wb's own environment (_opencode_env), or (None, why)."""
+    where, env = _opencode_env()
+    return model_list(env, where)
+
+
+def model_list(env: dict, cwd, timeout: float | None = None,
+               cmd: list[str] | None = None) -> tuple[dict | None, str]:
+    """(model.list's document, {location, data}; "") or (None, why), read from a private
+    `opencode serve --stdio` (the server `--standalone` starts) once its plugins have loaded. The
+    server gets a password of its own (OPENCODE_PASSWORD, which it takes out of the environment
+    its tools inherit), ends when its stdin closes, and its group is killed after, as run_group's.
+    ``env`` and ``cwd`` are OpenCode's (the location asked about is ``cwd``); ``cmd`` the OpenCode
+    command, runner.opencode_bin() by default; ``timeout`` CATALOG_TIMEOUT by default."""
+    from . import runner  # runner imports this module
+    from .media import _kill_group  # media imports this module
+    timeout = CATALOG_TIMEOUT if timeout is None else timeout
+    argv = [*(cmd or runner.opencode_bin()), "serve", "--stdio", "--port", "0", "--hostname", "127.0.0.1"]
+    password = secrets.token_urlsafe(24)
+    deadline = time.monotonic() + timeout
+    late = f"opencode model.list took over {timeout:g} s"
+    with tempfile.TemporaryFile() as err:
+        try:
+            p = subprocess.Popen(argv, cwd=cwd, env={**env, "OPENCODE_PASSWORD": password},
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err,
+                                 start_new_session=True)
+        except FileNotFoundError:
+            return None, f"{argv[0]} not found (OpenCode isn't installed)"
+        except OSError as e:
+            return None, f"opencode serve: {e.strerror or e}"
+        url, doc, why = None, None, ""
+        try:
+            url = _served_url(p, deadline)
+            if url is None and p.poll() is None:
+                why = late
+            elif url == "":
+                why = "opencode serve listened off this machine"
+            elif url:
+                doc, why = _ask_catalog(url, password, str(cwd), deadline, late)
+        finally:
+            with contextlib.suppress(OSError):
+                p.stdin.close()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                p.wait(timeout=5)
+            _kill_group(p)
+            p.wait()
+            p.stdout.close()
+        if url is None and not why:
+            err.seek(0)
+            first = next((x.strip() for x in err.read().decode(errors="replace").splitlines()
+                          if x.strip()), "")
+            why = _redact(first or f"opencode serve exited {p.returncode} before it listened")
+    return doc, why
+
+
+def _served_url(p: subprocess.Popen, deadline: float) -> str | None:
+    """The URL `serve --stdio` prints (`{"url": ...}`) when it listens; "" when it printed another
+    one (not this machine's), None when it exited or the deadline came first."""
+    fd, buf = p.stdout.fileno(), b""
+    while (left := deadline - time.monotonic()) > 0:
+        if not select.select([fd], [], [], left)[0]:
+            continue
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            # its stdout closes a moment before it exits: wait that out, or a loaded machine read
+            # an OpenCode that failed at once as one past the deadline (#1370's CI, 2026-11-25:
+            # "took over 30 s" for an immediate "Unable to connect")
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                p.wait(timeout=max(0.0, deadline - time.monotonic()))
+            return None
+        buf += chunk
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            try:
+                url = json.loads(line).get("url")
+            except (ValueError, AttributeError):
+                continue
+            if isinstance(url, str):
+                return url if _this_host(urlparse(url).hostname, dns=False) else ""
+    return None
+
+
+def _ask_catalog(url: str, password: str, where: str, deadline: float,
+                 late: str) -> tuple[dict | None, str]:
+    """model.list from the server at ``url``, once plugin.list lists any plugin (PLUGIN_POLL)."""
+    auth = "Basic " + base64.b64encode(f"opencode:{password}".encode()).decode()
+    query = urllib.parse.urlencode({"location[directory]": where})
+
+    def get(path):
+        req = urllib.request.Request(f"{url.rstrip('/')}{path}?{query}", headers={"Authorization": auth})
+        # no proxy, as _open's requests to this machine, but never its stored keys: this is
+        # OpenCode's own server, asked with the password wb gave it
+        with _DIRECT.open(req, timeout=max(0.5, deadline - time.monotonic())) as r:
+            return json.load(r)
+    try:
+        while not (get("/api/plugin") or {}).get("data"):
+            if time.monotonic() + PLUGIN_POLL > deadline:
+                return None, late
+            time.sleep(PLUGIN_POLL)
+        return get("/api/model"), ""
+    except urllib.error.HTTPError as e:
+        body = e.read(2000).decode(errors="replace")
+        e.close()
+        return None, _redact(f"opencode model.list: HTTP {e.code} {body}")
+    except (OSError, ValueError, AttributeError) as e:
+        if time.monotonic() >= deadline:
+            return None, late
+        return None, _redact(f"opencode model.list: {getattr(e, 'reason', None) or e}")
 
 
 def _auth_rows() -> tuple[dict | None, str]:
@@ -1116,19 +1282,39 @@ def _key_source(pid: str, auth: dict, prov: dict | None) -> str:
         source = ""  # the keyhole's _lone_env: only V1 options, as checked
     if not source and stored:
         source = "stored"
+    # Copilot's sign-in: the keyhole holds its never-rotating token as a key (#1191);
+    # keyhole.load_key checks the credential's shape (`expires: 0`) when a task starts
+    if not source and pid == COPILOT and any(c.get("type") == "credential" for c in conns):
+        source = "copilot"
     if not source and any(c.get("type") == "credential" for c in conns):
         source = "oauth"
     if not source and (env := next((c for c in conns if c.get("type") == "env"), None)):
         source = f"env:{env.get('name') or '?'}"
-    if source and pid in SIGNING:
+    if source and pid in SIGNING and not (source == "stored" and pid in KEYED_SIGNING):
         return "signing"
     return source
 
 
+def env_why(pid: str, var: str) -> str:
+    """Why the keyhole can't take ``pid``'s key from ``$var`` in this process's environment, which
+    a runner wb start spawns inherits (keyhole.env_source, #1189), or "" when it can."""
+    from . import keyhole  # keyhole imports this module lazily too
+    return keyhole.env_source(pid, var)
+
+
+def key_runs(pid: str, key: str) -> bool:
+    """Whether a provider's key source (Model.key, connected()'s `key`) is one a task runs with:
+    a stored key or Copilot's sign-in (HELD_KEYS, #1191), or an environment variable the keyhole
+    can read and the agent can't (#1189)."""
+    return key in HELD_KEYS or (key.startswith("env:") and not env_why(pid, key[4:]))
+
+
 def connected() -> dict[str, dict] | None:
     """The API providers OpenCode holds a key for, read fresh from `auth list` (never a secret):
-    {provider id: {"name", "key"}}, `key` as Model.key says it (_key_source: "stored" is the only
-    one the keyhole can hold; "oauth", "env:<NAME>", "config", "signing" can't run). Providers
+    {provider id: {"name", "key"}}, `key` as Model.key says it (_key_source: "stored" and
+    "copilot", HELD_KEYS, are the ones the keyhole can hold, and "env:<NAME>" when key_runs says
+    so, #1189; "oauth", "config",
+    "signing" can't run). Providers
     configured on this machine (the GPU side) are left out. None when `auth list` can't be read
     (OpenCode missing, or its error): wb setup and the router then say nothing of keys (#1024)."""
     auth, _ = _auth_rows()
@@ -1149,7 +1335,10 @@ def connected() -> dict[str, dict] | None:
 
 def _is_free(pid: str, entry: dict) -> bool:
     """An OpenCode free model: `opencode/*-free`, or every price 0 (marked only; child 13 warns
-    of its data use)."""
+    of its data use). Never a plan's (a coding plan lists every price 0: #1396)."""
+    from . import meter  # meter imports this module
+    if meter.plan_provider(pid):
+        return False
     if pid == "opencode" and str(entry.get("id") or "").endswith("-free"):
         return True
     cost = entry.get("cost")
@@ -1173,6 +1362,47 @@ def _dict(value) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,62}")
+
+
+def catalog_base(package: str, settings: dict) -> str:
+    """A catalog model's API base: its `settings.baseURL`, else the one its package builds from
+    the settings, as OpenCode 2.3.2 does (#1192): Azure's `https://<resourceName>.openai.azure.com
+    /openai` (azure.ts), Bedrock's `https://bedrock-runtime.<region>.amazonaws.com` for Converse
+    and `https://bedrock-mantle.<region>.api.aws/v1` (`/anthropic/v1` for Messages) for Mantle.
+    A listed baseURL's `${AWS_REGION}` is filled as model-resolver.ts `prepareProviderURL` fills
+    it: model.list prints every Mantle row's base as that template, and passed on as it was it was
+    the keyhole's upstream host, so every request failed (#1192's review, 2026-11-24). Any other
+    `${...}` is refused (""): OpenCode fills it from its own environment, which isn't wb's. The
+    region is `settings.region`, else AWS_REGION, AWS_DEFAULT_REGION, us-east-1 (bedrock-auth.ts
+    resolveRegion; plugin/provider/amazon-bedrock.ts sets it so). Not a secret: model.list prints
+    these beside the key, which wb never reads."""
+    if base := str(settings.get("baseURL") or ""):
+        if "${AWS_REGION}" in base:
+            region = _aws_region(settings)
+            base = base.replace("${AWS_REGION}", region) if region else ""
+        return "" if "${" in base else base
+    from . import keyhole  # keyhole imports this module lazily too
+    path = keyhole._package_path(package)
+    if path.split("/")[0] == "azure":
+        res = str(settings.get("resourceName") or "").strip()
+        return f"https://{res}.openai.azure.com/openai" if _NAME.fullmatch(res) else ""
+    if keyhole._bedrock("", path):
+        if not (region := _aws_region(settings)):
+            return ""
+        if "mantle" not in path:
+            return f"https://bedrock-runtime.{region}.amazonaws.com"
+        return f"https://bedrock-mantle.{region}.api.aws/{'anthropic/v1' if path.endswith('/messages') else 'v1'}"
+    return ""
+
+
+def _aws_region(settings: dict) -> str:
+    """catalog_base's Bedrock region, or "" when it isn't a plain host label."""
+    region = str(settings.get("region") or os.environ.get("AWS_REGION")
+                 or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1")
+    return region if _NAME.fullmatch(region) else ""
+
+
 def _off_machine(pid: str, url: str, extra: dict) -> bool:
     """A configured provider whose baseURL is on another host and not opted in (`local: true`):
     discovery skips it (with its hint), and its models are API models."""
@@ -1181,13 +1411,13 @@ def _off_machine(pid: str, url: str, extra: dict) -> bool:
 
 
 def _build_hosted() -> dict:
-    """hosted.json's document, read fresh: OpenCode's catalog (`api model.list`, only providers
+    """hosted.json's document, read fresh: OpenCode's catalog (model_list: only providers
     that can authenticate, plus OpenCode's free models) less the providers configured on this
     machine, the models of a configured provider off this machine, and each Ollama cloud model
     of a provider on this machine; providers OpenCode wouldn't load left out, as _scan leaves
     them. A failed read gives no models and its first stderr line."""
     doc = {"v": 1, "ts": time.time(), "stamp": _stamp(), "error": "", "providers": {}, "models": {}}
-    listed, why = _opencode_json("api", "model.list")
+    listed, why = _list_catalog()
     auth, auth_why = _auth_rows() if listed is not None else (None, "")
     if listed is None or auth is None:
         doc["error"] = why or auth_why
@@ -1213,7 +1443,7 @@ def _build_hosted() -> dict:
         pid = e["providerID"]
         mid = f"{pid}/{e['id']}"
         settings, caps = _dict(e.get("settings")), _dict(e.get("capabilities"))
-        api = str(settings.get("baseURL") or "")
+        api = catalog_base(e.get("package") if isinstance(e.get("package"), str) else "", settings)
         # a server on this machine that OpenCode found by itself (2.3.2 lists a running Ollama at
         # 127.0.0.1 with no config): GPU work, added through wb model add, never an API model that
         # would be told to /connect (#1013's review). No DNS: a catalog lists dozens of hosts.
@@ -1286,13 +1516,20 @@ def _read_hosted() -> dict:
 def hosted_doc(fresh: bool = False) -> dict:
     """hosted.json's document, rebuilt when missing, foreign, past HOSTED_TTL (a failed read
     past DOWN_SECS), its stamp changed, or ``fresh``. Two processes rebuilding at once both
-    write atomically: the last wins, equally fresh."""
+    write atomically: the last wins, equally fresh. A failed read by a process that finds no
+    OpenCode binary never replaces a good document: that one is answered (#1342)."""
     doc = _read_hosted()
     ts = doc.get("ts")
     ttl = DOWN_SECS if doc.get("error") else HOSTED_TTL
     if fresh or not isinstance(ts, (int, float)) or not 0 <= time.time() - ts < ttl \
             or doc.get("stamp") != _stamp():
-        doc = _build_hosted()
+        new = _build_hosted()
+        # a process with no OpenCode on its PATH (the web app's service under the manager's PATH)
+        # overwrote the terminal's good catalog with "opencode not found", and every read after
+        # it, the web Settings' too, failed (#1342): it keeps the good one, unwritten
+        if new.get("error") and not new["stamp"]["opencode"] and doc.get("models") and not doc.get("error"):
+            return doc
+        doc = new
         try:
             store.write_json(hosted_path(), doc)
         except OSError:  # a read-only state directory: still answer
@@ -1309,12 +1546,21 @@ def _count(v) -> int | None:
     return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
 
 
+def api_window(cfg: dict) -> int:
+    """The window an API model's entry is capped at (api_limits): API_WINDOW_LIFT, or the first
+    context tier of its price (meter.first_tier) when that is smaller, never under API_WINDOW. Past
+    a tier every request is priced at its rate: Haiku's rises 5x past 100K, so it keeps the 128K
+    it had before the lift (#1134's E19, 2026-11-24)."""
+    from . import meter  # meter imports this module
+    return max(API_WINDOW, min(API_WINDOW_LIFT, meter.first_tier(cfg) or API_WINDOW_LIFT))
+
+
 def api_limits(cfg: dict) -> dict:
     """An API model's entry with its window and output capped (#1017): `limit.context` at most
-    API_WINDOW, `limit.input` at most that, and `limit.output` and `options.max_tokens` both the
-    smallest of the entry's own two and API_OUTPUT (API_OUTPUT when it gives neither), and at
-    most _api_output_fit of the window (#1073). Written
-    once here, so the layer's pins (runner.model_pins), OpenCode's compaction
+    api_window (256K, or 128K for a price tier under that), `limit.input` at most that, and
+    `limit.output` and `options.max_tokens` both the smallest of the entry's own two and
+    API_OUTPUT (API_OUTPUT when it gives neither), and at most _api_output_fit of the window
+    (#1073). Written once here, so the layer's pins (runner.model_pins), OpenCode's compaction
     (runner.compaction_buffer), the slice, status `window`, the steps and the tuning keys all read
     one window. A catalog's 1M window let a session that only reads carry up to 1M tokens a
     request, and its 384K output put the compaction point below zero. The user's own entries (a
@@ -1325,7 +1571,7 @@ def api_limits(cfg: dict) -> dict:
     if not (context := _count(lim.get("context"))):
         return cfg
     opts = cfg.get("options") if isinstance(cfg.get("options"), dict) else {}
-    context = min(context, API_WINDOW)
+    context = min(context, api_window(cfg))
     cap = min(v for v in (_count(lim.get("output")), _count(opts.get("max_tokens")), API_OUTPUT) if v)
     # and at most what keeps the latest handover at or past the earliest fresh_at: a 32K window
     # with a 32K output put OpenCode's compaction below zero, and the note told the user to
@@ -1359,16 +1605,23 @@ def _api_model(mid: str, entry: dict, prov: dict, extra: dict) -> Model:
     # DeepInfra's bill, and every figure with it (#1135, 2026-11-23). Kept in config, so the meter
     # and the task's catalog.json (catalog_doc) price alike; the catalog's in `catalog_cost`
     if (mine := own_cost((extra.get(mid) or {}).get("cost"))) is not None:
+        mine = [{**mine[0], **({"cache": c} if (c := own_cache(mine[0], config.get("cost"))) else {})}]
         over = {**over, "catalog_cost": config.get("cost"), "cost": mine}
         config = {**config, "cost": mine}
     config = api_limits(config)
+    # the model's own package and base before its provider's, which is the catalog's first entry:
+    # one provider's models post through several (Azure's Responses, Chat and Claude on Foundry;
+    # Google's Gemini and Interactions: #1192), and OpenCode Zen's Claude models (anthropic,
+    # …/anthropic/v1) went out as its first one's (openai-compatible, …/openai/v1), every request a
+    # 404, and its Gemini ones read ready (#1387, 2026-11-25)
+    own = lambda k: entry[k] if isinstance(entry.get(k), str) and entry[k] else prov.get(k)  # noqa: E731
     return Model(id=mid, provider=pid, name=str(entry.get("name") or mid.split("/", 1)[1]),
-                 base_url=str(prov.get("api") or ""), engine="api",
+                 base_url=str(own("api") or ""), engine="api",
                  label=over.get("label") or (OLLAMA_CLOUD if cloud else f"{prov.get('name') or pid} (API)"),
                  extra=over, config=config, remote=True, cloud=cloud, kind="api",
                  key=str(prov.get("key") or ("none" if entry.get("free") else "")),
                  free=bool(entry.get("free")),
-                 package=str(prov.get("package") or ""))
+                 package=str(own("package") or ""))
 
 
 PRICE_KEYS = ("input", "output")  # per million tokens; cache read and write go in `cache`
@@ -1387,6 +1640,26 @@ def own_cost(v) -> list | None:
         return None
     return [{**{k: float(r[k]) for k in PRICE_KEYS},
              **({"cache": {k: float(x) for k, x in cache.items()}} if cache else {})}]
+
+
+def own_cache(row: dict, catalog) -> dict:
+    """The cache prices for the user's own row (wb model price): theirs, and for each one they left
+    out, the catalog's base row's at its ratio to input, times their input (0.006 of 0.2 with
+    --input 0.098: 0.00294). A missing one is priced as input (meter.price), and with only --input
+    and --output, the form the skill gave, cache reads (85-98% of an API task's tokens) booked a
+    DeepInfra task at 18x its bill, as exact (#1155, 2026-11-24). Without a catalog input price to
+    scale from, a missing one stays missing."""
+    cache = dict(row.get("cache") or {})
+    rows = catalog if isinstance(catalog, list) else [catalog] if isinstance(catalog, dict) else []
+    base = next((r for r in rows if isinstance(r, dict) and not r.get("tier")), None) or {}
+    ok = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool) and x >= 0  # noqa: E731
+    their = _dict(base.get("cache"))
+    if ok(base.get("input")) and base["input"] > 0:
+        for k in ("read", "write"):
+            v = their.get(k, base.get(f"cache_{k}"))
+            if k not in cache and ok(v):
+                cache[k] = round(v / base["input"] * row["input"], 10)
+    return cache
 
 
 def own_price(m: Model) -> bool:
@@ -1417,7 +1690,7 @@ def catalog_doc(m: Model) -> dict | None:
     the user's OpenCode lists (#1015). `reasoning` is left unsupported, so the file makes no
     variants of its own: the entry's variants go in the layer (catalog_variants), as V1
     `provider.<p>.models.<m>.variants`, which OpenCode 2.3.0 and 2.3.2 read back into exactly
-    what `api model.list` printed (RealOpenCodeAPI). A V2 `providers.<p>` beside the layer's V1
+    what model.list printed (RealOpenCodeAPI). A V2 `providers.<p>` beside the layer's V1
     `provider.<p>` would replace it whole, the keyhole's options with it (normalize.ts
     `mergeMaps`), and a request went out with no key. None for a model that isn't the
     catalog's (a config entry, an Ollama cloud model) or can't be rebuilt: headers or a body of
@@ -1465,7 +1738,7 @@ def catalog_doc(m: Model) -> dict | None:
 
 
 def _source_cost(cost) -> dict | None:
-    """`api model.list`'s prices (a base row, then one per context tier) in models.dev v2's
+    """model.list's prices (a base row, then one per context tier) in models.dev v2's
     shape, which OpenCode turns back into the same rows (models-dev.ts `cost`)."""
     rows = [r for r in cost if isinstance(r, dict)] if isinstance(cost, list) else []
     base = next((r for r in rows if not r.get("tier")), None)
@@ -1488,7 +1761,7 @@ def _source_cost(cost) -> dict | None:
 
 
 def catalog_variants(m: Model) -> dict:
-    """The catalog entry's variants (`api model.list`'s `[{id, settings}]`) as the layer's V1
+    """The catalog entry's variants (model.list's `[{id, settings}]`) as the layer's V1
     `provider.<p>.models.<m>.variants` ({id: settings}), beside catalog_doc's file."""
     return {str(v["id"]): dict(v.get("settings") or {}) for v in m.config.get("variants") or []
             if isinstance(v, dict) and v.get("id")}
@@ -1568,6 +1841,97 @@ def api_health(pid: str) -> dict | None:
     return row
 
 
+def credit_turn(pid: str, task: str = "") -> dict | None:
+    """For a runner about to send a round: the provider's `no_credit` mark while it holds (wait),
+    else None (go on). Past its `until` one runner asks: the mark is held CREDIT_RECHECK_SECS
+    more under the lock (`asked_by` its task), so the others wait for that one's answer, a 2xx's
+    `ok` or the keyhole's next 402, rather than each sending a round that wakes Claude with its
+    own stop (#1178, 2026-11-24). A mark `asked_by` this task (credit_ask: the user's resume of
+    the task the 402 stopped) is its turn: None."""
+    return credit_recheck(pid, task)[0]
+
+
+def credit_recheck(pid: str, task: str = "") -> tuple[dict | None, bool]:
+    """credit_turn's answer, and whether this call made ``task`` the one to ask the provider
+    again past the mark's `until`. NoLease.load counts it a recheck only after a wait: then its
+    402 is the stop Claude was already told of, so its round goes back to waiting with no stop of
+    its own (#1216, 2026-11-24). A turn with no wait first (a new start past an expired mark)
+    and the user's resume (credit_ask) are no recheck: their 402 still stops them."""
+    def waits(row: dict) -> dict | None:
+        return None if row["state"] != "no_credit" or (task and row.get("asked_by") == task) else row
+    if (row := api_health(pid)) is not None:
+        return waits(row), False
+    path = api_health_path()
+    # only an expired no_credit mark is taken under the lock: opening the lock file (a+) for any
+    # other closed it written, which woke every waiter's watch on $WB_HOME, so a waiter behind an
+    # expired outage's mark looked 30 times a second, not every API_WAIT's 2 s (the review of
+    # #1277, 2026-11-24). A read leaves the watch asleep
+    peek = store.read_json(path, {})
+    peek = peek.get(pid) if isinstance(peek, dict) else None
+    if not isinstance(peek, dict) or peek.get("state") != "no_credit":
+        return None, False
+    with store.locked(path.with_name(path.name + ".lock")):
+        doc = store.read_json(path, {})
+        row = doc.get(pid) if isinstance(doc, dict) else None
+        if not isinstance(row, dict) or row.get("state") != "no_credit":
+            return None, False
+        if (held := api_health(pid)) is not None:  # another runner asked meanwhile
+            return waits(held), False
+        doc[pid] = {**row, "until": time.time() + CREDIT_RECHECK_SECS, "asked_by": task}
+        store.write_json(path, doc)
+    return None, True
+
+
+def credit_ask(pid: str, task: str) -> bool:
+    """The user's resume (wb feedback, wb resume) of ``task``, which its provider stopped: a
+    `no_credit` mark becomes that task's turn to ask (`asked_by` it, held CREDIT_RECHECK_SECS on,
+    so the waiters behind it wait for its answer). The stop's remedy says top up, then resume,
+    and the resumed runner met the mark the 402 had just written and waited out its 900 s, the
+    user's top-up told to top up again (the review of #1178, 2026-11-24). True when it held one."""
+    path = api_health_path()
+    with store.locked(path.with_name(path.name + ".lock")):
+        doc = store.read_json(path, {})
+        row = doc.get(pid) if isinstance(doc, dict) else None
+        if not isinstance(row, dict) or row.get("state") != "no_credit":
+            return False
+        doc[pid] = {**row, "until": time.time() + CREDIT_RECHECK_SECS, "asked_by": task}
+        store.write_json(path, doc)
+    return True
+
+
+def held_mark(pid: str) -> dict | None:
+    """The provider's `rate_limited` or `unreachable` mark, past its `until` too: only a 2xx's
+    `ok` says it answers again (#1277). A mark lasts DOWN_SECS past the keyhole's last 5xx, and a
+    round and its revive take far longer, so the next task started past every expired one."""
+    doc = store.read_json(api_health_path(), {})
+    row = doc.get(pid) if isinstance(doc, dict) else None
+    return row if isinstance(row, dict) and row.get("state") in HELD_MARKS else None
+
+
+def held_told(pid: str, task: str = "", guards: tuple = HELD_STOPS) -> str:
+    """Another task whose stop for ``pid``'s rate limit or outage has told Claude, still standing,
+    else '': phase `stuck`, status `infra` `provider` and `guard` one of ``guards`` (HELD_STOPS;
+    drive's told-stop claim asks ("quota",) for a 402, #1344), its provider
+    ``pid`` (task.json `provider`, else its model's prefix: runner.provider_of) and a `noticed`."""
+    with contextlib.suppress(OSError):
+        for d in sorted(store.tasks_dir().iterdir()):
+            if d.name == task or not (d / "task.json").is_file():
+                continue
+            try:  # one task's damaged files hold no other back
+                t = store.Task(d.name)
+                st = t.status
+                if st.get("phase") != "stuck" or st.get("infra") != "provider" or st.get("guard") not in guards:
+                    continue
+                spec = t.spec
+                if str(spec.get("provider") or str(spec.get("model") or "").partition("/")[0]) != pid:
+                    continue
+                if float((d / "noticed").read_text() or 0) > 0:
+                    return d.name
+            except Exception:
+                continue
+    return ""
+
+
 def _fresh_key(m: Model) -> tuple[str, str]:
     """(key source, provider name) as `auth list` gives them now, ignoring the cache (a user who
     just ran /connect must not be told to run it again), written back to hosted.json when the
@@ -1605,19 +1969,37 @@ def _key_file(pid: str) -> str:
 
 
 def unspoken(pid: str, package: str) -> bool:
-    """Whether the keyhole can't carry a provider's requests (keyhole.protocol_of: Google's
-    x-goog-api-key, Azure's api-key, Cohere's native API, no package at all). A signing provider
-    isn't one: its key source says "signing"."""
+    """Whether the keyhole can't carry a provider's requests (keyhole.protocol_of None: Cohere's
+    native API, Google's Interactions route, no package at all). Vertex's packages are None too,
+    but a signing provider isn't one: its key source says "signing" (#1192)."""
     from . import keyhole  # keyhole imports this module lazily too
     return keyhole.protocol_of(package) is None and not keyhole._signs(pid, package)
+
+
+ZEN = "opencode"  # OpenCode's own provider (Zen): its free models run keyless (#1193)
+
+
+def keyless_free(m) -> bool:
+    """One of OpenCode Zen's free models with no key stored (#1193): OpenCode 2.3.2 serves those
+    with the apiKey "public" (plugin/provider/opencode.ts), so a task runs it through the keyhole
+    with that in place of a key (keyhole.PUBLIC), for its rate-limit and quota hold, the meter
+    and the pin to the task's model. Only Zen's: another provider's $0 model with no key ("none")
+    has no key a task could send, and stays refused (cli._runs_held)."""
+    return (getattr(m, "kind", "gpu") == "api" and not getattr(m, "cloud", False)
+            and m.provider == ZEN and m.key == "none" and bool(m.free))
 
 
 def keyhole_refusal(m: Model) -> str:
     """Why ``m`` can't run through the keyhole for its package, or "". Only keyhole.start checked
     it, so a Gemini, Azure or Cohere model was listed, offered, approved in the dialog and started,
     then failed every time (#1066, 2026-11-23). A model needing no keyhole (an Ollama cloud one,
-    a keyless free one: runner.needs_keyhole) is never refused here."""
-    if m.cloud or m.key == "none" or (m.free and not m.key) or not unspoken(m.provider, m.package):
+    a keyless free one other than Zen's: runner.needs_keyhole) is never refused here; Zen's goes
+    through the keyhole (#1193), so its package is checked as any. Copilot's Auto model is
+    (#1191): its router picks another model each session, which the keyhole can't hold to one."""
+    if m.provider == COPILOT and m.name == COPILOT_AUTO:
+        return COPILOT_AUTO_WHY
+    if m.cloud or ((m.key == "none" or (m.free and not m.key)) and not keyless_free(m)) \
+            or not unspoken(m.provider, m.package):
         return ""
     return unspoken_why(provider_name(m), m.package)
 
@@ -1634,11 +2016,22 @@ def unspoken_providers(pids) -> dict[str, str]:
     any when the catalog can't be built: a config that doesn't parse stopped wb setup's checklist
     (#1067's guard, which this read came after, 2026-11-23), and wb doctor names the config."""
     try:
-        provs = _dict(hosted_doc().get("providers")) if pids else {}
+        doc = hosted_doc() if pids else {}
     except (RuntimeError, OSError):
         return {}
-    return {p: str(provs[p].get("package") or "") for p in pids
-            if isinstance(provs.get(p), dict) and unspoken(p, str(provs[p].get("package") or ""))}
+    provs, listed = _dict(doc.get("providers")), _dict(doc.get("models"))
+    out = {}
+    for p in pids:
+        if not isinstance(provs.get(p), dict):
+            continue
+        own = str(provs[p].get("package") or "")
+        # each model's own package (#1192): Google's lists Gemini and Interactions ones, and
+        # the provider runs if any of its models can
+        pkgs = {str(e.get("package") or own) for mid, e in listed.items()
+                if mid.split("/", 1)[0] == p and isinstance(e, dict)} or {own}
+        if all(unspoken(p, k) for k in pkgs):
+            out[p] = own
+    return out
 
 
 def _api_status(m: Model, down=frozenset()) -> dict:
@@ -1660,15 +2053,29 @@ def _api_status(m: Model, down=frozenset()) -> dict:
     if why := keyhole_refusal(m):  # before the key: /connect can't fix it
         return _no(why)
     key = m.key
-    if not key:
-        key, who = _fresh_key(m)
-    if not key:
-        return _no(f"no key for {who}: run /connect in OpenCode and add it")
-    if key == "oauth" or key == "signing" or key == "config" or key.startswith("env:"):
+    # any key a task can't run with is asked again, not only none: /connect changes no stamp, so
+    # a cached OAuth or environment key stood for HOSTED_TTL after the user stored one (#1388,
+    # 2026-11-25; #1076 was ids missing from the cache). An exported key the keyhole can read
+    # runs as it is (key_runs, #1189)
+    if key not in ("ollama", "none") and not key_runs(m.provider, key):
+        fresh, who = _fresh_key(m)
+        # an exported key still unset says so (env_why), not "no key": `auth list` lists no
+        # variable the reader's environment lacks
+        key = fresh or (key if key.startswith("env:") else "")
+    from . import keyhole  # keyhole imports this module lazily too
+    if not key:  # OpenCode's one terminal command, not its TUI's /connect (#1189)
+        return _no(f"no key for {who}: run `{keyhole.login(m.provider)}` in a terminal and add it")
+    if key.startswith("env:"):  # the runner's own environment holds it (#1189): runs, unless
+        if why := env_why(m.provider, key[4:]):
+            return _no(f"can't run: {keyhole.NEEDS}: {why}")
+    elif key == "oauth" or key == "signing" or key == "config":
+        if key == "oauth" and (own := signin(m.provider)):  # the provider's own cause (#1191)
+            what, why, fix = own
+            return _no(f"can't run: needs a key wb can hold outside the lane ({who} is signed in "
+                       f"with {what}: {why}): {fix}")
         held = ("an OAuth login" if key == "oauth" else
                 "a cloud login that signs each request" if key == "signing" else
-                f"written in {_key_file(m.provider)}" if key == "config" else
-                f"from the environment, {key[4:]}")
+                f"written in {_key_file(m.provider)}")
         # a key written in a file: /connect alone changed nothing while the apiKey stayed (#1075)
         fix = "remove its apiKey there, and store the key with /connect" if key == "config" else \
             "store an API key with /connect"
@@ -1931,8 +2338,9 @@ def remedy(m: Model, state: dict) -> str:
     why = state.get("why", "")
     if m.kind == "api":
         who = provider_name(m)
-        if why.startswith("no key for "):
-            return f"run /connect in OpenCode and add an API key for {who}"
+        if why.startswith("no key for ") or (why.startswith("can't run: needs a key") and (
+                "opencode auth login" in why or "remove it there" in why)):
+            return ""  # the reason says its own fix (#1189)
         if why.startswith("can't run: needs a key") and "remove its apiKey there" in why:
             return f"remove options.apiKey for {who} from {_key_file(m.provider)}, and store the key with /connect in OpenCode"
         if why.startswith("can't run: needs a key"):
@@ -1943,12 +2351,16 @@ def remedy(m: Model, state: dict) -> str:
             return f"wait for {who}'s limit to lift ({why.rpartition(' until ')[2]})"
         if why.startswith("can't reach "):
             return f"check the network to {urlparse(m.base_url).hostname or who}; it may come up"
+    if why == "ollama is not answering" and (moved := windows_moved(m)):
+        return moved
     if why == "ollama is not answering":
         return f"start Ollama at {m.root} (ollama serve, or its service or app)"
     if why.endswith(" is not pulled"):
         return f"wb model add {m.id} --pull downloads it"
     if why.startswith(("the server lists", "the server answers but lists no model")):
         return f"load {m.name} in that server, or fix the model's name in OpenCode's config"
+    if why.startswith("not running, and no start command") and (moved := windows_moved(m)):
+        return moved  # LM Studio, llama.cpp, vLLM, Jan on Windows, as Ollama's (#1167)
     if why.startswith("not running, and no start command"):
         return f"start its server, or give {m.id} a \"start\" command there"
     return ""
@@ -2223,6 +2635,7 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
                            + (f": {fix}" if (fix := remedy(m, st)) else ""))
     lms = _lmstudio_of(m, _lmstudio_rows(m.root, m.api_key)) if m.engine == "server" else None
     short = _lmstudio_short(m, lms[1]) if lms else []
+    away = m.remote and not same_gpu(m)  # Ollama for Windows from WSL is on this GPU (#750)
     if lms and lms[0] and (not lms[1] or short):
         # LM Studio's just-in-time loading lists every downloaded model as served, so nothing
         # was loaded, and OpenCode's first request loaded it with LM Studio's default window
@@ -2230,7 +2643,9 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
         # the audit of 1.4). Load it here with the window OpenCode is told. One loaded with a
         # smaller window (the UI's 4K) is loaded again: short_window failed the task (#645).
         t0 = time.time()
-        if not m.remote and not _room_beside(m):
+        # LM Studio for Windows from WSL is on this GPU too: freed only when local, every switch
+        # stacked one more model in VRAM until a load was refused (#1248, 2026-11-24)
+        if not away and not _room_beside(m):
             free_gpu(keep={m.id, *keep}, say=say, warn=warn, of=m)
         for instance in short:
             say(f"unloading {instance} from LM Studio: loaded with a smaller window than OpenCode is told")
@@ -2238,7 +2653,6 @@ def make_resident(m: Model, say=print, keep=(), warn=None) -> float:
         _lmstudio_load(m, lms[0], say)
         return time.time() - t0
     respread = st["resident"] and _respread(m, keep)
-    away = m.remote and not same_gpu(m)  # Ollama for Windows from WSL is on this GPU (#750)
     if st["resident"] and not respread and (away or not _others_resident(m, keep) or _room_beside(m)):
         return 0.0
     t0 = time.time()
@@ -2482,11 +2896,13 @@ def free_gpu(keep=(), say=print, warn=None, of: Model | None = None,
     seen: dict = {}
     stopped: list[Model] = []
     held = keep_loaded()
-    local = on_this_gpu(discover())  # another host's GPU isn't ours to free (unless it's this one: #750)
-    kept = [o for o in local if o.id in keep or o.id in held]
+    found = discover()
+    local = on_this_gpu(found)  # another host's GPU isn't ours to free (unless it's this one: #750)
+    lms_scope = local + _shared_servers(found)
+    kept = [o for o in lms_scope if o.id in keep or o.id in held]
     # LM Studio loads and unloads one model at a time: every instance not kept is unloaded and
     # the server left running (#645); its server is then done
-    extra, lmstudio = _lmstudio_extra(local, kept, held)
+    extra, lmstudio = _lmstudio_extra(lms_scope, kept, held)
     for server, instance in extra:
         deadline = time.monotonic() + INFLIGHT_WAIT
         while not _server_idle(server) and time.monotonic() < deadline:  # never cut off a reply
@@ -2846,10 +3262,11 @@ def unheld_loaded(skip=()) -> list[str]:
 def _others_resident(m: Model, keep=()) -> bool:
     """Whether anything free_gpu would let go of holds the GPU beside ``m``: an Ollama on other
     cards (apart) isn't asked, as free_gpu leaves it be."""
-    held, seen = keep_loaded(), {}
-    local = on_this_gpu(discover())
-    ours = [m, *(o for o in local if o.id in keep or o.id in held)]
-    if _lmstudio_extra(local, ours, held)[0]:  # another of LM Studio's models, loaded (#645)
+    held, seen, found = keep_loaded(), {}, discover()
+    local = on_this_gpu(found)
+    lms_scope = local + _shared_servers(found)  # LM Studio for Windows too (#1248)
+    ours = [m, *(o for o in lms_scope if o.id in keep or o.id in held)]
+    if _lmstudio_extra(lms_scope, ours, held)[0]:  # another of LM Studio's models, loaded (#645)
         return True
     if any(o.engine == "server" and o.stop and o.server not in {x.server for x in ours}
            and status(o)["resident"] for o in local):
@@ -3648,7 +4065,9 @@ def api_provider(m: Model) -> str:
 class NoLease:
     """What an API task holds in place of the GPU lease (#1015): one of its provider's
     API_PARALLEL slots, and nothing of the GPU. The interface drive and _tests_gpu use:
-    load() loads nothing, step_aside and rejoin do nothing, `aside` False, `pool` None (so
+    load() loads nothing (it waits while the provider is out of credit, its slot let go, #1178;
+    runner._credit_move moves a task its role's fallback takes first, #1196), step_aside
+    and rejoin do nothing, `aside` False, `pool` None (so
     _tests_gpu takes this machine's pool for --unload-for-tests, where the tests run), `loaded`
     True. Past the limit it waits as queued, looking again after API_WAIT's backoff (a slot let
     go touches its file, which wakes it sooner)."""
@@ -3658,6 +4077,11 @@ class NoLease:
         self.pool = None
         self.aside = False
         self.loaded = True
+        # this load waited, then was the one to ask again past a 402's mark: "quota" (#1216), or past
+        # a told rate limit's or outage's: "held" (#1277); its round meeting that same stop waits again
+        self.recheck = ""
+        self.behind = ""  # the told stop of its provider's rate limit or outage this lease waits behind (#1277)
+        self.probe: int | None = None  # the provider's turn to ask again past that mark (#1277)
         self.fd: int | None = None
         self.path: Path | None = None
 
@@ -3701,7 +4125,123 @@ class NoLease:
         return self
 
     def load(self) -> float:
+        """Loads nothing, but waits as queued while the provider is out of credit (credit_turn),
+        before each round: the tasks queued behind a 402 each took a slot, sent a round, met the
+        402 and woke Claude with a stop of their own, though wb start refused in that state
+        (#1178, 2026-11-24). A top-up's 2xx (`ok`) or the mark's end lets it go on. It lets go
+        of its slot for the wait and takes one again after: held, a backlog of API_PARALLEL
+        waiters left the task whose turn it was (the user's resume) waiting for a slot, and each
+        of them for its 2xx, until the mark's 900 s ran out (the review of #1178, 2026-11-24).
+        A rate limit or outage is waited behind the same way once another task's stop for it has
+        told Claude (_held_turn, #1277)."""
+        pid = self.m.provider or api_provider(self.m)
+        self.recheck = ""
+        self._unprobe()  # its last round's turn to ask is over: that round has its answer
+        try:
+            # a turn handed here, with no wait first, is no recheck: a new start (or a next round)
+            # past an expired mark is the first to meet the 402 since, and its stop is the one
+            # notice Claude gets; counted as one, it waited forever untold (the review of #1216,
+            # 2026-11-24). Only the turn handed after a wait below is a recheck
+            row = self._turn(pid, waited=False)
+        except Exception:  # an unreadable file: the round's keyhole answers instead
+            return 0.0
+        if row is None:
+            return 0.0
+        held = self.fd is not None
+        self.__exit__(None, None, None)  # the slot, for the task whose turn it is to ask
+        task = store.Task(self.task) if self.task else None
+        said = None
+        with Watcher(api_health_path().parent) as w:  # ok's and the keyhole's writes wake it
+            while row is not None:
+                until = row.get("until") if isinstance(row.get("until"), (int, float)) else time.time()
+                at = datetime.fromtimestamp(max(until, time.time())).strftime('%H:%M')
+                why = row.get('why') or 'no detail'
+                if row["state"] == "no_credit":
+                    msg = (f"waiting: {pid} is out of credit or quota ({why}): top it up, or wait for "
+                           f"the plan's reset; wb asks it again at {at} (wb stop gives up)")
+                else:
+                    msg = (f"waiting: {pid} " + ("rate-limits its requests" if row["state"] == "rate_limited"
+                                                  else "isn't answering")
+                           + f" ({why}), as {self.behind}'s stop told the user: wb asks it again at "
+                           f"{at}, or goes on once it answers another task (wb stop gives up)")
+                if msg != said:
+                    if task is not None and task.exists:
+                        task.set_status(phase="queued", last=msg)
+                    else:
+                        self.say(msg)
+                    said = msg
+                left = until - time.time()
+                # past a held mark's `until` while another runner asks: a look every API_WAIT's 2 s
+                w.wait(min(left, API_WAIT[1]) if left > 0 else API_WAIT[0])
+                try:
+                    row = self._turn(pid, waited=True)
+                except Exception:
+                    row, self.recheck = None, ""
+        if held:  # not on a stop (wb stop's signal): that runner sends nothing more
+            self.__enter__()
         return 0.0
+
+    def _turn(self, pid: str, waited: bool) -> dict | None:
+        """The mark this load waits on, else None, `recheck` set: credit_recheck's, then
+        _held_turn's."""
+        row, recheck = credit_recheck(pid, self.task)
+        if row is not None or recheck:
+            self.recheck = "quota" if recheck and waited else ""
+            return row
+        return self._held_turn(pid)
+
+    def _held_turn(self, pid: str) -> dict | None:
+        """The provider's rate limit or outage (held_mark), waited behind as the 402 is once
+        another task's stop for it has told Claude (held_told): a backlog queued behind an outage
+        each took its slot, ran round 1 into it, revived it and woke Claude with a stop of its
+        own, the same one, though api-health.json had it (#1277, 2026-11-24). It waits until the
+        mark's `until` (a 429's Retry-After, hours on too) or an `ok`; past `until` one runner at
+        a time asks again (the provider's probe flock, held until its next load) and the others
+        wait for its answer. That turn is a recheck: its round meeting the same stop waits again
+        in drive, with no stop of its own. A lease once behind a told stop stays behind it until
+        the `ok` (the stop resumed meanwhile, its waiters went on at once, each to its own stop).
+        With no told stop the round goes on (a brief 503 or 429 never holds a start, #1088), and
+        its own stop is the notice Claude gets."""
+        mark = held_mark(pid)
+        if mark is None:
+            self.behind = ""
+            return None
+        self.behind = self.behind or held_told(pid, self.task)
+        if not self.behind:
+            self._probe(pid)  # it goes into the mark: the waiters behind it wait for its answer
+            return None
+        until = mark.get("until")
+        if isinstance(until, (int, float)) and until > time.time():
+            return mark
+        if self._probe(pid):
+            self.recheck = "held"
+            return None
+        return mark
+
+    def _probe(self, pid: str) -> bool:
+        """The provider's turn to ask again past a held mark (api/<provider>.probe.lock, flocked
+        while held; a dead runner's frees itself): True when this lease has it."""
+        if self.probe is not None:
+            return True
+        path = api_dir() / f"{_slot_name(pid)}.probe.lock"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # read-only: a close after a write wakes every slot waiter's watch (__enter__)
+            fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_CLOEXEC, 0o600)
+        except OSError:
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            return False
+        self.probe = fd
+        return True
+
+    def _unprobe(self) -> None:
+        if self.probe is not None:
+            os.close(self.probe)
+            self.probe = None
 
     def step_aside(self, unload: bool = False) -> None:
         pass
@@ -3710,6 +4250,7 @@ class NoLease:
         pass
 
     def __exit__(self, *exc):
+        self._unprobe()  # never held through load's wait: only the round after it holds it
         if self.fd is None:
             return
         try:
@@ -3785,6 +4326,14 @@ def on_this_gpu(found: dict) -> list[Model]:
     """The discovered models whose memory is this GPU's: the local ones, and the Ollama ones
     on a server same_gpu says shares it (its API unloads them as a local one's does: #750)."""
     return [o for o in found.values() if not o.remote or (o.engine == "ollama" and same_gpu(o))]
+
+
+def _shared_servers(found: dict) -> list[Model]:
+    """The discovered server models (not Ollama) on a server same_gpu says shares this GPU: LM
+    Studio for Windows from WSL2, which free_gpu unloads through its REST API as a local one's,
+    yet never stops (no 'can't stop it' warning for a Windows server). Left out of on_this_gpu,
+    its instances were never unloaded: each switch stacked one more in VRAM (#1248)."""
+    return [o for o in found.values() if o.remote and o.engine == "server" and same_gpu(o)]
 
 
 def _started(pid: int) -> str | None:
@@ -3928,10 +4477,10 @@ def ollama_root_here() -> str:
     return f"{u.scheme}://{f'[{host}]' if ':' in host else host}:{u.port or OLLAMA_PORT}"
 
 
-def ollama_answers(root: str) -> bool:
+def ollama_answers(root: str, timeout: float = 1.5) -> bool:
     if _fake():
         return False
-    body = _get(f"{root}/api/version", timeout=1.5)
+    body = _get(f"{root}/api/version", timeout=timeout)
     return isinstance(body, dict) and "version" in body and not emulator(root)
 
 
@@ -3975,8 +4524,10 @@ def add_server_provider(pid: str, base: str) -> bool:
     """Give OpenCode a provider ``pid`` for the OpenAI-compatible server at ``base`` (its
     baseURL, usually ending in /v1), whatever runs it: llama.cpp, LM Studio, vLLM, Ollama. Only
     Ollama had a command for it, so every other server meant editing opencode.json by hand. False
-    when the config already has ``pid`` for that same endpoint (a provider the user wrote is never
-    touched); RuntimeError when it has ``pid`` for another one."""
+    when the config already has ``pid`` for that same endpoint, left as it is except that one at
+    WSL2's Windows host gets the `wsl_url` mark (#1167); False too when ``pid`` is marked
+    `wsl_url` at Windows' old address and ``base`` is the same server at its new one, which moves
+    the provider there; RuntimeError when it has ``pid`` for another endpoint."""
     u = urlparse(base)
     if u.scheme not in ("http", "https") or not u.hostname:
         raise RuntimeError(f"--url {base}: give the server's baseURL, e.g. http://127.0.0.1:8080/v1")
@@ -3986,9 +4537,19 @@ def add_server_provider(pid: str, base: str) -> bool:
                            f"\"local\": true in {overrides_path()} first")
     cfg = read_config()
     prov = _provider(cfg, pid)
+    # WSL2's NAT gives Windows a new address on a reboot, and only wb remote's Ollama followed it:
+    # LM Studio, llama.cpp, vLLM or Jan there, added as wb setup and scout say, read "not running:
+    # start its server" for good after one (#1167, 2026-11-24). Marked `wsl_url`, discovery follows
+    win = (u.hostname or "").lower() == (windows_host() or "").lower()
+    mark = _overrides().get(pid) or {}
     if prov is not None:
         have = _provider_url(prov)
         if base.rstrip("/") in (have.rstrip("/"), _expand(have, base=_provider_dirs().get(pid)).rstrip("/")):
+            if win and have.rstrip("/") == base.rstrip("/") and not mark.get("wsl_host"):
+                set_override(pid, "wsl_url", base.rstrip("/"))  # one added before #1167: adopted
+            return False
+        if win and mark.get("wsl_url") == have.rstrip("/") and _at_host(have, u.hostname) == base.rstrip("/"):
+            _repoint(pid, "", url=base.rstrip("/"))  # Windows' new address, before discovery's
             return False
         # the model was registered under the old endpoint and wb said it was added: two servers
         # serving one model name then did plausible work on the wrong machine (#334, the audit of 1.4)
@@ -3997,12 +4558,206 @@ def add_server_provider(pid: str, base: str) -> bool:
                            f"a provider id of its own (wb model add <provider>/<model> --url {base}), "
                            f"or change {pid}'s baseURL in {opencode_config_path()} by hand")
     _add_provider(cfg, pid, pid, base.rstrip("/"))
+    if win:
+        set_override(pid, "wsl_url", base.rstrip("/"))
     return True
 
 
 def remote_pid(host: str) -> str:
     """The provider id wb remote gives another machine's Ollama: ollama-<host>, in id characters."""
     return "ollama-" + (re.sub(r"[^a-z0-9]+", "-", remote_host(host)).strip("-") or "host")
+
+
+# WSL2's default NAT networking gives Windows a new address when the WSL VM restarts (a Windows
+# reboot, wsl --shutdown). wb remote <that address> wrote provider ollama-<address> with it, so
+# after a reboot every wb start was refused with "start Ollama", which was running, a --queue
+# start waited for good, and wb remote <new address> made a second provider, whose new model ids
+# started the router's history, slices and tuning over (#1159, 2026-11-24). Windows' Ollama is one
+# provider, ollama-windows, marked `wsl_host` in models.json, and discovery follows the address.
+WSL_PID = "ollama-windows"
+
+
+def _remote_pid_for(cfg: dict, host: str, root: str | None = None) -> str:
+    """The provider wb remote uses for ``host``: remote_pid's, except WSL2's Windows host, which
+    is the provider marked `wsl_host` in models.json when OpenCode's config has one (one at
+    ``root`` first, when adding), else WSL_PID unless a provider of the old ollama-<address> id is
+    already there (at ``root``, when adding), kept so its models keep their ids (#1159)."""
+    pid = remote_pid(host)
+    if host != (windows_host() or "").lower():
+        return pid
+    # an adopted ollama-<old address> keeps its id after discovery repoints it, so at Windows'
+    # next address remote_pid named nothing there: wb remote made a second provider, ollama-windows,
+    # with new model ids, and --remove found nothing to remove (#1159's review, 2026-11-24)
+    marked = [p for p, e in _overrides().items()
+              if isinstance(e, dict) and e.get("wsl_host") and _provider(cfg, p) is not None]
+    if marked:
+        here = f"{root}/v1" if root else None
+        return min(marked, key=lambda p: (_provider_url(_provider(cfg, p)).rstrip("/") != here,
+                                          p != WSL_PID, p))
+    prov = _provider(cfg, pid)
+    old = prov is not None and (root is None or _provider_url(prov).rstrip("/") == f"{root}/v1")
+    return pid if old else WSL_PID
+
+
+def _follows_windows(pid: str, prov: dict) -> bool:
+    """Whether provider ``pid`` is one wb remote made for WSL2's Windows host, still pointing
+    where it made it: its models.json `wsl_host` and `remote` marks, the baseURL the mark's. One
+    the user repointed is theirs (#242). One wb model add --url made there: its `wsl_url` mark, the
+    baseURL itself (#1167)."""
+    mark = _overrides().get(pid) or {}
+    if isinstance(mark.get("wsl_url"), str):
+        return _provider_url(prov).rstrip("/") == mark["wsl_url"]
+    return bool(mark.get("wsl_host") and mark.get("remote")) and \
+        _provider_url(prov).rstrip("/") == f"{mark['remote']}/v1"
+
+
+def _repoint(pid: str, root: str, url: str = "") -> None:
+    """Point provider ``pid`` (one wb remote made) at ``root``/v1 in OpenCode's config, and its
+    `remote` mark with it; or, one wb model add --url made at Windows' address, at ``url``, and
+    its `wsl_url` mark with it (#1167). Refused as own_config refuses, or while another layer
+    sets it."""
+    base = url or f"{root}/v1"
+    change = f'set provider "{pid}"\'s baseURL to "{base}"'
+    with own_config(change) as (target, own):
+        if where := set_elsewhere(target, "provider", pid):
+            raise _not_ours(f"provider {pid}", where, change)
+        entry = (own.get("provider") or {}).get(pid) or (own.get("providers") or {}).get(pid)
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"provider {pid} isn't in {target}: make this change by hand: {change}")
+        opts = entry.get("options") if "options" in entry or "settings" not in entry else entry["settings"]
+        if not isinstance(opts, dict):
+            opts = entry["options"] = {}
+        opts["baseURL"] = base
+    if url:
+        set_override(pid, "wsl_url", url)
+    else:
+        set_override(pid, "remote", root)
+
+
+def _answers(base: str) -> bool:
+    """Whether an OpenAI-compatible server answers at baseURL ``base`` (its /models; one that
+    wants a key answers too)."""
+    return _models_at("", 1, url=f"{base}/models") is not None
+
+
+# (mark, root, ollama) still answering at the mark, and when: under mirrored networking or a VPN
+# windows_host() is another address for good, and one that drops packets cost every discover() a
+# second, about 5 s a wb models (#1397, 2026-11-25). Asked again after DOWN_SECS, or at once when
+# windows_host() changes (the root is at it). Never kept while the mark is silent: a runner
+# waiting after a reboot asks each pass for the server at Windows' new address (#1167).
+_STAYED: dict[tuple, float] = {}
+
+
+def _moved_to(mark: str, root: str, ollama: bool = True) -> bool:
+    """Whether Windows' Ollama left ``mark`` for ``root``: the old root silent, the new answering;
+    with ``ollama`` False, any OpenAI-compatible server, ``mark`` and ``root`` baseURLs probed on
+    /models (Ollama's /api/version had them all read as never moving, #1167). Both probed at
+    once, briefly, so a dead provider costs discovery a second, not three."""
+    from concurrent.futures import ThreadPoolExecutor
+    key = (mark, root, ollama)
+    if time.monotonic() - _STAYED.get(key, -DOWN_SECS) < DOWN_SECS:
+        return False
+    probe = (lambda r: ollama_answers(r, timeout=1)) if ollama else _answers
+    with ThreadPoolExecutor(2) as pool:
+        old, new = pool.map(probe, (mark, root))
+    if old:
+        _STAYED[key] = time.monotonic()
+    return new and not old
+
+
+def _at_host(base: str, host: str) -> str:
+    """baseURL ``base`` at ``host``: its scheme, port and path kept (#1167)."""
+    u = urlparse(base)
+    netloc = (f"[{host}]" if ":" in host else host) + (f":{u.port}" if u.port else "")
+    return u._replace(netloc=netloc).geturl().rstrip("/")
+
+
+def follow_windows_host(extra: dict) -> list[str]:
+    """Repoint each provider wb remote made for WSL2's Windows host (models.json `wsl_host`) whose
+    address is no longer windows_host()'s, keeping its port, when Ollama has stopped answering at
+    the old address and answers at the new one; a line each on stderr, once. Read in discover(),
+    so every command after the reboot finds it there (#1159). So too each one wb model add --url
+    made there (models.json `wsl_url`), any OpenAI-compatible server, its path kept (#1167). One
+    wb can't rewrite (comments, another layer) stays as it is, and remedy() names the new address."""
+    marked = [(pid, e["remote"], True) for pid, e in extra.items()
+              if isinstance(e, dict) and e.get("wsl_host") and isinstance(e.get("remote"), str)]
+    marked += [(pid, e["wsl_url"], False) for pid, e in extra.items()
+               if isinstance(e, dict) and isinstance(e.get("wsl_url"), str)]
+    if not marked or not (win := windows_host()):
+        return []
+    cfg, said = read_config(), []
+    for pid, mark, ollama in marked:
+        prov, was = _provider(cfg, pid), urlparse(mark)
+        if prov is None or (was.hostname or "").lower() == win.lower() or not _follows_windows(pid, prov):
+            continue
+        try:
+            root = remote_root(win, was.port or OLLAMA_PORT) if ollama else _at_host(mark, win)
+            # windows_host() is only the default gateway: under networkingMode=mirrored (which
+            # WSL_NAT and the remedy advise) it is the LAN router, and a VPN inside WSL moves it
+            # too. A working provider was rewritten to the router, a false "moved" line said, and
+            # every wb start sent the user to start Ollama there (#1159's review, 2026-11-24)
+            if not _moved_to(mark, root, ollama):
+                continue
+            _repoint(pid, root) if ollama else _repoint(pid, "", url=root)
+        except (RuntimeError, OSError, ValueError):
+            continue
+        said.append(f"wb: Windows' address moved from {was.hostname} to {win} (WSL2's NAT): "
+                    f"{pid} now points at {f'{root}/v1' if ollama else root}")
+        print(said[-1], file=sys.stderr, flush=True)
+    return said
+
+
+def windows_moved(m: Model) -> str:
+    """remedy()'s step for a remote Ollama (or one wb remote made) that doesn't answer at an
+    address that isn't WSL2's Windows host now, or "": it may be Windows at its address before a
+    reboot, where "start Ollama" sent the user to one already running (#1159). Any other remote
+    server (LM Studio, llama.cpp, vLLM, Jan), or one wb model add --url made there, the same
+    (#1167): "start its server" sent the user to one running at Windows' new address."""
+    if not (m.remote or m.extra.get("remote") or m.extra.get("wsl_url")) or m.cloud \
+            or not (win := windows_host()):
+        return ""
+    host = (urlparse(m.root).hostname or "").lower()
+    if not host or host == win.lower():
+        return ""
+    mirrored = ("networkingMode=mirrored under [wsl2] in %UserProfile%\\.wslconfig keeps 127.0.0.1 "
+                "for good")
+    if m.engine != "ollama" or m.extra.get("wsl_url"):
+        new, where = _at_host(m.base_url, win), opencode_config_path()
+        if not m.extra.get("wsl_url"):
+            # one wb model add made before the mark: the hand edit alone left it unmarked, so the
+            # next reboot broke it again; wb model add at the URL it now has marks it (the adopt
+            # branch), which this never said (#1167's review, 2026-11-24)
+            return (f"start its server at {m.root}; or, if {host} was Windows' address (WSL2's NAT "
+                    f"gives it a new one on a reboot), set {m.provider}'s baseURL to {new} in "
+                    f"{where}, then wb model add {m.id} --url {new}, which follows Windows' "
+                    f"address from now on, and {mirrored}")
+        if _answers(new):  # discovery couldn't rewrite it (comments, another layer)
+            return (f"WSL2's NAT gave Windows a new address, {win}: set {m.provider}'s baseURL to "
+                    f"{new} in {where}, and {mirrored}")
+        return (f"start its server on Windows: it answers neither at {m.base_url} nor at {win}, "
+                f"WSL2's default gateway; under networkingMode=mirrored Windows' server is on "
+                f"127.0.0.1 here instead, which wb model add <provider>/{m.name} --url "
+                f"{_at_host(m.base_url, '127.0.0.1')} adds (a provider of its own: new ids)")
+    if m.extra.get("wsl_host"):
+        port = urlparse(m.root).port or OLLAMA_PORT
+        with contextlib.suppress(RuntimeError):
+            if ollama_answers(remote_root(win, port)):
+                return (f"WSL2's NAT gave Windows a new address, {win}: wb remote {win} points it at "
+                        f"Windows' new address, and {mirrored}")
+        # nothing answers at the default gateway: under mirrored networking (or a VPN) that is
+        # the router, not Windows, and "WSL2's NAT gave Windows a new address" sent the user
+        # there (#1159's review, 2026-11-24)
+        return (f"start Ollama on Windows: it answers neither at {m.root} nor at {win}, WSL2's "
+                f"default gateway; under networkingMode=mirrored Windows' Ollama is on 127.0.0.1 "
+                f"here instead, which wb remote 127.0.0.1 --port {port} adds (its models get new ids)")
+    # wb remote <new> doesn't repoint this one: nothing says its address was Windows', so it makes
+    # ollama-windows beside it, and saying "points it at" sent the user round again (#1159's
+    # review, 2026-11-24)
+    drop = (f"wb remote {host} --remove drops this one" if m.extra.get("remote")
+            else f"{m.provider} can go from OpenCode's config")
+    return (f"start Ollama at {m.root}; or, if {host} was Windows' address (WSL2's NAT gives it a "
+            f"new one on a reboot), wb remote {win} adds Windows' Ollama as {WSL_PID}, which follows "
+            f"its address from now on (its models get new ids), {drop}, and {mirrored}")
 
 
 def remote_host(host: str) -> str:
@@ -4042,12 +4797,15 @@ def add_remote(host: str, port: int = OLLAMA_PORT) -> tuple[str, str, list[str]]
     if not ollama_answers(root):
         raise RuntimeError(f"no Ollama answers at {root}: on {host}, have Ollama listen on the "
                            "network (OLLAMA_HOST=0.0.0.0, then restart it), and check the port")
-    pid = remote_pid(host)
     cfg = read_config()
+    win = host == (windows_host() or "").lower()
+    pid = _remote_pid_for(cfg, host, root)
     prov = _provider(cfg, pid)
     if prov is None:
-        _add_provider(cfg, pid, f"Ollama on {host}", f"{root}/v1")
+        _add_provider(cfg, pid, "Ollama on Windows" if win else f"Ollama on {host}", f"{root}/v1")
         set_override(pid, "remote", root)  # wb made it, so --remove may delete it
+    elif _provider_url(prov).rstrip("/") != f"{root}/v1" and win and _follows_windows(pid, prov):
+        _repoint(pid, root)  # WSL2's NAT gave Windows a new address: the same provider (#1159)
     elif _provider_url(prov).rstrip("/") != f"{root}/v1":
         # a provider of that id for another endpoint (a port of its own, or the user's): kept,
         # and its models were reported as the new endpoint's (#197, the 2026-11-19 audit)
@@ -4056,6 +4814,8 @@ def add_remote(host: str, port: int = OLLAMA_PORT) -> tuple[str, str, list[str]]
                            f"alone. Rename or remove it, or add that server's models with wb model "
                            f"add <provider>/<model> --url {root}/v1")
     set_override(pid, "local", True)  # the user's own machine: its models count as local
+    if win:  # discovery follows it to Windows' next address (follow_windows_host, #1159)
+        set_override(pid, "wsl_host", True)
     names = []
     for row in (_get(f"{root}/api/tags") or {}).get("models", []):
         name = row.get("name")
@@ -4073,8 +4833,8 @@ def add_remote(host: str, port: int = OLLAMA_PORT) -> tuple[str, str, list[str]]
 def remove_remote(host: str) -> tuple[str, list[str]]:
     """Undo add_remote: its models out of OpenCode's config with their models.json entries, the
     provider and its local mark gone. (provider id, the models removed)."""
-    host, pid = remote_host(host), remote_pid(host)
-    cfg = read_config()
+    host, cfg = remote_host(host), read_config()
+    pid = _remote_pid_for(cfg, host)
     key = "provider" if pid in (cfg.get("provider") or {}) else "providers"
     prov = (cfg.get(key) or {}).get(pid)
     if prov is None:
@@ -4155,11 +4915,12 @@ def windows_host() -> str | None:
 NEEDS_KEY = "needs an API key"  # what _models_at says of a server that answered 401
 
 
-def _models_at(root: str, timeout: float) -> list[str] | str | None:
-    """The ids ``root``'s /v1/models lists; NEEDS_KEY when it answered 401 (Jan or LM Studio
-    with an API key set: taken as no answer, it was invisible on its own port, #810); else None."""
+def _models_at(root: str, timeout: float, url: str = "") -> list[str] | str | None:
+    """The ids ``root``'s /v1/models (or ``url``) lists; NEEDS_KEY when it answered 401 (Jan or LM
+    Studio with an API key set: taken as no answer, it was invisible on its own port, #810); else
+    None."""
     try:
-        with _open(f"{root}/v1/models", timeout=timeout) as r:
+        with _open(url or f"{root}/v1/models", timeout=timeout) as r:
             body = json.loads(r.read() or b"{}")
     except urllib.error.HTTPError as e:
         try:
@@ -4223,6 +4984,36 @@ def ollama_installed(root: str) -> list[dict]:
              "params": (x.get("details") or {}).get("parameter_size"),
              "quant": (x.get("details") or {}).get("quantization_level")}
             for x in (_get(f"{root}/api/tags") or {}).get("models", [])]
+
+
+# What a model's OpenCode entry says it reads (#1199): V1 config's `modalities.input`, V2 config's
+# and the catalog's (hosted.json) `capabilities.input`. Ollama says `vision` (/api/show).
+IMAGE_INPUT = "image"
+
+
+def declared_input(m: Model) -> list[str] | None:
+    """The input kinds ``m``'s entry declares (["text", "image"]), or None when it says none."""
+    for key in ("modalities", "capabilities"):
+        got = (m.config or {}).get(key)
+        if isinstance(got, dict) and isinstance(got.get("input"), list):
+            return [str(x) for x in got["input"]]
+    return None
+
+
+def takes_images(m: Model) -> bool | None:
+    """Whether ``m`` takes image input: its entry's declaration (declared_input), else for a GPU
+    model on Ollama what /api/show says now (5 s at most). None when nothing says. An entry with
+    no declaration is not "no": OpenCode then reads it as text and image (Capabilities.default,
+    2.3.2) and sends the image, and a text-only server fails the request, every later one in
+    the session too, since the image stays in its history (#1199, read in 2.3.2's source 2026-11-24)."""
+    if (said := declared_input(m)) is not None:
+        return IMAGE_INPUT in said
+    if m.kind != "gpu" or m.engine != "ollama":
+        return None
+    try:
+        return "vision" in (ollama_show(m.root, m.name, timeout=5).get("capabilities") or [])
+    except Exception:  # not answering: unknown, as for any server that doesn't say
+        return None
 
 
 def ollama_show(root: str, name: str, timeout: float = 30) -> dict:
@@ -4366,9 +5157,14 @@ def write_entry(provider: str, name: str, entry: dict | None) -> None:
         entries = mine.setdefault("models", {})
         if entry is None:
             entries.pop(name, None)
-        else:  # keys added by hand (variants, options) stay
+        else:  # keys added by hand (variants, options) stay; an option given as None goes
             old = entries.get(name) or {}
-            entries[name] = {**old, **entry, "options": {**(old.get("options") or {}), **(entry.get("options") or {})}}
+            if "modalities" in entry and mine is (own.get("providers") or {}).get(provider):
+                # V2 reads `capabilities.input`, and drops a V1 `modalities` unsaid (#1199)
+                caps = {**(old.get("capabilities") or {}), **entry["modalities"]}
+                entry = {**{k: v for k, v in entry.items() if k != "modalities"}, "capabilities": caps}
+            opts = {**(old.get("options") or {}), **(entry.get("options") or {})}
+            entries[name] = {**old, **entry, "options": {k: v for k, v in opts.items() if v is not None}}
             if not entries[name]["options"]:
                 del entries[name]["options"]
 
@@ -4379,7 +5175,15 @@ def is_api(model_id: str) -> bool:
     return bool(m and m.kind == "api")
 
 
-API_WINDOW = 131072   # the effective window an API task plans to (#1017; decision 10)
+# An API model's window is capped at API_WINDOW_LIFT (api_window): at 128K (API_WINDOW, #1017's
+# decision 10) every DeepSeek size-* and mid-xl-scout run on record compacted at 72% of it, one
+# large read jumping past fresh_at straight to OpenCode's own summary; at 256K, with the output
+# still API_OUTPUT, the buffer stays 36864 and OpenCode compacts at 86% (225K tokens). Measured on
+# DeepInfra's DeepSeek V4.1 Flash, 12 runs over 5 cells: 0-1 compactions a run instead of 4-13, at
+# about the same cost and with no new stop (#1134's E19, 2026-11-24). API_WINDOW stays the floor:
+# a price tier under 256K (Haiku's 100K) keeps the window it had.
+API_WINDOW = 131072
+API_WINDOW_LIFT = 262144
 API_OUTPUT = 32768    # output pinned for API tasks (#1017)
 
 

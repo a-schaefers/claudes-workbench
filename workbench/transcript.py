@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 from . import models, store
 from .watch import Watcher
-from .runner import INTERRUPT_HEAD, NOTE_HEAD, api_task, opencode_bin
+from .runner import INTERRUPT_HEAD, NOTE_HEAD, RERUN, api_task, opencode_bin
 
 STYLE = {"claude": "1;38;5;208", "agent": "1;36", "think": "2;3", "tool": "33", "out": "2",
          "ok": "1;32", "bad": "1;31", "sys": "34", "add": "32", "del": "31", "head": "1"}
@@ -83,15 +83,14 @@ def stores(task: store.Task | None) -> list[tuple[dict | None, object]]:
     there (state/, log/, the database's -wal) had OpenCode, run by wb outside the lane, write
     through it to any file of the user's (the #1010 review, 2026-11-22). The user's store is
     out of every lane, and read outside it."""
-    from . import context, lane
+    from . import context
     if task is None or not context.opencode_db(task).is_file():
         return [(None, _same)]
     env = {**os.environ, **context.opencode_home_env(task)}
     writable = context.writable(task)
     if writable is None:  # no lane: the agent's commands reach every file of the user's anyway
         return [(env, _same), (None, _same)]
-    readable, unix = context.readable(task), context.unix_paths(task)
-    return [(env, lambda cmd: lane.wrap(writable, cmd, readable, unix)), (None, _same)]
+    return [(env, context.lane_wrap(task)), (None, _same)]
 
 
 def export(session: str, strict: bool = False, task: store.Task | None = None) -> dict | None:
@@ -215,10 +214,14 @@ def _user_message(text: str, verbose: bool) -> tuple[str, list[tuple[str, str]]]
         head = "Claude → agent · next step"
     elif text.startswith(INTERRUPT_HEAD) and "without a tool call. Stop planning" in text:
         head = "workbench → agent · nudge: thinking too long without acting"  # runner.NUDGE
+    elif text.startswith(INTERRUPT_HEAD) and "without changing a file: make the first edit" in text:
+        head = "workbench → agent · nudge: many calls without changing a file"  # runner.EXPLORE_NUDGE
     elif text.startswith(INTERRUPT_HEAD):
         head = "Claude → agent · INTERRUPT, high priority"
     elif text.startswith(NOTE_HEAD):
         head = "Claude → agent · note"
+    elif text.startswith(RERUN[:40]):  # runner._run_again (#1235)
+        head = "workbench → agent · the round again, after its provider or server stopped it"
     else:
         head = "Claude → agent · spec"
     body = text = full
@@ -358,9 +361,30 @@ def session_entries(data: dict, worktree: str, verbose: bool) -> list[Entry]:
 # there, and a test checks task_entries has a branch for each (#861).
 EVENT_KINDS = frozenset({
     "round", "tests", "autofix", "self_review", "ask", "answer", "captain", "steer", "skills",
-    "allow", "interrupted", "fresh", "full", "load", "left_bg", "reading_full", "compacted",
-    "limits", "export", "resumed", "coding", "spec_gap", "next_step", "takeover", "stopped",
-    "error", "retry", "gpu", "served", "rate_limited", "backend"})
+    "allow", "interrupted", "fresh", "full", "load", "left_bg", "lingered", "settled", "reading_full",
+    "compacted", "limits", "export", "resumed", "coding", "spec_gap", "next_step", "takeover",
+    "stopped", "error", "retry", "gpu", "served", "rate_limited", "backend", "rewound",
+    "fallback"})  # a role's fallback model (#1196)
+
+
+# What `wb log` prints, and the web chat's task sheet (#1201): the agent's text, its tool calls,
+# and every kind wb watch shows (a fixed nine once left out the runner's own rows, #861).
+LOG_KINDS = frozenset({"text", "tool"}) | EVENT_KINDS
+
+
+def log_body(r: dict, verbose: bool = False) -> str | None:
+    """A `wb log` line after its time and round, None for a row it doesn't show. Not ``verbose``,
+    the agent's text is its first line, cut to 110 characters."""
+    k = r.get("kind")
+    if k == "tool":
+        mark = "" if r.get("ok") else "  ✗ " + str(r.get("error") or "")[:100]
+        return f"{r.get('tool', ''):8} {r.get('brief', '')}{mark}"
+    if k not in LOG_KINDS:
+        return None
+    body = str(r.get("text") or "")
+    if k == "text" and not verbose:
+        body = body.strip().splitlines()[0][:110] if body.strip() else ""
+    return f"{k:8} {body}"
 
 
 def task_entries(task: store.Task) -> list[Entry]:
@@ -408,12 +432,15 @@ def task_entries(task: store.Task) -> list[Entry]:
         # spec_gap and coding were dropped as kinds with no branch (#846), and then compacted,
         # limits and export, written just before (#865)
         elif kind in ("fresh", "full", "load", "left_bg", "reading_full", "compacted", "limits", "export",
+                      "lingered",  # the agent's turn over, OpenCode still open: stopped (#1160)
+                      "settled",  # a self-review at a guard, the tree its tests passed on: stopped (#1168, #1250, #1261)
                       "served",  # served: the keyhole, an API model's provider changed what ran
-                      "rate_limited"):  # an API provider's wait, the clocks paused (#1020)
+                      "rate_limited",  # an API provider's wait, the clocks paused (#1020)
+                      "fallback"):  # the role's fallback model took the task, or couldn't (#1196)
             out.append(Entry(ts, key, [("sys", f"■ {r.get('text', '')}")]))
         elif kind == "backend":  # OpenRouter served a backend outside the role's order (#1021)
             out.append(Entry(ts, key, [("bad", f"■ {r.get('text', '')}")]))
-        elif kind in ("resumed", "coding"):  # the text says who: Claude, or the user's allowance
+        elif kind in ("resumed", "coding", "rewound"):  # the text says who: Claude, or the user's allowance
             out.append(Entry(ts, key, [("claude", f"■ {r.get('text', '')}")]))
         elif kind == "spec_gap":
             out.append(Entry(ts, key, [("claude", f"■ Claude: the spec missed: {r.get('text', '')}")]))
@@ -584,7 +611,7 @@ def header(task: store.Task, paint: Painter, data: dict | None = None) -> str:
 
 def routed_text(task: store.Task) -> str:
     """How the task's model was chosen (#1016): an API task's `API <id> (<provider>) · trivial
-    role, set by you 11-20 · thinking off` from task.json's keys, a GPU task's the router's why
+    role · thinking off` from task.json's keys, a GPU task's the router's why
     (task.json `route`); '' for neither. wb watch's `routed:` line, and --json's `routed` row."""
     from . import routes
     sp = task.spec

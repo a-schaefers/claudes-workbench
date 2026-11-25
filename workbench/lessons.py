@@ -93,6 +93,41 @@ def items(feedback: str) -> list[str]:
     return [x[:600] for x in out if len(x) > 8]
 
 
+def feedback(prompt: str) -> list[str]:
+    """The body of each review feedback a round's prompt holds, on its own. A round that never
+    reached the agent gets wb feedback's text after its own prompt (runner.add_to_round), and a
+    note sent before a round began goes after it too (_early_notes): read as one body from the
+    first blank line on, the second feedback's head and its "carry on" were joined to the last
+    item, a garbled lesson of its own (#1180, 2026-11-24). So each FEEDBACK_HEAD paragraph opens
+    a feedback, wherever it is (a wb next step's unsent round's too), and a folded note ends it.
+    A handover's carry-on (CARRY_ON) or a resume's (RESUME) holds none of its own: it copies the
+    earlier rounds' feedback whole, which each recorded again under the new round, the last item
+    with the agent's last words joined on (the review of #1180, 2026-11-24)."""
+    from .runner import CARRY_ON, NOTE_HEAD, RESUME  # runner imports this module
+    if prompt.startswith((CARRY_ON[:60], RESUME[:60])):
+        return []
+    out = []
+    for part in re.split(r"\n\n(?=" + re.escape(FEEDBACK_HEAD) + ")", prompt):
+        if part.startswith(FEEDBACK_HEAD):
+            out.append(part.split("\n\n", 1)[-1].split("\n\n" + NOTE_HEAD, 1)[0])
+    return out
+
+
+def round_feedback(task: store.Task, rnd: int) -> list[str]:
+    """The review feedback round ``rnd`` gave (feedback's bodies): its prompt's when the prompt is
+    a feedback (a fresh session's handoff took prompt.md's place: store.round_prompt), else only
+    what wb feedback added to the round before it was sent (runner.add_to_round, kept in its
+    notes.md too): a carry-on or a resume copies the earlier feedback whole, and a spec or a wb
+    next step could quote the head (the review of #1180, 2026-11-24)."""
+    from .runner import FOLDED  # runner imports this module
+    prompt = store.round_prompt(task, rnd)
+    text = prompt.read_text() if prompt.is_file() else ""
+    if not text.startswith(FEEDBACK_HEAD):
+        folded = task.round_dir(rnd) / FOLDED
+        text = folded.read_text() if folded.is_file() else ""
+    return feedback(text)
+
+
 def gather(task: store.Task, outcome: str | None = None) -> list[dict]:
     """Every lesson candidate the task's files hold (outcome: how it closed, if it has)."""
     spec, st = task.spec, task.status
@@ -106,16 +141,16 @@ def gather(task: store.Task, outcome: str | None = None) -> list[dict]:
 
     for d in sorted(task.dir.glob("rounds/*"), key=lambda p: int(p.name) if p.name.isdigit() else 0):
         rnd = int(d.name) if d.name.isdigit() else 0
-        prompt = store.round_prompt(task, rnd)  # a fresh session's handoff took prompt.md's place
-        if prompt.is_file() and prompt.read_text().startswith(FEEDBACK_HEAD):
-            body = prompt.read_text().split("\n\n", 1)[-1]
+        for body in round_feedback(task, rnd):
             for item in items(body):
                 add("feedback", rnd, item)
-        summary = d / "summary.md"
-        if summary.is_file() and outcome != "discarded":
-            said = summary.read_text().split("agent's summary:", 1)[-1]
-            for m in LESSON.finditer(said):
-                add("agent", rnd, m.group(1).strip()[:400])
+        # the agent's whole final message, which the report may cut (#1186); a round from before
+        # final.md, its report's section
+        summary, final = d / "summary.md", d / "final.md"
+        said = ("" if outcome == "discarded" else final.read_text() if final.is_file()
+                else summary.read_text().split("agent's summary:", 1)[-1] if summary.is_file() else "")
+        for m in LESSON.finditer(said):
+            add("agent", rnd, m.group(1).strip()[:400])
     for e in store.read_jsonl(task.dir / "events.jsonl")[0]:
         if e.get("kind") == "stopped" and e.get("text") and not e.get("by"):  # the guard's, not a person's
             add("stopped", e.get("round"), f"the guard stopped the agent: {e['text'][:300]}")
@@ -265,12 +300,13 @@ def line(x: dict) -> str:
 
 
 def nudge(task: store.Task, outcome: str | None = None) -> str:
-    """The one line `wb feedback|next|resume|accept|discard` ends with when the task taught something."""
+    """The one line `wb feedback|next|resume|accept|discard` ends with when the task taught
+    something seen in other tasks too: a lesson met once is harvested quietly (#1322: the line
+    on every task's lessons was a nudge nobody acted on)."""
     new = harvest(task, outcome)
     if not new:
         return ""
     ids = {x["id"] for x in new}
     open_ = survey(only=ids)  # the new ones only, not a survey of every open lesson (#556)
     again = sum(bool(x["again"]) for x in open_)
-    return (f"lessons: {len(open_)} from this task" + (f", {again} seen in other tasks too" if again else "")
-            + " (wb lessons: write or patch a skill now, while it's fresh)") if open_ else ""
+    return f"lessons: {again} seen in other tasks too (wb lessons)" if again else ""

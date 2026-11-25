@@ -29,7 +29,11 @@ wb patch init            # a full clone at ~/.local/share/workbench/source (--di
 
 It carries over any changes the marketplace copy had as the first patches, points Claude Code's
 marketplace, `wb` and the `/workbench` skill at the new clone, and refreshes the plugin; then
-`/reload-plugins` in Claude Code. A developer's clone needs no init: `git switch -c local` in it.
+`/reload-plugins` in Claude Code. A developer's clone needs no init: `git switch -c local --track origin/main` in it
+(one made without `--track` gets that upstream from the next `wb update` or `wb patch init`).
+Run from a developer's clone, `wb update` checks Claude Code's git marketplace copy too, if there is
+one, and refuses the same way over its changes (saved first): `git am` takes them into your clone,
+and `claude plugin marketplace add <your clone>` makes it the marketplace, which is never re-cloned.
 
 A patch is a commit on branch `local`, with a scope trailer:
 
@@ -59,10 +63,10 @@ only once committed, through `wb update` (it copies the clone's HEAD into the pl
 
 ## 3. Offering it upstream
 
-1. **Search first**: `gh issue list --repo a-schaefers/claudes-workbench --state all --search
+1. **Search first**: `gh issue list --repo a-schaefers/workbench --state all --search
    "<words from the error>"`. Comment on an existing issue rather than opening a second.
 2. **Open an issue** with the matching form (bug, feature, docs), filled from real output: the
-   commit, `wb doctor`, `wb patch list`. `gh issue create --repo a-schaefers/claudes-workbench
+   commit, `wb doctor`, `wb patch list`. `gh issue create --repo a-schaefers/workbench
    --web` opens the chooser; an agent without a browser writes the form's fields, in its order,
    under its labels as `### ` headings, into `--body-file`.
 3. **Prepare the branch**: `wb patch upstream <commit> --name <slug>` makes branch `pr/<slug>`
@@ -78,8 +82,8 @@ only once committed, through `wb update` (it copies the clone's HEAD into the pl
    ```
    It forks the repository (unless it is yours), pushes `pr/<slug>` to the fork and opens the
    pull request (`--draft` for a draft). It refuses, sending nothing, while the branch has
-   uncommitted changes, the body is empty or still the template, or a commit's trailer is
-   `Scope: me` (`--anyway` overrides that one). A failed step says what is done already; running
+   uncommitted changes, or the body is empty or still the template; a commit whose trailer is
+   `Scope: me` is named in the dialog that asks you. A failed step says what is done already; running
    it again goes on from there. The commit message's body carries `Closes #N`. Once it merges,
    the next `wb update` drops the local patch and removes `pr/<slug>`, its worktree and its body;
    closed unmerged, it keeps the patch and says so once.
@@ -102,6 +106,12 @@ line for your system (GitHub's own instructions), then `gh auth login --hostname
 A change to `.github/workflows/` over https needs `gh auth refresh -h github.com -s workflow`.
 Claude never handles your token: you run the login yourself (`! gh auth login …` in Claude
 Code). The GitHub plugin for Claude Code is optional and not needed for any of this.
+
+**No GitHub account?** You don't need one: `wb patch zip` writes your patches on `local` (or the
+commits you name) as a .zip in `~/Downloads` (else `$WB_HOME/patches/out/`): a `git format-patch`
+file per commit and a README.txt naming the upstream commit they apply to. Email it to
+adam.schaefers@icloud.com, or send it any way you like; wb sends nothing. The patch files name the
+commit's author as your git config has it: edit their `From:` lines first if you'd rather not.
 
 Never `scripts/ship.sh`: it is the owner's road to main, pushing to this repository and arming
 auto-merge, which only the owner can.

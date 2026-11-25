@@ -33,11 +33,21 @@ def settings() -> dict:
     return s if isinstance(s, dict) else {}
 
 
+def user_after(s: dict) -> float | None:
+    """The user's fixed threshold in settings `s`, when it is a finite positive number of minutes.
+    A -5 or inf said "on" and no check ever came, and a NaN crashed every task's round loop
+    (#1401, 2026-11-25): progress.json is hand-editable, so a stored one is read this way too."""
+    a = s.get("after")
+    if isinstance(a, bool) or not isinstance(a, (int, float)) or not math.isfinite(a) or a <= 0:
+        return None
+    return float(a)
+
+
 def set_enabled(on: bool, after: float | None = None) -> None:
     """On or off, with the user's fixed threshold: None keeps the one stored, 0 clears it. The
     pane's Progress checks row runs a bare `wb progress on|off`, and each rewrote the file without
     `after`: a `--after 30` went at the next pick, and checks came at the typical length (#578)."""
-    kept = settings().get("after") if after is None else after
+    kept = user_after(settings() if after is None else {"after": after})
     store.write_json(path(), {"on": on, **({"after": kept} if kept else {}), "ts": store.now()})
 
 
@@ -50,9 +60,8 @@ def typical(spec: dict) -> tuple[float, str]:
     """(minutes, where from): the user's --after ("user"), else the typical length of a task
     this size on this model (router.expected: "measured" from TYPICAL_MIN timed tasks, at least
     FLOOR_MIN), else the size's DEFAULT_MIN ("default")."""
-    s = settings()
-    if s.get("after"):
-        return float(s["after"]), "user"
+    if (after := user_after(settings())) is not None:
+        return after, "user"
     from . import router  # router -> models: only when on
     size = spec.get("size", "significant")
     mins, n = router.expected(spec.get("model", ""), size, spec.get("weights_id"),
@@ -123,29 +132,18 @@ def text(task: store.Task, active_s: float, typical_min: float, moved: bool, fil
          errors: int) -> str:
     """The check's lines, after the check-in digest."""
     st, model = task.status, task.spec.get("model", "")
-    rates = helped(model)
-    kind = recommend(moved, rates)
+    kind = recommend(moved, helped(model))  # the record is weighed, not printed (#1322)
     tests = st.get("tests")
-    source = typical(task.spec)[1]
-    past = (f"the {_mins(typical_min)} the user set" if source == "user" else
-            f"the typical {_mins(typical_min)} for a {task.spec.get('size')} task on this model"
-            if source == "measured" else
-            f"the default {_mins(typical_min)} for a {task.spec.get('size')} task (fewer than "
-            f"{TYPICAL_MIN} timed on this model)")
-    lines = [f"progress check (on: wb progress): {_mins(active_s / 60)} of active work, past {past} "
-             "(waits for the GPU and for answers left out)",
-             f"evidence: {files} file(s) changed, " + ("some since the last check" if moved else
-                                                        "none since the last check")
-             + f"; {errors} failed tool call(s) this round; last tests: "
-             + ("none yet" if not tests else "passed" if tests.get("ok") else "failed"),
-             "recommended: " + SAY[kind].format(t=task.name)]
-    tried = [f"a {'hint' if k == 'hint' else 'smaller step'} helped {ok} of {n}"
-             for k, (ok, n) in rates.items() if n]
-    if tried:
-        lines.append("on this model before: " + ", ".join(tried))
-    lines.append("time alone never makes it yours to edit: the coding choice stays as the user "
-                 "set it (wb coding)")
-    return "\n".join(lines)
+    past = (f"the {_mins(typical_min)} the user set" if typical(task.spec)[1] == "user" else
+            f"the typical {_mins(typical_min)}")
+    # two lines (#1322, 2026-11-24): the left-out caveat, the default's source, the record "on this
+    # model before" and the reminder that time never makes it Claude's to edit changed nothing
+    return "\n".join([
+        f"progress check: {_mins(active_s / 60)} of active work, past {past}; {files} file(s) changed, "
+        + ("some since the last check" if moved else "none since the last check")
+        + f"; {errors} failed tool call(s) this round; last tests: "
+        + ("none yet" if not tests else "passed" if tests.get("ok") else "failed"),
+        "recommended: " + SAY[kind].format(t=task.name)])
 
 
 def record(task: store.Task, kind: str) -> bool:

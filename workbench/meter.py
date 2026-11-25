@@ -5,43 +5,66 @@ Prices are the catalog's (`Model.config["cost"]`, per million tokens), priced th
 prices itself (the spike for #1009): `input` leaves out cache reads, cache reads and writes at
 their own rates, reasoning at the output rate (the reasoning rate when one is listed), and a
 `tier: {type: "context", size}` price past its size. OpenCode's own figure is that same
-estimate, so wb meters the same way rather than at the cache-miss rate, which over-counted a
-cached context about 50 times. Where the split isn't known it never prices under: a usage
-that doesn't say its cache reads prices them as input, a missing cache price is the input's.
+estimate (unless the response's usage says its `cost`: then that, #1234), so wb meters the same
+way rather than at the cache-miss rate, which over-counted a cached context about 50 times.
+Where the split isn't known it never prices under: a usage that doesn't say its cache reads
+prices them as input, a missing cache price is the input's.
 
 Two views of the same requests, each kept as high as the other says (never under):
 - the keyhole's (`Meter.on_usage`, its thread): each upstream response's `usage`, every request
   the task's model got (titles and compaction too, which no `step_finish` carries). A
-  provider's own `usage.cost` (OpenRouter's) wins over the catalog;
+  provider's own figure (OpenRouter's `usage.cost`, DeepInfra's `usage.estimated_cost`) wins
+  over the catalog; a response cut short (wb stopping OpenCode mid-stream) is the keyhole's
+  estimate, marked `cut` (#1276);
 - OpenCode's: live, each `step_finish.part.cost` (`Meter.step`); at each round's end the
   sessions' exported `info.cost` (`Meter.end_round`). With the keyhole metering, these only add
-  a `reconcile` row when OpenCode says more than the ledger has; without it (no usage in the
-  answers, the suite's fake), each step books its own row, OpenCode's cost or the metered one.
+  a `reconcile` row when OpenCode says more than the keyhole saw, each at the same prices (a
+  provider's `estimated_cost` compared at the catalog's, `at_catalog`: never topped up to it; a
+  `usage.cost` as booked, which OpenCode reports as its own figure too, #1234); without
+  it (no usage in the answers, the suite's fake), each step books its own row, OpenCode's cost or
+  the metered one.
 An OpenCode cost of 0 for a model whose price isn't 0 is never trusted (never a false 0).
 
-The ledger is `$WB_HOME/spend-api.jsonl` (store.append_jsonl, locked): `step`, `reconcile` and
-`checkin` rows, each with its local `day`; a row at the user's own prices (wb model price,
-models.json `cost`) says `prices: "yours"`.
+The ledger is `$WB_HOME/spend-api.jsonl` (store.append_jsonl, locked): `step` and `reconcile`
+rows, each with its local `day` (a `checkin` row from before #1322 is ignored); a row at the
+user's own prices (wb model price, models.json `cost`) says `prices: "yours"`.
 
-Every figure is an estimate unless the user set the model's prices: the catalog's can be about
-twice a provider's bill (DeepInfra's, #1135, 2026-11-23). `basis` says which a figure is:
-"catalog" (shown `≈$0.42 … (catalog prices)`), "yours" (`$0.42 … (your prices)`) or "provider"
-(the provider's own `usage.cost`: plain). A plan (OpenCode Go, an Ollama cloud model) is a
-quota, not dollars: its rows have `usd: null` and `plan`, and never count against the cap."""
+Every figure is an estimate unless the provider says its own or the user set the model's prices:
+the catalog's can be about twice a provider's bill (DeepInfra's, #1135, 2026-11-23). `basis`
+says which a figure is: "catalog" (shown `≈$0.42`), "yours" or "provider" (the provider's own
+`usage.cost` or `usage.estimated_cost`), both plain. A plan (OpenCode Go, GitHub Copilot, an Ollama
+cloud model) is a quota, not dollars: its rows have `usd: null` and `plan`, and never count against
+the cap."""
 
 from __future__ import annotations
 
+import math
 import os
+import re
 import threading
 import time
 from pathlib import Path
 
 from . import keyhole, models, routes, store
 
-CHECKIN_SHARE = 0.5      # past this share of the day cap, one check-in a day, across all tasks
-PLAN_PROVIDERS = ("opencode-go",)   # a plan's quota, not dollars (and m.cloud: Ollama cloud)
+# a plan's quota, not dollars (and m.cloud: Ollama cloud). GitHub Copilot's subscription counts
+# premium requests: its catalog lists the models' API prices all the same (OpenCode 2.3.2's bundled
+# catalog: $2/$10 for its Claude and GPT models), which would book dollars the user never pays
+# against the day cap (#1191)
+PLAN_PROVIDERS = ("opencode-go", "github-copilot")
+# a coding plan's provider (zai-coding-plan, kimi-code-plan-global, xiaomi-token-plan-sgp): a paid
+# subscription whose catalog prices are all 0, which read as free, "may train on your code" (#1396,
+# 2026-11-25). A segment anywhere: the regional ids go on past it (alibaba-coding-plan-cn)
+PLAN_ID = re.compile(r"-(?:coding|code|token|step)-plan(?:-|$)")
 EPS = 1e-9               # less than this between two figures is the same figure
+# status `api`'s figures are written to 6 places (Meter._book), an export's aren't: closer than
+# this to one is its rounding. Compared within EPS, a DeepInfra export a few 1e-7 past a rounded-down
+# `at_catalog` closed 4 of 10 real tasks of its own rows as `catalog prices` (#1220, 2026-11-24)
+STATUS_EPS = 1e-6
 STOP = keyhole.SPEND_REFUSED   # the keyhole's answer to OpenCode (a 400, which it doesn't retry) says it
+# today under the cap, but not by the next request at its worst, which the keyhole's room refuses:
+# "the cap is reached" there had Claude resume into the same stop, a wake for nothing (#1150)
+NEAR = "too near the day's API spend cap for its next request"
 NO_PRICE = "OpenCode's catalog gives no price for it, so the day cap can't be kept"
 # routes.json without day_usd: #1014 refuses an API role without one, so only a hand-edited file
 # gets here, and an API task then spends nothing rather than without a limit
@@ -53,7 +76,7 @@ UNREADABLE = "routes.json can't be read ({why}), so the day cap can't be kept: w
 
 
 CATALOG, YOURS, PROVIDER = "catalog", "yours", "provider"  # a figure's basis (#1135)
-NOTE = {CATALOG: " (catalog prices)", YOURS: " (your prices)", PROVIDER: ""}
+BASES = (CATALOG, YOURS, PROVIDER)
 
 
 def row_basis(r: dict) -> str:
@@ -75,7 +98,8 @@ def model_basis(m) -> str:
 
 
 def money(x: float | None, b: str = CATALOG) -> str:
-    """usd(), with `≈` in front of a catalog estimate (#1135); $0 is none."""
+    """usd(), with `≈` in front of a catalog estimate (#1135); $0 is none. The figure's basis is
+    said by the `≈` alone: a "(catalog prices)" note after it said it twice (#1322)."""
     return ("≈" if b == CATALOG and x else "") + usd(x)
 
 
@@ -124,9 +148,15 @@ def _num(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v
 
 
+def plan_provider(pid: str) -> bool:
+    """A provider whose usage is a plan's quota, not dollars: OpenCode Go, a coding plan."""
+    return pid in PLAN_PROVIDERS or bool(PLAN_ID.search(pid))
+
+
 def is_plan(m) -> bool:
-    """A plan's quota, not dollars: OpenCode Go, an Ollama cloud model."""
-    return bool(getattr(m, "cloud", False)) or m.provider in PLAN_PROVIDERS
+    """A plan's quota, not dollars: OpenCode Go, GitHub Copilot (#1191), a coding plan, an Ollama
+    cloud model."""
+    return bool(getattr(m, "cloud", False)) or plan_provider(m.provider)
 
 
 def is_free(m) -> bool:
@@ -145,7 +175,18 @@ def price(m) -> list[dict] | None:
     never 0); every field 0 is a true 0, a free model. Takes the catalog's list
     (`[{input, output, cache{read, write}, tier?}]`) and a config entry's `{input, output,
     cache_read, cache_write}`."""
-    cost = (getattr(m, "config", None) or {}).get("cost")
+    return _prices((getattr(m, "config", None) or {}).get("cost"))
+
+
+def first_tier(cfg: dict) -> int | None:
+    """The context size past which a model entry's price first changes (price's lowest `size`
+    above 0), or None for a flat price or none: models.api_window lifts no window past it, as
+    every request over it is priced at the tier's rate (Haiku's 100K, 5x)."""
+    sizes = [p["size"] for p in _prices(cfg.get("cost")) or () if p["size"] > 0]
+    return int(min(sizes)) if sizes else None
+
+
+def _prices(cost) -> list[dict] | None:
     entries = cost if isinstance(cost, list) else [cost] if isinstance(cost, dict) else []
     out = []
     for e in entries:
@@ -207,9 +248,23 @@ def usage_tokens(u: dict) -> dict:
       `cache_creation_input_tokens` beside it, `output_tokens` with
       `output_tokens_details.thinking_tokens`. Told by its cache fields before the Responses
       API's details: its message_delta now carries `output_tokens_details` too, which read it as
-      the Responses API and booked every cache read and write as 0 (#1081, 2026-11-23).
+      the Responses API and booked every cache read and write as 0 (#1081, 2026-11-23);
+    - Gemini's `usageMetadata` (#1192): `promptTokenCount` holds the cache reads
+      (`cachedContentTokenCount`), `toolUsePromptTokenCount` is input beside it, and
+      `candidatesTokenCount` leaves out `thoughtsTokenCount` (OpenCode's gemini.ts mapUsage);
+    - Bedrock Converse's (#1192): `inputTokens` without the cache, `cacheReadInputTokens` and
+      `cacheWriteInputTokens` beside it, `outputTokens` (bedrock-converse.ts mapUsage).
     A cache read it doesn't name is priced as input: never under."""
     d = lambda k: u.get(k) if isinstance(u.get(k), dict) else {}  # noqa: E731
+    if "promptTokenCount" in u or "candidatesTokenCount" in u:
+        prompt = _n(u.get("promptTokenCount")) + _n(u.get("toolUsePromptTokenCount"))
+        read = min(prompt, _n(u.get("cachedContentTokenCount")))
+        return {"in": prompt - read, "cache_read": read, "cache_write": 0,
+                "out": _n(u.get("candidatesTokenCount")), "reasoning": _n(u.get("thoughtsTokenCount"))}
+    if "inputTokens" in u or "outputTokens" in u:
+        return {"in": _n(u.get("inputTokens")), "cache_read": _n(u.get("cacheReadInputTokens")),
+                "cache_write": _n(u.get("cacheWriteInputTokens")), "out": _n(u.get("outputTokens")),
+                "reasoning": 0}
     if "prompt_tokens" in u or "completion_tokens" in u:
         pd, cd = d("prompt_tokens_details"), d("completion_tokens_details")
         prompt = _n(u.get("prompt_tokens"))
@@ -233,6 +288,21 @@ def usage_tokens(u: dict) -> dict:
             "out": outp - think, "reasoning": think}
 
 
+def max_output(body) -> int | float:
+    """A request's output cap, wherever its API puts it: top-level `max_tokens` and the like,
+    Gemini's `generationConfig.maxOutputTokens`, Converse's `inferenceConfig.maxTokens` (#1192);
+    models.API_OUTPUT (the layer's cap) when it names none."""
+    if not isinstance(body, dict):
+        return models.API_OUTPUT
+    nested = [(body.get(o), k) for o, k in (("generationConfig", "maxOutputTokens"),
+                                            ("inferenceConfig", "maxTokens"))]
+    for v in [body.get(k) for k in ("max_tokens", "max_completion_tokens", "max_output_tokens")] + [
+            o.get(k) for o, k in nested if isinstance(o, dict)]:
+        if _num(v):
+            return v
+    return models.API_OUTPUT
+
+
 def _total(tok: dict) -> int:
     return sum(tok.values())
 
@@ -245,29 +315,26 @@ _TODAY_LOCK = threading.Lock()
 
 def today() -> dict:
     """Today's spend over every task: {"usd": float, "unpriced_tok": int, "plan_tok":
-    {provider: int}, "checkin": bool, "basis": its rows' (basis)}, from today's `step` and
-    `reconcile` rows."""
+    {provider: int}, "basis": its rows' (basis), "bases"}, from today's `step` and `reconcile`
+    rows."""
     path, d = ledger_path(), day()
     with _TODAY_LOCK:
         try:
             st = os.stat(path)
         except OSError:
-            return {"usd": 0.0, "unpriced_tok": 0, "plan_tok": {}, "checkin": False, "basis": CATALOG,
-                    "bases": []}
+            return {"usd": 0.0, "unpriced_tok": 0, "plan_tok": {}, "basis": CATALOG, "bases": []}
         c = _TODAY
         if (c.get("path"), c.get("ino"), c.get("day")) != (str(path), st.st_ino, d) \
                 or st.st_size < c.get("offset", 0):
             c.clear()
             c.update(path=str(path), ino=st.st_ino, day=d, offset=0, usd=0.0, unpriced=0, plan={},
-                     checkin=False, bases=set())
+                     bases=set())
         if st.st_size > c["offset"]:
             rows, c["offset"] = store.read_jsonl(path, c["offset"])
             for r in rows:
                 if not isinstance(r, dict) or r.get("day") != d:
                     continue
-                if r.get("kind") == "checkin":
-                    c["checkin"] = True
-                elif r.get("kind") in ("step", "reconcile"):
+                if r.get("kind") in ("step", "reconcile"):
                     tok = _total(r["tok"]) if isinstance(r.get("tok"), dict) else 0
                     if _num(r.get("usd")):
                         c["usd"] += r["usd"]
@@ -277,7 +344,7 @@ def today() -> dict:
                     else:
                         c["unpriced"] += tok
         return {"usd": round(c["usd"], 6), "unpriced_tok": c["unpriced"], "plan_tok": dict(c["plan"]),
-                "checkin": c["checkin"], "basis": basis(c["bases"]), "bases": sorted(c["bases"])}
+                "basis": basis(c["bases"]), "bases": sorted(c["bases"])}
 
 
 def _task_rows(name: str) -> list[dict]:
@@ -286,19 +353,32 @@ def _task_rows(name: str) -> list[dict]:
             and r.get("kind") in ("step", "reconcile") and _num(r.get("usd"))]
 
 
+def _at_catalog(usd_: float, source, mtr, own=None) -> float:
+    """A booked figure as OpenCode's own figure prices it, to compare the two: a provider's own
+    (`source: provider`) at its metered one, the catalog's (or the user's, which the task's
+    catalog.json gives OpenCode too); any other as booked (#1165, 2026-11-24). A provider's
+    `usage.cost` (``own`` "cost") as booked too: OpenCode 2.3.2 reports a usage's `cost` as its
+    own step and export figure; `estimated_cost` (DeepInfra's) it never reads. At the
+    catalog's, every OpenRouter response billed past its listed price booked the excess a second
+    time as a `reconcile` row (#1234, 2026-11-24). A row from before `own` is read as before."""
+    return float(mtr) if source == PROVIDER and own != "cost" and _num(mtr) else usd_
+
+
 def task_total(name: str) -> float:
     """Everything the ledger books for one task, any day."""
     return round(sum(r["usd"] for r in _task_rows(name)), 10)
 
 
 def usd(x: float | None) -> str:
-    """$5, $5.03, $0.0041; `unknown` for None."""
+    """Every dollar figure wb prints: $5.00, $0.42; `<$0.01` under a cent, `$0` for none, and
+    `unknown` for None. One rule here, the pane's and the chat's `usd` too: meter's "$5" and
+    savings' "$5.00" said one cap two ways (#1322)."""
     if x is None:
         return "unknown"
-    if abs(x) >= 1 and abs(x - round(x)) < 0.005:
-        return f"${round(x):.0f}"
+    if x == 0:
+        return "$0"
     if 0 < abs(x) < 0.01:
-        return f"${x:.4f}"
+        return "<$0.01"
     return f"${x:.2f}"
 
 
@@ -315,11 +395,106 @@ def _plan_name(m) -> str:
 
 # What wb start says and refuses (routes.resolve, #1016, calls these on the role's model)
 
-def refusal(m, role: str | None = None, advice: bool = True) -> str | None:
+# A fresh session's first request at the least, in tokens as the room counts a body (its bytes
+# / 4): OpenCode's system prompt and tools, the handbook, the protocol, the user's instructions.
+# A real task's first step read 16,161 input tokens, about 65 KB of body (#1173, 2026-11-24).
+FIRST_TOKENS = 16_384
+
+# An image in a request (#1199's review): OpenCode sends each `run -f` image, and the read tool's,
+# as base64, a data: URI (OpenAI's image_url, an OpenAI-compatible server's) or a `data` field
+# beside its image media type (Anthropic's source, Google's inlineData). At its bytes / 4 one
+# 10 MiB image read as 3.5M tokens, $10.49 at $3/M input: past a $10 cap every request carrying
+# it was refused, and wb start, counting no image, had let the task start (#1118's failure
+# again). A provider counts an image by its pixels after its own downscale, a few thousand
+# tokens (Anthropic's about 1,600, OpenAI's tiles about 1,100, a Qwen-VL's up to 16,384): the
+# room and runner.first_tokens count each at that worst, its base64 left out.
+IMAGE_TOKENS = 16_384
+MEDIA_KEYS = ("media_type", "mimeType", "mime_type", "mediaType")
+
+
+def images_in(body) -> tuple[int, int]:
+    """A request body's images: how many, and the characters of their base64 (each a data: URI,
+    or a `data` string beside an image/ media type), which the room leaves out of its bytes / 4."""
+    n = chars = 0
+    todo = [body]
+    while todo:
+        x = todo.pop()
+        if isinstance(x, dict):
+            data = x.get("data")
+            if isinstance(data, str) and any(isinstance(x.get(k), str) and x[k].startswith("image/")
+                                             for k in MEDIA_KEYS):
+                n, chars = n + 1, chars + len(data)
+            else:
+                todo.extend(x.values())
+        elif isinstance(x, list):
+            todo.extend(x)
+        elif isinstance(x, str) and x.startswith("data:image/") and ";base64," in x[:128]:
+            n, chars = n + 1, chars + len(x)
+    return n, chars
+
+
+def body_tokens(body, size: int) -> float:
+    """A request's input as the room reckons it: its bytes / 4, each image at IMAGE_TOKENS in
+    place of its base64 (images_in)."""
+    n, chars = images_in(body) if isinstance(body, (dict, list)) else (0, 0)
+    return max(size - chars, 0) / 4 + n * IMAGE_TOKENS
+
+
+def request_floor(m, tokens: int = FIRST_TOKENS) -> float | None:
+    """The next request at its worst, as the keyhole's room reckons it: its input ``tokens``
+    (the room's body / 4: runner.first_tokens, else a fresh session's FIRST_TOKENS) and the
+    model's pinned output (options.max_tokens, else limit.output, else models.API_OUTPUT), which
+    OpenCode asks for in full while the window has room, at the dearest tier's prices. None
+    unpriced. #1150 left the input out, to keep this a floor: then a day within the input's cost
+    of the cap passed wb start, feedback, next, resume and drive's look ahead, the round's first
+    request was refused at once, and the cap the refusal named ("a cap of at least") was refused
+    again at that request, a second wake and a second dialog (#1173, 2026-11-24)."""
+    if not (p := price(m)):
+        return None
+    cfg = getattr(m, "config", None) or {}
+    opts = cfg.get("options") if isinstance(cfg.get("options"), dict) else {}
+    lim = cfg.get("limit") if isinstance(cfg.get("limit"), dict) else {}
+    out = _n(opts.get("max_tokens")) or _n(lim.get("output")) or models.API_OUTPUT
+    top = p[-1]
+    return (_n(tokens) * top["input"] + out * max(top["output"], top["reasoning"])) / 1e6
+
+
+def _enough(t: float, worst: float) -> float:
+    """The least cap that lets today's spend ``t`` make one request of ``worst``: up to the cent."""
+    return math.ceil(round((t + worst) * 100, 6)) / 100
+
+
+def _ask(role: str | None, more: str, task=None, asked: bool = False) -> str:
+    """refusal's "Ask the user: …", ``more`` the cap that would do. For a task already running
+    (``task``: wb feedback, next or resume) the role on the GPU is for the next tasks only: the
+    task keeps its API model, so "the role on the GPU" there had the user switch it and the retry
+    refused again with the same line (#1171, 2026-11-24, #1095's mistake in stop_text again). The
+    way off API is routes.off_api's: `wb route <role> gpu` under Agents API changed nothing (#1218).
+    A `--model` start (``asked``) runs on the model it names whatever the roles say, so its way off
+    API is a GPU model, as the local-only refusal's: `wb route <role> gpu` there changed nothing
+    for it, and the retry was refused with the same line (#1233, 2026-11-24)."""
+    if asked and task is None:
+        return f". Ask the user: {more} (wb route cap <usd>), a GPU model, or tomorrow"
+    off = routes.off_api(role)
+    if task is None:
+        return f". Ask the user: {more} (wb route cap <usd>)" + (f", {off[0]} ({off[2]})," if off else "") + " or tomorrow"
+    n = task.name
+    return (f". Ask the user: {more} (wb route cap <usd>) or tomorrow, then try again; or "
+            + (f"{off[0]} ({off[2]}) for the next tasks, with wb takeover {n} or wb discard {n} for this one"
+               if off else f"wb takeover {n} or wb discard {n}") + " (it keeps its API model)")
+
+
+def refusal(m, role: str | None = None, advice: bool = True, tokens: int = FIRST_TOKENS,
+            task=None, asked: bool = False) -> str | None:
     """Why an API model can't start now, or None: no price (and not a plan), or today's spend
-    at the cap. ``role`` names the line's subject ("trivial"), else the model. ``advice``: the
-    cap line's "Ask the user: …"; the busy opt-in's note goes without, its role being on the GPU
-    already and its start only waiting for it (wave 2's merge). No cap at all (NO_CAP, or
+    at the cap, or so near it that one request at its worst (request_floor, its input
+    ``tokens``: runner.first_tokens, #1173) would pass it: the room refused that request at
+    once, after the checkout, setup and base check (#1150).
+    ``role`` names the line's subject ("trivial"), else the model. ``advice``: the cap line's
+    "Ask the user: …"; the busy opt-in's note goes without, its role being on the GPU already
+    and its start only waiting for it (wave 2's merge); ``task``, a task already running, whose
+    advice keeps the GPU for the next tasks (`_ask`, #1171); ``asked``, a `--model` start, whose
+    advice is a GPU model (#1233). No cap at all (NO_CAP, or
     UNREADABLE) is refused too: a `--model` start without one passed the dialog and wb start,
     then the guard stopped it in round 1, after the checkout, setup and base check (#1089,
     2026-11-23)."""
@@ -332,23 +507,25 @@ def refusal(m, role: str | None = None, advice: bool = True) -> str | None:
         return f"{who}: {no_cap()}"
     if (c := cap()) is not None and (t := today()["usd"]) >= c:
         return (f"{who}: API spend today is {money(t, today()['basis'])} of the {usd(c)} day cap (it resets at local "
-                f"midnight)" + (f". Ask the user: a higher cap (wb route cap <usd>), the role on the GPU "
-                                f"(wb route {role or '<role>'} gpu), or tomorrow" if advice else ""))
+                f"midnight)" + (_ask(role, "a higher cap", task, asked) if advice else ""))
+    if (w := request_floor(m, tokens)) and t + w > c:
+        return (f"{who}: API spend today is {money(t, today()['basis'])} of the {usd(c)} day cap, and one "
+                f"request on it can cost up to {usd(w)} (it resets at local midnight)"
+                + (_ask(role, f"a cap of at least {usd(_enough(t, w))}", task, asked) if advice else ""))
     return None
 
 
 def tail(m) -> str:
-    """The start line's spend part: ` · today ≈$0.42 of $5 (catalog prices)` (`$0.42 … (your
-    prices)` when today's rows and this model are all at the user's prices, #1135), or a plan's
-    ` · plan usage (OpenCode Go): 1.2M tokens today`; "" for a GPU model."""
+    """The start line's spend part: ` · today ≈$0.42 of $5.00` (plain `$0.42` when today's rows
+    are all the provider's own or at the user's prices, #1135, #1165), or a plan's ` · plan usage
+    (OpenCode Go): 1.2M tokens today`; "" for a GPU model."""
     if getattr(m, "kind", "gpu") != "api":
         return ""
     t = today()
     if is_plan(m):
         return f" · plan usage ({_plan_name(m)}): {_tokens(t['plan_tok'].get(m.provider, 0))} tokens today"
-    c, b = cap(), basis([*t["bases"], model_basis(m)])
-    return (f" · today {money(t['usd'], b)}" + (f" of {usd(c)}" if c is not None else ", no day cap")
-            + NOTE[b])
+    c = cap()
+    return f" · today {money(t['usd'], t['basis'])}" + (f" of {usd(c)}" if c is not None else ", no day cap")
 
 
 # The runner's meter, one per task in this process
@@ -371,11 +548,15 @@ def for_task(task, m=None):
     return _METERS[key]
 
 
-def stop_reason(task) -> str | None:
+def stop_reason(task, ahead: bool = False, tokens: int = FIRST_TOKENS) -> str | None:
     """Why the task's next request must not go out, or None (a GPU task, a plan): the keyhole
     refused one for want of room (status `api_stop`, guard `spend`), today's spend is at the
-    cap, or there is no cap. drive's `_go_on` asks before every round, run_round's tick within
-    one. A free model's is None too: it spends nothing for the cap to keep."""
+    cap, or there is no cap. drive's `_go_on` asks before every round, with ``ahead``: today
+    within one request at its worst (request_floor, its input ``tokens``: runner.first_tokens,
+    #1173) of the cap stops it too, as the round's first request would be refused (#1150).
+    run_round's tick asks within one, without: a request the room let out is never cut for the
+    next one's sake. A free model's is None too: it spends
+    nothing for the cap to keep."""
     mt = for_task(task)
     if mt is None or mt.plan or mt.free:
         return None
@@ -388,11 +569,15 @@ def stop_reason(task) -> str | None:
         return no_cap()
     if (t := today()["usd"]) >= c:
         return f"{STOP}: {money(t, today()['basis'])} of {usd(c)} today"
+    if ahead and (w := request_floor(mt.m, tokens)) and t + w > c:
+        return f"{NEAR}: {money(t, today()['basis'])} of {usd(c)} today, and it could cost up to {usd(w)}"
     return None
 
 
-def stop_text(task) -> str:
-    """The `stuck` notice's lead for a spend stop."""
+def stop_text(task, worst: float | None = None, tokens: int = FIRST_TOKENS) -> str:
+    """The `stuck` notice's lead for a spend stop; ``worst``: the room's refused request at its
+    worst, which the round's stop carries (`_spend_lead`: `api_stop` is consumed by then), else
+    request_floor's with the next request's input ``tokens`` (`_go_on`'s, #1173)."""
     c, t, b = cap(), today()["usd"], today()["basis"]
     if c is None:
         return (f"{task.name} stopped: {no_cap()}. Its work so far is in the worktree; then wb resume "
@@ -400,17 +585,41 @@ def stop_text(task) -> str:
     # "the role on the GPU" went with "then wb resume", but resume keeps the task's API model
     # (fixed per task): the resumed round stopped at the cap again at once (#1095, 2026-11-23).
     # A route change is for the next tasks; this one is taken over or discarded.
-    n, role = task.name, task.spec.get("role") or "<role>"
-    note = f"; {NOTE[b].strip(' ()')}" if t and NOTE[b] else ""
-    return (f"{n} stopped: {STOP} ({money(t, b)} of {usd(c)} today{note}). Its work so far is in the "
+    # The way off API is routes.off_api's, from routes.json now: `wb route <role> gpu` under Agents
+    # API, or for a task the busy opt-in sent, changed nothing (#1218, 2026-11-24).
+    n, off = task.name, routes.off_api(task.spec.get("role"))
+    tail = (f"; or {off[0]} ({off[2]}) for the next tasks, with wb takeover {n} or wb discard {n} for this one"
+            if off else f"; or wb takeover {n} or wb discard {n}") + " (resume keeps its API model)."
+    if w := _near(task, c, t, worst, tokens):  # under the cap: "the cap is reached" had Claude resume into it (#1150)
+        return (f"{n} stopped: {NEAR} (up to {usd(w)}; {money(t, b)} of {usd(c)} today). Its work "
+                f"so far is in the worktree. Ask the user: a cap of at least {usd(_enough(t, w))} (wb route "
+                f"cap <usd>) or tomorrow, then wb resume {n}" + tail)
+    return (f"{n} stopped: {STOP} ({money(t, b)} of {usd(c)} today). Its work so far is in the "
             f"worktree. Ask the user: a higher cap (wb route cap <usd>) or tomorrow, then wb resume "
-            f"{n}; or the role on the GPU (wb route {role} gpu) for the next tasks, with wb takeover "
-            f"{n} or wb discard {n} for this one (resume keeps its API model).")
+            f"{n}" + tail)
+
+
+def _near(task, c: float, t: float, worst: float | None = None,
+          tokens: int = FIRST_TOKENS) -> float | None:
+    """The next request's worst when today ``t`` is under the cap ``c`` but not by that much: the
+    room's own figure (``worst``, else status `api_stop` `worst`), else request_floor's for
+    ``tokens`` of input; None otherwise."""
+    if t >= c or (mt := for_task(task)) is None or not mt.prices:
+        return None
+    # The round's stop consumes `api_stop` (`_ProviderWait.stop`) before the notice is written:
+    # read from status alone, the room's worst was never seen, request_floor (no input) fell
+    # short of the cap, and the notice said "the cap is reached" with a cap too low (#1150,
+    # 2026-11-24). The round carries it instead.
+    stop = task.status.get("api_stop")
+    if not _num(worst):
+        worst = stop.get("worst") if isinstance(stop, dict) and _num(stop.get("worst")) else None
+    w = worst if worst is not None else request_floor(mt.m, tokens)
+    return w if w and t + w > c else None
 
 
 class Meter:
-    """One API task's meter in its runner: the ledger rows, status `api`, the check-in, and the
-    keyhole's hooks (`hooks()`: on_usage and room)."""
+    """One API task's meter in its runner: the ledger rows, status `api`, and the keyhole's hooks
+    (`hooks()`: on_usage and room)."""
 
     def __init__(self, task, m):
         self.task, self.m = task, m
@@ -421,6 +630,10 @@ class Meter:
         self.lock = threading.Lock()
         rows = _task_rows(task.name)  # booked for the task, any day, this runner's too
         self.total = round(sum(r["usd"] for r in rows), 10)
+        # the ledger as OpenCode's figure prices it: a provider's own row at its catalog figure
+        # (`metered`), unless it was usage.cost, which OpenCode reports too (#1165, #1234)
+        self.at_catalog = round(sum(_at_catalog(r["usd"], r.get("source"), r.get("metered"),
+                                                r.get("own")) for r in rows), 10)
         self.bases = {row_basis(r) for r in rows}
         self.metered_total = 0.0
         self.tok = {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0, "reasoning": 0}
@@ -444,7 +657,7 @@ class Meter:
         return _num(oc) and oc >= 0 and not (oc == 0 and (metered(self.prices, tok) or 0) > 0)
 
     def _book(self, kind: str, usd_: float | None, source: str, tok: dict | None = None,
-              mtr: float | None = None) -> None:
+              mtr: float | None = None, own: str | None = None, cut: bool = False) -> None:
         ts = time.time()
         row = {"ts": round(ts, 3), "day": day(ts), "kind": kind, "task": self.task.name,
                "round": self.n or self.task.status.get("round"), "provider": self.m.provider,
@@ -454,6 +667,10 @@ class Meter:
         if self.plan:
             row["plan"] = self.m.provider
         row["source"] = source
+        if own:
+            row["own"] = own   # the provider's field: `cost` OpenCode reports too (#1234)
+        if cut:
+            row["cut"] = True  # a response cut short: the keyhole's estimate (#1276)
         if self.yours and not self.plan:
             row["prices"] = YOURS
         if tok is not None:
@@ -462,6 +679,7 @@ class Meter:
         with self.lock:
             if _num(row["usd"]):
                 self.total += row["usd"]
+                self.at_catalog += _at_catalog(row["usd"], source, mtr, own)
                 self.bases.add(row_basis(row))
             if _num(mtr):
                 self.metered_total += mtr
@@ -469,52 +687,43 @@ class Meter:
                 self.tok[k] = self.tok.get(k, 0) + v
             api = {"usd": None if self.plan else round(self.total, 6),
                    "metered": round(self.metered_total, 6), "source": source, "tok": dict(self.tok),
+                   # the total as OpenCode's estimate prices it, which results.api_usage compares
+                   # its export with: against `usd`, a provider's own rows came back at the
+                   # catalog's in `paid` (#1165's review, 2026-11-24)
+                   **({} if self.plan else {"at_catalog": round(self.at_catalog, 6)}),
                    "prices": basis(self.bases or {model_basis(self.m)}),
                    **({"plan": self.m.provider} if self.plan else {})}
             # written under the lock: the keyhole's thread and the runner's book at once, and a
             # total written after a newer one left status `api` under the ledger (the review)
             self.task.set_status(api=api)
-        if _num(row["usd"]) and row["usd"] > 0:
-            self._checkin()
-
-    def _checkin(self) -> None:
-        """Once a day across every task: today past CHECKIN_SHARE of the cap wakes Claude once."""
-        c = cap()
-        if not c or today()["usd"] < CHECKIN_SHARE * c or today()["checkin"]:
-            return
-        path = ledger_path()
-        with store.locked(path.with_name(path.name + ".checkin.lock")):
-            t = today()
-            if t["checkin"]:
-                return
-            ts = time.time()
-            store.append_jsonl(path, {"ts": round(ts, 3), "day": day(ts), "kind": "checkin",
-                                      "task": self.task.name, "usd_today": round(t["usd"], 6), "cap": c})
-        b, note = t["basis"], NOTE[t["basis"]].strip(" ()")
-        self.task.notify("checkin", f"API spend today has passed half the day cap: {money(t['usd'], b)} of "
-                                    f"{usd(c)} ({self.task.name} {money(self.total, b)} so far"
-                                    f"{'; ' + note if note else ''}). Nothing to do "
-                                    "unless the user wants to change it.", round=self.n or None)
-
     def on_usage(self, usage: dict) -> None:
         """The keyhole's hook (its thread): one upstream response's usage, booked as a step."""
         if not isinstance(usage, dict):
             return
         tok = usage_tokens(usage)
         mtr = metered(self.prices, tok)
-        own = usage.get("cost")  # the provider's own figure (OpenRouter's usage.cost)
-        if _num(own) and own >= 0 and not (own == 0 and (mtr or 0) > 0):
-            value, source = float(own), "provider"
+        # the provider's own figure: OpenRouter's usage.cost, DeepInfra's usage.estimated_cost (in
+        # its last, `choices: []` chunk, at its own rate: dropped, every DeepInfra figure and the
+        # day cap ran at the catalog's, about 2x the bill, #1165, 2026-11-24)
+        field = "cost" if _num(usage.get("cost")) else "estimated_cost"
+        own = usage.get(field)
+        cut = usage.get("cut") is True  # keyhole._cut_usage's estimate: a running cost is partial
+        if not cut and _num(own) and own >= 0 and not (own == 0 and (mtr or 0) > 0):
+            value, source = float(own), PROVIDER
         else:
-            value, source = mtr, "keyhole"
+            value, source, field = mtr, "keyhole", None
         with self.lock:
             self.keyhole = True
-            self.round_kh += value or 0
-        self._book("step", value, source, tok, mtr)
+            # what the keyhole saw at the prices OpenCode's step figure uses (_at_catalog)
+            self.round_kh += _at_catalog(value or 0, source, mtr, field)
+        self._book("step", value, source, tok, mtr, field, cut)
 
     def step(self, part: dict) -> None:
         """A `step_finish` (the runner's thread): its own row, or OpenCode's figure reconciling
-        what the keyhole booked."""
+        what the keyhole saw. Compared at the same prices (round_kh: a provider's own figure at
+        its catalog one, but a usage.cost as booked, which OpenCode's figure is too, #1234):
+        against what was booked, OpenCode's catalog estimate topped every DeepInfra row back up
+        to the catalog's (#1165, 2026-11-24)."""
         if not isinstance(part, dict):
             return
         tok = step_tokens(part)
@@ -539,9 +748,10 @@ class Meter:
     def end_round(self, sessions: dict) -> None:
         """At a round's end: OpenCode's figure for the whole task, the `info.cost` of each of its
         sessions (``sessions``: id -> export), which counts the title requests no step carries.
-        More than the ledger has: one `reconcile` row with the difference. Never less (the
-        keyhole's view is what went out), never from a 0 for a priced model, never from a
-        session that didn't export."""
+        More than the ledger has, a provider's own rows at their catalog figure (at_catalog, as in
+        step: #1165; a usage.cost row as booked, #1234): one `reconcile` row with the difference.
+        Never less (the keyhole's view is what went out), never from a 0 for a priced model, never
+        from a session that didn't export."""
         if self.plan or not sessions:
             return
         costs = [(e.get("info") or {}).get("cost") if isinstance(e, dict) else None
@@ -550,14 +760,15 @@ class Meter:
             return
         said = sum(costs)
         with self.lock:
-            extra = said - self.total
+            extra = said - self.at_catalog
         if said == 0 or extra <= EPS:
             return
         self._book("reconcile", extra, "opencode")
 
     def room(self, body: dict, size: int) -> float | None:
         """The keyhole's check before each request: the cap less today less this request at its
-        worst (its body's length / 4 at the input price, its max output at the output price).
+        worst (its body's length / 4 at the input price, an image at IMAGE_TOKENS: body_tokens;
+        its max output at the output price).
         Negative: refused, and status `api_stop` (guard `spend`) stops the round on the next
         tick. None: nothing to keep (a plan, a free model). No cap at all is no room, and so is an
         unpriced model: wb start refuses one (refusal), and whichever path started it anyway, it
@@ -574,13 +785,13 @@ class Meter:
                 self.task.set_status(api_stop={"guard": "spend", "text": no_cap()})
             return -1.0
         top = self.prices[-1]  # the dearest tier: the worst case
-        out = next((body.get(k) for k in ("max_tokens", "max_completion_tokens", "max_output_tokens")
-                    if _num(body.get(k))), models.API_OUTPUT) if isinstance(body, dict) else models.API_OUTPUT
-        worst = (size / 4 * top["input"] + out * max(top["output"], top["reasoning"])) / 1e6
+        out = max_output(body)
+        worst = (body_tokens(body, size) * top["input"] + out * max(top["output"], top["reasoning"])) / 1e6
         t = today()["usd"]
         left = c - t - worst
         if left < 0 and not self.task.status.get("api_stop"):
-            self.task.set_status(api_stop={"guard": "spend", "text": (
-                f"{STOP}: {money(t, today()['basis'])} of {usd(c)} today, and its next request could cost up to "
-                f"{usd(worst)}")})
+            # NEAR while today is under the cap (#1150); `worst` for stop_text's "at least" cap
+            self.task.set_status(api_stop={"guard": "spend", "worst": round(worst, 10), "text": (
+                f"{STOP if t >= c else NEAR}: {money(t, today()['basis'])} of {usd(c)} today, and its next "
+                f"request could cost up to {usd(worst)}")})
         return left

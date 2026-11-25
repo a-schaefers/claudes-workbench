@@ -46,7 +46,7 @@ Never say a sound "sounds" good. Say what the checks show, and let the user's ea
 
 Mind each engine's `notes` in `wb audio --list`: an audio model's licence can forbid commercial
 use or require attribution. Without `--engine` each kind runs the one listed `default` (the user's
-pick in the pane's Settings), else its first; `wb audio --default NAME` changes it, only when the user asks. A `--ref` clip clones a voice: use only the user's own voice or one
+pick in the web app's Settings), else its first; `wb audio --default NAME` changes it, only when the user asks. A `--ref` clip clones a voice: use only the user's own voice or one
 they have the rights to, and never a real person's voice taken from a recording found online. A
 GPU engine needs the GPU to itself: while a task holds it, `wb audio` refuses and names the
 holder, and `--wait` (Bash `run_in_background: true`) queues behind it. A url engine without an
@@ -54,7 +54,7 @@ holder, and `--wait` (Bash `run_in_background: true`) queues behind it. A url en
 
 **No ready engine? Offer to set one up; never set it up unasked.** This step is optional, as
 ARCHITECTURE.md's Audio section says (in the workbench code, two directories above
-`readlink -f "$(command -v wb)"`). Read `wb scout` for the OS, GPU and RAM, then propose in one
+`readlink -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/workbench"`). Read `wb scout` for the OS, GPU and RAM, then propose in one
 message:
 - the runtime that section recommends, on the right backend (Vulkan for AMD or Intel, CUDA for
   NVIDIA, Metal on macOS, the CPU without a GPU), built from its upstream source or its release
@@ -66,4 +66,6 @@ message:
 
 Wait for a yes. Then install, write `~/.config/workbench/audio.json` (the licence goes in
 `notes`, `"gpu": false` for CPU engines, the listener as `"kind": "listen"`), make one test
-clip, and check its line (a speech test with WER 0%) before saying it works.
+clip, and check its line (a speech test with WER 0%) before saying it works. A listener also
+turns on the web chat's mic: the user dictates from the phone, and you get only the words they
+send (a `"gpu": false` listener works while a task holds the GPU; a GPU one gives way then).

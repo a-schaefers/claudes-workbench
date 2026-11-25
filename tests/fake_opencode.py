@@ -2,6 +2,17 @@
 """Stands in for `opencode run --format json` in tests. FAKE_SCENARIO picks the behaviour:
 
   ok     write answer.txt = "42", say so
+  patch  as ok, and lib/helper.py too, in one `patch` call (a GPT model's in 2.3.2: no edit or
+         write): input `patchText` only, the files in `state.metadata.files[].file` (#1148)
+  shellwrite  lib/util.py with a `bash` row run in lib/ by its `workdir` (cat > util.py <<X),
+         then main.py importing it and answer.txt = "42" with write (#1210, its third review);
+         a continued session (--session, a feedback round) adds a line to lib/util.py (#1259)
+  buildout  dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names
+         neither, then answer.txt = "42" with write (#1210's review)
+  pkgbuild  a `bash` row `grep -n answer pkg/a.py`, then build/lib/pkg/{__init__,a,b}.py behind
+         one `python -m build`, then answer.txt = "42" with write (#1210's second review)
+  stay   as ok, then stays open for an hour, its output open and silent: the agent's turn over
+         (reason stop) and OpenCode not exiting (#1160)
   fix    first round writes "41" (wrong); a continued session (--session) writes "42"
   loop   run the same failing command over and over (the stuck detector should stop it)
   hang   print one event, then go silent (the silence timeout should stop it)
@@ -14,20 +25,51 @@
   fill   writes "41", then a step that fills 76% of a 32K window (6K of it reasoning), then
          works on for an hour; a fresh session handed the task behaves like ok
   read   reads, a step that fills 76% before any change, then writes "42" like ok
+  donefull  writes "42", a step at 3K, then its last step (reason stop) at 20.2K of a 32K window
+         (61%), past fresh_at only as its turn ends (#1151); a fresh session behaves like ok
   compact  writes "41", a step at 52% of a 32K window, then one at 15%: OpenCode compacted it
          between them, which `run --format json` doesn't print (#774); then works on for an
          hour; a fresh session handed the task behaves like ok. FAKE_COMPACT_READ: it reads
          before writing, its first step at 50%. FAKE_COMPACT_BURST: its step before is at 30%,
-         then three reads whose 16 KB outputs (`state.output`) take it past the point (#1086)
+         then three reads whose 16 KB outputs (`state.output`) take it past the point (#1086).
+         FAKE_COMPACT_DONE: it writes "42" and its step at 15% ends its turn (reason stop, #1151).
+         FAKE_COMPACT_KEPT: its step after is at 34%, over half the one before: the tail OpenCode
+         2.4.1 keeps verbatim beside the summary (#1185)
   floor  reads 48% of its window before its first change, then fills to 76%, then writes "42"
+  think  a step at 40% of a 32K window whose 8192 output is a think OpenCode never sends back,
+         then writes "41", a step whose prompt grew (5.2K), and writes "42" like ok (#1219)
   refill every session changes a file, then fills 76% and works on for an hour
-  explore  FAKE_READS (41) reads of different files, each a small step, then 2 s (the runner
-         sees the last read before the edit) and writes "42" like ok: a one-shot still exploring
+  explore  FAKE_READS (41) reads of different files, each a small step, then FAKE_EXPLORE_PAUSE
+         seconds (2: the runner sees the last read before the edit; a runner slower than that
+         finds the file changed and lifts the guard) and writes "42" like ok: a one-shot still
+         exploring. FAKE_EXPLORE_ONCE: the reads, then an hour's wait; a continued session
+         (--session) behaves like ok: an agent the runner's explore nudge set to work (#1134)
+  selfreads  behaves like ok; a run whose prompt is the self-review's (runner.SELF_REVIEW, in
+         a continued session, a fresh one's handoff or a carry-on) breaks answer.txt ("41") and
+         writes it back, then FAKE_READS (45) reads and goes on exploring for an hour: the tree
+         as it began (#1168). FAKE_SELF_RERUN: those calls rerun the acceptance command
+         (`shell grep -qx 42 answer.txt`); FAKE_SELF_MISS: the reads fail (#1250).
+         FAKE_SELF_KEEP: it leaves "43" instead. FAKE_SELF_FILL: the
+         self-review's first session breaks it, then fills 76% of a 32K window and works on for
+         an hour; the fresh session carrying on plays the rest (#1188), or with FAKE_SELF_KEEP only
+         reads, the check left broken. FAKE_SELF_STALL: the self-review's first run breaks it,
+         says a few words and is silent for an hour; the run after a nudge or a note (its prompt
+         the NUDGE or a steer's, "Claude, your reviewer") plays the rest (#1207).
+         FAKE_SELF_API (ratelimit or down): the self-review's run plays that API scenario, its
+         tree the green one. FAKE_SELF_REFILL: every session of the self-review breaks answer.txt
+         or restores it, by turns, and fills 76% of a 32K window: the sixth, past HANDOVER_MAX,
+         on the green tree (#1261). FAKE_SELF_CRASH: after its reads the self-review's run
+         ends on its server's error (a provider.http 500, as Ollama's runner killed out of
+         memory), exit 1, the server still up (#1270)
   bgwait a command OpenCode moved to the background: `background_wait`, quiet for FAKE_BGWAIT
          seconds (6), then writes "42" like ok
   devserver  writes "42", starts `npm run dev` in the background, ends its turn (reason stop),
          then `background_wait` on that job for an hour (a server never ends: #658)
   toolhang  one tool call, then silent (a command that prints nothing for long)
+  fgcmd  runs `$SHELL -c 'sleep FAKE_FG'` (12) in the foreground, silent until it ends, as
+         OpenCode prints a shell call only then (a long `timeout`, #1386); then writes "42"
+  bgthink  one shell call whose `$SHELL -c 'sleep 300'` it leaves running, as OpenCode moves a
+         call past its timeout to the background, then silent for an hour (thinking, #1386)
   retry  no answer from the model's server: a `retry` line every FAKE_RETRY_EVERY seconds (1),
          OpenCode cutting the request at its provider timeout and sending it again (#491)
   say    a few words and no tool call ("I will inspect the files")
@@ -50,8 +92,12 @@ FAKE_SURROGATE: a run first reads a file whose name and text end in half an emoj
 unpaired surrogate escaped, which is valid JSON).
 FAKE_LATIN1: a run first prints a line that isn't UTF-8 (`caf\xe9`, Latin-1).
 FAKE_RUNS rows also say what OpenCode's environment had (`opencode_db`, `xdg_data`, `xdg_state`,
-`shell`) and what a command the agent runs through `$SHELL -c` sees (`shell_sees`: its
-XDG_DATA_HOME, XDG_STATE_HOME, OPENCODE_DB and SHELL, `-` for one unset).
+`shell`, and `env_names`: every variable's name, never a value) and what a command the agent runs through `$SHELL -c` sees (`shell_sees`: its
+XDG_DATA_HOME, XDG_STATE_HOME, OPENCODE_DB and SHELL, `-` for one unset); with FAKE_CONNECT (a
+port) the run connects to it on 127.0.0.1 first, its row's `connect` "ok" or the errno (13: the
+lane refused it, #1197); and `files`: each `run -f/--file` it attached, `{name, bytes}`, read as
+OpenCode's client reads it (one it can't open is "File not found", exit 1; a directory or one over
+10 MiB "Cannot attach", #1199).
 A run with OPENCODE_DB set records its new session in that home (`<db>.sessions`), as OpenCode
 keeps it in its database (#1010). `session export` prints one finished step, its `info.home` the
 database it read: FAKE_FILL sets the context it read, FAKE_COMPACTED adds a completed compaction;
@@ -61,8 +107,12 @@ does when another service holds the managed port, and so does `auth list` or `au
 (#1070). `auth export <provider>` prints the rows of
 FAKE_AUTH_EXPORT (a JSON list, as OpenCode 2.3.2 prints them) for that provider, or `[]`, and
 appends the provider to FAKE_AUTH_LOG when set. `--version` says
-`FAKE_VERSION` (2.3.0). A `run` starts the config's workbench MCP server and lists its tools,
-as OpenCode does, unless FAKE_NO_MCP.
+`FAKE_VERSION` (2.3.0). A `run` starts the config's local MCP servers (the workbench one, and
+a user's the layer passes through: tests/fake_mcp.py) and lists their tools, as OpenCode does,
+unless FAKE_NO_MCP; FAKE_MCP_LOG gets one line a run, {server: [tool, ...]}. Each server's
+connection goes in OpenCode's own log, $XDG_DATA_HOME/opencode/log/opencode.log (with that set
+alone), as 2.3.2 writes it: `message="mcp connected" server=<name> tools=<n>`, or `message="mcp connect failed"
+server=<name> status.error="<its stderr>"` for one that listed no tools.
 
 API models (#1011), as the spike for #1009 saw OpenCode 2.3.2 print them:
   ratelimit  a 429: `retry` events (attempts 2 to FAKE_RETRIES+1, 10 by default, FAKE_RETRY_EVERY
@@ -86,18 +136,27 @@ WB_FAKE_API sets a model's or a provider's state, `<provider>[/<id>]=<state>,…
 one of the API scenarios above (or `ok`): a run of that model (a config model's too) plays it,
 its own state before its provider's, and a `nokey` provider
 drops out of `api model.list`, `models` and `auth list`, as one OpenCode can't authenticate does.
-`api model.list` prints `{location, data}`; `models` prints `<provider>/<id>` lines and, like
+An `env` provider (#1189) has its key only in `<PROVIDER>_API_KEY` (env_var): `auth list` gives it
+one connection, `{type: "env", name}`, while that variable is set (and drops it otherwise), as
+2.3.2 does, and `auth export` prints no row of it; its runs play `ok`.
+`api model.list` prints `{location, data}`; `serve --stdio` (how wb reads the catalog: models.model_list)
+prints `{"url": ...}`, a server on 127.0.0.1 asking Basic `opencode:<OPENCODE_PASSWORD>` (401
+otherwise), until its stdin closes: GET /api/plugin `{location, data: [plugins]}`, GET /api/model
+the same `{location, data}`. FAKE_COLD (a number) plays OpenCode 2.4's cold server (2026-11-24): its
+first FAKE_COLD plugin.list reads list no plugin, and model.list until then lists only the
+catalog's first entry; FAKE_SERVE_PID, a file: the server writes its pid there. `models` prints `<provider>/<id>` lines and, like
 2.3.2, takes no provider argument; `auth list --format json` prints `[{id, name, connections:
 [{type: "credential", id, label, method: "key"}]}]` per provider. FAKE_CALLS, a file: each `api`,
-`models` and `auth` call appends its argv (how often wb read the catalog); FAKE_CATALOG_FAIL:
-`api model.list` and `models` print an error on stderr and exit 1. `run -m <provider>/<id>#<variant>`
+`models`, `serve` and `auth` call appends its argv (how often wb read the catalog); FAKE_CATALOG_FAIL:
+`api model.list`, `models` and `serve` print an error on stderr and exit 1. `run -m <provider>/<id>#<variant>`
 splits the provider at the first `/` and the variant at the first `#` after it; a catalog
 provider's unknown model is `nokey`'s error, its unknown variant (the catalog's and the config's
 `provider.<p>.models.<m>.variants`, from OPENCODE_CONFIG and OPENCODE_CONFIG_CONTENT) `Variant
 unavailable for <id>: <v>`, exit 1. Every `step_finish` carries `part.cost` (USD, from the
 catalog's first price, its context tier past `size`; FAKE_COST for a model with none, else 0) and
 `part.tokens{input, output, reasoning, cache{read, write}}`; `session export` gives each assistant
-message `cost` (FAKE_COST, else 0) and `tokens`, and `info.cost`, `info.tokens` their sums.
+message `cost` (FAKE_COST, else 0) and `tokens`, and `info.cost`, `info.tokens` their sums; its
+first message is the `agent-switched` one each `run --agent` records (`agent`, `previous`).
 FAKE_STEP_IN sets a step's input tokens (120), so a test prices it; FAKE_STEP_COST plays
 OpenCode's figure (a number, or `none`: no `part.cost`); scenario `spend` (#1019): a read and a
 priced `step_finish` every FAKE_STEP_EVERY seconds (0.3), FAKE_STEPS of them (50), then `ok`'s
@@ -105,11 +164,17 @@ answer, as an API task spending until the spend guard stops it.
 With OPENCODE_MODELS_PATH (a models.dev v2 catalog, as 2.3.2 reads it in place of its own), a
 `run -m` of a provider the file lists finds the model there or not at all (`nokey`'s error), its
 variants the config's only (the file makes none: wb leaves `reasoning` unsupported); FAKE_RUNS
-rows record it as `models_path`, and OPENCODE_CONFIG_CONTENT as `content`.
+rows record it as `models_path`, and OPENCODE_CONFIG_CONTENT as `content`. `run --agent <id>`
+takes an agent OpenCode 2.3.2 has built in or the config defines (`agents.<id>` in
+OPENCODE_CONFIG, then OPENCODE_CONFIG_CONTENT; `disabled: true` removes it), else prints
+`Agent not found: "<id>"`, exit 1 (#1290); FAKE_RUNS rows record it as `agent` (None: no flag).
   http   a model request as OpenCode makes one, through its config (#1015): the run's provider's
          options from OPENCODE_CONFIG, then OPENCODE_CONFIG_CONTENT over them; POST
          <baseURL>/chat/completions with `Authorization: Bearer <apiKey>` (an `anthropic`
-         provider: <baseURL>/messages?beta=true with `x-api-key`), through urllib, so the
+         provider: <baseURL>/messages?beta=true with `x-api-key`; `google`, as 2.3.2's Gemini
+         route: <baseURL>/models/<id>:streamGenerateContent?alt=sse with `x-goog-api-key` and
+         no `model` in the body; `azure`: <baseURL>/chat/completions with `api-key`, as its
+         package posts to a base that isn't `*.openai.azure.com`), through urllib, so the
          environment's http_proxy and no_proxy apply as they do to OpenCode's fetch. A 2xx is
          `ok` (it writes 42); another status is OpenCode's error for it, the upstream's message
          verbatim (`provider.auth` for 401/403 or, as 2.3.2, "Incorrect API key provided",
@@ -147,18 +212,85 @@ def api_state(provider: str, mid: str = "") -> str:
     return states.get(f"{provider}/{mid}") or states.get(provider) or "ok"
 
 
+def env_var(provider: str) -> str:
+    """The variable an `env` provider's key is in: `<PROVIDER>_API_KEY`, as the catalog names
+    DeepSeek's DEEPSEEK_API_KEY."""
+    return re.sub(r"[^A-Z0-9]", "_", provider.upper()) + "_API_KEY"
+
+
 def reachable() -> list:
     """The catalog as OpenCode lists it: only providers it can authenticate."""
     return [e for e in catalog_file()["data"]
             if api_state(e["providerID"], e["id"]) != "nokey"]
 
 
-if os.environ.get("FAKE_CALLS") and args[:1] in (["api"], ["models"], ["auth"]):
+if os.environ.get("FAKE_CALLS") and args[:1] in (["api"], ["models"], ["auth"], ["serve"]):
     with open(os.environ["FAKE_CALLS"], "a") as fh:  # which catalog and key reads wb made (#1013)
         fh.write(json.dumps(args) + "\n")
-if os.environ.get("FAKE_CATALOG_FAIL") and (args[:2] == ["api", "model.list"] or args[:1] == ["models"]):
+if os.environ.get("FAKE_CATALOG_FAIL") and (args[:2] == ["api", "model.list"]
+                                            or args[:1] in (["models"], ["serve"])):
     print("Error: Unable to connect. Is the computer able to access the url?", file=sys.stderr)
     sys.exit(1)
+if args[:2] == ["serve", "--stdio"]:
+    import base64
+    import threading
+    import urllib.parse
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    password = os.environ.get("OPENCODE_PASSWORD") or os.environ.get("OPENCODE_SERVER_PASSWORD") or ""
+    cold = [int(os.environ.get("FAKE_COLD") or 0)]
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            want = "Basic " + base64.b64encode(f"opencode:{password}".encode()).decode()
+            if self.headers.get("Authorization") != want:
+                return self.reply(401, {"_tag": "Unauthorized"})
+            url = urllib.parse.urlsplit(self.path)
+            where = (urllib.parse.parse_qs(url.query).get("location[directory]") or [os.getcwd()])[0]
+            if url.path == "/api/plugin":
+                loaded = cold[0] <= 0
+                cold[0] -= 1
+                return self.reply(200, {"location": {"directory": where},
+                                        "data": [{"id": "fake.models", "state": {"status": "active"}}]
+                                        if loaded else []})
+            if url.path == "/api/model":  # cold: what has loaded so far, as 2.4's model.list answers
+                rows = reachable()
+                return self.reply(200, {"location": {"directory": where},
+                                        "data": rows if cold[0] < 0 or not os.environ.get("FAKE_COLD")
+                                        else rows[:1]})
+            self.reply(404, {"_tag": "NotFound"})
+
+        def reply(self, code, doc):
+            body = json.dumps(doc).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    class Listens(ThreadingHTTPServer):
+        # listens at once, as the tests' own servers (_Listens, #950): HTTPServer's server_bind
+        # looks the address's name up (socket.getfqdn), 35 s on GitHub's macOS runners, past
+        # models.model_list's 30 s, so every catalog read there failed ("opencode model.list took
+        # over 30 s") and each macOS shard failed some 40 API tests (nightly run 45454423406,
+        # 2026-11-24)
+        def server_bind(self):
+            import socketserver
+            socketserver.TCPServer.server_bind(self)
+            self.server_name, self.server_port = self.server_address[:2]
+
+    if os.environ.get("FAKE_SERVE_PID"):
+        with open(os.environ["FAKE_SERVE_PID"], "w") as fh:
+            fh.write(str(os.getpid()))
+    server = Listens(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    print(json.dumps({"url": f"http://127.0.0.1:{server.server_address[1]}"}), flush=True)
+    sys.stdin.read()  # until the client closes it, as `serve --stdio` waits
+    server.shutdown()
+    sys.exit(0)
 if args[:2] == ["api", "model.list"]:  # with or without --standalone, as the real one takes
     print(json.dumps({"location": {"directory": os.getcwd()}, "data": reachable()}))
     sys.exit(0)
@@ -182,6 +314,10 @@ if args[:2] == ["auth", "list"]:
                                                       "label": "default", "method": "key"}]}
                 for p in dict.fromkeys(e["providerID"] for e in doc["data"])]
     rows = [r for r in rows if api_state(r["id"]) != "nokey"]
+    # `env`: the key only in the provider's variable, as 2.3.2 lists it (#1189): an `env`
+    # connection, and only while the variable is set in OpenCode's environment
+    rows = [{**r, "connections": [{"type": "env", "name": env_var(r["id"])}]} if api_state(r["id"]) == "env"
+            else r for r in rows if api_state(r["id"]) != "env" or os.environ.get(env_var(r["id"]))]
     print(json.dumps(rows) if "json" in args else "\n".join(r["id"] for r in rows))
     sys.exit(0)
 if args == ["--version"]:  # wb doctor; FAKE_VERSION plays an older or odder build
@@ -193,7 +329,8 @@ if args[:2] == ["auth", "export"]:  # models.auth_key: OpenCode 2.x's credential
         with open(os.environ["FAKE_AUTH_LOG"], "a") as f:
             f.write(f"{pid}\n")
     rows = json.loads(os.environ.get("FAKE_AUTH_EXPORT") or "[]")
-    print(json.dumps([r for r in rows if pid is None or r.get("integrationID") == pid]))
+    print(json.dumps([r for r in rows if (pid is None or r.get("integrationID") == pid)
+                      and api_state(r.get("integrationID") or "") != "env"]))  # none stored (#1189)
     sys.exit(0)
 
 
@@ -226,10 +363,14 @@ if args[:2] == ["session", "export"]:  # `wb watch`: one finished step, as OpenC
     compacted = [{"type": "compaction", "id": f"{sid}-c", "status": "completed", "reason": "auto",
                   "summary": "Earlier: read answer.txt.", "time": {"created": 1500}}] \
         if os.environ.get("FAKE_COMPACTED") else []
-    exported = {"info": {"id": sid, "home": db_path()}, "messages": [
+    # each round's `--agent wb-code` puts an `agent-switched` message before its prompt, even to
+    # the agent the session had (2.3.2, #1290): readers go by a message's type, never its place
+    exported = {"info": {"id": sid, "home": db_path(), "agent": "wb-code"}, "messages": [
+        {"type": "agent-switched", "id": f"{sid}-m0", "time": {"created": 900}, "agent": "wb-code",
+         "previous": "wb-code"},
         {"type": "user", "id": f"{sid}-m1", "time": {"created": 1000}, "text": "Write the answer."},
         *compacted,
-        {"type": "assistant", "id": f"{sid}-m2", "finish": "stop",
+        {"type": "assistant", "id": f"{sid}-m2", "agent": "wb-code", "finish": "stop",
          "time": {"created": 2000, "firstToken": 3000, "streamed": 5000, "completed": 5000},
          "cost": float(os.environ.get("FAKE_COST") or 0),
          "tokens": {"input": int(os.environ.get("FAKE_FILL", 1200)), "output": 80, "reasoning": 0,
@@ -295,10 +436,8 @@ def fail(kind: str, message: str, status: int | None = None):
     sys.exit(1)
 
 
-def layer_variants(provider: str, mid: str) -> set:
-    """The variants the config adds to a model: V1 `provider.<p>.models.<m>.variants.<name>`,
-    V2 `providers.<p>.models.<m>.variants: [{id}]`, from the layer file and the content."""
-    found = set()
+def config_docs() -> list:
+    """The layer file and the content, in the order OpenCode loads them."""
     docs = []
     if os.environ.get("OPENCODE_CONFIG"):
         try:
@@ -310,7 +449,14 @@ def layer_variants(provider: str, mid: str) -> set:
         docs.append(json.loads(os.environ.get("OPENCODE_CONFIG_CONTENT") or "{}"))
     except ValueError:
         pass
-    for doc in docs:
+    return docs
+
+
+def layer_variants(provider: str, mid: str) -> set:
+    """The variants the config adds to a model: V1 `provider.<p>.models.<m>.variants.<name>`,
+    V2 `providers.<p>.models.<m>.variants: [{id}]`, from the layer file and the content."""
+    found = set()
+    for doc in config_docs():
         for key in ("provider", "providers"):
             v = (((doc.get(key) or {}).get(provider) or {}).get("models") or {}).get(mid) or {}
             v = v.get("variants") or {}
@@ -393,12 +539,14 @@ def api_request() -> None:
     fail("provider.rate-limit", "too many retries", 429)
 
 
-def tool(name, inp, status="completed", error=None, output=None):
+def tool(name, inp, status="completed", error=None, output=None, metadata=None):
     state = {"status": status, "input": inp}
     if error:
         state["error"] = error
     if output is not None:  # `part.state.output`, the result as the model gets it (2.3.2)
         state["output"] = output
+    if metadata is not None:  # `part.state.metadata`: a patch's `files` (2.3.2, #1148)
+        state["metadata"] = metadata
     emit("tool_use", tool=name, state=state)
 
 
@@ -410,6 +558,25 @@ def finish(reason="stop"):  # FAKE_STEP_IN: the step's input tokens (what it cos
 if args and args[0] == "run" and args[-1].startswith("-") and args[-2:-1] != ["--"]:
     print("opencode run [flags] [<message...>]", file=sys.stderr)  # OpenCode 2.3 took it for a flag
     sys.exit(1)
+# `run -f/--file <path>` (repeatable, before `--`), as 2.3.2's run.ts prepareFile: a path not
+# there is "File not found: <path>", one not a regular file or over 10 MiB "Cannot attach …", exit
+# 1 before any event; each opened here, in the lane, as OpenCode's client opens it (#1199)
+attached = []
+if args and args[0] == "run":
+    flags = args[:args.index("--")] if "--" in args else args
+    for i, flag in enumerate(flags[:-1]):
+        if flag in ("-f", "--file"):
+            want = os.path.join(os.environ.get("PWD") or os.getcwd(), flags[i + 1])
+            try:
+                with open(want, "rb") as fh:
+                    if not os.path.isfile(want) or os.fstat(fh.fileno()).st_size > 10 * 1024 * 1024:
+                        print(f"Error: Cannot attach a directory, special file, or file larger than "
+                              f"10 MiB: {flags[i + 1]}", file=sys.stderr)
+                        sys.exit(1)
+                    attached.append({"name": os.path.basename(want), "bytes": len(fh.read())})
+            except OSError:
+                print(f"Error: File not found: {flags[i + 1]}", file=sys.stderr)
+                sys.exit(1)
 if os.environ.get("FAKE_PROMPTS") and args and args[0] == "run":
     with open(os.environ["FAKE_PROMPTS"], "a") as fh:
         fh.write(json.dumps(args[-1]) + "\n")
@@ -428,8 +595,17 @@ if os.environ.get("FAKE_RUNS") and args and args[0] == "run":  # which runs cont
                               capture_output=True, text=True, timeout=30).stdout
     except (OSError, subprocess.TimeoutExpired):
         sees = None
+    connect = None
+    if os.environ.get("FAKE_CONNECT"):  # a TCP connect the agent makes in its round (#1197)
+        import socket
+        try:
+            socket.create_connection(("127.0.0.1", int(os.environ["FAKE_CONNECT"])), 5).close()
+            connect = "ok"
+        except OSError as e:
+            connect = e.errno
     with open(os.environ["FAKE_RUNS"], "a") as fh:
-        fh.write(json.dumps({"session": "--session" in args, "prompt": args[-1],
+        fh.write(json.dumps({"session": "--session" in args, "prompt": args[-1], "connect": connect,
+                             "agent": args[args.index("--agent") + 1] if "--agent" in args else None,
                              "cwd": os.getcwd(), "pwd": os.environ.get("PWD"),
                              "opencode_db": os.environ.get("OPENCODE_DB"),
                              "xdg_data": os.environ.get("XDG_DATA_HOME"),
@@ -438,7 +614,16 @@ if os.environ.get("FAKE_RUNS") and args and args[0] == "run":  # which runs cont
                              "fetch_off": os.environ.get("OPENCODE_DISABLE_MODELS_FETCH"),
                              "models_path": os.environ.get("OPENCODE_MODELS_PATH"),
                              "content": os.environ.get("OPENCODE_CONFIG_CONTENT"),
+                             "env_names": sorted(os.environ),  # names only, never a value (#1189)
+                             "files": attached,
                              "shell_sees": sees}) + "\n")
+if args and args[0] == "run" and "--agent" in args:  # OpenCode 2.3.2's: built in, or the config's
+    known = {"build", "general", "explore", "compaction", "title", "summary"}
+    for doc in config_docs():
+        for name, entry in (doc.get("agents") or {}).items():
+            (known.discard if (entry or {}).get("disabled") else known.add)(name)
+    if (wanted := args[args.index("--agent") + 1]) not in known:
+        fail("unknown", f'Agent not found: "{wanted}"')
 if args and args[0] == "run" and "-m" in args:  # the model: <provider>/<id>[#<variant>]
     ref = args[args.index("-m") + 1]
     provider, _, rest = ref.partition("/")
@@ -484,12 +669,18 @@ if scenario == "http" and args and args[0] == "run":  # a model request through 
         opts.update(((doc.get("provider") or {}).get(pid) or {}).get("options") or {})
     base = str(opts.get("baseURL") or "").rstrip("/")
     key = str(opts.get("apiKey") or "")
+    msgs = {"model": rest.partition("#")[0], "stream": True,
+            "messages": [{"role": "user", "content": args[-1][:200]}]}
     if pid == "anthropic":
         url, heads = f"{base}/messages?beta=true", {"x-api-key": key, "anthropic-version": "2023-06-01"}
+    elif pid == "google":  # #1192: the model in the path, SSE pinned by the query
+        url, heads = f"{base}/models/{msgs['model']}:streamGenerateContent?alt=sse", {"x-goog-api-key": key}
+        msgs = {"contents": [{"role": "user", "parts": [{"text": args[-1][:200]}]}]}
+    elif pid == "azure":
+        url, heads = f"{base}/chat/completions", {"api-key": key}
     else:
         url, heads = f"{base}/chat/completions", {"Authorization": f"Bearer {key}"}
-    body = json.dumps({"model": rest.partition("#")[0], "stream": True,
-                       "messages": [{"role": "user", "content": args[-1][:200]}]}).encode()
+    body = json.dumps(msgs).encode()
     req = urllib.request.Request(url, data=body, method="POST",
                                  headers={**heads, "Content-Type": "application/json"})
 
@@ -518,7 +709,15 @@ if scenario == "http" and args and args[0] == "run":  # a model request through 
     scenario = "ok"
 if scenario == "slow":
     scenario = "ok" if "--session" in args else "hang"
-if (scenario in ("fill", "compact") or scenario == "compactfail" and not os.environ.get("FAKE_REFAIL")) \
+if scenario == "selfreads" and "Before Claude reviews this" not in (args[-1] if args else "") \
+        and not (os.environ.get("FAKE_SELF_STALL")  # #1207: the nudge's or the note's round
+                 and re.search(r"Claude, your reviewer|Stop planning", args[-1] if args else "")):
+    scenario = "ok"  # #1168: round 1 is ok's
+if scenario == "selfreads" and os.environ.get("FAKE_SELF_API") in ("ratelimit", "down"):
+    scenario = os.environ["FAKE_SELF_API"]  # #1261: the self-review's run ends on its provider's error
+if scenario == "explore" and os.environ.get("FAKE_EXPLORE_ONCE") and "--session" in args:
+    scenario = "ok"
+if (scenario in ("fill", "compact", "donefull") or scenario == "compactfail" and not os.environ.get("FAKE_REFAIL")) \
         and "picking this task up in a fresh session" in args[-1]:
     scenario = "ok"
 if scenario in ("crash", "crashtalk") and os.path.exists(os.environ.get("FAKE_DOWN", "") + ".crashed"):
@@ -536,20 +735,55 @@ if scenario == "crash":
     sys.exit(1)
 if args and args[0] == "run" and not os.environ.get("FAKE_NO_MCP"):
     # as OpenCode does when a session starts: each local MCP server in the config is started and
-    # its tools listed (the workbench one here; the user's are commands that do nothing)
+    # its tools listed: the workbench one, and a user's the layer passes through (#1202); the
+    # user's others are commands that do nothing. FAKE_MCP_LOG gets {server: [tool, ...]}
     import subprocess
     try:
         with open(os.environ["OPENCODE_CONFIG"]) as fh:
-            server = json.load(fh)["mcp"]["servers"]["workbench"]
+            servers = json.load(fh)["mcp"]["servers"]
     except (KeyError, OSError, ValueError, TypeError):
-        server = None
-    if server and server.get("type") == "local":
+        servers = {}
+    listed = {}
+    for name, server in (servers.items() if isinstance(servers, dict) else ()):
+        if not isinstance(server, dict) or server.get("type") != "local" or \
+                server.get("command") == ["false"]:
+            continue
         hello = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
                  {"jsonrpc": "2.0", "method": "notifications/initialized"},
                  {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}]
-        subprocess.run(server["command"], input="".join(json.dumps(m) + "\n" for m in hello),
-                       env={**os.environ, **(server.get("environment") or {})},
-                       capture_output=True, text=True, timeout=30)
+        try:
+            ran = subprocess.run(server["command"], input="".join(json.dumps(m) + "\n" for m in hello),
+                                 env={**os.environ, **(server.get("environment") or {})},
+                                 capture_output=True, text=True, timeout=30)
+            out, err = ran.stdout, ran.stderr or f"MCP server process exited with code {ran.returncode}"
+        except (OSError, subprocess.TimeoutExpired) as e:
+            out, err = "", str(e)
+        for row in out.splitlines():
+            try:
+                reply = json.loads(row)
+            except ValueError:
+                continue
+            if isinstance(reply, dict) and reply.get("id") == 2:
+                listed[name] = [t.get("name") for t in (reply.get("result") or {}).get("tools") or ()]
+        # only in a data home given (the task's): never the user's own OpenCode's
+        oclog = os.path.join(os.environ.get("XDG_DATA_HOME") or "", "opencode", "log")
+        try:
+            if not os.environ.get("XDG_DATA_HOME"):
+                raise OSError
+            os.makedirs(oclog, exist_ok=True)
+            with open(os.path.join(oclog, "opencode.log"), "a") as fh:
+                if name in listed:
+                    fh.write(f'level=INFO message="mcp connected" server={name} '
+                             f'tools={len(listed[name])} role=server server={name}\n')
+                else:
+                    fh.write(f'level=WARN message="mcp connect failed" server={name} '
+                             f'status.status=failed status.error={json.dumps(err.strip())} '
+                             f'role=server server={name}\n')
+        except OSError:
+            pass
+    if os.environ.get("FAKE_MCP_LOG"):
+        with open(os.environ["FAKE_MCP_LOG"], "a") as fh:
+            fh.write(json.dumps(listed) + "\n")
 if os.environ.get("FAKE_STRAY"):
     for stray in ("42", "[1, 2]", "null", '{"type": "step_finish", "part": {"tokens": 5}}',
                   '{"type": "tool_use", "part": "x"}', '{"type": "text", "part": {"text": 7}}',
@@ -580,13 +814,73 @@ if scenario in ("ratelimit", "down") and os.environ.get("FAKE_RETRY_OK"):
 if scenario == "api":  # one request through a keyhole, then as ok (#1020)
     api_request()
     scenario = "ok"
-if scenario in ("ok", "fix"):
+if scenario in ("ok", "fix", "stay"):
     value = "41" if scenario == "fix" and "--session" not in args else "42"
     with open("answer.txt", "w") as fh:
         fh.write(value + "\n")
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": value})
+    # FAKE_PAD: that many characters of words between the first line and the Lesson, a final
+    # message past the report's cut (#1186)
+    pad = int(os.environ.get("FAKE_PAD") or 0)
     emit("text", text=f"Wrote answer.txt = {value}."
+         + (("\n" + ("Checked the answer file. " * (pad // 25 + 1))[:pad].strip()) if pad else "")
          + (f"\nLesson: {os.environ['FAKE_LESSON']}" if os.environ.get("FAKE_LESSON") else ""))
+    finish()
+    if scenario == "stay":
+        time.sleep(3600)
+elif scenario == "patch":  # #1148: a GPT model's one `patch` call, as OpenCode 2.3.2 prints it
+    os.makedirs("lib", exist_ok=True)
+    with open(os.path.join("lib", "helper.py"), "w") as fh:
+        fh.write("ANSWER = 42\n")
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("patch", {"patchText": "*** Begin Patch\n*** Add File: lib/helper.py\n+ANSWER = 42\n"
+                                "*** Add File: answer.txt\n+42\n*** End Patch"},
+         output="Success. Updated the following files:\nA lib/helper.py\nA answer.txt",
+         metadata={"files": [{"file": "lib/helper.py", "status": "added", "additions": 1,
+                              "deletions": 0, "patch": "@@ -0,0 +1 @@\n+ANSWER = 42"},
+                             {"file": "answer.txt", "status": "added", "additions": 1,
+                              "deletions": 0, "patch": "@@ -0,0 +1 @@\n+42"}]})
+    emit("text", text="Wrote lib/helper.py and answer.txt = 42.")
+    finish()
+elif scenario == "shellwrite":  # #1210: a module written with the shell, the rest with write
+    os.makedirs("lib", exist_ok=True)
+    with open(os.path.join("lib", "util.py"), "w") as fh:
+        fh.write("def answer():\n    return 42\n" + ("# changed in round 2\n" if "--session" in args else ""))
+    # in lib/ by the shell tool's `workdir`, not a cd, as OpenCode 2.3.2 tells the model to
+    # (#1210's third review)
+    tool("bash", {"command": "mkdir -p lib", "description": "Make lib"}, output="")
+    tool("bash", {"command": "cat > util.py <<'X'\ndef answer():\n    return 42\nX",
+                  "workdir": os.path.abspath("lib"), "description": "Write lib/util.py"}, output="")
+    for name, text in (("main.py", "from lib.util import answer\nprint(answer())\n"), ("answer.txt", "42\n")):
+        with open(name, "w") as fh:
+            fh.write(text)
+        tool("write", {"filePath": os.path.abspath(name), "content": text})
+    emit("text", text="Wrote lib/util.py, main.py and answer.txt = 42.")
+    finish()
+elif scenario == "buildout":  # #1210's review: the agent's own build, its output under dist/
+    os.makedirs("dist", exist_ok=True)
+    for name, text in (("index.js", "exports.answer = () => 42;\n"),
+                       ("index.d.ts", "export declare const answer: () => number;\n")):
+        with open(os.path.join("dist", name), "w") as fh:
+            fh.write(text)
+    tool("bash", {"command": "npm run build", "description": "Build"}, output="> tsc\n")
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42\n"})
+    emit("text", text="Built, and wrote answer.txt = 42.")
+    finish()
+elif scenario == "pkgbuild":  # #1210's second review: a read of pkg/a.py, then build/lib's copy
+    tool("bash", {"command": "grep -n answer pkg/a.py", "description": "Read"}, output="1:# a\n")
+    os.makedirs(os.path.join("build", "lib", "pkg"), exist_ok=True)
+    for m in ("__init__", "a", "b"):
+        with open(os.path.join("build", "lib", "pkg", m + ".py"), "w") as fh:
+            fh.write("# " + m + "\n")
+    tool("bash", {"command": "python -m build", "description": "Build"}, output="ok\n")
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42\n"})
+    emit("text", text="Built, and wrote answer.txt = 42.")
     finish()
 elif scenario == "loop":
     for _ in range(10):
@@ -629,6 +923,22 @@ elif scenario == "say":
 elif scenario == "toolhang":
     tool("bash", {"command": "make check"})
     time.sleep(3600)
+elif scenario in ("fgcmd", "bgthink"):
+    import subprocess
+    sh = [os.environ.get("SHELL") or "sh", "-c"]
+    if scenario == "fgcmd":
+        emit("text", text="Running the suite.")
+        subprocess.run([*sh, f"sleep {os.environ.get('FAKE_FG') or 12}"])
+        tool("bash", {"command": "make test", "timeout": 1800000}, output="OK")
+        with open("answer.txt", "w") as fh:
+            fh.write("42\n")
+        tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
+        emit("text", text="Wrote answer.txt = 42.")
+        finish()
+    else:
+        subprocess.Popen([*sh, "sleep 300"])
+        tool("bash", {"command": "make test"}, output="moved to the background")
+        time.sleep(3600)
 elif scenario == "bgwait":
     tool("bash", {"command": "make test"})
     emit("text", text="The tests run in the background; waiting for them.")
@@ -670,16 +980,72 @@ elif scenario == "read":
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
     emit("text", text="Wrote answer.txt = 42.")
     finish()
+elif scenario == "donefull":  # #1151: done, its last step past fresh_at
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
+                                                      "cache": {"read": 900}})  # 3000
+    emit("text", text="Done: answer.txt = 42.")
+    emit("step_finish", reason="stop", tokens={"input": 2000, "output": 200,
+                                                "cache": {"read": 18000}})  # 20200: 61%
 elif scenario == "explore":  # #1087: many small reads before the first edit
     for i in range(int(os.environ.get("FAKE_READS", 41))):
         tool("read", {"filePath": os.path.abspath(f"src/f{i}.py")})
         emit("step_finish", reason="tool-calls", tokens={"input": 1000 + 100 * i, "output": 50})
-    time.sleep(2)
+    time.sleep(3600 if os.environ.get("FAKE_EXPLORE_ONCE") else float(os.environ.get("FAKE_EXPLORE_PAUSE", 2)))
     with open("answer.txt", "w") as fh:
         fh.write("42\n")
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
     emit("text", text="Wrote answer.txt = 42.")
     finish()
+elif scenario == "selfreads" and os.environ.get("FAKE_SELF_REFILL"):  # #1261: past HANDOVER_MAX
+    # every session of it breaks the check or restores it, by turns (a session that changed
+    # nothing reads to its fill, never handed over), so the sixth leaves the green tree
+    with open("answer.txt") as fh:
+        text = "41" if fh.read().strip() == "42" else "42"
+    with open("answer.txt", "w") as fh:
+        fh.write(text + "\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": text})
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
+                                                      "cache": {"read": 900}})  # changed early
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 900, "reasoning": 6000,
+                                                      "cache": {"read": 16100}})  # 76%, as fill's
+    time.sleep(3600)
+elif scenario == "selfreads" and os.environ.get("FAKE_SELF_FILL") \
+        and "Your last session filled up" not in args[-1]:  # #1188: it fills mid-check
+    with open("answer.txt", "w") as fh:
+        fh.write("41\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "41"})
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
+                                                      "cache": {"read": 900}})
+    emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 900, "reasoning": 6000,
+                                                      "cache": {"read": 16100}})  # 76%, as fill's
+    time.sleep(3600)
+elif scenario == "selfreads" and os.environ.get("FAKE_SELF_STALL") \
+        and "Before Claude reviews this" in args[-1]:  # #1207: it thinks mid-check
+    with open("answer.txt", "w") as fh:
+        fh.write("41\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "41"})
+    emit("text", text="Now the test should fail; let me think about why.")
+    time.sleep(3600)
+elif scenario == "selfreads":  # #1168: a self-review that breaks a check, copies it back, reads
+    keep = os.environ.get("FAKE_SELF_KEEP")
+    for text in () if keep and os.environ.get("FAKE_SELF_FILL") else ("41", keep and "43" or "42"):
+        with open("answer.txt", "w") as fh:
+            fh.write(text + "\n")
+        tool("write", {"filePath": os.path.abspath("answer.txt"), "content": text})
+    miss = os.environ.get("FAKE_SELF_MISS")  # #1250: reads that fail, the error-streak guard's
+    for i in range(int(os.environ.get("FAKE_READS", 45))):
+        if os.environ.get("FAKE_SELF_RERUN"):  # #1250: the acceptance command, again and again
+            tool("shell", {"command": "grep -qx 42 answer.txt"})
+        else:
+            tool("read", {"filePath": os.path.abspath(f"src/f{i}.py")},
+                 **({"status": "error", "error": "File not found"} if miss else {}))
+        emit("step_finish", reason="tool-calls", tokens={"input": 1000 + 100 * i, "output": 50})
+    if os.environ.get("FAKE_SELF_CRASH"):  # #1270: the server answers 500 and OpenCode exits 1
+        fail("provider.http", "model runner has unexpectedly stopped", 500)
+    time.sleep(3600)
 elif scenario == "probing":  # #857: probe in a compound line, a long file read whole and in part
     with open("long.py", "w") as fh:
         fh.write("x = 1\n" * 400)
@@ -733,9 +1099,17 @@ elif scenario == "compact":  # #774: a tool result past the margin compacted it 
         emit("step_finish", reason="tool-calls", tokens={"input": 2000, "output": 100,
                                                           "cache": {"read": 14900}})  # 17000: 52%
     tool("read", {"filePath": os.path.abspath("answer.txt")})
-    emit("step_finish", reason="tool-calls", tokens={"input": 4000, "output": 900,
-                                                      "cache": {"read": 0}})  # 4900: 15%
-    if os.environ.get("FAKE_COMPACT_READ"):  # a session that carries on: it finishes the work
+    if os.environ.get("FAKE_COMPACT_DONE"):  # #1151: the compacted step is its turn's last
+        with open("answer.txt", "w") as fh:
+            fh.write("42\n")
+        tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
+        emit("text", text="Done: answer.txt = 42.")
+    emit("step_finish", reason="stop" if os.environ.get("FAKE_COMPACT_DONE") else "tool-calls",
+         tokens={"input": 4000, "output": 900,  # 4900: 15%; or 11000, 34%: a kept tail (#1185)
+                 "cache": {"read": 6100 if os.environ.get("FAKE_COMPACT_KEPT") else 0}})
+    if os.environ.get("FAKE_COMPACT_DONE"):
+        pass  # its turn is over: the run ends
+    elif os.environ.get("FAKE_COMPACT_READ"):  # a session that carries on: it finishes the work
         with open("answer.txt", "w") as fh:
             fh.write("42\n")
         tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
@@ -743,6 +1117,22 @@ elif scenario == "compact":  # #774: a tool result past the margin compacted it 
         finish()
     else:
         time.sleep(3600)
+elif scenario == "think":  # #1219: a thinking GPU model's long think, counted in `output`
+    emit("step_finish", reason="tool-calls", tokens={"input": 4914, "output": 78})
+    emit("step_finish", reason="tool-calls", tokens={"input": 291, "output": 8192,
+                                                      "cache": {"read": 4910}})  # 13393: 40%
+    time.sleep(1)  # the runner sees that step before the change
+    with open("answer.txt", "w") as fh:
+        fh.write("41\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "41"})
+    # the think is not sent back: the prompt grew, 5201 to 5237, its history in the cache
+    emit("step_finish", reason="tool-calls", tokens={"input": 40, "output": 177,
+                                                      "cache": {"read": 5197}})
+    with open("answer.txt", "w") as fh:
+        fh.write("42\n")
+    tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
+    emit("text", text="Wrote answer.txt = 42.")
+    finish()
 elif scenario == "compactfail":  # #969: as OpenCode 2.3 prints it, then the run ends
     if os.environ.get("FAKE_COMPACT_EDIT"):
         with open("answer.txt", "w") as fh:

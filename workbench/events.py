@@ -33,6 +33,13 @@ def _simple_commands(command: str) -> list[str]:
     quotes or at a redirection's & (2>&1, >&2, &>): `grep -E "a|b" f 2>&1` is one command.
     Split blind, the pattern's | made "b" a program and 2>&1's & made "1" one (the probe A/B of
     2026-11-21, #857)."""
+    return [part for part, _ in _split_ops(command)]
+
+
+def _split_ops(command: str) -> list[tuple[str, str]]:
+    """_simple_commands' parts, each with the operator that ended it ("" for the last): `(`,
+    `)`, `$(` and a backquote are where a subshell starts or ends, which shell_names' cd
+    tracking needs (#1210's third review)."""
     parts, cur, quote, i = [], [], "", 0
     while i < len(command):
         c = command[i]
@@ -52,15 +59,108 @@ def _simple_commands(command: str) -> list[str]:
         elif c == "&" and ((cur and cur[-1] == ">") or command[i + 1:i + 2] == ">"):
             cur.append(c)                                  # a redirection, not a separator
         elif c in ";|&\n`()" or command.startswith("$(", i):
-            parts.append("".join(cur))
+            op = command[i:i + 2] if command.startswith(("&&", "||", "$("), i) else c
+            parts.append(("".join(cur), op))
             cur = []
-            if command.startswith(("&&", "||", "$("), i):
-                i += 1
+            i += len(op) - 1
         else:
             cur.append(c)
         i += 1
-    parts.append("".join(cur))
+    parts.append(("".join(cur), ""))
     return parts
+
+
+# The words of a shell line that may name a file: split at whitespace, quotes and the shell's
+# and a script's punctuation, so `cat > lib/util.py`, `--out=dist/x` and a heredoc's
+# open('lib/util.py') each give the path. Kept in a shell row's `names` (runner.shell_wrote).
+_NAME_SPLIT = re.compile(r"[\s'\"`;&|<>(){}\[\]$=,:*?!\\]+")
+NAMES_MAX = 300   # words a row keeps: a heredoc of a whole module is thousands
+NAME_LEN = 300
+
+
+def shell_names(command: str, limit: int = NAMES_MAX) -> list[str]:
+    """The words of a shell line that may name a file it wrote, paths first (a word with `/`,
+    then one with `.`), each once, NAMES_MAX of them; a word after a `cd` (or `pushd`) in the
+    line joined to its directory, so `cd lib && cat > util.py` gives lib/util.py, and an
+    absolute one kept whole (runner._shell_named resolves both against the row's `workdir`).
+    Build output under an ignored dist/ was taken for the agent's work and refused at accept,
+    though `npm run build` names none of it, while `cat > lib/util.py <<EOF` names its file
+    (#1210's review, 2026-11-24). A cd ends with the subshell it ran in (`( … )`, `$( … )`, a
+    backquote's) and a `popd` goes back to where its `pushd` was: carried past them, `(cd lib
+    && make) && cat > top.py` named lib/top.py, not the ignored top.py it wrote, which accept
+    then left out as build output (#1210's third review, 2026-11-24). After a move to where no
+    word says (`cd "$D"`, `cd -`, a `popd` with no `pushd` in the line) a word is `*/<word>`: the
+    file by that path in any directory. Kept as written, `cd "$D" && cat > util.py` named a
+    top-level util.py and the lib/util.py it wrote went unnamed, left out as build output: where
+    the directory can't be known, a false name costs a look at accept, a false drop the work.
+    ``limit`` words at most (NAMES_MAX for a row of events.jsonl)."""
+    words: dict[str, None] = {}
+    cwd: str | None = ""                                   # where the line is, from its start
+    pushed: list[str | None] = []                          # the line's pushd stack
+    outer: list[tuple[str | None, list[str | None]]] = []  # where each open subshell began
+    in_backquote = False                                   # inside a backquote's subshell
+    for part, op in _split_ops(command or ""):
+        here = [w for w in _NAME_SPLIT.split(part)
+                if w and len(w) <= NAME_LEN and not w.startswith("-") and re.search(r"[A-Za-z0-9]", w)]
+        for w in here:
+            words.setdefault(_joined(cwd, w))
+        if (moved := _cd_target(part)) is not None:
+            how, target = moved
+            if how == "popd":
+                cwd = pushed.pop() if pushed else None            # `popd >/dev/null` too
+            else:
+                if how == "pushd":
+                    pushed.append(cwd)
+                cwd = _joined(cwd, target) if target and cwd is not None else None
+        if op in ("(", "$(") or (op == "`" and not in_backquote):
+            outer.append((cwd, list(pushed)))
+            in_backquote = in_backquote or op == "`"
+        elif op == ")" or op == "`":
+            if op == "`":
+                in_backquote = False
+            if outer:
+                cwd, pushed = outer.pop()
+    bare = {w: w[2:] if w.startswith(ANYWHERE) else w for w in words}
+    ranked = ([w for w in words if "/" in bare[w]] + [w for w in words if "/" not in bare[w] and "." in bare[w]]
+              + [w for w in words if "/" not in bare[w] and "." not in bare[w]])
+    return ranked[:limit]
+
+
+ANYWHERE = "*/"   # a `names` word run where no word says: the path in any directory (no word holds a *)
+
+
+def _joined(cwd: str | None, word: str) -> str:
+    """A word of a simple command run in `cwd` (relative to the line's start; None after a `cd`
+    to where no word says: `cd $D`, `cd -`), as a path from the line's start: under None,
+    `*/<word>` (its `..`s dropped), which runner._rows_name matches in any directory."""
+    if word.startswith("/"):
+        return word
+    if cwd is None:
+        rest = os.path.normpath(word)
+        while rest == ".." or rest.startswith("../"):
+            rest = rest[3:]
+        return ANYWHERE + rest if rest and rest != "." else word
+    if not cwd:
+        return word
+    return os.path.normpath(os.path.join(cwd, word))
+
+
+def _cd_target(part: str) -> tuple[str, str] | None:
+    """A simple command that moves the line: (`cd`, `pushd` or `popd`, the directory it goes
+    to, "" where no word says: `cd`, `cd -`, `cd "$D"`, `cd ~/x`, `pushd +1`, a popd's), or None
+    if it isn't one."""
+    try:
+        words = shlex.split(part)
+    except ValueError:
+        words = part.split()
+    while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
+        words.pop(0)
+    if not words or words[0] not in ("cd", "pushd", "popd"):
+        return None
+    args = [w for w in words[1:] if not w.startswith("-")]
+    if words[0] == "popd" or not args or re.search(r"[$~`*?]", args[0]) or args[0].startswith("+"):
+        return words[0], ""
+    return words[0], args[0]
 
 
 def shell_programs(command: str) -> list[str]:
@@ -93,6 +193,43 @@ def _obj(v) -> dict:
     return v if isinstance(v, dict) else {}
 
 
+def patched(state: dict) -> list[str]:
+    """The files a `patch` call wrote: added, updated, or moved to (a file it deleted isn't
+    written). OpenCode 2.3.2 gives a GPT model (an id with `gpt-`, not `oss` or `gpt-4`) `patch`
+    in place of edit and write, its only input `patchText`: a module one wrote under an ignored
+    lib/ had no path in its row, so neither the report's NOTE nor accept's refusal saw it, and
+    the commit left it out and the worktree took it (#1148, 2026-11-24). Paths as OpenCode gives
+    them: `state.metadata.files[].file`, relative to its directory (the task's workdir) or
+    absolute; without the metadata, from patchText's headers."""
+    files = _obj(state.get("metadata")).get("files")
+    if isinstance(files, list):
+        out = [str(f["file"]) for f in files
+               if isinstance(f, dict) and f.get("file") and f.get("status") != "deleted"]
+        return list(dict.fromkeys(out))
+    text = _obj(state.get("input")).get("patchText")
+    lines = text.splitlines() if isinstance(text, str) else []
+    out = []
+    for i, line in enumerate(lines):
+        line = line.strip()
+        if line.startswith("*** Add File: "):
+            out.append(line[14:].strip())
+        elif line.startswith("*** Update File: "):
+            j = i + 1
+            while j < len(lines) and lines[j].strip() == "*** End of File":
+                j += 1
+            nxt = lines[j].strip() if j < len(lines) else ""
+            out.append(nxt[13:].strip() if nxt.startswith("*** Move to: ") else line[17:].strip())
+    return list(dict.fromkeys(p for p in out if p))
+
+
+def written(row: dict) -> list[str]:
+    """The paths an edit row wrote: its `path`, or a patch's `paths` (#1148)."""
+    if row.get("path"):
+        return [str(row["path"])]
+    paths = row.get("paths")
+    return [str(p) for p in paths] if isinstance(paths, list) else []
+
+
 def normalize(raw: dict, round_no: int):
     """One OpenCode event as a compact row, or None for events nobody needs to see. A line of
     the wrong shape (a plugin's console.log on OpenCode's stdout) is skipped, not a crash of the
@@ -115,12 +252,21 @@ def normalize(raw: dict, round_no: int):
         inp = state.get("input") if isinstance(state.get("input"), dict) else {}
         if tool in EDIT_TOOLS and (inp.get("filePath") or inp.get("path")):
             row["path"] = str(inp.get("filePath") or inp.get("path"))  # whole: brief is cut at 90
+        elif tool in ("patch", "apply_patch") and (paths := patched(state)):
+            row["paths"] = paths
+            row["brief"] = row["brief"] or _brief(tool, {"path": paths[0]})
         elif tool == "read" and (inp.get("filePath") or inp.get("path")):
             row["path"] = str(inp.get("filePath") or inp.get("path"))
             if not inp.get("offset") and not inp.get("limit"):
                 row["whole"] = True  # the whole file: the runner counts a long one (#857)
         elif tool in ("shell", "bash") and isinstance(inp.get("command"), str):
             row["programs"] = list(dict.fromkeys(shell_programs(inp["command"])))[:8]
+            # the words that may name a file it wrote: no edit row shows the shell's (#1210)
+            row["names"] = shell_names(inp["command"])
+            # where it ran: OpenCode 2.3.2's shell tool tells the model to set `workdir`, not to
+            # cd, and `cat > util.py` there wrote lib/util.py, named nowhere (#1210's third review)
+            if isinstance(inp.get("workdir"), str) and inp["workdir"]:
+                row["workdir"] = inp["workdir"]
         # The signature is what "the same call again" means to the stuck detector: the whole
         # input. Cut to its first 400 characters, `content` sorting before `filePath`, four new
         # files opening with one licence header were "the same call 4 times" (#497).
@@ -183,9 +329,11 @@ class StuckDetector:
     limits are the runner's (it owns the clock); this looks only at the stream of tool calls.
     """
 
-    def __init__(self, repeat=4, error_streak=6, no_edit=40, worktree=None):
+    def __init__(self, repeat=4, error_streak=6, no_edit=40, worktree=None, workdir=None):
         self.repeat, self.error_streak, self.no_edit = repeat, error_streak, no_edit
         self.worktree = os.path.realpath(worktree) if worktree else None
+        # a relative path is OpenCode's directory's, the package in a monorepo (#1148)
+        self.workdir = os.path.realpath(workdir) if workdir else self.worktree
         self.recent = deque(maxlen=repeat)
         self.errors = 0
         self.since_edit = 0
@@ -196,7 +344,8 @@ class StuckDetector:
             return None
         self.recent.append(row["sig"])
         self.errors = 0 if row["ok"] else self.errors + 1
-        changed = row["tool"] in EDIT_TOOLS and row["ok"] and self._ours(row.get("path"))
+        changed = row["tool"] in EDIT_TOOLS and row["ok"] and any(
+            self._ours(p) for p in written(row) or [None])
         self.since_edit = 0 if changed else self.since_edit + 1
         # .guard names the one that fired, for the Stats tab's "what stops agents" (#404)
         if len(self.recent) == self.repeat and len(set(self.recent)) == 1:
@@ -216,5 +365,5 @@ class StuckDetector:
         resetting the count, while its own change still failed its test (2026-11-18)."""
         if not (self.worktree and path):
             return True
-        full = os.path.realpath(os.path.join(self.worktree, path))
+        full = os.path.realpath(os.path.join(self.workdir, path))
         return full == self.worktree or full.startswith(self.worktree + os.sep)

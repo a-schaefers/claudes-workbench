@@ -8,11 +8,11 @@ agent that needs it, and only to that one, so a growing library never crowds a s
 prompt. You are the only author. Agents may propose a lesson (a `Lesson:` line in their summary),
 but an agent writing its own skills would record its mistakes as rules, so you vet each one.
 
-**Lessons come to you.** `wb feedback`, `next`, `resume`, `accept` and `discard` end with
-`lessons: N from this task` when the task taught something. That covers your numbered corrections,
-guard stops, its questions, a loaded skill that still needed review rounds, and the agent's own
-`Lesson:` lines. Run `wb lessons` then, while it's fresh. The ones seen in more than one task come
-first: the next agent will get those wrong too. Each one ends in a skill
+**Lessons come to you.** Each task's are gathered as it goes: your numbered corrections, guard
+stops, its questions, a loaded skill that still needed review rounds, and the agent's own `Lesson:`
+lines. `wb feedback`, `next`, `resume`, `accept` and `discard` end with `lessons: N seen in other
+tasks too (wb lessons)` when one repeats: run `wb lessons` then. Those come first: the next agent
+will get them wrong too. Each one ends in a skill
 (`wb skill patch|add … --lesson <id>`) or is closed with why (`wb lessons close <id> -m …`).
 
 **What a lesson is.** A rule an agent can follow, plus one clause of why: "Use DrawTextEx with
@@ -57,9 +57,10 @@ seems to need; it's a hint, so hand one only if it fits (`wb skill hand <task> <
 `loaded so far only in <repo>` was written from another project: read it first, and if it is that
 project's alone, move it there and retire it from the library.
 
-**Keep it honest.** Results record which skills each task was offered, which the agent loaded,
-and the version of each it held. `wb skill list` shows each skill's tasks against the same repos'
-tasks without it, and the tasks since its last edit, and says what to do:
+**Keep it honest.** Results record which skills each task's agent was told of (one handed after
+its last run counts nowhere), which it loaded, and the version of each it held. `wb skill list`
+shows each skill's tasks against the same repos' tasks without it, and the tasks since its last
+edit, and says what to do:
 - loaded and the agent still made its mistake → patch it
 - offered and never loaded → its description is wrong
 - no better than without it → sharpen it or retire it

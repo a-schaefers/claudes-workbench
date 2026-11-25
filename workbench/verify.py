@@ -1,7 +1,7 @@
 """wb verify: one regression test run on the base and on the candidate, each in a scratch
 checkout under the task's own lane and environment, so review can tell a proven fix from a test
 that already passed before the change (#96). Neither run touches the user's checkout or the
-worktree under review: the candidate is read through a snapshot of it (gitops.snapshot), and the
+worktree under review: the candidate is read through a snapshot of it (candidate_tree), and the
 base gets the candidate's test files copied in, which is what makes a test separable.
 
 A base failure proves the fix only when the test failed on an assertion: a missing module, a
@@ -18,9 +18,10 @@ import secrets
 import shlex
 import shutil
 import tempfile
+import time
 from pathlib import Path, PurePosixPath
 
-from . import context, gitops, runner, store
+from . import context, gitops, lane, runner, store
 
 LIMIT = 300  # seconds for each run; past it, that run is inconclusive
 
@@ -73,8 +74,10 @@ MISSING_API = re.compile(r"has no attribute '|\bis not a (function|constructor)\
                          r"|takes (from )?\d+ (to \d+ )?positional arguments? but"
                          r"|missing \d+ required (positional|keyword-only) argument"
                          r"|\bundefined method\b|\buninitialized constant\b"
-                         # a script the candidate adds (bats), PHP's function (#730)
-                         r"|\bcommand not found\b|\bCall to undefined function\b")
+                         # a script the candidate adds (bats), PHP's function (#730); dash's
+                         # `<script>: 3: slugify: not found` too, not only bash's wording
+                         # (nightly run 45362198509, 2026-11-24)
+                         r"|\bcommand not found\b|\bCall to undefined function\b|(?m::\s+not found$)")
 # pytest's own lines: `E   ` says what went wrong (the first one, what went wrong first); `>` quotes
 # the source line it went wrong on, which is no evidence of anything (#729)
 PYTEST_E = re.compile(r"^E\s{2,}(\S.*)$", re.M)
@@ -90,22 +93,6 @@ class _At(store.Task):
     @property
     def worktree(self) -> Path:
         return self._worktree
-
-
-def _review_base(task: store.Task) -> str | None:
-    """The commit this step is compared with: the base for step one, else the last approved
-    step's, which wb next records (status `step_base`). A step with no changes has no commit of
-    its own: from before the record, the newest earlier step that has one, else the base (#652:
-    the step after a clean one died on "cannot find the last approved step's commit")."""
-    step = task.status.get("steps", 1)
-    if step == 1:
-        return task.spec["base"]
-    if at := task.status.get("step_base"):
-        return at
-    for earlier in range(step - 1, 0, -1):
-        if found := gitops.step_commit(task, earlier, step):
-            return found
-    return task.spec["base"]
 
 
 def looks_like_test(path: str) -> bool:
@@ -310,11 +297,12 @@ def gpu(task: store.Task, say=_say):
 
 
 def _run(task: store.Task, checkout, cmd, limit: int, keep=None,
-         setup: bool = False) -> tuple[int | str, str]:
+         setup: bool = False, ran: list | None = None) -> tuple[int | str, str]:
     """``cmd`` in a scratch clone that ``checkout`` sets up, under the task's lane; ``keep(work)``
     takes what the run left before the clone goes. ``cmd`` may be a function of the clone's path,
     for a command that names it. Prepared from the task's worktree, unless ``setup`` (--setup)
-    asks for the setup to run there again."""
+    asks for the setup to run there again. ``ran`` gets where the run itself wrote what
+    gitops.hand_written would take for Claude's (gitops.ran_wrote, paths as the worktree's)."""
     store.home().mkdir(parents=True, exist_ok=True)  # not in /tmp, where the git shim allows writes
     with tempfile.TemporaryDirectory(prefix=store.scratch(".verify-"), dir=store.home()) as scratch:
         # nested as the worktree is, so that a sibling two levels up stays in the scratch (#261)
@@ -342,22 +330,29 @@ def _run(task: store.Task, checkout, cmd, limit: int, keep=None,
         if code != 0:
             why = runner.setup_timed_out(task.spec) if code == "timeout" else code
             return "setup failed", f"[setting up the scratch checkout failed: {why}]\n{said}"
+        began = time.time()
         out = runner.run_in_lane(at, cmd(work) if callable(cmd) else cmd, limit)
+        if ran is not None:
+            try:
+                ran.extend(gitops.ran_wrote(work, began))
+            except (gitops.GitError, OSError):
+                pass  # what the base check found, not where it wrote, is its job
         if keep:
             keep(work)
         return out
 
 
 def on_base(task: store.Task, cmd: str, limit: int, say=_say,
-            turn=contextlib.nullcontext) -> tuple[int | str, str]:
+            turn=contextlib.nullcontext, ran: list | None = None) -> tuple[int | str, str]:
     """``cmd`` on the task's base commit alone, in a scratch checkout under its lane (the runner's
-    base check): nothing it writes reaches the task's worktree. With the GPU alone when the
+    base check): nothing it writes reaches the task's worktree, and ``ran`` gets where it wrote
+    (_run). With the GPU alone when the
     task's tests need it (``gpu``), and then ``turn()`` (the runner's prep slot) around the run
     itself: taken first, the slot was held through the whole wait for the GPU, behind a task's
     round of up to 40 minutes, and every queued task's setup waited too (#679)."""
     with gpu(task, say), turn():
         return _run(task, lambda work: gitops.git(work, "checkout", "-q", "--detach", task.spec["base"]),
-                    cmd, limit)
+                    cmd, limit, ran=ran)
 
 
 def _checkouts(task: store.Task, tree: str, files: list[str], base_rev: str,
@@ -419,14 +414,25 @@ def verdict(base: int | str, base_out: str, cand: int | str, expect: str = "",
     return "proven" if assertion(base_out) else "inconclusive"
 
 
+def candidate_tree(task: store.Task) -> tuple[str, list[str]]:
+    """The tree wb accept would commit, and what it leaves out (gitops.snapshot_left, landing):
+    wb verify's and wb shot's candidate, and what verify.last calls a check stale against. With
+    the ignored files the agent wrote, which accept commits with --include and refuses without
+    (runner.ignored_to_commit, as the review diff since #1259): left out, verify said "the
+    candidate fails it" (ModuleNotFoundError: lib) for an agent's lib/util.py under
+    Python.gitignore's lib/ that passed in the worktree, and an edit to it left the last check
+    fresh, so --include landed code no check ran on (#1275, 2026-11-24)."""
+    return gitops.snapshot_left(task.worktree, landing=True, force=runner.ignored_to_commit(task))
+
+
 def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int = LIMIT,
         expect: str = "", setup: bool = False) -> dict:
     """Run ``cmd`` on the base (with the candidate's test files) and on the candidate; the
     result, also kept in tasks/<task>/verify/<n>/ with both outputs."""
     # the tree accept would commit: a big text file it lands is in it (#642); what accept refuses
     # without --include is left out, and lands with it, so then nothing here is proof (below)
-    tree, left = gitops.snapshot_left(task.worktree, landing=True)
-    base_rev = _review_base(task)
+    tree, left = candidate_tree(task)
+    base_rev = gitops.step_base(task)
     if not base_rev:
         raise RuntimeError("cannot find the last approved step's commit for the comparison")
     files = test_files(task, tree, base_rev) if files is None else files
@@ -449,6 +455,12 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
     said = verdict(b_code, b_out, c_code, expect, uncopied)
     if left and said == "proven":  # a candidate missing files accept can land proves nothing (#642)
         said = "inconclusive"
+    # a run the lane refused ran no test: its 126 is no failure of the candidate (#1308, 2026-11-24:
+    # "the candidate fails it" for a change whose tests passed)
+    refused = next((t.splitlines()[0] for c, t in ((b_code, b_out), (c_code, c_out))
+                    if c == 126 and t.startswith(lane.REFUSED)), "")
+    if refused:
+        said = "inconclusive"
     result = {"cmd": cmd, "files": files, "tree": tree, "ts": store.now(),
               "base": {"rev": base_rev, "exit": b_code, "assertion": assertion(b_out)},
               "candidate": {"rev": tree, "exit": c_code, "assertion": assertion(c_out)},
@@ -456,7 +468,8 @@ def run(task: store.Task, cmd: str, files: list[str] | None = None, limit: int =
               **({"expect": expect} if expect else {}),
               **({"uncopied": uncopied[:50]} if uncopied else {}),
               **({"removed": removed[:50]} if removed else {}),
-              **({"left_out": left} if left else {})}
+              **({"left_out": left} if left else {}),
+              **({"refused": refused} if refused else {})}
     for code, text in ((b_code, b_out), (c_code, c_out)):  # a checkout unlike the task's (#932)
         if code == "filtered":
             result["filtered"] = text.strip().strip("[]")
@@ -492,6 +505,8 @@ def lines(r: dict) -> list[str]:
         out.append(f"  {side}: exit {x['exit']}" + (f": {x['assertion']}" if x["assertion"] else ""))
     if r.get("filtered"):
         out.append(f"  {r['filtered']}")
+    if r.get("refused"):
+        out.append(f"  no test ran: {r['refused']}")
     if r.get("missing"):
         out.append(f"  the base lacked what the candidate adds: {', '.join(r['missing'])} "
                    "(--files copies what the test reads onto the base)")
@@ -523,10 +538,10 @@ def shot(task: store.Task, cmd: str, files: list[str] | None = None, viewport: s
     # what accept would land, as verify (#642); what it refuses without --include (a new binary
     # of 1 MiB or more, a directory past NEW_FILES_MAX) is said: a new photo missing from the
     # candidate showed as a broken image, with nothing said (#836)
-    tree, left = gitops.snapshot_left(task.worktree, landing=True)
+    tree, left = candidate_tree(task)
     # after wb next, the last approved step, as wb verify compares: the original base showed the
     # earlier steps' change as this one's (#501, the audit of 1.90)
-    base_rev = _review_base(task)
+    base_rev = gitops.step_base(task)
     if not base_rev:
         raise RuntimeError("cannot find the last approved step's commit for the comparison")
     base, candidate = _checkouts(task, tree, files or [], base_rev,
@@ -618,6 +633,14 @@ def note(task: store.Task) -> str:
     return ""
 
 
+def report_lines(task: store.Task) -> list[str]:
+    """The newest regression check as `wb report` shows it at review (#97), [] for none: the web
+    chat's task sheet shows the same lines (#1201)."""
+    if not (r := last(task)):
+        return []
+    return lines(r) + (["  (stale: the worktree has changed since; run wb verify again)"] if r["stale"] else [])
+
+
 def last(task: store.Task) -> dict | None:
     """The task's newest regression check, with ``stale`` when the worktree has changed since."""
     runs = sorted((p for p in (task.dir / "verify").glob("*") if p.name.isdigit()),
@@ -630,6 +653,6 @@ def last(task: store.Task) -> dict | None:
         return None
     # Old checks always compared against task.json's original base (#252).
     stale = task.worktree.is_dir() and (
-        r["base"].get("rev", task.spec["base"]) != _review_base(task)
-        or gitops.snapshot(task.worktree, landing=True) != r.get("tree"))
+        r["base"].get("rev", task.spec["base"]) != gitops.step_base(task)
+        or candidate_tree(task)[0] != r.get("tree"))
     return {**r, "stale": stale}

@@ -71,7 +71,7 @@ paths:
       summary: Server-sent events, the whole state first, then what changed.
       description: >-
         `event: state` with the whole state on connect (a reconnect is a resync), then `event: patch`
-        with what changed (`messages` and `asks` as `{put, drop}`, every other field whole), and a
+        with what changed (`messages` as `{put, drop}`, every other field whole), and a
         `: ping` comment after 15 s of silence. At most 16 are open; a 17th makes the oldest give
         way (an agent's is 503 at once). Send the bearer header: use fetch, not EventSource.
       responses:
@@ -285,37 +285,6 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
-  /api/v1/ask/{id}:
-    parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: string
-          minLength: 1
-          maxLength: 64
-    get:
-      operationId: ask
-      tags: [user]
-      x-user-only: true
-      summary: One of Claude Code's dialogs whole, answered or not.
-      responses:
-        "200":
-          description: the dialog
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [ask]
-                properties:
-                  ask:
-                    $ref: "#/components/schemas/Ask"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "404":
-          $ref: "#/components/responses/NotFound"
   /api/v1/latest:
     get:
       operationId: latest
@@ -324,7 +293,7 @@ paths:
       summary: What a push notification shows.
       responses:
         "200":
-          description: the newest open dialog and Claude's last message for the user
+          description: Claude's last message for the user, or an open notice
           content:
             application/json:
               schema:
@@ -332,10 +301,6 @@ paths:
                 properties:
                   now:
                     type: number
-                  asks:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/Ask"
                   messages:
                     type: array
                     items:
@@ -416,49 +381,63 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
-  /api/v1/answer:
-    post:
-      operationId: answer
+  /api/v1/task:
+    get:
+      operationId: task
       tags: [user]
       x-user-only: true
-      summary: Answer one of Claude Code's dialogs.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [id, answer]
-              additionalProperties: false
-              properties:
-                id:
-                  type: string
-                  minLength: 1
-                  maxLength: 64
-                answer:
-                  type: string
-                  enum: [allow, deny]
-                note:
-                  type: string
-                  maxLength: 2000
-                answers:
-                  type: object
-                  maxProperties: 4
-                  additionalProperties:
-                    type: string
+      summary: One open task's summary, diff or log, as the page's task sheet shows it.
+      description: >-
+        Read only, from the task's files and its worktree; only a task the state's `tasks` strip
+        lists. Every answer is `{task, part, ..., now}` (docs/chat-api.md has each part's fields).
+      parameters:
+        - name: name
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: part
+          in: query
+          schema:
+            type: string
+            enum: [summary, diff, log]
+            default: summary
+        - name: full
+          in: query
+          description: with part=diff, the whole diff instead of the stat
+          schema:
+            type: string
+            enum: ["1"]
+        - name: path
+          in: query
+          description: with full=1, one file of the diff
+          schema:
+            type: string
+        - name: n
+          in: query
+          description: with part=log, how many rows
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
       responses:
         "200":
-          description: the answer that stands
+          description: the part asked for
           content:
             application/json:
               schema:
                 type: object
-                required: [ask, state]
+                required: [task, part, now]
                 properties:
-                  ask:
-                    $ref: "#/components/schemas/Ask"
-                  state:
-                    $ref: "#/components/schemas/State"
+                  task:
+                    type: string
+                  part:
+                    type: string
+                    enum: [summary, diff, log]
+                  now:
+                    type: number
+                additionalProperties: true
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -467,49 +446,179 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
-        "415":
-          $ref: "#/components/responses/JsonOnly"
-  /api/v1/prefs:
-    post:
-      operationId: prefs
+  /api/v1/settings:
+    get:
+      operationId: settings
       tags: [user]
       x-user-only: true
-      summary: The page's settings.
+      summary: The web app's Settings, as rows.
+      responses:
+        "200":
+          description: the rows, read afresh
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [rows, ts]
+                properties:
+                  rows:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SettingRow"
+                  ts:
+                    type: number
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      operationId: setSetting
+      tags: [user]
+      x-user-only: true
+      summary: Change one setting, through its wb command, run as the user.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              additionalProperties: false
+              required: [key, value]
               properties:
-                away:
+                key:
                   type: string
-                  enum: [ask, allow]
+                value:
+                  type: [string, number, "null"]
       responses:
         "200":
-          description: the state after
+          description: "done: wb's line, the rows after, and help when the value needs Claude's help to work"
           content:
             application/json:
               schema:
                 type: object
+                required: [ok, said, rows]
                 properties:
-                  state:
-                    $ref: "#/components/schemas/State"
+                  ok:
+                    const: true
+                  said:
+                    type: string
+                  rows:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SettingRow"
+                  help:
+                    type: string
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "415":
           $ref: "#/components/responses/JsonOnly"
+  /api/v1/stats:
+    get:
+      operationId: stats
+      tags: [user]
+      x-user-only: true
+      summary: The Stats view's history.
+      responses:
+        "200":
+          description: "wb stats --json, and wb route --json and wb models --json (null when unread)"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [feed, routes, models]
+                properties:
+                  feed:
+                    type: object
+                  routes:
+                    type: [object, "null"]
+                  models:
+                    type: [object, "null"]
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /api/v1/top:
+    get:
+      operationId: top
+      tags: [user]
+      x-user-only: true
+      summary: The Stats view's live part, as server-sent events.
+      description: >-
+        `event: top` with one `wb top --json` object verbatim, the newest at once then each tick;
+        `event: down` with `{why, retry}` when the server's `wb top` ended (tried again after
+        `retry` seconds); a `: ping` comment after 15 s of silence. At most 4 are open. Send the
+        bearer header: use fetch, not EventSource.
+      responses:
+        "200":
+          description: the event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Busy"
+  /api/v1/transcribe/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UploadId"
+    post:
+      operationId: transcribe
+      tags: [user]
+      x-user-only: true
+      summary: The words of an uploaded voice clip, heard by the computer's listener, for the user to edit and send.
+      description: >-
+        The words are kept with the upload, so asking again never transcribes twice. It answers once
+        the listener is done: give it minutes. 409 (with busy true) while a task holds the GPU a GPU
+        listener needs, and 503 (with retry true) while a url listener doesn't answer: ask again
+        later. 502 when the listener ran and failed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              maxProperties: 0
+      responses:
+        "200":
+          description: the words
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [text]
+                properties:
+                  text:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "415":
+          $ref: "#/components/responses/JsonOnly"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+        "503":
+          $ref: "#/components/responses/Busy"
   /api/v1/active:
     post:
       operationId: active
       tags: [user]
       x-user-only: true
-      summary: A page is in use on this device, so the user is away from the terminal.
+      summary: A page is in use on this device, so the user is away from the terminal (never from a localhost Host).
       requestBody:
         required: true
         content:
@@ -673,13 +782,13 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
     NotFound:
-      description: no such path, message, upload, file, dialog, screenshot or take; for an agent, also one not in its view (not_found)
+      description: no such path, message, upload, file, screenshot, take, open task or listener; for an agent, also one not in its view (not_found)
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
     Conflict:
-      description: another sender's cid or upload id, or something else where an upload goes (conflict)
+      description: another sender's cid or upload id, something else where an upload goes, wb refusing a setting, or the GPU busy with a task (conflict)
       content:
         application/json:
           schema:
@@ -726,8 +835,14 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    BadGateway:
+      description: the listener failed a transcription (bad_gateway)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     Busy:
-      description: "too many waits or streams open (busy): try again in a moment"
+      description: "too many waits or streams open, or a listener not answering (busy): try again in a moment"
       content:
         application/json:
           schema:
@@ -752,7 +867,7 @@ components:
         code:
           type: string
           description: a stable code, for a program
-          enum: [bad_request, bad_idempotency_key, bad_token, token_revoked, not_local, agent_forbidden, unknown_host, forbidden, not_found, conflict, expired, length_required, too_large, json_only, idempotency_key_reused, rate_limited, server_error, not_implemented, busy, disk_full]
+          enum: [bad_request, bad_idempotency_key, bad_token, token_revoked, not_local, agent_forbidden, unknown_host, forbidden, not_found, conflict, expired, length_required, too_large, json_only, idempotency_key_reused, rate_limited, server_error, not_implemented, bad_gateway, busy, disk_full]
         retry_after:
           type: number
           description: with rate_limited, seconds to wait
@@ -843,29 +958,23 @@ components:
           items:
             type: string
       additionalProperties: true
-    Ask:
+    SettingRow:
       type: object
-      description: one of Claude Code's dialogs
-      required: [id, ts, kind]
+      description: one row of the Settings view (docs/chat-api.md, GET /api/settings)
+      required: [key, group, label, kind]
       properties:
-        id:
+        key:
           type: string
-        ts:
-          type: number
-        tool:
+        group:
           type: string
-        text:
+          enum: [shared, gpu, api, terminal, experimental]
+        label:
           type: string
         kind:
           type: string
-          enum: [permission, plan, question]
-        for:
-          type: array
-          items:
-            type: string
-        answer:
-          type: [string, "null"]
-          enum: [allow, deny, expired, null]
+          enum: [choice, number, info, action, note]
+        help:
+          type: string
       additionalProperties: true
     State:
       type: object
@@ -880,14 +989,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/Message"
-        asks:
-          type: array
-          items:
-            $ref: "#/components/schemas/Ask"
         listener:
           $ref: "#/components/schemas/Listener"
-        prefs:
-          type: object
         push:
           type: object
         savings:
@@ -900,6 +1003,9 @@ components:
           type: array
           items:
             type: object
+        dictate:
+          type: boolean
+          description: the computer has a listener for /transcribe
         expire:
           type: number
           description: seconds a message waits before it is never passed on (21600)
@@ -943,7 +1049,7 @@ components:
           description: upload ids, uploaded first
         about:
           type: object
-          description: the user's only, what it answers (a pair of screenshots or an audio take)
+          description: the user's only, what it answers (a pair of screenshots, an audio take, or {task})
     SendResponse:
       type: object
       required: [message, listener, state]

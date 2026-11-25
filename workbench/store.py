@@ -22,7 +22,7 @@ Layout of ``$WB_HOME`` (default ``~/.local/state/workbench``)::
         steer.jsonl, acked, context.md
         runner.log          the runner's own stdout/stderr
         base-tests.txt      the base check: the acceptance command on the base, before round 1
-        rounds/<n>/prompt.md, instructions.md, summary.md, tests.txt
+        rounds/<n>/prompt.md, instructions.md, summary.md, final.md, tests.txt
         ask/<id>.json, ask/<id>.answer   the agent's questions and Claude's answers
         worktree/           the git worktree the agent works in (branch delegate/<name>)
     Of a task's directory the agent's lane writes only worktree/ and ask/ (context.writable).
@@ -410,6 +410,15 @@ def _start_epoch(start) -> float | None:
 _BOOT: list = []
 
 
+def mac_tool(name: str) -> str:
+    """A macOS system tool by its absolute path (/usr/sbin's ioreg and sysctl), by name elsewhere.
+    Every process on one Mac must read the same machine and boot: the launchd agent's PATH had no
+    /usr/sbin, so `wb chat serve` took the host name for the machine while the mod's `wb events`
+    found ioreg and sent the hardware UUID, and the server read each session's listener.json as
+    another machine's claim, a closed session as listening (#1305, 2026-11-24)."""
+    return f"/usr/sbin/{name}" if sys.platform == "darwin" else name
+
+
 def boot_id() -> str | None:
     """This boot of the machine: Linux's (and WSL2's VM's) random boot_id, macOS's boot time; None
     where neither is known. The runner records it (status `boot`): a runner recorded under another
@@ -421,13 +430,37 @@ def boot_id() -> str | None:
         except OSError:
             import subprocess
             try:  # "{ sec = 1732000000, usec = 123456 } Wed Nov 20 …"
-                out = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True,
+                out = subprocess.run([mac_tool("sysctl"), "-n", "kern.boottime"], capture_output=True,
                                      text=True, timeout=5).stdout
                 boot = (m := re.search(r"sec = (\d+)", out)) and m.group(1)
             except (OSError, subprocess.SubprocessError):
                 pass
         _BOOT.append(boot)
     return _BOOT[0]
+
+
+def folds_case(path) -> bool:
+    """Whether ``path`` is on a file system that ignores case: some component of its real path,
+    with its letters' case swapped, is the same file in the same parent (APFS and HFS+ as macOS
+    formats them, WSL2's drvfs on /mnt/c; not ext4). Here, not in cli, since
+    context.repo_entries needs it too (#1157, 2026-11-24).
+
+    Each component is tried in its own parent, never the whole path swapped: on WSL2 that read
+    /MNT/C/uSERS/…, /MNT isn't on the ext4 root, so a repo on /mnt/c read as case-sensitive and
+    a local_only key in another case than the cwd's sent it to the API model (#1217,
+    2026-11-24). Any component, not only the deepest: drvfs makes a directory WSL creates
+    case-sensitive (`case=dir`) under Windows' own folding ones, such as C:\\Users."""
+    p = os.path.realpath(path)
+    while (head := os.path.dirname(p)) != p:
+        name = os.path.basename(p)
+        if name.swapcase() != name:
+            try:
+                if os.path.samefile(p, os.path.join(head, name.swapcase())):
+                    return True
+            except OSError:
+                pass
+        p = head
+    return False
 
 
 _MACHINE: list = []
@@ -451,7 +484,7 @@ def machine() -> str:
         if not mid and sys.platform == "darwin":
             import subprocess
             try:
-                out = subprocess.run(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+                out = subprocess.run([mac_tool("ioreg"), "-rd1", "-c", "IOPlatformExpertDevice"],
                                      capture_output=True, text=True, timeout=5).stdout
                 mid = (m := re.search(r'"IOPlatformUUID" = "([^"]+)"', out)) and m.group(1)
             except (OSError, subprocess.SubprocessError):
@@ -925,6 +958,15 @@ class Task:
 
     def round_dir(self, n: int) -> Path:
         return self.dir / "rounds" / str(n)
+
+    def report(self, n: int) -> str:
+        """Round ``n``'s report (summary.md), else what stands instead, as `wb report` and the
+        web chat's task sheet (#1201) both say it."""
+        p = self.round_dir(n) / "summary.md"
+        try:
+            return p.read_text(errors="replace")
+        except FileNotFoundError:
+            return f"round {n} has no report yet ({self.status.get('phase')}: {self.status.get('last')})"
 
 
     def set_status(self, **fields) -> dict:

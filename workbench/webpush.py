@@ -36,7 +36,7 @@ G = (0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296,
 # Chrome's are fcm.googleapis.com; Chromium's jmt17.google.com (seen 2026-11-18)
 PUSH_HOSTS = (".googleapis.com", ".google.com", ".push.apple.com", ".push.services.mozilla.com",
               ".notify.windows.com")
-SUBJECT = "https://github.com/a-schaefers/claudes-workbench"  # VAPID's contact: Apple wants one
+SUBJECT = "https://github.com/a-schaefers/workbench"  # VAPID's contact: Apple wants one
 TTL = 86400               # a phone off for a day still gets the news when it's back
 SEND_TIMEOUT = 10
 MAX_SUBS = 20             # a phone, a tablet, a laptop or two: more is someone else's loop
@@ -175,12 +175,23 @@ _ctx: list = []
 
 def tls() -> ssl.SSLContext:
     """The context pushes go out with: the default one, and macOS's bundle when its store is
-    empty (python.org's Python before Install Certificates.command), as Apple's Python has it."""
+    empty (python.org's Python before Install Certificates.command), as Apple's Python has it.
+    Without Python 3.13's VERIFY_X509_STRICT, and with NODE_EXTRA_CA_CERTS's CAs: the keyhole's
+    context too, which failed every request on a chain OpenCode, curl and node accept (a CA with
+    a non-critical basicConstraints, a TLS-inspecting proxy's) or a CA trusted only through that
+    variable, as OpenCode honours it (#1385, 2026-11-25). The CA and hostname checks stay."""
     if not _ctx:
         ctx = ssl.create_default_context()
+        ctx.verify_flags &= ~getattr(ssl, "VERIFY_X509_STRICT", 0)
         if not has_cas(ctx) and os.path.isfile(MAC_CAS):
             try:
                 ctx.load_verify_locations(MAC_CAS)
+            except (OSError, ssl.SSLError):
+                pass
+        extra = os.environ.get("NODE_EXTRA_CA_CERTS")
+        if extra and os.path.isfile(extra):
+            try:
+                ctx.load_verify_locations(extra)
             except (OSError, ssl.SSLError):
                 pass
         _ctx.append(ctx)
