@@ -27,6 +27,10 @@ from typing import Callable
 
 from . import store
 from .privacy import OPENROUTER  # the provider whose roles keep an `order` (#1021)
+# An OpenRouter role with no `order`: OpenRouter picks the backend by its own and the user's
+# account settings, no fallbacks (keyhole.route_body). Said in the dialog, never refused: wb
+# once refused it until Claude asked the user which backends, before a dialog that asks anyway.
+OPENROUTER_ANY = "via OpenRouter to its choice of backend"
 
 ROLES = ("significant", "trivial", "writing")
 # how the pane names them (#1023); files and commands keep the role names
@@ -116,7 +120,7 @@ def normalize(doc) -> dict:
         if row["via"] == "api" and not row.get("api"):
             raise RoutesError(f"{r} is on API with no api model")
         # an OpenRouter role's backends (wb route --order, #1021): the keyhole routes every
-        # request to them alone, and the start's where-note names them
+        # request to them alone
         if e.get("order") is not None:
             order = e["order"]
             if not isinstance(order, list) or not all(isinstance(b, str) and b.strip() for b in order):
@@ -380,6 +384,8 @@ def _role_part(r: str, old: dict, row: dict, cap, who: Callable[[str], str],
             clauses += [f"your code goes to {who(row['api'])}", thinks(row["api"], row["thinking"])]
             if row.get("order"):  # an OpenRouter role's backends (#1021): part of what is agreed to
                 clauses.append(f"backends {', '.join(row['order'])}")
+            elif str(row["api"]).split("/", 1)[0] == OPENROUTER:  # none named: OpenRouter's pick (#1322)
+                clauses.append(OPENROUTER_ANY)
             if cap is not None:
                 clauses.append(f"cap {money(cap)}/day")
         elif row.get("api"):

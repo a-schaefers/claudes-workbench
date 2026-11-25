@@ -192,7 +192,7 @@ GIT_LFS = subprocess.run(["git", "lfs", "version"], capture_output=True).returnc
 def home_outside_the_lane(test):
     """For a test that hides credentials under the home directory: the lane writes the temp roots
     whole, so with the home inside one (a sandbox's profile under /tmp) nothing there is hidden,
-    and wb doctor and wb start say so (context.home_gap). Codex's run of 1.0 failed 11 of these
+    and wb doctor says so (context.home_gap). Codex's run of 1.0 failed 11 of these
     (the 2026-11-19 audit)."""
     return unittest.skipIf(bool(context.home_gap()), "the home directory is inside a temp root, "
                            "which the lane writes whole (context.home_gap)")(test)
@@ -13721,12 +13721,13 @@ class Lane(Base):
                              text=True, timeout=20)
         self.assertIn("NoNewPrivs:\\t1", out.stdout, out.stderr)
 
-    def test_doctor_names_what_an_old_landlock_cant_confine(self):
-        self.assertEqual(lane.gaps(10), [])
-        self.assertTrue(any("truncat" in g for g in lane.gaps(2)))
-        self.assertTrue(any("cross-device" in g for g in lane.gaps(1)))
-        self.assertFalse(any("cross-device" in g for g in lane.gaps(2)))
-        self.assertEqual(lane.gaps(0), [])
+    def test_doctor_names_what_an_old_landlock_cant_confine_in_its_ok_line(self):
+        # #1322: one clause in the ok line, not a `--` line per gap
+        self.assertEqual(lane.partial(10), "")
+        self.assertEqual(lane.partial(9), "")
+        self.assertEqual(lane.partial(5), ", partial: it confines signals from ABI 6, UNIX sockets from ABI 9")
+        self.assertIn("truncation from ABI 3", lane.partial(2))
+        self.assertEqual(lane.partial(0), "")
 
     def test_doctor_says_wsl_interop_runs_windows_programs_outside_the_lane(self):
         # the 0.90 review: on WSL2 doctor said the lane held while interop ran Windows programs
@@ -13876,31 +13877,6 @@ class Lane(Base):
         self.assertEqual(env["K6_CONFIG"], str(context.runtime_dir(task) / "k6.json"))
         self.assertEqual(json.loads(Path(env["K6_CONFIG"]).read_text()), {})
 
-    def test_doctor_finds_the_local_daemons_listening_on_tcp_from_the_kernels_tables(self):
-        # #993 (2026-11-22): TCP reaches a Docker API or adb, which the lane's socket rule can't
-        tcp, tcp6 = Path(self.tmp.name) / "tcp", Path(self.tmp.name) / "tcp6"
-        head = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid\n"
-        tcp.write_text(head + "   0: 0100007F:13AD 00000000:0000 0A 00000000:00000000 00:0 0 1000\n"
-                              "   1: 0100007F:0947 00000000:0000 0A 00000000:00000000 00:0 0 1000\n"
-                              "   2: 0100007F:0D05 0100007F:A000 01 00000000:00000000 00:0 0 1000\n"
-                              "   3: 00000000:0016 00000000:0000 0A 00000000:00000000 00:0 0 0\n")
-        tcp6.write_text(head + "   0: 00000000000000000000000000000000:091B "
-                               "00000000000000000000000000000000:0000 0A 00000000:00000000 00:0 0 1000\n")
-        # adb (5037) and Docker's API (2375) listen, J-Link's 2331 on IPv6; 3333 is a connection
-        # (01), not a listener, and ssh (22) isn't a daemon the list names
-        self.assertEqual(context.listening_daemons((str(tcp), str(tcp6))), [2331, 2375, 5037])
-        self.assertEqual(context.listening_daemons((str(Path(self.tmp.name) / "none"),)), [])
-
-    @unittest.skipUnless(os.path.exists("/proc/net/tcp"), "the kernel's TCP tables: Linux")
-    def test_doctor_finds_a_real_listening_socket_on_this_machine(self):
-        import socket
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
-            self.assertEqual(context.listening_daemons(ports={port: "x"}), [])   # bound, not listening
-            s.listen(1)
-            self.assertEqual(context.listening_daemons(ports={port: "x"}), [port])
-
 
 class CheckoutVenv(Base):
     """#490 (the audit of 1.90): the user's activated venv, when it is their checkout's, stays out
@@ -13937,8 +13913,7 @@ class CheckoutVenv(Base):
                  "open(site.getsitepackages()[0] + '/_mypkg.pth', 'w').write(os.getcwd() + '/src')\"")
         out = self.start("t-venv", "ok", "--setup", setup, "--test", self.TEST, "--auto-fix", "0",
                          "--no-base-check")
-        self.assertIn(f"note: the active Python environment {user} (inside the repo) is your "
-                      "checkout's", out)
+        self.assertNotIn("leaves out your active venv", out)     # a --setup gives it one (#1322)
         st = wait_phase("t-venv", {"review"})
         task = store.Task("t-venv")
         said = task.round_dir(1).joinpath("tests.txt").read_text()
@@ -13963,8 +13938,8 @@ class CheckoutVenv(Base):
         bins = self.repo / "node_modules" / ".bin"
         os.environ["PATH"] = f"{os.environ['PATH']}{os.pathsep}{bins}"  # a direnv PATH_add
         out = self.start("t-novenv", "ok", "--test", self.TEST, "--auto-fix", "0", "--no-base-check")
-        self.assertIn(f"{user} (an editable install of the repo) is your checkout's", out)
-        self.assertIn("--setup 'uv sync' --test 'uv run pytest'", out)
+        self.assertIn(f"note: the agent leaves out your active venv ({user}): --setup 'uv sync' (or the "
+                      "project's install) gives the worktree its own\n", out)
         st = wait_phase("t-novenv", {"review"})
         task = store.Task("t-novenv")
         said = task.round_dir(1).joinpath("tests.txt").read_text()
@@ -13983,6 +13958,14 @@ class CheckoutVenv(Base):
         self.assertEqual(Permission.verdict(rules, "pipenv install"), "allow")
         with mock.patch.object(lane, "abi", return_value=0):
             self.assertEqual(Permission.verdict(context.shell_rules(task), "pipenv install"), "allow")
+
+    def test_a_venv_the_missing_directories_note_names_gets_no_note_of_its_own(self):
+        # #1322: the checkout's ignored .venv drew both notes, each with the same advice
+        self.venv(self.repo / ".venv")
+        out = self.start("t-twice", "ok", "--no-base-check")
+        self.assertIn("not the checkout's ignored .venv/", out)
+        self.assertNotIn("leaves out your active venv", out)
+        wait_phase("t-twice", {"review"})
 
     def test_a_venv_in_a_per_project_home_or_on_path_alone_is_the_checkouts_too(self):
         task = store.Task("t-homes")
@@ -14035,7 +14018,7 @@ class CheckoutVenv(Base):
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": [str(envs)]}))
         tools = self.venv(envs / "tools")                         # pytest and ruff, no project
         (envs / "scratch").mkdir()
-        self.assertNotIn("is your checkout's", self.start("t-tools", "ok"))
+        self.assertNotIn("leaves out your active venv", self.start("t-tools", "ok"))
         wait_phase("t-tools", {"review"})
         task = store.Task("t-tools")
         env = runner.agent_env(task)
@@ -33521,18 +33504,18 @@ class Routes(Base):
         with self.assertRaises(routes.RoutesError):
             routes.read()
 
-    def test_an_openrouter_role_needs_its_backends_and_the_line_names_them(self):
-        # #1021's `--order` on #1014's wb route (the wave 2 merge): one OpenRouter id is served by
-        # many backends, so a role never goes to one nobody chose
+    def test_an_openrouter_role_with_no_backends_says_openrouter_picks_and_one_with_them_names_them(self):
+        # #1021's `--order` on #1014's wb route (the wave 2 merge). #1322: a role with no --order
+        # was refused until Claude asked the user which backends, before a dialog that asks
+        # anyway; the dialog now says OpenRouter picks (no fallbacks, keyhole.route_body)
         self.catalog([*ROUTES_CATALOG, api_entry("openrouter", "vendor/model-x")],
                      [*ROUTES_AUTH, key_row("openrouter", "OpenRouter", STORED)])
         runner.models.hosted(fresh=True)
-        code, out, err = self.route("trivial", "openrouter/vendor/model-x", "--day-usd", "5")
-        self.assertEqual((code, out), (3, ""))
-        self.assertIn("openrouter/vendor/model-x is served by many backends that differ in quantization and "
-                      "data policy: pick them with --order <name>[,<name>]", err)
-        self.assertFalse(self.path.exists())
         os.environ["CLAUDECODE"] = "1"
+        anyone = self.dry("trivial", "openrouter/vendor/model-x", "--day-usd", "5")
+        self.assertIn(f"· {routes.OPENROUTER_ANY} ·", anyone["change"])
+        self.assertTrue(anyone["gate"])
+        self.assertFalse(self.path.exists())
         asked = self.dry("trivial", "openrouter/vendor/model-x", "--day-usd", "5", "--order", "baseten, deepinfra/fp8")
         self.assertIn("· backends baseten, deepinfra/fp8 ·", asked["change"])
         self.assertEqual(asked["approval"]["argv"], ["route", "trivial", "openrouter/vendor/model-x", "--day-usd", "5",
@@ -37801,8 +37784,8 @@ class ApiSpendKeyhole(_KeyholeTest):
 
 
 class Privacy(_KeyholeTest):
-    """Privacy for API roles (#1021): where the code goes (cli.privacy.where and the start's note),
-    a per-repo or per-task local_only, standing copies and siblings named or refused, token
+    """Privacy for API roles (#1021): a per-repo or per-task local_only, a standing copy that
+    holds a credential refused, token
     dotfiles hidden in an API lane when they hold a credential, and OpenRouter routed to the role's backends alone. An API
     start is made the way #1016's wb start will make one: pick_model's answer stands in."""
 
@@ -37992,10 +37975,8 @@ class Privacy(_KeyholeTest):
             self.assertIn(f'{cli.privacy.home_path(key)} is local-only (commands.json "repos"): the '
                           "significant role is on API", err)
             self.assertFalse(store.Task(name).exists)
-        # and the where-note says the submodules go with the repo
         self.conf.write_text("{}")
-        self.assertIn("note: this task sends the repo with its submodules, its spec, CLAUDE.md files "
-                      "to DeepInfra", self.start_api("t-subs"))
+        self.start_api("t-subs")
         # the runner's check before every round asks the base's submodules the same
         self.local_only(key=sub)
         self.assertIn("this repo is local-only now; the task's model is API (deepinfra)",
@@ -38018,7 +37999,7 @@ class Privacy(_KeyholeTest):
                           "put significant on the GPU (wb route significant gpu, the user's yes), "
                           f"without {' '.join(how)}, or the user lifts local_only there.", err)
             self.assertFalse(store.Task("t-sib").exists)
-        # a standing sibling: this refusal, never the standing one's "name it (--sibling …)"
+        # a standing sibling: this refusal
         self.conf.write_text(json.dumps({"repos": {str(self.repo): {"siblings": ["secretlib"]},
                                                    str(secret): {"local_only": True}}}))
         code, err = self.fails("start", "t-sib", "--spec", str(self.spec), "--repo", str(self.repo))
@@ -38080,17 +38061,14 @@ class Privacy(_KeyholeTest):
             self.assertIn("wb allow t-snap-api --path '*' first", err)
         self.assertIsNone(store.Task("t-snap-api").spec.get("test_cmd"))
 
-    def test_commands_json_standing_paths_are_named_in_an_api_tasks_where_note_and_a_local_only_one_refuses_it(self):
+    def test_a_local_only_commands_json_standing_path_refuses_an_api_start_and_stops_its_next_round(self):
         # #1269 (the bar loop, 2026-11-24): a standing `paths` entry (wb allow --always) is in
-        # every API task's lane, but the note said "the repo, its spec, CLAUDE.md files" alone
+        # every API task's lane
         notes = Path(self.tmp.name) / "private-notes"
         notes.mkdir()
         (notes / "n.txt").write_text("mine\n")
         self.conf.write_text(json.dumps({"paths": [str(notes)]}))
-        want = (f'note: this task sends the repo, its spec, CLAUDE.md files and {cli.privacy.home_path(notes)} '
-                '(commands.json "paths") to DeepInfra')
-        self.assertIn(want, self.start_api("t-paths"))
-        self.assertIn(want, self.start_api("t-paths2"))          # not the repo's first: it goes too
+        self.start_api("t-paths")
         self.role(via="api", api=FLASH)
         for paths in ([str(notes)], ["*"]):                      # "*": the lane off reads it too
             self.conf.write_text(json.dumps({"paths": paths, "repos": {str(notes): {"local_only": True}}}))
@@ -38246,89 +38224,135 @@ class Privacy(_KeyholeTest):
 
     # 6: standing copies and siblings
 
-    def test_an_api_task_takes_a_standing_copy_only_when_named_and_a_gpu_task_as_before(self):
+    def test_an_api_task_takes_a_standing_copy_as_configured_but_one_that_holds_a_credential(self):
+        # #1322: every standing entry was refused until the start named it again (--copy), a step
+        # on every start for what the user had set up; only a copied credential is refused, named
+        # or not
         (self.repo / ".gitignore").write_text("local.cfg\n")
         subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
         (self.repo / "local.cfg").write_text("db=dev\n")
         self.conf.write_text(json.dumps({"repos": {str(self.repo): {"copy": ["local.cfg"]}}}))
-        self.role(via="api", api=FLASH)                          # the start's role, on API
-        with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
-            self.start_api("t-cp1")
-        self.assertEqual(cm.exception.code, 3)
-        self.assertIn('commands.json "repos" copies local.cfg into every task, and this one is on '
-                      "API (DeepInfra): name it (--copy local.cfg) to send it, or put significant on "
-                      "the GPU (wb route significant gpu)\n", err.getvalue())
-        out = self.start_api("t-cp2", None, "--copy", "local.cfg")
-        self.assertIn("and local.cfg (--copy) to DeepInfra", out)
-        self.assertEqual(store.Task("t-cp2").spec["copy"], ["local.cfg"])
-        self.start("t-cp3", "ok")                                # GPU: copied as today, unnamed
-        self.assertEqual(store.Task("t-cp3").spec["copy"], ["local.cfg"])
-        wait_phase("t-cp3", ("review",))
-
-    def test_an_api_task_takes_a_standing_sibling_only_when_named(self):
-        shared = self.repo.parent / "shared"
-        shared.mkdir()
-        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"siblings": ["shared"]}}}))
-        with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
-            self.start_api("t-sib1")
-        self.assertEqual(cm.exception.code, 3)
-        self.assertIn("links shared beside every task", err.getvalue())
-        self.assertIn("shared (--sibling)", self.start_api("t-sib2", None, "--sibling", "../shared"))
-
-    def test_a_standing_copy_refused_from_a_package_names_the_copy_that_sends_it_and_the_packages_own_doesnt(self):
-        # #1158's review (2026-11-24): from packages/app, a --copy is read from the package, so the
-        # refusal's `--copy node_modules` named the package's node_modules: never the root's entry,
-        # refused again each time; nor may the package's name consent to sending the root's
-        (self.repo / ".gitignore").write_text("node_modules/\n")
-        app = self.repo / "packages" / "app"
-        app.mkdir(parents=True)
-        (app / "CLAUDE.md").write_text("# app\n")
-        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
-        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "a package"], check=True)
-        (self.repo / "node_modules" / "root-only").mkdir(parents=True)
-        (app / "node_modules" / "app-only").mkdir(parents=True)
-        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"copy": ["node_modules"]}}}))
         self.role(via="api", api=FLASH)
-        refusal = ('commands.json "repos" copies node_modules into every task, and this one is on API '
-                   "(DeepInfra): name it (--copy ../../node_modules) to send it, or put significant on "
-                   "the GPU (wb route significant gpu)")
-        for name, extra in (("t-pk1", ()), ("t-pk2", ("--copy", "node_modules"))):  # the package's
+        self.start_api("t-cp1")
+        self.assertEqual(store.Task("t-cp1").spec["copy"], ["local.cfg"])
+        (self.repo / "local.cfg").write_text("db=dev\ndb_password=hunter2\n")
+        for name, extra in (("t-cp2", ()), ("t-cp3", ("--copy", "local.cfg"))):
             with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
-                self.start_api(name, None, *extra, repo=app)
-            self.assertEqual(cm.exception.code, 3)
-            self.assertIn(refusal, err.getvalue())
-        self.start_api("t-pk3", None, "--copy", "../../node_modules", repo=app)  # the advice's
-        self.assertEqual(store.Task("t-pk3").spec["copy"], ["node_modules"])
-        # from the root, or from a package without its own, the entry as written, as before
-        (self.repo / "local.cfg").write_text("db=dev\n")
-        for sub in (None, "packages/app"):
-            self.assertIn("(--copy local.cfg)", cli._standing_gap(
-                {"copy": ["local.cfg"]}, types.SimpleNamespace(copy=None, sibling=None), "DeepInfra",
-                self.repo, sub))
+                self.start_api(name, None, *extra)
+            self.assertEqual(cm.exception.code, 3, name)
+            self.assertIn("commands.json copies local.cfg into every task and it holds a credential: an API "
+                          "task doesn't take it (run on the GPU, or keep the secret in an environment "
+                          "variable)\n", err.getvalue())
+            self.assertFalse(store.Task(name).exists)
+        self.start("t-cp4", "ok")                                # GPU: copied as today
+        self.assertEqual(store.Task("t-cp4").spec["copy"], ["local.cfg"])
+        wait_phase("t-cp4", ("review",))
 
-    # 11: the where-note
+    def test_an_api_task_takes_a_standing_binary_or_big_copy_but_not_a_directory_holding_a_credential(self):
+        # #1322's review: holds_credential read a binary test.db or a 1.6 MB .csv as holding a
+        # credential, refusing every API start for the repo, and a copied directory went unread
+        (self.repo / ".gitignore").write_text("test.db\nbig.csv\nconfig/local/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
+        (self.repo / "test.db").write_bytes(b"SQLite format 3\0" + bytes(range(256)) * 8)
+        (self.repo / "big.csv").write_text("id,password\n" + "1,x\n" * 400_000)
+        local = self.repo / "config" / "local"
+        local.mkdir(parents=True)
+        (local / "tsconfig.json").write_text("{ // a comment\n}\n")
+        (local / "app.js").write_text("const token = load()\n")       # source: not read
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"copy": ["test.db", "big.csv",
+                                                                             "config/local"]}}}))
+        self.role(via="api", api=FLASH)
+        self.start_api("t-cpb1")
+        self.assertEqual(store.Task("t-cpb1").spec["copy"], ["test.db", "big.csv", "config/local"])
+        (local / "settings.local.yml").write_text("db:\n  password: hunter2\n")
+        with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
+            self.start_api("t-cpb2")
+        self.assertEqual(cm.exception.code, 3)
+        self.assertIn("commands.json copies config/local into every task and it holds a credential",
+                      err.getvalue())
+        self.assertFalse(store.Task("t-cpb2").exists)
 
-    def test_the_first_api_task_of_a_repo_and_provider_says_what_goes_where_and_later_ones_dont(self):
-        self.claude.mkdir()
-        (self.claude / "CLAUDE.md").write_text("my rules\n")             # Claude's: never sent (#1061)
-        (self.claude / "rules").mkdir()
-        out = self.start_api("t-w1")
-        self.assertIn("note: this task sends the repo, its spec, CLAUDE.md files to DeepInfra (the "
-                      "trivial role's model; data policy: "
-                      "https://docs.deepinfra.com/account/data-privacy)", out)  # whose choice: #1016's
-        self.assertNotIn("this task sends", self.start_api("t-w2"))      # the same provider again
-        self.agents_md.parent.mkdir()
-        self.agents_md.write_text("my rules for agents\n")               # the user's own: named
-        other = self.api_model("anthropic/claude-haiku-5-5", "Anthropic (API)")
-        self.assertIn("note: this task sends the repo, its spec, CLAUDE.md files and your workbench "
-                      "AGENTS.md to Anthropic (the trivial role's model; data policy: "
-                      "https://www.anthropic.com/legal/privacy)", self.start_api("t-w3", other))
-        # archived tasks count too, so wb gc can't bring the note back
-        store.archive_dir().mkdir(parents=True, exist_ok=True)
-        for n in ("t-w1", "t-w2", "t-w3"):
-            shutil.move(str(store.Task(n).dir), str(store.archive_dir() / n))
-        self.assertNotIn("this task sends", self.start_api("t-w4"))
+    def test_an_api_task_takes_a_copied_directory_whose_files_only_mention_tokens(self):
+        # #1322's second review: in a copied directory holds_credential's matcher flagged any key
+        # with `token` in it and any line with a bare keyword, so a models/ copy's
+        # tokenizer_config.json (`bos_token`), a vocab.txt and a prose .txt refused every API
+        # start, named or not; and a deps/ copy for hex_metadata.config
+        (self.repo / ".gitignore").write_text("models/\ndeps/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
+        m = self.repo / "models" / "m"
+        m.mkdir(parents=True)
+        (m / "tokenizer_config.json").write_text(json.dumps({"bos_token": "<s>", "pad_token": "<pad>",
+                                                             "model_max_length": 512}))
+        (m / "vocab.txt").write_text("the\npassword\ntoken\n")
+        (m / "NOTES.txt").write_text("Set your API token in the environment\n")
+        (m / "generation.yml").write_text("max_tokens: 100\ntitle: Basic configuration\n")
+        hex_pkg = self.repo / "deps" / "oauth2"
+        hex_pkg.mkdir(parents=True)
+        (hex_pkg / "hex_metadata.config").write_text('{<<"name">>,<<"oauth2">>}.\n')
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"copy": ["models", "deps"]}}}))
+        self.role(via="api", api=FLASH)
+        self.start_api("t-cpt1")
+        self.assertEqual(store.Task("t-cpt1").spec["copy"], ["models", "deps"])
+        (m / "auth.json").write_text(json.dumps({"hub": {"api_key": "hf_abc123"}}))
+        with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
+            self.start_api("t-cpt2")
+        self.assertEqual(cm.exception.code, 3)
+        self.assertIn("commands.json copies models into every task and it holds a credential",
+                      err.getvalue())
+
+    def test_a_copied_directory_holding_a_provider_token_an_npmrc_or_aws_credentials_stays_off_api(self):
+        # #1322's third review (2026-11-24): the strong-signal pass let these through: a provider's
+        # `*_TOKEN` in an .env, an .npmrc's `//registry…:_authToken` (skipped as a `//` comment),
+        # an AWS credentials file and a web.config's connection-string password (neither read)
+        (self.repo / ".gitignore").write_text("local/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
+        self.role(via="api", api=FLASH)
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"copy": ["local"]}}}))
+        cases = [(".env", "GITHUB_TOKEN=ghp_abcdefghijklmnop\n"),
+                 (".env", "HF_TOKEN=hf_abcdefghijklmnop\n"),
+                 (".npmrc", "//registry.npmjs.org/:_authToken=npm_abcdefghijklmnop\n"),
+                 (".aws/credentials", "[default]\naws_secret_access_key = abcdEFGH1234\n"),
+                 ("web.config", '<add name="db" connectionString="Server=x;Password=hunter2;"/>\n')]
+        for i, (name, text) in enumerate(cases):
+            with self.subTest(name=name, text=text):
+                shutil.rmtree(self.repo / "local", ignore_errors=True)
+                f = self.repo / "local" / name
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(text)
+                with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
+                    self.start_api(f"t-cpr{i}")
+                self.assertEqual(cm.exception.code, 3, err.getvalue())
+                self.assertIn("commands.json copies local into every task and it holds a credential",
+                              err.getvalue())
+        shutil.rmtree(self.repo / "local")
+        (self.repo / "local").mkdir()
+        (self.repo / "local" / ".env").write_text("GITHUB_TOKEN=${GITHUB_TOKEN}\nmax_tokens=100\n")
+        (self.repo / "local" / "special_tokens_map.json").write_text(
+            json.dumps({"bos_token": "<s>", "mask_token": "[MASK]"}))
+        self.start_api("t-cpr-ok")
+
+    def test_an_api_task_takes_a_standing_sibling_and_a_big_copied_directory_as_configured(self):
+        # #1322; a copied directory's package trees aren't read for a credential
+        # (privacy.COPY_SKIP_DIRS): their code is full of `token = …`, which would refuse every
+        # standing node_modules
+        (self.repo / ".gitignore").write_text("node_modules/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
+        mods = self.repo / "node_modules"
+        mods.mkdir()
+        for i in range(201):
+            (mods / f"m{i}.js").write_text("token = 1\n")
+        shared = self.repo.parent / "shared"
+        shared.mkdir(exist_ok=True)
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"siblings": ["shared"],
+                                                                    "copy": ["node_modules"]}}}))
+        self.start_api("t-sib1")
+        spec = store.Task("t-sib1").spec
+        self.assertEqual((spec["siblings"], spec["copy"]), (["shared"], ["node_modules"]))
 
     # 7: token dotfiles in an API lane
 
@@ -38337,6 +38361,15 @@ class Privacy(_KeyholeTest):
         task.dir.mkdir(parents=True)
         (task.dir / "task.json").write_text(json.dumps({"name": name, "repo": str(self.repo), "via": via}))
         return task
+
+    def manifests(self, *names):
+        """The repo builds with these tools (context.API_HIDDEN_USES): the start's note names
+        only theirs (#1322)."""
+        for n in names:
+            (self.repo / n).write_text("{}\n" if n.endswith(".json") else "[tool.poetry]\n"
+                                       if n == "pyproject.toml" else "\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", *names], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "manifests"], check=True)
 
     @unittest.skipUnless(lane.abi(), "needs Landlock")
     @home_outside_the_lane
@@ -38361,6 +38394,7 @@ class Privacy(_KeyholeTest):
                                  capture_output=True, text=True, timeout=20)
             self.assertEqual(out.stdout.split(), [want] * len(files) + ["read", "built"], (via, out.stderr))
         self.assertIn(str(home / ".gradle" / "caches"), context.writable(self.bare("t-dot-g", "api")))
+        self.manifests("package.json", "pom.xml", "build.gradle", "pyproject.toml", "mix.exs", "app.csproj")
         self.assertIn("an API task can't read ~/.config/pypoetry/auth.toml, ~/.gradle/gradle.properties, "
                       "~/.hex/hex.config, ~/.m2/settings.xml and 2 more",
                       context.api_hidden_note(self.bare("t-dot-note", "api")))
@@ -38407,6 +38441,7 @@ class Privacy(_KeyholeTest):
             hidden = context.api_hidden_paths()
             for rel in (".config/composer/auth.json", ".npmrc"):
                 self.assertIn(os.path.realpath(home / rel), hidden, rel)
+            self.manifests("package.json", "Gemfile", "requirements.txt")
             with mock.patch.object(lane, "abi", return_value=6):  # the note is a lane's (#1156)
                 note = context.api_hidden_note(self.bare("t-cred-note", "api"))
             self.assertIn("each holds a credential, which would reach the provider): in its lane", note)
@@ -38474,6 +38509,7 @@ class Privacy(_KeyholeTest):
             self.assertNotIn(str(gh), api)
             for made in (gh / "caches", gh / "wrapper", hh / "packages", home / ".nuget/packages"):
                 self.assertIn(str(made), api)
+            self.manifests("build.gradle", "app.csproj", "mix.exs")
             with mock.patch.object(lane, "abi", return_value=6):  # the note is a lane's (#1156)
                 self.assertIn("in its lane Gradle and dotnet stop on every run, and Hex installs from a "
                               "private registry fail", context.api_hidden_note(self.bare("t-mv-note", "api")))
@@ -38509,6 +38545,7 @@ class Privacy(_KeyholeTest):
                                            context.readable(task)),
                                  capture_output=True, text=True, timeout=20)
             self.assertEqual(out.stdout.split(), want + ["wrote"] * len(dirs), (via, out.stderr))
+        self.manifests("requirements.txt")
         self.assertIn("Hugging Face's gated and private models don't download",
                       context.api_hidden_note(self.bare("t-hf-note", "api")))
         (hf / "token").write_text("")                               # logged out: nothing to hide
@@ -38625,13 +38662,16 @@ class Privacy(_KeyholeTest):
             self.assertIn(f"wb allow t-hid-gpu --path {settings}",
                           runner.not_the_code(gpu, {"ok": False, "exit": 1, "lane": [str(settings)]}))
 
-    def test_the_start_says_which_token_files_an_api_lane_hides_and_a_gpu_start_doesnt(self):
+    def test_the_start_says_which_token_files_an_api_lane_hides_that_the_repo_builds_with_and_a_gpu_start_doesnt(self):
         home = Path(self.tmp.name) / "home"
         home.mkdir()
         (home / ".npmrc").write_text("//registry.example/:_authToken=t\n")
         # the note is a lane's (#1156): macOS CI has none, so the API start draws one
         drawn = mock.patch.object(lane, "abi", return_value=6)
         with mock.patch.dict(os.environ, {"HOME": str(home)}), drawn:
+            # #1322: a repo with no package.json builds with no npm: nothing to say
+            self.assertNotIn("can't read", self.start_api("t-dn0"))
+            self.manifests("package.json", "pom.xml")
             self.assertIn("note: an API task can't read ~/.npmrc (it holds a credential, which would "
                           "reach the provider): in its lane npm installs from a private registry fail",
                           self.start_api("t-dn1"))
@@ -38656,6 +38696,7 @@ class Privacy(_KeyholeTest):
         # both and Maven ran; the skill had Claude tell the user the repo won't build on API
         home = Path(self.tmp.name) / "home"
         (home / ".m2").mkdir(parents=True)
+        self.manifests("pom.xml")
         (home / ".npmrc").write_text("//registry.example/:_authToken=t\n")
         (home / ".m2/settings.xml").write_text("<settings><servers><server><id>r</id>"
                                                "<password>p</password></server></servers></settings>")
@@ -38720,14 +38761,8 @@ class Privacy(_KeyholeTest):
 
     # 8, 9: OpenRouter
 
-    def test_an_openrouter_id_needs_its_backends_named_and_its_requests_go_to_them_alone(self):
+    def test_an_openrouter_tasks_requests_go_to_its_backends_alone(self):
         rid = "openrouter/deepseek/deepseek-v4.1-flash"
-        why = cli.privacy.order_refusal(rid, [])
-        self.assertIn("is served by many backends that differ in quantization and data policy: pick "
-                      "them with --order <name>[,<name>] (openrouter.ai/deepseek/deepseek-v4.1-flash, "
-                      "Providers tab)", why)
-        self.assertIsNone(cli.privacy.order_refusal(rid, cli.privacy.parse_order("baseten")))
-        self.assertIsNone(cli.privacy.order_refusal(FLASH, []))       # one backend: nothing to pick
         port, out, _ = ApiHarness.capture(self, "or")
         m = self.model("openrouter", "deepseek/deepseek-v4.1-flash", "/api/v1",
                        "@opencode/ai/providers/openrouter")
@@ -38797,25 +38832,6 @@ class Privacy(_KeyholeTest):
                "errors": [], "texts": ["done"]}
         self.assertIn("NOTE: OpenRouter served Novita, not baseten", runner.summary_text(t, 1, rnd, None))
 
-    # 10, and the line's other parts
-
-    def test_where_marks_a_free_model_and_names_the_policy_page_or_says_to_see_it(self):
-        free = cli.privacy.where(self.api_model("opencode/big-pickle-free", "OpenCode Zen (API)", free=True))
-        self.assertTrue(free["free"])
-        self.assertTrue(free["line"].endswith("the provider may keep or train on your code"))
-        self.assertEqual(free["policy"], "https://opencode.ai/docs/zen/")
-        paid = cli.privacy.where(self.api_model())
-        self.assertEqual(paid, {"provider": "deepinfra", "name": "DeepInfra",
-                                "line": "your code goes to DeepInfra",
-                                "policy": "https://docs.deepinfra.com/account/data-privacy",
-                                "free": False, "backends": []})
-        odd = cli.privacy.where(self.api_model("acme/m1", "Acme (API)"))
-        self.assertEqual((odd["policy"], odd["line"]), (None, "your code goes to Acme · see Acme's data policy"))
-        orr = cli.privacy.where(self.api_model("openrouter/deepseek/x", "OpenRouter (API)"), ["baseten"])
-        self.assertIn("via OpenRouter to baseten, no fallbacks (OpenRouter's account setting decides "
-                      "whether backends may keep it)", orr["line"])
-        self.assertEqual(orr["backends"], ["baseten"])
-
     def test_doctor_says_nothing_of_free_models_wb_never_uses(self):
         # wave 2's review: a `--` line on every doctor run once hosted.json listed any free model,
         # for models wb never suggests; one the user picks carries FREE_LINE where it is chosen
@@ -38827,7 +38843,6 @@ class Privacy(_KeyholeTest):
         with redirect_stdout(buf), redirect_stderr(io.StringIO()), contextlib.suppress(SystemExit):
             cli.main(["doctor"])
         self.assertNotIn("free model", buf.getvalue())
-        self.assertIn(cli.privacy.FREE_LINE, cli.privacy.where(self.api_model("opencode/a-free", free=True))["line"])
 
 
 class Writing(Base):
@@ -38931,7 +38946,6 @@ class Writing(Base):
         task = store.Task("t-next")
         prompt = task.round_dir(2).joinpath("prompt.md").read_text()
         self.assertTrue(prompt.endswith(self.protocol(task, cli.WRITING_PROTOCOL)))
-        self.assertNotIn("No unrelated refactors", prompt)
         wait_phase("t-next", {"review"})
 
     def test_self_review_is_off_for_a_writing_task_unless_asked(self):
@@ -39704,9 +39718,7 @@ class RoleResolution(Base):
         self.assertIn(f"\nmodel: deepseek/deepseek-flash · API (DeepSeek) · trivial role, set by you {day} · "
                       "thinking off · today $0 of $5.00\n", out)  # with today's spend (meter.tail, #1019)
         self.assertTrue(out.startswith("started t-api on deepseek/deepseek-flash (API) · branch "), out)
-        # the first API task in the repo for this provider: whose choice and where it goes (#1021's words)
-        self.assertIn("\nnote: this task sends the repo, its spec, CLAUDE.md files", out)
-        self.assertIn(" to DeepSeek (the trivial role's model; data policy: ", out)
+        self.assertNotIn("this task sends", out)  # where it goes is the dialog's, said once (#1322)
         # wb watch --json: a routed line naming the provider and the role, after the meta line
         rows = [json.loads(x) for x in self.wb("watch", "t-api", "--json")[1].splitlines()]
         self.assertEqual([r["s"] for r in rows[:2]], ["meta", "routed"])
@@ -39718,10 +39730,7 @@ class RoleResolution(Base):
         from workbench import chat
         self.assertIn({"name": "t-api", "phase": "queued", "model": "deepseek/deepseek-flash", "via": "api",
                        "provider_name": "DeepSeek"}, chat.snapshot()["tasks"])
-        # a second task there for that provider: the repo's code went there already, no note
-        code, out, _ = self.begin("t-api2", "--role", "trivial")
-        self.assertEqual(code, 0)
-        self.assertNotIn("this task sends", out)
+        self.assertEqual(self.begin("t-api2", "--role", "trivial")[0], 0)
 
     def test_a_model_that_cant_turn_thinking_off_is_said_so_in_the_dialog_the_start_line_and_task_json(self):
         # #1237 (2026-11-24): an Anthropic adaptive model with no `none` runs on its bare id,
@@ -40109,28 +40118,25 @@ class RoleResolution(Base):
         self.routes.write_text("{")                                      # unreadable: the role's own, as before
         self.assertEqual(routes.off_api("trivial")[2], "wb route trivial gpu")
 
-    def test_a_standing_copy_refusal_names_a_way_off_api_that_works_and_the_dry_run_refuses_it_before_the_dialog(self):
-        # #1227 (2026-11-24, #1218's fix missed it): the refusal of a standing commands.json copy
-        # always said "or put the role on the GPU", a no-op under Agents API and for a --model
-        # start, so the retry was refused the same way; and the mod's dry run never checked it,
-        # so the dialog asked the user to approve a start wb start then refused
-        (self.repo / ".gitignore").write_text("data/\n")
+    def test_a_standing_copy_with_a_credential_is_refused_on_api_and_the_dry_run_refuses_it_before_the_dialog(self):
+        # #1227 (2026-11-24, #1218's fix missed it): the mod's dry run never checked the standing
+        # copy, so the dialog asked the user to approve a start wb start then refused. #1322: only
+        # a copy that holds a credential is refused, and naming it is no way past
+        (self.repo / ".gitignore").write_text("deploy.cfg\n")
         subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
-        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore data"], check=True)
-        (self.repo / "data").mkdir()
-        (self.repo / "data" / "f").write_text("x\n")
-        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {"copy": ["data"]}}}))
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore it"], check=True)
+        (self.repo / "deploy.cfg").write_text("token=abc123\n")
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {"copy": ["deploy.cfg"]}}}))
         self.set_role("trivial", "--api", "deepseek/deepseek-flash", "--day-usd", "5")  # its own side: GPU
         self.set_role("all", "api")
+        line = ("wb: commands.json copies deploy.cfg into every task and it holds a credential: an API task "
+                "doesn't take it (run on the GPU, or keep the secret in an environment variable)\n")
         code, _, err = self.begin("t-role", "--role", "trivial")
-        self.assertEqual((code, err), (3, 'wb: commands.json "repos" copies data into every task, and this one '
-                                          "is on API (DeepSeek): name it (--copy data) to send it, or set Agents "
-                                          "to Both or GPU (wb route all both|gpu)\n"))
+        self.assertEqual((code, err), (3, line))
         os.environ["CLAUDECODE"] = "1"
         argv = ["t-m", "--spec", str(self.spec), "--repo", str(self.repo), "--model", "deepseek/deepseek-v4-pro"]
-        line = ('wb: commands.json "repos" copies data into every task, and this one is on API (DeepSeek): '
-                "name it (--copy data) to send it, or a GPU model\n")
-        self.assertEqual(self.wb("route", "--dry-run", "--json", "--start", *argv), (3, "", line))  # no dialog
+        for extra in ((), ("--copy", "deploy.cfg")):
+            self.assertEqual(self.wb("route", "--dry-run", "--json", "--start", *argv, *extra), (3, "", line))
         ok = store.home() / "route-ok.json"
         m = runner.models.lookup("deepseek/deepseek-v4-pro")
         store.write_json(ok, {"start": {"task": "t-m", "model": m.id}, "change": cli.start_line("t-m", m),
@@ -40138,11 +40144,10 @@ class RoleResolution(Base):
         self.assertEqual(self.wb("start", *argv), (3, "", line))
         self.assertTrue(ok.exists())                                      # the yes never used up
         self.assertFalse(store.Task("t-m").exists)
-        for said in (err, line):
-            self.assertNotIn("wb route trivial gpu", said)
-        code, out, err = self.wb("route", "--dry-run", "--json", "--start", *argv, "--copy", "data")
+        (self.repo / "deploy.cfg").write_text("region=eu\n")             # no credential: as configured
+        code, out, err = self.wb("route", "--dry-run", "--json", "--start", *argv)
         self.assertEqual(code, 0, err)
-        self.assertTrue(json.loads(out)["gate"])                          # named: the dialog, as before
+        self.assertTrue(json.loads(out)["gate"])
 
     def test_an_unreadable_routes_json_stops_the_start(self):
         self.routes.write_text("{")
@@ -40200,7 +40205,6 @@ class RoleResolution(Base):
         self.assertEqual((sp["via"], sp["said"], sp["role"]), ("api", "asked for", "significant"))
         self.assertIn("\nmodel: deepseek/deepseek-v4-pro · API (DeepSeek) · asked for · thinking off · today $0 "
                       "of $5.00\n", out)
-        self.assertIn(" to DeepSeek (asked for; data policy: ", out)  # the first-API note
 
     def test_a_model_that_left_the_catalog_mid_task_is_never_replaced(self):
         # robustness minor 5: a bare KeyError said `could not load <id>: '<id>'`
@@ -40476,12 +40480,13 @@ class FirstRunApi(Base):
         code, _, err = self.wb("route", "trivial", "gpu", "significant", "gpu", "--order", "baseten")
         self.assertEqual(code, 1)
         self.assertIn("--order, all, cap and busy go in a wb route of their own", err)
-        # nor does a pair's `api` put a kept OpenRouter model on API without its backends
+        # a pair's `api` puts a kept OpenRouter model on API with no backends: OpenRouter's pick,
+        # said in the line (#1322: it was refused until the user named backends)
         routes.write({"day_usd": 5, "roles": {"significant": {"api": "openrouter/deepseek/deepseek-v4.1-flash"}}})
-        code, _, err = self.wb("route", "significant", "api", "trivial", "gpu")
-        self.assertEqual(code, 3)
-        self.assertIn("pick them with --order", err)
-        self.assertEqual(routes.read()["roles"]["significant"]["via"], "gpu")
+        code, out, err = self.wb("route", "significant", "api", "trivial", "gpu")
+        self.assertEqual(code, 0, err)
+        self.assertIn(routes.OPENROUTER_ANY, out)
+        self.assertEqual(routes.read()["roles"]["significant"]["via"], "api")
 
     def skills_first_run(self) -> str:
         """The first-run step 2 of SKILL.md, flattened to one line."""
@@ -40508,10 +40513,11 @@ class FirstRunApi(Base):
     def test_the_skills_first_run_sets_an_openrouter_role_alone_with_the_users_backends(self):
         # #1100 (2026-11-23): the skill's one command for an OpenRouter pick exited 3 twice (pairs
         # refuse OpenRouter; alone it needs --order) after the user's only yes. The skill now asks
-        # for the backends in the same question and gives each OpenRouter role a route of its own
+        # for the backends in the same question and gives each OpenRouter role a route of its own;
+        # #1322: --order is offered, not asked for (with none OpenRouter picks)
         first = self.skills_first_run()
-        self.assertIn("`wb route <role> <id> --order <name>[,<name>]` of its own, `--day-usd` on the first", first)
-        self.assertIn("Providers tab", first)
+        self.assertIn("`wb route <role> <id>` of its own, `--day-usd` on the first", first)
+        self.assertIn("offer `--order <name>[,<name>]` if they care which", first)
         self.catalog([*ROUTES_CATALOG, api_entry("openrouter", "vendor/model-x"), api_entry("openrouter", "vendor/model-y")],
                      [key_row("openrouter", "OpenRouter", STORED)])
         runner.models.hosted(fresh=True)
@@ -41079,18 +41085,21 @@ class BusyGpu(Base):
         self.assertIn("Ask the user: a higher cap", cli.meter.refusal(runner.models.lookup("deepseek/deepseek-flash"),
                                                                      "trivial"))  # an API start's, as before
 
-    def test_a_standing_copy_unnamed_keeps_a_busy_start_off_api(self):
+    def test_a_standing_copy_with_a_credential_keeps_a_busy_start_off_api(self):
         # wave 2's merge: _worktree_setup checked commands.json's standing copy/siblings as a GPU
         # start's, then the busy opt-in moved it to API, so a copied .env.local reached the provider
         self.opt_in()
         conf = {"copy": [".env.local"]}
+        (self.repo / ".env.local").write_text("API_KEY=abc123\n")
         with mock.patch.object(cli.context, "repo_conf", lambda repo, sub=None: conf):
             line = cli._busy_api("trivial", self.asked(), self.repo, None)
             self.assertIsInstance(line, str)
-            self.assertIn("can't take it: commands.json \"repos\" copies .env.local into every task", line)
+            self.assertIn("can't take it: commands.json copies .env.local into every task and it holds a "
+                          "credential", line)
             # no way off API for a role on the GPU already: "or put the role on the GPU" was one (#1227)
-            self.assertTrue(line.endswith("name it (--copy .env.local) to send it"), line)
-            self.assertIsInstance(cli._busy_api("trivial", self.asked(copy=[".env.local"]), self.repo, None), tuple)
+            self.assertTrue(line.endswith("an API task doesn't take it"), line)
+            (self.repo / ".env.local").write_text("REGION=eu\n")
+            self.assertIsInstance(cli._busy_api("trivial", self.asked(), self.repo, None), tuple)
 
     def test_a_busy_start_on_an_openrouter_role_carries_its_backends(self):
         # wave 2's merge: busy_routed had no `order`, so the keyhole sent the busy task to any backend
@@ -41103,14 +41112,14 @@ class BusyGpu(Base):
         sp = store.Task("t-or-busy").spec
         self.assertEqual((sp["via"], sp.get("busy"), sp.get("order")), ("api", True, ["baseten"]))
 
-    def test_busy_api_with_an_openrouter_role_and_no_backends_is_refused(self):
-        # wave 2's merge: `wb route busy api` let an OpenRouter role with no --order start on API
+    def test_busy_api_with_an_openrouter_role_and_no_backends_is_openrouters_pick(self):
+        # wave 2's merge refused `wb route busy api` for an OpenRouter role with no --order; #1322:
+        # with none OpenRouter picks the backend, no fallbacks (keyhole.route_body)
         doc = routes.normalize({"day_usd": 5, "roles": {"trivial": {"api": "openrouter/deepseek/deepseek-v4.1-flash"}}})
         routes.write(doc)
         code, _, err = self.wb("route", "busy", "api")
-        self.assertEqual(code, 3)
-        self.assertIn("pick them with --order", err)
-        self.assertEqual(routes.read()["busy"], "wait")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(routes.read()["busy"], "api")
 
     def test_a_busy_roles_new_backends_are_a_new_place_for_its_code(self):
         # wave 2's merge: _busy_newly compared model ids alone; new backends are where the code goes

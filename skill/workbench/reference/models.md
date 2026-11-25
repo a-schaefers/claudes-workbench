@@ -6,7 +6,7 @@ updating workbench, or the weekly model check is due.
 **No role can run?** In this order:
 - No GPU model, and a provider with a stored key (`wb setup`'s `ok  API keys: …`): the skill's
   one-question first run (two of that provider's models for the three roles, the cap, one
-  `wb route … --day-usd`; an OpenRouter role its own, with the user's `--order`).
+  `wb route … --day-usd`; an OpenRouter role in a route of its own, `--order` if they name backends).
 - Neither: lay out both ways in a line each, a local server (below) or `/connect` in OpenCode for
   an API provider, and let the user pick.
 - A local server: do the model check below first: recommend models for this hardware and offer to

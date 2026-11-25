@@ -71,7 +71,7 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   printed; under Claude Code only on the mod's dialog's yes); `wb patch zip`, the way without
   GitHub (a .zip to email to `UPSTREAM_CONTACT`; local, no dialog). Its git calls run without hooks or a terminal, and it imports everything up front:
   `wb patch init` deletes the copy wb runs from.
-- `privacy.py`: where an API task's code goes (`where`, `PRIVACY_PAGES`, the first-task note),
+- `privacy.py`: an API task's standing copy that holds a credential (`copy_holds_credential`, `standing_refusal`),
   `local_only`, OpenRouter's routing, `holds_credential` (which token files an API lane hides) (ARCHITECTURE.md, *Privacy for API roles*).
 - `results.py`: results.jsonl rows (`kind`, `role`, `provider`; an API task's money, `api_usage`); read them through `store.results()`, which leaves out trials.
 - `router.py`: the model per size, slices, budgets. `tuning.py`: learned knobs (a new one goes in

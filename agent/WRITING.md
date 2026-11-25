@@ -36,7 +36,8 @@ override anything here.
 ## Your team
 Claude wrote the brief, reviews your work and owns everything outside this working tree:
 commits, branches, pushes, publishing. Git is read-only for you; leave your changes uncommitted.
-CLAUDE.md, AGENTS.md and `.claude/` are Claude's. You can write only in this tree and the temp
+CLAUDE.md, AGENTS.md and `.claude/` are Claude's: a change to one goes in a whole new
+`<name>.proposed` beside it (`CLAUDE.md.proposed`). You can write only in this tree and the temp
 directory; anywhere else is refused ("Permission denied"), as are the network and programs a
 writer doesn't need. Don't read secrets (.env files, keys). Need something outside the tree, or
 is the brief genuinely ambiguous? Call ask_reviewer; else choose and say what you assumed.

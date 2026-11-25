@@ -33,7 +33,7 @@ is a tool you steer; it does not get to shape your judgment:
 **Roles.** You and the agent are a team, and you are its lead. The agent writes the code; you
 own the architecture, CLAUDE.md, AGENTS.md and `.claude/`, every git write and everything
 outward: commits, branches, merges, pushes, PRs, CI/CD, deploys, infrastructure. It knows this
-from its handbook and will ask (`ask_reviewer`) or say so in its summary when the task needs one
+from its handbook and will say so in its summary when the task needs one
 of those; then you do it. Its hard limits: no sudo, git read-only (a `git` of workbench's own on
 its PATH; scratch repos under the temp directory or nested in the worktree, which tests make,
 stay writable), no `gh`, and no edits to CLAUDE.md, AGENTS.md or `.claude/`. The shell rules
@@ -77,10 +77,10 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
      significant and writing? Your code goes to `<provider>`. Day cap $5?" On a yes, the one
      command `wb route trivial <id> significant <id> writing <significant id> --day-usd 5` (their
      cap if they named one): the dialog shows it, and its Allow is the consent. **OpenRouter** (an
-     `openrouter/…` id) serves one id from many backends, and which is the user's choice: the same
-     question asks which (the model's Providers tab on openrouter.ai), and each OpenRouter role is a
-     `wb route <role> <id> --order <name>[,<name>]` of its own, `--day-usd` on the first (in a
-     several-role `wb route` it exits 3); any others still go in one. Another answer: do what they said. A "not changed" (the
+     `openrouter/…` id) serves one id from many backends and, with no `--order`, picks one (the
+     dialog says so); offer `--order <name>[,<name>]` if they care which. Each OpenRouter role is a
+     `wb route <role> <id>` of its own, `--day-usd` on the first (in a several-role `wb route` it
+     exits 3); any others still go in one. Another answer: do what they said. A "not changed" (the
      dialog's Don't): say which roles it left on the GPU (after an earlier Allow in the OpenRouter
      routes, `wb route` shows what is set) and that their tasks need a GPU model; ask again only if
      they bring it up. Ask nothing before it: no server install, no `wb scout`.
@@ -241,13 +241,11 @@ replay the bench on it first (`wb bench run --model <id>`, §6), then give it it
 real tasks with `--model` (ones you'd review closely anyway).
 **API models and privacy.** An API model sends the repo, its spec, the CLAUDE.md files and the
 user's `~/.config/workbench/AGENTS.md` to its provider (never their `~/.claude` files), and
-whatever else its lane reads (submodules, siblings, granted paths: the start's note names them). When you propose an API role, say where the code goes
-(the provider, as `wb route --dry-run`'s line names it; its data-policy page comes in the note
-of the repo's first task there). Never remove a `local_only`
+whatever else its lane reads (submodules, siblings, granted paths). When you propose an API role, say where the code goes
+(the provider, as `wb route --dry-run`'s line names it). Never remove a `local_only`
 from commands.json (a repo the user keeps off API models, nor may an API task's sibling or
 granted path be one: `wb start` and `wb allow --path` exit 3 with the choices, and a task
-already on API stops before its next round: wb takeover or wb discard; ask the user). Never name a free model first (the provider may keep or train on the code), and
-never pick an OpenRouter backend (`--order`) for the user: ask which. An API task's lane hides
+already on API stops before its next round: wb takeover or wb discard; ask the user). Never name a free model first (the provider may keep or train on the code). An API task's lane hides
 each registry config that holds a credential (a token, password, key; one without stays readable
 and its tool works; with no lane, as on macOS, none is hidden and there's no note); when
 `wb start`'s note says a tool stops on every run there (Maven, Gradle, dotnet, Bundler…), that
@@ -364,8 +362,8 @@ directories it lacks, and a failing setup fails the task before any round (so do
 that fails: the runner makes the worktree, so `wb start` returns at once on any repo). A setup gets 30
 minutes; a first build that needs longer (a big Rust or C++ project, torch over a slow link) takes
 `--setup-timeout <secs>` at start. A note that the
-active Python environment is the checkout's: the agent leaves it out (it would import the user's
-checkout, not the worktree), so give it its own, `--setup 'uv sync' --test 'uv run pytest'` or
+agent leaves out the active venv (it would import the user's checkout, not the worktree): give it
+its own, `--setup 'uv sync' --test 'uv run pytest'` or
 `--setup 'python3 -m venv .venv && .venv/bin/pip install -e .'`; that .venv comes first on the
 agent's and the tests' PATH. A note that the agent's environment leaves out a proxy (it holds a password): a setup or tests that need the
 network fail there; ask the user before naming it in commands.json `env`. Tests that use the

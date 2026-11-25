@@ -44,20 +44,13 @@ How to work (workbench protocol):
   uncommitted. Claude commits, pushes and deploys.
 {test_line}{experiment_protocol}- If the spec is genuinely ambiguous, you may call the `ask_reviewer` tool ({budget} \
 question(s) for this task). Otherwise make reasonable choices and say what you assumed.
-- Stay inside the scope of the spec. No unrelated refactors, no new dependencies unless asked.
-- You can write only in this worktree, the temp directory and build caches: "Permission denied"
-  anywhere else is that limit, so don't keep trying it. Need a directory outside? Call `ask_reviewer`
-  with `path` set to it (this doesn't use the question budget).
-- CLAUDE.md and AGENTS.md are Claude's, and you can't edit them. When the task asks for a change
-  to one, write the whole new file next to it as `<name>.proposed` (`CLAUDE.md.proposed`); Claude
-  reads the difference and takes it.
 - Finish with a short summary: the files you changed, the test result, and any assumptions.
   If you hit something the next agent would trip on too (a library's quirk, a pitfall, a check
   worth running), add a line `Lesson: <the rule, and why>` to it.
 """
 
 # The writing role's protocol (#1025): prose under its own rules, not the coding ones. Its fold
-# and first bullet, `{test_line}`, the ask_reviewer, lane and `.proposed` bullets, and the
+# and first bullet, `{test_line}`, the ask_reviewer bullet and the
 # `Lesson: <the rule, and why>` line are PROTOCOL's word for word: bench.FOLD and bench.TEST_LINE,
 # transcript's fold and runner.outline_section's split read them, lessons.LESSON the summary's
 # `Lesson:` lines. Its summary bullet is its own (the [TK] gaps, the check's result).
@@ -74,12 +67,6 @@ question(s) for this task). Otherwise make reasonable choices and say what you a
 - Facts come from the brief, the repository and the sources it names. Never invent a number,
   quote, name, command or link: write [TK: what is missing] and list it in your summary.
 - Don't reflow, rewrap or reformat text you aren't changing: Claude reviews the diff line by line.
-- You can write only in this worktree, the temp directory and build caches: "Permission denied"
-  anywhere else is that limit, so don't keep trying it. Need a directory outside? Call `ask_reviewer`
-  with `path` set to it (this doesn't use the question budget).
-- CLAUDE.md and AGENTS.md are Claude's, and you can't edit them. When the task asks for a change
-  to one, write the whole new file next to it as `<name>.proposed` (`CLAUDE.md.proposed`); Claude
-  reads the difference and takes it.
 - Finish with a short summary: the files you changed, every [TK] gap, the check's result if there
   is one, and any assumptions. If you hit something the next agent would trip on too, add a line
   `Lesson: <the rule, and why>` to it.
@@ -747,9 +734,8 @@ def _busy_api(role: str, a, repo: Path, sub: str | None, tokens: int | None = No
                                                          lane_places(repo, sub, a))):
         why = (f"{privacy.home_path(kept[0])}, which the task's lane reads ({kept[1]}), is kept local"
                if kept[1] else f"{repo.name} is kept local ({kept[0]})")
-    if why is None:  # commands.json's standing copy/siblings, unnamed (#1021), as an API start's
-        why = _standing_gap(context.repo_conf(repo, sub), a, models.provider_name(m), repo, sub,
-                            role, advice=False) or None
+    if why is None:  # commands.json's standing copy that holds a credential, as an API start's
+        why = _standing_gap(context.repo_conf(repo, sub), repo, advice=False) or None
     if why is None:  # no price, or today at the day cap (#1019), without an API start's advice:
         # the role is on the GPU and this start only waits for it (wave 2's merge)
         why = meter.refusal(m, role, advice=False,  # round 1's input too (#1173)
@@ -1030,16 +1016,15 @@ CACHE_DIRS = ("__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".to
               ".cache", ".idea", ".vscode")
 
 
-def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu", where: str = "",
-                    role: str | None = None) -> dict:
+def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu") -> dict:
     """The task's `setup`, `copy` and `siblings`: commands.json's `repos` entry for the repo,
     with --setup in its place and --copy/--sibling added, each checked (#201, the 2026-11-19
     audit). A copied path must be ignored in the checkout (else it shows in the review diff) and
     no secret (SECRET_FILES): the user's settings stay theirs. A sibling is a directory beside
     the repo the lane may read."""
     conf = context.repo_conf(repo, sub)  # the package's entry, not the repo's first (#778)
-    if via == "api":  # nothing standing goes to a provider unnamed (#1021)
-        _standing_refusal(conf, a, where, repo, sub, role)
+    if via == "api":  # no standing copy that holds a credential (#1021, #1322)
+        _standing_refusal(conf, repo)
     setup = a.setup if a.setup is not None else conf.get("setup") or ""
     copy, sibs = [], []
     for raw, given in [*((x, False) for x in conf.get("copy", [])), *((x, True) for x in a.copy or [])]:
@@ -1131,44 +1116,27 @@ def _copy_path(repo: Path, raw: str, sub: str | None) -> str:
     return p
 
 
-def _standing_refusal(conf: dict, a, where: str, repo: Path, sub: str | None,
-                      role: str | None = None) -> None:
-    """An API task takes commands.json's standing `copy` and `siblings` only when this command
-    line names them too: a `.env.local` copied into every worktree, or a `../shared` the lane
-    reads, would reach the provider unasked (#1021). Exit 3, the entry and how to name it."""
-    if why := _standing_gap(conf, a, where, repo, sub, role):
+def _standing_refusal(conf: dict, repo: Path) -> None:
+    """An API task takes commands.json's standing `copy` and `siblings` as configured (the setup
+    line says so), but a copied file that holds a credential: exit 3 (#1021, #1322)."""
+    if why := _standing_gap(conf, repo):
         die(why, 3)
 
 
-def _standing_gap(conf: dict, a, where: str, repo: Path, sub: str | None,
-                  role: str | None = None, advice: bool = True) -> str:
+def _standing_gap(conf: dict, repo: Path, advice: bool = True) -> str:
     """_standing_refusal's line, or '': also the busy opt-in's (#1023), which moves a GPU start to
     an API model after _worktree_setup checked it as a GPU one (wave 2's merge), and the mod's
-    dry run's (_route_start). A --copy names the path it copies, from a package the package's
-    (_copy_path, #1158). Its other way out is the role's, or a GPU model for a --model start
-    (privacy.standing_refusal, #1227)."""
-    asked = bool(getattr(a, "model", None))
-    named_copy = {_copy_path(repo, x, sub).rstrip("/") for x in a.copy or []}
-    named_sib = {x.strip().rstrip("/").removeprefix("../") for x in a.sibling or []}
+    dry run's (_route_start), so the dialog never asks for a start wb start then refuses (#1227).
+    A file is read if it is text under the cap, a directory's config files outside its package
+    trees for a strong signal only (privacy.copy_holds_credential): only files were, by
+    holds_credential, which refused a binary test.db and let config/local/ go unread (#1322's
+    review), and its matcher refused a models/ copy for tokenizer_config.json's bos_token. Naming the entry
+    once let it through, which every start then repeated (#1322)."""
     for raw in conf.get("copy", []):
-        if (entry := os.path.normpath(raw.strip()).rstrip("/")) not in named_copy:
-            return privacy.standing_refusal("copy", raw, where, _copy_name(repo, entry, sub),
-                                            role, asked, advice)
-    for raw in conf.get("siblings", []):
-        if raw.strip().rstrip("/").removeprefix("../") not in named_sib:
-            return privacy.standing_refusal("siblings", raw, where, None, role, asked, advice)
+        entry = os.path.normpath(raw.strip()).rstrip("/")
+        if privacy.copy_holds_credential(repo / entry):
+            return privacy.standing_refusal(entry, advice)
     return ""
-
-
-def _copy_name(repo: Path, entry: str, sub: str | None) -> str:
-    """How to type commands.json's repo-relative `copy` entry as a --copy from the package `sub`,
-    so that _copy_path reads it back as the entry: from packages/app the refusal advised
-    `--copy node_modules`, read as the package's, and refused the same start again and again
-    (#1158's review, 2026-11-24). The entry as written when it already reads back, else the path
-    from the package (`../../node_modules`)."""
-    if not sub or _copy_path(repo, entry, sub).rstrip("/") == entry:
-        return entry
-    return os.path.relpath(entry, sub.strip("/"))
 
 
 def _role(a) -> str:
@@ -1254,31 +1222,13 @@ def _local_only_since(task: store.Task) -> None:
         die(why, 3)
 
 
-def _api_notes(task_name: str, repo: Path, m: models.Model, a, routed: dict) -> list[str]:
-    """An API task's start notes: on the repo's first task to this provider, what goes, to whom
-    and whose choice it was (privacy.where_note, #1016's first-task note with #1021's words), and
-    the token files its lane hides: those holding a credential (#1021), when it has a lane (#1156).
-    ``routed``: what task.json holds (_routed_keys): the backends named are the ones the keyhole
-    routes by, never routes.json's (an `order` the note named once never reached the task: wave
-    2's review). Everything else the lane reads is named too, the start's grants and
-    commands.json's standing `paths` (#1269: "the repo, its spec, CLAUDE.md files" while the
-    lane read and sent ~/notes), and on any task that sends more than the repo, not only the
-    repo's first: a later task's --sibling or a path added since went unsaid."""
+def _api_notes(task_name: str, repo: Path) -> list[str]:
+    """An API task's start notes: the token files its lane hides that this checkout's build
+    reads (context.api_hidden_note, #1021), when it has a lane (#1156), and a token in a remote
+    URL (#1072). Where the code goes is the role's dialog's, said once when the user agreed:
+    a note on every start that named the provider and its policy again guarded nothing (#1322)."""
     notes = []
-    task = store.Task(task_name)
-    granted = set(context.grants(task).get("paths") or [])
-    named = [f"{c} (--copy)" for c in a.copy or []] + [f"{x} (--sibling)" for x in a.sibling or []] \
-        + [("every file your account reads" if p == "*" else privacy.home_path(p))
-           + (" (--allow-path)" if p in granted else ' (commands.json "paths")')
-           for p in dict.fromkeys(context.lane_paths(task))]
-    if privacy.first_for(repo, m.provider, task_name) or named:
-        info = privacy.where(m, routed.get("order"))
-        rules = context.user_agents_md().is_file()  # Claude's own files go to no agent (#1061)
-        whose = ("asked for" if (routed.get("said") or "").startswith("asked for")
-                 else f"the {routed.get('role') or _role(a)} role's model")
-        subs = bool(gitops.submodule_sources(repo, task.spec.get("base") or "HEAD"))  # #1267
-        notes.append(privacy.where_note(info, rules, named, whose, subs))
-    if gap := context.api_hidden_note(task):  # none with no lane (#1156)
+    if gap := context.api_hidden_note(store.Task(task_name)):  # none with no lane (#1156)
         notes.append(gap)
     if gap := context.git_url_note(repo):  # a token in a remote URL (#1072)
         notes.append(gap)
@@ -1511,7 +1461,7 @@ def cmd_start(a):
         print(f"package: {sub} (its own CLAUDE.md): the agent, the setup and the tests run there")
     if not a.no_sign:  # said now, not after the whole task at wb accept (#374)
         _say(gitops.sign_problem(repo, a.base))
-    setup = _worktree_setup(repo, a, sub, m.kind, models.provider_name(m), role)
+    setup = _worktree_setup(repo, a, sub, m.kind)
     checkout_bytes = _disk_room(repo, a.base, setup)
     # Two projects, one GPU: a task that can't run beside the GPU's holders used to queue in
     # silence behind them, maybe for hours (the 2026-11-16 audit). Say so before any worktree.
@@ -1669,6 +1619,7 @@ def cmd_start(a):
     if subs:
         print(f"note: submodules ({', '.join(subs[:5])}) are empty in the agent's worktree (your "
               "checkout lacks them at the base's commit): a build or test that needs them fails there")
+    lack: list[str] = []  # the missing-dirs note's, which the venv note defers to
     if setup:
         does = [*(["links " + ", ".join(n if n.startswith("../") else f"../{n}" for n in setup["siblings"])]
                   if setup.get("siblings") else []),
@@ -1681,11 +1632,11 @@ def cmd_start(a):
             print(f"note: the worktree has only committed files, not the checkout's ignored "
                   f"{', '.join(lack[:4])}: --setup '<install command>' sets a task up (--copy "
                   "<path> copies one in); commands.json \"repos\" for every task")
-    if context.lane_on() and (gap := context.home_gap()):
-        print(f"note: {gap}")
     if proxies := runner.dropped_proxies():  # #380 (the audit of 1.6)
         print(f"note: {runner.proxy_line(proxies)}")
-    if venvs := context.venv_line(task, bool(setup and setup.get("setup"))):  # #490
+    # #490; not beside a --setup, nor when the missing-dirs note named the venv already (#1322)
+    if not (setup and setup.get("setup")) and not any(d.rstrip("/").rsplit("/", 1)[-1] in ("venv", ".venv")
+                                                      for d in lack[:4]) and (venvs := context.venv_line(task)):
         print(f"note: {venvs}")
     if context.mise_trusted(task) is False:  # #674
         print(f"note: mise doesn't trust {repo}'s config (mise trust --show), so it trusts no "
@@ -1703,7 +1654,7 @@ def cmd_start(a):
     print(routes.model_line(m.id, routed) + meter.tail(m) if api else f"model: {why}" if why != "asked for"
           else f"model: {m.id} (asked for)")
     _say(routes.BUSY_LINE if routed.get("busy") else "")
-    for note in _api_notes(a.name, repo, m, a, routed) if api else ():  # #1016, #1021
+    for note in _api_notes(a.name, repo) if api else ():  # #1016, #1021
         print(f"note: {note}")
     print(f"slice: {router.slice(m).line()}")
     if handed:
@@ -3330,10 +3281,9 @@ def _route_start(a) -> None:
         die(_cant_run(m, state), 3)
     if repo is not None and (why := _no_base(repo, ns.base)):
         die(why)
-    # commands.json's standing copy/siblings this start doesn't name: wb start's exit 3, here
-    # before the dialog, which had the user approve a start wb start then refused (#1227)
-    if repo is not None and (why := _standing_gap(context.repo_conf(repo, sub), ns,
-                                                  models.provider_name(m), repo, sub)):
+    # commands.json's standing copy that holds a credential: wb start's exit 3, here before
+    # the dialog, which had the user approve a start wb start then refused (#1227)
+    if repo is not None and (why := _standing_gap(context.repo_conf(repo, sub), repo)):
         die(why, 3)
     if not ns.queue and not _api_slots_free(m, ns.name):
         die(_slots_full(m, ns.name), 4)
@@ -3575,23 +3525,9 @@ def cmd_route(a):
             if routes.effective_via(ch.doc, r) == "api" and (kept := ch.doc["roles"][r].get("api")) \
                     and kept != api and routes.effective_via(doc, r) != "api":
                 _route_api(kept, r)
-        _order_check(doc, ch.doc)
         return ch
 
     _route_apply(a, argv, changed)
-
-
-def _order_check(doc: dict, new: dict) -> None:
-    """An OpenRouter model run without its backends (#1021): exit 3, no dialog, for a role a
-    change newly sends there, on its own side or the Agents switch, or by the busy opt-in (#1023:
-    `wb route busy api` reached one that no check saw, wave 2's merge)."""
-    busy = routes._busy_newly(doc, new)
-    for r in routes.ROLES:
-        row = new["roles"][r]
-        if (routes.effective_via(new, r) == "api" and (
-                row.get("api") != doc["roles"][r].get("api") or routes.effective_via(doc, r) != "api")
-                or r in busy) and (why := privacy.order_refusal(str(row.get("api") or ""), row.get("order"))):
-            die(why, 3)
 
 
 def _route_pairs(a) -> None:
@@ -3632,7 +3568,6 @@ def _route_pairs(a) -> None:
         for r, via, mid in pairs:  # a kept API model a role newly runs on must still be one it may run
             if mid is None and routes.effective_via(ch.doc, r) == "api" and routes.effective_via(doc, r) != "api":
                 _route_api(ch.doc["roles"][r]["api"], r)
-        _order_check(doc, ch.doc)  # a kept OpenRouter model, put on API with no backends
         return ch
 
     _route_apply(a, argv, changed)
@@ -7502,18 +7437,12 @@ def cmd_doctor(a):
             # PermissionError's path (the 2026-11-16 audit)
             held = (r.returncode not in (0, 126) and "PermissionError" in r.stderr
                     and not (Path(out) / "x").exists())
-        line(held, f"agents write only in their lane (Landlock ABI {v})" if held else
+        line(held, f"agents write only in their lane (Landlock ABI {v}{lane.partial(v)})" if held else
              f"the lane didn't hold a write outside it: {r.stderr.strip()[-200:] or 'the write went through'}")
-        for gap in lane.gaps(v):  # what this kernel's Landlock can't confine (the 2026-11-16 audit)
-            print(f"--  Landlock ABI {v}: {gap}")
         if gap := context.interop_gap():  # WSL: a Windows program escapes it (the 0.90 review)
             print(f"--  {gap}")
-        if gap := context.home_gap():
+        if gap := context.home_gap():  # doctor's alone: wb start said it on every task (#1322)
             print(f"--  {gap}")
-        # what TCP reaches past the lane (#993, 2026-11-22): a warning, the user's own daemon
-        for port in context.listening_daemons():
-            print(f"--  port {port} listens here ({context.DAEMON_PORTS[port]}): the lane doesn't "
-                  "stop TCP, so an agent can reach it")
     else:
         print("--  agents' writes outside their lane and reads of credentials aren't refused here "
               "(no Landlock): only OpenCode's file tools keep to it; " +
