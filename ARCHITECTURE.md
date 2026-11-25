@@ -6000,13 +6000,20 @@ tasks alone. An expired message (claim refuses it) isn't tried again this load
 
 Each message passed on is owed a chat reply (`mem.chatOwed`, `owedAtTurnEnd`, #767: phone
 questions were answered in the terminal only for two releases): a `wb chat reply`/`listen` or `wb
-shot … --chat` in Bash, a `from: claude` row of this Claude Code's (`claude_pid` its own, or
-none: an older wb's row; `chat.send` stamps every one, as another session's screenshot still
-settled it when only `reply` did, the #1129 review) or answering it (`re` holds its id), or a typed prompt settles it (any session's row did:
-another's report kept the follow-up from going, #1129). At the end of the main
+shot … --chat` in Bash (with no `--to`, or `--to user`; a `--to <id>` settles the ids it names), a
+`from: claude` row of this Claude Code's to the message's sender (`to`, none: the user;
+`claude_pid` its own, or none: an older wb's row; `chat.send` stamps every one, as another
+session's screenshot still settled it when only `reply` did, the #1129 review) or answering it
+(`re` holds its id), or a typed prompt settles it (any session's row did: another's report kept
+the follow-up from going, #1129). An agent's message (`Owed.agent`, its name) is settled only by a
+row to it or a `--to` naming it, never by a plain reply or the user's return (#1273: the follow-up
+said the user wrote and named a plain `wb chat reply`, which went to the user's phone, and that
+reply settled the agent's debt, so its wait heard nothing). At the end of the main
 turn that had it (`grace` 1 when it was queued behind a running turn or behind a prompt the mod
-submitted that poll, `mem.submitted`, #837) with no reply, one OWED_NOTE turn is queued (taken back
-out of `mem.queued`, and skipped by `sendQueued`, once nothing is owed, #837); that turn too
+submitted that poll, `mem.submitted`, #837) with no reply, one follow-up turn is queued: the user's
+OWED_NOTE, an agent's `AGENT_OWED_NOTE` (`[workbench] Agent <name>'s message <id> has no answer:
+reply with wb chat reply --to <id> --text "…"`), each taken back out of `mem.queued`, and skipped
+by `sendQueued`, once nothing it is for is owed (#837); that turn too
 ending without one, OWED_POSTED (`wb chat reply --text="Claude answered in the terminal; nothing
 was sent here." --to=<id>`) goes to the chat, once per message (`--to`, so an agent's wait gets it, #1042).
 
