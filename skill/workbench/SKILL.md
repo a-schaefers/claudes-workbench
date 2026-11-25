@@ -212,17 +212,19 @@ model, unloading whatever is there. Old results weigh less, and one task in ten 
 the record left out on fewer than three tasks ("exploring: …"): review it as any other. `wb
 models` shows the ranking per size. Pass
 `--model <id or fragment>` (a GPU model) only if the user names one, or when the record argues
-against the guess, and say the model you passed in your reply. An API model is the user's choice:
-`--model <api id>` and `wb route` show them the exact change in the mod's dialog, and their click
-is the yes (a "not changed" means no). Never move a role between GPU and API because one can't run
-(`wb start` exits 3: tell the user the choices it printed).
+against the guess, and say the model you passed in your reply. An API model is the user's choice,
+never yours: never pass `--model <api id>` unless the user named that id for this task (the mod's
+dialog then asks them, and a "not changed" means no), never run `wb route` without the user's words
+in this conversation, and never move a role between GPU and API because one can't run (`wb start` exits 3:
+tell the user the choices it printed). Recommend; the user sets it, in the dialog or the pane's
+Settings tab.
 
 **Roles are the user's** (`wb route`): which model each kind of work goes to (`significant`,
-`trivial`, `writing`: GPU or API, each side's model, thinking, one day cap). Run a change when it
-is the right call, as a command of its own (`wb route trivial <exact provider/model id>`, `wb route
-all gpu|api|both`, `wb route <role> --gpu <id|auto>`): the mod shows the user the exact change in a
-dialog, and their click is the yes; a "not changed" means they said no, so say it wasn't changed
-and don't ask again. The first API role
+`trivial`, `writing`: GPU or API, each side's model, thinking, one day cap). Never pass `--model`
+for an API model or change a role without the user's yes; recommend only. When they ask for a
+change, run it as a command of its own (`wb route trivial <exact provider/model id>`, `wb route
+all gpu|api|both`, `wb route <role> --gpu <id|auto>`): the mod shows them the change in a dialog, and a
+"not changed" means they said no, so say it wasn't changed and don't ask again. The first API role
 needs a day cap: ask them for one (suggest $5), then add `--day-usd N`. Exit 3 names the fix (a
 key to add with /connect, an exact id). The user's **Agents** switch (`wb route all
 gpu|api|both`) puts every role on one side, or Both: each role as set. A role that can't run
@@ -230,8 +232,8 @@ gpu|api|both`) puts every role on one side, or Both: each role as set. A role th
 there is no fallback, so ask the user and never retry with another `--role` or `--model` to dodge it.
 The one exception is theirs: with **When the GPU is busy** set to the role's API model (`wb route busy
 api`), a start that would wait for the GPU runs on the role's API model, and its output says `GPU busy:
-on the role's API model, as you set`. The user can also set all of this in the pane's Settings
-tab (Shared, GPU, API).
+on the role's API model, as you set`. The user can set all of this in the pane's Settings tab
+(Shared, GPU, API): point them there rather than offering to run `wb route` yourself.
 Which sizes a model takes is set with `wb model sizes <id> trivial|significant`: set it when you
 add a model you judge fit only for small work, and otherwise change it only when the user asks.
 A newly added model has no record, so the router won't pick it over one with a good record:

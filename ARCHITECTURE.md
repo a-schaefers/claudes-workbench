@@ -906,9 +906,13 @@ wakes as `was stopped: its repo became local-only` (`LOCAL_ONLY_HEADLINE`, the t
 stuck wake's feedback line, which exit 3 refused (#1232). Any other `cause` outside `results.THE_STEP`
 (`outsideTheStep`, the same allowlist: `catalog`, `repo`, `checkout`, `setup`, `model`, `disk`, `server`, a lone `died`)
 wakes as `failed (not its agent's doing)` or `was stopped (not its agent's doing)` (`OUTSIDE_HEADLINE`, the toast's
-too). All three end with `OUTSIDE_NEXT`: `Not the agent's doing: its remedy is the notice's, above; tell the user when
-it needs them.` (the provider's and the local-only stop had next steps of their own, restating the notice's remedy and
-that Claude never changes a role or lifts local-only, #1322). A model gone from the catalog and a moved repo woke with the failed wake's feedback line, which exit 3
+too). All three end with `OUTSIDE_REMEDY`, `Not the agent's doing: its remedy is the notice's, above; tell the user
+when it needs them.`; the provider's and the outside-the-step ones then add `OUTSIDE_NEXT`'s no-step clause, `A notice
+that names no step: \`wb feedback <n> --text "carry on"\` once that cause is gone; never discard it for this.` (a model
+failure once the round reached the agent, `can't run: <e>`, names none; #1322's first cut dropped the clause and
+pointed at a remedy that wasn't there). The local-only one has `OUTSIDE_REMEDY` alone: its notice always names
+takeover or discard, and wb refuses its feedback. The provider's and the local-only stop had next steps of their own,
+restating the notice's remedy and that Claude never changes a role or lifts local-only (#1322). A model gone from the catalog and a moved repo woke with the failed wake's feedback line, which exit 3
 refused or a runner that failed at once followed (#1247), so every such stop's notice names its own remedy and carries
 its cause; one with a dedicated text (`spend`, `provider`, `local_only`) or a batch (`tasks`) keeps that.
 
@@ -4461,7 +4465,7 @@ goes on with the rest, as for a worktree problem. The runner checks the same (`r
 a slot, or in checkout, setup or the base check, sent round 1 to the provider anyway and billed it, and so did the
 rounds the runner starts itself): `stuck` before anything more is sent, status `infra` `local_only` (`runner.LOCAL_ONLY`),
 a `stopped` event `by` it, a `stuck` notice with `cause` `local_only`, `task <t>: round N didn't run, so nothing more went
-to its provider: ` + that line, and the latest round's report, as `_go_on`'s (the mod wakes Claude with `LOCAL_ONLY_HEADLINE` and `OUTSIDE_NEXT`, #1232). A round already running finishes. `wb route all api` is global and reads no repo: the check is per start.
+to its provider: ` + that line, and the latest round's report, as `_go_on`'s (the mod wakes Claude with `LOCAL_ONLY_HEADLINE` and `OUTSIDE_REMEDY`, #1232). A round already running finishes. `wb route all api` is global and reads no repo: the check is per start.
 Only the user lifts one: the mod's tool.call hook refuses Claude's Edit, MultiEdit or Write of commands.json
 (`$WB_COMMANDS`, else `~/.config/workbench/commands.json`, matched by real path: `/./` or a linked config directory is
 the same file) whose new text drops a `"local_only": true` the old text had, or gives an entry a `local_only` other than
@@ -5219,7 +5223,7 @@ The user chooses (`wb coding`, #92; the pane's Settings row, #93) in `$WB_HOME/c
 ts}`, read fresh, default `decide`. The agent always gets the first shot.
 - **Let Claude decide** (`decide`): nothing added, nothing gated.
 - **Ask me first** (`ask`): Claude's first edit in a task's worktree asks the user in a dialog (`Let Claude edit
-  <task>'s code now?`, `Allow`/`Don't`, through `consent`, so the web chat's page while away); `Allow` runs `wb coding
+  <task>'s code now?`, `Allow`/`Don't`, through `consent`: the terminal's, the user away or not); `Allow` runs `wb coding
   allow <task> --said="Allow, in the workbench dialog"` and lets it through, `Don't` denies (`NOT_EDITED`). `--edit`
   (default `its code`) and `--said` are optional (#1322: Claude once had to ask in chat and record both itself).
 - **Only when I say** (`only`): Claude reports the blocker and keeps the work until the user says.
@@ -5824,9 +5828,9 @@ the generated, gitignored `./.claude-plugin/types/tsconfig.json`.
 functions declared at the top level of `register.tsx` (a declaration or a const bound to one;
 imports from the module's own files pass too). The helpers type `$` as `any`, so validate's listing
 (hooks, calls, env reads, "gating hook without .catch") is the check. Env reads are string
-literals: `HOME`, `WB_HOME`, `WB_BIN`, `CLAUDE_CONFIG_DIR`, `WB_SAVINGS`, `WB_COMPACT_AT`.
+literals: `HOME`, `WB_HOME`, `WB_BIN`, `CLAUDE_CONFIG_DIR`, `WB_COMPACT_AT`.
 
-**State.** Ten `$.state` atoms survive a module reload; one read under an old shape tag is absent,
+**State.** Nine `$.state` atoms survive a module reload; one read under an old shape tag is absent,
 so change the tag when its type changes: `tasks` (`tasks-11`, WbTask[]: name, phase, round, model,
 label, via, role, provider, routed (#1016), tests, last, createdAt, updatedAt, tokens, recent, repo, cwd, subdir, session, claude_pid,
 claude_start, backlog, parked, allowed, and the Tasks view's (#1048, `viewFacts`): group, cards, tools, tokOut, ctxUsed,
@@ -5843,7 +5847,7 @@ is `mem`, reset by a reload. Task facts are re-read from `$WB_HOME`; the mod wri
 `tasks/<n>/acked`, scout.json's `offered_at` and `chat/listener.json`.
 
 **session.start.** `mem.root`, `mem.wb`, `mem.skill` (`$CLAUDE_CONFIG_DIR` or `~/.claude`, then
-`skills/workbench/SKILL.md`); `WB_HOME`, `CLAUDE_CONFIG_DIR` and `WB_SAVINGS` resolved by
+`skills/workbench/SKILL.md`); `WB_HOME` and `CLAUDE_CONFIG_DIR` resolved by
 `absolutePath` as `store.absolute_env` does (settings.json passes `~` literally, #454), `WB_BIN` too
 when it has a `/` or starts with `~` (#699); the chat key (`<start ms>-<6 base36>`, kept across
 reloads); `mem.cwd`, `mem.home` (which
@@ -6178,10 +6182,12 @@ Code's own `<CLAUDE_CONFIG_DIR or ~/.claude>/plugins/` (and `CLAUDE_CODE_PLUGIN_
 (the review of #1005). The upstream: `patches.json`'s `upstream`, else `UPSTREAM` (`a-schaefers/claudes-workbench`).
 A GitHub MCP tool (`GITHUB_MCP`, `mcp__…github…__<name>`) not named `get_`/`list_`/`search_` whose input names the
 upstream, or a repository of its name (a fork), asks the same (`mcpAimsUpstream`), its input shown up to `MCP_CHARS`
-4000. The question (`askToSend`, through `consent`): at the terminal `$.ui.ask`; with the user away on the web chat
-(`away`) the same question on the chat page (`askOnChat`, `--tool=workbench --kind=permission --here`: their away
-setting never answers it, and an agent's token can't, wb chat serve's 403), its allow the yes; a chat that can't take it
-(wb failing) leaves the terminal's dialog (#1322: it was refused until they were back). The text: `Claude wants to send this to GitHub (<slug>), publicly: <the command>`, the whole line up to
+4000. The question (`askToSend`, through `consent`) is always the terminal's `$.ui.ask`, a dismissed one (an interrupt)
+a no; with the user away on the web chat (`away`) the chat gets one line first, `wb chat reply --to=user` with
+`CONSENT_WAITING` (`Claude is waiting on a workbench dialog in the terminal: answer it there.`). The owner's rule (#1340,
+2026-11-24): consent is answered in the terminal, locally or over ssh and tmux, never relayed to the chat for answering.
+It was refused while they were away (`NOT_SENT_AWAY`), a round trip for nothing, and #1322's first cut asked on the chat
+page, which cut a long question at `chat.ASK_TEXT` unmarked and left a user back at the terminal with no dialog. The text: `Claude wants to send this to GitHub (<slug>), publicly: <the command>`, the whole line up to
 `SHOW_CHARS` 600, a longer one as the outward command in full, then the line's start (`shownCommand`: cut from the
 start, a long line hid the gh command and its body); for `wb patch send` its `--title` and the body file's first
 `BODY_LINES` 20 lines (`sendQuestion`, `sendArgs`: the last `--title`/`--body-file` given, as argparse takes them; wb
@@ -6207,8 +6213,8 @@ local-only, or not, by the session's repo, #1125). A `cd` the mod can't resolve 
 spawn and the call skipped the dialog. A route's runs in the session's (it reads no directory).
 A dry run that exits non-zero (wb refuses the change itself), prints nothing gated (a GPU model pin, a GPU `--model`, the Agents switch to GPU)
 or can't run lets the call through: wb refuses a gated change under Claude Code without the approval anyway. Else
-`consent(<the dry run's change line>, 'Allow', "Don't")`: at the terminal `$.ui.ask`, away on the web chat the chat
-page's ask, as the send's above. `Allow` writes `$WB_HOME/route-ok.json` (`{...approval, at}`, the dry run's `approval`: `{argv,
+`consent(<the dry run's change line>, 'Allow', "Don't")`: the terminal's `$.ui.ask`, with the chat's one line while
+away, as the send's above. `Allow` writes `$WB_HOME/route-ok.json` (`{...approval, at}`, the dry run's `approval`: `{argv,
 change}` or `{start: {task, model}, change}`) and lets the call through; anything else denies (`NOT_CHANGED`:
 `workbench: not changed: the user did not approve it in the dialog. Tell them it was not changed; ask again only if
 they ask for it.`). Refused without asking (`ROUTE_OWN`, `run wb route (or wb start --model) as a command of its own`):
@@ -6227,10 +6233,10 @@ the default and no cap is set (nothing to tell), `routes.json can't be read (wb 
 <summary>. <ROUTES_RULE>` whenever it differs from what was said (the first time `ROUTES_NOTE`), so any change, the
 dialog's, the pane's, a terminal's or a hand edit, reaches the conversation as one row. `prompt.context` adds the
 `workbench-routes` block (delegating, or a task open, as `wanted` reads) once any role has an API model (a GPU pin alone
-adds none): `Roles (the user's, wb route): <summary>. Day cap $5. A role change or a \`wb start --model <API id>\`
-shows the user a dialog with the exact change, and their click is the yes. Run it when it is the right call.`
-(`ROUTES_RULE`; `No day cap yet.` without one; it once ended `recommend only`, and Claude asked in chat for the yes the
-dialog then asked for again, #1322). The `/workbench` skill's text carries it the same way (`unsaid`).
+adds none): `Roles (the user's, wb route): <summary>. Day cap $5. Never pass --model for an API model or change a role
+without the user's yes (the mod asks them in a dialog); recommend only.` (`ROUTES_RULE`; `No day cap yet.` without one).
+Roles are settings, and Claude never changes one unasked (the owner's locked rule, 2026-11-24): #1322 tried `Run it when
+it is the right call`, and it went back. The `/workbench` skill's text carries it the same way (`unsaid`).
 
 **Tests** (`register.test.tsx`: an in-memory filesystem, a fake `wb events`; `statHeld`, a path
 whose stat comes back late). Not covered: check-in
@@ -6373,7 +6379,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb bench self <case>` | `--yes` (required), `--turns N` (40) | `claude -p` on the case; a row `arm: claude` and the cost ratio. |
 | `wb bench run` | `--model ID…` (default: every GPU model that can run and takes the case's size), `--case NAME…`, `--skill NAME…`, `--label TEXT`, `--repeat N` (1) | A detached driver, one replay at a time behind real tasks, preempted by one; refused while another run runs; trims runs past `RUNS_KEPT` 20 (`bench.prune_runs`), `bench.sweep`s; skips what the label already passed or failed (an `error` runs again); an API `--model` refused (#1013). |
 | `wb backlog [NAME]` | `--json` | A `--backlog` batch, archived included: per task, then `savings.summary`, then the batch's `api:` line when it has API tasks (`api_summary`, trials in, #1121); `--json` `{backlog, tasks, totals}` (`totals.api`: api_totals), unnamed `[{backlog, tasks, open}]`. Unknown: exit 1. |
-| `wb savings` | `--week` \| `--month` \| `--all`, `--json`, `--share`, `--card FILE.svg`, `--price X\|off`, `--api` | `savings.totals`, trials out, then the `api:` line when the period has API tasks; `--json` `{period, tasks, of, claude, self_est, saved, wh, cost, remote, score, price, api}` (the pane reads it); `--api`: the closed API tasks' money by provider, trials in, and the day ledger's spend and by day, open tasks and bench replays in (`savings.spent`, #1094), `--json` api_totals plus `bench` and `spent` (*What a task saved*, #1022); `--price` (positive, finite, else exit 1) writes savings.json `kwh_price` (`off`: `set_price(None)`, #609). |
+| `wb savings` | `--week` \| `--month` \| `--all`, `--json`, `--share`, `--card FILE.svg`, `--price X\|off`, `--api` | `savings.totals`, trials out, then the `api:` line when the period has API tasks; `--json` `{period, tasks, of, claude, self_est, saved, wh, cost, remote, score, price, api}` (the same totals as the web chat's Savings, `chat.week_saved`); `--api`: the closed API tasks' money by provider, trials in, and the day ledger's spend and by day, open tasks and bench replays in (`savings.spent`, #1094), `--json` api_totals plus `bench` and `spent` (*What a task saved*, #1022); `--price` (positive, finite, else exit 1) writes savings.json `kwh_price` (`off`: `set_price(None)`, #609). |
 | `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set recording\|live on\|off`, `set every 1\|2\|5`, `--json` (*The Stats feed*), `--all` | `set`: stats.json; `wb stats`: `stats.summary`, then results by model, kind and role (a row before roles by size; the model column as wide as the longest id, never cut, the role cut to 11) with columns `tasks`, `accepted`, `rounds`, `autofix`, `reviews`, `min`, `claude`; with an API row shown also `kind`, `role`, `agent tok` and `paid` (mean $ a task over the known costs: `-` GPU, `plan` all plan usage, `?` none known, `~$0.12` some unknown, plan rows and those that sent nothing aside, #1106; `results.paid_cell`), within 120 columns for ids up to 30 (`stats.STATS_MODEL_LINES` 3, #638, #1022); a GPU-only table is as before #1022: `size` (`role` once a writing row shows) and `local tok`; `tune`: the knobs; `trial`: closed tasks' rows marked, lessons dropped (an open task refused: it has no row). Beneath the table, each kind of row it leaves out counted apart: trial runs, discards put down to the spec, discards after a stop that wasn't the agent's, tasks whose agent never ran (`results.table`, #817, #1245). |
 | `wb gc` | `--days N` (`ARCHIVE_DAYS` 30) | `cli.gc`, writing `gc.json`: archives tasks closed N days (`store.archive`); old handled notices to `notify.old.jsonl` (`_rotate_notices`; `_cap_old_notices` at `NOTIFY_OLD_MAX` 8 MiB); rules of gone tasks (`RULES_GRACE` 1 h); `context.drop_stale_runtime_dirs`; `store.SCRATCH_PREFIXES` scratches (named `<prefix><maker's pid>.<start tag>.<machine tag>-` by `store.scratch`; `wb bench add`'s `.<case>.<pid>.tmp`) `SCRATCH_AGE` old whose maker is gone (`_drop_scratches`, `_maker_alive`: a reused pid with another start is gone, #532; `_scratch_homes`, #589; another machine's after `FAR_SCRATCH_AGE`, as its pid isn't in this process table, #876); half-made starts (`_dead_start`, `_drop_start`: worktree unlocked and removed, and the branch only when `starting.json` says this start made it and it still points at `branch_at`, `delete_branch(at=)`, #416, #376); chat uploads (`chat.drop_old_uploads`); landed `delegate/` branches (`_merged_branches`, `gitops.drop_landed_branch`, never one checked out, `gitops.checked_out_in`, nor one moved past the recorded tip, #930; status `branch_gone`, #686; one squash-merged elsewhere holds commits its target lacks and stays); accepted refs (`_released_refs`, `gitops.drop_accepted`, `accepted_ref_gone`: deleted when the tip is in `base_branch`, else moved into `steps.bundle` first; a `steps.bundle` stays as long as its task, #940); archived tasks past `store.SLIM_DAYS` 90 slimmed (`store.slim_archive`, `SLIM_GLOBS`: logs, test outputs, old exports, shot PNGs with shots.json marked `pruned` first, #821; task.json, status, prompts, summaries, events and asks stay: names stay taken, bench add and the lessons read them); `_drop_leftovers` (old `imports/`, dead `claude-sessions/<pid>`). Then (not in `cli.gc`) `bench.sweep` (#511). Accept and discard run it without the branches once per `GC_EVERY`. |
 
@@ -6584,7 +6590,7 @@ unnamed (*Setting the worktree up*).
 `OPENCODE_CONFIG_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`) take `~` and relative paths: `absolute_env()`, first in
 `cli.main` and the runner, makes them absolute against wb's cwd (not resolved), so every child sees one place (a
 relative one had wb and the runner, which runs from the package dir, disagree: the 2026-11-16 audit, #328, #650); the
-mod's `absolutePath` does the same for `WB_HOME`, `CLAUDE_CONFIG_DIR`, `WB_SAVINGS`, `WB_BIN` (#454).
+mod's `absolutePath` does the same for `WB_HOME`, `CLAUDE_CONFIG_DIR`, `WB_BIN` (#454).
 - `write_json`: an exclusively created `.<name>.<pid>.<random>.tmp` beside the file, fsynced (`store._synced`, `write_through` too), renamed
   (renamed unsynced, a power loss could leave `task.json` empty, #475); it replaces a symlink with a plain file. `replace_bytes` does
   the same for whole non-JSON rewrites (results.jsonl in `mark_trials`, notify.jsonl in gc, `acked`, notes.md: unsynced, a crash could empty the history or every notice, #734).
@@ -7509,7 +7515,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   table and the round report's `agent tokens` (an API task's) together. `WbTop`'s type is unchanged (the API fields are optional keys of `running` rows): `top-1` stays.
 - **Which session a task is** → the mod's `mine` and `cli._scope`: the same rule, the home-or-`/` exception included;
   `scope()` passes every id.
-- **A notice kind or its text** → the mod's `HEADLINE`, `NEXT` (a `cause` `provider` notice: `PROVIDER_HEADLINE`, `OUTSIDE_NEXT`; `local_only`, `runner.LOCAL_ONLY` ↔ `LOCAL_ONLY_HEADLINE`, `OUTSIDE_NEXT` ↔ `privacy.since_start_line`, #1232; a question notice's `PERMISSION to ` opening ↔ the mod's `PERMISSION`; any other `cause` outside `results.THE_STEP` ↔ the mod's `THE_STEP`, `OUTSIDE_HEADLINE`, `OUTSIDE_NEXT`, and its notice's text names its remedy, #1247), both still-true rules (`_ack_all`'s, the mod's), `wb wait`.
+- **A notice kind or its text** → the mod's `HEADLINE`, `NEXT` (a `cause` `provider` notice: `PROVIDER_HEADLINE`, `OUTSIDE_NEXT`; `local_only`, `runner.LOCAL_ONLY` ↔ `LOCAL_ONLY_HEADLINE`, `OUTSIDE_REMEDY` ↔ `privacy.since_start_line`, #1232; a question notice's `PERMISSION to ` opening ↔ the mod's `PERMISSION`; any other `cause` outside `results.THE_STEP` ↔ the mod's `THE_STEP`, `OUTSIDE_HEADLINE`, `OUTSIDE_NEXT`, and its notice's text names its remedy or none, when `OUTSIDE_NEXT`'s carry on is it, #1247), both still-true rules (`_ack_all`'s, the mod's), `wb wait`.
 - **A task.json or status key** → *Files and formats*; a results key a reader uses → `results.record` and defaults for
   old rows.
 - **The GPU admission rule** (`models.admits`, `can_share`) → the lease, `wb start`'s refusal, `cli._gpu_holders`,

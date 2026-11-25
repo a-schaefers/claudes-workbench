@@ -19213,7 +19213,8 @@ class ClaudeSpend(Base):
         stats = run_wb("stats")
         self.assertIn("claude", next(line for line in stats.splitlines() if line.startswith("model")))
         self.assertIn("7K", stats)
-        self.assertIn("cost ~2K more Claude tokens (estimate)", stats)  # the feed's headline, signed
+        # #1322: the savings headline left wb stats; wb accept's line above says the estimate
+        self.assertNotIn("Claude tokens (estimate)", stats)
 
     def test_stats_shows_the_claude_column_only_once_a_task_has_it(self):
         self.start("t-old", "ok")
@@ -19926,7 +19927,10 @@ class Coding(Base):
         self.assertIn("took over t", run_wb("takeover", "--all", "--user"))   # /workbench-quit-and-hand-back
         self.assertIn("the user handed it to Claude", run_wb("coding"))     # so the mod lets Claude edit
         self.assertIn("Only when I say", run_wb("coding"))           # kept: a restart reads it again
-        self.assertEqual(self.refused("coding", "allow", "t", "--edit", "x")[0], 1)  # needs their words
+        # #1322: --said is optional (the mod's dialog records a plain yes): it records, and still lasts
+        # only until the task goes back to the agent
+        self.assertIn("Claude may make this edit until it hands the task back: x",
+                      run_wb("coding", "allow", "t", "--edit", "x"))
 
     def test_takeover_all_says_each_refusal_and_still_takes_over_the_rest(self):
         # #601 (the audit of v1.90): the first refused task exited 3 before any runner was stopped

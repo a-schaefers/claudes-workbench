@@ -584,7 +584,13 @@ const OUTSIDE_HEADLINE: Record<string, string> = {
   stuck: 'was stopped (not its agent\'s doing)',
   failed: 'failed (not its agent\'s doing)',
 }
-const OUTSIDE_NEXT = 'Not the agent\'s doing: its remedy is the notice\'s, above; tell the user when it needs them.'
+// Some name no step (a model failure once the round reached the agent: `can't run: <e>`, no remedy
+// line): those go on with "carry on" once the cause is gone, and never discard work that is fine
+// (#1322's first cut dropped the clause). A local-only stop always names takeover or discard, and
+// wb refuses its feedback: OUTSIDE_REMEDY alone.
+const OUTSIDE_REMEDY = 'Not the agent\'s doing: its remedy is the notice\'s, above; tell the user when it needs them.'
+const OUTSIDE_NEXT = (n: string) => `${OUTSIDE_REMEDY} A notice that names no step: ` +
+  `\`wb feedback ${n} --text "carry on"\` once that cause is gone; never discard it for this.`
 
 // A question delivered into a running turn (#542): the engine frames it as another session's
 // message, so one line says whose it is and that it can't wait for the turn to end.
@@ -1576,18 +1582,17 @@ async function askToSend($: any, question: string): Promise<string> {
   return (await consent($, question, SEND_ASK, "Don't send")) ? '' : NOT_SENT
 }
 
-// A consent dialog (a send upstream, a role change, an edit of a task's code): the user's yes, one
-// click on the device they are using. At the terminal the engine's dialog; with the user away on the
-// web chat the same question there (askOnChat), answered only by the user (an agent's token can't
-// answer an ask: wb chat serve's 403) and never by their away setting (`--here`). It was refused
-// while they were away ("they approve it in the dialog once back"), a round trip for nothing (#1322).
-// A question the chat can't take (wb failing) comes up at the terminal, as a permission's does.
+// A consent dialog (a send upstream, a role change, an edit of a task's code): the user's own
+// click, in the terminal's dialog. The owner's rule (#1340, 2026-11-24): consent is answered in the
+// terminal, locally or over ssh and tmux, never relayed to the web chat for answering; while the
+// user is away on it the chat says in one line that Claude waits there (CONSENT_WAITING). #1322's
+// first cut asked on the chat page: it cut a long question at the chat's 2000 characters unmarked,
+// and a user back at the terminal had no dialog for up to 30 minutes; the refusal while away before
+// it ("they approve it in the dialog once back") was a round trip for nothing. A dismissed dialog
+// (an interrupt) rejects: no.
+const CONSENT_WAITING = 'Claude is waiting on a workbench dialog in the terminal: answer it there.'
 async function consent($: any, question: string, yes: string, no: string): Promise<boolean> {
-  if (await away($, await read($, chat))) {
-    const o: AskFor = { consent: true, text: question }
-    const d = await askOnChat($, 'workbench', {}, undefined, o)
-    if (!o.unposted) return d?.behavior === 'allow'
-  }
+  if (await away($, await read($, chat))) await runWb($, ['chat', 'reply', `--text=${CONSENT_WAITING}`, '--to=user'], 15_000)
   return (await $.ui.ask(question, [yes, no]).catch(() => '')) === yes
 }
 
@@ -1671,10 +1676,10 @@ const ROUTES_EDIT = 'workbench: not edited: the roles change only through wb rou
   'mod\'s dialog (wb route shows them).'
 // text a shell or an interpreter runs, not parsed as commands: a route change hidden in it is refused
 const ROUTE_TEXT = /(?:\bwb|-m\s*workbench[\w.]*)\s+(?:route\b|start\b[^\n]*\s--m)/i
-// Said with the roles (#1322): it once ended "recommend only", and Claude asked in chat for a yes the
-// dialog then asked for again
-const ROUTES_RULE = 'A role change or a `wb start --model <API id>` shows the user a dialog with the exact ' +
-  'change, and their click is the yes. Run it when it is the right call.'
+// Said with the roles. Roles are settings, and Claude never changes one unasked (the owner's locked
+// rule, 2026-11-24): #1322 tried "Run it when it is the right call", and it went back
+const ROUTES_RULE = 'Never pass --model for an API model or change a role without the user\'s yes (the mod ' +
+  'asks them in a dialog); recommend only.'
 
 // The simple commands a line runs, `bash -c '…'` and `eval`'s inside, as upstreamAim reads them
 function runsIn(src: string): string[][] {
@@ -3355,12 +3360,11 @@ async function askOnChat($: any, tool: string, input: unknown, signal?: AbortSig
   const kind = KIND[tool] ?? 'permission'
   const i = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
   // `--opt=value`: a value starting with `-` was read as a flag (#535)
-  const args = ['chat', 'ask', `--tool=${tool}`, `--kind=${kind}`, `--text=${kind === 'permission' ? (o.text ?? askText(input)) : ''}`]
+  const args = ['chat', 'ask', `--tool=${tool}`, `--kind=${kind}`, `--text=${kind === 'permission' ? askText(input) : ''}`]
   // this session's `wb events` process: once it's gone wb expires the ask, so a card left by a
   // crashed or closed session doesn't stay open for good, and pushes don't show it (#538)
   if (mem.eventsPid) args.push(`--pid=${mem.eventsPid}`)
   args.push(...askForArgs(o))
-  if (o.consent && !args.includes('--here')) args.push('--here') // the user's own click, never their away setting
   if (kind === 'question') args.push(`--detail=${JSON.stringify({ questions: askQuestions(i.questions) })}`)
   // what the call is for, as Claude described it (Bash's description): the card leads with it
   if (kind === 'permission' && typeof i.description === 'string' && i.description.trim())
@@ -3380,7 +3384,6 @@ async function askOnChat($: any, tool: string, input: unknown, signal?: AbortSig
     const what = kind === 'plan' ? 'a plan' : kind === 'question' ? 'a question' : 'a permission'
     await runWb($, ['chat', 'reply', `--text=Claude is waiting on ${what} in the terminal: it couldn't be shown here.`, '--to=user'], 15_000)
     $.ui.toast(`workbench: ${what} couldn't go to the web chat (${brief(posted.out)}): answer it here`)
-    o.unposted = true
     return undefined
   }
   if (state === 'allow') return { behavior: 'allow' as const }  // their setting: go ahead while away
@@ -3401,9 +3404,7 @@ async function askOnChat($: any, tool: string, input: unknown, signal?: AbortSig
 // the terminal's dialog stands too, and whichever answers first settles it. An agent's token
 // can't answer them (wb chat serve's 403), and the page says whose request it is ("for <name>").
 // At the terminal the user's away setting ("Let Claude go ahead") doesn't answer it (`--here`).
-// `consent`: one of the mod's own consent dialogs (consent), its question `text`; `unposted` set when
-// the chat couldn't take it.
-type AskFor = { for?: string[]; here?: boolean; agent?: string; consent?: boolean; text?: string; unposted?: boolean }
+type AskFor = { for?: string[]; here?: boolean; agent?: string }
 
 // The agents whose message the running turn took: given now (grace 0), their turn not yet ended
 export function agentsFor(turn: Map<string, number>, agents: Map<string, string>): string[] {
@@ -4011,7 +4012,8 @@ async function deliver($: any, now: number) {
       if (!own || !mem.wake) continue // the toast only: the notice stays for its session or wb wait
       // a batch's wake ends with its resume, not the failure's next step (#544)
       const next = batch ? BATCH_NEXT(batch) : row.cause === 'spend' ? (row.guard === 'agents' ? AGENTS_NEXT(name) : SPEND_NEXT(name, (await readRoutes($)).cap !== null))
-        : row.cause === 'provider' || row.cause === 'local_only' || (outsideTheStep(row) && OUTSIDE_HEADLINE[row.kind]) ? OUTSIDE_NEXT
+        : row.cause === 'local_only' ? OUTSIDE_REMEDY
+        : row.cause === 'provider' || (outsideTheStep(row) && OUTSIDE_HEADLINE[row.kind]) ? OUTSIDE_NEXT(name)
         : (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined, String(row.text ?? ''))
       const who = batch && batch.length > 1 ? `Tasks ${batch.map(n => `\`${n}\``).join(', ')} were interrupted`
         : `Task \`${name}\` ${headline}`

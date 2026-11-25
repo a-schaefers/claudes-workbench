@@ -1217,6 +1217,7 @@ test('#1124: a stop by the task\'s API provider wakes Claude to pass on its reme
   expect(woken).toHaveLength(1)
   expect(woken[0]).toContain('[workbench] Task `a` was stopped by its API provider.')
   expect(woken[0]).toContain('Not the agent\'s doing: its remedy is the notice\'s, above; tell the user when it needs them.')     // the notice says the remedy (#1322)
+  expect(woken[0]).toContain('never discard it for this')       // work that is fine
   expect(woken[0]).not.toContain('nor change its model or role yourself')
   expect(woken[0]).not.toContain('Steer it')
   expect(woken[0]).not.toContain('got stuck')
@@ -1244,6 +1245,7 @@ test('#1232: a stop for a repo marked local-only wakes Claude to takeover or dis
   expect(woken).toHaveLength(1)
   expect(woken[0]).toContain('[workbench] Task `a` was stopped: its repo became local-only.')
   expect(woken[0]).toContain('Not the agent\'s doing: its remedy is the notice\'s, above; tell the user when it needs them.')     // the notice names takeover or discard (#1322)
+  expect(woken[0]).not.toContain('names no step')                // its notice always names one
   expect(woken[0]).not.toContain('never you')
   expect(woken[0]).not.toContain('Steer it')
   expect(woken[0]).not.toContain('got stuck')
@@ -1288,6 +1290,25 @@ test('#1247: a stop outside the step wakes Claude to do as its notice says, neve
   expect(c).toContain('[workbench] Task `c` failed.')
   expect(c).toContain('then `wb feedback c --message <file>` or `wb discard c`')
   expect(toasts.join('\n')).toContain('workbench: a failed (not its agent\'s doing)')
+})
+
+test('#1322: a stop outside the step whose notice names no step still wakes with carry on once the cause is gone', async ($, on) => {
+  // runner's model failure once the round reached the agent says only `can't run: <e>`; the first
+  // cut of OUTSIDE_NEXT pointed at a remedy "above" that wasn't there
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'a', 'failed')
+  notice(files, { ts: ts0, task: 'a', kind: 'failed', round: 2, cause: 'model',
+    text: 'task a: deepseek/deepseek-flash can\'t run: connection refused' })
+  fakeTasks(on, files, ['a'])
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken).toHaveLength(1)
+  expect(woken[0]).toContain('A notice that names no step: `wb feedback a --text "carry on"` once that cause is gone; ' +
+    'never discard it for this.')
 })
 
 test('two wakes due in one turn both arrive, the second after the first one\'s turn', async ($, on) => {
@@ -4001,7 +4022,7 @@ const SOURCE = '/home/u/.local/share/workbench/source'
 const MARKET = '/home/u/.claude/plugins/marketplaces/workbench'
 function upstreamWorld(on: any, files: Record<string, string>) {
   const w = { cwd: SOURCE, answer: "Don't send" as string | null, asked: [] as string[], options: [] as unknown[], gits: [] as string[],
-    posted: '', onChat: { answer: 'deny' } as Record<string, unknown>, chats: [] as string[][] }   // the web chat's ask, for an away user
+    chats: [] as string[][] }   // wb chat's calls: the line for an away user
   files['/wb/patches.json'] = JSON.stringify({ source: SOURCE, upstream: SLUG })
   const origins: Record<string, string> = {
     [SOURCE]: `https://github.com/${SLUG}.git`,
@@ -4019,8 +4040,7 @@ function upstreamWorld(on: any, files: Record<string, string>) {
       const url = origins[e.argv[2]]
       return { value: { exitCode: url ? 0 : 2, stdout: url ? `${url}\n` : '', stderr: url ? '' : 'error: No such remote' } }
     }
-    if (e.argv[1] === 'chat' && e.argv[2] === 'ask') { w.chats.push(e.argv); return { value: { exitCode: 0, stdout: w.posted, stderr: '' } } }
-    if (e.argv[1] === 'chat' && e.argv[2] === 'wait') return { value: { exitCode: 0, stdout: JSON.stringify(w.onChat), stderr: '' } }
+    if (e.argv[1] === 'chat') w.chats.push(e.argv.slice(1))
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
   })
   on('tool.call', (_: any, e: any) => {
@@ -4155,15 +4175,16 @@ test('#1291: wb patch zip sends nothing, so the gate never asks about it, even i
   await clock.advance(1000)                                      // the poll the calls started ends here
 })
 
-test('#1005: with the user away on the web chat a send to upstream asks them there, and only their yes sends it', async ($, on) => {
-  // 2026-11-22: the dialog would wait at an empty terminal. It was refused until they were back
-  // (#1322): now the same question goes to the web chat, one tap there, never their away setting
+test('#1005: with the user away on the web chat a send to upstream asks in the terminal, and the chat says it waits there', async ($, on) => {
+  // 2026-11-22: it was refused while they were away, a round trip for nothing; #1322's first cut
+  // asked on the chat page, which cut a long question at 2000 characters and left a user back at
+  // the terminal with no dialog. The owner's rule (#1340): consent is answered in the terminal.
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
   chatOn(files)
   const w = upstreamWorld(on, files)
-  w.answer = 'Send it'
+  w.answer = "Don't send"
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
   on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
   await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
@@ -4171,20 +4192,16 @@ test('#1005: with the user away on the web chat a send to upstream asks them the
   await clock.advance(3000)
   files['/wb/chat/away.json'] = JSON.stringify({ at: clock.now() / 1000, by: 'page' })
   w.cwd = SOURCE
-  w.posted = 'ask-1-ab open\n'
   const r = await $.tool.call({ tool: 'Bash', command: 'git push' } as any) as any
-  expect(r.deny).toContain('not sent: the user did not approve it')    // they said no on the page
-  expect(w.asked).toEqual([])                                          // no terminal dialog
-  expect(w.chats[0]!.slice(2, 4)).toEqual(['ask', '--tool=workbench'])
-  expect(w.chats[0]).toContain('--here')                               // never answered by their away setting
-  expect(w.chats[0]!.find(a => a.startsWith('--text='))).toContain(`Claude wants to send this to GitHub (${SLUG})`)
-  w.onChat = { answer: 'allow' }
-  expect((await $.tool.call({ tool: 'Bash', command: 'git push' } as any) as any).deny).toBeUndefined()   // their yes
-  w.posted = ''                                                        // the chat can't take it: the terminal's dialog
-  expect((await $.tool.call({ tool: 'Bash', command: 'git push' } as any) as any).deny).toBeUndefined()
+  expect(r.deny).toContain('not sent: the user did not approve it')    // their no, in the terminal
   expect(w.asked.length).toBe(1)
-  w.cwd = '/home/u/project'
-  expect((await $.tool.call({ tool: 'Bash', command: 'git push' } as any) as any).deny).toBeUndefined()  // their own
+  expect(w.asked[0]).toContain(`Claude wants to send this to GitHub (${SLUG})`)
+  expect(w.chats.filter(a => a[1] === 'reply')).toEqual([['chat', 'reply', '--text=Claude is waiting on a workbench dialog in the terminal: answer it there.', '--to=user']])
+  expect(w.chats.some(a => a[1] === 'ask')).toBe(false)                // never asked on the page
+  w.answer = 'Send it'
+  expect((await $.tool.call({ tool: 'Bash', command: 'git push' } as any) as any).deny).toBeUndefined()   // their yes
+  w.answer = null                                                      // dismissed (an interrupt): no
+  expect((await $.tool.call({ tool: 'Bash', command: 'git push' } as any) as any).deny).toContain('not sent')
   await clock.advance(1000)                                      // the poll the calls started ends here
 })
 
@@ -5769,7 +5786,7 @@ function routeWorld(on: any, files: Record<string, string>) {
   const w = {
     asked: [] as string[], options: [] as string[][], answer: "Don't" as string | null, dry: [] as string[][], dryAt: [] as string[], code: 0,
     reply: { change: ROUTE_LINE, gate: true, approval: { argv: ROUTE_ARGV, change: ROUTE_LINE } } as Record<string, unknown>,
-    chats: [] as string[][], onChat: { answer: 'deny' } as Record<string, unknown>,   // the web chat's ask, for an away user
+    chats: [] as string[][],   // wb chat's calls: the line for an away user
   }
   on('session.cwd', () => ({ value: '/home/u/project' }))
   on('ui.toast', () => ({ value: undefined }))
@@ -5781,8 +5798,7 @@ function routeWorld(on: any, files: Record<string, string>) {
       w.dryAt.push(e.init?.cwd || '/home/u/project') // absent: the session's
       return { value: { exitCode: w.code, stdout: w.code ? '' : JSON.stringify(w.reply), stderr: w.code ? 'wb: no day cap yet' : '' } }
     }
-    if (e.argv[1] === 'chat' && e.argv[2] === 'ask') { w.chats.push(e.argv); return { value: { exitCode: 0, stdout: 'ask-1-ab open\n', stderr: '' } } }
-    if (e.argv[1] === 'chat' && e.argv[2] === 'wait') return { value: { exitCode: 0, stdout: JSON.stringify(w.onChat), stderr: '' } }
+    if (e.argv[1] === 'chat') w.chats.push(e.argv.slice(1))
     return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
   })
   on('tool.call', (_: any, e: any) => {
@@ -5932,18 +5948,18 @@ test('#1014: a route change hidden in text another program runs, or two in one l
   await clock.advance(1000)
 })
 
-test('#1014: away on the web chat a role change asks them there, and their yes writes the approval', async ($, on) => {
-  // #1322: it was refused until they were back at the terminal
+test('#1014: away on the web chat a role change asks in the terminal, and the chat says it waits there', async ($, on) => {
+  // #1322: it was refused until they were back; the owner's rule (#1340): consent is the terminal's
   const files: Record<string, string> = chatOn({})
   const { clock, bash, w } = await routeProbe($, on, files)
   await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
   files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_003, from: 'user', text: 'hi' }) + '\n'
   await clock.advance(3000)                                     // a web message: the user is away
   const r = await bash('wb route trivial deepseek/deepseek-flash --day-usd 5')
-  expect([r.asked, r.deny]).toEqual([0, expect.stringContaining('not changed: the user did not approve it')])
-  expect(w.chats[0]).toEqual(expect.arrayContaining(['--tool=workbench', `--text=${ROUTE_LINE}`, '--here']))
+  expect([r.asked, r.deny]).toEqual([1, expect.stringContaining('not changed: the user did not approve it')])
+  expect(w.chats.filter(a => a[1] === 'reply')).toEqual([['chat', 'reply', '--text=Claude is waiting on a workbench dialog in the terminal: answer it there.', '--to=user']])
   expect('/wb/route-ok.json' in files).toBe(false)
-  w.onChat = { answer: 'allow' }
+  w.answer = 'Allow'
   expect((await bash('wb route trivial deepseek/deepseek-flash --day-usd 5')).deny).toBeUndefined()
   expect(JSON.parse(files['/wb/route-ok.json']!)).toEqual({ argv: ROUTE_ARGV, change: ROUTE_LINE, at: expect.any(Number) })
   await clock.advance(1000)
@@ -6001,8 +6017,8 @@ test('#1014: the roles reach the conversation: a block while delegating with an 
   // a fresh conversation's (a /clear's, a compaction's) first block says them
   const block = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'workbench-routes')
   expect(block?.text).toBe('Roles (the user\'s, wb route): significant GPU (the router picks); trivial API deepseek/deepseek-flash, ' +
-    'thinking off; writing GPU (the router picks). Day cap $5. A role change or a `wb start --model <API id>` shows the user ' +
-    'a dialog with the exact change, and their click is the yes. Run it when it is the right call.')
+    'thinking off; writing GPU (the router picks). Day cap $5. Never pass --model for an API model or change a role without ' +
+    'the user\'s yes (the mod asks them in a dialog); recommend only.')
   await clock.advance(31_000)
   const before = rows.length
   // a change between polls, however made (here a hand edit): one row, then nothing more
@@ -6010,8 +6026,8 @@ test('#1014: the roles reach the conversation: a block while delegating with an 
   await clock.advance(31_000)
   const changed = rows.slice(before).filter(r => r.includes('The roles changed'))
   expect(changed).toEqual(['[workbench] The roles changed: significant GPU (the router picks); trivial GPU (the router picks), ' +
-    'API kept: deepseek/deepseek-flash; writing GPU (the router picks). Day cap $5. A role change or a `wb start --model ' +
-    '<API id>` shows the user a dialog with the exact change, and their click is the yes. Run it when it is the right call.'])
+    'API kept: deepseek/deepseek-flash; writing GPU (the router picks). Day cap $5. Never pass --model for an API model or ' +
+    'change a role without the user\'s yes (the mod asks them in a dialog); recommend only.'])
   await clock.advance(31_000)
   expect(rows.slice(before).filter(r => r.includes('roles'))).toHaveLength(1)   // once per change
   // the cap alone (2026-11-23 review: it was in no summary, so Claude kept the old cap)
@@ -6020,7 +6036,7 @@ test('#1014: the roles reach the conversation: a block while delegating with an 
   await clock.advance(31_000)
   await clock.advance(31_000)
   expect(rows.slice(capped).filter(r => r.includes('roles'))).toEqual([expect.stringContaining('writing GPU (the router ' +
-    'picks). Day cap $10. A role change')])
+    'picks). Day cap $10. Never pass')])
   files[at] = '{"roles": '                                       // broken: said, never read as all GPU
   await clock.advance(31_000)
   expect(rows.at(-1)).toContain('The roles changed: routes.json can\'t be read (wb route says why)')
