@@ -330,15 +330,16 @@
   // (store.NEEDS_CLAUDE): counted running, a task blocked on its question told the away user that
   // nothing needed Claude (the #1097 review, 2026-11-23)
   const RUNNING = ['running', 'testing'], TASKS_SHOWN = 3
+  const rank = t => RUNNING.includes(t.phase) ? 0 : t.phase === 'queued' ? 2 : 1
+  const ranked = tasks => Array.isArray(tasks) ? [...tasks].sort((a, b) => rank(a) - rank(b)) : []
+  const taskOn = t => {  // the model it runs on, as the pane's row says it
+    const short = String(t.model || '').split('/').pop()
+    return t.via === 'api' ? `API ${short}${t.provider_name ? ` (${t.provider_name})` : ''}` : `GPU ${short}`
+  }
   function tasksLine(tasks) {
-    if (!Array.isArray(tasks) || !tasks.length) return ''
-    const rank = t => RUNNING.includes(t.phase) ? 0 : t.phase === 'queued' ? 2 : 1
-    const all = [...tasks].sort((a, b) => rank(a) - rank(b))
-    const named = all.slice(0, TASKS_SHOWN).map(t => {
-      const short = String(t.model || '').split('/').pop()
-      const on = t.via === 'api' ? `API ${short}${t.provider_name ? ` (${t.provider_name})` : ''}` : `GPU ${short}`
-      return `${t.name}${RUNNING.includes(t.phase) ? '' : ` (${t.phase})`} · ${on}`
-    })
+    const all = ranked(tasks)
+    if (!all.length) return ''
+    const named = all.slice(0, TASKS_SHOWN).map(t => `${t.name}${RUNNING.includes(t.phase) ? '' : ` (${t.phase})`} · ${taskOn(t)}`)
     if (all.length > TASKS_SHOWN) named.push(`+${all.length - TASKS_SHOWN} more`)
     const n = r => all.filter(t => rank(t) === r).length
     const counts = [[n(0), 'running'], [n(1), 'waiting on Claude'], [n(2), 'queued']].filter(([c]) => c)
@@ -350,6 +351,117 @@
     const el = $('tasks'), text = tasksLine(state.tasks)
     el.textContent = text
     el.hidden = !text
+    if (!text) showTaskSheet(false)
+    sheetNews()
+  }
+
+  // ---- the task sheet (#1201): a tap on the strip lists the open tasks; a tap on one shows its
+  // summary (GET /api/task: wb status's row and wb report), its Diff and Log tabs fetched when
+  // opened. Nothing polls: a change in the stream's `tasks` re-fetches only the view that is open,
+  // and Refresh asks again. Its report, diff and log are agent-written text, drawn with
+  // textContent alone, never as markup: this page holds the user's key and changes their
+  // Settings, so markup an agent wrote would be a way to both. Steering is Claude's: "Reply about this task" tags the
+  // next message with the task (`about: {task}`), and Claude decides on wb steer.
+  const strip = $('tasks'), tsheet = $('task-sheet'), tsBody = $('ts-body')
+  let tsTask = null, tsPart = 'summary', tsDiff = null, tsSeen = '', tsAsked = 0  // tsDiff: null (the stat) or {path}
+  function showTaskSheet(on) {
+    if (on === !tsheet.hidden) return
+    tsheet.hidden = !on; strip.setAttribute('aria-expanded', String(on))
+    if (on) { tsTask = null; drawTaskSheet() }
+  }
+  strip.onclick = () => showTaskSheet(tsheet.hidden)
+  strip.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); showTaskSheet(tsheet.hidden) } }
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && !tsheet.hidden) showTaskSheet(false) })
+  document.addEventListener('pointerdown', e => { if (!tsheet.hidden && !tsheet.contains(e.target) && !strip.contains(e.target)) showTaskSheet(false) })
+  const mk = (tag, cls, text) => { const x = document.createElement(tag); if (cls) x.className = cls; if (text != null) x.textContent = text; return x }
+  const btn = (cls, text, fn) => { const b = mk('button', cls, text); b.type = 'button'; b.onclick = fn; return b }
+  const agoSecs = s => s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m` : `${Math.floor(s / 86400)}d`
+  // the stream's `tasks` changed: the list redrawn, or the open task's view fetched again
+  function sheetNews() {
+    const key = JSON.stringify(state.tasks || [])
+    if (key === tsSeen) return
+    tsSeen = key
+    if (!tsheet.hidden) drawTaskSheet({ quiet: true })
+  }
+  function drawTaskSheet({ quiet = false } = {}) {
+    $('ts-list').hidden = !!tsTask; $('ts-one').hidden = !tsTask
+    if (tsTask) return loadPart({ quiet })
+    $('ts-list').replaceChildren(...ranked(state.tasks).map(t => {
+      const row = btn('ts-row', null, () => { tsTask = t.name; tsPart = 'summary'; tsDiff = null; drawTaskSheet() })
+      row.append(mk('b', '', t.name), mk('span', 'ts-phase', ' · ' + t.phase), mk('small', '', taskOn(t)))
+      return row
+    }))
+  }
+  $('ts-back').onclick = () => { tsTask = null; tsAsked++; drawTaskSheet() }
+  $('ts-refresh').onclick = () => loadPart({ quiet: true })
+  $('ts-reply').onclick = () => { setAbout({ task: tsTask }); showTaskSheet(false); input.focus() }
+  for (const b of document.querySelectorAll('#ts-tabs [data-part]')) b.onclick = () => { tsPart = b.dataset.part; tsDiff = null; loadPart() }
+  async function loadPart({ quiet = false } = {}) {  // quiet: the view stays until the new one comes
+    const asked = ++tsAsked, name = tsTask
+    $('ts-name').textContent = name
+    for (const b of document.querySelectorAll('#ts-tabs [data-part]')) b.setAttribute('aria-selected', String(b.dataset.part === tsPart))
+    if (!quiet || !tsBody.childElementCount) tsBody.replaceChildren(mk('span', 'ts-note', 'Loading…'))
+    const extra = tsPart === 'diff' && tsDiff ? '&full=1' + (tsDiff.path ? '&path=' + encodeURIComponent(tsDiff.path) : '') : ''
+    let r, j
+    try {
+      r = await fetch(`/api/task?name=${encodeURIComponent(name)}&part=${tsPart}${extra}`, { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
+      j = await r.json().catch(() => ({}))
+    } catch { r = null }
+    if (asked !== tsAsked) return  // another view was asked for meanwhile
+    if (!r) return tsBody.replaceChildren(mk('span', 'ts-note', 'Not loaded: try again'))
+    if (r.status === 404 && !tsDiff) return tsBody.replaceChildren(mk('span', 'ts-note', `${name} is no longer open (accepted, discarded or parked).`))
+    if (!r.ok) return tsBody.replaceChildren(mk('span', 'ts-note', j.error || `Not loaded (HTTP ${r.status}): try again`))
+    tsBody.replaceChildren(...(tsPart === 'summary' ? drawSummary(j) : tsPart === 'diff' ? drawDiff(j) : drawLog(j)))
+  }
+  function drawSummary(j) {
+    const out = [mk('p', '', `${j.phase} · round ${j.round}${j.step > 1 ? ` · step ${j.step}` : ''} · ${taskOn(j)}`)]
+    const times = [j.created_at && `started ${agoSecs(j.now - j.created_at)} ago`, j.updated_at && `last change ${agoSecs(j.now - j.updated_at)} ago`].filter(Boolean)
+    if (times.length) out.push(mk('p', 'ts-dim', times.join(' · ')))
+    if (j.last) out.push(mk('p', '', j.last))
+    out.push(mk('h4', '', `Report, round ${j.round}`), mk('pre', '', j.report))
+    if (j.report_cut) out.push(mk('span', 'ts-note', `Cut here: wb report ${j.task} on the computer has it all.`))
+    if (j.verify && j.verify.length) out.push(mk('h4', '', 'Regression check'), mk('pre', '', j.verify.join('\n')))
+    return out
+  }
+  function drawDiff(j) {
+    const out = [], against = j.base === 'HEAD' ? 'this step' : 'base ' + j.base
+    if (j.note) return [mk('span', 'ts-note', j.note)]
+    if (!j.files.length) return [mk('span', 'ts-note', `No changes yet (against ${against}).`)]
+    const files = () => {
+      const list = mk('div', 'ts-files')
+      for (const f of j.files) {
+        const what = `${f.path}  ${f.added == null ? 'binary' : `+${f.added} −${f.deleted}`}`
+        list.append(f.path.includes(' => ') ? mk('div', 'ts-file', what) : btn('ts-file', what, () => { tsDiff = { path: f.path }; loadPart() }))
+      }
+      return list
+    }
+    if (!tsDiff) {
+      out.push(mk('pre', '', j.stat), btn('ts-link', 'Show the whole diff', () => { tsDiff = { path: '' }; loadPart() }))
+      return out
+    }
+    if (tsDiff.path) out.push(btn('ts-link', '‹ All files', () => { tsDiff = null; loadPart() }))
+    if (j.cut) {
+      out.push(mk('span', 'ts-note', `${tsDiff.path || 'The whole diff'} is too long for the page: wb diff ${j.task} on the computer.${tsDiff.path ? '' : ' One file at a time:'}`))
+      if (!tsDiff.path) out.push(files())
+      return out
+    }
+    const pre = mk('pre', 'ts-diff')
+    for (const line of j.diff.split('\n')) {  // each line its own span, coloured by its first character
+      const cls = /^(\+\+\+|---) /.test(line) || line.startsWith('diff ') ? 'meta' : line[0] === '+' ? 'add' : line[0] === '-' ? 'del' : line.startsWith('@@') ? 'hunk' : ''
+      pre.append(mk('span', cls, line + '\n'))
+    }
+    out.push(pre)
+    if (j.lines_cut) out.push(mk('span', 'ts-note', `${j.lines_cut} long line${j.lines_cut > 1 ? 's' : ''} cut short (…).`))
+    if (!tsDiff.path) out.push(btn('ts-link', 'Show the stat', () => { tsDiff = null; loadPart() }))
+    return out
+  }
+  function drawLog(j) {
+    if (!j.rows.length) return [mk('span', 'ts-note', 'Nothing logged yet.')]
+    const pre = mk('pre', 'ts-log')
+    for (const r of j.rows) pre.append(mk('span', r.ok === false ? 'del' : '', `${r.ts ? clock(r.ts) : ''} r${r.round ?? '?'} ${r.text}\n`))
+    const out = [pre]
+    if (j.more) out.unshift(mk('span', 'ts-note', `The last ${j.rows.length} rows: wb log ${j.task} on the computer has the rest.`))
+    return out
   }
 
   function render() {
@@ -455,15 +567,16 @@
     }
     return box
   }
-  const aboutBody = a => a.audio ? { audio: a.audio, n: a.n } : { task: a.task, n: a.n }
-  const aboutTag = a => a.audio ? `Kept take ${a.n} · ${a.name}` : `About ${a.task}, step ${a.step}`
+  // a task alone (`{task}`): from the task sheet (#1201)
+  const aboutBody = a => a.audio ? { audio: a.audio, n: a.n } : a.n == null ? { task: a.task } : { task: a.task, n: a.n }
+  const aboutTag = a => a.audio ? `Kept take ${a.n} · ${a.name}` : a.n == null ? `About ${a.task}` : `About ${a.task}, step ${a.step}`
 
   // what the next message is about: a pair of screenshots, so the reply reaches its task and step
   let about = load(K.about, null)
   function setAbout(a) {
     about = a; save(K.about, a)
     $('about').hidden = !a
-    $('about-text').textContent = !a ? '' : a.audio ? aboutTag(a) : `Replying about ${a.task}, step ${a.step}`
+    $('about-text').textContent = !a ? '' : a.audio ? aboutTag(a) : a.n == null ? `Replying about ${a.task}` : `Replying about ${a.task}, step ${a.step}`
   }
   $('about-x').onclick = () => setAbout(null)
   setAbout(about)
@@ -555,8 +668,8 @@
     if (s.build) build = s.build
     live = true; reachable = true
     if (!quiet) save(K.thread, (s.messages || []).slice(-50))  // a patch without messages: no rewrite (#755)
-    state = { messages: s.messages || [], push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null, tasks: s.tasks || [] }
-    drawTasks()
+    state = { messages: s.messages || [], push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null, tasks: s.tasks || [], dictate: !!s.dictate }
+    drawTasks(); drawMic()
     drawShown()
     if (state.push.key && !pushSynced) { pushSynced = true; syncPush() }
     reportSeen()
@@ -1075,11 +1188,143 @@
   })
   addEventListener('storage', e => { if (e.key === FILES) { draft = (load(FILES, []) || []).filter(d => d && d.id); drawTray(); armSend() } })
 
+  // ---- dictation (#1203): a voice clip in, its words in the box ----
+  // The mic shows only while the computer has a listener (the state's `dictate`). In a secure
+  // context (https, or localhost) it records with MediaRecorder: a tap starts, a tap stops; over
+  // plain http there is no microphone API, so it opens the phone's recorder or a voice memo
+  // (accept="audio/*" capture). The clip is uploaded as an attachment is (by its id, once), and
+  // POST /api/transcribe/<id> answers its words, added to the box for the user to edit and send:
+  // Claude only ever gets the text. Clips waiting for their words (wb-chat-dictate, the bytes in
+  // IndexedDB beside the draft's) outlive a reload; the computer keeps each one's words, so a
+  // retry never transcribes twice. A GPU listener gives way to a running task at once (409), a url
+  // listener's server can be down a moment (503 `retry`), and a proxy in front of the chat answers
+  // 5xx while it restarts: the clip is kept and asked for again with backoff, the mic saying what
+  // it waits for. A 409 dropped the clip, so once the task let the GPU go the user had to say it
+  // all again (#1203); only the listener's own 502 (it ran and failed) and a 4xx drop it.
+  const DICTATE = 'wb-chat-dictate'
+  const RECORD_MS = 5 * 60 * 1000  // a clip stops by itself at five minutes
+  const mic = $('mic')
+  let clips = (load(DICTATE, []) || []).filter(d => d && d.id), rec = null, recTimer = 0
+  let hearing = false, hearTimer = 0, hearTries = 0, hearAt = 0
+  let waiting = ''  // what the clips wait for: 'gpu' (a task's), 'listener' (not answering), or ''
+  const canRecord = () => window.isSecureContext && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) && typeof MediaRecorder !== 'undefined'
+  function drawMic() {
+    const busy = clips.length > 0
+    mic.hidden = !token || !(state.dictate || rec || busy)
+    mic.classList.toggle('rec', !!rec)
+    mic.classList.toggle('busy', !rec && busy)
+    const label = rec ? 'Stop recording' : !busy ? 'Dictate'
+      : waiting === 'gpu' ? 'Waiting for the GPU…' : waiting ? 'Waiting for the listener…' : 'Transcribing…'
+    mic.setAttribute('aria-label', label); mic.title = label
+  }
+  function note(text) {  // a passing word on the banner, cleared unless something else took it
+    banner(text, true)
+    setTimeout(() => { if (net.textContent === text) banner('') }, 6000)
+  }
+  function hearClip(blob, name) {
+    const lim = limits()
+    if (!blob.size) return note('That clip was empty.')
+    if (blob.size > lim.file) return note(`That clip is too big: ${fmtSize(blob.size)}, the limit is ${fmtSize(lim.file)}.`)
+    const d = { id: newId(), name, type: (blob.type || '').split(';')[0] || 'application/octet-stream', size: blob.size }
+    bytes.set(d.id, blob); db.put(d.id, blob)
+    clips.push(d); save(DICTATE, clips); drawMic(); hearAll(true)
+  }
+  function heard(d, text) {
+    clips = clips.filter(x => x.id !== d.id); save(DICTATE, clips)
+    db.del(d.id); bytes.delete(d.id); drawMic()
+    if (text === undefined) return
+    if (!text.trim()) return note('Nothing was heard in that clip.')
+    const box = input.value
+    input.value = box.trim() ? box.replace(/\s*$/, ' ') + text.trim() : text.trim()
+    save(K.draft, input.value); grow(); armSend()
+  }
+  // the listener's own verdict on a clip, or something in the way that will pass: a task on the
+  // GPU (409), a listener not answering (503 `retry`), a proxy's 5xx (no JSON error from the chat
+  // server), a 408/425/429, or a 200 that isn't the chat server's (#934)
+  const passing = (r, j) => r.status === 409 || transient(r.status) || r.ok
+    || (r.status >= 500 && !(r.status === 502 && typeof j.error === 'string'))
+  function waitFor(why) {
+    if (why === waiting) return
+    waiting = why
+    if (why === 'gpu') note('A task has the GPU: the clip waits, and its words come once it is free.')
+    else if (why) note("The listener isn't answering: the clip waits, and is tried again.")
+  }
+  async function hearAll(now) {
+    // a state's flush comes every few seconds: it asks again only once the backoff is up
+    if (hearing || !token || !clips.length || (!now && Date.now() < hearAt)) return
+    hearing = true; clearTimeout(hearTimer)
+    let again = false, after = 0
+    const tried = new Set()
+    try {
+      for (const d of [...clips]) {
+        tried.add(d.id)
+        try {
+          await upload(d)
+          const r = await fetch('/api/transcribe/' + encodeURIComponent(d.id), { method: 'POST', cache: 'no-store',
+            headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: '{}' })
+          const j = await r.json().catch(() => ({}))
+          if (r.ok && typeof j.text === 'string') { waitFor(''); heard(d, j.text) }
+          else if (r.status === 401) { keyless('That key was not accepted.'); break }
+          else if (passing(r, j)) {
+            again = true; after = Math.max(after, retryAfter(r))
+            if (r.status === 409) { waitFor('gpu'); break }  // the next clip needs the same GPU
+            if (j.retry) waitFor('listener')
+          }
+          else { heard(d); note('Not transcribed: ' + (j.error || 'HTTP ' + r.status) + '.') }
+        } catch (e) {
+          if (e instanceof Refused) { heard(d); note('Not transcribed: ' + e.message + '.') }
+          else if (e.message === 'key') break
+          else again = true
+        }
+      }
+    } finally {
+      hearing = false
+      if (!clips.length) waiting = ''
+      drawMic()
+      if (again) {
+        const ms = Math.max(after, BACKOFF[Math.min(hearTries++, BACKOFF.length - 1)])
+        hearAt = Date.now() + ms; hearTimer = setTimeout(() => hearAll(true), ms)
+      } else {
+        hearTries = 0; hearAt = 0
+        if (clips.some(d => !tried.has(d.id))) setTimeout(() => hearAll(true))  // recorded meanwhile
+      }
+    }
+  }
+  async function record() {
+    let stream
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }) }
+    catch (e) { return note("The microphone isn't allowed here (" + (e.name || e) + "): the keyboard's dictation works too.") }
+    const kind = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/ogg;codecs=opus', 'audio/webm']
+      .find(t => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t))
+    let r
+    try { r = new MediaRecorder(stream, kind ? { mimeType: kind } : undefined) }
+    catch (e) { stream.getTracks().forEach(t => t.stop()); return note("This browser can't record (" + (e.name || e) + ').') }
+    const chunks = []
+    r.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data) }
+    r.onstop = () => {
+      clearTimeout(recTimer); stream.getTracks().forEach(t => t.stop())
+      rec = null; drawMic()
+      const type = r.mimeType || kind || 'audio/webm'
+      const ext = /mp4/.test(type) ? 'm4a' : /ogg/.test(type) ? 'ogg' : 'webm'
+      hearClip(new Blob(chunks, { type }), `voice-${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}`)
+    }
+    rec = r; r.start(1000); drawMic()
+    recTimer = setTimeout(() => { if (rec === r) r.stop() }, RECORD_MS)
+  }
+  mic.onclick = () => {
+    if (rec) return rec.stop()
+    if (canRecord()) record()
+    else $('pick-voice').click()
+  }
+  $('pick-voice').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if (f) hearClip(f, f.name || 'voice') }
+  addEventListener('storage', e => { if (e.key === DICTATE) { clips = (load(DICTATE, []) || []).filter(d => d && d.id); drawMic() } })
+
   // ---- sending: the outbox ----
   let flushing = false, flushTimer = 0, flushTries = 0
   async function flush(now) {
     if (now) { clearTimeout(flushTimer); flushTries = 0 }
     pump()  // the draft's uploads, on the same occasions
+    hearAll(now)  // and the clips waiting for their words (#1203)
     outbox = outItems()  // another tab's too: whichever tab is online sends them all
     if (flushing || !token || !(outbox.length || held)) return
     flushing = true
@@ -1187,7 +1432,7 @@
   input.addEventListener('input', () => { grow(); armSend(); save(K.draft, input.value) })
   input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !touch && !e.isComposing) { e.preventDefault(); send() } })
   $('composer').addEventListener('submit', e => { e.preventDefault(); send() })
-  armSend(); grow(); drawTray()
+  armSend(); grow(); drawTray(); drawMic()
 
   // ---- no key: say how to get one, or take it pasted ----
   function keyless(why, forget) {
@@ -1469,6 +1714,7 @@
     const was = curView
     if (was === 'chat') { chatTop = scroller.scrollTop; leftAt = live ? now() : null }
     if (was) modHide(was)
+    if (name !== 'chat') showTaskSheet(false)  // the task sheet is the chat's (#1201)
     curView = name
     document.body.dataset.view = name
     for (const b of tabs) b.dataset.view === name ? b.setAttribute('aria-current', 'true') : b.removeAttribute('aria-current')

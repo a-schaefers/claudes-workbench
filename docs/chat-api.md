@@ -44,7 +44,8 @@ does the whole flow below with the standard library alone.
       the older wording where there was one (`change notifications` for `/api/push`,
       `mark the user away` for `/api/active`, `mark what the user has seen` for `/api/seen`,
       `read the user's notifications` for `/api/latest`, `read screenshots` for `/api/shot`,
-      `read audio takes` for `/api/audio`). An
+      `read audio takes` for `/api/audio`, `read tasks` for `/api/task`, `transcribe the user's
+      voice clips` for `/api/transcribe/<id>`). An
       endpoint added later is the user's alone unless this list names it.
     - It works only from this machine: a request with an agent token from any other machine
       (a tailnet or LAN peer, when the chat is bound there for the user's phone) is ``403
@@ -125,15 +126,15 @@ curl -s "${auth[@]}" "$CLAUDE_WB_URL/api/wait?after=1795436900301-a1b2c3&timeout
 An agent's token reads only its own conversation:
 - **`/api/state` and `/api/stream`** carry `{api, messages, listener, uploads, expire, now}`, and
   `messages` holds only its own messages and Claude's rows whose `to` names it. No
-  `push`, `savings`, `build` or `tasks`: those are the user's. `/api/send`'s `state` is the same view.
+  `push`, `savings`, `build`, `tasks` or `dictate`: those are the user's. `/api/send`'s `state` is the same view.
 - **`/api/wait`** on an id that is neither its own message nor a reply to it is `404 {"error":
   "no such message"}`.
 - **Files:** `GET /api/upload/<id>` and `/api/file/<id>` answer only for a file it uploaded or one
   attached to a row in its view; any other id is 404, as if there were none. A `PUT` under an id
   someone else stored is `409 {"error": "that upload id is another sender's"}`, and a send can
   attach only its own uploads.
-- **403:** every path outside the allow-list (*Base URL and auth*): `/api/latest`, `/api/shot`, `/api/audio`, the admin endpoints (`/api/settings`, `/api/stats`,
-  `/api/top`), and the user's `POST`s.
+- **403:** every path outside the allow-list (*Base URL and auth*): `/api/latest`, `/api/shot`, `/api/audio`, `/api/task`, the admin endpoints (`/api/settings`, `/api/stats`,
+  `/api/top`), and the user's `POST`s (`/api/transcribe/<id>` among them).
 - **`/api/health`** and the `listener` are as for the user.
 
 The user's own token reads everything, as below.
@@ -162,6 +163,8 @@ The whole state the page draws (an agent's token gets its own view: *An agent's 
 - `build`: the page files' stamp (a page whose stamp differs reloads).
 - `tasks`: the open tasks, for the strip over the thread: `[{name, phase, model, via: "gpu"|"api",
   provider_name}]` (none accepted, discarded or parked by `wb stop --all`).
+- `dictate`: true while the computer has a listener (a speech recognizer in `wb audio`'s
+  audio.json) for `POST /api/transcribe/<id>`: the page shows its mic only then.
 - `expire`: seconds a message waits before it is never passed on (21600).
 - `now`: the server's time (seconds).
 
@@ -204,11 +207,13 @@ long`):
   {"error": "that cid is another sender's"}`.
 - `files`: optional, up to 10 upload ids (uploaded first; the same content twice is kept once).
 - `about`: optional, the user's only, what it answers: `{task, n}` (a pair of `wb shot`
-  screenshots) or `{audio: <batch>, n}` (a take of a `wb chat listen` shortlist). An agent's send
-  with `about` is `400 {"error": "agent messages can't carry about"}`.
+  screenshots), `{audio: <batch>, n}` (a take of a `wb chat listen` shortlist) or `{task}` alone
+  (a task, from the page's task sheet: any task wb has, but a bench replay; Claude gets `(about
+  task <task>)` and decides whether to steer it). An agent's send with `about` is `400 {"error":
+  "agent messages can't carry about"}`.
 
 Response: `{"message": {...}, "listener": {...}|null, "state": {...}}`. Errors: 400 `a message is
-1 to 8000 characters`, `bad cid`, `bad json`, `no such screenshots`, `no such take`, `no upload
+1 to 8000 characters`, `bad cid`, `bad json`, `no such screenshots`, `no such take`, `no such task`, `no upload
 <id>: it must be uploaded before the message` (for an agent, also another's upload), `files is a
 list of up to 10 upload ids`, `agent messages can't carry about`; 409 for another sender's `cid`;
 413 `too much for one message: …`; 429 for an agent over its limit.
@@ -244,6 +249,38 @@ else 404 `no such screenshot`.
 
 ### `GET /api/audio?batch=<batch>&n=<n>` (user only)
 One take of a `wb chat listen` shortlist, as its audio type (at most 64 MiB). 404 `no such take`.
+
+### `GET /api/task?name=<task>&part=summary|diff|log` (user only)
+One open task, as `wb status`, `wb report`, `wb diff` and `wb log` show it: the page's task sheet.
+Read only, from the task's files and its worktree; it never starts OpenCode. Only a task the
+`tasks` strip lists (open, not parked, not a bench replay); any other is `404 {"error": "no such
+open task"}`. Every answer is `{task, part, …, now}`:
+- `summary` (the default): `phase`, `round`, `step` (above 1 after `wb next`), `last`,
+  `created_at` and `updated_at` (seconds; age and idle are `now` minus them), `model`, `via`,
+  `provider_name`, `report` (the round's summary.md, or what stands instead, cut at 64 KB with
+  `report_cut: true`) and `verify` (the regression check's lines, `[]` for none).
+- `diff`: against `base` (the task's base commit, or `HEAD` after `wb next`: the current step,
+  as `wb diff`): `stat` (`wb diff --stat`) and `files` (`[{path, added, deleted}]`, null counts
+  for a binary file). With `full=1`, `diff` instead of the stat: the whole diff, or with
+  `path=<one of files>` that file's (else 404 `no such file in the diff`), each line cut at
+  2,000 characters (`lines_cut`: how many), or `diff: null` with `cut: true` past 256 KB. A task
+  with no worktree yet, or a git failure, answers `note` and no files.
+- `log`: `rows`, the last `n` (1 to 200, default 50) of `wb log -v`'s rows, each `{ts, round,
+  kind, text}` (`wb log`'s words after the time, cut at 2,000 characters; `ok` for a tool call),
+  and `more: true` when older ones were left out.
+
+400 for another `part` or a bad `n`. All of it is text the agent wrote: show it as text.
+
+### `POST /api/transcribe/<id>` (user only)
+`{}`: the words of an upload that is a voice clip (`audio/*`, `video/*` or
+`application/octet-stream`), heard by the computer's listener → `{"text": "..."}`, for the user to
+edit and send as a message (the clip itself is never sent to Claude). The words are kept with the
+upload, so asking again never transcribes twice. Errors: 404 `no such upload`, `dictation is off:
+…` (no listener); 415 `not a voice clip (<type>)`; 409 `{error, busy: true, why}` while a task
+holds the GPU a GPU listener needs (it never waits for it: ask again later, as the page does);
+503 `{error, retry: true}` while a url listener's server doesn't answer (ask again too); 502 `the
+listener failed: …` (it ran and failed). It answers once the listener is done: give it minutes,
+not seconds.
 
 ### `POST /api/active` (user only)
 `{}`: a page is in use on this device, so the user is away from the terminal while the chat is

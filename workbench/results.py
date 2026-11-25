@@ -177,7 +177,10 @@ def _with_route(task: store.Task, row: dict) -> dict:
     spec = task.spec
     kind, model = task_kind(spec), str(spec.get("model") or "")
     row = {**row, "kind": kind, "role": spec.get("role"),
-           "provider": spec.get("provider") or (model.split("/", 1)[0] if "/" in model else None)}
+           "provider": spec.get("provider") or (model.split("/", 1)[0] if "/" in model else None),
+           # on the role's fallback (#1196): `model` is the one that finished, which the router,
+           # slices and tuning credit; the role's API model it stood in for keeps its stats
+           **({"fallback": True, "fallback_from": spec.get("fallback_from")} if spec.get("fallback") else {})}
     if kind == "api":
         row.pop("gpu_wh", None)
         row.pop("remote_gpu", None)

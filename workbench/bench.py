@@ -412,6 +412,9 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
                 "test_cmd": test_cmd, "test_timeout": spec.get("test_timeout") or 900,
                 "check_cmd": check, "hidden": picked, "allow": grants.get("allow") or [],
                 "paths": grants.get("paths") or [], "skills": st.get("skills_ever") or [],
+                # its `wb allow --port`s: without them each replay's tests were refused the port
+                # the original's passed with (#1197's review, 2026-11-24)
+                "ports": grants.get("ports") or [],
                 # the worktree's setup (#201), so the reference, the base and each replay are the
                 # project as the task had it: a task whose --setup made an ignored stamp had its
                 # own commit rejected, the scratch clone without it (#250, the audit of 1.2)
@@ -753,6 +756,8 @@ def _start_task(case: dict, model: str, name: str, repo: Path, skills: list[str]
         argv += ["--sibling", s]
     for path in case.get("paths") or []:
         argv += ["--allow-path", path]
+    for port in case.get("ports") or []:
+        argv += ["--allow-port", str(port)]
     a = cli.parser().parse_args(argv)
     a.bench = meta
     a.f(a)

@@ -7,10 +7,43 @@ updating workbench, or the weekly model check is due.
 - No GPU model, and a provider with a stored key (`wb setup`'s `ok  API keys: …`): the skill's
   one-question first run (two of that provider's models for the three roles, the cap, one
   `wb route … --day-usd`; an OpenRouter role in a route of its own, `--order` if they name backends).
-- Neither: lay out both ways in a line each, a local server (below) or `/connect` in OpenCode for
-  an API provider, and let the user pick.
-- A local server: do the model check below first: recommend models for this hardware and offer to
-  set them up in OpenCode (ask before any download).
+- Neither: one question, as the skill's first run says: a local server (*A local server in one
+  yes*, below), each option filled in for this machine, or `/connect` in OpenCode for an API
+  provider; the user picks.
+
+**A local server in one yes.** `wb scout` first (GPU, VRAM, RAM, disk, the servers on PATH and
+answering). For each server that fits the OS and GPU, one line: the server, the model you picked
+for this VRAM (weights plus a window of at least 32K inside VRAM, the model check's research
+below, verified today), its download size, and what the yes runs. Each server is installed its
+own official way, run as the user would run it, never wrapped in wb code (its URLs change, so they
+live here, not in code). Ollama serves its own small default window unless its service sets
+`OLLAMA_CONTEXT_LENGTH`, and `wb model add` refuses a window it can't read, so the install sets
+one that lasts: `<N>` is the window you picked (32768 or more), `<K>` that over 1024.
+- Ollama on macOS (no sudo): `brew install ollama && brew services start ollama`, or its app.
+  Never `launchctl setenv OLLAMA_CONTEXT_LENGTH`: it is gone at the next logout or reboot, Ollama
+  then serves its own default (4K under 24 GB) and the runner fails every task before a round
+  (`short_window`). The window goes in the model instead, Ollama's own way for its OpenAI API: a
+  `num_ctx`, which Ollama and `wb model add` both read before the environment (`wb optimize
+  apply` makes its models so). In the background, `ollama pull <family>:<tag> && curl -fsS http://127.0.0.1:11434/api/create
+  -d '{"model":"<family>:<tag>-<K>k","from":"<family>:<tag>","parameters":{"num_ctx":<N>},
+  "stream":false}' && wb model add ollama/<family>:<tag>-<K>k` (no download twice: the new name
+  shares the weights). A Mac whose tasks fail `short_window` after a reboot lost a
+  `launchctl setenv`: make that model the same way and `wb model add` it.
+- Ollama on Linux and WSL2 (WSL2 needs systemd on): its install.sh needs sudo, and your Bash has
+  no terminal for the password, so the user runs this one line, with Claude Code's `!` prefix or in
+  a terminal of their own if sudo can't ask there: `curl -fsSL https://ollama.com/install.sh | sh
+  && sudo mkdir -p /etc/systemd/system/ollama.service.d && printf
+  '[Service]\nEnvironment="OLLAMA_CONTEXT_LENGTH=<N>"\n' | sudo tee
+  /etc/systemd/system/ollama.service.d/context.conf >/dev/null && sudo systemctl daemon-reload &&
+  sudo systemctl restart ollama`. That is the only step that stays theirs.
+- Then, on Ollama on Linux, `wb model add ollama/<model> --pull` in the background: it writes the
+  provider, downloads, reads the served window, and starts `wb optimize` when due (no separate
+  yes); on macOS the `wb model add` above does the same after Ollama's own pull.
+- LM Studio: its app (`lms get` downloads), then `wb model add <p>/<m> --url … --context N`.
+  llama-server or vLLM: their own packages, then `wb model add <p>/<m> --url … --context N
+  --start "…" --stop "…"`, as below.
+- Then `wb doctor`, then `wb try`.
+
 **Work with the model server the user already runs**, whichever it is: `wb scout` lists the server
 commands on PATH and the servers answering here (one that "wants an API key" needs it in its
 provider's `options.apiKey`: ask the user for it). Never steer them to one they don't use. With
@@ -62,7 +95,8 @@ its size: a model that fits entirely in VRAM (or the GPU's share of unified memo
 one that spills into RAM, and on a big card the best is a larger model, a longer context, or both.
 The window sets the slice of every task (`slice:` in the report), so where the VRAM has room past
 the weights, raise the context the server serves (llama-server `-c`, LM Studio's context length,
-vLLM `--max-model-len`, Ollama's `OLLAMA_CONTEXT_LENGTH`), then `wb model add … --context N`;
+vLLM `--max-model-len`, Ollama's `OLLAMA_CONTEXT_LENGTH`, on macOS a `num_ctx` model as
+above), then `wb model add … --context N`;
 `wb model add` reads the window from the server (Ollama, llama-server, LM Studio once the model
 is loaded, vLLM) and refuses when it can't say: then `--context N`, the window it was started
 with; ask the user if you don't know it. `wb doctor` flags an entry whose

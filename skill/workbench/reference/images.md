@@ -30,7 +30,7 @@ memory while it runs, unless its entry has an `unload` URL (`(no unload URL)` in
 it hasn't): then ask the user to stop it before big coding tasks.
 
 **No ready engine? Offer to set one up; never set it up unasked.** This is an optional step, as
-ARCHITECTURE.md's Images section (in the workbench code, two directories above `readlink -f "$(command -v wb)"`) says. First read `wb scout`: it names an image server already answering on ComfyUI's (8188, or
+ARCHITECTURE.md's Images section (in the workbench code, two directories above `readlink -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/workbench"`) says. First read `wb scout`: it names an image server already answering on ComfyUI's (8188, or
 ComfyUI Desktop's 8000) or AUTOMATIC1111's port, on WSL2 at the Windows host too, with the entry
 that would use it, and ask whether the user runs one
 elsewhere: AUTOMATIC1111, Forge or SD.Next (port 7860; an entry `{"url":

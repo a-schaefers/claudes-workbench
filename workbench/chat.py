@@ -31,6 +31,7 @@ import socketserver
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import zlib
@@ -147,7 +148,9 @@ AGENT_MAY = {("GET", "/api/health"), ("GET", "/api/wait"), ("GET", "/api/state")
 # can't <this>"); any other path is "agent tokens can't use <path>". AGENT_MAY alone decides.
 AGENT_CANT = {"/api/push": "change notifications", "/api/active": "mark the user away",
               "/api/seen": "mark what the user has seen", "/api/latest": "read the user's notifications",
-              "/api/shot": "read screenshots", "/api/audio": "read audio takes"}
+              "/api/shot": "read screenshots", "/api/audio": "read audio takes",
+              "/api/transcribe/": "transcribe the user's voice clips",  # #1203
+              "/api/task": "read tasks"}  # a task's diff and report are the user's work (#1201)
 
 
 def _covers(rule: str, path: str) -> bool:
@@ -819,8 +822,8 @@ def wait_state(after: str, caller: str) -> dict | None:
 # Round one let an agent token read the whole state and stream: the user's own messages, Claude's
 # replies to the user, the settings. An agent reads only its own messages and Claude's rows whose
 # `to` names it (`in_view`), the listener, the upload limits and the clock; files only of its own
-# uploads (`by`) or attached to rows in its view; never a screenshot, an audio take or a push's
-# summary (outside AGENT_MAY, 403).
+# uploads (`by`) or attached to rows in its view; never a screenshot, an audio take, a task's sheet
+# or a push's summary (outside AGENT_MAY, 403).
 
 
 def in_view(row: dict, agent: str) -> bool:
@@ -866,7 +869,7 @@ def snapshot() -> dict:
             "push": {"key": _push_key_or_none(), "test": (store.read_json(chat_dir() / "push-test.json", None)
                                                  or {}).get("ts")},
             "savings": week_saved(), "uploads": upload_limits(), "build": build(), "expire": MESSAGE_EXPIRE,
-            "tasks": open_tasks(), "now": store.now()}
+            "tasks": open_tasks(), "dictate": dictate_ready(), "now": store.now()}
 
 
 def open_tasks() -> list[dict]:
@@ -883,6 +886,106 @@ def open_tasks() -> list[dict]:
         out.append({"name": t.name, "phase": phase or "queued", "model": sp.get("model") or "",
                     "via": sp.get("via") or "gpu", "provider_name": sp.get("provider_name") or ""})
     return out
+
+
+# ---- the task sheet (#1201): what `wb status`, `wb report`, `wb diff` and `wb log` show of an
+# open task, read in-process for GET /api/task as the user taps the strip. Away, the strip's one
+# line was all the user saw of the work, and "is it on track?" cost a message to Claude. Never
+# `wb watch --json`, which can start OpenCode; read only, the lookups shared with cli.py
+# (gitops.diff_base, store.Task.report, verify.report_lines, transcript.log_body) so the two
+# can't drift. Everything here is agent-written text, which the page draws as text alone: it
+# holds the user's token, which changes their Settings.
+TASK_PARTS = ("summary", "diff", "log")
+TASK_REPORT_CHARS = 64 * 1024   # the newest round's summary.md, cut past this
+TASK_DIFF_CHARS = 256 * 1024    # a whole diff past this is `cut` (the page offers its files one by one)
+TASK_LOG_ROWS = 50              # the log's rows by default (`n`), at most TASK_LOG_MAX
+TASK_LOG_MAX = 200
+TASK_LOG_BYTES = 1 << 20        # the events.jsonl tail read for them
+
+
+def open_task(name) -> store.Task | None:
+    """The open task ``name``, as the strip lists it (open_tasks: no bench replay, none parked), else None."""
+    if not isinstance(name, str) or not store.NAME_RE.match(name):
+        return None
+    return store.Task(name) if any(t["name"] == name for t in open_tasks()) else None
+
+
+def _cut_lines(text: str, most: int) -> tuple[str, int]:
+    """``text`` with each line past ``most`` characters cut to it (ending `…`), and how many were."""
+    n, out = 0, []
+    for line in text.split("\n"):
+        if len(line) > most:
+            n, line = n + 1, line[:most - 1] + "…"
+        out.append(line)
+    return "\n".join(out), n
+
+
+def task_summary(t: store.Task) -> dict:
+    """`wb status <t>`'s row and `wb report <t>`'s text: phase, round, step, last, when it began
+    and last changed (the page counts age and idle from `now`), its model, the newest round's
+    report (cut at TASK_REPORT_CHARS) and the regression check's lines."""
+    from . import gitops, transcript, verify
+    st, sp = t.status, t.spec
+    n = st.get("round", 1)
+    report = transcript.plain(t.report(n))
+    try:
+        checks = [transcript.plain(x) for x in verify.report_lines(t)]
+    except (OSError, ValueError, KeyError, gitops.GitError):
+        checks = []
+    return {"phase": st.get("phase") or "queued", "round": n, "step": st.get("steps", 1),
+            "last": transcript.plain(str(st.get("last") or "")), "created_at": sp.get("created_at"),
+            "updated_at": st.get("updated_at"), "model": sp.get("model") or "", "via": sp.get("via") or "gpu",
+            "provider_name": sp.get("provider_name") or "", "report": report[:TASK_REPORT_CHARS],
+            "report_cut": len(report) > TASK_REPORT_CHARS, "verify": checks}
+
+
+def task_diff(t: store.Task, full: bool = False, path: str | None = None) -> dict | None:
+    """`wb diff <t> --stat`, against the same base (gitops.diff_base: HEAD after `wb next`), and
+    its files (`numstat`); ``full``, the diff instead of the stat (of ``path`` alone, one of the files), each
+    line cut at transcript.JSON_LINE_CHARS (`lines_cut`), or null with `cut` past
+    TASK_DIFF_CHARS. None for a ``path`` that isn't in it."""
+    from . import gitops, transcript
+    base = gitops.diff_base(t)
+    out = {"base": base if base == "HEAD" else base[:12], "stat": "", "files": []}
+    if not t.worktree.is_dir():
+        return {**out, "note": "no worktree yet" if t.status.get("phase") in store.ACTIVE else "its worktree is gone"}
+    try:
+        for line in (gitops.diff(t.worktree, base, numstat=True) or "").splitlines():
+            added, deleted, name = (line.split("\t", 2) + ["", ""])[:3]
+            out["files"].append({"path": name, "added": int(added) if added.isdigit() else None,
+                                 "deleted": int(deleted) if deleted.isdigit() else None})
+        if path is not None and not any(f["path"] == path and " => " not in path for f in out["files"]):
+            return None
+        paths = [":(literal)" + path] if path is not None else ()
+        if not full:  # the stat first; the diff when asked for
+            out["stat"] = gitops.diff(t.worktree, base, stat=True, paths=paths) or ""
+        else:
+            text = gitops.diff(t.worktree, base, paths=paths, limit=TASK_DIFF_CHARS)
+            if text is None:
+                out.update(diff=None, cut=True)
+            else:
+                text, n = _cut_lines(transcript.plain(text),
+                                     transcript.JSON_LINE_CHARS)
+                out.update(diff=text, cut=False, lines_cut=n)
+    except (gitops.GitError, OSError) as e:
+        return {**out, "note": str(e)[:500]}
+    return out
+
+
+def task_log(t: store.Task, n: int = TASK_LOG_ROWS) -> dict:
+    """`wb log <t> -v -n <n>`: its last ``n`` rows (from the last TASK_LOG_BYTES of events.jsonl),
+    each `{ts, round, kind, text}` with wb log's words (transcript.log_body) cut at
+    transcript.JSON_LINE_CHARS, `ok` for a tool call; `more` when older ones were left out."""
+    from . import transcript
+    rows = [r for r in store.read_jsonl_tail(t.dir / "events.jsonl", TASK_LOG_BYTES)
+            if isinstance(r, dict) and r.get("kind") in transcript.LOG_KINDS]
+    out = []
+    for r in rows[-n:]:
+        text = transcript.plain(transcript.log_body(r, verbose=True) or "")
+        cut = text if len(text) <= transcript.JSON_LINE_CHARS else text[:transcript.JSON_LINE_CHARS - 1] + "…"
+        out.append({"ts": r.get("ts"), "round": r.get("round"), "kind": r.get("kind"), "text": cut,
+                    **({"ok": bool(r.get("ok"))} if r.get("kind") == "tool" else {})})
+    return {"rows": out, "more": len(rows) > n}
 
 
 LATEST_BYTES = 1 << 20  # the messages' tail `latest` reads for Claude's last word
@@ -1826,6 +1929,92 @@ def upload_file(uid: str):
     return os.fdopen(fd, "rb"), m
 
 
+
+# ---- dictation (#1203): a voice clip in, its words in the box ----
+# The page's mic (shown only while `dictate` is true: audio.json names a listener that can run)
+# records a clip, uploads it as any attachment (PUT /api/upload/<id>, once), and asks
+# POST /api/transcribe/<id> for its words, which land in the box for the user to edit and send:
+# Claude only ever gets text. A voice memo attached as a file reached Claude as audio it can't
+# hear. The words are kept beside the clip (TRANSCRIPT), so a retry or a reload never runs the
+# listener twice; a GPU listener gives way to a task at once (409), never waits behind it: the
+# page keeps the clip and asks again.
+TRANSCRIPT = ".transcript.txt"  # a leading dot: no saved upload's name has one (upload_name)
+TRANSCRIPT_MAX = 64 * 1024      # read back at most this; a listener's words are far fewer
+DICTATE_TYPES = ("audio/", "video/")  # a phone's voice memo may be video/mp4 or video/webm
+_dictate_lock = threading.Lock()  # one clip at a time: a retry of the same id then finds its words
+
+
+def dictate_ready() -> bool:
+    """The state's `dictate`: whether the page shows its mic (audio.dictation)."""
+    from . import audio  # only here: the server needs none of it otherwise
+    try:
+        return audio.dictation() is not None
+    except Exception:  # noqa: BLE001 - a snapshot never fails for it
+        return False
+
+
+def _transcript(uid: str) -> str | None:
+    """The words kept for upload ``uid``, or None when it has none yet."""
+    try:
+        d = _upload_dir(uid)
+    except (OSError, UploadError):
+        return None
+    try:
+        fd = os.open(TRANSCRIPT, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=d)
+    except OSError:
+        return None
+    finally:
+        os.close(d)
+    with os.fdopen(fd, "rb") as f:
+        return f.read(TRANSCRIPT_MAX).decode("utf-8", "replace")
+
+
+def _keep_transcript(uid: str, text: str) -> None:
+    d = _upload_dir(uid)
+    try:
+        tmp = f".transcript-{secrets.token_hex(6)}"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=d)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.rename(tmp, TRANSCRIPT, src_dir_fd=d, dst_dir_fd=d)
+    finally:
+        os.close(d)
+
+
+def _say(text: str) -> None:
+    print(f"wb chat: dictation: {text}", file=sys.stderr, flush=True)  # serve.log
+
+
+def transcribe_upload(uid: str) -> str:
+    """POST /api/transcribe/<id>: the words the listener hears in upload ``uid`` (audio.hear),
+    kept beside it. UploadError 404 (no such upload), 415 (not audio); audio.Busy (the GPU is a
+    task's), audio.Down (a url listener nothing answers at), LookupError (no listener),
+    RuntimeError and the like (the listener failed) as raised."""
+    from . import audio
+    m = upload_meta(uid)
+    if not m:
+        raise UploadError(404, "no such upload")
+    ctype = m.get("type") or ""
+    if not (ctype.startswith(DICTATE_TYPES) or ctype == "application/octet-stream"):
+        raise UploadError(415, f"not a voice clip ({ctype})")
+    with _dictate_lock:
+        if (said := _transcript(uid)) is not None:
+            return said
+        got = upload_file(uid)
+        if got is None:
+            raise UploadError(404, "no such upload")
+        f, m = got
+        ext = os.path.splitext(m["name"])[1].lower()
+        # a copy under a plain name: the user's file name (quotes, a leading dash) never reaches
+        # the listener's command line or the form's filename
+        with f, tempfile.TemporaryDirectory(prefix=".wb-clip-") as tmp:
+            clip = Path(tmp) / ("clip" + (ext if re.fullmatch(r"\.[a-z0-9]{1,8}", ext) else ""))
+            with open(clip, "wb") as out:
+                shutil.copyfileobj(f, out, 1 << 16)
+            text = audio.hear(clip, ctype, say=_say)
+        _keep_transcript(uid, text)
+        return text
+
 def drop_old_uploads(days: float) -> int:
     """`wb gc`: remove the uploads older than ``days`` whose message has its receipt (an expired
     one's too: open_work retires it, #741), or that no message waiting for one names (a draft
@@ -2213,6 +2402,27 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             self.waits.release()
 
+    def _task(self) -> None:
+        """GET /api/task?name=<t>&part=summary|diff|log (#1201): `diff` takes `full=1` (and
+        `path=<one of its files>`), `log` takes `n`. Only an open task, as the strip lists it."""
+        q = parse_qs(urlsplit(self.path).query)
+        one = lambda k: (q.get(k) or [""])[0]  # noqa: E731
+        part, n = one("part") or "summary", one("n")
+        if part not in TASK_PARTS or (n and not (n.isdigit() and 0 < int(n) <= TASK_LOG_MAX)):
+            return self._json(400, {"error": f"task is ?name=<task>&part=summary|diff|log"
+                                             f"&full=1&path=<file>&n=<1 to {TASK_LOG_MAX}>"})
+        if (t := open_task(one("name"))) is None:
+            return self._json(404, {"error": "no such open task"})
+        if part == "summary":
+            got = task_summary(t)
+        elif part == "diff":
+            got = task_diff(t, full=one("full") == "1", path=q["path"][0] if q.get("path") else None)
+            if got is None:
+                return self._json(404, {"error": "no such file in the diff"})
+        else:
+            got = task_log(t, int(n) if n else TASK_LOG_ROWS)
+        self._json(200, {"task": t.name, "part": part, **got, "now": store.now()})
+
     def _gone(self) -> bool:
         """Whether the client hung up: its side readable with nothing to read."""
         try:
@@ -2249,6 +2459,8 @@ class Handler(BaseHTTPRequestHandler):
             n = (q.get("n") or [""])[0]
             got = audio_take((q.get("batch") or [""])[0], int(n) if n.isdigit() else 0)
             return self._json(404, {"error": "no such take"}) if got is None else self._send(200, *got)
+        if path == "/api/task":  # the task sheet: one open task's summary, diff or log (#1201)
+            return self._task()
         if path.startswith(("/api/upload/", "/api/file/")):  # an attachment (#623)
             return self._get_upload(path)
         if path == "/api/state":
@@ -2463,6 +2675,27 @@ class Handler(BaseHTTPRequestHandler):
                                 f"not saved: {e.strerror or e}", final=e.errno in FINAL_ERRNOS)
         self._json(200, {"upload": {k: meta.get(k) for k in ATTACHED}, "new": new})
 
+    def _transcribe(self, uid: str) -> None:
+        """POST /api/transcribe/<id>: 200 {text}; 404 no such upload or no listener, 415 not
+        audio, 409 the GPU is a task's (`busy: true`), 503 a url listener nothing answers at
+        (`retry: true`), 502 the listener failed. The page keeps a clip through a 409 or a 503
+        and asks again (#1203); no GPU listener ever waits for the GPU here."""
+        from . import audio
+        try:
+            return self._json(200, {"text": transcribe_upload(uid)})
+        except UploadError as e:
+            return self._json(e.code, {"error": e.why})
+        except audio.Busy as e:
+            return self._json(409, {"error": "the GPU is busy with a task", "busy": True, "why": str(e)})
+        except audio.Down as e:
+            _say(f"the listener is down: {e}")
+            return self._json(503, {"error": f"the listener isn't answering: {e}", "retry": True})
+        except LookupError as e:
+            return self._json(404, {"error": f"dictation is off: {e}"})
+        except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as e:
+            _say(f"the listener failed: {e}")
+            return self._json(502, {"error": f"the listener failed: {e}"})
+
     def _refuse(self, code: int, why: str, final: bool = False) -> None:
         try:
             self._json(code, {"error": why, **({"final": True} if final else {})})
@@ -2488,7 +2721,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._allowed() or not self._gate("POST", self.path.split("?")[0]):
             return
-        if self.path not in ("/api/send", "/api/seen", "/api/push", "/api/active", "/api/settings"):
+        if self.path not in ("/api/send", "/api/seen", "/api/push", "/api/active", "/api/settings") \
+                and not self.path.startswith("/api/transcribe/"):
             return self._json(404, {"error": "not found"})
         if self.agent and self.path == "/api/send" and (wait := self.sends.hit(self.agent)):
             return self._json(429, {"error": f"over {AGENT_SENDS_PER_MIN} sends a minute", "retry_after": wait})
@@ -2507,6 +2741,8 @@ class Handler(BaseHTTPRequestHandler):
             text, cid = str(body.get("text", "")).strip(), body.get("cid")
         except (ValueError, AttributeError):
             return self._json(400, {"error": "bad json"})
+        if self.path.startswith("/api/transcribe/"):  # a voice clip's words, for the box (#1203)
+            return self._transcribe(self.path[len("/api/transcribe/"):])
         if self.path == "/api/seen":  # what the page showed: no push for it (endpoint: to it alone)
             ids, endpoint = body.get("ids"), body.get("endpoint")
             if not (isinstance(ids, list) and len(ids) <= 200
@@ -2561,6 +2797,11 @@ class Handler(BaseHTTPRequestHandler):
             if not take:
                 return self._json(400, {"error": "no such take"})
             about = {"audio": m["batch"], "n": n, "name": take.get("name"), "path": take.get("path")}
+        elif isinstance(about, dict) and set(about) == {"task"}:  # from the task sheet (#1201)
+            t = store.Task(about["task"]) if isinstance(about["task"], str) and store.NAME_RE.match(about["task"]) else None
+            if not t or not t.exists or t.spec.get("bench"):
+                return self._json(400, {"error": "no such task"})
+            about = {"task": t.name}
         elif about is not None:  # a reply to a pair of screenshots: its task and step, from the pair
             pair = shots(about.get("task"), about.get("n")) if isinstance(about, dict) else None
             if not pair:

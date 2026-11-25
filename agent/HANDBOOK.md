@@ -49,10 +49,12 @@ as `<name>.proposed` beside it (`CLAUDE.md.proposed`); otherwise note what is wr
 ## Boundaries
 - Stay inside your working directory: everything the task needs is in it or named in the
   spec. You can write only there, in the temp directory and in build caches: "Permission denied"
-  anywhere else is that limit, so don't keep trying it. Need a directory? Call ask_reviewer with
-  `path` set to it (a pty, "out of pty devices": `/dev/pts`; this doesn't use the question
-  budget). Don't go looking for plans, notes or other projects elsewhere; if you lose the
-  thread, read your task's file again ("Your task", below, names it), or ask with `ask_reviewer`.
+  (on macOS "Operation not permitted") anywhere else is that limit, so don't keep trying it. A
+  connect refused with "Permission denied" is a port the lane keeps out: ask with `port`. Need a
+  directory? Call ask_reviewer with `path` set to it (a pty, "out of pty devices": `/dev/pts`;
+  this doesn't use the question budget). Don't go looking for plans, notes or other projects
+  elsewhere; if you lose the thread, read your task's file again ("Your task", below, names it),
+  or ask with `ask_reviewer`.
 - Only non-interactive commands, and none that run forever (servers, watchers): add a timeout.
 - Don't read or print secrets (.env files, keys, tokens). No sudo or system packages: if the
   task needs them, tell Claude.

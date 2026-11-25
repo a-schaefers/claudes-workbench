@@ -190,6 +190,22 @@ class Settings(Rows):
         self.assertEqual(note["text"], settings.CATALOG_FAILED.format(
             why="opencode not found (OpenCode isn't installed)"))
 
+    def test_a_copilot_sign_in_or_an_exported_key_that_runs_counts_as_connected_one_that_cant_does_not(self):
+        # #1191 and #1189, carried from the pane's Settings tab when 2.0 moved it here: only a
+        # stored key or Ollama's login counted, so a Copilot sign-in or a key from $VAR, which run
+        # tasks, read "No API provider connected" and offered no API model
+        self.routes.write_text(json.dumps({"v": 1, "day_usd": 5, "roles": {}}))
+        r, _ = settings._read_json(["route", "--json"])
+        for provs, connected in (
+                ({"github-copilot": {"name": "GitHub Copilot", "key": "copilot", "why": "signed in to Copilot in OpenCode"}}, True),
+                ({"deepseek": {"name": "DeepSeek", "key": "env", "why": "key from $DEEPSEEK_API_KEY", "runs": True}}, True),
+                ({"deepseek": {"name": "DeepSeek", "key": "env", "why": "can't run: $DEEPSEEK_API_KEY isn't set"}}, False)):
+            doc = {**r, "providers": provs}
+            real = settings._read_json
+            with mock.patch.object(settings, "_read_json", lambda argv: (doc, "") if argv == ["route", "--json"] else real(argv)):
+                keys = {row["key"] for row in settings.rows(fresh=True)}
+            self.assertEqual(("api-none" not in keys, "api-connected" in keys), (connected, connected), provs)
+
     def test_turning_probe_on_without_probe_returns_the_note_for_claude(self):
         # #1279's addendum (the owner, 2026-11-24): the terminal still offers to help
         empty = Path(self.tmp.name) / "no-probe"

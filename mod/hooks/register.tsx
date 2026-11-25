@@ -471,7 +471,7 @@ const NEXT: Record<string, (n: string, id?: string, text?: string) => string> = 
   review: n => `Review it as /workbench says, from the diff above (\`wb diff ${n}\` when it was too ` +
     `big to include), then \`wb accept ${n} -m "…"\` or \`wb feedback ${n} --message <file>\`.`,
   question: (n, id, text) => `Answer with \`wb answer ${n}${id ? ` --id ${id}` : ''} --text "…"\`; it is blocked until then.` +
-    (text?.startsWith(PERMISSION) ? ` A PERMISSION request (a refused command or directory): the \`wb allow ${n}\` it ` +
+    (text?.startsWith(PERMISSION) ? ` A PERMISSION request (a refused command, directory or port): the \`wb allow ${n}\` it ` +
       `names (\`--always\` to keep it) when it is reasonable, which answers it and restarts the agent ` +
       `with it; else answer with another way.` : ''),
   stuck: n => `Steer it with \`wb feedback ${n} --message <file>\`, or \`wb discard ${n}\`.`,
@@ -1273,9 +1273,84 @@ async function gateConf($: any): Promise<Gate> {
   return { home, cwd, slug, slugs, dirs, plugins }
 }
 
+// The marketplace's full clone, which the mod runs wb from when no wb is on its PATH (#1190): a
+// fresh install has none until `wb setup` links one, and Claude Code puts the plugin's bin/
+// launcher on the Bash tool's PATH only, not the mod's. The same places in the same order as that
+// launcher (mod/bin/wb), the clones gateConf counts: known_marketplaces.json's installLocation
+// (a directory marketplace), then the clone under CLAUDE_CODE_PLUGIN_CACHE_DIR, then under
+// CLAUDE_CONFIG_DIR or ~/.claude. '' when none holds a bin/wb.
+async function marketplaceClone($: any, home: string, cwd: string): Promise<string> {
+  const config = absolutePath((await $.env.get('CLAUDE_CONFIG_DIR').catch(() => '')) || `${home}/.claude`, home, cwd)
+  const cacheDir = await $.env.get('CLAUDE_CODE_PLUGIN_CACHE_DIR').catch(() => '')
+  const cache = cacheDir ? absolutePath(cacheDir, home, cwd) : ''
+  const listed = (await readJson($, `${cache || `${config}/plugins`}/known_marketplaces.json`))?.workbench?.installLocation
+  for (const dir of [typeof listed === 'string' ? listed : '', cache && `${cache}/marketplaces/workbench`, `${config}/plugins/marketplaces/workbench`]) {
+    if (dir && await $.fs.stat(`${dir}/bin/wb`).catch(() => undefined)) return dir
+  }
+  return ''
+}
+
+// Whether a command of that name is in one of PATH's directories; null when PATH can't be read
+async function onPath($: any, name: string): Promise<boolean | null> {
+  const path: string = (await $.env.get('PATH').catch(() => '')) || ''
+  if (!path) return null
+  for (const dir of path.split(':')) {
+    if (dir.startsWith('/') && await $.fs.stat(`${dir}/${name}`).catch(() => undefined)) return true
+  }
+  return false
+}
+
+// A fresh install (#1190), read from the task files so the mod keeps no state: no task ever ran
+// (nothing under tasks/, no results.jsonl rows) and no role is on API. /workbench alone then starts
+// the skill's *First run* at once: told to wait for a first request, a new user saw nothing happen.
+async function freshInstall($: any): Promise<boolean> {
+  if ((await $.fs.list(`${mem.root}/tasks`).catch(() => []))?.length) return false
+  if ((await $.fs.stat(`${mem.root}/results.jsonl`).catch(() => undefined))?.size) return false
+  return !(await readRoutes($)).api
+}
+
+// What a fresh install's /workbench alone carries after the skill's text; SKILL.md's *First
+// task* reads it by this name
+const FIRSTRUN = 'workbench-firstrun'
+const FIRSTRUN_NOTE = `[${FIRSTRUN}] A fresh install: no task has run here yet and no role is on API. ` +
+  'Run the skill\'s *First run* now, from its step 1, each install or download on the user\'s yes; ' +
+  'don\'t wait for a first request.'
+
+// `wb setup` on a session's start when the /workbench skill isn't linked (#1190): a fresh install,
+// which `claude plugin install` alone leaves without it. It makes only links (and starts the
+// optimize when due), what the user installed the plugin for: no question asked. A skill linked
+// mid-session may not be listed until /reload-skills (Claude Code watches only the skill
+// directories there at its start), so the mod runs that too, and says so if it can't.
+async function setUp($: any, { ok, out, aborted }: WbRun) {
+  if (aborted) return // a reload under way: the next session start runs it again
+  if (!ok) {
+    const bad = out.split('\n').find(l => l.startsWith('BAD ')) ?? out
+    $.ui.toast(`workbench: wb setup failed: ${brief(bad)}`)
+    return
+  }
+  const reloaded = await $.command.run({ command: 'reload-skills', args: '' }).then(() => true, () => false)
+  $.ui.toast(`workbench: set up (wb and /workbench linked); ${reloaded ? '' : '/reload-skills, then '}type /workbench`)
+}
+
+// The consent dialog's answer, '' when $.ui.ask rejected: dismissed, a `-p` run, or a surface that
+// couldn't draw it, each a no (the gates fail closed). Off the terminal the person may never have
+// seen it (#1200), so a toast says where it does show; on the terminal alone a rejection is the
+// person's own Esc, and nothing more is said. Away on the web chat, consent says there in one line
+// that the dialog waits in the terminal (CONSENT_WAITING).
+async function askOrNo($: any, question: string, options: string[], outcome: string): Promise<string> {
+  try {
+    return await $.ui.ask(question, options)
+  } catch {
+    if ([...mem.surfaces].some(s => s !== 'terminal'))
+      $.ui.toast(`workbench: the question went unanswered, so ${outcome}. If it didn't show here, ` +
+        'ask again from Claude Code in a terminal, where it does.')
+    return ''
+  }
+}
+
 // The dialog, or its refusal: '' lets the call through on exactly 'Send it'
 async function askToSend($: any, question: string): Promise<string> {
-  return (await consent($, question, SEND_ASK, "Don't send")) ? '' : NOT_SENT
+  return (await consent($, question, SEND_ASK, "Don't send", 'nothing was sent')) ? '' : NOT_SENT
 }
 
 // A consent dialog (a send upstream, a role change, an edit of a task's code): the user's own
@@ -1285,11 +1360,12 @@ async function askToSend($: any, question: string): Promise<string> {
 // first cut asked on the chat page: it cut a long question at the chat's 2000 characters unmarked,
 // and a user back at the terminal had no dialog for up to 30 minutes; the refusal while away before
 // it ("they approve it in the dialog once back") was a round trip for nothing. A dismissed dialog
-// (an interrupt) rejects: no.
+// (an interrupt) rejects: no, and askOrNo says where it does show (#1200). ``outcome``: what a
+// no leaves, as its toast says it.
 const CONSENT_WAITING = 'Claude is waiting on a workbench dialog in the terminal: answer it there.'
-async function consent($: any, question: string, yes: string, no: string): Promise<boolean> {
+async function consent($: any, question: string, yes: string, no: string, outcome: string): Promise<boolean> {
   if (await away($, await read($, chat))) await runWb($, ['chat', 'reply', `--text=${CONSENT_WAITING}`, '--to=user'], 15_000)
-  return (await $.ui.ask(question, [yes, no]).catch(() => '')) === yes
+  return (await askOrNo($, question, [yes, no], outcome)) === yes
 }
 
 const realPath = async ($: any, p: string): Promise<string> =>
@@ -1548,11 +1624,13 @@ export function routesSummary(doc: Row): string {
     // an OpenRouter role's backends (routes.json `order`): where its code goes, so a change of them
     // alone is a row too; it reached the conversation as nothing (#1126, 2026-11-23)
     const backends = row.api && Array.isArray(row.order) && row.order.length ? `, backends ${row.order.join(', ')}` : ''
-    if (row.via === 'api') return `${r} API ${row.api}${backends}, ${thinkingSaid(row)}`
+    // the role's fallback (routes.json `fallback`, #1196): where its code may go too, so a change of it alone is a row
+    const fallback = typeof row.fallback === 'string' && row.fallback ? `, fallback ${row.fallback === 'gpu' ? 'GPU' : row.fallback}` : ''
+    if (row.via === 'api') return `${r} API ${row.api}${backends}, ${thinkingSaid(row)}${fallback}`
     let text = `${r} GPU ${gpu === 'auto' ? '(the router picks)' : gpu}`
     if (row.api) text += `, API kept: ${row.api}${backends}`
     if (thinking === 'on') text += ', thinking on'
-    return text
+    return text + fallback
   })
   // the Agents switch (#1016): routes.json `use`, over each role's own while it isn't Both
   const use = doc.use === 'gpu' ? 'GPU' : doc.use === 'api' ? 'API' : ''
@@ -1573,7 +1651,8 @@ function routesValid(doc: unknown): doc is Row {
   return Object.entries(d.roles as Row).every(([r, row]: [string, any]) => (ROLES as readonly string[]).includes(r) &&
     row && typeof row === 'object' && [undefined, 'gpu', 'api'].includes(row.via) &&
     [undefined, 'off', 'on'].includes(row.thinking) && (row.via !== 'api' || (typeof row.api === 'string' && !!row.api)) &&
-    (row.order == null || (Array.isArray(row.order) && row.order.every((b: unknown) => typeof b === 'string' && !!b.trim()))))
+    (row.order == null || (Array.isArray(row.order) && row.order.every((b: unknown) => typeof b === 'string' && !!b.trim()))) &&
+    (row.fallback == null || (typeof row.fallback === 'string' && !!row.fallback.trim() && row.fallback !== 'none')))
 }
 
 // What the conversation is told of the roles: `said`, their summary and the day cap ('. Day cap
@@ -1597,7 +1676,7 @@ async function readRoutes($: any): Promise<Routes> {
   const rows = Object.values((doc.roles ?? {}) as Record<string, Row>)
   const cap = typeof doc.day_usd === 'number' ? doc.day_usd : null
   const plain = cap === null && (doc.use ?? 'both') === 'both' && (doc.busy ?? 'wait') === 'wait' && rows.every(r => (r.via ?? 'gpu') === 'gpu' && (r.gpu ?? 'auto') === 'auto' &&
-    !r.api && (r.thinking ?? 'off') === 'off')
+    !r.api && (r.thinking ?? 'off') === 'off' && !r.fallback)
   let newest = -Infinity, by = ''
   for (const r of rows) {
     for (const [ts, who] of [[r.ts, r.by], [r.gpu_ts, r.gpu_by]]) {
@@ -1674,7 +1753,7 @@ async function routeRefusal($: any, e: Row): Promise<string> {
   if (!gated.length) return '' // a GPU model pin, nothing, or wb refuses it itself
   if (live.length > 1) return ROUTE_OWN // a gated change beside another call: the dialog shows one
   const q = gated[0]!
-  if (!(await consent($, q.change, ROUTE_ALLOW, "Don't"))) return NOT_CHANGED
+  if (!(await consent($, q.change, ROUTE_ALLOW, "Don't", 'nothing changed'))) return NOT_CHANGED
   await $.fs.write(`${mem.root}/${ROUTE_OK}`, JSON.stringify({ ...q.approval, at: (await $.clock.now()) / 1000 })).catch(() => {})
   return ''
 }
@@ -1856,7 +1935,7 @@ async function codingRefusal($: any, path: string): Promise<string> {
     return ''
   }
   if (mode === 'ask') {
-    if (!(await consent($, `Let Claude edit ${task}'s code now?`, CODING_ALLOW, "Don't"))) return NOT_EDITED(task)
+    if (!(await consent($, `Let Claude edit ${task}'s code now?`, CODING_ALLOW, "Don't", 'nothing was edited'))) return NOT_EDITED(task)
     await runWb($, ['coding', 'allow', task, `--said=${CODING_SAID}`], 15_000)
     return ''
   }
@@ -1968,6 +2047,7 @@ const mem = {
   picked: '', // the task whose row the user pressed: followed while listed (#1048)
   rolesReading: false, // a rolesNow for the Tasks tab's day-cap line under way (capNow)
   wb: 'wb',
+  surfaces: new Set<string>(), // where this session is drawn: session.start's, then each attach's (#1200)
   liveKey: '', // the followed task and its updated_at when last read
   liveAt: 0, // when its transcript was last read
   awayNoted: false, // AWAY_NOTE said in full this away stretch (awayToo)
@@ -3106,10 +3186,12 @@ async function listen($: any, now: number) {
     mem.chatSent.add(id)
     // The terminal shows only `[web chat] <their words>`: how to answer is the skill's to say. A
     // reply to wb shot's pair says which task and step it's about, whichever is active now (#99);
-    // a take kept from Claude's shortlist (wb chat listen), which take and where it is (#397).
+    // a take kept from Claude's shortlist (wb chat listen), which take and where it is (#397); a
+    // reply from the page's task sheet, which task (#1201): steering it is Claude's to decide.
     const a = m.about && typeof m.about === 'object' ? m.about : null
     const about = !a ? ''
       : a.audio ? `(keeps take ${Number(a.n)} of the shortlist: ${String(a.path ?? a.name ?? '')}) `
+      : a.n == null ? `(about task ${String(a.task)}) `
       : `(about ${String(a.task)}, step ${Number(a.step)}, screenshots ${Number(a.n)}) `
     const text = chatPrompt(m, elsewhereNote + about)
     // Mid-turn, into the running turn, as a message typed mid-turn would be; else, or if that is
@@ -3692,6 +3774,19 @@ export function absolutePath(v: string, home: string, cwd: string): string {
   return `/${out.join('/')}`
 }
 
+// The wb the mod runs without WB_BIN: `wb` by name while a directory on PATH has one, else wb
+// setup's link, ~/.local/bin/wb. A desktop app or an IDE started from the GUI (macOS above all)
+// may not have ~/.local/bin on its PATH, and the mod only said "Put wb on Claude Code's PATH"
+// (#1200). PATH is read, not tried: no wb run at every session start. wb doctor says the same
+// (cli.mod_wb).
+async function findWb($: any, home: string): Promise<string> {
+  const path = String((await $.env.get('PATH').catch(() => '')) ?? '')
+  for (const dir of path.split(':'))
+    if (dir.startsWith('/') && (await $.fs.stat(`${dir.replace(/\/+$/, '')}/wb`).catch(() => undefined))?.kind === 'file') return 'wb'
+  const linked = `${home}/.local/bin/wb`
+  return home && (await $.fs.stat(linked).catch(() => undefined))?.kind === 'file' ? linked : 'wb'
+}
+
 // The task /workbench was given, as the skill's text has it after expansion ("**First task:**
 // `<arguments>`."): empty when the user typed /workbench alone.
 const firstTask = (text: string) => /\*\*First task:\*\* `([\s\S]*?)`\. Empty\?/.exec(text)?.[1].trim() ?? ''
@@ -3710,20 +3805,29 @@ export const register: Register = (on, options) => {
     // `~/repos/workbench/bin/wb` ran a literal `~`, and the mod couldn't run wb at all, #699); a
     // bare name still goes through PATH
     const bin = await $.env.get('WB_BIN')
-    mem.wb = bin ? (bin.includes('/') || bin.startsWith('~') ? abs(bin) : bin) : 'wb'
+    mem.wb = bin ? (bin.includes('/') || bin.startsWith('~') ? abs(bin) : bin) : await findWb($, home ?? '')
+    // none on the mod's PATH nor wb setup's link (a fresh install): the marketplace clone's (#1190)
+    if (!bin && mem.wb === 'wb' && await onPath($, 'wb') === false) {
+      const clone = await marketplaceClone($, home ?? '', mem.cwd)
+      if (clone) mem.wb = `${clone}/bin/wb`
+    }
     const config = await $.env.get('CLAUDE_CONFIG_DIR')
     mem.skill = `${config ? abs(config) : `${home}/.claude`}/skills/workbench/SKILL.md`
     const commands = await $.env.get('WB_COMMANDS')
     mem.commandsFile = commands ? abs(commands) : `${home}/.config/workbench/commands.json`
     mem.startedAt = await $.clock.now()
-    // 2026-11-17: /delegate became /workbench. A copy updated across it still has only the old
-    // skill link, which now leads nowhere: wb setup makes the new one and drops the old.
+    // No /workbench skill: a fresh install (#1190; `setUp`), or a copy updated across 2026-11-17,
+    // when /delegate became /workbench, with only the old skill link, which leads nowhere. wb
+    // setup makes the link (and drops the old one). A fresh install's only with a person there:
+    // a `claude -p` or SDK session runs no wb (below).
     const skills = mem.skill.slice(0, -'/workbench/SKILL.md'.length)
-    if (!(await $.fs.stat(mem.skill).catch(() => undefined))
-      && (await $.fs.stat(`${skills}/delegate`).catch(() => undefined))?.isLink) {
-      const { ok, out } = await runWb($, ['setup'])
-      $.ui.toast(ok ? 'workbench: /delegate is now /workbench (wb setup linked it)'
-        : `workbench: /delegate is now /workbench, but wb setup failed: ${brief(out)}`)
+    if (!(await $.fs.stat(mem.skill).catch(() => undefined))) {
+      const renamed = (await $.fs.stat(`${skills}/delegate`).catch(() => undefined))?.isLink
+      if (renamed) {
+        const { ok, out } = await runWb($, ['setup'])
+        $.ui.toast(ok ? 'workbench: /delegate is now /workbench (wb setup linked it)'
+          : `workbench: /delegate is now /workbench, but wb setup failed: ${brief(out)}`)
+      } else if (e.isInteractive || e.surface != null) void setUp($, await runWb($, ['setup'])).catch(() => {})
     }
     if (!(await read($, chat)).key) {
       const key = `${Math.floor(mem.startedAt)}-${Math.random().toString(36).slice(2, 8)}`
@@ -3771,6 +3875,7 @@ export const register: Register = (on, options) => {
     // other sessions' wakes, the weekly check and a `wb status` before every prompt (the
     // 2026-11-16 audit). It stays quiet until then.
     mem.person = e.isInteractive || e.surface != null
+    if (e.surface) mem.surfaces.add(e.surface)
     if (mem.person) {
       await checkVersion($)
       startEars($)
@@ -3780,6 +3885,7 @@ export const register: Register = (on, options) => {
   })
 
   on('session.attach', async ($, e, next) => {
+    if (e.surface) mem.surfaces.add(e.surface)
     if (!mem.person && mem.root) {
       mem.person = true
       startEars($)
@@ -3881,7 +3987,8 @@ export const register: Register = (on, options) => {
   })
 
   // /workbench turns workbench mode on for the session, with or without a task, and shows the pane.
-  // Run again while it is on, it brings the pane back; alone, that is all it does.
+  // Run again while it is on, it brings the pane back; alone, that is all it does, except on a
+  // fresh install (FIRSTRUN_NOTE).
   on('skill.prompt', { skill: SKILL }, async ($, e, next) => {
     if (e.path) mem.skill = e.path
     const again = (await read($, chat)).delegating
@@ -3898,9 +4005,13 @@ export const register: Register = (on, options) => {
     }
     await workbenchMode($, true)
     await showPane($)
-    if (again && !firstTask(e.text)) return { text: add(AGAIN_NOTE(mem.skill)) }
+    // alone on a fresh install, the skill's whole text and the note to run its *First run* now
+    // (#1190), the mode on already or not: in this text, since prompt.context fires only at a
+    // conversation's first message, and /workbench may come later in it
+    const first = !firstTask(e.text) && await freshInstall($)
+    if (again && !firstTask(e.text) && !first) return { text: add(AGAIN_NOTE(mem.skill)) }
     const r = await next(e)
-    return { ...r, text: add(r.text) }
+    return { ...r, text: add(first ? `${r.text}\n\n${FIRSTRUN_NOTE}` : r.text) }
   })
 
   // Typed in the terminal: the user is back, so answers go here again

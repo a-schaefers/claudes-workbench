@@ -382,7 +382,10 @@ def _build() -> dict:
         out.append(_note("api-why", "api", why or OLDER_WB))
     else:
         provs = r.get("providers") or {}
-        stored = any(p.get("key") in ("stored", "ollama") for p in provs.values() if isinstance(p, dict))
+        # a key that runs tasks: a stored one, Ollama cloud's login, Copilot's sign-in, which the
+        # keyhole holds as a key (#1191), or an exported one it can read (`runs`, #1189)
+        stored = any(p.get("key") in ("stored", "ollama", "copilot") or p.get("runs") is True
+                     for p in provs.values() if isinstance(p, dict))
         if not stored and not any(row.get("api") for _, _, row in roles):
             err = r.get("catalog_error")
             out.append(_note("api-none", "api", CATALOG_FAILED.format(why=err) if err else NO_PROVIDER))

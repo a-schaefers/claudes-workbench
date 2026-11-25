@@ -32,8 +32,10 @@ from . import (__version__, ask_mcp, audio, bench, chat, context, gitops, hardwa
                transcript, tuning, verify, webpush)
 from .watch import Watcher, wait_exit
 from . import runner
+from . import keyhole
 from . import meter
 from . import privacy
+from . import schedule
 from .runner import PKG_ROOT
 
 # `{spec}`: the file this prompt is written to, rounds/<n>/prompt.md (wb start, wb next). In the
@@ -191,7 +193,8 @@ def _coding_used(task: store.Task) -> None:
             {**x, "used": x.get("used") or (store.now() if _spent(x) else None)} for x in rows]})
 
 
-def _model_still_listed(task: store.Task, prompt: str | None = None, fresh: bool | None = None) -> None:
+def _model_still_listed(task: store.Task, prompt: str | None = None, fresh: bool | None = None,
+                        images: int = 0) -> None:
     """An API task's model must still be in OpenCode's catalog before feedback, next or resume
     writes a round: exit 3 with runner.left_catalog's line, never another model (#1016). And
     wb start's spend refusal (meter.refusal: no price, no day cap (#1089), today at the cap or
@@ -199,7 +202,8 @@ def _model_still_listed(task: store.Task, prompt: str | None = None, fresh: bool
     stopped at once as a spend `stuck`, a Claude wake for nothing, with a review counted or a
     step committed for a round that never ran (#1118, 2026-11-23). That request's input is the
     round's first (runner.first_tokens of ``prompt`` and ``fresh``): the session's context
-    left out, the check passed and the room refused it at once (#1173, 2026-11-24). Its advice
+    left out, the check passed and the room refused it at once (#1173, 2026-11-24); ``images``,
+    --image's, besides the task's own (#1199's review). Its advice
     is a running task's: the role on the GPU for the next tasks only, as this one keeps its API
     model (#1171). And Agents on GPU (#1213), whose stop the runner's would be at once."""
     if task.spec.get("via") != "api":
@@ -209,7 +213,7 @@ def _model_still_listed(task: store.Task, prompt: str | None = None, fresh: bool
     if (m := models.lookup(task.spec.get("model") or "")) is None:
         die(runner.left_catalog(task), 3)
     if why := meter.refusal(m, task.spec.get("role"), task=task,
-                            tokens=runner.first_tokens(task, prompt, fresh)):
+                            tokens=runner.first_tokens(task, prompt, fresh, images)):
         die(why, 3)
 
 
@@ -252,7 +256,7 @@ def spawn_runner(task: store.Task) -> int:
     env = context.detached_env()  # the user's PYTHONPATH kept for the agent (#512)
     env.pop("WB_TASK", None)  # the agent's mark (runner.sweep kills what carries it), not the runner's
     # a stop wb made earlier says nothing about this runner, nor an earlier runner's beat (#872)
-    task.set_status(stopping=None, parked=None, beat=None)
+    task.set_status(stopping=None, parked=None, beat=None, rewound_to=None)  # said once (#1198)
     # handed back to the agent: no longer Claude's, so a later session adopting its review turns
     # workbench mode back on (#926: the mod's delegatedWork read the old takeover). Kept for a
     # task not checked out, whose runner's #655 guard reads it
@@ -730,9 +734,11 @@ def _routed_keys(routed: dict) -> dict:
     """task.json's routing keys (#1016), fixed at start as `model` is: `via` and `role` always;
     for API `provider`, `provider_name`, `thinking`, `said` and `said_ts` (when the role has one),
     an OpenRouter role's `order` (#1021), which the keyhole routes every request by, and `busy`
-    when the busy opt-in sent it there (#1023)."""
-    keys = ("via", "role") + (("provider", "provider_name", "thinking", "said", "said_ts", "order", "busy")
-                              if routed.get("via") == "api" else ())
+    when the busy opt-in sent it there (#1023); `fallback` and `fallback_from` (the role's API model
+    it stands in for) on the role's fallback, either side (#1196)."""
+    keys = ("via", "role", "fallback", "fallback_from") + (
+        ("provider", "provider_name", "thinking", "said", "said_ts", "order", "busy")
+        if routed.get("via") == "api" else ())
     return {k: routed[k] for k in keys if routed.get(k) is not None}
 
 
@@ -741,7 +747,8 @@ def _busy_api(role: str, a, repo: Path, sub: str | None, tokens: int | None = No
     model as pick_model gives one, (m, state, why, routed); "" when the opt-in doesn't apply (off,
     Agents GPU, a --model asked for, a role with no API model: it queues as before); a
     line saying why the role's API model can't take it now, which never changes the start either.
-    Only here, at a start: a running task never moves, and nothing goes from API to the GPU."""
+    Only here, at a start: a running task never moves, and nothing goes from API to the GPU, but
+    by the role's fallback, the user's explicit exception (_fallback_start, #1196)."""
     if a.model:
         return ""
     try:
@@ -776,6 +783,54 @@ def _busy_api(role: str, a, repo: Path, sub: str | None, tokens: int | None = No
     return m, state, f"{routes.routed_line(m.id, routed)} · {routes.BUSY_LINE}", routed
 
 
+def _fallback_start(role: str, size: str, a, repo: Path, sub: str | None, stack, m: models.Model,
+                    routed: dict, tokens: int | None = None, held: bool = False):
+    """The role's fallback (#1196) for a start whose role's API model ``m`` its provider holds now
+    (api-health.json: out of credit, rate-limited or unreachable), the user's own choice in wb
+    route: (m, state, why, routed) as pick_model gives one; "" when it doesn't apply (no fallback,
+    a --model asked for, the provider not marked, a busy start); else the line saying why the
+    fallback can't take it either, which leaves the start as it was (exit 3, or a held start that
+    waits). The user's explicit exception to "an API role never runs on the GPU" (#1016) and to
+    one model a role; at a start, and once in the runner (runner._fallback_move), nowhere else.
+    An API fallback meets _busy_api's checks but one: --local-only and commands.json's local_only
+    and standing copy/siblings, the day cap. Its provider's slots all taken, a start ``m`` can't
+    take (out of credit) is still the fallback's: cmd_start queues it for a slot, as any API start
+    (#1322). Refused here, the 4th --queue start of a backlog exited 3, "wb never switches
+    models" (the review of #1196, 2026-11-24), where waiting for a slot is what a queue means. A
+    ``held`` one (rate-limited or unreachable) runs on ``m`` and waits it out in the round, as with
+    no fallback: a full fallback can't take it, so it stays there (the second review, 2026-11-24);
+    so does a GPU fallback the GPU's holders would make it wait for (the third review). Out of
+    credit, a busy GPU is still the fallback's: cmd_start queues it behind the holders, the line
+    said."""
+    if a.model or routed.get("via") != "api" or routed.get("busy") \
+            or (routed.get("said") or "").startswith("asked for") or models.api_health(m.provider) is None:
+        return ""
+    try:
+        doc = routes.read()
+    except routes.RoutesError:
+        return ""
+    local = ("this task is kept local (--local-only)" if a.local_only else
+             f"{repo.name} is kept local ({kept})" if (kept := privacy.local_only(repo, sub)) else "")
+    got = routes.fallback_pick(doc, role, size, stack, getattr(a, "name", None), m, tokens, local)
+    if not isinstance(got, tuple):
+        return got
+    fb = got[0]
+    if fb.kind != "api":
+        # a held start the GPU would make wait stays on ``m`` too, as a full API fallback's: the
+        # move made a start that runs with no fallback exit 4 on the GPU's holders (the third
+        # review of #1196, 2026-11-24)
+        if held and (gpu := _gpu_wait(fb, getattr(a, "name", None)))[1]:
+            return f"the {role} role's fallback {fb.id} can't take it: " + models.busy(
+                gpu[0], f"{fb.id} would wait behind {'it' if len(gpu[0]) == 1 else 'them'}")
+        return got
+    if held and not _api_slots_free(fb, getattr(a, "name", None)):
+        return (f"the {role} role's fallback {fb.id} can't take it: every one of "
+                f"{models.api_provider(fb)}'s {models.API_PARALLEL} slots is taken")
+    if gap := _standing_gap(context.repo_conf(repo, sub), repo, sub):
+        return f"the {role} role's fallback {fb.id} can't take it: {gap}"
+    return got
+
+
 def _gpu_holders(me: str | None = None, of: models.Model | None = None) -> dict:
     # An API task is never one (#1015), twice over: discover() is GPU-only, so `m` below is None
     # for one, and models.pool() of an API model is None, never ``of``'s pool. Neither direction
@@ -797,7 +852,8 @@ def _gpu_holders(me: str | None = None, of: models.Model | None = None) -> dict:
         if t.name not in named and t.name != me and m and models.pool(m) == pool \
                 and not (own and store.elsewhere(t.status)) \
                 and t.status.get("phase") in store.ACTIVE and runner_alive(t) \
-                and t.status.get("leased") != t.status.get("pid"):
+                and t.status.get("leased") != t.status.get("pid") \
+                and runner.held_until(t) is None:  # held by --after: nothing until then (#1204)
             held[f"task {t.name}"] = {"model": m.id, "task": t.name}
     return held
 
@@ -875,7 +931,8 @@ def _api_pending(m: models.Model, me: str | None = None) -> list[str]:
                   if t.name != me and t.name not in held and t.spec.get("via") == "api"
                   and (t.spec.get("provider") or (t.spec.get("model") or "").split("/", 1)[0]) == p
                   and t.status.get("phase") in store.ACTIVE and runner_alive(t)
-                  and t.status.get("leased") != t.status.get("pid"))
+                  and t.status.get("leased") != t.status.get("pid")
+                  and runner.held_until(t) is None)  # held by --after (#1204)
 
 
 def _api_slots_free(m: models.Model, me: str | None = None) -> int:
@@ -1474,6 +1531,143 @@ def _no_base(repo: Path, base: str) -> str:
     return f"no commit {base} in {repo}: a typo, or a ref not fetched yet (git fetch)"
 
 
+# --image (#1199): what OpenCode's `run -f` attaches as an image, OpenCode 2.3.2's limits. Its
+# read tool takes these four (MEDIA_MIMES, core/src/tool/read-filesystem.ts), by extension, so
+# the copy gets the type's own; over ATTACH_FILE_MAX_BYTES (cli/src/run/run.ts) `run` exits 1
+# before any request, and the round would fail mid-task. At most IMAGE_MAX a command.
+IMAGE_MAX = 4
+IMAGE_BYTES = 10 * 1024 * 1024
+# A task's images in all, GPU or API (#1199's review): OpenCode 2.3.2 sends every image of the
+# session as base64 (4/3 of its bytes, the read tool's copy too) in each request, and its
+# boundImages (core/src/session/model-request.ts) swaps the oldest for "[This image was removed
+# to reduce the request size…]" once they pass IMAGE_BYTES_TRIGGER, 25 MiB of base64, cutting
+# down to IMAGE_BYTES_TARGET, 15 MiB, with nothing said to wb or Claude: two 10 MiB PNGs that
+# passed every other check left the agent one, four left it one. 8 MiB is 10.7 MiB of base64,
+# under the target, with room for one re-read under the trigger. On an API task it also keeps
+# the body well under the keyhole's BODY_CAP (32 MB, a 413 past it).
+OPENCODE_IMAGE_TRIGGER = 25 * 1024 * 1024
+OPENCODE_IMAGE_TARGET = 15 * 1024 * 1024
+IMAGE_TOTAL = 8 * 1024 * 1024
+IMAGE_KINDS = ((b"\x89PNG\r\n\x1a\n", ".png"), (b"\xff\xd8\xff", ".jpg"), (b"GIF87a", ".gif"),
+               (b"GIF89a", ".gif"))
+
+
+def _image_kind(head: bytes) -> str | None:
+    """An image's extension from its first bytes (WebP: RIFF....WEBP), or None."""
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return ".webp"
+    return next((ext for magic, ext in IMAGE_KINDS if head.startswith(magic)), None)
+
+
+def _images_given(paths: list[str] | None) -> list[tuple[Path, str]]:
+    """--image's files, each (path, extension), checked before anything is written: there, a
+    file, PNG, JPEG, GIF or WebP by its bytes, 10 MiB at most, IMAGE_MAX of them."""
+    if not paths:
+        return []
+    if len(paths) > IMAGE_MAX:
+        die(f"--image: at most {IMAGE_MAX} images a command")
+    found = []
+    for p in paths:
+        path = Path(p).expanduser()
+        try:
+            st = path.stat()
+            if not stat.S_ISREG(st.st_mode):  # never opened: a FIFO would hang the command
+                die(f"--image {p}: not a file")
+            size = st.st_size
+            with path.open("rb") as fh:
+                head = fh.read(12)
+        except FileNotFoundError:
+            die(f"--image {p}: no such file")
+        except OSError as e:
+            die(f"--image {p}: {e.strerror or e}")
+        if not (ext := _image_kind(head)):
+            die(f"--image {p}: not a PNG, JPEG, GIF or WebP image, the kinds OpenCode attaches")
+        if size > IMAGE_BYTES:
+            die(f"--image {p}: {size / 2**20:.1f} MiB, over OpenCode's 10 MiB for an attachment")
+        found.append((path.resolve(), ext))
+    return found
+
+
+def _images_fit(m: models.Model | None, model_id: str) -> None:
+    """--image only for a model that takes images (models.takes_images): one line otherwise, so
+    Claude says it in words instead. Never another model, never dropped unsaid (#1199)."""
+    said = models.takes_images(m) if m else None
+    if said is False:
+        die(f"{model_id} takes no image input: describe the image in the spec")
+    if said is None:
+        die(f"{model_id} doesn't say it takes image input (OpenCode's config: modalities.input): "
+            "describe the image in the spec")
+
+
+def _images_room(found: list[tuple[Path, str]], task: store.Task | None = None) -> None:
+    """A task's images, its own (``task``: what a fresh session resends) and ``found``, at most
+    IMAGE_TOTAL in all, on any model: one line over it, before anything is written, as OpenCode
+    would drop the oldest unsaid (#1199's review)."""
+    if not found:
+        return
+    had = [runner.images_dir(task) / Path(str(r["file"])).name for r in
+           (task.status.get("images") or () if task is not None else ()) if isinstance(r, dict) and r.get("file")]
+    total = 0
+    for p in [path for path, _ in found] + had:
+        with contextlib.suppress(OSError):
+            total += p.stat().st_size
+    if total > IMAGE_TOTAL:
+        die(f"--image: {total / 2**20:.1f} MiB of images on this task{' with its own' if had else ''}, "
+            f"over {IMAGE_TOTAL >> 20} MiB in all (OpenCode drops the oldest unsaid past "
+            f"{OPENCODE_IMAGE_TRIGGER >> 20} MiB of base64 in a request): fewer or smaller images "
+            "(a crop, a JPEG), or describe the rest in the spec")
+
+
+def _task_images(task: store.Task, paths: list[str] | None) -> list[tuple[Path, str]]:
+    """wb feedback's and wb next's --image, checked against the task's own model and, with the
+    task's own images, against IMAGE_TOTAL (_images_room)."""
+    shown = _images_given(paths)
+    if shown:
+        mid = task.spec.get("model") or ""
+        _images_fit(models.lookup(mid), mid)
+        _images_room(shown, task)
+    return shown
+
+
+def _keep_images(task: store.Task, found: list[tuple[Path, str]], rnd: int) -> dict:
+    """Copy --image's files into tasks/<task>/images/<k>-<name> (out of the worktree, so never
+    in the review diff; the lane reads the task's directory): the status fields that list them
+    for round ``rnd`` (`images`, {file, round} each), which runner.attachments sends with it.
+    Empty with none, so the caller's status write keeps the task's own."""
+    if not found:
+        return {}
+    rows = list(task.status.get("images") or [])
+    where = runner.images_dir(task)
+    where.mkdir(parents=True, exist_ok=True)
+    for path, ext in found:
+        stem = re.sub(r"[^A-Za-z0-9._-]+", "-", path.stem).strip("-.")[:40] or "image"
+        name = f"{len(rows) + 1}-{stem}{ext}"
+        shutil.copyfile(path, where / name)
+        rows.append({"file": name, "round": rnd})
+    return {"images": rows}
+
+
+def _images_line(fields: dict, rnd: int) -> str:
+    """What wb start, feedback and next say of the images going with round ``rnd``."""
+    names = [r["file"] for r in fields.get("images") or () if r.get("round") == rnd]
+    return f"images: {', '.join(names)} go with the agent's message (OpenCode's run -f)" if names else ""
+
+
+def after_time(text: str, now: float | None = None) -> float:
+    """--after HH:MM (#1204): the next such local time, as epoch seconds: today's while it is
+    ahead, else tomorrow's. A time zone's change in between (DST) is mktime's."""
+    m = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", text.strip())
+    if not m:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a time of day as HH:MM (24-hour)")
+    now = time.time() if now is None else now
+    day = time.localtime(now)
+    for ahead in (0, 1):
+        at = time.mktime((day.tm_year, day.tm_mon, day.tm_mday + ahead, int(m[1]), int(m[2]), 0, 0, 0, -1))
+        if at > now:
+            return at
+    raise argparse.ArgumentTypeError(f"{text!r}: no such time ahead")  # never: tomorrow's is
+
+
 def _start_refusals(a, dry: bool = False) -> tuple[Path, str, tuple[int, int] | None]:
     """wb start's refusals before a model is picked, and (its repo, the spec, OpenCode's version).
     The dry run behind the start dialog (`_route_start`, ``dry``) runs them too: it put a dialog
@@ -1524,7 +1718,10 @@ def _start_refusals(a, dry: bool = False) -> tuple[Path, str, tuple[int, int] | 
 
 
 def cmd_start(a):
+    if getattr(a, "after", None):  # held until then: the GPU's or a slot's room now says nothing
+        a.queue = True
     repo, spec_text, have = _start_refusals(a)
+    shown = _images_given(getattr(a, "image", None))  # #1199, before anything is written
     task = store.Task(a.name)
     handed = _skill_names(a.skill)
     # the repo's own directories (context.repo_dirs reads only the spec's repo: task.json is to come)
@@ -1539,14 +1736,24 @@ def cmd_start(a):
     _local_only_check(a, repo, role, _package(repo, Path(a.repo).resolve(), a.base))  # #1021
     # round 1's first request, input and all, for the day cap's look ahead: without its input a
     # start within that of the cap passed, then the room refused that request at once (#1173)
-    first = runner.first_tokens(prompt=spec_text)
+    first = runner.first_tokens(prompt=spec_text, images=len(shown))  # each image too (#1199's review)
     m, state, why, routed = pick_model(role, size, a.model, stack, a.name, tokens=first)
     # a rate limit or outage a task met on this provider (api-health.json) is no refusal: the
     # keyhole waits it out inside the round, which stops as rate_limited or outage if it holds.
     # One 503 any task saw blocked every start of the role for 60 s, --queue and --force too, and
     # told Claude to ask the user to put the role on the GPU (#1088, 2026-11-23)
     held_up = m.kind == "api" and not state["available"] and state["why"].startswith(TRANSIENT)
-    # an API role's model: no fallback, and --force (a --model's) never starts it anyway: the task
+    # the role's fallback, the user's own (#1196): a provider out of credit, rate-limited or
+    # unreachable starts it there instead, so an overnight --queue backlog drains
+    fell = ""
+    if not state["available"] and isinstance(moved := _fallback_start(
+            role, size, a, repo, _package(repo, Path(a.repo).resolve(), a.base), stack, m, routed, first, held_up), tuple):
+        fell = f"{m.id}: {state['why']}: {routes.FALLBACK_LINE} ({moved[0].id})"
+        m, state, why, routed = moved
+        held_up = False
+    elif not state["available"] and moved:
+        print(f"note: {moved}")
+    # an API role's model: no fallback but the user's (above), and --force (a --model's) never starts it anyway: the task
     # went on to fail in the runner, the user never asked (#1016's review)
     if not state["available"] and not held_up and (line := _role_cant_run(m, state, routed)):
         die(line, 3)
@@ -1565,6 +1772,11 @@ def cmd_start(a):
     if not a.no_sign:  # said now, not after the whole task at wb accept (#374)
         _say(gitops.sign_problem(repo, a.base))
     setup = _worktree_setup(repo, a, sub, m.kind)
+    # the user's MCP servers commands.json names for this repo (#1202): one that holds a
+    # credential is refused by name and key, never its value, like a token file (API_HIDDEN)
+    mcp = context.mcp_names(repo, sub)
+    if bad := context.mcp_servers(mcp)[1]:
+        die(bad[0], 3)
     checkout_bytes = _disk_room(repo, a.base, setup)
     # Two projects, one GPU: a task that can't run beside the GPU's holders used to queue in
     # silence behind them, maybe for hours (the 2026-11-16 audit), so its note names them. It
@@ -1576,14 +1788,20 @@ def cmd_start(a):
     if api:
         held, waits = {}, False
     else:
-        if not getattr(a, "bench", None):
+        if not getattr(a, "bench", None) and not getattr(a, "after", None):  # not for a later run's sake
             _say(_preempt_bench(m, a.name))
         held, waits = _gpu_wait(m, a.name)
-    if waits and not isinstance(moved := _busy_api(role, a, repo, sub, first), str):  # #1023, the user's opt-in
+    # held by --after, the GPU now says nothing of then: no busy move (#1204)
+    if getattr(a, "after", None):
+        moved = ""
+    elif waits and not isinstance(moved := _busy_api(role, a, repo, sub, first), str):  # #1023, the user's opt-in
         m, state, why, routed = moved
         api, held, waits, slots_full = True, {}, False, False
     elif waits and moved:
         print(f"note: {moved}")
+    if shown:  # the model the task runs on, once nothing moves it (_busy_api above)
+        _images_fit(m, m.id)
+        _images_room(shown)
 
     try:
         task.dir.mkdir(parents=True)
@@ -1641,6 +1859,7 @@ def cmd_start(a):
                                                   spec=task.round_dir(1) / "prompt.md")
     task.round_dir(1).mkdir(parents=True)
     task.round_dir(1).joinpath("prompt.md").write_text(prompt, encoding="utf-8")
+    pictures = _keep_images(task, shown, 1)  # before task.json too: a dead start's, for gc
     # from the model's measured speed on this machine, else defaults; its identity (cached:
     # weights_id below) finds the speed it had under an id it was renamed from (#905)
     limits = router.budgets(m, models.identity(m))
@@ -1665,11 +1884,13 @@ def cmd_start(a):
         **({"trial": True} if a.trial else {}), "test_cmd": a.test, "test_timeout": a.test_timeout,
         **({"local_only": True} if a.local_only else {}),  # this task's alone (#1021)
         **setup,  # setup, copy, siblings: runner.prepare, before the base check (#201)
+        **({"mcp": mcp} if mcp else {}),  # the user's MCP servers its agent gets (#1202)
         **({"worktree": str(wt.relative_to(task.dir))} if wt != task.dir / "worktree" else {}),
         "checkout": "runner",  # the runner makes the worktree, before its setup (#529)
         # the next start counts it as taken until the runner has made it (#676)
         **({"checkout_bytes": checkout_bytes} if checkout_bytes else {}),
         **({"backlog": a.backlog} if a.backlog else {}),  # a batch left to run: wb backlog
+        **({"not_before": round(at)} if (at := getattr(a, "after", None)) else {}),  # runner.hold (#1204)
         **({"group": g} if (g := getattr(a, "group", None)) else {}),  # one request's fan-out (#1048)
         # a replay of the bench driver's (bench.replay): no notices, no results row, not listed
         **({"bench": b} if (b := getattr(a, "bench", None)) else {}),
@@ -1700,15 +1921,25 @@ def cmd_start(a):
                     # each step's acceptance command, as data: bench add read it back from the
                     # prompt alone, whose one-line pattern missed a command of several lines
                     # (#941, the v1.90.24 review); task.json's test_cmd is only the latest
-                    step_tests={"1": a.test})
+                    step_tests={"1": a.test}, **pictures)
     exact, tools = context.test_allowances(a.test)
     context.grant(task, "allow", [p.strip() for p in a.allow or [] if p.strip()] + exact)
     context.grant(task, "test_tools", tools)
     context.grant(task, "paths", lane_dirs)
+    context.grant(task, "ports", list(dict.fromkeys(a.allow_port or [])))  # the bench's replays
     fixed = _fixed_line(task, m)  # before the runner, which writes the same rules files
     spawn_runner(task)
     print(f"started {a.name} on {f'{m.id} (API)' if api else m.label} · branch {gitops.branch_name(a.name)} · "
           f"base {base[:8]}" + (f" · tests `{a.test}`, auto-fix {fixes}" if a.test else ""))
+    if mcp:  # each server's tools go into every request: prefill on the GPU (#1202)
+        print(f"MCP: {', '.join(mcp)} (commands.json \"mcp\"): each server's tools go into every "
+              "request")
+        # only where a lane hides the checkout (Landlock, or Seatbelt on macOS: #1194): with none
+        # or the lane off the server reads it, and the note had Claude tell the user to change a
+        # config that works (#1202's review, 2026-11-24; api_hidden_note's gate, #1156)
+        hides = api and lane.held() and context.writable(task) is not None
+        for note in context.mcp_checkout_notes(mcp, [repo]) if hides else ():
+            print(note)
     if dirty:
         print("note: the repo has uncommitted changes; the agent's worktree starts from "
               f"{a.base}, without them")
@@ -1751,9 +1982,11 @@ def cmd_start(a):
     print(routes.model_line(m.id, routed) + meter.tail(m) if api else f"model: {why}" if why != "asked for"
           else f"model: {m.id} (asked for)")
     _say(routes.BUSY_LINE if routed.get("busy") else "")
+    _say(fell)  # on the role's fallback (#1196): what held its API model
     for note in _api_notes(a.name, repo) if api else ():  # #1016, #1021
         print(f"note: {note}")
     print(f"slice: {router.slice(m).line()}")
+    _say(_images_line(pictures, 1))
     if handed:
         print("skills handed: " + ", ".join(handed))
     elif fits := skills.suggest(spec_text):
@@ -1766,6 +1999,8 @@ def cmd_start(a):
               "it stops as rate_limited or outage)")
     if not state["available"] and not held_up:
         print(f"note: queued although {state['why']}")
+    elif getattr(a, "after", None):  # who holds the GPU or the slots now says nothing of then
+        pass
     elif api:  # none of the GPU's notes: it takes no GPU
         if slots_full:
             print(f"note: {_slot_note(m, a.name)}")
@@ -1775,6 +2010,10 @@ def cmd_start(a):
         print(f"note: {urlparse(m.root).hostname} has {', '.join(others)} loaded, which no task here "
               f"runs: the runner loads {m.name} once it has gone {models.BOX_QUIET} s without a "
               f"request (up to {models.BOX_WAIT // 60} min); {models.BOX_SHARED}")
+    if at := getattr(a, "after", None):
+        print(f"note: held until {runner.clock(at)} (--after): queued until then, checkout and all; "
+              "the machine is kept awake meanwhile where wb can, and a reboot before then fails it "
+              f"as interrupted (wb resume {a.name} holds it again)")
     if not os.environ.get("CLAUDECODE"):  # under Claude Code the mod wakes Claude (#1322)
         print(f"next: wb wait {a.name}")
 
@@ -1820,9 +2059,15 @@ def cmd_feedback(a):
         read_text(a.message, "the feedback")
     if not text.strip():  # before anything is written: an empty one cost a round (the audit)
         die("the feedback is empty")
+    shown = _task_images(task, getattr(a, "image", None))  # #1199
     rerun = " re-run the acceptance command and" if task.spec.get("test_cmd") else ""
-    said = (f"{lessons.FEEDBACK_HEAD} Make exactly these changes, then{rerun} finish with a short "
-            "summary:\n\n" + text.strip())
+    # after wb rewind (#1198): in the head paragraph, which lessons never read as an item
+    back = st.get("rewound_to")
+    reset = f" {REWOUND_LINE.format(back)}" if back else ""
+    said = (f"{lessons.FEEDBACK_HEAD}{reset} Make exactly these changes, then{rerun} finish with a "
+            "short summary:\n\n" + text.strip())
+    # the old session remembers edits that are gone: a fresh one, handed the work as it is now
+    fresh = a.fresh or bool(back and not a.keep_context)
     # Round n stopped before it reached the agent (its model couldn't load, the GPU server was
     # down, the API key gone): its prompt, wb next's step or the last review's feedback, was
     # never sent. Written as round n + 1 from the new text alone, the agent got "carry on" and
@@ -1837,7 +2082,8 @@ def cmd_feedback(a):
     # when that runs again: the text alone passed, and the room refused the rerun's first
     # request at once, a spend wake for nothing (the merge of #1173 and #1180, 2026-11-24)
     own = store.round_prompt(task, n).read_text() + "\n\n" if unsent else ""
-    _model_still_listed(task, own + said, True if a.fresh else False if a.keep_context else None)
+    _model_still_listed(task, own + said, True if fresh else False if a.keep_context else None,
+                        len(shown))
     _spec_gaps(task, a.spec_gap)
     dropped = _stale_notes(task)
     if unsent:
@@ -1880,10 +2126,12 @@ def cmd_feedback(a):
     # only once the round starts, so wb resume's or wb next --fresh's "fresh" (or a handover's
     # "full") still stands. Cleared here, the "carry on" a failed notice advises ran the resume
     # in the old stuck session, its RESUME prompt claiming a fresh one, and the day cap priced a
-    # fresh first request for a continued one (#1230, 2026-11-24).
-    if not unsent or a.fresh or a.keep_context:
-        task.set_status(context="fresh" if a.fresh else "keep" if a.keep_context else None)
+    # fresh first request for a continued one (#1230, 2026-11-24). ``fresh``: --fresh, or a
+    # rewind since the last round (#1198)
+    if not unsent or fresh or a.keep_context:
+        task.set_status(context="fresh" if fresh else "keep" if a.keep_context else None)
     gpu = _gpu_note(task)  # before the task looks live (REAP_GRACE): it may probe model servers
+    pictures = _keep_images(task, shown, n)
     task.set_status(round=n, reviews=reviews, phase="queued",  # the pane: "resumed", not "feedback 0"
                     # an unsent round keeps its own (`next`: the pane's `step 2`)
                     # an infra stop's resume carries a self-review on as wb resume's does (#1228)
@@ -1892,7 +2140,7 @@ def cmd_feedback(a):
                        {"round_for": "resume", "self_review_tree": runner.carried_tree(task)}),
                     **({"step_note": None} if step else {}),  # #1300
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
-                    auto_fixes=0)
+                    auto_fixes=0, **pictures)
     _credit_turn(task)
     spawn_runner(task)
     _ack_all(task, upto=handled)
@@ -1911,10 +2159,118 @@ def cmd_feedback(a):
               "--step), so no review round is counted")
     else:
         print(f"feedback round {reviews} sent to {a.name} (round {n})"
+              + (f", from round {back}'s files" if back else "")
               + ("  — that is past the usual 3 review rounds" if reviews > 3 else ""))
+    _say(_images_line(pictures, n))
     _say(gpu)
     _say_dropped(dropped)
     _say(lessons.nudge(task))
+
+
+# The next feedback's word on a rewind, in its head paragraph (#1198)
+REWOUND_LINE = "Your files were reset to round {}'s state; the edits after it are gone."
+
+
+def _tests_on(task: store.Task, rnd: int) -> str | None:
+    """Round ``rnd``'s tests, from its tests.txt: they ran on the tree its review notice showed."""
+    try:
+        text = task.round_dir(rnd).joinpath("tests.txt").read_text(errors="replace")
+    except OSError:
+        return None
+    code = next((line[len("exit: "):].strip() for line in text.splitlines()[:3]
+                 if line.startswith("exit: ")), None)
+    return None if code is None else "passed" if code == "0" else \
+        "timed out" if code == "timeout" else f"failed (exit {code})"
+
+
+def _drop_reviews(task: store.Task) -> None:
+    """The step's review trees go (gitops.drop_reviews): at wb next, accept and discard (#1198)."""
+    if (repo := gitops.repo_of(task.spec)).is_dir():
+        gitops.drop_reviews(repo, task.name)
+    if task.status.get("review_trees") is not None or task.status.get("rewound_to") is not None:
+        task.set_status(review_trees=None, rewound_to=None)
+
+
+@one_at_a_time
+def cmd_rewind(a):
+    """Put the worktree back to the tree an earlier review notice of this step showed (#1198)."""
+    task = need(a.name)
+    reap(task)
+    st = task.status
+    if st.get("phase") not in ("review", "stuck", "failed"):
+        die(f"{a.name} is {st.get('phase')}; a rewind goes to a task waiting for review")
+    if why := _accepting(task):  # (#878)
+        die(why)
+    if runner_alive(task):
+        die(f"{a.name}'s runner is still running")
+    _need_worktree(task)
+    steps, wt, now_round = st.get("steps", 1), task.worktree, st.get("round", 1)
+    trees = {k: v for k, v in (st.get("review_trees") or {}).items() if v.get("step") == steps}
+    want = trees.get(str(a.round))
+    if not want:
+        have = ", ".join(sorted(trees, key=int)) or "none yet"
+        die(f"{a.name} has no review of round {a.round} in step {steps} (its reviewed rounds: "
+            f"{have}; a rewind never goes back past wb next's commit)")
+    if not gitops.has_tree(wt, want["tree"]):  # its ref deleted by hand, and gc pruned it
+        die(f"round {a.round}'s tree is gone from the repo (its ref "
+            f"{gitops.REVIEW_REF.format(a.name, a.round)} was deleted)")
+    # the ignored files the agent wrote, as the runner's review trees hold them (#1259): without
+    # them every rewind from a reviewed round said "your edits … kept nowhere" and named the
+    # restored file "not as round N's" (the merge of 2.1 into main, 2026-11-25)
+    ignored = runner.ignored_to_commit(task)
+    try:
+        now, now_left, now_keep = gitops.review_snapshot(wt, force=ignored)
+    except (gitops.GitError, OSError) as e:
+        die(f"can't read the worktree: {e}")
+    saved = ""
+    if now not in {v["tree"] for v in trees.values()} and str(now_round) not in trees:
+        # a stuck or failed round's files, which no review showed: kept, so a rewind comes back
+        trees[str(now_round)] = {"step": steps, "tree": now, "left": now_left, "keep": now_keep,
+                                 "reviewed": False}
+        gitops.keep_review(wt, a.name, now_round, now)
+        saved = (f"\nround {now_round}'s files (not reviewed) are kept: wb rewind {a.name} "
+                 f"{now_round} brings them back")
+    elif now not in {v["tree"] for v in trees.values()}:
+        # no round ran since (it would be a new round): edits by hand, in the stat above
+        saved = "\nyour edits since the last review or rewind are undone too, and kept nowhere"
+    task.set_status(review_trees=trees)
+    if now == want["tree"]:
+        print(f"{a.name}'s files are round {a.round}'s already")
+        return
+    try:
+        done = gitops.restore_tree(wt, want["tree"], want.get("keep") or [], now=now,
+                                   now_keep=now_keep, force=ignored)
+    except (gitops.GitError, OSError) as e:
+        die(f"the rewind stopped partway ({e}): wb rewind {a.name} {a.round} again")
+    # the stat names no file left as it is: a grown file the tree has read as deleted (#1198)
+    undone = gitops.git(wt, "diff", "--no-ext-diff", "--no-color", "--stat",
+                        f"--stat-count={gitops.CHANGED_SHOWN}", want["tree"], now, "--", ".",
+                        *(f":(exclude,literal){p}" for p in done["left"]), check=False).rstrip()
+    # the next review's diff counts from here; the next round starts a fresh session (feedback)
+    task.set_status(reviewed={"step": steps, "tree": want["tree"]}, rewound_to=a.round,
+                    context="fresh")
+    task.event({"ts": store.now(), "round": now_round, "kind": "rewound",
+                "text": f"Claude rewound the files to round {a.round}'s"})
+    _ack_all(task)
+    print(f"rewound {a.name} to round {a.round}'s files (step {steps}); undone:\n{undone}")
+    tests = _tests_on(task, a.round) if task.spec.get("test_cmd") else None
+    if tests:
+        print(f"round {a.round}'s tests on these files: {tests}")
+    left = list(dict.fromkeys((want.get("left") or []) + now_left))
+    left += gitops.brief([k for k in done["kept"] if not any(x.startswith(k) for x in left)])
+    if left:
+        print(f"left as they are, in no review snapshot: {', '.join(left)}")
+    if done["unignored"]:  # a later round's .gitignore hid them; round N's doesn't (#1198)
+        print(f"deleted, not in round {a.round}'s files (a later .gitignore hid them): "
+              f"{', '.join(gitops.brief(done['unignored']))}")
+    if done["differs"]:  # never said to match round N's: wb accept would take them as they are
+        print(f"not as round {a.round}'s files, left as they are: "
+              f"{', '.join(gitops.brief(done['differs']))}")
+    if saved:
+        print(saved.lstrip("\n"))
+    force = "" if st.get("phase") == "review" else " --force"
+    print(f"next: wb accept {a.name}{force} -m \"…\", or wb feedback {a.name} --text \"…\" (a fresh "
+          "session unless --keep-context)")
 
 
 @contextmanager
@@ -1998,13 +2354,15 @@ def cmd_next(a):
         die(f"can't read the next step's spec: {e}")
     if not nxt.strip():
         die("the next step's spec is empty")
+    shown = _task_images(task, getattr(a, "image", None))  # #1199: before the commit
     if a.test:  # before the commit, as wb start refuses it (#1271)
         _snap_test(a.test, f"wb allow {a.name} --path '*' first",
                    off="*" in context.lane_paths(task),
                    kept=privacy.local_only_place("*") if runner.api_task(task) else None)
     # after the spec, before the commit: the step's first request carries the session's context
     # and the spec with the protocol (#1173)
-    _model_still_listed(task, nxt + protocol_for(spec), True if a.fresh else None)
+    fresh = a.fresh or bool(st.get("rewound_to"))  # the session remembers edits rewound away
+    _model_still_listed(task, nxt + protocol_for(spec), True if fresh else None, len(shown))
     commit = _step_landed(task, step)
     measured = results.step(task, landed=True, gaps=a.spec_gap)
     if not commit:
@@ -2058,7 +2416,7 @@ def cmd_next(a):
                    step_active_s=st.get("active_s") or 0, progress_checks=0,
                    step_sizes=(st.get("step_sizes") or []) + [measured],
                    step_tests={**(st.get("step_tests") or {}), str(step + 1): test},  # #941
-                   context="fresh" if a.fresh else None,
+                   context="fresh" if fresh else None, review_trees=None, rewound_to=None,
                    auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                    auto_fixes=0, phase="queued", last=f"step {step} " + (
                        "committed" if commit else "had no changes") + "; next step queued",
@@ -2073,7 +2431,9 @@ def cmd_next(a):
     # 2026-11-19 audit). Interrupted before the write, a retry advances from the step's commit.
     why = runner.fresh_reason(task, {**task.status, **advance})
     gpu = _gpu_note(task)
+    advance.update(_keep_images(task, shown, n))
     task.set_status(**advance)
+    gitops.drop_reviews(task.worktree, a.name)  # a rewind never crosses the step's commit (#1198)
     task.event({"ts": store.now(), "round": n, "kind": "next_step",
                 "text": f"step {step} " + (f"committed as {commit}" if commit else
                                            "had no changes") + "; next step sent"})
@@ -2082,6 +2442,7 @@ def cmd_next(a):
     print(f"step {step} of {a.name} " + (f"committed as {commit}" if commit else "had no changes")
           + f"; step {step + 1} sent "
           + (f"to a fresh session ({why})" if why else "to the same session"))
+    _say(_images_line(advance, n))
     _say(gpu)
     _say_dropped(dropped)
     _say(lessons.nudge(task))
@@ -2284,9 +2645,10 @@ def cmd_wait(a):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch()
     watcher = Watcher(store.home(), *([need(a.name).dir] if a.name else []))
-    if a.name and (a.repo or a.session or a.all_sessions):
-        die("--repo, --session and --all-sessions go with a bare wb wait")
-    where, sessions = (None, None) if a.name else _caller(a)
+    if a.name and (a.repo or a.session or a.all_sessions or getattr(a, "backlog", None)):
+        die("--repo, --session, --all-sessions and --backlog go with a bare wb wait")
+    batch = getattr(a, "backlog", None)  # one batch's tasks alone: a scheduled run's (#1204)
+    where, sessions = (None, None) if a.name or batch else _caller(a)
     while True:
         for t in [need(a.name)] if a.name else store.all_tasks():
             if t.status.get("phase") in LIVE:
@@ -2294,8 +2656,9 @@ def cmd_wait(a):
         rows = store.notices()
         # a bare wait takes only the caller's tasks (_caller): one in another session's terminal
         # acknowledged a notice its owner's mod then never woke for (#696)
-        theirs = set() if a.name or not (where or sessions) else {
-            t.name for t in _scope(store.all_tasks(), where, sessions)[1]}
+        theirs = ({t.name for t in store.all_tasks() if t.spec.get("backlog") != batch} if batch
+                  else set() if a.name or not (where or sessions) else {
+                      t.name for t in _scope(store.all_tasks(), where, sessions)[1]})
         for row in reversed(rows):
             if a.name and row["task"] != a.name or row["task"] in theirs:
                 continue
@@ -2338,7 +2701,8 @@ def cmd_wait(a):
         elif not any(t.status.get("phase") not in store.CLOSED and t.name not in theirs
                      for t in store.all_tasks()):
             die("no open tasks to wait for (wb status --all)"
-                + (" in this session (--all-sessions waits on every session's)" if theirs else ""), 2)
+                + (f" in backlog {batch}" if batch else
+                   " in this session (--all-sessions waits on every session's)" if theirs else ""), 2)
         if deadline and time.time() > deadline:
             die("timed out waiting", 2)
         # woken by the change itself; the minute bound re-checks the runner is alive
@@ -2529,26 +2893,17 @@ def cmd_log(a):
     # the agent's words and output, on a terminal: no raw escape sequences (transcript.plain)
     shown = transcript.plain if sys.stdout.isatty() else str
 
-    # the agent's text, its tool calls, and every kind wb watch shows (transcript.EVENT_KINDS):
-    # a fixed nine once left out the runner's own rows, a gpu or handover among them (#861)
-    kinds = {"text", "tool"} | transcript.EVENT_KINDS
-
+    # the agent's text, its tool calls, and every kind wb watch shows (transcript.LOG_KINDS,
+    # transcript.log_body: the web chat's task sheet shows the same lines, #1201)
     def show(r):
-        t = time.strftime("%H:%M:%S", time.localtime(r.get("ts") or 0))
-        k = r.get("kind")
-        if k == "tool":
-            mark = "" if r.get("ok") else "  ✗ " + r.get("error", "")[:100]
+        if (body := transcript.log_body(r, a.verbose)) is not None:
+            t = time.strftime("%H:%M:%S", time.localtime(r.get("ts") or 0))
             # flushed: piped or redirected, a follow printed nothing for minutes (#545)
-            print(shown(f"{t} r{r.get('round')} {r.get('tool', ''):8} {r.get('brief', '')}{mark}"), flush=True)
-        elif k in kinds:
-            body = str(r.get("text") or "")
-            if k == "text" and not a.verbose:
-                body = body.strip().splitlines()[0][:110] if body.strip() else ""
-            print(shown(f"{t} r{r.get('round')} {k:8} {body}"), flush=True)
+            print(shown(f"{t} r{r.get('round')} {body}"), flush=True)
 
     # -n counts the lines printed: the last N rows, cut before the filter, held step rows (one
     # per model request) that never print, and `-n 30` showed a dozen lines (#861)
-    rows = [r for r in rows if r.get("kind") in kinds]
+    rows = [r for r in rows if r.get("kind") in transcript.LOG_KINDS]
     for r in rows[-a.n:] if a.n else rows:
         show(r)
     watcher = Watcher(task.dir) if a.follow else None
@@ -2571,26 +2926,21 @@ def cmd_log(a):
 
 def cmd_report(a):
     task = need(a.name)
-    n = a.round or task.status.get("round", 1)
-    p = task.round_dir(n) / "summary.md"
-    text = p.read_text() if p.exists() else (f"round {n} has no report yet "
-                                             f"({task.status.get('phase')}: {task.status.get('last')})")
+    text = task.report(a.round or task.status.get("round", 1))
     print(transcript.plain(text) if sys.stdout.isatty() else text)  # it quotes the agent's words
-    if (r := verify.last(task)) and not a.round:  # the live comparison, at review (#97)
-        print("\n" + "\n".join(verify.lines(r)) + (
-            "\n  (stale: the worktree has changed since; run wb verify again)" if r["stale"] else ""))
+    if not a.round and (checks := verify.report_lines(task)):  # the live comparison, at review (#97)
+        print("\n" + "\n".join(checks))
 
 
 def cmd_diff(a):
     """The work under review: the whole task, or after `wb next` the current step (--all: all)."""
     task = need(a.name)
-    # the accepted commit, not the branch: --merge deletes the branch (#477, the audit of 1.8)
-    tip = (task.status.get("tip") or "")[:12] or task.spec["branch"]
+    tip = gitops.diff_tip(task)  # the accepted commit, not the branch (#477)
     repo = shlex.quote(str(gitops.repo_of(task.spec)))
     if not task.worktree.is_dir():
         die(f"{a.name} is {task.status.get('phase')} and its worktree is gone: "
             f"git -C {repo} diff {task.spec['base'][:12]} {tip}")
-    base = "HEAD" if task.status.get("steps", 1) > 1 and not a.all else task.spec["base"]
+    base = gitops.diff_base(task, a.all)  # the web chat's task sheet's too (#1201)
     try:
         # the ignored files --include commits too, as the review diff shows them (#1259)
         print(gitops.diff(task.worktree, base, stat=a.stat, paths=a.paths,
@@ -2805,9 +3155,12 @@ def _first_round(st: dict) -> bool:
 def _rechecks_out(task: store.Task) -> bool:
     """A task interrupted from outside before its checkout finished: its runner makes the
     checkout again from nothing (runner.checkout), so it resumes at round 1 (#529, #544). One
-    whose checkout failed still goes through wb discard."""
+    whose checkout failed still goes through wb discard. A `--after` task the user stopped
+    before its checkout too (#1204): held, it had none to fail, and a stopped hold was a task
+    only wb discard could end."""
     st = task.status
-    return _first_round(st) and not runner.checked_out(task) and _interrupted(st.get("last"))
+    held = bool(task.spec.get("not_before")) and st.get("last") == "stopped by the reviewer"
+    return _first_round(st) and not runner.checked_out(task) and (_interrupted(st.get("last")) or held)
 
 
 def _resume(task: store.Task) -> None:
@@ -2949,6 +3302,17 @@ def _lane_dir(raw: str, guard: set[str] = frozenset(), task: store.Task | None =
     return str(path)
 
 
+def tcp_port(text: str) -> int:
+    """A TCP port number (wb allow --port), or argparse's refusal."""
+    try:
+        n = int(text)
+    except ValueError:
+        n = 0
+    if not 0 < n < 65536:
+        raise argparse.ArgumentTypeError(f"{text!r} isn't a TCP port (1-65535)")
+    return n
+
+
 def _permission_asked(task: store.Task) -> str | None:
     """The oldest permission request still open. status.asking is the oldest question of any
     kind, and `wb allow` answered a plain question asked before the request with its leave,
@@ -2965,8 +3329,9 @@ def _permission_asked(task: store.Task) -> str | None:
 
 def cmd_allow(a):
     """Let a task's agent run commands outside the everyday list (context.ALLOWED_COMMANDS), or
-    use a directory outside its lane (--path, context.writable): for this task, or --always for
-    every task. A pending request is answered, and a running agent is restarted on its session at
+    use a directory outside its lane (--path, context.writable) or connect to a TCP port the lane
+    refuses (--port, context.deny_ports): for this task, or --always for every task. A pending
+    request is answered, and a running agent is restarted on its session at
     once so the new rule applies (OpenCode reads it at start, the lane is drawn at start)."""
     task = need(a.name)
     pats = [p.strip() for p in a.pattern if p.strip()]
@@ -2979,17 +3344,23 @@ def cmd_allow(a):
                 f"API ({task.spec.get('provider') or 'its provider'}), whose lane never reads it: take "
                 "what the task needs from it yourself, or the user lifts local_only there", 3)
     dirs = [_lane_dir(p, context.repo_dirs(task), task) for p in a.path or [] if p.strip()]
-    if not pats and not dirs:
+    ports = list(dict.fromkeys(a.port or []))
+    if free := [p for p in ports if p not in context.DAEMON_PORTS]:  # nothing to lift: say so
+        die(f"the lane doesn't refuse TCP port {', '.join(map(str, free))} (only local daemons' "
+            f"{', '.join(map(str, sorted(context.DAEMON_PORTS)))}): the agent can connect to it "
+            "already, so a refusal there is something else")
+    if not pats and not dirs and not ports:
         die("nothing to allow")
     context.commands_conf()  # refused unless it parses, before any grant: rewriting it would lose it
-    said = ", ".join([f"`{p}`" for p in pats] + [f"the directory {d}" for d in dirs])
+    said = ", ".join([f"`{p}`" for p in pats] + [f"the directory {d}" for d in dirs]
+                     + [f"TCP port {p}" for p in ports])
     text = (f"Claude allowed {said}" + (" from now on" if a.always else " for this task")
             + ". Run it again now and carry on." + (f" {a.text.strip()}" if a.text else ""))
     # the answer as written, before any grant (#605): a guess at the words around --text let
     # many patterns past it, the grants were saved and write_answer's refusal was a traceback
     if why := ask_mcp.too_long(text):
         die(f"--text: {why} ({task.worktree})")
-    for key, new in (("allow", pats), ("paths", dirs)):
+    for key, new in (("allow", pats), ("paths", dirs), ("ports", ports)):
         if not new:
             continue
         context.grant(task, key, new)
@@ -3323,12 +3694,24 @@ def _off_lan() -> dict[str, str]:
             if remote and "isn't this machine" in why and _on_lan(urlparse(url).hostname or "")}
 
 
-def _runs_held(m: models.Model) -> bool:
+def _runs_held(m: models.Model, seen: dict | None = None) -> bool:
     """Whether an API model's key is one a task can run with: stored by /connect (the keyhole
-    holds it outside the lane), or an Ollama cloud model's, which this machine's Ollama holds and
-    no keyhole needs (runner.needs_keyhole). Refused, doctor's "set a role to use it" led nowhere,
-    with a /connect that changes nothing for Ollama (#1077, 2026-11-23)."""
-    return m.key == "stored" or (m.cloud and m.key == "ollama")
+    holds it outside the lane), or in a variable of this environment the keyhole reads and the
+    agent never gets (models.key_runs, #1189), or an Ollama cloud model's, which this machine's
+    Ollama holds and no keyhole needs (runner.needs_keyhole). Refused, doctor's "set a role to use
+    it" led nowhere, with a /connect that changes nothing for Ollama (#1077, 2026-11-23). GitHub
+    Copilot's sign-in is held as a key (models.HELD_KEYS, in key_runs: #1191). And OpenCode Zen's
+    free models with no key stored (models.keyless_free, #1193): Zen's own `public` goes through
+    the keyhole in place of a key, so a user with no GPU and no key can try wb; another
+    provider's keyless free model has nothing a task could send, and stays refused.
+    ``seen``: {provider: answer} kept over a pass through the catalog (one config read each)."""
+    if (m.cloud and m.key == "ollama") or models.keyless_free(m):
+        return True
+    if seen is None:
+        return models.key_runs(m.provider, m.key)
+    if (m.provider, m.key) not in seen:
+        seen[m.provider, m.key] = models.key_runs(m.provider, m.key)
+    return seen[m.provider, m.key]
 
 
 def _route_api(mid: str, role: str) -> models.Model:
@@ -3360,7 +3743,7 @@ def _route_api(mid: str, role: str) -> models.Model:
         fix = models.remedy(m, st) if not st["available"] else \
             f"store an API key for {models.provider_name(m)} with /connect in OpenCode"
         # once: "no key for p: run /connect …" came with its remedy's own /connect line (#1109)
-        said = fix and (fix in why or "/connect" in why)
+        said = fix and (fix in why or "/connect" in why or "opencode auth login" in why)
         die(f"{mid} can't be a role's model: {why}" + (f": {fix}" if fix and not said else ""), 3)
     return m
 
@@ -3381,6 +3764,13 @@ def _route_gpu(wanted: str, role: str) -> str:
 def _who(mid: str) -> str:
     m = models.lookup(mid)
     return models.provider_name(m) if m is not None and m.kind == "api" else mid.split("/", 1)[0]
+
+
+def _free(mid: str) -> bool:
+    """Whether an API id is a free model (meter.is_free): the route line says privacy.FREE_LINE,
+    and a change putting only free models on API asks no day cap (#1193)."""
+    m = models.lookup(mid)
+    return m is not None and m.kind == "api" and meter.is_free(m)
 
 
 def _thinks(mid: str, thinking: str) -> str:
@@ -3455,8 +3845,12 @@ def _route_start(a) -> None:
     if why := local_only_refusal(repo, sub, _role(ns), ns.model, ns.local_only,
                                  lane_places(repo, sub, ns), ns.base):
         die(why, 3)
-    # no price, no cap, or today at the cap (#1019, #1089): wb start's too
-    if why := meter.refusal(m, tokens=runner.first_tokens(prompt=spec_text), asked=True):
+    shown = _images_given(getattr(ns, "image", None))  # wb start's checks of --image (#1199)
+    if shown:
+        _images_fit(m, m.id)
+        _images_room(shown)
+    # no price, no cap, or today at the cap (#1019, #1089): wb start's too, its images counted
+    if why := meter.refusal(m, tokens=runner.first_tokens(prompt=spec_text, images=len(shown)), asked=True):
         die(why, 3)
     # wb start's cheap refusals too, in place of a dialog for a start that then exits 1 or 3
     # (#1104, 2026-11-23): the model can't run, a --base naming no commit
@@ -3524,6 +3918,10 @@ def _route_show(as_json: bool) -> None:
         if made:
             ts, by = max(made, key=lambda x: x[0])
             bits.append(f"set by {'Claude' if by == 'claude' else 'you'} {time.strftime('%m-%d', time.localtime(ts))}")
+        if fb := row.get("fallback"):  # #1196: where its code goes when its provider is down or out of credit
+            bits.append(f"fallback {routes.fallback_name(fb, row['gpu'])}" + (
+                f" ({_who(fb)})" if fb != routes.FALLBACK_GPU else "")
+                + (" (not used while Agents is API)" if routes.fallback_of(doc, r) is None else ""))
         print(f"{r:<{width}}" + " · ".join(bits))
     if doc["day_usd"] is not None:
         print(f"day cap {routes.money(doc['day_usd'])}")
@@ -3533,16 +3931,20 @@ def _route_show(as_json: bool) -> None:
 
 # a provider's key as the pane says it (#1023): only a stored one runs (the keyhole holds it)
 # a key a task runs with too, as the Settings tab counts one connected (#1077's review, 2026-11-23)
-KEY_STATES = {"stored": "stored", "oauth": "oauth", "signing": "oauth", "ollama": "ollama", "": "none"}
+KEY_STATES = {"stored": "stored", "copilot": "copilot", "oauth": "oauth", "signing": "oauth",
+              "ollama": "ollama", "": "none"}
 KEY_HELD = {"oauth": "an OAuth login", "signing": "a cloud login that signs each request",
             "config": "written in OpenCode's config", "ollama": "Ollama's own login", "": "none stored"}
 
 
 CATALOG_LATER = "hosted.reading"  # in the state dir: when _route_pane last started a catalog read
-# How old a cache listing no stored key may be before the pane reads the catalog again (#1069's
-# review, 2026-11-23): /connect changes no stamp, so a cache written before it kept saying
+# How old a cache listing no key a task runs with may be before the pane reads the catalog again
+# (#1069's review, 2026-11-23): /connect changes no stamp, so a cache written before it kept saying
 # NO_PROVIDER for HOSTED_TTL; the pane reads wb route on a Settings open or a Stats load, and only
-# polls it while an API task works (a key stored, so never this), so a minute costs little
+# polls it while an API task works (a key that runs, so never this), so a minute costs little.
+# A key that runs is a stored one or an exported one (models.key_runs): counting only "stored"
+# read the catalog in the background about once a minute through a whole API task whose only key
+# was exported (#1189's review, 2026-11-24)
 PANE_REREAD_SECS = 60
 
 
@@ -3574,18 +3976,30 @@ def _route_pane() -> dict:
     "" when the last read worked, #1342) and `providers` ({id: {name, key, why}}, key
     stored, ollama (Ollama cloud's login), env, oauth or none, from the cached catalog: never a
     network probe or OpenCode run inline; with no cache, or one past PANE_REREAD_SECS that lists no
-    stored key, one read in the background, _read_catalog_later)."""
+    key a task runs with (models.key_runs), one read in the background, _read_catalog_later)."""
     doc = models._read_hosted()
     ts = doc.get("ts")
-    if not any(p.get("key") == "stored" for p in (doc.get("providers") or {}).values()) \
+    if not any(models.key_runs(pid, str(p.get("key") or ""))
+               for pid, p in (doc.get("providers") or {}).items()) \
             and not (isinstance(ts, (int, float)) and 0 <= time.time() - ts < PANE_REREAD_SECS):
         _read_catalog_later()
     provs = {}
     for pid, p in (doc.get("providers") or {}).items():
         raw, name, pkg = str(p.get("key") or ""), str(p.get("name") or pid), str(p.get("package") or "")
         key = "env" if raw.startswith("env:") else KEY_STATES.get(raw, "none")
-        held = f"key in {raw[4:]}" if key == "env" else KEY_HELD.get(raw, raw)
-        if key == "stored" and models.unspoken(pid, pkg):
+        own = models.signin(pid) if raw == "oauth" else None  # the provider's own cause (#1191)
+        held = f"key in {raw[4:]}" if key == "env" else f"signed in with {own[0]}: {own[1]}" if own else \
+            KEY_HELD.get(raw, raw)
+        # a key the keyhole reads from this environment runs as a stored one (#1189): `runs`
+        # tells the pane so, `why` where it comes from, or why it can't
+        env_why = models.env_why(pid, raw[4:]) if key == "env" else ""
+        if key == "env" and not env_why and not models.unspoken(pid, pkg):
+            provs[pid] = {"name": name, "key": key, "why": f"key from ${raw[4:]}", "runs": True}
+            continue
+        if key == "env" and env_why:
+            provs[pid] = {"name": name, "key": key, "why": f"can't run: {env_why}"}
+            continue
+        if key in ("stored", "env") and models.unspoken(pid, pkg):
             # a stored key the keyhole can't carry read "Google (key stored)" while wb setup said
             # it can't run and wb models --json left its models out (#1066, 2026-11-23)
             provs[pid] = {"name": name, "key": "none", "why": models.unspoken_why(name, pkg)}
@@ -3595,7 +4009,12 @@ def _route_pane() -> dict:
                          # its cloud models run through this machine's Ollama (#1077)
                          {"why": "signed in through Ollama: its cloud models need no key here"}
                          if raw == "ollama" else
+                         # Copilot's sign-in runs as a stored key does (#1191)
+                         {"why": "signed in to Copilot in OpenCode"} if raw == "copilot" else
                          {"why": f"can't run: needs a key wb can hold outside the lane ({held})" if raw
+                          # Zen's free models run keyless (#1193): "/connect adds one" alone read as needed
+                          else "no key: its free models need none; /connect in OpenCode adds one for "
+                               "the rest" if pid == models.ZEN
                           else "no key: /connect in OpenCode adds one"})}
     return {"spend_today": _spend_today(), "providers": provs, "catalog_error": models.hosted_error()}
 
@@ -3640,11 +4059,13 @@ def cmd_route(a):
     if what is None:
         if any(v is not None for v in (target, a.gpu, a.api, a.thinking, a.day_usd, a.order)):
             die("name a role: wb route <role> gpu|api|<provider/model>, wb route all gpu|api|both, wb route cap <usd>, "
-                "or wb route busy wait|api")
+                "wb route busy wait|api, or wb route <role> fallback <provider/model>|gpu|none")
         if a.dry_run:
             print(json.dumps({"change": "", "gate": False}) if a.json else "")
             return
         return _route_show(a.json)
+    if what in routes.ROLES and target == "fallback":
+        return _route_fallback(a)
     if a.more:
         return _route_pairs(a)
     role, via, api, gpu, day, use = None, None, a.api, a.gpu, a.day_usd, None
@@ -3703,7 +4124,7 @@ def cmd_route(a):
         try:
             ch = routes.change(doc, None if what == "cap" else role, via=via, gpu=gpu, api=api,
                                thinking=a.thinking, day_usd=day, who=_who, use=use, order=order, busy=busy,
-                               thinks=_thinks)
+                               free=_free, thinks=_thinks)
         except routes.RoutesError as e:
             die(str(e), 3)
         # a kept API model a role newly runs on (its own flip, or the Agents switch) must still be
@@ -3717,14 +4138,37 @@ def cmd_route(a):
     _route_apply(a, argv, changed)
 
 
+def _route_fallback(a) -> None:
+    """`wb route <role> fallback <id>|gpu|none` (#1196): the role's fallback, where a task of the
+    role on its API model goes when that provider is out of credit, rate-limited or unreachable
+    (at wb start, and once mid-task). An API id is checked as a role's model is (_route_api) and
+    takes the dialog's yes and a day cap; gpu (the role's GPU side) and none take neither."""
+    role = a.what
+    if len(a.more) != 1 or a.gpu or a.api or a.thinking or a.order is not None or a.day_usd is not None:
+        die(f"wb route {role} fallback <provider/model>|gpu|none: one choice, in a wb route of its own")
+    fb = a.more[0]
+    if fb not in (routes.FALLBACK_GPU, routes.FALLBACK_OFF):
+        fb = _route_api(fb, role).id
+    argv = ["route", role, "fallback", fb]
+
+    def changed(doc) -> routes.Change:
+        try:
+            return routes.change(doc, role, fallback=fb, who=_who)
+        except routes.RoutesError as e:
+            die(str(e), 3)
+
+    _route_apply(a, argv, changed)
+
+
 def _route_pairs(a) -> None:
     """wb route <role> <choice> <role> <choice>… [--day-usd N] (#1024): several roles in one
     change, so the first run's one question is one dialog. A choice is gpu, api or an API model's
     exact id. All or nothing: any pair wb refuses (an id not in the catalog, a key wb can't hold, a
     role named twice) exits 3 naming it, before anything is written."""
-    if a.gpu or a.api or a.thinking or a.order is not None or a.start is not None or a.what in ("all", "cap", "busy"):
+    if a.gpu or a.api or a.thinking or a.order is not None or a.start is not None or a.what in ("all", "cap", "busy") \
+            or "fallback" in a.more:
         die("several roles take a choice each (gpu, api or an API model's exact id) and --day-usd; "
-            "--gpu, --api, --thinking, --order, all, cap and busy go in a wb route of their own")
+            "--gpu, --api, --thinking, --order, all, cap, busy and fallback go in a wb route of their own")
     words = [a.what, a.target, *a.more]
     if len(words) % 2:
         die(f"{words[-1]} has no choice: wb route <role> gpu|api|<provider/model> <role> …")
@@ -3749,7 +4193,7 @@ def _route_pairs(a) -> None:
 
     def changed(doc) -> routes.Change:
         try:
-            ch = routes.change_pairs(doc, pairs, day_usd=a.day_usd, who=_who, thinks=_thinks)
+            ch = routes.change_pairs(doc, pairs, day_usd=a.day_usd, who=_who, free=_free, thinks=_thinks)
         except routes.RoutesError as e:
             die(str(e), 3)
         for r, via, mid in pairs:  # a kept API model a role newly runs on must still be one it may run
@@ -3990,6 +4434,9 @@ def cmd_shot(a):
 @one_at_a_time
 def cmd_accept(a):
     a.merge = a.merge or bool(a.merge_as)  # --merge-as says how, so it merges (#352)
+    if a.merge and os.environ.get("WB_SCHEDULE"):  # a scheduled run's headless Claude (#1204)
+        die(f"a scheduled run ({os.environ['WB_SCHEDULE']}) never merges: accept without --merge, "
+            "and the user merges the branch when they are back")
     task = need(a.name)
     # a repo kept to linear history says so once, in commands.json `repos` (#352)
     a.merge_as = a.merge_as or (a.merge and context.repo_conf(
@@ -4245,6 +4692,8 @@ def _finish_record(task: store.Task) -> bool:
         results.record(task, todo["outcome"], todo.get("step"), **(todo.get("extra") or {}))
     task.set_status(unrecorded=None)
     _ack_all(task)
+    with contextlib.suppress(OSError, gitops.GitError):
+        _drop_reviews(task)  # the interrupted close never reached _closed (#1198)
     commit = (todo.get("extra") or {}).get("commit")
     print(f"{task.name} was {todo['outcome']}" + (f" as {commit}" if commit else "")
           + "; its result is recorded now")
@@ -4364,6 +4813,10 @@ def _closed(task: store.Task) -> None:
     a day the rest of gc. Never an accept's or discard's failure."""
     _keep_grants(task)
     shutil.rmtree(store.home() / "rules" / task.name, ignore_errors=True)
+    try:
+        _drop_reviews(task)  # its review trees' refs (#1198)
+    except (OSError, gitops.GitError) as e:
+        print(f"wb: {e}", file=sys.stderr)
     if time.time() - ((store.read_json(store.home() / "gc.json", {}) or {}).get("at") or 0) > GC_EVERY:
         try:
             gc()
@@ -4819,9 +5272,9 @@ def _models_json() -> dict:
             "sizes": list(m.extra.get("sizes") or []),
             "cards": models.card_numbers(m.root, seen) if m.engine == "ollama" and not m.remote else None}
            for m in models.discover().values()]
-    api = []
+    api, held = [], {}
     for m in models._models_of(models._read_hosted()).values():
-        if not _runs_held(m) or models.keyhole_refusal(m):  # a package the keyhole can't carry (#1066)
+        if not _runs_held(m, held) or models.keyhole_refusal(m):  # a package the keyhole can't carry (#1066)
             continue
         cost = next((c for c in m.config.get("cost") or [] if isinstance(c, dict)), None) \
             if isinstance(m.config.get("cost"), list) else m.config.get("cost")
@@ -4856,15 +5309,20 @@ def _set_on(ts) -> str:
         return ""
 
 
-def _key_held(key: str) -> str:
+def _key_held(key: str, pid: str = "") -> str:
     """A provider's key source as wb models says it (Model.key, #1013). Not ``_held``:
-    that name is discard's, and a second def of it replaced the first (#1090, 2026-11-23)."""
+    that name is discard's, and a second def of it replaced the first (#1090, 2026-11-23). A key
+    in the environment says its variable, and why it can't run when it can't (#1189)."""
     if key == "stored":
         return "stored"
+    if key == "copilot":  # held as a key (#1191)
+        return "Copilot sign-in"
     if key == "ollama":
         return "Ollama's login"
-    what = ("environment" if key.startswith("env:") else "OAuth login" if key == "oauth" else
-            "cloud signing" if key == "signing" else "in a config file")
+    if key.startswith("env:"):
+        why = models.env_why(pid, key[4:])
+        return f"key from ${key[4:]}" + (f": can't run: {why}" if why else "")
+    what = "OAuth login" if key == "oauth" else "cloud signing" if key == "signing" else "in a config file"
     return f"{what}: {CANT_HOLD}"
 
 
@@ -4887,7 +5345,7 @@ def _api_section(gpu: bool) -> tuple[list[str], bool]:
     provs = doc.get("providers") if isinstance(doc.get("providers"), dict) else {}
     keys = {pid: str(p.get("key") or "") for pid, p in sorted(provs.items())
             if isinstance(p, dict) and str(p.get("key") or "") not in ("", "none")}
-    used = bool(on_api) or "stored" in keys.values()
+    used = bool(on_api) or any(models.key_runs(pid, k) for pid, k in keys.items())
     counts: dict = {}
     for m in cat.values():
         n, free = counts.get(m.provider, (0, 0))
@@ -4922,7 +5380,7 @@ def _api_section(gpu: bool) -> tuple[list[str], bool]:
                 lines.append(f"  {role:12} gpu " + (
                     ("(the router's pick above)" if gpu else "(no local model: none can run)")
                     if pick == "auto" else pick) + (f" · API kept: {r['api']}" if r.get("api") else "") + when)
-    lines.append("  keys: " + (", ".join(f"{pid} ({_key_held(k)})" for pid, k in keys.items())
+    lines.append("  keys: " + (", ".join(f"{pid} ({_key_held(k, pid)})" for pid, k in keys.items())
                                or "none: /connect in OpenCode stores one"))
     lines.append(f"  {catalog}")
     if listed:
@@ -4936,8 +5394,9 @@ def _window(n) -> str:
 
 def _api_list(text: str) -> None:
     """wb models --api TEXT: the catalog's ids containing TEXT (any case), sorted, at most
-    API_LIST_MAX, each with its window, its price per 1M tokens and the free-model note. It lists
-    only: a role is set by wb route, with the user's yes (#1026)."""
+    API_LIST_MAX, each with its window, its price per 1M tokens, the free-model note and `no tool
+    calls` for a model the catalog says has none (#1193). It lists only: a role is set by wb
+    route, with the user's yes (#1026)."""
     def match(found: dict) -> list:
         return sorted((m for mid, m in found.items() if text.lower() in mid.lower()), key=lambda m: m.id)
     hits = match(models.hosted())
@@ -4958,8 +5417,10 @@ def _api_list(text: str) -> None:
             price = " · plan usage"
         # the catalog's own window, the model's fact (an API task runs capped: models.api_window)
         own = (m.extra.get("catalog_limit") or m.config.get("limit") or {}).get("context")
+        # a model without tool calls can't be a coder: the first run's free pick reads this (#1193)
         print(f"{m.id}  {_window(own)}{price}"
-              + (f" · free: {FREE_NOTE}" if m.free else ""))
+              + (f" · free: {FREE_NOTE}" if m.free else "")
+              + (" · no tool calls" if m.config.get("tool_call") is False else ""))
     if len(hits) > API_LIST_MAX:
         print(f"and {len(hits) - API_LIST_MAX} more: a longer text narrows it")
 
@@ -5404,7 +5865,9 @@ def scout_api_lines() -> list[str]:
             key = ms[0].key
             out.append(f"  {pid}: {len(tools)}" + (f", {free} of them free" if free else "")
                        + (f", {unsaid} the catalog doesn't say" if unsaid else "")
-                       + ("" if key in ("stored", "none", "ollama") or any(m.free for m in ms)
+                       + ("" if key in ("stored", "copilot", "none", "ollama") or any(m.free for m in ms)
+                          or models.key_runs(pid, key)  # a variable the keyhole reads (#1189)
+                          else f" (can't run: {models.env_why(pid, key[4:])})" if key.startswith("env:")
                           else f" (can't run: {_held_elsewhere(pid, key) if key else 'no key'})"))
     elif err := models.hosted_error():
         out.append(f"connected providers: OpenCode's catalog couldn't be read ({err})")
@@ -6071,6 +6534,9 @@ def cmd_model(a):
                 entry["options"]["reasoningEffort"] = "none"
             elif a.thinking and had.get("reasoningEffort") == "none":
                 entry["options"]["reasoningEffort"] = None
+        if prov["engine"] == "ollama" and caps:  # what --image checks, and OpenCode sends (#1199)
+            entry["modalities"] = {"input": ["text", models.IMAGE_INPUT] if "vision" in caps
+                                   else ["text"], "output": ["text"]}
         try:
             models.write_entry(provider, name, entry)
         except RuntimeError as e:
@@ -6084,8 +6550,19 @@ def cmd_model(a):
         print(f"registered {a.id}: "
               f"{'tools' if entry['tool_call'] else 'NO tool calls, so wb will not route tasks to it'}, "
               f"{think}, "
-              f"{ctx // 1024}K context\nnext: wb model sizes {a.id} … if it should only "
-              "take some task sizes; the router guesses from its size until real tasks show more")
+              + ("images, " if models.IMAGE_INPUT in (entry.get("modalities") or {}).get("input", ()) else "")
+              + f"{ctx // 1024}K context", flush=True)
+        if prov["engine"] == "ollama":
+            # pull, register and measure the window in one command: a first run took a separate
+            # yes for wb optimize start after this one (#1195). Quiet when not due or a task holds
+            # the GPU, as at wb setup
+            try:
+                for line in optimize.start(if_due=True):
+                    print(f"--  {line}")
+            except (RuntimeError, OSError):
+                pass
+        print(f"next: wb model sizes {a.id} … if it should only take some task sizes; the router "
+              "guesses from its size until real tasks show more")
         return
     # retire
     cfg = models.read_config()
@@ -6615,18 +7092,63 @@ def logout_stops() -> list[str]:
     return out
 
 
-def path_advice() -> str:
+def mod_wb(wb_bin, on_path, linked) -> str:
+    """Which wb the mod runs, by register.tsx's rule (`findWb`, #1200): WB_BIN, else `wb` by name
+    while PATH has one, else wb setup's ~/.local/bin/wb. A desktop app or an IDE started from the
+    GUI may lack ~/.local/bin on its PATH, and the mod only said to put wb there. Doctor reads its
+    own PATH, which may not be the app's: by name, the link is said as the mod's fallback."""
+    if wb_bin:
+        return f"WB_BIN={wb_bin}"
+    if on_path:
+        return "it by name" + (", else ~/.local/bin/wb where its PATH has no wb" if linked else "")
+    return "~/.local/bin/wb (wb setup's link)" if linked else "nothing: no wb on PATH or in ~/.local/bin"
+
+
+def path_advice(claude: bool = True) -> str:
     """How to put ~/.local/bin on PATH for the user's own shell, then restart Claude Code. "Add
     it" was all wb setup said, and on macOS, or in a Claude Code started from the Dock or an IDE,
-    PATH comes from places users don't know (#274, the audit of 1.2)."""
+    PATH comes from places users don't know (#274, the audit of 1.2). Without `claude`, for the
+    user's own terminal alone: the plugin's bin/ gives Claude Code its wb (#1190)."""
     shell = Path(os.environ.get("SHELL") or "sh").name
     if shell == "fish":
         how = "run: fish_add_path ~/.local/bin"
     else:
         rc = {"zsh": "~/.zshrc", "bash": "~/.bash_profile" if sys.platform == "darwin" else "~/.bashrc"}
         how = (f"run: echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> {rc.get(shell, '~/.profile')}")
+    if not claude:
+        return f"For {shell}, {how}; then open a new terminal"
     return (f"For {shell}, {how}; then quit Claude Code and start it again from a new terminal "
             "(the desktop app or an IDE too: each reads PATH only when it starts)")
+
+
+def plugins_dir() -> Path:
+    """Where Claude Code keeps its plugins, installed_plugins.json and known_marketplaces.json:
+    CLAUDE_CODE_PLUGIN_CACHE_DIR when set, else <CLAUDE_CONFIG_DIR or ~/.claude>/plugins."""
+    cache = os.environ.get("CLAUDE_CODE_PLUGIN_CACHE_DIR")
+    return Path(os.path.expanduser(cache)) if cache else context.claude_home() / "plugins"
+
+
+def mod_listed() -> bool:
+    """The Claude Code mod among the installed plugins. Its bin/wb launcher then puts wb on Claude
+    Code's Bash PATH and the mod runs the marketplace clone's (#1190), so ~/.local/bin off PATH
+    leaves only the user's own terminal without wb. False when unreadable; a mod loaded another
+    way (--plugin-dir, a dev mod) isn't listed."""
+    try:
+        return any(k.startswith("workbench@") for k in json.loads(
+            (plugins_dir() / "installed_plugins.json").read_text()).get("plugins", {}))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def plugin_launcher(path: str | Path) -> bool:
+    """`path` is the plugin's bin/wb launcher (mod/bin/wb, in Claude Code's copy of the plugin):
+    it runs the marketplace clone's bin/wb, not a copy of its own (#1190)."""
+    p = Path(path).resolve()
+    try:
+        return p.parent.name == "bin" and json.loads(
+            (p.parent.parent / ".claude-plugin/plugin.json").read_text()).get("name") == "workbench"
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def _service_run(argv: list[str]) -> tuple[bool, str]:
@@ -6842,8 +7364,12 @@ def cmd_setup(a):
         print(f"ok  {old} removed: /delegate is now /workbench")
     bindir = str(Path.home() / ".local/bin")
     if bindir not in os.environ.get("PATH", "").split(os.pathsep):
-        print(f"--  {bindir} isn't on PATH: Claude and the mod run wb by name (WB_BIN moves only "
-              f"the mod's calls). {path_advice()}")
+        if mod_listed():  # the plugin's bin/ and the mod's lookup cover Claude Code (#1190)
+            print(f"--  {bindir} isn't on PATH: Claude Code runs wb from the plugin's bin/ and the "
+                  f"marketplace clone, so only your own terminal lacks it. {path_advice(claude=False)}")
+        else:
+            print(f"--  {bindir} isn't on PATH: Claude runs wb by name (the mod finds {bindir}/wb "
+                  f"without it, #1200). {path_advice()}")
     if not a.no_service and (said := install_service(a.force)):
         print(said)
     try:  # a minute or two, said up front; a task started meanwhile goes first
@@ -6871,14 +7397,16 @@ NO_SERVER_OPTIONAL = ("--  no model server answers here (optional: an API role c
                       "local model, run /workbench)")
 NO_LOCAL_OPTIONAL = "--  no local model registered (optional: an API role can do the coding; run /workbench)"
 NO_KEY = ("--  no API key connected (optional: /connect in OpenCode adds a provider, then /workbench "
-          "sets the roles)")
+          "sets the roles; or, with no key and no account, /workbench can try it on OpenCode's free "
+          "models, whose provider may keep or train on the code)")  # #1193
 
 
 def _held_elsewhere(pid: str, key: str) -> str:
-    """A provider whose key the keyhole can't hold, as wb setup says it (decision 6)."""
-    if key.startswith("env:"):
-        return f"{pid}'s key is in {key[4:]}"
-    return {"oauth": f"{pid} is signed in with OAuth", "signing": f"{pid} signs with a cloud login",
+    """A provider whose key the keyhole can't hold, as wb setup says it (decision 6); one in the
+    environment has its own line (api_key_lines, #1189)."""
+    own = models.signin(pid)  # a ChatGPT or OpenCode Console sign-in (#1191)
+    return {"oauth": f"{pid} is signed in with {own[0] if own else 'OAuth'}",
+            "signing": f"{pid} signs with a cloud login",
             "config": f"{pid}'s key is written in {models._key_file(pid)}"}.get(key, f"{pid}'s key is {key}")
 
 
@@ -6903,7 +7431,8 @@ def api_key_lines(keys: dict | None) -> list[str]:
     key written in a config file (remove it there, #1075), one for a stored key on a package the
     keyhole can't carry (models.unspoken_providers, #1066), and one for each provider a role on API
     uses with no key at all, required (#1067), never for a model that needs none held (_holds_key,
-    #1242); else NO_KEY for none; nothing when `auth list` can't be read."""
+    #1242), nor for roles on OpenCode Zen's free models, which need none (models.keyless_free,
+    #1193); else NO_KEY for none; nothing when `auth list` can't be read."""
     if keys is None:
         return []
     try:
@@ -6914,17 +7443,23 @@ def api_key_lines(keys: dict | None) -> list[str]:
                                    if routes.effective_via(doc, r) == "api" and doc["roles"][r].get("api")
                                    and _holds_key(doc["roles"][r]["api"])}
     # a provider a role on API uses with no key at all: required, not NO_KEY's "optional" (#1067)
-    unkeyed = {}
+    unkeyed, keyless = {}, {}
     for r, p in uses.items():
         if p not in keys:
-            unkeyed.setdefault(p, []).append(r)
+            free = models.keyless_free(models.lookup(doc["roles"][r]["api"], cached=True))
+            (keyless if free else unkeyed).setdefault(p, []).append(r)
+    # OpenCode's one terminal command for the key, not its TUI's /connect (#1189)
     need = [f"--  no API key for {p}, which {' and '.join(rs)} use{'s' if len(rs) == 1 else ''}: "
-            "/connect in OpenCode adds it (required: those tasks can't start without it)"
+            f"`{keyhole.login(p)}` in a terminal adds it (required: those tasks can't start without it)"
             for p, rs in unkeyed.items()]
+    need += [f"ok  no API key needed for {p}'s free models, which {' and '.join(rs)} "
+             f"use{'s' if len(rs) == 1 else ''} ({privacy.FREE_LINE})" for p, rs in keyless.items()]
     if not keys:
         return need or [NO_KEY]
     out = []
-    stored = [p for p, k in keys.items() if k["key"] == "stored"]
+    # a key in this environment's variable that the keyhole reads runs as a stored one (#1189);
+    # Copilot's sign-in is held as a key (#1191): `ok` beside the stored ones
+    stored = [p for p, k in keys.items() if models.key_runs(p, k["key"])]
     # a stored key on a package the keyhole can't carry read `ok`, and every task failed (#1066)
     odd = models.unspoken_providers(stored)
     if stored := [p for p in stored if p not in odd]:
@@ -6932,18 +7467,26 @@ def api_key_lines(keys: dict | None) -> list[str]:
         said = ("" if doc is None else "; no role uses one yet" if not used else
                 f"; {' and '.join(used)} use{'s' if len(used) == 1 else ''} it" if len(stored) == 1 else
                 "; " + ", ".join(f"{r} uses {uses[r]}" for r in used))
-        out.append(f"ok  API keys: {', '.join(f'{p} (stored via /connect)' for p in stored)}{said}")
-    other = [(p, k["key"]) for p, k in keys.items() if k["key"] != "stored"]
+        held = {p: "stored via /connect" if keys[p]["key"] == "stored" else "signed in to Copilot"
+                if keys[p]["key"] == "copilot" else f"key from ${keys[p]['key'][4:]}" for p in stored}
+        out.append(f"ok  API keys: {', '.join(f'{p} ({held[p]})' for p in stored)}{said}")
+    other = [(p, k["key"]) for p, k in keys.items() if p not in stored and p not in odd]
+    # a variable the keyhole can't read from (one agents get too, unset, or named where the
+    # agent's OpenCode expands it): its own fix, which the line says (#1189)
+    out += [f"--  {p}'s key is in ${k[4:]}, which wb can't use: {models.env_why(p, k[4:])}"
+            for p, k in other if k.startswith("env:")]
+    other = [x for x in other if not x[1].startswith("env:")]
     # a key written in a config file: /connect alone changed nothing while the apiKey stayed, so
     # the line said "/connect stores a key it can" to a user who had (#1075, 2026-11-23)
     written, other = [p for p, k in other if k == "config"], [x for x in other if x[1] != "config"]
     if other:
-        if len(other) == 1 and other[0][1] == "oauth":
+        if len(other) == 1 and other[0][1] == "oauth" and (own := models.signin(other[0][0])):
+            # the provider's own cause (#1191): ChatGPT's and the OpenCode Console's tokens rotate
+            out.append(f"--  {other[0][0]} is signed in with {own[0]}: {own[1]}, so wb can't hold "
+                       f"it outside the lane; {own[2]}")
+        elif len(other) == 1 and other[0][1] == "oauth":
             out.append(f"--  {other[0][0]} is signed in with OAuth: wb can't hold that outside the lane; an API "
                        "key through /connect works")
-        elif len(other) == 1 and other[0][1].startswith("env:"):
-            out.append(f"--  {_held_elsewhere(*other[0])}: wb can't hold it outside the lane yet; /connect "
-                       "stores one it can")
         else:
             out.append(f"--  {', '.join(_held_elsewhere(p, k) for p, k in other)}: wb can't hold "
                        f"{'that' if len(other) == 1 else 'those'} outside the lane; /connect stores a key it can")
@@ -6993,12 +7536,12 @@ def first_run() -> list[str]:
         api_only = all(routes.effective_via(doc, r) == "api" for r in routes.ROLES)
     except routes.RoutesError:
         api_only = False
-    stored = not found and (api_only or any(k["key"] == "stored" for k in (keys or {}).values()))
+    stored = not found and (api_only or any(models.key_runs(p, k["key"]) for p, k in (keys or {}).items()))
     # a key stored that the cache doesn't list as stored (none yet, or one read before /connect):
     # the pane's API settings read this cache (#1069); an OpenCode config that doesn't parse
     # stops no checklist (the review of #1067, 2026-11-23: wb setup exited 1 at it)
     cached = models._read_hosted().get("providers") or {}
-    if any(k["key"] == "stored" and (cached.get(pid) or {}).get("key") != "stored"
+    if any(k["key"] in models.HELD_KEYS and (cached.get(pid) or {}).get("key") != k["key"]
            for pid, k in (keys or {}).items()):
         try:
             models.hosted_doc(fresh=True)
@@ -7030,8 +7573,9 @@ def first_run() -> list[str]:
     out += api_key_lines(keys)
     v = lane.abi()
     out.append(f"ok  Landlock ABI {v}: each agent writes only inside its task" if v else
-               "--  no Landlock here: agents run unconfined (on Linux, a 5.13+ kernel with Landlock "
-               "on; none on macOS)")
+               "ok  Seatbelt: each agent writes only inside its task" if lane.kind() == "seatbelt" else
+               "--  no lane here: agents run unconfined (on Linux, a 5.13+ kernel with Landlock "
+               "on; on macOS, /usr/bin/sandbox-exec)")
     return out
 
 
@@ -7168,7 +7712,7 @@ def _mod_behind() -> str | None:
     said "up to date" while every new session opened a four-day-old pane, no splash, no modeline
     (2026-11-21). None when it is current, not installed from this clone, or unreadable."""
     try:
-        rows = json.loads((context.claude_home() / "plugins/installed_plugins.json").read_text()
+        rows = json.loads((plugins_dir() / "installed_plugins.json").read_text()
                           ).get("plugins", {}).get("workbench@workbench") or []
     except (OSError, ValueError, AttributeError):
         return None
@@ -7541,6 +8085,42 @@ def _api_role_lines(doc: dict) -> list[tuple[bool, str]]:
     return out
 
 
+def _tcp_refused() -> tuple[bool, str]:
+    """Whether a real lane refuses a TCP connect to a port it denies: a listener of this
+    process's own, on a port the kernel picked, denied to a lane drawn for it (a daemon's port
+    can't be borrowed: it may be in use). (held, why not)."""
+    import socket
+    import tempfile
+    with socket.socket() as srv, tempfile.TemporaryDirectory() as inside:
+        srv.bind(("127.0.0.1", 0))
+        srv.listen()
+        port = srv.getsockname()[1]
+        # an MPTCP socket too, which Landlock's rule doesn't see (#1197's review): the lane's
+        # seccomp filter refuses making one, as a kernel without MPTCP does
+        probe = [sys.executable, "-c", "import socket,sys\ntry:\n socket.create_connection("
+                 f"('127.0.0.1', {port}), 5)\nexcept PermissionError:\n pass\nelse:\n"
+                 " sys.exit('the connect went through')\ntry:\n socket.socket(2, 1, 262)"
+                 f".connect(('127.0.0.1', {port}))\nexcept OSError:\n sys.exit(13)\n"
+                 "sys.exit('an MPTCP socket connected')"]
+        r = subprocess.run(lane.wrap([inside], probe, deny_ports=[port]), capture_output=True,
+                           text=True, timeout=30)
+    if r.returncode == 13:
+        return True, ""
+    return False, r.stderr.strip()[-200:] or "the connect went through"
+
+
+def _mcp_named() -> dict[str, str]:
+    """Each MCP server commands.json names (`mcp`, `repos.<path>.mcp`), with whose tasks get it:
+    "every task", else the repos', for wb doctor (#1202)."""
+    conf = context.commands_conf()
+    out = {n: "every task" for n in conf.get("mcp") or ()}
+    for repo, v in (conf.get("repos") or {}).items():
+        for n in v.get("mcp") or ():
+            if out.get(n) != "every task":
+                out[n] = f"{out[n]}, {repo}" if n in out else repo
+    return out
+
+
 def cmd_doctor(a):
     ok = True
 
@@ -7606,14 +8186,23 @@ def cmd_doctor(a):
     # Claude's Bash runs `wb` by name whatever WB_BIN says: WB_BIN only moves the mod's own calls
     # (the 2026-11-16 audit: doctor said ok beside "the mod can't run it")
     on_path, wb_bin = shutil.which("wb"), os.environ.get("WB_BIN")
+    # the plugin's bin/ launcher (Claude Code's Bash, #1190) runs the marketplace clone's wb, not
+    # a copy of its own: no "comes from" another copy
+    launcher = bool(on_path) and plugin_launcher(on_path)
+    linked = (Path.home() / ".local/bin/wb").is_file()  # wb setup's link, maybe not on PATH (#274)
     if on_path:
-        line(True, f"wb on PATH: {on_path}" + (f" (the mod runs WB_BIN={wb_bin})" if wb_bin else ""))
+        line(True, f"wb on PATH: {on_path}" + (" (the plugin's bin/: it runs the marketplace clone's)"
+                                               if launcher else "")
+             + f"; the mod runs {mod_wb(wb_bin, on_path, linked)}")
+    elif mod_listed():  # Claude Code's Bash has the plugin's bin/, the mod the clone's (#1190)
+        print("--  wb isn't on this shell's PATH: Claude Code gets it from the plugin's bin/; for "
+              "your own terminal, " + (path_advice(claude=False) if linked
+                                       else "link bin/wb into a PATH directory (wb setup)"))
     else:
-        linked = (Path.home() / ".local/bin/wb").exists()  # wb setup's link, not on PATH (#274)
-        line(False, "wb isn't on PATH: Claude runs it by name in Bash, and the mod too; " +
-             (path_advice() if linked else "link bin/wb into a PATH directory (wb setup)")
+        line(False, f"wb isn't on PATH: Claude runs it by name in Bash; the mod runs {mod_wb(wb_bin, on_path, linked)}; "
+             + (path_advice() if linked else "link bin/wb into a PATH directory (wb setup)")
              + (f"; WB_BIN={wb_bin} covers only the mod's calls" if wb_bin else ""))
-    elsewhere("wb", wb_bin or on_path, PKG_ROOT / "bin/wb")
+    elsewhere("wb", wb_bin or (None if launcher else on_path), PKG_ROOT / "bin/wb")
     # a warning, not BAD: a desktop that never logs out is fine (#351). The chat's line only
     # with the chat on: nearly every desktop lingers off, and most never turn the chat on
     for why in logout_stops():
@@ -7623,6 +8212,8 @@ def cmd_doctor(a):
     if good is None:
         print(f"--  {said}")
     else:
+        line(good, said)
+    for good, said in schedule.doctor_lines():  # wb schedule (#1204)
         line(good, said)
     # #516: a warning, not BAD: a server or a desktop that never sleeps is fine. Its own name: once
     # it reassigned `ok`, forgetting every BAD above it and failing a healthy WSL2 install (#653)
@@ -7796,7 +8387,8 @@ def cmd_doctor(a):
         line(False, f"{models.SHARED_GPU} is the machine's shared GPU lease, and this account can't "
              "write it: add it to the directory's group, then log in again")
     v = lane.abi()
-    if v:  # draw a real lane and try a write outside it: the check is the refusal itself
+    name = f"Landlock ABI {v}" if v else "Seatbelt"   # macOS's sandbox-exec (#1194)
+    if lane.held():  # draw a real lane and try a write outside it: the check is the refusal itself
         import tempfile
         with tempfile.TemporaryDirectory() as inside, tempfile.TemporaryDirectory(dir=Path.home()) as out:
             probe = [sys.executable, "-c", f"open({str(Path(out) / 'x')!r}, 'w')"]
@@ -7806,17 +8398,28 @@ def cmd_doctor(a):
             # PermissionError's path (the 2026-11-16 audit)
             held = (r.returncode not in (0, 126) and "PermissionError" in r.stderr
                     and not (Path(out) / "x").exists())
-        line(held, f"agents write only in their lane (Landlock ABI {v})" if held else
+        line(held, f"agents write only in their lane ({name})" if held else
              f"the lane didn't hold a write outside it: {r.stderr.strip()[-200:] or 'the write went through'}")
-        for gap in lane.gaps(v):  # what this kernel's Landlock breaks for the agent's tools
-            print(f"--  Landlock ABI {v}: {gap}")
+        for gap in lane.gaps(v or "seatbelt"):  # what this kernel's lane breaks for the agent's tools
+            print(f"--  {name}: {gap}")
         if gap := context.interop_gap():  # WSL: a Windows program escapes it (the 0.90 review)
             print(f"--  {gap}")
         if gap := context.home_gap():  # doctor's alone: wb start said it on every task (#1322)
             print(f"--  {gap}")
+        # from ABI 4 the lane refuses local daemons' ports (#1197, 2026-11-24): checked by a
+        # refused connect, as the write above is by a refused write
+        if v >= context.NET_ABI:
+            try:
+                granted = sorted(context.granted_ports() & set(context.DAEMON_PORTS))
+            except RuntimeError:  # commands.json doesn't parse: its own BAD line follows
+                granted = []
+            denied = sorted(set(context.DAEMON_PORTS) - set(granted))
+            held, why = _tcp_refused() if denied else (True, "")
+            line(held, f"local daemons' TCP ports are out of the lane ({len(denied)} ports)"
+                 if held else f"the lane didn't refuse a TCP connect to a denied port: {why}")
     else:
         print("--  agents' writes outside their lane and reads of credentials aren't refused here "
-              "(no Landlock): only OpenCode's file tools keep to it; " +
+              "(no Landlock, no sandbox-exec): only OpenCode's file tools keep to it; " +
               ("sudo still is (no-new-privileges)" if sys.platform.startswith("linux")
                else "nor is sudo"))
     try:
@@ -7826,6 +8429,15 @@ def cmd_doctor(a):
     except RuntimeError as e:
         line(False, str(e))
         sys.exit(1)  # every task reads it: nothing runs until it is fixed
+    for name, where in _mcp_named().items():  # the user's MCP servers for agents (#1202)
+        why = context.mcp_servers([name])[1]
+        line(not why, why[0] if why else f"MCP server {name} (commands.json): the agents of {where}")
+        # one named in a repo its tasks run in, which an API task's lane hides (#1202's review);
+        # none with no lane to hide it (neither Landlock nor Seatbelt, or "paths": ["*"]), as wb start
+        repos = (context.commands_conf().get("repos") or {}) if lane.held() and context.lane_on() else {}
+        for note in context.mcp_checkout_notes([name], list(repos) if where == "every task" else
+                                               [r for r in repos if name in (repos[r].get("mcp") or ())]):
+            print(f"--  {note.removeprefix('note: ')}")
     snapped = context.snaps(context.TOOLCHAINS) if context.lane_on() else []
     if snapped and sys.platform.startswith("linux"):
         print(f"--  {', '.join(snapped)}: snaps, which can't run in the agent's lane "
@@ -7835,11 +8447,7 @@ def cmd_doctor(a):
     line(skill.exists(), f"/workbench skill at {skill.parent}" if skill.exists() else
          f"/workbench isn't in {skill.parent.parent}: wb setup links it")
     elsewhere("/workbench", skill.parent, PKG_ROOT / "skill/workbench")
-    try:  # information only: a mod loaded another way (--plugin-dir, a dev mod) isn't listed here
-        listed = any(k.startswith("workbench@") for k in json.loads(
-            (context.claude_home() / "plugins/installed_plugins.json").read_text()).get("plugins", {}))
-    except (OSError, ValueError, AttributeError):
-        listed = False
+    listed = mod_listed()  # information only: a mod loaded another way isn't listed here
     stale = _mod_behind() if listed else None
     print(f"--  the Claude Code mod is installed as of {stale}, older than this clone's mod: wb update "
           "refreshes it" if stale else
@@ -7854,6 +8462,12 @@ def cmd_doctor(a):
     for row in experiment_lines():
         print(f"--  experiment {row}")
     sys.exit(0 if ok else 1)
+
+
+def _image_flag(s) -> None:
+    s.add_argument("--image", action="append", metavar="PATH",
+                   help=f"an image for the agent to see (a mockup, a screenshot): PNG, JPEG, GIF or "
+                   f"WebP, 10 MiB at most, up to {IMAGE_MAX}; only for a model that takes images")
 
 
 def main(argv=None):
@@ -7908,6 +8522,7 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("start", help="hand a task to an OpenCode agent (GPU or API)")
     s.add_argument("name")
     s.add_argument("--spec", required=True, help="spec file, or - for stdin")
+    _image_flag(s)
     s.add_argument("--repo", default=".")
     s.add_argument("--role", choices=routes.ROLES,
                    help="the kind of work, whose model the user set (wb route): GPU or API; default: "
@@ -7959,6 +8574,9 @@ def parser() -> argparse.ArgumentParser:
                    "local_only")
     s.add_argument("--backlog", metavar="NAME", help="one of a batch left to run (overnight): "
                    "wb backlog NAME reports on the batch")
+    s.add_argument("--after", metavar="HH:MM", type=after_time,
+                   help="hold the task, queued, until this local time (the next one: tomorrow's "
+                   "once today's has passed), its checkout too; implies --queue")
     s.add_argument("--group", metavar="NAME", help="one of the tasks a request fans out to (dynamic "
                    "workflows): the pane draws them under one header")
     s.add_argument("--no-claude-md", action="store_true",
@@ -7967,6 +8585,8 @@ def parser() -> argparse.ArgumentParser:
                    help="let the agent run a command outside the everyday list, e.g. \"curl *\"")
     s.add_argument("--allow-path", action="append", metavar="DIR",
                    help="let the agent read and write this directory outside its lane")
+    s.add_argument("--allow-port", action="append", metavar="N", type=tcp_port,
+                   help="let the agent connect to this TCP port, which the lane refuses")
     s.add_argument("--skill", action="append", metavar="NAME",
                    help="hand the agent this library skill (repeatable; wb skill list)")
     s.add_argument("--setup", metavar="CMD",
@@ -7995,9 +8615,14 @@ def parser() -> argparse.ArgumentParser:
                    help="continue the session even if it is getting full")
     s.add_argument("--spec-gap", action="append", metavar="WHAT",
                    help="this round is the spec's fault: what it missed (repeatable)")
+    _image_flag(s)
     s.set_defaults(f=cmd_feedback)
+    s = sub.add_parser("rewind", help="put the worktree back to an earlier review round's files")
+    s.add_argument("name"); s.add_argument("round", type=int, help="the review round, as its notice says")
+    s.set_defaults(f=cmd_rewind)
     s = sub.add_parser("next", help="commit the approved step and send the same agent the next one")
     s.add_argument("name"); s.add_argument("--spec", required=True, help="the next step's spec file, or - for stdin")
+    _image_flag(s)
     s.add_argument("--message", "-m", required=True, help="commit subject for the approved step")
     s.add_argument("--test", help="the next step's acceptance command (default: unchanged)")
     s.add_argument("--include", action="store_true", help="commit it even with more than "
@@ -8109,6 +8734,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--session", action="append", metavar="ID",
                    help="unnamed: only the tasks of Claude Code session ID (repeatable)")
     s.add_argument("--all-sessions", action="store_true", help=ALL_SESSIONS)
+    s.add_argument("--backlog", metavar="NAME", help="unnamed: only that batch's tasks (a scheduled "
+                   "run's), whichever session started them")
     s.set_defaults(f=cmd_wait)
     s = sub.add_parser("watch", help="follow a task live: the conversation between Claude and "
                        "the agent, every tool call and test")
@@ -8146,6 +8773,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("name"); s.add_argument("pattern", nargs="*")
     s.add_argument("--path", action="append", metavar="DIR",
                    help="let it read and write this directory outside its lane (repeatable)")
+    s.add_argument("--port", action="append", metavar="N", type=tcp_port,
+                   help="let it connect to this TCP port, which the lane refuses (repeatable)")
     s.add_argument("--always", action="store_true", help="for every task from now on (commands.json)")
     s.add_argument("--text", help="a word for the agent with it")
     s.set_defaults(f=cmd_allow)
@@ -8228,10 +8857,12 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("what", nargs="?", metavar="role|all|cap|busy",
                    help="significant, trivial, writing; all (the Agents switch); cap (the day cap); busy "
                    "(when the GPU is busy)")
-    s.add_argument("target", nargs="?", metavar="gpu|api|both|wait|<provider/model>|<usd>",
+    s.add_argument("target", nargs="?", metavar="gpu|api|both|wait|fallback|<provider/model>|<usd>",
                    help="a role: gpu or api flips its selector, an API model's exact id sets it and goes to "
-                   "API; all: gpu, api or both (each role as set); cap: the day cap in dollars; busy: wait "
-                   "(the default) or api (a role with an API model starts on it while the GPU is busy)")
+                   "API, fallback <provider/model>|gpu|none sets where its tasks go when its API model's "
+                   "provider is down or out of credit (#1196); all: gpu, api or both (each role as set); cap: "
+                   "the day cap in dollars; busy: wait (the default) or api (a role with an API model starts "
+                   "on it while the GPU is busy)")
     s.add_argument("more", nargs="*", metavar="<role> <choice>",
                    help="more roles in the same change, one dialog (#1024): wb route trivial <id> "
                    "significant <id> --day-usd 5")
@@ -8499,6 +9130,22 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("name", nargs="?")
     s.add_argument("--json", action="store_true")
     s.set_defaults(f=cmd_backlog)
+    s = sub.add_parser("schedule", help="a backlog Claude runs on a timer with no session open "
+                       "(claude -p): add, list, rm, run now; fire is the timer's")
+    ss = s.add_subparsers(dest="action", required=True)
+    x = ss.add_parser("add", help="write the timer: a systemd user timer, or a launchd agent on macOS")
+    x.add_argument("name")
+    x.add_argument("--file", required=True, help="the backlog: what Claude is to run, as you would tell it")
+    x.add_argument("--repo", default=".", help="the project the backlog's tasks are in")
+    x.add_argument("--at", required=True, help="when: [DAYS] HH:MM ('Sun 02:00', 'Mon..Fri 01:30', "
+                   "'daily 03:00'), or on Linux a systemd OnCalendar")
+    x.add_argument("--max-turns", type=int, help=f"Claude's turns a fire may take (default {schedule.TURNS})")
+    ss.add_parser("list", help="each schedule and its last run (tasks, API dollars, Claude's tokens)")
+    x = ss.add_parser("rm", help="remove a schedule and its timer"); x.add_argument("name")
+    x = ss.add_parser("run", help="fire a schedule now, in the background"); x.add_argument("name")
+    x = ss.add_parser("fire", help="the timer's command: one headless run, one runs.jsonl row")
+    x.add_argument("name")
+    s.set_defaults(f=schedule.cmd)
     s = sub.add_parser("savings", help="what delegating saved Claude: the week, by default")
     g = s.add_mutually_exclusive_group()
     g.add_argument("--week", action="store_true", help="the last 7 days (the default)")

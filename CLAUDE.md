@@ -53,8 +53,8 @@ or comment without the user's yes for it.
 
 ## Layout
 `workbench/` is the Python package: standard library only, 3.11+ (CI's floor; developed on 3.14).
-No dependencies, no packaging: it runs from the clone, on Linux, WSL2 and macOS (Landlock only on
-Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
+No dependencies, no packaging: it runs from the clone, on Linux, WSL2 and macOS (Landlock on Linux,
+Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
 - `store.py`: task files, atomic JSON, locked JSONL, `Task`. Every other part talks through them.
 - `cli.py`: `wb` and `PROTOCOL` (the agent's rules; `WRITING_PROTOCOL`, the writing role's, same fold). `runner.py`: the detached per-task driver,
   and OpenCode's environment (`opencode_env`: the task's home, the shell shim).
@@ -62,7 +62,7 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
 - `context.py`: what the agent knows and may do (instructions: the user's are `USER_AGENTS_MD`,
   `~/.config/workbench/AGENTS.md`, never Claude's `~/.claude` files, #1061; denies, the shell allowlist, the
   lane's paths: `writable`, the worktree, `ask/` and the task's `opencode/`, `opencode_home`;
-  `API_HIDDEN`, the token files an API task's lane hides too when they hold a credential; grants). `lane.py`: the Landlock lane. `gitguard.py`: the agent's read-only `git`.
+  `API_HIDDEN`, the token files an API task's lane hides too when they hold a credential; grants). `lane.py`: the Landlock lane, Seatbelt's on macOS. `gitguard.py`: the agent's read-only `git`.
   Neither imports the rest of the package: the lane runs as a file, the shim on every git call.
 - `keyhole.py`: the per-task key proxy, outside the lane: only the task's model, the key swapped
   in, errors redacted (ARCHITECTURE.md, *The keyhole*); `runner.drive` starts it for an API task,
@@ -97,7 +97,7 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
   app's Stats, lessons.jsonl. `transcript.py`: `wb watch`, and the runner's session `export`. `watch.py`:
   inotify and pidfd waits. `chat.py` + `chat_static/`, `webpush.py`: the web chat; `settings.py`,
   its admin rows and their wb calls (*The admin table (settings.py)*). `try/`:
-  `wb try`'s sample.
+  `wb try`'s sample. `schedule.py`: `wb schedule` (a backlog on a timer, Claude headless: `claude -p`).
 - `agent/HANDBOOK.md`: in every agent prompt, so keep it short (prefill time). `agent/WRITING.md`:
   the writing role's, in its place in every writing prompt: keep it short too (under 3,000 bytes).
 - `skill/workbench/`: the `/workbench` procedure; `skill/agents/`: other agents' skill for the chat's API. `mod/`: the plugin (`hooks/register.tsx`, with
@@ -109,7 +109,7 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
 ## How a task runs
 Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change must not break:
 1. `wb start` resolves the role (`--role`, else from `--size`; unset: GPU): GPU through the router, API to the
-   role's model, never the other side (exit 3). It checks (a committed CLAUDE.md, the model, GPU room, or for an API model a free
+   role's model, never the other side (exit 3) but the role's `fallback`, the user's (#1196). It checks (a committed CLAUDE.md, the model, GPU room, or for an API model a free
    provider slot of `API_PARALLEL`: else it queues),
    writes round 1's prompt (spec plus `PROTOCOL`), spawns the runner and returns at once:
    anything slow (checkout, setup, base check) is the runner's, as Claude's Bash stops at 2 min.
@@ -121,7 +121,7 @@ Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change mus
    `rules/<task>/opencode.json`. Guards stop a stuck agent (an API task at the day cap too:
    `spend`, in the round and before each next one); an API provider's rate limit,
    outage or queue pauses their clocks, and held 10 minutes stops the round as `rate_limited`
-   (or `outage`), the provider's and never silence, run again once; `wb steer` queues a note.
+   (or `outage`), the provider's and never silence, run again once, then (or on `quota`) the role's fallback; `wb steer` queues a note.
 3. `--test` runs in the agent's lane, environment and shell (its code gains no rights when
    tested); failures go back up to `--auto-fix` times (2, on API 1) without waking Claude. At `fresh_at` a
    fresh session takes over; OpenCode's compaction is a backstop just past it, never ahead.
@@ -172,7 +172,7 @@ Environment (each in ARCHITECTURE.md): paths `WB_HOME`, `WB_MODELS`, `WB_SKILLS`
 (the user's file for agents; the tests' own) (relative or `~` allowed: a new
 one joins `store.PATH_VARS`); the mod's `WB_BIN`, `WB_COMPACT_AT`; `WB_ACTOR` (the chat server's wb
 children only: `web` stamps a role change `by: "web"`); the agent's `WB_TASK`, `WB_RUN`,
-`WB_USER_PYTHONPATH`; `wb shot`'s `WB_SHOT_OUT`, `WB_SHOT_VIEWPORT`; Claude Code's
+`WB_USER_PYTHONPATH`; a scheduled fire's `WB_SCHEDULE` (its Claude's `wb accept --merge` refused); `wb shot`'s `WB_SHOT_OUT`, `WB_SHOT_VIEWPORT`; Claude Code's
 `CLAUDE_CODE_SESSION_ID`, `CLAUDE_PID` (whose task it is), `CLAUDECODE` (under it `wb patch send`
 sends and `wb route` changes the API side only on the mod's dialog's yes: `send-ok.json`,
 `route-ok.json`; `wb start --model` on an API model the same, `cli.start_gate`). Tests only: `WB_OPENCODE_BIN`,

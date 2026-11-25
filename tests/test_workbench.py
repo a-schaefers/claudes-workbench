@@ -1,4 +1,5 @@
 """End-to-end tests: real git, real runner processes, a fake opencode. Run: python3 -m unittest"""
+import argparse
 import ast
 import base64
 import collections
@@ -18,6 +19,7 @@ import queue
 import select
 import shlex
 import os
+import platform
 import shutil
 import signal
 import socket
@@ -2371,6 +2373,8 @@ class Lifecycle(Base):
         runner.review_diff(task)
         tree = task.status["reviewed"]["tree"]
         (task.worktree / "fixed.txt").write_text("the fix\n")
+        # its ref pins it since #1198: a tree from before then, or one whose ref went, has none
+        gitops.drop_reviews(self.repo, "t-gc")
         subprocess.run(["git", "-C", str(self.repo), "prune", "--expire=now"], check=True)
         self.assertFalse(gitops.has_tree(task.worktree, tree))
         again = runner.review_diff(task)
@@ -10713,6 +10717,318 @@ class ConfigLayer(Base):
         self.assertEqual(json.loads(out.stdout)["result"]["serverInfo"]["name"], "workbench")
 
 
+class UsersMcpServers(Base):
+    """#1202 (2026-11-24): an MCP server of the user's own that commands.json names reaches the
+    agent, run by its OpenCode in the lane; every other server stays stubbed and denied (the
+    2026-11-16 audit), and one that holds a credential is refused by name, never shown."""
+
+    def setUp(self):
+        super().setUp()
+        self.server = [sys.executable, str(ROOT / "tests" / "fake_mcp.py"), "lookup", "schema"]
+        self.servers({"docs": {"type": "local", "command": self.server},
+                      "other": {"type": "local", "command": self.server}})
+        self.mcp_log = Path(self.tmp.name) / "mcp.jsonl"
+        os.environ["FAKE_MCP_LOG"] = str(self.mcp_log)
+
+    def servers(self, servers: dict) -> None:
+        """The user's OpenCode config with these MCP servers beside the test's providers."""
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(
+            json.dumps({**OPENCODE_CONFIG, "mcp": {"servers": servers}}))
+
+    def commands(self, conf: dict) -> None:
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps(conf))
+
+    def refused(self, name: str) -> str:
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as e, redirect_stderr(err), redirect_stdout(io.StringIO()):
+            self.start(name, "ok")
+        self.assertEqual(e.exception.code, 3)
+        self.assertFalse(store.Task(name).exists)
+        return err.getvalue()
+
+    def test_a_listed_server_reaches_the_agent_with_its_allow_rule_and_the_rest_stay_stubbed(self):
+        from workbench import runner
+        self.commands({"mcp": ["docs"]})
+        out = self.start("t-mcp", "ok")
+        self.assertIn('MCP: docs (commands.json "mcp")', out)
+        wait_phase("t-mcp", {"review"})
+        task = store.Task("t-mcp")
+        self.assertEqual(task.spec["mcp"], ["docs"])
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        servers = layer["mcp"]["servers"]
+        self.assertEqual(servers["docs"], {"type": "local", "command": self.server})  # as written
+        self.assertEqual(servers["other"], {"type": "local", "command": ["false"], "enabled": False})
+        rules = layer["permissions"]
+        actions = [(r["action"], r["effect"]) for r in rules]
+        allow = actions.index(("docs_*", "allow"))
+        self.assertLess(actions.index(("*_*", "deny")), allow)          # after MCP_RULES' deny
+        self.assertGreater(actions.index(("opencode_*", "deny")), allow)  # the last match: denied
+        self.assertGreater(actions.index(("execute", "deny")), allow)
+        self.assertNotIn(("other_*", "allow"), actions)
+        # the agent's OpenCode started the listed server and listed its tools, and not the other
+        ran = [json.loads(line) for line in self.mcp_log.read_text().splitlines()]
+        self.assertEqual(ran[0]["docs"], ["lookup", "schema"])
+        self.assertNotIn("other", ran[0])
+        self.assertNotIn("never connected", (task.round_dir(1) / "summary.md").read_text())
+
+    def test_a_named_server_that_dies_at_its_start_is_noted_in_the_round_report(self):
+        # #1202's review (2026-11-24): a server whose venv the lane didn't read died at its start,
+        # wb start had said `MCP: docs`, and the report said nothing of the tools the agent lacked
+        self.servers({"docs": {"type": "local", "command": [
+            sys.executable, "-c", "import sys; sys.exit(\"ModuleNotFoundError: No module named 'schema_mcp'\")"]}})
+        self.commands({"mcp": ["docs"]})
+        self.start("t-dead", "ok")
+        wait_phase("t-dead", {"review"})
+        summary = (store.Task("t-dead").round_dir(1) / "summary.md").read_text()
+        self.assertIn("NOTE: the agent's OpenCode never connected to MCP server 'docs', so the agent "
+                      "had none of its tools: ModuleNotFoundError: No module named 'schema_mcp'", summary)
+        self.assertIn("opencode.log", summary)
+        from workbench import runner
+        task = store.Task("t-dead")
+        self.assertEqual(set(runner.mcp_unreached(task, 0)), {"docs"})
+        # the log is in the agent's lane: a link it leaves on the way is never followed
+        log_dir = runner.opencode_log(task).parent
+        elsewhere = Path(self.tmp.name) / "elsewhere"
+        shutil.copytree(log_dir, elsewhere)
+        shutil.rmtree(log_dir)
+        log_dir.symlink_to(elsewhere)
+        self.assertEqual(runner.mcp_unreached(task, 0), {})
+        log_dir.unlink()
+        # a round whose part of the log has no line for workbench's own server says nothing: the
+        # log is back, round 1's lines before where round 2 reads from, so only the guard keeps a
+        # false "never connected" out (with the log gone it said nothing for its absence alone:
+        # #1202's review, 2026-11-24)
+        shutil.copytree(elsewhere, log_dir)
+        self.assertEqual(set(runner.mcp_unreached(task, 0)), {"docs"})
+        os.environ["FAKE_NO_MCP"] = "1"
+        run_wb("feedback", "t-dead", "--text", "Again.")
+        wait_phase("t-dead", {"review"})
+        self.assertNotIn("never connected", (store.Task("t-dead").round_dir(2) / "summary.md").read_text())
+
+    def test_a_servers_venv_and_its_projects_node_modules_are_read_not_only_the_resolved_program(self):
+        # #1202's review (2026-11-24): the realpath'd program alone left out the venv
+        # (`srv/.venv/bin/python` resolves to the base interpreter) and srv/node_modules (`node
+        # srv/dist/index.js` read dist/), so either server died at its start in the lane
+        root = Path(os.path.realpath(self.tmp.name))
+        home = root / "home"
+        py = home / "src" / "py-srv"
+        (py / ".venv" / "bin").mkdir(parents=True)
+        (py / "pyproject.toml").write_text("[project]\nname = 'schema-mcp'\n")
+        (py / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        (py / ".venv" / "bin" / "python").symlink_to(os.path.realpath(sys.executable))
+        js = home / "src" / "js-srv"
+        (js / "dist").mkdir(parents=True)
+        (js / "node_modules").mkdir()
+        (js / "package.json").write_text("{}")
+        (js / "dist" / "index.js").write_text("")
+        bare = home / "tools"           # no project of its own: its directory, never the home
+        bare.mkdir()
+        (bare / "mcp.js").write_text("")
+        (home / ".git").mkdir()         # the home a dotfiles repo
+        base = os.path.realpath(sys.executable)
+        base_dir = os.path.dirname(os.path.dirname(base)) if \
+            os.path.basename(os.path.dirname(base)) == "bin" else os.path.dirname(base)
+        task = types.SimpleNamespace(spec={"mcp": ["docs"]})
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for command, want in (([str(py / ".venv" / "bin" / "python"), "-m", "schema_mcp"], str(py)),
+                                  (["node", str(js / "dist" / "index.js")], str(js)),
+                                  (["node", str(bare / "mcp.js")], str(bare))):
+                self.servers({"docs": {"type": "local", "command": command}})
+                roots = context.mcp_roots(task)
+                self.assertIn(want, roots, command)
+                self.assertNotIn(str(home), roots)
+                self.assertFalse([r for r in roots if r != want and context._under(r, want)], roots)
+            self.servers({"docs": {"type": "local", "command": [
+                str(py / ".venv" / "bin" / "python"), "-m", "schema_mcp"]}})
+            self.assertIn(base_dir, context.mcp_roots(task))   # the base interpreter's install too
+            # on an API task never the checkout, which its lane hides (#1091), nor a directory in it
+            (py / ".venv" / "bin" / "mcp").write_text("")
+            api = types.SimpleNamespace(spec={"mcp": ["docs"], "via": "api", "repo": str(py)})
+            self.servers({"docs": {"type": "local", "command": [str(py / ".venv" / "bin" / "mcp")]}})
+            self.assertEqual(context.mcp_roots(api), set())
+
+    def test_on_an_api_task_no_root_is_the_checkout_lies_in_it_or_holds_it(self):
+        # #1202's review (2026-11-24): only the widening to a project was kept off the checkout,
+        # so a server in the repo gave its directory (tools/mcp, with its .env) and the repo named
+        # as an argument gave the whole checkout, which #1091 hides from an API task's provider
+        home = Path(os.path.realpath(self.tmp.name)) / "home"
+        app = home / "repos" / "app"
+        (app / "tools" / "mcp").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(app)], check=True)
+        (app / "package.json").write_text("{}")
+        (app / "tools" / "mcp" / "server.js").write_text("")
+        (app / "tools" / "mcp" / ".env").write_text("DB_PASSWORD=CANARY-VALUE\n")
+        servers = {"schema": ["node", str(app / "tools" / "mcp" / "server.js")],
+                   "fs": ["mcp-fs", str(app)], "up": ["mcp-fs", str(home / "repos")]}
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            self.servers({n: {"type": "local", "command": c} for n, c in servers.items()})
+            gpu = types.SimpleNamespace(spec={"mcp": list(servers), "repo": str(app)})
+            self.assertEqual(context.mcp_roots(gpu), {str(app), str(home / "repos")})  # its own lane reads it
+            for name in servers:
+                api = types.SimpleNamespace(spec={"mcp": [name], "via": "api", "repo": str(app)})
+                self.assertEqual(context.mcp_roots(api), set(), name)
+            notes = context.mcp_checkout_notes(list(servers), [app])
+        self.assertEqual(len(notes), 3, notes)
+        self.assertIn("MCP server 'schema' names", notes[0])
+        self.assertIn("name it relative to the repo: `tools/mcp/server.js`", notes[0])
+        self.assertIn("name it relative to the repo: `.`", notes[1])
+        self.assertIn("which holds the repo", notes[2])
+
+    def servers_in_the_repo(self, **conf) -> None:
+        """Two servers whose commands name the repo: 'schema' for every task, 'fs' for the repo's;
+        an API model with a key, for wb start."""
+        srv = self.repo / "tools" / "mcp" / "server.js"
+        srv.parent.mkdir(parents=True)
+        srv.write_text("")
+        self.servers({"schema": {"type": "local", "command": ["node", str(srv)]},
+                      "fs": {"type": "local", "command": ["mcp-fs", str(self.repo)]}})
+        self.commands({"mcp": ["schema"], "repos": {str(self.repo): {"mcp": ["fs"]}}, **conf})
+        ApiHarness.catalog(self, API_CATALOG)
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {}})
+        os.environ["FAKE_AUTH_EXPORT"] = json.dumps([
+            {"id": "cred_deepinfra", "integrationID": "deepinfra", "label": "main", "active": True,
+             "value": {"type": "key", "key": _ApiTask.CANARY}}])
+
+    def doctor(self) -> str:
+        buf = io.StringIO()
+        with redirect_stdout(buf), contextlib.suppress(SystemExit):
+            cli.main(["doctor"])
+        return buf.getvalue()
+
+    def test_wb_start_and_doctor_say_a_server_named_in_the_repo_goes_by_a_path_relative_to_it(self):
+        # #1202's review (2026-11-24): an API task's lane hides the checkout, so the server died
+        # at its start; OpenCode starts a local server in the task's worktree, where a path
+        # relative to the repo finds the worktree's copy. Landlock on, so it holds on a Mac too
+        self.servers_in_the_repo()
+        with mock.patch.object(lane, "abi", return_value=4):
+            out = _ApiTask.start_api(self, "t-mcp-api", "ok", spawn=False)
+            self.assertIn("note: MCP server 'schema' names", out)
+            self.assertIn("relative to the repo: `tools/mcp/server.js`", out)
+            self.assertIn("note: MCP server 'fs' names", out)
+            with mock.patch.object(cli, "spawn_runner"):   # a GPU task's lane reads the repo
+                self.assertNotIn("MCP server 'schema' names", self.start("t-mcp-gpu", "ok"))
+            out = self.doctor()
+        self.assertIn("--  MCP server 'schema' names", out)
+        self.assertIn("--  MCP server 'fs' names", out)
+
+    def test_with_no_lane_to_hide_the_checkout_neither_says_a_server_in_it_wont_be_reached(self):
+        # #1202's review (2026-11-24): with no Landlock (every Mac) or the lane off the server
+        # reads the checkout, yet both said it wouldn't, and Claude, as the skill says, told the
+        # user to change a config that works (api_hidden_note's gate, #1156)
+        self.servers_in_the_repo()
+        with mock.patch.object(lane, "abi", return_value=0):
+            out = _ApiTask.start_api(self, "t-no-landlock", "ok", spawn=False)
+            self.assertIn("MCP: ", out)
+            self.assertNotIn("note: MCP server", out)
+            self.assertNotIn("MCP server 'schema' names", self.doctor())
+        self.commands({"mcp": ["schema"], "repos": {str(self.repo): {"mcp": ["fs"]}}, "paths": ["*"]})
+        with mock.patch.object(lane, "abi", return_value=4):
+            out = _ApiTask.start_api(self, "t-lane-off", "ok", spawn=False)
+            self.assertIn("MCP: ", out)
+            self.assertNotIn("note: MCP server", out)
+            out = self.doctor()
+        self.assertNotIn("MCP server 'schema' names", out)
+        self.assertNotIn("MCP server 'fs' names", out)
+
+    def test_a_server_in_opencodes_1x_shape_is_stubbed_and_can_be_named_too(self):
+        from workbench import runner
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({**OPENCODE_CONFIG, "mcp": {
+            "legacy": {"type": "remote", "url": "https://mcp.example.com/",
+                       "headers": {"Authorization": "Bearer CANARY-VALUE"}},
+            "old-docs": {"type": "local", "command": self.server}}}))
+        self.commands({"mcp": ["old-docs"]})
+        self.start("t-v1", "ok")
+        wait_phase("t-v1", {"review"})
+        servers = json.loads(runner.write_config_layer(store.Task("t-v1")).read_text())["mcp"]["servers"]
+        self.assertEqual(servers["legacy"], {"type": "local", "command": ["false"], "enabled": False})
+        self.assertEqual(servers["old-docs"]["command"], self.server)
+
+    def test_a_repos_server_reaches_that_repos_tasks_alone(self):
+        other = Path(self.tmp.name) / "other-repo"
+        shutil.copytree(self.repo, other)
+        self.commands({"repos": {str(self.repo): {"mcp": ["docs"]}}})
+        self.start("t-mine", "ok")
+        wait_phase("t-mine", {"review"})
+        out = run_wb("start", "t-theirs", "--spec", str(self.spec), "--repo", str(other), "--model", "mimo")
+        self.assertNotIn("MCP:", out)
+        wait_phase("t-theirs", {"review"})
+        self.assertEqual(store.Task("t-mine").spec["mcp"], ["docs"])
+        self.assertNotIn("mcp", store.Task("t-theirs").spec)
+        ran = [json.loads(line) for line in self.mcp_log.read_text().splitlines()]
+        self.assertEqual([sorted(r) for r in ran], [["docs", "workbench"], ["workbench"]])
+
+    def test_a_listed_server_holding_a_credential_is_refused_by_name_never_its_value(self):
+        self.commands({"mcp": ["docs"]})
+        cases = {"environment": {"type": "local", "command": self.server,
+                                 "environment": {"DB_TOKEN": "CANARY-VALUE"}},
+                 "headers": {"type": "remote", "url": "https://mcp.example.com/",
+                             "headers": {"Authorization": "Bearer CANARY-VALUE"}},
+                 "oauth": {"type": "remote", "url": "https://mcp.example.com/",
+                           "oauth": {"clientSecret": "CANARY-VALUE"}},
+                 "a password": {"type": "local",
+                                "command": ["db-mcp", "postgres://me:CANARY-VALUE@db/app"]},
+                 "--api-key": {"type": "local", "command": ["mcp", "--api-key=CANARY-VALUE"]},
+                 "query": {"type": "remote", "url": "https://mcp.example.com/?api_key=CANARY-VALUE"},
+                 "{env:}": {"type": "local", "command": ["mcp", "{env:CANARY_VALUE}"]}}
+        for i, (key, entry) in enumerate(cases.items()):
+            self.servers({"docs": entry})
+            err = self.refused(f"t-cred-{i}")
+            self.assertIn("MCP server 'docs'", err)
+            self.assertIn(key, err)
+            self.assertNotIn("CANARY", err)
+        self.servers({})
+        self.assertIn("isn't in your OpenCode config", self.refused("t-missing"))
+        # none of it is a credential: a remote server without one starts
+        self.servers({"docs": {"type": "remote", "url": "https://mcp.example.com/mcp?page=1",
+                               "oauth": False, "headers": {}}})
+        self.start("t-clean-remote", "ok")
+        wait_phase("t-clean-remote", {"review"})
+
+    def test_commands_json_mcp_takes_a_list_of_server_names_and_never_workbenchs_own(self):
+        for bad in ("docs", ["docs", 3], ["my_docs"], ["workbench"], ["opencode"], ["a worktree"],
+                    ["my-worktree"]):
+            for conf in ({"mcp": bad}, {"repos": {str(self.repo): {"mcp": bad}}}):
+                self.commands(conf)
+                with self.assertRaises(RuntimeError) as e:
+                    context.commands_conf()
+                self.assertIn('"mcp"', str(e.exception))
+        self.commands({"mcp": ["docs", "Schema-2"]})
+        self.assertEqual(context.commands_conf()["mcp"], ["docs", "Schema-2"])
+        context.allow_always("allow", ["make *"])  # wb allow --always: allow and paths, never mcp
+        self.assertEqual(json.loads(Path(os.environ["WB_COMMANDS"]).read_text())["mcp"], ["docs", "Schema-2"])
+
+    def test_a_credential_added_after_wb_start_leaves_the_server_out_and_the_report_says_so(self):
+        from workbench import runner
+        self.commands({"mcp": ["docs"]})
+        self.start("t-later", "ok")
+        wait_phase("t-later", {"review"})
+        self.servers({"docs": {"type": "local", "command": self.server,
+                               "environment": {"DB_TOKEN": "CANARY-VALUE"}}})
+        run_wb("feedback", "t-later", "--text", "Again.")
+        wait_phase("t-later", {"review"})
+        task = store.Task("t-later")
+        summary = (task.round_dir(2) / "summary.md").read_text()
+        self.assertIn("note: MCP server 'docs'", summary)
+        self.assertIn("ran without it", summary)
+        self.assertNotIn("CANARY", summary)
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        self.assertEqual(layer["mcp"]["servers"]["docs"]["command"], ["false"])
+        self.assertNotIn("docs_*", [r["action"] for r in layer["permissions"]])
+
+    def test_wb_doctor_lists_the_named_servers_and_flags_one_it_would_refuse(self):
+        self.commands({"mcp": ["docs"], "repos": {str(self.repo): {"mcp": ["vault"]}}})
+        self.servers({"docs": {"type": "local", "command": self.server},
+                      "vault": {"type": "remote", "url": "https://v.example.com/",
+                                "headers": {"X-Key": "CANARY-VALUE"}}})
+        buf = io.StringIO()
+        with redirect_stdout(buf), contextlib.suppress(SystemExit):
+            cli.main(["doctor"])
+        out = buf.getvalue()
+        self.assertIn("ok  MCP server docs (commands.json): the agents of every task", out)
+        self.assertIn("BAD MCP server 'vault' (commands.json \"mcp\") sets `headers`", out)
+        self.assertNotIn("CANARY", out)
+
+
 class SlowFirstToken(Base):
     """#491 (the audit of 1.90): OpenCode's 300 s header timeout cut every request a slow reader
     hadn't answered in 5 minutes, its retry lines reset the silence clock, and no read speed was
@@ -11559,11 +11875,11 @@ class RealOpenCode(Base):
             self.assertTrue("CANARY-PROJ-SKILL" in text, flag)  # (not assertIn: a prompt per failure)
 
 
-    def run_calls(self, name, calls, *extra, before=None, in_lane=True):
+    def run_calls(self, name, calls, *extra, before=None, in_lane=True, reads=False):
         """Run real opencode in a task's worktree, in its lane (unless not ``in_lane``: a machine
         without Landlock), against a fake model that makes these tool calls; returns the tool
         results it got back, in order. `before(task)` runs once the task is set up, before
-        OpenCode starts."""
+        OpenCode starts. ``reads``: the lane keeps its reads too, as the runner's does."""
         self.start(name, "ok", *extra)
         wait_phase(name, {"review"})
         task = store.Task(name)
@@ -11589,7 +11905,8 @@ class RealOpenCode(Base):
         cmd = ["opencode", "run", "--standalone", "--agent", context.AGENT, "-m", "cap/cap", "--auto",
                "--format", "json", "go"]                           # the runner's argv (#1290)
         if in_lane:
-            cmd = lane.wrap(context.writable(task), cmd)
+            cmd = lane.wrap(context.writable(task), cmd,
+                            *((context.readable(task), context.unix_paths(task)) if reads else ()))
         subprocess.run(cmd, cwd=task.worktree, env=env, capture_output=True, timeout=180)
         reqs = [json.loads(line) for line in out.read_text().splitlines()]
         last = max(reqs, key=lambda r: len(r.get("messages", [])))
@@ -11875,6 +12192,67 @@ class RealOpenCode(Base):
         self.assertEqual(runner.claude_files_changed("?? opencode.json\n?? .opencode/x.json\n"),
                          ["opencode.json", ".opencode/x.json"])
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_a_server_commands_json_names_reaches_the_agent_in_its_lane_and_no_other_does(self):
+        # #1202 (2026-11-24): the user's own MCP server, named in commands.json, is passed through
+        # as written, here in code mode (`codemode: true`): with `execute` denied, OpenCode 2.3.2
+        # sends its tools direct all the same. It is run by the agent's OpenCode in the lane: its
+        # program under a non-dot home directory read, its writes there refused, SECRET_ENV not in
+        # its environment; the unlisted one stubbed
+        home = Path(tempfile.mkdtemp(dir=Path.home(), prefix="wb-mcp-test-"))
+        self.addCleanup(shutil.rmtree, home, True)
+        shutil.copy(ROOT / "tests" / "fake_mcp.py", home / "fake_mcp.py")
+        planted = home / "planted"
+        command = [sys.executable, str(home / "fake_mcp.py"), "lookup"]
+        # and in a project's own venv, run as a module (#1202's review): the venv's python
+        # resolves to the base interpreter, so the lane read neither the venv nor the module,
+        # the server died at its start, and nothing said so; `broken` dies at its start anyway
+        srv = Path(tempfile.mkdtemp(dir=Path.home(), prefix="wb-mcp-venv-"))  # beside, not in, home
+        self.addCleanup(shutil.rmtree, srv, True)
+        (srv / "pyproject.toml").write_text("[project]\nname = 'fake-mcp-srv'\n")
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(srv / ".venv")], check=True)
+        site = srv / ".venv" / "lib" / f"python{sys.version_info[0]}.{sys.version_info[1]}" / "site-packages"
+        shutil.copy(ROOT / "tests" / "fake_mcp.py", site / "fake_mcp_srv.py")
+        in_venv = [str(srv / ".venv" / "bin" / "python"), "-m", "fake_mcp_srv", "schema"]
+        # `other` in OpenCode's 1.x shape, mcp.<name>, which 2.3.2 still starts: read in the 2.x
+        # shape alone, it was never stubbed and ran in every agent's OpenCode (found here)
+        # where the agent's OpenCode reads it too, as the user's global config
+        xdg = Path(self.tmp.name) / "xdg"
+        (xdg / "opencode").mkdir(parents=True)
+        Path(os.environ["WB_OPENCODE_CONFIG"]).unlink()
+        os.environ.update(WB_OPENCODE_CONFIG=str(xdg / "opencode" / "opencode.json"),
+                          XDG_CONFIG_HOME=str(xdg))
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({**OPENCODE_CONFIG, "mcp": {
+            "servers": {"docs": {"type": "local", "command": command, "codemode": True},
+                        "venv-docs": {"type": "local", "command": in_venv},
+                        "broken": {"type": "local", "command": [
+                            sys.executable, "-c", "import wb_no_such_module"]}},
+            "other": {"type": "local", "command": [*command[:2], "leak"]}}}))
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"mcp": ["docs", "venv-docs", "broken"]}))
+        started = Path(self.tmp.name) / "mcp-started"
+        os.environ.update(WB_TEST_SECRET_TOKEN="CANARY-SECRET", FAKE_MCP_OUTSIDE=str(planted),
+                          FAKE_MCP_STARTED=str(started))
+        task, answers = self.run_calls("t-mcp-real", [{"name": "docs_lookup", "arguments": {}}],
+                                       reads=True)
+        self.assertIn("CANARY-MCP lookup secret=- write=refused", answers[0])
+        self.assertIn(str(home), context.readable(task))
+        self.assertFalse(planted.exists())
+        reqs = [json.loads(line) for line in
+                (Path(self.tmp.name) / "t-mcp-real-requests.jsonl").read_text().splitlines()]
+        tools = {t["function"]["name"] for r in reqs for t in r.get("tools", [])}
+        self.assertIn("docs_lookup", tools)
+        self.assertIn("venv-docs_schema", tools)
+        self.assertIn(str(srv), context.mcp_roots(task))
+        self.assertIn("workbench_ask_reviewer", tools)
+        self.assertFalse([t for t in tools if t.startswith("other_")], tools)
+        # OpenCode's own log names the one that never connected, and why (the round's note)
+        self.assertEqual(runner.mcp_unreached(task, 0),
+                         {"broken": "ModuleNotFoundError: No module named 'wb_no_such_module'"})
+        self.assertFalse({"execute", "question", "subagent"} & tools)
+        self.assertNotIn("leak", started.read_text().split())   # never started either
+        self.assertIn("lookup", started.read_text().split())
+
     def test_a_projects_agents_md_and_skills_reach_the_agent_and_its_config_lifts_nothing(self):
         # #994 (2026-11-22): the rules went again in OPENCODE_CONFIG_CONTENT, whose 120,000 bytes
         # a bare task's nearly filled; past them the fallback shut the project's config out, and
@@ -12045,6 +12423,34 @@ class RealOpenCodeRun(Base):
         task = store.Task("t-run")
         self.assertEqual(st["phase"], "review", (task.dir / "runner.log").read_text())
         return task, st
+
+    def test_an_image_reaches_the_model_through_run_f_and_once_per_session(self):
+        # #1199: wb passes `-f <copy>` before `--`; OpenCode's client reads it in the lane and
+        # sends it as a data URI. A continued session has it in its history: never sent twice
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        cfg = json.loads(conf.read_text())
+        cfg["provider"]["cap"]["models"]["cap"]["modalities"] = {"input": ["text", "image"], "output": ["text"]}
+        conf.write_text(json.dumps(cfg))
+        png = image_png(3, 2)
+        shot = Path(self.tmp.name) / "shot.png"
+        shot.write_bytes(png)
+        self.serve([WRITE_42])
+        run_wb("start", "t-run", "--spec", str(self.spec), "--repo", str(self.repo),
+               "--model", "cap", "--test", TEST_CMD, "--image", str(shot))
+        st = wait_phase("t-run", {"review", "stuck", "failed"}, timeout=180)
+        task = store.Task("t-run")
+        self.assertEqual(st["phase"], "review", (task.dir / "runner.log").read_text())
+        uri = "data:image/png;base64," + base64.b64encode(png).decode()
+        reqs = [l for l in self.requests.read_text().splitlines() if uri in l]
+        self.assertTrue(reqs)                                      # the model saw it
+        self.assertIn("Attached: 1-shot.png", reqs[0])
+        seen = len(self.requests.read_text().splitlines())
+        run_wb("feedback", "t-run", "--text", "Say done.")
+        st = wait_phase("t-run", {"review", "stuck", "failed"}, timeout=180)
+        self.assertEqual(st["phase"], "review", (task.dir / "runner.log").read_text())
+        later = [l for l in self.requests.read_text().splitlines()[seen:] if '"tools"' in l]
+        self.assertTrue(later)
+        self.assertEqual(later[-1].count(uri), 1)                  # in its history, once
 
     def test_the_runner_reads_the_real_events_the_export_and_the_session(self):
         task, st = self.answered([WRITE_42])
@@ -14160,7 +14566,7 @@ class Lane(Base):
         os.chmod(locked, 0o700)
         with mock.patch.object(lane, "abi", lambda: 6):
             self.assertEqual(runner.lane_refused(task, out), [f"{locked}/data.db"])
-        with mock.patch.object(lane, "abi", lambda: 0):     # macOS, or no Landlock: no lane
+        with mock.patch.object(lane, "kind", lambda: None):  # no Landlock, no Seatbelt: no lane
             self.assertEqual(runner.lane_refused(task, out), [])
         if os.geteuid() == 0:
             return
@@ -14525,6 +14931,536 @@ class Lane(Base):
                              text=True, timeout=20)
         self.assertIn("NoNewPrivs:\\t1", out.stdout, out.stderr)
 
+    # macOS's lane (#1194, 2026-11-24): Seatbelt behind lane.wrap and lane.py's main, drawn from
+    # the same lists. These run anywhere (the profile is text); the last one needs a Mac
+    def seatbelt_reads(self, rules, writable, path):
+        """Whether Seatbelt would let `path` be read under `rules`: the last match wins."""
+        real, ok = os.path.realpath(path), True
+        for effect, p in [*rules, *(("allow", w) for w in writable)]:
+            p = os.path.realpath(p)
+            if real == p or real.startswith(p.rstrip("/") + "/"):
+                ok = effect == "allow"
+        return ok
+
+    def landlock_reads(self, readable, writable, path):
+        real = os.path.realpath(path)
+        return any(real == r or real.startswith(r.rstrip("/") + "/")
+                   for r in map(os.path.realpath, [*readable, *writable]))
+
+    def test_seatbelts_profile_writes_only_the_lane_and_passes_each_path_as_a_parameter(self):
+        # every path a -D parameter, so none is quoted into the profile's text, and its real
+        # path: Seatbelt matches the resolved one, and macOS's /tmp is /private/tmp
+        base = Path(self.tmp.name)
+        odd = base / 'a "quoted" dir (x)'
+        odd.mkdir()
+        link = base / "link"
+        link.symlink_to(odd)
+        hidden, kept, sock = base / "h", base / "h" / "k", base / "sock"
+        text, params = lane.profile([str(link), "/dev/null"],
+                                    [("deny", str(hidden)), ("allow", str(kept))], [str(sock)])
+        self.assertTrue(all(p.startswith("-D") for p in params))
+        values = [p[2:].split("=", 1) for p in params]
+        self.assertIn(str(odd), [v for _, v in values])
+        self.assertNotIn(str(link), [v for _, v in values])
+        self.assertNotIn("quoted", text)
+        self.assertEqual(text.count("("), text.count(")"))
+
+        def name(path):
+            return next(k for k, v in values if v == path)
+        lines = text.splitlines()
+        self.assertEqual(lines[:3], ["(version 1)", "(allow default)", "(deny file-write*)"])
+        self.assertIn(f'(subpath (param "{name(str(odd))}"))', lines[3])
+        self.assertTrue(lines[3].startswith("(allow file-write* "))
+        hide = lines.index(f'(deny file-read-data (subpath (param "{name(str(hidden))}")))')
+        keep = lines.index(f'(allow file-read-data (subpath (param "{name(str(kept))}")))')
+        self.assertLess(hide, keep)                       # the last match wins: kept is read
+        lane_read = next(i for i, ln in enumerate(lines) if ln.startswith("(allow file-read-data ")
+                         and name(str(odd)) in ln)
+        self.assertGreater(lane_read, keep)               # the lane is read, as with Landlock
+        unix = lines.index("(deny network-outbound (remote unix-socket))")
+        self.assertIn(f'"{name(str(sock))}"', lines[unix + 1])
+        self.assertIn(f'"{name("/private/var/run/mDNSResponder")}"', lines[unix + 1])  # lookups
+        for rule in ("(deny signal)", "(allow signal (target same-sandbox))",
+                     "(deny process-info*)", "(allow process-info* (target same-sandbox))",
+                     "(deny file-link)"):
+            self.assertIn(rule, lines)
+        refused = next(ln for ln in lines if ln.startswith("(deny process-exec "))
+        for prog in ("/usr/bin/sudo", "/usr/bin/su", "/usr/bin/login", "/usr/bin/open"):
+            self.assertIn(f'"{name(prog)}"', refused)
+
+    @home_outside_the_lane
+    def test_seatbelts_read_rules_hide_what_landlocks_read_lane_leaves_out(self):
+        # Seatbelt reads by a list of refusals, Landlock by one of grants: the rules are the
+        # read walk's complement, so the two lanes read the same files
+        home = self.fake_home()
+        for f in (".ssh/id_ed25519", ".config/gh/hosts.yml", ".config/tool/conf", "Documents/tax.pdf",
+                  "Library/Application Support/tool/conf", "Library/Keychains/login.keychain-db",
+                  "bin/tool", "code/other/main.py"):
+            (home / f).parent.mkdir(parents=True, exist_ok=True)
+            (home / f).write_text("x")
+        task = self.bare_task("t-1194", self.repo)
+        task.worktree.mkdir()
+        (task.worktree / "a.py").write_text("x")
+        rules, readable = context.read_rules(task), context.readable(task)
+        writable = context.writable(task)
+        self.assertTrue(rules)
+        self.assertTrue(all(e in ("deny", "allow") and os.path.isabs(p) for e, p in rules))
+        depths = [len(Path(p).parts) for _, p in rules]
+        self.assertEqual(depths, sorted(depths))          # ancestors first: each over the wider
+        files = [home / f for f in (".ssh/id_ed25519", ".config/gh/hosts.yml", ".config/tool/conf",
+                                    "Documents/tax.pdf", "Library/Application Support/tool/conf",
+                                    "Library/Keychains/login.keychain-db", "bin/tool",
+                                    "code/other/main.py")]
+        files += [task.worktree / "a.py", task.dir / "task.json", ROOT / "workbench" / "lane.py",
+                  Path(sys.executable), Path("/etc/hosts")]
+        for f in files:
+            self.assertEqual(self.seatbelt_reads(rules, writable, f),
+                             self.landlock_reads(readable, writable, f), f)
+        said = {f.relative_to(home).as_posix(): self.seatbelt_reads(rules, writable, f)
+                for f in files[:8]}
+        self.assertEqual(said, {".ssh/id_ed25519": False, ".config/gh/hosts.yml": False,
+                                ".config/tool/conf": True, "Documents/tax.pdf": False,
+                                "Library/Application Support/tool/conf": True,  # macOS's dotfiles
+                                "Library/Keychains/login.keychain-db": False, "bin/tool": True,
+                                "code/other/main.py": False})
+        self.assertTrue(self.seatbelt_reads(rules, writable, task.worktree / "a.py"))
+        self.assertTrue(self.seatbelt_reads(rules, writable, ROOT / "workbench" / "lane.py"))
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": ["*"]}))
+        self.assertIsNone(context.read_rules(task))
+
+    # #1194's review (2026-11-24): with Library readable, each of these tools' macOS logins was
+    # read while its Linux twin was hidden: each row is (macOS, Linux)
+    MAC_TWINS = [("Library/Application Support/sops/age/keys.txt", ".config/sops/age/keys.txt"),
+                 ("Library/Application Support/com.vercel.cli/auth.json",
+                  ".local/share/com.vercel.cli/auth.json"),
+                 ("Library/Preferences/.wrangler/config/default.toml",
+                  ".config/.wrangler/config/default.toml"),
+                 ("Library/Application Support/Bitwarden CLI/data.json", ".config/Bitwarden CLI/data.json"),
+                 ("Library/Preferences/helm/registry/config.json", ".config/helm/registry/config.json"),
+                 ("Library/Preferences/netlify/config.json", ".config/netlify/config.json"),
+                 ("Library/Application Support/dart/pub-credentials.json",
+                  ".config/dart/pub-credentials.json"),
+                 ("Library/Application Support/loadimpact/k6/config.json",
+                  ".config/loadimpact/k6/config.json"),
+                 ("Library/Application Support/doctl/config.yaml", ".config/doctl/config.yaml"),
+                 ("Library/Thunderbird/Profiles/p.default/logins.json",
+                  ".thunderbird/p.default/logins.json"),
+                 ("Library/Application Support/Chromium/Default/Login Data",
+                  ".config/chromium/Default/Login Data"),
+                 ("Library/Application Support/openstack/secure.yaml", ".config/openstack/secure.yaml"),
+                 ("Library/Application Support/openstack/clouds.yaml", ".config/openstack/clouds.yaml")]
+
+    @home_outside_the_lane
+    def test_on_macos_each_tools_login_is_hidden_where_its_linux_twin_is(self):
+        home = self.fake_home()
+        files = [f for pair in self.MAC_TWINS for f in pair] + ["Library/Application Support/tool/conf"]
+        for f in files:
+            (home / f).parent.mkdir(parents=True, exist_ok=True)
+            (home / f).write_text("x")
+        task = self.bare_task("t-1194-twins", self.repo)
+        rules, writable = context.read_rules(task), context.writable(task)
+        said = {f: self.seatbelt_reads(rules, writable, home / f) for f in files}
+        self.assertEqual(said, {**{f: False for f in files[:-1]}, files[-1]: True})
+        # and pip's macOS config in an API task's lane when it holds a credential, as its XDG one
+        pip = home / "Library/Application Support/pip/pip.conf"
+        pip.parent.mkdir(parents=True)
+        pip.write_text("[global]\nindex-url = https://u:tok@pypi.example/simple\n")
+        self.assertIn(os.path.realpath(pip), context.api_hidden_paths())
+        self.assertEqual(context._api_hidden_tools()[os.path.realpath(pip)], "pip")
+
+    def test_macos_volumes_are_read_only_where_something_is_kept_and_its_system_disk_link_reads_root(self):
+        # #1194's review: /Volumes holds the external disks and network shares, as /media and
+        # /mnt do; `Macintosh HD` there is a link to /, which must not deny the system
+        self.assertIn("/Volumes", context.ONLY_KEPT)
+        root = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-volumes-"))  # not in the lane
+        self.addCleanup(shutil.rmtree, root, True)
+        self.fake_home()
+        (root / "Macintosh HD").symlink_to("/")
+        (root / "Backup").mkdir()
+        (root / "Backup" / "photos.jpg").write_text("x")
+        task = self.bare_task("t-1194-volumes", self.repo)
+        # in its place, and /home read (as / is) so that its one deny shows
+        kept = tuple(str(root) if p == "/Volumes" else p for p in context.ONLY_KEPT if p != "/home")
+        with mock.patch.object(context, "ONLY_KEPT", kept):
+            rules, readable = context.read_rules(task), context.readable(task)
+        writable = context.writable(task)
+        real = os.path.realpath(root)
+        self.assertIn(("deny", real), rules)
+        self.assertFalse([p for _, p in rules if context._under(p, real)])    # one rule, no descent
+        for f in (root / "Backup" / "photos.jpg", root / "Macintosh HD" / "etc" / "hosts"):
+            self.assertEqual(self.seatbelt_reads(rules, writable, f),
+                             self.landlock_reads(readable, writable, f), f)
+        self.assertFalse(self.seatbelt_reads(rules, writable, root / "Backup" / "photos.jpg"))
+        self.assertTrue(self.seatbelt_reads(rules, writable, root / "Macintosh HD" / "etc" / "hosts"))
+
+    def seatbelt_writes(self, text, params, path, link=False):
+        """Whether the Seatbelt profile ``text`` with ``params`` lets `path` be written: its
+        file-write* rules in order, the last match winning; a `literal` filter is the path
+        alone, a `subpath` one the path and what is beneath it. ``link``: the path's own name,
+        its directory resolved (an unlink or a rename of a link)."""
+        values = dict(p[2:].split("=", 1) for p in params)
+        real = os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path)) \
+            if link else os.path.realpath(path)
+        ok = False
+        for line in text.splitlines():
+            if line.startswith(("(allow file-write*", "(deny file-write*")):
+                refs = re.findall(r'\((subpath|literal) \(param "([^"]+)"\)\)', line)
+                if not refs or any(real == values[n] or kind == "subpath" and
+                                   real.startswith(values[n].rstrip("/") + "/")
+                                   for kind, n in refs):
+                    ok = line.startswith("(allow")
+        return ok
+
+    @home_outside_the_lane
+    def test_with_seatbelt_a_lane_root_holding_a_denied_place_cant_be_renamed_or_replaced(self):
+        # #1194's third review (2026-11-24): with Seatbelt the lane keeps ~/.cargo, ~/.dotnet
+        # and Library/Caches whole and denies only bin/, tools/ and com.apple.python by path, but
+        # a subpath allow takes in the root itself: `mv ~/.cargo $TMPDIR/old`, a ~/.cargo made
+        # in the temp directory with a planted bin/cargo, then moved into its place, ran as the
+        # user at their next cargo, every rename on an allowed path. A rename's source and
+        # destination are writes on their paths: the root's own path, and each directory down
+        # to the place, are refused, what is in them is not
+        home = self.fake_home()
+        for d in (".cargo/bin", ".cargo/registry", ".dotnet/tools", "Library/Caches/com.example"):
+            (home / d).mkdir(parents=True)
+        task = self.bare_task("t-1194-rename", self.repo)
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            w = context.writable(task)
+            text, params = lane.profile(w, context.read_rules(task), [], context.write_denied(w))
+        real = {os.path.realpath(p) for p in w}
+        for root in (".cargo", ".dotnet", "Library/Caches"):
+            self.assertIn(os.path.realpath(home / root), real, root)         # whole, as before
+            self.assertFalse(self.seatbelt_writes(text, params, home / root), root)
+        for f in (".cargo/bin/x", ".cargo/bin", ".dotnet/tools/x", "Library/Caches/com.apple.python"):
+            self.assertFalse(self.seatbelt_writes(text, params, home / f), f)
+        for f in (".cargo/registry/x", ".cargo/new", ".cargo/registry", ".dotnet/x",
+                  "Library/Caches/com.example/x", "Library/Caches/golangci-lint"):
+            self.assertTrue(self.seatbelt_writes(text, params, home / f), f)
+        # a grant above the root: each directory between it and the place too, made or not
+        work = Path(os.path.realpath(self.tmp.name)) / "grant"
+        (work / "a").mkdir(parents=True)
+        text, params = lane.profile([str(work)], [], [], [str(work / "a" / "b" / "c")])
+        for f in (work, work / "a", work / "a" / "b", work / "a" / "b" / "c" / "x"):
+            self.assertFalse(self.seatbelt_writes(text, params, f), f)
+        for f in (work / "x", work / "a" / "x", work / "a" / "b" / "x"):
+            self.assertTrue(self.seatbelt_writes(text, params, f), f)
+
+    @home_outside_the_lane
+    def test_cargos_own_config_is_out_of_the_lane_on_both_kernels_made_or_not(self):
+        # #1194's fourth review (2026-11-24): with Seatbelt ~/.cargo was whole but bin/ and env,
+        # so the agent could make ~/.cargo/config.toml, whose build.rustc-wrapper or target
+        # linker cargo ran as the user at their next build, outside the lane; Landlock's split
+        # refused a new one but granted one already there. And a ~/.cargo holding only the
+        # user's config.toml is split around it with cargo's own entries made first
+        home = self.fake_home()
+        for d in (".cargo/bin", ".cargo/registry"):
+            (home / d).mkdir(parents=True)
+        (home / ".cargo" / "env").write_text("export PATH")
+        moved = home / "moved-cargo"                   # CARGO_HOME, outside the temp roots
+        moved.mkdir()
+        (moved / "config.toml").write_text("[build]\n")    # the user's own, and nothing else
+        os.environ["CARGO_HOME"] = str(moved)
+        task = self.bare_task("t-1194-cargo-config", self.repo)
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            w = context.writable(task)
+            text, params = lane.profile(w, context.read_rules(task), [], context.write_denied(w))
+        for f in (home / ".cargo/config.toml", home / ".cargo/config", moved / "config.toml",
+                  moved / "config"):
+            self.assertFalse(self.seatbelt_writes(text, params, f), f)
+        for f in (home / ".cargo/registry/x", home / ".cargo/git", moved / "registry"):
+            self.assertTrue(self.seatbelt_writes(text, params, f), f)
+        (home / ".cargo" / "config.toml").write_text("[build]\n")   # already there
+        with mock.patch.object(lane, "kind", lambda: "landlock"):
+            w = context.writable(task)
+        for f in (home / ".cargo/config.toml", home / ".cargo/config", moved / "config.toml",
+                  moved / "config"):
+            self.assertFalse([q for q in w if q == str(f) or str(f).startswith(q + "/")], f)
+            self.assertIsNotNone(context.kept_out(str(f)), f)       # no grant reaches it
+        self.assertIn(str(home / ".cargo/registry"), w)
+        self.assertIn(str(moved / "registry"), w)                   # made first, then granted
+
+    @home_outside_the_lane
+    def test_with_landlock_a_distros_cargo_home_is_split_so_no_config_can_be_made(self):
+        # #1194's fifth review (2026-11-24): a distro's cargo (Arch's rust, Debian's, Fedora's)
+        # makes only registry/, and writable() split a cargo home only when bin/, env or a
+        # config was there, so ~/.cargo (and a CARGO_HOME like it) was granted whole and the
+        # agent made a config.toml whose build.rustc-wrapper cargo ran at the user's next build
+        home = self.fake_home()
+        (home / ".cargo/registry").mkdir(parents=True)
+        moved = home / "moved-cargo"
+        (moved / "registry").mkdir(parents=True)
+        os.environ["CARGO_HOME"] = str(moved)
+        task = self.bare_task("t-1194-distro-cargo", self.repo)
+        with mock.patch.object(lane, "kind", lambda: "landlock"):
+            w = context.writable(task)
+        for c in (home / ".cargo", moved):
+            self.assertNotIn(str(c), w)                      # split, never whole
+            for n in ("config.toml", "config", "bin", "env"):
+                f = c / n
+                self.assertFalse([q for q in w if q == str(f) or str(f).startswith(q + "/")], f)
+            for n in ("registry", "git", ".package-cache"):  # cargo's own, made first
+                self.assertIn(str(c / n), w)
+
+    @home_outside_the_lane
+    def test_with_seatbelt_a_linked_cargo_config_is_denied_by_its_own_name(self):
+        # #1194's fifth review (2026-11-24): ~/.cargo/config.toml linked into ~/dotfiles (stow;
+        # home-manager links it into /nix/store) was denied only at its target, outside the lane
+        # and dropped, so the agent could unlink the link inside the whole ~/.cargo and write a
+        # config.toml whose build.rustc-wrapper ran as the user at their next build
+        home = self.fake_home()
+        for d in (".cargo/bin", ".cargo/registry", "dotfiles"):
+            (home / d).mkdir(parents=True)
+        (home / ".cargo/env").write_text("export PATH")
+        (home / "dotfiles/cargo.toml").write_text("[build]\n")
+        (home / ".cargo/config.toml").symlink_to(home / "dotfiles/cargo.toml")
+        task = self.bare_task("t-1194-linked-config", self.repo)
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            w = context.writable(task)
+            denied = context.write_denied(w)
+            text, params = lane.profile(w, context.read_rules(task), [], denied)
+        link = home / ".cargo/config.toml"
+        self.assertIn(os.path.join(os.path.realpath(home / ".cargo"), "config.toml"), denied)
+        self.assertFalse(self.seatbelt_writes(text, params, link, link=True))  # rm, mv onto it
+        self.assertTrue(self.seatbelt_writes(text, params, home / ".cargo/registry/x"))
+
+    @home_outside_the_lane
+    def test_with_seatbelt_apples_python_bytecode_is_denied_inside_a_whole_library_caches(self):
+        # #1194's review: Library/Caches was writable whole, and the Command Line Tools'
+        # /usr/bin/python3 loads its stdlib's .pyc from Library/Caches/com.apple.python: one the
+        # agent planted ran as the user, outside the lane, at the next python3 anywhere. And its
+        # second review: split around that folder, Library/Caches refused every tool's first
+        # cache folder (golangci-lint's, pipenv's, black's, Homebrew's) but a few made for it.
+        # Seatbelt denies the one place by path instead, made or not
+        home = self.fake_home()
+        caches = home / "Library" / "Caches"
+        (caches / "com.example.app").mkdir(parents=True)
+        bytecode = caches / "com.apple.python"
+        task = self.bare_task("t-1194-pyc", self.repo)
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            w = context.writable(task)
+            denied = context.write_denied(w)
+            argv = context.lane_wrap(task)(["true"])
+            text, params = lane.profile(w, context.read_rules(task), [], denied)
+            only = context.read_only(task, w)
+            rules = context.read_only_rules(task)
+        self.assertIn(os.path.realpath(caches), map(os.path.realpath, w))   # whole
+        self.assertFalse(bytecode.exists())                                # nothing made for it
+        self.assertEqual(sorted(p.name for p in caches.iterdir()), ["com.example.app"])
+        self.assertEqual(denied, [os.path.realpath(bytecode)])
+        self.assertEqual(argv[argv.index("--deny-write") + 1], os.path.realpath(bytecode))
+        for f in (bytecode, bytecode / "lib" / "os.cpython-39.pyc"):
+            self.assertFalse(self.seatbelt_writes(text, params, f), f)
+        for n in ("com.example.app", "golangci-lint", "pipenv", "prisma-nodejs", "black",
+                  "Homebrew", "pip", "go-build"):
+            self.assertTrue(self.seatbelt_writes(text, params, caches / n / "x"), n)
+        self.assertIsNotNone(context.kept_out(str(bytecode / "Library")))   # no grant reaches it
+        self.assertIn(os.path.realpath(bytecode), only)                    # read, as the toolchains
+        self.assertIn({"action": "edit", "resource": f"{os.path.realpath(bytecode)}/*",
+                       "effect": "deny"}, rules)                           # never the file tools'
+        # Landlock can only allow: there the lane is split around the place once it is made
+        bytecode.mkdir()
+        with mock.patch.object(lane, "kind", lambda: "landlock"):
+            w = context.writable(task)
+            self.assertEqual(context.write_denied(w), [])
+        real = os.path.realpath(bytecode)
+        self.assertFalse([p for p in w if os.path.realpath(p) == real
+                          or context._under(real, os.path.realpath(p))])
+        self.assertIn(str(caches / "com.example.app"), w)
+
+    def test_a_read_rule_isnt_drawn_through_a_link_but_a_grant_by_one_is(self):
+        # a link's way to a place says nothing of the place (Landlock rules sit on the files):
+        # ~/sys-etc, a home folder the lane doesn't read, mustn't deny /etc, and ~/.tools
+        # pointing into one (~/src/tools) grants it, whatever order the walk met them in. A home
+        # outside /home, as root's or a service's (/var/lib/<svc>), is read but its folders
+        home = self.fake_home()
+        (home / "sys-etc").symlink_to("/etc")
+        (home / "src" / "tools").mkdir(parents=True)
+        (home / "src" / "tools" / "t").write_text("x")
+        (home / "src" / "other").write_text("x")
+        (home / ".tools").symlink_to(home / "src" / "tools")
+        (home / ".claude").mkdir()
+        (home / ".claude" / "settings.json").write_text("{}")
+        task = self.bare_task("t-1194-link", self.repo)
+        with mock.patch.object(context, "ONLY_KEPT", ("/dev",)):
+            rules, readable = context.read_rules(task), context.readable(task)
+        writable = context.writable(task)
+        self.assertNotIn(("deny", "/etc"), rules)
+        for f in ("/etc/hosts", home / "src" / "tools" / "t", home / "src" / "other",
+                  home / ".claude" / "settings.json"):
+            self.assertEqual(self.seatbelt_reads(rules, writable, f),
+                             self.landlock_reads(readable, writable, f), f)
+        self.assertTrue(self.seatbelt_reads(rules, writable, "/etc/hosts"))
+        self.assertTrue(self.seatbelt_reads(rules, writable, home / "src" / "tools" / "t"))
+        self.assertFalse(self.seatbelt_reads(rules, writable, home / "src" / "other"))
+        self.assertFalse(self.seatbelt_reads(rules, writable, home / ".claude" / "settings.json"))
+
+    def test_on_macos_the_lane_execs_sandbox_exec_once_its_profile_holds(self):
+        work = Path(self.tmp.name) / "lane"
+        work.mkdir()
+        reads = [("deny", "/Users"), ("allow", str(work))]
+        no = str(work / "no")
+        argv = lane.wrap([str(work)], ["true", "x"], unix=[str(work)], reads=reads, deny_write=[no])
+        self.assertEqual(argv[:3], [sys.executable, "-I", os.path.abspath(lane.__file__)])
+        self.assertEqual(argv[argv.index("--hide") + 1], "/Users")
+        self.assertNotIn("--reads", argv)
+        text, params = lane.profile([str(work)], reads, [str(work)], [no])
+        self.assertFalse(self.seatbelt_writes(text, params, work / "no" / "x"))   # #1194
+        self.assertTrue(self.seatbelt_writes(text, params, work / "x"))
+        tried, execd, err = [], [], io.StringIO()
+
+        def run(code):
+            return lambda cmd, **kw: tried.append(cmd) or subprocess.CompletedProcess(
+                cmd, code, "", "sandbox-exec: profile rejected" if code else "")
+
+        def main(args, code=0):
+            with mock.patch.object(lane, "kind", lambda: "seatbelt"), \
+                    mock.patch.object(lane, "die_with_parent", lambda: None), \
+                    mock.patch.object(lane, "restrict", side_effect=AssertionError("Landlock")), \
+                    mock.patch.object(lane.subprocess, "run", run(code)), \
+                    mock.patch.object(lane.os, "execv", lambda *a: execd.append(a)), \
+                    redirect_stderr(err):
+                lane.main(args)
+        main(argv[3:])
+        self.assertEqual(tried, [[lane.SANDBOX_EXEC, "-p", text, *params, "/usr/bin/true"]])
+        self.assertEqual(execd, [(lane.SANDBOX_EXEC,
+                                  [lane.SANDBOX_EXEC, "-p", text, *params, "--", "true", "x"])])
+        # a profile sandbox-exec refuses: never run outside it, and lane.py's own message
+        with self.assertRaises(SystemExit) as stop:
+            main(argv[3:], code=65)
+        self.assertEqual(stop.exception.code, 126)
+        self.assertIn("workbench lane: macOS refused the lane (sandbox-exec: profile rejected); "
+                      "not running true", err.getvalue())
+        with self.assertRaises(SystemExit) as stop:      # 127, as Landlock's side says it
+            main(lane.wrap([str(work)], ["wb-no-such-command"])[3:])
+        self.assertEqual(stop.exception.code, 127)
+        self.assertIn("can't run wb-no-such-command", err.getvalue())
+        self.assertEqual(len(execd), 1)
+
+    def test_the_lane_is_seatbelt_on_a_mac_with_sandbox_exec_and_landlock_first(self):
+        darwin = mock.patch.object(lane.sys, "platform", "darwin")
+        there = mock.patch.object(lane.os, "access", lambda p, m: p == lane.SANDBOX_EXEC)
+        with mock.patch.object(lane, "abi", lambda: 0), darwin, there:
+            self.assertEqual((lane.kind(), lane.held()), ("seatbelt", True))
+        with mock.patch.object(lane, "abi", lambda: 0), darwin, \
+                mock.patch.object(lane.os, "access", lambda p, m: False):
+            self.assertEqual((lane.kind(), lane.held()), (None, False))
+        with mock.patch.object(lane, "abi", lambda: 6):
+            self.assertEqual((lane.kind(), lane.held()), ("landlock", True))
+        gaps = " ".join(lane.gaps("seatbelt"))
+        for said in ("--disable-sandbox", "--no-sandbox", "temp directory"):   # what it breaks, never
+            self.assertIn(said, gaps)                                          # what it can't confine (#1322)
+        for unsaid in ("deprecated", "TCP", "by a list"):
+            self.assertNotIn(unsaid, gaps)
+
+    def test_a_tasks_lane_hands_seatbelt_its_read_rules_and_its_own_sockets(self):
+        task = self.bare_task("t-1194-wrap", self.repo)
+        task.worktree.mkdir()
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            argv = context.lane_wrap(task)(["opencode", "run"])
+        self.assertEqual(argv[-3:], ["--", "opencode", "run"])
+        self.assertIn("--hide", argv)
+        self.assertNotIn("--reads", argv)
+        unix = [argv[i + 1] for i, a in enumerate(argv) if a == "--unix"]
+        self.assertIn(str(task.worktree), unix)              # its own sockets, never /tmp
+        self.assertNotIn(os.path.realpath("/tmp"), map(os.path.realpath, unix))
+        with mock.patch.object(lane, "kind", lambda: "landlock"):
+            argv = context.lane_wrap(task)(["opencode", "run"])
+        self.assertIn("--reads", argv)
+        self.assertNotIn("--hide", argv)
+        if lane.held():  # and what it draws runs here, in this machine's own lane
+            out = subprocess.run(context.lane_wrap(task)([sys.executable, "-c", "print('ran')"]),
+                                 cwd=task.worktree, capture_output=True, text=True, timeout=60)
+            self.assertEqual(out.stdout, "ran\n", out.stderr)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": ["*"]}))
+        self.assertEqual(context.lane_wrap(task)(["opencode", "run"]), ["opencode", "run"])
+
+    def test_with_seatbelt_a_socket_outside_the_tasks_own_places_is_named_with_its_grant(self):
+        # Seatbelt can't tell the agent's sockets from the user's in a temp directory (tmux's,
+        # the SSH agent's), so one there is refused like ABI 9's, and named
+        task = self.bare_task("t-1194-sock", self.repo)
+        task.worktree.mkdir()
+        d = Path(os.path.realpath(tempfile.mkdtemp(prefix="wb-1194-")))
+        self.addCleanup(shutil.rmtree, d, True)
+        socks = []
+        for where in (d / "s", task.worktree / "s"):
+            srv = socket.socket(socket.AF_UNIX)
+            srv.bind(str(where))
+            self.addCleanup(srv.close)
+            socks.append(str(where))
+        out = "".join(f"connect {s}: Operation not permitted\n" for s in socks)
+        with mock.patch.object(lane, "abi", lambda: 0), mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            self.assertEqual(runner.lane_refused(task, out), socks[:1])
+        with mock.patch.object(lane, "abi", lambda: 0), mock.patch.object(lane, "kind", lambda: None):
+            self.assertEqual(runner.lane_refused(task, out), [])   # no lane, no refusal of its
+
+    @unittest.skipUnless(lane.kind() == "seatbelt", "needs macOS's sandbox-exec")
+    @home_outside_the_lane
+    def test_seatbelt_holds_the_lane_on_a_real_mac(self):
+        # the nightly macOS job runs this; a skip is not a pass
+        home = self.fake_home()
+        (home / ".ssh").mkdir()
+        (home / ".ssh" / "id_ed25519").write_text("secret")
+        (home / ".config" / "tool").mkdir(parents=True)
+        (home / ".config" / "tool" / "conf").write_text("conf")
+        (home / "Library" / "Caches").mkdir(parents=True)
+        (home / ".cargo" / "bin").mkdir(parents=True)
+        (home / ".cargo" / "registry").mkdir()
+        (home / "dotfiles").mkdir()                    # a stowed config, #1194's fifth review
+        (home / "dotfiles" / "cargo.toml").write_text("[build]\n")
+        (home / ".cargo" / "config.toml").symlink_to(home / "dotfiles" / "cargo.toml")
+        task = self.bare_task("t-1194-mac", self.repo)
+        task.worktree.mkdir()
+        d = Path(os.path.realpath(tempfile.mkdtemp(prefix="wb-1194-")))
+        self.addCleanup(shutil.rmtree, d, True)
+        sock = d / "s"
+        srv = socket.socket(socket.AF_UNIX)
+        srv.bind(str(sock))
+        srv.listen()
+        self.addCleanup(srv.close)
+        script = textwrap.dedent("""\
+            import os, socket, subprocess, sys
+            def say(what, f):
+                try:
+                    f(); print(what, "ok")
+                except (OSError, subprocess.CalledProcessError) as e:
+                    print(what, "refused", getattr(e, "errno", None))
+            home, wt, sock = sys.argv[1:4]
+            say("write-outside", lambda: open(os.path.join(home, "planted"), "w").close())
+            say("write-worktree", lambda: open(os.path.join(wt, "made"), "w").close())
+            caches = os.path.join(home, "Library", "Caches")
+            say("write-cache", lambda: os.makedirs(os.path.join(caches, "golangci-lint", "x")))
+            say("write-pyc", lambda: os.makedirs(os.path.join(caches, "com.apple.python", "x")))
+            # #1194's third review: a root holding a denied place can't be moved aside, into
+            # the temp directory the lane writes
+            import tempfile
+            aside = tempfile.mkdtemp()
+            say("mv-caches", lambda: os.rename(caches, os.path.join(aside, "caches")))
+            say("mv-cargo", lambda: os.rename(os.path.join(home, ".cargo"),
+                                              os.path.join(aside, "cargo")))
+            # #1194's fifth review: a linked config is unlinked on its own path
+            say("rm-linked-config", lambda: os.unlink(os.path.join(home, ".cargo", "config.toml")))
+            say("read-secret", lambda: open(os.path.join(home, ".ssh", "id_ed25519")).read())
+            say("read-dotfile", lambda: open(os.path.join(home, ".config", "tool", "conf")).read())
+            say("socket-outside", lambda: socket.socket(socket.AF_UNIX).connect(sock))
+            say("signal-outside", lambda: os.kill(os.getppid(), 0))
+            say("sudo", lambda: subprocess.run(["/usr/bin/sudo", "-n", "true"], check=True,
+                                               capture_output=True))
+            """)
+        out = subprocess.run(context.lane_wrap(task)([sys.executable, "-c", script, str(home),
+                                                      str(task.worktree), str(sock)]),
+                             cwd=task.worktree, capture_output=True, text=True, timeout=60)
+        said = dict(ln.split(" ", 1) for ln in out.stdout.splitlines())
+        no = f"refused {errno.EPERM}"   # Seatbelt's, which REFUSAL reads: not sudo's own failure
+        self.assertEqual(said, {"write-outside": no, "write-worktree": "ok", "write-cache": "ok",
+                                "write-pyc": no, "mv-caches": no, "mv-cargo": no,
+                                "rm-linked-config": no, "read-secret": no,
+                                "read-dotfile": "ok", "socket-outside": no, "signal-outside": no,
+                                "sudo": no}, out.stderr)
+        self.assertFalse((home / "planted").exists())
+        self.assertTrue((home / ".cargo" / "config.toml").is_symlink())
+        self.assertEqual(runner.lane_refused(task, f"connect {sock}: Operation not permitted\n"),
+                         [str(sock)])
+
     @staticmethod
     def mountinfo_marking(path: str, fstype: str, at: str) -> str:
         """A mount table with one row: `path`'s device mounted as `fstype` (as WSL2 shows drvfs)."""
@@ -14746,6 +15682,259 @@ class Lane(Base):
         self.assertEqual(env["K6_CONFIG"], str(context.runtime_dir(task) / "k6.json"))
         self.assertEqual(json.loads(Path(env["K6_CONFIG"]).read_text()), {})
 
+    # #1197 (2026-11-24): the lane left TCP open, so an agent reached a Docker API on 2375 (root
+    # on the host) or a debugger's port, and #993 only warned. Landlock lists the ports allowed,
+    # so the lane allows every port but the denied ones.
+    @unittest.skipUnless(lane.abi() >= context.NET_ABI, "needs Landlock's TCP rule (ABI 4)")
+    def test_the_lane_refuses_a_tcp_connect_to_a_denied_port_and_no_other(self):
+        import socket
+        probe = ("import socket, sys\nfor fam, host, port in ((socket.AF_INET, '127.0.0.1', "
+                 "int(sys.argv[1])), (socket.AF_INET, '127.0.0.1', int(sys.argv[2])), "
+                 "(socket.AF_INET6, '::1', int(sys.argv[3]))):\n    s = socket.socket(fam)\n"
+                 "    try:\n        s.connect((host, port))\n        print('ok')\n"
+                 "    except PermissionError:\n        print('refused')\n"
+                 "    except OSError as e:\n        print(e.errno)\n"
+                 "b = socket.socket(); b.bind(('127.0.0.2', int(sys.argv[2])))\n"
+                 "print('bound')\n")
+        with socket.socket() as open_, socket.socket() as denied, \
+                socket.socket(socket.AF_INET6) as denied6:
+            for s, host in ((open_, "127.0.0.1"), (denied, "127.0.0.1")):
+                s.bind((host, 0))
+                s.listen()
+            port = denied.getsockname()[1]
+            try:
+                denied6.bind(("::1", port))
+                denied6.listen()
+            except OSError:
+                self.skipTest("no IPv6 loopback")
+            inside = Path(self.tmp.name) / "inside"
+            inside.mkdir()
+            out = subprocess.run(lane.wrap([str(inside)], [sys.executable, "-c", probe,
+                                           str(open_.getsockname()[1]), str(port), str(port)],
+                                           deny_ports=[port]),
+                                 capture_output=True, text=True, timeout=30)
+        # the test's own server connects, the denied port is refused on either family, and
+        # binding stays free
+        self.assertEqual(out.stdout.split(), ["ok", "refused", "refused", "bound"], out.stderr)
+
+    def test_the_lane_denies_the_local_daemons_ports_less_the_grants_and_the_rounds_own(self):
+        task = self.bare_task("t-ports", self.repo)
+        denied = context.deny_ports(task)
+        self.assertEqual(denied, sorted(context.DAEMON_PORTS))
+        self.assertTrue({2375, 9222, 9229} <= set(denied))       # listening or not
+        context.grant(task, "ports", [9229])
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"ports": [2375]}))
+        self.assertEqual(context.granted_ports(task), {2375, 9229})
+        self.assertNotIn(2375, context.deny_ports(None))         # the user's, for every task
+        self.assertEqual(set(context.deny_ports(task, keep=[5037, None])),
+                         set(context.DAEMON_PORTS) - {2375, 9229, 5037})
+        # the model server's and the keyhole's ports stay open with no grant: runner.lane_ports
+        m = mock.Mock(base_url="http://127.0.0.1:3333/v1")
+        kh = mock.Mock(port=2331, task=task)
+        with mock.patch.dict(runner.CURRENT, {"model": m, "keyhole": kh}):
+            self.assertEqual(runner.lane_ports(task), [2376, 5037, 9222])
+        self.assertEqual(context.url_port("https://api.example/v1"), 443)
+        self.assertIsNone(context.url_port("http://h:notaport/"))
+        argv = lane.wrap(["/x"], ["opencode"], deny_ports=[9229, 2375])
+        self.assertEqual(argv[argv.index("--") - 4:argv.index("--")],
+                         ["--deny-port", "2375", "--deny-port", "9229"])
+        self.assertNotIn("--deny-port", lane.wrap(["/x"], ["opencode"]))
+        self.assertEqual(lane.wrap(None, ["opencode"], deny_ports=[9229]), ["opencode"])
+        for bad in ([0], ["9229"], [True], 9229):                 # refused, not read as none
+            Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"ports": bad}))
+            with self.assertRaisesRegex(RuntimeError, '"ports" must be a list of TCP port'):
+                context.commands_conf()
+
+    @unittest.skipUnless(lane.abi() >= context.NET_ABI, "needs Landlock's TCP rule (ABI 4)")
+    def test_the_tests_run_in_a_lane_that_refuses_the_denied_ports(self):
+        import socket
+        self.start("t-tcp", "ok")
+        wait_phase("t-tcp", {"review"})
+        task = store.Task("t-tcp")
+        with socket.socket() as srv:
+            srv.bind(("127.0.0.1", 0))
+            srv.listen()
+            port = srv.getsockname()[1]
+            cmd = (f"{shlex.quote(sys.executable)} -c \"import socket; "
+                   f"socket.create_connection(('127.0.0.1', {port}), 5); print('reached')\"")
+            with mock.patch.dict(context.DAEMON_PORTS, {port: "a test daemon"}):
+                code, text = runner.run_in_lane(task, cmd, 30)
+                self.assertNotEqual(code, 0)
+                self.assertIn("Permission denied", text)
+                context.grant(task, "ports", [port])              # wb allow --port
+                self.assertEqual(runner.run_in_lane(task, cmd, 30), (0, "reached\n"))
+
+    def test_a_port_request_names_wb_allow_port_and_wb_allow_grants_it(self):
+        task = self.bare_task("t-port", self.repo)
+        q = lambda p: {"question": "the suite drives Chrome", "command": "", "path": "",
+                       "port": p, "context": ""}
+        body = ask_mcp.notice(task, "q1", q("9222"))
+        self.assertTrue(body.startswith("PERMISSION to connect to TCP port 9222 (outside its lane)"))
+        self.assertIn("Chrome's DevTools", body)
+        self.assertIn("wb allow t-port --port 9222", body)
+        body = ask_mcp.notice(task, "q2", q("8080"))               # not one the lane refuses
+        self.assertIn("no grant lifts it", body)
+        self.assertNotIn("wb allow", body)
+        self.assertEqual(ask_mcp._judge(task, q("9222"), {}), ("p", None))
+        for bad in ("0", "65536", "80; rm", "９２２２"):
+            self.assertEqual(ask_mcp._judge(task, q(bad), {})[0], "x", bad)
+        task.set_status(phase="review")
+        self.assertIn("allowed TCP port 9229 on t-port", run_wb("allow", "t-port", "--port", "9229"))
+        self.assertEqual(context.grants(task)["ports"], [9229])
+        run_wb("allow", "t-port", "--port", "2375", "--always")
+        self.assertEqual(json.loads(Path(os.environ["WB_COMMANDS"]).read_text())["ports"], [2375])
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(err):
+            run_wb("allow", "t-port", "--port", "8080")          # nothing to lift
+        self.assertIn("doesn't refuse TCP port 8080", err.getvalue())
+        self.assertNotIn(8080, context.grants(task)["ports"])
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            run_wb("allow", "t-port", "--port", "http")
+
+    @unittest.skipUnless(lane.abi() >= context.NET_ABI, "needs Landlock's TCP rule (ABI 4)")
+    def test_an_abi_4_lane_packs_the_net_field_without_scopes_and_still_refuses_the_port(self):
+        # ABI 4-5's ruleset attr is 16 bytes (no `scoped`): drawn as an ABI 4 kernel would be
+        # asked, on this newer one, which takes the shorter struct
+        script = ("import socket, sys; sys.path.insert(0, sys.argv[1]); from workbench import lane\n"
+                  "srv = socket.socket(); srv.bind(('127.0.0.1', 0)); srv.listen()\n"
+                  "port = srv.getsockname()[1]\n"
+                  "lane.abi = lambda: 4; lane.restrict([sys.argv[2]], deny_ports=[port])\n"
+                  "try:\n    socket.create_connection(('127.0.0.1', port), 5); print('ok')\n"
+                  "except PermissionError:\n    print('refused')\n")
+        out = subprocess.run([sys.executable, "-c", script, str(ROOT), self.tmp.name],
+                             capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.stdout.split(), ["refused"], out.stderr)
+
+    @unittest.skipUnless(lane.abi() >= context.NET_ABI, "needs Landlock's TCP rule (ABI 4)")
+    def test_doctor_checks_the_lane_refuses_a_denied_port(self):
+        self.assertEqual(cli._tcp_refused(), (True, ""))
+        with mock.patch.object(lane, "wrap", lambda w, cmd, *a, **k: cmd):   # no lane at all
+            held, why = cli._tcp_refused()
+        self.assertFalse(held)
+        self.assertEqual(why, "the connect went through")
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"ports": [9229]}))
+        buf = io.StringIO()
+        with redirect_stdout(buf), contextlib.suppress(SystemExit):
+            cli.main(["doctor"])
+        n = len(context.DAEMON_PORTS) - 1
+        self.assertIn(f"ok  local daemons' TCP ports are out of the lane ({n} ports)", buf.getvalue())
+        # an MPTCP socket that connects is named (the lane's seccomp filter left out)
+        real = lane.wrap
+        no_filter = ("import sys; sys.path.insert(0, sys.argv[1]); from workbench import lane; "
+                     "lane.refuse_unseen_streams = lambda libc: None; lane.main(sys.argv[2:])")
+        if _mptcp_here():
+            with mock.patch.object(lane, "wrap", lambda *a, **k: [
+                    sys.executable, "-c", no_filter, str(ROOT), *real(*a, **k)[3:]]):
+                self.assertEqual(cli._tcp_refused(), (False, "an MPTCP socket connected"))
+
+    # #1197's review (2026-11-24): Landlock's TCP rule doesn't cover an MPTCP socket (protocol
+    # 262), which connected to a denied port and carried a full request and reply on Linux 7.2,
+    # ABI 10; the lane's seccomp filter refuses making one, as a kernel without MPTCP does
+    @unittest.skipUnless(lane.abi() >= context.NET_ABI, "needs Landlock's TCP rule (ABI 4)")
+    def test_an_mptcp_socket_to_a_denied_port_is_refused_as_a_plain_tcp_one_is(self):
+        probe = ("import ctypes, socket, sys\nport = int(sys.argv[1])\n"
+                 "for proto in (0, 262):\n    try:\n"
+                 "        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM, proto)\n"
+                 "        s.settimeout(5); s.connect(('127.0.0.1', port)); s.sendall(b'GET /')\n"
+                 "        print('got', s.recv(64))\n"
+                 "    except OSError as e:\n        print(e.errno)\n"
+                 "libc = ctypes.CDLL(None, use_errno=True)\n"
+                 "r = libc.syscall(425, 4, ctypes.create_string_buffer(120))\n"
+                 "print('uring', ctypes.get_errno() if r < 0 else 'made')\n"
+                 "socket.socket(socket.AF_INET, socket.SOCK_DGRAM).close(); print('udp')\n")
+        with socket.socket() as srv:
+            srv.bind(("127.0.0.1", 0))
+            srv.listen()
+            port = srv.getsockname()[1]
+            stop = threading.Event()
+
+            def echo():
+                srv.settimeout(0.2)
+                while not stop.is_set():
+                    try:
+                        c, _ = srv.accept()
+                    except OSError:
+                        continue
+                    with c:
+                        c.sendall(b"echo:" + c.recv(64))
+            t = threading.Thread(target=echo, daemon=True)
+            t.start()
+            inside = Path(self.tmp.name) / "inside"
+            inside.mkdir()
+            try:
+                run = lambda deny: subprocess.run(  # noqa: E731
+                    lane.wrap([str(inside)], [sys.executable, "-c", probe, str(port)],
+                              deny_ports=deny), capture_output=True, text=True, timeout=30)
+                out, free = run([port]), run([])
+            finally:
+                stop.set()
+                t.join()
+        # refused: plain TCP by Landlock, MPTCP's socket by the filter, io_uring (which makes
+        # sockets with no socket(2) to filter) as where it's off; UDP as it was
+        self.assertEqual(out.stdout.splitlines(), [str(errno.EACCES), str(errno.EPROTONOSUPPORT),
+                                                   f"uring {errno.ENOSYS}", "udp"], out.stderr)
+        # with no port to refuse there's no filter: the same probe reaches the server
+        got = "got b'echo:GET /'"
+        self.assertEqual(free.stdout.splitlines()[0], got, free.stderr)
+        if _mptcp_here():  # what the filter closes: an MPTCP socket reached it past the lane
+            self.assertEqual(free.stdout.splitlines()[1], got, free.stderr)
+
+    @unittest.skipUnless(sys.platform.startswith("linux")
+                         and platform.machine().lower() in lane.UNIFIED, "seccomp on Linux")
+    def test_the_stream_filter_refuses_mptcp_smc_and_io_uring_and_nothing_else(self):
+        # the filter alone (no-new-privileges, no Landlock), so a kernel before ABI 4 checks it
+        script = ("import ctypes, socket, sys; sys.path.insert(0, sys.argv[1]); "
+                  "from workbench import lane\nlibc = ctypes.CDLL(None, use_errno=True)\n"
+                  "libc.prctl(lane.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); "
+                  "lane.refuse_unseen_streams(libc)\n"
+                  "for args in ((2, 1, 262), (10, 1, 262), (2, 1, 256), (43, 1, 0), (2, 1, 0), "
+                  "(10, 1, 0), (2, 2, 0), (1, 1, 0)):\n    try:\n"
+                  "        socket.socket(*args).close(); print('ok')\n"
+                  "    except OSError as e:\n        print(e.errno)\n"
+                  "r = libc.syscall(425, 4, ctypes.create_string_buffer(120))\n"
+                  "print(ctypes.get_errno() if r < 0 else 'made')\n")
+        out = subprocess.run([sys.executable, "-c", script, str(ROOT)], capture_output=True,
+                             text=True, timeout=20)
+        no_proto, no_af = str(errno.EPROTONOSUPPORT), str(errno.EAFNOSUPPORT)
+        self.assertEqual(out.stdout.split(), [no_proto, no_proto, no_proto, no_af, "ok", "ok",
+                                              "ok", "ok", str(errno.ENOSYS)], out.stderr)
+        code = lane.stream_filter()
+        self.assertEqual(len(code) % 8, 0)
+        self.assertLess(len(code) // 8, 4096)                   # BPF_MAXINSNS
+
+    # #1197's review: nothing checked the round, the main path, got the refusal: run_round's
+    # lane and the transcript's reads could drop the ports and every test still passed
+    @unittest.skipUnless(lane.abi() >= context.NET_ABI, "needs Landlock's TCP rule (ABI 4)")
+    def test_the_agents_round_and_the_transcripts_reads_are_refused_the_denied_ports(self):
+        port = 2331                                      # J-Link's: no listener needed, a refusal
+        self.assertIn(port, context.DAEMON_PORTS)        # is EACCES before any packet is sent
+        runs = Path(self.tmp.name) / "runs.jsonl"
+        os.environ.update(FAKE_RUNS=str(runs), FAKE_CONNECT=str(port))
+        self.start("t-round-tcp", "ok")
+        wait_phase("t-round-tcp", {"review"})
+        rows = [json.loads(x) for x in runs.read_text().splitlines()]
+        self.assertEqual([r["connect"] for r in rows], [errno.EACCES])
+        task = store.Task("t-round-tcp")
+        probe = [sys.executable, "-c", "import socket\ntry:\n socket.create_connection("
+                 f"('127.0.0.1', {port}), 5); print('ok')\nexcept OSError as e:\n print(e.errno)"]
+        env, wrap = transcript.stores(task)[0]
+        out = subprocess.run(wrap(probe), capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.stdout.split(), [str(errno.EACCES)], out.stderr)
+        context.grant(task, "ports", [port])              # wb allow --port: lifted for both
+        env, wrap = transcript.stores(task)[0]
+        out = subprocess.run(wrap(probe), capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(out.stdout.split(), [str(errno.EACCES)], out.stderr)
+        self.assertNotIn(port, runner.lane_ports(task))
+
+
+def _mptcp_here() -> bool:
+    """Whether this kernel makes MPTCP sockets (net.mptcp.enabled)."""
+    try:
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM, 262).close()
+        return True
+    except OSError:
+        return False
+
 
 class CheckoutVenv(Base):
     """#490 (the audit of 1.90): the user's activated venv, when it is their checkout's, stays out
@@ -14822,10 +16011,10 @@ class CheckoutVenv(Base):
         # none active: pip installs where Landlock bounds it, else it asks
         rules = context.shell_rules(task)
         self.assertEqual(Permission.verdict(rules, "pip install -e ."),
-                         "allow" if lane.abi() else "deny")
+                         "allow" if lane.held() else "deny")
         # pipenv makes its own venv in the worktree: no lane needed for that (#950)
         self.assertEqual(Permission.verdict(rules, "pipenv install"), "allow")
-        with mock.patch.object(lane, "abi", return_value=0):
+        with mock.patch.object(lane, "kind", return_value=None):
             self.assertEqual(Permission.verdict(context.shell_rules(task), "pipenv install"), "allow")
 
     def test_the_venv_note_advises_uv_sync_locked_only_where_the_base_commits_a_uv_lock(self):
@@ -16449,6 +17638,200 @@ with wave.open(out, 'wb') as w:
     w.writeframes(b''.join(struct.pack('<h', 0 if i / rate < 0.2 or 0.6 < i / rate < 1.8 else
                                        int(9000 * math.sin(i / 3))) for i in range(int(rate * secs))))
 """
+
+
+class ImageInput(Base):
+    """--image (#1199): Claude's chosen image goes to the agent through OpenCode's own `run -f`,
+    only for a model that takes images, once per session."""
+    MIMO = "mimo-v2.6:9b-q8_0"
+
+    def declare(self, inputs):
+        """The test model's OpenCode entry with `modalities.input` (None: no declaration)."""
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        entry = cfg["provider"]["ollama"]["models"][self.MIMO]
+        entry.pop("modalities", None)
+        if inputs is not None:
+            entry["modalities"] = {"input": inputs, "output": ["text"]}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+
+    def picture(self, name, data=None):
+        path = Path(self.tmp.name) / name
+        path.write_bytes(data if data is not None else image_png(4, 3))
+        return path
+
+    def refused(self, *argv) -> str:
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as e, redirect_stderr(err), redirect_stdout(io.StringIO()):
+            cli.main(list(argv))
+        self.assertEqual(e.exception.code, 1)
+        return err.getvalue()
+
+    def runs(self):
+        return [json.loads(l) for l in self.runs_file.read_text().splitlines()]
+
+    def setUp(self):
+        super().setUp()
+        self.runs_file = Path(self.tmp.name) / "runs.jsonl"
+        os.environ["FAKE_RUNS"] = str(self.runs_file)
+
+    def test_an_image_goes_with_the_first_round_and_a_feedback_image_with_its_own_alone(self):
+        self.declare(["text", "image"])
+        shot = self.picture("My Mockup (v2).PNG")
+        out = self.start("t-img", "ok", "--image", str(shot))
+        self.assertIn("images: 1-My-Mockup-v2.png go with the agent's message", out)
+        wait_phase("t-img", {"review"})
+        task = store.Task("t-img")
+        kept = task.dir / "images" / "1-My-Mockup-v2.png"
+        self.assertEqual(kept.read_bytes(), shot.read_bytes())   # a copy, its type's extension
+        first = self.runs()[0]
+        self.assertEqual(first["files"], [{"name": kept.name, "bytes": len(shot.read_bytes())}])
+        self.assertIn(f"Attached: {kept.name}, the image Claude gave you", first["prompt"])
+        self.assertIn(f"read it in {task.dir / 'images'}.", first["prompt"])
+        self.assertNotIn("images", run_wb("diff", "t-img"))       # never in the worktree
+        # a continued session has the image in its history: never sent again
+        run_wb("feedback", "t-img", "--text", "Tidy it.")
+        wait_phase("t-img", {"review"})
+        second = self.runs()[1]
+        self.assertTrue(second["session"])
+        self.assertEqual(second["files"], [])
+        self.assertNotIn("Attached:", second["prompt"])
+        # a feedback's image goes with its round, alone
+        err = self.picture("error.jpg", b"\xff\xd8\xff\xe0" + b"\0" * 64)
+        out = run_wb("feedback", "t-img", "--text", "Fix what this shows.", "--image", str(err))
+        self.assertIn("images: 2-error.jpg go with", out)
+        wait_phase("t-img", {"review"})
+        third = self.runs()[2]
+        self.assertTrue(third["session"])
+        self.assertEqual([f["name"] for f in third["files"]], ["2-error.jpg"])
+        self.assertEqual([(r["file"], r["round"]) for r in task.status["images"]],
+                         [("1-My-Mockup-v2.png", 1), ("2-error.jpg", 3)])
+
+    def test_a_fresh_session_gets_every_image_again(self):
+        self.declare(["text", "image"])
+        self.start("t-fresh", "ok", "--image", str(self.picture("a.png")))
+        wait_phase("t-fresh", {"review"})
+        run_wb("feedback", "t-fresh", "--text", "Again, from the start.", "--fresh",
+               "--image", str(self.picture("b.webp", b"RIFF\0\0\0\0WEBPVP8 " + b"\0" * 32)))
+        wait_phase("t-fresh", {"review"})
+        last = self.runs()[-1]
+        self.assertFalse(last["session"])
+        self.assertEqual([f["name"] for f in last["files"]], ["1-a.png", "2-b.webp"])
+        self.assertIn("Attached: 1-a.png, 2-b.webp, the images Claude gave you", last["prompt"])
+
+    def test_wb_next_sends_its_image_with_the_next_step(self):
+        self.declare(["text", "image"])
+        self.start("t-step", "ok")
+        wait_phase("t-step", {"review"})
+        nxt = Path(self.tmp.name) / "next.md"
+        nxt.write_text("Now match the mockup.\n")
+        out = run_wb("next", "t-step", "--spec", str(nxt), "-m", "feat: answer",
+                     "--image", str(self.picture("mock.gif", b"GIF89a" + b"\0" * 32)))
+        self.assertIn("images: 1-mock.gif go with", out)
+        wait_phase("t-step", {"review"})
+        self.assertEqual(self.runs()[0]["files"], [])
+        self.assertEqual([f["name"] for f in self.runs()[-1]["files"]], ["1-mock.gif"])
+
+    def test_a_text_only_model_is_refused_in_one_line_before_anything_is_written(self):
+        self.declare(["text"])
+        why = self.refused("start", "t-text", "--spec", str(self.spec), "--repo", str(self.repo),
+                           "--model", "mimo", "--image", str(self.picture("m.png")))
+        self.assertIn(f"ollama/{self.MIMO} takes no image input: describe the image in the spec", why)
+        self.assertNotIn("--model", why)                           # never another model
+        self.assertFalse(store.Task("t-text").dir.exists())
+
+    def test_an_undeclared_model_is_asked_of_ollama_and_another_server_is_unknown(self):
+        self.declare(None)
+        shot = str(self.picture("m.png"))
+        argv = ["start", "t-und", "--spec", str(self.spec), "--repo", str(self.repo), "--model", "mimo",
+                "--image", shot]
+        # the fake Ollama's /api/show says tools and thinking, no vision
+        self.assertIn("takes no image input", self.refused(*argv))
+        with mock.patch.object(runner.models, "ollama_show",
+                               return_value={"capabilities": ["tools", "vision"]}) as show:
+            os.environ["FAKE_SCENARIO"] = "ok"
+            self.assertIn("images: 1-m.png", run_wb(*argv))
+        self.assertEqual(show.call_args.args[1], self.MIMO)
+        wait_phase("t-und", {"review"})
+        self.assertIn("doesn't say it takes image input", self.refused(
+            "start", "t-srv", "--spec", str(self.spec), "--repo", str(self.repo), "--model", "strata",
+            "--image", shot))
+
+    def test_a_file_that_is_no_image_too_big_or_too_many_is_refused(self):
+        self.declare(["text", "image"])
+        base = ["start", "t-bad", "--spec", str(self.spec), "--repo", str(self.repo), "--model", "mimo"]
+        self.assertIn("not a PNG, JPEG, GIF or WebP image", self.refused(
+            *base, "--image", str(self.picture("notes.png", b"just text, named .png"))))
+        big = self.picture("big.png")
+        with big.open("r+b") as fh:
+            fh.truncate(cli.IMAGE_BYTES + 1)                       # OpenCode's 10 MiB, plus one
+        self.assertIn("over OpenCode's 10 MiB", self.refused(*base, "--image", str(big)))
+        self.assertIn("no such file", self.refused(*base, "--image", str(Path(self.tmp.name) / "gone.png")))
+        self.assertIn("not a file", self.refused(*base, "--image", self.tmp.name))
+        five = [x for i in range(5) for x in ("--image", str(self.picture(f"{i}.png")))]
+        self.assertIn("at most 4 images", self.refused(*base, *five))
+        # #1199's review (2026-11-24): two at 10 MiB each pass every check above, but their 26.7
+        # MiB of base64 passes OpenCode's 25 MiB, and it drops the older from every request unsaid
+        two = []
+        for name in ("a.png", "b.png"):
+            with (pic := self.picture(name)).open("r+b") as fh:
+                fh.truncate(cli.IMAGE_BYTES)
+            two += ["--image", str(pic)]
+        self.assertIn("20.0 MiB of images on this task, over 8 MiB in all", self.refused(*base, *two))
+        self.assertFalse(store.Task("t-bad").dir.exists())
+
+    def test_a_feedback_image_for_a_text_only_model_is_refused_and_no_round_written(self):
+        self.declare(["text", "image"])
+        self.start("t-later", "ok")
+        wait_phase("t-later", {"review"})
+        self.declare(["text"])
+        self.assertIn("takes no image input", self.refused(
+            "feedback", "t-later", "--text", "See this.", "--image", str(self.picture("m.png"))))
+        self.assertEqual(store.Task("t-later").status["round"], 1)
+        self.assertFalse((store.Task("t-later").dir / "images").exists())
+
+    def test_the_agents_read_tool_may_open_the_images_again(self):
+        self.declare(["text", "image"])
+        self.start("t-read", "ok", "--image", str(self.picture("m.png")))
+        wait_phase("t-read", {"review"})
+        task = store.Task("t-read")
+        if context.writable(task) is None:
+            self.skipTest("the lane is off: external_directory allows everything")
+        allowed = {r["resource"] for r in context.external_rules(task) if r["effect"] == "allow"}
+        self.assertIn(f"{task.dir / 'images'}/*", allowed)
+
+    def test_model_add_writes_what_ollama_says_it_reads_in_each_configs_shape(self):
+        cfg_path = Path(os.environ["WB_OPENCODE_CONFIG"])
+        with mock.patch.object(runner.models, "ollama_show", return_value={
+                "capabilities": ["completion", "tools", "vision"], "context_length": None, "num_ctx": None}):
+            out = run_wb("model", "add", "ollama/eyes:8b", "--context", "32768")
+        self.assertIn("images, 32K context", out)
+        entry = json.loads(cfg_path.read_text())["provider"]["ollama"]["models"]["eyes:8b"]
+        self.assertEqual(entry["modalities"], {"input": ["text", "image"], "output": ["text"]})
+        run_wb("model", "add", "ollama/blind:8b", "--context", "32768")   # the fake: no vision
+        entry = json.loads(cfg_path.read_text())["provider"]["ollama"]["models"]["blind:8b"]
+        self.assertEqual(entry["modalities"]["input"], ["text"])
+        self.assertIs(runner.models.takes_images(runner.models.discover()["ollama/blind:8b"]), False)
+        # a V2 config (`providers`) reads `capabilities.input`, and would drop `modalities` unsaid
+        cfg_path.write_text(json.dumps({"providers": {"ollama": {
+            "settings": {"baseURL": "http://127.0.0.1:11434/v1"},
+            "models": {"eyes:8b": {"capabilities": {"tools": True}}}}}}))
+        with mock.patch.object(runner.models, "ollama_show", return_value={
+                "capabilities": ["tools", "vision"], "context_length": None, "num_ctx": None}):
+            run_wb("model", "add", "ollama/eyes:8b", "--context", "32768")
+        entry = json.loads(cfg_path.read_text())["providers"]["ollama"]["models"]["eyes:8b"]
+        self.assertNotIn("modalities", entry)
+        self.assertEqual(entry["capabilities"], {"tools": True, "input": ["text", "image"], "output": ["text"]})
+        self.assertIs(runner.models.takes_images(runner.models.discover()["ollama/eyes:8b"]), True)
+
+    def test_takes_images_reads_the_catalog_for_an_api_model_and_v2_capabilities(self):
+        api = runner.models.Model(id="p/m", provider="p", name="m", base_url="https://x/v1",
+                                  engine="api", label="m", kind="api",
+                                  config={"capabilities": {"tools": True, "input": ["text", "image"]}})
+        self.assertIs(runner.models.takes_images(api), True)
+        api.config = {"capabilities": {"input": ["text"]}}
+        self.assertIs(runner.models.takes_images(api), False)
+        api.config = {}
+        self.assertIsNone(runner.models.takes_images(api))         # never asks Ollama for an API model
 
 
 class Audio(Base):
@@ -18729,6 +20112,35 @@ class Bench(Base):
         self.assertEqual(argv[argv.index("--setup") + 1], "mkdir -p deps && touch deps/stamp")
         self.assertEqual(argv[argv.index("--allow") + 1], "make check*")
 
+    def test_a_case_keeps_the_tasks_port_grants_and_each_replay_starts_with_them(self):
+        # #1197's review (2026-11-24): bench add kept `allow` and `paths` only, and wb start had
+        # no port option, so a case whose tests needed `wb allow --port` passed its checks
+        # (under the task's own name) and failed every replay with the port refused
+        from workbench import bench
+        self.start("t-cdp", "ok", "--test", "sh tests/check.sh")
+        wait_phase("t-cdp", {"review"})
+        wt = store.Task("t-cdp").worktree
+        (wt / "tests").mkdir()
+        (wt / "tests" / "check.sh").write_text("grep -qx 42 answer.txt\n")
+        run_wb("allow", "t-cdp", "--port", "9222")
+        run_wb("accept", "t-cdp", "-m", "feat: the answer")
+        run_wb("bench", "add", "t-cdp")
+        case = bench.cases()["t-cdp"]
+        self.assertEqual(case["ports"], [9222])
+        argv = []
+        with mock.patch.object(cli, "parser") as parser:
+            parser.return_value.parse_args.side_effect = lambda a: argv.extend(a) or mock.Mock()
+            bench._start_task(case, "m", "bench-x", Path(self.tmp.name), [], {})
+        self.assertEqual(argv[argv.index("--allow-port") + 1], "9222")
+        self.assertEqual(cli.parser().parse_args(argv).allow_port, [9222])
+        # and wb start grants it, so the replay's lane lets its tests connect
+        self.start("t-replayed", "ok", "--allow-port", "9222", "--allow-port", "9222")
+        replayed = store.Task("t-replayed")
+        self.assertEqual(context.grants(replayed)["ports"], [9222])
+        self.assertNotIn(9222, context.deny_ports(replayed))
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            self.start("t-badport", "ok", "--allow-port", "http")
+
     def test_a_replay_keeps_the_tasks_setup_limit_and_its_gpu_for_tests(self):
         # #735 (the 2026-11-21 audit): each replay's wb start got --setup without
         # --setup-timeout, so a long build stopped at 1800 s on every run, and lost
@@ -20517,6 +21929,323 @@ class Backlog(Base):
         self.start("t-n4", "ok", "--backlog", f"overnight-{time.strftime('%Y-%m-%d')}")
         self.assertTrue(store.Task("t-n4").exists)
 
+class ScheduledRuns(Base):
+    """Scheduled runs (#1204): wb start --after holds a task until its time; wb schedule writes the
+    user's timer, whose fire runs Claude headless on a backlog file and keeps a run history."""
+
+    def setUp(self):
+        super().setUp()
+        tmp = Path(self.tmp.name)
+        self.bin = tmp / "sched-bin"
+        self.bin.mkdir()
+        self.calls = tmp / "systemctl-calls"
+        # a systemctl that logs each call, exiting FAKE_SYSTEMCTL_EXIT (0): never the user's manager
+        (self.bin / "systemctl").write_text('#!/bin/sh\necho "$*" >> "$FAKE_SYSTEMCTL_LOG"\n'
+                                            'exit "${FAKE_SYSTEMCTL_EXIT:-0}"\n')
+        # a claude that records its argv and environment, and prints a result as claude -p does
+        (self.bin / "claude").write_text(textwrap.dedent(f"""\
+            #!{sys.executable}
+            import json, os, sys
+            if os.environ.get("FAKE_CLAUDE_TASK"):  # a task headless Claude starts in its batch
+                import re, time
+                sys.path.insert(0, {str(ROOT)!r})
+                from workbench import store
+                batch = re.search(r"--backlog ([a-z0-9-]+)", sys.argv[-1])[1]
+                t = store.Task(os.environ["FAKE_CLAUDE_TASK"])
+                store.write_json(t.dir / "task.json", {{"name": t.name, "backlog": batch, "created_at": time.time()}})
+                t.set_status(phase="review")
+            with open(os.environ["FAKE_CLAUDE_LOG"], "w") as f:
+                json.dump({{"argv": sys.argv[1:], "cwd": os.getcwd(),
+                           "env": {{k: os.environ.get(k) for k in ("WB_SCHEDULE", "CLAUDECODE",
+                                                                  "CLAUDE_CODE_SESSION_ID", "WB_HOME")}}}}, f)
+            print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "num_turns": 7,
+                              "usage": {{"input_tokens": 100, "output_tokens": 2000,
+                                        "cache_read_input_tokens": 50000, "cache_creation_input_tokens": 3000}}}}))
+            """))
+        for p in self.bin.iterdir():
+            p.chmod(0o755)
+        os.environ.update(PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}", FAKE_SYSTEMCTL_LOG=str(self.calls),
+                          FAKE_CLAUDE_LOG=str(tmp / "claude-call.json"), XDG_CONFIG_HOME=str(tmp / "xdg"))
+        self.backlog = tmp / "backlog.md"
+        self.backlog.write_text("Fix issues #1 and #2.\n")
+        awake = mock.patch.object(cli, "keep_awake", return_value=False)  # no inhibitor on the test's pid
+        awake.start()
+        self.addCleanup(awake.stop)
+
+    def fire(self, name="night") -> int:
+        from workbench import schedule
+        with redirect_stdout(io.StringIO()):
+            return schedule.fire(name)
+
+    def add(self, name="night", at="Sun 02:00", *extra):
+        return run_wb("schedule", "add", name, "--file", str(self.backlog), "--repo", str(self.repo),
+                      "--at", at, *extra)
+
+    def test_after_is_the_next_such_local_time(self):
+        now = time.mktime((2026, 11, 24, 23, 30, 0, 0, 0, -1))
+        self.assertEqual(cli.after_time("23:45", now), now + 15 * 60)
+        self.assertEqual(time.localtime(cli.after_time("02:00", now))[:5], (2026, 11, 25, 2, 0))
+        self.assertEqual(time.localtime(cli.after_time("23:30", now)).tm_mday, 25)  # now is not ahead
+        for bad in ("24:00", "2:5", "2am", ""):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                cli.after_time(bad, now)
+
+    def test_a_task_started_after_a_time_waits_queued_before_its_checkout_and_holds_no_gpu(self):
+        at = time.strftime("%H:%M", time.localtime(time.time() + 7200))
+        out = self.start("t-later", "ok", "--test", TEST_CMD, "--after", at)
+        self.assertIn(f"note: held until {at}", out.replace("Mon ", "").replace("Tue ", ""))
+        task = store.Task("t-later")
+        self.assertGreater(task.spec["not_before"], time.time() + 3600)
+        deadline = time.time() + 20
+        while not (task.status.get("last") or "").startswith("waiting until") and time.time() < deadline:
+            time.sleep(POLL)
+        self.assertEqual(task.status["phase"], "queued")
+        self.assertIn("(--after)", task.status["last"])
+        self.assertFalse(task.worktree.exists())  # nothing before its time, the checkout neither
+        self.assertIsNotNone(runner.held_until(task))
+        # it holds nothing until then: a start now doesn't count it as on its way to the GPU
+        self.assertNotIn("task t-later", cli._gpu_holders())
+        # its time come (task.json read again on the change): it runs as any task
+        store.write_json(task.dir / "task.json", {**task.spec, "not_before": round(time.time()) - 1})
+        st = wait_phase("t-later", {"review"})
+        self.assertTrue(st["tests"]["ok"])
+        self.assertIsNone(runner.held_until(task))
+
+    def test_a_held_task_stops_as_any_queued_one_and_its_resume_holds_it_again(self):
+        at = time.strftime("%H:%M", time.localtime(time.time() + 7200))
+        self.start("t-held", "ok", "--after", at)
+        task = store.Task("t-held")
+        deadline = time.time() + 20
+        while not (task.status.get("last") or "").startswith("waiting until") and time.time() < deadline:
+            time.sleep(POLL)
+        run_wb("stop", "t-held")
+        self.assertEqual(task.status["phase"], "stuck")
+        run_wb("resume", "t-held")
+        deadline = time.time() + 20
+        while not (task.status.get("last") or "").startswith("waiting until") and time.time() < deadline:
+            time.sleep(POLL)
+        self.assertIn("(--after)", task.status["last"])
+        self.assertFalse(task.worktree.exists())
+        run_wb("stop", "t-held")
+
+    def test_at_takes_days_and_a_time_for_systemd_and_launchd_alike(self):
+        from workbench import schedule
+        got = schedule.parse_at("Mon..Fri 1:30")
+        self.assertEqual(got["calendar"], "Mon,Tue,Wed,Thu,Fri *-*-* 01:30:00")
+        self.assertEqual([w["Weekday"] for w in got["launchd"]], [1, 2, 3, 4, 5])
+        self.assertEqual(schedule.parse_at("daily 03:00")["launchd"], [{"Hour": 3, "Minute": 0}])
+        self.assertEqual(schedule.parse_at("Sat-Sun 02:05")["calendar"], "Sat,Sun *-*-* 02:05:00")
+        self.assertEqual(schedule.parse_at("sunday 02:00")["said"], "Sun 02:00")
+        with mock.patch.object(schedule, "_macos", return_value=True), \
+                self.assertRaises(schedule.ScheduleError):
+            schedule.parse_at("weekly")
+
+    def test_an_oncalendar_that_ends_in_a_time_goes_to_systemd_analyze_not_the_days_parser(self):
+        # the review of #1204: `*-*-* 02:00` was read as [DAYS] HH:MM, its front refused as days,
+        # and systemd's own forms the help names never reached systemd-analyze
+        from workbench import schedule
+        asked = []
+
+        def analyze(argv, **kw):
+            asked.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        with mock.patch.object(schedule.shutil, "which", lambda name, **kw: f"/usr/bin/{name}"), \
+                mock.patch.object(schedule.subprocess, "run", analyze):
+            for text in ("*-*-* 02:00", "*-*-01 03:00", "Mon *-*-* 02:00", "Mon..Fri *-*-* 01:30"):
+                self.assertEqual(schedule.parse_at(text), {"said": text, "calendar": text, "launchd": None})
+            self.assertEqual(schedule.parse_at("Mon..Fri 01:30")["calendar"], "Mon,Tue,Wed,Thu,Fri *-*-* 01:30:00")
+        self.assertEqual([a[2] for a in asked], ["*-*-* 02:00", "*-*-01 03:00", "Mon *-*-* 02:00",
+                                                 "Mon..Fri *-*-* 01:30"])
+        # on macOS there is no OnCalendar to fall to: the days' own reason
+        with mock.patch.object(schedule, "_macos", return_value=True), \
+                self.assertRaisesRegex(schedule.ScheduleError, "is not a day"):
+            schedule.parse_at("*-*-* 02:00")
+        if shutil.which("systemd-analyze"):  # the real one, where there is one
+            self.assertEqual(schedule.parse_at("*-*-* 02:00")["calendar"], "*-*-* 02:00")
+
+    def test_add_writes_a_persistent_user_timer_and_rm_takes_it_away(self):
+        from workbench import schedule
+        out = self.add("night", "Sun 02:00", "--max-turns", "50")
+        self.assertIn("scheduled night: Sun 02:00", out)
+        units = Path(os.environ["XDG_CONFIG_HOME"]) / "systemd" / "user"
+        timer = (units / "wb-schedule-night.timer").read_text()
+        self.assertIn("OnCalendar=Sun *-*-* 02:00:00\n", timer)
+        self.assertIn("Persistent=true\n", timer)
+        service = (units / "wb-schedule-night.service").read_text()
+        self.assertIn('"schedule" "fire" "night"', service)
+        self.assertIn(f'"{ROOT / "bin" / "wb"}"', service)
+        self.assertIn(f'Environment="PATH={os.environ["PATH"]}"', service)  # where claude was found
+        self.assertIn(f'Environment="WB_HOME={store.home()}"', service)
+        self.assertIn("KillMode=process", service)
+        self.assertEqual(self.calls.read_text().splitlines(),
+                         ["--user daemon-reload", "--user enable --now wb-schedule-night.timer"])
+        self.assertEqual(schedule.read("night")["max_turns"], 50)
+        self.assertEqual(run_wb("schedule", "list").splitlines()[1], "  never fired yet")
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            self.add("night")  # a name is one schedule
+        self.assertIn("removed schedule night", run_wb("schedule", "rm", "night"))
+        self.assertFalse((units / "wb-schedule-night.timer").exists())
+        self.assertIn("--user disable --now wb-schedule-night.timer", self.calls.read_text())
+        self.assertIn("no schedules", run_wb("schedule", "list"))
+
+    def test_a_user_manager_that_refuses_the_timer_leaves_nothing_behind(self):
+        from workbench import schedule
+        os.environ["FAKE_SYSTEMCTL_EXIT"] = "1"
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            self.add()
+        self.assertIn("no systemd user manager takes the timer here", err.getvalue())
+        self.assertIn("wb schedule fire night", err.getvalue())
+        self.assertEqual(list((Path(os.environ["XDG_CONFIG_HOME"]) / "systemd" / "user").iterdir()), [])
+        self.assertIsNone(schedule.read("night"))
+
+    def test_on_macos_add_writes_a_launchd_agent_with_its_calendar(self):
+        import plistlib
+        from workbench import schedule
+        home = Path(self.tmp.name) / "home"
+        (self.bin / "launchctl").write_text('#!/bin/sh\necho "launchctl $*" >> "$FAKE_SYSTEMCTL_LOG"\n')
+        (self.bin / "launchctl").chmod(0o755)
+        with mock.patch.object(schedule, "_macos", return_value=True), \
+                mock.patch.object(Path, "home", return_value=home):
+            self.add("night", "Sat,Sun 02:00")
+            plist = plistlib.loads((home / "Library/LaunchAgents/workbench.schedule.night.plist").read_bytes())
+            self.assertEqual(plist["StartCalendarInterval"], [{"Hour": 2, "Minute": 0, "Weekday": 6},
+                                                              {"Hour": 2, "Minute": 0, "Weekday": 0}])
+            self.assertEqual(plist["ProgramArguments"][-3:], ["schedule", "fire", "night"])
+            self.assertIn(f"launchctl bootstrap gui/{os.getuid()} ", self.calls.read_text())
+            run_wb("schedule", "rm", "night")
+            self.assertFalse((home / "Library/LaunchAgents/workbench.schedule.night.plist").exists())
+
+    def test_a_fire_runs_claude_headless_on_the_backlog_and_records_the_run(self):
+        from workbench import schedule
+        self.add()
+        os.environ.update(CLAUDECODE="1", CLAUDE_CODE_SESSION_ID="ses-day")  # fired from a session
+        batch = f"night-{time.strftime('%Y-%m-%d')}"
+        os.environ["FAKE_CLAUDE_TASK"] = "t-tonight"  # a task headless Claude starts in the batch
+        self.assertEqual(self.fire(), 0)
+        call = json.loads(Path(os.environ["FAKE_CLAUDE_LOG"]).read_text())
+        argv = call["argv"]
+        self.assertEqual(argv[:4], ["-p", "--output-format", "json", "--max-turns"])
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
+        self.assertEqual(argv[argv.index("--tools") + 1], "Bash,Read,Grep,Glob")
+        allowed = argv[argv.index("--allowedTools") + 1:argv.index("--disallowedTools")]
+        self.assertEqual(allowed, ["Bash(wb:*)", "Read", "Grep", "Glob"])
+        prompt = argv[argv.index("--") + 1]
+        self.assertIn("Fix issues #1 and #2.", prompt)
+        self.assertIn(f"--backlog {batch}", prompt)
+        self.assertIn(str(ROOT / "skill/workbench/SKILL.md"), prompt)
+        self.assertEqual(call["cwd"], str(self.repo))
+        # headless Claude's own: never the session it was fired from, and its wb accept never merges
+        self.assertEqual(call["env"], {"WB_SCHEDULE": "night", "CLAUDECODE": None,
+                                       "CLAUDE_CODE_SESSION_ID": None, "WB_HOME": str(store.home())})
+        row = schedule.runs("night")[-1]
+        self.assertEqual((row["outcome"], row["batch"]), ("ran", batch))
+        self.assertEqual(row["tasks"], [{"task": "t-tonight", "phase": "review"}])
+        self.assertEqual(row["claude"]["turns"], 7)
+        self.assertEqual(row["claude"]["cache_read"], 50000)
+        self.assertGreaterEqual(row["end"], row["ts"])
+        listed = run_wb("schedule", "list")
+        self.assertIn(f"ran · batch {batch} · 1 task(s) (1 review) · Claude 7 turns, 55K tokens", listed)
+        self.assertTrue(any(ok and "schedule night (Sun 02:00): last" in said
+                            for ok, said in schedule.doctor_lines()))
+
+    def test_a_fire_is_skipped_while_the_last_lives_and_without_room_for_api_money(self):
+        import fcntl
+        from workbench import schedule
+        self.add()
+        lock = schedule.lock_path("night")
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock, "a") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            self.assertEqual(self.fire(), 0)
+            self.assertIsNotNone(schedule.running("night"))
+        self.assertEqual(schedule.runs("night")[-1]["why"], "the last fire is still running")
+        self.assertFalse(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
+        # a role on API with no day cap: headless, nobody can be asked for one
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"roles": {"significant": {
+            "via": "api", "api": "deepinfra/x"}}}))
+        self.assertEqual(self.fire(), 0)
+        row = schedule.runs("night")[-1]
+        self.assertEqual(row["outcome"], "skipped")
+        self.assertIn("significant role", row["why"])
+        self.assertIn("skipped: significant role", run_wb("schedule", "list"))
+        self.assertFalse(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
+
+    def test_two_fires_on_one_day_each_get_a_batch_of_their_own(self):
+        # the review of #1204: every fire on a date was batch night-<date>, so a second one took
+        # the first's tasks (its row counted them again, its Claude was handed them to review),
+        # or, with them closed 6 h, had every wb start --backlog refused
+        from workbench import schedule
+        self.add()
+        day = f"night-{time.strftime('%Y-%m-%d')}"
+        os.environ["FAKE_CLAUDE_TASK"] = "t-first"
+        self.assertEqual(self.fire(), 0)
+        os.environ["FAKE_CLAUDE_TASK"] = "t-second"   # the first's task still open
+        self.assertEqual(self.fire(), 0)
+        first, second = schedule.runs("night")
+        self.assertEqual((first["batch"], first["tasks"]), (day, [{"task": "t-first", "phase": "review"}]))
+        self.assertEqual((second["batch"], second["tasks"]), (f"{day}-2", [{"task": "t-second", "phase": "review"}]))
+        prompt = json.loads(Path(os.environ["FAKE_CLAUDE_LOG"]).read_text())["argv"][-1]
+        self.assertIn(f"--backlog {day}-2.", prompt)
+        # both closed and 7 h old: the day's name is refused now, the next fire's is new
+        for n in ("t-first", "t-second"):
+            t = store.Task(n)
+            store.write_json(t.dir / "task.json", {**t.spec, "created_at": time.time() - 7 * 3600})
+            t.set_status(phase="accepted")
+        self.assertIsNotNone(cli._backlog_done(day))
+        os.environ.pop("FAKE_CLAUDE_TASK")
+        self.assertEqual(self.fire(), 0)
+        third = schedule.runs("night")[-1]
+        self.assertEqual((third["batch"], third["tasks"]), (f"{day}-3", []))
+        self.assertIsNone(cli._backlog_done(third["batch"]))
+        # a skip starts nothing, so its name is still free; the longest name's batch is a backlog name
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"roles": {"significant": {
+            "via": "api", "api": "deepseek/x"}}}))
+        self.assertEqual(self.fire(), 0)
+        self.assertEqual(schedule.runs("night")[-1]["outcome"], "skipped")
+        self.assertEqual(schedule.batch_name("night", time.time()), f"{day}-4")
+        self.assertTrue(store.NAME_RE.match(schedule.batch_name("n" * 34, time.time()) + "-99"))
+        self.assertFalse(schedule.NAME_RE.match("n" * 35))
+
+    def test_run_fires_now_in_the_background(self):
+        from workbench import schedule
+        self.add()
+        self.assertIn("fired night", run_wb("schedule", "run", "night"))
+        deadline = time.time() + 60
+        while not schedule.runs("night") and time.time() < deadline:
+            time.sleep(POLL)
+        self.assertEqual(schedule.runs("night")[-1]["outcome"], "ran")
+        self.assertTrue(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
+
+    def test_wait_on_a_backlog_takes_its_tasks_alone(self):
+        # headless Claude in the repo would otherwise take the daytime session's tasks there by
+        # directory, and review them
+        self.start("t-in", "ok", "--backlog", "night-b", "--queue")
+        self.start("t-day", "ok", "--queue")
+        for n in ("t-in", "t-day"):
+            wait_phase(n, {"review"})
+        self.assertTrue(run_wb("wait", "--backlog", "night-b", "--timeout", "5").startswith("[review] t-in"))
+        with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()):
+            run_wb("wait", "--backlog", "night-b", "--timeout", "1")
+        self.assertEqual(e.exception.code, 2)
+        self.assertNotIn("already delivered", run_wb("wait", "t-day", "--timeout", "2"))
+
+    def test_a_scheduled_runs_claude_accepts_but_never_merges(self):
+        os.environ["WB_SCHEDULE"] = "night"
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-any", "--merge", "-m", "feat: x")
+        self.assertIn("never merges", err.getvalue())
+
+    def test_doctor_says_when_a_schedules_unit_is_gone(self):
+        from workbench import schedule
+        self.add()
+        (Path(os.environ["XDG_CONFIG_HOME"]) / "systemd/user/wb-schedule-night.timer").unlink()
+        [(ok, said)] = schedule.doctor_lines()
+        self.assertFalse(ok)
+        self.assertIn("its unit is gone", said)
+
+
 class Notes(Base):
     def test_notes_about_the_user_are_kept_short_and_numbered(self):
         self.assertIn("no notes yet", run_wb("notes"))
@@ -21394,6 +23123,11 @@ class Verify(Base):
         self.assertIn("proven: it fails on the base and passes on the candidate", rep)
         self.assertIn("base: exit 1: AssertionError: 250000 != 250", rep)
         self.assertIn("/verify/1/{base,candidate}.txt", rep)               # each run's output
+        from workbench import chat                    # the web chat's task sheet says the same (#1201)
+        checks = chat.task_summary(store.Task("t"))["verify"]
+        self.assertTrue(checks)                       # an empty list joins to "", in any string
+        self.assertIn("proven: it fails on the base", "\n".join(checks))
+        self.assertIn("\n".join(checks), rep)
         (self.wt / "calc.py").write_text("def kw(watts):\n    return watts / 1000.0\n")
         self.assertIn("stale: the worktree has changed since", run_wb("report", "t"))
         out = run_wb("accept", "t", "-m", "kW from W")
@@ -22420,14 +24154,14 @@ class Setup(Base):
         code, out = self.setup(cmd="doctor")
         self.assertEqual(code, 1)
         for want in ("BAD opencode opencode v1.9.0: workbench needs OpenCode 2.x",
-                     "BAD wb isn't on PATH: Claude runs it by name in Bash",
+                     "BAD wb isn't on PATH: Claude runs it by name in Bash; the mod runs WB_BIN=/x/wb;",
                      "WB_BIN=/x/wb covers only the mod's calls",
                      f"ok  state dir {home / '.local/state/workbench'}\n",
                      f"BAD /workbench isn't in {home / '.claude/skills'}: wb setup links it",
                      "--  the Claude Code mod (the pane, the wake-ups) isn't among",
                      "ok  python 3."):                                     # which one runs wb (#259)
             self.assertIn(want, out)
-        if lane.abi():
+        if lane.held():
             self.assertIn("ok  agents write only in their lane", out)
         self.assertEqual(self.setup()[0], 0)
         (home / ".claude/plugins").mkdir(parents=True)
@@ -22436,7 +24170,8 @@ class Setup(Base):
         os.environ.update(FAKE_VERSION="opencode v2.3.0")
         os.environ.pop("WB_BIN")
         code, out = self.setup(cmd="doctor")
-        for want in ("ok  opencode opencode v2.3.0", f"ok  wb on PATH: {home / '.local/bin/wb'}",
+        for want in ("ok  opencode opencode v2.3.0",
+                     f"ok  wb on PATH: {home / '.local/bin/wb'}; the mod runs it by name, else ~/.local/bin/wb where its PATH has no wb\n",
                      f"ok  /workbench skill at {home / '.claude/skills/workbench'}",
                      "ok  the Claude Code mod is installed"):
             self.assertIn(want, out)
@@ -22449,6 +24184,23 @@ class Setup(Base):
         os.environ.update(FAKE_VERSION="opencode v3.1.0")  # finding 26: past the tested range
         self.assertIn("--  OpenCode 3.1 is outside what workbench is tested with", self.setup(cmd="doctor")[1])
         self.assertIn("--  wb comes from /usr, not this copy", out)
+
+    def test_doctor_names_the_wb_the_mod_runs_and_wb_setups_link_when_its_path_has_none(self):
+        # #1200: a desktop app or an IDE started from the GUI may lack ~/.local/bin on its PATH; the
+        # mod (findWb in register.tsx) then runs wb setup's link, and doctor says which wb it runs
+        self.assertEqual(cli.mod_wb("/x/wb", "/usr/bin/wb", True), "WB_BIN=/x/wb")
+        self.assertEqual(cli.mod_wb(None, "/usr/bin/wb", False), "it by name")
+        self.assertEqual(cli.mod_wb(None, "/usr/bin/wb", True), "it by name, else ~/.local/bin/wb where its PATH has no wb")
+        self.assertEqual(cli.mod_wb(None, None, True), "~/.local/bin/wb (wb setup's link)")
+        self.assertEqual(cli.mod_wb(None, None, False), "nothing: no wb on PATH or in ~/.local/bin")
+        home = Path(self.tmp.name) / "home"
+        (home / ".local/bin").mkdir(parents=True)
+        (home / ".local/bin/wb").write_text("#!/bin/sh\n")
+        os.environ.update(HOME=str(home), WB_HOME=str(home / ".local/state/workbench"), FAKE_VERSION="opencode v2.3.0",
+                          PATH=os.path.dirname(shutil.which("git")))
+        os.environ.pop("WB_BIN", None)
+        out = self.setup(cmd="doctor")[1]
+        self.assertIn("BAD wb isn't on PATH: Claude runs it by name in Bash; the mod runs ~/.local/bin/wb (wb setup's link);", out)
 
     def test_doctor_exit_code_does_not_follow_the_keep_awake_probe(self):
         # #653: `ok, said = awake_line()` reassigned doctor's verdict: a Mac (caffeinate) exited 0
@@ -22516,6 +24268,95 @@ class Setup(Base):
         with mock.patch.object(cli.sys, "platform", "linux"):
             self.assertIn(">> ~/.bashrc", cli.path_advice())
 
+    def test_with_the_plugin_installed_setup_and_doctor_leave_path_to_the_users_own_terminal(self):
+        # #1190: the plugin's bin/ puts wb on Claude Code's Bash PATH and the mod runs the
+        # marketplace clone's, so a PATH edit and a restart of Claude Code are no longer needed
+        home = Path(self.tmp.name) / "home"
+        os.environ.update(HOME=str(home), PATH=os.path.dirname(shutil.which("git")), SHELL="/bin/zsh")
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        os.environ.pop("CLAUDE_CODE_PLUGIN_CACHE_DIR", None)
+        plugins = home / ".claude/plugins"
+        plugins.mkdir(parents=True)
+        (plugins / "installed_plugins.json").write_text(
+            json.dumps({"version": 2, "plugins": {"workbench@workbench": []}}))
+        line = next(x for x in self.setup()[1].splitlines() if "isn't on PATH" in x)
+        self.assertIn("Claude Code runs wb from the plugin's bin/", line)
+        self.assertIn(">> ~/.zshrc; then open a new terminal", line)
+        self.assertNotIn("quit Claude Code", line)
+        out = self.setup(cmd="doctor")[1]
+        self.assertIn("--  wb isn't on this shell's PATH: Claude Code gets it from the plugin's bin/", out)
+        self.assertNotIn("BAD wb isn't on PATH", out)
+        # Claude Code's Bash: the launcher on PATH runs the clone's wb, which is no other copy
+        cached = plugins / "cache/workbench/workbench/abc123"
+        shutil.copytree(runner.PKG_ROOT / "mod/.claude-plugin", cached / ".claude-plugin")
+        (cached / "bin").mkdir()
+        shutil.copy2(runner.PKG_ROOT / "mod/bin/wb", cached / "bin/wb")
+        os.environ["PATH"] = os.pathsep.join([os.environ["PATH"], str(cached / "bin")])
+        out = self.setup(cmd="doctor")[1]
+        self.assertIn(f"ok  wb on PATH: {cached / 'bin/wb'} (the plugin's bin/: it runs the marketplace clone's)", out)
+        self.assertNotIn("wb comes from", out)
+        # under CLAUDE_CODE_PLUGIN_CACHE_DIR Claude Code lists its plugins there instead
+        os.environ["CLAUDE_CODE_PLUGIN_CACHE_DIR"] = str(home / "cache")
+        self.assertFalse(cli.mod_listed())
+        (home / "cache").mkdir()
+        shutil.copy2(plugins / "installed_plugins.json", home / "cache/installed_plugins.json")
+        self.assertTrue(cli.mod_listed())
+
+    def test_the_plugins_bin_wb_runs_the_marketplace_clone_where_claude_code_keeps_it(self):
+        # #1190: Claude Code copies only mod/ into its plugin cache and puts its bin/ on the Bash
+        # tool's PATH; mod/bin/wb looks where the mod's marketplaceClone does, in its order
+        tmp = Path(self.tmp.name)
+        home = tmp / "home"
+        home.mkdir()
+
+        def clone(at: Path, name: str):
+            (at / "bin").mkdir(parents=True)
+            (at / "bin/wb").write_text(f"#!/bin/sh\nprintf '{name}'; printf ' [%s]' \"$@\"\n")
+            (at / "bin/wb").chmod(0o755)
+
+        def run(cwd=home, **env):
+            r = subprocess.run([str(runner.PKG_ROOT / "mod/bin/wb"), "a b", "c"], cwd=cwd, capture_output=True,
+                               text=True, env={"HOME": str(home), "PATH": os.environ["PATH"], **env})
+            return r.returncode, r.stdout, r.stderr
+
+        def known(plugins: Path, at: Path):
+            plugins.mkdir(parents=True, exist_ok=True)
+            (plugins / "known_marketplaces.json").write_text(json.dumps(
+                {"workbench": {"source": {"source": "directory", "path": str(at)}, "installLocation": str(at)}}, indent=2))
+
+        # none: one line naming the fix, the exit a missing command's
+        code, out, err = run()
+        self.assertEqual(code, 127)
+        self.assertIn(f"isn't in known_marketplaces.json or at {home}/.claude/plugins/marketplaces/workbench: "
+                      "claude plugin marketplace add a-schaefers/workbench", err)
+        # the git marketplace's clone under ~/.claude, each argument as given
+        clone(home / ".claude/plugins/marketplaces/workbench", "git")
+        self.assertEqual(run(), (0, "git [a b] [c]", ""))
+        # known_marketplaces.json's installLocation first (a directory marketplace); one without a bin/wb is passed over
+        known(home / ".claude/plugins", tmp / "gone")
+        self.assertEqual(run()[1], "git [a b] [c]")
+        clone(tmp / "dev", "dev")
+        known(home / ".claude/plugins", tmp / "dev")
+        self.assertEqual(run()[1], "dev [a b] [c]")
+        # CLAUDE_CONFIG_DIR, as Claude Code reads it: a ~ or a path relative to here
+        clone(home / "cc/plugins/marketplaces/workbench", "cc")
+        self.assertEqual(run(CLAUDE_CONFIG_DIR="~/cc")[1], "cc [a b] [c]")
+        self.assertEqual(run(CLAUDE_CONFIG_DIR="cc")[1], "cc [a b] [c]")
+        # CLAUDE_CODE_PLUGIN_CACHE_DIR holds the clone and its known_marketplaces.json when set
+        clone(home / "cache/marketplaces/workbench", "cache")
+        self.assertEqual(run(CLAUDE_CODE_PLUGIN_CACHE_DIR="~/cache")[1], "cache [a b] [c]")
+        known(home / "cache", tmp / "dev")
+        self.assertEqual(run(CLAUDE_CODE_PLUGIN_CACHE_DIR=str(home / "cache"))[1], "dev [a b] [c]")
+        # an unreadable known_marketplaces.json is passed over, not a failure
+        (home / "cache/known_marketplaces.json").write_text("{not json")
+        self.assertEqual(run(CLAUDE_CODE_PLUGIN_CACHE_DIR=str(home / "cache"))[1], "cache [a b] [c]")
+        # this clone, end to end: the real bin/wb runs from it
+        known(home / ".claude/plugins", runner.PKG_ROOT)
+        r = subprocess.run([str(runner.PKG_ROOT / "mod/bin/wb"), "--version"], capture_output=True, text=True,
+                           env={**os.environ, "HOME": str(home)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"\d+\.\d+")
+
     def test_setup_ends_with_a_first_run_checklist_that_names_each_fix_and_no_model(self):
         # #111: what a working setup still needs, each line with its fix
         home = Path(self.tmp.name) / "home"
@@ -22526,7 +24367,7 @@ class Setup(Base):
         self.assertRegex(tail, r"ok  opencode .*2\.3\.0")
         self.assertIn("ok  a model server answers", tail)
         self.assertIn("local model(s) registered", tail)
-        self.assertRegex(tail, r"(ok  Landlock ABI \d+|--  no Landlock here)")
+        self.assertRegex(tail, r"(ok  Landlock ABI \d+|ok  Seatbelt|--  no lane here)")
         os.environ["WB_OPENCODE_BIN"] = str(Path(self.tmp.name) / "no-such-opencode")
         with mock.patch.object(cli.models, "discover", return_value={}):
             lines = cli.first_run()
@@ -28580,6 +30421,125 @@ class WebChat(Base):
         self.assertEqual(sorted(t["name"] for t in self.chat.open_tasks()), ["t-queued", "t-review"])
         self.assertEqual(sorted(t["name"] for t in self.chat.snapshot()["tasks"]), ["t-queued", "t-review"])
 
+    # ---- the task sheet (#1201) ----
+
+    def _sheet_task(self, name="fix-auth", phase="review", **status):
+        """An open task with a real worktree off self.repo: one file changed, one new."""
+        t = store.Task(name)
+        t.dir.mkdir(parents=True)
+        base = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"], capture_output=True,
+                              text=True, check=True).stdout.strip()
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "-q", "-b", f"wb/{name}",
+                        str(t.dir / "worktree"), base], check=True, capture_output=True)
+        store.write_json(t.dir / "task.json", {"name": name, "model": "deepinfra/vendor/flash", "via": "api",
+                                               "provider_name": "DeepInfra", "repo": str(self.repo), "base": base,
+                                               "branch": f"wb/{name}", "created_at": store.now() - 90})
+        t.set_status(phase=phase, round=2, last="tests pass", **status)
+        (t.worktree / "README.md").write_text("hello\nworld\n")
+        (t.worktree / "new.py").write_text("x = 1\n")
+        return t
+
+    def test_the_task_sheet_shows_an_open_task_as_wb_status_report_diff_and_log_do(self):
+        t = self._sheet_task()
+        t.round_dir(2).mkdir(parents=True)
+        (t.round_dir(2) / "summary.md").write_text("## Done\nAdded new.py.\n")
+        for row in ({"kind": "round", "round": 2, "text": "round 2", "ts": store.now()},
+                    {"kind": "text", "round": 2, "text": "I'll add it.\nThen test.", "ts": store.now()},
+                    {"kind": "step", "round": 2, "ts": store.now()},         # held: wb log never shows one
+                    {"kind": "tool", "round": 2, "tool": "bash", "brief": "pytest", "ok": False,
+                     "error": "1 failed", "ts": store.now()}):
+            t.event(row)
+        tok, q = self.chat.token(), "/api/task?name=fix-auth&part="
+        code, s = self.call(q + "summary", token=tok)
+        self.assertEqual(code, 200, s)
+        self.assertEqual({k: s[k] for k in ("task", "part", "phase", "round", "step", "last", "model", "via",
+                                            "provider_name", "verify", "report_cut")},
+                         {"task": "fix-auth", "part": "summary", "phase": "review", "round": 2, "step": 1,
+                          "last": "tests pass", "model": "deepinfra/vendor/flash", "via": "api",
+                          "provider_name": "DeepInfra", "verify": [], "report_cut": False})
+        self.assertEqual(s["report"] + "\n", run_wb("report", "fix-auth"))  # print adds a newline
+        self.assertLess(s["created_at"], s["updated_at"])
+        self.assertLessEqual(s["updated_at"], s["now"])
+        # the diff: the stat first, then the whole, then one file, each as `wb diff` has it
+        code, d = self.call(q + "diff", token=tok)
+        self.assertEqual(code, 200, d)
+        self.assertEqual(d["stat"], run_wb("diff", "fix-auth", "--stat").rstrip("\n"))
+        self.assertEqual(d["files"], [{"path": "README.md", "added": 1, "deleted": 0},
+                                      {"path": "new.py", "added": 1, "deleted": 0}])
+        self.assertNotIn("diff", d)
+        code, d = self.call(q + "diff&full=1", token=tok)
+        self.assertEqual((d["diff"], d["cut"], d["lines_cut"], d["stat"]),
+                         (run_wb("diff", "fix-auth").rstrip("\n"), False, 0, ""))
+        code, d = self.call(q + "diff&full=1&path=new.py", token=tok)
+        self.assertEqual(d["diff"], run_wb("diff", "fix-auth", "--", "new.py").rstrip("\n"))
+        self.assertEqual(self.call(q + "diff&full=1&path=CLAUDE.md", token=tok),
+                         (404, {"error": "no such file in the diff"}))
+        # the log: wb log -v's lines after their time
+        code, lg = self.call(q + "log", token=tok)
+        self.assertEqual(code, 200, lg)
+        self.assertEqual([(r["kind"], r["round"], r["text"], r.get("ok")) for r in lg["rows"]],
+                         [("round", 2, "round    round 2", None), ("text", 2, "text     I'll add it.\nThen test.", None),
+                          ("tool", 2, "bash     pytest  ✗ 1 failed", False)])
+        self.assertEqual(run_wb("log", "fix-auth", "-v"),
+                         "".join(f"{time.strftime('%H:%M:%S', time.localtime(r['ts']))} r2 {r['text']}\n"
+                                 for r in lg["rows"]))
+        self.assertFalse(lg["more"])
+        code, lg = self.call(q + "log&n=1", token=tok)
+        self.assertEqual(([r["kind"] for r in lg["rows"]], lg["more"]), (["tool"], True))
+
+    def test_the_task_sheet_is_the_users_and_only_for_an_open_task(self):
+        # the diff and report are the user's work: an agent's token reads none of it (AGENT_UNREAD)
+        self._sheet_task()
+        tok = self.chat.token()
+        self.assertEqual(self.call("/api/task?name=fix-auth")[0], 401)
+        code, r = self.call("/api/task?name=fix-auth", token=self._agent())
+        self.assertEqual((code, r), (403, {"error": "agent tokens can't read tasks"}))
+        self.assertEqual(self.call("/api/task?name=fix-auth", token=tok)[1]["part"], "summary")  # the default
+        for bad in ("part=watch", "part=log&n=0", "part=log&n=abc", f"part=log&n={self.chat.TASK_LOG_MAX + 1}"):
+            self.assertEqual(self.call(f"/api/task?name=fix-auth&{bad}", token=tok)[0], 400, bad)
+        # none the strip leaves out: parked, a bench replay, closed, unknown, or no task name at all
+        self._sheet_task("t-parked", parked=store.now())
+        self._sheet_task("t-done", phase="accepted")
+        b = self._sheet_task("t-bench")
+        store.write_json(b.dir / "task.json", {**b.spec, "bench": True})
+        for name in ("t-parked", "t-done", "t-bench", "nope", "../fix-auth", ""):
+            self.assertEqual(self.call(f"/api/task?name={name}&part=diff", token=tok),
+                             (404, {"error": "no such open task"}), name)
+
+    def test_the_task_sheet_cuts_a_long_report_diff_and_line_and_follows_wb_next(self):
+        t = self._sheet_task(steps=2)
+        t.round_dir(2).mkdir(parents=True)
+        (t.round_dir(2) / "summary.md").write_text("r" * 100)
+        subprocess.run(["git", "-C", str(t.worktree), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(t.worktree), "commit", "-qm", "step 1"], check=True, capture_output=True)
+        (t.worktree / "new.py").write_text("x = 2\n" + "y" * 50 + "\n")
+        tok, q = self.chat.token(), "/api/task?name=fix-auth&part="
+        with mock.patch.object(self.chat, "TASK_REPORT_CHARS", 40), \
+                mock.patch("workbench.transcript.JSON_LINE_CHARS", 40):
+            s = self.call(q + "summary", token=tok)[1]
+            self.assertEqual((s["report"], s["report_cut"], s["step"]), ("r" * 40, True, 2))
+            # after `wb next`, the current step alone, as `wb diff` (gitops.diff_base: HEAD)
+            d = self.call(q + "diff&full=1", token=tok)[1]
+            self.assertEqual((d["base"], d["lines_cut"]), ("HEAD", 1))
+            self.assertIn("+" + "y" * 38 + "…", d["diff"].splitlines())
+            self.assertEqual([f["path"] for f in d["files"]], ["new.py"])
+            with mock.patch.object(self.chat, "TASK_DIFF_CHARS", 30):
+                d = self.call(q + "diff&full=1", token=tok)[1]
+                self.assertEqual((d["diff"], d["cut"]), (None, True))
+                self.assertEqual(d["files"], [{"path": "new.py", "added": 2, "deleted": 1}])
+
+    def test_a_reply_from_the_task_sheet_names_its_task_and_only_a_real_one(self):
+        # "Reply about this task": the message reaches Claude tagged with the task; acting on it
+        # (wb steer) stays Claude's, so the page never steers
+        self._sheet_task()
+        tok = self.chat.token()
+        code, r = self.call("/api/send", {"text": "is it on track?", "about": {"task": "fix-auth"}}, tok)
+        self.assertEqual((code, r["message"]["about"]), (200, {"task": "fix-auth"}))
+        for bad in ({"task": "nope"}, {"task": "../fix-auth"}, {"task": 7}):
+            self.assertEqual(self.call("/api/send", {"text": "x", "about": bad}, tok), (400, {"error": "no such task"}), bad)
+        code, r = self.call("/api/send", {"text": "x", "about": {"task": "fix-auth"}}, token=self._agent())
+        self.assertEqual((code, r), (400, {"error": "agent messages can't carry about"}))
+
     # ---- the #1042 review ----
 
     def _held_wait(self, path, token):
@@ -29123,6 +31083,147 @@ class ChatUploads(Base):
                 if r["id"] == sent["id"]]
         self.assertEqual([(r["by"], r["how"]) for r in rows], [("wb", "expired")])  # once
         self.assertFalse((self.uploads() / "eeeeeeee-1").exists())
+
+
+    # ---- dictation (#1203): the page's mic sends a clip, the listener's words come back ----
+    def listener(self, entry: dict | None) -> None:
+        path = Path(self.tmp.name) / "audio.json"
+        path.write_text(json.dumps({"ear": {"kind": "listen", **entry}} if entry else {}))
+        os.environ["WB_AUDIO"] = str(path)
+
+    def ear(self, said: str, code: int = 0) -> str:
+        """A listener command: logs each clip it gets (its path and first bytes), prints ``said``."""
+        fake = Path(self.tmp.name) / "ear.py"
+        fake.write_text("import json, sys\nclip = sys.argv[1]\n"
+                        "open(sys.argv[0] + '.calls', 'a').write(json.dumps([clip, open(clip, 'rb').read(12).hex()]) + '\\n')\n"
+                        f"print({said!r})\nsys.exit({code})\n")
+        return f"{sys.executable} {fake} {{in}}"
+
+    def calls(self) -> list:
+        log = Path(self.tmp.name) / "ear.py.calls"
+        return [json.loads(l) for l in log.read_text().splitlines()] if log.exists() else []
+
+    def transcribe(self, uid: str, tok: str | None = None):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        c.request("POST", f"/api/transcribe/{uid}", "{}", {"Host": f"localhost:{self.port}",
+                  "Authorization": f"Bearer {tok or self.tok}", "Content-Type": "application/json"})
+        r = c.getresponse()
+        out = r.status, json.loads(r.read())
+        c.close()
+        return out
+
+    def test_a_voice_clip_comes_back_as_its_words_once_and_a_retry_never_runs_the_listener_again(self):
+        # #1203: a voice memo attached in the chat reached Claude as audio it can't hear. The page's
+        # mic uploads the clip as any attachment and gets its words for the box; Claude gets text
+        self.listener(None)
+        self.assertFalse(self.chat.snapshot()["dictate"])                    # no listener: no mic
+        uid = "dddddddd-1203-4000-8000-000000000001"
+        self.assertEqual(self.put(uid, b"\x1aE\xdf\xa3 a webm clip", name='my "voice" -x.webm',
+                                  ctype="audio/webm;codecs=opus")[0], 200)
+        self.assertEqual(self.transcribe(uid)[0], 404)
+        self.listener({"gpu": False, "command": self.ear("  Fix the parser, then run the tests.  ")})
+        self.assertTrue(self.chat.snapshot()["dictate"])
+        self.assertNotIn("dictate", self.chat.agent_snapshot("x"))
+        self.assertEqual(self.transcribe(uid), (200, {"text": "Fix the parser, then run the tests."}))
+        self.assertEqual(self.transcribe(uid), (200, {"text": "Fix the parser, then run the tests."}))
+        calls = self.calls()
+        self.assertEqual(len(calls), 1)                                      # kept: never heard twice
+        self.assertEqual(Path(calls[0][0]).name, "clip.webm")                # a plain name, not the user's
+        self.assertEqual(calls[0][1], (b"\x1aE\xdf\xa3 a webm clip"[:12]).hex())  # not audio to ffmpeg: as sent
+        self.assertEqual(sorted(p.name for p in (self.uploads() / uid).iterdir()),
+                         [".meta.json", ".transcript.txt", 'my "voice" -x.webm'])
+        self.assertEqual(self.chat.thread(), [])                            # nothing sent: the words go to the box
+        # a file that isn't audio, an upload that isn't there, and an agent's token are refused
+        self.put("tttttttt-1", b"notes", name="notes.txt", ctype="text/plain")
+        self.assertEqual(self.transcribe("tttttttt-1"), (415, {"error": "not a voice clip (text/plain)"}))
+        self.assertEqual(self.transcribe("nnnnnnnn-1"), (404, {"error": "no such upload"}))
+        with contextlib.redirect_stderr(io.StringIO()):
+            agent = run_wb("chat", "token", "add", "my-agent").strip()
+        self.assertEqual(self.transcribe(uid, agent),
+                         (403, {"error": "agent tokens can't transcribe the user's voice clips"}))
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_a_listener_that_fails_is_a_502_with_its_words_and_the_next_try_runs_it_again(self):
+        self.listener({"gpu": False, "command": self.ear("", code=3)})
+        self.put("ffffffff-1203", b"RIFF a clip", name="memo.m4a", ctype="audio/mp4")
+        with redirect_stderr(io.StringIO()) as log:
+            code, got = self.transcribe("ffffffff-1203")
+            self.assertEqual((code, got["error"][:30]), (502, "the listener failed: listener "))
+            self.assertIn("exited 3", got["error"])
+            self.assertFalse((self.uploads() / "ffffffff-1203" / ".transcript.txt").exists())
+            self.assertEqual(self.transcribe("ffffffff-1203")[0], 502)
+        self.assertEqual(len(self.calls()), 2)
+        self.assertIn("wb chat: dictation: the listener failed", log.getvalue())   # serve.log
+
+    def test_a_gpu_listener_gives_way_to_a_task_on_the_gpu_at_once_and_runs_once_it_is_free(self):
+        # #1203: dictation must never queue behind a task (the page would hang for its whole
+        # round): a GPU listener is 409 at once while anything holds the GPU, and never runs
+        self.listener({"command": self.ear("hello")})                       # no "gpu": false: on the GPU
+        self.put("gggggggg-1203", b"OggS a clip", name="voice.ogg", ctype="audio/ogg")
+        held = subprocess.Popen([sys.executable, "-c", (
+            "import sys\nsys.path.insert(0, sys.argv[1])\nfrom workbench import models\n"
+            "with models.GpuLease(None, 't-busy', lambda *_: None):\n"
+            "    print('held', flush=True)\n    sys.stdin.read()\n"), str(ROOT)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: held.poll() is None and held.kill())
+        self.assertEqual(held.stdout.readline().strip(), "held")
+        began = time.monotonic()
+        code, got = self.transcribe("gggggggg-1203")
+        self.assertLess(time.monotonic() - began, 10)
+        self.assertEqual((code, got["error"], got["busy"]),
+                         (409, "the GPU is busy with a task", True))
+        self.assertIn("t-busy", got["why"])
+        self.assertEqual(self.calls(), [])
+        held.stdin.close()
+        held.wait(30)
+        self.assertEqual(self.transcribe("gggggggg-1203"), (200, {"text": "hello"}))
+        from workbench import models
+        self.assertEqual(models.holders(), {})                              # the turn was let go
+
+    def test_a_url_listener_nothing_answers_at_is_a_503_to_try_again_not_the_listeners_502(self):
+        # #1203: the page dropped a clip on any answer but a 408/425/429, so a url listener's server
+        # restarting lost what the user had just said: down for now is 503 `retry`, kept and asked again
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]                                     # nothing listens there now
+        self.listener({"gpu": False, "url": f"http://127.0.0.1:{port}/v1/audio/transcriptions"})
+        self.put("kkkkkkkk-1203", b"\x1aE\xdf\xa3 webm", name="voice.webm", ctype="audio/webm")
+        with redirect_stderr(io.StringIO()) as log:
+            code, got = self.transcribe("kkkkkkkk-1203")
+        self.assertEqual((code, got.get("retry")), (503, True))
+        self.assertIn("the listener isn't answering: listener ear: nothing answers at", got["error"])
+        self.assertIn("wb chat: dictation: the listener is down", log.getvalue())
+        # it answered the probe, then dropped the connection before the clip's reply: down too
+        with mock.patch.object(audio, "ready", return_value=""), \
+                mock.patch.object(audio, "_ffmpeg", return_value=None), redirect_stderr(io.StringIO()):
+            code, got = self.transcribe("kkkkkkkk-1203")
+        self.assertEqual((code, got.get("retry")), (503, True))
+
+    def test_a_server_listener_gets_the_clips_own_type_when_there_is_no_ffmpeg_to_convert_it(self):
+        # #1203: _multipart labelled every file audio/wav, so a phone's webm reached a
+        # /v1/audio/transcriptions server mislabelled when nothing here could convert it
+        from http.server import BaseHTTPRequestHandler
+        got = []
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(404); self.end_headers()
+
+            def do_POST(self):
+                got.append(self.rfile.read(int(self.headers["Content-Length"])))
+                self.send_response(200); self.end_headers(); self.wfile.write(b'{"text": "from the server"}')
+
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        self.listener({"gpu": False, "url": f"http://127.0.0.1:{srv.server_port}/v1/audio/transcriptions"})
+        self.put("hhhhhhhh-1203", b"\x1aE\xdf\xa3 webm", name="voice.webm", ctype="audio/webm")
+        with mock.patch.object(audio, "_ffmpeg", return_value=None):
+            self.assertEqual(self.transcribe("hhhhhhhh-1203"), (200, {"text": "from the server"}))
+        self.assertIn(b'filename="clip.webm"\r\nContent-Type: audio/webm\r\n\r\n\x1aE\xdf\xa3 webm', got[0])
 
 
 class Top(Base):
@@ -31009,10 +33110,50 @@ def _tls_upstream(tmp: Path, handler, server=None):
     return srv, cert
 
 
+def gemini_events(served: str) -> list[dict]:
+    """A Gemini stream as generativelanguage sends one (#1192): `usageMetadata` a running total
+    in every chunk, `modelVersion` the served model, the last candidate's `finishReason`."""
+    return [{"candidates": [{"content": {"role": "model", "parts": [{"text": "o"}]}, "index": 0}],
+             "usageMetadata": {"promptTokenCount": 9, "candidatesTokenCount": 1, "totalTokenCount": 10},
+             "modelVersion": served, "responseId": "r1"},
+            {"candidates": [{"content": {"role": "model", "parts": [{"text": "k"}]}, "index": 0,
+                             "finishReason": "STOP"}],
+             "usageMetadata": {"promptTokenCount": 9, "cachedContentTokenCount": 4,
+                               "candidatesTokenCount": 3, "thoughtsTokenCount": 5,
+                               "totalTokenCount": 17},
+             "modelVersion": served, "responseId": "r1"}]
+
+
+CONVERSE_EVENTS = [("messageStart", {"role": "assistant"}),
+                   ("contentBlockDelta", {"contentBlockIndex": 0, "delta": {"text": "ok"}}),
+                   ("contentBlockStop", {"contentBlockIndex": 0}),
+                   ("messageStop", {"stopReason": "end_turn"}),
+                   ("metadata", {"usage": {"inputTokens": 7, "outputTokens": 3, "totalTokens": 12,
+                                           "cacheReadInputTokens": 2}, "metrics": {"latencyMs": 5}})]
+
+
+def es_frame(event_type: str, payload: dict) -> bytes:
+    """One AWS event-stream frame, CRCs and all, as Bedrock's converse-stream sends it."""
+    import zlib
+
+    def header(name, value):
+        n, v = name.encode(), value.encode()
+        return bytes([len(n)]) + n + b"\x07" + len(v).to_bytes(2, "big") + v
+    heads = (header(":event-type", event_type) + header(":content-type", "application/json")
+             + header(":message-type", "event"))
+    body = json.dumps(payload).encode()
+    total = 12 + len(heads) + len(body) + 4
+    prelude = total.to_bytes(4, "big") + len(heads).to_bytes(4, "big")
+    prelude += zlib.crc32(prelude).to_bytes(4, "big")
+    msg = prelude + heads + body
+    return msg + zlib.crc32(msg).to_bytes(4, "big")
+
+
 class _Upstream(http.server.BaseHTTPRequestHandler):
     """A provider for the keyhole's tests: records each request (method, path, headers, body) on
     its server's `seen` and answers as its server's `mode` says: "ok" (an OpenAI SSE answer,
-    or Anthropic's for /messages), "status" (`status`, a body echoing part of the key the way
+    or Anthropic's for /messages, Gemini's for :streamGenerateContent, a Bedrock event stream for
+    /converse-stream), "status" (`status`, a body echoing part of the key the way
     OpenAI's 401 does, `retry_after`), "chunks" (`chunks` SSE pieces `gap` s apart; the
     Responses API's events for /responses), "raw" (the head `head` s late, `status`, `ctype`,
     then `pieces` sent as they are, one chunk each, the end `tail` s later), with `served` (the response's model) and `by` (OpenRouter's
@@ -31057,10 +33198,30 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path.split("?")[0].endswith("/converse-stream"):  # #1192: AWS event-stream frames
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.amazon.eventstream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            for kind, ev in CONVERSE_EVENTS:
+                frame = es_frame(kind, ev)
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(frame), frame))
+                self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
+        if ":streamGenerateContent" in self.path:  # #1192: running usage, and no [DONE]
+            for i, ev in enumerate(gemini_events(s.served)):
+                if i:
+                    time.sleep(s.gap)
+                line = f"data: {json.dumps(ev)}\r\n\r\n".encode()
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(line), line))
+                self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+            return
         if "/messages" in self.path:
             events = [{"type": "message_start", "message": {
                 "id": "msg_up", "type": "message", "role": "assistant", "model": s.served,
@@ -31074,13 +33235,27 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
                  "usage": {"output_tokens": 2}},
                 {"type": "message_stop"}]
         elif self.path.endswith("/responses"):
-            events = [{"type": "response.created", "sequence_number": 0, "response": {
+            # the whole item lifecycle: OpenCode 2.3.2's Responses protocols (Azure's, Bedrock
+            # Mantle's: #1192) refuse a delta without its item_id, and a stream without the item
+            item = {"id": "msg_up", "type": "message", "role": "assistant", "status": "in_progress",
+                    "content": []}
+            text = {"type": "output_text", "text": "ok", "annotations": []}
+            at = {"item_id": "msg_up", "output_index": 0, "content_index": 0}
+            done = {**item, "status": "completed", "content": [text]}
+            events = [{"type": "response.created", "response": {
                 "id": "resp_up", "object": "response", "model": s.served, "status": "in_progress",
-                "usage": None}},
-                {"type": "response.output_text.delta", "sequence_number": 1, "delta": "ok"},
-                {"type": "response.completed", "sequence_number": 2, "response": {
-                    "id": "resp_up", "object": "response", "model": s.served,
-                    "status": "completed", "usage": {"input_tokens": 9, "output_tokens": 4}}}]
+                "output": [], "usage": None}},
+                {"type": "response.output_item.added", "output_index": 0, "item": item},
+                {"type": "response.content_part.added", **at, "part": {**text, "text": ""}},
+                {"type": "response.output_text.delta", **at, "delta": "ok"},
+                {"type": "response.output_text.done", **at, "text": "ok"},
+                {"type": "response.content_part.done", **at, "part": text},
+                {"type": "response.output_item.done", "output_index": 0, "item": done},
+                {"type": "response.completed", "response": {
+                    "id": "resp_up", "object": "response", "model": s.served, "status": "completed",
+                    "output": [done], "usage": {"input_tokens": 9, "output_tokens": 4}}}]
+            for i, ev in enumerate(events):
+                ev["sequence_number"] = i
         else:
             events = [{"model": s.served, **({"provider": s.by} if s.by else {}),
                        "choices": [{"index": 0, "delta": {"content": f"part {i}"}}]}
@@ -31221,6 +33396,58 @@ class Keyhole(_KeyholeTest):
                               "\n".join(self.lines), self.all_files(self.task.dir))
         with self.assertRaises(TypeError):
             __import__("pickle").dumps(kh._key)
+
+    def zen_free(self):
+        """OpenCode Zen's free model with no key stored, as discovery makes it (#1193)."""
+        m = self.model("opencode", "big-pickle-free", "/inference/openai/v1",
+                       "@opencode/ai/providers/openai-compatible")
+        m.kind, m.key, m.free, m.remote = "api", "none", True, True
+        return m
+
+    def test_opencode_zens_keyless_free_model_sends_public_upstream_and_nothing_redacts_it(self):
+        # #1193: OpenCode 2.3.2 serves Zen's free models with the apiKey "public" when no key is
+        # stored; the keyhole sends that, loading nothing (no `auth export`), and since it is no
+        # secret, never scrubs it: replaced in every answer, a model's `public class` read
+        # `[key redacted] class` in the agent's code
+        m = self.zen_free()
+        self.assertTrue(self.models.keyless_free(m))
+        with mock.patch.object(self.kh_mod, "_opencode", side_effect=AssertionError("auth export")):
+            kh = self.kh_mod.start(self.task, m, log=self.lines.append)
+        self.addCleanup(kh.close)
+        self.assertEqual(repr(kh._key), "Key(opencode, api key)")
+        self.assertTrue(kh.base.endswith("/inference/openai/v1"))
+        code = 'public class Main { public static void main(String[] a) {} }'
+        self.up.mode, self.up.status, self.up.ctype = "raw", 200, "text/event-stream"
+        self.up.pieces = [b"data: " + json.dumps({"model": m.name, "choices": [{"index": 0, "delta": {
+            "content": code}}]}).encode() + b"\n\n",
+            b"data: " + json.dumps({"error": {"message": "a public notice"}}).encode() + b"\n\n",
+            b"data: [DONE]\n\n"]
+        status, _, body = self.post(kh, headers={"x-opencode-client": "cli", "x-opencode-session": "ses_1"})
+        self.assertEqual(status, 200, body)
+        [req] = self.up.seen
+        self.assertEqual(req["path"], "/inference/openai/v1/chat/completions")
+        self.assertEqual(req["headers"]["Authorization"], "Bearer public")
+        self.assertNotIn(kh.token, json.dumps(req))
+        # Zen's "Free-tier chat models require OpenCode": its client headers go on
+        self.assertEqual((req["headers"]["x-opencode-client"], req["headers"]["x-opencode-session"]), ("cli", "ses_1"))
+        self.assertIn(json.dumps(code)[1:-1], body)
+        self.assertIn("a public notice", body)
+        self.assertNotIn(self.kh_mod.REDACTED, body)
+        self.up.ctype, self.up.pieces = "application/json", [b'{"model": "big-pickle-free", "x": "pub', b'lic"}']
+        self.assertIn('"pub', self.post(kh, body={"model": m.name})[2])
+        self.assertEqual(self.post(kh, body={"model": m.name})[2], '{"model": "big-pickle-free", "x": "public"}')
+        self.up.mode, self.up.status, self.up.message = "status", 400, "public models only"
+        self.assertIn("public models only", self.post(kh)[2])
+        self.assertEqual(self.kh_mod.redact("public", kh._key), "public")
+        self.assertEqual(self.kh_mod.redact(f"sk {self.CANARY}", self.kh_mod.Key("x", self.CANARY)),
+                         f"sk {self.kh_mod.REDACTED}")                    # a secret still is
+        # another provider's keyless free model is no Zen one: no "public" for it
+        other = self.zen_free()
+        other.provider, other.id = "freeco", "freeco/gratis-1"
+        self.assertFalse(self.models.keyless_free(other))
+        stored = self.zen_free()
+        stored.key = "stored"                                               # Zen with a key: that key
+        self.assertFalse(self.models.keyless_free(stored))
 
     def test_anthropic_gets_x_api_key(self):
         kh = self.keyhole(self.model("anthropic", "claude-haiku-5-5", "/v1",
@@ -31552,7 +33779,7 @@ class Keyhole(_KeyholeTest):
         said = runner.keyhole_failure(e.exception)
         self.assertEqual(said, "can't read broken's key: opencode auth export exited 1: "
                                "Error: Database is locked")              # no /connect remedy
-        self.assertNotIn(self.kh_mod.REMEDY, said)
+        self.assertNotIn("opencode auth login", said)
 
     def test_a_python_with_no_ca_certificates_reaches_the_provider_through_macos_own_bundle(self):
         # #1080 (2026-11-23): the keyhole's bare default context had no CAs under python.org's
@@ -31729,7 +33956,8 @@ class Keyhole(_KeyholeTest):
         os.environ["OPENCODE_CONFIG_CONTENT"] = json.dumps(
             {"provider": {"incontent": {"options": {"apiKey": self.CANARY}}}})
         for provider, why in (("literal", f"written in {os.environ['WB_OPENCODE_CONFIG']}, which "
-                                          "agents can read: remove it there, and store the key with /connect"),
+                                          "agents can read: remove it there, and store the key with "
+                                          "`opencode auth login literal`"),
                               ("viaenv", "$VIAENV_KEY"),
                               ("incontent", "written in OPENCODE_CONFIG_CONTENT")):
             with self.assertRaises(self.kh_mod.KeyholeError) as e:
@@ -31891,12 +34119,11 @@ class Keyhole(_KeyholeTest):
         self.assertEqual((code, json.loads(text)["text"]), (200, f"{ident} [key redacted]"))
 
     def test_a_package_the_keyhole_cant_speak_cant_run(self):
-        # Google's x-goog-api-key and Gemini paths, Azure's api-key, Cohere's native /chat:
-        # every request was a 401 or 404 after a start that said nothing (the protocol review,
-        # 2026-11-23)
+        # Cohere's native /chat, Google's Interactions route: every request was a 401 or 404
+        # after a start that said nothing (the protocol review, 2026-11-23); Gemini's and Azure's
+        # are spoken since #1192
         need = "needs a key wb can hold outside the lane: "
-        for provider, package in (("google", "@opencode/ai/providers/google"),
-                                  ("azure", "@opencode/ai/providers/azure"),
+        for provider, package in (("google", "@opencode/ai/providers/google/interactions"),
                                   ("cohere", "@opencode/ai/providers/cohere"),
                                   ("someco", "")):
             self.assertIsNone(self.kh_mod.protocol_of(package))
@@ -31910,15 +34137,219 @@ class Keyhole(_KeyholeTest):
         for package, want in (("@opencode/ai/providers/anthropic", "anthropic"),
                               ("@opencode/ai/providers/meta/messages", "bearer"),
                               ("@opencode/ai/providers/openai", "bearer"),
-                              ("@opencode/ai/providers/deepinfra", "bearer")):
-            self.assertEqual(self.kh_mod.protocol_of(package), want)
+                              ("@opencode/ai/providers/deepinfra", "bearer"),
+                              ("@opencode/ai/providers/google", "google"),               # #1192
+                              ("@opencode/ai/providers/azure/responses", "api-key"),
+                              ("@opencode/ai/providers/azure/chat", "api-key"),
+                              ("@opencode/ai/providers/amazon-bedrock", "converse"),
+                              ("@opencode/ai/providers/amazon-bedrock/mantle/responses", "bearer"),
+                              ("@opencode/ai/providers/amazon-bedrock/mantle/messages", "bearer"),
+                              ("@opencode/ai/providers/google-vertex", None)):
+            self.assertEqual(self.kh_mod.protocol_of(package), want, package)
+
+    # #1192: Gemini, Azure OpenAI and Bedrock's API key through the keyhole
+
+    def gemini(self, **kw):
+        return self.keyhole(self.model("google", "gemini-x-flash", "/v1beta",
+                                       "@opencode/ai/providers/google"), **kw)
+
+    def test_gemini_gets_its_key_in_x_goog_api_key_on_its_model_path_and_its_usage_is_booked(self):
+        from workbench import meter
+        got = []
+        kh = self.gemini(on_usage=got.append)
+        self.up.served = "gemini-x-flash-001"
+        code, _, text = self.post(kh, "/models/gemini-x-flash:streamGenerateContent?alt=sse",
+                                  body={"contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                                        "generationConfig": {"maxOutputTokens": 8192}},
+                                  headers={"Authorization": None, "x-goog-api-key": kh.token})
+        self.assertEqual(code, 200, text)
+        [req] = self.up.seen
+        self.assertEqual(req["path"], "/v1beta/models/gemini-x-flash:streamGenerateContent?alt=sse")
+        heads = {k.lower(): v for k, v in req["headers"].items()}
+        self.assertEqual(heads["x-goog-api-key"], self.CANARY)
+        self.assertNotIn("authorization", heads)
+        self.assertNotIn(kh.token, json.dumps(req))
+        # the running total read once, at the stream's end (no [DONE], no end event)
+        self.assertEqual(got, [{"promptTokenCount": 9, "candidatesTokenCount": 3, "totalTokenCount": 17,
+                                "cachedContentTokenCount": 4, "thoughtsTokenCount": 5}])
+        self.assertEqual(meter.usage_tokens(got[0]), {"in": 5, "cache_read": 4, "cache_write": 0,
+                                                      "out": 3, "reasoning": 5})
+        self.assertEqual(self.task.status["served"], {"model": "gemini-x-flash-001", "by": None})
+        self.assertIn('"text": "k"', text)                                 # the stream went on whole
+        code, _, text = self.post(kh, "/models", method="GET",
+                                  headers={"Authorization": None, "x-goog-api-key": kh.token})
+        self.assertEqual((code, json.loads(text)["models"][0]["name"]), (200, "models/gemini-x-flash"))
+        self.assertEqual(meter.max_output({"generationConfig": {"maxOutputTokens": 512}}), 512)
+        self.assertEqual(meter.max_output({"inferenceConfig": {"maxTokens": 256}}), 256)
+        self.assertEqual(meter.max_output({"contents": []}), self.models.API_OUTPUT)
+
+    def test_gemini_refuses_another_model_in_the_path_and_a_key_in_the_query(self):
+        kh = self.gemini()
+        heads = {"Authorization": None, "x-goog-api-key": kh.token}
+        body = {"contents": []}
+        for path, body_, want in (
+                ("/models/gemini-x-pro:streamGenerateContent?alt=sse", body, 403),
+                ("/tunedModels/gemini-x-flash:streamGenerateContent?alt=sse", body, 403),
+                ("/models/gemini-x-flash/../gemini-x-pro:streamGenerateContent?alt=sse", body, 403),
+                ("/models/gemini-x-flash:streamGenerateContent?alt=sse", {**body, "model": "x"}, 403),
+                ("/models/gemini-x-flash:streamGenerateContent?alt=sse",
+                 {**body, "models": ["gemini-x-pro"]}, 403),
+                ("/models/gemini-x-flash:streamGenerateContent?alt=sse&key=AIzaOther", body, 400),
+                ("/models/gemini-x-flash:streamGenerateContent?KEY=AIzaOther", body, 400),
+                ("/models/gemini-x-flash:streamGenerateContent?alt=json", body, 400),
+                ("/models/gemini-x-flash:generateContent", body, 404),
+                ("/models/gemini-x-flash:countTokens", body, 404),
+                ("/chat/completions", {"model": "gemini-x-flash"}, 404)):
+            code, _, text = self.post(kh, path, body=body_, headers=heads)
+            self.assertEqual(code, want, (path, text))
+        self.assertEqual(self.up.seen, [])                                    # nothing went on
+        self.assertIn(f"keyhole: refused models/gemini-x-pro (this task runs {kh.model.id})", self.lines)
+        self.assertIn(f"keyhole: refused tunedModels/gemini-x-flash (this task runs {kh.model.id})", self.lines)
+        code, _, _ = self.post(kh, "/models/gemini-x-flash:streamGenerateContent?alt=sse", body=body,
+                               headers={"Authorization": None, "x-goog-api-key": "nope"})
+        self.assertEqual((code, self.up.seen), (401, []))
+
+    def test_geminis_per_minute_429_is_held_as_a_rate_and_its_daily_one_stops_the_round(self):
+        # Google's free tier says "You exceeded your current quota" of both: QUOTA read the
+        # per-minute one as a spent balance and stopped the round
+        told = []
+        kh = self.gemini(hold=0, on_health=lambda state, why, until: told.append((state, until)))
+        rpm = {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": (
+            "You exceeded your current quota, please check your plan and billing details."),
+            "details": [{"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [{
+                "quotaMetric": "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+                "quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}]},
+                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "41s"}]}}
+        self.up.mode, self.up.status, self.up.ctype = "raw", 429, "application/json"
+        self.up.pieces = [json.dumps(rpm).encode()]
+        path, heads = ("/models/gemini-x-flash:streamGenerateContent?alt=sse",
+                       {"Authorization": None, "x-goog-api-key": kh.token})
+        code, _, _ = self.post(kh, path, body={"contents": []}, headers=heads)
+        self.assertEqual(code, 429)                                       # passed back after the hold
+        self.assertNotIn("api_stop", self.task.status)
+        [(state, until)] = told
+        self.assertEqual(state, "rate_limited")
+        self.assertAlmostEqual(until, time.time() + 41, delta=5)           # RetryInfo's wait
+        daily = json.loads(json.dumps(rpm).replace("PerMinute", "PerDay"))
+        self.up.pieces = [json.dumps(daily).encode()]
+        code, _, text = self.post(kh, path, body={"contents": []}, headers=heads)
+        self.assertEqual(code, 400, text)                                 # no wait helps: the round stops
+        self.assertEqual(self.task.status["api_stop"]["guard"], "quota")
+
+    def test_azure_openai_gets_api_key_and_its_api_version_on_the_path_opencode_posts(self):
+        # azure.ts: an `*.openai.azure.com` base gets `/v1` and `?api-version=v1`; the keyhole's
+        # on 127.0.0.1 gets neither, so the keyhole mirrors the one and adds the other
+        up = "https://myres.openai.azure.com/openai"
+        for package in ("@opencode/ai/providers/azure/responses", "@opencode/ai/providers/azure/chat"):
+            self.assertEqual(self.kh_mod.mirror_path(package, up), up + "/v1")
+            self.assertEqual(self.kh_mod.upstream_query(package, up), {"api-version": "v1"})
+        other = "https://gw.example.test/openai"                         # posted to as it is
+        self.assertEqual(self.kh_mod.mirror_path("@opencode/ai/providers/azure", other), other)
+        self.assertEqual(self.kh_mod.upstream_query("@opencode/ai/providers/azure", other), {})
+        self.assertEqual(self.kh_mod.upstream_query("@opencode/ai/providers/openai", up), {})
+        self.assertEqual(self.models.catalog_base("@opencode/ai/providers/azure/responses",
+                                                  {"resourceName": "myres"}), up)
+        self.assertEqual(self.models.catalog_base("@opencode/ai/providers/azure/responses",
+                                                  {"resourceName": "my.evil/host"}), "")
+        m = self.model("azure", "gpt-x-mini", "/openai/v1", "@opencode/ai/providers/azure/responses")
+        kh = self.keyhole(m, query={"api-version": "v1"})
+        code, _, text = self.post(kh, "/responses?api-version=2020-01-01", body={"model": "gpt-x-mini"},
+                                  headers={"Authorization": None, "api-key": kh.token})
+        self.assertEqual(code, 200, text)
+        [req] = self.up.seen
+        self.assertEqual(req["path"], "/openai/v1/responses?api-version=v1")
+        heads = {k.lower(): v for k, v in req["headers"].items()}
+        self.assertEqual(heads["api-key"], self.CANARY)
+        self.assertNotIn("authorization", heads)
+        self.assertEqual(self.post(kh, "/responses", body={"model": "gpt-x"},
+                                   headers={"Authorization": None, "api-key": kh.token})[0], 403)
+
+    def test_bedrocks_api_key_runs_converse_with_the_model_in_the_path_and_its_usage_is_booked(self):
+        from workbench import meter
+        # amazon-bedrock.ts sends a Bedrock API key as a bearer ahead of SigV4; Converse names
+        # the model in the path, encodeURIComponent'd, and frames its stream as AWS event-stream
+        got = []
+        name = "us.anthropic.claude-x-1:0"
+        kh = self.keyhole(self.model("amazon-bedrock", name, "", "@opencode/ai/providers/amazon-bedrock"),
+                          on_usage=got.append)
+        good = "/model/us.anthropic.claude-x-1%3A0/converse-stream"
+        conn = http.client.HTTPConnection("127.0.0.1", kh.port, timeout=30)
+        self.addCleanup(conn.close)
+        conn.request("POST", good, body=json.dumps({"modelId": name, "messages": []}),
+                     headers={"Authorization": f"Bearer {kh.token}"})
+        r = conn.getresponse()
+        self.assertEqual((r.status, r.read()), (200, b"".join(es_frame(*ev) for ev in CONVERSE_EVENTS)))
+        [req] = self.up.seen
+        self.assertEqual(req["path"], good)
+        self.assertEqual(req["headers"]["Authorization"], f"Bearer {self.CANARY}")
+        self.assertEqual(got, [CONVERSE_EVENTS[-1][1]["usage"]])
+        self.assertEqual(meter.usage_tokens(got[0]), {"in": 7, "cache_read": 2, "cache_write": 0,
+                                                      "out": 3, "reasoning": 0})
+        for path, body in (("/model/us.anthropic.claude-x-1:0/converse-stream", {"modelId": name}),
+                           ("/model/us.anthropic.claude-x-2%3A0/converse-stream", {"modelId": name}),
+                           (good, {"modelId": "us.anthropic.claude-x-2:0"}),
+                           (good, {"modelId": name, "model": "other"})):
+            self.assertEqual(self.post(kh, path, body=body)[0], 403, (path, body))
+        for path in ("/model/x/converse", "/model/x/invoke", "/chat/completions"):
+            self.assertEqual(self.post(kh, path, body={"modelId": name})[0], 404, path)
+        self.assertEqual(self.post(kh, "/models", method="GET")[0], 404)
+        self.assertEqual(len(self.up.seen), 1)
+        self.assertEqual(self.models.catalog_base("@opencode/ai/providers/amazon-bedrock",
+                                                  {"region": "eu-west-1"}),
+                         "https://bedrock-runtime.eu-west-1.amazonaws.com")
+        self.assertEqual(self.models.catalog_base("@opencode/ai/providers/amazon-bedrock/mantle/responses",
+                                                  {"region": "eu-west-1"}),
+                         "https://bedrock-mantle.eu-west-1.api.aws/v1")
+        self.assertEqual(self.models.catalog_base("@opencode/ai/providers/amazon-bedrock/mantle/messages",
+                                                  {"region": "eu-west-1"}),
+                         "https://bedrock-mantle.eu-west-1.api.aws/anthropic/v1")
+
+    def test_a_listed_mantle_base_gets_its_region_as_opencode_fills_it_and_any_other_variable_is_refused(self):
+        # #1192's review (2026-11-24): OpenCode 2.3.2's model.list prints every Mantle row's base
+        # as a template, filled only when it resolves the model (model-resolver.ts
+        # prepareProviderURL); passed on as it was, the keyhole's upstream host was
+        # `bedrock-mantle.${aws_region}.api.aws` and every request a 502 or a 10-minute outage
+        mantle = "@opencode/ai/providers/amazon-bedrock/mantle/responses"
+        row = {"providerID": "amazon-bedrock", "id": "openai.gpt-x", "package": mantle,  # as listed
+               "settings": {"region": "us-east-1",
+                            "baseURL": "https://bedrock-mantle.${AWS_REGION}.api.aws/openai/v1"}}
+        base = self.models.catalog_base(row["package"], row["settings"])
+        self.assertEqual(base, "https://bedrock-mantle.us-east-1.api.aws/openai/v1")
+        self.assertEqual(self.kh_mod.mirror_path(mantle, base), base)
+        template = {"baseURL": "https://bedrock-mantle.${AWS_REGION}.api.aws/v1"}
+        for env, want in (({"AWS_REGION": "eu-west-1", "AWS_DEFAULT_REGION": "ap-south-1"}, "eu-west-1"),
+                          ({"AWS_DEFAULT_REGION": "ap-south-1"}, "ap-south-1"), ({}, "us-east-1")):
+            with mock.patch.dict(os.environ, env), self.subTest(env):
+                for name in {"AWS_REGION", "AWS_DEFAULT_REGION"} - set(env):
+                    os.environ.pop(name, None)
+                self.assertEqual(self.models.catalog_base(mantle, template),
+                                 f"https://bedrock-mantle.{want}.api.aws/v1")
+        for settings in ({**template, "region": "us-east-1.evil.test/x"},   # not a host label
+                         {"baseURL": "https://${HOST}/v1", "region": "us-east-1"},
+                         {"baseURL": "https://bedrock-mantle.${AWS_REGION}.${DOMAIN}/v1"}):
+            self.assertEqual(self.models.catalog_base(mantle, settings), "", settings)
+        plain = "https://gw.example.test/v1"
+        self.assertEqual(self.models.catalog_base(mantle, {"baseURL": plain}), plain)
+
+    def test_bedrock_runs_on_a_stored_api_key_and_still_refuses_signing(self):
+        self.fake_auth({"amazon-bedrock": {"export": [self.key_row("amazon-bedrock", {
+            "type": "key", "key": self.CANARY})]}})
+        self.assertEqual(self.kh_mod.load_key("amazon-bedrock").value, self.CANARY)
+        auth = {"amazon-bedrock": {"connections": [{"type": "credential", "method": "key"}]},
+                "google-vertex": {"connections": [{"type": "credential", "method": "key"}]}}
+        self.assertEqual(self.models._key_source("amazon-bedrock", auth, None), "stored")
+        self.assertEqual(self.models._key_source("google-vertex", auth, None), "signing")
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:
+            self.kh_mod.start(self.task, self.model("google-vertex", "gemini-x", "/v1",
+                                                    "@opencode/ai/providers/google-vertex"))
+        self.assertIn("signs each request (Vertex)", str(e.exception))
 
     def test_an_ai_sdk_npm_runs_through_the_keyhole_as_its_opencode_package(self):
         # #1137 (2026-11-23): a config provider's npm `@ai-sdk/openai-compatible` read as its
         # scope, `@ai-sdk`, so a custom provider set up as OpenCode's docs say was refused
         for package, want in (("@ai-sdk/openai-compatible", "bearer"), ("@ai-sdk/anthropic", "anthropic"),
                               ("@ai-sdk/openai", "bearer"), ("@ai-sdk/deepinfra", "bearer"),
-                              ("@ai-sdk/foo", None), ("@ai-sdk/google", None), ("@acme/openai", None),
+                              ("@ai-sdk/foo", None), ("@ai-sdk/google", "google"), ("@acme/openai", None),
                               ("aisdk:@ai-sdk/openai", None), ("@ai-sdk", None)):
             self.assertEqual(self.kh_mod.protocol_of(package), want, package)
         # as OpenCode runs `@ai-sdk/deepinfra`: its own package, which appends /openai
@@ -31998,12 +34429,88 @@ class Keyhole(_KeyholeTest):
         conf["providers"] = {"envv2": {"settings": {"apiKey": "{env:ENVV2_KEY}"}}}  # not checked: still refused
         path.write_text(json.dumps(conf))
         self.assertEqual(self.kh_mod.load_key("envstored").value, self.CANARY)
-        for provider, why in (("envonly", "envonly's key is only in the environment ($ENVONLY_KEY)"),
-                              ("envv2", "envv2's key is only in the environment ($ENVV2_KEY)")):
+        # with none stored, the variable is read (#1189): here unset, so said, and a V2 one never
+        os.environ.pop("ENVONLY_KEY", None)
+        for provider, why in (("envonly", "$ENVONLY_KEY isn't set where wb start ran: export it, or "
+                                          "store the key with `opencode auth login envonly`"),
+                              ("envv2", "envv2's key is read from $ENVV2_KEY in a header or V2 `settings`")):
             with self.assertRaises(self.kh_mod.KeyholeError) as e:
                 self.kh_mod.load_key(provider)
             self.assertIn(why, str(e.exception))
             self.assert_no_canary(str(e.exception))
+
+    def test_with_none_stored_the_key_comes_from_the_variable_opencode_names_in_the_runners_environment(self):
+        # #1189: an exported key was refused ("only in the environment, which agents don't get")
+        # and the user sent to /connect in OpenCode's TUI, though the runner already carries the
+        # environment wb start ran in (context.detached_env) and the agent's drops the variable
+        self.fake_auth({"xenv": {"list": [{"type": "env", "name": "XENV_API_KEY"}]},
+                        "lone": {},
+                        "both": {"export": [self.key_row("both", {"type": "key", "key": self.CANARY})],
+                                 "list": [{"type": "env", "name": "BOTH_API_KEY"}]}})
+        path = Path(os.environ["WB_OPENCODE_CONFIG"])
+        conf = json.loads(path.read_text())
+        conf.setdefault("provider", {})["lone"] = {"options": {"apiKey": "{env:LONE_API_KEY}"}}
+        path.write_text(json.dumps(conf))
+        os.environ.update(XENV_API_KEY=self.CANARY + "\n", LONE_API_KEY=self.CANARY,
+                          BOTH_API_KEY="sk-the-other-" + "Z" * 30)
+        for provider, var in (("xenv", "XENV_API_KEY"), ("lone", "LONE_API_KEY")):
+            key = self.kh_mod.load_key(provider)
+            self.assertEqual((key.value, key.source), (self.CANARY, f"${var}"))   # trimmed, as a paste
+            self.assert_no_canary(repr(key), str(key))
+            self.assertEqual(self.models.env_why(provider, var), "")
+        key = self.kh_mod.load_key("both")                               # a stored key first
+        self.assertEqual((key.value, key.source), (self.CANARY, ""))
+        calls = [json.loads(x)["argv"][:3] for x in Path(os.environ["FAKE_AUTH_ARGV"]).read_text().splitlines()]
+        self.assertEqual(calls, [["auth", "export", "xenv"], ["auth", "list", "--format"],
+                                 ["auth", "export", "lone"], ["auth", "export", "both"]])  # lone: no list
+        # what the runner logs names the variable, never its value
+        m = self.model("xenv")
+        m.package = "@opencode/ai/providers/deepinfra"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            kh = self.kh_mod.start(self.task, m)
+        self.addCleanup(kh.close)
+        self.assertEqual(out.getvalue().strip(),
+                         f"keyhole: xenv on 127.0.0.1:{kh.port} for {m.id} (key from $XENV_API_KEY)")
+        self.assertEqual(self.post(kh)[0], 200)
+        self.assertEqual(self.up.seen[-1]["headers"]["Authorization"], f"Bearer {self.CANARY}")
+        self.assert_no_canary(json.dumps(self.kh_mod.layer_options(kh)))
+
+    def test_an_environment_key_the_agent_would_get_too_or_that_isnt_set_refuses(self):
+        # #1189's guard: the keyhole takes a variable only where the agent's environment drops it
+        # (runner.env_kept: SECRET_ENV by its name, and not passed through by commands.json
+        # `env`), and only when it is set where wb start ran; each refusal names the variable,
+        # never its value, and its own fix
+        self.fake_auth({"xenv": {"list": [{"type": "env", "name": "XENV_API_KEY"}]}, "plain": {}})
+        path = Path(os.environ["WB_OPENCODE_CONFIG"])
+        conf = json.loads(path.read_text())
+        conf.setdefault("provider", {})["plain"] = {"options": {"apiKey": "{env:PLAINVAR}"}}
+        path.write_text(json.dumps(conf))
+        need = "needs a key wb can hold outside the lane: "
+        os.environ.pop("XENV_API_KEY", None)
+        cases = [("xenv", {}, "$XENV_API_KEY isn't set where wb start ran: export it, or store the key "
+                              "with `opencode auth login xenv`"),
+                 ("xenv", {"XENV_API_KEY": "  "}, "$XENV_API_KEY isn't set where wb start ran: export it, or "
+                                                  "store the key with `opencode auth login xenv`"),
+                 ("xenv", {"XENV_API_KEY": self.CANARY, "commands": ["XENV_API_KEY"]},
+                  "$XENV_API_KEY is passed to agents (commands.json env): remove it there"),
+                 ("plain", {"PLAINVAR": self.CANARY}, "agents get $PLAINVAR too (wb keeps a variable from "
+                                                      "them by a key's name, such as *_API_KEY): rename it, or "
+                                                      "store the key with `opencode auth login plain`"),
+                 ("xenv", {"XENV_API_KEY": self.CANARY[:20] + "\x01" + self.CANARY[20:]},
+                  "$XENV_API_KEY holds a character an HTTP header can't carry: export it again, or store "
+                  "the key with `opencode auth login xenv`")]
+        for provider, env, why in cases:
+            with self.subTest(why=why):
+                Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": env.pop("commands", [])}))
+                with mock.patch.dict(os.environ, env):
+                    with self.assertRaises(self.kh_mod.KeyholeError) as e:
+                        self.kh_mod.load_key(provider)
+                    self.assertEqual(str(e.exception), need + why)
+                    self.assertEqual(runner.keyhole_failure(e.exception, provider), need + why)  # its own fix
+                    var = "PLAINVAR" if provider == "plain" else "XENV_API_KEY"
+                    self.assertEqual(self.models.env_why(provider, var), why)
+                    self.assert_no_canary(str(e.exception))
 
     def test_a_key_in_a_models_own_entry_or_the_v2_form_cant_run(self):
         # the review of #1015 (2026-11-23): only provider.<pid>.options was read, so a model's
@@ -32031,6 +34538,214 @@ class Keyhole(_KeyholeTest):
             self.assertIn("its key is written in OPENCODE_CONFIG_CONTENT", str(e.exception))
             self.assert_no_canary(str(e.exception))
         self.assertEqual(self.kh_mod.load_key("clean").value, self.CANARY)
+
+
+class _CopilotUser(http.server.BaseHTTPRequestHandler):
+    """GitHub's copilot_internal/user for copilot_endpoint's tests: its server's `answer` (a JSON
+    object, or a status number), each request's headers on `seen`."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        self.server.seen.append({"path": self.path, "headers": dict(self.headers)})
+        answer = self.server.answer
+        body = b"{}" if isinstance(answer, int) else json.dumps(answer).encode()
+        self.send_response(answer if isinstance(answer, int) else 200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class CopilotSignIn(_KeyholeTest):
+    """GitHub Copilot's sign-in held as a key (#1191): OpenCode 2.3.2's device login stores the
+    GitHub token as `access` and `refresh` with `expires: 0`, which never rotates; the keyhole
+    sends it to the account's own endpoint, Bearer on every route, and the meter counts a plan."""
+
+    def copilot_row(self, **value):
+        return self.key_row("github-copilot", {"type": "oauth", "methodID": "device",
+                                               "refresh": self.CANARY, "access": self.CANARY,
+                                               "expires": 0, **value})
+
+    def copilot_model(self, name="claude-haiku-4.5", base="https://api.githubcopilot.com/v1",
+                      package="@opencode/ai/providers/anthropic"):
+        m = self.models.Model(id=f"github-copilot/{name}", provider="github-copilot", name=name,
+                              base_url=base, engine="api", label=name, kind="api", key="copilot")
+        m.package = package
+        return m
+
+    def user_server(self, answer):
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), _CopilotUser)
+        srv.daemon_threads, srv.seen, srv.answer = True, [], answer
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        p = mock.patch.object(self.kh_mod, "copilot_user_url",
+                              return_value=f"http://127.0.0.1:{srv.server_port}/copilot_internal/user")
+        p.start()
+        self.addCleanup(p.stop)
+        return srv
+
+    def test_a_copilot_device_sign_in_is_held_as_a_key_with_its_endpoint_beside_it(self):
+        self.fake_auth({"github-copilot": {"export": [self.copilot_row(metadata={
+            "apiEndpoint": "https://api.business.githubcopilot.com", "other": "x"})]}})
+        key = self.kh_mod.load_key("github-copilot")
+        self.assertEqual(key.value, self.CANARY)
+        self.assertEqual(key.meta, {"apiEndpoint": "https://api.business.githubcopilot.com"})
+        self.assert_no_canary(repr(key), str(key))
+
+    def test_a_copilot_sign_in_that_rotates_or_holds_no_token_is_refused_with_its_own_fix(self):
+        for value, why in (({"expires": 1795522477438}, "expires and rotates its token"),
+                           ({"access": " "}, "holds no token"),
+                           ({"type": "external"}, "comes from an external source")):
+            self.fake_auth({"github-copilot": {"export": [self.copilot_row(**value)]}})
+            with self.assertRaises(self.kh_mod.KeyholeError) as e:
+                self.kh_mod.load_key("github-copilot")
+            self.assertIn(why, str(e.exception))
+            self.assertEqual(runner.keyhole_failure(e.exception), str(e.exception))  # no API key fix
+            self.assert_no_canary(str(e.exception))
+        self.fake_auth({"github-copilot": {"export": []}})
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:
+            self.kh_mod.load_key("github-copilot")
+        self.assertIn("no GitHub Copilot sign-in: /connect in OpenCode signs in", str(e.exception))
+
+    def test_the_active_copilot_credential_is_the_one_held(self):
+        other = self.key_row("github-copilot", {"type": "key", "key": "old-" + self.CANARY}, active=False)
+        self.fake_auth({"github-copilot": {"export": [other, self.copilot_row()]}})
+        self.assertEqual(self.kh_mod.load_key("github-copilot").value, self.CANARY)
+
+    def test_a_chatgpt_or_opencode_console_sign_in_says_its_own_cause(self):
+        oauth = {"type": "oauth", "methodID": "m", "refresh": "r", "access": "a", "expires": 1}
+        self.fake_auth({p: {"export": [self.key_row(p, oauth)]} for p in ("openai", "opencode-go")})
+        for provider, why in (("openai", "openai is signed in with ChatGPT: its tokens rotate, and a "
+                                         "copy wb refreshed would sign your own OpenCode out; an "
+                                         "OpenAI API key through /connect works"),
+                              ("opencode-go", "signed in with the OpenCode Console: its tokens rotate, "
+                                              "and the keyhole doesn't speak its API (SystemOne) yet")):
+            with self.assertRaises(self.kh_mod.KeyholeError) as e:
+                self.kh_mod.load_key(provider)
+            self.assertIn(why, str(e.exception))
+
+    def test_the_endpoint_is_the_accounts_own_as_github_says_it_else_the_stored_one(self):
+        key = self.kh_mod.Key("github-copilot", self.CANARY,
+                              meta={"apiEndpoint": "https://api.individual.githubcopilot.com"})
+        srv = self.user_server({"chat_enabled": True,
+                                "endpoints": {"api": "https://api.business.githubcopilot.com/"}})
+        self.assertEqual(self.kh_mod.copilot_endpoint(key), "https://api.business.githubcopilot.com")
+        [asked] = srv.seen
+        heads = {k.lower(): v for k, v in asked["headers"].items()}
+        self.assertEqual(heads["authorization"], f"Bearer {self.CANARY}")
+        self.assertEqual(heads["x-github-api-version"], "2025-04-01")
+        # an answer that isn't an https root, or no answer: the sign-in's stored endpoint
+        for answer in ({"endpoints": {"api": "http://evil.example"}},
+                       {"endpoints": {"api": "https://user@evil.example"}}, 401, {"x": 1}):
+            srv.answer = answer
+            self.assertEqual(self.kh_mod.copilot_endpoint(key),
+                             "https://api.individual.githubcopilot.com", answer)
+        self.assertIsNone(self.kh_mod.copilot_endpoint(self.kh_mod.Key("github-copilot", self.CANARY)))
+        srv.answer = {"chat_enabled": False}
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:
+            self.kh_mod.copilot_endpoint(key)
+        self.assertIn("no Copilot chat", str(e.exception))
+        self.assert_no_canary(str(e.exception))
+
+    def test_an_enterprise_sign_in_asks_its_own_domain(self):
+        url = self.kh_mod.copilot_user_url
+        self.assertEqual(url({}), "https://api.github.com/copilot_internal/user")
+        self.assertEqual(url({"enterpriseUrl": "https://company.ghe.com/"}),
+                         "https://api.company.ghe.com/copilot_internal/user")
+
+    def test_the_upstream_is_the_accounts_root_with_the_catalog_routes_path(self):
+        up = self.kh_mod.copilot_upstream
+        root = "https://api.business.githubcopilot.com"
+        self.assertEqual(up("https://api.githubcopilot.com/v1", root), f"{root}/v1")   # Messages
+        self.assertEqual(up("https://api.githubcopilot.com", root), root)               # OpenAI's
+        self.assertEqual(up("https://api.githubcopilot.com/", root), root)
+        self.assertEqual(up("https://api.githubcopilot.com/v1", None), "https://api.githubcopilot.com/v1")
+        self.assertEqual(up("https://x.example/odd/path", root), "https://x.example/odd/path")
+
+    def test_a_copilot_model_posts_bearer_to_the_accounts_endpoint_on_every_route(self):
+        # its Messages route as well: the plugin's applyHeaders sends Bearer there, never x-api-key
+        self.fake_auth({"github-copilot": {"export": [self.copilot_row()]}})
+        root = f"http://127.0.0.1:{self.up.server_port}"
+        with mock.patch.object(self.kh_mod, "copilot_endpoint", return_value=root):
+            kh = self.kh_mod.start(self.task, self.copilot_model(), log=self.lines.append)
+        self.addCleanup(kh.close)
+        self.assertEqual((kh.protocol, kh.base), ("bearer", f"http://127.0.0.1:{kh.port}/v1"))
+        self.assertIn("(the account's endpoint, 127.0.0.1)", self.lines[-1])
+        code, _, body = self.post(kh, "/messages", headers={"Authorization": None,
+                                                           "x-api-key": kh.token})
+        self.assertEqual(code, 200, body)
+        [req] = self.up.seen
+        self.assertEqual(req["path"], "/v1/messages")
+        self.assertEqual(req["headers"]["Authorization"], f"Bearer {self.CANARY}")
+        self.assertNotIn("x-api-key", {k.lower() for k in req["headers"]})
+        self.assertNotIn(kh.token, json.dumps(req))
+
+    def test_the_layer_says_a_copilot_models_package_so_its_plugin_routes_it(self):
+        # the task's catalog holds one model, so OpenCode gives its package to the provider and
+        # none to the model, and the plugin sent a Claude model to /chat/completions (#1191)
+        m = self.copilot_model()
+        kh = self.kh_mod.Keyhole(self.task, m, self.kh_mod.Key("github-copilot", self.CANARY),
+                                 f"http://127.0.0.1:{self.up.server_port}/v1", "bearer",
+                                 log=self.lines.append)
+        self.addCleanup(kh.close)
+        runner.CURRENT["keyhole"] = kh
+        self.addCleanup(runner.CURRENT.clear)
+        over = runner.keyhole_overlay(self.task)
+        entry = over["provider"]["github-copilot"]["models"][m.name]
+        self.assertEqual(entry["provider"], {"api": kh.base, "npm": "@opencode/ai/providers/anthropic"})
+        self.assertEqual(runner.keyhole_v2(over)["github-copilot"]["models"][m.name]["package"],
+                         "@opencode/ai/providers/anthropic")                 # V2's word for it
+        self.assert_no_canary(json.dumps(over))
+
+    def test_copilots_auto_model_is_refused_at_start_and_never_listed_as_runnable(self):
+        m = self.copilot_model("auto", "https://api.githubcopilot.com",
+                               "@opencode/ai/providers/openai-compatible")
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:
+            self.kh_mod.start(self.task, m, log=self.lines.append)
+        self.assertIn("Auto model picks another model each session", str(e.exception))
+        self.assertEqual(self.models.keyhole_refusal(m), self.models.COPILOT_AUTO_WHY)
+
+    def test_spent_premium_requests_stop_the_round_as_no_credit(self):
+        m = self.copilot_model("gpt-5.4-nano", f"http://127.0.0.1:{self.up.server_port}",
+                               "@opencode/ai/providers/openai-compatible-responses")
+        states = []
+        kh = self.kh_mod.Keyhole(self.task, m, self.kh_mod.Key("github-copilot", self.CANARY),
+                                 m.base_url, "bearer", log=self.lines.append,
+                                 on_health=lambda state, why, until: states.append(state))
+        self.addCleanup(kh.close)
+        self.up.mode, self.up.status = "status", 403
+        self.up.message = "You have exceeded your premium request allowance for this month."
+        code, _, body = self.post(kh, "/responses")
+        self.assertEqual(code, 400, body)
+        self.assertIn("out of credit", body)
+        self.assertEqual(states, ["no_credit"])
+        self.assertEqual(self.task.status["api_stop"]["guard"], "quota")
+
+    def test_a_copilot_sign_in_is_its_own_key_source_and_runs(self):
+        conns = [{"type": "credential", "id": "cred_1", "label": "default", "method": "oauth"}]
+        auth = {p: {"connections": conns} for p in ("github-copilot", "openai")}
+        self.assertEqual(self.models._key_source("github-copilot", auth, None), "copilot")
+        self.assertEqual(self.models._key_source("openai", auth, None), "oauth")
+        self.assertTrue(cli._runs_held(self.copilot_model()))
+        self.assertTrue(runner.needs_keyhole(self.copilot_model()))
+
+    def test_copilot_usage_is_a_plan_never_dollars_against_the_day_cap(self):
+        # OpenCode 2.3.2's catalog prices Copilot's models at their API rates ($2/$10 for its
+        # Claude ones): booked as dollars they'd stop tasks at a cap the subscription never spends
+        from workbench import meter
+        m = self.copilot_model()
+        m.config = {"cost": [{"input": 2, "output": 10}], "limit": {"context": 200000, "output": 64000}}
+        self.assertTrue(meter.is_plan(m))
+        self.assertIsNone(meter.refusal(m))                       # no cap asked for
+        mt = meter.Meter(self.task, m)
+        self.assertIsNone(mt.room({"model": m.name}, 4_000_000))  # never refused for spend
+        mt.on_usage({"input_tokens": 1000, "output_tokens": 50})
+        [row] = store.read_jsonl(meter.ledger_path())[0]
+        self.assertEqual((row["usd"], row["plan"]), (None, "github-copilot"))
+        self.assertEqual(row["tok"]["in"], 1000)
 
 
 @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
@@ -32157,6 +34872,123 @@ class RealOpenCodeAPI(_KeyholeTest):
             self.assertIn(kh.token, sent[header])                          # OpenCode had the token
             self.assert_no_canary(json.dumps(sent))                        # and never the key
 
+    def test_copilot_models_post_through_the_keyhole_with_the_plugins_headers_and_no_sign_in(self):
+        # #1191: the agent's OpenCode holds no Copilot credential, only the layer's base and
+        # token; its Copilot plugin still adds Copilot's headers (by provider, not by credential),
+        # each route posts under the keyhole's mirrored base (Messages under /v1), the keyhole
+        # sends the sign-in's token as Bearer to the account's endpoint, and the plugin asks
+        # nothing else (no /models, no Auto router, no GitHub lookup: it has no sign-in)
+        from workbench import keyhole
+        tmp = Path(self.tmp.name)
+        keys = {"disabled_providers": ["ollama"],
+                "provider": {"github-copilot": {"options": {"apiKey": "dummy-not-a-key"}}}}
+        (tmp / "copilot-keys.json").write_text(json.dumps(keys))
+        rows = [r for r in self.listed(tmp / "copilot-keys.json", "copilot-list")
+                if r["providerID"] == "github-copilot" and (r.get("capabilities") or {}).get("tools")]
+        routes_ = {"@opencode/ai/providers/anthropic": "/v1/messages",
+                   "@opencode/ai/providers/openai-compatible": "/chat/completions",
+                   "@opencode/ai/providers/openai-compatible-responses": "/responses"}
+        picked = {}
+        for r in rows:
+            picked.setdefault(r.get("package"), r)
+        self.assertEqual(set(routes_) - set(picked), set(), [r.get("package") for r in rows])
+        root = f"http://127.0.0.1:{self.up.server_port}"
+        for package, path in routes_.items():
+            row = picked[package]
+            self.up.seen.clear()
+            m = self.models.Model(id=f"github-copilot/{row['id']}", provider="github-copilot",
+                                  name=row.get("modelID") or row["id"], kind="api", engine="api",
+                                  base_url=row["settings"]["baseURL"], label=row["id"], key="copilot")
+            m.package = package
+            # as hosted() keeps the row, so the task's own catalog (catalog_doc) carries it
+            m.config = {"catalog": True, "api": m.base_url, "package": package, "type": "chat",
+                        "limit": row.get("limit") or {}, "cost": row.get("cost") or [],
+                        "capabilities": row.get("capabilities") or {}, "title": row.get("name")}
+            with mock.patch.object(keyhole, "load_key", return_value=keyhole.Key("github-copilot", self.CANARY)), \
+                    mock.patch.object(keyhole, "copilot_endpoint", return_value=root):
+                kh = keyhole.start(self.task, m, log=self.lines.append)
+            self.addCleanup(kh.close)
+            runner.CURRENT["keyhole"] = kh
+            self.addCleanup(runner.CURRENT.clear)
+            self.assertIsNotNone(runner.write_catalog(self.task))          # the task's own catalog
+            layer = tmp / f"copilot-layer-{len(picked)}-{path.strip('/').replace('/', '-')}.json"
+            over = runner.keyhole_overlay(self.task)                        # as the runner writes it
+            layer.write_text(json.dumps({"disabled_providers": ["ollama"], **over}))
+            env = {**self.scratch_env(layer, f"copilot-{path.strip('/').replace('/', '-')}",
+                                      runner.catalog_path(self.task)),
+                   "OPENCODE_CONFIG_CONTENT": runner.rules_env(json.loads(layer.read_text()), over)[
+                       "OPENCODE_CONFIG_CONTENT"]}
+            r = subprocess.run(["opencode", "run", "--standalone", "--title", "t", "-m", m.id,
+                                "--format", "json", "say ok"], cwd=self.repo, env=env,
+                               capture_output=True, text=True, timeout=180)
+            self.assertEqual(r.returncode, 0, f"{package}: {r.stdout[-2000:]}{r.stderr[-2000:]}")
+            self.assert_no_canary(layer.read_text(), json.dumps(env),
+                                  runner.catalog_path(self.task).read_text())
+            [req] = self.up.seen                                           # that request alone
+            heads = {k.lower(): v for k, v in req["headers"].items()}
+            self.assertEqual((req["method"], req["path"]), ("POST", path), package)
+            self.assertEqual(heads["authorization"], f"Bearer {self.CANARY}", package)
+            self.assertNotIn("x-api-key", heads)
+            self.assertEqual(req["body"]["model"], m.name)
+            for h in ("x-initiator", "openai-intent", "x-github-api-version", "x-interaction-type"):
+                self.assertIn(h, heads, f"{package}: the plugin's {h}")
+            self.assertNotIn(kh.token, json.dumps(req))
+
+    def test_gemini_azure_and_bedrock_post_through_the_keyhole_as_their_packages_do(self):
+        # #1192: what OpenCode 2.3.2's own packages send a keyhole base: Gemini's model path,
+        # `?alt=sse` and x-goog-api-key; Azure OpenAI's api-key, no `/v1` or api-version added to
+        # a base off `*.openai.azure.com` (the keyhole adds the version); a Bedrock API key as a
+        # bearer, ahead of SigV4, for Mantle's Responses and Converse's model path
+        from workbench import keyhole
+        tmp = Path(self.tmp.name)
+        keys = {"disabled_providers": ["ollama"], "provider": {
+            "google": {"options": {"apiKey": "dummy-not-a-key"}},
+            "azure": {"options": {"apiKey": "dummy-not-a-key", "resourceName": "wbtest"}},
+            "amazon-bedrock": {"options": {"apiKey": "dummy-not-a-key", "region": "us-east-1"}}}}
+        (tmp / "keys-1192.json").write_text(json.dumps(keys))
+        rows = self.listed(tmp / "keys-1192.json", "bundled-1192")
+        # each case's base is the listed row's, through catalog_base and mirror_path as
+        # keyhole.start takes it: a hand-written Mantle `/v1` hid that model.list prints Mantle's
+        # base as `https://bedrock-mantle.${AWS_REGION}.api.aws/openai/v1` (#1192's review)
+        cases = (("google", "@opencode/ai/providers/google", "generativelanguage.googleapis.com",
+                  "x-goog-api-key", self.CANARY, "/models/{name}:streamGenerateContent?alt=sse"),
+                 # Azure through its Chat route: its Responses one builds the same URL and auth
+                 # (azure.ts `endpoint`, `auth`), but OpenCode's OpenAI Responses parser ends this
+                 # test upstream's stream as incomplete, retrying for 90 s (2026-11-24)
+                 ("azure", "@opencode/ai/providers/azure/chat", "wbtest.openai.azure.com",
+                  "api-key", self.CANARY, "/chat/completions?api-version=v1"),
+                 ("amazon-bedrock", "@opencode/ai/providers/amazon-bedrock/mantle/responses",
+                  "bedrock-mantle.us-east-1.api.aws", "authorization", f"Bearer {self.CANARY}", "/responses"),
+                 ("amazon-bedrock", "@opencode/ai/providers/amazon-bedrock", "bedrock-runtime.us-east-1.amazonaws.com",
+                  "authorization", f"Bearer {self.CANARY}", "/model/{quoted}/converse-stream"))
+        for provider, package, host, header, want, upstream in cases:
+            row = next((r for r in rows if r["providerID"] == provider and r.get("package") == package), None)
+            if row is None:  # a newer OpenCode's catalog without one: said, not passed silently
+                self.fail(f"the bundled catalog lists no {provider} model on {package}")
+            name = row["id"]
+            base = self.models.catalog_base(package, row.get("settings") or {})
+            self.assertEqual(urllib.parse.urlsplit(base).hostname, host, (package, base))
+            mirrored = urllib.parse.urlsplit(keyhole.mirror_path(package, base))
+            self.up.seen.clear()
+            m = self.model(provider, name, mirrored.path, package)
+            kh = keyhole.Keyhole(self.task, m, keyhole.Key(provider, self.CANARY), m.base_url,
+                                 keyhole.protocol_of(package), log=self.lines.append,
+                                 query=keyhole.upstream_query(package, base) or None)
+            self.addCleanup(kh.close)
+            with self.subTest(package):
+                self.run_opencode(kh, provider)
+                self.check_1192(req=self.up.seen, header=header, want=want, upstream=mirrored.path + upstream.format(
+                    name=name, quoted=urllib.parse.quote(name, safe="-_.!~*'()")), token=kh.token)
+
+    def check_1192(self, req, header, want, upstream, token):
+        [req] = req                                                      # one request upstream
+        heads = {k.lower(): v for k, v in req["headers"].items()}
+        self.assertEqual(req["path"], upstream)
+        self.assertEqual(heads[header], want)
+        self.assertFalse({"authorization", "x-api-key", "api-key", "x-goog-api-key"} - {header}
+                         & set(heads))                                  # the key in one header only
+        self.assertNotIn(token, json.dumps(req))
+
     def test_a_custom_provider_on_an_ai_sdk_npm_posts_through_the_keyhole(self):
         # #1137 (2026-11-23): the documented form of a custom provider, V1 npm `@ai-sdk/...`,
         # was refused as a package the keyhole can't speak; OpenCode 2.3.2 runs it as its own
@@ -32226,11 +35058,35 @@ class RealOpenCodeAPI(_KeyholeTest):
         self.addCleanup(lambda: [os.kill(pid, signal.SIGKILL) for pid in ours()])
         service("set", "port", str(port))       # not the user's service's port
         self.assertEqual(service("status"), "stopped")
+        os.environ.pop("DEEPSEEK_API_KEY", None)  # one the caller exported is read now (#1189)
         with self.assertRaises(self.kh_mod.KeyholeError) as e:
             self.kh_mod.load_key("deepseek")                             # none stored here
         self.assertIn("OpenCode has no key stored for deepseek", str(e.exception))
         self.assertEqual(service("status"), "stopped")
         self.assertEqual(ours(), [])
+
+    def test_real_opencode_names_the_variable_the_keyhole_reads_a_key_from(self):
+        # #1189: with none stored, the keyhole reads the variable OpenCode's own `auth list`
+        # names (an `env` connection, listed only while it is set), never one wb guesses. No
+        # request goes anywhere: only the key's read, in a scratch home
+        tmp = Path(self.tmp.name)
+        env = {"PATH": os.environ["PATH"], "HOME": str(tmp / "home"),
+               "OPENCODE_DISABLE_MODELS_FETCH": "1",
+               **{f"XDG_{d.upper()}_HOME": str(tmp / "svc" / d)
+                  for d in ("config", "data", "state", "cache")}}
+        for k in ("OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR",
+                  "WB_OPENCODE_CONFIG", "WB_OPENCODE_BIN", "OPENCODE_DB"):
+            os.environ.pop(k, None)
+        os.environ.update(env, DEEPSEEK_API_KEY=self.CANARY)
+        key = self.kh_mod.load_key("deepseek")
+        self.assertEqual((key.value, key.source), (self.CANARY, "$DEEPSEEK_API_KEY"))
+        auth, _ = self.models._auth_rows()
+        self.assertEqual(self.models._key_source("deepseek", auth, None), "env:DEEPSEEK_API_KEY")
+        self.assertEqual(self.models.env_why("deepseek", "DEEPSEEK_API_KEY"), "")
+        os.environ.pop("DEEPSEEK_API_KEY")
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:          # unset: OpenCode names none
+            self.kh_mod.load_key("deepseek")
+        self.assertIn("OpenCode has no key stored for deepseek", str(e.exception))
 
     def test_a_response_is_booked_before_opencode_prints_its_step_finish(self):
         # #1114 (2026-11-23): OpenCode prints step_finish when it reads [DONE], not at the body's
@@ -32328,6 +35184,45 @@ class RealOpenCodeAPI(_KeyholeTest):
         for row in rows:
             (row.get("settings") or {}).pop("apiKey", None)        # the layer's dummy, given back
         return rows
+
+    def test_zens_free_model_runs_through_the_keyhole_on_the_tokens_overlay_and_goes_up_with_public(self):
+        # #1193: OpenCode 2.3.2's Zen plugin turns its provider on with apiKey "public" only when it
+        # sees no key; the layer's overlay gives it the keyhole's token instead. Offline, the real
+        # OpenCode must still run the free model, send the token to the keyhole (else a 401
+        # there), and the keyhole Zen's own "public" upstream, OpenCode's client headers kept
+        from workbench import keyhole, models
+        tmp = Path(self.tmp.name)
+        (tmp / "zen-base.json").write_text(json.dumps({"disabled_providers": ["ollama"]}))
+        rows = [r for r in self.listed(tmp / "zen-base.json", "zen-bundled") if r["providerID"] == models.ZEN
+                and (r.get("capabilities") or {}).get("tools")
+                and all(not c.get("input") and not c.get("output") for c in r.get("cost") or [{"input": 1}])]
+        if not rows:
+            self.skipTest("this OpenCode's bundled catalog lists no free Zen model")
+        ApiHarness.catalog(self, rows[:1], [])                              # no key stored for Zen
+        m = models.hosted(fresh=True)[f"{models.ZEN}/{rows[0]['id']}"]
+        self.assertTrue(models.keyless_free(m), m)
+        path = urllib.parse.urlsplit(m.base_url).path
+        m.base_url = f"http://127.0.0.1:{self.up.server_port}{path}"
+        with mock.patch.object(keyhole, "_opencode", side_effect=AssertionError("auth export")):
+            kh = keyhole.start(self.task, m, log=self.lines.append)
+        self.addCleanup(kh.close)
+        runner.CURRENT["keyhole"] = kh
+        self.addCleanup(runner.CURRENT.clear)
+        catalog = runner.write_catalog(self.task)
+        over = runner.keyhole_overlay(self.task)
+        layer = {"disabled_providers": ["ollama"], **over}
+        (tmp / "zen-layer.json").write_text(json.dumps(layer))
+        env = {**self.scratch_env(tmp / "zen-layer.json", "zen-run", catalog),
+               "OPENCODE_CONFIG_CONTENT": runner.rules_env(layer, over)["OPENCODE_CONFIG_CONTENT"]}
+        r = subprocess.run(["opencode", "run", "--standalone", "--title", "t", "-m", m.id, "--format", "json",
+                            "say ok"], cwd=self.repo, env=env, capture_output=True, text=True, timeout=180)
+        self.assertEqual(r.returncode, 0, r.stdout[-2000:] + r.stderr[-2000:])
+        [req] = self.up.seen                                                # past the keyhole's token check
+        heads = {k.lower(): v for k, v in req["headers"].items()}
+        self.assertEqual((req["path"], heads["authorization"]), (f"{path}/chat/completions", "Bearer public"))
+        self.assertEqual(req["body"]["model"], m.name)
+        self.assertIn("x-opencode-client", heads)                           # "Free-tier chat models require OpenCode"
+        self.assertNotIn(kh.token, json.dumps(req))
 
     def test_the_tasks_own_catalog_is_read_as_the_bundled_one_and_carries_a_model_it_lacks(self):
         # #1015: the agent's OpenCode fetches no catalog (#1010), so wb hands it the model in a
@@ -33481,6 +36376,25 @@ class ApiHarness(Base):
         self.assertEqual(json.loads(self.fake("auth", "list", "--format", "json", "--standalone")[2])[0]["connections"],
                          [{"type": "env", "name": "XAI_API_KEY"}])  # the test's own rows
 
+    def test_the_fakes_env_state_lists_a_variable_only_while_it_is_set_and_exports_no_key(self):
+        # #1189, as 2.3.2 prints it (checked in a scratch home, 2026-11-24): a provider whose key
+        # is only in its variable has one `env` connection while the variable is set, none after
+        self.catalog()
+        os.environ["WB_FAKE_API"] = "deepinfra=env"
+        os.environ["FAKE_AUTH_EXPORT"] = json.dumps([{"id": "c", "integrationID": "deepinfra", "label": "x",
+                                                      "active": True, "value": {"type": "key", "key": "k"}}])
+        os.environ.pop("DEEPINFRA_API_KEY", None)
+
+        def listed():
+            return {a["id"]: a["connections"] for a in
+                    json.loads(self.fake("auth", "list", "--format", "json", "--standalone")[2])}
+        self.assertEqual(list(listed()), ["anthropic"])               # unset: not listed
+        os.environ["DEEPINFRA_API_KEY"] = "not-a-real-key"
+        self.assertEqual(listed()["deepinfra"], [{"type": "env", "name": "DEEPINFRA_API_KEY"}])
+        self.assertEqual(json.loads(self.fake("auth", "export", "deepinfra", "--standalone")[2]), [])
+        self.assertEqual([e["providerID"] for e in self.fake("api", "model.list")[1][0]["data"]],
+                         ["deepinfra", "anthropic"])                   # its models still listed
+
     def test_a_provider_without_a_key_drops_out_of_every_list_and_its_models_cant_run(self):
         self.catalog()
         os.environ["WB_FAKE_API"] = "anthropic=nokey"
@@ -34054,8 +36968,9 @@ class ApiDiscovery(Base):
         os.environ["WB_FAKE_API"] = "xenv=ratelimit"  # a run's state: status never runs one
         st, up, fix = self.state(FLASH)
         self.assertEqual((st["available"], st["why"], up),
-                         (False, "no key for deepinfra: run /connect in OpenCode and add it", False))
-        self.assertEqual(fix, "run /connect in OpenCode and add an API key for deepinfra")
+                         (False, "no key for deepinfra: run `opencode auth login deepinfra` in a terminal "
+                                 "and add it", False))
+        self.assertEqual(fix, "")                                  # the line says it (#1189)
         st, up, fix = self.state("oauthco/chat-1")
         self.assertEqual((st["available"], up), (False, False))
         self.assertEqual(st["why"], "can't run: needs a key wb can hold outside the lane (OAuthCo's is "
@@ -34111,7 +37026,8 @@ class ApiDiscovery(Base):
             self.assertFalse(st["available"])
             self.assertTrue(st["why"].startswith("can't run: needs a key wb can hold outside the lane"), st)
             self.assertFalse(self.models.may_come_up(st))
-        self.assertIn("(XEnv's is from the environment, XENV_API_KEY)", said["xenv/grok-9"]["why"])
+        # a variable OpenCode names that isn't set here (#1189: a set one runs)
+        self.assertIn("$XENV_API_KEY isn't set where wb start ran", said["xenv/grok-9"]["why"])
         self.assertIn(f"(literal's is written in {os.environ['WB_OPENCODE_CONFIG']})", said["literal/model-a"]["why"])
         self.assertNotIn("not-a-real-key", json.dumps(said) + (store.home() / "hosted.json").read_text())
 
@@ -34343,8 +37259,8 @@ class ApiDiscovery(Base):
         doc["roles"]["trivial"]["api"] = "acme/coder-flash"
         routes.write(doc)
         self.assertEqual([x for x in cli.api_key_lines({}) if "no API key for" in x],
-                         ["--  no API key for acme, which trivial uses: /connect in OpenCode adds it "
-                          "(required: those tasks can't start without it)"])
+                         ["--  no API key for acme, which trivial uses: `opencode auth login acme` in a "
+                          "terminal adds it (required: those tasks can't start without it)"])
 
     def test_a_lan_server_not_opted_in_gets_its_local_true_hint_from_setup_and_route_never_connect(self):
         # #1109: wb setup said nothing of it, and wb route told the user to /connect a key, twice,
@@ -34362,7 +37278,7 @@ class ApiDiscovery(Base):
             cli.main(["route", "trivial", "lan/coder", "--day-usd", "1"])
         self.assertEqual((code.exception.code, err.getvalue()), (3, f"wb: lan/coder can't be a role's model: {hint}\n"))
 
-    def test_a_hosted_provider_added_by_hand_keeps_connect_and_a_tailnet_box_gets_the_hint(self):
+    def test_a_hosted_provider_added_by_hand_keeps_the_key_remedy_and_a_tailnet_box_gets_the_hint(self):
         # #1109's review (2026-11-23): the hint replaced /connect for any host off this machine,
         # so a cloud provider configured by hand (api.together.xyz) lost the key it needed, and
         # following the hint would make a cloud host count as a local model
@@ -34380,7 +37296,7 @@ class ApiDiscovery(Base):
         with self.assertRaises(SystemExit) as code, redirect_stderr(err):
             cli.main(["route", "trivial", "together/qwen-coder", "--day-usd", "1"])
         self.assertEqual(code.exception.code, 3)
-        self.assertIn("/connect", err.getvalue())
+        self.assertIn("`opencode auth login together`", err.getvalue())   # a hosted one's fix (#1189)
         self.assertNotIn("local", err.getvalue())
         err = io.StringIO()
         with self.assertRaises(SystemExit) as code, redirect_stderr(err):
@@ -34460,7 +37376,7 @@ class ApiDiscovery(Base):
             self.assertEqual((found["mix/zero"].key, found["mix/paid"].key), ("none", ""))
             self.assertTrue(self.models.status(found["mix/zero"])["available"])
             self.assertEqual(self.models.status(found["mix/paid"])["why"],
-                             "no key for mix: run /connect in OpenCode and add it")
+                             "no key for mix: run `opencode auth login mix` in a terminal and add it")
             self.models._AUTH_FRESH.clear()                     # the fresh check, from either one
             self.models.status(self.models.hosted()["mix/zero"])
             self.assertEqual(self.models.hosted()["mix/paid"].key, "")
@@ -34924,10 +37840,15 @@ class Routes(Base):
         runner.models.hosted(fresh=True)
         code, _, err = self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
         self.assertEqual(code, 3)
-        self.assertIn("deepseek/deepseek-flash can't be a role's model: no key for deepseek: run /connect in "
-                      "OpenCode and add it", err)
-        for mid, held in (("oauthco/chat-1", "an OAuth login"), ("xenv/grok-9", "from the environment, XENV_API_KEY"),
-                          ("opencode/big-pickle-free", "none: a free model takes no key")):
+        self.assertIn("deepseek/deepseek-flash can't be a role's model: no key for deepseek: run `opencode auth "
+                      "login deepseek` in a terminal and add it", err)
+        # a keyless free model of another provider than OpenCode Zen's has no key a task could send
+        # (#1193 lifted the refusal for Zen's alone: Routes.test_opencode_zens_free_model_…)
+        self.catalog([*ROUTES_CATALOG, api_entry("freeco", "gratis-1", cost=[{"input": 0, "output": 0}])],
+                     [r for r in ROUTES_AUTH if r["id"] != "deepseek"])
+        runner.models.hosted(fresh=True)
+        for mid, held in (("oauthco/chat-1", "an OAuth login"), ("xenv/grok-9", "$XENV_API_KEY isn't set where wb start ran"),
+                          ("freeco/gratis-1", "none: a free model takes no key")):
             with self.subTest(mid=mid):
                 code, _, err = self.route("trivial", mid, "--day-usd", "5")
                 self.assertEqual(code, 3)
@@ -34945,6 +37866,42 @@ class Routes(Base):
         self.assertEqual(self.route("trivial", "deepseek/deepseek-flash")[1], f"changed: {DEEPSEEK_LINE}\n")
         self.assertEqual(routes.read()["day_usd"], 5)
         self.assertEqual(self.route("cap", "7.5")[1], "changed: day cap $5 → $7.50/day\n")
+
+    def test_opencode_zens_free_model_takes_a_role_with_no_key_and_no_cap_and_the_line_says_it_may_train(self):
+        # #1193: a user with no GPU and no key could not run even wb try, as _runs_held refused
+        # OpenCode Zen's keyless free models ("none: a free model takes no key"); OpenCode serves
+        # them with its own "public" key, so the role takes one, asks no day cap (the guard keeps
+        # none for a free model), and the dialog's line says the provider may train on the code
+        from workbench import privacy
+        free = "opencode/big-pickle-free"
+        self.assertEqual(runner.models.lookup(free).key, "none")          # no key stored for Zen
+        os.environ["CLAUDECODE"] = "1"
+        asked = self.dry("trivial", free)
+        self.assertTrue(asked["gate"])                                     # the user's yes, as any API role
+        self.assertEqual(asked["change"], f"trivial: GPU → API {free} · your code goes to opencode · "
+                                          f"{privacy.FREE_LINE} · thinking off")
+        self.approve(asked["approval"])
+        self.assertEqual(self.route("trivial", free)[0], 0)
+        doc = self.doc()
+        self.assertEqual((doc["roles"]["trivial"]["api"], doc["roles"]["trivial"]["via"], doc["day_usd"]),
+                         (free, "api", None))
+        os.environ.pop("CLAUDECODE")
+        # a priced model later takes the cap then (the suggested one, #1322), the free one beside it or not
+        self.assertIn(f"cap {routes.money(routes.DAY_USD_SUGGEST)}/day",
+                      self.dry("significant", "deepseek/deepseek-flash")["change"])
+        # several roles in one question: the free mark once, for the free role, and no cap
+        self.route("trivial", "gpu")
+        pairs = self.dry("trivial", free, "writing", free)["change"]
+        self.assertEqual(pairs.count(privacy.FREE_LINE), 1)
+        self.assertIn(f"{privacy.FREE_LINE} (trivial, writing)", pairs)
+        self.assertNotIn("cap", pairs)
+        self.assertIn(f"cap {routes.money(routes.DAY_USD_SUGGEST)}/day",
+                      self.dry("trivial", free, "significant", "deepseek/deepseek-flash")["change"])
+        # the busy opt-in with only free API models: no cap either, the free mark said
+        self.route("trivial", "--api", free)
+        busy = self.dry("busy", "api")["change"]
+        self.assertIn(f"{privacy.FREE_LINE} (trivial)", busy)
+        self.assertNotIn("cap", busy)
 
     def test_with_api_runs_off_an_api_start_is_refused_before_any_dialog_and_a_gpu_model_starts_as_before(self):
         # 2026-11-23 review: the dialog asked the user to send their code to Acme for a start
@@ -35338,10 +38295,12 @@ class Routes(Base):
         # #1388, 2026-11-25: only an empty cached key was asked again, so after the /connect wb
         # advised, wb route kept saying "OAuth" or "from the environment" for HOSTED_TTL
         runner.models.hosted(fresh=True)
-        for mid in ("xenv/grok-9", "oauthco/chat-1"):
+        # an exported key that isn't set here says so (#1189), an OAuth login to /connect a key
+        for mid, said in (("xenv/grok-9", "$XENV_API_KEY isn't set where wb start ran: export it, or store "
+                           "the key with `opencode auth login xenv`"), ("oauthco/chat-1", "store an API key with /connect")):
             code, _, err = self.route("trivial", mid, "--day-usd", "1", "--dry-run")
             self.assertEqual(code, 3)
-            self.assertIn("store an API key with /connect", err)
+            self.assertIn(said, err)
         self.catalog(ROUTES_CATALOG, [key_row(r["id"], r["name"], STORED) if r["id"] in ("xenv", "oauthco")
                                       else r for r in ROUTES_AUTH])  # /connect: no stamp changes
         runner.models._AUTH_FRESH.clear()                           # a retry past AUTH_FRESH_SECS
@@ -35353,41 +38312,73 @@ class Routes(Base):
 
     def test_a_stored_key_on_a_package_the_keyhole_cant_speak_is_refused_before_the_dialog(self):
         # #1066: only keyhole.start checked the package, so a Gemini model was listed, offered,
-        # routed with the user's yes and started, then failed every time
-        gemini = {**api_entry("google", "gemini-2.5-flash"), "package": "@opencode/ai/providers/google"}
-        self.catalog([*ROUTES_CATALOG, gemini], [*ROUTES_AUTH, key_row("google", "Google", STORED)])
-        m = runner.models.hosted(fresh=True)["google/gemini-2.5-flash"]
+        # routed with the user's yes and started, then failed every time (Gemini runs since
+        # #1192: Cohere's native API is still one the keyhole doesn't speak)
+        cohere = {**api_entry("cohere", "command-x"), "package": "@opencode/ai/providers/cohere"}
+        self.catalog([*ROUTES_CATALOG, cohere], [*ROUTES_AUTH, key_row("cohere", "Cohere", STORED)])
+        m = runner.models.hosted(fresh=True)["cohere/command-x"]
         self.assertEqual(m.key, "stored")
         st = runner.models.status(m)
         self.assertEqual((st["available"], st["why"]), (False, (
-            "can't run: the keyhole doesn't speak Google's API (@opencode/ai/providers/google), so wb "
+            "can't run: the keyhole doesn't speak Cohere's API (@opencode/ai/providers/cohere), so wb "
             "can't hold its key outside the lane: a model of another provider can run")))
         self.assertEqual(runner.models.remedy(m, st), "")          # not "/connect": it can't help
-        code, _, err = self.route("trivial", "google/gemini-2.5-flash", "--day-usd", "1")
+        code, _, err = self.route("trivial", "cohere/command-x", "--day-usd", "1")
         self.assertEqual(code, 3)
-        self.assertIn("the keyhole doesn't speak Google's API", err)
+        self.assertIn("the keyhole doesn't speak Cohere's API", err)
         self.assertFalse(self.path.exists())
         out = io.StringIO()
         with redirect_stdout(out):
             cli.main(["models", "--json"])
         api = [x["id"] for x in json.loads(out.getvalue())["api"]]
         self.assertIn("deepseek/deepseek-flash", api)
-        self.assertNotIn("google/gemini-2.5-flash", api)
+        self.assertNotIn("cohere/command-x", api)
         lines = cli.api_key_lines({"deepseek": {"name": "DeepSeek", "key": "stored"},
-                                   "google": {"name": "Google", "key": "stored"}})
+                                   "cohere": {"name": "Cohere", "key": "stored"}})
         self.assertEqual(lines, ["ok  API keys: deepseek (stored via /connect); no role uses one yet",
-                                 "--  google (@opencode/ai/providers/google): the keyhole doesn't speak "
+                                 "--  cohere (@opencode/ai/providers/cohere): the keyhole doesn't speak "
                                  "its API, so wb can't run its models; another provider's key works"])
-        # and the Settings tab's Connected line: not "Google (key stored)"
+        # and the Settings tab's Connected line: not "Cohere (key stored)"
         provs = json.loads(self.route("--json")[1])["providers"]
-        self.assertEqual(provs["google"], {"name": "Google", "key": "none", "why": st["why"]})
+        self.assertEqual(provs["cohere"], {"name": "Cohere", "key": "none", "why": st["why"]})
         self.assertEqual(provs["deepseek"]["key"], "stored")
         self.assertTrue(runner.models.status(runner.models.hosted()["deepseek/deepseek-flash"])["available"])
+
+    def test_each_model_runs_through_its_own_package_and_base_and_gemini_and_azure_keys_run(self):
+        # #1192: one provider's models post through several packages (Google's Gemini and
+        # Interactions; Azure's Responses, Chat and Claude on Foundry), and the first model seen
+        # set the package and base for all; Azure's base is built from its resourceName
+        g = "@opencode/ai/providers/google"
+        gemini = {**api_entry("google", "gemini-x-flash"), "package": g,
+                  "settings": {"baseURL": "https://generativelanguage.googleapis.com/v1beta"}}
+        inter = {**api_entry("google", "deep-x"), "package": g + "/interactions",
+                 "settings": {"baseURL": "https://generativelanguage.googleapis.com/v1beta"}}
+        gpt = {**api_entry("azure", "gpt-x"), "package": "@opencode/ai/providers/azure/responses",
+               "settings": {"resourceName": "myres", "apiKey": LISTED_KEY}}
+        claude = {**api_entry("azure", "claude-x"), "package": "@opencode/ai/providers/anthropic-compatible",
+                  "settings": {"resourceName": "myres", "provider": "azure",
+                               "baseURL": "https://myres.services.ai.azure.com/anthropic/v1"}}
+        self.catalog([*ROUTES_CATALOG, inter, gemini, claude, gpt],
+                     [*ROUTES_AUTH, key_row("google", "Google", STORED), key_row("azure", "Azure", STORED)])
+        hosted = runner.models.hosted(fresh=True)
+        got = {mid: (hosted[mid].package, hosted[mid].base_url) for mid in
+               ("google/gemini-x-flash", "google/deep-x", "azure/gpt-x", "azure/claude-x")}
+        self.assertEqual(got, {
+            "google/gemini-x-flash": (g, "https://generativelanguage.googleapis.com/v1beta"),
+            "google/deep-x": (g + "/interactions", "https://generativelanguage.googleapis.com/v1beta"),
+            "azure/gpt-x": ("@opencode/ai/providers/azure/responses", "https://myres.openai.azure.com/openai"),
+            "azure/claude-x": ("@opencode/ai/providers/anthropic-compatible",
+                               "https://myres.services.ai.azure.com/anthropic/v1")})
+        for mid in ("google/gemini-x-flash", "azure/gpt-x", "azure/claude-x"):
+            self.assertTrue(runner.models.status(hosted[mid])["available"], mid)
+        self.assertIn("the keyhole doesn't speak Google's API", runner.models.status(hosted["google/deep-x"])["why"])
+        self.assertEqual(runner.models.unspoken_providers(["google", "azure"]), {})   # each runs a model
 
     def test_a_providers_models_each_keep_their_own_package_and_base_not_its_first_ones(self):
         # #1387 (2026-11-25): OpenCode Zen lists openai-compatible, anthropic and google models at
         # different bases; every one took the first entry's, so its Claude models posted /messages
-        # to …/openai/v1 with a bearer key (a 404 every request) and its Gemini ones read ready
+        # to …/openai/v1 with a bearer key (a 404 every request), and its Gemini ones went as
+        # openai-compatible too
         from workbench import keyhole
         base = "https://opencode.test/zen"
         zen = [api_entry("opencode", "big-pickle", settings={"baseURL": f"{base}/openai/v1"},
@@ -35406,17 +38397,17 @@ class Routes(Base):
                          ("@opencode/ai/providers/anthropic", f"{base}/anthropic/v1"))
         self.assertEqual(keyhole.protocol_of(claude.package), "anthropic")
         self.assertEqual(runner.models.keyhole_refusal(claude), "")
-        self.assertIn("the keyhole doesn't speak", runner.models.keyhole_refusal(gemini))
-        self.assertFalse(runner.models.status(gemini)["available"])
-        code, _, err = self.route("trivial", "opencode/gemini-x-4", "--day-usd", "1")
-        self.assertEqual(code, 3, err)
-        self.assertIn("the keyhole doesn't speak", err)
+        # its Gemini ones go as Google's API, which the keyhole speaks since #1192, never as the
+        # first entry's openai-compatible
+        self.assertEqual((gemini.package, gemini.base_url), ("@opencode/ai/providers/google", f"{base}/google/v1beta"))
+        self.assertEqual(keyhole.protocol_of(gemini.package), "google")
+        self.assertEqual(runner.models.keyhole_refusal(gemini), "")
         out = io.StringIO()
         with redirect_stdout(out):
             cli.main(["models", "--json"])
         api = [x["id"] for x in json.loads(out.getvalue())["api"]]
         self.assertIn("opencode/claude-x-5", api)
-        self.assertNotIn("opencode/gemini-x-4", api)
+        self.assertIn("opencode/gemini-x-4", api)
 
     def test_a_role_out_of_credit_runs_again_once_the_recheck_time_has_passed(self):
         # #1068: no_credit had no `until` and only a 2xx cleared it, which only a running task
@@ -35578,6 +38569,39 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         p.start()
         self.addCleanup(p.stop)
         return m
+
+    def test_a_task_on_opencode_zens_free_model_runs_through_the_keyhole_on_public_with_no_day_cap(self):
+        # #1193: with no GPU and no key the first run tries wb on Zen's free models; the task goes
+        # through the keyhole (its hold, health record, meter, pin), which sends Zen's own
+        # "public" with no `auth export`, and starts with no day cap, a free model keeping none
+        from workbench import keyhole, meter
+        m = self.model("opencode", "big-pickle-free", "/inference/openai/v1",
+                       "@opencode/ai/providers/openai-compatible")
+        m.kind, m.key, m.free, m.remote = "api", "none", True, True
+        m.config = {"limit": {"context": 200000, "output": 8192}, "cost": [{"input": 0, "output": 0}]}
+        for name in ("resolve", "lookup"):  # discovery never lists a model on this machine's port
+            real = getattr(self.models, name)
+            p = mock.patch.object(self.models, name, lambda w, *a, _real=real, **k: m if w == m.id else _real(w, *a, **k))
+            p.start()
+            self.addCleanup(p.stop)
+        self.assertTrue(runner.needs_keyhole(m))
+        # the trivial role on it, as the free try routes it: no day cap
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "roles": {"trivial": {"via": "api", "api": m.id}}})
+        self.assertIsNone(meter.refusal(m))
+        os.environ["FAKE_SCENARIO"] = "http"
+        with mock.patch.object(keyhole, "_opencode", side_effect=AssertionError("auth export")), \
+                mock.patch.object(cli, "spawn_runner", lambda task: 0):
+            run_wb("start", "t-zen", "--spec", str(self.spec), "--repo", str(self.repo), "--role", "trivial",
+                   "--test", TEST_CMD)
+            log = self.drive_here("t-zen")
+        task = store.Task("t-zen")
+        self.assertEqual((task.spec["via"], task.spec["role"], task.spec["model"]), ("api", "trivial", m.id))
+        self.assertEqual(task.status["phase"], "review", (task.status, log))
+        self.assertIn("keyhole: opencode on 127.0.0.1:", log)
+        [req] = self.up.seen
+        self.assertEqual((req["path"], req["headers"]["Authorization"]),
+                         ("/inference/openai/v1/chat/completions", "Bearer public"))
+        self.assertEqual(req["body"]["model"], "big-pickle-free")
 
     def test_an_api_task_never_says_it_waits_for_the_gpu_while_queued(self):
         # #1112: the base check wrote "waiting for the GPU" for an API task, wb watch printed
@@ -36014,6 +39038,33 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual([(r["task"], r["kind"], r.get("cause"))
                           for r in store.read_jsonl(store.home() / "notify.jsonl")[0]],
                          [("t-new", "stuck", "provider")])
+
+    def test_a_gemini_task_runs_through_the_keyhole_and_books_its_usage(self):
+        # #1192: a Gemini key stored with /connect runs a task, the model in the path, the key
+        # in x-goog-api-key, the usage read from usageMetadata at the stream's end
+        from workbench import meter
+        m = self.model("google", "gemini-x-flash", "/v1beta", "@opencode/ai/providers/google")
+        m.kind, m.key, m.remote = "api", "stored", True
+        m.config = {"limit": {"context": 200000, "output": 8192}, "cost": [{"input": 1.0, "output": 2.0}]}
+        real = self.models.resolve
+        p = mock.patch.object(self.models, "resolve", lambda w: m if w == m.id else real(w))
+        p.start()
+        self.addCleanup(p.stop)
+        os.environ["FAKE_AUTH_EXPORT"] = json.dumps([
+            {"id": "cred_g", "integrationID": "google", "label": "main", "active": True,
+             "value": {"type": "key", "key": self.CANARY}}])
+        self.start_api("api-gemini", "http", model=m.id, spawn=False)
+        self.drive_here("api-gemini")
+        task = store.Task("api-gemini")
+        self.assertEqual(task.status["phase"], "review", task.status)
+        [req] = self.up.seen
+        self.assertEqual(req["path"], "/v1beta/models/gemini-x-flash:streamGenerateContent?alt=sse")
+        self.assertEqual({k.lower(): v for k, v in req["headers"].items()}["x-goog-api-key"], self.CANARY)
+        self.assertNotIn("model", req["body"])
+        rows, _ = store.read_jsonl(meter.ledger_path())
+        [row] = [r for r in rows if r.get("task") == "api-gemini" and r.get("source") == "keyhole"]
+        self.assertEqual(row["tok"], {"in": 5, "cache_read": 4, "cache_write": 0, "out": 3, "reasoning": 5})
+        self.assert_no_canary(self.all_files(task.dir), (Path(os.environ["WB_HOME"]) / "spend-api.jsonl").read_text())
 
     def held_outage(self, retry_after=None):
         """#1277's setup: an upstream answering 503 (or, with ``retry_after``, 429 with that
@@ -36535,7 +39586,7 @@ class ApiTasks(_ApiTask, _KeyholeTest):
                 self.assertFalse(results.step(task, landed=False)["stuck"])  # never the step's
                 if guard == "auth":
                     self.assertEqual(st["last"], f"deepinfra refused the API key (HTTP {code})")
-                    self.assertIn("/connect", note["text"])
+                    self.assertIn("`opencode auth login deepinfra` in a terminal", note["text"])
                     continue
                 self.assertEqual(st["last"], f"deepinfra refused the request (HTTP {code}): {message}")
                 self.assertNotIn("API key", note["text"])
@@ -36630,8 +39681,50 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual(content["theme"], "x")                      # the rest of theirs stays
         self.assert_no_canary(json.dumps(content), json.dumps(layer))
 
-    def test_oauth_and_env_keys_fail_the_task_with_the_connect_remedy(self):
-        # the /connect half of Keyhole.test_oauth_and_env_keys_cant_run, through the runner
+    def test_a_key_exported_where_wb_start_ran_reaches_only_the_keyhole_never_the_agent(self):
+        # #1189: the key only in DEEPINFRA_API_KEY (the fake's `env` state: auth list names the
+        # variable, auth export holds none), exported where wb start runs. wb start's check takes
+        # it as runnable, the runner's keyhole reads it from its own environment and sends it
+        # upstream, and the agent's OpenCode, its layer, its catalog and runner.log never get it
+        m = self.local_api_model()
+        m.key = "env:DEEPINFRA_API_KEY"
+        os.environ["WB_FAKE_API"] = "deepinfra=env"
+        runs = Path(self.tmp.name) / "runs.jsonl"
+        os.environ["FAKE_RUNS"] = str(runs)
+        os.environ.pop("DEEPINFRA_API_KEY", None)
+        with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()) as err:
+            self.start_api("api-unset", "http", spawn=False)      # unset: refused at start, no task
+        self.assertEqual(e.exception.code, 3, err.getvalue())          # a model that can't run
+        self.assertIn("$DEEPINFRA_API_KEY isn't set where wb start ran: export it, or store the key with "
+                      "`opencode auth login deepinfra`", err.getvalue())
+        self.assertFalse(store.Task("api-unset").dir.exists())
+        os.environ["DEEPINFRA_API_KEY"] = self.CANARY
+        self.start_api("api-envkey", "http", spawn=False)
+        log = self.drive_here("api-envkey")
+        task = store.Task("api-envkey")
+        self.assertEqual(task.status["phase"], "review", task.status.get("last"))
+        self.assertEqual(len(self.up.seen), 1)                       # through the keyhole
+        self.assertEqual(self.up.seen[0]["headers"]["Authorization"], f"Bearer {self.CANARY}")
+        self.assertIn(f"keyhole: deepinfra on 127.0.0.1:", log)
+        self.assertIn(f"for {m.id} (key from $DEEPINFRA_API_KEY)", log)
+        [run] = [json.loads(x) for x in runs.read_text().splitlines()]
+        self.assertNotIn("DEEPINFRA_API_KEY", run["env_names"])      # SECRET_ENV dropped it
+        self.assertIn("PATH", run["env_names"])
+        self.assertNotIn("DEEPINFRA_API_KEY", runner.agent_env(task))
+        self.assert_no_canary(log, self.all_files(task.dir), json.dumps(task.status), json.dumps(run),
+                              self.all_files(store.home() / "rules" / task.name))
+        # passed through to agents by commands.json `env`: the runner refuses, naming the fix
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": ["DEEPINFRA_API_KEY"]}))
+        self.start_api("api-through", "http", "--force", spawn=False)
+        self.drive_here("api-through")
+        last = store.Task("api-through").status["last"]
+        self.assertIn("$DEEPINFRA_API_KEY is passed to agents (commands.json env): remove it there", last)
+        self.assertEqual(len(self.up.seen), 1)                       # nothing went upstream
+        self.assert_no_canary(last, self.all_files(store.Task("api-through").dir))
+
+    def test_an_oauth_login_and_an_unset_env_key_fail_the_task_with_the_login_remedy(self):
+        # the remedy half of Keyhole.test_oauth_and_env_keys_cant_run, through the runner: OpenCode's
+        # one terminal command, the provider's id filled in (#1189)
         os.environ["FAKE_AUTH_EXPORT"] = json.dumps([self.key_row("deepinfra", {
             "type": "oauth", "methodID": "m", "refresh": self.CANARY, "access": self.CANARY,
             "expires": 1})])
@@ -36640,7 +39733,8 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         task = store.Task("api-oauth")
         last = task.status["last"]
         self.assertIn("needs a key wb can hold outside the lane: deepinfra is signed in with OAuth", last)
-        self.assertIn("store an API key with /connect in OpenCode", last)
+        self.assertIn("store an API key with `opencode auth login deepinfra` in a terminal (or /connect in "
+                      "OpenCode)", last)
         self.assertEqual(task.status.get("failed_before"), "load")
         note = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
                 if r.get("task") == "api-oauth"][-1]
@@ -36649,14 +39743,17 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertIn("wb resume api-oauth", note["text"])
         self.assertNotIn("could not load", note["text"])
         self.assert_no_canary(self.all_files(task.dir), json.dumps(task.status))
-        # a key only in the environment (auth list names the variable; nothing to export)
+        # a key only in a variable auth list names (nothing to export), unset where the runner
+        # runs (#1189: a set one is read): said once, with its own fix
+        os.environ.pop("DEEPINFRA_API_KEY", None)
         os.environ["FAKE_AUTH_EXPORT"] = "[]"
         self.catalog(API_CATALOG, [key_row("deepinfra", "DeepInfra", {"type": "env", "name": "DEEPINFRA_API_KEY"})])
         self.start_api("api-env", "ok", "--force")
         wait_phase("api-env", {"failed"})
         last = store.Task("api-env").status["last"]
-        self.assertIn("deepinfra's key is only in the environment ($DEEPINFRA_API_KEY)", last)
-        self.assertIn("store an API key with /connect in OpenCode", last)
+        self.assertIn("needs a key wb can hold outside the lane: $DEEPINFRA_API_KEY isn't set where wb start "
+                      "ran: export it, or store the key with `opencode auth login deepinfra`", last)
+        self.assertNotIn("/connect", last)
 
     def test_the_keyholes_answers_set_the_providers_health(self):
         self.local_api_model()
@@ -38780,6 +41877,118 @@ class ApiSpend(Base):
         spawned.assert_called_once()
         self.assertEqual(store.Task("t-big").spec["role"], "significant")
 
+    def eyes(self):
+        """SPEND_TIER's prices on a model whose catalog entry takes images (#1199's review)."""
+        eyes = "meterco/eyes-1"
+        entry = {**next(e for e in SPEND_CATALOG if e["id"] == SPEND_TIER.split("/")[1]), "id": "eyes-1",
+                 "capabilities": {"tools": True, "input": ["text", "image"]}}
+        Path(os.environ["WB_FAKE_CATALOG"]).write_text(json.dumps([*SPEND_CATALOG, entry]))
+        return eyes, runner.models.lookup(eyes)
+
+    def png(self, name, mib):
+        """A PNG's first bytes, ``mib`` MiB in all (sparse): wb's checks read its head and size."""
+        path = Path(self.tmp.name) / name
+        path.write_bytes(image_png(2, 2))
+        with path.open("r+b") as fh:
+            fh.truncate(int(mib * 2**20))
+        return path
+
+    def test_a_tasks_images_in_all_stay_under_what_opencode_keeps_in_a_request(self):
+        # #1199's review (2026-11-24): OpenCode 2.3.2 sends each image of the session as base64
+        # (4/3) in every request and, past 25 MiB of it, swaps the oldest for "[This image was
+        # removed…]" unsaid (boundImages): two 10 MiB PNGs that passed every check left one
+        eyes, m = self.eyes()
+        b64 = 4 * -(-cli.IMAGE_TOTAL // 3)
+        self.assertLess(b64, cli.OPENCODE_IMAGE_TARGET)                    # kept whole after a cut
+        self.assertLess(2 * b64, cli.OPENCODE_IMAGE_TRIGGER)              # and one re-read
+        self.assertLess(2 * b64, runner.keyhole.BODY_CAP)                 # under the keyhole's 413
+        three = [x for i in range(3) for x in ("--image", str(self.png(f"{i}.png", 3)))]
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err), mock.patch.object(cli, "API_RUNS", True),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("start", "t-many", "--spec", str(self.spec), "--repo", str(self.repo), "--model", eyes,
+                   "--no-base-check", *three)
+        self.assertEqual(e.exception.code, 1)
+        self.assertIn("9.0 MiB of images on this task, over 8 MiB in all (OpenCode drops the oldest", err.getvalue())
+        spawned.assert_not_called()
+        self.assertFalse(store.Task("t-many").dir.exists())
+        # a GPU task's OpenCode drops them too: the same refusal, the model never asked
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            cli._images_room([(self.png("g.png", 9), ".png")] * 3)
+        self.assertIn("27.0 MiB of images on this task, over 8 MiB in all", err.getvalue())
+        # wb feedback counts the task's own images: a fresh session would send them all
+        task = self.api_task("t-own", eyes)
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        runner.images_dir(task).mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(self.png("own.png", 6), runner.images_dir(task) / "1-own.png")
+        task.set_status(images=[{"file": "1-own.png", "round": 1}])
+        rnd = task.status["round"]
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("feedback", "t-own", "--text", "See this.", "--image", str(self.png("more.png", 3)))
+        self.assertEqual(e.exception.code, 1)
+        self.assertIn("9.0 MiB of images on this task with its own, over 8 MiB", err.getvalue())
+        spawned.assert_not_called()
+        self.assertEqual(task.status["round"], rnd)
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb("feedback", "t-own", "--text", "See this.", "--image", str(self.png("less.png", 1)))
+        spawned.assert_called_once()
+
+    def test_an_image_counts_at_a_providers_figure_in_the_room_and_in_wb_starts_look_ahead(self):
+        # #1199's review (2026-11-24): the room read a 10 MiB image's base64 as 3.5M tokens, $10.49
+        # at $3/M, so past a $10 cap every request with it was refused, while wb start, counting
+        # no image, let the task start (#1118's failure again)
+        need = lambda text: float(re.search(r"a cap of at least \$([\d.]+) ", text)[1])  # noqa: E731
+        eyes, m = self.eyes()
+        uri = "data:image/png;base64," + "A" * (4 << 20)
+        body = {"max_tokens": 32768, "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "x" * 60_000}]
+             + [{"type": "image_url", "image_url": {"url": uri}}] * 2},
+            {"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                                                      "data": uri[22:]}}]},
+            {"role": "user", "parts": [{"inlineData": {"mimeType": "image/png", "data": uri[22:]}}]}]}
+        size = len(json.dumps(body))
+        self.assertEqual(self.meter.images_in(body), (4, 2 * len(uri) + 2 * (len(uri) - 22)))
+        self.assertLess(self.meter.body_tokens(body, size), 20_000 + 4 * self.meter.IMAGE_TOKENS)
+        self.assertGreater(size / 4, 4_000_000)                   # what the room counted before
+        # wb start, and the dialog's dry run before it, count each --image at that figure too
+        self.assertEqual(runner.first_tokens(prompt="spec", images=4),
+                         runner.first_tokens(prompt="spec") + 4 * self.meter.IMAGE_TOKENS)
+        four = [x for i in range(4) for x in ("--image", str(self.png(f"{i}.png", 1)))]
+        start = ("start", "t-eyes", "--spec", str(self.spec), "--repo", str(self.repo), "--model", eyes,
+                 "--no-base-check", *four)
+        for args in (("route", "--dry-run", "--json", "--start", *start[1:]), start):
+            self.cap(5)
+            self.spent(4.55)          # one request without its images fits: with four it doesn't
+            self.assertIsNone(self.meter.refusal(m, tokens=runner.first_tokens(prompt=self.spec.read_text())))
+            err = io.StringIO()
+            with (self.assertRaises(SystemExit) as e, redirect_stderr(err), mock.patch.object(cli, "API_RUNS", True),
+                  mock.patch.object(cli, "spawn_runner") as spawned):
+                run_wb(*args)
+            self.assertEqual(e.exception.code, 3, args[0])
+            spawned.assert_not_called()
+            self.assertFalse(store.Task("t-eyes").dir.exists())
+            self.meter.ledger_path().unlink()
+        self.spent(4.55)
+        self.cap(need(err.getvalue()))
+        with mock.patch.object(cli, "API_RUNS", True), mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb(*start)
+        spawned.assert_called_once()
+        task = store.Task("t-eyes")
+        self.assertEqual(len(task.status["images"]), 4)
+        # the room lets its first request through, four images and all, at the cap wb start named
+        self.assertGreaterEqual(self.meter.for_task(task, m).room(body, 65_000 + 4 * len(uri)), 0)
+        self.assertIsNone(task.status.get("api_stop"))
+        # a later round's look ahead counts the task's own images (a fresh session resends them)
+        task.set_status(images=[])
+        with_none = runner.first_tokens(task, "carry on", fresh=True)
+        task.set_status(images=[{"file": f"{i}.png", "round": 1} for i in range(4)])
+        self.assertEqual(runner.first_tokens(task, "carry on", fresh=True) - with_none,
+                         4 * self.meter.IMAGE_TOKENS)
+
     def test_a_large_next_spec_counts_in_wb_nexts_look_ahead_so_the_cap_it_names_lets_the_step_through(self):
         # #1173's review (2026-11-24): with a small next spec only the carried context tipped the
         # look ahead, so wb next passing its step's prompt went untested: left out, wb next passed
@@ -40612,7 +43821,7 @@ class Privacy(_KeyholeTest):
         (home / ".m2/settings.xml").write_text("<settings><servers><server><id>r</id>"
                                                "<password>p</password></server></servers></settings>")
         with mock.patch.dict(os.environ, {"HOME": str(home)}):
-            with mock.patch.object(lane, "abi", return_value=0):         # macOS, a kernel without it
+            with mock.patch.object(lane, "kind", return_value=None):    # no Landlock, no Seatbelt
                 out = self.start_api("t-nl1")
                 self.assertNotIn("can't read", out)
                 self.assertEqual(context.api_hidden_note(store.Task("t-nl1")), "")
@@ -41952,6 +45161,23 @@ class RoleResolution(Base):
             self.assertEqual(code, 0, err)
             self.assertNotIn("waits as queued for a slot", out)
 
+    def test_a_task_held_by_after_takes_no_slot_of_its_provider_until_its_time(self):
+        # #1204: a start --after holds nothing until then, so a start now may take the slot
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        at = time.strftime("%H:%M", time.localtime(time.time() + 7200))
+        code, _, err = self.begin("t-held", "--role", "trivial", "--after", at)
+        self.assertEqual(code, 0, err)
+        task = store.Task("t-held")
+        task.set_status(pid=4242)                              # its runner alive, waiting for its time
+        m = runner.models.lookup("deepseek/deepseek-flash")
+        with mock.patch.object(cli, "runner_alive", lambda t: t.name == "t-held"):
+            self.assertEqual(cli._api_pending(m), [])
+            self.assertEqual(cli._api_slots_free(m), runner.models.API_PARALLEL)
+            # its time come: on its way to a slot as any start
+            store.write_json(task.dir / "task.json", {**task.spec, "not_before": round(time.time()) - 1})
+            self.assertEqual(cli._api_pending(m), ["t-held"])
+            self.assertEqual(cli._api_slots_free(m), runner.models.API_PARALLEL - 1)
+
     def test_an_api_role_that_cant_run_exits_3_with_one_line_and_never_the_gpu(self):
         self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
         self.no_key_for("deepseek")
@@ -41961,8 +45187,8 @@ class RoleResolution(Base):
             code, out, err = self.begin("t-nokey", "--size", "trivial")
         self.assertEqual((code, out), (3, ""))
         self.assertEqual(err, "wb: trivial role: deepseek/deepseek-flash can't run: no key for deepseek: run "
-                              "/connect in OpenCode and add it. Ask the user: fix that, or put the role on the GPU "
-                              "(wb route trivial gpu)\n")
+                              "`opencode auth login deepseek` in a terminal and add it. Ask the user: fix that, or "
+                              "put the role on the GPU (wb route trivial gpu)\n")
         self.assertEqual(chose, [])                            # no fallback to the GPU
         self.assertFalse(store.Task("t-nokey").dir.exists())
         # --force is a --model's: a role's API model that can't run never starts anyway (#1016's review)
@@ -42266,19 +45492,68 @@ class FirstRunApi(Base):
         self.assertEqual(self.key_lines(), ["ok  API keys: deepseek (stored via /connect), anthropic (stored via "
                                             "/connect); significant uses deepseek, trivial uses deepseek"])
 
-    def test_an_env_key_or_an_oauth_login_is_never_shown_as_usable(self):
+    def test_a_copilot_sign_in_runs_with_no_setup_and_a_chatgpt_one_says_why_it_cant(self):
+        # #1191: Copilot's sign-in is held as a key, so wb setup, the pane and the role dialog
+        # offer it as they offer a stored key; ChatGPT's rotates, and its line says so
+        self.catalog([*ROUTES_CATALOG, api_entry("github-copilot", "gpt-5.4-nano")],
+                     [key_row("github-copilot", "GitHub Copilot", OAUTH)])
+        runner.models.hosted(fresh=True)
+        self.assertEqual(self.key_lines(), ["ok  API keys: github-copilot (signed in to Copilot); no role "
+                                            "uses one yet"])
+        self.assertEqual(cli._route_pane()["providers"]["github-copilot"],
+                         {"name": "GitHub Copilot", "key": "copilot", "why": "signed in to Copilot in OpenCode"})
+        m = runner.models.lookup("github-copilot/gpt-5.4-nano")
+        self.assertEqual((m.key, runner.models.status(m)["available"]), ("copilot", True))
+        self.keys(key_row("openai", "OpenAI", OAUTH))
+        self.assertEqual(self.key_lines(), ["--  openai is signed in with ChatGPT: its tokens rotate, and a copy wb "
+                                            "refreshed would sign your own OpenCode out, so wb can't hold it outside "
+                                            "the lane; an OpenAI API key through /connect works"])
+
+    def test_with_no_key_setup_offers_the_free_try_and_a_role_on_zens_free_model_needs_none(self):
+        # #1193: wb setup's first run named only /connect for a user with no key; it names the
+        # free try too, and a role on OpenCode Zen's free model reads `ok`, never "required"
+        from workbench import privacy
+        self.keys()
+        self.assertEqual(self.key_lines(), [cli.NO_KEY])
+        self.assertIn("/workbench can try it on OpenCode's free models, whose provider may keep or train on the code",
+                      cli.NO_KEY)
+        code, _, err = self.wb("route", "trivial", "opencode/big-pickle-free")   # no cap asked
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.key_lines(), [f"ok  no API key needed for opencode's free models, which trivial "
+                                            f"uses ({privacy.FREE_LINE})"])
+        # a priced role whose provider's key went is still required beside it
+        self.keys(key_row("deepseek", "DeepSeek", STORED))
+        self.assertEqual(self.wb("route", "significant", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)
+        self.keys()
+        lines = self.key_lines()
+        self.assertIn("--  no API key for deepseek, which significant uses: `opencode auth login deepseek` in a "
+                      "terminal adds it (required: those tasks can't start without it)", lines)
+        self.assertIn(f"ok  no API key needed for opencode's free models, which trivial uses ({privacy.FREE_LINE})",
+                      lines)
+
+    def test_an_oauth_login_or_an_env_key_wb_cant_read_is_never_shown_as_usable_and_one_it_can_is(self):
+        # #1189: a variable OpenCode names reads as the keyhole's when set here and dropped from
+        # the agent's environment; it said "wb can't hold it outside the lane yet" before
+        os.environ.pop("XAI_API_KEY", None)
         self.keys(key_row("xai", "xAI", {"type": "env", "name": "XAI_API_KEY"}))
-        self.assertEqual(self.key_lines(), ["--  xai's key is in XAI_API_KEY: wb can't hold it outside the lane "
-                                            "yet; /connect stores one it can"])
+        unset = ("--  xai's key is in $XAI_API_KEY, which wb can't use: $XAI_API_KEY isn't set where wb start "
+                 "ran: export it, or store the key with `opencode auth login xai`")
+        self.assertEqual(self.key_lines(), [unset])
+        with mock.patch.dict(os.environ, {"XAI_API_KEY": "xai-not-a-real-key"}):
+            self.assertEqual(self.key_lines(), ["ok  API keys: xai (key from $XAI_API_KEY); no role uses one yet"])
+            Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": ["XAI_API_KEY"]}))
+            self.assertEqual(self.key_lines(), ["--  xai's key is in $XAI_API_KEY, which wb can't use: $XAI_API_KEY "
+                                                "is passed to agents (commands.json env): remove it there"])
+            Path(os.environ["WB_COMMANDS"]).write_text("{}")
         self.keys(key_row("anthropic", "Anthropic", OAUTH))
         self.assertEqual(self.key_lines(), ["--  anthropic is signed in with OAuth: wb can't hold that outside the "
                                             "lane; an API key through /connect works"])
         self.keys(key_row("xai", "xAI", {"type": "env", "name": "XAI_API_KEY"}), key_row("anthropic", "Anthropic", OAUTH),
                   key_row("deepseek", "DeepSeek", STORED))
         lines = self.key_lines()
-        self.assertEqual(lines, ["ok  API keys: deepseek (stored via /connect); no role uses one yet",
-                                 "--  xai's key is in XAI_API_KEY, anthropic is signed in with OAuth: wb can't hold "
-                                 "those outside the lane; /connect stores a key it can"])
+        self.assertEqual(lines, ["ok  API keys: deepseek (stored via /connect); no role uses one yet", unset,
+                                 "--  anthropic is signed in with OAuth: wb can't hold that outside the lane; an "
+                                 "API key through /connect works"])
         self.keys()
         self.assertEqual(self.key_lines(), [cli.NO_KEY])
         # no `auth list` to read (OpenCode missing): its own line says so, and none of keys
@@ -42296,6 +45571,10 @@ class FirstRunApi(Base):
             self.assertEqual(cli.NO_LOCAL_OPTIONAL, "--  no local model registered (optional: an API role can do "
                                                     "the coding; run /workbench)")
             self.assertNotIn("Claude picks one for this machine", "\n".join(lines))
+            # unset here: since #1189 a key the keyhole reads from this environment runs, so the
+            # $XAI_API_KEY of the shell running the tests read the GPU lines as optional
+            self.enterContext(mock.patch.dict(os.environ))
+            os.environ.pop("XAI_API_KEY", None)
             for rows in ((), (key_row("xai", "xAI", {"type": "env", "name": "XAI_API_KEY"}),)):
                 self.keys(*rows)                                   # no key wb can hold: as before
                 with mock.patch.object(cli.models, "_fake", return_value=False):
@@ -42339,13 +45618,13 @@ class FirstRunApi(Base):
         code, out = doctor()
         self.assertEqual(code, 1)
         self.assertIn("BAD trivial role: deepseek/deepseek-flash can't run: no key for ", out)
-        self.assertIn("/connect", out)
+        self.assertIn("opencode auth login deepseek", out)
         with mock.patch.object(cli.models, "discover", return_value={}):
             lines = cli.first_run()                                  # wb setup: the key is required
         self.assertIn(cli.NO_LOCAL_OPTIONAL, lines)
         self.assertNotIn(cli.NO_KEY, lines)
-        self.assertIn("--  no API key for deepseek, which significant and trivial and writing use: /connect "
-                      "in OpenCode adds it (required: those tasks can't start without it)", lines)
+        self.assertIn("--  no API key for deepseek, which significant and trivial and writing use: `opencode "
+                      "auth login deepseek` in a terminal adds it (required: those tasks can't start without it)", lines)
 
     def test_setup_with_a_stored_key_and_an_opencode_config_that_doesnt_parse_still_prints_its_checklist(self):
         # the review of #1067 (2026-11-23): wb setup's catalog read for a stored key ran outside
@@ -42431,7 +45710,7 @@ class FirstRunApi(Base):
         # wave 2's --order names one role's backends: never on several (wave 2's merge)
         code, _, err = self.wb("route", "trivial", "gpu", "significant", "gpu", "--order", "baseten")
         self.assertEqual(code, 1)
-        self.assertIn("--order, all, cap and busy go in a wb route of their own", err)
+        self.assertIn("--order, all, cap, busy and fallback go in a wb route of their own", err)  # #1196
         # a pair's `api` puts a kept OpenRouter model on API with no backends: OpenRouter's pick,
         # said in the line (#1322: it was refused until the user named backends)
         routes.write({"day_usd": 5, "roles": {"significant": {"api": "openrouter/deepseek/deepseek-v4.1-flash"}}})
@@ -42690,7 +45969,14 @@ class SettingsRoles(Base):
         p = shown["providers"]
         self.assertEqual(p["deepseek"], {"name": "DeepSeek", "key": "stored"})
         self.assertEqual((p["xenv"]["key"], p["xenv"]["why"]),
-                         ("env", "can't run: needs a key wb can hold outside the lane (key in XENV_API_KEY)"))
+                         ("env", "can't run: $XENV_API_KEY isn't set where wb start ran: export it, or store "
+                                 "the key with `opencode auth login xenv`"))
+        self.assertNotIn("runs", p["xenv"])
+        with mock.patch.dict(os.environ, {"XENV_API_KEY": "xenv-not-a-real-key"}):  # set: it runs (#1189)
+            p = json.loads(self.wb("route", "--json")[1])["providers"]
+        self.assertEqual({k: p["xenv"][k] for k in ("key", "why", "runs")},
+                         {"key": "env", "why": "key from $XENV_API_KEY", "runs": True})
+        self.assertNotIn("xenv-not-a-real-key", json.dumps(p))
         self.assertEqual(p["oauthco"]["key"], "oauth")
         self.assertIn("needs a key wb can hold outside the lane (an OAuth login)", p["oauthco"]["why"])
         ledger.unlink()
@@ -42758,6 +46044,25 @@ class SettingsRoles(Base):
         with mock.patch.object(cli.subprocess, "Popen", side_effect=AssertionError("a read with a key")):
             self.wb("route", "--json")
 
+    def test_an_old_cache_listing_an_exported_key_that_runs_is_not_read_again_for_the_pane(self):
+        # #1189's review (2026-11-24): the re-read counted only a stored key, so through an API
+        # task whose only key was exported, every poll past a minute read the catalog again
+        def cache(key):
+            store.write_json(runner.models.hosted_path(), {
+                "v": 1, "ts": time.time() - cli.PANE_REREAD_SECS * 2, "models": {},
+                "providers": {"deepseek": {"name": "DeepSeek", "key": key,
+                                           "package": "@opencode/ai/providers/deepseek"}}})
+        with mock.patch.dict(os.environ, DEEPSEEK_API_KEY="dummy-not-a-key"), \
+                mock.patch.object(cli, "_read_catalog_later") as later:
+            for key in ("stored", "env:DEEPSEEK_API_KEY"):
+                cache(key)
+                cli._route_pane()
+                self.assertFalse(later.called, key)
+            self.assertTrue(cli._route_pane()["providers"]["deepseek"]["runs"])
+            cache("env:NO_SUCH_WB_TEST_VAR")                             # exported nowhere: read again
+            cli._route_pane()
+            self.assertTrue(later.called)
+
     def test_wb_setup_reads_the_catalog_again_when_a_stored_key_isnt_in_the_cache(self):
         # the review of #1069: wb setup read it only when hosted.json was missing
         self.catalog(ROLE_CATALOG, [])
@@ -42796,8 +46101,10 @@ class SettingsRoles(Base):
         self.assertEqual(api["deepseek/deepseek-flash"]["provider_name"], "DeepSeek")
         self.assertEqual(api["deepseek/deepseek-flash"]["price"], {"input": 0.2, "output": 0.6})
         self.assertIsInstance(api["deepseek/deepseek-flash"]["window"], int)
-        for kept_out in ("oauthco/chat-1", "xenv/grok-9", "opencode/big-pickle-free"):  # no key wb can hold
+        for kept_out in ("oauthco/chat-1", "xenv/grok-9"):  # no key wb can hold
             self.assertNotIn(kept_out, api)
+        # OpenCode Zen's keyless free model runs with Zen's own "public" (#1193): listed, marked free
+        self.assertTrue(api["opencode/big-pickle-free"]["free"])
         self.assertEqual(doc["used"], ["acme/coder-pro"])
         self.assertTrue(doc["free_line"])
         self.assertEqual(set(doc["optimize"]), {"done_at", "models", "running"})
@@ -42937,6 +46244,29 @@ class BusyGpu(Base):
                          ("off", "deepseek/deepseek-flash", cli.AUTO_FIX["api"]))
         self.assertIn("thinking_shown", sp)
         self.assertEqual(store.Task("t-busy").status["phase"], "queued")
+
+    def test_a_start_after_a_time_while_the_gpu_is_held_is_queued_not_refused(self):
+        # #1204: --after is "run it once I'm off the GPU": the GPU's holders now say nothing of
+        # then, so it queues (implied) rather than exit 4
+        at = time.strftime("%H:%M", time.localtime(time.time() + 7200))
+        code, out, err = self.begin("t-later", "--after", at)
+        self.assertEqual(code, 0, err)
+        task = store.Task("t-later")
+        self.assertEqual((task.status["phase"], task.spec["via"]), ("queued", "gpu"))
+        self.assertIn("note: held until ", out)
+        self.assertEqual(self.begin("t-now")[0], 0)            # without it, queued too (#1322)
+
+    def test_a_start_after_a_time_stays_on_its_gpu_role_with_busy_api(self):
+        # #1204: the busy opt-in reads the GPU now, which says nothing of the --after time
+        self.opt_in()
+        at = time.strftime("%H:%M", time.localtime(time.time() + 7200))
+        code, out, err = self.begin("t-later", "--role", "trivial", "--after", at)
+        self.assertEqual(code, 0, err)
+        sp = store.Task("t-later").spec
+        self.assertEqual((sp["via"], sp.get("busy")), ("gpu", None))
+        self.assertNotIn(routes.BUSY_LINE, out)
+        self.assertEqual(self.begin("t-now", "--role", "trivial")[0], 0)   # without it, the move
+        self.assertEqual(store.Task("t-now").spec["via"], "api")
 
     def test_with_busy_wait_the_default_a_busy_gpu_queues_the_start_on_the_gpu(self):
         code, _, err = self.wb("route", "trivial", "--api", "deepseek/deepseek-flash", "--day-usd", "5")
@@ -43087,6 +46417,493 @@ class BusyGpu(Base):
         new = routes.change(doc, "trivial", order=["deepinfra"]).doc
         self.assertEqual(routes._busy_newly(doc, new), ["trivial"])
         self.assertEqual(routes._busy_newly(doc, doc), [])
+
+
+HAIKU = "anthropic/claude-haiku-5-5"   # ROLE_CATALOG's other provider (API_CATALOG[1])
+# #1196's runner fixtures: the role's API model and a fallback on another priced provider
+FB_PRIMARY, FB_OTHER = SPEND_M, "otherco/coder-1"
+FB_CATALOG = [*SPEND_CATALOG, {**SPEND_CATALOG[0], "id": "coder-1", "providerID": "otherco",
+                               "settings": {"baseURL": "https://api.otherco.example/v1"},
+                               "cost": [{"input": 1, "output": 2, "cache": {"read": 0, "write": 0}}]}]
+
+
+class Fallbacks(Base):
+    """A fallback per role (#1196): routes.json `fallback`, an API id on another provider or
+    `gpu`, set by `wb route <role> fallback <id>|gpu|none` (an API one on the dialog's yes and a
+    cap); a role's API model its provider holds (out of credit, rate-limited, unreachable) starts
+    on it at wb start, and a round stopped as out of credit, or held again after its revive,
+    moves there once, in a fresh session."""
+    catalog = ApiHarness.catalog
+    wb = RoleResolution.wb
+    begin = RoleResolution.begin
+
+    def setUp(self):
+        super().setUp()
+        self.catalog(ROLE_CATALOG, ROLE_AUTH)
+        self.ok = store.home() / "route-ok.json"
+        p = mock.patch.object(cli, "spawn_runner", lambda task: 0)  # the start alone
+        p.start()
+        self.addCleanup(p.stop)
+
+    def set_role(self, *argv):
+        code, _, err = self.wb("route", *argv)
+        self.assertEqual(code, 0, err)
+
+    def on_api(self, fallback=HAIKU):
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.set_role("trivial", "fallback", fallback)
+
+    def test_a_roles_fallback_is_read_checked_and_said_in_the_summary(self):
+        self.assertNotIn("fallback", routes.read()["roles"]["trivial"])   # none by default
+        for bad in ("", "none", 3, ["gpu"]):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(routes.RoutesError, "trivial's fallback is"):
+                    routes.normalize({"roles": {"trivial": {"fallback": bad}}})
+        # register.test.tsx checks routesSummary on the same fixture (Couplings)
+        doc = routes.normalize({"roles": {
+            "trivial": {"via": "api", "api": "deepseek/deepseek-flash", "thinking": "off", "fallback": HAIKU},
+            "significant": {"via": "api", "api": "deepseek/deepseek-v4-pro", "fallback": "gpu"},
+            "writing": {"fallback": "gpu"}}})
+        self.assertEqual(routes.summary(doc), (
+            "significant API deepseek/deepseek-v4-pro, thinking off, fallback GPU; trivial API deepseek/deepseek-flash, "
+            f"thinking off, fallback {HAIKU}; writing GPU (the router picks), fallback GPU"))
+        self.assertEqual(routes.fallback_of(doc, "trivial"), HAIKU)
+        self.assertIsNone(routes.fallback_of({**doc, "use": "api"}, "significant"))  # Agents API: no GPU
+        self.assertEqual(routes.fallback_of({**doc, "use": "api"}, "trivial"), HAIKU)
+
+    def test_an_api_fallback_takes_the_dialogs_yes_and_a_cap_while_gpu_and_none_take_neither(self):
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        os.environ["CLAUDECODE"] = "1"
+        asked = json.loads(self.wb("route", "--dry-run", "--json", "trivial", "fallback", HAIKU)[1])
+        self.assertEqual((asked["gate"], asked["approval"]["argv"]), (True, ["route", "trivial", "fallback", HAIKU]))
+        self.assertEqual(asked["change"], f"trivial: fallback none → {HAIKU}: your code goes to Anthropic when its "
+                                          "API model's provider is down or out of credit · thinking off · cap $5/day")
+        code, _, err = self.wb("route", "trivial", "fallback", HAIKU)    # Claude, no yes: unchanged
+        self.assertEqual(code, 3)
+        self.assertIn("approved none for this change", err)
+        self.assertNotIn("fallback", routes.read()["roles"]["trivial"])
+        store.write_json(self.ok, {**asked["approval"], "at": time.time()})
+        code, out, err = self.wb("route", "trivial", "fallback", HAIKU)
+        self.assertEqual((code, out), (0, f"changed: {asked['change']}\n"), err)
+        row = routes.read()["roles"]["trivial"]
+        self.assertEqual((row["fallback"], row["by"], row["said"]), (HAIKU, "dialog", asked["change"]))
+        self.assertIn(f"fallback {HAIKU} (Anthropic)", self.wb("route")[1])
+        for target, line in (("gpu", f"trivial: fallback {HAIKU} → GPU (the router's pick) when its API model's "
+                                     "provider is down or out of credit"),
+                             ("none", "trivial: fallback GPU (the router's pick) → none")):
+            with self.subTest(target=target):
+                shown = json.loads(self.wb("route", "--dry-run", "--json", "trivial", "fallback", target)[1])
+                self.assertEqual((shown["gate"], shown["change"]), (False, line))
+                code, out, err = self.wb("route", "trivial", "fallback", target)   # no dialog: Claude's own
+                self.assertEqual((code, out), (0, f"changed: {line}\n"), err)
+        self.assertNotIn("fallback", routes.read()["roles"]["trivial"])
+        del os.environ["CLAUDECODE"]
+        self.routes = Path(os.environ["WB_ROUTES"])
+        self.routes.write_text(json.dumps({"roles": {"trivial": {"api": "deepseek/deepseek-flash"}}}))
+        code, out, err = self.wb("route", "trivial", "fallback", HAIKU)   # no cap yet: it takes $5 (#1322)
+        self.assertEqual(code, 0, err)
+        self.assertIn("cap $5/day", out)
+        self.assertEqual(routes.read()["day_usd"], routes.DAY_USD_SUGGEST)
+
+    def test_wb_route_refuses_a_fallback_on_the_roles_provider_its_own_model_or_openrouter(self):
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        for fb, said in (("deepseek/deepseek-v4-pro", "a provider down or out of credit stops both"),
+                         ("deepseek/deepseek-flash", "is the trivial role's own API model"),
+                         ("openrouter/deepseek/deepseek-v4.1-flash", "an OpenRouter model can't be a fallback"),
+                         ("nobody/nothing", "not in OpenCode's catalog")):
+            with self.subTest(fb=fb):
+                code, _, err = self.wb("route", "trivial", "fallback", fb)
+                self.assertEqual(code, 3)
+                self.assertIn(said, err)
+        self.assertNotIn("fallback", routes.read()["roles"]["trivial"])
+        self.set_role("trivial", "fallback", HAIKU)
+        code, _, err = self.wb("route", "trivial", HAIKU)              # the API model onto the fallback
+        self.assertEqual(code, 3)
+        self.assertIn(f"{HAIKU} is the trivial role's own API model", err)
+        self.assertEqual(routes.read()["roles"]["trivial"]["api"], "deepseek/deepseek-flash")
+        self.assertEqual(self.wb("route", "trivial", "fallback")[0], 1)            # no choice
+        self.assertEqual(self.wb("route", "trivial", "fallback", "gpu", "--day-usd", "9")[0], 1)
+
+    def test_a_kept_api_fallback_is_named_when_its_role_goes_to_api(self):
+        self.set_role("trivial", "--api", "deepseek/deepseek-flash", "--day-usd", "5")   # kept on the GPU
+        self.set_role("trivial", "fallback", HAIKU)
+        line = json.loads(self.wb("route", "--dry-run", "--json", "trivial", "api")[1])["change"]
+        self.assertIn(f"fallback {HAIKU} (Anthropic)", line)
+
+    def test_a_provider_out_of_credit_at_start_starts_the_task_on_the_roles_api_fallback(self):
+        from workbench import results
+        self.on_api()
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        code, out, err = self.begin("t-fb", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        sp = store.Task("t-fb").spec
+        self.assertEqual({k: sp.get(k) for k in ("model", "via", "role", "provider", "fallback", "fallback_from")},
+                         {"model": HAIKU, "via": "api", "role": "trivial", "provider": "anthropic",
+                          "fallback": True, "fallback_from": "deepseek/deepseek-flash"})
+        self.assertTrue(out.startswith(f"started t-fb on {HAIKU} (API) · "), out)
+        self.assertIn(f"model: {HAIKU} · API (Anthropic) · trivial role's fallback · ", out)   # no stamp (#1322)
+        self.assertIn(f"deepseek/deepseek-flash: out of credit or quota at DeepSeek", out)
+        self.assertIn(f"{routes.FALLBACK_LINE} ({HAIKU})\n", out)
+        self.assertIn(routes.FALLBACK_LINE, sp["route"])
+        self.assertEqual(sp["opencode_model"].split("#")[0], HAIKU)
+        row = results._with_route(store.Task("t-fb"), {})
+        self.assertEqual((row["fallback"], row["fallback_from"], row["provider"]),
+                         (True, "deepseek/deepseek-flash", "anthropic"))
+
+    def test_a_held_provider_at_start_starts_the_task_on_the_roles_gpu_fallback(self):
+        self.on_api("gpu")
+        runner.models.note_api("deepseek", "rate_limited", "HTTP 429", time.time() + 60)
+        code, out, err = self.begin("t-fbgpu", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        sp = store.Task("t-fbgpu").spec
+        self.assertEqual((sp["via"], sp["fallback"], sp["fallback_from"]), ("gpu", True, "deepseek/deepseek-flash"))
+        self.assertIn(sp["model"], runner.models.discover())
+        self.assertNotIn("provider", sp)
+        self.assertIn(f" · {routes.FALLBACK_LINE}\n", out)                 # the router's line, then it
+        self.assertNotIn("the round waits for it", out)
+        self.assertEqual(sp["auto_fix"], cli.AUTO_FIX["gpu"])
+
+    def test_with_no_fallback_or_one_that_cant_take_it_the_start_is_as_before(self):
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        code, _, err = self.begin("t-none", "--role", "trivial")
+        self.assertEqual(code, 3)                                         # no fallback: exit 3, as before
+        self.assertIn("trivial role: deepseek/deepseek-flash can't run: ", err)
+        self.set_role("trivial", "fallback", HAIKU)
+        runner.models.note_api("anthropic", "no_credit", "HTTP 402: Insufficient balance")
+        code, out, err = self.begin("t-both", "--role", "trivial")
+        self.assertEqual(code, 3)
+        self.assertIn(f"note: the trivial role's fallback {HAIKU} can't run: out of credit", out)
+        runner.models.note_api("anthropic", "ok")
+        runner.models.note_api("deepseek", "ok")
+        code, out, err = self.begin("t-fine", "--role", "trivial")      # its own model, while it runs
+        self.assertEqual(code, 0, err)
+        self.assertEqual(store.Task("t-fine").spec["model"], "deepseek/deepseek-flash")
+        self.assertNotIn("fallback", store.Task("t-fine").spec)
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        gpu = next(iter(runner.models.discover()))
+        code, _, _ = self.begin("t-asked", "--role", "trivial", "--model", "deepseek/deepseek-flash")
+        self.assertEqual(code, 3)                                         # a --model never moves
+        self.assertNotIn(gpu, [t.spec.get("model") for t in store.all_tasks() if t.name == "t-asked"])
+
+    def test_an_api_fallback_with_its_slots_taken_queues_for_one(self):
+        # the review of #1196 (2026-11-24): refused as "can't take it", the 4th --queue start of a
+        # backlog exited 3 saying wb never switches models; a start queues for a slot now (#1322)
+        self.on_api()
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        with mock.patch.object(cli.models, "api_slots_free", lambda provider: False):
+            code, out, err = self.begin("t-q", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("never switches", err)
+        self.assertEqual((store.Task("t-q").spec["model"], store.Task("t-q").spec["fallback"]), (HAIKU, True))
+        self.assertIn(f"{routes.FALLBACK_LINE} ({HAIKU})", out)
+
+    def test_a_held_provider_whose_api_fallback_has_no_free_slot_starts_on_the_roles_own_model(self):
+        # the second review of #1196 (2026-11-24): moved to the full fallback, a start that runs
+        # with no fallback, waiting out the limit in its round, exited 4 on anthropic's slots
+        self.on_api()
+        runner.models.note_api("deepseek", "rate_limited", "HTTP 429", time.time() + 60)
+        with mock.patch.object(cli.models, "api_slots_free", lambda provider: provider != "anthropic"):
+            code, out, err = self.begin("t-held", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        sp = store.Task("t-held").spec
+        self.assertEqual(sp["model"], "deepseek/deepseek-flash")
+        self.assertNotIn("fallback", sp)
+        self.assertIn(f"note: the trivial role's fallback {HAIKU} can't take it: every one of "
+                      "anthropic's", out)
+        self.assertNotIn(routes.FALLBACK_LINE, out)
+
+    def test_a_held_provider_whose_gpu_fallback_would_wait_starts_on_the_roles_own_model(self):
+        # the third review of #1196 (2026-11-24): moved to the GPU fallback behind a busy GPU, a
+        # start that runs with no fallback, waiting out the limit in its round, exited 4
+        self.on_api("gpu")
+        runner.models.note_api("deepseek", "rate_limited", "HTTP 429", time.time() + 60)
+        with mock.patch.object(cli, "_gpu_wait", lambda m, me=None: ({"gpu0": {"task": "other", "model": m.id}}, True)):
+            code, out, err = self.begin("t-hb", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        sp = store.Task("t-hb").spec
+        self.assertEqual((sp["model"], sp["via"]), ("deepseek/deepseek-flash", "api"))
+        self.assertNotIn("fallback", sp)
+        self.assertIn("note: the trivial role's fallback ", out)
+        self.assertIn(" can't take it: the GPU is in use by other: ", out)
+        self.assertNotIn(routes.FALLBACK_LINE, out)
+
+    def test_out_of_credit_onto_a_busy_gpu_fallback_queues_saying_it_was_the_fallback(self):
+        # the third review of #1196 (2026-11-24): exit 4 named a GPU model Claude never picked, and
+        # not that the role was out of credit or moved; a start queues behind the holders now, as
+        # any GPU start (#1322), the fallback line saying why it is on the GPU
+        self.on_api("gpu")
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        with mock.patch.object(cli, "_gpu_wait", lambda m, me=None: ({"gpu0": {"task": "other", "model": m.id}}, True)):
+            code, out, err = self.begin("t-cb", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        self.assertIn("deepseek/deepseek-flash: out of credit or quota at DeepSeek", out)
+        self.assertIn(routes.FALLBACK_LINE, out)
+        sp = store.Task("t-cb").spec
+        self.assertEqual((sp["via"], sp.get("fallback")), ("gpu", True))
+
+    def test_an_api_fallback_meets_the_cap_a_repo_kept_local_and_commands_jsons_standing_copy(self):
+        self.on_api()
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        (self.repo / ".env.local").write_text("API_TOKEN=sk-abcdef0123456789\n")   # a standing copy with a credential (#1322)
+        with mock.patch.object(cli.context, "repo_conf", lambda repo, sub=None: {"copy": [".env.local"]}):
+            got = cli._fallback_start("trivial", "trivial", BusyGpu.asked(), self.repo, None, [],
+                                      runner.models.lookup("deepseek/deepseek-flash"),
+                                      {"via": "api", "role": "trivial"})
+        self.assertEqual(got, f"the trivial role's fallback {HAIKU} can't take it: "
+                              + cli.privacy.standing_refusal(".env.local"))
+        got = cli._fallback_start("trivial", "trivial", BusyGpu.asked(), self.repo, None, [],
+                                  runner.models.lookup("deepseek/deepseek-flash"),
+                                  {"via": "api", "role": "trivial", "busy": True})
+        self.assertEqual(got, "")                                       # a busy-routed start never falls back
+        with mock.patch.object(cli.privacy, "local_only", lambda repo, sub: str(repo)):
+            got = cli._fallback_start("trivial", "trivial", BusyGpu.asked(), self.repo, None, [],
+                                      runner.models.lookup("deepseek/deepseek-flash"),
+                                      {"via": "api", "role": "trivial"})
+        self.assertEqual(got, f"the trivial role's fallback {HAIKU} is an API model, and {self.repo.name} is kept "
+                              f"local ({self.repo})")
+        with mock.patch.object(cli.meter, "refusal", lambda m, role=None, advice=True, tokens=None: "at the cap"):
+            got = cli._fallback_start("trivial", "trivial", BusyGpu.asked(), self.repo, None, [],
+                                      runner.models.lookup("deepseek/deepseek-flash"),
+                                      {"via": "api", "role": "trivial"})
+        self.assertEqual(got, f"the trivial role's fallback {HAIKU} can't take it: at the cap")
+
+
+class FallbackMoves(Base):
+    """The runner's move to the role's fallback (#1196): a round its provider stops as out of
+    credit, or holds again after its one revive, runs again on the fallback the user set, once,
+    in a fresh session, the keyhole serving the fallback alone; with none, or one that can't take
+    it, the stop stands as before."""
+    api_task = ApiSpend.api_task
+    events = RateLimits.events
+
+    def setUp(self):
+        super().setUp()
+        from workbench import meter
+        path = Path(self.tmp.name) / "catalog.json"
+        path.write_text(json.dumps(FB_CATALOG))
+        os.environ["WB_FAKE_CATALOG"] = str(path)
+        os.environ["FAKE_AUTH_EXPORT"] = json.dumps([
+            {"id": f"cred_{p}", "integrationID": p, "label": "main", "active": True,
+             "value": {"type": "key", "key": "sk-fallback-test"}} for p in ("meterco", "otherco")])
+        meter._METERS.clear()
+        self.addCleanup(meter._METERS.clear)
+        self.addCleanup(runner.CURRENT.pop, "keyhole", None)
+
+    def roles(self, fallback, **row):
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {"significant": {
+            "via": "api", "api": FB_PRIMARY, "thinking": "off", "fallback": fallback, "ts": time.time(), **row}}})
+
+    def test_a_round_out_of_credit_moves_once_to_the_roles_api_fallback_in_a_fresh_session(self):
+        self.roles(FB_OTHER)
+        served = []
+        real = runner.start_keyhole
+        with mock.patch.object(runner, "start_keyhole",
+                               lambda task, m: served.append(m.id) or real(task, m)):
+            task = self.api_task("t-move", FB_PRIMARY, "ok", WB_FAKE_API="meterco=quota")
+            runner.drive(task)
+        st, sp = task.status, task.spec
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertEqual(served, [FB_PRIMARY, FB_OTHER])                 # one model a keyhole, each
+        self.assertEqual({k: sp.get(k) for k in ("model", "via", "provider", "fallback", "fallback_from")},
+                         {"model": FB_OTHER, "via": "api", "provider": "otherco", "fallback": True,
+                          "fallback_from": FB_PRIMARY})
+        [ev] = self.events(task, "fallback")
+        self.assertEqual((ev["moved"], ev["from"], ev["to"], ev["round"]), (True, FB_PRIMARY, FB_OTHER, 1))
+        [fresh] = self.events(task, "fresh")
+        self.assertFalse(fresh["overflow"])                              # no handover the window caused
+        self.assertTrue(task.round_dir(1).joinpath("prompt.md").read_text().startswith(
+            f"You are picking this task up in a fresh session ({runner.FALLBACK_SAID}"))
+        self.assertEqual(st["fallback_moved"]["to"], FB_OTHER)
+        self.assertIn(f"the task moved to the significant role's fallback {FB_OTHER}",
+                      task.round_dir(1).joinpath("summary.md").read_text())
+        self.assertEqual(json.loads(runner.catalog_path(task).read_text()).keys(), {"otherco"})
+
+    def test_with_no_fallback_the_stop_stands_and_a_moved_task_never_moves_again(self):
+        self.roles(None)
+        task = self.api_task("t-stays", FB_PRIMARY, "ok", WB_FAKE_API="meterco=quota")
+        runner.drive(task)
+        self.assertEqual((task.status["phase"], task.status.get("infra")), ("stuck", "provider"))
+        self.assertEqual(task.spec["model"], FB_PRIMARY)
+        self.assertFalse(self.events(task, "fallback"))
+        self.roles(FB_OTHER)                                             # on the fallback already
+        moved = self.api_task("t-moved", FB_OTHER, "ok", WB_FAKE_API="otherco=quota")
+        store.write_json(moved.dir / "task.json", {**moved.spec, "fallback": True, "fallback_from": FB_PRIMARY})
+        runner.drive(moved)
+        self.assertEqual((moved.status["phase"], moved.spec["model"]), ("stuck", FB_OTHER))
+
+    def test_a_fallback_that_cant_take_it_leaves_the_providers_stop_and_says_why(self):
+        self.roles(FB_OTHER)
+        task = self.api_task("t-both", FB_PRIMARY, "ok", WB_FAKE_API="meterco=quota")
+        runner.models.note_api("otherco", "no_credit", "HTTP 402")
+        runner.drive(task)
+        self.assertEqual((task.status["phase"], task.spec["model"]), ("stuck", FB_PRIMARY))
+        [ev] = self.events(task, "fallback")
+        self.assertFalse(ev["moved"])
+        self.assertIn(f"the significant role's fallback {FB_OTHER} can't run: ", ev["text"])
+
+    def test_a_task_with_images_never_moves_to_a_fallback_that_doesnt_say_it_takes_them(self):
+        # #1196 met #1199 in the 2.1 merges: the fallback's fresh session sends every image again,
+        # and a model that takes none fails each request, so the provider's stop stands
+        self.roles(FB_OTHER)
+        task = self.api_task("t-images", FB_PRIMARY, "ok", WB_FAKE_API="meterco=quota")
+        task.set_status(images=[{"file": "1-mockup.png", "round": 1}])
+        runner.drive(task)
+        self.assertEqual((task.status["phase"], task.spec["model"]), ("stuck", FB_PRIMARY))
+        [ev] = self.events(task, "fallback")
+        self.assertFalse(ev["moved"])
+        self.assertIn(f"the significant role's fallback {FB_OTHER} doesn't take image input", ev["text"])
+
+    def test_a_round_held_again_after_its_revive_moves_to_the_roles_gpu_fallback(self):
+        os.environ.update(FAKE_RETRIES="200", FAKE_RETRY_EVERY="0.5")
+        gpu = sorted(runner.models.discover())
+        task = self.api_task("t-held", FB_PRIMARY, "ok", "--silence-timeout", "2", "--think-timeout", "2",
+                             WB_FAKE_API="meterco=ratelimit")
+        other = next(g for g in gpu if g != task.spec["model"])
+        self.roles("gpu", gpu=other)
+        with mock.patch.object(runner, "RATE_WAIT_S", 2), mock.patch.object(runner.models, "RATE_LIMIT_SECS", 1):
+            runner.drive(task)
+        st, sp = task.status, task.spec
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertEqual((sp["model"], sp["via"], sp["fallback"]), (other, "gpu", True))
+        for key in ("provider", "thinking", "said"):
+            self.assertNotIn(key, sp)
+        self.assertEqual(len(self.events(task, "load")), 1)              # revived once, then moved
+        self.assertTrue(self.events(task, "fallback")[0]["moved"])
+        self.assertFalse(runner.catalog_path(task).exists())             # the GPU's: no API catalog
+        self.assertIsNone(st.get("api_entry"))
+        # the lane keeps the fallback's server port open, not the first model's (#1197 met
+        # #1196 in the 2.1 merges: a fallback on a DAEMON_PORTS port was refused to OpenCode)
+        self.assertEqual(runner.CURRENT["model"].id, other)
+        port = next(iter(runner.context.DAEMON_PORTS))
+        with mock.patch.object(runner.context, "url_port", lambda url: port):
+            self.assertNotIn(port, runner.lane_ports(task))
+
+    def test_a_task_whose_provider_went_out_of_credit_after_its_start_moves_before_its_round_rather_than_wait(self):
+        # the review of #1196 (2026-11-24): it waited in NoLease.load on credit_turn, so a --queue
+        # backlog queued before the 402 drained one task each CREDIT_RECHECK_SECS
+        self.roles(FB_OTHER)
+        served = []
+        real = runner.start_keyhole
+        task = self.api_task("t-wait", FB_PRIMARY, "ok")
+        runner.models.note_api("meterco", "no_credit", "HTTP 402", time.time() + 600)
+        with mock.patch.object(runner, "start_keyhole", lambda task, m: served.append(m.id) or real(task, m)):
+            t = threading.Thread(target=runner.drive, args=(task,), daemon=True)
+            t.start()
+            t.join(25)
+        self.assertFalse(t.is_alive(), task.status.get("last"))
+        st, sp = task.status, task.spec
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertEqual((sp["model"], sp["provider"], sp["fallback"]), (FB_OTHER, "otherco", True))
+        self.assertEqual(served, [FB_PRIMARY, FB_OTHER])
+        [ev] = self.events(task, "fallback")
+        self.assertEqual((ev["moved"], ev["from"], ev["to"], ev["round"]), (True, FB_PRIMARY, FB_OTHER, 1))
+        self.assertEqual({k: st["fallback_moved"].get(k) for k in ("round", "before", "fresh")},
+                         {"round": 1, "before": True, "fresh": False})
+        self.assertFalse(self.events(task, "fresh"))                     # round 1 had no session to leave
+        self.assertFalse(task.round_dir(1).joinpath("prompt.md").read_text().startswith("You are picking"))
+        self.assertIn(f"fallback: before round 1 {FB_PRIMARY} couldn't run (meterco is out of credit",
+                      task.round_dir(1).joinpath("summary.md").read_text())
+
+    def test_a_task_waiting_for_a_slot_when_its_provider_runs_out_of_credit_moves_once_it_holds_the_slot(self):
+        # the review of #1196 (2026-11-24): a backlog past API_PARALLEL is in NoLease.__enter__
+        # when the running tasks meet the 402, past the check before the slot; without the one in
+        # it each waited ~900 s in NoLease.load
+        self.roles(FB_OTHER)
+        task = self.api_task("t-slotwait", FB_PRIMARY, "ok")
+        real = runner.models.NoLease.__enter__
+
+        def enter(lease):  # the 402 another task met while this one waited for the slot
+            if lease.m.id == FB_PRIMARY:
+                runner.models.note_api("meterco", "no_credit", "HTTP 402", time.time() + 600)
+            return real(lease)
+        with mock.patch.object(runner.models.NoLease, "__enter__", enter):
+            t = threading.Thread(target=runner.drive, args=(task,), daemon=True)
+            t.start()
+            t.join(25)
+        self.assertFalse(t.is_alive(), task.status.get("last"))
+        self.assertEqual(task.spec["model"], FB_OTHER)
+        [ev] = self.events(task, "fallback")
+        self.assertEqual((ev["moved"], ev["to"], ev["round"]), (True, FB_OTHER, 1))
+
+    def test_a_provider_marked_out_of_credit_between_rounds_moves_the_next_round_in_a_fresh_session(self):
+        self.roles(FB_OTHER)
+        task = self.api_task("t-between", FB_PRIMARY, "ok", "--test", "false", "--auto-fix", "1")
+        real = runner.run_round
+
+        def then_402(task, n, **kw):
+            try:
+                return real(task, n, **kw)
+            finally:  # another task's 402, while this one's tests run
+                runner.models.note_api("meterco", "no_credit", "HTTP 402", time.time() + 600)
+        with mock.patch.object(runner, "run_round", then_402):
+            t = threading.Thread(target=runner.drive, args=(task,), daemon=True)
+            t.start()
+            t.join(60)
+        self.assertFalse(t.is_alive(), task.status.get("last"))
+        [ev] = self.events(task, "fallback")
+        self.assertEqual((ev["moved"], ev["to"], ev["round"]), (True, FB_OTHER, 2))
+        self.assertEqual(task.status["fallback_moved"]["fresh"], True)
+        self.assertEqual([e["round"] for e in self.events(task, "fresh")], [2])
+        self.assertEqual(task.spec["model"], FB_OTHER)
+
+    def test_before_a_round_a_mark_that_is_this_tasks_turn_or_a_fallback_that_cant_take_it_leaves_the_wait(self):
+        self.roles(FB_OTHER)
+        task = self.api_task("t-turn", FB_PRIMARY, "ok")
+        m = runner.models.resolve(FB_PRIMARY)
+        runner.models.note_api("meterco", "no_credit", "HTTP 402", time.time() + 600)
+        runner.models.credit_ask("meterco", "t-turn")                   # the user's resume: its turn to ask
+        self.assertIsNone(runner._credit_move(task, m))
+        runner.models.note_api("meterco", "no_credit", "HTTP 402", time.time() + 600)
+        runner.models.note_api("otherco", "no_credit", "HTTP 402")
+        self.assertIsNone(runner._credit_move(task, m))
+        self.assertIsNone(runner._credit_move(task, m))                 # before the slot and in it
+        [ev] = self.events(task, "fallback")                            # said once
+        self.assertFalse(ev["moved"])
+        self.assertTrue(ev["text"].endswith("the round waits for meterco's credit"), ev["text"])
+        self.assertEqual(task.spec["model"], FB_PRIMARY)
+
+    def test_a_repo_made_local_only_after_the_start_never_moves_to_an_api_fallback(self):
+        # the review of #1196: deleting _fallback_move's local-only check survived every test
+        self.roles(FB_OTHER)
+        task = self.api_task("t-local", FB_PRIMARY, "ok")
+        with mock.patch.object(runner.privacy, "local_only", lambda repo, sub: str(repo)):
+            self.assertIsNone(runner._fallback_move(task, 1, {"guard": "quota", "stuck": "out of credit"}))
+        [ev] = self.events(task, "fallback")
+        self.assertFalse(ev["moved"])
+        self.assertIn(f"{FB_OTHER} is an API model, and {self.repo.name} is kept local", ev["text"])
+        self.assertEqual(task.spec["model"], FB_PRIMARY)
+        store.write_json(task.dir / "task.json", {**task.spec, "local_only": True})   # --local-only
+        self.assertIsNone(runner._fallback_move(task, 1, {"guard": "quota", "stuck": "out of credit"}))
+        self.assertIn("this task is kept local (--local-only)", self.events(task, "fallback")[-1]["text"])
+
+    def test_a_moved_task_never_moves_again_even_to_another_providers_fallback(self):
+        # the review of #1196: the never-again guard's test passed on the same-provider refusal alone
+        self.roles(HAIKU)
+        task = self.api_task("t-again", FB_OTHER, "ok")
+        store.write_json(task.dir / "task.json", {**task.spec, "fallback": True, "fallback_from": FB_PRIMARY})
+        with mock.patch.object(routes, "fallback_pick", lambda *a, **k: self.fail("a moved task looked for one")):
+            self.assertIsNone(runner._fallback_move(task, 1, {"guard": "quota", "stuck": "out of credit"}))
+        self.assertEqual(task.spec["model"], FB_OTHER)
+
+    def test_a_fallback_on_the_roles_own_provider_is_refused_by_the_pick(self):
+        doc = {"roles": {"significant": {"via": "api", "api": FB_PRIMARY, "gpu": "auto", "thinking": "off",
+                                         "fallback": FB_PRIMARY}}}
+        primary = types.SimpleNamespace(id="meterco/other", provider="meterco")
+        got = routes.fallback_pick(doc, "significant", "significant", [], "t", primary)
+        self.assertEqual(got, f"the significant role's fallback {FB_PRIMARY} is on meterco too")
+
+    def test_a_fallback_whose_keyhole_cant_start_puts_task_json_back(self):
+        self.roles(FB_OTHER)
+        task = self.api_task("t-kh", FB_PRIMARY, "ok")
+        before = task.spec
+
+        def refuse(task, m):
+            raise runner.keyhole.KeyholeError("no key")
+        with mock.patch.object(runner, "start_keyhole", refuse):
+            self.assertIsNone(runner._fallback_move(task, 1, {"guard": "quota", "stuck": "out of credit"}))
+        self.assertEqual(task.spec, before)
+        self.assertIn(f"the significant role's fallback {FB_OTHER} can't start: ", self.events(task, "fallback")[-1]["text"])
 
 
 class MediaDefaults(Base):
@@ -43360,8 +47177,9 @@ class ApiCompat(Base):
         self.assertIn("  significant  gpu (no local model: none can run)", out)
         self.assertIn("  trivial      acme/coder-flash  ready · thinking off · set by you 11-20", out)
         self.assertIn("keys: acme (stored), deepinfra (stored), nolimit (stored), oauthco (OAuth login: "
-                      "can't run, needs a key wb can hold outside the lane), xenv (environment: can't run, "
-                      "needs a key wb can hold outside the lane)", out)
+                      "can't run, needs a key wb can hold outside the lane), xenv (key from $XENV_API_KEY: "
+                      "can't run: $XENV_API_KEY isn't set where wb start ran: export it, or store the key "
+                      "with `opencode auth login xenv`)", out)
         self.assertIn(f"opencode 1 (free: {cli.FREE_NOTE})", out)
         self.assertNotIn("coder-pro", out)                          # counts, never ids
         Path(os.environ["WB_ROUTES"]).unlink()
@@ -43385,6 +47203,16 @@ class ApiCompat(Base):
         skill = (Path(cli.__file__).resolve().parent.parent / "skill/workbench/SKILL.md").read_text()
         first = " ".join(skill[skill.index("  2. **No GPU model"):skill.index("  3. **No GPU model")].split())
         self.assertIn("`wb models --api <provider>` lists that provider's ids", first)
+
+    def test_wb_models_api_marks_a_model_the_catalog_says_has_no_tool_calls(self):
+        # #1193: the first run's free pick needs tool calls, which the listing never said
+        self.catalog([api_entry("opencode", "big-pickle-free", cost=[{"input": 0, "output": 0}]),
+                      api_entry("opencode", "chatty-free", cost=[{"input": 0, "output": 0}],
+                                capabilities={"tools": False})], [])
+        self.models.hosted(fresh=True)
+        out = run_wb("models", "--api", "opencode").splitlines()
+        self.assertEqual(out, [f"opencode/big-pickle-free  200K · free: {cli.FREE_NOTE}",
+                               f"opencode/chatty-free  200K · free: {cli.FREE_NOTE} · no tool calls"])
 
     def test_wb_models_names_an_api_roles_state_and_a_gpu_user_gets_two_lines(self):
         self.catalog([api_entry("opencode", "big-pickle-free", cost=[{"input": 0, "output": 0}])], [])
@@ -43548,6 +47376,229 @@ class ApiCompat(Base):
             with runner._tests_gpu(task, types.SimpleNamespace(pool=None)):   # an API task's NoLease (#1015)
                 pass
         self.assertEqual(took, [("t", True)] * 2)
+
+
+class Rewind(Base):
+    """wb rewind: a task's files back to an earlier review round's tree in the step (#1198)."""
+    def setUp(self):
+        super().setUp()
+        self.runs_file = Path(self.tmp.name) / "runs.jsonl"
+        os.environ["FAKE_RUNS"] = str(self.runs_file)
+
+    def reviewed(self, task, rnd, write=(), delete=(), tests="0"):
+        """Round ``rnd`` as the runner ends one: its files, its tests.txt, its review notice's tree."""
+        for path, text in dict(write).items():
+            (task.worktree / path).parent.mkdir(parents=True, exist_ok=True)
+            (task.worktree / path).write_bytes(text if isinstance(text, bytes) else text.encode())
+        for path in delete:
+            (task.worktree / path).unlink()
+        task.round_dir(rnd).mkdir(parents=True, exist_ok=True)
+        task.round_dir(rnd).joinpath("tests.txt").write_text(f"$ {TEST_CMD}\nexit: {tests}\nshell: sh\n\n")
+        task.set_status(round=rnd, phase="review")
+        runner.review_diff(task, rnd)
+
+    def refs(self, name):
+        return subprocess.run(["git", "-C", str(self.repo), "for-each-ref", "--format=%(refname)",
+                               f"refs/workbench/review/{name}/"], capture_output=True, text=True,
+                              check=True).stdout.split()
+
+    def refused(self, *argv) -> str:
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            run_wb(*argv)
+        return err.getvalue()
+
+    def test_a_rewind_restores_round_twos_files_after_round_three_broke_one(self):
+        name = "t-rw"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        self.assertEqual(self.refs(name), [f"refs/workbench/review/{name}/1"])  # the runner's own
+        head = subprocess.run(["git", "-C", str(task.worktree), "rev-parse", "HEAD"],
+                              capture_output=True, text=True).stdout
+        self.reviewed(task, 2, {"lib/good.py": "def f():\n    return 2\n"})
+        self.reviewed(task, 3, {"answer.txt": "41\n", "lib/good.py": "def f(:\n", "junk/x.txt": "x\n"},
+                      delete=["README.md"], tests="1")
+        # the trees are pinned: git gc prunes what nothing reaches (#795)
+        subprocess.run(["git", "-C", str(self.repo), "prune", "--expire=now"], check=True)
+        out = run_wb("rewind", name, "2")
+        self.assertIn(f"rewound {name} to round 2's files (step 1); undone:", out)
+        self.assertIn("round 2's tests on these files: passed", out)
+        self.assertEqual((task.worktree / "answer.txt").read_text(), "42\n")
+        self.assertEqual((task.worktree / "lib/good.py").read_text(), "def f():\n    return 2\n")
+        self.assertEqual((task.worktree / "README.md").read_text(), "hello\n")  # a deletion undone
+        self.assertFalse((task.worktree / "junk").exists())                     # a new file gone
+        git = lambda *a: subprocess.run(["git", "-C", str(task.worktree), *a],  # noqa
+                                        capture_output=True, text=True).stdout
+        self.assertEqual(git("rev-parse", "HEAD"), head)                         # nothing committed
+        self.assertEqual(git("diff", "--cached", "--name-only"), "")             # nor staged
+        st = task.status
+        self.assertEqual(st["reviewed"]["tree"], st["review_trees"]["2"]["tree"])  # the next diff's base
+        self.assertEqual((st["rewound_to"], st["context"], st["phase"]), (2, "fresh", "review"))
+        self.assertIn("Claude rewound the files to round 2's", run_wb("log", name))
+        out = run_wb("rewind", name, "3")                                        # and forward again
+        self.assertIn("round 3's tests on these files: failed (exit 1)", out)
+        self.assertEqual((task.worktree / "answer.txt").read_text(), "41\n")
+        self.assertFalse((task.worktree / "README.md").exists())
+        self.assertIn("no review of round 4 in step 1 (its reviewed rounds: 1, 2, 3",
+                      self.refused("rewind", name, "4"))
+
+    def test_a_rewind_from_a_stuck_round_keeps_its_files_for_a_rewind_back(self):
+        name = "t-rws"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        (task.worktree / "half.txt").write_text("half done\n")   # round 2 stopped, never reviewed
+        task.set_status(round=2, phase="stuck")
+        out = run_wb("rewind", name, "1")
+        self.assertIn(f"round 2's files (not reviewed) are kept: wb rewind {name} 2", out)
+        self.assertIn(f"wb accept {name} --force", out)          # not in review: accept says so
+        self.assertFalse((task.worktree / "half.txt").exists())
+        run_wb("rewind", name, "2")
+        self.assertEqual((task.worktree / "half.txt").read_text(), "half done\n")
+
+    def test_a_rewind_leaves_a_file_the_snapshot_left_out_untouched_and_names_it(self):
+        name = "t-rwk"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        big = b"\0" * gitops.BINARY_MAX
+        self.reviewed(task, 2, {"data.bin": big, "notes.txt": "two\n"})
+        self.assertEqual(task.status["review_trees"]["2"]["keep"], ["data.bin"])
+        # round 3 shrinks it: now in the worktree's snapshot, though round 2's tree has no copy
+        self.reviewed(task, 3, {"data.bin": b"small\n", "notes.txt": "three\n"})
+        out = run_wb("rewind", name, "2")
+        self.assertEqual((task.worktree / "notes.txt").read_text(), "two\n")
+        self.assertEqual((task.worktree / "data.bin").read_bytes(), b"small\n")  # never deleted
+        self.assertIn("left as they are, in no review snapshot: data.bin (1 MB)\n", out)
+
+    def test_a_rewind_never_writes_over_a_file_grown_past_the_snapshot_and_says_so_truly(self):
+        # #1198's review: round 2's 10 KB data.bin was written over the 2 MB one no tree held,
+        # while the rewind said it was left as it was, and wb rewind 4 couldn't bring it back
+        name = "t-rwg"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        self.reviewed(task, 2, {"data.bin": b"\1" * 10240, "notes.txt": "two\n"})
+        grown = b"\2" * (2 << 20)
+        (task.worktree / "data.bin").write_bytes(grown)           # round 3, left out of `now`
+        (task.worktree / "notes.txt").write_text("three\n")
+        task.set_status(round=4, phase="stuck")
+        out = run_wb("rewind", name, "2")
+        self.assertEqual((task.worktree / "notes.txt").read_text(), "two\n")
+        self.assertEqual((task.worktree / "data.bin").read_bytes(), grown)   # never written over
+        self.assertIn("left as they are, in no review snapshot: data.bin (2 MB)\n", out)
+        # not in the stat as undone: --stat pads each name to the longest, so `data.bin |` never
+        # matched, and the test passed with the exclusion gone (#1198's review)
+        stat = out.split("undone:\n", 1)[1].split("round 2's tests", 1)[0]
+        self.assertIn("notes.txt", stat)
+        self.assertNotIn("data.bin", stat)
+        self.assertIn(f"round 4's files (not reviewed) are kept: wb rewind {name} 4", out)
+        run_wb("rewind", name, "4")
+        self.assertEqual((task.worktree / "notes.txt").read_text(), "three\n")
+        self.assertEqual((task.worktree / "data.bin").read_bytes(), grown)
+
+    def test_a_file_too_big_for_the_second_snapshot_is_not_named_as_differing_when_the_tree_has_it(self):
+        # #1198's review: round 3's .gitignore, undone, unignored logs/ and pushed the second
+        # snapshot past SNAPSHOT_MAX, which left a.txt out: named as not round 2's, though it was
+        name = "t-rwb"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        with mock.patch.object(gitops, "SNAPSHOT_MAX", 30000):
+            self.reviewed(task, 2, {"a.txt": "a" * 20000})
+            self.reviewed(task, 3, {".gitignore": "logs/\n", "logs/big.log": "b" * 15000})
+            out = run_wb("rewind", name, "2")
+        self.assertEqual((task.worktree / "a.txt").read_text(), "a" * 20000)
+        self.assertFalse((task.worktree / ".gitignore").exists())
+        self.assertFalse((task.worktree / "logs/big.log").exists())   # unignored: deleted
+        self.assertIn("deleted, not in round 2's files (a later .gitignore hid them): logs/big.log", out)
+        self.assertNotIn("not as round 2's files", out)
+
+    def test_a_rewind_deletes_a_file_a_later_rounds_gitignore_hid_so_accept_cant_commit_it(self):
+        # #1198's review: round 2's .gitignore back, round 3's ignored secret.env was a new file
+        # wb accept's `add -A` would commit, though the rewind said only `.gitignore | 1 +`
+        name = "t-rwi"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        self.reviewed(task, 2, {"notes.txt": "two\n"})
+        self.reviewed(task, 3, {".gitignore": "secret.env\nbig.bin\n", "secret.env": "KEY=x\n",
+                                "big.bin": b"\0" * gitops.BINARY_MAX})
+        out = run_wb("rewind", name, "2")
+        self.assertIn("deleted, not in round 2's files (a later .gitignore hid them): secret.env",
+                      out)
+        self.assertIn("not as round 2's files, left as they are: big.bin\n", out)  # too big to hash
+        self.assertFalse((task.worktree / "secret.env").exists())
+        self.assertEqual(gitops.snapshot(task.worktree), task.status["review_trees"]["2"]["tree"])
+        status = subprocess.run(["git", "-C", str(task.worktree), "status", "--porcelain"],
+                                capture_output=True, text=True, check=True).stdout
+        self.assertNotIn("secret.env", status)
+
+    def test_a_rewind_puts_back_an_ignored_file_the_agent_wrote_and_says_nothing_false_of_it(self):
+        # the merge of 2.1 into main (2026-11-25): main's review trees hold the ignored files the
+        # agent wrote (#1259's force), wb rewind's own snapshots didn't, so a rewind from a
+        # reviewed round said "your edits since the last review … kept nowhere" and named the
+        # restored lib/util.py as "not as round 2's files"
+        (self.repo / ".gitignore").write_text("lib/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore lib"], check=True)
+        name = "t-rwl"
+        self.start(name, "shellwrite", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        self.reviewed(task, 2, {"lib/util.py": "def answer():\n    return 42  # two\n"})
+        self.reviewed(task, 3, {"lib/util.py": "def answer(:\n", "notes.txt": "three\n"}, tests="1")
+        out = run_wb("rewind", name, "2")
+        self.assertEqual((task.worktree / "lib/util.py").read_text(), "def answer():\n    return 42  # two\n")
+        self.assertFalse((task.worktree / "notes.txt").exists())
+        self.assertNotIn("kept nowhere", out)
+        self.assertNotIn("not as round 2's files", out)
+        self.assertIn("lib/util.py", out.split("undone:\n", 1)[1])
+
+    def test_feedback_after_a_rewind_says_so_and_starts_a_fresh_session(self):
+        from workbench import lessons
+        name = "t-rwf"
+        self.start(name, "fix", "--test", TEST_CMD, "--no-base-check", "--auto-fix", "0")
+        wait_phase(name, {"review"})                     # round 1: 41, tests fail
+        run_wb("feedback", name, "--text", "1. The answer is 42.")
+        wait_phase(name, {"review"})                     # round 2: 42, on the same session
+        task = store.Task(name)
+        self.assertEqual((task.worktree / "answer.txt").read_text(), "42\n")
+        run_wb("rewind", name, "1")
+        self.assertEqual((task.worktree / "answer.txt").read_text(), "41\n")
+        out = run_wb("feedback", name, "--text", "1. Write 42 to answer.txt.")
+        self.assertIn("from round 1's files", out)
+        st = wait_phase(name, {"review"})
+        last = [json.loads(x) for x in self.runs_file.read_text().splitlines()][-1]
+        self.assertFalse(last["session"])                                    # a fresh session
+        self.assertIn(cli.REWOUND_LINE.format(1), last["prompt"])
+        self.assertIsNone(st.get("rewound_to"))                              # said once
+        self.assertEqual(lessons.items(lessons.round_feedback(task, 3)[0]), ["Write 42 to answer.txt."])
+        run_wb("rewind", name, "2")
+        run_wb("feedback", name, "--text", "1. Keep it.", "--keep-context")
+        wait_phase(name, {"review"})
+        last = [json.loads(x) for x in self.runs_file.read_text().splitlines()][-1]
+        self.assertTrue(last["session"])                                     # as asked
+
+    def test_the_review_refs_are_gone_after_next_accept_or_discard(self):
+        for name in ("t-rwa", "t-rwd", "t-rwn"):
+            self.start(name, "ok", "--test", TEST_CMD, "--no-base-check", "--queue")
+        for name in ("t-rwa", "t-rwd", "t-rwn"):
+            wait_phase(name, {"review"})
+            self.reviewed(store.Task(name), 2, {"more.txt": "more\n"})
+            self.assertEqual(len(self.refs(name)), 2)
+        run_wb("accept", "t-rwa", "-m", "feat: answer")
+        run_wb("discard", "t-rwd", "--reason", "test")
+        self.assertEqual((self.refs("t-rwa"), self.refs("t-rwd")), ([], []))
+        self.assertIsNone(store.Task("t-rwa").status.get("review_trees"))
+        self.spec.write_text("Step two.\n")
+        run_wb("next", "t-rwn", "--spec", str(self.spec), "-m", "feat: step one")
+        self.assertEqual(self.refs("t-rwn"), [])
+        st = wait_phase("t-rwn", {"review"})
+        self.assertEqual(list(st["review_trees"]), [str(st["round"])])       # step 2's alone
+        self.assertIn("a rewind never goes back past wb next's commit",
+                      self.refused("rewind", "t-rwn", "1"))
 
 
 if __name__ == "__main__":

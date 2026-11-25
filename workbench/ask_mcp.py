@@ -37,7 +37,8 @@ TOOL = {
         "minutes. Also how to run a shell command that was refused (\"Permission denied: "
         "shell\"): put it in `command` and say why in `question`; or a directory outside your "
         "lane (\"Permission denied\" writing it, or \"Permission denied: external_directory\"): "
-        "put it in `path`. Claude allows it or suggests another way, and these don't use the "
+        "put it in `path`; or a TCP port whose connect fails with \"Permission denied\": put it "
+        "in `port`. Claude allows it or suggests another way, and these don't use the "
         "question budget."
     ),
     "inputSchema": {
@@ -50,13 +51,15 @@ TOOL = {
                         "description": "Only for a refused shell command: the exact command."},
             "path": {"type": "string",
                      "description": "Only for a refused directory: its absolute path."},
+            "port": {"type": "integer",
+                     "description": "Only for a refused TCP connect: the port number."},
         },
         "required": ["question"],
     },
 }
 
 
-PERMISSION_BUDGET = 8  # requests for a refused command or directory, per task: a cap on a stuck loop
+PERMISSION_BUDGET = 8  # requests for a refused command, directory or port, per task: a cap on a stuck loop
 QID = re.compile(r"^[0-9a-f]{8,32}$")
 LINE_MAX = 4096       # characters of a `command` or `path`: one line, never clipped (Claude copies it)
 QUESTION_CHARS = 2000  # of the question in Claude's notice; the ask file keeps the whole of it
@@ -66,7 +69,7 @@ NEW_MAX = 20           # new ask files the runner looks at in one tick
 ASKS_MAX = 200         # ask files it counts in all (status `asks`); past that it looks at none
 BUDGET_USED = ("The question budget for this task is used up. Make the most reasonable "
                "assumption, carry on, and state the assumption in your final summary.")
-PERMISSIONS_USED = (f"You have asked for {PERMISSION_BUDGET} refused commands or directories "
+PERMISSIONS_USED = (f"You have asked for {PERMISSION_BUDGET} refused commands, directories or ports "
                     "already. Work inside your lane with the allowed tools, and list what you "
                     "couldn't do in your final summary.")
 NO_QUESTION = "Ask with a `question`, and ask again."
@@ -101,28 +104,31 @@ _WAITS: dict[tuple[str, str], Waited] = {}
 
 
 def _permission(q: dict) -> bool:
-    return bool(q.get("command") or q.get("path"))
+    return bool(q.get("command") or q.get("path") or q.get("port"))
 
 
 def ask_dir(task: store.Task):
     return task.dir / "ask"
 
 
-def bad_request(command: str, path: str) -> str | None:
-    """Why a `command` or `path` can't go to Claude as it is, or None. One line, so it can't
-    write lines of its own into Claude's notice; an absolute path, which `wb allow --path` would
-    otherwise resolve against Claude's working directory (the 2026-11-16 audit)."""
+def bad_request(command: str, path: str, port: str = "") -> str | None:
+    """Why a `command`, `path` or `port` can't go to Claude as it is, or None. One line, so it
+    can't write lines of its own into Claude's notice; an absolute path, which `wb allow --path`
+    would otherwise resolve against Claude's working directory (the 2026-11-16 audit); a port
+    as digits, which the notice prints (#1197)."""
     for name, v in (("command", command), ("path", path)):
         if v and (len(v) > LINE_MAX or any(c in v for c in "\n\r\0")):
             return f"Give `{name}` as one line of at most {LINE_MAX} characters, and ask again."
     if path and not os.path.isabs(path):
         return "Give `path` as one absolute directory path, and ask again."
+    if port and not (port.isascii() and port.isdigit() and 0 < int(port) < 65536):
+        return "Give `port` as one TCP port number (1-65535), and ask again."
     return None
 
 
 def ask(task: store.Task, question: str, context: str = "", command: str = "",
-        path: str = "") -> str:
-    if why := bad_request(command, path):
+        path: str = "", port: str = "") -> str:
+    if why := bad_request(command, path, port):
         return why
     if not (question or "").strip():  # as the runner judges it (_judge): never an "x" file (#831)
         return NO_QUESTION
@@ -135,7 +141,7 @@ def ask(task: store.Task, question: str, context: str = "", command: str = "",
     kinds = [k for k in asks.values() if k in ("q", "p")]
     kinds += ["p" if _permission(q) else "q" for n in _names(task) if n[:-5] not in asks
               and (q := read_question(task, n[:-5]))]
-    if command or path:
+    if command or path or port:
         if kinds.count("p") >= PERMISSION_BUDGET:
             return PERMISSIONS_USED
     elif kinds.count("q") >= int(spec.get("ask_budget", 2)):
@@ -145,7 +151,8 @@ def ask(task: store.Task, question: str, context: str = "", command: str = "",
     store.write_json(qfile, {"id": qid, "ts": store.now(), "round": task.status.get("round"),
                              "question": question, "context": context,
                              **({"command": command} if command else {}),
-                             **({"path": path} if path else {})})
+                             **({"path": path} if path else {}),
+                             **({"port": int(port)} if port else {})})
     limit, waited = float(spec.get("ask_timeout", 1200)), Waited()
     watcher = Watcher(afile.parent)  # wakes the moment `wb answer` writes the file
     try:
@@ -195,7 +202,8 @@ def read_question(task: store.Task, qid: str) -> dict | None:
         return None
     if not isinstance(q, dict):
         return None
-    return {**q, **{k: str(q.get(k) or "") for k in ("question", "context", "command", "path")}}
+    return {**q, **{k: str(q.get(k) or "") for k in ("question", "context", "command", "path",
+                                                     "port")}}
 
 
 def too_long(text: str) -> str:
@@ -296,7 +304,7 @@ def _quote(text: str, limit: int, qfile) -> str:
 
 def notice(task: store.Task, qid: str, q: dict) -> str:
     """The `question` notice's text; its openings are an API (`Q: `, `PERMISSION to run: `,
-    `PERMISSION to use the directory `)."""
+    `PERMISSION to use the directory `, `PERMISSION to connect to TCP port `)."""
     qfile = ask_dir(task) / f"{qid}.json"
     question = _quote(q["question"], QUESTION_CHARS, qfile)
     if q["command"]:
@@ -312,6 +320,16 @@ def notice(task: store.Task, qid: str, q: dict) -> str:
         else:
             body += (f"Allow it with `wb allow {task.name} --path {path}` (--always to keep it), "
                      "or answer with another way.")
+    elif q["port"]:
+        from . import context
+        body = f"PERMISSION to connect to TCP port {q['port']} (outside its lane)\nWhy: {question}\n"
+        if int(q["port"]) in context.DAEMON_PORTS:
+            body += (f"It is {context.DAEMON_PORTS[int(q['port'])]}'s port. Allow it with `wb allow "
+                     f"{task.name} --port {q['port']}` (--always to keep it), or answer with "
+                     "another way.")
+        else:  # the lane refuses only DAEMON_PORTS: nothing a grant lifts
+            body += ("The lane doesn't refuse that port, so no grant lifts it: answer with "
+                     "another way.")
     else:
         body = f"Q: {question}"
     if q["context"].strip():
@@ -324,7 +342,7 @@ def _judge(task: store.Task, q: dict | None, asks: dict) -> tuple[str, str | Non
     refused, what the agent is told instead."""
     if q is None or not q["question"].strip():
         return "x", NO_QUESTION
-    if why := bad_request(q["command"], q["path"]):
+    if why := bad_request(q["command"], q["path"], q["port"]):
         return "x", why
     if _permission(q):
         if sum(1 for k in asks.values() if k == "p") >= PERMISSION_BUDGET:
@@ -413,7 +431,8 @@ def handle(msg: dict, task: store.Task):
             args = {}
         try:
             text = ask(task, str(args.get("question", "")).strip(), str(args.get("context", "")),
-                       str(args.get("command", "")).strip(), str(args.get("path", "")).strip())
+                       str(args.get("command", "")).strip(), str(args.get("path", "")).strip(),
+                       str(args.get("port") or "").strip())
         except Exception as exc:  # a full disk, an unwritable ask/: the agent hears it and goes on
             why = " ".join(str(exc).split())[:200] or type(exc).__name__
             return {"jsonrpc": "2.0", "id": mid, "result": {"isError": True, "content": [

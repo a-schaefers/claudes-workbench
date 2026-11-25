@@ -71,12 +71,12 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertEqual(missing, [], "add these to ARCHITECTURE.md's *Every `wb` command*")
 
     def test_the_quickstart_finds_the_marketplace_where_claude_code_keeps_it(self):
-        # the 2026-11-19 audit: ~/.claude hard-coded, wrong for CLAUDE_CONFIG_DIR users
+        # the 2026-11-19 audit: ~/.claude hard-coded, wrong for CLAUDE_CONFIG_DIR users. Since
+        # #1190 the quickstart has no such line (the mod runs wb setup): only where one appears
         for text in ((ROOT / "README.md").read_text(), ARCH):
-            setup = [line for line in text.splitlines() if "marketplaces/workbench/bin/wb setup" in line]
-            self.assertTrue(setup)
-            for line in setup:
-                self.assertIn('"${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/', line)
+            for line in text.splitlines():
+                if "marketplaces/workbench/bin/wb setup" in line:
+                    self.assertIn('"${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/', line)
 
     def test_every_module_is_in_the_layout(self):
         layout = section(CLAUDE, "## Layout")
@@ -167,6 +167,17 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertIn("never a path you name elsewhere (a plan under ~/.claude, another repo)", bullet)
         self.assertIn("`wb answer <name> --file <path>`, which sends the file's contents", bullet)
         self.assertIn("Path(a.file).read_text(", (ROOT / "workbench/cli.py").read_text())   # cmd_answer's
+
+    def test_the_macos_ollama_install_puts_the_window_in_the_model_not_a_launchctl_setenv(self):
+        # #1195's review (2026-11-24): `launchctl setenv OLLAMA_CONTEXT_LENGTH` is lost at logout or
+        # reboot; Ollama then served its 4K default and short_window failed every GPU task
+        ref = " ".join((ROOT / "skill/workbench/reference/models.md").read_text().split())
+        mac = ref[ref.index("- Ollama on macOS"):ref.index("- Ollama on Linux")]
+        self.assertIn("Never `launchctl setenv OLLAMA_CONTEXT_LENGTH`", mac)
+        self.assertNotIn("&& launchctl setenv", mac)
+        self.assertIn('"parameters":{"num_ctx":<N>}', mac)
+        self.assertIn("wb model add ollama/<family>:<tag>-<K>k", mac)
+        self.assertIn("a `launchctl setenv` is lost at logout or reboot", " ".join(ARCH.split()))
 
     def test_the_backlog_promises_start_order_for_the_gpu_only_not_for_api_slots(self):
         # #1130 (2026-11-23): driving.md promised start order and sent-back-first, which only

@@ -65,8 +65,9 @@ ASSIGN = "*=*"
 # `cd x && sudo ...` is refused too. Everything else is the agent's, guided by the handbook.
 # The plain wrappers are covered too (`env gh`, `timeout 5 sudo …`). A command built some other
 # way (`bash -c`, an interpreter, `FOO=1 sudo`, `env CI=1 gh`) still gets past these patterns;
-# behind them, the kernel refuses sudo (no_new_privs, lane.py, on any Linux) and, with Landlock,
-# gh finds no login (its config and tokens are out of reach). On macOS only these patterns stand.
+# behind them, the kernel refuses sudo (no_new_privs, lane.py, on any Linux; Seatbelt by its path
+# on macOS) and, with Landlock or Seatbelt, gh finds no login (its config and tokens are out of
+# reach). Without either only these patterns stand.
 _HARD = ("sudo", "doas", "pkexec", "su", "gh")
 # A wrapper's own option shapes, before the hard word: `time -p sudo x` matched only the allow
 # rule `time *` (the 2026-11-16 audit). Never a `*` before the hard word: `*` matches spaces too,
@@ -673,7 +674,7 @@ def commands_path() -> Path:
 
 
 def allow_always(key: str, items: list[str]) -> None:
-    """Add ``items`` to commands.json's ``key`` ("allow" or "paths"), for every task (`wb allow
+    """Add ``items`` to commands.json's ``key`` ("allow", "paths" or "ports"), for every task (`wb allow
     --always`): under its lock and through a link, the file checked first (commands_conf), since
     rewriting one that doesn't parse would lose it. Unlocked, two sessions' grants close together
     lost one; written with write_json, a dotfiles link became a plain 0644 file (#495)."""
@@ -700,6 +701,12 @@ def commands_conf() -> dict:
         v = conf.get(key)
         if v is not None and not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
             raise RuntimeError(f'{path}: "{key}" must be a list of strings, e.g. ["make *"]')
+    v = conf.get("ports")  # wb allow --port --always (#1197)
+    if v is not None and not (isinstance(v, list) and all(
+            isinstance(x, int) and not isinstance(x, bool) and 0 < x < 65536 for x in v)):
+        raise RuntimeError(f'{path}: "ports" must be a list of TCP port numbers, e.g. [9229]')
+    if why := mcp_list_refusal(conf.get("mcp")):
+        raise RuntimeError(f"{path}: {why}")
     repos = conf.get("repos")
     if repos is not None and not isinstance(repos, dict):
         raise RuntimeError(f'{path}: "repos" must map a repo\'s path to its settings, e.g. '
@@ -722,6 +729,8 @@ def commands_conf() -> dict:
         if "local_only" in v and not isinstance(v["local_only"], bool):
             raise RuntimeError(f'{path}: "repos" → {repo!r}: "local_only" is true or false '
                                '(true: API models never get this repo)')
+        if why := mcp_list_refusal(v.get("mcp")):
+            raise RuntimeError(f'{path}: "repos" → {repo!r}: {why}')
     return conf
 
 
@@ -1359,7 +1368,11 @@ TOOL_HOMES = (".cache", ".cargo", ".rustup", "go/pkg", ".npm", ".bun/install/cac
               # module cache
               ".local/share/godot", ".texlive*/texmf-var", ".dub/packages", ".dub/cache",
               ".xmake/packages", ".xmake/cache", ".zef/store", ".cpanm", ".foundry/cache",
-              ".tflint.d", ".bicep")
+              ".tflint.d", ".bicep",
+              # macOS's ~/.cache (#1194): Go's build cache, pip's, Yarn's, node-gyp's and
+              # Playwright's browsers are there, and Seatbelt would refuse every build's write;
+              # whole, Apple's Python bytecode in it denied by path (NOT_WRITABLE, write_denied)
+              "Library/Caches")
 # where the user moved them: a toolchain follows its variable, not the default path; GOPATH and
 # BUN_INSTALL name a whole home (GOPATH may hold every project), so only their caches. The second
 # line's were refused where the user moved them, HF_HOME though ENV_KEEP passes it on (#911)
@@ -1385,11 +1398,24 @@ VAR_CACHES = {"GOPATH": "pkg", "BUN_INSTALL": "install/cache"}
 # CARGO_HOME and RUSTUP_HOME for theirs); no grant reaches them (kept_out, #912), so `cargo
 # install` or a toolchain a rust-toolchain.toml names that isn't installed yet is Claude's to do
 NOT_WRITABLE = (".cargo/bin", ".cargo/env", ".dotnet/tools", ".cabal/bin", ".ghcup/bin",
-                ".rustup/toolchains", ".nimble/bin")
+                ".rustup/toolchains", ".nimble/bin",
+                # #1194's fourth review (2026-11-24): cargo's own config, which it runs from at
+                # the user's next build (build.rustc-wrapper, build.rustc, a target's linker or
+                # runner), outside the lane. Seatbelt keeps ~/.cargo whole, so the agent could
+                # make it; Landlock's split refused a new one but granted one already there.
+                # Cargo never writes it (`cargo login` writes credentials.toml)
+                ".cargo/config.toml", ".cargo/config",
+                # #1194's review (2026-11-24): Apple's /usr/bin/python3 (the Command Line
+                # Tools') keeps its bytecode here (sys.pycache_prefix, its stdlib on a read-only
+                # volume) and loads a .pyc whose recorded mtime and size match the source's, so
+                # one planted in the writable Library/Caches ran as the user, outside the lane,
+                # at the next node-gyp, Xcode build script or shell's python3. Seatbelt denies
+                # its writes inside the whole Library/Caches (write_denied), made or not
+                "Library/Caches/com.apple.python")
 # and the same places in the homes TOOL_HOME_VARS moved: nimble and cabal install programs into
 # their bin/ (#911)
-VAR_NOT_WRITABLE = {"CARGO_HOME": ("bin", "env"), "RUSTUP_HOME": ("toolchains",),
-                    "NIMBLE_DIR": ("bin",), "CABAL_DIR": ("bin",)}
+VAR_NOT_WRITABLE = {"CARGO_HOME": ("bin", "env", "config.toml", "config"),
+                    "RUSTUP_HOME": ("toolchains",), "NIMBLE_DIR": ("bin",), "CABAL_DIR": ("bin",)}
 # a home holding one is made with it first, so the split keeps it out before the tool makes it
 # (else the agent could make it and plant a program there)
 MADE_FIRST = {".rustup": "toolchains", ".nimble": "bin", "RUSTUP_HOME": "toolchains",
@@ -1624,7 +1650,7 @@ def _config_includes(checkout: set[str], git: set[str]) -> set[str]:
 
 # What a task's directory holds beside its worktree: a sibling's link (`../<name>` from the
 # worktree) may not take one of these names. A new file in the task directory goes here too.
-TASK_FILES = ("acked", "ask", "base-tests.txt", "claude-sessions", "context.md", "events.jsonl", "noticed", "prepared.json", "rounds",
+TASK_FILES = ("acked", "ask", "base-tests.txt", "claude-sessions", "context.md", "events.jsonl", "images", "noticed", "prepared.json", "rounds",
               "left-out", "runner.log", "setup.txt", "shots", "status.json", "steer.jsonl", "steps.bundle", "task.json",
               "tree", "verify", "worktree")
 
@@ -1808,16 +1834,21 @@ def writable(task: store.Task) -> list[str] | None:
         except OSError as e:
             print(f"workbench: can't make OpenCode's directory {d} ({e.strerror}): "
                   f"its first run fails without it", file=sys.stderr)
-    places = [tempfile.gettempdir(), *TEMP_ROOTS, *DEV_NODES, *gpu_nodes(task), "/proc",
-              *tool_homes(), *(x for x in xdg if x),
+    places = [tempfile.gettempdir(), *TEMP_ROOTS, *darwin_cache(), *DEV_NODES, *gpu_nodes(task),
+              "/proc", *tool_homes(), *(x for x in xdg if x),
               *flutter_caches(),
               *(Path(p).expanduser() for p in extra)]
     whole = {"/", os.path.realpath(home)}  # a GOPATH=~ must not hand over the home directory
     temps = {os.path.realpath(t) for t in (tempfile.gettempdir(), *TEMP_ROOTS)}
     guard = repo_dirs(task)  # a repo kept in /tmp is the user's choice: the temp dirs stay
     cargo = os.environ.get("CARGO_HOME")
-    for c in {os.path.realpath(c) for c in (home / ".cargo", cargo) if c}:
-        if os.path.isdir(c) and any(os.path.lexists(os.path.join(c, n)) for n in ("bin", "env")):
+    cargos = {os.path.realpath(c) for c in (home / ".cargo", cargo) if c}
+    for c in cargos:
+        # every cargo home is split, its own entries made first: #1194's fifth review
+        # (2026-11-24): split only when bin/, env or a config was there, a distro's cargo
+        # (Arch's rust, Debian's, Fedora's), which makes only registry/, left ~/.cargo whole,
+        # and the agent made a config.toml whose build.rustc-wrapper ran at the next build
+        if os.path.isdir(c):
             _make_first(c, CARGO_MADE)
     nimble = os.environ.get("NIMBLE_DIR")
     for c in {os.path.realpath(c) for c in (home / ".nimble", nimble) if c and os.path.isabs(c)}:
@@ -1843,7 +1874,11 @@ def writable(task: store.Task) -> list[str] | None:
     # the user's active Python environments too: a venv in a tool home (poetry's, pipenv's,
     # WORKON_HOME) was the agent's to install into (#490)
     envs = set(python_envs())
-    out_of = hidden | envs | not_writable()
+    # Seatbelt denies NOT_WRITABLE's places by path inside the lane (write_denied): no split.
+    # Landlock splits around those made, and a cargo home's made or not, so its split refuses
+    # a new bin/, env or config there (#1194's fifth review)
+    out_of = hidden | envs | (set() if lane.kind() == "seatbelt" else not_writable() | {
+        os.path.join(c, n) for c in cargos for n in VAR_NOT_WRITABLE["CARGO_HOME"]})
     cache = os.path.realpath(os.environ.get("XDG_CACHE_HOME") or home / ".cache")
     if any(_under(e, cache) for e in envs):  # (#825)
         for n in CACHE_MADE:
@@ -1867,6 +1902,38 @@ def writable(task: store.Task) -> list[str] | None:
         else:  # split around the repo like a secret: a grant of ~/work beside the repo ~/work/api
             kept += _split(str(p), out_of | guard)  # was dropped whole (the 0.90 review)
     return [p for p in _both(kept) if os.path.exists(p) and os.path.realpath(p) not in whole]
+
+
+def write_denied(places: list[str]) -> list[str]:
+    """With Seatbelt, NOT_WRITABLE's places (made or not, real paths and their own names, a link
+    unresolved) inside the lane's
+    writable ``places``: its profile denies their writes after the lane's allows, the last match
+    winning, and a path rule holds before the tool makes the place, so nothing is made first.
+    Landlock can only allow, so there writable() splits around them instead, and this is [].
+    #1194's second review (2026-11-24): split around com.apple.python, Library/Caches refused
+    every tool's first cache folder (golangci-lint's, pipenv's, black's, Homebrew's) but the
+    few made for it, and woke Claude for a grant it never needed."""
+    if lane.kind() != "seatbelt":
+        return []
+    real = {os.path.realpath(p) for p in places}
+    # and each by its own name, its directory resolved but not the place: a ~/.cargo/config.toml
+    # linked into ~/dotfiles or /nix/store (stow, home-manager) was denied only at its target,
+    # outside the lane and dropped, so the agent could unlink the link and write its own config
+    # (#1194's fifth review, 2026-11-24)
+    named = {p for q in not_writable_paths() for p in (
+        os.path.realpath(q), os.path.join(os.path.realpath(q.parent), q.name))}
+    return sorted(p for p in named if any(p == w or _under(p, w) for w in real))
+
+
+def darwin_cache() -> list[str]:
+    """macOS's per-user cache directory (DARWIN_USER_CACHE_DIR, `C` beside the temp directory's
+    `T` in /var/folders), where clang's module cache and xcrun's go: Seatbelt would refuse every
+    Swift or Objective-C build's write there (#1194). Nothing elsewhere."""
+    temp = Path(tempfile.gettempdir())
+    cache = temp.parent / "C"
+    if sys.platform != "darwin" or temp.name != "T" or not cache.is_dir():
+        return []
+    return [str(cache)]
 
 
 def _make_first(home: str, names) -> None:
@@ -2240,7 +2307,27 @@ SECRETS = (".ssh", ".gnupg", ".password-store", ".netrc", ".git-credentials", ".
            ".config/.semgrep/settings.yml", ".rush-user/credentials.json",
            # #1092 (2026-11-23): Ollama's account key, which signs its ollama.com requests:
            # the server uses it, outside the lane, and the agent's `ollama` talks to the server
-           ".ollama/id_ed25519")
+           ".ollama/id_ed25519",
+           # #1194 (2026-11-24): macOS's own, readable now that Library is (HOME_READABLE): the
+           # keychains, cookies, mail and messages, and the browsers' and Claude's profiles
+           "Library/Keychains", "Library/Cookies", "Library/Mail", "Library/Messages",
+           "Library/Safari", "Library/Application Support/Google/Chrome",
+           "Library/Application Support/BraveSoftware", "Library/Application Support/Firefox",
+           "Library/Application Support/Microsoft Edge", "Library/Application Support/Vivaldi",
+           "Library/Application Support/com.operasoftware.Opera", "Library/Application Support/Claude",
+           # and the macOS homes of the tools above, where each keeps its login there (#1194's
+           # review, 2026-11-24): Go's os.UserConfigDir (sops' age keys, doctl, k6, which keeps
+           # its token under loadimpact/k6 on Linux too), env-paths' and the CLIs' own (Vercel,
+           # wrangler, Netlify, helm, Bitwarden's, pub's), Thunderbird's and Chromium's profiles,
+           # and OpenStack's clouds.yaml and secure.yaml (openstacksdk's loader reads platformdirs'
+           # user_config_dir before ~/.config/openstack)
+           "Library/Application Support/sops", "Library/Application Support/com.vercel.cli",
+           "Library/Preferences/.wrangler", "Library/Application Support/Bitwarden CLI",
+           "Library/Preferences/helm/registry", "Library/Preferences/netlify",
+           "Library/Application Support/dart/pub-credentials.json",
+           "Library/Application Support/loadimpact/k6", ".config/loadimpact/k6",
+           "Library/Application Support/doctl", "Library/Thunderbird",
+           "Library/Application Support/Chromium", "Library/Application Support/openstack")
 # The sockets inside a secret that a grant may still reach, to connect only (unix_paths): Docker
 # Desktop's, under ~/.docker beside the registry logins in config.json, so `wb allow --path` was
 # refused and only turning the lane off let a Testcontainers suite run (#441, the audit of 1.8)
@@ -2268,7 +2355,8 @@ SECRET_VARS = ("GNUPGHOME", "PASSWORD_STORE_DIR", "GH_CONFIG_DIR", "DOCKER_CONFI
 # poetry's config dir (XDG on Linux, Library/Application Support on macOS), composer's home
 # (XDG, else ~/.composer, as on macOS), pub's tokens (cli_util's applicationConfigHome: XDG,
 # Library/Application Support on macOS), Hex's home and its MIX_XDG config, pip's user config
-# (pip's configuration.py: the XDG one and the legacy ~/.pip), Bundler's global config
+# (pip's configuration.py: the XDG one, macOS's Library/Application Support and the legacy
+# ~/.pip), Bundler's global config
 # (Settings#global_config_file) and bun's global bunfig (bunfig's get_home_config_path).
 # And Hugging Face's login (#1092, 2026-11-23: huggingface_hub's constants.py, HF_HOME's `token`
 # and `stored_tokens`): SECRET_ENV drops HF_TOKEN, but the library reads the same token from the
@@ -2280,7 +2368,8 @@ API_HIDDEN = (".npmrc", ".yarnrc.yml", ".m2/settings.xml", ".gradle/gradle.prope
               "Library/Application Support/pypoetry/auth.toml", ".config/composer/auth.json",
               ".composer/auth.json", ".config/dart/pub-tokens.json",
               "Library/Application Support/dart/pub-tokens.json", ".hex/hex.config",
-              ".config/hex/hex.config", ".config/pip/pip.conf", ".pip/pip.conf", ".bundle/config",
+              ".config/hex/hex.config", ".config/pip/pip.conf", ".pip/pip.conf",
+              "Library/Application Support/pip/pip.conf", ".bundle/config",
               ".bunfig.toml", ".cache/huggingface/token", ".cache/huggingface/stored_tokens")
 # the ones that are a token and nothing else, by name or by the variable that moves it, which
 # holds_credential's key and value matcher can't see: one there holds one unless empty (#1092)
@@ -2338,11 +2427,16 @@ API_HIDDEN_USES = {"npm": ("package.json",), "Yarn": ("package.json",), "bun": (
 # Of the home directory's own entries, the dotfiles (tools' configs, caches, toolchains) stay
 # readable, and these (R's and Perl's user libraries); the user's documents and other projects
 # don't, beyond the task's repo, workbench itself, the programs on PATH and what Claude allowed.
-HOME_READABLE = ("bin", "go", "R", "perl5")
+# macOS's Library too (#1194): its Application Support and Preferences are what the dotfiles are
+# on Linux, and `pip install --user` puts packages in Library/Python; what of it holds a login is
+# in SECRETS.
+HOME_READABLE = ("bin", "go", "R", "perl5", "Library")
 # Outside the home directory, these hold the user's data, not the system: like the home's own
 # entries, only what is kept (the repo, the lane, a grant) is readable beneath them. /mnt holds
-# the Windows drives on WSL2, /home the other users' homes (the 2026-11-16 audit).
-ONLY_KEPT = ("/dev", "/mnt", "/media", "/run/media", "/run/user", "/home")
+# the Windows drives on WSL2, /home the other users' homes (the 2026-11-16 audit), and /Users
+# theirs on macOS (#1194), /Volumes its external disks and network shares, as /media and /mnt
+# (#1194's review: its `Macintosh HD` is a link to /, which Seatbelt matches resolved)
+ONLY_KEPT = ("/dev", "/mnt", "/media", "/run/media", "/run/user", "/home", "/Users", "/Volumes")
 # The links in /dev to the calling process's own descriptors: they name no file. Resolved in wb's
 # process, /dev/stderr was /dev/null under `wb verify 2>/dev/null` and so was listed beside it, and
 # in the lane's child, where fd 2 is a pipe, Landlock refused the rule (EBADFD) and with it the
@@ -2568,7 +2662,7 @@ def python_installs(task: store.Task) -> tuple[bool, bool]:
     if own_venv(task):
         return True, False
     kept = [r for r in python_envs() if r not in checkout_envs(task)]
-    return not kept and writable(task) is not None and lane.abi() > 0, bool(kept)
+    return not kept and writable(task) is not None and lane.held(), bool(kept)
 
 
 # mise refuses a config it hasn't been told to trust outside a terminal, and trust is kept per
@@ -2657,6 +2751,43 @@ def interop_gap() -> str | None:
             "repo still runs; [interop] enabled=false in /etc/wsl.conf (then wsl --shutdown) "
             "closes it, and also stops wb reading Windows' GPUs: set their memory in models.json "
             "gpu_gb then")  # a GPU only Windows sees had no budget at all after it (#702)
+
+
+# Local daemons that take commands over TCP, each a way out of the lane: a Docker or Podman API
+# runs containers as the user (root on the host), adb drives their devices, a GDB server their
+# boards, Chrome's DevTools port is a browser (maybe the user's, signed in), Node's inspector runs
+# code outside the lane. #993 (2026-11-22) only warned in `wb doctor`, believing Landlock's TCP
+# rule could only allow ports; it can refuse these by allowing every other one (#1197,
+# 2026-11-24), so the lane refuses connecting to them from ABI 4 (deny_ports), listening or not:
+# a daemon started after the lane is drawn is refused too.
+DAEMON_PORTS = {2375: "a Docker or Podman API", 2376: "a Docker or Podman API (TLS)",
+                5037: "adb's server", 3333: "OpenOCD's GDB server", 2331: "J-Link's GDB server",
+                9222: "Chrome's DevTools", 9229: "Node's inspector"}
+NET_ABI = 4  # Landlock's TCP rule (Linux 6.7)
+
+
+def granted_ports(task: store.Task | None = None) -> set[int]:
+    """The TCP ports the user (commands.json `ports`) or Claude for this task (grants `ports`,
+    `wb allow --port`) let the agent connect to."""
+    ports = [*commands_conf().get("ports", []),
+             *((grants(task).get("ports") or []) if task else [])]
+    return {p for p in ports if isinstance(p, int) and not isinstance(p, bool)}
+
+
+def url_port(url: str) -> int | None:
+    """The TCP port a URL's requests go to (its scheme's when unsaid), or None."""
+    try:
+        u = urllib.parse.urlsplit(url or "")
+        return u.port or {"http": 80, "https": 443}.get(u.scheme.lower())
+    except ValueError:
+        return None
+
+
+def deny_ports(task: store.Task | None = None, keep=()) -> list[int]:
+    """The TCP ports the task's lane refuses connecting to (lane.wrap's `deny_ports`):
+    DAEMON_PORTS but the granted ones and ``keep``, the ports the round itself needs (its model
+    server's, its keyhole's: runner.lane_ports), so no setup is ever asked for."""
+    return sorted(set(DAEMON_PORTS) - granted_ports(task) - {p for p in keep if p})
 
 
 def secret_paths() -> set[str]:
@@ -2767,11 +2898,11 @@ def api_hidden_note(task: store.Task) -> str:
     checkout builds with its tool (_uses), else '': the files, then the tools that don't run in
     its lane (API_HIDDEN_STOPS), those whose private-registry installs fail and what else fails
     (API_HIDDEN_FAILS: Hugging Face's gated models, #1092). '' where ``task`` has no lane to
-    hide them: no Landlock, or the lane off."""
+    hide them: neither Landlock nor Seatbelt, or the lane off."""
     # Without a lane nothing is hidden: the agent reads the file and Maven runs. On macOS every
     # API start said otherwise, so Claude, as the skill says, told the user the repo won't build
     # on API and that the token couldn't reach the provider (#1156, 2026-11-24)
-    if not lane.abi() or writable(task) is None:
+    if not lane.held() or writable(task) is None:
         return ""
     home = os.path.realpath(Path.home())
     uses = _uses(task)
@@ -2917,6 +3048,22 @@ def readable(task: store.Task) -> list[str] | None:
     directory, its lane and the programs it runs. None with the lane off. Landlock
     only allows, so this lists the entries beside each excluded one; lane.py adds the lane
     (writable) itself."""
+    walked = _read_walk(task)
+    return None if walked is None else walked[0]
+
+
+def read_rules(task: store.Task) -> list[tuple[str, str]] | None:
+    """The same read lane as Seatbelt's rules (#1194): ("deny" | "allow", real path), each over
+    those before it (the last match wins, as in a Seatbelt profile; ancestors first), everything
+    readable until a rule says otherwise. So a hidden directory is denied
+    and what is kept inside it allowed after, and a directory where little is kept (/dev, the
+    state directory) is one rule, not one per entry. None with the lane off."""
+    walked = _read_walk(task)
+    return None if walked is None else walked[1]
+
+
+def _read_walk(task: store.Task) -> tuple[list[str], list[tuple[str, str]]] | None:
+    """readable and read_rules, from one walk of the file system."""
     lane = writable(task)
     if lane is None:
         return None
@@ -2926,6 +3073,7 @@ def readable(task: store.Task) -> list[str] | None:
                                           *lane_paths(task), *siblings(task))  # the git shim,
             if p}                                                              # the ask server
     keep |= tool_roots(hidden) | sdk_roots(hidden) | search_roots(hidden)
+    keep |= mcp_roots(task)  # the user's MCP servers this task runs (#1202); their secrets stay hidden
     # OpenCode's global config where OPENCODE_CONFIG_DIR keeps it, outside the dotfiles: the
     # agent's OpenCode loads it itself (#370, the audit of 1.6)
     if os.environ.get("OPENCODE_CONFIG_DIR"):
@@ -2963,31 +3111,49 @@ def readable(task: store.Task) -> list[str] | None:
     only_kept |= set(windows_drives() or [])
     under = _under
     out: list[str] = []
+    rules: list[tuple[str, str]] = []  # read_rules': what changes the state each place inherits
 
-    def visit(p: str, default: bool) -> None:
+    def say(real: str, p: str, now: bool, was: bool) -> bool:
+        """Note a change of state at `real`; the state its entries inherit."""
+        if real != p:  # reached through a link: a grant by it adds up (Landlock grants the
+            if now:    # target), a refusal by it is nothing (the place is hidden or not on its
+                rules.append(("allow", real))  # own way there)
+            return now or was
+        if now != was:
+            rules.append(("allow" if now else "deny", real))
+        return now
+
+    def visit(p: str, default: bool, was: bool = True) -> None:
         if p in FD_LINKS:  # the caller's fds, not files: the child's are its own (#1308)
             return
         real = os.path.realpath(p)
         if real in hidden or any(under(real, h) for h in hidden):
             if real in inner:
                 out.append(p)
-            elif any(under(i, real) for i in inner):
+                say(real, p, True, was)
+                return
+            now = say(real, real, False, was)  # a secret, or a link into one: by any way there
+            if any(under(i, real) for i in inner):
                 try:
                     names = sorted(os.listdir(p))
                 except OSError:
                     names = []
                 for name in names:
-                    visit(os.path.join(p, name), False)
-            return                                         # a secret, or a link into one
+                    visit(os.path.join(p, name), False, now)
+            return
         inside = real in keep
         holds = [h for h in hidden | keep | only_kept if under(h, real)]
         hides = any(h in hidden or h in only_kept for h in holds)
         if inside and not hides:
             out.append(p)
+            say(real, p, True, was)
             return
         if default and not hides:
             out.append(p)
+            say(real, p, True, was)
         elif holds:                    # go in: something to skip or keep (a repo at ~/.config
+            # the place itself as its entries mostly are: denied where only what is kept is read
+            now = say(real, p, inside or default, was)
             try:                       # keeps the rest of itself, not its secrets)
                 names = sorted(os.listdir(p))
             except OSError:
@@ -2995,14 +3161,48 @@ def readable(task: store.Task) -> list[str] | None:
             for name in names:
                 child = os.path.join(p, name)
                 if inside:
-                    visit(child, True)
+                    visit(child, True, now)
                 elif os.path.realpath(child) in only_kept:
-                    visit(child, False)
+                    visit(child, False, now)
                 else:
                     visit(child, name.startswith(".") or name in HOME_READABLE
-                          if real == home else default)
+                          if real == home else default, now)
+        else:
+            say(real, p, False, was)
     visit("/", True)
-    return out
+    # ancestors first, so each rule is over the wider ones (the last match wins), and an allow
+    # over a deny of the same place: Landlock's rules add up, so a place granted by a link
+    # elsewhere (~/bin to ~/tools/bin) is read whatever its own way there says
+    rules = sorted(dict.fromkeys(rules), key=lambda r: (len(Path(r[1]).parts), r[0] == "allow"))
+    return out, rules
+
+
+def socket_places(task: store.Task) -> list[str]:
+    """Where the agent may connect to a UNIX socket: unix_paths, and with Seatbelt, which can't
+    tell a socket the agent made from the user's (Landlock can), the task's own places too: its
+    worktree, ask/, its OpenCode home and its runtime directory; never a temp directory, where
+    tmux's and the SSH agent's are (#1194)."""
+    places = unix_paths(task)
+    if lane.kind() == "seatbelt":
+        places += [str(task.worktree), str(ask_dir(task)), str(opencode_home(task)),
+                   str(_runtime_path(task))]
+    return places
+
+
+def lane_wrap(task: store.Task, ports: list[int] | None = None):
+    """What runs a command in ``task``'s lane (lane.wrap with its lists, drawn once): Landlock's
+    read lane (readable) and its refused TCP ports (``ports``, else deny_ports: #1197), or
+    Seatbelt's read rules (read_rules, #1194), whichever this machine has; the command as it is
+    with the lane off."""
+    places = writable(task)
+    if places is None:
+        return lambda cmd: lane.wrap(None, cmd)
+    if lane.kind() == "seatbelt":
+        reads, sockets, denied = read_rules(task), socket_places(task), write_denied(places)
+        return lambda cmd: lane.wrap(places, cmd, unix=sockets, reads=reads, deny_write=denied)
+    readable_, sockets = readable(task), unix_paths(task)
+    denied_ports = deny_ports(task) if ports is None else ports
+    return lambda cmd: lane.wrap(places, cmd, readable_, sockets, deny_ports=denied_ports)
 
 
 def read_only(task: store.Task, lane: list[str]) -> list[str]:
@@ -3012,7 +3212,7 @@ def read_only(task: store.Task, lane: list[str]) -> list[str]:
     `read` on pandas' frame.py got "Permission denied: external_directory", counting toward the
     six-errors guard, and the only remedy, `wb allow --path`, made the install writable (#521,
     the audit of 1.90). Also the SDKs (sdk_roots). Never one inside a lane entry, whose own
-    rules say what is done there."""
+    rules say what is done there, but Seatbelt's write_denied places (#1194)."""
     hidden = secret_paths() | private_paths()
     split = not_writable_paths()
     places = tool_roots(hidden) | sdk_roots(hidden) | {
@@ -3020,14 +3220,16 @@ def read_only(task: store.Task, lane: list[str]) -> list[str]:
         if os.path.isdir(p) and not any(_under(os.path.realpath(p), h) for h in hidden)}
     real_lane = {os.path.realpath(p) for p in lane}
     # one holding a lane entry stays (a Flutter SDK, its bin/cache in the lane: read_only_rules
-    # lets the entry be edited again); one in a lane entry is the lane's
-    return sorted(p for p in places if p not in real_lane and not any(
-        p == q or _under(p, q) for q in real_lane))
+    # lets the entry be edited again); one in a lane entry is the lane's, but one Seatbelt
+    # denies there (write_denied: com.apple.python in the whole Library/Caches)
+    return sorted({p for p in places if p not in real_lane and not any(
+        p == q or _under(p, q) for q in real_lane)} | set(write_denied(lane)))
 
 
 def read_only_rules(task: store.Task) -> list[dict]:
     """The file tools may read `read_only` places but never edit there: the kernel refuses the
-    write too, with Landlock; without it (macOS) these rules are what keep the file tools out."""
+    write too, with Landlock or Seatbelt; without either these rules are what keep the file tools
+    out."""
     lane = writable(task)
     if lane is None:
         return []
@@ -3045,8 +3247,10 @@ def external_rules(task: store.Task) -> list[dict]:
     if lane is None:  # (explicit: layer's rule for other MCP servers' tools would match it)
         return [{"action": "external_directory", "resource": "*", "effect": "allow"}]
     have = skills.available()
-    # and the rounds' prompts, read-only, where a prompt too long for one argument waits
-    places = [*lane, *READABLE, *read_only(task, lane), task.dir / "rounds", *siblings(task),
+    # and the rounds' prompts, read-only, where a prompt too long for one argument waits, and the
+    # images Claude attached (--image, #1199), which the prompt says to read again there
+    places = [*lane, *READABLE, *read_only(task, lane), task.dir / "rounds", task.dir / "images",
+              *siblings(task),
               *(sibling_link(task.worktree, n) for n in task.spec.get("siblings") or ()),
               *(have[n]["path"] for n in task.status.get("skills") or [] if n in have)]
     rules = [{"action": "external_directory", "resource": "*", "effect": "deny"}]
@@ -3071,6 +3275,213 @@ MCP_RULES = ({"action": "*_*", "resource": "*", "effect": "deny"},
              {"action": "workbench_*", "resource": "*", "effect": "allow"},
              {"action": "doom_loop", "resource": "*", "effect": "allow"})  # what --auto gave it
 
+# The user's own MCP servers an agent may have (#1202, 2026-11-24): each one the user names in
+# commands.json `mcp` (every task) or `repos.<path>.mcp` (that repo's tasks), from their OpenCode
+# config, if it holds no credential: no `environment`, `headers` or `oauth`, no password in a URL
+# or a key in its query, no token flag in its command and no {env:}/{file:} for OpenCode to fill
+# in (the 2026-11-16 audit's GitHub and database servers reached every agent with their tokens).
+# Only the user names one: `wb allow --always` never writes `mcp`. A name is letters, digits and
+# hyphens, as OpenCode names its tools <server>_<tool>: an underscore would let `a_*` allow a
+# server `a_b`'s tools, and a name whose tools a denied rule matches (`opencode`, DENIED_TOOLS)
+# would be listed and never callable.
+MCP_NAME = re.compile(r"^[A-Za-z0-9-]+$")
+MCP_TOKEN_FLAG = re.compile(r"^--?[\w-]*(token|secret|passw|api[_-]?key|access[_-]?key|auth)",
+                            re.I)
+MCP_URL_PASSWORD = re.compile(r"\w+://[^/@\s:]*:[^/@\s]+@")
+MCP_QUERY_KEY = re.compile(r"key|token|secret|passw|auth|sig|cred", re.I)
+
+
+def mcp_list_refusal(v) -> str:
+    """Why commands.json's `mcp` value ``v`` (top level or a repo's) is refused, or ''."""
+    if v is None:
+        return ""
+    if not (isinstance(v, list) and all(isinstance(x, str) for x in v)):
+        return '"mcp" must be a list of your OpenCode MCP servers\' names, e.g. ["docs"]'
+    for name in v:
+        if not MCP_NAME.match(name):
+            return f'"mcp": {name!r}: a server\'s name is letters, digits and hyphens'
+        if name == "workbench" or any(fnmatch.fnmatchcase(f"{name}_tool", p) for p in DENIED_TOOLS):
+            return f'"mcp": {name!r} is a name workbench keeps for itself or denies; rename the server'
+    return ""
+
+
+def users_mcp_servers() -> dict:
+    """The user's OpenCode MCP servers by name, or {}: the 2.x shape, mcp.servers.<name>, over
+    the 1.x one, mcp.<name>, which OpenCode 2.3.2 still starts beside the layer's mcp.servers.
+    Read in the 2.x shape alone, a 1.x entry was never stubbed (runner.users_servers_off) and
+    started in every agent's OpenCode, its `environment` and `headers` with it; a 2.x stub of
+    its name stops it (both measured, 2026-11-24, #1202)."""
+    try:
+        mcp = models.read_config().get("mcp") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+    if not isinstance(mcp, dict):
+        return {}
+    v2 = mcp.get("servers") if isinstance(mcp.get("servers"), dict) else {}
+    return {**{k: v for k, v in mcp.items() if k != "servers" and isinstance(v, dict)}, **v2}
+
+
+def mcp_refusal(name: str, entry) -> str:
+    """Why the user's MCP server ``name`` (its OpenCode entry) can't go to an agent, or '': the
+    key that holds a credential, never its value."""
+    head = f"MCP server {name!r} (commands.json \"mcp\")"
+    if not isinstance(entry, dict):
+        return f"{head} isn't in your OpenCode config ({models.opencode_config_path()}): add it there"
+    fix = f"; take it out of commands.json \"mcp\", or give {name!r} no credential"
+    kind = entry.get("type")
+    if kind == "local":
+        cmd = entry.get("command")
+        if not (isinstance(cmd, list) and cmd and all(isinstance(x, str) for x in cmd)):
+            return f"{head}: its `command` isn't a list of strings"
+        if entry.get("environment"):
+            return f"{head} sets `environment`, which can hold a token{fix}"
+        if flag := next((w for w in cmd if MCP_TOKEN_FLAG.match(w)), None):
+            return f"{head}: its `command` passes {flag.split('=', 1)[0]}, a credential{fix}"
+    elif kind == "remote":
+        if entry.get("headers"):
+            return f"{head} sets `headers`, which can hold a token{fix}"
+        if entry.get("oauth") not in (None, False):
+            return f"{head} sets `oauth`{fix}"
+        url = entry.get("url")
+        if not isinstance(url, str):
+            return f"{head}: its `url` isn't a string"
+        if any(MCP_QUERY_KEY.search(k) for k, _ in urllib.parse.parse_qsl(
+                urllib.parse.urlsplit(url).query, keep_blank_values=True)):
+            return f"{head}: its `url` carries a key in its query{fix}"
+    else:
+        return f"{head}: its `type` is neither local nor remote"
+    text = json.dumps(entry)
+    if MCP_URL_PASSWORD.search(text):
+        return f"{head}: a URL in it carries a password{fix}"
+    if "{env:" in text or "{file:" in text:
+        return f"{head} uses {{env:}} or {{file:}}, which OpenCode fills in from your environment or files{fix}"
+    return ""
+
+
+def mcp_servers(names) -> tuple[dict, list[str]]:
+    """The user's servers ``names`` for the agent's layer, {name: entry}, and the refusal lines
+    (mcp_refusal) of those that can't go. An entry goes as the user wrote it, `codemode` too:
+    OpenCode 2.3.2 sends every tool as a direct one when `execute` is denied, whatever its
+    `codemode`, and DENIED_TOOLS always denies it (its tool builder, read 2026-11-24; the
+    real-OpenCode test's server says `codemode: true`)."""
+    have = users_mcp_servers() if names else {}
+    ok, bad = {}, []
+    for name in names or ():
+        if why := mcp_refusal(name, have.get(name)):
+            bad.append(why)
+        else:
+            ok[name] = have[name]
+    return ok, bad
+
+
+def mcp_names(repo: str | Path, sub: str | None = None) -> list[str]:
+    """The servers commands.json gives the tasks of ``repo`` (its package ``sub``): the top
+    level's, then the repo entry's (repo_conf), each once."""
+    conf = commands_conf()
+    return list(dict.fromkeys([*(conf.get("mcp") or []), *(repo_conf(repo, sub).get("mcp") or [])]))
+
+
+def task_mcp(task: store.Task) -> dict:
+    """The user's servers this task's agent gets: task.json `mcp` (fixed at wb start), less any
+    that now holds a credential (checked again every round: the user's config can change)."""
+    return mcp_servers(task.spec.get("mcp") or [])[0]
+
+
+# What marks a server's own project (mcp_project): its node_modules, its venv and its sources
+# sit beside one of these
+MCP_PROJECT_MARKS = ("package.json", "pyproject.toml", ".git")
+
+
+def mcp_roots(task: store.Task) -> set[str]:
+    """The files a task's local MCP servers run from, for the lane to read: for each absolute
+    path in a server's command, its directory (its parent when it is a `bin`) both as written
+    and resolved, each widened to its project (mcp_project); a directory named as itself. One
+    under a non-dot home directory (~/src/schema-mcp) couldn't start in the lane otherwise. The
+    resolved path alone missed the two usual layouts of a server built by hand (#1202's review,
+    2026-11-24): `srv/.venv/bin/python -m schema_mcp` resolved to the base interpreter, so
+    Python started without its venv, and `node srv/dist/index.js` read dist/ without
+    srv/node_modules; each server died at its start in the lane. Never `/` nor the home
+    directory itself, and on an API task never one that is, lies in or holds the checkout."""
+    home = os.path.realpath(Path.home())
+    # on an API task never the checkout, a directory in it or one holding it, which its lane
+    # hides (#1091): only the widening was kept from it, and a server named in the repo
+    # (`node <repo>/tools/mcp/server.js`) or the repo itself as a server's argument made its
+    # gitignored .env one `cat` away from the provider again (#1202's review, 2026-11-24)
+    checkout = _repo_parts(task)[0] if task.spec.get("via") == "api" else set()
+    out = set()
+    for entry in task_mcp(task).values():
+        for word in entry.get("command") or () if entry.get("type") == "local" else ():
+            w = os.path.expanduser(word)
+            if not os.path.isabs(w) or not os.path.exists(w):
+                continue
+            for p in dict.fromkeys((os.path.abspath(w), os.path.realpath(w))):
+                if os.path.isdir(p):
+                    d = p
+                else:
+                    d = os.path.dirname(p)
+                    d = os.path.dirname(d) if os.path.basename(d) == "bin" else d
+                    top = mcp_project(d, home)
+                    if top and not _touches(os.path.realpath(top), checkout):
+                        d = top
+                d = os.path.realpath(d)
+                if d not in ("/", home) and not _under(home, d) and not _touches(d, checkout):
+                    out.add(d)
+    return out
+
+
+def _touches(d: str, dirs) -> bool:
+    """Whether ``d`` is one of ``dirs``, lies in one or holds one."""
+    return any(c == d or _under(d, c) or _under(c, d) for c in dirs)
+
+
+def mcp_checkout_notes(names, repos) -> list[str]:
+    """A line for each of the user's servers ``names`` whose command names a path that is, lies
+    in or holds one of ``repos``: an API task's lane hides the checkout (#1091), so mcp_roots
+    leaves it out and the server dies at its start there. OpenCode 2.3.2 starts a local server
+    in the project's directory (its `resolveCwd`: the config's `cwd` from there, else the
+    directory itself), the task's worktree, so a path relative to the repo names the
+    worktree's copy (#1202's review, 2026-11-24). Its callers ask it only where a lane hides the
+    checkout (Landlock or Seatbelt, the lane on): with none the server reads it."""
+    home = os.path.realpath(Path.home())
+    tops = {os.path.realpath(os.path.expanduser(str(r))) for r in repos}
+    tops |= {os.path.abspath(os.path.expanduser(str(r))) for r in repos}
+    out = []
+    for name, entry in mcp_servers(list(names))[0].items():
+        for word in entry.get("command") or () if entry.get("type") == "local" else ():
+            w = os.path.expanduser(word)
+            if not os.path.isabs(w):
+                continue
+            # as written and resolved, as mcp_roots reads it: a venv's python in the repo resolves
+            # out of it, but its venv is left out
+            hit = next(((p, t) for p in dict.fromkeys((os.path.abspath(w), os.path.realpath(w)))
+                        if p not in ("/", home) and not _under(home, p)
+                        for t in sorted(tops) if _touches(p, {t})), None)
+            if not hit:
+                continue
+            p, top = hit
+            holds = _under(top, p)
+            out.append(f"note: MCP server {name!r} names {word}, "
+                       + (f"which holds the repo {top}" if holds else f"in the repo {top}")
+                       + ", which an API task's lane hides (#1091), so an API agent won't reach it: "
+                       + ("name what it needs in the repo relative to it" if holds else
+                          f"name it relative to the repo: `{os.path.relpath(p, top)}`")
+                       + " (OpenCode starts a local server in the task's worktree)")
+            break
+    return out
+
+
+def mcp_project(d: str, home: str) -> str | None:
+    """The nearest of ``d`` and its parents holding a MCP_PROJECT_MARKS file, below ``home``
+    when under it; never `/`, the home directory nor one holding it."""
+    while d not in ("/", home) and not _under(home, d):
+        if any(os.path.lexists(os.path.join(d, m)) for m in MCP_PROJECT_MARKS):
+            return d
+        up = os.path.dirname(d)
+        if up == d:
+            return None
+        d = up
+    return None
+
 
 def rules_dir(task: store.Task) -> Path:
     """Where the agent's rules live (its OpenCode config, its instructions, the git shim): out
@@ -3082,8 +3493,9 @@ def rules_dir(task: store.Task) -> Path:
 
 def grants(task: store.Task) -> dict:
     """What Claude allowed this task beyond the everyday rules: {"allow": [patterns], "paths":
-    [dirs], "test_tools": [patterns, ASK_FIRST still asked]}. Kept with the rules, out of the agent's reach: an agent that edited its own grants
-    would widen its next round."""
+    [dirs], "ports": [TCP ports], "test_tools": [patterns, ASK_FIRST still asked]}. Kept with
+    the rules, out of the agent's reach: an agent that edited its own grants would widen its
+    next round."""
     # read without making the directory: a closed task's rules are gone (cli.gc), its grants
     # kept in its status (cli._keep_grants: wb bench add replays a case with them, #250)
     return store.read_json(store.home() / "rules" / task.name / "grants.json", {}) or \
@@ -3549,6 +3961,9 @@ def layer(task: store.Task) -> dict:
     files, nested = instruction_files(task)
     note = write_map(task, nested)
     rules = [dict(r) for r in MCP_RULES]   # external_directory gets its own below
+    # the user's servers commands.json names (#1202): after MCP_RULES' deny, before DENIED_TOOLS,
+    # whose `opencode_*` and `execute` the last match keeps denied
+    rules += [{"action": f"{n}_*", "resource": "*", "effect": "allow"} for n in task_mcp(task)]
     rules += [{"action": t, "resource": "*", "effect": "deny"} for t in DENIED_TOOLS]
     rules += shell_rules(task)
     rules += external_rules(task)

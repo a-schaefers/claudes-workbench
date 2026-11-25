@@ -24,9 +24,13 @@ const PANE = {
   },
 } as const
 
+// The surfaces the plugin kit mounts a tree on, each checked against its own element table (#1200)
+const SURFACES = ['terminal', 'desktop', 'vscode', 'mobile'] as const
+type Surface = typeof SURFACES[number]
+
 test('with no tasks the pane says how to start one, on every surface', async ($, on) => {
   on('clock.now', () => ({ value: 1_800_000_000_000 }))
-  for (const surface of ['terminal', 'desktop'] as const) {
+  for (const surface of SURFACES) {
     const ui = await $.ui.mount({ ...PANE, surface })
     expect((await ui.find({ type: 'Text', text: /No delegated tasks/ }))?.text)
       .toBe('No delegated tasks.')
@@ -55,6 +59,7 @@ test('/workbench run again brings the pane back; alone, it is all it does', asyn
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
   on('fs.exists', () => ({ value: false }))                      // the mode's poll: no state yet
+  on('fs.list', () => ({ value: [{ name: 'fix-it', kind: 'dir' }] }))  // a task ran here once: no fresh install's first run (#1190)
   on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
   const skill = (task: string) => $.skill.prompt({ skill: 'workbench', frontmatter: {}, source: 'userSettings',
     text: `- **First task:** \`${task}\`. Empty? Reply in one line that workbench mode is on.` })
@@ -183,6 +188,168 @@ test('a copy updated from /delegate gets its /workbench link from wb setup', asy
   expect(toasts.join('\n')).toContain('/delegate is now /workbench')
 })
 
+// A machine just after `claude plugin install` (#1190): HOME /home/u, WB_HOME /wb, a PATH with no
+// wb on it unless `files` has one, the files `files` holds (any other path is missing), and the
+// environment `env` adds. What the mod ran, toasted and ran as a slash command is recorded; `fail`
+// makes `wb setup` exit 1 with that output, `refuse` makes a slash command throw.
+function freshMachine(on: any, files: Record<string, string>, env: Record<string, string> = {}) {
+  const seen = { ran: [] as string[][], toasts: [] as string[], commands: [] as string[], fail: '', refuse: false }
+  on('session.version', () => ({ value: TESTED }))
+  on('command.register', (_: any, e: any) => ({ value: { command: e.name } }))
+  on('env.get', (_: any, e: any) => ({ value: ({ HOME: '/home/u', WB_HOME: '/wb', PATH: '/usr/bin:/bin', ...env } as any)[e.name] }))
+  on('clock.now', () => ({ value: 1_800_000_000_000 }))
+  on('clock.every', () => ({ value: { cancel: () => {} } }))
+  on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
+  const stat = (path: string) => {
+    if (!(path in files)) throw new Error(`ENOENT: ${path}`)
+    return { value: { kind: 'file', size: files[path].length, mtimeMs: 0, isLink: false } }
+  }
+  on('fs.stat', (_: any, e: any) => stat(e.path))
+  on('fs.read', (_: any, e: any) => ({ value: (stat(e.path), files[e.path]) }))
+  on('fs.exists', (_: any, e: any) => ({ value: Object.keys(files).some(p => p.startsWith(e.path)) }))
+  on('fs.write', (_: any, e: any) => { files[e.path] = e.text; return { value: undefined } })
+  on('fs.list', (_: any, e: any) => ({ value: [...new Set(Object.keys(files).filter(p => p.startsWith(`${e.path}/`))
+    .map(p => p.slice(e.path.length + 1).split('/')[0]))].map(name => ({ name, kind: 'dir' })) }))
+  on('process.run', (_: any, e: any) => {
+    seen.ran.push(e.argv)
+    const failed = e.argv[1] === 'setup' && seen.fail
+    return { value: { exitCode: failed ? 1 : 0, stdout: failed ? seen.fail : '', stderr: '' } }
+  })
+  on('process.spawn', async function* () {             // `wb events`, saying hello
+    yield { stream: 'stdout', text: '{"hello": 4242}\n' }
+    await new Promise(() => {})
+    return { code: 0, signal: null }
+  })
+  on('ui.toast', (_: any, e: any) => { seen.toasts.push(e.text); return { value: undefined } })
+  on('command.run', (_: any, e: any) => {
+    seen.commands.push(e.command)
+    if (seen.refuse) throw new Error(`no ${e.command} here`)
+    return { text: '' }
+  })
+  return seen
+}
+// what a hook left running after its return (setUp's reload and toast) has done by then
+const settle = async (done: () => boolean) => {
+  for (let i = 0; i < 100 && !done(); i++) await new Promise(r => setTimeout(r, 2))
+}
+const SKILL_AT = '/home/u/.claude/skills/workbench/SKILL.md'
+const CLONE = '/home/u/.claude/plugins/marketplaces/workbench'
+
+test('a fresh install runs wb setup from the marketplace clone, reloads the skills and says so once (#1190)', async ($, on) => {
+  // two plugin commands then /workbench: no PATH edit, no third command; the mod ran wb by name,
+  // which isn't on its PATH before wb setup has linked it
+  const files: Record<string, string> = { [`${CLONE}/bin/wb`]: '' }
+  const seen = freshMachine(on, files)
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await settle(() => seen.toasts.length > 0)
+  expect(seen.ran).toContainEqual([`${CLONE}/bin/wb`, 'setup'])
+  expect(seen.commands).toEqual(['reload-skills'])
+  expect(seen.toasts).toEqual(['workbench: set up (wb and /workbench linked); type /workbench'])
+  // the next session finds the skill linked: no setup again, nothing said
+  files[SKILL_AT] = '(the skill)'
+  seen.ran.length = 0
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await settle(() => false)
+  expect(seen.ran.filter(a => a[1] === 'setup')).toEqual([])
+  expect(seen.toasts).toHaveLength(1)
+})
+
+test('the mod looks for the clone where its bin/wb launcher does, and a wb on PATH or WB_BIN goes first (#1190)', async ($, on) => {
+  const files: Record<string, string> = {}
+  const env: Record<string, string> = {}
+  const seen = freshMachine(on, files, env)
+  const setupBy = async (have: Record<string, string>, vars: Record<string, string> = {}) => {
+    for (const k of Object.keys(files)) delete files[k]
+    for (const k of Object.keys(env)) delete env[k]
+    Object.assign(files, have)
+    Object.assign(env, vars)
+    seen.ran.length = 0
+    await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+    return seen.ran.find(a => a[1] === 'setup')?.[0]
+  }
+  const known = (at: string) => JSON.stringify({ workbench: { source: { source: 'directory', path: at }, installLocation: at } })
+  // known_marketplaces.json's installLocation first: a directory marketplace, a developer's clone
+  expect(await setupBy({ '/home/u/.claude/plugins/known_marketplaces.json': known('/home/u/src/wb'),
+    '/home/u/src/wb/bin/wb': '', [`${CLONE}/bin/wb`]: '' })).toBe('/home/u/src/wb/bin/wb')
+  // a listed one without a bin/wb is passed over
+  expect(await setupBy({ '/home/u/.claude/plugins/known_marketplaces.json': known('/home/u/gone'),
+    [`${CLONE}/bin/wb`]: '' })).toBe(`${CLONE}/bin/wb`)
+  // CLAUDE_CODE_PLUGIN_CACHE_DIR holds the clone, and its known_marketplaces.json, when set (a ~ as typed)
+  expect(await setupBy({ '/home/u/cache/marketplaces/workbench/bin/wb': '', [`${CLONE}/bin/wb`]: '' },
+    { CLAUDE_CODE_PLUGIN_CACHE_DIR: '~/cache' })).toBe('/home/u/cache/marketplaces/workbench/bin/wb')
+  expect(await setupBy({ '/home/u/cache/known_marketplaces.json': known('/home/u/src/wb'), '/home/u/src/wb/bin/wb': '' },
+    { CLAUDE_CODE_PLUGIN_CACHE_DIR: '/home/u/cache' })).toBe('/home/u/src/wb/bin/wb')
+  // CLAUDE_CONFIG_DIR's plugins, else ~/.claude's
+  expect(await setupBy({ '/home/u/cc/plugins/marketplaces/workbench/bin/wb': '', [`${CLONE}/bin/wb`]: '' },
+    { CLAUDE_CONFIG_DIR: '/home/u/cc' })).toBe('/home/u/cc/plugins/marketplaces/workbench/bin/wb')
+  // a wb on the mod's PATH (wb setup's link, a developer's), or WB_BIN, is what runs
+  expect(await setupBy({ '/home/u/bin/wb': '', [`${CLONE}/bin/wb`]: '' }, { PATH: '/usr/bin:/home/u/bin' })).toBe('wb')
+  expect(await setupBy({ [`${CLONE}/bin/wb`]: '' }, { WB_BIN: '/opt/wb' })).toBe('/opt/wb')
+  // no clone anywhere: by name, as before, and its failure is said
+  expect(await setupBy({})).toBe('wb')
+})
+
+test('a fresh install\'s failing wb setup toasts its BAD line, and a refused /reload-skills is left to the user (#1190)', async ($, on) => {
+  const files: Record<string, string> = { [`${CLONE}/bin/wb`]: '' }
+  const seen = freshMachine(on, files)
+  seen.fail = 'ok  /home/u/.claude/skills/workbench → x (made)\nBAD /home/u/.local/bin/wb is already there: left as it is\nfirst run:\n--  OpenCode isn\'t installed'
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await settle(() => seen.toasts.length > 0)
+  expect(seen.toasts).toEqual(['workbench: wb setup failed: BAD /home/u/.local/bin/wb is already there: left as it is'])
+  expect(seen.commands).toEqual([])
+  seen.fail = ''
+  seen.refuse = true
+  seen.toasts.length = 0
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await settle(() => seen.toasts.length > 0)
+  expect(seen.toasts).toEqual(['workbench: set up (wb and /workbench linked); /reload-skills, then type /workbench'])
+})
+
+test('a scripted session on a fresh install runs no wb setup: the next one with a person does (#1190)', async ($, on) => {
+  const seen = freshMachine(on, { [`${CLONE}/bin/wb`]: '' })
+  await $.session.start({ cwd: '/home/u/a', isInteractive: false } as any)
+  await settle(() => false)
+  expect(seen.ran).toEqual([])
+  expect(seen.toasts).toEqual([])
+})
+
+test('/workbench alone on a fresh install starts the first run at once; a task, one run before, or an API role waits as before (#1190)', async ($, on) => {
+  const files: Record<string, string> = { [SKILL_AT]: '(the skill)', '/usr/bin/wb': '' }
+  const seen = freshMachine(on, files)
+  let held: any[] = []
+  on('ui.panes', () => ({ value: held }))
+  on('ui.close', () => { held = []; return { value: undefined } })
+  on('ui.open', () => { held = [{ id: 'workbench', title: 'Workbench', isShown: true, isFocused: false, isPlaced: true }]; return { value: { isPlaced: true } } })
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  const skill = async (task: string) => (await $.skill.prompt({ skill: 'workbench', frontmatter: {}, source: 'userSettings',
+    text: `- **First task:** \`${task}\`. Empty? Reply in one line that workbench mode is on.` })).text
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  expect(seen.ran.filter(a => a[1] === 'setup')).toEqual([])           // linked already: no setup
+  const first = await skill('')
+  expect(first).toContain('First task')                                // the whole skill
+  expect(first).toContain('[workbench-firstrun] A fresh install')
+  expect(first).toContain('*First run* now')
+  // run again with the mode on and still nothing run: the skill again, not "reply in one line"
+  const again = await skill('')
+  expect(again).toContain('[workbench-firstrun]')
+  expect(again).not.toContain('The user ran /workbench again')
+  // with a task given, the task is the work: no first run note
+  expect(await skill('add a high-score screen')).not.toContain('workbench-firstrun')
+  // a task ran here (its files under tasks/): /workbench alone is the pane again
+  files['/wb/tasks/fix-it/task.json'] = '{}'
+  expect(await skill('')).toContain('The user ran /workbench again')
+  delete files['/wb/tasks/fix-it/task.json']
+  // one accepted and cleaned up since: results.jsonl has its row
+  files['/wb/results.jsonl'] = '{"task": "fix-it"}\n'
+  expect(await skill('')).not.toContain('workbench-firstrun')
+  delete files['/wb/results.jsonl']
+  // a role on API: the user set the roles up already
+  files['/home/u/.config/workbench/routes.json'] = JSON.stringify({ roles: { trivial: { via: 'api', api: 'prov/model' } } })
+  expect(await skill('')).not.toContain('workbench-firstrun')
+  delete files['/home/u/.config/workbench/routes.json']
+  expect(await skill('')).toContain('[workbench-firstrun]')
+})
+
 // A file system in memory: what `wb` and its runner would have written. `ui` records the pane
 // opening and closing and each status line.
 // The web chat as the user turned it on (`wb chat on`): off by default (the user, 2026-11-19)
@@ -218,6 +385,8 @@ function fakeTasks(on: any, files: Record<string, string>, dirs = ['fix-it'], sc
   })
   // the weekly model check was done just now, unless the test is about it
   if (scouted) files['/wb/scout.json'] = JSON.stringify({ done_at: 1_800_000_000 })
+  // the /workbench skill linked, as wb setup leaves it: without it a session's start runs wb setup (#1190)
+  files['/home/u/.claude/skills/workbench/SKILL.md'] ??= '(the skill)'
   on('env.get', (_: any, e: any) => ({ value: ({ WB_HOME: '/wb', HOME: '/home/u', ...engine.env } as any)[e.name] }))
   const reads: string[] = []
   on('fs.read', (_: any, e: any) => {
@@ -2238,6 +2407,25 @@ test('a reply to a pair of screenshots reaches Claude with its task and step (#9
   expect(asked).toEqual(['[web chat] (about fix-nav, step 1, screenshots 2) the button moved'])
 })
 
+test('a reply from the task sheet reaches Claude with its task alone (#1201)', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'is it on track?',
+    about: { task: 'fix-auth' } }) + '\n'
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  expect(asked).toEqual(['[web chat] (about task fix-auth) is it on track?'])
+})
+
 test('a take the user keeps from the shortlist reaches Claude with its number and path (#397)', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
@@ -3944,7 +4132,7 @@ const GIT_LOG = '/test/git-log'  // what upstreamWorld's `git -C <dir> log` prin
 
 function upstreamWorld(on: any, files: Record<string, string>) {
   const w = { cwd: SOURCE, answer: "Don't send" as string | null, asked: [] as string[], options: [] as unknown[], gits: [] as string[],
-    chats: [] as string[][] }   // wb chat's calls: the line for an away user
+    toasts: [] as string[], chats: [] as string[][] }   // chats: wb chat's calls, the line for an away user
   files['/wb/patches.json'] = JSON.stringify({ source: SOURCE, upstream: SLUG })
   const origins: Record<string, string> = {
     [SOURCE]: `https://github.com/${SLUG}.git`,
@@ -3955,7 +4143,7 @@ function upstreamWorld(on: any, files: Record<string, string>) {
     '/home/u/.claude/plugins/marketplaces/other': 'https://github.com/u/other.git',
   }
   on('session.cwd', () => ({ value: w.cwd }))
-  on('ui.toast', () => ({ value: undefined }))
+  on('ui.toast', (_: any, e: any) => { w.toasts.push(e.text); return { value: undefined } })
   on('process.run', (_: any, e: any) => {
     // the Scope trailers of a send's branch (#1322): a test sets them, else none
     if (e.argv[0] === 'git' && e.argv[3] === 'log') return { value: { exitCode: 0, stdout: files[GIT_LOG] ?? '', stderr: '' } }
@@ -4837,12 +5025,13 @@ const ROUTE_ARGV = ['route', 'trivial', 'deepseek/deepseek-flash', '--day-usd', 
 function routeWorld(on: any, files: Record<string, string>) {
   const w = {
     asked: [] as string[], options: [] as string[][], answer: "Don't" as string | null, dry: [] as string[][], dryAt: [] as string[], code: 0,
+    toasts: [] as string[],
     reply: { change: ROUTE_LINE, gate: true, approval: { argv: ROUTE_ARGV, change: ROUTE_LINE } } as Record<string, unknown>,
     replyFor: {} as Record<string, Record<string, unknown>>,  // one dry run's own reply, by its argv joined with spaces
     chats: [] as string[][],   // wb chat's calls: the line for an away user
   }
   on('session.cwd', () => ({ value: '/home/u/project' }))
-  on('ui.toast', () => ({ value: undefined }))
+  on('ui.toast', (_: any, e: any) => { w.toasts.push(e.text); return { value: undefined } })
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
   on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
   on('process.run', (_: any, e: any) => {
@@ -4866,11 +5055,11 @@ function routeWorld(on: any, files: Record<string, string>) {
   return w
 }
 
-async function routeProbe($: any, on: any, files: Record<string, string> = {}) {
+async function routeProbe($: any, on: any, files: Record<string, string> = {}, surface: Surface = 'terminal') {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   fakeTasks(on, files, [])
   const w = routeWorld(on, files)
-  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.session.start({ cwd: '/home/u/project', surface, isInteractive: true })
   await clock.advance(1000)
   const call = async (input: Record<string, unknown>) => {
     const n = w.asked.length, d = w.dry.length
@@ -5380,6 +5569,14 @@ test('#1014: the mod\'s summary of the roles reads as routes.summary does', () =
     writing: { via: 'gpu', gpu: 'ollama/x', api: 'anthropic/claude-haiku-5-5', thinking: 'on' } } }))
     .toBe('significant GPU (the router picks); trivial API deepseek/deepseek-flash, thinking off; writing GPU ollama/x, ' +
       'API kept: anthropic/claude-haiku-5-5, thinking on')
+})
+
+test('#1196: a role\'s fallback is in the roles\' summary, as routes.summary says it', () => {
+  // tests.test_workbench.Fallbacks checks routes.summary on the same fixture
+  expect(routesSummary({ roles: { trivial: { via: 'api', api: 'deepseek/deepseek-flash', thinking: 'off', fallback: 'anthropic/claude-haiku-5-5' },
+    significant: { via: 'api', api: 'deepseek/deepseek-v4-pro', fallback: 'gpu' }, writing: { fallback: 'gpu' } } }))
+    .toBe('significant API deepseek/deepseek-v4-pro, thinking off, fallback GPU; trivial API deepseek/deepseek-flash, thinking off, ' +
+      'fallback anthropic/claude-haiku-5-5; writing GPU (the router picks), fallback GPU')
 })
 
 test('#1126: an OpenRouter role\'s backends are in the roles\' summary, so a change of them alone reaches the conversation', async ($, on) => {
@@ -6065,4 +6262,148 @@ test('#1283: a role changed in the web app reaches the conversation once, saying
   files[at] = JSON.stringify({ v: 1, day_usd: 5, roles: { writing: { via: 'gpu', api: 'deepseek/deepseek-flash', thinking: 'off', by: 'terminal', ts: ts0 + 40 } } })
   await clock.advance(31_000)
   expect(rows.filter(r => r.includes('The roles changed')).at(-1)).not.toContain('web app')
+})
+
+// #1200: the mod on every surface Claude Code offers (the desktop app, the IDE extensions, the
+// phone). The kit checks each tree against that surface's element table; how a surface paints it
+// is a check by hand (docs/release-checklist.md).
+
+test('#1200: the pane draws review, stuck and failed tasks alike on every surface', { timeoutMs: 20_000 }, async ($, on) => {
+  const clock = mock.clock(on, { now: T0 * 1000 })
+  const files: Record<string, string> = {}
+  viewTask(files, 'menu-tweak', QWEN30, { phase: 'review', tests: { ok: true }, last: 'tests passed: Claude reviews next' })
+  viewTask(files, 'fix-crash', QWEN30, { phase: 'stuck', last: 'silent for 10 min: stopped' })
+  viewTask(files, 'fix-boot', QWEN30, { phase: 'failed', last: 'opencode exited 1' })
+  viewWorld(on, files, ['menu-tweak', 'fix-crash', 'fix-boot'])
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  await $.session.start({ cwd: '/home/u/a', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  const drawn: Record<string, string[]> = {}
+  for (const surface of SURFACES) {
+    const ui = await $.ui.mount({ ...PANE, surface, props: { ...PANE.props, bodyColumns: 71, scroll: { offset: 0, bodyRows: 40 } } })
+    drawn[surface] = await listRows(ui)
+    expect([surface, ['menu-tweak', 'fix-crash', 'fix-boot'].every(n => drawn[surface]!.some(r => r.includes(n)))]).toEqual([surface, true])
+    await ui.unmount()
+  }
+  for (const surface of SURFACES) expect([surface, drawn[surface]]).toEqual([surface, drawn.terminal])
+})
+
+for (const surface of SURFACES)
+  test(`#1200: a send to upstream asks with the session on ${surface}; a dialog that came back unanswered is a no, and off the terminal a toast says where it shows`, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_800_000_000_000 })
+    const files: Record<string, string> = {}
+    fakeTasks(on, files, [])
+    const w = upstreamWorld(on, files)
+    await $.session.start({ cwd: SOURCE, surface, isInteractive: true })
+    await clock.advance(1000)
+    const bash = async (command: string) => ((await $.tool.call({ tool: 'Bash', command } as any)) as any).deny as string | undefined
+    expect(await bash('git push')).toContain('not sent: the user did not approve it')   // "Don't send"
+    expect(w.asked).toHaveLength(1)
+    expect(w.toasts).toEqual([])                                                       // an answer: nothing more said
+    w.answer = null                                                                     // dismissed, or never drawn
+    expect(await bash('git push')).toContain('not sent')
+    expect(w.toasts).toEqual(surface === 'terminal' ? []
+      : ["workbench: the question went unanswered, so nothing was sent. If it didn't show here, ask again from Claude Code in a terminal, where it does."])
+    w.answer = 'Send it'
+    expect(await bash('git push')).toBeUndefined()
+    await clock.advance(1000)
+  })
+
+for (const surface of SURFACES)
+  test(`#1200: a role change asks with the session on ${surface}; only Allow writes the approval`, async ($, on) => {
+    const { clock, bash, files, w } = await routeProbe($, on, {}, surface)
+    expect((await bash('wb route trivial deepseek/deepseek-flash --day-usd 5')).deny).toContain('not changed: the user did not approve it')
+    expect('/wb/route-ok.json' in files).toBe(false)
+    w.answer = null
+    expect((await bash('wb route trivial deepseek/deepseek-flash --day-usd 5')).deny).toContain('not changed')
+    expect('/wb/route-ok.json' in files).toBe(false)
+    expect(w.toasts.filter(t => t.includes('unanswered'))).toEqual(surface === 'terminal' ? []
+      : ["workbench: the question went unanswered, so nothing changed. If it didn't show here, ask again from Claude Code in a terminal, where it does."])
+    w.answer = 'Allow'
+    expect((await bash('wb route trivial deepseek/deepseek-flash --day-usd 5')).deny).toBeUndefined()
+    expect(JSON.parse(files['/wb/route-ok.json']!)).toEqual({ argv: ROUTE_ARGV, change: ROUTE_LINE, at: expect.any(Number) })
+    await clock.advance(1000)
+  })
+
+// The desktop app's session starts with no surface and gets one only from session.attach (the
+// wake test below): the toast must count that attach, or the app the toast was built for never
+// shows it (the #1200 review: deleting attach's surfaces.add left the suite green)
+test('#1200: a session that starts with no surface and then attaches the desktop app toasts a send dialog that came back unanswered', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const w = upstreamWorld(on, files)
+  on('session.attach', (_: any, e: any) => ({ clientId: e.clientId }))
+  await $.session.start({ cwd: SOURCE, surface: null, isInteractive: false })   // how the app's session starts
+  await $.session.attach({ surface: 'desktop', clientId: 'desktop:default' })
+  await clock.advance(1000)
+  w.answer = null                                                                     // dismissed, or never drawn
+  const deny = ((await $.tool.call({ tool: 'Bash', command: 'git push' } as any)) as any).deny as string | undefined
+  expect(deny).toContain('not sent: the user did not approve it')
+  expect(w.asked).toHaveLength(1)
+  expect(w.toasts).toEqual(["workbench: the question went unanswered, so nothing was sent. If it didn't show here, ask again from Claude Code in a terminal, where it does."])
+  await clock.advance(1000)
+})
+
+for (const surface of ['desktop', 'vscode'] as const)
+  test(`#1200: a session that starts with no surface takes its wake once ${surface} attaches, once, and acknowledges it`, async ($, on) => {
+    const clock = mock.clock(on, { now: 1_800_000_000_000 })
+    const files: Record<string, string> = {}
+    task(files, 'fix-it', 'review')
+    notice(files, { ts: ts0, task: 'fix-it', kind: 'review', text: 'REPORT' })
+    fakeTasks(on, files)
+    on('process.run', wbAck(files))
+    on('ui.toast', () => ({ value: undefined }))
+    on('session.attach', (_: any, e: any) => ({ clientId: e.clientId }))
+    const woken: string[] = []
+    on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+    await $.session.start({ cwd: '/', surface: null, isInteractive: false })   // how the app's session starts
+    await clock.advance(60_000)
+    expect([woken, files['/wb/tasks/fix-it/acked']]).toEqual([[], undefined])
+    await $.session.attach({ surface, clientId: `${surface}:default` })
+    await clock.advance(3000)
+    expect(woken.filter(t => t.includes('REPORT'))).toHaveLength(1)
+    expect(files['/wb/tasks/fix-it/acked']).toBe(String(ts0))
+    await clock.advance(120_000)
+    expect(woken.filter(t => t.includes('REPORT'))).toHaveLength(1)                 // and only once
+  })
+
+// Which wb the mod runs, given PATH and what is on disk; `wb events` is its first call
+async function wbRun($: any, on: any, env: Record<string, string>, onDisk: string[]): Promise<string> {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = Object.fromEntries(onDisk.map(p => [p, '#!/usr/bin/env python3\n']))
+  fakeTasks(on, files, [], true, [], false)
+  const spawned: string[][] = []
+  on('process.spawn', async function* (_: any, e: any) {
+    spawned.push(e.argv)
+    yield { stream: 'stdout', text: '{"hello": 4242}\n' }
+    await new Promise(() => {})
+    return { code: 0, signal: null }
+  })
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  engine.env = env
+  try {
+    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+    await clock.advance(1000)
+  } finally {
+    engine.env = undefined
+  }
+  return spawned.find(a => a[1] === 'events')?.[0] ?? ''
+}
+
+test('#1200: without WB_BIN the mod runs wb by name while a PATH directory has it', async ($, on) => {
+  expect(await wbRun($, on, { PATH: '/usr/bin:/home/u/.local/bin/' }, ['/home/u/.local/bin/wb'])).toBe('wb')
+})
+
+test('#1200: a GUI-started app without ~/.local/bin on its PATH runs wb setup\'s link there', async ($, on) => {
+  expect(await wbRun($, on, { PATH: '/usr/bin:/bin' }, ['/home/u/.local/bin/wb'])).toBe('/home/u/.local/bin/wb')
+})
+
+test('#1200: with no wb on PATH nor in ~/.local/bin the mod runs wb by name, as before', async ($, on) => {
+  expect(await wbRun($, on, { PATH: '/usr/bin:/bin' }, [])).toBe('wb')
+})
+
+test('#1200: WB_BIN still wins over PATH and wb setup\'s link', async ($, on) => {
+  expect(await wbRun($, on, { PATH: '/usr/bin', WB_BIN: '/opt/wb/bin/wb' }, ['/home/u/.local/bin/wb'])).toBe('/opt/wb/bin/wb')
 })
