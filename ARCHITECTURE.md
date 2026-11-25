@@ -3556,7 +3556,7 @@ read as a wrong id, Claude hunted for the "right" one).
   `OPENCODE_PASSWORD` as HTTP Basic `opencode:<password>`, and ends when its stdin closes; its group is
   killed after): `GET /api/plugin` every `PLUGIN_POLL` (25 ms) until it lists a plugin, then `GET
   /api/model`, both with `location[directory]`, through `_DIRECT` (no proxy; never `_open`'s stored keys), within `CATALOG_TIMEOUT` (past it,
-  `opencode model.list took over 30 s`: never a partial list). Not `opencode api model.list
+  `opencode model.list took over 30 s`: never a partial list; a server that exits before it listens gives its stderr's first line, its exit awaited after its stdout closes, as a loaded runner's lagged: #1370). Not `opencode api model.list
   --standalone`: from OpenCode 2.4.0 the server answers model.list with what has loaded so far, and
   the catalog and every provider are plugins that load after it starts (#63814 upstream), so 2.4.1
   printed no model, or 14 of 93, and wb saw no API model (the opencode workflow, 2026-11-23);
