@@ -37723,7 +37723,9 @@ class ApiSpend(Base):
         self.assertIsNotNone(self.drive_until_waiting(queued[1], then))
         other.join(30)
         self.assertEqual(seen, {"phases": ["queued", "queued"], "waiting": [True, True], "stops": ["t-w0"]})
-        self.assertEqual([t.status["phase"] for t in queued], ["review", "review"])
+        self.assertEqual([t.status["phase"] for t in queued], ["review", "review"],
+                         [(t.status.get("last"), (t.dir / "runner.log").read_text()[-1500:]
+                           if (t.dir / "runner.log").exists() else "") for t in queued])
 
     def test_a_takeover_of_a_told_cap_stop_lets_one_waiter_on_to_its_own_stop_and_the_other_waits_behind_it(self):
         # #1304's review (2026-11-24): a takeover or discard of the told stop let every waiter go
