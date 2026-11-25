@@ -532,7 +532,8 @@ yours to edit: the coding choice is the user's (`wb coding`), never changed by a
   or `resume` refused at the cap (exit 3) is the same call. API tasks queued behind it send no
   stop of their own: they wait as queued and go on once the cap is raised or at midnight.
   The notice's route change is for the next tasks; this one keeps its API model (resume never
-  re-routes), so `wb takeover` or `wb discard` it. Nothing but the user raises the cap.
+  re-routes), so `wb takeover` or `wb discard` it, and so do those queued behind it: they wait on,
+  but for one, whose own stop is the next notice. Nothing but the user raises the cap.
   With Agents on GPU the same stop says `Agents is GPU, so nothing spends`: API tasks already
   started stop before their next round, and feedback, next, resume and an API `--model` are
   refused. Ask the user (Agents back to Both or API, then `wb resume`), or takeover or discard.

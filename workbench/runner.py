@@ -1903,6 +1903,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             elif row["kind"] == "step":
                 if spend:
                     spend.step(raw.get("part") or {})  # the ledger, before the guard below
+                    _cap_go_past(task)  # past its first request: the next waiter's turn (#1304)
                 out["tok_in"] += row["in"]
                 out["tok_out"] += row["out"]
                 used = row["in"] + row.get("cache", 0) + row["out"] + row.get("reasoning", 0)  # #644
@@ -5387,7 +5388,10 @@ def _stop_before(task: store.Task, n: int, what: str, why: str, lead: str, guard
         kh.close(why)
     # infra and `by` as the in-round stop has them (stopped_by, #1020): the user's budget, never
     # the step's, nor a lesson about the agent
-    task.set_status(phase="stuck", last=why[:200], guard=guard, infra=SPEND)
+    # the cap it stopped at (`cap_told`): only a higher one is a new question for the tasks
+    # waiting behind this stop (_cap_told, #1304)
+    task.set_status(phase="stuck", last=why[:200], guard=guard, infra=SPEND,
+                    cap_told=meter.cap() if guard == SPEND else None)
     task.event({"ts": store.now(), "round": n, "kind": "stopped", "text": f"{why}: {what} didn't run",
                 "by": SPEND})
     text = f"{lead}\n{what} didn't run: {why}."
@@ -5396,6 +5400,7 @@ def _stop_before(task: store.Task, n: int, what: str, why: str, lead: str, guard
     if (summary := task.round_dir(n) / "summary.md").exists():
         text += f"\nRound {n}'s report (wb report {task.name} --round {n}):\n{summary.read_text()}"
     task.notify("stuck", text, round=n, cause=SPEND, **({"guard": guard} if guard != SPEND else {}))
+    _cap_go_done(task)  # told: the waiters behind the cap wait behind this stop now (#1304)
 
 
 def _midnight(after: bool = False) -> float:
@@ -5407,10 +5412,13 @@ def _midnight(after: bool = False) -> float:
 def _cap_told(task: store.Task) -> str:
     """Another task whose spend stop has told Claude of today's cap, still standing, else '':
     phase `stuck`, status `infra` `spend` (not the Agents switch's `guard`), its newest notice
-    (`noticed`) today and since routes.json last changed (a cap raised since is a new question)."""
-    since = _midnight()
-    with contextlib.suppress(OSError):
-        since = max(since, os.stat(routes.path()).st_mtime)
+    (`noticed`) today, and the cap now no higher than the one it stopped at (status `cap_told`):
+    a raised cap is a new question. Any other routes.json write is none: the mtime test before
+    let a role moved to the GPU (the stop's own advice), a GPU pin, a thinking or busy change
+    release every waiter at once, each into round 1, the guard and its own notice, the same ask
+    once per task (#1304, the bar loop, 2026-11-24). A stop from before `cap_told` keeps that
+    test: told since routes.json last changed."""
+    since, now = _midnight(), meter.cap()
     with contextlib.suppress(OSError):
         for d in store.tasks_dir().iterdir():
             if d.name == task.name or not (d / "task.json").is_file():
@@ -5419,34 +5427,101 @@ def _cap_told(task: store.Task) -> str:
             if st.get("phase") != "stuck" or st.get("infra") != SPEND or st.get("guard") == AGENTS:
                 continue
             try:
-                if float((d / "noticed").read_text() or 0) >= since:
-                    return d.name
+                at = float((d / "noticed").read_text() or 0)
+                if meter._num(told := st.get("cap_told")):
+                    stands = at >= since and now is not None and now <= told + meter.EPS
+                else:
+                    stands = at >= max(since, os.stat(routes.path()).st_mtime)
             except (OSError, ValueError):
                 continue
+            if stands:
+                return d.name
     return ""
+
+
+# The one task at the cap let through to its own stop, and the fd of its lock (#1304's review,
+# 2026-11-24): a takeover or discard of the told stop ended it for every waiter on the same tick
+# (they look together: routes.json's writes wake them all), each into round 1, the guard and
+# its own spend notice, the ask once per task again. Held from the "no told stop, go on" until
+# its stop is told (_stop_before, the round's stop) or its first request is booked under the cap
+# (_cap_go_past), else drive's end; a runner's death lets it go too (flock). By task name: the
+# tests drive several tasks in one process.
+CAP_GO_LOCK = "cap-wait.lock"
+_CAP_GO: dict = {}
+
+
+def _cap_go(task: store.Task) -> str:
+    """'' when ``task``, at the cap with no told stop, is the one to go on to its own stop: it
+    holds locks/cap-wait.lock, taken now or before. Else what it waits behind: the task that
+    holds it ("<name> goes on first"), or a stop told while the lock was taken (_cap_told)."""
+    if task.name in _CAP_GO:
+        return ""
+    import fcntl
+    path = store.home() / "locks" / CAP_GO_LOCK
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = store.lock_fd(path, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            who = os.pread(fd, 256, 0).decode("utf-8", "replace").strip()
+        except OSError:
+            who = ""
+        os.close(fd)
+        return f"{who or 'another task'} goes on first"
+    if told := _cap_told(task):  # stopped and told between the look and the lock
+        os.close(fd)
+        return f"{told}'s stop has asked the user"
+    with contextlib.suppress(OSError):
+        os.ftruncate(fd, 0)
+        os.pwrite(fd, task.name.encode(), 0)
+    _CAP_GO[task.name] = fd
+    return ""
+
+
+def _cap_go_done(task: store.Task) -> None:
+    """``task``'s turn past the cap over (its stop told, its first request booked, its runner's
+    end): the next waiter may look for itself."""
+    if (fd := _CAP_GO.pop(task.name, None)) is None:
+        return
+    with contextlib.suppress(OSError):
+        os.ftruncate(fd, 0)
+    os.close(fd)  # the flock goes with its last fd
+
+
+def _cap_go_past(task: store.Task) -> None:
+    """After a step is booked: the task let through the cap is past its first request, and
+    under the cap still, so no stop of its comes for the waiters to wait behind."""
+    if task.name in _CAP_GO and not meter.stop_reason(task):
+        _cap_go_done(task)
 
 
 def _cap_wait(task: store.Task, lease) -> bool:
     """Before the first round this runner sends (#1249, 2026-11-24): an API task at the day cap,
     or within its first request of it, while another task's spend stop has told Claude so
     (_cap_told), waits as queued, its provider slot let go (taken again after), until the cap is
-    raised (a watch on routes.json's directory), local midnight or that stop no longer stands
-    (looked at every API_WAIT's 30 s). A backlog queued behind the cap each took its slot, ran
+    raised or Agents is switched to GPU (a watch on routes.json's directory; the switch's stop is
+    drive's next look, _agents_gpu: any other route change leaves it waiting, #1304), local
+    midnight or that stop no longer stands (looked at every API_WAIT's 30 s). A backlog queued behind the cap each took its slot, ran
     round 1 into the guard and woke Claude with the same stop, one ask of the user per task, as
-    #1178's 402. With no such stop it goes on, and its own stop is the notice Claude gets: never
-    a wait untold. True when it waited (the caller looks again)."""
+    #1178's 402. With no such stop one waiter goes on (_cap_go: the rest wait behind it as behind
+    a told stop, #1304), and its own stop is the notice Claude gets: never a wait untold. True
+    when it waited (the caller looks again)."""
     if meter.for_task(task) is None:
         return False
     waited, said = False, None
     with Watcher(routes.path().parent) as w:
         while True:
             why = meter.stop_reason(task, ahead=True, tokens=first_tokens(task))
-            if not why or not why.startswith((meter.STOP, meter.NEAR)) or not (told := _cap_told(task)):
+            if not why or not why.startswith((meter.STOP, meter.NEAR)) or routes.agents_gpu():
+                break
+            told = _cap_told(task)
+            if not (behind := f"{told}'s stop has asked the user" if told else _cap_go(task)):
                 break
             if not waited:
                 lease.__exit__(None, None, None)  # the slot, for a task the cap lets run
                 waited = True
-            msg = (f"waiting: {why}; {told}'s stop has asked the user: it goes on once the cap is "
+            msg = (f"waiting: {why}; {behind}: it goes on once the cap is "
                    f"raised (wb route cap <usd>) or at local midnight (wb stop gives up)")
             if msg != said:
                 task.set_status(phase="queued", last=msg)
@@ -5545,6 +5620,7 @@ def drive(task: store.Task) -> None:
     finally:
         if kh := CURRENT.pop("keyhole", None):  # a runner's own: it dies with it; closed for a
             kh.close()                          # runner driven in-process (the tests)
+        _cap_go_done(task)  # its turn past the cap, if it had one, ends with the runner (#1304)
 
 
 def _drive(task: store.Task, m: models.Model, say) -> None:
@@ -5759,12 +5835,16 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 ours = None if server else stopped_by(rnd["guard"])
                 # its guard with a provider's: a rate limit's or outage's told stop holds the
                 # tasks queued behind it (models.held_told, #1277)
+                # and a spend stop's cap, which the tasks waiting behind it go on past only
+                # once raised (_cap_told, #1304)
                 task.set_status(phase=phase, last=last,
                                 **({"infra": "model"} if server else {"infra": ours} if ours else {}),
-                                **({"guard": rnd["guard"]} if ours == "provider" else {}))
+                                **({"guard": rnd["guard"]} if ours == "provider" else {}),
+                                **({"cap_told": meter.cap()} if ours == SPEND else {}))
                 # what stopped it, for results.step: a guard or the agent's own exit (#582)
                 task.notify(phase, text, round=n, cause="server" if server else ours
                             or ("guard" if rnd["stuck"] else "agent"))
+                _cap_go_done(task)  # told (cap_told above): the waiters wait behind it (#1304)
                 return
             # the tests need no model: the GPU is the queue's, or theirs (--unload-for-tests), #257.
             # Theirs is waited for (a peer's round, up to its timeout; this machine's pool for a
