@@ -488,6 +488,11 @@ class Keyhole:
         self._server.shutdown()
         self._server.server_close()
 
+    def reopen(self) -> None:
+        """Serve model requests again after close(reason): a runner that waited behind another
+        task's told spend stop goes on once the cap is raised (runner._cap_wait, #1344)."""
+        self.stopped = None
+
     def __enter__(self):
         return self
 

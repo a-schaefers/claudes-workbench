@@ -516,7 +516,7 @@ yours to edit: the coding choice is the user's (`wb coding`), never changed by a
   A `rate_limited`, `outage`, `quota`, `auth` or `refused` stop is the API provider's, not the
   agent's (the report says "the provider's stop"): tell the user so, and its remedy (wait, top
   up, or /connect the key again), then `wb feedback <name> --text "carry on"` once it allows (no review round counted);
-  the tasks queued behind a `quota` stop wait as queued, with no stop of their own, and go on once credit is back (resumed, the stopped task asks the provider at once, and its 2xx lets them go); behind a `rate_limited` or `outage` one too, one of them asking again now and then, and going on at the provider's first 2xx: one stop to tell the user, not one per task. A
+  the tasks queued or running behind a `quota` stop wait as queued, with no stop of their own, and go on once credit is back (resumed, the stopped task asks the provider at once, and its 2xx lets them go); behind a `rate_limited` or `outage` one too, one of them asking again now and then, and going on at the provider's first 2xx: one stop to tell the user, not one per task. A
   `refused` one (the provider turned the request down: a moderation flag, a schema, a model gone)
   quotes what it said: fix that, then `wb feedback`; on an HTTP 404 the model is gone, so `wb
   takeover` or `wb discard`. Never switch the task's model or role yourself: a route change
@@ -529,8 +529,8 @@ yours to edit: the coding choice is the user's (`wb coding`), never changed by a
   A `spend` stop (cause `spend`: the day's API spend cap is reached, or too near it for the next
   request) is the user's call, never a retry: ask them, as the notice says (it names a cap that
   would do). A higher cap or tomorrow: `wb resume <name>` once it allows. `wb feedback`, `next`
-  or `resume` refused at the cap (exit 3) is the same call. API tasks queued behind it send no
-  stop of their own: they wait as queued and go on once the cap is raised or at midnight.
+  or `resume` refused at the cap (exit 3) is the same call. API tasks queued or running behind it
+  send no stop of their own: they wait as queued and go on once the cap is raised or at midnight.
   The notice's route change is for the next tasks; this one keeps its API model (resume never
   re-routes), so `wb takeover` or `wb discard` it, and so do those queued behind it: they wait on,
   but for one, whose own stop is the next notice. Nothing but the user raises the cap.

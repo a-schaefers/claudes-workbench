@@ -35518,6 +35518,99 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual(fresh.load(), 0.0)
         self.assertFalse(fresh.recheck)
 
+    def test_a_running_task_that_meets_the_402_another_tasks_stop_told_waits_as_queued_with_no_stop_of_its_own(self):
+        # #1344 (the bar loop, 2026-11-24): #1178's wait held only the queued tasks; each task of
+        # a fan-out already running when its provider ran out of credit met its own 402 and woke
+        # Claude with the same stop. One stop tells; the others wait as queued until the top-up
+        self.local_api_model()
+        self.up.mode, self.up.status, self.up.message = "status", 402, "Insufficient balance"
+        self.start_api("t-paid", "http", spawn=False)
+        self.start_api("t-running", "http", spawn=False)
+        self.drive_here("t-paid")
+        self.assertEqual(store.Task("t-paid").status.get("infra"), "provider")
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")     # lets a hung wait go
+        self.models.note_api("deepinfra", "ok")  # its round already sent, past the lease's load
+        task = store.Task("t-running")
+        driver = threading.Thread(target=self.drive_here, args=("t-running",), daemon=True)
+        driver.start()
+        self.addCleanup(driver.join, 60)
+        deadline = time.time() + 30
+        while not (task.status.get("phase") == "queued"
+                   and (task.status.get("last") or "").startswith("waiting: deepinfra is out of credit")):
+            self.assertLess(time.time(), deadline, task.status)
+            self.assertTrue(driver.is_alive(), task.status)
+            time.sleep(POLL)
+        self.assertEqual(len(self.up.seen), 2)                        # each one's 402
+        self.assertIn("deepinfra stopped the round, as t-paid's stop told the user: the task waits as queued",
+                      [e.get("text") for e in store.read_jsonl(task.dir / "events.jsonl")[0]])
+        self.up.mode, self.up.status = "ok", 200                      # the user tops up
+        self.models.note_api("deepinfra", "ok")                       # t-paid's resume, answered
+        driver.join(60)
+        self.assertFalse(driver.is_alive(), task.status)
+        self.assertEqual(task.status["phase"], "review", task.status)
+        self.assertEqual([(r["task"], r["kind"], r.get("cause")) for r in store.notices() if r["kind"] != "review"],
+                         [("t-paid", "stuck", "provider")])
+
+    def test_a_running_task_that_meets_an_outage_another_tasks_stop_told_after_its_revive_waits_with_no_stop_of_its_own(self):
+        # #1344: a fan-out's running tasks revive a held outage together, and each looked for a
+        # told stop before any was told: every one stopped and woke Claude with the same stop
+        told, task = self.held_outage()
+        self.models.note_api("deepinfra", "ok")  # t-b's round already sent, past the lease's load
+        real, calls = runner.run_round, []
+
+        def told_meanwhile(t, n, keep=False):
+            calls.append(n)
+            if len(calls) == 2:                  # its revive under way: t-a's stop told by then
+                told.set_status(phase="stuck")
+                told.notify("stuck", "STOPPED: deepinfra didn't answer", cause="provider")
+            return real(t, n, keep)
+        p = mock.patch.object(runner, "run_round", told_meanwhile)
+        p.start()
+        self.addCleanup(p.stop)
+        told.set_status(phase="review")          # none told yet when t-b's round began
+        driver = threading.Thread(target=self.drive_here, args=("t-b",), daemon=True)
+        driver.start()
+        self.addCleanup(driver.join, 60)
+        self.until_waiting(task, driver, "waiting: deepinfra isn't answering")
+        self.assertIn(", as t-a's stop told the user: ", task.status["last"])
+        self.assertIn("deepinfra stopped the round, as t-a's stop told the user: the task waits as queued",
+                      [e.get("text") for e in store.read_jsonl(task.dir / "events.jsonl")[0]])
+        self.up.mode, self.up.status = "ok", 200                      # the provider is back
+        self.models.note_api("deepinfra", "ok")
+        driver.join(60)
+        self.assertFalse(driver.is_alive(), task.status)
+        self.assertEqual(task.status["phase"], "review", task.status)
+        self.assertEqual([r["task"] for r in store.notices() if r["kind"] != "review"], ["t-a", "t-a"])
+
+    def test_two_rounds_stopped_by_the_same_402_at_once_tell_claude_once(self):
+        # #1344: the stops land in the same second, so a look for a told stop alone found none
+        # for each; the claim is taken under the provider's lock, held through the notice
+        m = self.local_api_model()
+        tasks = []
+        for name in ("t-one", "t-two"):
+            t = store.Task(name)
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"model": m.id, "provider": "deepinfra", "via": "api"})
+            tasks.append(t)
+        found = {}
+
+        def stop(t):
+            with runner._told_stop(t, {"stuck": "out of credit", "guard": "quota"}) as told:
+                found[t.name] = told
+                if not told:
+                    time.sleep(0.3)              # the other's look comes meanwhile
+                    t.set_status(phase="stuck", infra="provider", guard="quota")
+                    t.notify("stuck", f"{t.name} stopped: out of credit", cause="provider")
+        threads = [threading.Thread(target=stop, args=(t,)) for t in tasks]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(10)
+        self.assertEqual(sorted(found.values()), ["", next(n for n, v in found.items() if not v)], found)
+        self.assertEqual(len([r for r in store.notices() if r["kind"] == "stuck"]), 1)
+        with runner._told_stop(tasks[0], {"stuck": "x", "guard": "outage"}) as other:
+            self.assertEqual(other, "")          # a 402's told stop holds no outage's
+
     def test_a_waiter_past_a_held_mark_while_another_asks_looks_every_two_seconds_not_in_a_loop(self):
         # the review of #1277 (2026-11-24): credit_recheck opened api-health.json's lock file to
         # look past an expired outage's mark, and its close woke the waiter's own watch on
@@ -37438,6 +37531,86 @@ class ApiSpend(Base):
         self.assertEqual((st["phase"], st["guard"], st["round"]), ("stuck", "agents", 1))
         ev, _ = store.read_jsonl(task.dir / "events.jsonl")
         self.assertFalse([e for e in ev if e["kind"] == "step"])  # no round ran
+
+    def told_cap_stop(self, told, cap):
+        """``told``'s spend stop at ``cap``, told to Claude: what a fan-out's first stop leaves."""
+        told.set_status(phase="stuck", infra="spend", guard="spend", cap_told=cap)
+        told.notify("stuck", f"{told.name} stopped: the day's API spend cap is reached", cause="spend")
+
+    def test_a_running_task_whose_round_meets_the_cap_another_stop_told_waits_as_queued_and_runs_again_once_raised(self):
+        # #1344 (the bar loop, 2026-11-24): #1249's wait held only the tasks yet to send round 1:
+        # each task of a fan-out running when the cap was reached stopped in its round and woke
+        # Claude with the same ask, one wake per running task
+        self.cap(100, api=("significant",))
+        told = self.api_task("t-told", SPEND_M, "ok")
+        task = self.api_task("t-run", SPEND_M, "spend", FAKE_STEP_IN="100", FAKE_STEPS="5",
+                             FAKE_STEP_EVERY="0.3")
+        real, calls = runner.run_round, []
+
+        def round_meets_the_cap(t, n, keep=False):
+            calls.append(n)
+            if len(calls) == 1:                                   # mid-fan-out: another's stop, told
+                self.told_cap_stop(told, 100)
+                self.spent(150.0)
+            return real(t, n, keep)
+        waiting = lambda: str(task.status.get("last") or "").startswith(  # noqa: E731
+            "waiting: the day's API spend cap is reached")
+        seen = {}
+
+        def then():
+            seen["last"] = task.status["last"]
+            seen["phase"] = task.status["phase"]
+            seen["stops"] = self.notices("t-run", "stuck")
+            self.cap(1000, api=("significant",))                   # the user's answer to t-told's ask
+        with mock.patch.object(runner, "run_round", round_meets_the_cap):
+            done = threading.Event()
+
+            def meanwhile():
+                while not done.wait(POLL):
+                    if waiting():
+                        return then()
+            threading.Thread(target=meanwhile, daemon=True).start()
+            try:
+                runner.drive(task)
+            finally:
+                done.set()
+        self.assertEqual(seen["phase"], "queued", seen)
+        self.assertIn("; t-told's stop has asked the user: it goes on once the cap is raised", seen["last"])
+        self.assertEqual(seen["stops"], [])                       # no stop of its own while it waited
+        self.assertEqual(calls, [1, 1])                           # the round ran again once raised
+        self.assertEqual(task.status["phase"], "review", task.status)
+        self.assertEqual(self.notices("t-run", "stuck"), [])
+        ev, _ = store.read_jsonl(task.dir / "events.jsonl")
+        self.assertIn("the day cap stopped the round, as another task's stop told the user: the round runs again",
+                      [e.get("text") for e in ev])
+
+    def test_a_running_task_at_the_cap_before_its_next_round_waits_behind_a_told_stop_and_goes_on_once_raised(self):
+        # #1344: _go_on (auto-fix, self-review, a handover, Claude's note) stopped each running
+        # task at the cap with its own notice, though another task's stop had asked the user
+        self.cap(100, api=("significant",))
+        told = self.api_task("t-told", SPEND_M, "ok")
+        task = self.api_task("t-next", SPEND_M, "ok", FAKE_STEP_IN="100")
+        runner.drive(task)
+        self.told_cap_stop(told, 100)
+        self.spent(150.0)
+        lease, went = mock.MagicMock(), []
+        driver = threading.Thread(target=lambda: went.append(runner._go_on(task, 2, "auto-fix", lease)),
+                                  daemon=True)
+        driver.start()
+        self.addCleanup(driver.join, 30)
+        deadline = time.time() + 20
+        while not str(task.status.get("last") or "").startswith("waiting: the day's API spend cap"):
+            self.assertLess(time.time(), deadline, task.status)
+            time.sleep(POLL)
+        self.assertEqual(task.status["phase"], "queued")
+        self.assertIn("; t-told's stop has asked the user: ", task.status["last"])
+        lease.__exit__.assert_called_once()                       # its provider slot let go
+        self.cap(1000, api=("significant",))
+        driver.join(30)
+        self.assertEqual(went, [True])
+        lease.__enter__.assert_called_once()                      # and taken again
+        self.assertEqual(self.notices("t-next", "stuck"), [])
+        self.assertEqual(runner._CAP_GO, {})
 
     def local_only(self):
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {"local_only": True}}}))
