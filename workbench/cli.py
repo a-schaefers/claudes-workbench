@@ -5765,7 +5765,7 @@ def _model_price(mid: str, inp, out, read, write, clear: bool = False) -> None:
           + " per 1M tokens"
           + (f" (cache {' and '.join(scaled)} at the catalog's ratio to input: "
              + ", ".join(f"--cache-{k}" for k in scaled) + " to set)" if scaled else "")
-          + "; its costs say \"your prices\" from its next task (--clear: the catalog's)")
+          + "; its costs are plain, no ≈, from its next task (--clear: the catalog's)")
 
 
 def _api_id(model_id: str) -> bool:
