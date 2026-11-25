@@ -39377,14 +39377,16 @@ class Privacy(_KeyholeTest):
         # the note is a lane's (#1156): macOS CI has none, so the API start draws one
         drawn = mock.patch.object(lane, "abi", return_value=6)
         with mock.patch.dict(os.environ, {"HOME": str(home)}), drawn:
-            # #1322: a repo with no package.json builds with no npm: nothing to say
-            self.assertNotIn("can't read", self.start_api("t-dn0"))
             self.manifests("package.json", "pom.xml")
             self.assertIn("note: an API task can't read ~/.npmrc (it holds a credential, which would "
                           "reach the provider): in its lane npm installs from a private registry fail",
                           self.start_api("t-dn1"))
             # the repo's first API task only (#1322): a refusal of one says why again (API_HIDDEN_WHY)
             self.assertNotIn("can't read ~/.npmrc", self.start_api("t-dn1b"))
+            # #1322: a checkout with no package.json builds with no npm: nothing to say
+            (self.repo / "package.json").rename(self.repo / "package.json.off")
+            self.assertEqual(context.api_hidden_note(store.Task("t-dn1")), "")
+            (self.repo / "package.json.off").rename(self.repo / "package.json")
             # a tool that stops on every run with its file unreadable is named as one (#1021's
             # review: the note said only private installs fail, and Maven never ran at all)
             (home / ".m2").mkdir()
