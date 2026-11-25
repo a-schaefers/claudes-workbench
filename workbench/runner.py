@@ -620,6 +620,14 @@ ENV_KEEP = frozenset({"HF_HOME", "HF_HUB_CACHE", "HF_HUB_OFFLINE", "HF_DATASETS_
                       "HF_ENDPOINT", "HF_HUB_DISABLE_TELEMETRY", "TRANSFORMERS_OFFLINE",
                       "TOKENIZERS_PARALLELISM", "AWS_REGION", "AWS_DEFAULT_REGION",
                       "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"})
+# and OpenTelemetry's variables, every one (found by #1205's research, 2026-11-24): OpenCode
+# 2.3.2 exports OTLP/HTTP traces and logs to OTEL_EXPORTER_OTLP_ENDPOINT whenever it is set, its
+# "cli starting" record carrying the argv, the round's prompt in it, with the worktree's path and
+# the session, and OTEL_EXPORTER_OTLP_HEADERS (the collector's key) on each request. Claude
+# Code's OTel set them for Claude Code, and every agent then reported to that collector unasked,
+# its key in the agent's shell; the tests' programs read the same names. Only commands.json `env`
+# lets one through (the user then names each: an endpoint passed alone sends no header).
+TELEMETRY_ENV = re.compile(r"^OTEL_")
 
 
 # The cloud SDKs' own switches off their instance metadata lookup (#993, 2026-11-22): on a cloud
@@ -659,9 +667,11 @@ CLAUDE_CODE_OFF = ("OPENCODE_DISABLE_CLAUDE_CODE", "OPENCODE_DISABLE_CLAUDE_CODE
 
 
 def env_kept(name: str, value: str, through: set) -> bool:
-    """Whether the agent's environment keeps ``name``: passed through by commands.json `env`,
-    configuration (ENV_KEEP), or no credential by its name (SECRET_ENV) nor its value (USERINFO)."""
-    return name in through or name in ENV_KEEP or not (SECRET_ENV.search(name) or USERINFO.search(value))
+    """Whether the agent's environment keeps ``name``: passed through by commands.json `env`;
+    else never telemetry (TELEMETRY_ENV), and configuration (ENV_KEEP) or no credential by its
+    name (SECRET_ENV) nor its value (USERINFO)."""
+    return name in through or not TELEMETRY_ENV.match(name) and (
+        name in ENV_KEEP or not (SECRET_ENV.search(name) or USERINFO.search(value)))
 
 
 # Signing off for the agent's git: a user with commit.gpgsign or tag.gpgsign in ~/.gitconfig had
