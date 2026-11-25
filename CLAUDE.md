@@ -109,7 +109,8 @@ Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change mus
 2. The runner holds the GPU (`GpuLease`) and loads the model before every round, or for an API
    model holds a provider slot (`NoLease`, never in gpu.json) and starts the keyhole (the key stays
    there, outside the lane); it runs
-   `opencode run … -- <prompt>` in the worktree through `lane.wrap`, with the layer
+   `opencode run --agent wb-code … -- <prompt>` (wb's agent, never the user's `default_agent`:
+   #1290) in the worktree through `lane.wrap`, with the layer
    `rules/<task>/opencode.json`. Guards stop a stuck agent (an API task at the day cap too:
    `spend`, in the round and before each next one); an API provider's rate limit,
    outage or queue pauses their clocks, and held 10 minutes stops the round as `rate_limited`

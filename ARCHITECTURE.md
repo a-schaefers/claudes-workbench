@@ -349,8 +349,9 @@ the last run's line meanwhile, the review of #1015). Its tests run under
 this machine's pool as any task's (`_tests_gpu`, `--unload-for-tests`). The bench counts it as
 no GPU work (`bench._idle`, `bench.api_task`).
 
-**4. The agent works a round**: `opencode run --standalone -m <model> --auto --format json
---title "wb: <task>" [--session <id>] -- <prompt>` in the worktree, in the lane, `$PWD` the
+**4. The agent works a round**: `opencode run --standalone --agent wb-code -m <model> --auto --format json
+--title "wb: <task>" [--session <id>] -- <prompt>` (`context.AGENT`: wb's own agent, never the user's
+`default_agent`; *The user's agents can't lift the rules*, #1290) in the worktree, in the lane, `$PWD` the
 worktree, `OPENCODE_CONFIG` the layer. Later rounds continue the session until a handover.
 
 **5. Guards:**
@@ -1593,7 +1594,7 @@ and takes the same `.format` fields. Only the code bullets differ: prose only, n
 An agent should start knowing what Claude would know in the same repo (Claude's own global
 files aside: they are Claude's, #1061), and nothing that would distract it. The per-task config layer (`<state>/rules/<task>/opencode.json`, written before every
 round by `runner.write_config_layer` from `context.layer`) gives it `instructions`, `permissions`,
-`skills`, `compaction`, the `ask_reviewer` server and the providers OpenCode wouldn't load itself
+`skills`, `agents` (wb's agent removed by name, `AGENT_OFF`, and made afresh in the content, #1290), `compaction`, the `ask_reviewer` server and the providers OpenCode wouldn't load itself
 (`models.agent_providers`). For the task's provider it sets `options.headerTimeout: false` and
 `chunkTimeout` at the larger of 900 s and `--silence-timeout` + 60 s (`runner.provider_timeouts`,
 `PROVIDER_TIMEOUTS`): OpenCode 2.3's 300 s header wait cut every slow request (a `retry` line);
@@ -2420,6 +2421,24 @@ slugs, `deepinfra/fp8`, compared folded, through `OPENROUTER_SLUGS` for the five
 2026-11-23 list that fold to something else, `Google` for `google-vertex` among them) is a
 `backend` event, `OpenRouter served <x>, not <order>`, and a `NOTE:` line in that round's report
 (`runner.backend_lines`). `data_collection` stays the user's OpenRouter account setting.
+
+**The user's agents can't lift the rules.** With no `--agent`, OpenCode 2.3.2's `run` took the
+session's agent from the config's `default_agent`, and the user's global `opencode.json` is one of those
+documents. OpenCode appends the top-level `permissions` (the layer's among them) to every agent, then
+each agent's own after them, and the last match wins: a user's `default_agent: mine` whose rules
+allowed `webfetch` and `subagent` gave both to every wb agent (#1290, 2026-11-24, measured with
+`tests/capture_llm.py`). So `run_round` always passes `--agent wb-code` (`context.AGENT`; OpenCode
+switches a resumed `--session` to it too, so every round, fresh session, self-review and repair runs
+under it). OpenCode loads the global config (and its `agents/*.md`) before the layer, and an agent entry
+merges onto an earlier one of that name, so a user's own `wb-code` would keep its `system`, `steps`,
+`request` and rules: the layer's `agents` removes it (`AGENT_OFF`, `disabled: true`), and
+`rules_env`'s `OPENCODE_CONFIG_CONTENT`, loaded after the layer, makes it again (`AGENT_ENTRY`,
+`mode: primary`, in wb's part, so the size fallback keeps it too). A new agent starts from OpenCode's
+defaults (allow, `.env` reads ask) and takes every top-level rule, as the default `build` agent did (its
+own `question: allow` the layer denies anyway). The user's content loses `agents` (the layer sets it)
+and its 1.x `agent`. Titles go to the hidden `title` agent and `small_model` as before (wb passes
+`--title`, so a round makes none). `RealOpenCodeRun.test_neither_the_users_default_agent_nor_their_own_wb_code_lifts_a_deny_in_any_round`;
+the fake refuses an agent the config never made (*The tests*).
 
 **Project config can't lift the rules.** OpenCode loads a project's `opencode.json` (worktree,
 `.opencode/`, any directory above) after `OPENCODE_CONFIG` and appends its permissions, so an
@@ -6938,7 +6957,10 @@ connections: [{type: "credential", id, label, method: "key"}]}]` per catalog pro
 splits at the first `/` and the first `#` after it: a catalog provider's unknown model is `{"type": "error", "error":
 {"type": "provider.no-route", "message": "Model unavailable: <id>"}}`, an unknown variant (neither the catalog's nor the
 config's `provider.<p>.models.<m>.variants`, V1 or V2, from `OPENCODE_CONFIG` and `OPENCODE_CONFIG_CONTENT`) `Variant
-unavailable for <id>: <v>`, both exit 1 before any step; a config model passes as before. Every `step_finish` has
+unavailable for <id>: <v>`, both exit 1 before any step; a config model passes as before. `run --agent <id>` takes
+an agent 2.3.2 has built in or the config makes (`agents.<id>` in `OPENCODE_CONFIG`, then `OPENCODE_CONFIG_CONTENT`;
+`disabled: true` removes it), else `{"type": "error", "error": {"type": "unknown", "message": "Agent not found:
+\"<id>\""}}`, exit 1 (#1290); `FAKE_RUNS` rows record it as `agent`. Every `step_finish` has
 `part.cost` (from the catalog's first price, its context tier past `size` by input plus cache reads and writes: `input` without cache reads, reasoning at
 the output rate; `FAKE_COST` for an unpriced model, else 0; `FAKE_STEP_COST` plays OpenCode's figure, a number or
 `none` for no `part.cost`) and `part.tokens{input, output, reasoning, cache{read, write}}` (`FAKE_STEP_IN` the input,
@@ -7049,11 +7071,12 @@ shell lines, rule order, git by path, the edit rule, PATH, the lane, `tool_outpu
 with it shut out (#994), and the instructions: the user's `~/.config/workbench/AGENTS.md` and its imports in, Claude's
 `~/.claude/CLAUDE.md` and rules out, in the lane and (OpenCode's own read, `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT`) without
 it (#513, #1061), and OpenTelemetry: an `OTEL_EXPORTER_OTLP_ENDPOINT` in the user's environment reaches no
-listener and no agent's shell, and passed by commands.json `env` it does, its unnamed headers not (`TELEMETRY_ENV`). `run_calls(name, calls, *start_flags)` runs `opencode run --auto` through `agent_env` and
+listener and no agent's shell, and passed by commands.json `env` it does, its unnamed headers not (`TELEMETRY_ENV`). `run_calls(name, calls, *start_flags)` runs `opencode run --agent wb-code --auto` (the runner's argv, #1290) through `agent_env` and
 `lane.wrap`; refusals read `permission.rejected`, `external_directory` or `Permission denied`. `RealOpenCodeRun` is the
 runner on real OpenCode (`wb start --model cap`): argv, `run --format json` events (a `tool_use`'s `state.output`, #1086; the shell tool's `workdir` in `state.input`, #1210's third review), `session export`
 (`context_state`), `session list` (`find_session`), `--session`, a real compaction (and the tail it keeps, `compaction.keep`, #1185), the task's own OpenCode home
-(no credentials in it, the user's store given no session, its commands seeing the user's `XDG_DATA_HOME`, #1010)
+(no credentials in it, the user's store given no session, its commands seeing the user's `XDG_DATA_HOME`, #1010),
+wb's agent (a user's `default_agent` and own `wb-code` lift no deny, in either round, #1290)
 (CLAUDE.md's *OpenCode quirks* points here). They are the only checks of the quirks, interop and lane: a skip is not a pass.
 `ApiThinking`'s `test_real_opencode_*` is one too (#1018): a `wb-off` body variant and the catalog's `none` reach a DeepSeek-shaped server as `thinking: {type: disabled}` in the agent's request, and the npm provider's V1 `wb-off`.
 
@@ -7336,6 +7359,9 @@ doc needs its own `!/` line).
   `measure_speed`, `last_words`), the fake's `<db>.sessions`, `RealOpenCodeRun`. A variable it moves → `runner.SHIM_RESTORES`,
   which the shell shim gives back; the shim's shell and its name ↔ `runner.test_shell` (the tests run where the agent's
   commands do; OpenCode picks its flags by the name, which `runner.shell_args` restates for the runner's own commands).
+- **wb's agent** (`context.AGENT`, #1290) → `run_round`'s `--agent`, the layer's `AGENT_OFF` (`context.layer`),
+  `rules_env`'s `AGENT_ENTRY` (loaded after the layer: one without the other leaves a user's `wb-code` merged in, or
+  no agent at all, which OpenCode refuses), the fake's `--agent` check, `RealOpenCode.run_calls`' argv.
 - **The layer's `permissions`** → the layer file alone, the project's config shut out (`rules_env`,
   `PROJECT_CONFIG_OFF`, #994); never `OPENCODE_CONFIG_CONTENT` (`CONFIG_CONTENT_MAX`); the user's own (`USERS_RULES`)
   before them. A key a project config mustn't change → `RESTATED`.

@@ -145,7 +145,10 @@ answer, as an API task spending until the spend guard stops it.
 With OPENCODE_MODELS_PATH (a models.dev v2 catalog, as 2.3.2 reads it in place of its own), a
 `run -m` of a provider the file lists finds the model there or not at all (`nokey`'s error), its
 variants the config's only (the file makes none: wb leaves `reasoning` unsupported); FAKE_RUNS
-rows record it as `models_path`, and OPENCODE_CONFIG_CONTENT as `content`.
+rows record it as `models_path`, and OPENCODE_CONFIG_CONTENT as `content`. `run --agent <id>`
+takes an agent OpenCode 2.3.2 has built in or the config defines (`agents.<id>` in
+OPENCODE_CONFIG, then OPENCODE_CONFIG_CONTENT; `disabled: true` removes it), else prints
+`Agent not found: "<id>"`, exit 1 (#1290); FAKE_RUNS rows record it as `agent` (None: no flag).
   http   a model request as OpenCode makes one, through its config (#1015): the run's provider's
          options from OPENCODE_CONFIG, then OPENCODE_CONFIG_CONTENT over them; POST
          <baseURL>/chat/completions with `Authorization: Bearer <apiKey>` (an `anthropic`
@@ -385,10 +388,8 @@ def fail(kind: str, message: str, status: int | None = None):
     sys.exit(1)
 
 
-def layer_variants(provider: str, mid: str) -> set:
-    """The variants the config adds to a model: V1 `provider.<p>.models.<m>.variants.<name>`,
-    V2 `providers.<p>.models.<m>.variants: [{id}]`, from the layer file and the content."""
-    found = set()
+def config_docs() -> list:
+    """The layer file and the content, in the order OpenCode loads them."""
     docs = []
     if os.environ.get("OPENCODE_CONFIG"):
         try:
@@ -400,7 +401,14 @@ def layer_variants(provider: str, mid: str) -> set:
         docs.append(json.loads(os.environ.get("OPENCODE_CONFIG_CONTENT") or "{}"))
     except ValueError:
         pass
-    for doc in docs:
+    return docs
+
+
+def layer_variants(provider: str, mid: str) -> set:
+    """The variants the config adds to a model: V1 `provider.<p>.models.<m>.variants.<name>`,
+    V2 `providers.<p>.models.<m>.variants: [{id}]`, from the layer file and the content."""
+    found = set()
+    for doc in config_docs():
         for key in ("provider", "providers"):
             v = (((doc.get(key) or {}).get(provider) or {}).get("models") or {}).get(mid) or {}
             v = v.get("variants") or {}
@@ -522,6 +530,7 @@ if os.environ.get("FAKE_RUNS") and args and args[0] == "run":  # which runs cont
         sees = None
     with open(os.environ["FAKE_RUNS"], "a") as fh:
         fh.write(json.dumps({"session": "--session" in args, "prompt": args[-1],
+                             "agent": args[args.index("--agent") + 1] if "--agent" in args else None,
                              "cwd": os.getcwd(), "pwd": os.environ.get("PWD"),
                              "opencode_db": os.environ.get("OPENCODE_DB"),
                              "xdg_data": os.environ.get("XDG_DATA_HOME"),
@@ -531,6 +540,13 @@ if os.environ.get("FAKE_RUNS") and args and args[0] == "run":  # which runs cont
                              "models_path": os.environ.get("OPENCODE_MODELS_PATH"),
                              "content": os.environ.get("OPENCODE_CONFIG_CONTENT"),
                              "shell_sees": sees}) + "\n")
+if args and args[0] == "run" and "--agent" in args:  # OpenCode 2.3.2's: built in, or the config's
+    known = {"build", "general", "explore", "compaction", "title", "summary"}
+    for doc in config_docs():
+        for name, entry in (doc.get("agents") or {}).items():
+            (known.discard if (entry or {}).get("disabled") else known.add)(name)
+    if (wanted := args[args.index("--agent") + 1]) not in known:
+        fail("unknown", f'Agent not found: "{wanted}"')
 if args and args[0] == "run" and "-m" in args:  # the model: <provider>/<id>[#<variant>]
     ref = args[args.index("-m") + 1]
     provider, _, rest = ref.partition("/")
