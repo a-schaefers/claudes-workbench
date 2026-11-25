@@ -2093,8 +2093,18 @@ deliberately hostile process.
 `SECRET`, `PASSW`, `CREDENTIAL`, `API_KEY`, `WEBHOOK` and the like; the `ANTHROPIC_`, `CLAUDE_`,
 `GH_`, `GITHUB_`, `AWS_`, `GOOGLE_`, `OPENAI_`, `HF_`… prefixes; the SSH and GPG agents and the
 D-Bus addresses) and any value that is a URL with a password (`USERINFO`), except `ENV_KEEP`
-(configuration under those prefixes: `HF_HOME`, `AWS_REGION`…). `commands.json` `"env": [names]` passes a needed one through (a
-provider's key, `DATABASE_URL`). A proxy with a password is one too (#380: installs and tests
+(configuration under those prefixes: `HF_HOME`, `AWS_REGION`…), and every OpenTelemetry variable
+(`TELEMETRY_ENV`, `OTEL_*`: OpenCode 2.3.2 exports OTLP/HTTP traces and logs to
+`OTEL_EXPORTER_OTLP_ENDPOINT` whenever it is set, its `cli starting` record carrying the argv, the
+round's prompt in it, with `OTEL_EXPORTER_OTLP_HEADERS`, the collector's key, on each request; with
+Claude Code's OTel on, every agent reported to the user's collector unasked, found by #1205's
+research). Without an endpoint OpenCode sends no telemetry of its own, so there is no switch to add: 2.3.2's
+CLI has no analytics or crash reporting, and a traced run (`strace`, a loopback-only network
+namespace, 2026-11-24) reached nothing past 127.0.0.1 but `models.opencode.ai`, the catalog fetch
+`OPENCODE_DISABLE_MODELS_FETCH` already stops (below).
+`commands.json` `"env": [names]` passes a needed one through (a
+provider's key, `DATABASE_URL`, an `OTEL_*` name for the user who wants the agents' telemetry: each
+by name, so an endpoint passed alone goes without its headers). A proxy with a password is one too (#380: installs and tests
 failed with network errors that read as the project's): `wb start` notes each dropped `*_proxy`
 (`runner.dropped_proxies`, `env_kept`), and a setup or test failing on `NET_FAILED` says so again
 (`proxy_gap`: the setup's `failed` notice, status `tests.proxy`), with the `"env"` line.
@@ -7038,7 +7048,8 @@ verbatim; a 402 run's message stays in its session, so a `--session` run of `RER
 shell lines, rule order, git by path, the edit rule, PATH, the lane, `tool_output` (cuts the shell's output, not `read`'s; a project config can't lift it), the project config handed back
 with it shut out (#994), and the instructions: the user's `~/.config/workbench/AGENTS.md` and its imports in, Claude's
 `~/.claude/CLAUDE.md` and rules out, in the lane and (OpenCode's own read, `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT`) without
-it (#513, #1061). `run_calls(name, calls, *start_flags)` runs `opencode run --auto` through `agent_env` and
+it (#513, #1061), and OpenTelemetry: an `OTEL_EXPORTER_OTLP_ENDPOINT` in the user's environment reaches no
+listener and no agent's shell, and passed by commands.json `env` it does, its unnamed headers not (`TELEMETRY_ENV`). `run_calls(name, calls, *start_flags)` runs `opencode run --auto` through `agent_env` and
 `lane.wrap`; refusals read `permission.rejected`, `external_directory` or `Permission denied`. `RealOpenCodeRun` is the
 runner on real OpenCode (`wb start --model cap`): argv, `run --format json` events (a `tool_use`'s `state.output`, #1086; the shell tool's `workdir` in `state.input`, #1210's third review), `session export`
 (`context_state`), `session list` (`find_session`), `--session`, a real compaction (and the tail it keeps, `compaction.keep`, #1185), the task's own OpenCode home
@@ -7287,6 +7298,9 @@ doc needs its own `!/` line).
   `ts`, `round`, `out`; gpu.json's `waiting`, `since`, `waiting_since`) → `top.py`, the Top tests; `--json` → *wb top*.
 - **A git call on a task's worktree** → `gitops.git` (pinned, no hooks), never `git -C`; parsed output: porcelain or `-z`.
 - **Permissions or the config layer** (`context.py`, `write_config_layer`) → the real-OpenCode tests, unskipped.
+- **`runner.TELEMETRY_ENV`** ↔ the variables through which OpenCode exports (2.3.2: `OTEL_EXPORTER_OTLP_ENDPOINT`,
+  `OTEL_EXPORTER_OTLP_HEADERS`; packages/util/src/observability) and any telemetry it adds by default: re-check its
+  source on each OpenCode bump, and RealOpenCode's OTel test.
 - **The lane** (`context.writable`, `readable`, `SECRETS`, `lane.py`) → the Lane and RealOpenCode tests on Landlock, the
   protocol's lane line, the handbook. What it leaves writable that runs later outside it (`TOOL_HOMES`, `NOT_WRITABLE`), what WSL's interop
   runs outside it (`windows_drives`, `agent_path`, `interop_gap`) → the lane's *Writes* and *Reads*, `wb doctor`. A secret in a `TOOL_HOMES` entry → `SPLIT_MADE`; one a

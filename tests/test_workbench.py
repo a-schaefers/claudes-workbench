@@ -10924,6 +10924,49 @@ class RealOpenCode(Base):
         self.assertEqual(len(answers), len(calls), "not every fake call came back")
         return task, answers
 
+    def test_the_users_opentelemetry_collector_hears_from_no_agent_unless_commands_json_names_it(self):
+        # found by #1205's research (2026-11-24): OpenCode 2.3.2 exports OTLP/HTTP traces and
+        # logs to OTEL_EXPORTER_OTLP_ENDPOINT whenever it is set, its "cli starting" record
+        # carrying the argv, the round's prompt in it, with OTEL_EXPORTER_OTLP_HEADERS on each
+        # request; wb kept both, so with Claude Code's OTel on every agent posted its prompt to
+        # the user's collector unasked, and the collector's key was in the agent's shell
+        posts = []
+
+        class Collector(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                n = int(self.headers.get("content-length") or 0)
+                posts.append((self.path, dict(self.headers), self.rfile.read(n) if n else b""))
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *a):
+                pass
+        collector = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Collector)
+        threading.Thread(target=collector.serve_forever, daemon=True).start()
+        self.addCleanup(collector.server_close)
+        self.addCleanup(collector.shutdown)
+        printenv = lambda name: [{"name": "shell", "arguments": {
+            "command": "printenv", "workdir": str(store.Task(name).worktree)}}]
+        with mock.patch.dict(os.environ, {
+                "OTEL_EXPORTER_OTLP_ENDPOINT": f"http://127.0.0.1:{collector.server_address[1]}",
+                "OTEL_EXPORTER_OTLP_HEADERS": "x-wb-test=CANARY-HEADER"}):
+            _, answers = self.run_calls("t-otel-off", printenv("t-otel-off"), in_lane=bool(lane.abi()))
+            time.sleep(3)                                    # OpenCode's batch, had it sent one
+            self.assertEqual([p for p, _, _ in posts], [])
+            self.assertNotIn("OTEL_", answers[0])            # nor in the agent's shell
+            self.assertNotIn("CANARY-HEADER", answers[0])
+            # named in commands.json `env`, the endpoint goes through (and the listener hears it)
+            Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": ["OTEL_EXPORTER_OTLP_ENDPOINT"]}))
+            _, answers = self.run_calls("t-otel-on", printenv("t-otel-on"), in_lane=bool(lane.abi()))
+        deadline = time.time() + 15
+        while time.time() < deadline and not any(p == "/v1/logs" for p, _, _ in posts):
+            time.sleep(0.2)
+        self.assertIn("/v1/logs", {p for p, _, _ in posts})
+        self.assertIn("OTEL_EXPORTER_OTLP_ENDPOINT", answers[0])
+        self.assertFalse([h for _, h, _ in posts if "CANARY-HEADER" in json.dumps(h)])  # not named
+
     def test_a_handed_skill_named_like_a_personal_one_loads_the_librarys_in_and_out_of_the_lane(self):
         # #515 (the audit of v1.90, reproduced): the app synced a personal `pdf` after the
         # library had one; denied by name, every load of the handed skill failed, unexplained
@@ -12181,6 +12224,32 @@ class Lane(Base):
         self.assertEqual(env["MY_API_KEY"], "k")        # passed through by name
         self.assertIn("PATH", env)
         self.assertEqual(env["PWD"], str(task.worktree))
+
+    def test_no_opentelemetry_variable_reaches_the_agent_unless_commands_json_names_it(self):
+        # found by #1205's research (2026-11-24): OpenCode exports its traces and logs, the
+        # round's prompt in them, to OTEL_EXPORTER_OTLP_ENDPOINT whenever it is set, and
+        # env_kept kept every OTEL_* but none of the collector's *_HEADERS (its key), so a
+        # user with Claude Code's OTel on had each agent report to their collector unasked
+        self.start("t-otel", "ok")
+        wait_phase("t-otel", {"review"})
+        task = store.Task("t-otel")
+        otel = {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4318",
+                "OTEL_EXPORTER_OTLP_HEADERS": "x-honeycomb-team=abc",
+                "OTEL_EXPORTER_OTLP_TRACES_HEADERS": "Authorization=Bearer abc",
+                "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": "http://127.0.0.1:4318/v1/logs",
+                "OTEL_RESOURCE_ATTRIBUTES": "team=core", "OTEL_SERVICE_NAME": "x",
+                "OTEL_METRICS_EXPORTER": "otlp", "OTEL_SDK_DISABLED": "false"}
+        for name, value in otel.items():
+            self.assertFalse(runner.env_kept(name, value, set()), name)
+            self.assertTrue(runner.env_kept(name, value, {name}), name)
+        self.assertTrue(runner.env_kept("HOTEL_NAME", "x", set()))         # a prefix, not a word
+        with mock.patch.dict(os.environ, otel):
+            self.assertFalse([k for k in runner.opencode_env(task) if k.startswith("OTEL_")])
+            self.assertFalse([k for k in runner.agent_env(task) if k.startswith("OTEL_")])  # the tests'
+            Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": ["OTEL_EXPORTER_OTLP_ENDPOINT"]}))
+            env = runner.opencode_env(task)
+        self.assertEqual({k: v for k, v in env.items() if k.startswith("OTEL_")},
+                         {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4318"})
 
     @home_outside_the_lane
     @unittest.skipUnless(lane.abi(), "needs Landlock: the kernel refuses the reads")
