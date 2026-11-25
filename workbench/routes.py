@@ -66,6 +66,14 @@ class RoutesError(RuntimeError):
     """routes.json can't be read, or a change can't be made; the message says why."""
 
 
+class _NoCap(RoutesError):
+    """A change that can spend with no day cap: change() makes it again with DAY_USD_SUGGEST as
+    its cap, said in its one line (#1322), unless the change itself took the cap off."""
+
+    def __init__(self):
+        super().__init__(NO_CAP)
+
+
 def path() -> Path:
     return Path(os.environ.get("WB_ROUTES") or Path.home() / ".config" / "workbench" / "routes.json")
 
@@ -273,7 +281,7 @@ def _busy_part(doc: dict, new: dict, cap, thinks: Callable[[str, str], str] = pl
     if now == "wait":
         return "When the GPU is busy: the role's API model → wait (queue, as before)", False
     if cap is None:
-        raise RoutesError(NO_CAP)
+        raise _NoCap()
     has = [r for r in ROLES if new["roles"][r].get("api")]
     what = ([f"a role with an API model ({', '.join(has)}) starts on it while the GPU is busy",
              *_thinking_on(has, new, thinks)]
@@ -476,9 +484,24 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
     switch, and ``thinking`` only) or None (the cap alone). ``who``: an API id's provider, as the
     user knows it (the catalog's name); ``thinks``: what an API id does with a thinking setting,
     as its task would run it (thinking_of, #1237). Never writes. RoutesError for a change that can't be
-    made: `api` with no API model kept, and the first API role with no cap (NO_CAP). ``order``:
-    an OpenRouter role's backends (#1021), dropped when the role's API model is another
-    provider's."""
+    made: `api` with no API model kept. The first API role with no cap takes DAY_USD_SUGGEST as
+    the change's cap, in its line (`cap $5/day`), so the dialog's one yes sets both: it was a
+    refusal (NO_CAP) whose answer was always --day-usd 5 (#1322); with the cap taken off in
+    this change it is still refused. ``order``: an OpenRouter role's backends (#1021), dropped
+    when the role's API model is another provider's."""
+    args = dict(role=role, via=via, gpu=gpu, api=api, thinking=thinking, who=who, use=use,
+                order=order, busy=busy, thinks=thinks)
+    try:
+        return _change(doc, day_usd=day_usd, **args)
+    except _NoCap:
+        if day_usd is not None:
+            raise
+    return _change(doc, day_usd=DAY_USD_SUGGEST, **args)
+
+
+def _change(doc: dict, role: str | None, via: str | None, gpu: str | None, api: str | None,
+            thinking: str | None, day_usd, who: Callable[[str], str], use: str | None,
+            order: list[str] | None, busy: str | None, thinks: Callable[[str, str], str]) -> Change:
     new = copy.deepcopy(doc)
     new.setdefault("use", "both")
     if day_usd is not None:
@@ -529,8 +552,9 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
                  and (effective_via(doc, r) != "api" or doc["roles"][r].get("api") != new["roles"][r].get("api"))
                  for r in ROLES)
     if to_api and cap is None:
-        raise RoutesError(NO_CAP)
+        raise _NoCap()
     busy_line, g = _busy_part(doc, new, cap, thinks)
+    capped = to_api or g  # a line that says "cap $N/day" already
     if busy_line:
         parts.append(busy_line)
         gated |= g
@@ -540,12 +564,12 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
         # (2026-11-23 review: `wb route all both` re-enabled it with no dialog, and a role's API
         # model set after `cap off` spent with no cap)
         if cap is None:
-            raise RoutesError(NO_CAP)
+            raise _NoCap()
         parts.append(f"when the GPU is busy, {', '.join(busy_now)} {'starts' if len(busy_now) == 1 else 'start'} "
                      f"on {'its' if len(busy_now) == 1 else 'their'} API model "
                      f"({'; '.join([_goes_to(busy_now, new, who), *_thinking_on(busy_now, new, thinks)])}; "
                      f"cap {money(cap)}/day)")
-        gated = True
+        gated = capped = True
     if cap is None and doc["day_usd"] is not None:  # `wb route cap off` (#1023): never under an API role
         if spends := [r for r in ROLES if effective_via(new, r) == "api"] + (["busy"] if busy_api_any(new) else []):
             raise RoutesError(f"the day cap stays while {', '.join(spends)} can spend on API: put "
@@ -554,7 +578,7 @@ def change(doc: dict, role: str | None, via: str | None = None, gpu: str | None 
         gated = True
     elif cap != doc["day_usd"]:
         gated = True
-        if doc["day_usd"] is not None or not to_api:  # else the role's "cap $N/day" said it
+        if doc["day_usd"] is not None or not capped:  # else the role's or busy's "cap $N/day" said it
             parts.append(f"day cap {money(doc['day_usd']) if doc['day_usd'] is not None else 'none'}"
                          f" → {money(cap)}/day")
     if not changed and not agents and not busy_line and cap == doc["day_usd"]:

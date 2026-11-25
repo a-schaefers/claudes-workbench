@@ -3397,7 +3397,7 @@ def _route_show(as_json: bool) -> None:
     if doc["day_usd"] is not None:
         print(f"day cap {routes.money(doc['day_usd'])}")
     elif routes.any_api(doc):
-        print(f"no day cap yet (asked when the first role goes to API; suggest ${routes.DAY_USD_SUGGEST})")
+        print("no day cap yet: wb route cap <usd> sets one")
 
 
 # a provider's key as the pane says it (#1023): only a stored one runs (the keyhole holds it)

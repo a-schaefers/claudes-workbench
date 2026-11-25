@@ -4178,8 +4178,9 @@ Three fixed roles (`routes.ROLES`, #1014): `significant` (complex coding), `triv
 selector between them, so flipping never loses the other side's model: `via` (`gpu` or `api`), `gpu`
 (a GPU model's id, or `auto`: the router picks, the default), `api` (an API model's exact OpenCode
 id, kept while the role is on the GPU) and `thinking` (`off`, the default, or `on`). One spend cap
-for the day, `day_usd`, asked when the first role goes to API (`DAY_USD_SUGGEST` $5 is only the
-suggestion: there is no default cap). Kept in `~/.config/workbench/routes.json` (`$WB_ROUTES`,
+for the day, `day_usd`, set when the first role goes to API: `--day-usd N`, else `DAY_USD_SUGGEST`
+$5 in that change's own line (`cap $5/day`), so the dialog's one yes sets both (#1322: no cap was a
+refusal, `NO_CAP`, whose answer was always `--day-usd 5`); there is no cap before it. Kept in `~/.config/workbench/routes.json` (`$WB_ROUTES`,
 `routes.path`), which no agent reads (`context.private_paths` adds `routes.path()`, wherever it is).
 
 **The Agents switch** (#1016, the owner's request in #1023): routes.json's top-level `use`
@@ -4218,7 +4219,7 @@ as before; one whose API model can't take it now (not in the catalog, no key, it
 full, a repo or task kept local, a standing commands.json `copy`/`siblings` the command line
 doesn't name, `cli._standing_gap`, the day cap reached, said without an API start's advice) does too, after `note: the GPU is busy, and the <role>
 role's API model <id> can't take it: <why>`. A running task never moves, and nothing goes from API to
-the GPU. Turning it to `api` takes the dialog's yes (it can spend) and a day cap (`NO_CAP`); back to
+the GPU. Turning it to `api` takes the dialog's yes (it can spend) and a day cap (the suggested one with no cap yet, #1322); back to
 `wait` none. While it is on, any change that lets a role newly start on an API model while the GPU is
 busy (an API model set on a GPU role, Agents back from GPU, an OpenRouter role's new backends:
 `routes._busy_newly`, which compares `routes._sent`, the model and its `order`) takes the yes and a
@@ -4286,8 +4287,9 @@ The changes (each one exit 3 with one line when refused, writing nothing):
   (`can't run: needs a key wb can hold outside the lane (…)`). A provider out of credit, rate-limited
   or unreachable is no refusal (`cli.HEALTH`): that passes. The kept API model of a role flipped to
   API is checked the same way.
-- The first role to go to API with no cap: `routes.NO_CAP`, `no day cap yet: ask the user for one
-  (suggest $5), then add --day-usd 5`.
+- The first role to go to API with no cap is none: the change takes `DAY_USD_SUGGEST` as its cap
+  (`routes._NoCap`, made again with it; #1322). `routes.NO_CAP` is left for a change that took the
+  cap off itself.
 - No change: `unchanged: <summary>`, nothing written.
 
 **The change line** (`routes.change`, which never writes) is the dialog's text, one part per role
@@ -4318,7 +4320,7 @@ next start runs on its API model already, so the part is said as if the role kep
 both)` (several: `the moves of significant to API, trivial to the GPU apply`); a role already on API
 given a new model has nothing held (#1236, 2026-11-24: the whole change was said to wait for Both, and
 the role's next start ran on the new model). The first role newly on API by any of these with no
-cap: `NO_CAP`.
+cap takes the suggested cap, `cap $5/day` in the line, said once (#1322).
 **Several roles in one change** (#1024, the first run's one question): `wb route <role> <choice>
 <role> <choice>… [--day-usd N]` (`cli._route_pairs`, the `more` positionals; a choice is `gpu`, `api`
 or an API id) is one write, one approval (its canonical `argv` holds every pair) and one echo. All or

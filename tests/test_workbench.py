@@ -33785,12 +33785,15 @@ class Routes(Base):
         self.assertEqual(self.route("trivial", "gpu")[1], "changed: trivial: API deepseek/deepseek-flash → GPU · API "
                          "kept: deepseek/deepseek-flash · its tasks already started keep their model\n")
 
-    def test_the_agents_switch_to_api_needs_a_cap_and_an_api_model_somewhere(self):
+    def test_the_agents_switch_to_api_takes_the_suggested_cap_and_needs_an_api_model_somewhere(self):
         self.assertEqual(self.route("all", "api")[0:3:2],
                          (3, "wb: no role has an API model yet: wb route <role> <provider/model>\n"))
         self.route("trivial", "--api", "deepseek/deepseek-flash")     # kept on the GPU: no cap asked
-        self.assertEqual(self.route("all", "api")[0:3:2], (3, f"wb: {routes.NO_CAP}\n"))
-        self.assertEqual(self.route("all", "api", "--day-usd", "5")[0], 0)
+        self.assertIsNone(routes.read()["day_usd"])
+        code, out, err = self.route("all", "api")                     # the cap in its line (#1322)
+        self.assertEqual(code, 0, err)
+        self.assertIn("cap $5/day", out)
+        self.assertEqual(routes.read()["day_usd"], routes.DAY_USD_SUGGEST)
         self.assertEqual(self.route("all", "nope")[0], 1)
         self.path.write_text(json.dumps({**self.doc(), "use": "sometimes"}))
         with self.assertRaises(routes.RoutesError) as e:
@@ -33820,15 +33823,15 @@ class Routes(Base):
                 self.assertIn(held, err)
         self.assertFalse(self.path.exists())
 
-    def test_the_first_api_role_needs_a_day_cap(self):
-        code, out, err = self.route("trivial", "deepseek/deepseek-flash")
-        self.assertEqual((code, out, err), (3, "", "wb: no day cap yet: ask the user for one (suggest $5), then "
-                                                    "add --day-usd 5\n"))
-        self.assertEqual(self.route("--dry-run", "--json", "trivial", "deepseek/deepseek-flash")[0], 3)
+    def test_the_first_api_role_takes_the_suggested_day_cap_in_its_one_line(self):
+        # it was refused (NO_CAP) until --day-usd 5 was added, always the answer: the dialog's one
+        # yes sets both now (#1322)
+        code, out, err = self.route("--dry-run", "--json", "trivial", "deepseek/deepseek-flash")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["change"], DEEPSEEK_LINE)
         self.assertFalse(self.path.exists())
-        self.assertEqual(self.route("cap", "5")[1], "changed: day cap none → $5/day\n")
-        self.assertEqual(self.route("trivial", "deepseek/deepseek-flash")[1],
-                         f"changed: {DEEPSEEK_LINE}\n")
+        self.assertEqual(self.route("trivial", "deepseek/deepseek-flash")[1], f"changed: {DEEPSEEK_LINE}\n")
+        self.assertEqual(routes.read()["day_usd"], 5)
         self.assertEqual(self.route("cap", "7.5")[1], "changed: day cap $5 → $7.50/day\n")
 
     def test_with_api_runs_off_an_api_start_is_refused_before_any_dialog_and_a_gpu_model_starts_as_before(self):
@@ -40550,8 +40553,10 @@ class FirstRunApi(Base):
         self.assertEqual(code, 3)
         self.assertTrue(err.startswith("wb: anthropic/claude-haiku-5-5 can't be a role's model: "), err)
         self.assertFalse(Path(os.environ["WB_ROUTES"]).exists())
-        code, _, err = self.wb("route", "trivial", "deepseek/deepseek-flash", "significant", "deepseek/deepseek-v4-pro")
-        self.assertEqual((code, err), (3, f"wb: {routes.NO_CAP}\n"))   # the cap is asked with the first API role
+        code, out, err = self.wb("route", "--dry-run", "trivial", "deepseek/deepseek-flash", "significant",
+                                 "deepseek/deepseek-v4-pro")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.endswith(" · cap $5/day\n"), out)    # the first API role's cap, suggested (#1322)
         for argv, want in ((("trivial", "gpu", "significant"), "significant has no choice"),
                            (("trivial", "gpu", "trivial", "api"), "trivial is named twice"),
                            (("trivial", "gpu", "cap", "5"), "no role 'cap'"),
@@ -40961,9 +40966,9 @@ class SettingsRoles(Base):
             "; when the GPU is busy, a role with an API model runs on it"))
 
     def test_wb_route_busy_api_takes_the_dialogs_yes_and_a_cap_while_wait_takes_none(self):
-        code, _, err = self.wb("route", "busy", "api")              # a terminal, but no cap yet
-        self.assertEqual(code, 3)
-        self.assertIn("no day cap yet", err)
+        code, out, err = self.wb("route", "--dry-run", "busy", "api")   # no cap yet: the suggested one
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.endswith("; cap $5/day)\n"), out)         # said once
         self.set_role("trivial", "--api", "deepseek/deepseek-flash", "--day-usd", "5")  # kept on the GPU
         os.environ["CLAUDECODE"] = "1"
         code, out, err = self.wb("route", "--dry-run", "--json", "busy", "api")
@@ -41028,10 +41033,10 @@ class SettingsRoles(Base):
         self.set_role("busy", "wait")
         self.routes.write_text(json.dumps({"busy": "api", "day_usd": 5}))   # the opt-in, no API model yet
         self.set_role("cap", "off")                                 # nothing can spend: allowed
-        code, _, err = self.wb("route", "trivial", "--api", "deepseek/deepseek-flash")
-        self.assertEqual(code, 3)
-        self.assertIn("no day cap yet", err)
-        self.assertNotIn("api", routes.read()["roles"]["trivial"])
+        code, out, err = self.wb("route", "trivial", "--api", "deepseek/deepseek-flash")
+        self.assertEqual(code, 0, err)                              # a terminal: the suggested cap with it
+        self.assertIn("cap $5/day", out)
+        self.assertEqual(routes.read()["day_usd"], 5)
 
 
 class BusyGpu(Base):
