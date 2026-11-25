@@ -402,13 +402,13 @@ worktree, `OPENCODE_CONFIG` the layer. Later rounds continue the session until a
 | OpenCode open after the agent's turn ended (#1160): the round ends as its finish, not stuck | the round, silence or think limit | `runner.run_round` |
 
 Past the think budget (7 min, `--think-timeout`, 0 off; from the round's first output, paused
-on a background command) the runner interrupts with `runner.NUDGE` and raises a check-in; the
-next round that stalls again is stuck; in a self-review on its green tree neither: the round's
-finish (`runner.settle`, #1261). The calls-without-an-edit guard's first trip in a session
+on a background command) the runner interrupts with `runner.NUDGE` (no check-in since #1322:
+the next round's report says "nudged once: it thought past its budget…"); the next round that
+stalls again is stuck; in a self-review on its green tree neither: the round's finish (`runner.settle`, #1261). The calls-without-an-edit guard's first trip in a session
 interrupts the same way with `runner.EXPLORE_NUDGE` ("N tool calls without changing a file: make
-the first edit now, one file per call, or finish and say what blocks you.") and a check-in ("the
-runner nudged it: N tool calls without changing a file"), unless a self-review's green tree
-settles it first; a second trip in the session it nudged (status `explore_nudged_session`; an
+the first edit now, one file per call, or finish and say what blocks you."), no check-in either
+(#1322: the report's "nudged once: many tool calls without changing a file"), unless a
+self-review's green tree settles it first; a second trip in the session it nudged (status `explore_nudged_session`; an
 unknown one stopped) stops the round as before; a fresh session is nudged again only after a
 change (status `explore_nudge_mark`, the worktree's `gitops.mark` at the nudge: a session that
 only read until OpenCode compacted it went fresh every round, each new session nudged, round 52
@@ -1485,7 +1485,7 @@ next round passing the budget again is stuck ("… even after a nudge"; else a s
 nudged, killed and rerun forever), only in the same session (`runner.renudged`, status `nudged_round`, #681). The explore
 nudge is the same kind of `now` note, once a session, a fresh one again only after a change (status `explore_nudged_session`,
 `explore_nudge_mark`, never `nudged_round`:
-*Guards*; its `checkin`: "the runner nudged it: N tool calls without changing a file"). Nudge rounds are marked
+*Guards*; no `checkin` either, #1322). Nudge rounds are marked
 `rounds/<n>/nudged` (`NUDGED`), skipped by `round_asks` (#681); a fresh nudge round keeps every
 earlier ask (#859). A note pending at exit is never delivered by that runner: the stuck report
 lists Claude's ("NOTE: not delivered…"), the next command marks them taken (`cli._stale_notes`);

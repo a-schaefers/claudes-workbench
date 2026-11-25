@@ -3165,7 +3165,7 @@ class Lifecycle(Base):
         self.assertEqual(st.get("nudges"), 1)
         self.assertFalse([r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
                           if r["task"] == "t-think" and r["kind"] == "checkin"])
-        self.assertIn("nudged once", store.Task("t-think").round_dir(st["round"])
+        self.assertIn("nudged once: it thought past its budget", store.Task("t-think").round_dir(st["round"])
                       .joinpath("summary.md").read_text())
 
     def test_a_prompt_too_long_for_one_argument_is_sent_as_its_file(self):
@@ -35542,9 +35542,11 @@ class ApiTasks(_ApiTask, _KeyholeTest):
             self.assertIn({"kind": "interrupted", "by": "workbench"},
                           [{"kind": e["kind"], "by": e.get("by")} for e in events if e["kind"] == "interrupted"])
             self.assertFalse([e for e in events if e["kind"] == "stopped"])
-            self.assertTrue(any(r["task"] == name and r.get("kind") == "checkin" and
-                                f"the runner nudged it: {limit} tool calls without changing a file" in r["text"]
-                                for r in store.read_jsonl(store.home() / "notify.jsonl")[0]))
+            # no wake, as the think nudge's (#1322, 2026-11-24): the review says "nudged once"
+            self.assertFalse([r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
+                              if r["task"] == name and r.get("kind") == "checkin"])
+            self.assertIn("nudged once: many tool calls without changing a file",
+                          task.round_dir(2).joinpath("summary.md").read_text())
 
     def test_a_fresh_session_after_an_explore_nudge_with_no_file_changed_is_stopped_not_nudged_again(self):
         # #1134 (D1)'s review, 2026-11-24: a session that only read until OpenCode compacted it

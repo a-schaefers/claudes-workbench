@@ -2089,11 +2089,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         if explore and not out["stuck"]:  # another guard's stop this pass: stopped, not nudged
             _, calls, here = explore
             task.set_status(explore_nudged_session=task.status.get("session"), explore_nudge_mark=here)
-            nudges = _runner_nudge(task, n, EXPLORE_NUDGE.format(n=calls))
-            task.notify("checkin", checkin_text(task, n, out, max(started, float(
-                task.status.get("checkin_at") or 0)), step_prior + clock.ran(mono))
-                + f"\nthe runner nudged it: {calls} tool calls without changing a file "
-                f"(nudge {nudges} this task; limit {detector.no_edit})", round=n)
+            # no wake, as the think nudge's (#1322, 2026-11-24): the next round's report says
+            # "nudged once"
+            _runner_nudge(task, n, EXPLORE_NUDGE.format(n=calls))
         if nudge:
             nudged = True
             task.set_status(nudged_round=n)
@@ -4311,8 +4309,12 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
                      + ("; next round fresh" if fresh_reason(task, after) else "")
                      + (f"; {full[-1]['read']}% read before its first edit: name fewer files or "
                         "put them in the spec" if full and full[-1].get("read") is not None else ""))
-    if task.round_dir(n).joinpath(NUDGED).exists():  # the think nudge's, no wake of its own (#1322)
-        lines.append("nudged once: it thought past its budget with no tool call")
+    if task.round_dir(n).joinpath(NUDGED).exists():  # a nudge's, no wake of its own (#1322)
+        prompt = task.round_dir(n) / "prompt.md"
+        explore = prompt.exists() and EXPLORE_NUDGE.split(":")[0].removeprefix("{n}") in prompt.read_text(
+            errors="replace")
+        lines.append("nudged once: " + ("many tool calls without changing a file" if explore
+                                        else "it thought past its budget with no tool call"))
     lines += backend_lines(task, n)  # #1021
     if (oc := st.get("opencode_note") or {}).get("round") == n:  # opencode_moved (#1322)
         lines.append(oc.get("text") or "")
