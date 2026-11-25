@@ -66,6 +66,10 @@
   // Until the first live state, the thread this page last had, so a reload shows it at once
   let state = { messages: token ? load(K.thread, []) : [], push: {}, listener: null }
   let live = false
+  // the computer answering: not while the stream fails past its first tries, or offline. Without
+  // it the header said "Claude · listening" in green under "Can't reach the computer" (#1415,
+  // 2026-11-25); apart from `live`, which says only that a state came once
+  let reachable = true
   let skew = 0                                  // server clock − ours, seconds
   // The outbox: one localStorage key per message (OUT + its cid), read afresh whenever it is
   // used. A single shared array was each tab's own copy saved over the others': two tabs offline,
@@ -512,8 +516,9 @@
   function drawPresence() {
     const l = state.listener
     const where = l ? l.cwd.replace(/^\/home\/[^/]+/, '~') : ''
-    presence.className = 'presence ' + (!l ? 'away' : l.busy ? 'working' : 'listening')
-    presenceText.textContent = !token ? 'not connected' : !live ? 'connecting…' : !l ? 'no session listening · messages wait' :
+    presence.className = 'presence ' + (live && !reachable ? 'down' : !l ? 'away' : l.busy ? 'working' : 'listening')
+    presenceText.textContent = !token ? 'not connected' : !live ? 'connecting…' : !reachable ? 'computer unreachable · messages wait'
+      : !l ? 'no session listening · messages wait' :
       // the app's name above, whom you talk to here (#103: a notification opened on "Claude")
       'Claude · ' + (l.busy ? 'working in ' : 'listening in ') + where
   }
@@ -536,7 +541,7 @@
     if (typeof s.now === 'number') { skew = s.now - Date.now() / 1000; stamp = Math.max(stamp, s.now) }
     if (s.build && build && s.build !== build && reloadOnce()) return  // updated: the new page
     if (s.build) build = s.build
-    live = true
+    live = true; reachable = true
     if (!quiet) save(K.thread, (s.messages || []).slice(-50))  // a patch without messages: no rewrite (#755)
     state = { messages: s.messages || [], push: s.push || {}, listener: s.listener || null, savings: s.savings || null, expire: s.expire || 0, uploads: s.uploads || null, tasks: s.tasks || [] }
     drawTasks()
@@ -660,6 +665,7 @@
     const wait = Math.round(base * (0.8 + Math.random() * 0.4))
     if (!online) banner('Offline. Messages will send when the connection is back.', true)
     else if (failures > 2) banner(`Can't reach the computer. Trying again in ${Math.ceil(wait / 1000)}s…`, true)
+    if (reachable && (!online || failures > 2)) { reachable = false; drawPresence() }
     retryTimer = setTimeout(connect, wait)
   }
   const reconnectNow = () => { if (conn) { conn.abort(); conn = null } failures = Math.min(failures, 1); connect() }
@@ -681,7 +687,7 @@
   // another tab queued, sent or dropped a message: show it, and send it if this tab can
   addEventListener('storage', e => { if (e.key === null || e.key.startsWith(OUT)) { outbox = outItems(); render(); flush(true) } })
   addEventListener('online', () => { online = true; banner(''); reconnectNow(); flush(true); render(); reshowView() })
-  addEventListener('offline', () => { online = false; banner('Offline. Messages will send when the connection is back.', true); render() })
+  addEventListener('offline', () => { online = false; reachable = false; banner('Offline. Messages will send when the connection is back.', true); render() })
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
       finishAll()

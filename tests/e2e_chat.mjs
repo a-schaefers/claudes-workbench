@@ -219,6 +219,18 @@ async function run(engine, device) {
     await until(async () => (await page.locator('.row.claude .bubble').last().textContent()).includes('Back again.'), 20000)
     await until(async () => await page.locator('#net').isHidden())
   })
+  await check('while the computer can\'t be reached the header says so, never listening, and says listening again once it is back (#1415)', async () => {
+    // #1415 (2026-11-25): the banner said "Can't reach the computer", the header under it "Claude ·
+    // listening in …" with its green dot, the whole time
+    const said = () => page.evaluate(() => ({ text: document.getElementById('presence-text').textContent, cls: document.getElementById('presence').className }))
+    await stopServer()
+    try {
+      await until(async () => { const s = await said(); return s.text === 'computer unreachable · messages wait' && !/listening|working/.test(s.cls) })
+        .catch(async () => { throw new Error(JSON.stringify(await said())) })
+    } finally { startServer() }
+    await until(async () => (await said()).text.includes('listening in ~/project'), 40000)
+    await until(async () => await page.locator('#net').isHidden())
+  })
   await check('a reload shows the same thread, nothing doubled, still keyed', async () => {
     await page.reload()
     await until(async () => (await page.locator('.row').count()) === 4)

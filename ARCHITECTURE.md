@@ -5968,7 +5968,9 @@ the composer until the server has it (#245). A 4xx but 401 marks it not sent, ex
 `DEAD_MS` 40 s watchdog counts as a failure (jittered backoff 0.5–30 s); an abort cancels the body's
 reader (WebKit keeps the socket); back on screen after `AWAY_MS` 3 s, or from the bfcache silent for
 `STALE_MS` 20 s, or on the worker's `{kind: "push"}`, it dials at once (2026-11-20); a new `build`
-reloads (`reloadOnce`, once a minute). The thread follows the newest line (`follow`) until a wheel, a finger or a scroll up
+reloads (`reloadOnce`, once a minute). While the stream fails past its first two tries (the banner's `Can't reach
+the computer`) or the page is offline, the header says `computer unreachable · messages wait` with a grey dot
+(`reachable`, set again by the next state), never the last listener's green `listening` (#1415). The thread follows the newest line (`follow`) until a wheel, a finger or a scroll up
 releases it; a scroll that came with the thread's height changing is the layout's (`lastHeight`: images loading
 after a reload had read as the reader going up, and the server's thread was drawn mid-thread, #1223). A screen reader
 hears the thread through `#say` (`role=log`, `.sr-only`), outside it: each new message from Claude and each waiting line once,
@@ -7783,7 +7785,8 @@ the click still runs the real wb. What the chat is for (#1341): the empty state'
 thread the hint shows, dismisses, and stays dismissed after a reload, and where every storage call throws it still
 shows and dismisses with no page error. Sends land exactly once through
 outages, reloads and a SIGSTOP past the 40 s watchdog; settings (no away setting, its old endpoint 404), install over https, `/api/seen` and
-`/api/active` only while in use and on the Chat view (none from a click in Settings or Stats, #1374), the thread
+`/api/active` only while in use and on the Chat view (none from a click in Settings or Stats, #1374), the header's
+`computer unreachable` while the server is down, `listening` once it is back (#1415), the thread
 in no live region (a presence change re-adds no row's line, and a focused `copy` keeps the focus; a reply said once,
 whole, in `#say`, #1408, #1409), the message box's focus ring at 3:1 on the page (#1411), the waiting line (one line, no buttons, no answer card, cleared once settled, #1350), shot pairs, listen's shortlist, the keyboard, uploads (an upload check that never answers given up, #1390), an agent's message
 shown with its name and its reply through `/api/wait`, that reply named `Claude to <agent>` and
