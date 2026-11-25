@@ -115,9 +115,15 @@ class Sharing(Base):
         out = run_wb("start", "t-small", "--spec", str(self.spec), "--repo", str(self.repo),
                      "--model", SMALL, "--test", TEST_CMD)  # no wait for it (#805)
         self.assertNotIn("the GPU is busy", out)
-        wait_phase("t-small", {"review"})              # while t-big's tests still run
+        # its round runs while t-big's tests still do; its own tests then wait their turn, one
+        # suite at a time on this machine (#1378, 2026-11-25), so it reaches review once t-big stops
+        deadline = time.time() + 60
+        while "t-big's tests" not in (store.Task("t-small").status.get("last") or "") and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertIn("waiting for t-big's tests", store.Task("t-small").status.get("last") or "")
         self.assertEqual(store.Task("t-big").status["phase"], "testing")
         run_wb("stop", "t-big")
+        wait_phase("t-small", {"review"})
 
     def runs_in_order(self, *marks):
         """Each mark's first fake run, in the order the runs came (FAKE_RUNS)."""
