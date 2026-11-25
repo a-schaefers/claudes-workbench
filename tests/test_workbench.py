@@ -27331,6 +27331,31 @@ class WebChat(Base):
         self.assertIn('"$HOME/.local/bin/wb" chat serve', agent["ProgramArguments"][-1])
         self.assertTrue(agent["RunAtLoad"] and agent["KeepAlive"])
         self.assertIn("/opt/homebrew/bin", agent["EnvironmentVariables"]["PATH"])  # not the stub python3
+        self.assertIn("/usr/sbin", agent["EnvironmentVariables"]["PATH"].split(":"))  # #1305
+
+    def test_on_macos_the_machine_and_boot_are_read_by_absolute_path_whatever_the_path(self):
+        # #1305 (bar loop round 8): the launchd agent's PATH had no /usr/sbin, so wb chat serve
+        # took the host name for the machine while the mod's wb events sent the hardware UUID,
+        # and a closed session's listener.json read as another machine's claim, still listening
+        def run(argv, **kw):
+            if argv[0] == "/usr/sbin/ioreg":
+                return subprocess.CompletedProcess(argv, 0, '  "IOPlatformUUID" = "5A1B-UUID"\n', "")
+            if argv[0] == "/usr/sbin/sysctl":
+                return subprocess.CompletedProcess(argv, 0, "{ sec = 1732000000, usec = 1 } Wed", "")
+            raise FileNotFoundError(argv[0])                 # by name: not on the agent's PATH
+        real_read = Path.read_text
+        def read(path, *a, **kw):
+            if str(path) in ("/etc/machine-id", "/var/lib/dbus/machine-id",
+                             "/proc/sys/kernel/random/boot_id"):
+                raise FileNotFoundError(path)
+            return real_read(path, *a, **kw)
+        with mock.patch.object(store.sys, "platform", "darwin"), \
+                mock.patch.object(store, "_MACHINE", []), mock.patch.object(store, "_BOOT", []), \
+                mock.patch.object(Path, "read_text", read), \
+                mock.patch("subprocess.run", side_effect=run), \
+                mock.patch.dict(os.environ, {"PATH": "/opt/homebrew/bin:/usr/bin:/bin"}):
+            self.assertEqual(store.machine(), "5A1B-UUID")       # never the host name
+            self.assertEqual(store.boot_id(), "1732000000")
 
     def test_a_chat_on_an_address_that_comes_and_goes_rebinds_in_place_when_it_changes(self):
         # #200 (the 2026-11-19 audit): with bind ["tailscale"] the plan was loopback while the
