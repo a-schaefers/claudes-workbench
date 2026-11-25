@@ -1516,13 +1516,18 @@ def _api_model(mid: str, entry: dict, prov: dict, extra: dict) -> Model:
         over = {**over, "catalog_cost": config.get("cost"), "cost": mine}
         config = {**config, "cost": mine}
     config = api_limits(config)
+    # the model's own package and base before its provider's, which is the catalog's first entry:
+    # OpenCode Zen's Claude models (anthropic, …/anthropic/v1) went out as its first one's
+    # (openai-compatible, …/openai/v1), every request a 404, and its Gemini ones read ready
+    # (#1387, 2026-11-25)
+    own = lambda k: entry[k] if isinstance(entry.get(k), str) and entry[k] else prov.get(k)  # noqa: E731
     return Model(id=mid, provider=pid, name=str(entry.get("name") or mid.split("/", 1)[1]),
-                 base_url=str(prov.get("api") or ""), engine="api",
+                 base_url=str(own("api") or ""), engine="api",
                  label=over.get("label") or (OLLAMA_CLOUD if cloud else f"{prov.get('name') or pid} (API)"),
                  extra=over, config=config, remote=True, cloud=cloud, kind="api",
                  key=str(prov.get("key") or ("none" if entry.get("free") else "")),
                  free=bool(entry.get("free")),
-                 package=str(prov.get("package") or ""))
+                 package=str(own("package") or ""))
 
 
 PRICE_KEYS = ("input", "output")  # per million tokens; cache read and write go in `cache`

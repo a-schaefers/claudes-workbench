@@ -111,6 +111,13 @@ QUOTA = re.compile(r"(?i)insufficient[_ ](?:quota|balance|credits?|funds)|exceed
 # task failed as the agent's, no no_credit, no remedy (#1079, 2026-11-23). Only this wording on a
 # 400, never a bare "billing": an ordinary bad request may mention billing.
 CREDIT = re.compile(r"(?i)credit balance is too low|purchase credits|plans (?:&|and) billing")
+# A 429 for one request over the account's per-minute token limit (OpenAI's "Request too large for
+# <model> … on tokens per min (TPM): Limit 30000, Requested 45210", every request on tier 1 under
+# the pinned output cap): the same request never passes, so it was held, run again once and failed
+# after about 20 minutes as "rate-limited" (#1380, 2026-11-25). "Limit N, Requested M" only with
+# M > N: an ordinary TPM 429 says "Limit 30000, Used 29000, Requested 2000".
+TOO_LARGE = re.compile(r"(?i)request too large")
+LIMIT_ASKED = re.compile(r"(?i)\blimit:? ([\d,]+), requested:? ([\d,]+)")
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
        "trailers", "transfer-encoding", "upgrade", "proxy-connection"}
 CLIENT_AUTH = {"authorization", "x-api-key", "api-key"}
@@ -631,6 +638,15 @@ class Keyhole:
             self.task.set_status(api_stop={"guard": "quota", "text": text})
         return text
 
+    def too_large(self, code: int, text: str) -> str:
+        """A request over the per-minute token limit by itself (#1380): `api_stop` with guard
+        `refused`, the provider's words in its text, and the text OpenCode is answered with."""
+        said = _error_said(text)
+        text = f"{self.model.provider} refused the request (HTTP {code})" + (f": {said}" if said else "")
+        if self.task is not None:
+            self.task.set_status(api_stop={"guard": "refused", "text": text})
+        return text
+
     def unreachable(self, why: str) -> str:
         """This machine's setup can't reach the provider (a certificate that doesn't verify, a
         proxy refusing the tunnel): `api_stop` with guard `setup`, so the round stops at once and
@@ -707,6 +723,27 @@ def _timeout(task) -> float:
 
 def _printable(text: str) -> str:
     return redact(re.sub(r"[^\x20-\x7e]", "?", str(text)))[:120]
+
+
+def _too_large(text: str) -> bool:
+    """Whether a 429's body says the request alone is over a per-minute limit (#1380)."""
+    if TOO_LARGE.search(text):
+        return True
+    m = LIMIT_ASKED.search(text)
+    return bool(m) and int(m[2].replace(",", "") or 0) > int(m[1].replace(",", "") or 0)
+
+
+def _error_said(text: str) -> str:
+    """An error body's message (`error.message` or `message` of its JSON), else its first line:
+    redacted, printable, at most 200 characters."""
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        doc = None
+    err = doc.get("error") if isinstance(doc, dict) else None
+    said = err.get("message") if isinstance(err, dict) else doc.get("message") if isinstance(doc, dict) else None
+    said = said if isinstance(said, str) and said.strip() else text
+    return _first_line(re.sub(r"[^\x20-\x7e\n]", "?", said))
 
 
 def _retry_after(value: str | None) -> float:
@@ -1029,6 +1066,8 @@ def _handler(kh: Keyhole):
                         resp, backoff if backoff <= deadline - time.monotonic() else None)
                     if kind == "quota":  # no wait helps: the round stops, and OpenCode doesn't retry a 400
                         return self.send_json(400, f"keyhole: {kh.quota(status)}: the round stops")
+                    if kind == "too_large":  # nor here (#1380): never held, sent again or a cooldown
+                        return self.send_json(400, f"keyhole: {kh.too_large(status, text)}: the round stops")
                     if kind in ("rate_limited", "outage"):
                         after = _after_secs(resp.getheader("Retry-After"))
                         how = self.hold_on(kind, status, backoff if after is None else after, deadline)
@@ -1075,7 +1114,8 @@ def _handler(kh: Keyhole):
 
         def read_error(self, resp, wait: float | None = None):
             """(status, headers, redacted body, kind) of an upstream error: kind `quota`,
-            `rate_limited`, `outage` or None (HOLD_CODES, QUOTA, CREDIT), and the provider's health: a
+            `too_large`, `rate_limited`, `outage` or None (HOLD_CODES, QUOTA, CREDIT, _too_large),
+            and the provider's health (none for `too_large`: the account isn't limited): a
             rate limit until Retry-After, else ``wait`` (the hold's backoff) when given, else
             RATE_LIMIT_SECS; any 5xx unreachable, held or not."""
             data = resp.read(ERROR_CAP + 1)
@@ -1088,7 +1128,8 @@ def _handler(kh: Keyhole):
             text = kh.redact(text)
             status = resp.status
             kind = ("quota" if status == 402 or (status in (429, 403) and QUOTA.search(text))
-                    or (status in (400, 403, 429) and CREDIT.search(text)) else HOLD_CODES.get(status))
+                    or (status in (400, 403, 429) and CREDIT.search(text))
+                    else "too_large" if status == 429 and _too_large(text) else HOLD_CODES.get(status))
             if kind == "quota" or "insufficient_quota" in text:
                 kh.health("no_credit", _first_line(text))
             elif kind == "rate_limited":
@@ -1341,9 +1382,9 @@ def _strict_json(raw: bytes):
 
 def start(task, m, *, log=None, on_usage=None, on_health=None, room=None) -> Keyhole:
     """The keyhole for task ``task``'s API model ``m`` (models.Model: id, provider, name,
-    base_url, and the catalog's provider package as ``package``): its key loaded (load_key), its
-    protocol from the package, its upstream the catalog's base. Logs one line, no key and no
-    token. Raises KeyholeError when there is no key wb can hold, or no API base."""
+    base_url, and the catalog's package as ``package``: the model's own, else its provider's,
+    #1387): its key loaded (load_key), its protocol from the package, its upstream the catalog's
+    base. Logs one line, no key and no token. Raises KeyholeError when there is no key wb can hold, or no API base."""
     package = getattr(m, "package", "") or ""
     if _signs(m.provider, package):
         raise KeyholeError(f"{NEEDS}: {m.provider} signs each request (SigV4 or Vertex)")

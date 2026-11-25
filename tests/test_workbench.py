@@ -31043,6 +31043,36 @@ class Keyhole(_KeyholeTest):
         self.assertAlmostEqual(seen[2][2], now + 60, delta=5)          # no Retry-After: 60 s
         self.assertAlmostEqual(seen[3][2], now + 120, delta=5)
 
+    def test_a_429_saying_the_request_is_too_large_for_the_tpm_limit_is_passed_on_at_once_not_held(self):
+        # #1380 (2026-11-25): OpenAI tier 1's 429 for one request over the TPM limit was held as a
+        # rate limit, sent again and again, and the round failed ~20 minutes on as "rate-limited"
+        seen = []
+        kh = self.keyhole(on_health=lambda *a: seen.append(a), hold=30)
+        self.up.mode, self.up.status, self.up.retry_after = "status", 429, "1"
+        self.up.message = ("Request too large for gpt-up-1101 in organization org-x on tokens per min "
+                           "(TPM): Limit 30000, Requested 45210. The input or output tokens must be reduced.")
+        began = time.monotonic()
+        code, _, text = self.post(kh)
+        self.assertEqual(code, 400, text)                                # OpenCode won't retry a 400
+        self.assertLess(time.monotonic() - began, 5)                     # never the hold
+        self.assertEqual(len(self.up.seen), 1)
+        stop = self.task.status["api_stop"]
+        self.assertEqual(stop["guard"], "refused")
+        self.assertEqual(stop["text"], "deepinfra refused the request (HTTP 429): " + self.up.message)
+        self.assertIn("the round stops", json.loads(text)["error"]["message"])
+        self.assertEqual(seen, [])                                       # no cooldown for other tasks
+        # "Limit N, Requested M" alone says it only when M > N: an ordinary TPM 429 is still held
+        self.task.set_status(api_stop=None)
+        kh = self.keyhole(on_health=lambda *a: seen.append(a), hold=0)
+        for message in ("Rate limit reached on tokens per min (TPM): Limit 30000, Used 29000, Requested 2000.",
+                        "Rate limit on tokens per min: Limit 30000, Requested 20000."):
+            self.up.message = message
+            self.assertEqual(self.post(kh)[0], 429)
+        self.assertEqual([s[0] for s in seen], ["rate_limited", "rate_limited"])
+        self.up.message = "Rate limit on tokens per min: Limit 6,000, Requested 8,000."
+        self.assertEqual(self.post(kh)[0], 400)
+        self.assertEqual(self.task.status["api_stop"]["guard"], "refused")
+
     def test_an_unreachable_upstream_is_a_502_that_says_so(self):
         seen = []
         m = self.model()
@@ -31205,6 +31235,67 @@ class Keyhole(_KeyholeTest):
                       text)
         self.assertIn("the round stops", text)                           # a 400: OpenCode won't retry
         self.assertEqual(self.task.status["api_stop"]["guard"], "setup")
+
+    def test_a_ca_without_critical_basic_constraints_or_trusted_through_node_extra_ca_certs_verifies_as_opencode_would(self):
+        # #1385 (2026-11-25): Python 3.13's default VERIFY_X509_STRICT failed every request on a
+        # chain OpenCode, curl and node accept (a TLS-inspecting proxy's CA, basicConstraints not
+        # critical, no key identifiers), and a CA trusted for OpenCode through NODE_EXTRA_CA_CERTS
+        # alone never verified, on any Python. The strict flag is set here as 3.13's default does.
+        import ssl
+        from workbench import webpush
+        if not shutil.which("openssl"):
+            self.skipTest("needs openssl")
+        tmp = Path(self.tmp.name)
+        ca, ca_key, key, cert, csr, ext = (tmp / n for n in ("ca.pem", "ca-k.pem", "k.pem", "c.pem",
+                                                              "c.csr", "ext"))
+        ext.write_text("subjectAltName=DNS:localhost,IP:127.0.0.1\n")
+        ec = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-config", os.devnull]
+        for argv in (["req", "-x509", *ec, "-keyout", ca_key, "-out", ca, "-days", "1", "-subj", "/CN=wb-ca",
+                      "-addext", "basicConstraints=CA:TRUE", "-addext", "keyUsage=keyCertSign"],
+                     ["req", *ec, "-keyout", key, "-out", csr, "-subj", "/CN=localhost"],
+                     ["x509", "-req", "-in", csr, "-CA", ca, "-CAkey", ca_key, "-CAcreateserial",
+                      "-out", cert, "-days", "1", "-extfile", ext]):
+            subprocess.run(["openssl", *argv], check=True, capture_output=True)
+        up = _QuietUpstream(("127.0.0.1", 0), _Upstream)
+        up.daemon_threads = True
+        up.seen, up.mode, up.status, up.message = [], "ok", 200, ""
+        up.retry_after, up.chunks, up.gap = None, 1, 0
+        up.served, up.by, up.ctype, up.pieces = "served-model", None, "application/json", []
+        served = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        served.load_cert_chain(cert, key)
+        up.socket = served.wrap_socket(up.socket, server_side=True)
+        threading.Thread(target=up.serve_forever, daemon=True).start()
+        self.addCleanup(up.server_close)
+        self.addCleanup(up.shutdown)
+        (tmp / "no-cas.pem").write_text("")
+        (tmp / "no-cas").mkdir()
+        made = ssl.create_default_context
+
+        def strict(*a, **kw):
+            ctx = made(*a, **kw)
+            ctx.verify_flags |= ssl.VERIFY_X509_STRICT
+            return ctx
+
+        m = self.model()
+        base = f"https://localhost:{up.server_port}/v1/openai"
+        for env, want in (({"SSL_CERT_FILE": str(ca)}, 200),              # the CA in Python's store
+                          ({"NODE_EXTRA_CA_CERTS": str(ca)}, 200),        # trusted for OpenCode alone
+                          ({}, 400)):                                     # trusted nowhere: the CA check stays
+            os.environ.update(SSL_CERT_FILE=str(tmp / "no-cas.pem"), SSL_CERT_DIR=str(tmp / "no-cas"))
+            os.environ.pop("NODE_EXTRA_CA_CERTS", None)
+            os.environ.update(env)
+            with mock.patch.object(webpush, "_ctx", []), mock.patch.object(webpush, "MAC_CAS", str(tmp / "none.pem")), \
+                    mock.patch.object(ssl, "create_default_context", strict):
+                kh = self.kh_mod.Keyhole(self.task, m, self.kh_mod.Key(m.provider, self.CANARY), base,
+                                         "bearer", log=self.lines.append)
+                self.addCleanup(kh.close)
+                code, _, text = self.post(kh)
+                ctx = webpush.tls()
+            self.assertEqual(code, want, (env, text))
+            self.assertTrue(ctx.check_hostname)
+            self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+        self.assertIn("its certificate didn't verify", text)
+        self.assertEqual(len(up.seen), 2)
 
     def test_anthropics_cache_writes_are_metered_when_its_message_delta_names_thinking_tokens(self):
         # #1081 (2026-11-23): Anthropic's message_delta now carries output_tokens_details
@@ -34898,6 +34989,40 @@ class Routes(Base):
         self.assertEqual(provs["deepseek"]["key"], "stored")
         self.assertTrue(runner.models.status(runner.models.hosted()["deepseek/deepseek-flash"])["available"])
 
+    def test_a_providers_models_each_keep_their_own_package_and_base_not_its_first_ones(self):
+        # #1387 (2026-11-25): OpenCode Zen lists openai-compatible, anthropic and google models at
+        # different bases; every one took the first entry's, so its Claude models posted /messages
+        # to …/openai/v1 with a bearer key (a 404 every request) and its Gemini ones read ready
+        from workbench import keyhole
+        base = "https://opencode.test/zen"
+        zen = [api_entry("opencode", "big-pickle", settings={"baseURL": f"{base}/openai/v1"},
+                         package="@opencode/ai/providers/openai-compatible"),
+               api_entry("opencode", "claude-x-5", settings={"baseURL": f"{base}/anthropic/v1"},
+                         package="@opencode/ai/providers/anthropic"),
+               api_entry("opencode", "gemini-x-4", settings={"baseURL": f"{base}/google/v1beta"},
+                         package="@opencode/ai/providers/google")]
+        rest = [e for e in ROUTES_CATALOG if e["providerID"] != "opencode"]
+        self.catalog([*rest, *zen], [*ROUTES_AUTH, key_row("opencode", "OpenCode Zen", STORED)])
+        hosted = runner.models.hosted(fresh=True)
+        pickle, claude, gemini = (hosted[f"opencode/{n}"] for n in ("big-pickle", "claude-x-5", "gemini-x-4"))
+        self.assertEqual((pickle.package, pickle.base_url),
+                         ("@opencode/ai/providers/openai-compatible", f"{base}/openai/v1"))
+        self.assertEqual((claude.package, claude.base_url),
+                         ("@opencode/ai/providers/anthropic", f"{base}/anthropic/v1"))
+        self.assertEqual(keyhole.protocol_of(claude.package), "anthropic")
+        self.assertEqual(runner.models.keyhole_refusal(claude), "")
+        self.assertIn("the keyhole doesn't speak", runner.models.keyhole_refusal(gemini))
+        self.assertFalse(runner.models.status(gemini)["available"])
+        code, _, err = self.route("trivial", "opencode/gemini-x-4", "--day-usd", "1")
+        self.assertEqual(code, 3, err)
+        self.assertIn("the keyhole doesn't speak", err)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.main(["models", "--json"])
+        api = [x["id"] for x in json.loads(out.getvalue())["api"]]
+        self.assertIn("opencode/claude-x-5", api)
+        self.assertNotIn("opencode/gemini-x-4", api)
+
     def test_a_role_out_of_credit_runs_again_once_the_recheck_time_has_passed(self):
         # #1068: no_credit had no `until` and only a 2xx cleared it, which only a running task
         # gets, and wb start refused that task: after a top-up or the plan's reset the role
@@ -37034,6 +37159,28 @@ class RateLimits(Base):
                                  "message": "max_tokens: billing tier allows at most 8192"}})
         self.assertEqual(wait.fatal, ("refused", "deepseek refused the request (HTTP 400): "
                                                  "max_tokens: billing tier allows at most 8192"))
+
+    def test_a_tpm_too_large_stop_tells_claude_the_providers_words(self):
+        # #1380 (2026-11-25): a 429 for one request over the TPM limit was held 10 minutes, revived
+        # once, and stopped as "rate-limited … (HTTP 429)" with advice to carry on later
+        said = ("Request too large for deepseek-flash on tokens per min (TPM): Limit 30000, "
+                "Requested 45210. The input or output tokens must be reduced.")
+        task = self.api_task("t-tpm", "api", "--silence-timeout", "30")
+        self.up.rate_until, self.up.code, self.up.after, self.up.body = float("inf"), 429, "1", said
+        self.keyhole(task, hold=60)
+        began = time.monotonic()
+        runner.drive(task)
+        self.assertLess(time.monotonic() - began, 30)               # never the hold or the revive
+        st = task.status
+        self.assertEqual((st["phase"], st["last"], st.get("infra")),
+                         ("stuck", f"deepseek refused the request (HTTP 429): {said}", "provider"))
+        self.assertEqual(len(self.up.seen), 1)
+        self.assertFalse(self.events(task, "load"))                 # never revived
+        n = self.notice(task)
+        self.assertEqual(n["cause"], "provider")
+        self.assertIn(said, n["text"])
+        self.assertIn("once what deepseek said is fixed", n["text"])
+        self.assertIsNone(self.models.api_health("deepseek"))      # no cooldown for its other tasks
 
     def test_a_certificate_that_doesnt_verify_stops_the_round_at_once_as_this_machines(self):
         # #1080 (2026-11-23): the keyhole's 502 was retried, read as the provider's outage for
