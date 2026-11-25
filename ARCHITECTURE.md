@@ -3088,7 +3088,10 @@ A batch's other tasks are acked up to the row's stamp as written, never below th
   asking still stop before another open question's notice.
 - **The safety net** (`rewake`): a task waiting on Claude (review, asking, stuck, failed) a minute after its last status change,
   newest notice unacked (by notify.jsonl's tail or `noticed`, #844), wakes Claude once with `wb
-  report <n>`.
+  report <n>`, and the headline and next step deliver's wake would have given its newest notice
+  (`headlineOf`, `nextOf`: from the phase alone a provider's, a day-cap, an Agents-GPU or a
+  local-only stop woke as "got stuck … Steer it with wb feedback", #1384); none in the tail, the
+  phase's.
 - **Without the mod.** `wb wait [task]` blocks for news past `acked`, prints `[kind] task` and the
   text, and acks it, skipping what the mod would (`_stale`; of a task's questions only the oldest
   open, `_oldest_open`, judged by the answer files), partial rows and gone tasks; it reaps first.
@@ -6308,7 +6311,10 @@ adds the `wb allow` paragraph (#1322: every question carried it). A dropped subm
 toasts once. With `wake` off it is only toasted and `acked` isn't written, so `wb wait` still gets
 it. `rewake`: idle, wake on, a `mine` task waiting on Claude whose status changed between
 `REWAKE_MS` 60 s and `REWAKE_MAX_MS` 12 h ago, whose news Claude hasn't had and whose wake wasn't
-dropped in the last minute, gets `acked = now` and a prompt with `wb report <n>` and NEXT. Had the
+dropped in the last minute, gets `acked = now` and a prompt with `wb report <n>` and its newest
+notice's headline and next step (`headlineOf`, `nextOf`, deliver's; that notice one of a batch:
+its own `BATCH_NEXT`; none in `mem.notifyRows`, or of another kind than the phase: `HEADLINE` and
+NEXT, #1384). Had the
 news: `acked` at or past the later of `mem.noticed` (each task's newest notice in the tail, a
 batch's for each task it names) and the task's `noticed` file (the runner's last status write lands
 after its notice, so `updated_at` alone woke twice, #844), else past `updated_at`. `cli._ack_all`

@@ -1090,6 +1090,59 @@ test('a review whose notice left notify.jsonl\'s tail is not rewoken after a rel
   expect(woken.filter(w => w.includes('no notice reached Claude'))).toHaveLength(1)
 })
 
+// tasks stopped two hours ago, past deliver's hour, whose notices reached no one: rewake's to say
+async function rewokenStops($: any, on: any, files: Record<string, string>, rows: Record<string, any>[]) {
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  for (const row of rows) {
+    task(files, row.task, row.kind, {}, ts0 - 7200 + 0.05)
+    notice(files, { ts: ts0 - 7200, round: 1, text: `${row.task}: STOPPED`, ...row })
+  }
+  fakeTasks(on, files, rows.map(r => r.task))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.advance(120_000)
+  return (name: string) => woken.find(w => w.startsWith(`[workbench] Task \`${name}\``)) ?? ''
+}
+
+test('#1384: a stop outside the agent whose notice missed Claude is rewoken with its own headline and next step, never "got stuck"', async ($, on) => {
+  // the 2026-11-25 audit: rewake read the phase alone, so a provider's, the day cap's, an
+  // Agents-GPU or a local-only stop woke as "got stuck … Steer it with wb feedback", which wb
+  // refuses (exit 3) or which runs a round on an agent that wasn't stuck
+  const woke = await rewokenStops($, on, {}, [
+    { task: 'prov', kind: 'stuck', cause: 'provider' },
+    { task: 'cap', kind: 'stuck', cause: 'spend' },
+    { task: 'gpu', kind: 'stuck', cause: 'spend', guard: 'agents' },
+    { task: 'lo', kind: 'stuck', cause: 'local_only' },
+    { task: 'gone', kind: 'failed', cause: 'catalog' },
+    { task: 'mine', kind: 'stuck', cause: 'guard' },
+  ])
+  expect(woke('prov')).toContain('Task `prov` was stopped by its API provider, 2h ago, and no notice reached Claude.')
+  expect(woke('prov')).toContain('`wb feedback prov --text "carry on"` once that cause is gone; never discard it')
+  expect(woke('cap')).toContain('Ask the user for a day cap (`wb route cap <usd>`), then `wb resume cap`')
+  expect(woke('gpu')).toContain('Ask the user: Agents back to Both or API')
+  expect(woke('lo')).toContain('Task `lo` was stopped: its repo became local-only, 2h ago')
+  expect(woke('gone')).toContain('Task `gone` failed (not its agent\'s doing), 2h ago')
+  for (const name of ['prov', 'cap', 'gpu', 'lo', 'gone']) {
+    expect(woke(name)).toContain(`\`wb report ${name}\` shows where it is.`)
+    expect(woke(name)).not.toContain('got stuck')
+    expect(woke(name)).not.toContain('Steer it')
+  }
+  // the agent's own stop keeps its wording
+  expect(woke('mine')).toContain('Task `mine` was stopped: it got stuck, 2h ago')
+  expect(woke('mine')).toContain('Steer it with `wb feedback mine --message <file>`')
+})
+
+test('#1384: a day-cap stop rewoken under a cap asks for a higher cap or tomorrow', async ($, on) => {
+  const files: Record<string, string> = {}
+  files['/home/u/.config/workbench/routes.json'] = JSON.stringify({ v: 1, day_usd: 5, roles: {} })
+  const woke = await rewokenStops($, on, files, [{ task: 'cap', kind: 'stuck', cause: 'spend' }])
+  expect(woke('cap')).toContain('Ask the user: a higher cap (`wb route cap <usd>`) or tomorrow, then `wb resume cap`')
+  expect(woke('cap')).not.toContain('Steer it')
+})
+
 test('one notice for the tasks a restart interrupted wakes once, ending with the resume, not the failure\'s next step', async ($, on) => {
   // #544: the batch's wake ended with "Look at wb log …; feedback or discard" after its own
   // wb resume --all line, and the tasks it named but carried no notice of their own were rewoken
