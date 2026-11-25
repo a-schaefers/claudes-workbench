@@ -455,8 +455,10 @@ web page, marked for that agent (the mod does it): never ask the agent to answer
 handovers). Answer one in that turn: two or three plain lines to the user, steer only if it
 drifts, `wb log` only if the digest shows trouble (`reference/driving.md`). A **progress check**
 (only when the user ran `wb progress on`) recommends a hint or a smaller step: give it with the
-command it names, so whether it helped is learned. Time never makes the task yours to edit: the
-coding choice is the user's (`wb coding`), never changed by a check.
+command it names, so whether it helped is learned. A smaller step comes to review with no
+auto-fix or self-review, even when the `--test` fails because it tests the whole task: review the
+part, then send the rest with `wb feedback` (no review round counted). Time never makes the task
+yours to edit: the coding choice is the user's (`wb coding`), never changed by a check.
 
 ## 4. When woken
 - **review**: the wake carries the report and, when it is small, the whole diff (`wb diff <name>`

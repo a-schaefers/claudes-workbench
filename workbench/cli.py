@@ -1823,6 +1823,11 @@ def cmd_feedback(a):
     outside = stopped_outside(st)
     resumed = bool(outside)
     env = st.get("env_skip")  # set only in review, so never with an unsent round
+    # ... nor the round after a smaller step (status `step_note`, wb steer --step): the agent did
+    # the part it was told, and the rest Claude sends now is the step's plan, not a correction;
+    # counted, a step Claude shrank went badly for the model's slice (#1300, 2026-11-24). Unlike
+    # an env skip it is the new ask round_asks stops at, and the step ends with it.
+    step = bool(st.get("step_note")) and not (resumed or unsent or env)
     # ... and no review for round_asks either: it stopped at this round, so a later handover or
     # wb resume carried only "carry on" and dropped the review feedback the stop interrupted
     # (#1169, 2026-11-24). Unlinked otherwise: a feedback that died before its round was counted
@@ -1835,7 +1840,7 @@ def cmd_feedback(a):
         mark.touch()
     else:
         mark.unlink(missing_ok=True)
-    reviews = st.get("reviews", 0) + (0 if resumed or unsent or env else 1)
+    reviews = st.get("reviews", 0) + (0 if resumed or unsent or env or step else 1)
     handled = store.now()  # everything before the new round; what its runner raises stays news
     # An unsent round keeps its own `context` unless a flag says otherwise: the runner clears it
     # only once the round starts, so wb resume's or wb next --fresh's "fresh" (or a handover's
@@ -1851,6 +1856,7 @@ def cmd_feedback(a):
                     # and after an env skip: no review counted, the pane's "resumed" (#1257)
                     **({} if unsent else {"round_for": "feedback"} if not (resumed or env) else
                        {"round_for": "resume", "self_review_tree": runner.carried_tree(task)}),
+                    **({"step_note": None} if step else {}),  # #1300
                     auto_fixes_total=st.get("auto_fixes_total", 0) + st.get("auto_fixes", 0),
                     auto_fixes=0)
     _credit_turn(task)
@@ -1866,6 +1872,9 @@ def cmd_feedback(a):
     elif env:
         print(f"feedback sent to {a.name} (round {n}): it follows a skipped auto-fix that wasn't "
               f"the code's ({env}), so no review round is counted")
+    elif step:
+        print(f"feedback sent to {a.name} (round {n}): it follows a smaller step (wb steer "
+              "--step), so no review round is counted")
     else:
         print(f"feedback round {reviews} sent to {a.name} (round {n})"
               + ("  — that is past the usual 3 review rounds" if reviews > 3 else ""))
@@ -2010,6 +2019,7 @@ def cmd_next(a):
     # the step's own active work and progress checks start here: set against a step's typical
     # length, the chain's total put step 2 past it in its first minutes (#815)
     advance = dict(round=n, round_for="next", steps=step + 1, step_round=n, reviews=0, step_base=approved,
+                   step_note=None,  # a smaller step's note held only the step it came in (#1300)
                    step_active_s=st.get("active_s") or 0, progress_checks=0,
                    step_sizes=(st.get("step_sizes") or []) + [measured],
                    step_tests={**(st.get("step_tests") or {}), str(step + 1): test},  # #941
@@ -2811,7 +2821,8 @@ def _resume(task: store.Task) -> None:
     # runner) goes on here: without its green tree, the resumed session that read on was stopped
     # as stuck on a green change, the step counted against it (#1228, 2026-11-24)
     task.set_status(round=n + 1, context="fresh", phase="queued", last="resumed by the reviewer",
-                    round_for="resume", self_review_tree=runner.carried_tree(task))
+                    round_for="resume", self_review_tree=runner.carried_tree(task),
+                    **runner.step_noted(notes))  # a smaller step's note carried on (#1300)
     task.event({"ts": store.now(), "round": n + 1, "kind": "resumed",
                 "text": "Claude resumed the task in a fresh session"})
     _credit_turn(task)
@@ -2974,7 +2985,7 @@ def cmd_steer(a):
     if not text:
         die("empty note")
     if a.step:  # a smaller step: the agent finishes this part and stops (#95)
-        text = STEP_NOTE + text
+        text = runner.STEP_NOTE + text  # the runner knows a step round by it (#1300)
     store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text, "now": a.now})
     task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "steer",
                 "now": a.now, "text": text})
@@ -2987,10 +2998,6 @@ def cmd_steer(a):
         print(f"interrupting {a.name}: it stops within a few seconds and continues with your note")
     else:
         print(f"note queued for {a.name}: delivered when its current run ends, before the tests")
-
-
-STEP_NOTE = ("A smaller step: do only this now, then stop and report; the rest of the task waits "
-             "for the next step.\n\n")  # what a smaller step's note says first (#95)
 
 
 def cmd_progress(a):
