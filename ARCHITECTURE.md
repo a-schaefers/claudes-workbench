@@ -301,7 +301,7 @@ Then:
   act on): the base check's explanation, the spec-gap scorecard, where the model loads on the GPU or
   whom it runs beside, `wb optimize`'s advice (`wb doctor` keeps it), an untested OpenCode
   (`wb doctor`'s alone), an API model's handover note, and the setup Claude passed by flag (only
-  commands.json's: ``setup from commands.json: links ../x; copies a; runs `uv sync` ``,
+  commands.json's: ``setup from commands.json: links ../x; copies a; runs `uv sync --locked` ``, with `(from <dir>)` after a setup run from its key's directory, not the package, #1376;
   `cli._standing_setup`). The dirty-repo note counts tracked files only (`--untracked-files=no`);
   the Windows-drive note comes on the repo's first task only.
 
@@ -1563,10 +1563,16 @@ everywhere). In order:
   repo-relative (`cli._copy_path`; it copied the root's node_modules for the package's, #1158). commands.json's
   `copy` is read the same way from its key's directory (`context.repo_conf_dir`): a root key's paths stay
   repo-relative, a package key's are the package's (#1346), and the start's `setup:` line names the path it
-  copies; a refused one names `commands.json "repos" copy <path>`, never a `--copy` not given.
+  copies; a refused one names `commands.json "repos" copy <path>`, never a `--copy` not given. A standing
+  entry the checkout lacks is left out with a note (`note: commands.json "repos" copy node_modules: no
+  node_modules in <repo>, so the task goes without it; --setup '<install command>' sets it up`), not refused:
+  a linked worktree (`claude --worktree`) matches the main checkout's entry by git dir and has none of its
+  installs, and every start there exited 1 with no flag past it (#1377); a missing `--copy` is still refused.
 - For an API task, a standing `copy` entry of commands.json's `repos` that holds a credential
-  (`privacy.copy_holds_credential`: a file if it is text under `CREDENTIAL_MAX` and the matcher flags it, so a
-  binary `test.db` or a big `.csv` goes along; a directory by its dotfiles, the files under a dot-directory,
+  (`privacy.copy_holds_credential`: a file, whatever its name, if it is text under `CREDENTIAL_MAX`, so a
+  binary `test.db` or a big `.csv` goes along, by the strong signal below plus an XML element whose tag ends in a
+  secret's name (Maven's `<password>hunter2</password>`, `privacy._copy_file_holds`) or a Bundler host's login: the
+  token-file matcher refused every API start for an `llm.json`'s `max_tokens` or `TOKENIZERS_PARALLELISM=false`, #1381; a directory by its dotfiles, the files under a dot-directory,
   `COPY_CREDENTIAL_NAMES` (`credentials`, `.git-credentials`, `web.config`, `app.config`) and
   `COPY_CONFIG_SUFFIXES` files (`.env`, `.ini`, `.yml`, `.yaml`, `.toml`, `.properties`, `.netrc`, `.json`,
   `.pem`, `.key`) outside `COPY_SKIP_DIRS` such as `node_modules` or `deps`, whose code is full of
@@ -1587,7 +1593,9 @@ everywhere). In order:
   again (#1021), a step on every start for what the user had set up (#1322). A sibling local_only marks is
   refused before this, named or standing (`cli.lane_places`, *Privacy for API roles*, #1268). `setup` and GPU
   tasks are unchanged.
-- `setup` (`--setup`), as the tests run, for `setup_limit(spec)`: task.json `setup_timeout`
+- `setup` (`--setup`), as the tests run, in `Task.workdir`, a commands.json one in its key's directory
+  (task.json `setup_dir`, `context.repo_conf_dir`, as its `copy` is read; the start line says `runs `…` (from the
+  repo's top)`): a root entry's `./scripts/bootstrap.sh` ran in a package and failed its every task (#1376), for `setup_limit(spec)`: task.json `setup_timeout`
   (`--setup-timeout`, else commands.json `repos` `setup_timeout`), else `SETUP_SECS` (1800 s), in
   every scratch checkout too (#520). A venv it makes goes first on PATH (`context.own_venv`, *Its
   environment*).
@@ -1608,7 +1616,10 @@ changed files git tracks (Gemfile.lock)" / "wrote files git doesn't ignore (gen/
 "the review would show them as the agent's and wb accept would commit them (undone in the
 worktree)", the remedy a setup that leaves the repo as committed (`npm ci`, `BUNDLE_FROZEN=1
 bundle install`, `uv sync --locked`) or a commit of its change or a `.gitignore`, then "wb discard
-<task> and start again". `_undo_setup` checks the tracked ones out from HEAD (no hooks) and
+<task> and start again". When all it left is new files named in `gitops.LOCKFILES` (`uv sync` in a project
+with no committed uv.lock), it says "the setup wrote a lockfile the repo doesn't commit (uv.lock)" and the
+remedy is to commit the lockfile or a setup that writes none (`context.VENV_SETUP`, `python3 -m venv .venv &&
+.venv/bin/pip install -e .`): `uv sync --locked`, the other remedy, fails with no lockfile (#1379). `_undo_setup` checks the tracked ones out from HEAD (no hooks) and
 removes the new ones, so a `wb resume` is told the same again (#1347: a `bundle install`'s
 PLATFORMS was the agent's drift NOTE and was committed under its trailer). A setup that fails or
 times out has what it left for git to see undone the same way before its notice: kept, the resume
@@ -1818,7 +1829,7 @@ An API provider's header wait is 600 s instead (`API_HEADER_S`, *An API task's w
   from `--repo` up, with a committed `CLAUDE.md`/`.claude/CLAUDE.md` or a gitignored one in the
   checkout, `cli._local_package_md`: `wb start` notes `<package>'s CLAUDE.md is gitignored: the
   agent gets your checkout's copy`; never a `.claude` directory), the package's three the same
-  way. The agent, setup, tests and session export run there (`Task.workdir`); diff and commits
+  way. The agent, setup (a commands.json one from its key's directory, #1376), tests and session export run there (`Task.workdir`); diff and commits
   stay the whole repo's; a plain subdirectory means the top (#375, #606, #785);
 - tracked `.claude/rules/**/*.md` (`project_rules`), and the `.md` under a tracked directory link:
   one resolving outside the worktree and repo is copied to `rules/<task>/project-rules/<path>`
@@ -2390,7 +2401,9 @@ PATH directories in the repo become the worktree's, and the worktree's own venv 
 up without those worktree directories; OpenCode by the runner's PATH (`opencode_bin`). Any other
 active env stays, written by nothing in the lane (step 6). Without `--setup`, `wb start` names each
 one left out and how to give the worktree its own (`venv_line`: `note: the agent leaves out your
-active venv (<root>): --setup 'uv sync' (or the project's install) gives the worktree its own`),
+active venv (<root>): --setup 'python3 -m venv .venv && .venv/bin/pip install -e .' (or the project's install)
+gives the worktree its own`; `venv_setup`: `uv sync --locked` instead where the base commits a uv.lock, the
+package's or the top's, since `uv sync` writes one where none is committed and `_setup_unclean` fails it, #1379),
 unless the missing-directories note named the venv (`.venv/`, `venv/`) already (#1322: the same
 advice twice). Not covered: `pip install
 --user -e .`.
@@ -7017,7 +7030,8 @@ the same way. A key's `copy` paths are read from its directory as a `--copy` fro
 (`context.repo_conf_dir`, `cli._copy_path`): a package key's `node_modules` is the package's (#1346: the root's
 was copied, and every round ran without the package's). Its directory is measured as it matched: by path only when
 the spot is at or under the key, else inside the key's own worktree (a key on `.claude/worktrees/x` is the root's,
-not three parts deep: #1346's review). `--setup`,
+not three parts deep: #1346's review). Its `setup` runs there too (task.json `setup_dir`: a root entry's
+`./scripts/bootstrap.sh` ran in the package, #1376). `--setup`,
 `--setup-timeout` (a positive whole number) replace; `--copy`, `--sibling` add; `merge` is `wb accept --merge`'s way
 (`context.MERGE_AS`; `--merge-as` overrides). `local_only` is read for the whole repo, not the spot: any entry at or
 under the repo's top that says `true` holds for every task of it (`context.repo_entries` `whole`: by real path and
@@ -7067,7 +7081,7 @@ machine is never gone here, `cli._gone`, nor checked by the mod's `noteClaude`: 
 `provider`, `provider_name` (the catalog's), `thinking` (`off`|`on`, the role's, default off), `said` (the role's `said`, or `asked for[, approved in the dialog]` for a `--model`), and `said_ts` (the role's `ts`) (API only, fixed at start as `model` is), `thinking_shown` (what it does: `thinking off`, `thinking at its lowest effort (it can't turn off)`, `thinking as the model's default (it lists no lower setting)`…), `thinking_off` (`wb-off`'s `{settings}` or `{body}`, #1018), `size`, `stack`, `trial`, `backlog`,
 `group` (`--group`: the tasks one request fanned out to, #1048; missing: no group),
 `bench` (`{case, run, label}`), `test_cmd`, `no_base_check`, `unload_for_tests`, `sign` (false: `--no-sign`), `subdir` (a monorepo package), `setup`,
-`setup_timeout`, `copy`, `siblings`, `local_only` (`--local-only`, #1021), `order` (an OpenRouter role's backends, which the keyhole routes to: `routes.resolve` copies the role's row, `cli._routed_keys`; none for a `--model` start or a role with none: OpenRouter's choice of backend), `worktree` (when nested), `checkout` (`"runner"`; missing before #529),
+`setup_dir` (a commands.json setup's key directory when it isn't the package, `.` the top: where it runs, #1376), `setup_timeout`, `copy`, `siblings`, `local_only` (`--local-only`, #1021), `order` (an OpenRouter role's backends, which the keyhole routes to: `routes.resolve` copies the role's row, `cli._routed_keys`; none for a `--model` start or a role with none: OpenRouter's choice of backend), `worktree` (when nested), `checkout` (`"runner"`; missing before #529),
 `checkout_bytes` (wb start's disk-check size, counted as taken until the runner checks out; missing when free space was
 unknown), `auto_fix`, `self_review` (null: learned; false for a writing task unless asked), `ask_budget`, `ask_timeout`, `checkin`, `round_timeout`,
 `silence_timeout`, `think_timeout`, `timeouts_given` (which of `round`, `silence`, `think` a flag gave; the rest
@@ -7199,7 +7213,7 @@ the step included, #904), `stuck`, `took_over`, `claude` (its share, `spend.usag
 **bench/cases/<case>/case.json** (`bench.add`): `name`, `task`, `step`, `repo`, `checkout` (task.json `repo`, which
 `siblings` resolve from lexically, #909), `git_common` (`bench._repo`), `base`, `reference`, `size`, `stack`,
 `test_cmd`, `test_timeout`, `check_cmd`, `hidden` (paths; their files in `hidden/`), `allow`, `paths` (the grants, `grants_kept` once rules are gone), `setup`, `copy`, `siblings`, `setup_timeout`,
-`unload_for_tests`, `subdir` ('' for the top), `skills`, `original` (`model`, `rounds`, `reviews`, `minutes`, `steps`),
+`unload_for_tests`, `subdir` ('' for the top), `setup_dir` (task.json's; a replay's `--setup` gets a `cd` there first, #1376), `skills`, `original` (`model`, `rounds`, `reviews`, `minutes`, `steps`),
 `base_check` (`fails` or `not checked (timed out)`), `created_at`. **bench/runs.jsonl** (`bench.replay`): `ts`, `run`,
 `label`, `rep`, `case`, `model`, `task`, `wb_commit`, `skills`, `outcome` (`passed`, `failed`, `preempted`, `error`:
 not started, or the machine broke it, `<infra>: <last>`), `why`, `phase`, `rounds`, `auto_fixes`, `tok_in`, `tok_out`, `minutes`, `asks_refused`,

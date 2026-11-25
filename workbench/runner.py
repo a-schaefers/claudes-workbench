@@ -2375,17 +2375,18 @@ def write_shell_shim(task: store.Task) -> Path:
     return path
 
 
-def run_in_lane(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]:
-    """Run `cmd` in the task's worktree, in the agent's lane and with its environment; the
-    exit code ("timeout" past `limit` seconds, "output limit" past TEST_OUTPUT_CAP bytes) and the
-    decoded output (its head and tail when long)."""
+def run_in_lane(task: store.Task, cmd: str, limit: int,
+                cwd: Path | None = None) -> tuple[int | str, str]:
+    """Run `cmd` in the task's worktree (``cwd``, else Task.workdir), in the agent's lane and
+    with its environment; the exit code ("timeout" past `limit` seconds, "output limit" past
+    TEST_OUTPUT_CAP bytes) and the decoded output (its head and tail when long)."""
     # in the agent's lane, environment and shell: the tests run the agent's code, and must pass
     # or fail as they did when the agent ran them
     sh = test_shell()
     argv = lane.wrap(context.writable(task), [sh, *shell_args(sh), cmd], context.readable(task),
                      context.unix_paths(task))
     run = _issue()  # its own mark: sweep ends what it left, and nothing else (#324)
-    proc = subprocess.Popen(argv, cwd=task.workdir, stdout=subprocess.PIPE,
+    proc = subprocess.Popen(argv, cwd=cwd or task.workdir, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, env=agent_env(task, run),
                             start_new_session=True)  # its own group: a timeout ends all of it
     prev = CURRENT.get("proc")
@@ -2765,7 +2766,9 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
         return "copy failed", str(e)
     if not (cmd := spec.get("setup")):
         return 0, ""
-    return run_in_lane(task, cmd, setup_limit(spec))
+    # a commands.json setup from its key's directory, not the package (task.json `setup_dir`, #1376)
+    at = wt / spec["setup_dir"] if spec.get("setup_dir") else None
+    return run_in_lane(task, cmd, setup_limit(spec), at)
 
 
 # what a test run rewrites in a prepared path without changing what the code is: Python's bytecode,
@@ -3501,16 +3504,23 @@ def _setup_unclean(task: store.Task, left: dict[str, str]) -> bool:
         return ", ".join(paths[:3]) + (f" and {len(paths) - 3:,} more" if len(paths) > 3 else "")
     tracked = sorted(p for p, xy in left.items() if xy != "??")
     loose = sorted(p for p, xy in left.items() if xy == "??")
-    what = "the setup " + " and ".join(
-        ([f"changed files git tracks ({few(tracked)})"] if tracked else [])
-        + ([f"wrote files git doesn't ignore ({few(loose)})"] if loose else []))
+    # only a lockfile the repo doesn't commit: a frozen install (uv sync --locked) needs one, so
+    # the remedy was a second failed start; `uv sync` in a project without uv.lock (#1379, 2026-11-25)
+    if loose and not tracked and all(Path(p).name in gitops.LOCKFILES for p in loose):
+        what = f"the setup wrote a lockfile the repo doesn't commit ({few(loose)})"
+        fix = ("Commit the lockfile (and the setup may freeze to it: uv sync --locked, npm ci), or "
+               f"have the setup write none ({context.VENV_SETUP})")
+    else:
+        what = "the setup " + " and ".join(
+            ([f"changed files git tracks ({few(tracked)})"] if tracked else [])
+            + ([f"wrote files git doesn't ignore ({few(loose)})"] if loose else []))
+        fix = ("Have the setup leave the repo as committed (npm ci, BUNDLE_FROZEN=1 bundle install, "
+               "uv sync --locked), or commit its change or a .gitignore for what it writes")
     _undo_setup(task.worktree, left)
     task.set_status(phase="failed", last=what[:200], infra="setup", failed_before="setup")
     task.notify("failed", f"task {task.name}: {what}, before any round: the review would show them "
-                "as the agent's and wb accept would commit them (undone in the worktree). Have "
-                "the setup leave the repo as committed (npm ci, BUNDLE_FROZEN=1 bundle install, uv "
-                "sync --locked), or commit its change or a .gitignore for what it writes; then wb "
-                f"discard {task.name} and start again (the agent never ran)", cause="setup")
+                f"as the agent's and wb accept would commit them (undone in the worktree). {fix}; "
+                f"then wb discard {task.name} and start again (the agent never ran)", cause="setup")
     return False
 
 

@@ -6457,6 +6457,19 @@ class WorktreeSetup(Base):
         self.assertFalse((t.worktree / "gen").exists())        # removed, its directories too
         self.assertEqual(gitops.changed(t.worktree), "")
 
+    def test_a_setup_that_writes_an_uncommitted_lockfile_is_told_to_commit_it_or_write_none(self):
+        # #1379 (2026-11-25): `uv sync` in a project with no committed uv.lock writes one; the
+        # notice's remedy, `uv sync --locked`, then failed for want of a lockfile
+        self.start("t-uvlock", "ok", "--test", TEST_CMD, "--setup", "echo 'version = 1' > uv.lock")
+        wait_phase("t-uvlock", {"failed"})
+        note = [r for r in store.notices() if r["task"] == "t-uvlock"][-1]
+        self.assertIn("task t-uvlock: the setup wrote a lockfile the repo doesn't commit (uv.lock), "
+                      "before any round", note["text"])
+        self.assertIn("Commit the lockfile (and the setup may freeze to it: uv sync --locked, npm ci), "
+                      "or have the setup write none (python3 -m venv .venv && .venv/bin/pip install -e .); "
+                      "then wb discard t-uvlock and start again", note["text"])
+        self.assertFalse((store.Task("t-uvlock").worktree / "uv.lock").exists())
+
     def test_a_setup_that_writes_files_then_fails_has_them_undone_so_the_resume_is_told(self):
         # #1347's review (2026-11-24): only a setup that exited 0 was undone; a codegen then a
         # failed install left gen/ and its Gemfile.lock edit, the resume the notice advises
@@ -6927,6 +6940,65 @@ class WorktreeSetup(Base):
                          "packages/app/node_modules")
         self.assertEqual(cli._copy_path(self.repo, "../../../x", "packages/app"), "../x")
 
+    def test_a_root_entrys_setup_runs_from_the_root_for_a_package_task(self):
+        # #1376 (2026-11-25): the root key's setup ran in the package, so its
+        # ./scripts/bootstrap.sh failed every package task before round 1 (exit 127), while the
+        # same entry's copy paths were read from the root (#1346)
+        self.ignore(".boot", "where")
+        app = self.repo / "packages" / "app"
+        app.mkdir(parents=True)
+        (app / "CLAUDE.md").write_text("# app\n")
+        (self.repo / "scripts").mkdir()
+        (self.repo / "scripts" / "bootstrap.sh").write_text("#!/bin/sh\necho ok > .boot\n")
+        (self.repo / "scripts" / "bootstrap.sh").chmod(0o755)
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "a package"], check=True)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "setup": "./scripts/bootstrap.sh"}}}))
+        os.environ["FAKE_SCENARIO"] = "ok"
+        start = lambda name, *x: run_wb("start", name, "--spec", str(self.spec), "--repo", str(app),  # noqa
+                                        "--model", "mimo", "--no-base-check", *x)
+        out = start("t-rootsetup")
+        self.assertIn("setup from commands.json: runs `./scripts/bootstrap.sh` (from the repo's top)", out)
+        wait_phase("t-rootsetup", {"review"})
+        t = store.Task("t-rootsetup")
+        self.assertEqual(t.spec["setup_dir"], ".")
+        self.assertTrue((t.worktree / ".boot").is_file())
+        self.assertIn("\nexit: 0\n", (t.dir / "setup.txt").read_text())
+        # a --setup still runs at the spot, the package
+        start("t-spotsetup", "--setup", "pwd > where")
+        wait_phase("t-spotsetup", {"review"})
+        t = store.Task("t-spotsetup")
+        self.assertNotIn("setup_dir", t.spec)
+        self.assertTrue((t.worktree / "packages/app/where").is_file())
+        self.assertFalse((t.worktree / "where").exists())
+
+    def test_a_standing_copy_missing_in_a_linked_worktree_is_skipped_with_a_note(self):
+        # #1377 (2026-11-25): the main checkout's entry matches a linked worktree by git dir
+        # (#498), which has no node_modules of its own: every start there exited 1, and no flag
+        # got past it. A --copy Claude passed itself is still refused.
+        self.ignore("node_modules/", ".claude/")
+        (self.repo / "node_modules" / "x").mkdir(parents=True)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "copy": ["node_modules"]}}}))
+        feat = self.repo / ".claude" / "worktrees" / "feat"
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "-q", "-b", "feat", str(feat)],
+                       check=True, capture_output=True)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        start = lambda name, *x: run_wb("start", name, "--spec", str(self.spec), "--repo", str(feat),  # noqa
+                                        "--model", "mimo", "--no-base-check", *x)
+        out = start("t-lw1")
+        self.assertIn(f'note: commands.json "repos" copy node_modules: no node_modules in {feat}, so '
+                      "the task goes without it; --setup '<install command>' sets it up", out)
+        self.assertNotIn("copies node_modules", out)
+        self.assertNotIn("copy", store.Task("t-lw1").spec)
+        wait_phase("t-lw1", {"review"})
+        with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
+            start("t-lw2", "--copy", "node_modules")
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn(f"--copy node_modules: no node_modules in {feat}", err.getvalue())
+        self.assertFalse(store.Task("t-lw2").dir.exists())
+
     def test_a_packages_own_commands_json_copy_is_read_from_the_package(self):
         # #1346 (bar round 9, 2026-11-24; #1158 fixed only --copy): a package key's
         # `copy: ["node_modules"]` copied the root's node_modules, so the base check and every
@@ -6963,12 +7035,13 @@ class WorktreeSetup(Base):
         conf.write_text(json.dumps({"repos": {str(app): {"copy": ["localconf"]}}}))
         self.assertEqual(cli._standing_gap(context.repo_conf(self.repo, "packages/app"), self.repo,
                                            "packages/app"), "")
-        # a refused standing entry names commands.json, not a flag never given
+        # a missing standing entry's note names commands.json, not a flag never given (a note
+        # since #1377, not a refusal)
         conf.write_text(json.dumps({"repos": {str(app): {"copy": ["dist"]}}}))
-        with self.assertRaises(SystemExit), redirect_stderr(err := io.StringIO()):
-            run_wb("start", "t-nodist", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo")
-        self.assertIn('commands.json "repos" copy dist: no packages/app/dist in', err.getvalue())
-        self.assertNotIn("--copy", err.getvalue())
+        out = run_wb("start", "t-nodist", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo")
+        self.assertIn('note: commands.json "repos" copy dist: no packages/app/dist in', out)
+        self.assertNotIn("--copy", out)
+        wait_phase("t-nodist", {"review"})
         # #1346's review (2026-11-24): a key on a linked worktree nested in the repo (Claude
         # Code's .claude/worktrees/x) is the main checkout's root by git dir, but its depth was
         # measured from the main top, three parts: the package's node_modules was read for the root's
@@ -14585,8 +14658,8 @@ class CheckoutVenv(Base):
         bins = self.repo / "node_modules" / ".bin"
         os.environ["PATH"] = f"{os.environ['PATH']}{os.pathsep}{bins}"  # a direnv PATH_add
         out = self.start("t-novenv", "ok", "--test", self.TEST, "--auto-fix", "0", "--no-base-check")
-        self.assertIn(f"note: the agent leaves out your active venv ({user}): --setup 'uv sync' (or the "
-                      "project's install) gives the worktree its own\n", out)
+        self.assertIn(f"note: the agent leaves out your active venv ({user}): --setup 'python3 -m venv .venv "
+                      "&& .venv/bin/pip install -e .' (or the project's install) gives the worktree its own\n", out)
         st = wait_phase("t-novenv", {"review"})
         task = store.Task("t-novenv")
         said = task.round_dir(1).joinpath("tests.txt").read_text()
@@ -14605,6 +14678,21 @@ class CheckoutVenv(Base):
         self.assertEqual(Permission.verdict(rules, "pipenv install"), "allow")
         with mock.patch.object(lane, "abi", return_value=0):
             self.assertEqual(Permission.verdict(context.shell_rules(task), "pipenv install"), "allow")
+
+    def test_the_venv_note_advises_uv_sync_locked_only_where_the_base_commits_a_uv_lock(self):
+        # #1379 (2026-11-25): the note said `uv sync`, which writes an uncommitted uv.lock and
+        # fails the task before any round (#1347), and `uv sync --locked` fails with no lockfile
+        task = store.Task("t-uvnote")
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": "t-uvnote", "repo": str(self.repo),
+                                                        "base": "HEAD", "subdir": "pkg"}))
+        self.assertEqual(context.venv_setup(task), "python3 -m venv .venv && .venv/bin/pip install -e .")
+        (self.repo / "pkg").mkdir()
+        (self.repo / "pkg" / "uv.lock").write_text("version = 1\n")
+        self.assertEqual(context.venv_setup(task), context.VENV_SETUP)     # not committed yet
+        subprocess.run(["git", "-C", str(self.repo), "add", "pkg/uv.lock"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "lock"], check=True)
+        self.assertEqual(context.venv_setup(task), "uv sync --locked")
 
     def test_a_venv_the_missing_directories_note_names_gets_no_note_of_its_own(self):
         # #1322: the checkout's ignored .venv drew both notes, each with the same advice
@@ -39815,6 +39903,37 @@ class Privacy(_KeyholeTest):
         (self.repo / "local" / "special_tokens_map.json").write_text(
             json.dumps({"bos_token": "<s>", "mask_token": "[MASK]"}))
         self.start_api("t-cpr-ok")
+
+    def test_a_copied_config_file_with_only_settings_named_like_tokens_does_not_refuse_an_api_start(self):
+        # #1381 (2026-11-25): a single copied file was judged by the token-file matcher, whose bare
+        # keyword refused every API start for settings, while the same file in a copied directory
+        # went along
+        d = Path(self.tmp.name) / "copied"
+        d.mkdir()
+        def holds(name, text):
+            (d / name).write_text(text)
+            return cli.privacy.copy_holds_credential(d / name)
+        for name, text in ((".env", "TOKENIZERS_PARALLELISM=false\nDEBUG=1\n"),
+                           ("llm.json", json.dumps({"model": "local", "max_tokens": 4096})),
+                           ("app.env", "PASSWORD_MIN_LENGTH=8\nSESSION_TIMEOUT=30\n"),
+                           ("settings.ini", "[auth]\npassword_reset_ttl = 3600\n")):
+            self.assertFalse(holds(name, text), name)
+        for name, text in ((".env", "OPENAI_API_KEY=sk-abcdef1234567890\n"),
+                           ("db.env", "DB_PASSWORD=hunter2\n"),
+                           (".npmrc", "//registry.npmjs.org/:_authToken=npm_abcdefghijklmnop\n"),
+                           ("settings.xml", "<server><id>x</id><password>hunter2</password></server>\n"),
+                           ("config", 'BUNDLE_GEMS__EXAMPLE__COM: "user:pass"\n')):
+            self.assertTrue(holds(name, text), name)
+        # end to end (a .env is never copied: cli.SECRET_FILES)
+        (self.repo / ".gitignore").write_text("llm.json\napp.env\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
+        (self.repo / "llm.json").write_text(json.dumps({"model": "local", "max_tokens": 4096}))
+        (self.repo / "app.env").write_text("TOKENIZERS_PARALLELISM=false\nPASSWORD_MIN_LENGTH=8\n")
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"copy": ["llm.json", "app.env"]}}}))
+        self.role(via="api", api=FLASH)
+        self.start_api("t-cpenv")
+        self.assertEqual(store.Task("t-cpenv").spec["copy"], ["llm.json", "app.env"])
 
     def test_an_api_task_takes_a_standing_sibling_and_a_big_copied_directory_as_configured(self):
         # #1322; a copied directory's package trees aren't read for a credential

@@ -367,7 +367,8 @@ its errors reach the agent as auto-fix rounds, not your review. Only one the pro
 configures, or a syntax-only check, and only when it passes on the base: `reference/checks.md`
 has each language's, the first time a task needs one.
 In a monorepo, `--repo` inside a package with its own committed CLAUDE.md (`package: …` printed)
-runs the agent, the setup and the tests in that package; the diff stays the whole repo's.
+runs the agent, a `--setup` and the tests in that package (a commands.json setup from its own
+key's directory); the diff stays the whole repo's.
 The worktree holds only committed files. When the acceptance command needs what the user
 installed (node_modules, a .venv, a build), add `--setup '<install command>'` (a .venv always: a copy still runs the original) (or `--copy <ignored
 path>`, from a package as the note names it; `--sibling <path>` for a `../<name>` or `../../<path>` the project uses, by that same path): `wb start` names the ignored
@@ -376,8 +377,8 @@ that fails: the runner makes the worktree, so `wb start` returns at once on any 
 minutes; a first build that needs longer (a big Rust or C++ project, torch over a slow link) takes
 `--setup-timeout <secs>` at start. A note that the
 agent leaves out the active venv (it would import the user's checkout, not the worktree): give it
-its own, `--setup 'uv sync' --test 'uv run pytest'` or
-`--setup 'python3 -m venv .venv && .venv/bin/pip install -e .'`; that .venv comes first on the
+its own: where uv.lock is committed, `uv sync --locked` as the setup with `--test 'uv run pytest'`, else
+`--setup 'python3 -m venv .venv && .venv/bin/pip install -e .'` (a plain `uv sync` writes an uncommitted uv.lock, which fails the task); that .venv comes first on the
 agent's and the tests' PATH. A note that the agent's environment leaves out a proxy (it holds a password): a setup or tests that need the
 network fail there; ask the user before naming it in commands.json `env`. Tests that use the
 GPU themselves (CUDA, PyTorch, a game engine): add `--unload-for-tests`, or they run beside the
