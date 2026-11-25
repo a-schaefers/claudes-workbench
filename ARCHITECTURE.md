@@ -76,6 +76,7 @@ wb-python` against a second hand-over; with none, exit 78 and one line (the chat
 | the git shim | the agent's shell (`<rules>/bin/git`) | a `/bin/sh` wrapper exec'ing `<python> -I -c` (quoted: a shebang splits at a space) with `sys.path.insert` |
 | the lane | the runner (`context.lane_wrap`) | `python -I lane.py …`, standard library only; on macOS it execs `/usr/bin/sandbox-exec -p <profile> -D… -- …` |
 | a scheduled fire | the user's systemd timer or launchd agent (`wb schedule add`), or `wb schedule run` | `[sys.executable, -X, utf8, <root>/bin/wb, schedule, fire, <name>]` by full path (`schedule.fire_argv`), with the PATH it was added under |
+| the agents' MCP server | another agent's MCP client | `python3 skill/agents/claude-workbench/scripts/mcp_server.py`: no package, standard library only, `ask_claude.py` beside it loaded by path |
 
 ## Why it's built this way
 
@@ -6323,7 +6324,7 @@ else `chat/serve.pid`, whose `port` stays when `wb chat off` stops its server an
 
 **Other agents** (#1042). The API is documented for other clients in `docs/chat-api.md` (every
 endpoint, the stream, the agent flow with curl; `test_docs` fails on a path in `chat.py` it doesn't
-name), and `skill/agents/claude-workbench/` is a portable skill (agentskills.io: SKILL.md, and
+name) and, machine-readable, in `docs/chat-api.yaml` (OpenAPI 3.1, #1138: below), and `skill/agents/claude-workbench/` is a portable skill (agentskills.io: SKILL.md, and
 `scripts/ask_claude.py`, standard library only) the user points another agent at. The page is one
 client; the server needs no browser.
 - **Tokens.** `wb chat token add <name>` (`chat.agent_add`: `AGENT_NAME` `[a-z0-9-]{1,32}`, not
@@ -6331,16 +6332,16 @@ client; the server needs no browser.
   `chat-agents.json` beside the token file (`chat.agents_path`, 0600, under `chat-agents.lock`);
   `list`, `revoke` (`chat.agent_revoke`). `Handler._authed` returns `"user"` or `"agent <name>"`
   (`chat.agent_for`, constant time, the file read per request so a revoke is at once) and sets
-  `Handler.agent`; an agent token from a peer that isn't this machine (`Handler._from_this_machine`: `127.*`, `::1`, or the very address it connected to, `Handler._local`: an agent here reaching a chat bound only to the tailnet or LAN IP comes from that IP, and was refused, #1274) is 403 ``agent tokens work only from this machine, at the address `wb chat url` prints`` whatever the bind, as agents are this machine's own (owner, 2026-11-23), while the user's token still works from the tailnet or LAN; a held wait or open stream checks again at every wake (`Handler._revoked`:
+  `Handler.agent`; an agent token from a peer that isn't this machine (`Handler._from_this_machine`: `127.*`, `::1`, or the very address it connected to, `Handler._local`: an agent here reaching a chat bound only to the tailnet or LAN IP comes from that IP, and was refused, #1274) is 403 `not_local` (``agent tokens work only from this machine, at the address `wb chat url` prints``) whatever the bind, as agents are this machine's own (owner, 2026-11-23), while the user's token still works from the tailnet or LAN; a held wait or open stream checks again at every wake (`Handler._revoked`:
   both went on reading its replies after a revoke, the #1042 review). An agent's token is on an
   allow-list, `AGENT_MAY` (`(method, path)` pairs, a trailing `/` matching by prefix: GET `/api/health`,
   `/api/wait`, `/api/state`, `/api/stream`, `/api/upload/`, `/api/file/`; PUT `/api/upload/`; POST
   `/api/send`; `chat.agent_may`), checked for every `/api/` request before its path's own handler
-  (`Handler._gate`: the token's 401, then 403), so an endpoint added later is the user's alone until
+  (`Handler._gate`: the token's 401, then 403 `agent_forbidden`), so an endpoint added later is the user's alone until
   named there (#1280: the deny-lists it replaced, `AGENT_DENIED` and `AGENT_UNREAD`, left every new
   one open to agents). Every other path is 403 `agent tokens can't use <path>` (`chat.agent_refusal`),
   or the old wording where there was one (`AGENT_CANT`, wording only: `/api/push`, `/api/active`,
-  `/api/seen`, `/api/latest`, `/api/shot`, `/api/audio`, `/api/transcribe/` (#1203), `/api/task` (#1201)); an unknown `/api/` path is 401 without a token, 404 with the user's. And 429 `{error, retry_after}` past
+  `/api/seen`, `/api/latest`, `/api/shot`, `/api/audio`, `/api/transcribe/` (#1203), `/api/task` (#1201)); an unknown `/api/` path (off `chat.ROUTES`, #1138) is 401 without a token, 403 with an agent's, 404 with the user's. And 429 `{error, code: rate_limited, retry_after}` past
   `AGENT_SENDS_PER_MIN` 30 sends in any 60 s (`chat.RateLimit`, per agent, in the server's memory).
   No switch of its own: answered while the server runs and a token exists. With the chat off no
   session listens, so `/api/health` says `listening: false` and a message waits, unread, until one
@@ -6383,12 +6384,97 @@ client; the server needs no browser.
   returns when that turns true during the wait (once: true at its start, it holds). `wb chat reply
   --to user` addresses the user's thread whatever the turn took: a consent question during an
   agent's request went to that agent alone, pushed to no phone (the review). `GET /api/health`:
-  `{api, listening}`. `/api/state` carries `api` (`API_VERSION` 1).
+  `{api, listening}`. `/api/state` carries `api` (`API_VERSION` 1). A wait on a message to Claude
+  unread past `MESSAGE_EXPIRE`, with no reply, is 410 `expired` at once (`chat.wait_state`'s
+  `expired`, read through `chat.expired`): it was held to its timeout again and again, and
+  `ask_claude.py` waited out its whole deadline for an answer that could not come (#1138); the
+  client exits 2.
+- **Versioned paths, one error shape, retry safety** (#1138, for 2.1). Every `/api/<x>` is also
+  `/api/v1/<x>` (`API_V1`): `Handler._versioned` rewrites the path first in `do_GET`, `do_PUT` and
+  `do_POST`, so every check after it (`Handler._gate`'s `AGENT_MAY`, `chat.ROUTES`) sees the one
+  name; `/api/` stays for the page and older clients, and `ask_claude.py` keeps it. `chat.ROUTES`
+  lists every route by method (one ending in `/` takes an id; `chat.routed`): `do_GET`, `do_PUT`
+  and `do_POST` answer 404 for an `/api/` path off it once `_gate` has passed it (so an agent's
+  token there is still 403, `agent_forbidden`), and `docs/chat-api.yaml`, the OpenAPI 3.1
+  description (the `/api/v1/` paths, bearer auth, the `Error` schema and each status's response,
+  the `Idempotency-Key` parameter and `Idempotent-Replayed` header, `x-user-only` on what an agent
+  may not call), describes exactly those: `test_docs` reads it with a parser of the YAML subset it
+  is written in (`read_yaml`: no PyYAML) and fails on a route in one and not the other, a route in
+  `ROUTES` that isn't a branch of its `do_<method>` (or a branch off it), a dangling `$ref`, a
+  refusal not answered with `Error`, `Error`'s `code` enum against `ERROR_CODES` and
+  `ERRORS_SAID`, or `x-user-only` against every route outside `AGENT_MAY` (`chat.agent_may`). Every error answer is
+  `{error, code, …}` (`Handler._json` adds `code` from `ERROR_CODES` by status unless the answer
+  names its own: `token_revoked`, `not_local`, `unknown_host`, `agent_forbidden`,
+  `bad_idempotency_key`, and `not_audio` for `/api/transcribe/`'s 415 (the upload's type, not the
+  request's), `ERRORS_SAID`); `error` stays the text, as `app.js` and `ask_claude.py`
+  show it as is. `Handler.send_error` answers http.server's own refusals (501 for another method,
+  a malformed request line) in that shape: they were HTML. A revoked agent token's sha256 moves to
+  `chat-agents.json`'s `revoked` (the newest `REVOKED_KEPT` 200; `chat.token_revoked`), so its
+  next request, held wait included (`REVOKED`), is 401 `token_revoked`, not `bad_token`.
+  `POST /api/send` with an `Idempotency-Key` (`IDEM_KEY`: 1 to 255 printable ASCII, no spaces;
+  else 400 `bad_idempotency_key`) runs under `chat/idempotency.lock` (`Handler._send_once`): the
+  key's record (`chat.idem_key`: the caller's name and the key's sha256) within `IDEM_FOR` (a day)
+  answers with the message it sent (`chat.message`, from anywhere in messages.jsonl) and
+  `Idempotent-Replayed: true`, sending nothing and costing no rate-limit slot (the limit is now
+  counted in `Handler._send_message`, after the body is read); another body under it
+  (`chat.idem_request`, the JSON with sorted keys) is 422 `idempotency_key_reused`; only a sent
+  message is recorded (`chat.idem_record`). An upload needs none: its id is stored once.
+  `ask_claude.py` sends one fresh UUID as both the key and the `cid`, and sends again after a cut
+  (a reset, 502 to 504) for up to `OUTAGE_MOST`: it ended at once, exit 1, and a rerun asked
+  Claude twice. Still cut then, it exits 2 naming the key (`Unreachable`: it may have landed,
+  and exit 1 named nothing to follow, the #1138 review); `--key` reruns the request under it
+  (`KEY`: at most 64, as it is the `cid` too), its uploads' ids a `uuid5` of the key and each
+  file's sha256, so the rerun's body is the first one's (a random id was a new body: 422).
 - **Kept apart.** A `cid` another sender used is 409 (`chat.send`: an agent's send could get the
   user's message back); an agent's stream never makes the oldest give way (503 at once); the mod
   indents an agent's later lines, so none starts as `[web chat]` or `[message …]` (`chatPrompt`).
   An agent's `about` is 400 `agent messages can't carry about` (what a message answers is the
   user's to say).
+- **The MCP server** (#1138, for 2.1): `skill/agents/claude-workbench/scripts/mcp_server.py`, a
+  stdio MCP server (newline-delimited JSON-RPC, as `ask_mcp.py`: `initialize` with the client's
+  protocol version, else `PROTOCOL` `2025-06-18`; `ping`; `tools/list`; `tools/call` on a thread
+  of its own, so pings go on while one holds) for an agent that speaks MCP rather than running
+  `ask_claude.py`. The same config (`CLAUDE_WB_URL`, `CLAUDE_WB_TOKEN` from its environment) and
+  `ask_claude.call`, loaded by path. It calls only the versioned paths (`API` `/api/v1`, every
+  path below under it): it is new with them in 2.1, and a chat without them (its `/health` 404s)
+  is refused as one to update, nothing sent. Three tools, each answering text and `structuredContent`:
+  - `ask_claude {text, key?}`: `GET /api/health` first (not listening: refused, nothing sent, as
+    `ask_claude.py`), then `POST /api/send` with `cid` and an `Idempotency-Key` header both the
+    key (`key`, `KEY` 1 to 64 of `A-Za-z0-9._:-`, or a new uuid4), sent again under it up to
+    `SEND_TRIES` 3 on a reset or 502 to 504; a 429 is refused naming `retry_after` and the key,
+    and `idempotency_key_reused` (422) as the key having gone with another request, nothing sent.
+    Returns `{id, key, listening, replayed}` at once (`replayed`: the chat's
+    `Idempotent-Replayed`, read through `ask_claude.call`'s `answered`: the key had sent it, and it
+    was not sent again; the text says so).
+  - `get_reply {id, wait?}`: `/api/wait?after=<id>&timeout=0`, then held (`wait`, `WAIT_DEFAULT`
+    20 s, at most `WAIT_MOST` 300: many clients cut a tool call at 60 s) from the last reply on
+    until the turn's end, not the first reply ("On it" came first). The wait answers for the
+    agent's whole conversation and its `done` for the newest row it is after, so the replies kept
+    are those whose `re` names the id, and it is done when: no reply came after it and a turn that
+    took it ended; its newest reply is the newest and a turn ended after it; or a later reply's
+    turn ended, or a reply names a request sent after it (`/api/state`'s `ts`) and not it (that
+    came from a later turn: the one that took it may have answered the user alone). A reply to an
+    earlier request says nothing of it. With none of its own among the replies the hold is
+    `until=reply` (with `until=done` the later reply's ended turn answered at once, over and over:
+    3,105 waits in 2 s, the review); a wait back with nothing new ends it; `timeout` goes in
+    tenths. Status `done`, `waiting on the user` (`waiting_on_user`), `queued` (`listener:
+    null`), `expired` (no reply of its own, its row in `/api/state` says so, listener or not: the
+    chat retires it either way; checked before the hold too) or `still working`, each with what
+    to do next (`NEXT`); an id outside the agent's view is refused (404). The chat's own `410
+    expired` on the wait is `expired` too: it was a refusal, `the chat answered …`, never the
+    status (#1138, integrating the parts).
+  - `list_requests {}`: the newest `LISTED` 20 of its own messages from `/api/state`, each with
+    `N replies`, `received`, `queued` or `expired`, and whether Claude listens.
+
+  Local only, by design: `this_machine` takes `localhost`, `127.0.0.0/8` and `::1` (IPv4-mapped
+  too) over http or https, or an IP of this machine's own (`_own`: a socket binds to it;
+  `0.0.0.0`, `::` and multicast never), as a chat bound only to the tailnet or LAN IP serves no
+  localhost and an agent here reaches it there (#1274); anything else (another machine's address,
+  any other name: its address could be anywhere) makes every tool refuse, nothing sent, as the
+  chat refuses an agent token from another machine anyway. `ask_claude.py`'s opener follows no redirect (`_Stay`): urllib
+  sends `Authorization` on to wherever a 3xx points. Its config line for OpenCode needs
+  `codemode: false`, or OpenCode 2.3 offers MCP tools only behind `execute` (docs/chat-api.md,
+  *An MCP server*).
 - **An agent's view.** An agent reads only its own conversation: round one let its token read the
   whole state and stream, the user's messages included. `Handler._snap` gives it
   `chat.agent_snapshot` (`{api, messages, listener, uploads, expire, now}`, `messages` only the rows
@@ -6458,6 +6544,9 @@ client; the server needs no browser.
 - `uploads/<id>/`: `<name>` and `.meta.json` `{id, name, size, type, sha256, ts, path, by?}`, written
   last (it marks the upload whole; `by`: the agent that uploaded it, #1042); `uploads.lock`: one
   finishing at a time. A voice clip's `.transcript.txt` (#1203): the listener's words, plain UTF-8.
+- `idempotency.json`: `{<sha256 of caller and Idempotency-Key>: {ts, req: the request's sha256,
+  id: the message sent}}` under `idempotency.lock`: none older than `IDEM_FOR` (a day), the newest
+  `IDEM_KEPT` 1000, ids and hashes only, never a message's text (#1138).
 - `turns.jsonl`: `{ids, ended, by}`: a main turn of a session ended (`by`, its mod's key), having taken the
   messages `ids` (none: messages.jsonl grew in it, maybe another session's write), from `wb chat ended` (the mod's
   `chatTurnEnd`, #1042); read from its last 4 MiB.
@@ -7692,6 +7781,7 @@ $WB_HOME (~/.local/state/workbench)
                                  away.json ({at, by}; 0 once the user types in the terminal) page.json ({at})
                                  audio/<batch>/ (wb chat listen: <n>.<ext>, audio.json; newest 20) uploads/<id>/ (<name> 0600, .meta.json, .transcript.txt) uploads.lock
                                  turns.jsonl ({ids, ended, by}: the mod's turn ends, wb chat ended; #1042)
+                                 idempotency.json idempotency.lock (POST /api/send's Idempotency-Key: caller and key's sha256 → {ts, req, id}; #1138)
   rules/<task>/                  outside the lane: opencode.json (the config layer), HANDBOOK.md, AGENTS.md (the user's ~/.config/workbench/AGENTS.md, copied: #1061),
                                  project-rules/<path> (a rule a link takes outside the repo: context.project_rules),
                                  imports/<n>/<name> (an import from outside the repo: context.import_files),
@@ -7757,7 +7847,8 @@ $WB_HOME (~/.local/state/workbench)
                                  "mcp": [server names] (that repo's agents too; names [A-Za-z0-9-]+, never workbench's, or refused)}}
   chat.json ($WB_CHAT_CONFIG)    {"bind": [...], "hosts": [...], "upload_mb": 25, "upload_message_mb": 50}
   chat-token ($WB_CHAT_TOKEN)    mode 600
-  chat-agents.json               beside chat-token, mode 600: {"agents": {"<name>": {"sha256", "ts"}}} (wb chat token; *Other agents*, #1042)
+  chat-agents.json               beside chat-token, mode 600: {"agents": {"<name>": {"sha256", "ts"}}, "revoked"?: {"<sha256>": ts}}
+                                 (wb chat token; *Other agents*, #1042; revoked: the newest 200, so a revoked token is told so, #1138)
   savings.json ($WB_SAVINGS)     {"kwh_price": N} (wb savings --price; off removes it; other keys kept)
   AGENTS.md ($WB_AGENTS_MD)      the user's own file for agents, every project's (*What the agent knows*, #1061); wb only reads it
   routes.json ($WB_ROUTES)       the roles (*Roles*, #1014): {"v": 1, "use": "gpu"|"api"|"both" (the Agents switch, #1016; missing: both),
@@ -8559,7 +8650,16 @@ requests once the service worker was registered), and a click on a pair or a tak
 control checks", its words for a same-origin fetch a reload cut off, which Playwright hands over as a page error.
 `WebChat` checks `/api/task` against `wb report`, `wb diff` and `wb log -v` on one task, its cuts, the agents' 403
 and `about: {task}` (#1201). `WebChat` runs the agents' client, `skill/agents/claude-workbench/scripts/ask_claude.py`, against its server with a
-listener played in the test (#1042).
+listener played in the test (#1042), and against a stub that cuts a send (one Idempotency-Key every try; cut for good,
+exit 2 naming the key, and `--key` sending the same body, upload ids included) and answers a wait `410 expired`
+(#1138); it checks every `/api/v1/` path against its `/api/` twin, each error `code` against docs/chat-api.md's table
+(and a wait on a message Claude read 6 hours ago held, never `410`), and four racers under one key landing one
+message (#1138).
+`AgentMcp` runs the agents' MCP server as a subprocess on stdio against its own
+chat server (`initialize`, `tools/list`, each tool, the refusal of a URL not this machine's (its own IP taken), a redirect never followed, a request
+answered to the user alone staying done in a bounded number of waits, an expired one with a listener up, every call
+on `/api/v1/` with a key's replay, its 422 and the chat's 410 each said as such, a chat without `/api/v1/` refused, 2.0's 403 and an older one's 404 alike), and, with
+`opencode` on PATH, real OpenCode with the docs' config line, `capture_llm.py` making the tool calls (#1138).
 
 **Rate limits** (`RateLimits`, #1020): the runner in-process (`runner.drive`) on a task written as `wb start --role`
 writes it (`via: api`, `provider`, `role`), the keyhole started in the test as `drive` will start it (#1015,
@@ -9016,10 +9116,13 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **A message's `from`** (`user`, `claude`, `notice`, an agent's name with `role: "agent"`) → `chat.NEWS`,
   `chat._inbound`, `chat.AGENT_RESERVED`, `sw.js`, `makeRow`, `metaFor`, `agentMeta`, `reportSeen`, `wb chat log`, the
   mod's `unread`/`agentOf`/`chatPrompt` and `owedAtTurnEnd` (`claude` only), docs/chat-api.md.
-- **The web chat's API** (a path, a field, an error, a limit) → docs/chat-api.md (`test_docs` checks the paths),
-  `skill/agents/claude-workbench/` (SKILL.md, `ask_claude.py`); a change that breaks a client → `chat.API_VERSION` and
+- **The web chat's API** (a path, a field, an error, a limit) → docs/chat-api.md (`test_docs` checks the paths;
+  a route → `chat.ROUTES` and `docs/chat-api.yaml`, which `test_docs` checks against each other and the handlers;
+  an error `code`, `chat.ERROR_CODES` or `ERRORS_SAID`, → its *Errors* table, which a test checks),
+  `skill/agents/claude-workbench/` (SKILL.md, `ask_claude.py`, `mcp_server.py`); a change that breaks a client → `chat.API_VERSION` and
   the doc's *Versions*. **What an agent token may do** → `chat.AGENT_MAY` (and `AGENT_CANT`'s wording) ↔ the doc's
-  allow-list (`test_docs` checks each path and method), the agents' skill; a new endpoint stays out of `AGENT_MAY` unless an agent needs it. **What an agent may read** →
+  allow-list (`test_docs` checks each path and method) and docs/chat-api.yaml's `x-user-only` (every route outside
+  it), the agents' skill; a new endpoint stays out of `AGENT_MAY` unless an agent needs it. **What an agent may read** →
   `chat.in_view`, `chat.agent_snapshot`, `chat.agent_may_read`, the doc's *An agent's view*.
 - **settings-changes.jsonl's rows** (`settings.record`: `key`, `label`, `from`, `to`, `said`, `help`, `by`) → the mod's
   reader of it (#1283, which delivers `by: "web"` alone), *Files and formats*. **A Settings row's `wb route` call**

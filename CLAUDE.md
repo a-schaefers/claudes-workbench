@@ -100,11 +100,11 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
   `wb try`'s sample. `schedule.py`: `wb schedule` (a backlog on a timer, Claude headless: `claude -p`).
 - `agent/HANDBOOK.md`: in every agent prompt, so keep it short (prefill time). `agent/WRITING.md`:
   the writing role's, in its place in every writing prompt: keep it short too (under 3,000 bytes).
-- `skill/workbench/`: the `/workbench` procedure; `skill/agents/`: other agents' skill for the chat's API. `mod/`: the plugin (`hooks/register.tsx`, with
+- `skill/workbench/`: the `/workbench` procedure; `skill/agents/`: other agents' skill for the chat's API (`ask_claude.py`; `mcp_server.py`, the same over MCP, loopback only). `mod/`: the plugin (`hooks/register.tsx`, with
   the consent gates on sends to upstream and on the roles; `plugin.json` has no version, so installs track main).
   `bin/`: the launchers. `tests/`: ARCHITECTURE.md's *The tests*. `.github/`, `scripts/`: CI and `ship.sh` (*Shipping to main*).
   `systemd/`, `launchd/`: keep the chat up. `docs/`: images (a replaced one gets a new name, for
-  GitHub's cache), the release checklist and notes, `chat-api.md` (the chat's HTTP API).
+  GitHub's cache), the release checklist and notes, `chat-api.md` (the chat's HTTP API; `chat-api.yaml`, its OpenAPI).
 
 ## How a task runs
 Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change must not break:

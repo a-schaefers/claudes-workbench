@@ -107,9 +107,9 @@ class ChatAdmin(Base):
         self.assertEqual(rec[0]["said"], r["said"])
         # nothing runs for a row that isn't, or a value it doesn't take; neither is recorded
         self.assertEqual(self.call("/api/settings", {"key": "nope", "value": "x"}, token=self.user),
-                         (400, {"error": "no such setting"}))
+                         (400, {"error": "no such setting", "code": "bad_request"}))
         self.assertEqual(self.call("/api/settings", {"key": "coding", "value": "sometimes"}, token=self.user),
-                         (400, {"error": "not one of its choices"}))
+                         (400, {"error": "not one of its choices", "code": "bad_request"}))
         self.assertEqual(self.call("/api/settings", {"key": "coding", "value": True}, token=self.user)[0], 400)
         self.assertEqual(len(store.read_jsonl(chat.changes_path())[0]), 1)
 
@@ -133,7 +133,7 @@ class ChatAdmin(Base):
     def test_a_post_without_the_json_content_type_gets_415(self):
         code, r = self.call("/api/settings", "key=coding&value=ask", token=self.user,
                             ctype="application/x-www-form-urlencoded")
-        self.assertEqual((code, r), (415, {"error": "json only"}))
+        self.assertEqual((code, r), (415, {"error": "json only", "code": "json_only"}))
         self.assertEqual(cli.coding_mode(), "decide")
 
     def test_the_stats_view_gets_wb_stats_feed_and_the_names_reads(self):
@@ -148,9 +148,9 @@ class ChatAdmin(Base):
         with contextlib.redirect_stderr(io.StringIO()):
             agent = run_wb("chat", "token", "add", "my-agent").strip()
         for path in ("/api/settings", "/api/stats", "/api/top"):
-            self.assertEqual(self.call(path, token=agent), (403, {"error": f"agent tokens can't use {path}"}))
+            self.assertEqual(self.call(path, token=agent), (403, {"error": f"agent tokens can't use {path}", "code": "agent_forbidden"}))
         self.assertEqual(self.call("/api/settings", {"key": "coding", "value": "only"}, token=agent),
-                         (403, {"error": "agent tokens can't use /api/settings"}))
+                         (403, {"error": "agent tokens can't use /api/settings", "code": "agent_forbidden"}))
         self.assertEqual(cli.coding_mode(), "decide")
         # every path the handler answers, by every method it takes: outside AGENT_MAY is 403
         paths = set(re.findall(r'"(/api/[a-z]+/?)', (ROOT / "workbench" / "chat.py").read_text()))
@@ -169,8 +169,9 @@ class ChatAdmin(Base):
         self.assertGreater(refused, 30)
         # the old wording where there was one
         self.assertEqual(self.call("/api/push", {"test": True}, token=agent)[1],
-                         {"error": "agent tokens can't change notifications"})
-        self.assertEqual(self.call("/api/latest", token=agent)[1], {"error": "agent tokens can't read the user's notifications"})
+                         {"error": "agent tokens can't change notifications", "code": "agent_forbidden"})
+        self.assertEqual(self.call("/api/latest", token=agent)[1], {"error": "agent tokens can't read the user's notifications",
+                                                                         "code": "agent_forbidden"})
         self.assertEqual(self.call("/api/health", token=agent)[0], 200)   # and its own still work
         self.assertEqual(self.call("/api/send", {"text": "hi"}, token=agent)[0], 200)
 

@@ -181,8 +181,24 @@ def agent_tokens() -> dict:
             and AGENT_NAME.fullmatch(k)} if isinstance(agents, dict) else {}
 
 
-def _agents_write(agents: dict) -> None:
-    store.write_json(agents_path(), {"agents": agents}, mode=0o600)
+# A revoked token's sha256 is kept (the newest REVOKED_KEPT), so its next request is told it was
+# revoked (`token_revoked`) rather than that it is wrong (`bad_token`): an agent can then say
+# "ask the user for a new token", not "check your setup" (#1138). Only hashes, as for live ones.
+REVOKED_KEPT = 200
+
+
+def _revoked_hashes() -> dict:
+    """{sha256: when revoked} of the agent tokens revoked; {} for none or an unreadable file."""
+    got = store.read_json(agents_path(), {}) or {}
+    r = got.get("revoked") if isinstance(got, dict) else None
+    return {k: v for k, v in r.items() if isinstance(k, str) and isinstance(v, (int, float))} \
+        if isinstance(r, dict) else {}
+
+
+def _agents_write(agents: dict, revoked: dict | None = None) -> None:
+    revoked = _revoked_hashes() if revoked is None else revoked
+    keep = dict(sorted(revoked.items(), key=lambda kv: kv[1])[-REVOKED_KEPT:])
+    store.write_json(agents_path(), {"agents": agents, **({"revoked": keep} if keep else {})}, mode=0o600)
 
 
 def agent_add(name: str) -> str:
@@ -203,13 +219,24 @@ def agent_add(name: str) -> str:
 
 
 def agent_revoke(name: str) -> bool:
-    """Revoke ``name``'s token (False: it had none). Its next request is 401."""
+    """Revoke ``name``'s token (False: it had none). Its next request is 401 `token_revoked`."""
     with store.locked(agents_path().with_name("chat-agents.lock")):
         agents = agent_tokens()
-        if agents.pop(name, None) is None:
+        if (rec := agents.pop(name, None)) is None:
             return False
-        _agents_write(agents)
+        _agents_write(agents, {**_revoked_hashes(), rec["sha256"]: store.now()})
     return True
+
+
+def token_revoked(secret: str) -> bool:
+    """Whether ``secret`` is an agent token that was revoked (by its sha256, in constant time)."""
+    if not secret.startswith(AGENT_PREFIX):
+        return False
+    digest = hashlib.sha256(secret.encode()).hexdigest()
+    found = False
+    for h in _revoked_hashes():
+        found |= hmac.compare_digest(h, digest)
+    return found
 
 
 def agent_for(secret: str) -> str | None:
@@ -801,13 +828,18 @@ def addressed(row: dict, caller: str) -> bool:
 def wait_state(after: str, caller: str) -> dict | None:
     """What GET /api/wait answers for message ``after``: {replies (Claude's rows after it for the
     caller), done (a turn has ended since the newest of those, the listener's that wrote it when
-    the row says `turn_by`, else since ``after``: one that took it, for a message to Claude)};
-    None when ``after`` is in no recent part of the thread."""
+    the row says `turn_by`, else since ``after``: one that took it, for a message to Claude), and
+    expired: True for a message to Claude unread past MESSAGE_EXPIRE with no reply}; None when
+    ``after`` is in no recent part of the thread."""
     rows = store.read_jsonl_tail(chat_dir() / "messages.jsonl", THREAD_BYTES)
     at = next((n for n, r in enumerate(rows) if isinstance(r, dict) and r.get("id") == after), None)
     if at is None or (caller != "user" and not in_view(rows[at], caller)):  # another's is no message to it
         return None
     replies = [r for r in rows[at + 1:] if isinstance(r, dict) and addressed(r, caller)]
+    if not replies and _inbound(rows[at]) and _expired(rows[at], store.now()) and expired(after):
+        # never passed on: a wait on it held to its timeout, again and again, and the agent's
+        # client waited out its whole deadline for an answer that could not come (#1138)
+        return {"replies": [], "done": False, "expired": True}
     # done since the last row the caller now has: its newest reply's turn, else the message's
     me, turns = (replies or rows[at:at + 1])[-1], _turns()
     # a reply's: a turn of the session that wrote it (`turn_by`; an older or another session's
@@ -2054,7 +2086,97 @@ def _read_meta_path(d: Path) -> dict | None:
         os.close(fd)
 
 
+# ---- retry safety: Idempotency-Key (#1138) ----
+# An agent whose POST /api/send was cut (a reset, a proxy's 502, its own timeout) can't tell
+# whether the message landed; sent again, Claude was asked twice and did the work twice. A send
+# with an `Idempotency-Key` header records {caller and key's sha256: {ts, req, id}} in
+# chat/idempotency.json; the same key from the same caller within IDEM_FOR returns the message it
+# sent the first time and sends nothing. The same key on another body is 422, never a silent drop
+# of a new request. Only a sent message is recorded: a refusal sent nothing, so its retry is
+# checked afresh. Kept small: ids, not messages, the newest IDEM_KEPT, none past IDEM_FOR. An
+# upload needs none: PUT /api/upload/<id> already stores an id once.
+IDEM_FOR = 86400
+IDEM_KEPT = 1000
+IDEM_KEY = re.compile(r"[\x21-\x7e]{1,255}")  # printable ASCII, no spaces (as the header is sent)
+
+
+def idem_path() -> Path:
+    return chat_dir() / "idempotency.json"
+
+
+def _idem_read() -> dict:
+    got = store.read_json(idem_path(), {}) or {}
+    now = store.now()
+    return {k: v for k, v in got.items() if isinstance(v, dict) and isinstance(v.get("id"), str)
+            and isinstance(v.get("ts"), (int, float)) and now - v["ts"] < IDEM_FOR} if isinstance(got, dict) else {}
+
+
+def idem_key(caller: str, key: str) -> str:
+    return hashlib.sha256(f"{caller}\n{key}".encode()).hexdigest()
+
+
+def idem_request(body) -> str:
+    """The request's fingerprint: its JSON, keys sorted (a client that serialises again still matches)."""
+    return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def idem_lookup(k: str) -> dict | None:
+    return _idem_read().get(k)
+
+
+def idem_record(k: str, req: str, msg_id: str) -> None:
+    got = _idem_read()
+    got.pop(k, None)
+    got[k] = {"ts": store.now(), "req": req, "id": msg_id}
+    store.write_json(idem_path(), dict(sorted(got.items(), key=lambda kv: kv[1]["ts"])[-IDEM_KEPT:]))
+
+
+def message(msg_id: str) -> dict | None:
+    """The thread's row ``msg_id``, from anywhere in messages.jsonl (only the lines naming it are
+    parsed): a replayed send's message may be older than the thread's tail."""
+    try:
+        data = (chat_dir() / "messages.jsonl").read_bytes()
+    except FileNotFoundError:
+        return None
+    key = msg_id.encode()
+    return next((r for line in data.splitlines() if key in line for r in store._rows(line)
+                 if isinstance(r, dict) and r.get("id") == msg_id), None)
+
+
 # ---- the server ----
+
+# One shape for every error answer (#1138): {"error": the plain line, "code": a stable code}.
+# "error" stays the text, as before: the page (chat_static/app.js) and ask_claude.py show it as is,
+# so moving it would have broken both; a client branches on "code". A code by status unless the
+# answer names its own (ERRORS_SAID: a revoked token, an agent token from another machine, an
+# unknown host, what an agent may not do (outside AGENT_MAY), a malformed Idempotency-Key, an
+# upload to transcribe that isn't a voice clip).
+ERROR_CODES = {400: "bad_request", 401: "bad_token", 403: "forbidden", 404: "not_found",
+               409: "conflict", 410: "expired", 411: "length_required", 413: "too_large",
+               414: "too_large", 415: "json_only", 422: "idempotency_key_reused",
+               429: "rate_limited", 431: "too_large", 500: "server_error", 501: "not_implemented",
+               502: "bad_gateway", 503: "busy", 507: "disk_full"}
+ERRORS_SAID = ("token_revoked", "not_local", "unknown_host", "agent_forbidden", "bad_idempotency_key",
+               "not_audio")
+API_V1 = "/api/v1/"  # every /api/<x> is also /api/v1/<x>, the same handler (#1138)
+# Every API route, by method (#1138): docs/chat-api.yaml describes exactly these, under /api/v1/,
+# and a test checks it both ways and that each is a branch of its do_<method>; a route ending in
+# "/" takes an id after it. A path off this list is 404, once the token and AGENT_MAY have passed
+# it (an agent's token on any path outside AGENT_MAY is 403, as it was)
+ROUTES = {"GET": ("/api/health", "/api/state", "/api/stream", "/api/wait", "/api/upload/", "/api/file/",
+                  "/api/latest", "/api/shot", "/api/audio", "/api/task", "/api/settings", "/api/stats",
+                  "/api/top"),
+          "PUT": ("/api/upload/",),
+          "POST": ("/api/send", "/api/seen", "/api/push", "/api/active", "/api/settings", "/api/transcribe/")}
+
+
+def routed(method: str, path: str) -> bool:
+    """Whether ``method`` ``path`` is one of ROUTES (else 404)."""
+    return any(_covers(r, path) for r in ROUTES.get(method, ()))
+
+
+REVOKED = {"error": "this agent token was revoked: ask the user for a new one (wb chat token add)",
+           "code": "token_revoked"}
 
 # ---- the web app's admin (#1280): Settings, Stats, the live view; the user's token alone ----
 # A Settings change runs its wb command as a child that isn't Claude (settings.child_env): the
@@ -2254,16 +2376,44 @@ class Handler(BaseHTTPRequestHandler):
                          "media-src blob:; "
                          "frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
 
-    def _send(self, code: int, body: bytes, ctype: str) -> None:
+    def _send(self, code: int, body: bytes, ctype: str, headers: dict | None = None) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
         self._security_headers()
         self.end_headers()
         self.wfile.write(body)
 
     def _json(self, code: int, obj) -> None:
+        if code >= 400 and isinstance(obj, dict) and "error" in obj:  # every error: {error, code} (#1138)
+            obj = {"error": obj["error"], "code": obj.get("code") or ERROR_CODES.get(code, "error"),
+                   **{k: v for k, v in obj.items() if k not in ("error", "code")}}
         self._send(code, json.dumps(obj).encode(), "application/json")
+
+    def send_error(self, code, message=None, explain=None):
+        """http.server's own refusals (an unsupported method, a malformed request line, headers
+        too long) as JSON in the one error shape: they were an HTML page (#1138)."""
+        if code < 400:
+            return super().send_error(code, message, explain)
+        self.close_connection = True
+        said = (message or self.responses.get(code, ("error",))[0])[:200]
+        body = json.dumps({"error": said, "code": ERROR_CODES.get(code, "error")}).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self._security_headers()
+        self.end_headers()
+        if self.command != "HEAD":  # a HEAD's answer has no body (as http.server's own)
+            self.wfile.write(body)
+
+    def _versioned(self) -> None:
+        """/api/v1/<x> is /api/<x>: rewritten before anything reads the path, so every check
+        (the token's, AGENT_MAY's, ROUTES') sees the one name (#1138)."""
+        if self.path.startswith(API_V1):
+            self.path = "/api/" + self.path[len(API_V1):]
 
     def _host(self) -> str:
         """The Host header's name, lowercased, without its port or a v6 address's brackets."""
@@ -2285,7 +2435,8 @@ class Handler(BaseHTTPRequestHandler):
         host = self._host()
         if (self.hosts is not None and host not in self.hosts and not (host and host.split("%")[0] == self._local())
                 and not (host and host == tailnet_name())):
-            self._json(403, {"error": f"unknown host {host[:100]}: add it to chat.json's hosts"})
+            self._json(403, {"error": f"unknown host {host[:100]}: add it to chat.json's hosts",
+                             "code": "unknown_host"})
             return False
         return True
 
@@ -2333,10 +2484,13 @@ class Handler(BaseHTTPRequestHandler):
                 # refused, whatever the bind; the user's own token is unaffected. It named
                 # localhost, which a chat bound only to the tailnet doesn't serve (#1274)
                 self._json(403, {"error": "agent tokens work only from this machine, at the address"
-                                          " `wb chat url` prints"})
+                                          " `wb chat url` prints", "code": "not_local"})
                 return None
             self.agent, self.agent_token = name, got
             return f"agent {name}"
+        if got and token_revoked(got):
+            self._json(401, REVOKED)
+            return None
         self._json(401, {"error": "bad or missing token: open the link from `wb chat url`"})
         return None
 
@@ -2356,7 +2510,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authed():
             return False
         if self.agent and not agent_may(method, path):
-            self._json(403, {"error": agent_refusal(path)})
+            self._json(403, {"error": agent_refusal(path), "code": "agent_forbidden"})
             return False
         return True
 
@@ -2383,10 +2537,13 @@ class Handler(BaseHTTPRequestHandler):
                 with hub.cond:
                     seen = hub.version  # before the look: a change after it wakes the wait
                 if self._revoked():
-                    return self._json(401, {"error": "bad or missing token: open the link from `wb chat url`"})
+                    return self._json(401, REVOKED)
                 got = wait_state(after, caller)
                 if got is None:
                     return self._json(404, {"error": "no such message"})
+                if got.get("expired"):
+                    return self._json(410, {"error": "that message expired unread: it was never passed "
+                                                     "to Claude, so send it again"})
                 lst, left, held = listener(), deadline - time.monotonic(), waiting_on_user()
                 paused = held if paused is None else paused
                 if got["replies"] or (got["done"] and until == "done") or lst is None or left <= 0 \
@@ -2434,9 +2591,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._allowed():
             return
+        self._versioned()
         path = self.path.split("?")[0]
         if path.startswith("/api/") and not self._gate("GET", path):  # the token; agents' allow-list
             return
+        if path.startswith("/api/") and not routed("GET", path):  # off ROUTES: none (#1138)
+            return self._json(404, {"error": "not found"})
         if path == "/manifest.webmanifest":  # with the key, it opens the installed app keyed
             k = (parse_qs(urlsplit(self.path).query).get("k") or [""])[0]
             m = json.loads((STATIC / "manifest.webmanifest").read_text())
@@ -2652,9 +2812,12 @@ class Handler(BaseHTTPRequestHandler):
         """PUT /api/upload/<id>: the file's bytes as the body, its name (URI-encoded) in
         X-File-Name, its type in Content-Type. 200 {upload, new}; the same id again stores nothing
         and answers with the first. Refusals say why, for the page's chip (#623)."""
-        if not self._allowed() or not self._gate("PUT", self.path.split("?")[0]):
+        if not self._allowed():
             return
-        if not self.path.startswith("/api/upload/"):
+        self._versioned()
+        if not self._gate("PUT", self.path.split("?")[0]):
+            return
+        if not routed("PUT", self.path):
             return self._json(404, {"error": "not found"})
         try:
             n = int(self.headers.get("Content-Length") or -1)
@@ -2683,8 +2846,8 @@ class Handler(BaseHTTPRequestHandler):
         from . import audio
         try:
             return self._json(200, {"text": transcribe_upload(uid)})
-        except UploadError as e:
-            return self._json(e.code, {"error": e.why})
+        except UploadError as e:  # a 415 here is the upload's type, not the request's (json_only)
+            return self._json(e.code, {"error": e.why, **({"code": "not_audio"} if e.code == 415 else {})})
         except audio.Busy as e:
             return self._json(409, {"error": "the GPU is busy with a task", "busy": True, "why": str(e)})
         except audio.Down as e:
@@ -2719,13 +2882,17 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def do_POST(self):
-        if not self._allowed() or not self._gate("POST", self.path.split("?")[0]):
+        if not self._allowed():
             return
-        if self.path not in ("/api/send", "/api/seen", "/api/push", "/api/active", "/api/settings") \
-                and not self.path.startswith("/api/transcribe/"):
+        self._versioned()
+        if not self._gate("POST", self.path.split("?")[0]):
+            return
+        if not routed("POST", self.path):
             return self._json(404, {"error": "not found"})
-        if self.agent and self.path == "/api/send" and (wait := self.sends.hit(self.agent)):
-            return self._json(429, {"error": f"over {AGENT_SENDS_PER_MIN} sends a minute", "retry_after": wait})
+        key = (self.headers.get("Idempotency-Key") or "").strip() if self.path == "/api/send" else ""
+        if key and not IDEM_KEY.fullmatch(key):
+            return self._json(400, {"error": "an Idempotency-Key is 1 to 255 printable characters, no spaces",
+                                    "code": "bad_idempotency_key"})
         if (self.headers.get("Content-Type") or "").split(";")[0] != "application/json":
             return self._json(415, {"error": "json only"})
         try:  # -1 would read until the client hangs up (the 2026-11-16 audit)
@@ -2741,6 +2908,11 @@ class Handler(BaseHTTPRequestHandler):
             text, cid = str(body.get("text", "")).strip(), body.get("cid")
         except (ValueError, AttributeError):
             return self._json(400, {"error": "bad json"})
+        if key:  # one key, one send: held while it sends, so a retry racing the first waits for it
+            with store.locked(chat_dir() / "idempotency.lock"):
+                return self._send_once(body, text, cid, key)
+        if self.path == "/api/send":
+            return self._send_message(body, text, cid)
         if self.path.startswith("/api/transcribe/"):  # a voice clip's words, for the box (#1203)
             return self._transcribe(self.path[len("/api/transcribe/"):])
         if self.path == "/api/seen":  # what the page showed: no push for it (endpoint: to it alone)
@@ -2775,6 +2947,27 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"on": on})
         if self.path == "/api/settings":  # one of the web app's Settings, through its wb command
             return self._json(*admin_set(body.get("key"), body.get("value")))
+        return None
+
+    def _send_once(self, body: dict, text: str, cid, key: str) -> None:
+        """POST /api/send with an Idempotency-Key (#1138): the first answer's message again for a
+        key this caller sent within IDEM_FOR (header `Idempotent-Replayed: true`), sending nothing;
+        422 for the same key on another body; else sent, and the key recorded."""
+        k, req = idem_key(self.agent or "user", key), idem_request(body)
+        if (had := idem_lookup(k)) and (msg := message(had["id"])):
+            if had.get("req") != req:
+                return self._json(422, {"error": "that Idempotency-Key went with another request in the "
+                                                 "last 24 hours: use a new key for a new request"})
+            data = json.dumps({"message": msg, "listener": listener(), "state": self._snap()}).encode()
+            return self._send(200, data, "application/json", {"Idempotent-Replayed": "true"})
+        sent = self._send_message(body, text, cid)
+        if sent:
+            idem_record(k, req, sent["id"])
+
+    def _send_message(self, body: dict, text: str, cid) -> dict | None:
+        """POST /api/send: the message sent (and answered), else None (answered with the refusal)."""
+        if self.agent and (wait := self.sends.hit(self.agent)):  # a replay above costs none of these
+            return self._json(429, {"error": f"over {AGENT_SENDS_PER_MIN} sends a minute", "retry_after": wait})
         if self.agent and body.get("about") is not None:  # what it answers is the user's (#1042)
             return self._json(400, {"error": "agent messages can't carry about"})
         files = body.get("files")
@@ -2812,6 +3005,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as e:
             return self._json(409, {"error": str(e)})
         self._json(200, {"message": msg, "listener": listener(), "state": self._snap()})
+        return msg
 
 
 WILDCARD = ("0.0.0.0", "::")

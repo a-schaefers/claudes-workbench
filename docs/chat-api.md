@@ -4,17 +4,24 @@
 it serves (`workbench/chat_static/`) is one client of it; another agent with a token of its own is
 another. No browser is needed: the server runs headless, and everything below works with curl.
 
-This page is the reference for both. The internals are in ARCHITECTURE.md, *The web chat*.
+This page is the reference for both. The same API, machine-readable, is `docs/chat-api.yaml`
+beside it (OpenAPI 3.1: the `/api/v1/` paths, bearer auth, the one error schema, the
+`Idempotency-Key`), for a tool that builds a client from one; a test keeps its paths exactly the
+routes the server serves. The internals are in ARCHITECTURE.md, *The web chat*.
 
 **Handing it to another agent:** make it a token (`wb chat token add my-agent`) and point it at
 `skill/agents/claude-workbench/` in this repository. That directory is a portable skill (the
 agentskills.io format, `SKILL.md` with `name` and `description`), and its `scripts/ask_claude.py`
-does the whole flow below with the standard library alone.
+does the whole flow below with the standard library alone. An agent that speaks MCP uses its
+`scripts/mcp_server.py` instead ([An MCP server](#an-mcp-server)).
 
 ## Contents
 - [Base URL and auth](#base-url-and-auth)
+- [Errors](#errors)
+- [Retry safety](#retry-safety)
 - [The agent flow, end to end](#the-agent-flow-end-to-end)
 - [An agent's view](#an-agents-view)
+- [An MCP server](#an-mcp-server)
 - [Endpoints](#endpoints)
 - [Rows: messages](#rows-messages)
 - [The stream's events](#the-streams-events)
@@ -27,11 +34,16 @@ does the whole flow below with the standard library alone.
   localhost unless `~/.config/workbench/chat.json` says otherwise (`bind`: an address,
   `tailscale`, or `0.0.0.0`; `hosts`: more names to answer to). Reaching it from another machine
   is the user's own setup, for instance `tailscale serve --bg 1337` for https on the tailnet.
+- **Paths:** every `/api/<x>` below is also served at `/api/v1/<x>`, by the same handler with the
+  same rules (an agent's denials too). New clients use `/api/v1/` (workbench 2.1 and later);
+  `/api/` stays for the page and older clients, and `ask_claude.py` keeps it, so it works with any
+  server.
 - **Host check:** a request whose `Host` header is a name the server doesn't answer to gets
-  `403 {"error": "unknown host <host>: add it to chat.json's hosts"}`. An address it listens on
-  always passes.
+  `403 {"error": "unknown host <host>: add it to chat.json's hosts", "code": "unknown_host"}`. An
+  address it listens on always passes.
 - **Auth:** every `/api/` path wants `Authorization: Bearer <token>`. A missing or wrong token
-  is `401 {"error": "bad or missing token: open the link from `wb chat url`"}`.
+  is `401 {"error": "bad or missing token: open the link from `wb chat url`", "code":
+  "bad_token"}`; a revoked agent token is `401` with `"code": "token_revoked"`.
 - **Two kinds of token:**
   - **The user's** (`~/.config/workbench/chat-token`, or `$WB_CHAT_TOKEN`): everything here.
   - **An agent's** (`wb chat token add <name>`, printed once and kept only as its sha256 in
@@ -39,23 +51,25 @@ does the whole flow below with the standard library alone.
     and `-`). It can check health, send, upload, wait for replies, and read its own conversation
     (*An agent's view*): never the user's messages or the user's settings.
     - It works on an allow-list: `GET /api/health`, `/api/wait`, `/api/state`, `/api/stream`,
-      `/api/upload/<id>` and `/api/file/<id>`; `PUT /api/upload/<id>`; `POST /api/send`. Every
-      other path and method is `403 {"error": "agent tokens can't …"}`: `use <path>` for most,
-      the older wording where there was one (`change notifications` for `/api/push`,
-      `mark the user away` for `/api/active`, `mark what the user has seen` for `/api/seen`,
-      `read the user's notifications` for `/api/latest`, `read screenshots` for `/api/shot`,
-      `read audio takes` for `/api/audio`, `read tasks` for `/api/task`, `transcribe the user's
-      voice clips` for `/api/transcribe/<id>`). An
-      endpoint added later is the user's alone unless this list names it.
+      `/api/upload/<id>` and `/api/file/<id>`; `PUT /api/upload/<id>`; `POST /api/send` (each
+      at `/api/v1/` too). Every other path and method is `403 {"error": "agent tokens can't …",
+      "code": "agent_forbidden"}`: `use <path>` for most, the older wording where there was one
+      (`change notifications` for `/api/push`, `mark the user away` for `/api/active`, `mark
+      what the user has seen` for `/api/seen`, `read the user's notifications` for
+      `/api/latest`, `read screenshots` for `/api/shot`, `read audio takes` for `/api/audio`,
+      `read tasks` for `/api/task`, `transcribe the user's voice clips` for
+      `/api/transcribe/<id>`). An endpoint added later is the user's alone unless this list
+      names it.
     - It works only from this machine: a request with an agent token from any other machine
       (a tailnet or LAN peer, when the chat is bound there for the user's phone) is ``403
       {"error": "agent tokens work only from this machine, at the address `wb chat url`
-      prints"}``. On a chat bound only to the tailnet or a LAN IP, an agent here uses that address
-      (localhost isn't served). The user's token is unaffected.
-    - Its sends are limited to `AGENT_SENDS_PER_MIN` (30) a minute, then `429 {"error",
-      "retry_after": <seconds>}`.
+      prints", "code": "not_local"}``. On a chat bound only to the tailnet or a LAN IP, an agent
+      here uses that address (localhost isn't served). The user's token is unaffected.
+    - Its sends are limited to `AGENT_SENDS_PER_MIN` (30) a minute, then `429 {"error", "code":
+      "rate_limited", "retry_after": <seconds>}`.
     - `wb chat token list` names the agents; `wb chat token revoke <name>` ends one at once
-      (the next request is 401; a held wait answers 401 and an open stream closes).
+      (the next request is 401 `token_revoked`; a held wait answers it too and an open stream
+      closes).
 - **Agents never carry the user's authority.** An agent's message is stored with `role:
   "agent"` and `from: "<name>"`. Claude gets it as `[agent <name>] …`, not as the user's
   `[web chat] …`, and treats it as a teammate's request. Anything that needs the user's yes
@@ -73,6 +87,59 @@ does the whole flow below with the standard library alone.
 - **Transport:** HTTP/1.0, one request per connection, no CORS. A connection that sends nothing
   for 30 s is closed. Every response has `Cache-Control: no-store` (but `/api/file`) and a
   `X-Workbench-Chat` header naming whose chat it is.
+
+## Errors
+
+Every error answer is JSON of one shape: `{"error": "<a plain line, for a person>", "code":
+"<a stable code, for a program>"}`, some with more fields (`retry_after`, `final`). Branch on
+`code`; `error`'s wording may change. It holds on every path, and for the server's own refusals
+too (an unsupported method, a malformed request line):
+
+| Status | `code` | What it means |
+|---|---|---|
+| 400 | `bad_request` | the request is malformed: the line says which part |
+| 400 | `bad_idempotency_key` | an `Idempotency-Key` that isn't 1 to 255 printable characters without spaces |
+| 401 | `bad_token` | no token, or not one the chat knows |
+| 401 | `token_revoked` | an agent token the user revoked: ask them for a new one |
+| 403 | `not_local` | an agent token from another machine: agents work only from this one |
+| 403 | `agent_forbidden` | the user's alone (*An agent's view*) |
+| 403 | `unknown_host` | a `Host` the chat doesn't answer to |
+| 403 | `forbidden` | refused otherwise |
+| 404 | `not_found` | no such path, message, upload, file, screenshot, take, open task or setting's listener (for an agent, also one not in its view) |
+| 409 | `conflict` | another sender's `cid` or upload id, something else where an upload goes, wb refusing a setting, or the GPU busy with a task (a transcription) |
+| 410 | `expired` | a message never passed to Claude (unread past 6 hours: send it again), or a screenshot pruned with its task |
+| 411 | `length_required` | an upload without its `Content-Length` |
+| 413 | `too_large` | a body, file or message over its limit (or a request line or headers too long) |
+| 415 | `json_only` | a `POST` that isn't `application/json` |
+| 415 | `not_audio` | an upload to transcribe that isn't a voice clip |
+| 422 | `idempotency_key_reused` | an `Idempotency-Key` sent with another request in the last 24 hours |
+| 429 | `rate_limited` | an agent over its sends a minute: try again after `retry_after` seconds |
+| 500 | `server_error` | the disk or the server failed (`"final": true`: trying again can't help) |
+| 501 | `not_implemented` | a method the server doesn't serve (only `GET`, `PUT` and `POST`) |
+| 502 | `bad_gateway` | the listener failed a transcription |
+| 503 | `busy` | too many waits or streams open, or a listener not answering: try again in a moment |
+| 507 | `disk_full` | no room to store an upload |
+
+Nobody listening is not an error: `listener: null` on a 200 (*The agent flow*).
+
+## Retry safety
+
+A send cut short (a reset connection, a proxy's 502, the client's own timeout) may or may not have
+landed. Send it again with the same key and Claude is never asked twice:
+- **`Idempotency-Key: <1 to 255 printable characters, no spaces>`** on `POST /api/send`, say a
+  fresh UUID per request. The same key from the same token within 24 hours answers with the
+  message the first send made, sends nothing, and carries `Idempotent-Replayed: true` (the
+  `listener` and `state` are as of now). The same key on another body is `422
+  idempotency_key_reused`, never a new request dropped. Only a send that landed is remembered: a
+  refused one sent nothing, so its retry is checked afresh. A replay costs none of an agent's
+  sends a minute.
+- **`cid`** in the body does the same within the thread (*`POST /api/send`*); `ask_claude.py`
+  sends both, the same value, and tries a cut send again for up to two minutes. Still cut, it
+  exits 2 naming the key, and `--key <key>` sends the same request again under it; its files'
+  upload ids come from the key and their bytes, so the body matches (keep a key's body the same:
+  a new upload id is a new body, `422`).
+- **An upload** needs no key: `PUT /api/upload/<id>` stores an id once, and the same id again
+  answers with the first upload.
 
 ## The agent flow, end to end
 
@@ -139,6 +206,52 @@ An agent's token reads only its own conversation:
 
 The user's own token reads everything, as below.
 
+## An MCP server
+
+`skill/agents/claude-workbench/scripts/mcp_server.py` puts the agent flow behind three MCP tools,
+for an agent or tool that speaks MCP. It is a stdio server (newline-delimited JSON-RPC), standard
+library only, started by the agent's MCP client. It reads the same `CLAUDE_WB_URL` and
+`CLAUDE_WB_TOKEN` as `ask_claude.py`, from its environment.
+
+It is for the user's own agents on this machine, talking to the user's own Claude Code session.
+It calls only the `/api/v1/` paths, so it needs a chat from workbench 2.1 or later (an older one
+is said so, nothing sent). It listens on nothing but stdio. It refuses a `CLAUDE_WB_URL` whose host isn't this machine's
+(`localhost`, `127.*`, `::1`, or an IP address of its own, such as the tailnet or LAN address a
+chat bound only there is reached at): every tool says so, and nothing is sent. It follows no redirect.
+
+- **`ask_claude {text, key?}`**: checks `/api/v1/health` (not listening: refused, nothing sent),
+  sends the request and returns its id at once. `key` (optional, 1 to 64 of `A-Z a-z 0-9 . _ :
+  -`; a new one per call by default) goes as the send's `cid` and its `Idempotency-Key` header, so
+  a retry under the same key lands once: it answers `replayed: true` and says it was not sent
+  again. A send cut off by a restart is sent again under it. The same key on another request is
+  refused (`idempotency_key_reused`), nothing sent.
+- **`get_reply {id, wait?}`**: Claude's replies to that request and its status:
+  - `done`: the turn that took it has ended. A later report can still come (its reply says so);
+    `get_reply` shows it then.
+  - `still working`.
+  - `waiting on the user`: paused on the user's yes, not stuck.
+  - `queued`: no session listens yet.
+  - `expired`: unread past 6 hours, never passed on (the chat's `410 expired`).
+
+  It holds up to `wait` seconds (default 20, at most 300) for the turn to end.
+- **`list_requests {}`**: the agent's 20 newest requests, how far each got, and whether Claude
+  listens.
+
+The config, one line. For OpenCode (`opencode.json`; `codemode: false` offers the tools as
+themselves, not behind `execute`):
+
+```json
+"mcp": {"servers": {"claude-workbench": {"type": "local", "command": ["python3", "/path/to/workbench/skill/agents/claude-workbench/scripts/mcp_server.py"], "environment": {"CLAUDE_WB_URL": "http://localhost:1337", "CLAUDE_WB_TOKEN": "wba-…"}, "codemode": false}}}
+```
+
+For clients that read an `mcpServers` map (Cursor's `mcp.json`, Gemini CLI's `settings.json`):
+
+```json
+"mcpServers": {"claude-workbench": {"command": "python3", "args": ["/path/to/workbench/skill/agents/claude-workbench/scripts/mcp_server.py"], "env": {"CLAUDE_WB_URL": "http://localhost:1337", "CLAUDE_WB_TOKEN": "wba-…"}}}
+```
+
+The token is the agent's own (`wb chat token add <name>`), with an agent's view and limits.
+
 ## Endpoints
 
 Every `/api/` path below needs the bearer token. *User only* means an agent token gets 403.
@@ -190,9 +303,10 @@ A long poll for Claude's replies after the message `after` (a message's or a rep
   - `waiting_on_user`: Claude is paused on the user: one of Claude Code's dialogs waits in the
     terminal, and the phone was told of it. The work is waiting on the human, not stuck: keep
     waiting.
-- Errors: 400 for a bad `after`, `timeout` or `until`; `404 {"error": "no such message"}` for an
-  id not in the thread's recent part (the last 4 MiB), or, for an agent, not in its view; `503`
-  when 16 waits are open already.
+- Errors: 400 for a bad `after`, `timeout` or `until`; `404 {"error": "no such message", "code":
+  "not_found"}` for an id not in the thread's recent part (the last 4 MiB), or, for an agent, not
+  in its view; `410 expired` at once for a message unread past 6 hours with no reply (it was never
+  passed to Claude: send it again); `503` when 16 waits are open already.
 - A wait can be cut: the server restarts itself on an update (a reset connection, or 502 to 504
   from a proxy in front meanwhile), and `503` passes. Wait again, after a short pause, with the
   same `after`: nothing was lost (`ask_claude.py` does for up to two minutes in a row, then exits
@@ -212,11 +326,14 @@ long`):
   task <task>)` and decides whether to steer it). An agent's send with `about` is `400 {"error":
   "agent messages can't carry about"}`.
 
+Header: `Idempotency-Key`, optional (*Retry safety*).
+
 Response: `{"message": {...}, "listener": {...}|null, "state": {...}}`. Errors: 400 `a message is
 1 to 8000 characters`, `bad cid`, `bad json`, `no such screenshots`, `no such take`, `no such task`, `no upload
 <id>: it must be uploaded before the message` (for an agent, also another's upload), `files is a
-list of up to 10 upload ids`, `agent messages can't carry about`; 409 for another sender's `cid`;
-413 `too much for one message: …`; 429 for an agent over its limit.
+list of up to 10 upload ids`, `agent messages can't carry about`, and `bad_idempotency_key`; 409
+for another sender's `cid`; 413 `too much for one message: …`; 422 `idempotency_key_reused`; 429
+for an agent over its limit.
 
 ### `PUT /api/upload/<id>`
 Store a file under an id of yours (`[A-Za-z0-9-]{8,64}`), once: the same id again stores nothing
@@ -344,9 +461,10 @@ One `wb top` runs per server, whoever watches; it stops 15 s after the last view
 `GET /` (or `/index.html`) and the page's files (`/app.js`, `/app.css`, `/sw.js`, icons,
 `/manifest.webmanifest`); anything else is 404.
 
-Any other `/api/` method or path wants the token too (401 without it, 403 for an agent's) and
-is then `404 {"error": "not found"}`. Every `POST` takes JSON as above: a bad `Content-Length` is
-400 `bad length`, an unparsable body 400 `bad json`.
+Any other `/api/` path wants the token too (401 without it, 403 `agent_forbidden` for an
+agent's) and is then `404 {"error": "not found", "code": "not_found"}`; any other method is `501
+not_implemented`. Every `POST` takes JSON as above: a bad `Content-Length` is 400 `bad length`,
+an unparsable body 400 `bad json`.
 
 ## Rows: messages
 
@@ -391,4 +509,6 @@ bumps it; adding a field or an endpoint doesn't (the admin endpoints, `/api/sett
 `/api/stats` and `/api/top`, came in 2.0 under version 1).
 - **1** (2026-11-23): agent tokens, `/api/health`, `/api/wait`, `role`/`re`/`to` on rows, an
   agent's view of its own conversation. Before 2.0 shipped, the user's dialog cards and their
-  endpoints left it (#1350): Claude Code's dialogs are answered in the terminal.
+  endpoints left it (#1350): Claude Code's dialogs are answered in the terminal. Added since, in
+  the same version (workbench 2.1): the `/api/v1/` paths, `code` on every error (`error` kept as
+  the text), a revoked token's own code, `410 expired` from `/api/wait`, and `Idempotency-Key`.

@@ -28694,7 +28694,7 @@ class WebChat(Base):
         store.write_json(d / "shots.json", {**store.read_json(d / "shots.json"),
                                             "candidate": {"rev": "def", "ok": True, "pruned": True}})
         self.assertEqual(self.call("/api/shot?task=t&n=1&side=candidate", token=tok),
-                         (410, {"error": "expired"}))
+                         (410, {"error": "expired", "code": "expired"}))
         code, r = self.call("/api/send", {"text": "the button moved", "cid": "c1",
                                           "about": {"task": "t", "n": 1, "step": 9}}, tok)
         self.assertEqual(code, 200)
@@ -30473,7 +30473,7 @@ class WebChat(Base):
         code, d = self.call(q + "diff&full=1&path=new.py", token=tok)
         self.assertEqual(d["diff"], run_wb("diff", "fix-auth", "--", "new.py").rstrip("\n"))
         self.assertEqual(self.call(q + "diff&full=1&path=CLAUDE.md", token=tok),
-                         (404, {"error": "no such file in the diff"}))
+                         (404, {"error": "no such file in the diff", "code": "not_found"}))
         # the log: wb log -v's lines after their time
         code, lg = self.call(q + "log", token=tok)
         self.assertEqual(code, 200, lg)
@@ -30493,7 +30493,7 @@ class WebChat(Base):
         tok = self.chat.token()
         self.assertEqual(self.call("/api/task?name=fix-auth")[0], 401)
         code, r = self.call("/api/task?name=fix-auth", token=self._agent())
-        self.assertEqual((code, r), (403, {"error": "agent tokens can't read tasks"}))
+        self.assertEqual((code, r), (403, {"error": "agent tokens can't read tasks", "code": "agent_forbidden"}))
         self.assertEqual(self.call("/api/task?name=fix-auth", token=tok)[1]["part"], "summary")  # the default
         for bad in ("part=watch", "part=log&n=0", "part=log&n=abc", f"part=log&n={self.chat.TASK_LOG_MAX + 1}"):
             self.assertEqual(self.call(f"/api/task?name=fix-auth&{bad}", token=tok)[0], 400, bad)
@@ -30504,7 +30504,7 @@ class WebChat(Base):
         store.write_json(b.dir / "task.json", {**b.spec, "bench": True})
         for name in ("t-parked", "t-done", "t-bench", "nope", "../fix-auth", ""):
             self.assertEqual(self.call(f"/api/task?name={name}&part=diff", token=tok),
-                             (404, {"error": "no such open task"}), name)
+                             (404, {"error": "no such open task", "code": "not_found"}), name)
 
     def test_the_task_sheet_cuts_a_long_report_diff_and_line_and_follows_wb_next(self):
         t = self._sheet_task(steps=2)
@@ -30536,9 +30536,9 @@ class WebChat(Base):
         code, r = self.call("/api/send", {"text": "is it on track?", "about": {"task": "fix-auth"}}, tok)
         self.assertEqual((code, r["message"]["about"]), (200, {"task": "fix-auth"}))
         for bad in ({"task": "nope"}, {"task": "../fix-auth"}, {"task": 7}):
-            self.assertEqual(self.call("/api/send", {"text": "x", "about": bad}, tok), (400, {"error": "no such task"}), bad)
+            self.assertEqual(self.call("/api/send", {"text": "x", "about": bad}, tok), (400, {"error": "no such task", "code": "bad_request"}), bad)
         code, r = self.call("/api/send", {"text": "x", "about": {"task": "fix-auth"}}, token=self._agent())
-        self.assertEqual((code, r), (400, {"error": "agent messages can't carry about"}))
+        self.assertEqual((code, r), (400, {"error": "agent messages can't carry about", "code": "bad_request"}))
 
     # ---- the #1042 review ----
 
@@ -30629,7 +30629,7 @@ class WebChat(Base):
         tok, user = self._agent(), self.chat.token()
         mine = self.call("/api/send", {"text": "mine", "cid": "c-1"}, token=user)[1]["message"]
         code, r = self.call("/api/send", {"text": "theirs", "cid": "c-1"}, token=tok)
-        self.assertEqual((code, r), (409, {"error": "that cid is another sender's"}))
+        self.assertEqual((code, r), (409, {"error": "that cid is another sender's", "code": "conflict"}))
         self.assertEqual(self.call("/api/send", {"text": "mine", "cid": "c-1"}, token=user)[1]["message"]["id"], mine["id"])
         self.assertEqual([m["text"] for m in self.chat.thread()], ["mine"])
 
@@ -30787,12 +30787,233 @@ class WebChat(Base):
         # what a message answers (a pair of screenshots, a take) is the user's to say
         tok = self._agent()
         code, r = self.call("/api/send", {"text": "keep this one", "about": {"audio": "x", "n": 1}}, token=tok)
-        self.assertEqual((code, r), (400, {"error": "agent messages can't carry about"}))
+        self.assertEqual((code, r), (400, {"error": "agent messages can't carry about", "code": "bad_request"}))
         code, r = self.call("/api/send", {"text": "about step 1", "about": {"task": "t", "n": 1}}, token=tok)
-        self.assertEqual((code, r), (400, {"error": "agent messages can't carry about"}))
+        self.assertEqual((code, r), (400, {"error": "agent messages can't carry about", "code": "bad_request"}))
         self.assertEqual(self.chat.thread(), [])
         code, r = self.call("/api/send", {"text": "about step 1", "about": {"task": "t", "n": 1}}, token=self.chat.token())
         self.assertEqual((code, r["error"]), (400, "no such screenshots"))  # the user's is read as before
+
+    # ---- #1138: versioned paths, one error shape, retry safety ----
+
+    def _raw(self, method, path, body=b"", token=None, headers=None):
+        """(status, headers, JSON or bytes) for one request with any method and headers."""
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        h = {"Host": f"localhost:{self.port}", **({"Authorization": f"Bearer {token}"} if token else {}),
+             **(headers or {})}
+        c.request(method, path, body, h)
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+        return r.status, r, (json.loads(data) if r.getheader("Content-Type") == "application/json" else data)
+
+    def _keyed(self, body, key, token):
+        """POST /api/send with an Idempotency-Key: (status, JSON, its Idempotent-Replayed header)."""
+        code, r, got = self._raw("POST", "/api/send", json.dumps(body), token,
+                                 {"Content-Type": "application/json", "Idempotency-Key": key})
+        return code, got, r.getheader("Idempotent-Replayed")
+
+    def test_every_api_path_answers_under_v1_too_with_the_same_handler_and_the_same_denials(self):
+        # #1138: versioned paths for other clients; /api/ stays for the page and old clients
+        tok, user = self._agent(), self.chat.token()
+        self.assertEqual(self.call("/api/v1/health", token=tok), self.call("/api/health", token=tok))
+        code, r = self.call("/api/v1/send", {"text": "hi from v1"}, token=tok)
+        self.assertEqual((code, r["message"]["from"]), (200, "my-agent"))
+        mid = r["message"]["id"]
+        self.assertEqual(self.call(f"/api/v1/wait?after={mid}&timeout=0", token=tok)[1]["replies"], [])
+        self.assertEqual(self.call("/api/v1/state", token=tok)[1]["messages"][-1]["id"], mid)
+        code, _, got = self._raw("PUT", "/api/v1/upload/abcdefgh-1", b"hello", tok,
+                                 {"X-File-Name": "a.txt", "Content-Type": "text/plain"})
+        self.assertEqual((code, got["new"]), (200, True))
+        self.assertEqual(self.call("/api/v1/upload/abcdefgh-1", token=tok)[1]["upload"]["name"], "a.txt")
+        self.assertEqual(self._raw("GET", "/api/v1/file/abcdefgh-1", token=tok)[::2], (200, b"hello"))
+        stream = self._held_wait("/api/v1/stream", tok)
+        got = b""
+        while b"event: state" not in got:
+            got += stream.recv(1 << 20)
+        stream.close()
+        for path, body in (("/api/v1/active", {}), ("/api/v1/settings", {"key": "coding", "value": "ask"}),
+                           ("/api/v1/latest", None), ("/api/v1/task", None), ("/api/v1/shot", None),
+                           ("/api/v1/transcribe/abcdefgh-1", {}), ("/api/v1/nope", None)):
+            code, r = self.call(path, body, token=tok)
+            self.assertEqual((code, r["code"]), (403, "agent_forbidden"), path)  # its allow-list holds
+            self.assertTrue(r["error"].startswith("agent tokens can't "), r)
+        self.assertFalse((self.chat.chat_dir() / "away.json").exists())
+        self.assertEqual(self.call("/api/v1/latest", token=user)[0], 200)
+        self.assertEqual(self.call("/api/v1/health")[0], 401)                   # the token, as ever
+        self.assertEqual(self.call("/api/v1/nope", token=user)[1]["code"], "not_found")
+        self.assertEqual(self.call("/api/v1/answer", {"id": "x", "answer": "allow"}, token=user)[0], 404)  # gone (#1350)
+
+    def test_every_error_answer_is_one_shape_with_a_code_for_each_kind_of_refusal(self):
+        # #1138: "error" stays the plain line the page and ask_claude.py show; "code" is what a
+        # client branches on: a bad token, a revoked one, an agent from another machine, a rate
+        # limit, not found and an expired message each its own
+        tok = self._agent()
+
+        def refused(got, status, code):
+            self.assertEqual((got[0], got[1].get("code")), (status, code), got)
+            self.assertTrue(isinstance(got[1]["error"], str) and got[1]["error"], got)
+        refused(self.call("/api/health"), 401, "bad_token")
+        refused(self.call("/api/health", token="wba-" + "x" * 40), 401, "bad_token")
+        refused(self.call("/api/health", token=tok, host="elsewhere.example"), 403, "unknown_host")
+        refused(self.call("/api/nope", token=self.chat.token()), 404, "not_found")
+        refused(self.call("/api/wait?after=nope&timeout=0", token=tok), 404, "not_found")
+        refused(self.call("/api/push", {"test": True}, token=tok), 403, "agent_forbidden")
+        refused(self.call("/api/nope", token=tok), 403, "agent_forbidden")      # outside its allow-list
+        refused(self.call("/api/wait?after=x&timeout=9999", token=tok), 400, "bad_request")
+        with mock.patch.object(self.chat.Handler, "_peer", lambda self: "100.64.0.7"):  # a tailnet peer
+            refused(self.call("/api/health", token=tok), 403, "not_local")
+        with mock.patch.object(self.srv.RequestHandlerClass.sends, "per_min", 1):
+            code, r = self.call("/api/send", {"text": "the first"}, token=tok)
+            self.assertEqual(code, 200)
+            got = self.call("/api/send", {"text": "the second"}, token=tok)
+            refused(got, 429, "rate_limited")
+            self.assertTrue(1 <= got[1]["retry_after"] <= 60)
+        mid, now = r["message"]["id"], store.now()
+        self._listening()
+        began = time.monotonic()
+        with mock.patch.object(store, "now", lambda: now + self.chat.MESSAGE_EXPIRE + 60):
+            refused(self.call(f"/api/wait?after={mid}&timeout=4", token=tok), 410, "expired")
+        self.assertLess(time.monotonic() - began, 3)                       # said at once, not held
+        # one Claude read, still at work 6 hours on with no reply yet, is no expired message:
+        # told "never passed on, send it again", the agent would ask Claude twice (the review)
+        code, r = self.call("/api/send", {"text": "the long one"}, token=tok)
+        self.assertEqual(code, 200)
+        read = r["message"]["id"]
+        self.chat.ack(read, "sess-1")
+        with mock.patch.object(store, "now", lambda: now + self.chat.MESSAGE_EXPIRE + 60):
+            code, r = self.call(f"/api/wait?after={read}&timeout=1", token=tok)
+        self.assertEqual((code, r.get("code"), r.get("replies")), (200, None, []))  # held as before
+        code, r, got = self._raw("DELETE", "/api/state", token=tok)         # http.server's own refusal
+        refused((code, got), 501, "not_implemented")
+        run_wb("chat", "token", "revoke", "my-agent")
+        refused(self.call("/api/health", token=tok), 401, "token_revoked")
+        refused(self.call("/api/send", {"text": "hi"}, token=tok), 401, "token_revoked")
+        self.assertNotIn(tok, self.chat.agents_path().read_text())         # only its hash is kept
+        doc = (ROOT / "docs/chat-api.md").read_text()
+        for c in set(self.chat.ERROR_CODES.values()) | set(self.chat.ERRORS_SAID):
+            self.assertTrue(f"`{c}`" in doc, c)                              # each code documented
+
+    def test_a_send_with_an_idempotency_key_lands_once_a_day_and_its_retry_gets_the_first_message(self):
+        # #1138: an agent whose send was cut can't tell whether it landed; sent again, Claude was
+        # asked twice and did the work twice
+        tok, user = self._agent(), self.chat.token()
+        with mock.patch.object(self.srv.RequestHandlerClass.sends, "per_min", 1):
+            code, first, again = self._keyed({"text": "refactor the parser"}, "k-1", tok)
+            self.assertEqual((code, again), (200, None))
+            code, r, again = self._keyed({"text": "refactor the parser"}, "k-1", tok)  # no 429: nothing sent
+            self.assertEqual((code, again, r["message"]), (200, "true", first["message"]))
+        self.assertEqual([m["text"] for m in self.chat.thread()], ["refactor the parser"])
+        code, r, again = self._keyed({"text": "refactor the parser"}, "k-1", user)   # another caller's key
+        self.assertEqual((code, again, r["message"]["from"]), (200, None, "user"))
+        code, r, _ = self._keyed({"text": "something else"}, "k-1", tok)
+        self.assertEqual((code, r["code"]), (422, "idempotency_key_reused"))        # never a silent drop
+        self.assertEqual(self._keyed({"text": "x"}, "a key", tok)[1]["code"], "bad_idempotency_key")
+        self.assertEqual(len(self.chat.thread()), 2)
+        kept = self.chat.idem_path()
+        self.assertNotIn("refactor", kept.read_text())                          # ids, never the text
+        rows = store.read_json(kept)
+        store.write_json(kept, {k: {**v, "ts": v["ts"] - self.chat.IDEM_FOR - 1} for k, v in rows.items()})
+        code, r, again = self._keyed({"text": "refactor the parser"}, "k-1", tok)    # a day on: sent anew
+        self.assertEqual((code, again), (200, None))
+        self.assertNotEqual(r["message"]["id"], first["message"]["id"])
+        with mock.patch.object(self.chat, "IDEM_KEPT", 3):
+            for i in range(5):
+                self.assertEqual(self._keyed({"text": f"n{i}"}, f"n-{i}", user)[0], 200)
+            self.assertEqual(len(store.read_json(kept)), 3)                      # pruned to the newest
+        self.assertEqual(self._keyed({"text": "n4"}, "n-4", user)[2], "true")
+        got = []
+        racers = [threading.Thread(target=lambda: got.append(self._keyed({"text": "race"}, "r-1", tok)))
+                  for _ in range(4)]
+        for t in racers:
+            t.start()
+        for t in racers:
+            t.join()
+        self.assertEqual([g[0] for g in got], [200] * 4)
+        self.assertEqual(len({g[1]["message"]["id"] for g in got}), 1)          # four racers, one send
+        self.assertEqual([m["text"] for m in self.chat.thread()].count("race"), 1)
+
+    def test_ask_claude_sends_again_after_a_cut_with_one_key_and_exits_2_on_an_expired_message(self):
+        # #1138: a send cut by the chat restarting ended the client with exit 1, and its rerun
+        # asked Claude twice; one Idempotency-Key and cid for every try makes the retry safe. A
+        # send cut for good exited 1 naming nothing (the review): exit 2 with its key, and the
+        # rerun with --key sends the same body, its files' upload ids included
+        import importlib.util
+        script = ROOT / "skill/agents/claude-workbench/scripts/ask_claude.py"
+        spec = importlib.util.spec_from_file_location("ask_claude_1138", script)
+        ac = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ac)
+        posts, answers, puts, bodies = [], [], [], []
+
+        class Stub(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _answer(self, code, body):
+                data = json.dumps(body).encode()
+                self.send_response(code)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                posts.append((self.headers.get("Idempotency-Key"), body.get("cid")))
+                bodies.append(body)
+                what = answers.pop(0) if answers else "drop"
+                if what == "drop":                       # the server going away mid-send
+                    return
+                if what == "502":
+                    return self._answer(502, {"error": "bad gateway"})
+                self._answer(200, {"message": {"id": "m1"}, "listener": {}})
+
+            def do_PUT(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                puts.append(self.path)
+                self._answer(200, {"upload": {}})
+
+            def do_GET(self):
+                if self.path.startswith("/api/health"):
+                    return self._answer(200, {"api": 1, "listening": True})
+                self._answer(410, {"error": "that message expired unread", "code": "expired"})
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Stub)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        env = {"CLAUDE_WB_URL": f"http://127.0.0.1:{srv.server_address[1]}", "CLAUDE_WB_TOKEN": "wba-x"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(ac, "RETRY_FIRST", 0.05):
+            answers[:] = ["drop", "502", "ok"]
+            self.assertEqual(ac.send("refactor the parser", [], "k-1138")["message"]["id"], "m1")
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                rc = ac.follow("m1", "done", time.monotonic() + 20)
+        self.assertEqual(len(posts), 3)
+        self.assertEqual(len(set(posts)), 1)                    # one key and cid, every try
+        self.assertEqual(posts[0], ("k-1138", "k-1138"))
+        self.assertEqual(rc, 2, err.getvalue())
+        self.assertIn("expired unread: message m1", err.getvalue())
+        notes = Path(self.tmp.name) / "notes.md"
+        notes.write_text("the parser's notes")
+        del posts[:], bodies[:]
+        with mock.patch.dict(os.environ, env), mock.patch.object(ac, "RETRY_FIRST", 0.05), \
+                mock.patch.object(ac, "OUTAGE_MOST", 0.3):
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                rc = ac.main(["refactor the parser", "--file", str(notes)])     # cut every try
+            self.assertEqual(rc, 2, err.getvalue())
+            key = posts[0][0]
+            self.assertEqual(set(posts), {(key, key)})
+            self.assertIn(f"--key {key}", err.getvalue())                       # what to rerun with
+            self.assertIn("may have landed", err.getvalue())
+            first = bodies[0]
+            answers[:] = ["ok"]
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                rc = ac.main(["refactor the parser", "--file", str(notes), "--key", key])
+        self.assertEqual(rc, 2)                                                  # sent; the wait: 410
+        self.assertEqual((posts[-1], bodies[-1]), ((key, key), first))           # the same request
+        self.assertEqual(len(set(puts)), 1, puts)                                # its file, one id
+
 
 FAKE_SMI = """import os, sys, time
 with open(os.environ["FAKE_SMI_LOG"], "a") as f:
@@ -30821,6 +31042,397 @@ while True:
         print("1, [N/A], [N/A], [N/A], [N/A]", flush=True)
     time.sleep(ms / 1000)
 """
+
+
+class AgentMcp(Base):
+    """The agents' MCP server (#1138): skill/agents/claude-workbench/scripts/mcp_server.py, run as
+    an MCP client runs it, on stdio, against this test's chat server; no network."""
+    SCRIPT = ROOT / "skill/agents/claude-workbench/scripts/mcp_server.py"
+
+    def setUp(self):
+        super().setUp()
+        os.environ["WB_CHAT_TOKEN"] = str(Path(self.tmp.name) / "chat-token")
+        os.environ["WB_CHAT_CONFIG"] = str(Path(self.tmp.name) / "chat.json")  # not the user's
+        from workbench import chat
+        self.chat = chat
+        fqdn = mock.patch("socket.getfqdn", lambda name="": name or socket.gethostname())  # WebChat's why
+        fqdn.start()
+        self.addCleanup(fqdn.stop)
+        servers, _ = chat.make_servers(0, ["127.0.0.1"])
+        self.srv = servers[0]
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        self.srv.RequestHandlerClass.hub.close()
+        super().tearDown()
+
+    def _agent(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            return run_wb("chat", "token", "add", "my-agent").strip()
+
+    def _listening(self):
+        from workbench import models
+        me = os.getpid()
+        store.write_json(self.chat.chat_dir() / "listener.json",
+                         {"session": "s1", "cwd": "/home/u/project", "pid": me, "start": models._started(me)})
+
+    def _server(self, url=None, token="wba-x"):
+        """The MCP server as a client starts it; rpc(method, params) -> the reply's message."""
+        env = {"PATH": os.environ.get("PATH", ""), "CLAUDE_WB_URL": url or f"http://localhost:{self.port}",
+               "CLAUDE_WB_TOKEN": token}
+        proc = subprocess.Popen([sys.executable, "-I", str(self.SCRIPT)], env=env, text=True,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.addCleanup(lambda: (proc.kill(), proc.wait(), proc.stdout.close(), proc.stderr.close()))
+        waiting, lines, ids, lock = {}, queue.Queue(), iter(range(1, 10 ** 6)), threading.Lock()
+
+        def read():  # each reply to the call that waits on its id (calls overlap: a held get_reply)
+            for line in proc.stdout:
+                got = json.loads(line)
+                with lock:
+                    to = waiting.pop(got.get("id"), lines)
+                to.put(got)
+        threading.Thread(target=read, daemon=True).start()
+
+        def rpc(method, params=None, notify=False):
+            msg = {"jsonrpc": "2.0", "method": method, **({"params": params} if params is not None else {})}
+            if not notify:
+                with lock:
+                    msg["id"] = mid = next(ids)
+                    waiting[mid] = mine = queue.Queue()
+            with lock:
+                proc.stdin.write(json.dumps(msg) + "\n")
+                proc.stdin.flush()
+            return None if notify else mine.get(timeout=30)
+
+        def tool(name, **args):
+            return rpc("tools/call", {"name": name, "arguments": args})["result"]
+        rpc.tool, rpc.lines = tool, lines
+        return rpc
+
+    def test_the_mcp_server_initializes_and_lists_ask_claude_get_reply_and_list_requests(self):
+        rpc = self._server()
+        init = rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                  "clientInfo": {"name": "test", "version": "0"}})["result"]
+        self.assertEqual((init["protocolVersion"], init["serverInfo"]["name"]), ("2025-06-18", "claude-workbench"))
+        self.assertIn("tools", init["capabilities"])
+        rpc("notifications/initialized", notify=True)                    # no reply to a notification
+        tools = {t["name"]: t for t in rpc("tools/list")["result"]["tools"]}
+        self.assertEqual(set(tools), {"ask_claude", "get_reply", "list_requests"})
+        self.assertEqual(tools["ask_claude"]["inputSchema"]["required"], ["text"])
+        self.assertEqual(tools["get_reply"]["inputSchema"]["required"], ["id"])
+        self.assertEqual(rpc("ping")["result"], {})
+        self.assertTrue(rpc.lines.empty())                               # the notification had none
+        self.assertEqual(rpc("tools/call", {"name": "nope"})["error"]["code"], -32602)
+        self.assertEqual(rpc("resources/list")["error"]["code"], -32601)
+
+    def test_the_mcp_server_asks_claude_and_gets_the_reply_end_to_end_once_per_key(self):
+        # #1138: ask_claude returns the request's id at once; get_reply says "still working", then
+        # "waiting on the user" while a dialog of Claude Code's is open, then the reply once done
+        tok = self._agent()
+        rpc = self._server(token=tok)
+        rpc("initialize", {"protocolVersion": "2025-06-18"})
+        r = rpc.tool("ask_claude", text="fix it")
+        self.assertTrue(r["isError"])                                    # nobody listening: nothing sent
+        self.assertIn("Claude isn't listening", r["content"][0]["text"])
+        self.assertEqual(self.chat.thread(), [])
+        self._listening()
+        keys, handler = [], self.srv.RequestHandlerClass
+        post = handler.do_POST
+
+        def seen(h):  # the header part A's server reads; the cid already lands it once
+            keys.append(h.headers.get("Idempotency-Key"))
+            return post(h)
+        mock.patch.object(handler, "do_POST", seen).start()
+        self.addCleanup(mock.patch.stopall)
+        began = time.monotonic()
+        r = rpc.tool("ask_claude", text="In ~/src/app: add a --json flag.", key="retry-1")
+        self.assertLess(time.monotonic() - began, 10)
+        self.assertFalse(r["isError"], r)
+        rid = r["structuredContent"]["id"]
+        self.assertIn(f"request {rid}: sent", r["content"][0]["text"])
+        again = rpc.tool("ask_claude", text="In ~/src/app: add a --json flag.", key="retry-1")
+        self.assertEqual(again["structuredContent"]["id"], rid)          # a retry under its key lands once
+        self.assertEqual([m["id"] for m in self.chat.thread()], [rid])
+        self.assertEqual(self.chat.thread()[0]["cid"], "retry-1")
+        self.assertEqual(keys, ["retry-1", "retry-1"])
+        self.assertIn("key is 1 to 64", rpc.tool("ask_claude", text="x", key="a b")["content"][0]["text"])
+        r = rpc.tool("get_reply", id=rid, wait=0)
+        self.assertEqual(r["structuredContent"]["status"], "still working")
+        self.chat.ack(rid, "s1")
+        self.chat.reply("On it: a branch json-flag.", [rid])
+        store.write_json(self.chat.chat_dir() / "page.json", {"at": store.now()})
+        ask = self.chat.notice("AskUserQuestion", "Push the branch?", kind="question")  # waits in the terminal
+        r = rpc.tool("get_reply", id=rid, wait=0)
+        self.assertEqual(r["structuredContent"]["status"], "waiting on the user", r)
+        self.assertIn("On it: a branch json-flag.", r["content"][0]["text"])
+        self.chat.notice_done(ask["id"])                                 # settled there
+        got = {}
+        t = threading.Thread(target=lambda: got.update(r=rpc.tool("get_reply", id=rid, wait=20)))
+        t.start()
+        time.sleep(0.5)
+        self.assertTrue(t.is_alive())                                    # held for the turn's end
+        self.assertEqual(rpc("ping")["result"], {})                      # pings answered meanwhile
+        self.chat.reply("Done: branch json-flag, tests pass.", [rid])
+        self.chat.turn_ended([rid], "s1")
+        t.join(15)
+        r = got["r"]
+        self.assertEqual(r["structuredContent"]["status"], "done", r)
+        self.assertEqual([x["text"] for x in r["structuredContent"]["replies"]],
+                         ["On it: a branch json-flag.", "Done: branch json-flag, tests pass."])
+        listed = rpc.tool("list_requests")["structuredContent"]
+        self.assertTrue(listed["listening"])
+        self.assertEqual([(q["id"], q["status"]) for q in listed["requests"]], [(rid, "2 replies")])
+        # a later request Claude answers on its own: the first is still done, the second has its reply
+        r2 = rpc.tool("ask_claude", text="and a changelog line")["structuredContent"]["id"]
+        self.chat.ack(r2, "s1")
+        self.chat.reply("Adding it.", [r2])
+        self.assertEqual(rpc.tool("get_reply", id=rid, wait=0)["structuredContent"]["status"], "done")
+        r = rpc.tool("get_reply", id=r2, wait=0)["structuredContent"]
+        self.assertEqual((r["status"], [x["text"] for x in r["replies"]]), ("still working", ["Adding it."]))
+        self.assertIn("no request nope", rpc.tool("get_reply", id="nope", wait=0)["content"][0]["text"])
+        # a request unread past 6 hours is expired, listener or not: the chat retires it either
+        # way, and with one up it said "still working" for good, held each time (the #1138 review)
+        old = {"id": f"{int(time.time() * 1000) - 1}-abcdef", "ts": store.now() - 7 * 3600,
+               "from": "my-agent", "role": "agent", "text": "an old one"}
+        store.append_jsonl(self.chat.chat_dir() / "messages.jsonl", old)
+        began = time.monotonic()
+        self.assertEqual(rpc.tool("get_reply", id=old["id"], wait=5)["structuredContent"]["status"], "expired")
+        self.assertLess(time.monotonic() - began, 4)                     # no hold for a turn that won't come
+        (self.chat.chat_dir() / "listener.json").unlink()
+        self.assertEqual(rpc.tool("get_reply", id=old["id"], wait=5)["structuredContent"]["status"], "expired")
+
+    def test_the_mcp_server_calls_only_api_v1_lands_a_key_once_and_says_expired_on_the_chats_410(self):
+        # #1138: the MCP server spoke the unversioned /api/ and read nothing of the key's answers:
+        # a replay looked like a new send, the same key on another request was a bare "not sent",
+        # and the chat's 410 for a request unread past 6 hours was a refusal, never "expired"
+        tok = self._agent()
+        self._listening()
+        rpc = self._server(token=tok)
+        rpc("initialize", {"protocolVersion": "2025-06-18"})
+        handler, asked = self.srv.RequestHandlerClass, []
+        for name in ("do_GET", "do_POST", "do_PUT"):
+            real = getattr(handler, name)
+
+            def seen(h, real=real):  # the path as sent, before the handler reads /api/v1/ as /api/
+                asked.append(h.path.split("?")[0])
+                return real(h)
+            mock.patch.object(handler, name, seen).start()
+        self.addCleanup(mock.patch.stopall)
+        first = rpc.tool("ask_claude", text="In ~/src/app: add a --json flag.", key="k-1")
+        self.assertFalse(first["isError"], first)
+        self.assertFalse(first["structuredContent"]["replayed"])
+        again = rpc.tool("ask_claude", text="In ~/src/app: add a --json flag.", key="k-1")
+        rid = first["structuredContent"]["id"]
+        self.assertEqual((again["structuredContent"]["id"], again["structuredContent"]["replayed"]), (rid, True))
+        self.assertIn("not sent again", again["content"][0]["text"])
+        other = rpc.tool("ask_claude", text="something else", key="k-1")
+        self.assertTrue(other["isError"])
+        self.assertIn("key k-1 went with another request", other["content"][0]["text"])
+        self.assertEqual([m["id"] for m in self.chat.thread()], [rid])     # one send in all
+        self.assertEqual(rpc.tool("get_reply", id=rid, wait=0)["structuredContent"]["status"], "still working")
+        self.assertEqual(rpc.tool("list_requests")["structuredContent"]["requests"][0]["id"], rid)
+        now = store.now()
+        began = time.monotonic()
+        with mock.patch.object(store, "now", lambda: now + self.chat.MESSAGE_EXPIRE + 60):
+            r = rpc.tool("get_reply", id=rid, wait=5)
+        self.assertFalse(r["isError"], r)
+        self.assertEqual(r["structuredContent"]["status"], "expired")      # the chat's 410, said as such
+        self.assertLess(time.monotonic() - began, 4)
+        self.assertGreaterEqual(set(asked), {"/api/v1/health", "/api/v1/send", "/api/v1/wait", "/api/v1/state"})
+        self.assertEqual([p for p in asked if not p.startswith("/api/v1/")], [])
+        # a chat from before 2.1: 2.0's allow-list answers /api/v1/ 403 (it was "the token was
+        # refused", the merge of 2.0), an older chat 404
+        for may in (self.chat.agent_may, lambda m, p: True):
+            with mock.patch.object(handler, "_versioned", lambda h: None), \
+                    mock.patch.object(self.chat, "agent_may", may):
+                r = rpc.tool("ask_claude", text="hello")
+            self.assertTrue(r["isError"])
+            self.assertIn("no /api/v1/", r["content"][0]["text"])
+        self.assertEqual(len(self.chat.thread()), 1)                       # nothing sent
+
+    def test_get_reply_stays_done_for_a_request_answered_to_the_user_alone_without_polling_the_chat(self):
+        # #1138 review: a turn that took the user's message and the agent's replies to the user
+        # alone, so the request has no reply; once a later request was answered and its turn
+        # ended, get_reply on the first said "still working" for good, and its wait for the later
+        # reply's turn answered at once, over and over: 3,105 GET /api/wait in 2 s
+        tok = self._agent()
+        self._listening()
+        rpc = self._server(token=tok)
+        rpc("initialize", {"protocolVersion": "2025-06-18"})
+        handler = self.srv.RequestHandlerClass
+        waits, held = [], handler._wait
+
+        def counted(h):
+            waits.append(h.path)
+            return held(h)
+        mock.patch.object(handler, "_wait", counted).start()
+        self.addCleanup(mock.patch.stopall)
+        earlier = rpc.tool("ask_claude", text="a request from before")["structuredContent"]["id"]
+        time.sleep(0.01)
+        first = rpc.tool("ask_claude", text="add a --json flag")["structuredContent"]["id"]
+        user = self.chat.send("and the docs please", "user")["id"]
+        for i in (user, first):
+            self.chat.ack(i, "s1")
+        self.assertEqual(self.chat.reply("Both in hand.")["re"], [user])  # the user's alone
+        self.chat.turn_ended([user, first], "s1")
+        self.assertEqual(rpc.tool("get_reply", id=first, wait=0)["structuredContent"]["status"], "done")
+        # an earlier request's reply, its turn ended, says nothing of `first`... nor of a request
+        # sent after it, not taken yet: still working, held for a new reply, not polled
+        time.sleep(0.01)
+        second = rpc.tool("ask_claude", text="and a changelog line")["structuredContent"]["id"]
+        self.chat.reply("About the earlier one: done.", [earlier])
+        self.chat.turn_ended([earlier], "s1")
+        del waits[:]
+        began = time.monotonic()
+        r = rpc.tool("get_reply", id=second, wait=2)["structuredContent"]
+        self.assertEqual((r["status"], r["replies"]), ("still working", []))
+        self.assertGreater(time.monotonic() - began, 1.5)                # held, not answered at once
+        self.assertLessEqual(len(waits), 3, waits)
+        # the later request answered and its turn ended: `first` stays done, in a few waits
+        self.chat.ack(second, "s1")
+        self.chat.reply("Added.", [second])
+        self.chat.turn_ended([second], "s1")
+        del waits[:]
+        for wait in (0, 3):
+            r = rpc.tool("get_reply", id=first, wait=wait)["structuredContent"]
+            self.assertEqual((r["status"], r["replies"]), ("done", []))
+        self.assertLessEqual(len(waits), 4, waits)
+        self.assertEqual(rpc.tool("get_reply", id=second, wait=3)["structuredContent"]["status"], "done")
+
+    @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+    def test_real_opencode_calls_the_mcp_servers_tools_end_to_end(self):
+        # #1138's acceptance: a real MCP client's tool calls, from the config line the docs give
+        # (`codemode: false`: by default OpenCode 2.3 offers MCP tools only behind `execute`),
+        # against this test's chat and a Claude played here; the model is capture_llm.py, which
+        # makes the calls. No network: every server is on 127.0.0.1
+        tok = self._agent()
+        self._listening()
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        tmp = Path(self.tmp.name)
+        out = tmp / "requests-1138.jsonl"
+        calls = [{"name": "claude-workbench_ask_claude", "arguments": {"text": "CANARY-MCP: add a --json flag"}},
+                 {"name": "claude-workbench_list_requests", "arguments": {}}]
+        llm = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"), str(port), str(out),
+                                json.dumps(calls)])
+        self.addCleanup(lambda: (llm.kill(), llm.wait()))
+        xdg = tmp / "xdg-1138"
+        (xdg / "opencode").mkdir(parents=True)
+        (xdg / "opencode" / "opencode.json").write_text(json.dumps({
+            "provider": {"cap": {"npm": "@ai-sdk/openai-compatible",
+                                 "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"},
+                                 "models": {"cap": {"name": "capture", "tool_call": True,
+                                                    "limit": {"context": 32768, "output": 1024}}}}},
+            "mcp": {"servers": {"claude-workbench": {
+                "type": "local", "command": [sys.executable, str(self.SCRIPT)], "codemode": False,
+                "environment": {"CLAUDE_WB_URL": f"http://localhost:{self.port}", "CLAUDE_WB_TOKEN": tok}}}}}))
+        proj = tmp / "proj-1138"
+        proj.mkdir()
+        # OpenCode in homes of the test's own: never the user's config, database or CLAUDE.md
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp / "home-1138"), "PWD": str(proj),
+               "XDG_CONFIG_HOME": str(xdg), "XDG_DATA_HOME": str(tmp / "share-1138"),
+               "XDG_STATE_HOME": str(tmp / "state-1138"), "XDG_CACHE_HOME": str(tmp / "cache-1138"),
+               "TMPDIR": tempfile.gettempdir(), "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+               "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT": "1", "OPENCODE_DISABLE_MODELS_FETCH": "1",
+               "OPENCODE_DISABLE_AUTOUPDATE": "1"}
+        stop = threading.Event()
+
+        def claude():
+            while not stop.is_set():
+                for m in self.chat.pending():
+                    self.chat.ack(m["id"], "s1")
+                    self.chat.reply("On it.", [m["id"]])
+                time.sleep(0.1)
+        t = threading.Thread(target=claude)
+        t.start()
+        try:
+            r = subprocess.run(["opencode", "run", "--standalone", "-m", "cap/cap", "--auto", "--format", "json",
+                                "go"], cwd=proj, env=env, capture_output=True, text=True, timeout=180)
+        finally:
+            stop.set()
+            t.join()
+        sent = [m for m in self.chat.thread() if m.get("role") == "agent"]
+        self.assertEqual([(m["from"], m["text"]) for m in sent], [("my-agent", "CANARY-MCP: add a --json flag")],
+                         r.stdout[-2000:] + r.stderr[-2000:])
+        seen = json.dumps([json.loads(line).get("messages") for line in out.read_text().splitlines()])
+        self.assertIn(f"request {sent[0]['id']}: sent (Claude is listening)", seen)   # ask_claude's result
+        self.assertIn(f"{sent[0]['id']}  ", seen)                                     # list_requests' row
+
+    def test_the_mcp_server_refuses_a_chat_url_that_isnt_this_machines_and_sends_nothing(self):
+        # #1138: local only by design; the token never goes to another machine's address
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("wb_mcp_1138", self.SCRIPT)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        for url in ("http://localhost:1337", "http://127.0.0.1:1337", "http://127.8.9.10", "http://[::1]:1337",
+                    "https://LOCALHOST.", "http://[::ffff:127.0.0.1]:1"):
+            self.assertTrue(m.this_machine(url), url)
+        for url in ("http://192.0.2.1:1337", "http://localhost.example.com", "http://[::ffff:192.0.2.1]",
+                    "http://100.64.0.1:1337", "http://0.0.0.0:1337", "http://[::]:1337", "http://224.0.0.1",
+                    "ftp://localhost", "localhost:1337", "http://localhost:99999", "http://my-host.tailnet.ts.net"):
+            self.assertFalse(m.this_machine(url), url)
+        # a chat bound only to this machine's tailnet or LAN IP serves no localhost, and an agent
+        # here reaches it there (the chat's #1274): that IP is this machine's, so it is taken
+        with mock.patch.object(m, "_own", lambda ip: str(ip) == "100.64.0.1"):
+            self.assertTrue(m.this_machine("http://100.64.0.1:1337"))
+            self.assertFalse(m.this_machine("http://100.64.0.2:1337"))
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
+            try:
+                sk.connect(("192.0.2.1", 9))                             # a route's source: sends nothing
+                mine = sk.getsockname()[0]
+            except OSError:
+                mine = ""
+        if mine and not mine.startswith("127."):
+            self.assertTrue(m.this_machine(f"http://{mine}:1337"), mine)   # the real check, a real own IP
+        rpc = self._server(url="http://192.0.2.1:1337")                  # TEST-NET-1: never reached
+        for name, args in (("ask_claude", {"text": "x"}), ("get_reply", {"id": "m1"}), ("list_requests", {})):
+            r = rpc.tool(name, **args)
+            self.assertTrue(r["isError"])
+            self.assertIn("must be this machine's chat", r["content"][0]["text"])
+        r = self._server(token="wba-nope").tool("list_requests")         # a token the chat refuses
+        self.assertTrue(r["isError"])
+        self.assertIn("the token was refused", r["content"][0]["text"])
+
+    def test_the_agents_client_never_follows_a_redirect_with_the_token(self):
+        # #1138: urllib sends Authorization on to wherever a 3xx points, past the loopback check
+        hits = []
+
+        class Away(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                hits.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+
+        away = HTTPServer(("127.0.0.1", 0), Away)
+        threading.Thread(target=away.serve_forever, daemon=True).start()
+        self.addCleanup(away.server_close)
+        self.addCleanup(away.shutdown)
+
+        class Redirect(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{away.server_address[1]}/api/state")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        srv = HTTPServer(("127.0.0.1", 0), Redirect)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        r = self._server(url=f"http://127.0.0.1:{srv.server_address[1]}", token="wba-secret").tool("list_requests")
+        self.assertTrue(r["isError"])
+        self.assertIn("HTTP 302", r["content"][0]["text"])
+        self.assertEqual(hits, [])
 
 
 class ChatUploads(Base):
@@ -30893,7 +31505,7 @@ class ChatUploads(Base):
         self.assertEqual(self.chat.upload_meta(theirs)["by"], "my-agent")
         self.assertNotIn("by", self.chat.upload_meta(mine))
         code, r = self.put(mine, b"other bytes")                          # the user's id: not answered with it
-        self.assertEqual((code, r), (409, {"error": "that upload id is another sender's"}))
+        self.assertEqual((code, r), (409, {"error": "that upload id is another sender's", "code": "conflict"}))
 
         def get(path, tok):
             c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -30904,8 +31516,8 @@ class ChatUploads(Base):
             return out
         self.assertEqual(get(f"/api/upload/{theirs}", agent)[0], 200)
         self.assertEqual(get(f"/api/file/{theirs}", agent), (200, b"notes"))
-        self.assertEqual(get(f"/api/upload/{mine}", agent), (404, b'{"error": "no such upload"}'))
-        self.assertEqual(get(f"/api/file/{mine}", agent), (404, b'{"error": "no such file"}'))
+        self.assertEqual(get(f"/api/upload/{mine}", agent), (404, b'{"error": "no such upload", "code": "not_found"}'))
+        self.assertEqual(get(f"/api/file/{mine}", agent), (404, b'{"error": "no such file", "code": "not_found"}'))
         self.assertEqual(get(f"/api/file/{mine}", user)[0], 200)            # the user's: everything
         self.assertEqual(get(f"/api/file/{theirs}", user)[0], 200)
         code, r = self.send({"text": "see this", "files": [mine]})       # another's upload: none to it
@@ -30940,7 +31552,8 @@ class ChatUploads(Base):
         self.put(b, b"same photo", name="copy.jpg")                          # picked twice
         self.put(c, b"%PDF-1.7", name="notes.pdf", ctype="application/pdf")
         self.assertEqual(self.send({"text": "look", "cid": "m1", "files": [a, "dddddddd-4"]}),
-                         (400, {"error": "no upload dddddddd-4: it must be uploaded before the message"}))
+                         (400, {"error": "no upload dddddddd-4: it must be uploaded before the message",
+                                "code": "bad_request"}))
         self.assertEqual(self.chat.thread(), [])                             # nothing logged
         code, r = self.send({"text": "", "cid": "m2", "files": [a, b, c]})   # files alone are a message
         self.assertEqual(code, 200)
@@ -31063,6 +31676,7 @@ class ChatUploads(Base):
             with mock.patch.object(self.chat, "save_upload", side_effect=OSError(err, os.strerror(err))):
                 got = self.put("ffffffff-1", b"x")
             self.assertEqual(got, (code, {"error": f"not saved: {os.strerror(err)}",
+                                          "code": "disk_full" if code == 507 else "server_error",
                                           **({"final": True} if final else {})}))
 
     def test_an_expired_message_leaves_the_open_index_once_and_gc_then_drops_its_uploads(self):
@@ -31135,12 +31749,13 @@ class ChatUploads(Base):
         self.assertEqual(self.chat.thread(), [])                            # nothing sent: the words go to the box
         # a file that isn't audio, an upload that isn't there, and an agent's token are refused
         self.put("tttttttt-1", b"notes", name="notes.txt", ctype="text/plain")
-        self.assertEqual(self.transcribe("tttttttt-1"), (415, {"error": "not a voice clip (text/plain)"}))
-        self.assertEqual(self.transcribe("nnnnnnnn-1"), (404, {"error": "no such upload"}))
+        self.assertEqual(self.transcribe("tttttttt-1"), (415, {"error": "not a voice clip (text/plain)", "code": "not_audio"}))
+        self.assertEqual(self.transcribe("nnnnnnnn-1"), (404, {"error": "no such upload", "code": "not_found"}))
         with contextlib.redirect_stderr(io.StringIO()):
             agent = run_wb("chat", "token", "add", "my-agent").strip()
         self.assertEqual(self.transcribe(uid, agent),
-                         (403, {"error": "agent tokens can't transcribe the user's voice clips"}))
+                         (403, {"error": "agent tokens can't transcribe the user's voice clips",
+                                 "code": "agent_forbidden"}))
         self.assertEqual(len(self.calls()), 1)
 
     def test_a_listener_that_fails_is_a_502_with_its_words_and_the_next_try_runs_it_again(self):
