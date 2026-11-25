@@ -1464,6 +1464,9 @@
       if ((plain || typeof body === 'string') && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
       return fetch(path, { ...init, headers, body, cache: 'no-store' })
     },
+    // a JSON POST under post()'s deadline: Settings' through WB.api never gave up, so one that
+    // hung showed as applied and held every later change (#1391, 2026-11-25)
+    post: (path, body) => post(path, body),
     view: (name, mod) => {  // mounted once, at once; shown and hidden with its view and the page
       if (!ROOTS[name] || mods.has(name) || !mod) return
       const v = { mod, shown: false }

@@ -1308,14 +1308,15 @@ async function run(engine, device) {
         const keys = Object.keys(WB).sort().join()
         const r = await WB.api('/api/state'), state = await r.json()
         const p = await WB.api('/api/seen', { method: 'POST', body: { ids: [] } })   // a JSON body, its type set
+        const q = await WB.post('/api/seen', { ids: [] })                             // under POST_MS (#1391)
         location.hash = 'settings'
         for (let i = 0; i < 100 && WB.current() !== 'settings'; i++) await new Promise(r => setTimeout(r, 50))
         WB.toast('Saved.')
         const t = document.getElementById('toast')
-        return { keys, status: r.status, messages: Array.isArray(state.messages), posted: p.status, cur: WB.current(), seen,
+        return { keys, status: r.status, messages: Array.isArray(state.messages), posted: p.status, timed: [q.status, JSON.stringify(await q.json())], cur: WB.current(), seen,
           token: WB.token().length > 20, toast: !t.hidden && t.textContent }
       })
-      if (JSON.stringify(got) !== JSON.stringify({ keys: 'api,current,on,toast,token,view', status: 200, messages: true, posted: 200,
+      if (JSON.stringify(got) !== JSON.stringify({ keys: 'api,current,on,post,toast,token,view', status: 200, messages: true, posted: 200, timed: [200, '{}'],
         cur: 'settings', seen: ['settings'], token: true, toast: 'Saved.' })) throw new Error(JSON.stringify(got))
       const was = await page.evaluate(() => window._states)
       wb('chat', 'reply', '--text', 'A state for the views.')

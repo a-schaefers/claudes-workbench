@@ -95,7 +95,11 @@ export async function check(page, ctx) {
     window.fetch = async (url, init = {}) => {
       if (new URL(String(url), location.href).pathname !== '/api/settings') return real(url, init)
       const method = (init.method || 'GET').toUpperCase()
-      const out = await window.__wbSettings(method, init.body ? JSON.parse(init.body) : null)
+      // a hung answer ends as a real fetch's does, at its signal's abort (#1391)
+      const out = await new Promise((resolve, reject) => {
+        if (init.signal) init.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })
+        window.__wbSettings(method, init.body ? JSON.parse(init.body) : null).then(resolve, reject)
+      })
       if (!out) return real(url, init)
       return new Response(JSON.stringify(out[1]), { status: out[0], headers: { 'Content-Type': 'application/json' } })
     }
@@ -169,6 +173,34 @@ export async function check(page, ctx) {
       await until(() => posts.length === 2)
       await until(async () => (await row('splash').locator('[aria-checked="true"]').getAttribute('data-value')) === 'off')
       if (most !== 1 || posts.map(p => p.key).join() !== 'workflows,splash') throw new Error(JSON.stringify({ most, posts }))
+    })
+
+    await ctx.check('a change whose POST never answers is given up after POST_MS: the toast says so, the next change goes, and the control shows the computer\'s value (#1391)', async () => {
+      // #1391: with no deadline the hung change stayed lit as applied, and every later click
+      // queued behind it, never sent until a reload
+      let rows = MOCK_ROWS, release = null
+      const posts = []
+      unmock()
+      mock(async (method, body) => {
+        if (method !== 'POST') return answer(200, { rows, ts: 1 })
+        posts.push(body)
+        if (body.key === 'workflows') { await new Promise(res => { release = res }); return answer(200, { ok: true, said: 'late', rows }) }
+        await new Promise(res => setTimeout(res, 1500))  // the lost one's toast stays up to be read
+        rows = rows.map(x => x.key === body.key ? { ...x, value: body.value } : x)
+        return answer(200, { ok: true, said: 'images: on', rows })
+      })
+      try {
+        await reshow()
+        // not splash: the last check's answer, landing after its end, may have drawn it off already
+        await until(async () => (await row('media-images').locator('[aria-checked="true"]').getAttribute('data-value')) === 'off')
+        await row('workflows').locator('[data-value="on"]').click()             // its POST hangs
+        await until(() => posts.length === 1)
+        await row('media-images').locator('[data-value="on"]').click()          // made meanwhile: it waits
+        await until(async () => (await toast()).includes("didn't answer"), 30000)
+        await until(() => posts.map(p => p.key).join() === 'workflows,media-images')
+        await until(async () => (await row('media-images').locator('[aria-checked="true"]').getAttribute('data-value')) === 'on')
+        await until(async () => (await row('workflows').locator('[aria-checked="true"]').getAttribute('data-value')) === 'off')
+      } finally { if (release) release() }
     })
 
     await ctx.check('"Other model…" opens a text input, Escape closes it, Enter sends the typed id; a note is a line beside its group\'s rows, an info row a line', async () => {

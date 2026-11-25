@@ -5944,7 +5944,9 @@ would open an iPhone app keyless.
 **The views' API** (`window.WB`, frozen, set by `app.js` before `stats.js` and `settings.js` run:
 `defer`, after it; `stats.css`, `settings.css` after `app.css`): `token()` (`''` without a key),
 `api(path, init?)` (`fetch` with the bearer header and `cache: 'no-store'`; a plain-object body is
-sent as JSON, and a JSON or string body gets `Content-Type: application/json`), `view(name, {mount(root),
+sent as JSON, and a JSON or string body gets `Content-Type: application/json`), `post(path, body)`
+(`app.js`'s `post`: JSON, the key, given up after `POST_MS` of silence; a `{ok, status, headers,
+json()}`, #1391), `view(name, {mount(root),
 show(), hide()})` (`stats` gets `#stats-body`, `settings` `#settings-rows`; mounted once, at once,
 shown and hidden on each switch and on `visibilitychange`; a second registration is ignored),
 `toast(text)` (3.5 s), `on('state' | 'view', fn)` (each snapshot applied; each switch, its name),
@@ -6174,7 +6176,9 @@ alone, and a generic renderer: a new setting touches only Python.
   as Agent code navigation on with no probe), the toast adds "Claude will offer to set it up." (the
   pane's words), and the terminal's Claude offers (#1283). On a refusal (400, 409), `WB.toast(error)`
   and a redraw from the answer's rows, else the last ones, which puts the control back. With no
-  answer at all, the same, then a fresh read once nothing waits, since the change may have landed.
+  answer (the POST goes through `WB.post`, so one silent for `POST_MS` 15 s is given up: with no
+  deadline a hung one stayed lit as applied and held every later change, #1391), the same, then a
+  fresh read once nothing waits, since the change may have landed.
 - **One request at a time** (`queue`, `pump`): a click made meanwhile lights at once and waits; a
   row clicked again while its first click still waits sends only its newest value. A redraw keeps
   an id or a number being typed in another row, and its focus. A blur caused by the redraw itself
@@ -7660,7 +7664,8 @@ real `wb stats --json` of the run's `WB_HOME`; a held stream): Playwright's rout
 requests once the worker registers (#1223). The Settings
 view's (#1286): the groups in order, "Agents and roles" first, above the device cards (the gear's old cards are
 `#settings`'s alone); Claude coding → "Ask me first" lit at once, then `coding.json` and `wb coding` say `ask`; a
-409 puts the control back and toasts, with a second click waiting for the first; "Other model…": Escape closes
+409 puts the control back and toasts, with a second click waiting for the first; a POST that never answers given
+up after `POST_MS`, the next change sent (the wrapper rejects at the signal's abort, as a real fetch, #1391); "Other model…": Escape closes
 the input, the select back on the row's value, and Enter sends the typed id; a note drawn beside a choice in its
 group; a number's Enter and Off; `help`'s toast; the layout at the phone's width, and on the desktop at 1280 px
 (two columns) and 390 px (one), nothing past the view's edge. Its calls to `/api/settings` go through a page-side

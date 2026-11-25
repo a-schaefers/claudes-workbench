@@ -57,7 +57,9 @@
     const { key, value } = queue[0]
     let said = '', lost = false
     try {
-      const r = await WB.api('/api/settings', { method: 'POST', body: { key, value } })
+      // given up after the page's POST_MS, into the lost path below: with no deadline a POST that
+      // hung kept its value lit as applied and every later click queued behind it (#1391)
+      const r = await WB.post('/api/settings', { key, value })
       const body = await r.json().catch(() => ({}))
       if (Array.isArray(body.rows)) rows = body.rows
       said = r.ok && body.ok ? body.said || 'Done.' : body.error || body.said || `the server said ${r.status}`
