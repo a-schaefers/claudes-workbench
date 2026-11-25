@@ -407,7 +407,7 @@ worktree, `OPENCODE_CONFIG` the layer. Later rounds continue the session until a
 | the same tool call in a row (its input hashed, cut to 400 characters, #497) | 4; in a self-review round with the tree its tests passed on, the round's finish instead (`settled`, as below: #1250) | `events.StuckDetector` |
 | failing tool calls in a row | 6; the same (#1250) | |
 | calls since the last edit to the task's files (outside the worktree doesn't count: 2026-11-18; a relative path is the workdir's, and a `patch` counts if any file it wrote is the task's, #1148): the first trip in a session is nudged (`runner.EXPLORE_NUDGE`), a second in it stops ("…, even after a nudge"; #1134), as does a fresh session's when no file changed since the nudge | 40; an API task's 40 per 32K of the window, at most 160 (`runner.no_edit_limit`, #1087: 40 stopped 131K API one-shots still exploring); a GPU task's stays 40 at any window, as in 1.91.x; in a self-review round with the tree its tests passed on, the round's finish instead (`settled`, #1168; its fresh session after a full window too, #1188, the round a nudge or a note starts in it, #1207, and the round `wb resume` starts after it, #1228) | |
-| no output (not while waiting on Claude; a background job gets the test timeout if longer) | 15 min; the self-review's finish instead, as every guard here (#1261) | `--silence-timeout` |
+| no output (not while waiting on Claude; a background job or a command in the foreground gets the test timeout if longer) | 15 min; the self-review's finish instead, as every guard here (#1261) | `--silence-timeout` |
 | one round, waits on Claude excluded | 40 min | `--round-timeout` |
 | mid-round handovers in one review round | more than `HANDOVER_MAX` (5) | `runner.drive` |
 | an API task's spend: today at the day cap, before a round within one worst request of it, its input too (#1150, #1173), or the keyhole refused a request that could pass it (`spend`, *Spend*) | routes.json `day_usd` | `runner._spend_guard`, `runner._go_on`; behind a told stop, before round 1 or at a running task's stop, a wait: `runner._cap_wait` (#1249, #1344) |
@@ -415,7 +415,7 @@ worktree, `OPENCODE_CONFIG` the layer. Later rounds continue the session until a
 | OpenCode open after the agent's turn ended (#1160): the round ends as its finish, not stuck | the round, silence or think limit | `runner.run_round` |
 
 Past the think budget (7 min, `--think-timeout`, 0 off; from the round's first output, paused
-on a background command) the runner interrupts with `runner.NUDGE` (no check-in since #1322:
+on a background command or one in the foreground, #1386) the runner interrupts with `runner.NUDGE` (no check-in since #1322:
 the next round's report says "nudged once: it thought past its budget…"); the next round that
 stalls again is stuck; in a self-review on its green tree neither: the round's finish (`runner.settle`, #1261). The calls-without-an-edit guard's first trip in a session
 interrupts the same way with `runner.EXPLORE_NUDGE` ("N tool calls without changing a file: make
@@ -1349,9 +1349,17 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   revive and no `provider_remedy`; like `provider` it stays outside `results.THE_STEP`, so it never
   counts against the model or shrinks its slice (the engineer's call, 2026-11-23). Each run of waiting is one `rate_limited` event as it ends or the round stops; status
   keys left by a killed runner are cleared as the next round starts, and as each round ends.
-- `background_wait` (a shell command past 2 minutes) pauses the think budget and stretches silence
-  to max(`--silence-timeout`, `--test-timeout`) (a long suite was nudged and killed every 7
-  minutes); the round limit holds. Once the turn is over (last
+- `background_wait` (a shell command past its call's `timeout`, 2 minutes unless the model sets
+  one) pauses the think budget and stretches silence to max(`--silence-timeout`, `--test-timeout`)
+  (a long suite was nudged and killed every 7 minutes); the round limit holds. So does a command
+  still in the foreground (a model that sets a long `timeout` keeps its suite there, and OpenCode
+  prints the call only when it ends: the nudge killed it, #1386): once the round is quiet past the
+  least of `KEEP_WARM_S`, silence and the think budget, `runner.agent_commands(task, run)` looks
+  for the round's processes (its `WB_RUN`) whose `SHELL` the shell shim gave back (OpenCode, its MCP
+  and language servers keep the shim's), the outermost of each (`_procs`: /proc, else ps and
+  `KERN_PROCARGS2`); what still ran when the last shell call came back is a job left in the
+  background (a dev server), never a wait, so a model thinking beside it is still nudged. The
+  silence stop then says ", waiting on a command the agent runs". Once the turn is over (last
   `step_finish` reason `stop`) and `BG_GRACE` (120 s, or less with a shorter silence timeout)
   passes, the round is done (a dev server never ends, #658): OpenCode stopped, `left_bg` recorded
   (from `jobs[]`; not `died`), a `left_bg {text}` event, then the tests; the report says nothing
@@ -3834,8 +3842,8 @@ non-zero while nothing answers fails after `START_GRACE` 10 s ("… run it by ha
 <cmd>"); exit 0 keeps waiting (it daemonized); probes paced 5 s on a monotonic clock (the 2026-11-19
 audit: back to back). `_placement` warns "<name> is N% on the CPU …". Warnings go to `warn` (status
 `last`, a `gpu` event, `■ GPU: …`); seconds to `status.load_secs`. Every round, since each request
-resets `OLLAMA_KEEP_ALIVE` (5 min); mid-round, during `background_wait` or `asking`, the runner
-renews it every `runner.KEEP_WARM_S` 180 s (`models.keep_warm`: only while `/api/ps` lists the model,
+resets `OLLAMA_KEEP_ALIVE` (5 min); mid-round, during `background_wait`, a command in the
+foreground (#1386) or `asking`, the runner renews it every `runner.KEEP_WARM_S` 180 s (`models.keep_warm`: only while `/api/ps` lists the model,
 never loading one gone, which would skip `free_gpu`; not on another machine's GPU; #864).
 
 **Sharing the GPU** (`GpuLease`, `admits`, `can_share`, `budget_devices`, `gpu_budget`, `need`).
@@ -7493,7 +7501,7 @@ else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `shellwrite` (lib/util.py through a `bash` row's `cat > util.py <<X` with `workdir` lib/, main.py and answer.txt with `write`: #1210, its third review; a continued session adds a line to lib/util.py: #1259), `buildout` (dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names neither, then answer.txt: #1210's review), `pkgbuild` (a `bash` row `grep -n answer pkg/a.py`, then build/lib/pkg/{__init__,a,b}.py behind one `python -m build`, then answer.txt: #1210's second review), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
 `read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087; `FAKE_EXPLORE_ONCE`: no edit, a continued session like `ok`: #1134), `selfreads` (ok, then a self-review, told by its prompt, that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168; `FAKE_SELF_RERUN`: those calls rerun the acceptance command, `FAKE_SELF_MISS`: the reads fail, #1250; `FAKE_SELF_FILL`: its first session breaks it and fills 76%, the fresh one restores it, or with `FAKE_SELF_KEEP` only reads: #1188; `FAKE_SELF_STALL`: it breaks it and goes silent, the run after a nudge or a note restores it: #1207; `FAKE_READS` 0: it restores it and goes quiet, the think, silence and wall guards' case; `FAKE_SELF_API` `ratelimit` or `down`: its run plays that API scenario on the green tree, the provider's stop at OpenCode's exit; `FAKE_SELF_REFILL`: each of its sessions breaks or restores it, by turns, and fills 76%, the last past `HANDOVER_MAX` on the green tree: #1261; `FAKE_SELF_CRASH`: after its reads, a provider.http 500 and exit 1, the server still up: #1270), `floor` (`HANDOVER_ROOM`), `think` (a long think in a step's output, then a prompt that grew: no compaction, #1219), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151; `FAKE_COMPACT_KEPT`: the step after at 34%, over half, a kept tail: #1185), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
 2.3's `{"type": "error", …, "error": {"type": "compaction.failed", "message": "Compaction produced no summary"}}`;
-`FAKE_COMPACT_MSG`, `FAKE_COMPACT_EXIT`, `FAKE_COMPACT_EDIT`, `FAKE_REFAIL`), `bgwait` (`FAKE_BGWAIT`), `toolhang`,
+`FAKE_COMPACT_MSG`, `FAKE_COMPACT_EXIT`, `FAKE_COMPACT_EDIT`, `FAKE_REFAIL`), `bgwait` (`FAKE_BGWAIT`), `fgcmd` (`$SHELL -c 'sleep FAKE_FG'` in the foreground, then `ok`'s answer: #1386), `bgthink` (a shell call's command left running, then silent), `toolhang`,
 `retry` (`FAKE_RETRY_EVERY`), `say`, `stay` (as `ok`, then open and silent: #1160), `spend` (#1019: a read and a priced step every `FAKE_STEP_EVERY` s, `FAKE_STEPS` of
 them, then `ok`'s answer). A new fake behaviour is a new scenario.
 

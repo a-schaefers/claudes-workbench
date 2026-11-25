@@ -66,6 +66,10 @@
   devserver  writes "42", starts `npm run dev` in the background, ends its turn (reason stop),
          then `background_wait` on that job for an hour (a server never ends: #658)
   toolhang  one tool call, then silent (a command that prints nothing for long)
+  fgcmd  runs `$SHELL -c 'sleep FAKE_FG'` (12) in the foreground, silent until it ends, as
+         OpenCode prints a shell call only then (a long `timeout`, #1386); then writes "42"
+  bgthink  one shell call whose `$SHELL -c 'sleep 300'` it leaves running, as OpenCode moves a
+         call past its timeout to the background, then silent for an hour (thinking, #1386)
   retry  no answer from the model's server: a `retry` line every FAKE_RETRY_EVERY seconds (1),
          OpenCode cutting the request at its provider timeout and sending it again (#491)
   say    a few words and no tool call ("I will inspect the files")
@@ -824,6 +828,22 @@ elif scenario == "say":
 elif scenario == "toolhang":
     tool("bash", {"command": "make check"})
     time.sleep(3600)
+elif scenario in ("fgcmd", "bgthink"):
+    import subprocess
+    sh = [os.environ.get("SHELL") or "sh", "-c"]
+    if scenario == "fgcmd":
+        emit("text", text="Running the suite.")
+        subprocess.run([*sh, f"sleep {os.environ.get('FAKE_FG') or 12}"])
+        tool("bash", {"command": "make test", "timeout": 1800000}, output="OK")
+        with open("answer.txt", "w") as fh:
+            fh.write("42\n")
+        tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
+        emit("text", text="Wrote answer.txt = 42.")
+        finish()
+    else:
+        subprocess.Popen([*sh, "sleep 300"])
+        tool("bash", {"command": "make test"}, output="moved to the background")
+        time.sleep(3600)
 elif scenario == "bgwait":
     tool("bash", {"command": "make test"})
     emit("text", text="The tests run in the background; waiting for them.")
