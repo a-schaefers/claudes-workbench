@@ -15,14 +15,19 @@
 # writes its own log, printed whole as it ends (interleaved, unittest's tracebacks would mix),
 # under a header naming its WB_TEST_SHARD, so a failure reproduces with that shard alone. A
 # cancelled job prints every log so far: a cancel that reported nothing is #950's lesson.
-# Exit 1 if any process failed (each one's status, never through a pipe), 64 on bad arguments.
+# Exit 1 if any process failed (each one's status, never through a pipe), 64 on bad arguments
+# or a bash older than 5.1 (wait -n -p): macOS's is 3.2, where the nightly's run of this script's
+# test failed every process as "wait failed" (its review, 2026-11-25). check.yml runs it on Linux.
 set -uo pipefail
+if [ "${BASH_VERSINFO[0]}" -lt 5 ] || { [ "${BASH_VERSINFO[0]}" -eq 5 ] && [ "${BASH_VERSINFO[1]}" -lt 1 ]; }; then
+  echo "scripts/suite.sh needs bash 5.1 or newer (wait -n -p), not $BASH_VERSION" >&2; exit 64
+fi
 
 shard=${1:-} procs=${2:-}
 if ! [[ $procs =~ ^[1-9][0-9]*$ ]] || ! [[ $shard =~ ^([0-9]+)/([0-9]+)$ ]]; then
   echo "usage: scripts/suite.sh K/N P" >&2; exit 64
 fi
-k=${BASH_REMATCH[1]} n=${BASH_REMATCH[2]}  # the last match's: the shard's
+k=$((10#${BASH_REMATCH[1]})) n=$((10#${BASH_REMATCH[2]}))  # the last match's, the shard's; 08 is 8, not octal
 if [ "$k" -lt 1 ] || [ "$k" -gt "$n" ]; then
   echo "scripts/suite.sh: K/N with 1 <= K <= N, not $shard" >&2; exit 64
 fi

@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import shutil
+import signal
 import sys
 import tempfile
 import time
@@ -20,6 +21,9 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
+# scripts/suite.sh's wait -n -p; macOS's bash is 3.2 (the nightly runs this file there)
+_bash_51 = bool(shutil.which("bash")) and subprocess.run(
+    ["bash", "-c", "((BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 501))"]).returncode == 0
 WORKFLOWS = ROOT / ".github" / "workflows"
 RULESET = ROOT / ".github" / "rulesets" / "main.json"
 OWNER_ID = "26800291"  # a-schaefers
@@ -73,7 +77,7 @@ class RequiredCheck(unittest.TestCase):
         self.assertNotIn("continue-on-error", text("check.yml"))
         suite = job("check.yml", "suite")
         for want in ("fail-fast: false", "WB_TEST_SHARD: ${{ matrix.shard }}/6",
-                     'run: scripts/suite.sh "$WB_TEST_SHARD" 4\n'):
+                     'run: exec scripts/suite.sh "$WB_TEST_SHARD" 4\n'):
             self.assertIn(want, suite)
         self.assertIn("claude plugin validate mod && claude plugin test mod", job("check.yml", "mod"))
 
@@ -273,6 +277,7 @@ class SuiteHooks(unittest.TestCase):
                     self.assertEqual(sorted(ids(f"{k}/{n}", named=True)), sorted(part))
         self.assertEqual(sorted(ids(named=True)), sorted(whole))
 
+    @unittest.skipUnless(_bash_51, "scripts/suite.sh needs bash 5.1 (wait -n -p): check.yml's Linux has it")
     def test_suite_sh_runs_each_test_of_its_shard_once_across_its_processes_and_fails_with_any(self):
         # check.yml's shards in four processes each (2026-11-25: one process left its runner's
         # CPUs half idle, and the slowest shard was every pull request's 10-minute wait)
@@ -312,3 +317,50 @@ class SuiteHooks(unittest.TestCase):
         self.assertEqual(len(list((tmp / "ran").iterdir())), 8)  # the others still ran
         self.assertEqual(subprocess.run(["bash", script, "4/3", "4"], cwd=tmp, env=env,
                                         capture_output=True).returncode, 64)
+
+    @unittest.skipUnless(_bash_51, "scripts/suite.sh needs bash 5.1 (wait -n -p): check.yml's Linux has it")
+    def test_suite_sh_cancelled_prints_every_log_so_far_and_stops_its_processes(self):
+        # a cancel's signal reaches suite.sh only through check.yml's exec: the step's shell never
+        # passes SIGINT or SIGTERM on, and suite.sh was SIGKILLed with no log printed (its review,
+        # 2026-11-25)
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        (tmp / "tests").mkdir()
+        shutil.copy(ROOT / "tests" / "__init__.py", tmp / "tests" / "__init__.py")
+        (tmp / "tests" / "test_slow.py").write_text(
+            "import os, sys, time, unittest\n"
+            "class Slow(unittest.TestCase):\n" + "".join(
+                f"    def test_{i}(self):\n"
+                f"        print('started {i}', os.getpid(), file=sys.stderr, flush=True)\n"
+                "        open(os.path.join('pids', str(os.getpid())), 'w').close()\n"
+                "        time.sleep(120)\n" for i in range(2)))
+        (tmp / "pids").mkdir()
+        env = {k: v for k, v in os.environ.items() if k != "WB_TEST_SHARD"}
+        step = subprocess.Popen(["bash", "-c", f"exec {ROOT / 'scripts' / 'suite.sh'} 1/1 2"], cwd=tmp,
+                                env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self.addCleanup(lambda: step.poll() is None and step.kill())
+        deadline = time.monotonic() + 60
+        while len(list((tmp / "pids").iterdir())) < 2 and time.monotonic() < deadline:
+            time.sleep(0.1)
+        pids = [int(p.name) for p in (tmp / "pids").iterdir()]
+        self.assertEqual(len(pids), 2)
+        step.send_signal(signal.SIGINT)  # the runner's cancel: the step's process alone
+        out, _ = step.communicate(timeout=30)
+        self.assertEqual(step.returncode, 1, out)
+        for sub, i in (("1/2", 0), ("2/2", 1)):
+            self.assertIn(f"=== WB_TEST_SHARD={sub}: cancelled\nstarted {i}", out)
+        deadline = time.monotonic() + 10
+        while any(_alive(p) for p in pids) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        self.assertFalse([p for p in pids if _alive(p)], "suite.sh left its processes running")
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    try:  # a zombie is dead, waiting on its reaper
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1][:1] != "Z"
+    except OSError:
+        return not Path("/proc/self").exists()

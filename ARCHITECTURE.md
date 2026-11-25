@@ -7163,7 +7163,7 @@ From the repo root: `python3 -m unittest` (`tests/__init__.py` makes `tests` a p
 **CI.** `check.yml` on every push to main and pull request: `suite` in six shards (`WB_TEST_SHARD=K/6`, `fail-fast`
 off) on Python 3.11, the floor, each run by `scripts/suite.sh K/6 4` as four `python3 -m unittest` processes at once,
 one per runner CPU (process j runs `WB_TEST_SHARD=K+6(j-1)/24`, so every test of the shard once; each log printed whole,
-headed by its `WB_TEST_SHARD`, as its process ends; every log on a cancel; exit 1 if any failed, 64 on bad arguments):
+headed by its `WB_TEST_SHARD`, as its process ends; every log on a cancel, which reaches it because the step `exec`s it (the step's shell passes no signal on: unexec'd, a cancel SIGKILLed it with no log printed, its review, 2026-11-25); exit 1 if any failed, 64 on bad arguments or a bash older than 5.1, `wait -n -p`: macOS's 3.2, where its two `tests/test_workflows.py` tests skip):
 one process left the CPUs half idle (a local shard 1/6, 404 s wall for 221 s of CPU; 142 s in four), and the slowest
 shard, 6.5 to 10 minutes, was the 9.5 to 10.5 minute check (40 runs to 2026-11-25); `mod` with `CLAUDE_CODE_VERSION`; `check`, the required one, `needs` both, runs
 `always()` (a skipped required check passes) and is green only when both succeeded, so the ruleset waits on one name. A pull request touching only
