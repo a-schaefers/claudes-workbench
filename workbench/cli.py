@@ -6447,11 +6447,15 @@ def chat_line() -> tuple[bool | None, str]:
     """wb doctor's one line on the web app, never its token (#1281): (True, "web app answers on
     localhost:<port> (<who keeps it>)"), (None, "web app off (wb chat on)") for the user's off,
     (False, "web app down: <why> (wb chat on)"). Doctor only looks: `wb chat url` and the mod
-    start it. A chat gone after a reboot or a crash once went unnoticed (#449)."""
+    start it. A chat gone after a reboot or a crash once went unnoticed (#449). No token file
+    means no server of ours ever ran: who_answers would make one, and doctor made the user's
+    ~/.config/workbench/chat-token (and the tests' HOME's) just by looking (#1281's review)."""
     if not chat.is_on():
         return None, "web app off (wb chat on)"
     try:
         port = chat.port()
+        if not chat.token_path().exists():
+            return False, f"web app down: no server answers on port {port} (wb chat on)"
         who = chat.who_answers(port)
     except RuntimeError as e:  # chat.json it can't follow
         return False, f"web app down: {e} (wb chat on)"

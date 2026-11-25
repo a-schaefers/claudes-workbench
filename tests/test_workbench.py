@@ -371,7 +371,11 @@ class Base(unittest.TestCase):
                           # the user's file for agents (#1102, 2026-11-23): theirs went into the
                           # tests' prompts, and in an agent's lane, which hides it, every test
                           # that started a task failed on its read
-                          WB_AGENTS_MD=str(tmp / "wb-config" / "AGENTS.md"))
+                          WB_AGENTS_MD=str(tmp / "wb-config" / "AGENTS.md"),
+                          # the web app's token and settings (#1281's review, 2026-11-24): on by
+                          # default, every doctor test read the user's token, or made one in HOME
+                          WB_CHAT_TOKEN=str(tmp / "chat-token"),
+                          WB_CHAT_CONFIG=str(tmp / "chat.json"))
         (tmp / "opencode.json").write_text(json.dumps(OPENCODE_CONFIG))
         runner.models._AUTH.clear()  # OpenCode's stored keys, per process (models.auth_key)
         runner.models._STORED.clear()

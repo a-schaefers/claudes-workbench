@@ -74,6 +74,18 @@ class ChatDefault(Base):
         self.assertFalse((chat.chat_dir() / "serve.pid").exists())        # nothing started
         self.assertEqual(cli.chat_line(), (None, "web app off (wb chat on)"))
 
+    def test_doctor_only_looks_and_makes_no_chat_token_where_none_is(self):
+        # #1281's review (2026-11-24): on by default, doctor's line went through who_answers to
+        # chat.token(), which made the token file, so every doctor test wrote one into its HOME
+        self.assertEqual(Path(os.environ["WB_CHAT_TOKEN"]), Path(self.tmp.name) / "chat-token")
+        token = chat.token_path()
+        self.assertFalse(token.exists())
+        port = chat.port()
+        with mock.patch.object(chat, "who_answers") as probed:
+            self.assertEqual(cli.chat_line(), (False, f"web app down: no server answers on port {port} (wb chat on)"))
+        probed.assert_not_called()
+        self.assertFalse(token.exists())
+
     def test_ensure_starts_a_server_that_never_runs_wb_as_claude_then_finds_it_up(self):
         # a server started from a Claude session (the mod's `wb chat url`) would run every web
         # click's wb command as Claude, behind the mod's dialogs
