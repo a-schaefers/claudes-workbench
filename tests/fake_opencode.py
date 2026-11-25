@@ -91,7 +91,7 @@ stays alive (a shutdown that hangs). FAKE_EXIT: after its last event a run exits
 FAKE_SURROGATE: a run first reads a file whose name and text end in half an emoji (an
 unpaired surrogate escaped, which is valid JSON).
 FAKE_LATIN1: a run first prints a line that isn't UTF-8 (`caf\xe9`, Latin-1).
-FAKE_RUNS rows also say what OpenCode's environment had (`opencode_db`, `xdg_data`, `xdg_state`,
+FAKE_RUNS rows also say the run's `-m` (`model`, #1059) and what OpenCode's environment had (`opencode_db`, `xdg_data`, `xdg_state`,
 `shell`, and `env_names`: every variable's name, never a value) and what a command the agent runs through `$SHELL -c` sees (`shell_sees`: its
 XDG_DATA_HOME, XDG_STATE_HOME, OPENCODE_DB and SHELL, `-` for one unset); with FAKE_CONNECT (a
 port) the run connects to it on 127.0.0.1 first, its row's `connect` "ok" or the errno (13: the
@@ -606,6 +606,7 @@ if os.environ.get("FAKE_RUNS") and args and args[0] == "run":  # which runs cont
     with open(os.environ["FAKE_RUNS"], "a") as fh:
         fh.write(json.dumps({"session": "--session" in args, "prompt": args[-1], "connect": connect,
                              "agent": args[args.index("--agent") + 1] if "--agent" in args else None,
+                             "model": args[args.index("-m") + 1] if "-m" in args else None,
                              "cwd": os.getcwd(), "pwd": os.environ.get("PWD"),
                              "opencode_db": os.environ.get("OPENCODE_DB"),
                              "xdg_data": os.environ.get("XDG_DATA_HOME"),

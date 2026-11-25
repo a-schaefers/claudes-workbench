@@ -5571,6 +5571,21 @@ test('#1014: the mod\'s summary of the roles reads as routes.summary does', () =
       'API kept: anthropic/claude-haiku-5-5, thinking on')
 })
 
+test('#1059: a role whose self-review alone thinks reads "thinking: review only", as routes.summary says it', () => {
+  // tests.test_workbench.Routes checks wb's on the same roles; the record's effort is kept, as wb keeps it
+  const thinks = { api: 'deepinfra/x', off: 'thinking off', on: 'thinking on (effort high)' }
+  expect(routesSummary({ roles: { trivial: { via: 'api', api: 'deepseek/deepseek-flash', thinking: 'off', thinking_review: 'on' },
+    significant: { via: 'api', api: 'deepinfra/x', thinking_review: 'on', thinks }, writing: { api: 'deepinfra/x', thinking_review: 'on' } } }))
+    .toBe('significant API deepinfra/x, thinking: review only (effort high); trivial API deepseek/deepseek-flash, thinking: review only; ' +
+      'writing GPU (the router picks), API kept: deepinfra/x, thinking: review only')
+  // thinking on thinks in every round; a model that can't turn thinking off keeps its line
+  expect(routesSummary({ roles: { trivial: { via: 'api', api: 'deepinfra/x', thinking: 'on', thinking_review: 'on', thinks } } }))
+    .toBe('significant GPU (the router picks); trivial API deepinfra/x, thinking on (effort high); writing GPU (the router picks)')
+  const lowest = { api: 'deepinfra/x', off: 'thinking at its lowest effort (it can\'t turn off)', on: 'thinking on (effort high)' }
+  expect(routesSummary({ roles: { trivial: { via: 'api', api: 'deepinfra/x', thinking_review: 'on', thinks: lowest } } }))
+    .toBe('significant GPU (the router picks); trivial API deepinfra/x, thinking at its lowest effort (it can\'t turn off); writing GPU (the router picks)')
+})
+
 test('#1196: a role\'s fallback is in the roles\' summary, as routes.summary says it', () => {
   // tests.test_workbench.Fallbacks checks routes.summary on the same fixture
   expect(routesSummary({ roles: { trivial: { via: 'api', api: 'deepseek/deepseek-flash', thinking: 'off', fallback: 'anthropic/claude-haiku-5-5' },

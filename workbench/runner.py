@@ -540,11 +540,12 @@ def api_entry(task: store.Task) -> dict | None:
 def fixed_knobs(task: store.Task, m: models.Model) -> dict:
     """The knobs tuning.tune doesn't choose for this task: Claude's --self-review /
     --no-self-review; else, for an API model, self_review off (#1017): a round Claude never
-    sees costs money there, so neither the record nor the explore turns it on."""
+    sees costs money there, so neither the record nor the explore turns it on; on when the
+    role's `thinking_review` gave the task a thinking variant for it (`review_model`, #1059)."""
     own = task.spec.get("self_review")
     if own is not None:
         return {"self_review": int(own)}
-    return {"self_review": 0} if m.kind == "api" else {}
+    return {"self_review": int(bool(task.spec.get("review_model")))} if m.kind == "api" else {}
 
 
 # The user's own OPENCODE_CONFIG_CONTENT goes under the rules, not away: replaced, the providers,
@@ -1767,6 +1768,20 @@ def carried_tree(task: store.Task) -> str | None:
     return st.get("self_review_tree") if st.get("round_for") in SELF_REVIEW_ROUNDS else None
 
 
+def round_model(task: store.Task) -> str:
+    """Round n's `-m`: task.json `review_model` (the role's thinking variant, #1059) for a round
+    of the self-review (round_for `self_review`, or a round carrying one on: carried_tree), else
+    `opencode_model`. The variant changes in place, in the session the coding rounds began:
+    DeepInfra's DeepSeek took a tool-using session whose earlier turns had no reasoning, then one
+    at `#high` that reasoned, then `#none` again (2026-11-25, OpenCode 2.4.1, a paid check); the
+    switch drops the provider's prompt cache past the system prompt for the one round, and the
+    next coding round read it again from the cache."""
+    spec, st = task.spec, task.status
+    if spec.get("review_model") and (st.get("round_for") == "self_review" or carried_tree(task)):
+        return spec["review_model"]
+    return spec["opencode_model"]
+
+
 def green_tree(task: store.Task, began: str) -> str | None:
     """The tree (gitops.mark) the self-review this round is part of began on, the one the last
     round's tests passed on (status `self_review_tree`), or None when the round is no part of a
@@ -1912,7 +1927,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
     spec, st = task.spec, task.status
     prompt = task.round_dir(n).joinpath("prompt.md").read_text()
     # --agent: wb's own, never the user's default_agent (context.AGENT, #1290)
-    cmd = opencode_bin() + ["run", "--standalone", "--agent", context.AGENT, "-m", spec["opencode_model"],
+    cmd = opencode_bin() + ["run", "--standalone", "--agent", context.AGENT, "-m", round_model(task),
                             "--auto", "--format", "json", "--title", f"wb: {task.name}"]
     began = gitops.mark(task.worktree)  # the tree as the round began
     marks = {began}  # and as the session began
@@ -5592,7 +5607,7 @@ FALLBACK_STOPS = ("quota", *HELD)
 FALLBACK_SAID = "the task moved to its role's fallback"  # the handoff's why, and never an overflow
 # task.json's keys of the model it ran on, which the fallback's replace or drop
 MODEL_KEYS = ("provider", "provider_name", "thinking", "thinking_shown", "thinking_off", "said", "said_ts",
-              "order", "busy", "weights_id")
+              "order", "busy", "weights_id", "thinking_review", "review_model")
 
 
 def _fallback_move(task: store.Task, n: int, rnd: dict, before: bool = False) -> models.Model | None:
@@ -7196,16 +7211,35 @@ def thinking_variant(m, thinking: str) -> tuple[str | None, str]:
     return variant, shown
 
 
+def review_variant(m, thinking: str, review: str | None) -> tuple[str | None, str]:
+    """The self-review round's `-m` for an API task of a role whose `thinking_review` is
+    ``review`` (#1059), or None, and the task's thinking line. Only where the coding rounds really
+    don't think (THINKING_OFF_LINE) and the thinking variant (_thinking's "on") does and differs:
+    then `routes.REVIEW_ONLY (effort high)`. Else None and the coding rounds' line, as before:
+    thinking on thinks in every round already, and a model that doesn't reason has nothing to
+    turn on."""
+    variant, shown, _ = _thinking(m, thinking)
+    if review != "on" or shown != THINKING_OFF_LINE:
+        return None, shown
+    on, on_shown, _ = _thinking(m, "on")
+    if not on_shown.startswith(THINKING_ON) or on == variant:
+        return None, shown
+    return f"{m.id}#{on}" if on else m.id, routes.REVIEW_ONLY + on_shown.removeprefix(THINKING_ON)
+
+
 def with_thinking(m, spec: dict) -> dict:
     """task.json with an API task's thinking fixed (cmd_start, once): `thinking` (task.json's,
-    which the role sets; default off), `thinking_shown`, `opencode_model` with the variant, and
-    `thinking_off`, wb's own variant when one goes in the layer. A GPU task's is left as it was."""
+    which the role sets; default off), `thinking_shown`, `opencode_model` with the variant,
+    `thinking_off`, wb's own variant when one goes in the layer, and `review_model`, the
+    self-review round's (review_variant, #1059). A GPU task's is left as it was."""
     if getattr(m, "kind", "gpu") != "api":
         return spec
     thinking = "on" if spec.get("thinking") == "on" else "off"
     variant, shown, off = _thinking(m, thinking)
+    review, said = review_variant(m, thinking, spec.get("thinking_review"))
     return {**spec, "opencode_model": f"{m.id}#{variant}" if variant else m.id,
-            "thinking": thinking, "thinking_shown": shown, **({"thinking_off": off} if off else {})}
+            "thinking": thinking, "thinking_shown": said, **({"thinking_off": off} if off else {}),
+            **({"review_model": review} if review else {})}
 
 
 def _as_v2(doc: dict, pid: str, mid: str, variant: dict) -> dict:

@@ -38699,6 +38699,37 @@ class Routes(Base):
                 self.assertEqual(self.path.read_text(), was)
         self.assertFalse(self.dry("significant", "--thinking", "on")["gate"])   # thinking on the GPU: no yes
 
+    def test_a_roles_thinking_review_is_off_by_default_and_goes_on_on_api_only_on_the_dialogs_yes(self):
+        # #1059 (2026-11-25): the self-review thinking is one more paid round on API, so it takes
+        # the user's yes as thinking does; every view says "thinking: review only"
+        self.assertEqual(self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)
+        self.assertNotIn("thinking_review", self.doc()["roles"]["trivial"])        # off by default
+        os.environ["CLAUDECODE"] = "1"
+        asked = self.dry("trivial", "--thinking-review", "on")
+        self.assertEqual((asked["change"], asked["gate"]), (
+            "trivial: self-review thinking off → on (thinking: review only: the agent reviews its own change in "
+            "one more round before Claude)", True))
+        self.assertEqual(asked["approval"]["argv"], ["route", "trivial", "--thinking-review", "on"])
+        self.assertEqual(self.route("trivial", "--thinking-review", "on")[0], 3)    # no yes: unchanged
+        self.assertNotIn("thinking_review", self.doc()["roles"]["trivial"])
+        self.approve(asked["approval"])
+        self.assertEqual(self.route("trivial", "--thinking-review", "on")[0], 0)
+        self.assertFalse(self.dry("significant", "--thinking-review", "on")["gate"])  # a GPU role with no API model
+        os.environ.pop("CLAUDECODE")
+        self.assertEqual(self.doc()["roles"]["trivial"]["thinking_review"], "on")
+        self.assertIn("trivial      API deepseek/deepseek-flash (DeepSeek) · thinking: review only · ", self.route()[1])
+        self.assertEqual(routes.summary(routes.read()), "significant GPU (the router picks); trivial API "
+                         "deepseek/deepseek-flash, thinking: review only; writing GPU (the router picks)")
+        # with the role's thinking on every round thinks: said as thinking on, as before
+        self.assertEqual(routes.thinking_said({**routes.read()["roles"]["trivial"], "thinking": "on"}), "thinking on")
+        from workbench import settings  # the web app's thinking row says the coding rounds' alone
+        self.assertEqual(settings._think_stops(routes.read()["roles"]["trivial"])[0], settings.THINK[0])
+        self.assertEqual(self.route("trivial", "--thinking-review", "off")[0], 0)
+        self.assertNotIn("thinking_review", self.doc()["roles"]["trivial"])
+        self.path.write_text(json.dumps({"v": 1, "roles": {"trivial": {"thinking_review": "yes"}}}))
+        with self.assertRaisesRegex(routes.RoutesError, "trivial's thinking_review is 'yes', not off or on"):
+            routes.read()
+
     def test_wb_settings_set_dry_runs_each_route_row_as_that_rows_own_wb_route_dry_run(self):
         # #1336 (#1296's G3): Claude's wb settings set on a row wb route gates reaches the mod's
         # dialog, which shows what `wb settings set … --dry-run --json` prints. It must be that
@@ -39217,6 +39248,49 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual((req["path"], req["headers"]["Authorization"]),
                          ("/inference/openai/v1/chat/completions", "Bearer public"))
         self.assertEqual(req["body"]["model"], "big-pickle-free")
+
+    def test_thinking_review_runs_the_self_review_alone_on_the_thinking_variant_in_the_same_session(self):
+        # #1059 (2026-11-25): the role's `thinking_review` on runs the self-review round an API
+        # task skips (#1017) on the role's thinking variant (`#high`, _thinking_on's pick), and
+        # every coding round on the off one (`#none`), the variant changed in place: DeepInfra's
+        # DeepSeek took that in one tool-using session (the paid check, runner.round_model)
+        os.environ["FAKE_RUNS"] = runs = str(Path(self.tmp.name) / "runs.jsonl")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {
+            "trivial": {"via": "api", "api": FLASH, "thinking_review": "on"}}})
+        with mock.patch.object(cli, "spawn_runner", lambda task: 0):
+            out = run_wb("start", "api-rev", "--spec", str(self.spec), "--repo", str(self.repo),
+                         "--role", "trivial", "--test", TEST_CMD, "--no-base-check")
+        self.assertIn(" · thinking: review only (effort high)", out)               # the start line
+        sp = store.Task("api-rev").spec
+        self.assertEqual((sp["opencode_model"], sp["review_model"], sp["thinking_review"]),
+                         (f"{FLASH}#none", f"{FLASH}#high", "on"))
+        self.drive_here("api-rev")
+        st = store.Task("api-rev").status
+        self.assertEqual((st["phase"], st["round"], st["round_for"]), ("review", 2, "self_review"))
+        rows = [json.loads(x) for x in Path(runs).read_text().splitlines()]
+        self.assertEqual([(r["model"], r["session"]) for r in rows],
+                         [(f"{FLASH}#none", False), (f"{FLASH}#high", True)])          # in the same session
+        self.assertTrue(rows[1]["prompt"].startswith(runner.SELF_REVIEW[:40]), rows[1]["prompt"][:200])
+        with mock.patch.object(cli, "spawn_runner", lambda task: 0):             # Claude's feedback: coding
+            run_wb("feedback", "api-rev", "--text", "Also keep answer.txt as it is.")
+        self.drive_here("api-rev")
+        rows = [json.loads(x) for x in Path(runs).read_text().splitlines()]
+        self.assertEqual([r["model"] for r in rows[2:]], [f"{FLASH}#none", f"{FLASH}#high"])
+        from workbench import results  # the evidence the issue asks before it is ever recommended
+        self.assertEqual(results.record(store.Task("api-rev"), "discarded")["thinking_review"], "on")
+        # off (the default): no review variant, and the self-review stays off on API (#1017)
+        m = self.models.hosted()[FLASH]
+        self.assertEqual(runner.with_thinking(m, {}), {"opencode_model": f"{FLASH}#none", "thinking": "off",
+                                                       "thinking_shown": "thinking off"})
+        knobs = lambda spec: runner.fixed_knobs(types.SimpleNamespace(spec=spec), m)  # noqa: E731
+        self.assertEqual((knobs({}), knobs({"review_model": f"{FLASH}#high"}),
+                          knobs({"review_model": f"{FLASH}#high", "self_review": False})),
+                         ({"self_review": 0}, {"self_review": 1}, {"self_review": 0}))  # Claude's no wins
+        # thinking on thinks in every round already: no review variant, no self-review of its own
+        on = runner.with_thinking(m, {"thinking": "on", "thinking_review": "on"})
+        self.assertEqual((on["opencode_model"], on["thinking_shown"]), (f"{FLASH}#high", "thinking on (effort high)"))
+        self.assertNotIn("review_model", on)
 
     def test_an_api_task_never_says_it_waits_for_the_gpu_while_queued(self):
         # #1112: the base check wrote "waiting for the GPU" for an API task, wb watch printed

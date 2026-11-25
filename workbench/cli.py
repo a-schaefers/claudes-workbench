@@ -735,9 +735,10 @@ def _routed_keys(routed: dict) -> dict:
     for API `provider`, `provider_name`, `thinking`, `said` and `said_ts` (when the role has one),
     an OpenRouter role's `order` (#1021), which the keyhole routes every request by, and `busy`
     when the busy opt-in sent it there (#1023); `fallback` and `fallback_from` (the role's API model
-    it stands in for) on the role's fallback, either side (#1196)."""
+    it stands in for) on the role's fallback, either side (#1196); `thinking_review` when the role's
+    is on (#1059: runner.with_thinking gives the task its `review_model`)."""
     keys = ("via", "role", "fallback", "fallback_from") + (
-        ("provider", "provider_name", "thinking", "said", "said_ts", "order", "busy")
+        ("provider", "provider_name", "thinking", "said", "said_ts", "order", "busy", "thinking_review")
         if routed.get("via") == "api" else ())
     return {k: routed[k] for k in keys if routed.get(k) is not None}
 
@@ -3780,11 +3781,11 @@ def _thinks(mid: str, thinking: str) -> str:
     return routes.thinking_of(m, thinking) if m is not None and m.kind == "api" else routes.plain_thinks(mid, thinking)
 
 
-def _route_argv(role, target, gpu, api, thinking, day, order=None) -> list[str]:
+def _route_argv(role, target, gpu, api, thinking, day, order=None, review=None) -> list[str]:
     """The change as one canonical command (after `wb`): what the dialog approved and the gate
     compares, whatever spelling (an abbreviation, `--flag=value`) Claude used."""
     out = ["route", *([role] if role else []), *([str(target)] if target is not None else [])]
-    for flag, v in (("--gpu", gpu), ("--api", api), ("--thinking", thinking),
+    for flag, v in (("--gpu", gpu), ("--api", api), ("--thinking", thinking), ("--thinking-review", review),
                     ("--day-usd", f"{day:g}" if day is not None else None),
                     ("--order", ",".join(order) if order is not None else None)):
         if v is not None:
@@ -3911,6 +3912,8 @@ def _route_show(as_json: bool) -> None:
                 bits.append(f"API kept: {row['api']}" + (" (not in OpenCode's catalog now)" if gone else ""))
             if row["thinking"] == "on":
                 bits.append("thinking on")
+            elif row.get("thinking_review") == "on":  # kept for API, as routes.summary says it (#1059)
+                bits.append(routes.REVIEW_ONLY)
         # on API: who sent its code there (the gated change), a GPU pin since never replacing
         # it; on the GPU: the newer of the two records
         keys = (("ts", "by"),) if row["via"] == "api" else (("ts", "by"), ("gpu_ts", "gpu_by"))
@@ -4057,7 +4060,7 @@ def cmd_route(a):
         return _route_start(a)
     what, target = a.what, a.target
     if what is None:
-        if any(v is not None for v in (target, a.gpu, a.api, a.thinking, a.day_usd, a.order)):
+        if any(v is not None for v in (target, a.gpu, a.api, a.thinking, a.thinking_review, a.day_usd, a.order)):
             die("name a role: wb route <role> gpu|api|<provider/model>, wb route all gpu|api|both, wb route cap <usd>, "
                 "wb route busy wait|api, or wb route <role> fallback <provider/model>|gpu|none")
         if a.dry_run:
@@ -4074,7 +4077,7 @@ def cmd_route(a):
         die("--order names an OpenRouter role's backends: wb route <role> openrouter/<model> --order <name>[,<name>]")
     busy = None
     if what == "cap":
-        if a.gpu or a.api or a.thinking or a.day_usd is not None:
+        if a.gpu or a.api or a.thinking or a.thinking_review or a.day_usd is not None:
             die("wb route cap <usd> takes only the amount")
         try:
             day = float(target) if target not in (None, routes.CAP_OFF) else target
@@ -4083,7 +4086,7 @@ def cmd_route(a):
         if day != routes.CAP_OFF and (day is None or not day > 0 or day == float("inf")):
             die(f"wb route cap <usd>|off: a day cap in dollars, such as {routes.DAY_USD_SUGGEST}, or off")
     elif what == "busy":  # #1023: the opt-in for a busy GPU
-        if a.gpu or a.api or a.thinking or a.day_usd is not None or target not in routes.BUSY:
+        if a.gpu or a.api or a.thinking or a.thinking_review or a.day_usd is not None or target not in routes.BUSY:
             die("wb route busy wait|api: when the GPU is busy, wait (queue, as before) or start a role "
                 "that has an API model on it")
         busy = target
@@ -4091,7 +4094,8 @@ def cmd_route(a):
         role = "all"
         if a.gpu or a.api:
             die("--gpu and --api name one role's model: wb route <role> --gpu|--api <id>")
-        if target not in (None, *routes.USES) or (target is None and a.thinking is None):
+        if target not in (None, *routes.USES) or (target is None and a.thinking is None
+                                                   and a.thinking_review is None):
             die("wb route all gpu|api|both: the Agents switch, every role on the GPU, every role on its API "
                 "model, or each role as set")
         use = target  # the Agents switch: no role's own via changes (#1016)
@@ -4116,7 +4120,7 @@ def cmd_route(a):
     else:  # an API id as resolved, given as the positional or --api
         argv = _route_argv(what, target if target in (None, *routes.USES) else api, gpu,
                            api if a.api is not None and target in (None, *routes.USES) else None,
-                           a.thinking, a.day_usd, order)
+                           a.thinking, a.day_usd, order, a.thinking_review)
 
     def changed(doc) -> routes.Change:
         if use == "api" and not routes.any_api(doc):
@@ -4124,7 +4128,7 @@ def cmd_route(a):
         try:
             ch = routes.change(doc, None if what == "cap" else role, via=via, gpu=gpu, api=api,
                                thinking=a.thinking, day_usd=day, who=_who, use=use, order=order, busy=busy,
-                               free=_free, thinks=_thinks)
+                               free=_free, thinks=_thinks, thinking_review=a.thinking_review)
         except routes.RoutesError as e:
             die(str(e), 3)
         # a kept API model a role newly runs on (its own flip, or the Agents switch) must still be
@@ -4144,7 +4148,8 @@ def _route_fallback(a) -> None:
     (at wb start, and once mid-task). An API id is checked as a role's model is (_route_api) and
     takes the dialog's yes and a day cap; gpu (the role's GPU side) and none take neither."""
     role = a.what
-    if len(a.more) != 1 or a.gpu or a.api or a.thinking or a.order is not None or a.day_usd is not None:
+    if len(a.more) != 1 or a.gpu or a.api or a.thinking or a.thinking_review or a.order is not None \
+            or a.day_usd is not None:
         die(f"wb route {role} fallback <provider/model>|gpu|none: one choice, in a wb route of its own")
     fb = a.more[0]
     if fb not in (routes.FALLBACK_GPU, routes.FALLBACK_OFF):
@@ -4165,10 +4170,11 @@ def _route_pairs(a) -> None:
     change, so the first run's one question is one dialog. A choice is gpu, api or an API model's
     exact id. All or nothing: any pair wb refuses (an id not in the catalog, a key wb can't hold, a
     role named twice) exits 3 naming it, before anything is written."""
-    if a.gpu or a.api or a.thinking or a.order is not None or a.start is not None or a.what in ("all", "cap", "busy") \
-            or "fallback" in a.more:
+    if a.gpu or a.api or a.thinking or a.thinking_review or a.order is not None or a.start is not None \
+            or a.what in ("all", "cap", "busy") or "fallback" in a.more:
         die("several roles take a choice each (gpu, api or an API model's exact id) and --day-usd; "
-            "--gpu, --api, --thinking, --order, all, cap, busy and fallback go in a wb route of their own")
+            "--gpu, --api, --thinking, --thinking-review, --order, all, cap, busy and fallback go in a wb "
+            "route of their own")
     words = [a.what, a.target, *a.more]
     if len(words) % 2:
         die(f"{words[-1]} has no choice: wb route <role> gpu|api|<provider/model> <role> …")
@@ -8871,6 +8877,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--api", metavar="ID", help="the role's API model, its exact OpenCode id; the "
                    "selector stays as it is")
     s.add_argument("--thinking", choices=routes.THINKING, help="the role's thinking (off by default)")
+    s.add_argument("--thinking-review", choices=routes.THINKING, help="on: with the role's thinking off, "
+                   "an API task reviews its own change in one more round before Claude, that round alone "
+                   "thinking (off by default, #1059)")
     s.add_argument("--order", metavar="NAME[,NAME]", help="an OpenRouter role's backends, which every "
                    "request goes to alone (the model's Providers tab on openrouter.ai): the user's choice")
     s.add_argument("--day-usd", type=float, metavar="N", help="the day cap in dollars ($"

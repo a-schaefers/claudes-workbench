@@ -78,6 +78,10 @@ WORKFLOWS = [("off", "Off (default)", "Claude runs one task at a time."),
 PROGRESS_OFF = ("off", "Off (default)", "No progress checks: each one wakes Claude, which spends its tokens.")
 THINK = [("off", "Off (default)", "Faster and cheaper; for tasks started after this."),
          ("on", "On", "Better on hard steps, slower and costs more; for tasks started after this.")]
+# a role's `thinking_review` (#1059): only a role with an API model gets the row
+REVIEW = [("off", "Off (default)", "An API task skips its own review round: Claude reviews its work."),
+          ("on", "On", "With thinking off, an API task reviews its own change in one more round before "
+           "Claude, that round alone thinking: it costs more; for tasks started after this.")]
 SIZES = [("all", "Any size (default)", "The router may give it any task."),
          ("trivial", "Trivial only", "The router gives it trivial coding tasks only."),
          ("significant", "Complex only", "The router gives it complex coding tasks only.")]
@@ -235,6 +239,7 @@ def _api_stops(label: str, m: dict | None, current: str, others: list[str]) -> l
 
 def _think_stops(row: dict) -> list:
     """The pane's thinkStops: each choice a model can't keep says what it does instead (#1263)."""
+    row = {**row, "thinking_review": "off"}  # the coding rounds' thinking alone: its own row says the review's
     off = routes.thinking_said({**row, "thinking": "off"})
     on = routes.thinking_said({**row, "thinking": "on"})
     off_why = ("This model can't turn thinking off, but its lowest effort is still cheaper than On; for "
@@ -403,6 +408,10 @@ def _build() -> dict:
             for name, label, row in roles:
                 out.append(_choice(f"think-{name}", "api", f"{label} thinking",
                                    _think_stops({"api": None, "thinking": "off", **row}), row.get("thinking") or "off"))
+            for name, label, row in roles:
+                if row.get("api"):
+                    out.append(_choice(f"review-{name}", "api", f"{label} self-review thinking", REVIEW,
+                                       row.get("thinking_review") or "off"))
             out.append(_info("api-spend", "api", "Spend today", _spend_line(r)))
 
     out.append(_choice("splash", "terminal", "Opening animation", SPLASH, "on" if cli.splash_on() else "off"))
@@ -491,6 +500,8 @@ def _argv(row: dict, value) -> list[str]:
         return ["route", rest, "--api", value]
     if head == "think":
         return ["route", rest, "--thinking", value]
+    if head == "review":
+        return ["route", rest, "--thinking-review", value]
     if head == "size":
         return ["model", "sizes", rest, *([] if value == "all" else [value])]
     if head == "media":
