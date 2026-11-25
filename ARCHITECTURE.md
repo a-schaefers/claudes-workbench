@@ -142,7 +142,7 @@ stuck, failed, asking; `CLOSED` = accepted, discarded.
 | `running` / `asking` | the runner per round; `asking` while a question is open (`ask_mcp.relay`) |
 | `testing` | the runner while the acceptance command runs |
 | `review` | the runner (tests pass, auto-fix spent, or no `--test`); `wb takeover` |
-| `stuck` | the runner (a guard; a SIGTERM not wb's: `runner.SIGNAL_STOP`; `runner.UPDATED`, #603; an API task's repo marked local-only, #1215); `wb stop`; `wb accept` whose commit fails on a live task ("accept failed: …") |
+| `stuck` | the runner (a guard; a SIGTERM not wb's: `runner.SIGNAL_STOP`; OpenCode below 2.0, `runner.opencode_moved`; an API task's repo marked local-only, #1215); `wb stop`; `wb accept` whose commit fails on a live task ("accept failed: …") |
 | `failed` | the runner (opencode exited non-zero: `runner.died`; setup; load; a crash or full disk); `cli.reap`. All but `runner.died` (save one whose server went down again, `infra` "model", #657) set status `infra`, which `wb bench` doesn't grade (#508) |
 | `accepted` / `discarded` | `wb accept` / `wb discard` |
 
@@ -973,19 +973,24 @@ exception: traceback to `runner.log`, `failed` with its tail. On exit `_end_agen
 git shim, ask server) load from the clone afresh, so a mid-task pull paired old and new. `main`
 records `code_print()` (sha256 of `runner.CHILD_CODE`) in `CURRENT["code"]` and imports every
 module the runner imports late up front (`load_up_front`: `cli`, `results`, `router`, `transcript`,
-`verify`; #1115: an API round's report loaded `results` mid-task, a test walks the late imports); before each round `_updated` compares and on a change sets `stuck`
-("workbench was updated under this task: wb resume <task> continues it on the new code", `cause`
-`updated`, not held against the step's size, #660; status `infra` `updated`, so `wb feedback` counts
-no review round, and the notice's `tasks` `[<task>]`, so the mod wakes it as interrupted with
-`BATCH_NEXT`, `wb resume`: it woke as "got stuck" advising feedback, and one real review after
-that made the step go badly, #1176); `wb update` refuses while a runner is live
-(unless `--stop`), so a manual pull is what this catches. `opencode_moved` (before the lease and
-each later round) compares status `opencode` (`M.m`, set by start and by feedback, next, resume
-through `cli._opencode_again`) with `opencode --version`: changed, `stuck` with `OPENCODE_MOVED` ("OpenCode was changed under this task (2.3, now
-2.5): wb resume <task> continues it on 2.5", an interruption to `wb resume --all`); below 2.0,
-`OPENCODE_GET`; `cause` `opencode` (#866: a 1.x reinstall failed every round as the model's fault),
-`infra` `opencode` and `tasks` `[<task>]` as `_updated`'s (#1176).
-Feedback, next and resume refuse 1.x (exit 3) and note one outside `OPENCODE_TESTED`.
+`verify`; #1115: an API round's report loaded `results` mid-task, a test walks the late imports); before each round `_updated` compares and on a change
+hands the task over with no notice: a `load` event ("workbench was updated: a runner on the new
+code carries on"), phase `queued`, `CURRENT["successor"]`, and `main`, after its cleanup (unless a
+`wb stop` set `stopping`), `_successor` execs `python -X utf8 -m workbench.runner <task>` from
+`PKG_ROOT`: the same pid (status `pid`, the scope, the awake inhibitor stay), the runner lock
+(close-on-exec) free for it, and the new runner's own checks (`_cap_wait`, `_local_only_stop`,
+`_agents_gpu`) before the round it was about to run. Until #1322 it set `stuck` (`UPDATED`, "workbench
+was updated under this task: wb resume <task> …", cause and `infra` `updated`, #660, #1176) and woke
+Claude for a resume that was always the answer; `UPDATED` stays for `cli._interrupted` and old
+notices. `wb update` refuses while a runner is live (unless `--stop`), so a manual pull is what
+this catches. `opencode_moved` (before the lease and each later round) compares status `opencode`
+(`M.m`, set by start and by feedback, next, resume through `cli._opencode_again`) with `opencode
+--version`: below 2.0, `stuck` with `OPENCODE_GET`, `cause` and `infra` `opencode`, `tasks`
+`[<task>]` (#866: a 1.x reinstall failed every round as the model's fault; #1176); changed within
+2.x, it carries on: status `opencode` the new version, and `opencode_note` `{round, text}` puts
+"OpenCode now 2.5" (with `untested()`'s line outside `OPENCODE_TESTED`) in that round's report
+(#1322: it stopped the task for `wb resume`; `OPENCODE_MOVED`, its old `last`, stays for
+`cli._interrupted`). Feedback, next and resume refuse 1.x (exit 3).
 
 **`drive(task)`**, the loop:
 1. Phase `queued`, `pid`, `boot`, `machine`, `host`, `beat` (touched every `BEAT_SECS`, #872);
@@ -2865,13 +2870,13 @@ or whose command wasn't found).
 `rate_limited`/`outage` after its one revive, `quota`, `auth`: #1020; `refused`: #1082, #1084; the
 keyhole's `setup`, this machine's, #1080), `spend` (the day's API spend
 cap, #1019: `runner.SPEND`; Agents on GPU, `guard` `agents`, #1213), `updated`
-(`runner._updated`), `opencode` (`runner.opencode_moved`), `local_only` (an API task's repo marked local-only since it started:
+(runners before #1322's `_updated`), `opencode` (`runner.opencode_moved`, OpenCode below 2.0), `local_only` (an API task's repo marked local-only since it started:
 `runner.LOCAL_ONLY`, #1215), `signal` (`SIGNAL_STOP`), `died`
 (`reap`), `update` (`wb update --stop`). A failure whose text names its own remedy has a cause too, with no round:
 `checkout` (`_checkout_failed`), `setup` (`_prepare`), `repo` (`_repo_gone`), `catalog` (`_left_catalog`, both of
 `left_catalog`'s lines), `model` (`_load_failed`, not `Damaged`), `disk` (the crash handler's full disk; a crash has
 none), so the mod's wake is `OUTSIDE_NEXT`'s (#1247). `tasks` names a batch (restart, shutdown, `wb update
---stop`), or the one task `_updated` or `opencode_moved` stopped, so its wake is an interruption's
+--stop`), or the one task `opencode_moved` stopped, so its wake is an interruption's
 (`BATCH_NEXT`, #1176). `wb` itself writes only `reap`'s `failed` and `cli._stop_for_update`'s `stuck`, one per
 owner (#694). The file is out of the agent's lane (2026-11-16 audit: it could forge or wipe wakes).
 Read through `store.notices()`, whole rows only (a `NAME_RE` task, a kind, a numeric ts: one row
@@ -6652,7 +6657,7 @@ off), not `wb start`'s.
 | `reviewed` | `{step, tree}`: the tree the last review notice showed (`gitops.snapshot`, bulky new files left out); the next shows the diff since (the whole diff once git gc pruned it) |
 | `tests` | `{ok, exit, tail, round, lane?, proxy?, hang?}` (`exit`: code, `timeout`, `output limit`; `lane`: devices refused; `proxy`: variables left out, on a connection failure; `hang`: `{base, limit}`, a timeout where the base check ran it in a quarter of the limit or less) |
 | `base_check` | `{ok, exit, tail, limit, secs, cmd}`, `runner.base_check` in the lane before round 1, with `--test` and no `--no-base-check` (`exit` may be `"timeout"`, `"setup failed"`, `"filtered"`: not the task's bytes) |
-| `infra` | the machine failed it: `setup` (`_prepare`), `model` (`_load_failed`: no load, or the server down past `DOWN_WAIT`), `provider` (an API provider's stop, #1020), `spend` (the day's API spend cap, #1019), `updated` (`runner._updated`), `opencode` (`runner.opencode_moved`, #1176), `local_only` (an API task's repo marked local-only since it started, `runner._local_only_stop`, #1215), `crash`, `disk full` (the crash handler), `runner died` (`cli.reap`), `update` (`wb update --stop`, `cli._stop_for_update`), `stopped` (`wb stop --all`, `cli.stop_everything`), `signal` (a SIGTERM not wb's, `runner.SIGNAL_STOP`), `repo` (`runner._repo_gone`) (these four #1260); `wb feedback` then counts no review (#1153) and `wb discard`'s row carries it (#1245): both read it through `cli.stopped_outside`, which reads the first three (`update`, `stopped`, `signal`) from `last` too for a status written before they set it (the update that installs #1260 stops its tasks with the old code); cleared at runner start; a replay with it is an `error` row |
+| `infra` | the machine failed it: `setup` (`_prepare`), `model` (`_load_failed`: no load, or the server down past `DOWN_WAIT`), `provider` (an API provider's stop, #1020), `spend` (the day's API spend cap, #1019), `updated` (runners before #1322's `_updated`), `opencode` (`runner.opencode_moved`, OpenCode below 2.0, #1176), `local_only` (an API task's repo marked local-only since it started, `runner._local_only_stop`, #1215), `crash`, `disk full` (the crash handler), `runner died` (`cli.reap`), `update` (`wb update --stop`, `cli._stop_for_update`), `stopped` (`wb stop --all`, `cli.stop_everything`), `signal` (a SIGTERM not wb's, `runner.SIGNAL_STOP`), `repo` (`runner._repo_gone`) (these four #1260); `wb feedback` then counts no review (#1153) and `wb discard`'s row carries it (#1245): both read it through `cli.stopped_outside`, which reads the first three (`update`, `stopped`, `signal`) from `last` too for a status written before they set it (the update that installs #1260 stops its tasks with the old code); cleared at runner start; a replay with it is an `error` row |
 | `env_skip` | with phase `review`: the cause of a skipped auto-fix whose fix ends `then wb feedback` (`runner.THEN_FEEDBACK`: a tool the agent's environment lacks, `GIVE_TOOL`; a lane grant): `wb feedback` then counts no review, and `wb discard`'s row has `infra` `environment` (#1257); cleared at runner start |
 | `prepared`, `setup_secs` | the worktree is set up (`_prepare`), so a later runner doesn't again; how long (older tasks: `prepared_paths`, `prepared_marks`, `prepared_bytes`, `runner.prepared_record`) |
 | `checked_out`, `checkout_secs` | `runner.checkout` made the worktree; how long |
@@ -6673,7 +6678,8 @@ off), not `wb start`'s.
 | `gpu_wh`; `gpu_w_sum`, `gpu_w_n`, `gpu_w_peak` | GPU energy (`_Power`, its share when sharing); the watt samples for the row's `gpu_w` |
 | `speeds` | `{write, read, ttft}` (`router.speed_samples`), newest `TASK_SPEED_KEEP` (200), stats recording on |
 | `guards` | `{<guard>: n}`, stats recording on |
-| `opencode` | OpenCode's `M.m` when the runner last started; `runner.opencode_moved` stops the task when it changes |
+| `opencode` | OpenCode's `M.m` when the runner last started; `runner.opencode_moved` stops the task below 2.0 and takes a 2.x change here |
+| `opencode_note` | `{round, text}`: "OpenCode now M.m" (and `untested()`'s line) for that round's report, set by `runner.opencode_moved` on a 2.x change (#1322) |
 | `leased` | the pid of the runner that entered its lease (`drive`): alive and not in gpu.json, it stepped aside (its tests, a server's wait) and `cli._gpu_holders` doesn't count it |
 | `remote_gpu` | its model runs elsewhere; energy not measured |
 | `unrecorded` | `{outcome, step, extra}` until the results row is written: what a retried accept/discard writes |

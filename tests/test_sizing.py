@@ -258,8 +258,8 @@ class Measured(Base):
         task = store.Task("t-upd")
         with mock.patch.dict(runner.CURRENT, code="the code before the update"):
             self.assertTrue(runner._updated(task))
-        note = [r for r in store.notices() if r["task"] == "t-upd"][-1]
-        self.assertEqual((note["kind"], note["cause"]), ("stuck", "updated"))
+        # since #1322 a runner of the new code carries on, with no notice at all
+        self.assertFalse([r for r in store.notices() if r["task"] == "t-upd" and r["kind"] == "stuck"])
         self.assertFalse(results.step(task, True)["stuck"])
         old = {"kind": "stuck", "round": 1, "text": f"task t: {runner.UPDATED}: wb resume t …"}
         self.assertTrue(results._not_the_step(old))                # one written before the cause

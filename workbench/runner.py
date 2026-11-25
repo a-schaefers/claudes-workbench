@@ -103,21 +103,25 @@ def opencode_version() -> tuple[int, int] | None:
 
 
 def opencode_moved(task: store.Task) -> bool:
-    """Whether OpenCode changed under the task since the last wb command started its runner
-    (status `opencode`, set by wb start, feedback, next and resume), or is now before 2.0; if so,
-    the task is left stuck for wb resume, cause `opencode`: not the step's. Only wb start
-    looked: OpenCode reinstalled from npm (1.x) mid-task failed the next round as "opencode
-    exited 1", charged to the model's slice, and every resume repeated it (#866). Not installed
+    """Whether OpenCode is now before 2.0 under the task: if so, the task is left stuck for wb
+    resume, cause `opencode`: not the step's. Only wb start looked: OpenCode reinstalled from npm
+    (1.x) mid-task failed the next round as "opencode exited 1", charged to the model's slice,
+    and every resume repeated it (#866). A change within 2.x carries on: status `opencode` takes
+    the new version and the next round's report says so (`opencode_note`); it stopped the task
+    and woke Claude for a wb resume that was always the answer (#1322, 2026-11-24). Not installed
     or saying no version: the lane's own error says so."""
     if not (have := opencode_version()):
         return False
     now, was = f"{have[0]}.{have[1]}", task.status.get("opencode")
-    if have >= (2, 0) and (not was or was == now):
+    if have >= (2, 0):
+        if was and was != now:
+            drift = untested(have)
+            task.set_status(opencode=now, opencode_note={
+                "round": task.status.get("round", 1),
+                "text": f"OpenCode now {now}" + (f": {drift}" if drift else "")})
         return False
     msg = (f"OpenCode {now} can't run tasks: workbench needs OpenCode 2.x: {OPENCODE_GET}; then wb "
-           f"resume {task.name}" if have < (2, 0) else
-           f"{OPENCODE_MOVED} ({was}, now {now}): wb resume {task.name} continues it on {now}"
-           + (f". {drift}" if (drift := untested(have)) else ""))
+           f"resume {task.name}")
     # status `infra` and the notice's `tasks`, as for an interruption: without them wb feedback
     # (the wake advised it, "it got stuck") counted a review round, and one real review after it
     # made the step go badly (#1176, 2026-11-24)
@@ -127,6 +131,8 @@ def opencode_moved(task: store.Task) -> bool:
     return True
 
 
+# What a runner before #1322 left in status `last` when OpenCode changed within 2.x: still read
+# by cli._interrupted, so wb resume --all takes a task an older runner stopped so
 OPENCODE_MOVED = "OpenCode was changed under this task"
 
 
@@ -4268,6 +4274,8 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     if full:
         lines.append("reading: " + full[-1]["text"])
     lines += backend_lines(task, n)  # #1021
+    if (oc := st.get("opencode_note") or {}).get("round") == n:  # opencode_moved (#1322)
+        lines.append(oc.get("text") or "")
     if st.get("claude_rules_gone") == n:  # #1119
         lines.append(RULES_GONE.format(claude=privacy.home_path(context.claude_home()),
                                        mine=privacy.home_path(context.user_agents_md())))
@@ -5475,6 +5483,7 @@ def drive(task: store.Task) -> None:
     # `last` at once, from the config alone (gpu_side): left to after resolve, which may read the
     # catalog, a GPU task showed the last run's line ("Claude reviews next") as queued (the
     # review of #1015, 2026-11-23)
+    CURRENT.pop("successor", None)  # _updated's, for this runner's own drive
     task.set_status(phase="queued", pid=os.getpid(), infra=None, env_skip=None,
                     last="waiting for the GPU" if _gpu_side(task) else "starting",
                     boot=store.boot_id(),  # a later boot reaps it as a restart's (cli.reap)
@@ -5992,9 +6001,13 @@ def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:
 # gitguard) and the ask server (ask_mcp, store, watch). A `git pull` or Claude Code's plugin
 # update mid-task gave them new code under the old runner, and a changed interface between them
 # ended the task stuck or failed with the cause only in runner.log (#603, the audit of v1.90).
-# So the runner prints them at its start and, before each round, ends cleanly when they changed.
+# So the runner prints them at its start and, before each round, hands the task to a runner of
+# the new code when they changed (_updated, _successor): until #1322 (2026-11-24) it stopped the
+# task as stuck and woke Claude for a wb resume that was always the answer.
 CHILD_CODE = ("bin/wb-ask-mcp", "workbench/__init__.py", "workbench/ask_mcp.py",
               "workbench/gitguard.py", "workbench/lane.py", "workbench/store.py", "workbench/watch.py")
+# What a runner before #1322 left in status `last`: still read by cli._interrupted and
+# results._not_the_step, so wb resume --all takes a task an older runner stopped so
 UPDATED = "workbench was updated under this task"
 
 
@@ -6011,18 +6024,26 @@ def code_print() -> str:
 
 def _updated(task: store.Task) -> bool:
     """Whether the children's code changed since this runner started (CURRENT["code"]); if so,
-    the task is left stuck for wb resume, which starts a runner on the new code."""
+    the runner ends cleanly and main starts a runner on the new code in its place (_successor),
+    with no notice: the round it was about to run is the new runner's, its checks (the spend
+    cap, local_only, Agents on GPU) run again before it."""
     if not (was := CURRENT.get("code")) or code_print() == was:
         return False
-    msg = f"{UPDATED}: wb resume {task.name} continues it on the new code"
-    # not the step's: an update mid-step shrank the model's slice (#660). Status `infra`, so wb
-    # feedback counts no review round, and the notice's `tasks`, so the mod's wake says it was
-    # interrupted and names wb resume: it said "it got stuck" and advised wb feedback, which
-    # counted a round, and one real review after it made the step go badly (#1176, 2026-11-24)
-    task.set_status(phase="stuck", last=msg, infra="updated")
-    task.notify("stuck", f"task {task.name}: {msg}", round=task.status.get("round"), cause="updated",
-                tasks=[task.name])
+    CURRENT["successor"] = True
+    task.set_status(phase="queued", last="workbench was updated: a runner on the new code carries on")
+    task.event({"ts": store.now(), "round": task.status.get("round"), "kind": "load",
+                "text": "workbench was updated: a runner on the new code carries on"})
     return True
+
+
+def _successor(task: store.Task) -> None:
+    """Replace this process with a runner on the code now on disk (_updated): the same pid, so
+    status `pid`, the scope and the awake inhibitor stay; the runner lock (opened close-on-exec)
+    is free for the new runner to take."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.chdir(PKG_ROOT)
+    os.execv(sys.executable, [sys.executable, "-X", "utf8", "-m", "workbench.runner", task.name])
 
 
 # A SIGTERM that didn't come from wb (a shutdown, a logout, a kill): wb marks its own stops
@@ -6221,16 +6242,22 @@ def main():
         try:
             _end_agent(task)  # a backstop: drive's own cleanup may not have been reached
         finally:
+            # a wb stop that came in meanwhile wins over the hand-over (_updated)
+            succeed = CURRENT.get("successor") and not task.status.get("stopping")
             try:
-                task.set_status(pid=None, stopping=None)
-                hands_off(task)  # the agent is stopped: what is written next is Claude's (#1179)
+                if not succeed:
+                    task.set_status(pid=None, stopping=None)
+                    hands_off(task)  # the agent is stopped: what is written next is Claude's (#1179)
             except OSError as e:
                 if not store.disk_full(e):
                     raise
             try:
-                awake_for_review(task)
+                if not succeed:
+                    awake_for_review(task)
             except Exception:  # never the runner's exit
                 pass
+    if succeed:
+        _successor(task)
 
 
 # Thinking per task (#1018). API providers think by default (DeepSeek at effort high), and

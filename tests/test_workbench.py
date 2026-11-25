@@ -8234,29 +8234,23 @@ class StartChecks(Base):
         self.assertIn("opencode upgrade --major", runner.OPENCODE_GET)
         self.assertIn(runner.OPENCODE_GET, "\n".join(cli.first_run()))
 
-    def test_opencode_changed_under_a_task_stops_it_for_resume_and_1x_is_refused_before_any_round(self):
+    def test_opencode_changed_within_2x_carries_on_and_1x_is_refused_before_any_round(self):
         # #866 (the third 2026-11-21 audit): only wb start checked the version, so OpenCode
         # reinstalled from npm (1.x) mid-task failed the next round as "opencode exited 1",
-        # charged to the model's slice, and every feedback or resume repeated it
-        from workbench import results
+        # charged to the model's slice, and every feedback or resume repeated it. A change within
+        # 2.x stopped the task for a wb resume that was always the answer: it carries on, and the
+        # round's report says so (#1322, 2026-11-24)
         with mock.patch.object(cli, "spawn_runner"):
             self.start("t-oc", "ok", "--no-base-check")
         task = store.Task("t-oc")
         self.assertEqual(task.status["opencode"], "2.3")
         os.environ["FAKE_VERSION"] = "opencode v2.5.0"              # upgraded before the runner
         runner.drive(task)
-        st = task.status
-        self.assertEqual((st["phase"], st.get("session")), ("stuck", None))   # no round ran
-        self.assertIn("OpenCode was changed under this task (2.3, now 2.5): wb resume t-oc", st["last"])
-        rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-oc"]
-        self.assertEqual(rows[-1]["cause"], "opencode")
-        self.assertNotIn(rows[-1]["cause"], results.THE_STEP)
-        self.assertTrue(cli._interrupted(st["last"]))               # wb resume --all takes it
-        with mock.patch.object(cli, "spawn_runner"):
-            run_wb("resume", "t-oc")
-        self.assertEqual(task.status["opencode"], "2.5")
-        runner.drive(task)
-        self.assertEqual(task.status["phase"], "review")
+        self.assertEqual((task.status["phase"], task.status["opencode"]), ("review", "2.5"))
+        self.assertIn("OpenCode now 2.5", task.round_dir(1).joinpath("summary.md").read_text())
+        self.assertFalse([r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
+                          if r["task"] == "t-oc" and r["kind"] == "stuck"])
+        self.assertTrue(cli._interrupted(f"{runner.OPENCODE_MOVED} (2.3, now 2.5): wb resume t-oc"))
         os.environ["FAKE_VERSION"] = "opencode v1.9.0"              # npm's, before feedback
         rounds = sorted(p.name for p in (task.dir / "rounds").iterdir())
         with self.assertRaises(SystemExit) as e:
@@ -21785,7 +21779,10 @@ class UpdatedUnderATask(Base):
                              capture_output=True, check=True).stdout.split()
         self.assertEqual(sorted(late - set(out)), [])
 
-    def test_a_runner_whose_lane_shim_or_ask_code_changed_stops_before_the_next_round(self):
+    def test_a_runner_whose_lane_shim_or_ask_code_changed_hands_the_next_round_to_one_on_the_new_code(self):
+        # #603: the children load the clone afresh each round. Until #1322 (2026-11-24) the
+        # runner stopped the task as stuck and woke Claude for a wb resume that was always the
+        # answer: it now execs a runner of the new code, the same pid, which runs the next round
         pkg = Path(self.tmp.name) / "pkg"   # a copy to update: the runner runs from it
         ignore = shutil.ignore_patterns("__pycache__")
         for d in ("workbench", "bin", "agent", "tests"):   # the fake too: the lane reads the copy
@@ -21797,24 +21794,22 @@ class UpdatedUnderATask(Base):
             running("t")
             with (pkg / "workbench/lane.py").open("a") as f:
                 f.write("\n# a pull landed\n")
-            st = wait_phase("t", {"stuck"})
-        self.assertIn("workbench was updated under this task: wb resume t", st["last"])
-        self.assertEqual(st["round"], 2)                          # its prompt written, never run
-        self.assertFalse(store.Task("t").round_dir(2).joinpath("summary.md").exists())
-        notes = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r.get("task") == "t"]
-        self.assertIn("workbench was updated under this task", notes[-1]["text"])
-        # #788: wb resume --all matched `last` exactly against INTERRUPTED, which held neither
-        # UPDATED nor its text with the task's name: every task updated under had to be named
-        os.environ["FAKE_SCENARIO"] = "ok"
-        os.environ.pop("FAKE_SLEEP", None)
-        self.assertTrue(cli._interrupted(st["last"]))
-        self.assertIn("resumed t", run_wb("resume", "--all"))
+            st = wait_phase("t", {"review", "stuck", "failed"})
+        self.assertEqual((st["phase"], st["round"]), ("review", 2), st.get("last"))
+        self.assertTrue(store.Task("t").round_dir(2).joinpath("summary.md").exists())
+        loads = [e["text"] for e in store.read_jsonl(store.Task("t").dir / "events.jsonl")[0]
+                 if e.get("kind") == "load"]
+        self.assertIn("workbench was updated: a runner on the new code carries on", loads)
+        notes = [r["kind"] for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r.get("task") == "t"]
+        self.assertNotIn("stuck", notes)
+        # #788: a task an older runner stopped so still resumes with --all
+        self.assertTrue(cli._interrupted(f"{runner.UPDATED}: wb resume t continues it on the new code"))
         self.assertFalse(cli._interrupted("workbench was updated under this tasking"))
 
-    def test_the_carry_on_after_an_update_or_an_opencode_change_is_no_review_round(self):
-        # #1176 (2026-11-24): #1153 left out these two stops. Neither set status `infra`, and the
-        # wake read "it got stuck ... Steer it with wb feedback", which counted a review round:
-        # with one real review after it the step went badly, shrinking the model's slice
+    def test_an_update_or_an_opencode_change_before_a_round_stops_nothing_and_counts_no_review(self):
+        # #1176 (2026-11-24): the stop these two made, and the wb feedback its wake advised,
+        # counted a review round. Since #1322 neither stops: the update hands the round to a
+        # runner of the new code (here the second drive), the 2.x change carries on
         from workbench import results, router, tuning
         for cause in ("updated", "opencode"):
             with self.subTest(cause=cause):
@@ -21830,23 +21825,14 @@ class UpdatedUnderATask(Base):
                         mock.patch.object(runner, "opencode_version",
                                           lambda: (2, 5) if ran() and cause == "opencode" else (2, 3)):
                     runner.drive(task)
-                st = task.status
-                self.assertEqual((st["phase"], st.get("infra"), st["round"]), ("stuck", cause, 2))
-                [n] = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
-                       if r["task"] == name and r["kind"] == "stuck"]
-                # the mod's wake: "was interrupted" and wb resume (batchOf, BATCH_NEXT)
-                self.assertEqual((n["cause"], n.get("tasks")), (cause, [name]))
-                os.environ["FAKE_SCENARIO"] = "ok"
-                with mock.patch.object(cli, "spawn_runner"):
-                    out = run_wb("feedback", name, "--text", "carry on")
-                self.assertIn("no review round is counted", out)
-                # the auto-fix round the stop came before never reached the agent: it runs again
-                # as itself, the carry-on after its prompt (#1180), so round_for stays `fix`
-                self.assertIn(f"({cause})", out)
-                self.assertEqual((task.status["reviews"], task.status["round"], task.status["round_for"]),
-                                 (0, 2, "fix"))
-                runner.drive(task)
+                    self.assertEqual(bool(runner.CURRENT.get("successor")), cause == "updated")
+                if cause == "updated":
+                    self.assertEqual((task.status["phase"], task.status["round"]), ("queued", 2))
+                    runner.drive(task)                             # the runner on the new code
                 self.assertEqual(task.status["phase"], "review", task.status.get("last"))
+                self.assertFalse([r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
+                                  if r["task"] == name and r["kind"] == "stuck"])
+                os.environ["FAKE_SCENARIO"] = "ok"
                 with mock.patch.object(cli, "spawn_runner"):
                     self.assertIn("feedback round 1 sent", run_wb("feedback", name, "--text", "rename x"))
                 runner.drive(task)
