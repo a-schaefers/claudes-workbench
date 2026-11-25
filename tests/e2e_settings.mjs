@@ -59,12 +59,13 @@ const MOCK_ROWS = [
 ]
 
 // In the page, of a focused element: whether its ring shows (:focus-visible, an outline) and the
-// ring's contrast against what is under it, its own fill or the nearest one behind it (WCAG's ratio)
-export function ringContrast(el) {
+// ring's contrast against what is under it, its own fill or the nearest one behind it (WCAG's
+// ratio); `outside`, a ring drawn outside the element: the fill behind the element
+export function ringContrast(el, outside = false) {
   const rgb = s => { const n = (s.match(/[\d.]+/g) || []).map(Number); return s.startsWith('color(') ? n.map(x => x * 255) : n }
   const lum = c => { const [r, g, b] = c.slice(0, 3).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4 }); return 0.2126 * r + 0.7152 * g + 0.0722 * b }
   const cs = getComputedStyle(el)
-  let under = el
+  let under = outside ? el.parentElement : el
   while (under && (rgb(getComputedStyle(under).backgroundColor)[3] ?? 1) === 0) under = under.parentElement
   const a = lum(rgb(cs.outlineColor)), b = lum(rgb(getComputedStyle(under || document.body).backgroundColor))
   return { visible: el.matches(':focus-visible') && cs.outlineStyle !== 'none' && parseFloat(cs.outlineWidth) >= 2,

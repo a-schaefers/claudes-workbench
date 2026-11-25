@@ -279,6 +279,9 @@ body.kb-open .composer { padding-bottom: 10px; }
   outline: none; box-shadow: var(--shadow); transition: border-color .15s;
 }
 .composer textarea:focus { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+/* and a ring from the keyboard (the box's always): the border's tint alone was 1.6:1 against the unfocused
+   one; the accent toward the text holds 3:1 on the page in light, as the plain accent doesn't (#1411) */
+.composer textarea:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 80%, var(--fg)); outline-offset: 2px; }
 .composer button {
   flex: none; width: 46px; height: 46px; padding: 12px; border-radius: 50%; border: 0; cursor: pointer;
   background: var(--accent); color: var(--accent-fg); box-shadow: var(--shadow); transition: transform .12s, opacity .15s;

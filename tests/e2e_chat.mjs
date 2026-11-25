@@ -280,6 +280,13 @@ async function run(engine, device) {
     if (!(await on())) throw new Error('the focus went to ' + await page.evaluate(() => document.activeElement && document.activeElement.tagName))
     await page.evaluate(() => document.activeElement.blur())
   })
+  await check('the message box, focused, shows a ring at 3:1 or more against the page (#1411)', async () => {
+    // #1411 (2026-11-25): outline none, and the border's tint alone, 1.6:1 against the unfocused one
+    await page.focus('#input')
+    const got = await page.locator('#input').evaluate(settingsView.ringContrast, true)
+    await page.evaluate(() => document.getElementById('input').blur())
+    if (!got.visible || got.ratio < 3) throw new Error(JSON.stringify(got))
+  })
   // the shell's views (#1284): a tap on the nav (the rail on a desktop), then the body shows it
   const goTo = async name => {
     await page.click(`#tabbar .tab[data-view="${name}"]`)
