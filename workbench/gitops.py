@@ -736,6 +736,27 @@ def submodules(repo: Path, commit: str) -> list[str]:
     return [rec.split("\n", 1)[1] for rec in out.split("\0") if "\n" in rec]
 
 
+def submodule_sources(repo: Path, commit: str) -> list[Path]:
+    """The user's checkouts fill_submodules fills a worktree of ``commit`` from, nested ones too
+    (each at the commit the one around it records), as _fill finds them: what a task's worktree
+    holds beyond the repo's own files. privacy.local_only reads their marks: a submodule marked
+    local-only went to the API model with every task of the repo around it (#1267, the bar loop,
+    2026-11-24)."""
+    out = []
+    for path in submodules(repo, commit):
+        row = git(repo, "ls-tree", commit, "--", path, check=False).split()
+        src = Path(repo) / path
+        if len(row) >= 3 and row[1] == "commit" and (src / ".git").exists():
+            out += [src, *submodule_sources(src, row[2])]
+    return out
+
+
+def superproject(path) -> Path | None:
+    """The working tree of the repo whose submodule ``path``'s repo is, or None."""
+    out = git(path, "rev-parse", "--show-superproject-working-tree", check=False).strip()
+    return Path(out) if out else None
+
+
 SUBMODULES = "submodules.json"  # rules/<task>/: the submodules filled in its worktree (#419)
 
 

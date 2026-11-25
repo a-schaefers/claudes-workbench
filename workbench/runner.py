@@ -5409,9 +5409,20 @@ def local_only_now(task: store.Task) -> str:
     """For an API task whose repo is local-only now, the line the runner stops it with and wb
     next, feedback and resume refuse it with (its model is fixed per task: takeover or discard),
     else ''. api_task: a task from before #1016 on an API model has no `via` until its runner
-    writes one (settle_via), and its first round after the upgrade went too (#1111)."""
-    if api_task(task) and privacy.local_only(task.spec["repo"], task.spec.get("subdir")):
-        return privacy.since_start_line(task)
+    writes one (settle_via), and its first round after the upgrade went too (#1111). Anything
+    its lane reads counts (privacy.local_only_reach): its submodules at its base, its siblings,
+    its grants and commands.json's standing `paths`; only the repo was asked, so a sibling or a
+    `wb allow --path` grant marked local-only went on to the provider every round (#1267,
+    #1268, the bar loop, 2026-11-24)."""
+    if not api_task(task):
+        return ""
+    granted = set(context.grants(task).get("paths") or [])
+    places = [(s, f"--sibling {n}") for s, n in zip(context.siblings(task), task.spec.get("siblings") or ())]
+    places += [(p, ("wb allow --path" if p in granted else 'commands.json "paths"')
+                + (' "*"' if p == "*" else "")) for p in context.lane_paths(task)]
+    if hit := privacy.local_only_reach(task.spec["repo"], task.spec.get("subdir"),
+                                       task.spec.get("base"), places):
+        return privacy.since_start_line(task, *hit)
     return ""
 
 

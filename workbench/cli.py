@@ -744,8 +744,11 @@ def _busy_api(role: str, a, repo: Path, sub: str | None, tokens: int | None = No
         why = f"every one of {models.api_provider(m)}'s {models.API_PARALLEL} slots is taken"
     if why is None and a.local_only:  # wb start --local-only (#1021)
         why = "this task is kept local (--local-only)"
-    if why is None and (kept := privacy.local_only(repo, sub)):  # commands.json's (#1021)
-        why = f"{repo.name} is kept local ({kept})"
+    # commands.json's (#1021), on anything the lane reads (#1267, #1268, #1269)
+    if why is None and (kept := privacy.local_only_reach(repo, sub, getattr(a, "base", None),
+                                                         lane_places(repo, sub, a))):
+        why = (f"{privacy.home_path(kept[0])}, which the task's lane reads ({kept[1]}), is kept local"
+               if kept[1] else f"{repo.name} is kept local ({kept[0]})")
     if why is None:  # commands.json's standing copy/siblings, unnamed (#1021), as an API start's
         why = _standing_gap(context.repo_conf(repo, sub), a, models.provider_name(m), repo, sub,
                             role, advice=False) or None
@@ -1161,19 +1164,41 @@ def _role(a) -> str:
 def _local_only_check(a, repo: Path, role: str, sub: str | None) -> None:
     """Refuse an API model for a local-only spot before any model is picked (#1021): exit 3 with
     the choices (local_only_refusal); never the GPU instead."""
-    if why := local_only_refusal(repo, sub, role, a.model, a.local_only):
+    if why := local_only_refusal(repo, sub, role, a.model, a.local_only, lane_places(repo, sub, a),
+                                 a.base):
         die(why, 3)
 
 
+def lane_places(repo: Path, sub: str | None, a) -> list[tuple[str, str]]:
+    """What a start's lane reads beyond its checkout, as (path, how) for
+    privacy.local_only_reach: commands.json's siblings for the spot and the --sibling ones, the
+    --allow-path ones, commands.json's standing `paths` (those context.lane_paths keeps). Only
+    the repo was asked, so a local-only repo went to the provider as a sibling or a path
+    (#1268, #1269, the bar loop, 2026-11-24). wb start, its busy opt-in and the mod's dry run."""
+    out = []
+    for name, how in [*((n, 'commands.json "repos" siblings')
+                        for n in context.repo_conf(repo, sub).get("siblings", [])),
+                      *((n, f"--sibling {n}") for n in getattr(a, "sibling", None) or [])]:
+        ups, rest = context.sibling_parts(name.strip().rstrip("/"))
+        if rest and ups <= len(repo.parents):  # else _worktree_setup refuses it
+            out.append((context.sibling_real(repo, name.strip().rstrip("/")), how))
+    out += [(p, f"--allow-path {p}") for p in getattr(a, "allow_path", None) or []]
+    out += [(p, 'commands.json "paths"' + (' "*"' if p == "*" else ""))
+            for p in context.commands_conf().get("paths", [])
+            if p == "*" or not context.lane_refusal(p)]
+    return out
+
+
 def local_only_refusal(repo: Path, sub: str | None, role: str, model: str | None,
-                       this_task: bool = False) -> str:
+                       this_task: bool = False, places=(), base: str | None = None) -> str:
     """Why an API model may not take this spot (commands.json `repos.<path>.local_only`, or
     --local-only: ``this_task``), or '': ``model`` (--model) when it is an API id, else the
     role's side as it runs (routes.effective_via: the Agents switch over the role's own `via`).
     The line wb start dies with; #1014's `wb route --dry-run --model` gives it
     the start's repo and prints it in place of a dialog line, so the user is never asked to
-    approve a start that would be refused (#1021's review)."""
-    key = privacy.local_only(repo, sub)
+    approve a start that would be refused (#1021's review). ``places``: what the lane reads
+    beyond the checkout (lane_places), ``base``: whose submodules (privacy.local_only_reach)."""
+    key, how = privacy.local_only_reach(repo, sub, base, places) or ("", "")
     if not key and not this_task:
         return ""
     if model:
@@ -1197,7 +1222,7 @@ def local_only_refusal(repo: Path, sub: str | None, role: str, model: str | None
         model_id, asked = str(entry["api"]), False
     at = privacy.home_path(Path(key).expanduser() if key else repo)
     why = 'commands.json "repos"' if key else "--local-only"
-    return privacy.local_only_line(at, why, role, model_id, asked)
+    return privacy.local_only_line(at, why, role, model_id, asked, how)
 
 
 def _local_only_now(task: store.Task) -> str:
@@ -1220,16 +1245,25 @@ def _api_notes(task_name: str, repo: Path, m: models.Model, a, routed: dict) -> 
     the token files its lane hides: those holding a credential (#1021), when it has a lane (#1156).
     ``routed``: what task.json holds (_routed_keys): the backends named are the ones the keyhole
     routes by, never routes.json's (an `order` the note named once never reached the task: wave
-    2's review)."""
+    2's review). Everything else the lane reads is named too, the start's grants and
+    commands.json's standing `paths` (#1269: "the repo, its spec, CLAUDE.md files" while the
+    lane read and sent ~/notes), and on any task that sends more than the repo, not only the
+    repo's first: a later task's --sibling or a path added since went unsaid."""
     notes = []
-    if privacy.first_for(repo, m.provider, task_name):
+    task = store.Task(task_name)
+    granted = set(context.grants(task).get("paths") or [])
+    named = [f"{c} (--copy)" for c in a.copy or []] + [f"{x} (--sibling)" for x in a.sibling or []] \
+        + [("every file your account reads" if p == "*" else privacy.home_path(p))
+           + (" (--allow-path)" if p in granted else ' (commands.json "paths")')
+           for p in dict.fromkeys(context.lane_paths(task))]
+    if privacy.first_for(repo, m.provider, task_name) or named:
         info = privacy.where(m, routed.get("order"))
-        named = [f"{c} (--copy)" for c in a.copy or []] + [f"{x} (--sibling)" for x in a.sibling or []]
         rules = context.user_agents_md().is_file()  # Claude's own files go to no agent (#1061)
         whose = ("asked for" if (routed.get("said") or "").startswith("asked for")
                  else f"the {routed.get('role') or _role(a)} role's model")
-        notes.append(privacy.where_note(info, rules, named, whose))
-    if gap := context.api_hidden_note(store.Task(task_name)):  # none with no lane (#1156)
+        subs = bool(gitops.submodule_sources(repo, task.spec.get("base") or "HEAD"))  # #1267
+        notes.append(privacy.where_note(info, rules, named, whose, subs))
+    if gap := context.api_hidden_note(task):  # none with no lane (#1156)
         notes.append(gap)
     if gap := context.git_url_note(repo):  # a token in a remote URL (#1072)
         notes.append(gap)
@@ -2865,6 +2899,14 @@ def cmd_allow(a):
     once so the new rule applies (OpenCode reads it at start, the lane is drawn at start)."""
     task = need(a.name)
     pats = [p.strip() for p in a.pattern if p.strip()]
+    # an API task's lane never reads what local_only marks: the grant went to the provider, and
+    # the skill leans towards yes on a PERMISSION ask (#1268, the bar loop, 2026-11-24). Before
+    # _lane_dir, which makes a directory not there yet
+    for d in [p for p in a.path or [] if p.strip()] if runner.api_task(task) else ():
+        if key := privacy.local_only_place(d):
+            die(f"{privacy.home_path(key)} is local-only (commands.json \"repos\") and {a.name} is on "
+                f"API ({task.spec.get('provider') or 'its provider'}), whose lane never reads it: take "
+                "what the task needs from it yourself, or the user lifts local_only there", 3)
     dirs = [_lane_dir(p, context.repo_dirs(task), task) for p in a.path or [] if p.strip()]
     if not pats and not dirs:
         die("nothing to allow")
@@ -3269,7 +3311,8 @@ def _route_start(a) -> None:
         sub = _package(repo, Path(ns.repo).resolve(), ns.base)
     except gitops.GitError:
         repo = sub = None  # wb start says why
-    if repo is not None and (why := local_only_refusal(repo, sub, _role(ns), ns.model, ns.local_only)):
+    if repo is not None and (why := local_only_refusal(repo, sub, _role(ns), ns.model, ns.local_only,
+                                                       lane_places(repo, sub, ns), ns.base)):
         die(why, 3)
     try:  # round 1's input, as wb start reckons it (#1173): stdin's is read by wb start alone
         spec_text = "" if ns.spec == "-" else Path(ns.spec).read_text(encoding="utf-8", errors="replace")

@@ -37626,13 +37626,123 @@ class Privacy(_KeyholeTest):
 
     def test_a_repo_of_its_own_nested_in_a_local_only_marks_nothing_for_the_repo_around_it(self):
         # #1255's review: the whole repo's entries are what its checkout holds, and a nested
-        # repo's files are in no checkout of the repo around it
+        # repo that isn't a submodule is in no checkout of the repo around it (a submodule is:
+        # fill_submodules fills it, #1267)
         inner = self.repo / "vendor" / "inner"
         inner.mkdir(parents=True)
         subprocess.run(["git", "init", "-q", str(inner)], check=True)
         self.local_only(key=inner)
         self.assertIsNone(cli.privacy.local_only(self.repo))
         self.assertEqual(cli.privacy.local_only(inner), str(inner))
+
+    def submodule(self) -> Path:
+        """vendor/lib, a submodule of the repo holding secret.py, committed; its checkout."""
+        lib = Path(self.tmp.name) / "lib-src"
+        subprocess.run(["git", "init", "-q", str(lib)], check=True)
+        (lib / "secret.py").write_text("KEY = 1\n")
+        subprocess.run(["git", "-C", str(lib), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(lib), "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-qm", "lib"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "-c", "protocol.file.allow=always", "submodule",
+                        "add", "-q", str(lib), "vendor/lib"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "a submodule"], check=True)
+        return self.repo / "vendor" / "lib"
+
+    def test_a_local_only_submodule_refuses_an_api_start_in_its_superproject_and_a_local_only_superproject_one_in_its_submodule(self):
+        # #1267 (the bar loop, 2026-11-24): repo_entries leaves a repo of its own out, every
+        # submodule among them, yet fill_submodules fills it in every task's worktree, so the
+        # submodule's code went to the API model with each superproject task; and nothing walked
+        # up, so a task started in a marked superproject's submodule went too
+        sub = self.submodule()
+        self.role(via="api", api=FLASH)
+        for key, at, name in ((sub, self.repo, "t-super"), (self.repo, sub, "t-in-sub")):
+            self.local_only(key=key)
+            self.assertEqual(cli.privacy.local_only(at), str(key), name)
+            code, err = self.fails("start", name, "--spec", str(self.spec), "--repo", str(at))
+            self.assertEqual(code, 3, name)
+            self.assertIn(f'{cli.privacy.home_path(key)} is local-only (commands.json "repos"): the '
+                          "significant role is on API", err)
+            self.assertFalse(store.Task(name).exists)
+        # and the where-note says the submodules go with the repo
+        self.conf.write_text("{}")
+        self.assertIn("note: this task sends the repo with its submodules, its spec, CLAUDE.md files "
+                      "to DeepInfra", self.start_api("t-subs"))
+        # the runner's check before every round asks the base's submodules the same
+        self.local_only(key=sub)
+        self.assertIn("this repo is local-only now; the task's model is API (deepinfra)",
+                      runner.local_only_now(store.Task("t-subs")))
+
+    def test_a_local_only_sibling_or_path_refuses_an_api_start_its_dry_run_wb_allow_and_the_next_round(self):
+        # #1268 (the bar loop, 2026-11-24): only the task's repo was asked, so a local-only repo
+        # linked with --sibling, granted with --allow-path or `wb allow --path`, went into the API
+        # agent's lane and on to the provider, every round
+        secret = self.repo.parent / "secretlib"
+        subprocess.run(["git", "init", "-q", str(secret)], check=True)
+        self.role(via="api", api=FLASH)
+        self.local_only(key=secret)
+        at = cli.privacy.home_path(secret)
+        for how in (("--sibling", "../secretlib"), ("--allow-path", str(secret))):
+            code, err = self.fails("start", "t-sib", "--spec", str(self.spec), "--repo", str(self.repo), *how)
+            self.assertEqual(code, 3, how)
+            self.assertIn(f"{at}, which the task's lane reads ({' '.join(how)}), is local-only "
+                          f'(commands.json "repos"): the significant role is on API ({FLASH}). Choices: '
+                          "put significant on the GPU (wb route significant gpu, the user's yes), "
+                          f"without {' '.join(how)}, or the user lifts local_only there.", err)
+            self.assertFalse(store.Task("t-sib").exists)
+        # a standing sibling: this refusal, never the standing one's "name it (--sibling …)"
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"siblings": ["secretlib"]},
+                                                   str(secret): {"local_only": True}}}))
+        code, err = self.fails("start", "t-sib", "--spec", str(self.spec), "--repo", str(self.repo))
+        self.assertEqual(code, 3)
+        self.assertIn('which the task\'s lane reads (commands.json "repos" siblings), is local-only', err)
+        self.assertNotIn("name it", err)
+        # the mod's dry run for an API --model start says the same in place of a dialog line
+        ApiHarness.catalog(self)
+        self.local_only(key=secret)
+        code, err = self.fails("route", "--dry-run", "--json", "--start", "t-sib", "--spec", str(self.spec),
+                               "--repo", str(self.repo), "--model", FLASH, "--sibling", "../secretlib")
+        self.assertEqual(code, 3)
+        self.assertIn("which the task's lane reads (--sibling ../secretlib), is local-only", err)
+        # marked after an API task started: wb allow --path is refused, and the next round stops
+        self.conf.write_text("{}")
+        self.start_api("t-allow", None, "--sibling", "../secretlib")
+        task = store.Task("t-allow")
+        self.assertEqual(runner.local_only_now(task), "")
+        self.local_only(key=secret)
+        self.assertIn(f"{at}, which its lane reads (--sibling secretlib), is local-only now; the task's "
+                      "model is API (deepinfra): wb takeover t-allow or wb discard t-allow",
+                      runner.local_only_now(task))
+        other = self.repo.parent / "privaterepo"
+        subprocess.run(["git", "init", "-q", str(other)], check=True)
+        self.local_only(key=other)
+        code, err = self.fails("allow", "t-allow", "--path", str(other))
+        self.assertEqual(code, 3)
+        self.assertIn(f"{cli.privacy.home_path(other)} is local-only (commands.json \"repos\") and "
+                      "t-allow is on API (deepinfra), whose lane never reads it", err)
+        self.assertNotIn("paths", context.grants(task))
+        context.grant(task, "paths", [str(other / "data")])       # a grant made before the mark
+        self.assertIn("(wb allow --path), is local-only now", runner.local_only_now(task))
+
+    def test_commands_json_standing_paths_are_named_in_an_api_tasks_where_note_and_a_local_only_one_refuses_it(self):
+        # #1269 (the bar loop, 2026-11-24): a standing `paths` entry (wb allow --always) is in
+        # every API task's lane, but the note said "the repo, its spec, CLAUDE.md files" alone
+        notes = Path(self.tmp.name) / "private-notes"
+        notes.mkdir()
+        (notes / "n.txt").write_text("mine\n")
+        self.conf.write_text(json.dumps({"paths": [str(notes)]}))
+        want = (f'note: this task sends the repo, its spec, CLAUDE.md files and {cli.privacy.home_path(notes)} '
+                '(commands.json "paths") to DeepInfra')
+        self.assertIn(want, self.start_api("t-paths"))
+        self.assertIn(want, self.start_api("t-paths2"))          # not the repo's first: it goes too
+        self.role(via="api", api=FLASH)
+        for paths in ([str(notes)], ["*"]):                      # "*": the lane off reads it too
+            self.conf.write_text(json.dumps({"paths": paths, "repos": {str(notes): {"local_only": True}}}))
+            code, err = self.fails("start", "t-paths4", "--spec", str(self.spec), "--repo", str(self.repo))
+            self.assertEqual(code, 3, paths)
+            self.assertIn(f"{cli.privacy.home_path(notes) if paths != ['*'] else ''}, which the task's "
+                          'lane reads (commands.json "paths"' + (' "*")' if paths == ["*"] else ")"), err)
+        self.assertIn('(commands.json "paths" "*"), is local-only now',
+                      runner.local_only_now(store.Task("t-paths")))
 
     def test_a_directory_marked_local_only_holds_for_a_linked_worktree_of_its_repo(self):
         # #1255: by git dir too, so a start in another checkout of the repo is refused alike
@@ -40588,7 +40698,7 @@ class BusyGpu(Base):
         self.assertGreater(first, cli.meter.FIRST_TOKENS)
         self.assertEqual(seen[:2], [40_123, cli.meter.FIRST_TOKENS])
         self.assertIn(first, seen[2:])                       # the busy start's, its spec in it
-        with mock.patch.object(cli.privacy, "local_only", lambda repo, sub: str(repo)):
+        with mock.patch.object(cli.privacy, "local_only", lambda repo, sub, base=None: str(repo)):
             self.assertEqual(cli._busy_api("trivial", asked, self.repo, None),
                              why + f"{self.repo.name} is kept local ({self.repo})")
             code, out, err = self.begin("t-local", "--role", "trivial")
