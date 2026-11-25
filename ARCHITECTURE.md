@@ -2276,7 +2276,9 @@ deliberately hostile process.
   first (`MADE_FIRST`), and OpenCode's `npm/` while it is kept out (so no generation is planted
   before OpenCode installs one), so with Landlock `~/.cache` is split then, and only then: its
   existing entries granted, a tool's first new one refused and named with its grant
-  (`wb allow --path ~/.cache/<it>`), `CACHE_MADE`'s made first, and in OpenCode's cache directory
+  (`wb allow --path ~/.cache/<it>`), `CACHE_MADE`'s made first (uv's, pip's, Go's and pre-commit's, #825,
+  and the common tools' caches, node-gyp's, ms-playwright's, deno's, yarn's, pnpm's and others, so a
+  plugin user's first build is not refused: #1311's third review), and in OpenCode's cache directory
   `OPENCODE_CACHE_MADE`'s `bin/` (where it downloads ripgrep when none is on PATH,
   `core/src/ripgrep/binary.ts`), itself left in the lane as a trade like pre-commit's hooks (#1311's review); the rest are split around once made (`.dotnet/tools`, `.cabal/bin`,
   `.ghcup/bin` not made yet can be made there, their homes kept whole until then); the user's active Python environments (`context.python_envs`:

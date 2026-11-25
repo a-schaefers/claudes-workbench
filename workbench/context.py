@@ -1458,8 +1458,13 @@ NIMBLE_MADE = ("pkgs2/", "pkgcache/", "buildtemp/", "packages_temp.json", "nimbl
 MADE_TEXT = {"nimbledata2.json": '{"version": 1, "reverseDeps": {}}\n'}
 # What the common tools make in a cache home split around an active venv (poetry's, from
 # `poetry shell` or direnv), made first so the split grants them: Landlock can only allow, so a
-# split home refuses every new entry, and uv's, Go's and pre-commit's first run failed (#825)
-CACHE_MADE = ("uv", "pip", "go-build", "pre-commit")
+# split home refuses every new entry, and uv's, Go's and pre-commit's first run failed (#825).
+# And the other common tools' caches: with Landlock every OpenCode-plugin user's ~/.cache is split
+# around OpenCode's npm/ (plugin_caches), where node-gyp's, Playwright's and Deno's first run was
+# refused (#1311's third review, 2026-11-25); a tool not listed is still refused, named with its grant
+CACHE_MADE = ("uv", "pip", "go-build", "pre-commit", "node-gyp", "ms-playwright", "deno", "puppeteer",
+              "Cypress", "electron", "yarn", "pnpm", "node", "typescript", "bazel", "zig", "ccache",
+              "torch", "selenium")
 # and what Hugging Face's libraries make at their home's top (huggingface_hub's and datasets'
 # constants: HF_HUB_CACHE, HF_XET_CACHE, HF_ASSETS_CACHE, HF_DATASETS_CACHE, HF_MODULES_CACHE)
 HF_MADE = ("hub/", "xet/", "assets/", "datasets/", "modules/")

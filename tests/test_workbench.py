@@ -15384,7 +15384,8 @@ class Lane(Base):
             self.assertIsNone(runner.lane_grant(str(npm / "git-x" / "1" / "server.ts")), npm)
             self.assertIn(str(npm), context.read_only(task, w))           # read, never edited
         self.assertNotIn(str(home / ".cache"), w)                         # split around it
-        for p in (".cache/go-build", ".cache/uv", ".cache/opencode/bin", "xdg-cache/opencode/bin", "xdg-cache/uv"):
+        for p in (".cache/go-build", ".cache/uv", ".cache/opencode/bin", "xdg-cache/opencode/bin", "xdg-cache/uv",
+                  ".cache/node-gyp", ".cache/ms-playwright", ".cache/deno", "xdg-cache/deno"):
             self.assertIn(str(home / p), w, p)                            # kept, or made first
         with mock.patch.object(lane, "kind", lambda: "seatbelt"):
             w = context.writable(task)
@@ -15433,7 +15434,8 @@ class Lane(Base):
     @home_outside_the_lane
     def test_with_landlock_an_agent_cant_write_opencodes_package_cache_holding_the_plugin(self):
         # #1311's review (2026-11-25): the refusal itself, in this machine's own lane: neither the
-        # plugin's wb nor a new generation beside it; OpenCode's bin/ and a tool's cache still
+        # plugin's wb nor a new generation beside it; OpenCode's bin/ and a tool's cache still, and
+        # the common tools' first caches, made first (CACHE_MADE: #1311's third review)
         home = self.fake_home()
         (home / ".cache" / "go-build").mkdir(parents=True)
         pkg = self.plugin_in_cache(home)
@@ -15442,9 +15444,10 @@ class Lane(Base):
         cache = home / ".cache"
         out = subprocess.run(context.lane_wrap(task)([
             sys.executable, "-c", self.WRITE_EACH, str(pkg / "bin" / "wb"), str(cache / "opencode/npm/git-y/9/x"),
-            str(cache / "go-build" / "x"), str(cache / "opencode/bin/x")]),
+            str(cache / "go-build" / "x"), str(cache / "opencode/bin/x"), str(cache / "node-gyp/20.0.0/x"),
+            str(cache / "ms-playwright/chromium-1/x"), str(cache / "deno/x")]),
             cwd=task.worktree, capture_output=True, text=True, timeout=60)
-        self.assertEqual(out.stdout.split(), ["refused", "refused", "wrote", "wrote"], out.stderr)
+        self.assertEqual(out.stdout.split(), ["refused", "refused"] + ["wrote"] * 5, out.stderr)
         self.assertEqual((pkg / "bin" / "wb").read_text(), "#!/bin/sh\n")
         self.assertFalse((cache / "opencode/npm/git-y").exists())
 
