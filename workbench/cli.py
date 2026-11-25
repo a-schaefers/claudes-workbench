@@ -1000,14 +1000,25 @@ def _lane_fits(repo: Path, test: str | None, *, off: bool = False) -> None:
     if any(real == h or real.startswith(h + os.sep) for h in context.secret_paths()):
         die(f"{repo} lies where credentials live (context.SECRETS), which the agent can't read: "
             "delegate from a repository outside it")
+    _snap_test(test, "start with --allow-path '*'")
+
+
+def _snap_test(test: str | None, lift: str, *, off: bool = False) -> None:
+    """Refuse an acceptance command that is a snap while the lane is on: no-new-privileges, which
+    the lane sets, stops snap-confine, so every test round and every auto-fix round would fail
+    and tell the agent the bug is its change. wb start's and wb next's --test both (#1271,
+    2026-11-24: wb next took one wb start refused). `lift`: how this command turns the lane off
+    for the task."""
+    if off or not context.lane_on():
+        return
     try:
         first = shlex.split(test)[:1] if test else []
     except ValueError:
         first = []
     if first and sys.platform.startswith("linux") and context.snaps(first):
         die(f"{first[0]} is a snap, which can't run in the agent's lane (no-new-privileges stops "
-            "snap-confine): install it another way, or start with --allow-path '*' (the lane "
-            'off for this task), or commands.json "paths": ["*"] for every task')
+            f"snap-confine): install it another way, or {lift} (the lane off for this task), or "
+            'commands.json "paths": ["*"] for every task')
 
 
 # Ignored directories a worktree lacks that are only caches, not worth a note at wb start
@@ -1938,6 +1949,9 @@ def cmd_next(a):
         die(f"can't read the next step's spec: {e}")
     if not nxt.strip():
         die("the next step's spec is empty")
+    if a.test:  # before the commit, as wb start refuses it (#1271)
+        _snap_test(a.test, f"wb allow {a.name} --path '*' first",
+                   off="*" in context.lane_paths(task))
     # after the spec, before the commit: the step's first request carries the session's context
     # and the spec with the protocol (#1173)
     _model_still_listed(task, nxt + protocol_for(spec), True if a.fresh else None)
