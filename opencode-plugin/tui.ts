@@ -6,8 +6,9 @@
 import type { TuiPlugin } from './host.d.ts'
 import { Workbench, type Status } from './rpc.ts'
 
-// what the plugin needs and its Git install lacks: wb, from a clone (ocplugin.CLONE says the same)
-export const CLONE = 'git clone https://github.com/a-schaefers/workbench, then run bin/wb setup --opencode in it'
+// where wb comes from when this install brings none (ocplugin.GET_WB, word for word): the Git
+// install of the whole repository does (#1311's review, 2026-11-25)
+export const GET_WB = "opencode plugin add 'github:a-schaefers/workbench#main' brings it, or bin/wb setup --opencode in a clone"
 
 const plugin: TuiPlugin = {
   id: 'workbench',
@@ -25,9 +26,9 @@ const plugin: TuiPlugin = {
         variant: 'warning',
         message: st.from === 'options'
           ? `wb isn't at ${st.wb}, which the plugin's options name: run bin/wb setup --opencode in your Workbench clone`
-          // the Git install brings only this package, never wb (#1311's review, 2026-11-25): say
-          // where wb comes from, not a clone the user was never told to make
-          : `no wb on OpenCode's PATH, and the plugin doesn't bring one: ${CLONE}`,
+          // a copy of opencode-plugin/ alone, without the package's bin/wb beside it, and none
+          // on the service's PATH (#1311's review, 2026-11-25): say where wb comes from
+          : `this install of the plugin brings no wb, and OpenCode's PATH has none: ${GET_WB}`,
       })
     }
   },

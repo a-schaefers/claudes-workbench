@@ -1412,27 +1412,35 @@ NOT_WRITABLE = (".cargo/bin", ".cargo/env", ".dotnet/tools", ".cabal/bin", ".ghc
                 # one planted in the writable Library/Caches ran as the user, outside the lane,
                 # at the next node-gyp, Xcode build script or shell's python3. Seatbelt denies
                 # its writes inside the whole Library/Caches (write_denied), made or not
-                "Library/Caches/com.apple.python",
-                # #1311's review (2026-11-25): OpenCode's package cache, where `opencode plugin
-                # add` installs the OpenCode plugin from Git (packages/util/src/npm.ts: global.cache
-                # /npm/<key>/<generation>/node_modules), and every npm plugin and provider package
-                # beside it. The user's OpenCode, outside the lane, imports what is there at its
-                # next start with no integrity check (npm.resolve; npm.add trusts an active
-                # generation), and the plugin holds the consent gates and runs wb as the user.
-                # Made first (MADE_FIRST), so a generation can't be planted before the install
-                ".cache/opencode/npm")
+                "Library/Caches/com.apple.python")
 # and the same places in the homes TOOL_HOME_VARS moved: nimble and cabal install programs into
-# their bin/ (#911); OpenCode's package cache where XDG_CACHE_HOME moves it (#1311's review)
+# their bin/ (#911)
 VAR_NOT_WRITABLE = {"CARGO_HOME": ("bin", "env", "config.toml", "config"),
-                    "RUSTUP_HOME": ("toolchains",), "NIMBLE_DIR": ("bin",), "CABAL_DIR": ("bin",),
-                    "XDG_CACHE_HOME": ("opencode/npm",)}
+                    "RUSTUP_HOME": ("toolchains",), "NIMBLE_DIR": ("bin",), "CABAL_DIR": ("bin",)}
 # a home holding one is made with it first, so the split keeps it out before the tool makes it
 # (else the agent could make it and plant a program there)
 MADE_FIRST = {".rustup": "toolchains", ".nimble": "bin", "RUSTUP_HOME": "toolchains",
-              "NIMBLE_DIR": "bin", ".cache": "opencode/npm", "XDG_CACHE_HOME": "opencode/npm"}
-# and what the agent's own OpenCode makes in its cache directory beside npm/ (ripgrep, downloaded
-# into bin/ when none is on PATH: core/src/ripgrep/binary.ts), made first: the cache directory is
-# split around npm/ and refuses a new entry (#1311's review)
+              "NIMBLE_DIR": "bin"}
+# OpenCode's package cache (packages/util/src/npm.ts: global.cache/npm/<key>/<generation>/
+# node_modules), under ~/.cache and where XDG_CACHE_HOME moves it (ocplugin.package_caches;
+# plugin_caches, below): kept out like NOT_WRITABLE's places only when it holds
+# the OpenCode plugin, or is about to (ocplugin.in_cache: a generation there, or a Git or npm
+# `plugins` entry). `opencode plugin add` installs the plugin there with wb itself (the root
+# package.json's `files`), and the user's OpenCode imports the plugin and runs that wb outside the
+# lane with no integrity check (npm.resolve; npm.add trusts an active generation), the next
+# round's lane.py among it: an agent could rewrite them (#1311's review, 2026-11-25). Made first
+# then, so a generation can't be planted before OpenCode installs it. Else ~/.cache stays whole:
+# split around npm/ always, every Linux agent's lane refused a tool's first new cache directory
+# (node-gyp's, ms-playwright's, deno's), the regression #1194's second review rejected for
+# macOS's Library/Caches (#1311's second review). Kept out, the agent's own OpenCode can't install
+# there either: a provider package it doesn't build in and the user's OpenCode hasn't fetched
+# (core/src/provider.ts, npm.add) fails the round's first request, and a plugin of the user's
+# that is missing, or follows a branch or @latest, isn't installed or updated in the round
+# (core/src/plugin/module.ts); the user's own OpenCode does both at its next start.
+# OPENCODE_CACHE_MADE is what the agent's own OpenCode makes in its cache directory beside npm/
+# (ripgrep, downloaded into bin/ when none is on PATH: core/src/ripgrep/binary.ts), made first:
+# the cache directory is split around npm/ then and refuses a new entry. bin/ itself stays in the lane,
+# a trade like pre-commit's hooks: what is there is a program the user's OpenCode runs later
 OPENCODE_CACHE_MADE = ("bin/",)
 # and what cargo makes at the top of its split home, made first so the split grants it: a split
 # home refuses a new entry (the 0.90 review: a fresh rustup's ~/.cargo, only bin/ and env, failed
@@ -1737,12 +1745,19 @@ def tool_home_of(real: str) -> str | None:
     return below[0] if len(below) == 1 else None
 
 
+def plugin_caches() -> list[Path]:
+    """OpenCode's package caches when the lane keeps them out (the OpenCode plugin is there or
+    about to be, ocplugin.in_cache: the comment above OPENCODE_CACHE_MADE), else []."""
+    return ocplugin.package_caches() if ocplugin.in_cache() else []
+
+
 def not_writable_paths() -> list[Path]:
     """NOT_WRITABLE's places under the home and VAR_NOT_WRITABLE's in the homes those variables
-    name, made or not."""
+    name, made or not, and OpenCode's package caches when they hold the OpenCode plugin
+    (plugin_caches)."""
     return [*(Path.home() / h for h in NOT_WRITABLE),
             *(Path(os.environ[v]) / n for v, names in VAR_NOT_WRITABLE.items()
-              if os.environ.get(v) for n in names)]
+              if os.environ.get(v) for n in names), *plugin_caches()]
 
 
 def not_writable(made_only: bool = True) -> set[str]:
@@ -1842,10 +1857,15 @@ def writable(task: store.Task) -> list[str] | None:
                 os.makedirs(os.path.join(r, n), exist_ok=True)
             except OSError:
                 pass
-    if made[0].is_dir():  # OpenCode's cache, split around npm/ (MADE_FIRST): its own first
-        _make_first(str(made[0]), OPENCODE_CACHE_MADE)
+    for npm in plugin_caches():  # the OpenCode plugin's there or about to be: made first, so
+        try:                      # split out, and OpenCode's own bin/ beside it (#1311's review)
+            npm.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            continue
+        _make_first(str(npm.parent), OPENCODE_CACHE_MADE)
     # with Landlock a NOT_WRITABLE place splits its home like a secret (~/.cache around
-    # OpenCode's npm/, #1311's review): what the common tools make at its top is made first too
+    # OpenCode's npm/ when it holds the plugin, #1311's review): what the common tools make at
+    # its top is made first too
     split_by = hidden | (set() if lane.kind() == "seatbelt" else not_writable())
     for d, names in SPLIT_MADE.items():  # only a home something splits: else it is granted whole
         c = os.path.realpath(home / d)

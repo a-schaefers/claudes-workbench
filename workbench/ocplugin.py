@@ -1,25 +1,31 @@
 """The OpenCode plugin (opencode-plugin/): its id, its install and what wb doctor says of it (#1311).
 
 OpenCode installs it itself, the owner's choice (#1357, 2026-11-25: "installs through OpenCode's
-own plugin mechanism, staying close to OpenCode"): `opencode plugin add` with GIT_SPEC, a Git
-package with npm's `::path:` subdirectory selector, which OpenCode 2.4.1 accepts and follows on its
-branch (its docs, plugins.mdx *Manage*; cli/src/commands/handlers/plugin/add.ts writes the
-`plugins` entry). That brings the plugin alone, never wb, so a clone's `wb setup --opencode` is
-needed either way (CLONE; #1311's review): alone it is a whole install, and after `opencode plugin
-add` it gives that entry its options. Alone, its entry points at this copy's opencode-plugin/,
-written through models.own_config, and either way it carries `options`
-with this copy's bin/wb and the WB_* paths set where setup ran, since OpenCode's background service
-starts without the user's shell (#1296's host-shape decision).
+own plugin mechanism, staying close to OpenCode"): `opencode plugin add` with GIT_SPEC, this
+repository as a Git package (the root package.json), which OpenCode 2.4.1 installs into its package
+cache and follows on its branch (its docs, plugins.mdx *Manage*; cli/src/commands/handlers/plugin/
+add.ts writes the `plugins` entry). The package's `files` bring wb with the plugin (bin/, workbench/,
+agent/, skill/), and the plugin runs that wb when its entry names none (wb.ts, OWN): #1311's review
+(2026-11-25) found the first form, `::path:opencode-plugin`, brought the plugin alone, which could
+do nothing without a clone. `wb setup --opencode` is the fallback, for a clone: the entry points at
+this copy's opencode-plugin/, written through models.own_config, and carries `options` with this
+copy's bin/wb and the WB_* paths set where setup ran, since OpenCode's background service starts
+without the user's shell (#1296's host-shape decision); after `opencode plugin add` it gives that
+entry the options.
 
 Inside an agent the plugin never runs: every task's config layer removes it by id (PLUGIN_OFF,
 context.layer), which OpenCode applies after the user's global `plugins`
 (core/src/plugin/supervisor.ts `remove`; core/src/config.ts: the global files load below
-OPENCODE_CONFIG), and the plugin does nothing under WB_TASK besides (#1363)."""
+OPENCODE_CONFIG), and the plugin does nothing under WB_TASK besides (#1363). Where OpenCode's
+package cache holds it, or is about to (in_cache), the agent's lane keeps that cache out
+(context.not_writable_paths): wb itself runs from there."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -29,14 +35,17 @@ PKG_ROOT = Path(__file__).resolve().parent.parent
 DIR = PKG_ROOT / "opencode-plugin"
 PLUGIN_ID = "workbench"           # server.ts's and tui.ts's `id`
 PLUGIN_OFF = f"-{PLUGIN_ID}"      # OpenCode's remove-by-id entry: in every task's layer
-PACKAGE = "opencode-workbench"    # opencode-plugin/package.json's name: how a copy is told apart
+# the name in both package.json files (the root's, which a Git install fetches, and
+# opencode-plugin/'s, which a clone's entry loads): how a copy is told apart
+PACKAGE = "opencode-workbench"
 REPO = "a-schaefers/workbench"
-GIT_SPEC = f"github:{REPO}#main::path:opencode-plugin"
+GIT_SPEC = f"github:{REPO}#main"
 ADD = f"opencode plugin add '{GIT_SPEC}'"
-# The Git install brings opencode-plugin/ alone (package.json's `files`), never bin/wb, so the
-# plugin needs wb from a clone either way (#1311's review, 2026-11-25): every line naming ADD says
-# so, and the TUI's toast too (tui.ts's CLONE, word for word)
-CLONE = f"git clone https://github.com/{REPO}, then run bin/wb setup --opencode in it"
+# what the TUI's toast and doctor say when no wb is found (tui.ts's GET_WB, word for word)
+GET_WB = f"{ADD} brings it, or bin/wb setup --opencode in a clone"
+# npm's `::path:` subdirectory selector on opencode-plugin/: a Git install of the plugin alone, no
+# wb (this module's first form, and a fork's that copies it)
+SUBDIR = "::path:opencode-plugin"
 GIT_SCHEMES = ("github:", "gitlab:", "bitbucket:", "git+", "git:", "git@")  # npm's Git specs
 
 
@@ -69,8 +78,9 @@ def is_copy(d: Path) -> bool:
 
 
 def ours(entry, base: Path) -> bool:
-    """Whether a `plugins` entry loads this plugin: a Git spec of REPO's opencode-plugin/, or a
-    local directory holding a copy (that copy may be gone: still ours, said as missing)."""
+    """Whether a `plugins` entry loads this plugin: a Git spec of REPO (or of any repository's
+    opencode-plugin/), or a local directory holding a copy (that copy may be gone: still ours,
+    said as missing)."""
     spec = target(entry)
     if not spec or spec.startswith("-"):
         return False
@@ -78,9 +88,80 @@ def ours(entry, base: Path) -> bool:
         # a copy, or one that is gone (a clone moved or removed): said as missing, never another
         # project's directory that happens to share the name
         return is_copy(d) or (d.name == "opencode-plugin" and not d.exists())
-    # a Git install of opencode-plugin/: this repo's, or a fork's (npm's `::path:` selector)
-    return spec.split("#", 1)[-1].endswith("::path:opencode-plugin") or (
-        REPO in spec.lower() and "opencode-plugin" in spec)
+    # a Git install of this repository, or of opencode-plugin/ alone (npm's `::path:` selector,
+    # a fork's too)
+    return spec.split("#", 1)[-1].endswith(SUBDIR) or bool(
+        re.search(rf"(^|[/:]){re.escape(REPO)}(\.git)?($|#|::)", spec.lower()))
+
+
+def brings_wb(spec: str) -> bool:
+    """Whether a Git or npm install of ``spec`` brings wb: the root package does, opencode-plugin/
+    alone (SUBDIR) doesn't."""
+    return not spec.split("#", 1)[-1].endswith(SUBDIR)
+
+
+def package_caches() -> list[Path]:
+    """OpenCode's package caches (packages/util/src/npm.ts: global.cache/npm): under
+    XDG_CACHE_HOME, else ~/.cache, and ~/.cache's too when XDG_CACHE_HOME moves it (the lane
+    keeps both)."""
+    home = Path.home() / ".cache" / "opencode" / "npm"
+    moved = os.environ.get("XDG_CACHE_HOME") or ""
+    return [home, *([Path(moved) / "opencode" / "npm"] if os.path.isabs(moved) else [])]
+
+
+def _git_key(spec: str) -> str:
+    """The cache directory OpenCode installs a Git ``spec`` in, as packages/util/src/npm.ts names
+    it (`key`, `gitSlug`): git-<the repository's last name>-<sha256 of the spec, 12 digits>."""
+    from urllib.parse import unquote
+    base = spec.split("#", 1)[0]
+    try:
+        base = unquote(base, errors="strict")
+    except UnicodeDecodeError:
+        pass
+    last = re.split(r"[/:\\]", re.sub(r"\.git$", "", base, flags=re.I))[-1]
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", last).strip("-") or "repository"
+    return f"git-{slug}-{hashlib.sha256(spec.encode()).hexdigest()[:12]}"
+
+
+def copy_of(spec: str) -> Path | None:
+    """The package OpenCode installed for the Git ``spec``: its newest generation's (not one it
+    rejected), or None before OpenCode has installed it."""
+    for npm in package_caches():
+        root = npm / _git_key(spec)
+        try:
+            names = os.listdir(root)
+        except OSError:
+            continue
+        gens = sorted((n for n in names if n.isdigit() and f"{n}.rejected" not in names), key=int)
+        if gens and is_copy(d := root / gens[-1] / "node_modules" / PACKAGE):
+            return d
+    return None
+
+
+def cached() -> list[Path]:
+    """The copies of this package in OpenCode's package caches, each generation's
+    `<key>/<generation>/node_modules/opencode-workbench`, newest generation last."""
+    out = []
+    for npm in package_caches():
+        try:
+            found = npm.glob(f"*/*/node_modules/{PACKAGE}")
+            out += sorted((d for d in found if is_copy(d)), key=lambda d: d.parent.parent.name.zfill(20))
+        except OSError:
+            pass
+    return out
+
+
+def in_cache() -> bool:
+    """Whether OpenCode's package cache holds this plugin, or is about to: a generation of it
+    there, or a Git or npm `plugins` entry of it, which OpenCode installs at its next start. wb
+    and the plugin run from there as the user, so the lane keeps the cache out then
+    (context.not_writable_paths); else ~/.cache stays whole (#1311's review, 2026-11-25)."""
+    if cached():
+        return True
+    try:
+        return any(f["kind"] in ("git", "package") for f in installs())
+    except (RuntimeError, OSError):  # a config OpenCode can't read either: it installs nothing
+        return False
 
 
 def options() -> dict:
@@ -104,7 +185,11 @@ def installs() -> list[dict]:
         found = []
     out += [{"where": str(plugins_dir), "spec": str(d), "kind": "discovered", "dir": d, "options": {}}
             for d in found]
-    layers = [(str(p), p.parent, layer) for p, layer in models._layers()]
+    try:
+        read = models._layers()
+    except OSError as e:  # unreadable: wb doctor said BAD for its traceback (#1311's review)
+        raise RuntimeError(f"OpenCode's config can't be read ({e.strerror or e})") from None
+    layers = [(str(p), p.parent, layer) for p, layer in read]  # objects (models._layers)
     if content := models.users_config_content():
         layers.append((models.CONTENT, Path.cwd(), content))
     for where, base, layer in layers:
@@ -171,8 +256,7 @@ def doctor_lines() -> list[tuple[bool | None, str]]:
     on = [f for f in found if f["kind"] != "off"]
     if not on:
         return [(None, f"the OpenCode plugin (Workbench inside OpenCode) isn't installed (optional): "
-                       f"wb setup --opencode from this clone; or {ADD}, which brings the plugin "
-                       f"but not wb (it runs the one a clone's wb setup --opencode names)")]
+                       f"{ADD} (it brings its wb), or wb setup --opencode from this clone")]
     out: list[tuple[bool | None, str]] = []
     which = shutil.which("wb")
     for f in on:
@@ -187,13 +271,25 @@ def doctor_lines() -> list[tuple[bool | None, str]]:
                                f"it: wb setup --opencode from your Workbench clone"))
             continue
         wb = opts.get("wb") if isinstance(opts.get("wb"), str) else None
+        # without options the plugin runs the wb its package brings (wb.ts's OWN, ../bin/wb):
+        # a clone's, or the Git install's in OpenCode's package cache (#1311's review)
+        brings = f["kind"] in ("git", "package") and brings_wb(f["spec"])
+        pkg = copy_of(f["spec"]) if brings else None   # the root package: bin/wb inside it
+        own = d.parent / "bin" / "wb" if d is not None else pkg / "bin" / "wb" if pkg else None
         if wb:
             good = os.path.isabs(wb) and os.path.isfile(wb) and os.access(wb, os.X_OK)
             out.append((good, f"the OpenCode plugin {f['spec']} ({how}, in {f['where']}) runs {wb}"
                               + ("" if good else ": it isn't there; wb setup --opencode from your Workbench clone")))
-        elif not which:  # a Git or npm install brings no wb: it needs a clone's (#1311's review)
-            out.append((False, f"the OpenCode plugin {f['spec']} ({how}, in {f['where']}) runs wb by "
-                               f"name, and there is none: the install brings only the plugin; {CLONE}"))
+        elif own is not None and os.path.isfile(own) and os.access(own, os.X_OK):
+            out.append((True, f"the OpenCode plugin {f['spec']} ({how}, in {f['where']}) runs the wb "
+                              f"it brings, {own}"))
+        elif brings and pkg is None:
+            out.append((None, f"the OpenCode plugin {f['spec']} ({how}, in {f['where']}) isn't in "
+                              f"OpenCode's package cache yet: OpenCode installs it, with its wb, at "
+                              f"its next start"))
+        elif not which:  # opencode-plugin/ alone (SUBDIR), or a copy without bin/wb beside it
+            out.append((False, f"the OpenCode plugin {f['spec']} ({how}, in {f['where']}) brings no "
+                               f"wb and finds none on PATH: {GET_WB}"))
         else:
             out.append((True, f"the OpenCode plugin {f['spec']} ({how}, in {f['where']}) runs wb by "
                               f"name from OpenCode's PATH ({which}'s here; the background "

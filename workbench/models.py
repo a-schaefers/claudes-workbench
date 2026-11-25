@@ -226,7 +226,10 @@ def _layers() -> list[tuple[Path, dict]]:
     out = []
     for path in opencode_config_files():
         try:
-            out.append((path, json.loads(_strip_jsonc(path.read_text()))))
+            doc = json.loads(_strip_jsonc(path.read_text()))
+            if not isinstance(doc, dict):  # a list or a number: every reader's .get crashed wb
+                raise ValueError("its top level isn't an object")  # doctor (#1311's review)
+            out.append((path, doc))
         except ValueError as e:  # one bad hand edit crashed every model command with a traceback
             raise RuntimeError(f"{path} doesn't parse ({e}); fix it by hand "
                                "(wb doctor checks it)") from None  # (the 2026-11-16 audit)
@@ -1086,6 +1089,20 @@ def _opencode_env() -> tuple[Path, dict]:
     env = {**os.environ, "PWD": str(where), "OPENCODE_DISABLE_PROJECT_CONFIG": "1"}
     if os.environ.get("WB_OPENCODE_CONFIG"):
         env["OPENCODE_CONFIG"] = os.environ["WB_OPENCODE_CONFIG"]
+    # and the OpenCode plugin removed, as in every task's layer: these servers load the user's
+    # global `plugins`, so its setup ran in each, and model_list waits for plugins to load (#1311's
+    # review, 2026-11-25). Last in the content, which loads after every file; content that
+    # doesn't parse is left for OpenCode to refuse
+    from .ocplugin import PLUGIN_OFF  # ocplugin imports this module
+    raw = os.environ.get("OPENCODE_CONFIG_CONTENT")
+    try:
+        content = json.loads(_strip_jsonc(raw)) if raw else {}
+    except ValueError:
+        content = None
+    if isinstance(content, dict):
+        theirs = content.get("plugins")
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(
+            {**content, "plugins": [*(theirs if isinstance(theirs, list) else []), PLUGIN_OFF]})
     return where, env
 
 

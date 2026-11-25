@@ -4,7 +4,8 @@
 export const Workbench = {
   id: 'workbench',
   methods: {
-    // which wb the server part runs (the config entry's options, else PATH) and wb's state dir
+    // which wb the server part runs (the config entry's options, else the package's own bin/wb,
+    // else PATH) and wb's state dir
     status: {
       input: { type: 'object', properties: {}, additionalProperties: false },
       output: {
@@ -12,7 +13,7 @@ export const Workbench = {
         properties: {
           wb: { type: 'string' },
           found: { type: 'boolean' },
-          from: { type: 'string', enum: ['options', 'PATH', 'none'] },
+          from: { type: 'string', enum: ['options', 'package', 'PATH', 'none'] },
           home: { type: 'string' },
         },
         required: ['wb', 'found', 'from', 'home'],
@@ -26,6 +27,6 @@ export const Workbench = {
 export interface Status {
   readonly wb: string
   readonly found: boolean
-  readonly from: 'options' | 'PATH' | 'none'
+  readonly from: 'options' | 'package' | 'PATH' | 'none'
   readonly home: string
 }

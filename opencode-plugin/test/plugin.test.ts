@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test'
 import server, { ID, status } from '../server.ts'
 import tui from '../tui.ts'
 import { Workbench } from '../rpc.ts'
-import { findWb, optionEnv, wbEnv, wbHome } from '../wb.ts'
+import { OWN, findWb, optionEnv, wbEnv, wbHome } from '../wb.ts'
 
 // The plugin's skeleton (#1311, 2026-11-25), under OpenCode's own Bun:
 // `BUN_BE_BUN=1 opencode test opencode-plugin/test`.
@@ -70,10 +70,21 @@ test('the options\' wb is the one run, even when another is on PATH', () => {
     { wb: '/gone/bin/wb', found: false, from: 'options' })
 })
 
-test('without options wb is found by name on PATH, else not found', () => {
+test('without options the package\'s own wb is run before PATH\'s (#1311\'s review)', () => {
+  // the Git install brings bin/wb beside opencode-plugin/: the plugin and its wb, one commit
+  expect(OWN.endsWith('/bin/wb')).toBe(true)
+  expect(OWN.includes('/opencode-plugin/')).toBe(false)
+  const exec = (p: string) => p === '/pkg/bin/wb' || p === '/b/wb'
+  expect(findWb(undefined, { PATH: '/b' }, exec, '/pkg/bin/wb')).toEqual(
+    { wb: '/pkg/bin/wb', found: true, from: 'package' })
+  // the options' still come first
+  expect(findWb({ wb: '/b/wb' }, { PATH: '' }, exec, '/pkg/bin/wb').from).toBe('options')
+})
+
+test('without options or a wb of its own, wb is found by name on PATH, else not found', () => {
   const exec = (p: string) => p === '/b/wb'
-  expect(findWb(undefined, { PATH: '/a:/b' }, exec)).toEqual({ wb: '/b/wb', found: true, from: 'PATH' })
-  expect(findWb({}, { PATH: '/a' }, exec)).toEqual({ wb: 'wb', found: false, from: 'none' })
+  expect(findWb(undefined, { PATH: '/a:/b' }, exec, '/pkg/bin/wb')).toEqual({ wb: '/b/wb', found: true, from: 'PATH' })
+  expect(findWb({}, { PATH: '/a' }, exec, '/pkg/bin/wb')).toEqual({ wb: 'wb', found: false, from: 'none' })
 })
 
 test('the options\' WB_* paths reach wb over the service\'s own environment', () => {
@@ -82,6 +93,10 @@ test('the options\' WB_* paths reach wb over the service\'s own environment', ()
   expect(env.WB_HOME).toBe('/state')
   expect(env.PATH).toBe('/p')
   expect(wbHome({ HOME: '/h' })).toBe('/h/.local/state/workbench')
+  // a `~` or relative WB_HOME as store.home expands it (store.PATH_VARS allows both)
+  expect(wbHome({ HOME: '/h', WB_HOME: '~/wb' }, '/cwd')).toBe('/h/wb')
+  expect(wbHome({ HOME: '/h', WB_HOME: '~' }, '/cwd')).toBe('/h')
+  expect(wbHome({ HOME: '/h', WB_HOME: 'state/wb' }, '/cwd')).toBe('/cwd/state/wb')
   // a service started with an empty environment still finds the state dir setup named
   expect(status({ wb: '/nonexistent/wb', env: { WB_HOME: '/state' } }, {}).home).toBe('/state')
 })

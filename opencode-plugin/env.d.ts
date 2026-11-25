@@ -6,6 +6,20 @@
 declare const process: {
   readonly env: Record<string, string | undefined>
   readonly platform: string
+  cwd(): string
+}
+
+interface ImportMeta {
+  readonly url: string
+}
+
+declare class URL {
+  constructor(url: string, base?: string)
+  readonly href: string
+}
+
+declare module 'node:url' {
+  export function fileURLToPath(url: string | URL): string
 }
 
 declare module 'node:fs' {
@@ -16,6 +30,7 @@ declare module 'node:path' {
   export const delimiter: string
   export function join(...parts: string[]): string
   export function isAbsolute(path: string): boolean
+  export function resolve(...parts: string[]): string
 }
 
 declare module 'bun:test' {

@@ -8125,7 +8125,7 @@ def cmd_doctor(a):
     listed = mod_listed()  # information only: a mod loaded another way isn't listed here
     try:  # the OpenCode path's installs (#1311): optional, so none only informs
         oc_lines = ocplugin.doctor_lines()
-    except RuntimeError as e:  # a config file that doesn't parse: said BAD above already
+    except RuntimeError as e:  # a config file that doesn't parse or can't be read (#1311's review)
         oc_lines = [(None, f"the OpenCode plugin: {e}")]
     opencode_only = not listed and any(good is not None for good, _ in oc_lines)
     if skill.exists() or not opencode_only:
@@ -8862,7 +8862,7 @@ def parser() -> argparse.ArgumentParser:
                                      "from this copy")
     s.add_argument("--opencode", action="store_true", help="for OpenCode alone: link wb and add this "
                    "copy's OpenCode plugin to OpenCode's config, with this wb in its options "
-                   f"({ocplugin.ADD} brings the plugin but not wb: run this after it too)")
+                   f"(OpenCode's own install, {ocplugin.ADD}, brings its wb: after it, this names a clone's)")
     # a link that points elsewhere is replaced by default (#1322); kept for old callers
     s.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
     s.set_defaults(f=cmd_setup)

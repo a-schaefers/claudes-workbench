@@ -1,0 +1,17 @@
+{
+  "name": "opencode-workbench",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Workbench inside OpenCode, as OpenCode's own Git install fetches it: the plugin (opencode-plugin/) and the wb it runs (bin/, workbench/). A Git install reports its commit, not this version (#1311).",
+  "license": "MIT",
+  "exports": {
+    ".": "./opencode-plugin/server.ts",
+    "./server": "./opencode-plugin/server.ts",
+    "./tui": "./opencode-plugin/tui.ts",
+    "./rpc": "./opencode-plugin/rpc.ts"
+  },
+  "bin": {
+    "wb": "bin/wb"
+  },
+  "files": ["bin/", "workbench/", "agent/", "skill/", "opencode-plugin/*.ts", "LICENSE"]
+}

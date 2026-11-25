@@ -54,8 +54,9 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
 - **The kernel** (`kernel/`, `scripts/kernel.py`; *The kernel*): the pure decisions the mod and
   the OpenCode plugin must make the same way, in PureScript, compiled into the committed
   `mod/hooks/kernel.js`. Users install nothing for it; wb never imports it.
-- **The OpenCode plugin** (`opencode-plugin/`, `ocplugin.py`; *The OpenCode plugin*): Workbench
-  inside OpenCode (2.2), its server, TUI and RPC parts; never loaded inside an agent's run.
+- **The OpenCode plugin** (`opencode-plugin/`, `ocplugin.py`, the root `package.json`; *The
+  OpenCode plugin*): Workbench inside OpenCode (2.2), its server, TUI and RPC parts, installed by
+  OpenCode from Git with the wb it runs; never loaded inside an agent's run.
 
 The runner, the ask server and the chat server never call each other or the mod: they share
 files in `$WB_HOME` (`store.py`), and waiters sleep in the kernel (inotify, pidfd: `watch.py`).
@@ -2204,17 +2205,26 @@ deliberately hostile process.
   `credentials.toml`, hidden), #1194's fourth review: Seatbelt's whole `~/.cargo` let the agent
   make one, Landlock's split granted one already there; macOS's `Library/Caches/com.apple.python`, where Apple's
   `/usr/bin/python3` keeps its stdlib's bytecode, `sys.pycache_prefix`, and loads a planted `.pyc`
-  at every later python3, #1194's review; OpenCode's package cache, `.cache/opencode/npm`, where
-  `opencode plugin add` installs the OpenCode plugin from Git (`packages/util/src/npm.ts`:
-  `<cache>/npm/<key>/<generation>/node_modules/opencode-workbench/server.ts`) beside every npm
-  plugin and provider package, which the user's OpenCode, outside the lane, imports at its next
-  start with no integrity check (`npm.resolve`; `npm.add` trusts an active generation), the plugin
-  that holds the consent gates and runs `wb` as the user: `~/.cache` was granted whole, so an agent
-  could rewrite it (#1311's review, 2026-11-25); and `VAR_NOT_WRITABLE` under the variables,
-  `XDG_CACHE_HOME`'s `opencode/npm` among them), made or not
-  (`not_writable_paths`). The agent's own OpenCode only reads its package cache: a real round with
-  a Git-installed plugin cached there, in the user's global `plugins`, and a newer commit on its
-  branch, runs as before and leaves the cache as it was (`RealOpenCodeRun`). With Seatbelt each is denied by path inside a whole home instead of split
+  at every later python3, #1194's review; and `VAR_NOT_WRITABLE` under the variables), made or
+  not, and OpenCode's package cache (`ocplugin.package_caches`: `.cache/opencode/npm`, and
+  `$XDG_CACHE_HOME/opencode/npm`) only while it holds the OpenCode plugin or
+  is about to (`context.plugin_caches`, `ocplugin.in_cache`: a generation of `opencode-workbench`
+  there, or a Git or npm `plugins` entry of it, which OpenCode installs at its next start)
+  (`not_writable_paths`). `opencode plugin add` installs the plugin there with wb itself
+  (`packages/util/src/npm.ts`: `<cache>/npm/<key>/<generation>/node_modules/opencode-workbench/`,
+  the root `package.json`'s `files`), and the user's OpenCode imports the plugin and runs that wb
+  outside the lane with no integrity check (`npm.resolve`; `npm.add` trusts an active
+  generation), the next round's `lane.py` among it (#1311's review, 2026-11-25). Without the plugin
+  there `~/.cache` stays whole: split around `npm/` always, every Linux lane, Claude Code users'
+  too, refused a tool's first new cache directory (node-gyp's, ms-playwright's, deno's), the
+  regression #1194's second review rejected for `Library/Caches` (#1311's second review). Kept
+  out, the agent's own OpenCode can't install there either: a provider package OpenCode doesn't
+  build in and the user's OpenCode hasn't fetched yet (`core/src/provider.ts`, `npm.add`) fails the
+  round's first request, and a plugin of the user's that is missing from the cache, or follows a
+  branch or `@latest`, isn't installed or updated in the round (`core/src/plugin/module.ts`); the
+  user's own OpenCode does both at its next start. A real round with the Git-installed plugin
+  cached there, in the user's global `plugins`, and a newer commit on its branch, runs as before
+  and leaves the cache as it was (`RealOpenCodeRun`). With Seatbelt each is denied by path inside a whole home instead of split
   out (`context.write_denied`, so nothing is made first for it), by its real path and by its own
   name, its directory resolved but not itself: a `~/.cargo/config.toml` linked into `~/dotfiles`
   or `/nix/store` (stow, home-manager) was denied only at its target, outside the lane, so the
@@ -2223,12 +2233,12 @@ deliberately hostile process.
   not, so a new `bin/`, `env` or config there is refused: a distro's cargo (Arch's, Debian's,
   Fedora's) makes only `registry/`, and a split only when one was there granted `~/.cargo` whole
   and let the agent make a `config.toml` (#1194's fifth review); rustup's and nimble's are made
-  first (`MADE_FIRST`), and OpenCode's `npm/` in `~/.cache/opencode` and `$XDG_CACHE_HOME/opencode`
-  (so no generation is planted before the user's install), so with Landlock `~/.cache` is always
-  split: its existing entries granted, a tool's first new one refused and named with its grant
+  first (`MADE_FIRST`), and OpenCode's `npm/` while it is kept out (so no generation is planted
+  before OpenCode installs one), so with Landlock `~/.cache` is split then, and only then: its
+  existing entries granted, a tool's first new one refused and named with its grant
   (`wb allow --path ~/.cache/<it>`), `CACHE_MADE`'s made first, and in OpenCode's cache directory
   `OPENCODE_CACHE_MADE`'s `bin/` (where it downloads ripgrep when none is on PATH,
-  `core/src/ripgrep/binary.ts`), a trade for the plugin's integrity (#1311's review); the rest are split around once made (`.dotnet/tools`, `.cabal/bin`,
+  `core/src/ripgrep/binary.ts`), itself left in the lane as a trade like pre-commit's hooks (#1311's review); the rest are split around once made (`.dotnet/tools`, `.cabal/bin`,
   `.ghcup/bin` not made yet can be made there, their homes kept whole until then); the user's active Python environments (`context.python_envs`:
   `VIRTUAL_ENV`, `CONDA_PREFIX`, each PATH `bin` beside `pyvenv.cfg` or `conda-meta`, #490). So
   `cargo install`, a new rustup toolchain, a pip install into the user's env are Claude's: no grant
@@ -2237,15 +2247,17 @@ deliberately hostile process.
   workbench's own files, an active environment, a `NOT_WRITABLE` place) is granted its existing
   entries one by one and refuses every new top-level one. So what the tool makes there is made
   first, never replacing an entry (`_make_first`): `CACHE_MADE` in a cache home holding an active
-  env (#825) or, with Landlock, a `NOT_WRITABLE` place (OpenCode's `npm/`, #1311's review),
-  `OPENCODE_CACHE_MADE` in OpenCode's cache directory, `MADE_FIRST` (so the split holds before the tool makes them), `CARGO_MADE` (a fresh
+  env (#825) or, with Landlock, a `NOT_WRITABLE` place (OpenCode's `npm/` while it holds the
+  plugin, #1311's review), `OPENCODE_CACHE_MADE` in OpenCode's cache directory then, `MADE_FIRST` (so the split holds before the tool makes them), `CARGO_MADE` (a fresh
   rustup install refused every build with a dependency, the 0.90 review; made in every cargo
   home that exists, which Landlock always splits, #1194's fifth review), `NIMBLE_MADE` with
   `MADE_TEXT` (nimble parses its data file, #911; its first `nimble refresh` is Claude's),
   `SPLIT_MADE` (`~/.m2`). The agent's poetry and pipenv make their venv in the worktree.
   A home kept whole is a documented trade, like `/tmp`: it can hold a program the user's tools run
-  later outside the lane (`.dotnet`, `.ghcup`, `.julia`, `~/.cache`'s pre-commit hooks, cargo's
-  registry sources, `.tflint.d`'s plugins); splitting would refuse a build's first new entry.
+  later outside the lane (`.dotnet`, `.ghcup`, `.julia`, `~/.cache`'s pre-commit hooks and
+  OpenCode's `bin/`, OpenCode's `npm/` while the plugin isn't there (a generation planted under
+  the key OpenCode would install it at, which `npm.add` then trusts), cargo's registry sources,
+  `.tflint.d`'s plugins); splitting would refuse a build's first new entry.
   No entry may resolve to `/` or the home directory, nor contain the task's repo or its git
   directory (`repo_dirs`, the main worktree's for a linked one, #776: with `GOPATH=~/src` the agent
   could write a hook or `core.fsmonitor` that wb's git runs outside the lane): a place holding them
@@ -2484,7 +2496,7 @@ deliberately hostile process.
   lane gains `Library/Caches` (`TOOL_HOMES`: macOS's `~/.cache`), whole, so any tool's first cache
   folder is made (golangci-lint's, pipenv's, Homebrew's), and Apple's Python bytecode in it,
   `com.apple.python` (`NOT_WRITABLE`), denied by path, made or not, as is OpenCode's package
-  cache in the whole `~/.cache` (`.cache/opencode/npm`, #1311's review), and `Library/Caches` itself
+  cache in the whole `~/.cache` while it holds the OpenCode plugin (`context.plugin_caches`, #1311's review), and `Library/Caches` itself
   can't be renamed or replaced, nor `~/.cargo` or `~/.dotnet` when whole (`--deny-write`, #1194's second
   review: split around it, every tool's first folder there but a listed few was refused; the
   file tools' `edit` is denied there too, `read_only`), and the per-user cache beside the
@@ -7185,31 +7197,42 @@ https://github.com/a-schaefers/workbench/issues/1296#issuecomment-7158435888); t
 laned `opencode run --standalone` per round from the runner. This is the skeleton (#1311); the
 pane, the notices, the gates and the agent come in #1312 to #1316.
 
-- **The package** (`package.json`, name `opencode-workbench` (`ocplugin.PACKAGE`), `private`,
-  `type: module`; its version is unused: a Git install reports its commit): `exports` `.` and
+- **The package**, in two manifests of one name, `opencode-workbench` (`ocplugin.PACKAGE`),
+  `private`, its version unused (a Git install reports its commit), each `exports` `.` and
   `./server` → `server.ts`, `./tui` → `tui.ts`, `./rpc` → `rpc.ts`, the names OpenCode's
-  `Host.resolve` asks for (`plugin/src/host.ts`), and `files` lists them with `wb.ts`. Each part is
-  TypeScript, run as it is by OpenCode's Bun, a package's in `node_modules` too.
+  `Host.resolve` asks for (`plugin/src/host.ts`). The repository's root `package.json` is what
+  OpenCode's Git install fetches: its `exports` point into `opencode-plugin/`, its `files` bring
+  `bin/`, `workbench/`, `agent/`, `skill/`, `opencode-plugin/*.ts` and `LICENSE` (the plugin and
+  the wb it runs; no `opencode-plugin/test`), and `bin` names `bin/wb` (so Arborist keeps it
+  executable); no `type` field, so nothing else in the repository changes how it loads.
+  `opencode-plugin/package.json` (`type: module`, `files` the four parts) is the one a clone's
+  entry loads (`wb setup --opencode`'s `opencode-plugin/` directory). Each part is TypeScript, run
+  as it is by OpenCode's Bun, a package's in `node_modules` too.
   - `server.ts`: `{id: "workbench", setup}` (OpenCode's check is that shape alone,
     `core/src/plugin/module.ts` `Module`). Setup registers the RPC's `status` handler; under
     `WB_TASK` it returns at once (#1363). It exports `ID` and `status(options, env)`.
   - `rpc.ts`: the contract `Workbench` (`id: "workbench"`), JSON Schema, no validator package:
-    `status` → `{wb, found, from: options|PATH|none, home}`. Called over HTTP as `POST
+    `status` → `{wb, found, from: options|package|PATH|none, home}`. Called over HTTP as `POST
     /api/rpc/workbench/status` with `{"input": {}}` (`protocol/src/groups/rpc.ts`), by the TUI
     part as `ctx.client.rpc(Workbench).status({})`.
   - `tui.ts`: `{id: "workbench", setup}`. OpenCode's TUI loads it only for a server plugin that is
     active (`tui/src/plugin/context.tsx`, `serverTuiPlugins`). It asks `status` and, when no wb
     was found, shows one warning toast titled `Workbench` (`wb isn't at <path>, which the
-    plugin's options name: run bin/wb setup --opencode in your Workbench clone`, or `no wb on
-    OpenCode's PATH, and the plugin doesn't bring one: git clone
-    https://github.com/a-schaefers/workbench, then run bin/wb setup --opencode in it`, its `CLONE`,
-    `ocplugin.CLONE` word for word); nothing when all is well, nothing when the server part
+    plugin's options name: run bin/wb setup --opencode in your Workbench clone`, or `this install
+    of the plugin brings no wb, and OpenCode's PATH has none: opencode plugin add
+    'github:a-schaefers/workbench#main' brings it, or bin/wb setup --opencode in a clone`, its
+    `GET_WB`, `ocplugin.GET_WB` word for word); nothing when all is well (a healthy install is
+    seen in the TUI's `/plugins`, or `opencode plugin list`), nothing when the server part
     doesn't answer. A no-op under `WB_TASK`.
-  - `wb.ts`: `findWb(options, env, exec)`: the options' `wb` (an absolute path; one that isn't
-    there is `found: false`, never swapped for PATH's), else `wb` by name on `PATH`, as the mod's
+  - `wb.ts`: `findWb(options, env, exec, own)`: the options' `wb` (an absolute path; one that
+    isn't there is `found: false`, never swapped for another), else the package's own `OWN`,
+    `../bin/wb` from `wb.ts` (the Git install's in OpenCode's package cache, or a clone's: the
+    plugin and its wb from one commit, `from: package`), else `wb` by name on `PATH`, as the mod's
     `findWb` (#1200); `wbEnv`: OpenCode's environment with the options' `env` over it;
-    `wbHome`: `WB_HOME`, else `~/.local/state/workbench`. Nothing runs at import.
-  - `env.d.ts`, `host.d.ts`: the runtime (`process`, `node:fs`, `node:path`, `bun:test`) and the
+    `wbHome(env, cwd)`: `WB_HOME` with a `~` or a relative path expanded as `store.home` does,
+    else `~/.local/state/workbench`. Nothing runs at import.
+  - `env.d.ts`, `host.d.ts`: the runtime (`process`, `URL`, `import.meta.url`, `node:fs`,
+    `node:path`, `node:url`, `bun:test`) and the
     subset of OpenCode's plugin API the parts use, declared from OpenCode's source (each shape
     names its file), so the package imports nothing from `@opencode/*` and type-checks with
     nothing installed. A new use adds its declaration.
@@ -7225,38 +7248,50 @@ pane, the notices, the gates and the agent come in #1312 to #1316.
   content loads after the layer. Removed, the plugin's setup never runs and its TUI part never
   loads; `WB_TASK` is the second fence.
 - **Installing it.** OpenCode's own mechanism first (#1357's decision):
-  `opencode plugin add 'github:a-schaefers/workbench#main::path:opencode-plugin'`
-  (`ocplugin.ADD`, `GIT_SPEC`): a Git package with npm's `::path:` subdirectory selector, which
-  OpenCode installs into its package cache and adds to the global config's `plugins`
+  `opencode plugin add 'github:a-schaefers/workbench#main'` (`ocplugin.ADD`, `GIT_SPEC`): this
+  repository as a Git package, which OpenCode installs into its package cache
+  (`<cache>/npm/git-workbench-<12 hex of the spec's sha256>/<generation>/node_modules/opencode-workbench`,
+  `ocplugin._git_key`, `copy_of`) and adds to the global config's `plugins`
   (`cli/src/commands/handlers/plugin/add.ts`); following `#main`, OpenCode checks it at start and
-  daily and installs a newer commit (`plugins.mdx` *Manage*). Without options the plugin runs
-  `wb` from the service's PATH. **That install brings the plugin alone, never `wb`**: OpenCode
-  fetches `opencode-plugin/` (its `package.json` `files`: `server.ts`, `tui.ts`, `rpc.ts`,
-  `wb.ts`), no `bin/wb` and no package, so a clone is needed either way (#1311's review,
-  2026-11-25): `git clone https://github.com/a-schaefers/workbench`, then `bin/wb setup --opencode`
-  in it (`ocplugin.CLONE`), which alone is the whole install and after `opencode plugin add` gives
-  that entry its options. A main path without a clone needs `wb` itself to come from OpenCode's
-  install (a design gap, open with #1357; no README install line until it closes).
-  `wb setup --opencode` (`ocplugin.install`, *Every `wb` command*) writes the entry through
-  `models.own_config` with `options` `{wb: <clone>/bin/wb, env: {<each WB_* of store.PATH_VARS set
-  there, absolute>}}`: OpenCode's background service starts without the user's shell, so the
-  paths ride in the entry. The package lands in OpenCode's package cache, which the lane keeps
-  out (`NOT_WRITABLE`'s `.cache/opencode/npm`, *What the agent knows*): an agent can't rewrite
-  what the user's OpenCode imports.
+  daily and installs a newer commit (`plugins.mdx` *Manage*). It brings wb with the plugin (the
+  root `package.json`'s `files`), and without options the plugin runs that wb: the whole install,
+  no clone. #1311's review (2026-11-25) found the first form,
+  `…#main::path:opencode-plugin` (npm's subdirectory selector, `ocplugin.SUBDIR`), fetched
+  `opencode-plugin/` alone, a plugin that could do nothing without a clone; such an entry is still
+  recognised (`ocplugin.ours`, `brings_wb`) and runs wb by name from PATH. `wb setup --opencode`
+  (`ocplugin.install`, *Every `wb` command*) is the fallback, from a clone: it writes the entry
+  through `models.own_config` with `options` `{wb: <clone>/bin/wb, env: {<each WB_* of
+  store.PATH_VARS set there, absolute>}}` (OpenCode's background service starts without the
+  user's shell, so the paths ride in the entry), and after `opencode plugin add` gives that entry
+  the options, so it runs the clone's wb. The package and its wb land in OpenCode's package cache,
+  which the lane keeps out once they are there or about to be (`ocplugin.in_cache`,
+  `context.plugin_caches`, *What the agent knows*): an agent can't rewrite what the user's
+  OpenCode imports and runs. The Git install's wb runs from its generation's directory: a new
+  commit is a new directory, and OpenCode removes a generation only when two newer ones exist
+  and it is over a week old (`npm.ts` `collect`).
+- **Never in wb's own OpenCode calls.** `models._opencode_env` (`model_list`'s `opencode serve
+  --stdio`, `_opencode_json`'s commands) puts `"-workbench"` last in `OPENCODE_CONFIG_CONTENT`,
+  after the user's own content `plugins` (kept; content that doesn't parse is left for OpenCode
+  to refuse): those servers load the user's global plugins, and `model_list` waits for them
+  (#1311's review).
 - **What `wb doctor` says** (`ocplugin.doctor_lines`, after the Claude Code mod's line): one line
   per install, in OpenCode's load order (the global `plugins/` directory's copies, then each config
   file's entries, then `OPENCODE_CONFIG_CONTENT`'s): `ok  the OpenCode plugin <spec> (<how>, in
   <file>) runs <wb>` where `<how>` is `OpenCode's own install, from Git`, `… from npm`, `this
   clone's opencode-plugin/`, `another copy's: <dir>` or `found in OpenCode's plugins directory`,
-  and `<wb>` the options' path or `wb by name from OpenCode's PATH (<which wb>'s here; the
-  background service's may differ: wb setup --opencode names it)`; `BAD` for an options' `wb`
+  and `<wb>` the options' path, `the wb it brings, <path>` (a copy's `../bin/wb`, or the Git
+  install's in the package cache), or `wb by name from OpenCode's PATH (<which wb>'s here; the
+  background service's may differ: wb setup --opencode names it)`; `--` for a Git entry OpenCode
+  hasn't fetched yet (`isn't in OpenCode's package cache yet: OpenCode installs it, with its wb,
+  at its next start`); `BAD` for an options' `wb`
   that isn't there (`… it isn't there; wb setup --opencode from your Workbench clone`), a
-  directory that holds no copy (`… which holds no copy of it`), or an entry without options when
-  no `wb` is on PATH (`runs wb by name, and there is none: the install brings only the plugin;
-  <ocplugin.CLONE>`); `--` for each `"-workbench"` (`turns the OpenCode plugin off`); none
-  installed is a `--` line (`wb setup --opencode from this clone; or opencode plugin add '…',
-  which brings the plugin but not wb (it runs the one a clone's wb setup --opencode names)`), as
-  the plugin is optional. With the plugin installed and the Claude Code mod
+  directory that holds no copy (`… which holds no copy of it`), or an install that brings no wb
+  when none is on PATH (`brings no wb and finds none on PATH: <ocplugin.GET_WB>`); `--` for each
+  `"-workbench"` (`turns the OpenCode plugin off`); none installed is a `--` line (`opencode
+  plugin add '…' (it brings its wb), or wb setup --opencode from this clone`), as the plugin is
+  optional. An OpenCode config that can't be read is said, never a traceback
+  (`ocplugin.installs`' RuntimeError; a top level that isn't an object is `models._layers`'
+  `doesn't parse`). With the plugin installed and the Claude Code mod
   not listed, the missing Claude Code skill link is `--  /workbench isn't in <dir>: Claude Code's
   path only (wb setup links it)`, not `BAD`.
 - **Type-checked** by OpenCode's own Bun: `BUN_BE_BUN=1 opencode check -p opencode-plugin`
@@ -7268,21 +7303,35 @@ pane, the notices, the gates and the agent come in #1312 to #1316.
   both parts' shape and id, nothing touched under `WB_TASK` (a proxy context that records every
   access, the list asserted empty: a throw alone was swallowed by `tui.ts`'s own `catch`, so its
   guard could be deleted with the test passing, #1311's review), the one RPC registered, which wb
-  and which state dir), `Setup -k opencode` (the install and doctor's lines), `ConfigLayer`'s
-  `test_every_tasks_layer_removes_the_opencode_plugin_after_the_users_own_plugins`, and on a real
-  OpenCode `RealOpenCodePlugin` (an `opencode serve` loads it from an entry with options, `plugin
-  list` names it, its RPC answers with the options' wb and `WB_HOME` though the service's is empty;
-  a layer's `"-workbench"` after the global entry leaves a canary of its id unrun while another
-  plugin runs, and the same entry without the layer runs it) and `RealOpenCodeRun`'s
+  (the options', the package's own before PATH's) and which state dir (`~` and relative
+  expanded)), `Setup -k opencode` (the install and doctor's lines) and
+  `test_doctor_survives_an_opencode_config_that_isnt_an_object_or_cant_be_read`, `ConfigLayer`'s
+  `test_every_tasks_layer_removes_the_opencode_plugin_after_the_users_own_plugins`,
+  `ApiDiscovery`'s `test_wbs_own_opencode_calls_remove_the_opencode_plugin_after_the_users_plugins`,
+  and on a real OpenCode `RealOpenCodePlugin` (an `opencode serve` loads it from an entry with
+  options, `plugin list` names it, its RPC answers with the options' wb and `WB_HOME` though the
+  service's is empty; `opencode plugin add` of a `git+file://` copy of the repository brings
+  `bin/wb`, `workbench/`, `agent/` and `skill/`, that wb runs, and the RPC names it, `from:
+  package`, with no options; a layer's `"-workbench"` after the global entry leaves a canary of
+  its id unrun while another plugin runs, and the same entry without the layer runs it; wb's own
+  `model_list` server leaves it unrun) and `RealOpenCodeRun`'s
   `test_the_opencode_plugin_never_runs_inside_an_agents_round_though_the_users_others_do` (a real
   round: the canary of id `workbench` in the user's global `plugins` never runs, another runs in
   the worktree with `WB_TASK` set) and
   `test_a_round_runs_with_a_git_installed_plugin_in_a_package_cache_the_agent_cant_write` (a
   `git+file://` install by `opencode plugin add`, outside the temp roots, loaded read-only by the
-  agent's OpenCode); `Lane`'s `test_opencodes_package_cache_is_out_of_the_lane_on_both_kernels_made_or_not`
-  and `test_with_landlock_an_agent_cant_write_opencodes_package_cache`. Checked by hand on 2.4.1 (2026-11-25): `opencode plugin add`
-  of a Git spec with `::path:opencode-plugin` installs it from the package cache, and the TUI's
-  `/plugins` lists it under TUI and Server.
+  agent's OpenCode); `Lane`'s `test_without_the_opencode_plugin_installed_from_git_the_cache_home_stays_whole`,
+  `test_with_landlock_a_tools_first_cache_directory_is_written_without_the_plugin`,
+  `test_opencodes_package_cache_is_out_of_the_lane_once_it_holds_the_plugin_on_both_kernels`,
+  `test_a_git_plugins_entry_keeps_the_package_cache_out_before_opencode_installs_it` and
+  `test_with_landlock_an_agent_cant_write_opencodes_package_cache_holding_the_plugin`. Checked by
+  hand on 2.4.1 (2026-11-25): `opencode plugin add` of the repository's Git spec installs it and
+  its wb from the package cache, and the TUI's `/plugins` lists it under TUI and Server.
+- **Live checks #1311 owns**, each run by hand in a real OpenCode by the slice that first builds
+  what it checks, and recorded there: setup off in `opencode run` (this slice: the canary in
+  `RealOpenCodeRun`); a runner that survives the TUI and the background service ending (#1312,
+  the first slice that starts a task from inside OpenCode); a wake with no TUI open and a notice
+  resent once only (#1313, the notices); forms in the web app and on a phone (#1314, the gates).
 
 ## Waiting without polling
 
@@ -7956,9 +8005,8 @@ directory marketplace in place of the git one, `wb` and the skill relinked to it
 clone, its patches rebased (*Local patches*). `wb doctor`'s `install:` line says which of the three this copy is.
 
 **OpenCode alone** (2.2, in progress: #1296; today the plugin is its skeleton, *The OpenCode plugin*): OpenCode
-installs the plugin itself, `opencode plugin add 'github:a-schaefers/workbench#main::path:opencode-plugin'`, which
-brings the plugin but never `wb`: that comes from a clone either way (`git clone
-https://github.com/a-schaefers/workbench`, then `bin/wb setup --opencode` in it, `ocplugin.CLONE`). `wb setup
+installs the plugin itself, `opencode plugin add 'github:a-schaefers/workbench#main'`, which brings the plugin
+and the wb it runs (the root `package.json`'s `files`), no clone needed. The fallback, from a clone: `wb setup
 --opencode` links `wb` and writes the plugin's entry (or gives OpenCode's own its options) with this clone's
 `bin/wb` in its options, no Claude Code skill link. `wb doctor` names
 each install, Claude Code's and OpenCode's, and the wb each runs.
@@ -8519,8 +8567,8 @@ doc needs its own `!/` line).
 - **The README's bold opening line and the sentence after it** → the GitHub repository's About description, word for word (the owner, 2026-11-24, on #1357: keep the two in sync while iterating). `tests/test_docs.py` pins the README side; the About side is set by hand (`gh repo edit --description`).
 - **What a scheduled fire lets headless Claude use** (`schedule.TOOLS`, `ALLOWED`, `DENIED`, the permission mode) and `schedule.PROMPT`'s section names → driving.md's *Headless: a scheduled run* (a spec on stdin, `wb wait --backlog <batch> --timeout 100` loops), and `tests.test_workbench.ScheduledRuns`. The fire's batch name (`<name>-YYYY-MM-DD[-N]`, `schedule.batch_name`, N up to `SAME_DAY` 99) → `schedule.NAME_RE`'s 34 against `store.NAME_RE`'s 48 (#1204).
 - **A file a round's children load** (lane, git shim, ask server, their imports) → `runner.CHILD_CODE`, so an update under a running task is caught.
-- **The OpenCode plugin's id** (`'workbench'` in `opencode-plugin/server.ts`'s `ID`, `tui.ts`, `rpc.ts`) → `ocplugin.PLUGIN_ID` and `PLUGIN_OFF` (`"-workbench"`, every task's layer, `context.PLUGIN_OFF`); **its directory and package name** (`opencode-plugin/`, `package.json` `opencode-workbench`) → `ocplugin.DIR`, `PACKAGE`, `GIT_SPEC`'s `::path:` and the install line people copy (`ocplugin.ADD`); **where `wb` comes from** (`ocplugin.CLONE`) → `tui.ts`'s
-`CLONE`, word for word, and doctor's lines; **an OpenCode API it uses** → its declaration in `opencode-plugin/host.d.ts` (or `env.d.ts`), with the source file it was read from (#1311).
+- **The OpenCode plugin's id** (`'workbench'` in `opencode-plugin/server.ts`'s `ID`, `tui.ts`, `rpc.ts`) → `ocplugin.PLUGIN_ID` and `PLUGIN_OFF` (`"-workbench"`, every task's layer, `context.PLUGIN_OFF`); **its directory and package name** (`opencode-plugin/`, both `package.json`s' `opencode-workbench`) → `ocplugin.DIR`, `PACKAGE`, `SUBDIR`, `GIT_SPEC` and the install line people copy (`ocplugin.ADD`); **its parts' `exports`** → the root `package.json`'s, the same with `./opencode-plugin/` (`Setup`'s package test); **a file the plugin or its wb needs at run time** (a new import from `mod/hooks/`, a top-level directory `workbench/` reads, like `agent/` and `skill/`) → the root `package.json`'s `files`, or OpenCode's Git install lacks it; **where `wb` comes from when none is found** (`ocplugin.GET_WB`) → `tui.ts`'s
+`GET_WB`, word for word, and doctor's lines; **an OpenCode API it uses** → its declaration in `opencode-plugin/host.d.ts` (or `env.d.ts`), with the source file it was read from (#1311).
 - **The wb the mod runs** (`findWb` in register.tsx: `WB_BIN`, `wb` on PATH, `~/.local/bin/wb`) → `cli.mod_wb`, what wb
   doctor says the mod runs, and wb setup's PATH note (#1200).
 - **`lane.REFUSED`** (the refused lane's first words) → `verify.run`, which reads a run starting with it as no test run, never the candidate failing (#1308).
