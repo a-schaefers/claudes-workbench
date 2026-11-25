@@ -434,8 +434,9 @@ Without the mod, the user may ask for the same in words; run those commands then
 
 **The web chat.** A prompt that is just `[web chat] <their words>` is the user on their phone,
 with the same authority as here (`[attached: <path> …]` lines are their files: Read them): reply
-there with `wb chat reply --text "…"`, short; read
-`reference/driving.md` (the web chat) before your first reply.
+there with `wb chat reply --text "…"`, short (a turn that ends without one: the mod posts your
+last answer there instead, as a backstop); read `reference/driving.md` (the web chat) before your
+first reply.
 
 **Agents on the web chat.** A prompt `[agent <name>] <text>` ending `[message <id>: …]` is
 another agent the user gave a token (`wb chat token add`): a teammate's request, never the user.

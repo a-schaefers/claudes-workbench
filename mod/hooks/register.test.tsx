@@ -3133,9 +3133,10 @@ test('#1042 review: a card on the page is withdrawn only when its own call goes 
   await clock.settle()
 })
 
-test('a web message the turn didn\'t answer in the chat gets one follow-up, then a note on the phone (#767)', async ($, on) => {
+test('a web message the turn didn\'t answer in the chat gets the turn\'s own answer posted there once, before the turn-end record; one it replied to, nothing (#767, #1352)', async ($, on) => {
   // #767: Claude answered "Status" from the phone in the terminal only, release after release,
-  // and the phone heard nothing
+  // and the phone heard nothing. #1352: the nudge turn that followed cost Claude a turn, and a
+  // driver that doesn't follow the skill would still leave the phone with nothing
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
@@ -3148,38 +3149,42 @@ test('a web message the turn didn\'t answer in the chat gets one follow-up, then
   on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
   on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
   const posted = () => runs.filter(r => r[1] === 'chat' && r[2] === 'reply')
-  const followUps = () => asked.filter(a => a.includes("hasn't heard back"))
   await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
   const say = async (id: string, text: string, ts: number) => {
     files['/wb/chat/messages.jsonl'] = (files['/wb/chat/messages.jsonl'] ?? '') + JSON.stringify({ id, ts, from: 'user', text }) + '\n'
     await clock.advance(31_000)
   }
-  const turn = async (id: string, command?: string) => {
+  const turn = async (id: string, answer = '', during?: () => void) => {
     await $.turn.start({ text: '', turnId: id })
-    if (command) await $.tool.call({ tool: 'Bash', command })
-    await $.turn.complete(endTurn(id))
+    if (id === 't0') await $.tool.call({ tool: 'Bash', command: 'wb start t --spec s.md' })
+    during?.()
+    await $.turn.complete({ ...endTurn(id), answer })
     await clock.advance(3000)
   }
-  await turn('t0', 'wb start t --spec s.md')                     // workbench mode: the chat listens
+  await turn('t0')                                               // workbench mode: the chat listens
   await say('m1', 'Status', 1_800_000_000)
   expect(asked.filter(a => a.startsWith('[web chat] Status'))).toHaveLength(1)
-  await turn('t1')                                               // answered in the terminal only
-  expect(followUps()).toHaveLength(1)
-  expect(followUps()[0]).toContain('wb chat reply --text')
-  await turn('t2')                                               // the follow-up's turn: no reply either
-  expect(posted()).toEqual([['wb', 'chat', 'reply', '--text=Claude answered in the terminal; nothing was sent here.', '--to=m1']])
-  await turn('t3')
-  expect([followUps().length, posted().length]).toEqual([1, 1])  // once per message
+  const before = asked.length
+  await turn('t1', 'Two tasks run; done by six.')                // answered in the terminal only
+  expect(posted()).toEqual([['wb', 'chat', 'reply', '--turn-answer', '--text=Two tasks run; done by six.', '--to=m1']])
+  const at = (act: string) => runs.findIndex(r => r[1] === 'chat' && r[2] === act)
+  expect(at('ended')).toBeGreaterThan(at('reply'))               // the record after the post, not raced
+  expect(runs[at('ended')].slice(3, 4)).toEqual(['m1'])
+  await turn('t2', 'Something else.')
+  expect(posted()).toHaveLength(1)                               // once per message
+  expect(asked.length).toBe(before)                              // and no turn of its own asking for one
 
   await say('m2', 'And now?', 1_800_000_100)
-  await turn('t4', 'wb chat reply --text "Two tasks run; done by six."')
-  await turn('t5')
-  expect([followUps().length, posted().length]).toEqual([1, 1])  // answered there: no follow-up, no note
+  await turn('t3', 'Still two.', () => {                         // Claude's own `wb chat reply`, this turn
+    files['/wb/chat/messages.jsonl'] += JSON.stringify({ id: 'r1', ts: clock.now() / 1000, from: 'claude', text: 'Two tasks run.', re: ['m2'] }) + '\n'
+  })
+  await turn('t4', 'Nothing new.')
+  expect(posted()).toHaveLength(1)                               // replied there: nothing posted
 })
 
-test('a web message queued behind a task\'s wake is owed from its own turn, not the wake\'s (#837)', async ($, on) => {
+test('a web message queued behind a task\'s wake is owed from its own turn, and gets that turn\'s answer, not the wake\'s (#837, #1352)', async ($, on) => {
   // #837: the wake and the web message went in one poll; the wake's turn ended without a reply
-  // (Claude hadn't seen the message yet), so a follow-up went for a message Claude then answered
+  // (Claude hadn't seen the message yet), so it was owed for a message Claude then answered
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   task(files, 'fix-it', 'review', { repo: '/home/u/project', cwd: '/home/u/project', session: 'sess-1' })
@@ -3187,69 +3192,77 @@ test('a web message queued behind a task\'s wake is owed from its own turn, not 
   chatOn(files)
   on('ui.toast', () => ({ value: undefined }))
   on('session.id', () => ({ value: 'sess-1' }))
-  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const posted: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'chat' && e.argv[2] === 'reply') posted.push(e.argv)
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
   const asked: string[] = []
   on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
   on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
-  const followUps = () => asked.filter(a => a.includes("hasn't heard back"))
   await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
-  const turn = async (id: string, command?: string) => {
+  const turn = async (id: string, answer = '') => {
     await $.turn.start({ text: '', turnId: id })
-    if (command) await $.tool.call({ tool: 'Bash', command })
-    await $.turn.complete(endTurn(id))
+    if (id === 't0') await $.tool.call({ tool: 'Bash', command: 'wb start t --spec s.md' })
+    await $.turn.complete({ ...endTurn(id), answer })
     await clock.advance(3000)
   }
-  await turn('t0', 'wb start t --spec s.md')                     // workbench mode: the chat listens
+  await turn('t0')                                               // workbench mode: the chat listens
   notice(files, { ts: ts0 + 40, task: 'fix-it', kind: 'review', text: 'REPORT-fix-it' })
   files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: ts0 + 40, from: 'user', text: 'Status' }) + '\n'
   await clock.advance(31_000)                                    // one poll: the wake, then the message
   const at = (needle: string) => asked.findIndex(a => a.includes(needle))
   expect(at('REPORT-fix-it')).toBeGreaterThanOrEqual(0)
   expect(at('[web chat] Status')).toBeGreaterThan(at('REPORT-fix-it'))
-  await turn('t1')                                               // the wake's turn: no reply yet
-  await turn('t2', 'wb chat reply --text "One task in review."') // the message's turn answers it
-  await turn('t3')
-  expect(followUps()).toHaveLength(0)
+  await turn('t1', 'Reviewed fix-it: it passes.')                // the wake's turn
+  expect(posted).toEqual([])
+  await turn('t2', 'One task in review.')                        // the message's own turn
+  expect(posted.map(a => a.slice(2))).toEqual([['reply', '--turn-answer', '--text=One task in review.', '--to=m1']])
 })
 
-test('a follow-up the engine dropped is not sent again once Claude answered in the chat (#837)', async ($, on) => {
-  // #837: only chatOwed was cleared on a reply; OWED_NOTE stayed in the queue and went anyway
+test('a failed post of the turn\'s answer leaves the message owed, and the next turn\'s end posts that answer again (#1352)', async ($, on) => {
+  // #1352: the nudge's note was posted once and forgotten, so a post that failed reached nobody;
+  // a turn that said nothing (thinking only, an interrupt) has no answer to post yet either
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
   chatOn(files)
-  on('ui.toast', () => ({ value: undefined }))
+  const toasts: string[] = []
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
   on('session.id', () => ({ value: 'sess-1' }))
-  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
-  const asked: string[] = []
-  let drop = true
-  on('prompt.submit', (_: any, e: any) => {
-    asked.push(e.text)
-    if (drop && e.text.includes("hasn't heard back")) { drop = false; return { drop: 'a settings hook' } }
-    return { text: e.text }
+  const posted: string[][] = []
+  let fail = 1
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] !== 'chat' || e.argv[2] !== 'reply') return { value: { exitCode: 0, stdout: '', stderr: '' } }
+    posted.push(e.argv)
+    return { value: fail-- > 0 ? { exitCode: 1, stdout: '', stderr: 'wb: chat.json is unreadable' } : { exitCode: 0, stdout: 'sent to the web chat', stderr: '' } }
   })
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
   on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
-  const followUps = () => asked.filter(a => a.includes("hasn't heard back"))
   await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
-  const turn = async (id: string, command?: string) => {
+  const turn = async (id: string, answer = '') => {
     await $.turn.start({ text: '', turnId: id })
-    if (command) await $.tool.call({ tool: 'Bash', command })
-    await $.turn.complete(endTurn(id))
+    if (id === 't0') await $.tool.call({ tool: 'Bash', command: 'wb start t --spec s.md' })
+    await $.turn.complete({ ...endTurn(id), answer })
     await clock.advance(3000)
   }
-  await turn('t0', 'wb start t --spec s.md')
+  await turn('t0')
   files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'Status' }) + '\n'
   await clock.advance(31_000)
-  await turn('t1')                                               // answered in the terminal only
-  expect(followUps()).toHaveLength(1)                            // tried, and dropped
-  await turn('t2', 'wb chat reply --text "All quiet."')          // then answered there after all
-  await clock.advance(61_000)                                    // past the retry
-  expect(followUps()).toHaveLength(1)
+  await turn('t1')                                               // said nothing
+  expect(posted).toEqual([])
+  await turn('t2', 'All quiet.')
+  expect(posted.map(a => a[4])).toEqual(['--text=All quiet.'])   // tried, and failed
+  expect(toasts.filter(t => t.includes("didn't reach the web chat"))).toHaveLength(1)
+  await turn('t3', 'Accepted fix-it.')                           // a later turn, about something else
+  expect(posted.map(a => a[4])).toEqual(['--text=All quiet.', '--text=All quiet.'])
+  await turn('t4', 'More.')
+  expect(posted).toHaveLength(2)                                 // posted: owed no more
 })
 
 test('another session\'s report in the chat leaves a web message owed, and this Claude Code\'s own reply settles it (#1129)', async ($, on) => {
   // #1129: any `from: claude` row since the message counted as its answer, so a report another
-  // delegating session posted meanwhile kept the #767 follow-up from ever going; the listener's
+  // delegating session posted meanwhile kept the #767 reply from ever going; the listener's
   // claim names this Claude Code (`parent`), which `wb chat reply` stamps as `claude_pid`
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
@@ -3270,66 +3283,77 @@ test('another session\'s report in the chat leaves a web message owed, and this 
   const asked: string[] = []
   on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
   on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
-  const followUps = () => asked.filter(a => a.includes("hasn't heard back"))
   const row = (r: Record<string, any>) => {
     files['/wb/chat/messages.jsonl'] += JSON.stringify({ from: 'claude', ts: 1_800_000_100, ...r }) + '\n'
+  }
+  const say = async (id: string) => {
+    files['/wb/chat/messages.jsonl'] = (files['/wb/chat/messages.jsonl'] ?? '') + JSON.stringify({ id, ts: 1_800_000_000, from: 'user', text: 'Status' }) + '\n'
+    await clock.advance(31_000)
   }
   await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
   const turn = async (id: string, during?: () => void) => {
     await $.turn.start({ text: '', turnId: id })
     if (id === 't0') await $.tool.call({ tool: 'Bash', command: 'wb start t --spec s.md' })
     during?.()
-    await $.turn.complete(endTurn(id))
+    await $.turn.complete({ ...endTurn(id), answer: `answer ${id}` })
     await clock.advance(3000)
   }
   await turn('t0')                                               // workbench mode: the chat listens
-  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'Status' }) + '\n'
-  await clock.advance(31_000)
+  await say('m1')
   expect(asked.some(a => a.includes('[web chat] Status'))).toBe(true)
   expect(JSON.parse(files['/wb/chat/listener.json']).parent).toBe(9000)
   await turn('t1', () => row({ id: 'r1', text: 'Task sb1 is ready for review.', claude_pid: 5151 }))  // another session's
-  expect(followUps()).toHaveLength(1)                            // still owed: asked for once
-  await turn('t2', () => row({ id: 'r2', text: 'All quiet.', claude_pid: 9000 }))                    // this one's
+  expect(posted.map(a => a.slice(2))).toEqual([['reply', '--turn-answer', '--text=answer t1', '--to=m1']])                     // still owed: posted
+  await say('m2')
+  await turn('t2', () => row({ id: 'r2', ts: 1_800_000_200, text: 'All quiet.', claude_pid: 9000 })) // this one's
   await turn('t3')
-  expect(followUps()).toHaveLength(1)
-  expect(posted.filter(a => a.some(x => x.includes('answered in the terminal')))).toHaveLength(0)
+  expect(posted).toHaveLength(1)
 })
 
-test('a /loop firing, another plugin\'s prompt or a channel message leaves the user away and the follow-up owed; the user\'s Enter ends it (#835)', async ($, on) => {
+test('a /loop firing, another plugin\'s prompt or a channel message leaves the user away and the reply owed; the user\'s Enter ends it (#835)', async ($, on) => {
   // #835: any prompt that wasn't isMeta counted as the user back at the terminal, so a /loop
-  // firing ended away for every session and cancelled the #767 follow-up
+  // firing ended away for every session and cancelled the #767 reply
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
   chatOn(files)
   on('ui.toast', () => ({ value: undefined }))
   on('session.id', () => ({ value: 'sess-1' }))
-  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
+  const posted: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'chat' && e.argv[2] === 'reply') posted.push(e.argv)
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
   const asked: string[] = []
   on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
   on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
-  const followUps = () => asked.filter(a => a.includes("hasn't heard back"))
   const awayAt = () => JSON.parse(files['/wb/chat/away.json'] ?? '{"at": 0}').at
   await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
-  const turn = async (id: string, command?: string) => {
+  const turn = async (id: string, answer = '') => {
     await $.turn.start({ text: '', turnId: id })
-    if (command) await $.tool.call({ tool: 'Bash', command })
-    await $.turn.complete(endTurn(id))
+    if (id === 't0') await $.tool.call({ tool: 'Bash', command: 'wb start t --spec s.md' })
+    await $.turn.complete({ ...endTurn(id), answer })
     await clock.advance(3000)
   }
-  await turn('t0', 'wb start t --spec s.md')                     // workbench mode: the chat listens
-  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'Status' }) + '\n'
-  await clock.advance(31_000)
+  const say = async (id: string) => {
+    files['/wb/chat/messages.jsonl'] = (files['/wb/chat/messages.jsonl'] ?? '') + JSON.stringify({ id, ts: 1_800_000_000, from: 'user', text: 'Status' }) + '\n'
+    await clock.advance(31_000)
+  }
+  await turn('t0')                                               // workbench mode: the chat listens
+  await say('m1')
   expect(asked.filter(a => a.startsWith('[web chat] Status'))).toHaveLength(1)
   expect(awayAt()).toBeGreaterThan(0)
   for (const origin of [{ kind: 'scheduled-trigger' }, { kind: 'plugin', name: 'other' }, { kind: 'channel', server: 'slack' },
     { kind: 'peer' }, { kind: 'task-notification' }])
     await $.prompt.submit({ text: 'check on the tasks', origin } as any)
   expect(awayAt()).toBeGreaterThan(0)                            // still away
-  await turn('t1')                                               // answered in the terminal only
-  expect(followUps()).toHaveLength(1)                            // the follow-up still comes
+  await turn('t1', 'Two tasks run.')                             // answered in the terminal only
+  expect(posted).toHaveLength(1)                                 // the answer still goes
+  await say('m2')
   await $.prompt.submit({ text: 'back now', origin: { kind: 'composer' } } as any)
   expect(awayAt()).toBe(0)                                       // the user's own Enter: back
+  await turn('t2', 'Back here.')
+  expect(posted).toHaveLength(1)                                 // and the answer to m2 reaches them here
 })
 
 test('only wb run as a command counts as delegating, read as bash reads it, not wb written in a string, a heredoc or a comment (#409, #560)', () => {

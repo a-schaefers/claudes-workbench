@@ -6334,8 +6334,12 @@ def cmd_chat(a):
                 Path(a.message).read_text() if a.message and a.message != "-" else sys.stdin.read()).strip()
         if not text:
             die("the reply is empty")
+        # the mod's: a turn's own answer for a web message it didn't reply to, cut (#1352)
+        auto = {"auto": True} if a.turn_answer else {}
+        if auto:
+            text = chat.turn_answer(text)
         try:  # what it answers (`re`, `to`): --to, else the messages this turn took (#1042)
-            chat.reply(text, a.to, **_chat_writer())
+            chat.reply(text, a.to, **auto, **_chat_writer())
         except ValueError as e:
             die(f"wb chat reply: {e}")
         print("sent to the web chat")
@@ -8178,6 +8182,9 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--by", help=argparse.SUPPRESS); s.add_argument("-n", type=int, default=10)
     # into: an agent's message delivered into a running turn it didn't open (#1175, 2026-11-24)
     s.add_argument("--how", choices=["now", "into", "queued"], default="now", help=argparse.SUPPRESS)
+    s.add_argument("--turn-answer", action="store_true", help="reply: the mod's: a turn's own answer, "
+                   "posted for a web message the turn didn't reply to (an `auto` row, cut to "
+                   f"{chat.TURN_ANSWER_MAX:,} characters)")
     s.set_defaults(f=cmd_chat)
     s = sub.add_parser("optimize", help="measure this machine for its models when the user asks: "
                        "the largest window each Ollama model keeps all on the GPU (detached; real "

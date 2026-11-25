@@ -339,7 +339,9 @@ A **message** (`messages`, `replies`, `message`):
   user's are among them; from another Claude Code session than the listening one, none: it is
   the user's),
   `to?: ["user" | agent names]` (whose those messages are, or `"user"` for a question to the
-  user, `wb chat reply --to user`; absent means the user's), `shots?`, `audio?`, `claude_pid?`
+  user, `wb chat reply --to user`; absent means the user's), `shots?`, `audio?`, `auto?: true`
+  (the turn's own answer, which the mod posted when a turn that had the message ended with no
+  reply to it: at most 4,000 characters, the whole in the terminal), `claude_pid?`
   (the Claude Code process that wrote it, on every Claude row: a reply, a screenshot, a listen),
   and on a `wb chat reply` from Claude Code `session?`, `claude_start?`, `claude_machine?` beside
   it (the Claude Code session that wrote it, so the user's answer goes back to that session).

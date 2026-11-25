@@ -744,6 +744,23 @@ def caller_listens() -> bool:
     return int(me) == parent
 
 
+# A turn's own answer, which the mod posts when a turn that had a web message ended with no reply
+# to it (`wb chat reply --turn-answer`, an `auto` row; #1352, from #1340 F). The nudge turn it
+# replaced cost Claude a turn, and a driver that doesn't follow the skill (OpenCode's, #1296)
+# would have left the phone with nothing. Cut to about a phone's screenful: the whole answer stays
+# in the terminal.
+TURN_ANSWER_MAX = 4000
+TURN_ANSWER_CUT = "… [cut: the whole answer is in the terminal]"
+
+
+def turn_answer(text: str) -> str:
+    """``text``, at most TURN_ANSWER_MAX characters: cut, it ends with TURN_ANSWER_CUT."""
+    text = text.strip()
+    if len(text) <= TURN_ANSWER_MAX:
+        return text
+    return text[:TURN_ANSWER_MAX - len(TURN_ANSWER_CUT)].rstrip() + TURN_ANSWER_CUT
+
+
 def reply(text: str, to: list[str] | None = None, **extra) -> dict:
     """Claude's reply (`wb chat reply`), with `re` (``to``, else `taken`, for the listening
     session's own calls: `caller_listens`; another's goes to the user) and `to` (whose those

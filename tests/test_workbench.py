@@ -27176,6 +27176,23 @@ class WebChat(Base):
                           "claude_machine": store.machine() or None})
         self.assertFalse({"session", "claude_pid"} & set(plain))          # no session: the listener's
 
+    def test_a_turns_own_answer_posted_by_the_mod_is_an_auto_row_cut_to_a_screenful(self):
+        # #1352 (from #1340 F): a turn that had a web message and ended with no reply gets its own
+        # answer posted by the mod, where a nudge turn asked Claude to reply and cost it a turn
+        code, r = self.call("/api/send", {"text": "Status"}, token=self.chat.token())
+        self.assertEqual(code, 200)
+        mid = r["message"]["id"]
+        run_wb("chat", "reply", "--turn-answer", f"--to={mid}", "--text=  Two tasks run; done by six.\n")
+        run_wb("chat", "reply", "--turn-answer", f"--to={mid}", "--text=" + "word " * 2000)
+        run_wb("chat", "reply", "--text", "a reply of Claude's own")
+        short, long, own = [r for r in store.read_jsonl(self.chat.chat_dir() / "messages.jsonl")[0]
+                            if r["from"] == "claude"]
+        self.assertEqual((short["text"], short["auto"], short["re"]), ("Two tasks run; done by six.", True, [mid]))
+        self.assertTrue(self.chat.TURN_ANSWER_MAX - 50 < len(long["text"]) <= self.chat.TURN_ANSWER_MAX)
+        self.assertTrue(long["text"].endswith(self.chat.TURN_ANSWER_CUT))
+        self.assertTrue(long["auto"])
+        self.assertNotIn("auto", own)
+
     # ---- other agents (#1042): their own tokens, never the user's authority ----
 
     def _agent(self, name="my-agent"):
