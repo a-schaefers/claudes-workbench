@@ -25115,6 +25115,39 @@ class Update(Base):
         self.assertIn("claude isn't on PATH", self.update())
         self.assertFalse((self.copy / "new.txt").exists())
 
+    def test_a_clone_only_opencodes_plugin_loads_updates_without_claude(self):
+        # #1321's findings 4 and 15: wb setup --opencode's clone, which Claude Code doesn't have,
+        # was refused without claude ("claude isn't on PATH"), and with claude failed on a
+        # marketplace it doesn't know after the pull. Pulled alone; Claude Code's clone as before
+        from workbench import ocplugin
+        os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self.tmp.name) / "elsewhere")
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        cfg = json.loads(conf.read_text())
+        (self.copy / "package.json").write_text(json.dumps({"name": ocplugin.PACKAGE}))  # the clone's own
+        with mock.patch.object(ocplugin, "PKG_ROOT", self.copy):
+            for plugins, loads in (([str(self.copy / "opencode-plugin")], True), ([str(self.copy)], True),
+                                   ([{"package": ocplugin.GIT_SPEC, "options": {"wb": str(self.copy / "bin/wb")}}], True),
+                                   ([ocplugin.GIT_SPEC], False)):   # OpenCode's own install: not this clone
+                conf.write_text(json.dumps({**cfg, "plugins": plugins}))
+                self.assertEqual(ocplugin.loaded_from(), loads, plugins)
+            conf.write_text(json.dumps({**cfg, "plugins": [
+                {"package": str(self.copy / "opencode-plugin"), "options": {"wb": str(self.copy / "bin/wb")}}]}))
+            only_git = Path(self.tmp.name) / "only-git"
+            only_git.mkdir()
+            (only_git / "git").symlink_to(shutil.which("git"))
+            with mock.patch.dict(os.environ, {"PATH": str(only_git)}):     # no claude
+                out = self.update()
+        self.assertTrue((self.copy / "new.txt").exists(), out)
+        self.assertIn("updated clone ", out)
+        self.assertIn("OpenCode loads its plugin from this clone", out)
+        self.assertFalse(self.calls.exists())                     # no claude step
+        known = Path(self.tmp.name) / "elsewhere/plugins/known_marketplaces.json"   # Claude Code has it too
+        known.parent.mkdir(parents=True)
+        known.write_text(json.dumps({"workbench": {"installLocation": str(self.copy)}}))
+        with mock.patch.object(ocplugin, "PKG_ROOT", self.copy):
+            self.assertIn("already up to date", self.update())
+        self.assertIn("plugin marketplace update workbench", self.calls.read_text())
+
     def test_a_clone_pulled_by_hand_says_its_mod_is_older_than_claude_codes_copy(self):
         # 2026-11-21: the owner's clone was current, pulled with git, and wb update --check said
         # "up to date" while Claude Code ran its cached mod from four days before: no splash

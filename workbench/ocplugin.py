@@ -159,6 +159,26 @@ def brought_wb(d: Path) -> Path | None:
     return (real / entry).resolve().parent.parent / "bin" / "wb"
 
 
+def loaded_from(root: Path | None = None) -> bool:
+    """Whether OpenCode's config loads the plugin from this clone (an entry naming its
+    opencode-plugin/ or the clone itself) or runs this clone's wb (an entry's options): wb update
+    then updates the clone for OpenCode (#1321's findings 4 and 15)."""
+    root = (root or PKG_ROOT).resolve()
+    try:
+        found = installs()
+    except (RuntimeError, OSError):
+        return False
+    for f in found:
+        if f["kind"] == "off":
+            continue
+        d, wb = f.get("dir"), f["options"].get("wb")
+        if d is not None and d.resolve() in (root, root / "opencode-plugin"):
+            return True
+        if isinstance(wb, str) and os.path.isabs(wb) and Path(wb).resolve() == root / "bin" / "wb":
+            return True
+    return False
+
+
 def copy_of(spec: str) -> Path | None:
     """The package OpenCode installed for the Git ``spec``: its newest generation's (not one it
     rejected), or None before OpenCode has installed it."""

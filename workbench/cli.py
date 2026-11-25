@@ -7767,6 +7767,20 @@ def _install_kind() -> str:
     return "marketplace" if any(here.is_relative_to((r / "marketplaces").resolve()) for r in _plugin_roots()) else "clone"
 
 
+def _claude_has_workbench() -> bool:
+    """Whether Claude Code has workbench: the mod installed, or its marketplace known in either
+    plugins root (known_marketplaces.json's `workbench`)."""
+    if mod_listed():
+        return True
+    for r in _plugin_roots():
+        try:
+            if "workbench" in store.read_json(r / "known_marketplaces.json", {}):
+                return True
+        except (OSError, ValueError, TypeError):
+            pass
+    return False
+
+
 def _plugin_roots() -> list[Path]:
     roots = [context.claude_home() / "plugins"]
     if cache := os.environ.get("CLAUDE_CODE_PLUGIN_CACHE_DIR"):
@@ -7860,8 +7874,12 @@ def cmd_update(a):
     # every check that can refuse comes before any task is stopped: --stop stopped every
     # session's tasks, then died on a dirty clone, a missing claude, a failed fetch, or found
     # nothing new, each task resumed in a fresh session on the same code (#775)
+    # a clone OpenCode's plugin loads, which Claude Code doesn't have (wb setup --opencode, the
+    # OpenCode path's fallback): pulled and rebased alone. Claude's steps refused it without
+    # claude, and with claude failed on a marketplace it doesn't know (#1321's findings 4 and 15)
+    claude_steps = not (kind == "clone" and ocplugin.loaded_from() and not _claude_has_workbench())
     steps = [["claude", "plugin", "marketplace", "update", "workbench"],
-             ["claude", "plugin", "update", "workbench@workbench"]]
+             ["claude", "plugin", "update", "workbench@workbench"]] if claude_steps else []
     behind = None  # a marketplace copy is one commit deep: its news can't be counted beforehand
     rebased = None  # a clone's patches on `local`, rebased onto the news (#1005)
     settled = patches.Settled(set(), [], [], [])  # what became of the pull requests wb patch send opened
@@ -7880,7 +7898,7 @@ def cmd_update(a):
     if (market := _marketplace_clone()) and (refusal := patches.marketplace_refusal(  # saved first,
             market, None if market == PKG_ROOT else PKG_ROOT)):  # then refused (#1005, #1326)
         die(refusal)
-    if not shutil.which("claude"):  # before the pull: a clone once pulled, then died (the audit)
+    if claude_steps and not shutil.which("claude"):  # before the pull: a clone once pulled, then died (the audit)
         die("claude isn't on PATH: wb update refreshes the plugin through it (run /workbench-update "
             "in Claude Code, or put claude on PATH)")
     if kind == "clone":
@@ -7980,8 +7998,9 @@ def cmd_update(a):
             n = f" ({int(gitops.git(PKG_ROOT, 'rev-list', '--count', f'{before}..{to}'))} commit(s))"
         except (gitops.GitError, ValueError):
             n = ""
-        print(f"updated {kind} {before[:7]}..{after[:7]}{n}; /reload-plugins or a restart picks up "
-              "the pane")
+        print(f"updated {kind} {before[:7]}..{after[:7]}{n}; " + ("/reload-plugins or a restart picks up "
+              "the pane" if claude_steps else "OpenCode loads its plugin from this clone: restart "
+              "OpenCode if it doesn't pick it up"))
         if rebased:
             print("\n".join([*settled.dropped, *patches.landed_lines(rebased)]))
     say_later()
