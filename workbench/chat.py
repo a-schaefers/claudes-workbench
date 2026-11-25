@@ -1384,11 +1384,13 @@ def notice_done(msg_id: str) -> bool:
     return True
 
 
-# The web chat's switch (the user, 2026-11-19): off unless they turn it on, from the pane or `wb chat
-# on`, and kept as they left it. Off, the pane shows no link and no session listens or sends it
-# their prompts; a server already running (systemd's) is left alone, its messages waiting.
+# The web chat's switch: on by default (the owner, 2026-11-24: "just turn on by default", #1281),
+# reversing 2026-11-19's off until `wb chat on`. Only `wb chat off` writes {"on": false}, and that
+# stays as the user left it. Off, the pane shows no link and no session listens or sends it their
+# prompts; a server already running (systemd's) is left alone, its messages waiting.
 def is_on() -> bool:
-    return bool((store.read_json(chat_dir() / "switch.json", None) or {}).get("on"))
+    doc = store.read_json(chat_dir() / "switch.json", None)
+    return not isinstance(doc, dict) or bool(doc.get("on", True))
 
 
 def set_on(on: bool) -> None:
@@ -1452,13 +1454,17 @@ def running(port: int) -> bool:
 START_WAIT = 10  # seconds wb chat on waits for the server it started to answer
 
 
-def wait_up(port: int, pid: int, limit: float = START_WAIT) -> bool:
+def wait_up(port: int, pid: int | None, limit: float = START_WAIT) -> bool:
     """Whether the server started as ``pid`` answers within ``limit`` seconds: it may exit at once
-    (the port taken, an address not here), and a fixed half second said started either way."""
+    (the port taken, an address not here), and a fixed half second said started either way. With
+    no pid (systemd or launchd started it), only the wait."""
     deadline = time.monotonic() + limit
     while time.monotonic() < deadline:
         if running(port):
             return True
+        if pid is None:
+            time.sleep(0.1)
+            continue
         try:
             if os.waitpid(pid, os.WNOHANG)[0]:
                 return False  # it exited: serve.log says why
@@ -1469,21 +1475,29 @@ def wait_up(port: int, pid: int, limit: float = START_WAIT) -> bool:
     return False
 
 
+# Claude Code's variables, which make a wb command Claude's (the mod's dialogs gate it). The server
+# runs commands for the user's clicks, so one started from a Claude session (`wb chat url`, the
+# mod's ensure) must never carry them: it would run wb as Claude (#1281).
+CLAUDE_VARS = ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_CODE_SESSION_ID")
+
+
 def start(port: int) -> int:
     """`wb chat serve` detached, its output in chat/serve.log, its pid in chat/serve.pid: for a
-    machine without the systemd unit, so turning the chat on is enough to reach it."""
+    machine without the systemd unit, so turning the chat on is enough to reach it. Its
+    environment has none of CLAUDE_VARS."""
     from . import cli  # only here: the server never starts one
     root = Path(__file__).resolve().parent.parent
+    env = {k: v for k, v in os.environ.items() if k not in CLAUDE_VARS}
     with open(chat_dir() / "serve.log", "a") as log:  # outlives wb, and a logout (#531)
         proc = cli.detach([sys.executable, "-X", "utf8", str(root / "bin" / "wb"), "chat", "serve",
-                           "--port", str(port)], cwd=root, stdout=log, stderr=log)
+                           "--port", str(port)], cwd=root, stdout=log, stderr=log, env=env)
     store.write_json(chat_dir() / "serve.pid", {"pid": proc.pid, "port": port, "start": _started(proc.pid)})
     return proc.pid
 
 
 # What keeps the chat up: systemd's wb-chat.service on Linux, launchd's workbench.chat agent on
 # macOS (launchd/workbench.chat.plist). Only systemd was known: on a Mac `wb chat off` and the
-# port-taken error gave systemctl advice, and revive ignored the agent (#756).
+# port-taken error gave systemctl advice, and the restart ignored the agent (#756).
 LAUNCHD_LABEL = "workbench.chat"
 
 
@@ -1516,24 +1530,71 @@ def _unit_keeps_it() -> bool:
         return False
 
 
-def revive() -> int | None:
-    """Start again the server `wb chat on` started (chat/serve.pid), when the switch is still on and
-    it is gone and nothing answers on its port; the port it started on, else None. Nothing brought
-    it back after a reboot or a crash, while the switch said on and the pane showed the link, so
-    the phone said "Can't reach the computer" for good (#449). `wb chat url` calls it, which the
-    mod runs at a session's start and every ten minutes while the chat is on. Never for a chat wb
-    didn't start, nor where wb-chat.service is enabled (systemd's to restart)."""
+def blocked_why(port: int) -> str:
+    """Why the chat can't come up on ``port``: something not this account's chat answers there."""
+    return (f"another account's chat (or another program, or a server still on a replaced token) "
+            f"answers on port {port}: wb chat on --port <free port> (and the same --port in "
+            "chat.json's service, if any)")
+
+
+def _start_unit() -> None:
+    """Have systemd or launchd start the chat it keeps (_unit_keeps_it): a stopped unit stays
+    stopped until something starts it, and a second server beside it would take its port."""
+    argv = (["launchctl", "kickstart", f"gui/{os.getuid()}/{LAUNCHD_LABEL}"] if _macos()
+            else ["systemctl", "--user", "start", "wb-chat"])
+    try:
+        subprocess.run(argv, capture_output=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        pass  # wait_up says whether it came up
+
+
+def _log_tail() -> str:
+    try:
+        lines = (chat_dir() / "serve.log").read_text(errors="replace").strip().splitlines()
+    except OSError:
+        lines = []
+    return (lines or ["(nothing)"])[-1]
+
+
+def ensure(port: int) -> dict:
+    """The chat up on ``port`` unless the user turned it off (#1281, replacing revive, #449):
+    {"url", "state", "why"?}. "off": the switch is off. "up": this account's chat answers.
+    "blocked": something else answers there (why: blocked_why). Otherwise it starts the unit that
+    keeps it (_unit_keeps_it), else a detached server (start), unless the one serve.pid names is
+    still starting, and waits START_WAIT: "started", or "failed" (why: serve.log's last line). The
+    unit only for PORT, the one it serves.
+    `wb chat url` runs it, which the mod does at session start and every minute: a reboot, a
+    crash, WSL without systemd, an install where setup never ran. One at a time (chat/ensure.lock):
+    two sessions' at once started two servers, the second failing on the port."""
     from . import models  # as in stop_started
-    rec = store.read_json(chat_dir() / "serve.pid", None) or {}
-    pid, port = rec.get("pid"), rec.get("port")
-    if not is_on() or not isinstance(port, int) or not pid:
-        return None
-    if _alive(pid) and models.runs(int(pid), "chat", "serve"):  # up, or still starting
-        return None
-    if who_answers(port) is not None or _unit_keeps_it():
-        return None
-    start(port)
-    return port
+    out = {"url": ""}
+    try:
+        out["url"] = url(port)
+        if not is_on():
+            return {**out, "state": "off"}
+        with store.locked(chat_dir() / "ensure.lock"):
+            who = who_answers(port)
+            if who == "workbench":
+                return {**out, "state": "up"}
+            if who == "other":
+                return {**out, "state": "blocked", "why": blocked_why(port)}
+            rec = store.read_json(chat_dir() / "serve.pid", None) or {}
+            pid = rec.get("pid") if isinstance(rec, dict) else None
+            unit = False
+            if not (pid and rec.get("port") == port and _alive(pid, rec.get("start"))
+                    and models.runs(int(pid), "chat", "serve")):  # else still starting: wait for it
+                if unit := port == PORT and _unit_keeps_it():  # the unit serves PORT alone
+                    _start_unit()
+                    pid = None
+                else:
+                    pid = start(port)
+            if wait_up(port, int(pid) if pid else None):
+                return {**out, "state": "started"}
+            why = (f"{service_name()} didn't answer within {START_WAIT} s ({service_hint('status')})"
+                   if unit else _log_tail())
+            return {**out, "state": "failed", "why": why}
+    except (RuntimeError, OSError) as e:  # chat.json it can't follow, a state dir it can't write
+        return {**out, "state": "failed", "why": str(e)}
 
 
 def stop_started() -> bool:

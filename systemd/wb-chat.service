@@ -6,8 +6,9 @@ Description=workbench web chat (wb chat serve): reach Claude's /workbench sessio
 StartLimitIntervalSec=0
 
 [Service]
-# localhost, or the addresses in ~/.config/workbench/chat.json (`bind`). The install's link
-# (README): bin/wb finds the package from its real path, wherever the clone is.
+# localhost, or the addresses in ~/.config/workbench/chat.json (`bind`). `wb setup` links this
+# file into ~/.config/systemd/user/ and runs `systemctl --user enable --now wb-chat` (--no-service
+# skips it); bin/wb finds the package from its real path, wherever the clone is.
 # bin/wb runs `/usr/bin/env python3` with the user manager's PATH (/usr/local/bin:/usr/bin), not
 # your shell's, and without the WB_* variables you export. If your Python 3.11+ comes from pyenv,
 # uv or conda, or you set WB_HOME or WB_CHAT_*: `systemctl --user edit wb-chat` and add

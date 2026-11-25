@@ -3563,6 +3563,14 @@ class Launchers(unittest.TestCase):
                    if l.startswith("RestartPreventExitStatus=")]
         self.assertEqual(prevent, [["78"]])
 
+    def test_the_chat_unit_and_agent_say_wb_setup_installs_them(self):
+        # #1281: wb setup installs the web app's service by default; the unit's comment sent the
+        # user to the README for a link they no longer make by hand
+        unit = (self.ROOT / "systemd" / "wb-chat.service").read_text()
+        self.assertIn("`wb setup` links this", unit)
+        self.assertNotIn("(README)", unit)
+        self.assertIn("`wb setup` installs it as a copy", (self.ROOT / "launchd" / "workbench.chat.plist").read_text())
+
     def test_no_note_says_the_chat_exits_75_since_it_re_execs_in_place(self):
         # #480 (the audit of v1.8): the unit and ARCHITECTURE.md still said chat.py exits 75 to be
         # restarted, after #200 made it re-exec in place
