@@ -3,7 +3,7 @@
 The kernel is the decisions the Claude Code mod and the OpenCode plugin must make the same way,
 written once in PureScript (`kernel/src`) and compiled into one committed ES module,
 `mod/hooks/kernel.js`. It holds pure decisions only: plain data in, plain data out. No words, no
-gates, no I/O. `scripts/kernel.py check` and `tests/test_kernel.py` hold every rule below; a
+parsing, no I/O. `scripts/kernel.py check` and `tests/test_kernel.py` hold every rule below; a
 section a test reads is named so.
 
 ## Entry test
@@ -13,7 +13,7 @@ A decision moves in only when all of these hold:
 - it is a state machine or a classifier with closed outcomes;
 - the need is cited (an issue, a drift found);
 - the host already reads its inputs;
-- it is not on the per-tool-call path.
+- it is not on the per-tool-call path, but for the gate classifier (*Rulings*).
 
 The same commit adds its row to `## Exports`, deletes what `replaces` names, and updates
 ARCHITECTURE.md's *Couplings*.
@@ -38,16 +38,24 @@ defined (`tests/test_kernel.py`).
 
 ## Rulings
 
-Final, from #1356's production plan (#1354):
+Final, from #1356's production plan (#1354), with the owner's ruling on the gates (2026-11-25):
 - **In, in this order:** Tables (#1356), Phase (#1325's M1), Owner and Away after #1309 (M2),
   Notice: extracted in TypeScript first (M3), then ported (M4).
-- **Stays in TypeScript:** the gates (on every call, string-heavy, already shared), the mode
-  (wording and `$`), the web chat's asks (#1350-1352 delete most of them), formatting (`usd`,
-  `providerWord`, `money`, `absolutePath`).
+- **The gate classifier comes in** (the owner, 2026-11-25, on #1356, after #1296's host-shape
+  decision, https://github.com/a-schaefers/workbench/issues/1296#issuecomment-7158435888): which
+  gate a shell command meets is a kernel decision, not host glue. One classifier over a parsed
+  command, its argv words plus its redirect and `tee` targets, with closed outcomes; Claude Code
+  feeds it shellparse's output, OpenCode its own scan of the command line. It is #1364's fix (a
+  command's words, never what its text mentions) and the shell gate #1314 uses. It is the one
+  decision on the per-tool-call path the entry test lets in. Parsing the command line stays in
+  each host, and so do the refusals' words and the dialog.
+- **Stays in TypeScript:** parsing a command line (shellparse's `simpleCommands`; OpenCode scans
+  its own), the mode (wording and `$`), the web chat's asks (#1350-1352 delete most of them),
+  formatting (`usd`, `providerWord`, `money`, `absolutePath`).
 - **Stays in wb:** routes, the settings offer, scout timing, the verdicts of record (`claim_ack`).
-- **Never in the kernel:** effects; parsing outside text (`simpleCommands`, `sendsOut`,
-  `routeCalls`, prompts, task.json); wording (`texts.ts`); rendering (`taskParts`); code for one
-  host only; locale; telemetry.
+- **Never in the kernel:** effects; parsing text (a command line, prompts, task.json); wording
+  (`texts.ts`, a refusal's words); rendering (`taskParts`); code for one host only; locale;
+  telemetry.
 - **Before its callers:** `phaseOf` came in with the scaffolding (#1356), with no caller yet, to
   prove the build, the checks and the goldens on a real decision. M1 gives it its callers and
   fills in its `replaces` (`register.tsx:waitsOnClaude`, `RUNNING`, `tasks.ts`'s phase checks)

@@ -7567,8 +7567,9 @@ The decisions both hosts (the Claude Code mod; the OpenCode plugin, #1296) must 
 are written once in PureScript under `kernel/src` and compiled into one committed ES module,
 `mod/hooks/kernel.js` (#1325, its boundary #1356). `kernel/BOUNDARY.md` is the contract: the
 entry test, `## Exports` (each export's module, decision, what it `replaces`, its consumers), the
-rulings (gates, wording, formatting and parsing stay in TypeScript; effects, rendering, locale and
-telemetry never go in), `## Budget` (12 exports, 65,536 bytes, 1,200 source lines and 350 per
+rulings (one gate classifier over a parsed command comes in, by the owner's ruling of 2026-11-25,
+with the parsing left to each host; wording, formatting and parsing stay in TypeScript; effects,
+rendering, locale and telemetry never go in), `## Budget` (12 exports, 65,536 bytes, 1,200 source lines and 350 per
 module with Tables aside, `core.ts` 250 lines), the wire types (`Number`, `String`, `Boolean`,
 `Array`, closed records; every field present, `-1` and `""` for none, an unknown tag the safe
 answer), the denied imports and the move protocol. Today it holds `tables`, which `register.tsx`
