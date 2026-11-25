@@ -28,8 +28,8 @@ from types import SimpleNamespace
 from urllib.parse import urlparse
 
 from . import (__version__, ask_mcp, audio, bench, chat, context, gitops, hardware, images, lane, lessons,
-               media, models, optimize, patches, progress, results, router, routes, savings, scan, skills, stats, store,
-               transcript, tuning, verify, webpush)
+               media, models, ocplugin, optimize, patches, progress, results, router, routes, savings, scan, skills,
+               stats, store, transcript, tuning, verify, webpush)
 from .watch import Watcher, wait_exit
 from . import runner
 from . import keyhole
@@ -7007,9 +7007,13 @@ def plugin_launcher(path: str | Path) -> bool:
 def cmd_setup(a):
     """Link `wb` onto PATH and /workbench into Claude Code's skills, from wherever this copy lives:
     the marketplace's clone (~/.claude/plugins/marketplaces/workbench) for users, a git clone for
-    development (2026-11-16: the plugin install copies only mod/, so these two come from here)."""
-    links = [(Path.home() / ".local/bin/wb", PKG_ROOT / "bin/wb"),
-             (context.claude_home() / "skills/workbench", PKG_ROOT / "skill/workbench")]
+    development (2026-11-16: the plugin install copies only mod/, so these two come from here).
+    With --opencode, the OpenCode path's fallback (#1311): the wb link and the OpenCode plugin's
+    entry (ocplugin.install), never Claude Code's skill link, which OpenCode would also list
+    (it scans ~/.claude/skills: #1296, row 8)."""
+    links = [(Path.home() / ".local/bin/wb", PKG_ROOT / "bin/wb")]
+    if not a.opencode:
+        links.append((context.claude_home() / "skills/workbench", PKG_ROOT / "skill/workbench"))
     bad = False
     for at, to in links:
         if at.is_symlink() and at.resolve() == to.resolve():
@@ -7027,13 +7031,23 @@ def cmd_setup(a):
         at.parent.mkdir(parents=True, exist_ok=True)
         at.symlink_to(to)
         print(f"ok  {at} → {to} " + (f"(was {was})" if was is not None else "(made)"))
+    if a.opencode:
+        try:
+            for said in ocplugin.install():
+                print(said)
+        except RuntimeError as e:  # own_config's refusal: the change, to make by hand
+            bad = True
+            print(f"BAD {e}")
     old = context.claude_home() / "skills/delegate"  # /delegate became /workbench (2026-11-17)
     if old.is_symlink() and not old.exists() and os.readlink(old).rstrip("/").endswith("skill/delegate"):
         old.unlink()
         print(f"ok  {old} removed: /delegate is now /workbench")
     bindir = str(Path.home() / ".local/bin")
     if bindir not in os.environ.get("PATH", "").split(os.pathsep):
-        if mod_listed():  # the plugin's bin/ and the mod's lookup cover Claude Code (#1190)
+        if a.opencode:  # the plugin runs the wb its options name, whatever OpenCode's PATH
+            print(f"--  {bindir} isn't on PATH: OpenCode's plugin runs {PKG_ROOT / 'bin/wb'} (its "
+                  f"options), so only your own terminal lacks it. {path_advice(claude=False)}")
+        elif mod_listed():  # the plugin's bin/ and the mod's lookup cover Claude Code (#1190)
             print(f"--  {bindir} isn't on PATH: Claude Code runs wb from the plugin's bin/ and the "
                   f"marketplace clone, so only your own terminal lacks it. {path_advice(claude=False)}")
         else:
@@ -8108,16 +8122,29 @@ def cmd_doctor(a):
               "(no-new-privileges stops snap-confine): install them another way, or turn the lane "
               'off with commands.json "paths": ["*"]')
     skill = context.claude_home() / "skills/workbench/SKILL.md"
-    line(skill.exists(), f"/workbench skill at {skill.parent}" if skill.exists() else
-         f"/workbench isn't in {skill.parent.parent}: wb setup links it")
-    elsewhere("/workbench", skill.parent, PKG_ROOT / "skill/workbench")
     listed = mod_listed()  # information only: a mod loaded another way isn't listed here
+    try:  # the OpenCode path's installs (#1311): optional, so none only informs
+        oc_lines = ocplugin.doctor_lines()
+    except RuntimeError as e:  # a config file that doesn't parse: said BAD above already
+        oc_lines = [(None, f"the OpenCode plugin: {e}")]
+    opencode_only = not listed and any(good is not None for good, _ in oc_lines)
+    if skill.exists() or not opencode_only:
+        line(skill.exists(), f"/workbench skill at {skill.parent}" if skill.exists() else
+             f"/workbench isn't in {skill.parent.parent}: wb setup links it")
+    else:  # OpenCode alone, set up by wb setup --opencode, which links no Claude Code skill
+        print(f"--  /workbench isn't in {skill.parent.parent}: Claude Code's path only (wb setup links it)")
+    elsewhere("/workbench", skill.parent, PKG_ROOT / "skill/workbench")
     stale = _mod_behind() if listed else None
     print(f"--  the Claude Code mod is installed as of {stale}, older than this clone's mod: wb update "
           "refreshes it" if stale else
           "ok  the Claude Code mod is installed (workbench@workbench)" if listed else
           "--  the Claude Code mod (the pane, the wake-ups) isn't among Claude Code's installed "
           "plugins: claude plugin install workbench@workbench, unless it loads another way")
+    for good, said in oc_lines:
+        if good is None:
+            print(f"--  {said}")
+        else:
+            line(good, said)
     try:  # how workbench is installed, its local patches, and gh when they need it (#1005)
         for row in patches.doctor_lines(PKG_ROOT, _install_kind()):
             print(row)
@@ -8833,6 +8860,9 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_trial)
     s = sub.add_parser("setup", help="link wb onto PATH and /workbench into Claude Code's skills, "
                                      "from this copy")
+    s.add_argument("--opencode", action="store_true", help="for OpenCode alone: link wb and add this "
+                   "copy's OpenCode plugin to OpenCode's config, with this wb in its options "
+                   f"(OpenCode's own install: {ocplugin.ADD})")
     # a link that points elsewhere is replaced by default (#1322); kept for old callers
     s.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
     s.set_defaults(f=cmd_setup)

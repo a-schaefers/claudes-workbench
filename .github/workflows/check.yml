@@ -144,6 +144,9 @@ jobs:
       - run: python3 scripts/kernel.py fetch
       - run: python3 scripts/kernel.py check
       - run: BUN_BE_BUN=1 opencode test opencode-plugin/test
+      # the OpenCode plugin's TypeScript, type-checked by the same Bun (`bun check`; 2.3.0's and
+      # 2.4.1's have it): its env.d.ts and host.d.ts declare what it uses, so nothing is installed (#1311)
+      - run: BUN_BE_BUN=1 opencode check -p opencode-plugin --no-pretty
 
   # The ruleset's required check (.github/rulesets/main.json): one name whatever the shards are
   # called. always(): a failed or cancelled shard must fail it, not skip it, as a skip passes.

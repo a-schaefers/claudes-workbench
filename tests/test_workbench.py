@@ -10315,6 +10315,28 @@ class ConfigLayer(Base):
         self.assertEqual((layer["small_model"], layer["autoupdate"]),
                          (store.Task("t-cfg").spec["model"], False))
 
+    def test_every_tasks_layer_removes_the_opencode_plugin_after_the_users_own_plugins(self):
+        # #1311 (the host-shape decision on #1296, 2026-11-25): the OpenCode plugin is the
+        # driver's; inside an agent's `opencode run` it would load from the user's global
+        # `plugins`. "-workbench" removes it by id, and only after every add: the layer loads
+        # after the global files, and the content (rules_env) after the layer, where a plugin entry
+        # of the user's own would add it back, so the removal is said again there, last
+        from workbench import ocplugin, runner
+        self.start("t-plug", "ok")
+        wait_phase("t-plug", {"review"})
+        layer = json.loads(runner.write_config_layer(store.Task("t-plug")).read_text())
+        self.assertEqual(layer["plugins"], [context.PLUGIN_OFF])
+        self.assertEqual(context.PLUGIN_OFF, "-workbench")
+        self.assertEqual(ocplugin.PLUGIN_ID, "workbench")
+        self.assertIn("export const ID = 'workbench'", (ocplugin.DIR / "server.ts").read_text())  # the id removed
+        self.assertIn("id: 'workbench'", (ocplugin.DIR / "tui.ts").read_text())
+        got = json.loads(runner.rules_env(layer)["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(got["plugins"], [context.PLUGIN_OFF])
+        os.environ["OPENCODE_CONFIG_CONTENT"] = json.dumps({"plugins": ["acme", ocplugin.GIT_SPEC]})
+        os.environ.pop("WB_OPENCODE_CONFIG")  # which stands alone, the user's content unread
+        got = json.loads(runner.rules_env(layer)["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(got["plugins"], ["acme", ocplugin.GIT_SPEC, context.PLUGIN_OFF])  # theirs kept, ours last
+
     def test_providers_from_a_config_opencode_wont_load_by_itself_reach_the_agent(self):
         # the 2026-11-19 audit (finding 13): wb read $WB_OPENCODE_CONFIG (or ignored the user's
         # OPENCODE_CONFIG), the agent's OpenCode got the layer in its place, and a model wb called
@@ -12205,6 +12227,20 @@ class RealOpenCodeRun(Base):
         later = [l for l in self.requests.read_text().splitlines()[seen:] if '"tools"' in l]
         self.assertTrue(later)
         self.assertEqual(later[-1].count(uri), 1)                  # in its history, once
+
+    def test_the_opencode_plugin_never_runs_inside_an_agents_round_though_the_users_others_do(self):
+        # #1311 (#1363): the driver's plugin, in the user's global `plugins`, is loaded by every
+        # `opencode run` the runner starts; the task's layer removes it by id. A canary with its
+        # id never runs its setup in the round, while another global plugin does, in the lane
+        from workbench import ocplugin
+        tmp = Path(self.tmp.name)
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        conf.write_text(json.dumps({**json.loads(conf.read_text()), "plugins": [
+            str(canary_plugin(tmp / "plugins", ocplugin.PLUGIN_ID)), str(canary_plugin(tmp / "plugins", "other"))]}))
+        task, st = self.answered([WRITE_42])
+        log = (task.dir / "runner.log").read_text()
+        self.assertEqual((task.worktree / "canary-other").read_text(), "t-run", log)  # in the agent's run
+        self.assertFalse((task.worktree / f"canary-{ocplugin.PLUGIN_ID}").exists(), log)
 
     def test_the_runner_reads_the_real_events_the_export_and_the_session(self):
         task, st = self.answered([WRITE_42])
@@ -23816,6 +23852,135 @@ class Setup(Base):
         out = self.setup(cmd="doctor")[1]
         self.assertIn("BAD wb isn't on PATH: Claude runs it by name in Bash; the mod runs ~/.local/bin/wb (wb setup's link);", out)
 
+    def opencode_home(self) -> Path:
+        """A home with nothing of Claude Code's in it, for the OpenCode path (#1311)."""
+        home = Path(self.tmp.name) / "ochome"
+        home.mkdir()
+        os.environ.update(HOME=str(home), WB_HOME=str(home / ".local/state/workbench"),
+                          FAKE_VERSION="opencode v2.4.1",
+                          PATH=os.pathsep.join([str(home / ".local/bin"), os.environ["PATH"]]))
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        return home
+
+    def plugins(self) -> list:
+        return json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text()).get("plugins")
+
+    def test_wb_setup_opencode_adds_this_copys_plugin_with_its_wb_and_paths_and_no_claude_skill(self):
+        # #1311: the OpenCode path's fallback install. OpenCode's background service starts without
+        # the user's shell, so the entry's options name this copy's bin/wb and the WB_* paths set
+        # here; Claude Code's skill link is left out, as OpenCode lists ~/.claude/skills too
+        from workbench import ocplugin
+        home = self.opencode_home()
+        code, out = self.setup("--opencode")
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"ok  the OpenCode plugin {ocplugin.DIR} added to {os.environ['WB_OPENCODE_CONFIG']} (made)", out)
+        want = {"package": str(ocplugin.DIR), "options": {"wb": str(ROOT / "bin" / "wb"), "env": {
+            v: os.environ[v] for v in store.PATH_VARS if v.startswith("WB_") and os.environ.get(v)}}}
+        self.assertEqual(self.plugins(), [want])
+        self.assertEqual(want["options"]["env"]["WB_HOME"], str(home / ".local/state/workbench"))
+        self.assertTrue((home / ".local/bin/wb").is_symlink())
+        self.assertFalse((home / ".claude/skills/workbench").exists())
+        self.assertEqual(self.setup("--opencode")[0], 0)          # again: still one entry
+        self.assertEqual(self.plugins(), [want])
+        self.assertEqual(json.loads((ocplugin.DIR / "package.json").read_text())["name"], ocplugin.PACKAGE)
+
+    def test_wb_setup_opencode_keeps_opencodes_own_git_install_and_gives_it_the_options(self):
+        # the owner's decision on #1357: OpenCode's own plugin mechanism first. An entry
+        # `opencode plugin add` wrote keeps its source, which OpenCode updates; it gains the options
+        from workbench import ocplugin
+        self.opencode_home()
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        conf.write_text(json.dumps({**json.loads(conf.read_text()), "plugins": [ocplugin.GIT_SPEC, "acme"]}))
+        code, out = self.setup("--opencode")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.plugins(), [{"package": ocplugin.GIT_SPEC, "options": ocplugin.options()}, "acme"])
+        self.assertIn(f"its options name {ROOT / 'bin' / 'wb'}", out)
+        self.assertIn("provider", json.loads(conf.read_text()))  # the rest of the file kept
+
+    def test_wb_setup_opencode_moves_an_entry_from_another_copy_to_this_one(self):
+        from workbench import ocplugin
+        self.opencode_home()
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        gone = Path(self.tmp.name) / "old-clone" / "opencode-plugin"
+        other = Path(self.tmp.name) / "acme" / "opencode-plugin"  # another project's, same name
+        other.mkdir(parents=True)
+        (other / "package.json").write_text('{"name": "acme"}')
+        conf.write_text(json.dumps({"plugins": [{"package": str(gone), "options": {"wb": "/old/wb"}},
+                                                str(other), ocplugin.PLUGIN_OFF]}))
+        code, out = self.setup("--opencode")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.plugins(), [{"package": str(ocplugin.DIR), "options": ocplugin.options()},
+                                          str(other), ocplugin.PLUGIN_OFF])
+        self.assertIn(f"(was {gone})", out)
+        self.assertIn(f'--  "{ocplugin.PLUGIN_OFF}" in {conf} turns it off: left as it is', out)
+
+    def test_wb_setup_opencode_adds_no_second_copy_beside_one_in_opencodes_plugins_directory(self):
+        # OpenCode loads a copy in its global plugins/ directory by itself; an entry beside it
+        # would be a second plugin of the same id, which OpenCode refuses as a duplicate
+        from workbench import ocplugin
+        home = self.opencode_home()
+        copy = home / "xdg" / "opencode" / "plugins" / "workbench"
+        shutil.copytree(ocplugin.DIR, copy)
+        os.environ["XDG_CONFIG_HOME"] = str(home / "xdg")
+        before = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        code, out = self.setup("--opencode")
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"--  {copy} loads the OpenCode plugin already (OpenCode's plugins directory)", out)
+        self.assertEqual(json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text()), before)
+        self.assertIn(f"ok  the OpenCode plugin {copy} (found in OpenCode's plugins directory, in "
+                      f"{copy.parent}) runs wb by name", self.setup(cmd="doctor")[1])
+
+    def test_wb_setup_opencode_refuses_a_config_with_comments_saying_the_change_to_make(self):
+        # models.own_config's refusal: a rewrite would lose the comments; the line says the entry
+        self.opencode_home()
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        conf.write_text('{\n  // mine\n  "plugins": []\n}\n')
+        code, out = self.setup("--opencode")
+        self.assertEqual(code, 1)
+        self.assertIn('has comments, which rewriting it would lose; make this change by hand: add {"package": ', out)
+        self.assertIn("opencode plugin add 'github:a-schaefers/workbench#main::path:opencode-plugin'", out)
+        self.assertEqual(conf.read_text(), '{\n  // mine\n  "plugins": []\n}\n')
+
+    def test_doctor_names_each_opencode_plugin_install_and_the_wb_it_runs(self):
+        # #1311: doctor names Claude Code's install and OpenCode's, and which wb each runs. The
+        # OpenCode plugin is optional: none only informs, and with it alone Claude Code's skill
+        # link (which wb setup --opencode never makes) isn't BAD
+        from workbench import ocplugin
+        home = self.opencode_home()
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        out = self.setup(cmd="doctor")[1]
+        self.assertIn(f"--  the OpenCode plugin (Workbench inside OpenCode) isn't installed (optional): "
+                      f"{ocplugin.ADD}, or wb setup --opencode from a clone", out)
+        self.assertIn(f"BAD /workbench isn't in {home / '.claude/skills'}: wb setup links it", out)
+        self.setup("--opencode")
+        code, out = self.setup(cmd="doctor")
+        self.assertIn(f"ok  the OpenCode plugin {ocplugin.DIR} (this clone's opencode-plugin/, in {conf}) "
+                      f"runs {ROOT / 'bin' / 'wb'}\n", out)
+        self.assertIn(f"--  /workbench isn't in {home / '.claude/skills'}: Claude Code's path only", out)
+        self.assertNotIn("BAD /workbench", out)
+        self.assertIn("--  the Claude Code mod (the pane, the wake-ups) isn't among", out)
+        cfg = json.loads(conf.read_text())
+        cfg["plugins"] = [ocplugin.GIT_SPEC, ocplugin.PLUGIN_OFF]        # OpenCode's own, no options
+        conf.write_text(json.dumps(cfg))
+        out = self.setup(cmd="doctor")[1]
+        self.assertIn(f"ok  the OpenCode plugin {ocplugin.GIT_SPEC} (OpenCode's own install, from Git, "
+                      f"in {conf}) runs wb by name from OpenCode's PATH", out)
+        self.assertIn(f'--  "{ocplugin.PLUGIN_OFF}" in {conf} turns the OpenCode plugin off', out)
+        cfg["plugins"] = [{"package": ocplugin.GIT_SPEC, "options": {"wb": "/gone/bin/wb"}}]
+        conf.write_text(json.dumps(cfg))
+        code, out = self.setup(cmd="doctor")
+        self.assertIn("BAD the OpenCode plugin github:a-schaefers/workbench#main::path:opencode-plugin "
+                      f"(OpenCode's own install, from Git, in {conf}) runs /gone/bin/wb: "
+                      "it isn't there; wb setup --opencode from your clone", out)
+        self.assertEqual(code, 1)
+        # Claude Code's side unchanged beside it: the mod listed, the skill's line as always
+        (home / ".claude/plugins").mkdir(parents=True)
+        (home / ".claude/plugins/installed_plugins.json").write_text(
+            json.dumps({"version": 2, "plugins": {"workbench@workbench": []}}))
+        out = self.setup(cmd="doctor")[1]
+        self.assertIn("ok  the Claude Code mod is installed", out)
+        self.assertIn(f"BAD /workbench isn't in {home / '.claude/skills'}: wb setup links it", out)
+
     def test_doctor_exit_code_does_not_follow_the_keep_awake_probe(self):
         # #653: `ok, said = awake_line()` reassigned doctor's verdict: a Mac (caffeinate) exited 0
         # beside "BAD opencode not found", and a healthy WSL2 install exited 1 with no BAD line
@@ -32742,6 +32907,99 @@ class SkillLearning(Base):
         self.assertNotIn("may fit", self.start("t-sug0", "ok", "--queue"))   # one shared word is chance
         for t in ("t-sug", "t-sug2", "t-sug0"):  # tearDown's rmtree raced a runner still writing (CI, 2026-11-17)
             wait_phase(t, {"review"})
+
+
+def canary_plugin(root: Path, plugin_id: str) -> Path:
+    """A plugin of id ``plugin_id`` whose setup leaves `canary-<id>` in OpenCode's project
+    directory ($PWD): proof that OpenCode ran its setup there (#1311)."""
+    d = root / f"canary-{plugin_id}"
+    d.mkdir(parents=True)
+    (d / "server.ts").write_text(
+        "import { appendFileSync } from 'node:fs'\n"
+        f"export default {{ id: {json.dumps(plugin_id)}, setup: async () => {{\n"
+        f"  appendFileSync((process.env.PWD ?? process.cwd()) + '/canary-{plugin_id}', process.env.WB_TASK ?? '-')\n"
+        "} }\n")
+    return d
+
+
+@unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+class RealOpenCodePlugin(Base):
+    """The OpenCode plugin (opencode-plugin/, #1311) in a real OpenCode server: it loads from a
+    `plugins` entry, its RPC answers with the wb its options name, and a "-workbench" after it,
+    as every task's layer has, keeps its setup from running."""
+
+    def setUp(self):
+        super().setUp()
+        self.root = Path(self.tmp.name)
+        self.conf = self.root / "xdg" / "config" / "opencode" / "opencode.json"
+        self.conf.parent.mkdir(parents=True)
+        os.environ.update({f"XDG_{d.upper()}_HOME": str(self.root / "xdg" / d)
+                           for d in ("config", "data", "state", "cache")})
+        os.environ["OPENCODE_PASSWORD"] = "pw-1311"  # a server of its own, which asks for one
+        os.environ.pop("OPENCODE_CONFIG", None)
+        self.project = self.root / "project"
+        self.project.mkdir()
+
+    def serve(self, **env) -> str:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        log = open(self.root / f"serve-{port}.log", "w")
+        self.addCleanup(log.close)
+        proc = subprocess.Popen(["opencode", "serve", "--hostname", "127.0.0.1", "--port", str(port),
+                                 "--print-logs"], cwd=self.project, stdout=log, stderr=log,
+                                env={**os.environ, "PWD": str(self.project), **env})
+        self.addCleanup(lambda: (proc.kill(), proc.wait()))
+        return f"http://127.0.0.1:{port}"
+
+    def ask(self, url: str, *argv) -> str:
+        r = subprocess.run(["opencode", *argv, "--server", url], cwd=self.project, capture_output=True,
+                           text=True, timeout=60, env={**os.environ, "PWD": str(self.project)})
+        return r.stdout + r.stderr
+
+    def listed(self, url: str, want: str, timeout: float = 60) -> str:
+        """`opencode plugin list` once it lists ``want``: activation runs after the server answers."""
+        end = time.monotonic() + timeout
+        while True:
+            out = self.ask(url, "plugin", "list")
+            if want in out or time.monotonic() > end:
+                return out
+            time.sleep(0.5)
+
+    def test_the_plugin_loads_in_a_real_opencode_and_its_rpc_names_the_wb_its_options_give(self):
+        from workbench import ocplugin
+        home = self.root / "wb-state"
+        self.conf.write_text(json.dumps({"plugins": [{"package": str(ocplugin.DIR), "options": {
+            "wb": str(ROOT / "bin" / "wb"), "env": {"WB_HOME": str(home)}}}]}))
+        # the service's environment need not have WB_HOME: the options carry it
+        url = self.serve(WB_HOME="")
+        out = self.listed(url, ocplugin.PLUGIN_ID)
+        self.assertRegex(out, rf"(?m)^{ocplugin.PLUGIN_ID}\s+local\s+{re.escape(str(ocplugin.DIR))}$", out)
+        got = json.loads(self.ask(url, "api", "POST", f"/api/rpc/{ocplugin.PLUGIN_ID}/status",
+                                  "-d", '{"input":{}}'))
+        self.assertEqual(got["output"], {"wb": str(ROOT / "bin" / "wb"), "found": True,
+                                         "from": "options", "home": str(home)})
+
+    def test_a_removal_after_the_users_global_entry_keeps_the_plugins_setup_from_running(self):
+        # the host-shape decision's risk, "-workbench loses to a later add": the user's global
+        # config adds it, the task's layer (OPENCODE_CONFIG, loaded after the global files)
+        # removes it. OpenCode imports the module (to learn its id) and never runs its setup;
+        # another plugin beside it still runs, so the server did load the user's plugins
+        from workbench import ocplugin
+        ours, other = canary_plugin(self.root, ocplugin.PLUGIN_ID), canary_plugin(self.root, "other")
+        self.conf.write_text(json.dumps({"plugins": [str(ours), str(other)]}))
+        layer = self.root / "layer.json"
+        layer.write_text(json.dumps({"plugins": [context.PLUGIN_OFF]}))
+        url = self.serve(OPENCODE_CONFIG=str(layer))
+        out = self.listed(url, "other")
+        self.assertIn("other", out)
+        self.assertNotIn(ocplugin.PLUGIN_ID, out)
+        self.assertTrue((self.project / "canary-other").exists())
+        self.assertFalse((self.project / f"canary-{ocplugin.PLUGIN_ID}").exists())
+        # the control: without the layer the same entry runs it
+        url = self.serve()
+        self.listed(url, ocplugin.PLUGIN_ID)
+        self.assertTrue((self.project / f"canary-{ocplugin.PLUGIN_ID}").exists())
 
 
 @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")

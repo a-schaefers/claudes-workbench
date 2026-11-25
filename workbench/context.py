@@ -25,7 +25,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-from . import audio, chat, gitops, hardware, images, lane, models, privacy, routes, skills, store
+from . import audio, chat, gitops, hardware, images, lane, models, ocplugin, privacy, routes, skills, store
 
 PKG_ROOT = Path(__file__).resolve().parent.parent
 HANDBOOK = PKG_ROOT / "agent" / "HANDBOOK.md"
@@ -51,6 +51,7 @@ DENIED_TOOLS = ("question", "experimental_image_generate", "execute", "subagent"
 AGENT = "wb-code"
 AGENT_OFF = {AGENT: {"disabled": True}}
 AGENT_ENTRY = {AGENT: {"mode": "primary", "description": "Workbench's agent: the task's rules alone"}}
+PLUGIN_OFF = ocplugin.PLUGIN_OFF  # "-workbench": the task layer's removal of the OpenCode plugin (#1311)
 # A command written `NAME=value cmd`: OpenCode matches each simple command's raw text, so `FOO=1
 # ls` was refused while `ls` and `env FOO=1 ls` ran. It is how CLAUDE.md files and READMEs spell
 # tests (`PYTHONPATH=. pytest`, `CI=1 npm test`), and a small model copying the project's command
@@ -3928,4 +3929,9 @@ def layer(task: store.Task) -> dict:
               for p in _both([skills.library()])]
     return {"instructions": [str(p) for p in files + ([note] if note else [])],
             "permissions": rules, "skills": [*handed, *map(str, own)],
-            "agents": json.loads(json.dumps(AGENT_OFF))}  # made afresh in the content (AGENT)
+            "agents": json.loads(json.dumps(AGENT_OFF)),  # made afresh in the content (AGENT)
+            # the OpenCode plugin is the driver's, never an agent's (#1311, 2026-11-25): removed by
+            # its id after the user's global `plugins` add it, so OpenCode never runs its setup
+            # here (it still imports the module, which does nothing at import time); restated in
+            # the content after the user's own (runner.rules_env)
+            "plugins": [PLUGIN_OFF]}
