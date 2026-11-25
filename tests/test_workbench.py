@@ -13060,6 +13060,46 @@ class Lane(Base):
             self.assertEqual(self.reads_in_lane(task, [handed / "SKILL.md", lib / "other" / "SKILL.md"]),
                              ["read", "refused"], lib)
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_git_config_included_from_outside_the_dotfiles_is_read_in_the_lane_but_a_secret_isnt(self):
+        # #1382 (2026-11-25): the user's [includeIf "gitdir:~/work/"] path = ~/work/.gitconfig,
+        # a repo's include.path beside its checkout, or GIT_CONFIG_GLOBAL in ~/dotfiles was
+        # unreadable, and every git call in the lane died "bad config line", GPU and API
+        home = self.fake_home()
+        repo = home / "work" / "proj"
+        repo.mkdir(parents=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True,  # noqa: E731
+                                      capture_output=True)
+        g("init", "-q", "-b", "main")
+        g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init")
+        (home / "work" / ".gitconfig").write_text("[user]\n\temail = me@work\n")
+        (home / "work" / "team.gitconfig").write_text("[alias]\n\tlg = log\n")
+        (home / ".gitconfig").write_text('[includeIf "gitdir:~/work/"]\n\tpath = ~/work/.gitconfig\n')
+        g("config", "include.path", str(home / "work" / "team.gitconfig"))
+        script = ("import subprocess, sys\nfor k in ('user.email', 'alias.lg'):\n"
+                  "    r = subprocess.run(['git', '-C', sys.argv[1], 'config', k], capture_output=True, text=True)\n"
+                  "    print(r.stdout.strip() or r.stderr.replace(chr(10), ' '))\n")
+        for via in ("gpu", "api"):
+            task = store.Task(f"t-inc-{via}")
+            task.dir.mkdir(parents=True)
+            (task.dir / "task.json").write_text(json.dumps({"name": task.name, "repo": str(repo), "via": via}))
+            g("worktree", "add", "-q", "-b", f"delegate/{task.name}", str(task.worktree))
+            out = subprocess.run(lane.wrap(context.writable(task), [sys.executable, "-c", script, str(task.worktree)],
+                                           context.readable(task)), capture_output=True, text=True, timeout=20)
+            self.assertEqual(out.stdout.split("\n")[:2], ["me@work", "log"], (via, out.stderr))
+        (home / "dotfiles").mkdir()
+        (home / "dotfiles" / "gitconfig").write_text("[user]\n\temail = me@dotfiles\n")
+        os.environ["GIT_CONFIG_GLOBAL"] = str(home / "dotfiles" / "gitconfig")
+        out = subprocess.run(lane.wrap(context.writable(task), [sys.executable, "-c", script, str(task.worktree)],
+                                       context.readable(task)), capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.stdout.split("\n")[:2], ["me@dotfiles", "log"], out.stderr)
+        (home / ".ssh").mkdir()                                        # a secret stays hidden
+        (home / ".ssh" / "gitconfig").write_text("[user]\n\tname = x\n")
+        g("config", "--add", "include.path", str(home / ".ssh" / "gitconfig"))
+        self.assertNotIn(str(home / ".ssh" / "gitconfig"), context.read_repo_dirs(task))
+        self.assertFalse([p for p in context.readable(task) if p.startswith(str(home / ".ssh"))])
+
     @home_outside_the_lane
     def test_toolchain_bins_user_site_and_a_repo_under_gopath_stay_out_of_the_lane(self):
         home = self.fake_home()

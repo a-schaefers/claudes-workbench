@@ -1556,26 +1556,33 @@ def _repo_parts(task: store.Task) -> tuple[set[str], set[str]]:
 
 def read_repo_dirs(task: store.Task) -> set[str]:
     """What the lane reads of the task's repo (readable): the checkout and its git directory, or
-    for an API task the git directory and the files its config includes (_config_includes),
-    which the worktree's git needs. Every file an API agent reads goes to the provider, and a
-    gitignored .env in the checkout was one `cat` away, though wb start refuses to copy it unless
-    it is named (#1091, 2026-11-23); the instruction files only the checkout holds go as copies
-    (instruction_files)."""
+    for an API task the git directory alone, and the files its git config includes
+    (_config_includes), which the worktree's git needs, but those the lane hides. Every file an
+    API agent reads goes to the provider, and a gitignored .env in the checkout was one `cat`
+    away, though wb start refuses to copy it unless it is named (#1091, 2026-11-23); the
+    instruction files only the checkout holds go as copies (instruction_files)."""
     checkout, git = _repo_parts(task)
-    return git | _config_includes(checkout, git) if task.spec.get("via") == "api" else checkout | git
+    hidden = secret_paths() | private_paths() | api_hidden(task)
+    # dropped here: readable() lists what this returns even inside a hidden directory (#1382)
+    extra = {f for f in _config_includes(checkout, git) if not any(f == h or _under(f, h) for h in hidden)}
+    return (git if task.spec.get("via") == "api" else checkout | git) | extra
 
 
 def _config_includes(checkout: set[str], git: set[str]) -> set[str]:
-    """The files the repo's own git config includes outside its git directory, real paths: with
-    `include.path = ../.gitconfig` (a tracked .gitconfig of aliases, filters or merge drivers)
-    every git call in an API lane, which reads no checkout, died "bad config line" (#1091's
-    review, 2026-11-23). git's own `--show-origin` names them, relative to the top."""
+    """The files the repo's git config reads outside its git directory, in every scope, real
+    paths: with `include.path = ../.gitconfig` (a tracked .gitconfig of aliases, filters or
+    merge drivers) every git call in an API lane, which reads no checkout, died "bad config
+    line" (#1091's review, 2026-11-23); and so did every one in any lane with the user's
+    `[includeIf "gitdir:~/work/"] path = ~/work/.gitconfig`, an include from ~/dotfiles, or
+    GIT_CONFIG_GLOBAL there (#1382, 2026-11-25). Asked in the checkout, which the agent can't
+    write (its worktree's `.git` it can, and could name any file); git's own `--show-origin`
+    names them, relative to the top."""
     found: set[str] = set()
     for top in sorted(checkout):
         if not os.path.isdir(top):
             continue
         try:
-            out = os.fsdecode(gitops.git_bytes(Path(top), "config", "--local", "--includes",
+            out = os.fsdecode(gitops.git_bytes(Path(top), "config", "--includes",
                                                "--list", "--show-origin", "-z"))
         except (gitops.GitError, OSError):
             continue
@@ -2859,8 +2866,8 @@ def tool_roots(hidden: set[str]) -> set[str]:
 
 def readable(task: store.Task) -> list[str] | None:
     """What the agent's processes may read: the system, the home directory's dotfiles but
-    SECRETS, the task's repo (an API task's: its git directory and config includes alone,
-    read_repo_dirs) and its git
+    SECRETS, the task's repo (an API task's: its git directory alone) and the files its git
+    config includes (read_repo_dirs) and its git
     directory, its lane and the programs it runs. None with the lane off. Landlock
     only allows, so this lists the entries beside each excluded one; lane.py adds the lane
     (writable) itself."""
@@ -2891,7 +2898,8 @@ def readable(task: store.Task) -> list[str] | None:
     keep |= {os.path.realpath(have[n]["path"]) for n in task.status.get("skills") or [] if n in have}
     # the git directory too, outside the repo when it is a linked worktree: git failed there
     # ("gitfile does not point to a valid repository", the 0.90 review); writable() keeps it out
-    keep |= read_repo_dirs(task)  # the checkout too, but on an API task (#1091)
+    repo = read_repo_dirs(task)  # (one git call, not two: its config's includes)
+    keep |= repo  # the checkout too, but on an API task (#1091)
     # Inside a hidden directory, only these come out: workbench itself (the marketplace install
     # puts it in ~/.claude/plugins, the 2026-11-16 audit), and of workbench's state the task's own
     # directory (its prompts, the ask server's spec) and its rules (its OpenCode config, its
@@ -2900,7 +2908,7 @@ def readable(task: store.Task) -> list[str] | None:
     # a clone in bench/runs/<run>/<task>/repo, so in every replay the agent's `git status` and
     # `git diff` failed, "gitfile does not point to a valid repository", and the agent spent its
     # round's calls on a git it took for broken (found in the probe pilot, 2026-11-21, #858)
-    own = (PKG_ROOT, task.dir, rules_dir(task), *read_repo_dirs(task))
+    own = (PKG_ROOT, task.dir, rules_dir(task), *repo)
     inner = {r for r in map(os.path.realpath, own) if r not in hidden
              and any(_under(r, h) for h in hidden)}
     only_kept = {os.path.realpath(p) for p in ONLY_KEPT}

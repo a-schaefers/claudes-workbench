@@ -2127,9 +2127,12 @@ deliberately hostile process.
   library at `WB_SKILLS=~/skills`, or the default path linked into `~/src`, was refused and
   OpenCode dropped the skill silently, #1375; the rest of the library stays out), the
   task's repo (its secrets still out; an API task's lane reads its git directory alone, `read_repo_dirs`:
-  a gitignored `.env` in the checkout was one `cat` away, #1091; and each file its `.git/config`
-  includes, `_config_includes`, from `git config --local --includes --show-origin`: with
-  `include.path = ../.gitconfig` every git call died "bad config line"), its `siblings` and git common directory (read-only),
+  a gitignored `.env` in the checkout was one `cat` away, #1091), the files its git config
+  reads outside the git directory, in any scope, but those the lane hides (`_config_includes`,
+  from `git config --includes --list --show-origin` in the checkout, never the agent's worktree:
+  with `include.path = ../.gitconfig` in an API lane, #1091, or the user's `[includeIf
+  "gitdir:~/work/"] path = ~/work/.gitconfig`, an include from `~/dotfiles` or `GIT_CONFIG_GLOBAL`
+  there, #1382, every git call died "bad config line"), its `siblings` and git common directory (read-only),
   workbench itself, the lane, the programs the agent runs (`tool_roots`: each PATH directory, its
   prefix under home or under an `ONLY_KEPT` root short of a user's home or a drive, the install a
   home `bin` link points into, the running Python, conda's by `CONDA_VARS`, #827; never `/`, home or
