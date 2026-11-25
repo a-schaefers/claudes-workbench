@@ -37943,6 +37943,7 @@ class OpenCodeDriver(Base):
         self.path = Path(os.environ["WB_ROUTES"])
         self.ok = store.home() / "route-ok.json"
         self.here = str(self.repo)
+        self.db = str(Path(self.tmp.name) / "opencode.db")   # the user's OpenCode store
 
     def route(self, *argv):
         """(exit code, stdout, stderr) of wb route ARGV."""
@@ -37966,8 +37967,12 @@ class OpenCodeDriver(Base):
 
     def beat(self, *sessions, ago=0.0, pid=None, **kw):
         """The heartbeat the plugin's server part in server ``pid`` (default: this process, a server
-        that runs) writes, listing these sessions as live."""
+        that runs) writes: these sessions, every one in its store (`store`, default the user's;
+        None: a beat that names none)."""
         pid = pid or os.getpid()
+        kw.setdefault("store", self.db)
+        if kw["store"] is None:
+            kw.pop("store")
         store.write_json(store.beat_path(pid), {
             "tool": "opencode", "pid": pid, "ts": time.time() - ago, **kw,
             "sessions": {s: {"model": "deepseek/deepseek-flash", "variant": "fast", "dir": self.here}
@@ -37987,7 +37992,8 @@ class OpenCodeDriver(Base):
         this process)."""
         from workbench import models
         pid = pid or os.getpid()
-        return {"tool": "opencode", "machine": store.machine(), "pid": pid, "start": models._started(pid)}
+        return {"tool": "opencode", "machine": store.machine(), "pid": pid, "start": models._started(pid),
+                "store": self.db, "seen": time.time() - 60}
 
     def opencode_task(self, name, session, server=None, **kw):
         return self.task(name, session=session, driver=self.server(server), **kw)
@@ -38069,8 +38075,10 @@ class OpenCodeDriver(Base):
         self.start("t-oc", "ok")
         wait_phase("t-oc", {"review"})
         spec = store.Task("t-oc").spec
+        self.assertAlmostEqual(spec["driver"].pop("seen"), time.time(), delta=60)  # wb's own server: now
         self.assertEqual((spec["session"], spec["driver"]), ("ses_a", {   # its server's pid, read by wb
-            **self.server(), "model": "deepseek/deepseek-flash", "variant": "fast"}))
+            **{k: v for k, v in self.server().items() if k != "seen"},
+            "model": "deepseek/deepseek-flash", "variant": "fast"}))
         self.assertFalse({"claude_pid", "claude_start", "claude_machine"} & set(spec))
         self.assertEqual(store.driver_of(spec), "opencode")
         code, out, _ = self.wb("status")
@@ -38087,11 +38095,13 @@ class OpenCodeDriver(Base):
 
     def test_the_heartbeat_says_whether_a_session_is_live_gone_or_unknown(self):
         d = self.server()
-        self.assertEqual(store.driver_state("ses_a"), "unknown")     # no server recorded
+        self.assertEqual(store.driver_state("ses_a"), "unknown")     # no store recorded
         self.assertEqual(store.driver_state("ses_a", d), "unknown")  # its server runs, no beat: no plugin to say
         self.beat("ses_a")
         self.assertEqual((store.driver_state("ses_a", d), store.driver_state("ses_b", d)), ("live", "gone"))
-        self.assertEqual(store.driver_state("ses_b"), "unknown")     # no server of its own: none says gone
+        self.assertEqual(store.driver_state("ses_b"), "unknown")     # no store of its own: none says gone
+        self.assertEqual(store.driver_state("ses_b", dict(d, seen=time.time() + 60)), "unknown")  # seen after the listing
+        self.assertEqual(store.driver_state("ses_b", dict(d, store=self.db + "-2")), "unknown")    # another store's beat
         self.assertEqual(store.driver_state("ses_a", dict(d, machine="machine-b")), "unknown")  # #922
         self.beat("ses_a", machine="machine-b")                       # another machine's beat: not this one's
         self.assertEqual(store.driver_state("ses_a", d), "unknown")
@@ -38099,29 +38109,64 @@ class OpenCodeDriver(Base):
         self.assertEqual(store.driver_state("ses_a", d), "unknown")   # asleep or stalled, not gone
         self.beat(ago=store.HEARTBEAT_FRESH + 5)                       # nor a stale beat without it
         self.assertEqual(store.driver_state("ses_a", d), "unknown")
-        self.beat()                                                    # a fresh one without it: deleted
+        self.beat(store=None)                                          # nor one that names no store
+        self.assertEqual(store.driver_state("ses_a", d), "unknown")
+        self.beat()                                                    # a fresh one of its store without it: deleted
         self.assertEqual(store.driver_state("ses_a", d), "gone")
         dead = subprocess.Popen(["true"]); dead.wait()
-        gone = dict(d, pid=dead.pid, start=None)
-        self.assertEqual(store.driver_state("ses_a", gone), "gone")   # its server exited, no beat left
-        self.beat("ses_a", pid=dead.pid)                              # or its beat left behind
-        self.assertEqual(store.driver_state("ses_a", gone), "gone")
-        self.beat("ses_a")                                            # the service restarted, the session
-        self.assertEqual(store.driver_state("ses_a", gone), "live")   # reopened in the new server
+        old = dict(d, pid=dead.pid, start=None)
+        for f in (store.home() / "drivers").iterdir():
+            f.unlink()
+        self.assertEqual(store.driver_state("ses_a", old), "unknown")  # its server exited: the session outlives it
+        self.beat("ses_a", pid=dead.pid)                               # its beat left behind: removed, says nothing
+        self.assertEqual(store.driver_state("ses_a", old), "unknown")
+        self.assertFalse(store.beat_path(dead.pid).exists())
+        self.beat("ses_a")                                             # the service restarted, the session
+        self.assertEqual(store.driver_state("ses_a", old), "live")    # listed by the new server
         tag = f"{(int(store.machine_tag(), 16) + 1) % 2 ** 32:08x}"
         for name, bad in ((f"opencode-{tag}-{os.getpid()}.json", None),  # another machine's file
-                          (None, {"tool": "claude", "pid": os.getpid(), "ts": time.time(), "sessions": {"ses_a": {}}}),
-                          (None, {"tool": "opencode", "pid": os.getpid(), "ts": "now", "sessions": {"ses_a": {}}}),
-                          (None, {"tool": "opencode", "pid": os.getpid(), "ts": time.time(), "sessions": ["ses_a"]}),
-                          (None, {"tool": "opencode", "pid": dead.pid, "ts": time.time(), "sessions": {"ses_a": {}}}),
+                          (None, {"tool": "claude", "pid": os.getpid(), "ts": time.time(), "sessions": {}}),
+                          (None, {"tool": "opencode", "pid": os.getpid(), "ts": "now", "sessions": {}}),
+                          (None, {"tool": "opencode", "pid": os.getpid(), "ts": time.time(), "sessions": []}),
+                          (None, {"tool": "opencode", "pid": dead.pid, "ts": time.time(), "sessions": {}}),
                           (None, [])):
             with self.subTest(name=name, bad=bad):
                 for f in (store.home() / "drivers").iterdir():
                     f.unlink()
                 store.write_json(store.home() / "drivers" / name if name else store.beat_path(os.getpid()),
-                                 bad if bad is not None else {"tool": "opencode", "pid": os.getpid(), "ts": time.time(),
-                                         "sessions": {"ses_a": {}}})
+                                 {**(bad if bad is not None else {"tool": "opencode", "pid": os.getpid(),
+                                                                  "ts": time.time(), "sessions": {}}),
+                                  "store": self.db} if not isinstance(bad, list) else bad)
                 self.assertEqual(store.driver_state("ses_a", d), "unknown")
+
+    def test_a_service_restart_whose_new_beat_lacks_a_session_never_hands_its_task_to_another(self):
+        # the #1309 third review (2026-11-25): a recorded server that exited read as gone, though
+        # an OpenCode session outlives its server; after a service restart (an update, `opencode
+        # service stop`, a reboot) the new server's beat listed only ses_b, and ses_b claimed t1,
+        # waited on its notice and adopted it. Gone needs a fresh beat of the task's store
+        old = subprocess.Popen(["sleep", "60"]); self.addCleanup(old.wait); self.addCleanup(old.kill)
+        new = subprocess.Popen(["sleep", "60"]); self.addCleanup(new.wait); self.addCleanup(new.kill)
+        b = subprocess.Popen(["sleep", "60"]); self.addCleanup(b.wait); self.addCleanup(b.kill)
+        self.beat("ses_a", "ses_b", pid=old.pid)
+        self.opencode_task("t1", "ses_a", server=old.pid, phase="review")
+        store.append_jsonl(store.home() / "notify.jsonl", {"ts": store.now(), "task": "t1", "kind": "review",
+                                                            "round": 1, "text": "t1 is ready"})
+        old.kill(); old.wait()                                         # the service stops
+        os.environ["OPENCODE_SESSION_ID"] = "ses_b"
+        for how in ({"store": None}, {"store": self.db + "-other"}):   # its new beat names no store, or another
+            with self.subTest(**how):
+                self.beat("ses_b", pid=new.pid, **how)
+                self.assertEqual(self.mine("opencode", "ses_b"), [])
+                self.assertEqual(self.wb("wait", "--timeout", "1")[0], 2)   # t1's notice stays A's
+                code, _, err = self.wb("adopt", "t1")
+                self.assertEqual(code, 1)
+                self.assertIn("t1 belongs to an OpenCode session (ses_a) not known to be gone", err)
+                code, _, err = self.wb("adopt", "t1", "--session", "sess-2", "--pid", str(b.pid))  # the mod's
+                self.assertEqual(code, 1)
+        self.assertEqual(store.Task("t1").spec["session"], "ses_a")
+        self.beat("ses_a", "ses_b", pid=new.pid)                       # the store's every session: A's too
+        self.assertEqual(store.driver_state("ses_a", store.Task("t1").spec["driver"]), "live")
+        self.assertEqual(self.mine("opencode", "ses_b"), [])
 
     def test_another_servers_beat_never_makes_a_live_sessions_task_gone(self):
         # the #1309 review (2026-11-25): one drivers/opencode.json for every server, and any other
@@ -38134,7 +38179,7 @@ class OpenCodeDriver(Base):
         self.opencode_task("t1", "ses_a", phase="review")
         store.append_jsonl(store.home() / "notify.jsonl", {"ts": store.now(), "task": "t1", "kind": "review",
                                                             "round": 1, "text": "t1 is ready"})
-        self.beat(pid=helper.pid)                                     # a helper's: fresh, no sessions
+        self.beat(pid=helper.pid, store=self.db + "-task")            # a helper's: another store, none of A's
         os.environ["OPENCODE_SESSION_ID"] = "ses_b"
         for when in ("helper running", "helper exited"):
             with self.subTest(when=when):

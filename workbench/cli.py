@@ -2727,9 +2727,9 @@ def _gone(pid, start=None, machine=None) -> bool:
 
 def _owner_gone(spec: dict) -> bool:
     """Whether the driver session a task records is gone, so the directory rule may hand it on:
-    a Claude Code task's process (`_gone`), an OpenCode task's session by its server's heartbeat
+    a Claude Code task's process (`_gone`), an OpenCode task's session by its store's heartbeat
     (store.driver_state: only `gone`, never `unknown`, #1309)."""
-    if store.driver_of(spec) == "opencode":  # against the server it recorded, never another's
+    if store.driver_of(spec) == "opencode":  # against the store it recorded, never another's
         return store.driver_state(spec.get("session"), spec.get("driver")) == "gone"
     return _gone(spec.get("claude_pid"), spec.get("claude_start"), spec.get("claude_machine"))
 

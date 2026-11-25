@@ -3571,10 +3571,13 @@ their `wb` child, and OpenCode sets it in every shell, the agents' own shells in
 and no variable of the plugin's marks a driver, and the plugin stamps nothing on a shell: a missing
 plugin can only fail to ask, never open a gate (`store.under_model`, *The gate*).
 - **task.json.** `wb start` records the session as `session`, as a Claude Code task's, and `driver`
-  `{tool: "opencode", machine, pid?, start?, model?, variant?}` (`store.driver_record`): `pid` the
-  OpenCode server whose fresh heartbeat lists the session then (none lists it: no `pid`), `start`
-  that process's start as wb reads it (`models._started`, never the beat's), the model and variant
-  from that beat. No `claude_pid`: OpenCode's shells run in a long-lived server, which outlives the
+  `{tool: "opencode", machine, pid?, start?, store?, seen?, model?, variant?}` (`store.driver_record`):
+  the session's server is the beating OpenCode server `wb` runs under (`store._lineage`: its tool's
+  child, or its shell's), whose store holds the session even before a listing caught it, `seen`
+  now; else the running server whose beat lists the session, a fresh beat first, a stale one too
+  (a busy service: the #1309 third review), `seen` that beat's `ts`. From it: `pid`, `start` that
+  process's start as wb reads it (`models._started`, never the beat's), `store` (the beat's), the
+  model and variant. No beat: none of those, and the task stays `unknown`. No `claude_pid`: OpenCode's shells run in a long-lived server, which outlives the
   session. The mod's `mine` takes no OpenCode task once it has its own session ids (`mem.ids`):
   its `session` is none the mod's process had, and with no `claude_pid` it is never gone to the
   mod. Before the mod has an id, its directory rule could match one (a check of `driver.tool` in
@@ -3587,23 +3590,25 @@ plugin can only fail to ask, never open a gate (`store.under_model`, *The gate*)
   server, and with one shared file any of them, beating its own pid and none of the service's
   sessions, made a live session's task read as gone, so another session nearby took it, its
   notice and `wb adopt` (the #1309 review, 2026-11-25; #693/#696's kind). Each beat, rewritten
-  every 30 s, is `{tool: "opencode", pid, machine?, ts, sessions: {<id>: {model?, variant?, dir?}}}`
+  every 30 s, is `{tool: "opencode", pid, machine?, store?, ts, sessions: {<id>: {model?, variant?, dir?}}}`
   (`pid` the name's; a file not of that shape, or of another machine's tag or `machine`, is left
-  out: `store.heartbeats`). **Which sessions are live** (#1296 row 3, "the session no longer
-  exists"): every session the server serves (made in it, or opened in it by a client) that still
-  exists, attached to a TUI or not, busy or idle; a session leaves the list when it is deleted,
-  never because its TUI detached. A server serving none writes `sessions: {}` (wb's helpers), and
-  the writer may remove its file on exit. `store.driver_server(session, driver)` judges a task
-  against the server it recorded, never another's: `live` (a fresh beat, `store.HEARTBEAT_FRESH`
-  120 s, of a running server lists the session: its own, or another after the service restarted
-  and the session reopened there; that beat is returned), `gone` (the recorded server's process
-  has exited, its beat left or removed; or its fresh beat leaves the session out: deleted),
-  `unknown` (no server recorded, no plugin having beaten at `wb start`; the recorded server
-  running with no beat, or a stale one: a laptop asleep, a stopped or busy service, a stalled
-  timer; another machine's task, #922's rule). Only positive evidence makes a task `gone`: never
-  another server's beat, never a stale beat of a server still running (the #1309 re-review,
-  2026-11-25: stale read as gone, and another session nearby took its tasks, their notices and
-  `wb adopt`), as `cli._gone` never says gone while Claude Code's process lives; and only `gone`
+  out; one of this machine's whose pid has exited is removed: `store.heartbeats`). **Which sessions
+  are live** (#1296 row 3, "the session no longer exists"): `store` is the server's database (an
+  absolute path: OpenCode's data dir and `opencode.db`, or `OPENCODE_DB`), and `sessions` every
+  session in it (the plugin's `session.list`, unfiltered, every page), whether any server serves
+  it or not; `ts` is when that listing began. A beat that can't list its whole store (a failed or
+  partial listing, an `OPENCODE_DB` of `:memory:`) names no `store`: its `sessions` can then say
+  live, never gone. A session outlives its server, so a server's exit says nothing of it.
+  `store.driver_server(session, driver)`: `live` (a fresh beat, `store.HEARTBEAT_FRESH` 120 s, of a
+  running server lists the session; the recorded server's beat first, else the newest, is
+  returned), `gone` (a fresh beat of a running server of the store the task recorded, its listing
+  begun after the task's `seen`, leaves the session out: deleted), `unknown` (no store recorded,
+  no plugin having beaten at `wb start`; no fresh beat of that store: a laptop asleep, a stopped,
+  restarting or busy service, a stalled timer; another machine's task, #922's rule). Only positive
+  evidence makes a task `gone`: never another store's beat, never a stale beat, never a server's
+  exit (the #1309 reviews, 2026-11-25: each read as gone, and another session nearby took its
+  tasks, their notices and `wb adopt`; the third, a service restart whose new beat didn't list the
+  session yet), as `cli._gone` never says gone while Claude Code's process lives; and only `gone`
   hands a task on (`store.driver_state`).
 - **Scope.** `cli._caller` from an OpenCode driver is the session's one id (an OpenCode session keeps
   it; no `claude-sessions/` ledger) and the directory, with the driver's kind; `cli._scope`'s
@@ -3611,7 +3616,7 @@ plugin can only fail to ask, never open a gate (`store.under_model`, *The gate*)
   host's sessions take the other's tasks by directory. `wb status`, a bare `wb wait` (a notice
   goes to the session that owns its task), `stop`/`takeover`/`resume --all` follow it.
 - **Adoption.** `wb adopt <task>` from an OpenCode driver (`cli._adopt_opencode`) takes a task
-  whose owner is gone, from either driver: an OpenCode session `gone` by its server's heartbeat, a
+  whose owner is gone, from either driver: an OpenCode session `gone` by its store's heartbeat, a
   Claude Code process gone (`cli._gone`; one with no `claude_pid` is not known gone); a user moving
   a project between the two hands its tasks over with it, and the task records the adopting
   session's server (`store.driver_record`). wb permits `wb adopt --session … --pid` of an OpenCode
@@ -7388,7 +7393,7 @@ $WB_HOME (~/.local/state/workbench)
   notify.jsonl                   notices that need Claude, all tasks (the runner writes them)
   notify.old.jsonl               handled notices older than ARCHIVE_DAYS, moved by gc (_rotate_notices); past NOTIFY_OLD_MAX its newest half kept
   claude-sessions/<pid>          "<ts> <session id>" lines after a "start <its start>" line (#787): sessions a Claude Code process ran wb in (spend.sessions, cli._caller)
-  drivers/opencode-<machine_tag>-<pid>.json   one per OpenCode server, the format the workbench plugin's server part is to write (#1309, #1316; no writer yet, wb only reads it): {tool: "opencode", pid, machine?, ts, sessions: {<id>: {model?, variant?, dir?}}}, `sessions` every session the server serves that still exists (*The heartbeat*); store.beat_path, read by store.heartbeats, store.driver_server
+  drivers/opencode-<machine_tag>-<pid>.json   one per OpenCode server, the format the workbench plugin's server part is to write (#1309, #1316; no writer yet, wb only reads it): {tool: "opencode", pid, machine?, store?, ts, sessions: {<id>: {model?, variant?, dir?}}}, `store` the server's database, `sessions` every session in it when the listing began (`ts`), no `store` when it can't list them all (*The heartbeat*); store.beat_path, read by store.heartbeats (which removes this machine's files whose pid exited), store.driver_server
   gc.json                        the last gc: {at, archived, notices, rules, runtime, scratch, starts, uploads, branches, refs, …}
   archive/<task>/                a task closed and untouched for ARCHIVE_DAYS (30), moved by gc
   coding.json                    {mode: only|ask|decide, ts}; none: decide
@@ -7620,7 +7625,7 @@ mod's `absolutePath` does the same for `WB_HOME`, `CLAUDE_CONFIG_DIR`, `WB_BIN` 
 
 **task.json** (by `wb start`; `wb next --test` rewrites `test_cmd`, `wb relocate` `repo`, `git_common`, `cwd`):
 `name`, `repo`, `git_common` (the repo's git dir, real path: `gitops.repo_of` finds the repo once `repo` is gone),
-`cwd` (where `wb start` ran), `session` (`CLAUDE_CODE_SESSION_ID`, else an OpenCode driver's `OPENCODE_SESSION_ID`, `store.opencode_session`; with `cwd`/`repo`, whose task it is), `driver` (an OpenCode driver's task only, #1309: `{tool: "opencode", machine, pid?, start?, model?, variant?}`, `store.driver_record`: the server whose heartbeat listed the session at `wb start` or `wb adopt`, its start as wb read it, the model and variant from that beat; none on a Claude Code task, whose task.json is as before 2.2: `store.driver_of`), `claude_pid` (`CLAUDE_PID`: once gone,
+`cwd` (where `wb start` ran), `session` (`CLAUDE_CODE_SESSION_ID`, else an OpenCode driver's `OPENCODE_SESSION_ID`, `store.opencode_session`; with `cwd`/`repo`, whose task it is), `driver` (an OpenCode driver's task only, #1309: `{tool: "opencode", machine, pid?, start?, store?, seen?, model?, variant?}`, `store.driver_record`: at `wb start` or `wb adopt`, the server `wb` ran under, else one whose heartbeat listed the session, its start as wb read it, its beat's `store`, when the session was last known there (`seen`), the model and variant from that beat; none on a Claude Code task, whose task.json is as before 2.2: `store.driver_of`), `claude_pid` (`CLAUDE_PID`: once gone,
 the directory rule adopts the task), `claude_start` (`models._started`, against a recycled pid), `claude_machine` (a process on another
 machine is never gone here, `cli._gone`, nor checked by the mod's `noteClaude`: two machines adopted each other's tasks,
 #922), `base` (full sha), `base_ref`, `base_branch` (where `--merge` lands: `HEAD`'s branch, or `--base` naming a local one; null on a detached HEAD, tag or commit),
@@ -8707,9 +8712,10 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **Which session a task is** → the mod's `mine` and `cli._scope`: the same rule, the home-or-`/` exception included;
   `scope()` passes every id. An OpenCode task's `session` with no `claude_pid` is what keeps the unchanged mod's `mine`
   off it (`store.driver_record`); a `driver` key on a Claude task, or a `claude_pid` on an OpenCode one, breaks that.
-- **The heartbeat** (`drivers/opencode-<machine_tag>-<pid>.json`: the name, its keys, which sessions count as live,
-  `store.HEARTBEAT_FRESH` against the plugin's beat) → the OpenCode plugin's server part, which is to write it (#1316),
-  and `store.beat_path`, `store.heartbeats`, `store.driver_server`, `store.driver_record` (task.json `driver.pid`).
+- **The heartbeat** (`drivers/opencode-<machine_tag>-<pid>.json`: the name, its keys, `store` and its `sessions` being every
+  session in it, `ts` the listing's start, `store.HEARTBEAT_FRESH` against the plugin's beat) → the OpenCode plugin's server part,
+  which is to write it (#1316; a beat naming a `store` with a partial list makes live sessions' tasks gone), and `store.beat_path`,
+  `store.heartbeats`, `store.driver_server`, `store.driver_record` (task.json `driver.store`, `seen`, `pid`).
 - **A notice kind or its text** → the mod's `HEADLINE`, `NEXT` (a `cause` `provider` notice: `PROVIDER_HEADLINE`, `OUTSIDE_NEXT`; `local_only`, `runner.LOCAL_ONLY` ↔ `LOCAL_ONLY_HEADLINE`, `OUTSIDE_REMEDY` ↔ `privacy.since_start_line`, #1232; a question notice's `PERMISSION to ` opening ↔ the mod's `PERMISSION`; any other `cause` outside `results.THE_STEP` ↔ the mod's `THE_STEP`, `OUTSIDE_HEADLINE`, `OUTSIDE_NEXT`, and its notice's text names its remedy or none, when `OUTSIDE_NEXT`'s carry on is it, #1247), both still-true rules (`_ack_all`'s, the mod's), `wb wait`.
 - **A task.json or status key** → *Files and formats*; a results key a reader uses → `results.record` and defaults for
   old rows.
