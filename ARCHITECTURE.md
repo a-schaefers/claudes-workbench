@@ -7627,7 +7627,7 @@ caller yet: #1325's M1 moves `register.tsx`'s `ACTIVE`/`NEEDS`/`RUNNING`/`waitsO
   `Tables.purs` `-merge`, all `linguist-generated`: a rebase that meets one stops with `wb
   update`'s message; take either side, then `build`.
 
-Left for after the web app lands (#1356's plan): `core.ts`'s callers in `register.tsx` and
+Not done yet (#1356's plan; the web app they waited on shipped in 2.1): `core.ts`'s callers in `register.tsx` and
 `tasks.ts` (K4) and the Python twins, the seeded property tests and `kernel.py props` (K5), the
 macOS nightly's `check` and `opencode.yml`'s goldens (K6), `spend.WAKE_OPENING` in Tables, the
 `wb patch upstream` test line, CONTRIBUTING.md (K7).
