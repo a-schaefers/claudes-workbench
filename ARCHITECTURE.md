@@ -6688,7 +6688,9 @@ letters' case swapped, so WSL2's drvfs (`/mnt/c`, folding under an ext4 root tha
 swapped, `/MNT/C/uSERS/…`, isn't there, and a key in another case than the cwd's missed (#1217). wb accept reads it
 the same way. A key's `copy` paths are read from its directory as a `--copy` from there
 (`context.repo_conf_dir`, `cli._copy_path`): a package key's `node_modules` is the package's (#1346: the root's
-was copied, and every round ran without the package's). `--setup`,
+was copied, and every round ran without the package's). Its directory is measured as it matched: by path only when
+the spot is at or under the key, else inside the key's own worktree (a key on `.claude/worktrees/x` is the root's,
+not three parts deep: #1346's review). `--setup`,
 `--setup-timeout` (a positive whole number) replace; `--copy`, `--sibling` add; `merge` is `wb accept --merge`'s way
 (`context.MERGE_AS`; `--merge-as` overrides). `local_only` is read for the whole repo, not the spot: any entry at or
 under the repo's top that says `true` holds for every task of it (`context.repo_entries` `whole`: by real path and

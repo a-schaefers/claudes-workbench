@@ -6867,6 +6867,22 @@ class WorktreeSetup(Base):
             run_wb("start", "t-nodist", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo")
         self.assertIn('commands.json "repos" copy dist: no packages/app/dist in', err.getvalue())
         self.assertNotIn("--copy", err.getvalue())
+        # #1346's review (2026-11-24): a key on a linked worktree nested in the repo (Claude
+        # Code's .claude/worktrees/x) is the main checkout's root by git dir, but its depth was
+        # measured from the main top, three parts: the package's node_modules was read for the root's
+        wtx = self.repo / ".claude" / "worktrees" / "x"
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "-q", str(wtx)],
+                       check=True, capture_output=True)
+        conf.write_text(json.dumps({"repos": {str(wtx): {"copy": ["node_modules"]}}}))
+        self.assertEqual(context.repo_entries(self.repo, "packages/app")[0][0], str(wtx))
+        self.assertEqual(context.repo_conf_dir(self.repo, "packages/app"), "")
+        root_copy = types.SimpleNamespace(copy=["../../node_modules"], sibling=None)
+        self.assertEqual(cli._standing_gap(context.repo_conf(self.repo, "packages/app"), root_copy,
+                                           "DeepInfra", self.repo, "packages/app"), "")
+        why = cli._standing_gap(context.repo_conf(self.repo, "packages/app"), named, "DeepInfra",
+                                self.repo, "packages/app")
+        self.assertIn("copies node_modules into every task", why)
+        self.assertIn("--copy ../../node_modules", why)
 
     def test_a_repo_on_a_windows_drive_gets_a_note(self):
         # #201's finding 30: git is much slower on WSL's /mnt/c, and wb checks the worktree every step

@@ -1199,8 +1199,13 @@ def repo_conf_dir(repo: str | Path, sub: str | None = None) -> str:
     fold = store.folds_case(repo)
     real = lambda p: os.path.realpath(p).lower() if fold else os.path.realpath(p)  # noqa: E731
     kp, top = Path(entries[0][0]).expanduser(), real(repo)
-    kr = real(kp)
-    if kr == top or kr.startswith(top.rstrip(os.sep) + os.sep):
+    kr, spot = real(kp), real(Path(repo) / sub)
+    # by path only when the spot is at or under the key, repo_entries' `near`: a key on a linked
+    # worktree under the top (.claude/worktrees/x) matches the main checkout by git dir, and its
+    # depth from the top, three parts, read the root key's node_modules as the package's (#1346's
+    # review, 2026-11-24)
+    if (kr == top or kr.startswith(top.rstrip(os.sep) + os.sep)) \
+            and (spot == kr or spot.startswith(kr.rstrip(os.sep) + os.sep)):
         rel = os.path.relpath(kr, top)
     else:  # by git dir: the key's path inside its own worktree
         try:
