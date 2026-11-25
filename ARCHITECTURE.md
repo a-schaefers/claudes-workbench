@@ -5222,8 +5222,10 @@ effect's hit came 0.8-1.45 s in (the skill says to trim the lead); ACE-Step peak
 The user chooses (`wb coding`, #92; the pane's Settings row, #93) in `$WB_HOME/coding.json` `{mode,
 ts}`, read fresh, default `decide`. The agent always gets the first shot.
 - **Let Claude decide** (`decide`): nothing added, nothing gated.
-- **Ask me first** (`ask`): after helping the agent, Claude may ask for one named edit; the user's
-  yes is recorded with `wb coding allow <task> --edit "…" --said "<their words>"`.
+- **Ask me first** (`ask`): Claude's first edit in a task's worktree asks the user in a dialog (`Let Claude edit
+  <task>'s code now?`, `Allow`/`Don't`, through `consent`, so the web chat's page while away); `Allow` runs `wb coding
+  allow <task> --said="Allow, in the workbench dialog"` and lets it through, `Don't` denies (`NOT_EDITED`). `--edit`
+  (default `its code`) and `--said` are optional (#1322: Claude once had to ask in chat and record both itself).
 - **Only when I say** (`only`): Claude reports the blocker and keeps the work until the user says.
 
 An allowance (`tasks/<task>/coding.json` `{allowed: [{edit, said, ts, used, when?, started?,
@@ -6176,9 +6178,10 @@ Code's own `<CLAUDE_CONFIG_DIR or ~/.claude>/plugins/` (and `CLAUDE_CODE_PLUGIN_
 (the review of #1005). The upstream: `patches.json`'s `upstream`, else `UPSTREAM` (`a-schaefers/claudes-workbench`).
 A GitHub MCP tool (`GITHUB_MCP`, `mcp__…github…__<name>`) not named `get_`/`list_`/`search_` whose input names the
 upstream, or a repository of its name (a fork), asks the same (`mcpAimsUpstream`), its input shown up to `MCP_CHARS`
-4000. With the user away on the web chat (`away`) it denies at once, as the dialog would wait at an empty terminal
-(`NOT_SENT_AWAY`: `workbench: not sent: the user is away: it waits until they are at the terminal. …`). Else `$.ui.ask`
-(`askToSend`): `Claude wants to send this to GitHub (<slug>), publicly: <the command>`, the whole line up to
+4000. The question (`askToSend`, through `consent`): at the terminal `$.ui.ask`; with the user away on the web chat
+(`away`) the same question on the chat page (`askOnChat`, `--tool=workbench --kind=permission --here`: their away
+setting never answers it, and an agent's token can't, wb chat serve's 403), its allow the yes; a chat that can't take it
+(wb failing) leaves the terminal's dialog (#1322: it was refused until they were back). The text: `Claude wants to send this to GitHub (<slug>), publicly: <the command>`, the whole line up to
 `SHOW_CHARS` 600, a longer one as the outward command in full, then the line's start (`shownCommand`: cut from the
 start, a long line hid the gh command and its body); for `wb patch send` its `--title` and the body file's first
 `BODY_LINES` 20 lines (`sendQuestion`, `sendArgs`: the last `--title`/`--body-file` given, as argparse takes them; wb
@@ -6203,10 +6206,9 @@ local-only, or not, by the session's repo, #1125). A `cd` the mod can't resolve 
 `-`) and a directory that isn't there (`mkdir x && cd x`) leave the session's: a missing one failed the dry run to
 spawn and the call skipped the dialog. A route's runs in the session's (it reads no directory).
 A dry run that exits non-zero (wb refuses the change itself), prints nothing gated (a GPU model pin, a GPU `--model`, the Agents switch to GPU)
-or can't run lets the call through: wb refuses a gated change under Claude Code without the approval anyway. Else, away
-on the web chat it denies at once (`NOT_CHANGED_AWAY`: `workbench: not changed: the user is away: say in the web chat
-what you'd change; they approve it in the dialog once back.`); at the terminal `$.ui.ask(<the dry run's change line>,
-['Allow', "Don't"])`. `Allow` writes `$WB_HOME/route-ok.json` (`{...approval, at}`, the dry run's `approval`: `{argv,
+or can't run lets the call through: wb refuses a gated change under Claude Code without the approval anyway. Else
+`consent(<the dry run's change line>, 'Allow', "Don't")`: at the terminal `$.ui.ask`, away on the web chat the chat
+page's ask, as the send's above. `Allow` writes `$WB_HOME/route-ok.json` (`{...approval, at}`, the dry run's `approval`: `{argv,
 change}` or `{start: {task, model}, change}`) and lets the call through; anything else denies (`NOT_CHANGED`:
 `workbench: not changed: the user did not approve it in the dialog. Tell them it was not changed; ask again only if
 they ask for it.`). Refused without asking (`ROUTE_OWN`, `run wb route (or wb start --model) as a command of its own`):
@@ -6225,8 +6227,10 @@ the default and no cap is set (nothing to tell), `routes.json can't be read (wb 
 <summary>. <ROUTES_RULE>` whenever it differs from what was said (the first time `ROUTES_NOTE`), so any change, the
 dialog's, the pane's, a terminal's or a hand edit, reaches the conversation as one row. `prompt.context` adds the
 `workbench-routes` block (delegating, or a task open, as `wanted` reads) once any role has an API model (a GPU pin alone
-adds none): `Roles (the user's, wb route): <summary>. Day cap $5. Never pass --model for an API model or change a role without the user's yes (the mod asks them in a dialog);
-recommend only.` (`No day cap yet.` without one). The `/workbench` skill's text carries it the same way (`unsaid`).
+adds none): `Roles (the user's, wb route): <summary>. Day cap $5. A role change or a \`wb start --model <API id>\`
+shows the user a dialog with the exact change, and their click is the yes. Run it when it is the right call.`
+(`ROUTES_RULE`; `No day cap yet.` without one; it once ended `recommend only`, and Claude asked in chat for the yes the
+dialog then asked for again, #1322). The `/workbench` skill's text carries it the same way (`unsaid`).
 
 **Tests** (`register.test.tsx`: an in-memory filesystem, a fake `wb events`; `statHeld`, a path
 whose stat comes back late). Not covered: check-in
@@ -6318,7 +6322,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb splash [on\|off]` | | `$WB_HOME/splash.json`: the pane's opening (#963). |
 | `wb experiment [<name> [on\|off]]` | | *Experiments* (`cli.experiment_lines`, `context.EXPERIMENTS`, use over `USE_RECENT` 5 rows, `cli.use_recent`); sets `experiments.json` for later tasks; old probe levels `context.OLD_LEVELS` mean on; `; on is recommended` while `context.PROBE_RECOMMENDED`. |
 | `wb workflows [on\|off]` | | *Dynamic workflows* (#1041): `$WB_HOME/workflows.json`; off by default. |
-| `wb coding [only\|ask\|decide]` | `allow <task> --edit "…" --said "…" [--when "…"]`, `used <task> --did "…"` | *Claude coding*: the mode and allowances; `allow` records the user's yes for one task until it goes back to the agent; `used` what Claude changed (exit 1 with none). |
+| `wb coding [only\|ask\|decide]` | `allow <task> [--edit "…"] [--said "…"] [--when "…"]`, `used <task> --did "…"` | *Claude coding*: the mode and allowances; `allow` records the user's yes for one task until it goes back to the agent; `used` what Claude changed (exit 1 with none). |
 | `wb shot <task>` | `--capture CMD` (required), `--viewport WxH` (1280x800), `--files PATH…`, `--timeout N` (300), `--chat`, `--setup` | *Screenshots of the base and the candidate*. |
 | `wb takeover [<task> \| --all]` | `--repo DIR`, `--session ID`, `--all-sessions`, `--user` (the user's ask, recorded) | Stops the runner: phase `review`, status `taken_over`, `hands_off_at` unless set (a file Claude then writes under an ignored path is refused at accept until `--include`, #1179). Refuses (exit 1) an unfinished checkout (the hand-back remade it and lost Claude's edits, #655). Outside "Let Claude decide" needs the user's yes, else exit 3. `--all` takes the rest past a refusal (#601), skipping unready checkouts (#918). Scope (`_scope`, for stop, resume, wait, status too): from Claude Code's Bash without `--repo`/`--session`, the caller's (`cli._caller`: every id in `claude-sessions/<CLAUDE_PID>`, and its directory, #693), else `--all-sessions` or a terminal: every session's; by `session` id wherever it ran, or by directory (`repo`, package, `cwd`; real paths, case-folded where the file system is; never home or `/`) when no `session`, no `--session` given, or its `claude_pid` is gone (#695); a task with neither key is everyone's. Others: `left alone (other sessions'): …`. |
 | `wb verify <task>` | `--test CMD`, `--files PATH…`, `--expect TEXT`, `--timeout N` (300), `--setup` | *Verifying a fix against the base*; refused while the agent runs. SIGTERM/SIGHUP end it cleanly (`cli._ends_cleanly`, #372), like `wb image`, `wb audio`, `wb bench add`, `wb bench self` (`media.run_group`: the child's whole process group killed, since killing only a wrapper left its worker holding the GPU, #589). |

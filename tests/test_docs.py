@@ -118,9 +118,9 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertIn("`wb route all gpu\\|api\\|both`", ref)
         self.assertIn("--role", (ROOT / "skill/workbench/SKILL.md").read_text())
 
-    def test_the_skills_first_run_sets_api_roles_in_one_route_and_never_picks_an_api_model(self):
+    def test_the_skills_first_run_sets_api_roles_in_one_route_and_the_api_model_is_the_users_click(self):
         # #1024: the API-only first run is one question and one wb route with its cap; an API
-        # model is the user's choice, never Claude's
+        # model is the user's choice, their click in the mod's dialog (#1322: no more "recommend only")
         skill = (ROOT / "skill/workbench/SKILL.md").read_text()
         first = skill[skill.index("- **First run**"):skill.index("- **Claude coding**")]
         self.assertIn("wb route", first)
@@ -133,7 +133,7 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertIn('"no GPU model', (ROOT / "workbench/router.py").read_text())
         self.assertNotIn("`wb route` and `wb setup` say so", first)
         choosing = section(skill, "## 1. Pick the role; the user's roles pick the model")
-        self.assertIn("never pass `--model <api id>`", " ".join(choosing.split()))
+        self.assertIn("An API model is the user's choice", " ".join(choosing.split()))
 
     def test_the_skill_lets_a_user_named_api_model_through_wb_starts_dialog(self):
         # #1132 (2026-11-23): "never pass `--model <api id>`" read as a ban even on the user's own
@@ -142,8 +142,8 @@ class DocsMatchTheCode(unittest.TestCase):
         skill = (ROOT / "skill/workbench/SKILL.md").read_text()
         self.assertIn("[--model <id>]", skill[:skill.index("\n---", 4)])
         choosing = " ".join(section(skill, "## 1. Pick the role; the user's roles pick the model").split())
-        self.assertIn("never pass `--model <api id>` unless the user named that id for this task (the mod's "
-                      'dialog then asks them, and a "not changed" means no)', choosing)
+        self.assertIn("`--model <api id>` and `wb route` show them the exact change in the mod's dialog, and "
+                      'their click is the yes (a "not changed" means no)', choosing)
         self.assertTrue(callable(cli.start_gate))
         self.assertIn("calls.push(['--start'", (ROOT / "mod/hooks/register.tsx").read_text())
 
@@ -255,9 +255,9 @@ class DocsFor20(unittest.TestCase):
         said = "\n".join(line for line in pane.splitlines() if not line.lstrip().startswith("//"))
         for words in ("local agent", "work stays local"):
             self.assertNotIn(words, said)
-        # "stays local" lost only its last word: the ask rule still says where the work stays, as
-        # wb takeover's refusal does (cli._coding_gate)
-        self.assertIn("Unanswered, the work stays with the agent.", said)
+        # "stays local" lost only its last word: wb takeover's refusal still says where the work
+        # stays (cli._coding_gate); the mod's ask rule went to a dialog at the edit (#1322)
+        self.assertIn("Unanswered, the work stays with the agent", (ROOT / "workbench/cli.py").read_text())
 
     def test_wb_coding_and_the_pane_say_the_same_sentence_for_each_choice(self):
         # *Couplings*: cli.CODING → the mod's CODING_STOPS (#1027 changed both in one word)

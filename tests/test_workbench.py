@@ -19851,12 +19851,12 @@ class Coding(Base):
         self.assertIn("took over t", run_wb("takeover", "t"))
 
     def test_ask_me_first_takes_the_users_yes_for_that_task_until_it_goes_back_to_the_agent(self):
-        self.assertIn("Ask me first. Claude can ask", run_wb("coding", "ask"))
+        self.assertIn("Ask me first. Claude asks you in a dialog", run_wb("coding", "ask"))
         self.start("t", "ok")
         wait_phase("t", {"review"})
         code, err = self.refused("takeover", "t")
         self.assertEqual(code, 3)
-        self.assertIn("ask the user, naming the exact edit", err)
+        self.assertIn("ask the user; on their yes, wb coding allow t", err)
         out = run_wb("coding", "allow", "t", "--edit", "divide the reading by 1000 in power.py",
                      "--said", "yes, fix it")
         self.assertIn("Claude may make this edit", out)
@@ -19869,6 +19869,16 @@ class Coding(Base):
         self.assertEqual(self.refused("takeover", "t")[0], 3)        # the next edit asks again
         rows = json.loads((store.Task("t").dir / "coding.json").read_text())["allowed"]
         self.assertTrue(rows[0]["used"])                             # a retry remembers it
+
+    def test_a_plain_yes_needs_no_edit_nor_words_as_the_mods_dialog_records_it(self):
+        # #1322: the mod's dialog at Claude's edit records the yes; --edit and --said were required
+        run_wb("coding", "ask")
+        self.start("t", "ok")
+        wait_phase("t", {"review"})
+        self.assertIn("Claude may make this edit until it hands the task back: its code",
+                      run_wb("coding", "allow", "t"))
+        self.assertIn("t: allowed until handed back: its code\n", run_wb("coding") + "\n")
+        self.assertIn("took over t", run_wb("takeover", "t"))
 
     def test_a_one_task_exception_waits_for_its_condition_and_is_spent_once_used(self):
         # #94: "if the next try still gets the units wrong, Claude may fix the conversion once"

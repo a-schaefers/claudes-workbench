@@ -79,8 +79,8 @@ record (tasks, accepted, paid a task, rate-limited rounds) and the week's spend 
 (`≈`: at the catalog's prices, an estimate; `wb model price` only if the user finds it off their bill),
 and a count of each connected provider's models. Look up the same providers' newer or cheaper
 models and any price change on the providers' own pages, and whether thinking would pay for
-`significant` from its record. Recommend in chat only: changing a role is the user's, in the
-dialog (on their words, `wb route`) or the pane's Settings tab. Name a free model only when the
+`significant` from its record. A role change (`wb route`) shows the user the exact change in
+the mod's dialog, and their click is the yes. Name a free model only when the
 user asks, with what it does with the code (some keep or train on it).
 
 **The audio and image engines** are in the check too, when `wb scout` lists any (speech, sound

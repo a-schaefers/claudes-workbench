@@ -149,7 +149,7 @@ def need(name: str) -> store.Task:
 # agent gets the first shot in all three; Claude can always review and advise. Without a saved
 # choice it is "decide", which is how Claude worked before there was a choice.
 CODING = {"only": ("Only when I say", "You tell Claude when to write code."),
-          "ask": ("Ask me first", "Claude can ask to make a specific fix and waits for your yes."),
+          "ask": ("Ask me first", "Claude asks you in a dialog before it edits code in a task."),
           "decide": ("Let Claude decide",
                      "Claude uses its judgment to guide the agent or make a fix itself.")}
 
@@ -3044,9 +3044,8 @@ def _coding_gate(task: store.Task, user: bool) -> None:
     if mode == "decide" or user or coding_allowed(task):
         return
     if mode == "ask":
-        die(f"Claude coding is {CODING['ask'][0]}: ask the user, naming the exact edit; on their "
-            f"yes, wb coding allow {task.name} --edit \"…\" --said \"<their words>\", then take it "
-            "over. Unanswered, the work stays with the agent", 3)
+        die(f"Claude coding is {CODING['ask'][0]}: ask the user; on their yes, wb coding allow "
+            f"{task.name}, then take it over. Unanswered, the work stays with the agent", 3)
     die(f"Claude coding is {CODING['only'][0]}: report the blocker to the user and keep the work "
         f"with the agent (wb feedback, a smaller step); they say when Claude writes code "
         f"(then wb coding allow {task.name} --edit \"…\" --said \"<their words>\")", 3)
@@ -3726,13 +3725,15 @@ def cmd_coding(a):
               "--message <file> (what you changed, and what it checks next)")
         return
     if a.what == "allow":
-        if not a.task or not a.edit or not a.said:
-            die("wb coding allow <task> --edit \"<the exact edit>\" --said \"<the user's words>\" "
+        # --edit and --said optional (#1322): the mod's dialog records a plain yes for the task
+        if not a.task:
+            die("wb coding allow <task> [--edit \"<the edit>\"] [--said \"<the user's words>\"] "
                 "[--when \"<the condition>\"]")
         task = need(a.task)
         if task.status.get("phase") in store.CLOSED:
             die(f"{a.task} is {task.status.get('phase')}")
-        _allow(task, a.edit, a.said, a.when)
+        a.edit = a.edit or "its code"
+        _allow(task, a.edit, a.said or "", a.when)
         print(f"{a.task}: Claude may make this edit " + (f"once, if {a.when}" if a.when else
               "until it hands the task back") + f": {a.edit}")
         return
@@ -3745,7 +3746,8 @@ def cmd_coding(a):
     for t in store.all_tasks():
         if t.status.get("phase") not in store.CLOSED and (x := coding_allowed(t)):
             print(f"  {t.name}: " + (f"allowed once, if {x['when']}: " if x.get("when") else
-                  "allowed until handed back: ") + f"{x['edit']} (the user: \"{x['said']}\")")
+                  "allowed until handed back: ") + f"{x['edit']}"
+                  + (f" (the user: \"{x['said']}\")" if x.get("said") else ""))
 
 
 # Dynamic workflows (#1041): whether Claude may split one request into several tasks that run at

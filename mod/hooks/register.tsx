@@ -635,12 +635,10 @@ const HAND_BACK = 'workbench-quit-and-hand-back-claude'
 // Claude coding (#92), the user's choice (`wb coding`): when Claude may write code for a delegated
 // task. "decide" (no saved choice) adds nothing, so Claude works as before there was a choice.
 const CODING_RULES: Record<string, string> = {
-  ask: 'Claude coding is "Ask me first" (the user\'s choice; `wb coding` shows it). The agent ' +
-    'gets the first shot; review and advise as always. Before you write any of a task\'s code (an ' +
-    'edit in its worktree, `wb takeover`), help the agent first (feedback, a smaller step). If it ' +
-    'still falls short, ask the user for one specific edit, naming the task and the exact change, ' +
-    'and wait: only their yes allows it. Record it with `wb coding allow <task> --edit "…" --said ' +
-    '"<their words>"`; it lasts until you hand the task back. Unanswered, the work stays with the agent.',
+  // the mod's dialog asks at the edit (codingRefusal): Claude once had to ask in chat, wait, and
+  // record the yes itself with --edit and --said (#1322)
+  ask: 'Claude coding is "Ask me first" (the user\'s choice; `wb coding` shows it): your edits in a ' +
+    'task\'s worktree ask the user first.',
   only: 'Claude coding is "Only when I say" (the user\'s choice; `wb coding` shows it). Never write ' +
     'a task\'s code yourself, not a one-line fix in review nor `wb takeover`: guide the agent, ' +
     'and when it stays stuck, report the blocker to the user and keep the work with the agent. ' +
@@ -673,7 +671,7 @@ async function workflowsMode($: any): Promise<string> {
 // how it was at the start (the user, 2026-11-19)
 const CODING_STOPS: [string, string, string][] = [
   ['only', 'Only when I say', 'You tell Claude when to write code.'],
-  ['ask', 'Ask me first', 'Claude can ask to make a specific fix and waits for your yes.'],
+  ['ask', 'Ask me first', 'Claude asks you in a dialog before it edits code in a task.'],
   ['decide', 'Let Claude decide (default)', 'Claude uses its judgment to guide the agent or make a fix itself.'],
 ]
 
@@ -1344,8 +1342,6 @@ const SEND_ASK = 'Send it'
 // dialog of its own pleading for the yes the user had just refused (the review of #1005)
 const NOT_SENT = 'workbench: not sent: the user did not approve it in the dialog. Tell them it was not ' +
   'sent; try again only if they ask for it.'
-const NOT_SENT_AWAY = 'workbench: not sent: the user is away: it waits until they are at the terminal. ' +
-  'Tell them in the web chat what it would send; they approve it in the dialog once back.'
 const NOT_SHOWN = (why: string) => `workbench: not sent: the dialog can't show what it sends (${why}). Run ` +
   'wb patch send as a command of its own, its --title written out and --body-file naming the file, so the ' +
   'user sees both.'
@@ -1611,10 +1607,22 @@ async function gateConf($: any): Promise<Gate> {
 
 // The dialog, or its refusal: '' lets the call through on exactly 'Send it'
 async function askToSend($: any, question: string): Promise<string> {
-  // the dialog would wait at an empty terminal
-  if (await away($, await read($, chat))) return NOT_SENT_AWAY
-  const said = await $.ui.ask(question, [SEND_ASK, "Don't send"]).catch(() => '')
-  return said === SEND_ASK ? '' : NOT_SENT
+  return (await consent($, question, SEND_ASK, "Don't send")) ? '' : NOT_SENT
+}
+
+// A consent dialog (a send upstream, a role change, an edit of a task's code): the user's yes, one
+// click on the device they are using. At the terminal the engine's dialog; with the user away on the
+// web chat the same question there (askOnChat), answered only by the user (an agent's token can't
+// answer an ask: wb chat serve's 403) and never by their away setting (`--here`). It was refused
+// while they were away ("they approve it in the dialog once back"), a round trip for nothing (#1322).
+// A question the chat can't take (wb failing) comes up at the terminal, as a permission's does.
+async function consent($: any, question: string, yes: string, no: string): Promise<boolean> {
+  if (await away($, await read($, chat))) {
+    const o: AskFor = { consent: true, text: question }
+    const d = await askOnChat($, 'workbench', {}, undefined, o)
+    if (!o.unposted) return d?.behavior === 'allow'
+  }
+  return (await $.ui.ask(question, [yes, no]).catch(() => '')) === yes
 }
 
 const realPath = async ($: any, p: string): Promise<string> =>
@@ -1689,8 +1697,6 @@ const ROUTE_ALLOW = 'Allow'
 const ROLES = ['significant', 'trivial', 'writing'] as const
 const NOT_CHANGED = 'workbench: not changed: the user did not approve it in the dialog. Tell them it was not ' +
   'changed; ask again only if they ask for it.'
-const NOT_CHANGED_AWAY = 'workbench: not changed: the user is away: say in the web chat what you\'d change; ' +
-  'they approve it in the dialog once back.'
 const ROUTE_OWN = 'workbench: not changed: run wb route (or wb start --model) as a command of its own, one ' +
   'to a call, so the dialog shows exactly what changes.'
 const ROUTE_OK_OWN = `workbench: not run: ${ROUTE_OK} is the mod's dialog's to write, on the user's yes; ` +
@@ -1699,8 +1705,10 @@ const ROUTES_EDIT = 'workbench: not edited: the roles change only through wb rou
   'mod\'s dialog (wb route shows them).'
 // text a shell or an interpreter runs, not parsed as commands: a route change hidden in it is refused
 const ROUTE_TEXT = /(?:\bwb|-m\s*workbench[\w.]*)\s+(?:route\b|start\b[^\n]*\s--m)/i
-const ROUTES_RULE = 'Never pass --model for an API model or change a role without the user\'s yes (the mod ' +
-  'asks them in a dialog); recommend only.'
+// Said with the roles (#1322): it once ended "recommend only", and Claude asked in chat for a yes the
+// dialog then asked for again
+const ROUTES_RULE = 'A role change or a `wb start --model <API id>` shows the user a dialog with the exact ' +
+  'change, and their click is the yes. Run it when it is the right call.'
 
 // The simple commands a line runs, `bash -c '…'` and `eval`'s inside, as upstreamAim reads them
 function runsIn(src: string): string[][] {
@@ -1876,9 +1884,7 @@ async function routeRefusal($: any, e: Row): Promise<string> {
     return '' // no dry run: wb itself refuses the change under Claude Code without route-ok.json
   }
   if (!q?.gate || typeof q.change !== 'string' || !q.change) return '' // a GPU model pin, or nothing
-  if (await away($, await read($, chat))) return NOT_CHANGED_AWAY // the dialog would wait at an empty terminal
-  const said = await $.ui.ask(q.change, [ROUTE_ALLOW, "Don't"]).catch(() => '')
-  if (said !== ROUTE_ALLOW) return NOT_CHANGED
+  if (!(await consent($, q.change, ROUTE_ALLOW, "Don't"))) return NOT_CHANGED
   await $.fs.write(`${mem.root}/${ROUTE_OK}`, JSON.stringify({ ...q.approval, at: (await $.clock.now()) / 1000 })).catch(() => {})
   return ''
 }
@@ -2183,7 +2189,13 @@ async function noteCall($: any, tasks: string[], row: Row, at: number, name: str
 }
 
 // Why Claude may not make this edit now, or '': outside a task's worktree, under "decide", or
-// with the user's yes recorded for that task and not yet handed back (`wb coding allow`).
+// with the user's yes recorded for that task and not yet handed back (`wb coding allow`). Under
+// "Ask me first" the first such edit asks the user in a dialog (consent), and Allow records the
+// allowance, as the roles' dialog writes route-ok.json (#1322).
+const CODING_ALLOW = 'Allow'
+const CODING_SAID = 'Allow, in the workbench dialog'
+const NOT_EDITED = (task: string) => `workbench: not edited: the user said no to editing ${task}'s code. ` +
+  'Keep the work with the agent; ask again only if they ask for it.'
 async function codingRefusal($: any, path: string): Promise<string> {
   const task = taskOfPath(path, mem.root)
   if (!task) return ''
@@ -2201,6 +2213,11 @@ async function codingRefusal($: any, path: string): Promise<string> {
       open.started = (await $.clock.now()) / 1000
       await $.fs.write(file, JSON.stringify({ allowed })).catch(() => {})
     }
+    return ''
+  }
+  if (mode === 'ask') {
+    if (!(await consent($, `Let Claude edit ${task}'s code now?`, CODING_ALLOW, "Don't"))) return NOT_EDITED(task)
+    await runWb($, ['coding', 'allow', task, `--said=${CODING_SAID}`], 15_000)
     return ''
   }
   return `workbench: not edited: ${task} is the agent's. ${CODING_RULES[mode]}`
@@ -3467,11 +3484,12 @@ async function askOnChat($: any, tool: string, input: unknown, signal?: AbortSig
   const kind = KIND[tool] ?? 'permission'
   const i = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
   // `--opt=value`: a value starting with `-` was read as a flag (#535)
-  const args = ['chat', 'ask', `--tool=${tool}`, `--kind=${kind}`, `--text=${kind === 'permission' ? askText(input) : ''}`]
+  const args = ['chat', 'ask', `--tool=${tool}`, `--kind=${kind}`, `--text=${kind === 'permission' ? (o.text ?? askText(input)) : ''}`]
   // this session's `wb events` process: once it's gone wb expires the ask, so a card left by a
   // crashed or closed session doesn't stay open for good, and pushes don't show it (#538)
   if (mem.eventsPid) args.push(`--pid=${mem.eventsPid}`)
   args.push(...askForArgs(o))
+  if (o.consent && !args.includes('--here')) args.push('--here') // the user's own click, never their away setting
   if (kind === 'question') args.push(`--detail=${JSON.stringify({ questions: askQuestions(i.questions) })}`)
   // what the call is for, as Claude described it (Bash's description): the card leads with it
   if (kind === 'permission' && typeof i.description === 'string' && i.description.trim())
@@ -3491,6 +3509,7 @@ async function askOnChat($: any, tool: string, input: unknown, signal?: AbortSig
     const what = kind === 'plan' ? 'a plan' : kind === 'question' ? 'a question' : 'a permission'
     await runWb($, ['chat', 'reply', `--text=Claude is waiting on ${what} in the terminal: it couldn't be shown here.`, '--to=user'], 15_000)
     $.ui.toast(`workbench: ${what} couldn't go to the web chat (${brief(posted.out)}): answer it here`)
+    o.unposted = true
     return undefined
   }
   if (state === 'allow') return { behavior: 'allow' as const }  // their setting: go ahead while away
@@ -3511,7 +3530,9 @@ async function askOnChat($: any, tool: string, input: unknown, signal?: AbortSig
 // the terminal's dialog stands too, and whichever answers first settles it. An agent's token
 // can't answer them (wb chat serve's 403), and the page says whose request it is ("for <name>").
 // At the terminal the user's away setting ("Let Claude go ahead") doesn't answer it (`--here`).
-type AskFor = { for?: string[]; here?: boolean; agent?: string }
+// `consent`: one of the mod's own consent dialogs (consent), its question `text`; `unposted` set when
+// the chat couldn't take it.
+type AskFor = { for?: string[]; here?: boolean; agent?: string; consent?: boolean; text?: string; unposted?: boolean }
 
 // The agents whose message the running turn took: given now (grace 0), their turn not yet ended
 export function agentsFor(turn: Map<string, number>, agents: Map<string, string>): string[] {
