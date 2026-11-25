@@ -2079,7 +2079,7 @@ def merge_lock(repo: Path, say=None):
 
 def merge(repo: Path, task: str, into: str | None = None, base: str | None = None,
           *, tip: str | None = None, how: str = "merge", sign: bool = True,
-          started: Callable[[int], None] | None = None) -> str:
+          started: Callable[[int], None] | None = None, message: str | None = None) -> str:
     """Merge the task's branch into ``into`` (the branch it started from: task.json's
     base_branch), which the main checkout must have out, clean and not mid-merge; a conflict, an
     ignored file in the way, or a merge git left unfinished is backed out, leaving the repo as it
@@ -2094,7 +2094,9 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
     interruption (a SIGTERM, raised by the caller) backs the checkout out to where it was: a
     pinentry nobody answered hung accept until it was killed, leaving MERGE_HEAD and the staged
     merge in the user's checkout, and --no-sign's merge still signed (#420, the audit of 1.8).
-    ``started(pid)``: the pid of each git that may sign, once it runs, for clear_killed_merge."""
+    ``started(pid)``: the pid of each git that may sign, once it runs, for clear_killed_merge.
+    ``message``: the squash's, in place of the tip's: wb accept's when it made no commit, the tip
+    a step's, whose subject and `(step N)` trailer stood for the whole task on main (#1393)."""
     dirty, submodules = _uncommitted(repo)
     if dirty:
         raise GitError(f"{repo} has uncommitted changes ({_listed(dirty)}); merge "
@@ -2164,7 +2166,8 @@ def merge(repo: Path, task: str, into: str | None = None, base: str | None = Non
     try:
         if how == "squash":  # no MERGE_HEAD to abort: backed out with reset --merge
             git(repo, *NO_HOOKS, "merge", "--squash", "--ff", "--no-commit", source)
-            committing([*NO_HOOKS, "commit", "--no-verify", "-q", "-C", source])
+            committing([*NO_HOOKS, "commit", "--no-verify", "-q",
+                        *(("--cleanup=verbatim", "-m", message) if message else ("-C", source))])
         elif how == "ff":
             committing([*NO_HOOKS, "merge", "--ff-only", "--no-squash", source])
         else:
@@ -2239,14 +2242,16 @@ def merge_message(repo: Path, task: str, tip: str) -> str:
     return said or f"Merge branch '{b}'"
 
 
-def squashed(repo: Path, into: str, before: str | None, tip: str) -> str | None:
+def squashed(repo: Path, into: str, before: str | None, tip: str,
+             message: str | None = None) -> str | None:
     """The squash of ``tip`` an earlier accept made on ``into``, which stood at ``before`` then:
     a commit of the branch's first-parent line whose parent is ``before`` and whose message is
-    the tip's (commit -C). A squash never holds the tip, so a retry interrupted between it and
-    its record squashed again and recorded it refused (#432, the audit of 1.8)."""
+    the tip's (commit -C), or ``message`` when merge was given one (#1393). A squash never holds
+    the tip, so a retry interrupted between it and its record squashed again and recorded it
+    refused (#432, the audit of 1.8)."""
     if not before:
         return None
-    want = git(repo, "log", "-1", "--format=%B", tip, check=False).strip()
+    want = message.strip() if message else git(repo, "log", "-1", "--format=%B", tip, check=False).strip()
     log = git(repo, "log", "--first-parent", "--format=%H %P%x00%B%x01",
               f"{before}..refs/heads/{into}", check=False)
     for entry in log.split("\x01"):

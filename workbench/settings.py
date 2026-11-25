@@ -355,7 +355,7 @@ def _build() -> dict:
     # pane's Settings tab did until #1322 dropped them (recording always on; wb stats set and wb
     # savings --price keep the rest): a `recording` row read a key stats.settings() no longer has
     prog = progress.settings()
-    after = prog.get("after") if isinstance(prog.get("after"), (int, float)) and not isinstance(prog.get("after"), bool) else 0
+    after = progress.user_after(prog) or 0
     out.append(_choice("progress", "shared", "Progress checks", _progress_stops(after),
                        "on" if prog.get("on") is True else "off"))
 

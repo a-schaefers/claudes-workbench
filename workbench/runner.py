@@ -4572,8 +4572,11 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
         lines.append("NOTE: " + gitops.ignored_line(ignored))
     edits, new = gitops.submodule_check(task.worktree)
     lines += [f"NOTE: {e}" for e in edits + new]  # #419, #889
+    # after wb next, the step's, as the files list, review_diff and wb diff are: the task's total
+    # from its base read as a second file the diff "(all of it)" never showed (#1404, 2026-11-25)
+    base = "HEAD" if st.get("steps", 1) > 1 else spec["base"]
     try:  # a git that refuses the diff costs the report a line, not the task (#493)
-        stat = gitops.diff(task.worktree, spec["base"], stat=True).splitlines()
+        stat = gitops.diff(task.worktree, base, stat=True).splitlines()
     except gitops.GitError as e:
         stat = [f"(no diffstat: {(str(e).splitlines() or [''])[0][:300]})"]
     if stat:

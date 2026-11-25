@@ -393,6 +393,14 @@ class Base(unittest.TestCase):
                           WB_CHAT_TOKEN=str(tmp / "chat-token"),
                           WB_CHAT_CONFIG=str(tmp / "chat.json"))
         (tmp / "opencode.json").write_text(json.dumps(OPENCODE_CONFIG))
+        # the suite's own cgroup is no service's: CI's runner is one (a .service), so after #1407
+        # every runner, chat and bench driver went through systemd-run's scope there, and tests
+        # that kill or wait on them failed (#1420's CI, 2026-11-25); LogoutStops patches its own
+        cgroup = mock.patch.object(cli, "SELF_CGROUP", tmp / "no-cgroup")
+        cgroup.start()
+        self.addCleanup(cgroup.stop)
+        cli.runner_scope.cache_clear()
+        self.addCleanup(cli.runner_scope.cache_clear)
         runner.models._AUTH.clear()  # OpenCode's stored keys, per process (models.auth_key)
         runner.models._STORED.clear()
         runner.models._KEYS.clear()
@@ -8341,6 +8349,44 @@ class Context(Base):
             run_wb("discard", "t-n")
         self.assertTrue(subprocess.run(["git", "-C", str(self.repo), "rev-parse", "delegate/t-n"],
                                        capture_output=True).returncode == 0)
+
+    def test_an_accept_whose_last_step_changed_nothing_squashes_under_its_own_message_or_says_m_went_unused(self):
+        # #1393 (2026-11-25): the squash on main took step 1's subject and `(step 1)` trailer for
+        # the whole task, and a plain accept dropped -m and its provenance line without a word
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Check the answer again.\n")
+        main = lambda: subprocess.run(["git", "-C", str(self.repo), "log", "-1", "--format=%B", "main"],  # noqa
+                                      capture_output=True, text=True, check=True).stdout
+        for name, merge in (("t-pl", ()), ("t-sq", ("--merge-as", "squash"))):  # main unmoved first
+            self.start(name, "ok", "--test", TEST_CMD)
+            wait_phase(name, {"review"})
+            run_wb("next", name, "--spec", str(step2), "-m", "feat: step one")
+            wait_phase(name, {"review"})                       # step 2 rewrote the same answer
+            out = run_wb("accept", name, "-m", "feat: both steps", *merge)
+            if merge:
+                self.assertNotIn("-m unused", out)
+                body = main()
+                self.assertTrue(body.startswith("feat: both steps\n"), body)
+                self.assertIn(f"\nWorkbench-Task: {name}\n", body)
+                self.assertNotIn("(step", body)
+                self.assertIn("Delegated to ", body)
+            else:
+                self.assertRegex(out, r"\(-m unused: nothing changed since [0-9a-f]+\)")
+
+    def test_after_wb_next_the_review_notices_diffstat_is_the_steps_as_wb_diff_says(self):
+        # #1404 (2026-11-25): the stat line was the task's since its base, "2 files changed" beside
+        # a files list and a diff "(all of it)" that held step 2's one file
+        self.start("t-nst", "ok", "--test", TEST_CMD)
+        wait_phase("t-nst", {"review"})
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Now also add lib/helper.py.\n")
+        os.environ["FAKE_SCENARIO"] = "patch"
+        run_wb("next", "t-nst", "--spec", str(step2), "-m", "feat: the answer")
+        st = wait_phase("t-nst", {"review"})
+        report = store.Task("t-nst").round_dir(st["round"]).joinpath("summary.md").read_text()
+        stat = run_wb("diff", "t-nst", "--stat").strip().splitlines()[-1].strip()
+        self.assertEqual(stat, "1 file changed, 1 insertion(+)")
+        self.assertEqual(report.rstrip().splitlines()[-1].strip(), stat)
 
     def test_discarding_a_stuck_later_step_keeps_the_steps_wb_next_committed(self):
         # #494 (the audit of 1.90): steps landed with wb next, a later one stuck, and the
@@ -22136,6 +22182,21 @@ class Progress(Base):
         self.assertIn("past its typical length", run_wb("progress", "on", "--after", "0"))
         self.assertNotIn("after", progress.settings())
 
+    def test_an_after_that_is_negative_or_not_finite_is_refused_and_a_stored_one_is_ignored(self):
+        # #1401 (2026-11-25): -5 and inf said "on" and no check ever came; NaN crashed every round
+        run_wb("progress", "on", "--after", "30")
+        before = progress.path().read_text()
+        for bad in ("-5", "nan", "inf"):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), mock.patch("sys.stderr", err):
+                run_wb("progress", "on", "--after", bad)
+            self.assertIn("a positive number, or 0 to clear it", err.getvalue())
+            self.assertEqual(progress.path().read_text(), before)
+        progress.path().write_text('{"on": true, "after": -5}')   # written by hand
+        self.assertEqual(progress.typical({"size": "trivial"}),
+                         (float(progress.DEFAULT_MIN["trivial"]), "default"))
+        self.assertIn("past its typical length", run_wb("progress"))
+
     def test_a_check_recommends_and_a_steer_that_answers_it_is_learned_from(self):
         run_wb("coding", "only")
         self.assertIn("on: a task past 0.05 min of active work", run_wb("progress", "on", "--after", "0.05"))
@@ -24586,6 +24647,37 @@ class Projects(Base):
         run_wb("start", "t-ok", "--spec", str(self.spec), "--repo", str(self.repo), "--no-claude-md")
         self.assertTrue(store.Task("t-ok").exists)
 
+    def test_a_repo_whose_instructions_are_a_committed_agents_md_starts_and_its_agent_gets_it(self):
+        # #1394 (2026-11-25): OpenCode's and Codex's convention was refused as an agent that
+        # "would start blind", though the layer hands it AGENTS.md
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        g("mv", "CLAUDE.md", "AGENTS.md")
+        g("commit", "-qm", "the OpenCode way")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = run_wb("start", "t-ag", "--spec", str(self.spec), "--repo", str(self.repo), "--model", "mimo")
+        self.assertIn("note: AGENTS.md and no CLAUDE.md: the agent gets it; for Claude Code, wb init", out)
+        wait_phase("t-ag", {"review"})
+        task = store.Task("t-ag")
+        self.assertIn(task.worktree / "AGENTS.md", context.instruction_files(task)[0])
+
+    def test_a_package_with_only_its_own_agents_md_is_the_tasks_package(self):
+        # #1394 (2026-11-25): only a CLAUDE.md made a package, so from packages/app with only an
+        # AGENTS.md the agent, the setup and the tests ran at the root
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        app = self.repo / "packages" / "app"
+        app.mkdir(parents=True)
+        (app / "AGENTS.md").write_text("# app\nThe app package.\n")
+        g("add", "-A")
+        g("commit", "-qm", "a package with its AGENTS.md")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = run_wb("start", "t-pag", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo")
+        self.assertIn("package: packages/app", out)
+        self.assertIn("note: packages/app has AGENTS.md and no CLAUDE.md: the agent gets it", out)
+        wait_phase("t-pag", {"review"})
+        task = store.Task("t-pag")
+        self.assertEqual(task.spec["subdir"], "packages/app")
+        self.assertIn(task.worktree / "packages" / "app" / "AGENTS.md", context.instruction_files(task)[0])
+
     def refused(self, *argv) -> str:
         err = io.StringIO()
         with self.assertRaises(SystemExit), redirect_stderr(err):
@@ -26183,6 +26275,19 @@ class LogoutStops(Base):
             said = cli.logout_stops()
         self.assertEqual(len(said), 1)
         self.assertIn("loginctl enable-linger", said[0])
+
+    def test_what_a_service_starts_gets_a_scope_of_its_own_so_a_restart_of_the_unit_spares_it(self):
+        # #1407 (2026-11-25): the web app's Measure now ran wb optimize in wb-chat.service's
+        # cgroup, and wb setup's restart of the unit killed the run; a terminal's survived
+        from workbench import cli
+        scope = ("systemd-run", "--user", "--scope", "--quiet", "--collect")
+        cgroup = Path(self.tmp.name) / "cgroup"
+        for where, want in (("user@1000.service/app.slice/wb-chat.service", scope),
+                            ("user@1000.service/app.slice/app-konsole.scope/tab(1).scope", ())):
+            cgroup.write_text(f"0::/user.slice/user-1000.slice/{where}\n")
+            with mock.patch.object(cli, "SELF_CGROUP", cgroup), \
+                    self.fake_loginctl("yes", "no", scope="ok"):  # logind kills no session
+                self.assertEqual(cli.runner_scope(), want, where)
 
     def test_kill_user_processes_is_named_as_killing_running_tasks_without_a_scope_for_them(self):
         from workbench import cli
@@ -33818,6 +33923,27 @@ class ApiDiscovery(Base):
         os.environ["WB_FAKE_API"] = "acme=nokey"                  # OpenCode can't authenticate it
         self.assertNotIn("acme/coder-flash", self.models.hosted_doc(fresh=True)["models"])
 
+    def test_a_coding_plans_zero_priced_models_read_as_a_plan_not_free(self):
+        # #1396 (2026-11-25): a paid coding plan lists every price 0, so wb called it free ("may
+        # keep or train on your code") and its start line said "today $0 of $5", never plan usage
+        from workbench import meter, results
+        zero = [{"input": 0, "output": 0, "cache": {"read": 0, "write": 0}}]
+        self.catalog(DISCOVERY_CATALOG + [api_entry("zai-coding-plan", "glm-9", cost=zero),
+                                          api_entry("kimi-code-plan-global", "k-9", cost=zero)],
+                     DISCOVERY_AUTH + [key_row("zai-coding-plan", "Z.AI Coding Plan", STORED)])
+        m = self.models.hosted()["zai-coding-plan/glm-9"]
+        self.assertEqual((m.free, m.key, meter.is_plan(m)), (False, "stored", True))
+        self.assertTrue(meter.tail(m).startswith(" · plan usage ("), meter.tail(m))
+        k = self.models.hosted()["kimi-code-plan-global/k-9"]   # a regional id goes on past it
+        self.assertEqual((k.free, k.key), (False, ""))         # no key stored: never keyless
+        self.assertEqual(results._plan(k.id), "kimi-code-plan-global")
+        self.assertEqual(run_wb("models", "--api", "glm-9").splitlines()[0],
+                         "zai-coding-plan/glm-9  200K · plan usage")
+        out = run_wb("models")
+        self.assertIn("kimi-code-plan-global 1, ", out)
+        self.assertIn("zai-coding-plan 1\n", out)
+        self.assertIn(f"opencode 1 (free: {cli.FREE_NOTE})", out)   # OpenCode's free one still is
+
     def test_discover_never_returns_an_api_model(self):
         # passes before #1013 too: it pins the rule that keeps the GPU paths on the GPU
         cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
@@ -34833,6 +34959,31 @@ class Routes(Base):
         self.assertIn("note: 3 tasks run on acme's API (a1, a2, a3); t-api waits as queued for a slot", out)
         self.assertFalse(self.ok.exists())
         self.assertEqual(store.Task("t-api").spec["said"], "asked for, approved in the dialog")
+
+    def test_the_start_dry_run_gives_no_dialog_for_a_taken_name_a_missing_spec_or_a_repo_with_no_claude_md(self):
+        # #1395 (2026-11-25): the dry run behind the dialog gated each of these, wb start then
+        # refused it, and the corrected retry asked the user again
+        store.write_json(self.path, {"v": 1, "day_usd": 5, "roles": {}})
+        os.environ["CLAUDECODE"] = "1"
+        m = runner.models.resolve("acme/coder-flash")
+        store.Task("t-old").dir.mkdir(parents=True)
+        store.write_json(store.Task("t-old").dir / "task.json", {"repo": str(self.repo)})
+        bare = Path(self.tmp.name) / "bare"
+        subprocess.run(["git", "init", "-q", str(bare)], check=True)
+        subprocess.run(["git", "-C", str(bare), "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+        spec, missing = str(self.spec), str(Path(self.tmp.name) / "nope.md")
+        for name, spec_at, repo, says in (
+                ("t-old", spec, self.repo, "task 't-old' exists"),
+                ("BAD_NAME", spec, self.repo, "a task name is lowercase letters"),
+                ("t-nospec", missing, self.repo, "nope.md"),
+                ("t-bare", spec, bare, "has no CLAUDE.md")):
+            argv = [name, "--spec", spec_at, "--repo", str(repo), "--model", m.id]
+            code, out, err = self.route("--dry-run", "--json", "--start", *argv)
+            self.assertEqual((code, out), (1, ""), name)
+            self.assertIn(says, err, name)
+            self.assertFalse(self.ok.exists())
+        self.assertTrue(self.dry("--start", "t-new", "--spec", spec, "--repo", str(self.repo),
+                                 "--model", m.id)["gate"])
 
     def test_wb_try_on_an_api_model_is_refused_plainly_before_any_sample_is_made(self):
         # 2026-11-23 review: it reached start_gate as try-<n>, a name no dialog could show, and
@@ -40715,9 +40866,10 @@ class Writing(Base):
         self.assertEqual([r for r in store.results() if r.get("task") == "t-row"][-1]["role"], "writing")
 
     def record(self, model, role, outcome, n, minutes=2.0):
-        for _ in range(n):
+        for _ in range(n):  # a trivial task's size is trivial, as wb start records it (#1398)
             store.append_jsonl(store.home() / "results.jsonl", {
-                "model": model, "size": "significant", "outcome": outcome, "ran": True,
+                "model": model, "size": "trivial" if role == "trivial" else "significant",
+                "outcome": outcome, "ran": True,
                 "minutes": minutes, "active_minutes": minutes, **({"role": role} if role else {})})
 
     def test_wb_start_routes_a_writing_task_on_its_writing_record_and_a_coding_one_on_its_coding_one(self):
@@ -40776,6 +40928,21 @@ class Writing(Base):
         self.assertIn("(typically 40m)", transcript.clock_line(task))
         self.assertEqual(runner.typical_now(task)["typical"]["min"], 40.0)
         self.assertIn("(typically 40m)", runner.checkin_text(task, 1, {"texts": []}, since=0, active=0))
+
+    def test_a_coding_task_is_filed_under_the_size_it_was_routed_at_not_its_role(self):
+        # #1398 (2026-11-25): `--role trivial --size significant` ran on the significant pick, and
+        # its result moved the model's trivial record, never the significant one choose() reads
+        from workbench import router, tuning
+        m = cli.models.resolve("mimo")
+        for role, size in (("trivial", "significant"), ("significant", "trivial"),
+                           ("writing", "significant")):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": m.id, "role": role, "size": size, "outcome": "accepted", "ran": True,
+                "active_minutes": 10})
+        self.assertEqual([tuning.work(r) for r in store.results()], ["significant", "trivial", "writing"])
+        self.assertEqual(router.score(m, "significant").tries, 1)
+        self.assertEqual(router.score(m, "trivial").tries, 1)
+        self.assertEqual(router.score(m, "significant", role="writing").tries, 1)
 
     def test_prose_steps_leave_the_coding_rows_speed_reward_alone(self):
         # the review of #1025: tuning.record set each row's speed against the median step of its

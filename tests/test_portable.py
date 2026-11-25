@@ -156,6 +156,7 @@ class Real(unittest.TestCase):
         models._AUTH.clear()
         models._EMULATORS.clear()
         models._DOWN.clear()
+        models._STAYED.clear()
         models._KEYS.clear()
         models._STORED.clear()
         models._FACTS.clear()
@@ -2705,6 +2706,31 @@ class Remote(unittest.TestCase):
             code, out = self.wb("model", "add", "lmstudio/qwen-coder", "--url", new, "--context", "32768")
             self.assertEqual(code, 0, out)                                # the same provider
             self.assertEqual(list(json.loads(cfg_path.read_text())["provider"]), ["lmstudio"])
+
+    def test_a_server_still_answering_where_it_was_is_probed_once_while_windows_host_stays(self):
+        # #1397 (2026-11-25): under mirrored networking or a VPN windows_host() is another address
+        # for good, and every discover() probed both, a second each where that one drops packets
+        before = self.lmstudio_at("127.0.0.2")
+        port = before.server_address[1]
+        self.config({}, {"lmstudio": {"local": True}})
+        old = f"http://127.0.0.2:{port}/v1"
+        with mock.patch.object(models, "windows_host", return_value="127.0.0.2"):
+            code, out = self.wb("model", "add", "lmstudio/qwen-coder", "--url", old, "--context", "32768")
+        self.assertEqual(code, 0, out)
+        probed = []
+        real = models._answers
+
+        def answers(base):
+            probed.append(base)
+            return real(base)
+        with mock.patch.object(models, "_answers", answers):
+            with mock.patch.object(models, "windows_host", return_value="127.0.0.3"):
+                for _ in range(3):
+                    self.assertEqual(models.discover()["lmstudio/qwen-coder"].base_url, old)
+            self.assertEqual(len(probed), 2, probed)                  # the first discover() only
+            with mock.patch.object(models, "windows_host", return_value="127.0.0.4"):
+                models.discover()
+            self.assertEqual(len(probed), 4, probed)                  # a new address: asked again
 
     def test_wb_model_add_at_windows_new_address_before_any_discovery_moves_the_provider_there(self):
         # #1167 (2026-11-24): wb model add runs add_server_provider before discovery, so after a

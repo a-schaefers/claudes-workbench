@@ -284,14 +284,31 @@ def kills_sessions() -> bool:
         _loginctl("show-session", "-p", "KillUserProcesses", "--value") == "yes"
 
 
+SELF_CGROUP = Path("/proc/self/cgroup")
+
+
+def in_service() -> bool:
+    """This process runs in a systemd service's own cgroup (wb-chat.service's, for every wb the
+    web app runs), which a stop or restart of the unit kills whole. A terminal's is a scope; an
+    INVOCATION_ID alone says nothing, as terminals pass theirs on. False off Linux."""
+    try:
+        lines = SELF_CGROUP.read_text().splitlines()
+    except OSError:
+        return False
+    return any(ctl in ("", "name=systemd") and path.rstrip().endswith(".service")
+               for _, ctl, path in (ln.split(":", 2) for ln in lines if ln.count(":") >= 2))
+
+
 @functools.cache
 def runner_scope() -> tuple[str, ...]:
     """What starts a detached process (`detach`) in a scope of its own under the user's systemd
     manager, where logind kills a login session's processes at logout: a runner started from an
     SSH or desktop session died with it, and the night's backlog too (#351, the audit of 1.4).
-    `--scope` execs the command, so the pid is the command's. Empty anywhere else, or when the
-    manager doesn't answer."""
-    if not kills_sessions() or not shutil.which("systemd-run"):
+    So does one started from a service (`in_service`): the web app's Measure now ran wb optimize
+    in wb-chat.service's cgroup, and wb setup's restart of the unit killed the run (#1407,
+    2026-11-25). `--scope` execs the command, so the pid is the command's. Empty anywhere else,
+    or when the manager doesn't answer."""
+    if not (in_service() or kills_sessions()) or not shutil.which("systemd-run"):
         return ()
     argv = ("systemd-run", "--user", "--scope", "--quiet", "--collect")
     try:
@@ -923,6 +940,16 @@ def _claude_md_at(repo: Path, ref: str, under: str = "") -> str | None:
     return next((p for p in PROJECT_MEMORY if _has_file(repo, ref, f"{under}/{p}".lstrip("/"))), None)
 
 
+def _agents_md_at(repo: Path, ref: str, under: str = "") -> bool:
+    """Whether an AGENTS.md (a file, not a link) is committed at ``ref`` in directory ``under``:
+    the OpenCode and Codex convention, which the layer hands the agent (context.agents_files).
+    A repo with only that was refused as one whose agent "would start blind", and a package with
+    only its own ran at the root (#1394, 2026-11-25). A link counts only through what it names."""
+    out = subprocess.run(["git", "-C", str(repo), "ls-tree", ref, "--", f"{under}/AGENTS.md".lstrip("/")],
+                         capture_output=True, text=True).stdout
+    return out.startswith(("100644 ", "100755 "))
+
+
 def _package(repo: Path, given: Path, base: str) -> str | None:
     """The nearest directory from ``given`` up to (not including) the repo's top with a CLAUDE.md
     of its own at ``base``: a monorepo's package, where the agent, the setup and the tests then
@@ -938,7 +965,8 @@ def _package(repo: Path, given: Path, base: str) -> str | None:
         # not a `.claude` directory: its CLAUDE.md is its parent's .claude/CLAUDE.md, and from
         # .claude/skills/x the walk took the repo's own for a package at .claude (review of #606)
         if parts[n - 1] != ".claude" and (_claude_md_at(repo, base, sub := "/".join(parts[:n]))
-                                          or _local_package_md(repo, sub)):
+                                          or _local_package_md(repo, sub)
+                                          or _agents_md_at(repo, base, sub)):  # #1394
             return sub
     return None
 
@@ -951,17 +979,27 @@ def _local_package_md(repo: Path, sub: str) -> bool:
 
 
 def _need_claude_md(repo: Path, base: str, a, sub: str | None = None) -> None:
-    if sub and not _claude_md_at(repo, base, sub):  # a package's own, kept local (#785)
-        print(f"note: {sub}'s CLAUDE.md is gitignored: the agent gets your checkout's copy")
+    if sub and not _claude_md_at(repo, base, sub):
+        if _local_package_md(repo, sub):  # a package's own, kept local (#785)
+            print(f"note: {sub}'s CLAUDE.md is gitignored: the agent gets your checkout's copy")
+        else:  # its AGENTS.md alone (#1394)
+            print(f"note: {sub} has AGENTS.md and no CLAUDE.md: the agent gets it")
     if a.no_claude_md or sub:  # a package's own CLAUDE.md counts
         return
     if not _claude_md_at(repo, base) and (md := _local_claude_md(repo)):
         print(f"note: {md} is gitignored: the agent gets your checkout's copy")
+    elif not _claude_md_at(repo, base) and _agents_md_at(repo, base):  # #1394
+        print(f"note: AGENTS.md and no CLAUDE.md: the agent gets it; for Claude Code, wb init "
+              f"{shlex.quote(str(repo))} moves it to CLAUDE.md and links it back")
     elif not _claude_md_at(repo, base):
         die(f"{repo} has no CLAUDE.md (or .claude/CLAUDE.md) at {base}: the agent would start "
             "blind. Write it (what the project is, how to build and test it, its conventions), "
             f"commit it, and run wb init {shlex.quote(str(repo))} to link AGENTS.md (a monorepo "
             "package with its own: --repo <the package's directory>); --no-claude-md skips this check")
+
+
+NO_IDENTITY = ("git has no user.name/user.email here: the user's identity signs the commits "
+               "(git config --global user.name/user.email)")
 
 
 def _identity(repo: Path) -> bool:
@@ -1436,7 +1474,11 @@ def _no_base(repo: Path, base: str) -> str:
     return f"no commit {base} in {repo}: a typo, or a ref not fetched yet (git fetch)"
 
 
-def cmd_start(a):
+def _start_refusals(a, dry: bool = False) -> tuple[Path, str, tuple[int, int] | None]:
+    """wb start's refusals before a model is picked, and (its repo, the spec, OpenCode's version).
+    The dry run behind the start dialog (`_route_start`, ``dry``) runs them too: it put a dialog
+    up for a start under a taken or malformed name, from a missing spec or outside a repo, which
+    wb start then refused, and the retry asked again (#1395, 2026-11-25)."""
     if not store.NAME_RE.match(a.name):
         die("a task name is lowercase letters, digits and hyphens, at most 48")
     if a.backlog is not None and not store.NAME_RE.match(a.backlog):
@@ -1463,13 +1505,10 @@ def cmd_start(a):
         die(f"{repo} is task {owner.name}'s worktree, not a project: start from its repo "
             f"(--repo {owner.spec.get('repo', '<the project>')})")
     _lane_fits(repo, a.test, off="*" in (a.allow_path or []))
-    spec_text = read_text(a.spec, "the spec")
-    if not spec_text.strip():
+    # stdin's is wb start's alone to read: the dry run behind the start dialog leaves it
+    spec_text = read_text(a.spec, "the spec") if a.spec != "-" or not dry else ""
+    if not spec_text.strip() and not (dry and a.spec == "-"):
         die("the spec is empty")
-    handed = _skill_names(a.skill)
-    # the repo's own directories (context.repo_dirs reads only the spec's repo: task.json is to come)
-    guard = context.repo_dirs(SimpleNamespace(spec={"repo": str(repo)}))
-    lane_dirs = [_lane_dir(p, guard) for p in a.allow_path or []]
     if not shutil.which(exe := runner.opencode_bin()[0]):  # else the runner emptied the GPU, then
         # the round died as "opencode exited 1" (the 2026-11-16 audit)
         die(f"{exe} isn't on PATH: install OpenCode 2.x ({runner.OPENCODE_GET}), or put it on the "
@@ -1481,6 +1520,16 @@ def cmd_start(a):
             f"{runner.OPENCODE_GET}", 3)
     if store.noexec():  # every git call the agent makes would exit 126 (#851)
         die(noexec_line())
+    return repo, spec_text, have
+
+
+def cmd_start(a):
+    repo, spec_text, have = _start_refusals(a)
+    task = store.Task(a.name)
+    handed = _skill_names(a.skill)
+    # the repo's own directories (context.repo_dirs reads only the spec's repo: task.json is to come)
+    guard = context.repo_dirs(SimpleNamespace(spec={"repo": str(repo)}))
+    lane_dirs = [_lane_dir(p, guard) for p in a.allow_path or []]
     # the package first: its stack is the task's, not the whole monorepo's (#820). Read again
     # below, after the base is checked; a base that names no commit finds none here
     stack = gitops.stack(repo, _package(repo, Path(a.repo).resolve(), a.base))
@@ -1508,8 +1557,7 @@ def cmd_start(a):
     if nobase := _no_base(repo, a.base):  # first: a typo read as a missing CLAUDE.md (the audit)
         die(nobase)  # `nobase`, not `why`: that is the router's reason, task.json's route
     if not _identity(repo):
-        die("git has no user.name/user.email here: the user's identity signs the commits "
-            "(git config --global user.name/user.email)")
+        die(NO_IDENTITY)
     sub = _package(repo, Path(a.repo).resolve(), a.base)
     _need_claude_md(repo, a.base, a, sub)
     if sub:
@@ -2990,6 +3038,8 @@ def cmd_progress(a):
     the threshold of checks already on (it was ignored, and "on: …" printed as if saved: #602)."""
     if a.after is not None and a.state == "off":
         die("--after goes with on: wb progress on --after MIN")
+    if a.after is not None and a.after != 0 and progress.user_after({"after": a.after}) is None:
+        die("--after is minutes of active work: a positive number, or 0 to clear it")  # #1401
     if a.after is not None and not a.state:
         if not progress.settings().get("on"):
             die("progress checks are off: wb progress on --after MIN")
@@ -2997,7 +3047,8 @@ def cmd_progress(a):
     if a.state:
         progress.set_enabled(a.state == "on", a.after)  # --after kept unless given (0 clears it, #578)
     s = progress.settings()
-    print("progress checks: " + (f"on: a task past {s['after']:g} min of active work" if s.get("after")
+    after = progress.user_after(s)
+    print("progress checks: " + (f"on: a task past {after:g} min of active work" if after
                                   else "on: a task past its typical length of active work (until a model "
                                   f"and size have {progress.TYPICAL_MIN} timed tasks: "
                                   + ", ".join(f"{m} min {k}" for k, m in progress.DEFAULT_MIN.items()) + ")")
@@ -3388,20 +3439,18 @@ def _route_start(a) -> None:
     # never asked to approve a start that then exits 3 (#1213's review, 2026-11-24)
     if routes.agents_gpu():
         die(f"{routes.AGENTS_GPU}: {m.id} is an API model. {routes.AGENTS_BACK}, or a GPU model", 3)
+    # wb start's first refusals (a taken or malformed name, the spec, the repo, OpenCode): its
+    # own line and exit, and no dialog for a start it refuses (#1395, 2026-11-25). Its notes
+    # aren't the JSON the mod parses. Round 1's input as wb start reckons it (#1173): stdin's is
+    # read by wb start alone
+    with redirect_stdout(io.StringIO()):
+        repo, spec_text, _ = _start_refusals(ns, dry=True)
+    sub = _package(repo, Path(ns.repo).resolve(), ns.base)
     # a local-only spot's refusal in place of a dialog line (#1021): never ask the user to
     # approve a start wb start refuses
-    try:
-        repo = gitops.toplevel(Path(ns.repo).resolve())
-        sub = _package(repo, Path(ns.repo).resolve(), ns.base)
-    except gitops.GitError:
-        repo = sub = None  # wb start says why
-    if repo is not None and (why := local_only_refusal(repo, sub, _role(ns), ns.model, ns.local_only,
-                                                       lane_places(repo, sub, ns), ns.base)):
+    if why := local_only_refusal(repo, sub, _role(ns), ns.model, ns.local_only,
+                                 lane_places(repo, sub, ns), ns.base):
         die(why, 3)
-    try:  # round 1's input, as wb start reckons it (#1173): stdin's is read by wb start alone
-        spec_text = "" if ns.spec == "-" else Path(ns.spec).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        spec_text = ""
     # no price, no cap, or today at the cap (#1019, #1089): wb start's too
     if why := meter.refusal(m, tokens=runner.first_tokens(prompt=spec_text), asked=True):
         die(why, 3)
@@ -3410,11 +3459,15 @@ def _route_start(a) -> None:
     state = models.status(m)
     if not state["available"] and not state["why"].startswith(TRANSIENT) and not ns.force:
         die(_cant_run(m, state), 3)
-    if repo is not None and (why := _no_base(repo, ns.base)):
+    if why := _no_base(repo, ns.base):
         die(why)
+    if not _identity(repo):  # #1395
+        die(NO_IDENTITY)
+    with redirect_stdout(io.StringIO()):  # its notes (#1395)
+        _need_claude_md(repo, ns.base, ns, sub)
     # commands.json's standing copy that holds a credential: wb start's exit 3, here before
     # the dialog, which had the user approve a start wb start then refused (#1227)
-    if repo is not None and (why := _standing_gap(context.repo_conf(repo, sub), repo, sub)):
+    if (why := _standing_gap(context.repo_conf(repo, sub), repo, sub)):
         die(why, 3)
     line = start_line(ns.name, m)
     print(json.dumps({"change": line, "gate": True,
@@ -3982,7 +4035,7 @@ def cmd_accept(a):
         # card priced the task at nothing
         measured = results.step(task, landed=True, gaps=a.spec_gap)  # recorded below (#904)
         try:
-            commit = _landed(task)
+            commit, reused = _landed(task), False
             if not commit:
                 head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
                 with _settle_proposals(task, a.take_claude_md):  # kept if the commit fails (#507)
@@ -3996,6 +4049,7 @@ def cmd_accept(a):
                     else:  # nothing new: the branch's commits past the base are the work (the
                         # steps wb next committed, or Claude's own after a takeover: the audit)
                         commit = gitops.git(task.worktree, "rev-parse", "--short", "HEAD").strip()
+                        reused = True
                     if left:  # kept before the worktree goes (#1179's review)
                         print(_keep_left(task, left))
             # the branch must hold it before the worktree goes: on a detached HEAD the commit was
@@ -4014,6 +4068,8 @@ def cmd_accept(a):
             into = gitops.current_branch(repo)
         close = {"commit": commit, "step": measured, "merge": bool(a.merge), "merge_into": into,
                  "merge_as": a.merge_as or "merge", "sign": _signed(spec, a)}
+        if reused:  # no commit of accept's: its message for a squash, and said unused otherwise (#1393)
+            close["message"] = msg
         task.set_status(closing=close, tip=tip,  # before anything is removed
                         last=f"being accepted: wb accept {a.name} finishes it if this stops")  # #878
         _spec_gaps(task, a.spec_gap)
@@ -4043,7 +4099,7 @@ def cmd_accept(a):
         if into and into != "HEAD" and gitops.contains(repo, f"refs/heads/{into}", tip):
             merged = gitops.git(repo, "rev-parse", "--short", f"refs/heads/{into}").strip()  # made already
         elif into and into != "HEAD" and (merged := gitops.squashed(
-                repo, into, close.get("merge_from"), tip)):
+                repo, into, close.get("merge_from"), tip, close.get("message"))):
             pass  # a squash made already: it never holds the tip, so the retry squashed again (#432)
         else:
             try:
@@ -4067,6 +4123,7 @@ def cmd_accept(a):
                     merged = gitops.merge(repo, a.name, into, spec["base"], tip=tip,
                                           how=close.get("merge_as", "merge"),
                                           sign=close.get("sign", True) and _signed(spec, a),
+                                          message=close.get("message"),
                                           started=lambda pid: task.set_status(closing={
                                               **close, "merge_git": [pid, models._started(pid)]}))
             except gitops.GitError as e:
@@ -4108,6 +4165,10 @@ def cmd_accept(a):
         print("the repo has no CLAUDE.md: write one (wb init)")
     # an API task's money on its line; the savings estimate isn't said on every close (#1322)
     paid = f" · {p}" if (p := savings.paid(row)) else ""
+    # the branch ends on a commit that isn't accept's (a step's, Claude's own): -m went nowhere
+    # but a squash, and nothing said so (#1393, 2026-11-25)
+    if close.get("message") and not (merged and close.get("merge_as") == "squash"):
+        paid += f" (-m unused: nothing changed since {commit})"
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
           (f", merged into {close['merge_into']} as {merged}{paid}" if merged else
            f"{paid}\n" + _merge_line(repo, spec, close, a)))
@@ -4889,6 +4950,8 @@ def _api_list(text: str) -> None:
             if isinstance(cost, list) else None
         price = f" · ${rate.get('input') or 0:g}/${rate.get('output') or 0:g} per 1M in/out" \
             if rate and not m.free else ""
+        if meter.is_plan(m) and meter.is_free(m):  # a coding plan's 0s are no price (#1396)
+            price = " · plan usage"
         # the catalog's own window, the model's fact (an API task runs capped: models.api_window)
         own = (m.extra.get("catalog_limit") or m.config.get("limit") or {}).get("context")
         print(f"{m.id}  {_window(own)}{price}"

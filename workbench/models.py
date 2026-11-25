@@ -1286,7 +1286,10 @@ def connected() -> dict[str, dict] | None:
 
 def _is_free(pid: str, entry: dict) -> bool:
     """An OpenCode free model: `opencode/*-free`, or every price 0 (marked only; child 13 warns
-    of its data use)."""
+    of its data use). Never a plan's (a coding plan lists every price 0: #1396)."""
+    from . import meter  # meter imports this module
+    if meter.plan_provider(pid):
+        return False
     if pid == "opencode" and str(entry.get("id") or "").endswith("-free"):
         return True
     cost = entry.get("cost")
@@ -4504,15 +4507,28 @@ def _answers(base: str) -> bool:
     return _models_at("", 1, url=f"{base}/models") is not None
 
 
+# (mark, root, ollama) still answering at the mark, and when: under mirrored networking or a VPN
+# windows_host() is another address for good, and one that drops packets cost every discover() a
+# second, about 5 s a wb models (#1397, 2026-11-25). Asked again after DOWN_SECS, or at once when
+# windows_host() changes (the root is at it). Never kept while the mark is silent: a runner
+# waiting after a reboot asks each pass for the server at Windows' new address (#1167).
+_STAYED: dict[tuple, float] = {}
+
+
 def _moved_to(mark: str, root: str, ollama: bool = True) -> bool:
     """Whether Windows' Ollama left ``mark`` for ``root``: the old root silent, the new answering;
     with ``ollama`` False, any OpenAI-compatible server, ``mark`` and ``root`` baseURLs probed on
     /models (Ollama's /api/version had them all read as never moving, #1167). Both probed at
     once, briefly, so a dead provider costs discovery a second, not three."""
     from concurrent.futures import ThreadPoolExecutor
+    key = (mark, root, ollama)
+    if time.monotonic() - _STAYED.get(key, -DOWN_SECS) < DOWN_SECS:
+        return False
     probe = (lambda r: ollama_answers(r, timeout=1)) if ollama else _answers
     with ThreadPoolExecutor(2) as pool:
         old, new = pool.map(probe, (mark, root))
+    if old:
+        _STAYED[key] = time.monotonic()
     return new and not old
 
 
