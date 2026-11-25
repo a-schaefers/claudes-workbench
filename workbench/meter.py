@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -46,6 +47,10 @@ from pathlib import Path
 from . import keyhole, models, routes, store
 
 PLAN_PROVIDERS = ("opencode-go",)   # a plan's quota, not dollars (and m.cloud: Ollama cloud)
+# a coding plan's provider (zai-coding-plan, kimi-code-plan-global, xiaomi-token-plan-sgp): a paid
+# subscription whose catalog prices are all 0, which read as free, "may train on your code" (#1396,
+# 2026-11-25). A segment anywhere: the regional ids go on past it (alibaba-coding-plan-cn)
+PLAN_ID = re.compile(r"-(?:coding|code|token|step)-plan(?:-|$)")
 EPS = 1e-9               # less than this between two figures is the same figure
 # status `api`'s figures are written to 6 places (Meter._book), an export's aren't: closer than
 # this to one is its rounding. Compared within EPS, a DeepInfra export a few 1e-7 past a rounded-down
@@ -138,9 +143,14 @@ def _num(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v
 
 
+def plan_provider(pid: str) -> bool:
+    """A provider whose usage is a plan's quota, not dollars: OpenCode Go, a coding plan."""
+    return pid in PLAN_PROVIDERS or bool(PLAN_ID.search(pid))
+
+
 def is_plan(m) -> bool:
-    """A plan's quota, not dollars: OpenCode Go, an Ollama cloud model."""
-    return bool(getattr(m, "cloud", False)) or m.provider in PLAN_PROVIDERS
+    """A plan's quota, not dollars: OpenCode Go, a coding plan, an Ollama cloud model."""
+    return bool(getattr(m, "cloud", False)) or plan_provider(m.provider)
 
 
 def is_free(m) -> bool:

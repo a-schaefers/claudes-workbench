@@ -4892,6 +4892,8 @@ def _api_list(text: str) -> None:
             if isinstance(cost, list) else None
         price = f" · ${rate.get('input') or 0:g}/${rate.get('output') or 0:g} per 1M in/out" \
             if rate and not m.free else ""
+        if meter.is_plan(m) and meter.is_free(m):  # a coding plan's 0s are no price (#1396)
+            price = " · plan usage"
         # the catalog's own window, the model's fact (an API task runs capped: models.api_window)
         own = (m.extra.get("catalog_limit") or m.config.get("limit") or {}).get("context")
         print(f"{m.id}  {_window(own)}{price}"
