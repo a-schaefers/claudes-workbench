@@ -37075,7 +37075,10 @@ class RateLimits(Base):
         self.assertEqual(n["cause"], "provider")
         self.assertIn("top up your deepseek account, or wait for the plan's reset", n["text"])
         self.assertEqual(self.models.api_health("deepseek")["state"], "no_credit")
-        # OpenCode's own provider.quota (no keyhole between): the same stop
+        # OpenCode's own provider.quota (no keyhole between): the same stop. The credit comes
+        # back first: with t-402's told stop still standing, t-402b would wait behind it as
+        # queued with no stop of its own (#1344), and this test hung in CI (2026-11-24)
+        self.models.note_api("deepseek", "ok")
         fake = self.api_task("t-402b", "quota", "--silence-timeout", "30")
         runner.drive(fake)
         self.assertEqual((fake.status["phase"], self.notice(fake)["cause"]), ("stuck", "provider"))
