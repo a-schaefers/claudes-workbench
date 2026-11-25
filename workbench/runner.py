@@ -3314,9 +3314,12 @@ def checkout(task: store.Task) -> bool:
 # lane reads: prepare-<n>.lock the slots, prepare.json the queue. Setups and base checks queue
 # apart (prepare-check-<n>.lock, prepare-check.json): one queue made a 5-second base check, held
 # to 120 s, wait out another task's 25-minute build, with the GPU idle (#868). Two base checks
-# (two test suites, a fixed port) still never run together, nor two setups.
+# (two test suites, a fixed port) still never run together, nor two setups. A round's tests take
+# the base checks' turn too: fanned-out tasks ran theirs at once, and a suite on a fixed port
+# failed with EADDRINUSE in all but one, a FAIL and paid auto-fix rounds for correct code
+# (#1378, 2026-11-25).
 PREP_SLOTS = 1
-PREP_KINDS = {"setup": ("prepare", "setup"), "check": ("prepare-check", "base check")}
+PREP_KINDS = {"setup": ("prepare", "setup"), "check": ("prepare-check", "tests")}
 
 
 def _prep_queue(kind: str = "setup") -> Path:
@@ -3325,8 +3328,9 @@ def _prep_queue(kind: str = "setup") -> Path:
 
 @contextlib.contextmanager
 def prep_turn(task: store.Task, kind: str = "setup"):
-    """Hold one of PREP_SLOTS for a setup or (``kind`` "check") a base check, waiting behind the
-    tasks queued for the same before this one (status `last` names the one it waits for). A
+    """Hold one of PREP_SLOTS for a setup or (``kind`` "check") a base check or a round's tests,
+    waiting behind the tasks queued for the same before this one (status `last` names the one it
+    waits for). A
     holder that died lets go: the kernel drops its flock, and its queue entry is passed over
     once its pid is gone."""
     import fcntl
@@ -6042,7 +6046,10 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
             if unload := bool(task.spec.get("unload_for_tests")):
                 task.set_status(phase="queued", last="waiting for the GPU: the tests use it alone")
             lease.step_aside(unload=unload)
-            with _tests_gpu(task, lease):
+            # one task's tests at a time on this machine, after the GPU wait (#1378); their
+            # --test-timeout starts in run_tests, past the wait
+            with _tests_gpu(task, lease), \
+                    prep_turn(task, "check") if task.spec.get("test_cmd") else contextlib.nullcontext():
                 tests = run_tests(task, n)
             if pending_steer(task):  # a note that came in while the tests ran
                 _steer_round(task, n, False)

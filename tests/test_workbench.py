@@ -6588,6 +6588,22 @@ class WorktreeSetup(Base):
         lines = log.read_text().split()                       # (the round's tests log too)
         self.assertLess(lines.index("check-done"), lines.index("build-done"), lines)
 
+    def test_fanned_out_tasks_run_their_round_tests_one_at_a_time(self):
+        # #1378 (2026-11-25): two tasks of a fan-out ran their round tests at once, and a suite
+        # on a fixed port failed EADDRINUSE in all but one: a FAIL and an auto-fix for correct
+        # code. The directory stands in for the port: taken while one suite runs.
+        held = Path(self.tmp.name) / "port-3000"
+        suite = f"mkdir {held} || exit 98; sleep 2; rmdir {held}; {TEST_CMD}"
+        for who in ("a", "b"):
+            self.start(f"t-fan{who}", "ok", "--no-self-review", "--no-base-check", "--auto-fix", "0",
+                       "--test", suite)
+        for who in ("a", "b"):
+            wait_phase(f"t-fan{who}", {"review"}, timeout=60)
+            st = store.Task(f"t-fan{who}").status
+            self.assertTrue(st["tests"]["ok"], st["tests"])
+            self.assertEqual(st.get("auto_fixes", 0), 0)
+        self.assertEqual(json.loads((store.home() / "locks" / "prepare-check.json").read_text()), {})
+
     def test_a_task_whose_setup_failed_is_resumed_and_discarded_never_counts_against_its_model(self):
         # #581, the audit of 1.90: three discards of a lockfile problem scored the model 0/3 and
         # the router passed it by, though its agent never ran a request

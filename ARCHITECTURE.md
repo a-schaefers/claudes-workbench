@@ -1075,10 +1075,13 @@ this catches. `opencode_moved` (before the lease and each later round) compares 
    #510): the base check, before the GPU. Setups and base checks take machine-wide turns, a queue
    each (`prep_turn(task, kind)`, `PREP_KINDS`, `PREP_SLOTS` 1, by `created_at`;
    `locks/prepare{,-check}.json`, flock slots `locks/prepare{,-check}-<n>.lock`), `last` "waiting
-   for <task>'s setup" / "base check" "(one at a time on this machine)": unqueued, N tasks ran N
+   for <task>'s setup" / "tests" "(one at a time on this machine)": unqueued, N tasks ran N
    installs at once (#590); one queue held a 5 s check behind a 25-minute build (#868). A base check
-   needing the GPU takes the GPU first, its turn only around the run (#679). Round tests take no
-   turn. Probe on: round 1's outline (`add_outline`) next.
+   needing the GPU takes the GPU first, its turn only around the run (#679). A round's tests take
+   the base checks' turn too, after `_tests_gpu`'s wait and before `run_tests` (whose
+   `--test-timeout` the wait doesn't count): a fan-out's suites on one fixed port failed
+   EADDRINUSE in all but one task, a FAIL and auto-fix rounds for correct code (#1378).
+   Probe on: round 1's outline (`add_outline`) next.
 2. One `GpuLease` holds for the rest, stepping aside (`lease.step_aside`) where no GPU is needed:
    the tests, and waiting for a down server (#257). With `--unload-for-tests` (task.json
    `unload_for_tests`) the tests keep it as a modelless `gpu.json` entry with `tests: true`, so
@@ -6909,7 +6912,7 @@ $WB_HOME (~/.local/state/workbench)
   locks/<task>.ask.lock          one answer to a question (ask_mcp.answer_once)
                                  (store.task_lock: locks live here, out of every lane: in the task dir an agent flocked runner.lock and status.lock and froze every runner and wb stop, the 0.90 review)
   locks/prepare.json, prepare-<n>.lock   the setups' queue ({pid: {task, since, start, holding}}), PREP_SLOTS turns (runner.prep_turn)
-  locks/prepare-check.json, prepare-check-<n>.lock   the base checks' own
+  locks/prepare-check.json, prepare-check-<n>.lock   the base checks' and the rounds' tests' own
   locks/signal-stop.lock         one runner writing a shutdown's one notice (runner._signal_notice)
   locks/cap-wait.lock            the one API task let past the day cap to its own stop, its name in it (runner._cap_go, #1304)
   locks/provider-stop-<provider>.lock   empty: one running task's quota, rate limit or outage stop at a time looks for a told one and tells (runner._told_stop, #1344)
