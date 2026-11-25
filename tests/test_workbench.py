@@ -26235,7 +26235,8 @@ class WebChat(Base):
         hub.close()  # or it outlives the test (#134)
         # and its streams end before the next test's environment: one that outlived its test
         # made a snapshot in the next one's WB_HOME, and the push key it cached there failed
-        # test_an_empty_or_broken_vapid_key_file_is_replaced… (nightly run 45577067512)
+        # test_an_empty_or_broken_vapid_key_file_is_replaced… (nightly run 45577067512); woken
+        # between tests, with WB_CHAT_TOKEN unset, it read the user's own ~/.config/workbench
         deadline = time.monotonic() + 5
         while hub.open and time.monotonic() < deadline:
             time.sleep(0.01)

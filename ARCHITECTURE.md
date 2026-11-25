@@ -7204,7 +7204,10 @@ every workflow its own permissions, `check` never path-filtered and required fro
 (every command and flag in *Every `wb` command*, every module in CLAUDE.md's layout, every `WB_*` variable in CLAUDE.md,
 CLAUDE.md under 25,000 characters); `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`. The tests' own
 `HTTPServer`/`ThreadingHTTPServer` (`_Listens`, 0.02 s tick) listen at once: http.server's looked the name up first, 35 s
-on macOS runners (#950); not patched suite-wide, so `WebChat` still catches chat.py doing it.
+on macOS runners (#950); not patched suite-wide, so `WebChat` still catches chat.py doing it. `WebChat`'s
+tearDown closes its hub and waits up to 5 s for the hub's open streams to end, then fails by name ("a stream outlived its
+test's closed hub"): one left ran its snapshot in the next test's `WB_HOME`, or between tests in the user's own
+`~/.config/workbench` (nightly run 45577067512).
 
 **The fixture** (`Base`): `WB_HOME=<tmp>/state`, `WB_OPENCODE_BIN` (the fake, `shlex`-split), `WB_FAKE_MODELS=1`,
 `WB_OPENCODE_CONFIG` (`ollama` on 127.0.0.1:11434 with `mimo-v2.6:9b-q8_0`, 32K, and `qwen3.8-27b` with no
