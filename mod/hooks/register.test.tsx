@@ -4110,6 +4110,29 @@ test('#1005: every command that would send to workbench upstream waits for the u
   await clock.advance(1000)                                      // the poll the calls started ends here
 })
 
+test('#1291: wb patch zip sends nothing, so the gate never asks about it, even in the patch clone', async ($, on) => {
+  // 2026-11-24: a zip for a user without GitHub to email upstream themselves; only a send asks
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  const w = upstreamWorld(on, files)
+  w.answer = "Don't send"
+  await $.session.start({ cwd: SOURCE, surface: 'terminal', isInteractive: true })
+  await clock.advance(1000)
+  for (const command of [
+    'wb patch zip', 'wb patch zip 1a2b3c4 5d6e7f8 --name fix-push', `python3 ${SOURCE}/bin/wb patch zip`,
+    `cd ${SOURCE} && wb patch zip`, 'bash -lc "wb patch zip"', 'bash <<EOF\nwb patch zip\nEOF',
+  ]) {
+    const r = await $.tool.call({ tool: 'Bash', command } as any) as any
+    expect([command, r.deny]).toEqual([command, undefined])
+  }
+  expect(w.asked).toEqual([])
+  // a send still asks
+  expect(((await $.tool.call({ tool: 'Bash', command: 'git push' } as any)) as any).deny).toContain('not sent')
+  expect(w.asked.length).toBe(1)
+  await clock.advance(1000)                                      // the poll the calls started ends here
+})
+
 test('#1005: with the user away on the web chat a send to upstream is refused without a dialog', async ($, on) => {
   // 2026-11-22: the dialog would wait at an empty terminal; Claude is told it waits for them
   const clock = mock.clock(on, { now: 1_800_000_000_000 })

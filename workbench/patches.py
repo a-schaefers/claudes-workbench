@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import NamedTuple
@@ -42,6 +43,9 @@ DIFF_PLAIN = ("-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "-
 REBASE_PLAIN = ("-c", "rebase.updateRefs=false", "-c", "rebase.autoSquash=false",
                 "-c", "rebase.autoStash=false")
 NET_SECS = 600  # a full clone of workbench over a slow line
+# workbench's contact, for a patch sent without GitHub (wb patch zip, #1291): the owner's own
+# address, already in the git log; README.md, CONTRIBUTING.md and ARCHITECTURE.md say the same
+UPSTREAM_CONTACT = "adam.schaefers@icloud.com"
 
 
 class PatchError(RuntimeError):
@@ -936,6 +940,97 @@ def upstream(root, kind, commit, slug) -> None:
     print(f"once it merges, the next wb update drops the local patch ({what.split()[0]})")
 
 
+ZIP_HINT = ("no GitHub account, or rather not? wb patch zip makes a .zip of the patch to email upstream "
+            "yourself (it sends nothing)")
+ZIP_README = """A patch to workbench, made by wb patch zip on {when} (UTC).
+
+{count} commit(s), oldest first, a .patch file each:
+{rows}
+
+They apply to upstream's commit {base}.
+To apply them, in a clone of workbench:
+  git switch -c patch-{name} {base}
+  git am <this folder>/*.patch
+
+To send it upstream: email this .zip to {contact}, workbench's contact,
+or send it any way you like. wb sent nothing.
+
+The .patch files name each commit's author as git had them, in their From: lines
+({authors}): edit them before sending if you'd rather not.
+"""
+
+
+def zip_out() -> Path:
+    """Where wb patch zip writes: ~/Downloads when it exists, else $WB_HOME/patches/out/."""
+    downloads = Path.home() / "Downloads"
+    return downloads if downloads.is_dir() else store.home() / "patches" / "out"
+
+
+def zip_patches(root, kind, commits=(), name=None) -> Path:
+    """wb patch zip (#1291): ``commits`` (else every commit on PATCH_BRANCH its upstream lacks,
+    what wb patch upstream would send) as one format-patch file each in a .zip, with README.txt
+    (the subjects, the upstream commit they apply to, git am, UPSTREAM_CONTACT), for a user with
+    no GitHub account to email upstream themselves. The owner, 2026-11-24: "a lot of people dont
+    have a github account and dont want to bother". Local only: no fetch, no gh, nothing sent,
+    so the mod's consent gate doesn't ask about it."""
+    _need_clone(kind)
+    if name is not None and not SLUG.fullmatch(name):
+        raise PatchError(f"--name {name!r}: lowercase letters, digits and hyphens")
+    ref = f"refs/heads/{PATCH_BRANCH}"
+    if not _out(root, "rev-parse", "-q", "--verify", ref, check=False):
+        raise PatchError(f"{root} has no branch {PATCH_BRANCH}: patches are commits on it "
+                         f"(git -C {root} switch -c {PATCH_BRANCH})")
+    up = _upstream(root, PATCH_BRANCH)
+    if not up:
+        raise PatchError(f"{PATCH_BRANCH} tracks no upstream: git -C {root} branch -u origin/main {PATCH_BRANCH}")
+    mine = _commits(root, f"{up}..{ref}")  # no fetch: the upstream wb update last fetched
+    if not mine:
+        raise PatchError(f"no patches on {PATCH_BRANCH}: it is upstream's (wb patch list)")
+    if commits:
+        order = {sha: i for i, (sha, _) in enumerate(mine)}
+        picked = set()
+        for c in commits:
+            sha = _out(root, "rev-parse", "-q", "--verify", f"{c}^{{commit}}", check=False)
+            if not sha:
+                raise PatchError(f"{c}: no such commit")
+            if sha not in order:
+                raise PatchError(f"{c} isn't one of {PATCH_BRANCH}'s patches (wb patch list)")
+            picked.add(sha)
+        mine = [row for row in mine if row[0] in picked]  # in local's order, as git am applies them
+    base = _out(root, "merge-base", ref, up)
+    authors = list(dict.fromkeys(_out(root, "log", "-1", "--format=%an <%ae>", sha) for sha, _ in mine))
+    stamp = time.gmtime()
+    stem = f"workbench-patch-{name or mine[-1][0][:7]}-{time.strftime('%Y%m%d', stamp)}"
+    out = zip_out()
+    out.mkdir(parents=True, exist_ok=True)
+    readme = ZIP_README.format(
+        when=time.strftime("%Y-%m-%d %H:%M", stamp), count=len(mine), base=base, name=name or mine[-1][0][:7],
+        rows="\n".join(f"  {sha[:7]} {subject}" for sha, subject in mine), contact=UPSTREAM_CONTACT,
+        authors=", ".join(authors))
+    with tempfile.TemporaryDirectory() as made:
+        for i, (sha, _) in enumerate(mine, 1):
+            _git(root, *DIFF_PLAIN, "format-patch", "-q", "--no-signature", "-1", f"--start-number={i}",
+                 "-o", made, sha)
+        fd, part = tempfile.mkstemp(prefix=".wb-patch-", suffix=".part", dir=out)
+        try:
+            with os.fdopen(fd, "wb") as f, zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED) as z:
+                z.writestr(f"{stem}/README.txt", readme)
+                for patch in sorted(Path(made).iterdir()):
+                    z.write(patch, f"{stem}/{patch.name}")
+            n, dest = 1, out / f"{stem}.zip"
+            while dest.exists():  # a second zip the same day keeps the first
+                n += 1
+                dest = out / f"{stem}-{n}.zip"
+            os.replace(part, dest)
+        finally:
+            Path(part).unlink(missing_ok=True)
+    print(f"wrote {dest}: {len(mine)} patch(es) on upstream's {base[:7]}")
+    print(f"email it to {UPSTREAM_CONTACT}, or send it any way you like; nothing was sent")
+    print(f"the patch files name the commit author ({', '.join(authors)}); edit them before sending if "
+          "you'd rather not")
+    return dest
+
+
 def body_path(slug) -> Path:
     return store.home() / "upstream" / f"{slug}.md"
 
@@ -1053,7 +1148,9 @@ def send(root, kind, slug, title, body_file, draft=False, anyway=False) -> None:
         raise PatchError(f"{remote} ({_shown_url(url)}) isn't on GitHub: wb patch send sends only there")
     st = gh_state(root)
     if st["state"] != "ready":
-        raise PatchError("gh can't send it yet, nothing was sent:\n" + gh_line(st))
+        # no gh, or no login: the zip is the way without GitHub (#1291)
+        raise PatchError("gh can't send it yet, nothing was sent:\n" + gh_line(st)
+                         + (f"\n{ZIP_HINT}" if st["state"] in ("missing", "logged-out") else ""))
     login, protocol = st["login"], st["protocol"]
     workflows = _out(wt, "diff", "--name-only", f"{base}...HEAD", "--", ".github/workflows/")
     if workflows and protocol == "https" and "workflow" not in st["scopes"]:

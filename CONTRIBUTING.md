@@ -103,6 +103,12 @@ A change to `.github/workflows/` over https needs `gh auth refresh -h github.com
 Claude never handles your token: you run the login yourself (`! gh auth login …` in Claude
 Code). The GitHub plugin for Claude Code is optional and not needed for any of this.
 
+**No GitHub account?** You don't need one: `wb patch zip` writes your patches on `local` (or the
+commits you name) as a .zip in `~/Downloads` (else `$WB_HOME/patches/out/`): a `git format-patch`
+file per commit and a README.txt naming the upstream commit they apply to. Email it to
+adam.schaefers@icloud.com, or send it any way you like; wb sends nothing. The patch files name the
+commit's author as your git config has it: edit their `From:` lines first if you'd rather not.
+
 Never `scripts/ship.sh`: it is the owner's road to main, pushing to this repository and arming
 auto-merge, which only the owner can.
 With a developer's clone and no `wb patch`, the same steps by hand: fork, a branch from

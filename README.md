@@ -84,6 +84,11 @@ directing for you.
 `/workbench-quit-and-hand-back-claude` has Claude finish their tasks itself.
 `/workbench-update` installs the latest workbench (Claude Code tells you when there's one).
 
+## Contributing
+
+Fixes are welcome: [CONTRIBUTING.md](CONTRIBUTING.md). No GitHub account? `wb patch zip` makes a
+.zip of your patch; email it to adam.schaefers@icloud.com.
+
 ## License
 
 MIT.
