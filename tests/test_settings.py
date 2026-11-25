@@ -4,6 +4,7 @@ import io
 import json
 import os
 import textwrap
+import time
 from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
@@ -31,7 +32,8 @@ def expected(key: str, value) -> list[str]:
             "media": ["image" if rest == "image" else "audio", "--default", value]}[head]
 
 
-class Settings(tw.Base):
+class Rows(tw.Base):
+    """The rows over a test's own roles and catalog (no tests of its own)."""
     catalog = tw.ApiHarness.catalog
 
     def setUp(self):
@@ -64,6 +66,8 @@ class Settings(tw.Base):
         self.addCleanup(patch.stop)
         return log
 
+
+class Settings(Rows):
     def test_every_row_has_a_known_group_and_kind_and_the_groups_come_in_order(self):
         rows = settings.rows()
         self.assertEqual([r for r in rows if r["group"] not in settings.GROUPS or r["kind"] not in settings.KINDS], [])
@@ -170,3 +174,122 @@ class Settings(tw.Base):
         self.assertEqual((row["value"], row["help"]), ("on", got["help"].replace(
             "; tasks already started keep theirs", "")))
         self.assertNotIn("help", settings.apply("probe", "off"))
+
+
+class ClaudeSets(Rows):
+    """wb settings (#1287): Claude explains the rows and, on the user's clear ask and yes in the
+    conversation, changes one through settings.apply, as the web app does; the owner, 2026-11-24:
+    "We trust Claude", so only what wb route already gates waits for the mod's dialog."""
+
+    def claude(self):
+        return mock.patch.dict(os.environ, {"CLAUDECODE": "1", "CLAUDE_PID": str(os.getpid()),
+                                            "CLAUDE_CODE_SESSION_ID": "s-1"})
+
+    def changes(self) -> list[dict]:
+        from workbench import chat
+        p = chat.changes_path()
+        return [json.loads(ln) for ln in p.read_text().splitlines()] if p.exists() else []
+
+    def refused(self, *argv) -> tuple[int, str]:
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit) as e:
+            tw.run_wb(*argv)
+        return e.exception.code, err.getvalue()
+
+    def test_wb_settings_lists_every_row_with_its_choices_the_current_one_marked(self):
+        out = tw.run_wb("settings")
+        rows = settings.rows()
+        lines = out.splitlines()
+        for r in rows:
+            with self.subTest(key=r["key"]):
+                if r["kind"] == "note":
+                    self.assertIn(f"  {r['text']}", lines)
+                    continue
+                self.assertTrue(any(ln.startswith(f"  {r['key']}") for ln in lines), r["key"])
+                for c in r.get("choices") or []:
+                    mark = "*" if r["kind"] == "choice" and c["value"] == r["value"] else " "
+                    says = "" if r.get("other") else f". {c['says']}"
+                    self.assertIn(f"    {mark} {c['value']}: {c['label']}{says}", lines)
+        self.assertIn("  coding: Claude coding: decide", lines)
+        self.assertIn("  cap: API day cap: $5. API tasks stop for the day at $5 of spend. Takes a number, or off.", lines)
+        self.assertEqual(lines[-1], "wb settings set <key> <value> changes one, on the user's clear ask and yes")
+        self.assertEqual(json.loads(tw.run_wb("settings", "--json")), rows)
+
+    def test_wb_settings_set_applies_the_change_and_records_it_by_claude(self):
+        from workbench import cli
+        with self.claude():
+            out = tw.run_wb("settings", "set", "coding", "ask")
+        self.assertEqual(cli.coding_mode(), "ask")
+        self.assertEqual(out, "Claude coding: Ask me first. " + cli.CODING["ask"][1] + "\n")
+        [row] = self.changes()
+        self.assertEqual({k: row[k] for k in ("key", "label", "from", "to", "said", "by")},
+                         {"key": "coding", "label": "Claude coding", "from": "decide", "to": "ask",
+                          "said": out.strip(), "by": "claude"})
+        self.assertNotIn("help", row)
+
+    def test_a_role_moved_to_api_by_claude_still_waits_for_the_mods_dialog(self):
+        self.routes.write_text(json.dumps({"v": 1, "day_usd": 5, "roles": {
+            "significant": {"via": "gpu", "api": "deepseek/deepseek-flash"}}}))
+        with self.claude():
+            code, err = self.refused("settings", "set", "role-significant", "api")
+            self.assertEqual(code, 3)
+            self.assertIn("only through the workbench mod's dialog", err)
+            self.assertEqual(json.loads(self.routes.read_text())["roles"]["significant"]["via"], "gpu")
+            self.assertEqual(self.changes(), [])
+            # the mod's dialog: the dry run's line, and on Allow its approval in route-ok.json
+            q = json.loads(tw.run_wb("settings", "set", "--dry-run", "--json", "role-significant", "api"))
+            self.assertTrue(q["gate"], q)
+            self.assertTrue(q["change"].startswith("significant: GPU → API deepseek/deepseek-flash"), q)
+            self.assertEqual(q["approval"], {"argv": ["route", "significant", "api"], "change": q["change"]})
+            (store.home() / routes.ROUTE_OK).write_text(json.dumps({**q["approval"], "at": time.time()}))
+            out = tw.run_wb("settings", "set", "role-significant", "api")
+        self.assertTrue(out.startswith("changed: significant: GPU → API deepseek/deepseek-flash"), out)
+        row = json.loads(self.routes.read_text())["roles"]["significant"]
+        self.assertEqual((row["via"], row["by"]), ("api", "dialog"))
+        self.assertFalse((store.home() / routes.ROUTE_OK).exists())  # one-shot
+        self.assertEqual([(c["key"], c["from"], c["to"], c["by"]) for c in self.changes()],
+                         [("role-significant", "gpu", "api", "claude")])
+
+    def test_a_change_wb_route_doesnt_gate_needs_no_dialog(self):
+        with self.claude():
+            for argv in (("coding", "ask"), ("splash", "off")):
+                self.assertEqual(json.loads(tw.run_wb("settings", "set", "--dry-run", *argv)),
+                                 {"change": "", "gate": False})
+            q = json.loads(tw.run_wb("settings", "set", "--dry-run", "--json", "gpu-trivial", "auto"))
+        self.assertFalse(q["gate"], q)
+        self.assertEqual(self.changes(), [])  # a dry run writes nothing
+
+    def test_probe_turned_on_without_probe_prints_the_help_note(self):
+        empty = Path(self.tmp.name) / "no-probe"
+        empty.mkdir()
+        with self.claude(), mock.patch.dict(os.environ, {"PATH": str(empty)}):
+            out = tw.run_wb("settings", "set", "probe", "on")
+        said, _, note = out.partition("\n")
+        self.assertTrue(said.startswith("probe: on, but not set up"), out)
+        self.assertTrue(note.startswith("Agent code navigation (the probe experiment) is on, but it can't work yet."), out)
+        self.assertIn("install nothing without their yes", note)
+        [row] = self.changes()
+        self.assertEqual((row["key"], row["to"], row["by"], row["help"]), ("probe", "on", "claude", note.strip()))
+
+    def test_an_unknown_key_or_a_value_off_its_choices_exits_2_and_runs_nothing(self):
+        log = self.fake_wb()
+        with self.claude():
+            code, err = self.refused("settings", "set", "no-such", "on")
+            self.assertEqual((code, err), (2, "wb: no setting 'no-such': wb settings lists them\n"))
+            code, err = self.refused("settings", "set", "busy", "sometimes")
+            self.assertEqual(code, 2)
+            self.assertIn("isn't one of busy's choices", err)
+            self.assertEqual(self.refused("settings", "set", "busy")[0], 2)
+        self.assertFalse(log.exists())
+        self.assertEqual(self.changes(), [])
+
+    def test_an_agents_shell_cant_run_wb_settings(self):
+        # #1287: the agent's shell is deny by default and wb isn't on its list
+        from workbench import context
+        task = store.Task("t-settings")
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": "t-settings", "repo": str(self.repo)}))
+        rules = [*context.shell_rules(task), *({"action": "shell", "resource": r, "effect": "deny"}
+                                                for r in context.denied_shell())]
+        for cmd in ("wb settings set coding ask", "wb settings", "wb settings set role-trivial api"):
+            self.assertEqual(tw.Permission.verdict(rules, cmd), "deny", cmd)

@@ -2101,10 +2101,8 @@ def admin_set(key, value) -> tuple[int, dict]:
     rows = admin.rows()
     if not done["ok"]:
         return 409, {"ok": False, "error": done["said"], "rows": rows}
+    admin.record(before, key, value, done, "web")
     helps = {"help": done["help"]} if done.get("help") else {}
-    store.append_jsonl(changes_path(), {"ts": store.now(), "key": key, "label": before.get("label") or key,
-                                        "from": before.get("value"), "to": value, "said": done["said"],
-                                        **helps, "by": "web"})
     return 200, {"ok": True, "said": done["said"], "rows": rows, **helps}
 
 

@@ -19,6 +19,12 @@ child of child_env() (no CLAUDECODE, CLAUDE_PID or CLAUDE_CODE_SESSION_ID, WB_AC
 time, then the cache is dropped. The user's click on the web app is the yes, as a command they
 type at their terminal is: the child isn't Claude, so `wb route` doesn't gate it, and no approval
 file is written. It stamps a role change `by: "web"` (WB_ACTOR; CLAUDECODE wins over it).
+
+Claude writes through the same apply() (#1287, `wb settings set`, on the user's clear ask and yes
+in the conversation: the owner, 2026-11-24, "We trust Claude"), with by="claude": its child keeps
+Claude's environment, so a row that moves a role to API, or any other change `wb route` gates,
+still waits for the mod's dialog (route-ok.json), as `wb route` typed by Claude does. Each change
+that went through is a row of settings-changes.jsonl (record()), `by` who made it.
 """
 from __future__ import annotations
 
@@ -33,7 +39,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import chat, cli, context, progress, routes, savings, stats
+from . import chat, cli, context, progress, routes, savings, stats, store
 
 GROUPS = ("shared", "gpu", "api", "terminal", "experimental")  # display order
 KINDS = ("choice", "number", "info", "action", "note")
@@ -112,19 +118,25 @@ def _probe_help(value, said: str) -> str | None:
 HELP = {"probe": _probe_help}
 
 
-def child_env() -> dict[str, str]:
+BY = ("web", "claude")  # apply()'s writers: the web app's click, Claude's `wb settings set`
+
+
+def child_env(by: str = "web") -> dict[str, str]:
     """The environment of every wb the server runs: never Claude's (a server started under Claude
-    Code carries CLAUDECODE=1, and wb would then gate the user's own click), marked as the web's."""
+    Code carries CLAUDECODE=1, and wb would then gate the user's own click), marked as the web's.
+    by="claude" (`wb settings set`): the caller's own, unmarked, so wb gates it as it gates Claude."""
+    if by == "claude":
+        return {k: v for k, v in os.environ.items() if k != ACTOR}
     env = {k: v for k, v in os.environ.items() if k not in chat.CLAUDE_VARS}  # what chat.start scrubs
     env[ACTOR] = "web"
     return env
 
 
-def _run(argv: list[str], timeout: float) -> tuple[bool, str, str]:
-    """wb ARGV as a child of child_env(): (ok, stdout, stderr); a timeout or a launch failure is
+def _run(argv: list[str], timeout: float, by: str = "web") -> tuple[bool, str, str]:
+    """wb ARGV as a child of child_env(by): (ok, stdout, stderr); a timeout or a launch failure is
     not ok, its reason in stderr."""
     try:
-        p = subprocess.run([sys.executable, "-X", "utf8", str(WB), *argv], env=child_env(),
+        p = subprocess.run([sys.executable, "-X", "utf8", str(WB), *argv], env=child_env(by),
                            capture_output=True, text=True, errors="replace", timeout=timeout,
                            stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
@@ -505,20 +517,50 @@ def _said(argv: list[str], ok: bool, out: str, err: str) -> str:
     return said or ("done" if ok else "wb refused, and said nothing")
 
 
-def apply(key: str, value) -> dict:
-    """Set ``key`` to ``value`` through its wb command: {"ok", "said", "help"?}. KeyError for no
-    such row, ValueError for a value it doesn't take (nothing runs for either); `ok` false is wb's
-    refusal, `said` its line. `help`, when the value chosen needs Claude's help to work (HELP)."""
+def _row(key: str) -> dict:
     row = next((x for x in _fresh(False)["rows"] if x["key"] == key), None)
     if row is None:
         raise KeyError(key)
-    argv = _argv(row, value)
+    return row
+
+
+def apply(key: str, value, by: str = "web") -> dict:
+    """Set ``key`` to ``value`` through its wb command: {"ok", "said", "help"?}. KeyError for no
+    such row, ValueError for a value it doesn't take (nothing runs for either); `ok` false is wb's
+    refusal, `said` its line. `help`, when the value chosen needs Claude's help to work (HELP).
+    `by` (BY): "web", the user's click, never gated; "claude", run as its caller (child_env)."""
+    if by not in BY:
+        raise ValueError(f"by is one of {', '.join(BY)}")
+    argv = _argv(_row(key), value)
     with _WRITE:
         try:
-            ok, out, err = _run(argv, WRITE_TIMEOUT_S)
+            ok, out, err = _run(argv, WRITE_TIMEOUT_S, by)
         finally:
             drop()
     result = {"ok": ok, "said": _said(argv, ok, out, err)}
     if ok and key in HELP and (note := HELP[key](argv[-1], result["said"])):
         result["help"] = note
     return result
+
+
+def dry_run(key: str, value) -> tuple[int, str, str]:
+    """What apply(key, value, by="claude") would ask the mod's dialog: for a row whose wb call is
+    a `wb route`, that call's `--dry-run --json` (exit code, stdout, stderr), else no gate
+    (`{"change": "", "gate": false}`). The mod shows its `change` and, on the user's Allow,
+    writes its `approval` to route-ok.json, which the real call then takes (#1287). KeyError and
+    ValueError as apply's."""
+    argv = _argv(_row(key), value)
+    if argv[0] != "route":
+        return 0, json.dumps({"change": "", "gate": False}), ""
+    ok, out, err = _run(["route", "--dry-run", "--json", *argv[1:]], WRITE_TIMEOUT_S, "claude")
+    return (0 if ok else 3), out, err
+
+
+def record(before: dict, key: str, value, done: dict, by: str) -> dict:
+    """Append a change that went through to settings-changes.jsonl (chat.CHANGES): {ts, key,
+    label, from, to, said, help?, by}, ``before`` the row as it was. The mod tells Claude of the
+    web's (#1283); Claude's own (by "claude") it made itself."""
+    entry = {"ts": store.now(), "key": key, "label": before.get("label") or key, "from": before.get("value"),
+             "to": value, "said": done["said"], **({"help": done["help"]} if done.get("help") else {}), "by": by}
+    store.append_jsonl(chat.changes_path(), entry)
+    return entry

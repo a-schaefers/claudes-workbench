@@ -295,7 +295,9 @@ reads them again.
 - 409 `{"ok": false, "error": <wb's line>, "rows": [...]}` when wb refused.
 
 A change that went through is recorded (`settings-changes.jsonl` in the state directory: `{ts,
-key, label, from, to, said, help?, by: "web"}`), so Claude in the terminal hears of it.
+key, label, from, to, said, help?, by: "web"}`), so Claude in the terminal hears of it. Claude
+changes a row through the same writer with `wb settings set`, on the user's yes in the
+conversation; its rows say `by: "claude"`.
 
 ### `GET /api/stats` (user only)
 The Stats view's history: `{"feed": <wb stats --json>, "routes": <wb route --json, or null>,

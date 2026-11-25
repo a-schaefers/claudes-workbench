@@ -238,6 +238,15 @@ add a model you judge fit only for small work, and otherwise change it only when
 A newly added model has no record, so the router won't pick it over one with a good record:
 replay the bench on it first (`wb bench run --model <id>`, §6), then give it its first few
 real tasks with `--model` (ones you'd review closely anyway).
+**Settings are the user's** (the web app's Settings; `wb settings` lists every row, its value,
+its choices and what each does). When they are unsure about an option, explain it from `wb
+settings`. Change one only when they have clearly asked for that change and said yes: `wb
+settings set <key> <value>` applies it as the web app does and prints wb's line, and for a
+setting that needs more to work, a note: offer what it says, installing nothing without their
+yes. One yes covers the change asked for and nothing more. Never change a setting unasked, and
+after a no don't ask again. A role moved to API still goes through the mod's dialog, as `wb
+route` does: a "not changed" is their no. The same holds from the web chat: answer there and
+run the same command.
 **API models and privacy.** An API model sends the repo, its spec, the CLAUDE.md files and the
 user's `~/.config/workbench/AGENTS.md` to its provider (never their `~/.claude` files). When you propose an API role, say where the code goes
 (the provider, as `wb route --dry-run`'s line names it; its data-policy page comes in the note

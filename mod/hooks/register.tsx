@@ -1697,7 +1697,7 @@ const ROUTE_OK_OWN = `workbench: not run: ${ROUTE_OK} is the mod's dialog's to w
 const ROUTES_EDIT = 'workbench: not edited: the roles change only through wb route, on the user\'s yes in the ' +
   'mod\'s dialog (wb route shows them).'
 // text a shell or an interpreter runs, not parsed as commands: a route change hidden in it is refused
-const ROUTE_TEXT = /(?:\bwb|-m\s*workbench[\w.]*)\s+(?:route\b|start\b[^\n]*\s--m)/i
+const ROUTE_TEXT = /(?:\bwb|-m\s*workbench[\w.]*)\s+(?:route\b|settings\s+set\b|start\b[^\n]*\s--m)/i
 const ROUTES_RULE = 'Never pass --model for an API model or change a role without the user\'s yes (the mod ' +
   'asks them in a dialog); recommend only.'
 
@@ -1715,7 +1715,8 @@ function runsIn(src: string): string[][] {
 
 // Each wb route and each wb start with a --model (any abbreviation: --m…) in a command line, as
 // the arguments `wb route --dry-run --json` takes for it: a route's own, or `--start` and the
-// start's (parsed there by wb start's own parser). `hidden`: a route or such a start inside text
+// start's (parsed there by wb start's own parser); and each `wb settings set` (#1287), as
+// `--settings` and its own, whose dry run is `wb settings set … --dry-run --json`. `hidden`: a route or such a start inside text
 // another program runs, which can't be shown. `at`: the directory each call runs in, `cd` and
 // pushd followed from ``cwd`` as upstreamAim follows them: the dry run ran in the session's
 // directory, so `cd other && wb start … --model <API id>` (--repo defaults to `.`) was judged
@@ -1741,6 +1742,7 @@ export function routeCalls(command: string, cwd = '', home = ''): { calls: strin
     if (RUNS_CODE.test(cmd)) runner = true
     const wb = wbArgs(cmd, words.slice(i + 1))
     if (wb?.[0] === 'route') calls.push(wb.slice(1))
+    else if (wb?.[0] === 'settings' && wb[1] === 'set') calls.push(['--settings', ...wb.slice(2)])
     else if (wb?.[0] === 'start' && wb.some(w => /^--m/.test(w))) calls.push(['--start', ...wb.slice(1)])
     else continue
     at.push(here)
@@ -1850,7 +1852,7 @@ async function routeRefusal($: any, e: Row): Promise<string> {
   const tool = String(e.tool ?? '')
   if ((tool !== 'Bash' && tool !== 'Monitor') || typeof e.command !== 'string') return ''
   const command = e.command
-  if (!/\b(?:route|start)\b|route-ok\.json/i.test(command)) return '' // most calls: no parse
+  if (!/\b(?:route|start|settings)\b|route-ok\.json/i.test(command)) return '' // most calls: no parse
   if (command.includes(ROUTE_OK) && (mentions(command, mem.root, await routesHome($)) ||
     /\$\{?WB_HOME\b/.test(command))) return ROUTE_OK_OWN
   const { calls, hidden, at } = routeCalls(command, (await $.session.cwd().catch(() => '')) || mem.cwd, await routesHome($))
@@ -1868,7 +1870,11 @@ async function routeRefusal($: any, e: Row): Promise<string> {
     // dialog; the session's is the better guess (the review of #1125, 2026-11-23)
     const { args, cwd } = live[0]!
     const there = args[0] === '--start' && cwd && await $.fs.exists(cwd).catch(() => false) ? { cwd } : {}
-    const r = await $.process.run([mem.wb, 'route', '--dry-run', '--json', ...args], { timeoutMs: 60_000, ...there })
+    // a Settings row's (#1287): `wb settings set <key> <value> --dry-run --json` is its wb route's
+    // dry run, or no gate for a row that isn't a role's
+    const dry = args[0] === '--settings' ? ['settings', 'set', ...args.slice(1), '--dry-run', '--json']
+      : ['route', '--dry-run', '--json', ...args]
+    const r = await $.process.run([mem.wb, ...dry], { timeoutMs: 60_000, ...there })
     if (r.exitCode !== 0) return '' // wb refuses it itself, saying why
     q = JSON.parse(String(r.stdout ?? ''))
   } catch {

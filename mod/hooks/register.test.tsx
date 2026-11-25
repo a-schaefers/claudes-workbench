@@ -5687,7 +5687,7 @@ function routeWorld(on: any, files: Record<string, string>) {
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
   on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
   on('process.run', (_: any, e: any) => {
-    if (e.argv[1] === 'route' && e.argv[2] === '--dry-run') {
+    if ((e.argv[1] === 'route' && e.argv[2] === '--dry-run') || (e.argv[1] === 'settings' && e.argv.includes('--dry-run'))) {
       w.dry.push(e.argv.slice(1))
       w.dryAt.push(e.init?.cwd || '/home/u/project') // absent: the session's
       return { value: { exitCode: w.code, stdout: w.code ? '' : JSON.stringify(w.reply), stderr: w.code ? 'wb: no day cap yet' : '' } }
@@ -5838,6 +5838,31 @@ test('#1014: a route change hidden in text another program runs, or two in one l
   }
   expect(routeCalls('wb route && wb route trivial api').calls).toEqual([[], ['trivial', 'api']])
   expect((await bash('wb route && wb route trivial api')).asked).toBe(1)  // a show beside it is no second change
+  await clock.advance(1000)
+})
+
+test('#1287: wb settings set on a role row asks in the dialog with its dry run\'s line; a row wb route doesn\'t gate asks nothing', async ($, on) => {
+  // the owner, 2026-11-24 ("We trust Claude"): Claude changes a setting on the user's yes in the
+  // conversation, and a role moved to API still waits for this dialog, as wb route does
+  const { clock, bash, files, w } = await routeProbe($, on)
+  const line = 'significant: GPU → API deepseek/deepseek-flash · your code goes to DeepSeek · thinking off'
+  const argv = ['route', 'significant', 'api']
+  w.reply = { change: line, gate: true, approval: { argv, change: line } }
+  w.answer = 'Allow'
+  const r = await bash('wb settings set role-significant api')
+  expect(r).toEqual({ deny: undefined, asked: 1, question: line,
+    dry: [['settings', 'set', 'role-significant', 'api', '--dry-run', '--json']] })
+  expect(JSON.parse(files['/wb/route-ok.json']!)).toEqual({ argv, change: line, at: expect.any(Number) })
+  w.answer = "Don't"
+  expect((await bash('cd /tmp && wb settings set role-significant api')).deny).toContain('not changed')
+  w.reply = { change: '', gate: false }                         // Claude coding: no dialog
+  expect(await bash('wb settings set coding ask')).toEqual({ deny: undefined, asked: 0, question: '',
+    dry: [['settings', 'set', 'coding', 'ask', '--dry-run', '--json']] })
+  for (const command of ['wb settings', 'wb settings --json', 'wb settings set role-trivial api --dry-run --json']) {
+    expect([command, await bash(command)]).toEqual([command, { deny: undefined, asked: 0, question: '', dry: [] }])
+  }
+  expect((await bash('bash <<EOF\nwb settings set role-trivial api\nEOF')).deny).toContain('as a command of its own')
+  expect(routeCalls('wb settings set cap 5').calls).toEqual([['--settings', 'cap', '5']])
   await clock.advance(1000)
 })
 

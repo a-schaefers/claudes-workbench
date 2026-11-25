@@ -3076,6 +3076,86 @@ def cmd_splash(a):
                                    "any key skips it" if splash_on() else "Off: the Tasks page opens at once"))
 
 
+# wb settings (#1287): the web app's Settings rows (settings.py, the source of truth), for Claude
+# to explain the options and, on the user's clear ask and yes in the conversation, change one
+# through the same writer the web app uses (the owner, 2026-11-24: "claude is an interactive
+# assistant to the web panel, in case a user gets confused about the options"; "We trust Claude")
+SETTINGS_GROUPS = {"shared": "Shared", "gpu": "GPU", "api": "API", "terminal": "Terminal",
+                   "experimental": "Experimental"}
+SETTINGS_SET = "wb settings set <key> <value> changes one, on the user's clear ask and yes"
+
+
+def settings_lines(rows: list[dict]) -> list[str]:
+    """wb settings: each row by group, `key: label: value`, then its choices, `*` the current
+    one, each with its line (an API model's, its label alone); a read-only row says so."""
+    out: list[str] = []
+    group = None
+    for r in rows:
+        if r["group"] != group:
+            group = r["group"]
+            out.append(SETTINGS_GROUPS.get(group, group))
+        kind = r["kind"]
+        if kind == "note":
+            out.append(f"  {r['text']}")
+            continue
+        if kind == "info":
+            out.append(f"  {r['key']} (read-only): {r['text']}")
+            continue
+        if kind == "number":
+            v = r["value"]
+            now = "off" if v is None else routes.money(v) if r.get("unit") == "usd" else f"{v:g} per kWh"
+            out.append(f"  {r['key']}: {r['label']}: {now}. {r['says']} Takes a number, or off.")
+            continue
+        choices = r.get("choices") or []
+        if kind == "action":
+            out.append(f"  {r['key']}: {r['text']}")
+        else:
+            out.append(f"  {r['key']}: {r['label']}: {r['value'] if r['value'] is not None else 'none'}")
+            if r["value"] not in [c["value"] for c in choices] and r.get("says"):
+                out.append(f"      {r['says']}")
+        for c in choices:  # an API model's line is its name, provider and price: its says only repeat them
+            mark = "*" if kind == "choice" and c["value"] == r["value"] else " "
+            out.append(f"    {mark} {c['value']}: {c['label']}" + ("" if r.get("other") else f". {c['says']}"))
+        if r.get("other"):
+            out.append("      or any API model's exact provider/model id (wb models lists them)")
+    out.append(SETTINGS_SET)
+    return out
+
+
+def cmd_settings(a):
+    """List every Settings row, or set one as Claude (#1287): through settings.apply, wb's own
+    command for the row run with this environment, so under Claude Code a change wb route gates
+    (a role to API, the cap) still waits for the mod's dialog. A change that went through is a
+    settings-changes.jsonl row, by claude (terminal outside Claude Code)."""
+    from . import settings  # it imports this module
+    if a.action is None:
+        rows = settings.rows(fresh=True)
+        print(json.dumps(rows) if a.json else "\n".join(settings_lines(rows)))
+        return
+    try:
+        if a.dry_run:  # the mod's dialog: what the change's wb route --dry-run --json says
+            code, out, err = settings.dry_run(a.key, a.value)
+            print(out, end="")
+            print(err, end="", file=sys.stderr)
+            if code:
+                sys.exit(code)
+            return
+        before = next((r for r in settings.rows() if r["key"] == a.key), {})
+        done = settings.apply(a.key, a.value, by="claude")
+    except KeyError:
+        die(f"no setting {a.key!r}: wb settings lists them", 2)
+    except ValueError as e:
+        die(f"{e}: wb settings lists its choices", 2)
+    if not done["ok"]:
+        said = done["said"]
+        print(said if said.startswith("wb:") else f"wb: {said}", file=sys.stderr)
+        sys.exit(3)
+    settings.record(before, a.key, a.value, done, "claude" if os.environ.get("CLAUDECODE") == "1" else "terminal")
+    print(done["said"])
+    if done.get("help"):
+        print(done["help"])
+
+
 # The roles (#1014): wb route
 ROUTE_CATALOG = "not in OpenCode's catalog: wb models lists the API models"
 API_NOT_YET = ("is an API model, and this workbench doesn't start tasks on API models yet: wb "
@@ -8015,7 +8095,19 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("state", nargs="?", metavar="on|off",
                    help="on or off; probe's on means large files only (wb experiment says what it does)")
     s.set_defaults(f=cmd_experiment)
-    s = sub.add_parser("stop", help="stop a running task (wb resume or wb feedback continues it)")
+    s = sub.add_parser("settings", help="the web app's Settings: list every row and its choices, or "
+                       "`set` one on the user's clear ask and yes")
+    s.add_argument("--json", action="store_true", help="the rows as JSON (the web app's)")
+    s.set_defaults(f=cmd_settings, action=None, dry_run=False)
+    x = s.add_subparsers(dest="action", metavar="set").add_parser(
+        "set", help="change one row, on the user's clear ask and yes")
+    x.add_argument("key", metavar="KEY", help="a row's key, as wb settings lists it")
+    x.add_argument("value", metavar="VALUE", help="one of its choices; a number or off for a number "
+                   "row; any exact API model id where the row says so")
+    x.add_argument("--dry-run", action="store_true", help="the change as JSON, whether it needs the "
+                   "mod's dialog, and its approval; nothing written (the mod's dialog reads it)")
+    x.add_argument("--json", action="store_true", help="with --dry-run: JSON (it always is)")
+    s = sub.add_parser("stop",help="stop a running task (wb resume or wb feedback continues it)")
     s.add_argument("name", nargs="?")
     s.add_argument("--all", action="store_true", help="every running agent")
     s.add_argument("--repo", metavar="DIR", help="with --all: only those of a session started in DIR")

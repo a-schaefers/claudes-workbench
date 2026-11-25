@@ -4318,7 +4318,9 @@ terminal of their own: wb route …`. `by`: `dialog` (the approval's `by` is `pa
 rows, #1023: `pane`), `terminal` (outside Claude Code), `web` (outside Claude Code with
 `WB_ACTOR=web`: the web app's Settings, whose server runs wb with Claude's variables scrubbed,
 `settings.child_env`, #1279); `gpu_by`: `terminal`, `web`, or `claude` (a change under Claude Code
-that needs no dialog). `CLAUDECODE=1` wins over `WB_ACTOR`, so Claude setting it changes nothing. A flag or an environment variable is no consent, and the
+that needs no dialog). `CLAUDECODE=1` wins over `WB_ACTOR`, so Claude setting it changes nothing. `wb settings set`
+on a role's row (#1287) runs this same `wb route` with Claude's environment (`settings.child_env("claude")`), so it
+meets this gate and the same dialog. A flag or an environment variable is no consent, and the
 approval is one-shot, fresh, and bound to the exact command and line. The mod refuses the file tools
 on both files and a Bash command naming `route-ok.json` with the state directory spelled out, but
 that check is a speed bump, like the one on routes.json: a command that builds the path (a
@@ -5826,12 +5828,20 @@ setting touches only Python. The chat server draws from it (#1280); nothing in i
 - `rows(fresh=False) -> list[dict]`: every row, kept `ROWS_CACHE_S` 10 s (`fresh` reads again);
   `reads(fresh=False)`, the same cache's `{routes, models}` (`wb route --json`, `wb models --json`,
   or None); `drop()` forgets it.
-- `apply(key, value) -> {ok, said, help?}`: `KeyError` for no such row, `ValueError` for a value
-  it doesn't take (a read-only row, a value off its choices, a number not positive; nothing runs).
-  `said` is the child's last non-empty stdout line, or its stderr's on failure (the price row says
-  `electricity price: 0.3 per kWh` for its `--json` document).
-- `child_env()`: `os.environ` minus `chat.CLAUDE_VARS` (`CLAUDECODE`, `CLAUDE_PID`,
-  `CLAUDE_CODE_SESSION_ID`: the one list `chat.start` scrubs too), plus `WB_ACTOR=web` (`ACTOR`).
+- `apply(key, value, by="web") -> {ok, said, help?}`: `KeyError` for no such row, `ValueError` for
+  a value it doesn't take (a read-only row, a value off its choices, a number not positive; nothing
+  runs), or a `by` not in `BY` (`web`, `claude`). `said` is the child's last non-empty stdout line,
+  or its stderr's on failure (the price row says `electricity price: 0.3 per kWh` for its `--json`
+  document).
+- `child_env(by="web")`: `os.environ` minus `chat.CLAUDE_VARS` (`CLAUDECODE`, `CLAUDE_PID`,
+  `CLAUDE_CODE_SESSION_ID`: the one list `chat.start` scrubs too), plus `WB_ACTOR=web` (`ACTOR`);
+  `by="claude"` (`wb settings set`, #1287): the caller's own, minus `WB_ACTOR`, so wb gates the
+  child as it gates Claude.
+- `dry_run(key, value) -> (code, stdout, stderr)`: for a row whose call is a `wb route`, that
+  call's `wb route --dry-run --json` (as Claude); for any other `{"change": "", "gate": false}`.
+  `wb settings set --dry-run` prints it, for the mod's dialog.
+- `record(before, key, value, done, by)`: the change's row of `settings-changes.jsonl` (`chat.admin_set`'s
+  with `by` `web`, `wb settings set`'s with `claude`, or `terminal` outside Claude Code).
 
 **A row** is JSON-safe: `key`, `group`, `label`, `kind` and by kind: `choice` (`value`, `choices`
 `[{value, label, says}]`, `says` for the current value, `other`); `number` (`value` a float or null
@@ -5878,6 +5888,24 @@ dropped. No approval file is written: the child isn't Claude, so `wb route` does
 the user's own terminal, and wb stamps a role change `by: "web"` (*Roles*, the gate). A server started
 from Claude's Bash carries `CLAUDECODE=1`; `child_env` is what keeps the user's click from being
 gated as Claude's. `tests/test_settings.py` covers it.
+
+**Claude's writes** (#1287; the owner, 2026-11-24: "claude is an interactive assistant to the web
+panel, in case a user gets confused about the options", then "We trust Claude"). `wb settings`
+lists every row (`cli.settings_lines`: by group, `key: label: value`, each choice with its line and
+`*` on the current one, an API model's by its label alone; `--json`, the rows). `wb settings set
+<key> <value>` (`cli.cmd_settings`) runs `settings.apply(key, value, by="claude")`, the one writer
+the web app uses too, prints wb's line and the row's `help` when it came back, and appends
+`record(..., by)` to settings-changes.jsonl (`claude` under `CLAUDECODE=1`, else `terminal`), so the
+web app and the other session see it; the mod tells Claude only of `by: "web"` rows. Exit 2 for no
+such key or a value off the row's choices (nothing runs), 3 when wb refused (its line). No confirm
+card, pending ask or token gate: the user's yes is given in the conversation, and the skill says
+when Claude may run it. What stays gated is what `wb route` gates: the child keeps `CLAUDECODE`, so
+a row that moves a role to API (or sets the cap, an API model, thinking on API) exits 3 without
+route-ok.json, and the mod's `routeRefusal` reads `wb settings set` as it reads `wb route`
+(`routeCalls`' `--settings` call; the dry run `wb settings set <key> <value> --dry-run --json`,
+`settings.dry_run`), shows the change in the dialog and on Allow writes the approval the child's
+`wb route` takes. An agent's shell is denied `wb` (no `ALLOWED_COMMANDS` entry: the shell rules
+deny by default), and its lane writes none of `$WB_HOME`'s settings files.
 
 ### The admin endpoints (#1280)
 
@@ -6358,9 +6386,12 @@ atom.
 
 **The roles' dialog** (`routeRefusal`, beside `sendRefusal` in the same hook, #1014; *Roles*). In Bash and Monitor
 commands, read as above (`runsIn`: `simpleCommands`, `bash -c` and `eval` inside; `wbArgs`), each `wb route …` and each
-`wb start … --m…` (any abbreviation of `--model`) is a call (`routeCalls`); a show (`wb route`, `--json`) and a dry run
+`wb start … --m…` (any abbreviation of `--model`) is a call (`routeCalls`), and each `wb settings set …` (#1287, a
+`--settings` call); a show (`wb route`, `--json`) and a dry run
 change nothing. For the one call, the mod runs `wb route --dry-run --json <its args>` (a start's as `--start <wb start's
-args>`, parsed there by wb start's own parser: the task's name and an abbreviated `--model` as wb takes them), 60 s,
+args>`, parsed there by wb start's own parser: the task's name and an abbreviated `--model` as wb takes them; a
+Settings row's as `wb settings set <key> <value> --dry-run --json`, `settings.dry_run`: its row's own dry run, or
+nothing gated for a row that isn't a role's), 60 s,
 a start's in the directory it runs in (`routeCalls`' `at`: `cd` and `pushd` followed from the session's, with
 `upstreamAim`'s `cdTarget`; wb start's `--repo` is `.` unless given, and a start after `cd other &&` was judged
 local-only, or not, by the session's repo, #1125). A `cd` the mod can't resolve (a word with `$` or a backquote, none,
@@ -6480,6 +6511,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb steer <task> --text "…" \| --message <file>` | `--now`, `--step` (opens with `STEP_NOTE`: a `smaller` intervention after a progress check, else a `hint`) | Queued/running/testing/asking with a live runner only. steer.jsonl, delivered when the run ends, before the tests; `--now` at once. |
 | `wb note <task> --text "…"` | | A `captain` event. |
 | `wb splash [on\|off]` | | `$WB_HOME/splash.json`: the pane's opening (#963). |
+| `wb settings [set KEY VALUE]` | `--json`; `set`: `--dry-run`, `--json` | The web app's Settings rows (*The admin table (settings.py)*, *Claude's writes*, #1287): every row by group with its choices (`cli.settings_lines`); `set` runs `settings.apply(by="claude")` (a role's row gated as `wb route` is, the mod's dialog reading `--dry-run --json`), prints wb's line and the row's `help`, appends to settings-changes.jsonl; exit 2 no such key or value, 3 wb refused. |
 | `wb experiment [<name> [on\|off]]` | | *Experiments* (`cli.experiment_lines`, `context.EXPERIMENTS`, use over `USE_RECENT` 5 rows, `cli.use_recent`); sets `experiments.json` for later tasks; old probe levels `context.OLD_LEVELS` mean on; `; on is recommended` while `context.PROBE_RECOMMENDED`. |
 | `wb workflows [on\|off]` | | *Dynamic workflows* (#1041): `$WB_HOME/workflows.json`; off by default. |
 | `wb coding [only\|ask\|decide]` | `allow <task> --edit "…" --said "…" [--when "…"]`, `used <task> --did "…"` | *Claude coding*: the mode and allowances; `allow` records the user's yes for one task until it goes back to the agent; `used` what Claude changed (exit 1 with none). |
@@ -6565,8 +6597,9 @@ $WB_HOME (~/.local/state/workbench)
   gc.json                        the last gc: {at, archived, notices, rules, runtime, scratch, starts, uploads, branches, refs, …}
   archive/<task>/                a task closed and untouched for ARCHIVE_DAYS (30), moved by gc
   coding.json                    {mode: only|ask|decide, ts}; none: decide
-  settings-changes.jsonl  .lock  a web app Settings change that went through (chat.admin_set, #1280): {ts, key, label, from, to, said, help?,
-                                 by: "web"}; `help` the note asking Claude to offer to set it up (settings.HELP); the mod tells Claude (#1283)
+  settings-changes.jsonl  .lock  a Settings change that went through (settings.record: chat.admin_set's, #1280, and wb settings set's, #1287):
+                                 {ts, key, label, from, to, said, help?, by: "web"|"claude"|"terminal"}; `help` the note asking Claude to
+                                 offer to set it up (settings.HELP); the mod tells Claude of the web's (#1283)
   experiments.json  .lock        wb experiment: {<name>: "on"|"off"}; probe's old levels adaptable|moderate|aggressive, or true: on; else off
   probe-languages.json           {probe (real path), version, languages, at} from `probe search --help`; re-read when path or version differs (context.probe_languages)
   progress.json                  progress checks' opt-in: {on, after?, ts}; none: off
@@ -7153,7 +7186,11 @@ CLAUDE.md under 25,000 characters); `test_settings.py` (*The admin table (settin
 each choice applied running the pane's `wb` call through a fake `wb`, a role changed from the web stamped `by: "web"`,
 a click under `CLAUDECODE` still written ungated while Claude's own `WB_ACTOR=web` stays gated, `KeyError` for an
 unknown key and `ValueError` for a value off the choices, an API row taking a free id and leaving it to `wb route`,
-wb's refusal passed back, turning probe on without `probe` returning the note that asks Claude's help); `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`. The tests' own
+wb's refusal passed back, turning probe on without `probe` returning the note that asks Claude's help; and `ClaudeSets`,
+#1287's `wb settings`: every row listed with its choices, `wb settings set coding ask` applied and recorded `by: "claude"`,
+`role-significant api` under `CLAUDECODE` exiting 3 until the dialog's approval from its dry run, then written `by:
+"dialog"`, a row `wb route` doesn't gate dry-running to no dialog, probe's `help` printed, exit 2 for an unknown key or
+value, an agent's shell denied `wb settings`); `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`. The tests' own
 `HTTPServer`/`ThreadingHTTPServer` (`_Listens`, 0.02 s tick) listen at once: http.server's looked the name up first, 35 s
 on macOS runners (#950); not patched suite-wide, so `WebChat` still catches chat.py doing it.
 
@@ -7708,8 +7745,10 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   the doc's *Versions*. **What an agent token may do** → `chat.AGENT_MAY` (and `AGENT_CANT`'s wording), the doc, the
   agents' skill; a new endpoint stays out of `AGENT_MAY` unless an agent needs it. **What an agent may read** →
   `chat.in_view`, `chat.agent_snapshot`, `chat.agent_may_read`, the doc's *An agent's view*.
-- **settings-changes.jsonl's rows** (`chat.admin_set`: `key`, `label`, `from`, `to`, `said`, `help`, `by`) → the mod's
-  reader of it (#1283), *Files and formats*. **`/api/top`'s events** (`top`, `down` `{why, retry}`) → the web app's
+- **settings-changes.jsonl's rows** (`settings.record`: `key`, `label`, `from`, `to`, `said`, `help`, `by`) → the mod's
+  reader of it (#1283, which delivers `by: "web"` alone), *Files and formats*. **A Settings row's `wb route` call**
+  (`settings._argv`) → `settings.dry_run` and the mod's `routeCalls` `--settings` (the dialog's dry run).
+  **`wb settings set`'s rule** (on the user's clear ask and yes) → `skill/workbench/SKILL.md`. **`/api/top`'s events** (`top`, `down` `{why, retry}`) → the web app's
   Stats view, docs/chat-api.md.
 - **An agent's turn** (`mem.agentTurn`, `agentsFor`) → the `classic.PermissionRequest` hook, `askForArgs`, `wb chat ask
   --for --here`, the ask's `for` (`makeAsk`'s `.ask-for`, `sw.js`); **an ask settled elsewhere** (`watchAsk`,
