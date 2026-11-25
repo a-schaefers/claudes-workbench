@@ -22047,7 +22047,9 @@ class ScheduledRuns(Base):
     def test_a_task_started_after_a_time_waits_queued_before_its_checkout_and_holds_no_gpu(self):
         at = time.strftime("%H:%M", time.localtime(time.time() + 7200))
         out = self.start("t-later", "ok", "--test", TEST_CMD, "--after", at)
-        self.assertIn(f"note: held until {at}", out.replace("Mon ", "").replace("Tue ", ""))
+        # runner.clock's weekday comes in when the time is tomorrow, any weekday: the macOS nightly
+        # crossed midnight (run 45707953076, 2026-11-25) with only Mon and Tue stripped
+        self.assertRegex(out, rf"note: held until (\S+ )?{re.escape(at)} \(--after\)")
         task = store.Task("t-later")
         self.assertGreater(task.spec["not_before"], time.time() + 3600)
         deadline = time.time() + 20
