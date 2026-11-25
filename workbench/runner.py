@@ -35,7 +35,7 @@ from collections import deque
 from pathlib import Path
 
 from . import (ask_mcp, context, gitguard, gitops, hardware, keyhole, lane, lessons, models, progress,
-               routes, skills, stats, store, tuning)
+               routes, skills, store, tuning)
 from . import meter
 from . import privacy
 from .events import ANYWHERE, EDIT_TOOLS, StuckDetector, compaction_failed, normalize, shell_names, written
@@ -4194,15 +4194,14 @@ def steps_line(task: store.Task) -> str | None:
 
 
 def _spend_part(task: store.Task) -> str:
-    """The round report's money for an API task (#1022): ` · ≈$0.12 so far (catalog prices)`
-    (`$0.12 so far (your prices)` at the user's own, #1135), ` · cost unknown` (no price: never a
+    """The round report's money for an API task (#1022): ` · ≈$0.12 so far` (plain `$0.12` at the
+    user's own prices or the provider's figure, #1135), ` · cost unknown` (no price: never a
     false $0); nothing for a GPU task."""
     if task.spec.get("via") != "api":
         return ""
     from .results import live_basis, spend_so_far
-    from .savings import money
     v, b = spend_so_far(task), live_basis(task.status)
-    return f" · {money(v, b)} so far{meter.NOTE[b] if v else ''}" if v is not None else " · cost unknown"
+    return f" · {meter.money(v, b)} so far" if v is not None else " · cost unknown"
 
 
 # The round report's line for a task whose agent had a copy of Claude's global files until this
@@ -4768,7 +4767,7 @@ def measure_speed(task: store.Task, since: float) -> None:
         msgs = [m for m in export(sid, task=task).get("messages", [])
                 if ((m.get("time") or {}).get("created") or 0) >= since * 1000]
         got = router.record_speed(task.spec["model"], msgs, api=api_entry(task) is not None)
-        if any(got.values()) and stats.recording():
+        if any(got.values()):
             had = task.status.get("speeds") or {}
             task.set_status(speeds={k: ((had.get(k) or []) + v)[-TASK_SPEED_KEEP:]
                                     for k, v in got.items()})
@@ -4831,10 +4830,8 @@ def died(rnd: dict) -> bool:
 
 def _round_end(task: store.Task, n: int, rnd: dict, began: float) -> None:
     """How the round ended, for the Stats tab (#404): the guard that stopped it is counted in
-    status `guards`, and a `round_end` event says how long it ran and how it ended. Only with
-    stats recording on; no reader of events shows the kind, so the transcript is unchanged."""
-    if not stats.recording():
-        return
+    status `guards`, and a `round_end` event says how long it ran and how it ended. No reader of
+    events shows the kind, so the transcript is unchanged."""
     how = ("stuck" if rnd.get("stuck") else "handover" if rnd.get("full") else
            "interrupted" if rnd.get("interrupted") else
            "failed" if died(rnd) else "done")

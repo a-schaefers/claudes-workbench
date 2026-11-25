@@ -775,14 +775,10 @@ async function probeMode($: any): Promise<string> {
   }
 }
 
-// The Stats tab's rows (#406): what wb records for it and its live view, on by default (the user,
-// 2026-11-20: a measurement that costs nothing is on, and every one can be turned off), then
-// progress checks, off by default since each one wakes Claude. Each is wb's choice: `wb stats set`
+// The Stats tab's rows (#406): its live view, on by default, then progress checks, off by default
+// since each one wakes Claude. What a task records for the tab is always recorded: it costs
+// nothing, and a switch to stop it guarded nothing (#1322). Each is wb's choice: `wb stats set`
 // (stats.json), `wb progress` (progress.json).
-const RECORD_STOPS: [string, string, string][] = [
-  ['on', 'On (default)', 'Each task keeps how it went for the Stats tab: speeds, watts, what stopped it. Nothing leaves this machine.'],
-  ['off', 'Off', 'Tasks keep only what workbench itself learns from.'],
-]
 const LIVE_STOPS: [string, string, string][] = [
   ['on', 'On (default)', 'The Stats tab shows this machine now (wb top), and only while it is on screen.'],
   ['off', 'Off', 'The Stats tab shows the history only.'],
@@ -888,11 +884,11 @@ async function setWeb($: any, value: string) {
 
 // stats.json's settings as wb reads them (stats.py): each its default unless the file says
 // otherwise, a mistyped value ignored
-async function statsSettings($: any): Promise<{ recording: boolean; live: boolean; every: number }> {
+async function statsSettings($: any): Promise<{ live: boolean; every: number }> {
   let d: any = {}
   try { d = JSON.parse(await $.fs.read(`${mem.root}/stats.json`)) } catch { /* the defaults */ }
   const on = (v: unknown) => (typeof v === 'boolean' ? v : true)
-  return { recording: on(d?.recording), live: on(d?.live), every: [1, 2, 5].includes(d?.every) ? d.every : 2 }
+  return { live: on(d?.live), every: [1, 2, 5].includes(d?.every) ? d.every : 2 }
 }
 
 // progress.json as wb reads it (progress.py): on only when it says so; a fixed threshold when
@@ -1089,7 +1085,6 @@ export function liveLines(t: WbTop, why = '', names: Names = NO_NAMES): { color?
     } else if (g.total) row.push({ dim: true, text: `${gib(g.total)} GiB${g.unified ? ' unified' : ''} ` })
     // an Apple GPU: its bar is the RAM, and the most of it the GPU may wire is said here (#701)
     if (typeof g.limit === 'number' && g.limit) row.push({ dim: true, text: `· GPU may wire ${gib(g.limit)} GiB ` })
-    if (g.stale) row.push({ dim: true, text: 'no reading ' })            // known, not read just now (#547)
     if (typeof g.busy === 'number')
       row.push({ dim: true, text: '· busy ' }, { color: g.busy > 80 ? 'warning' : 'success', text: bar(g.busy / 100, 8) },
         { text: ` ${g.busy}% ` })
@@ -1116,13 +1111,13 @@ export function liveLines(t: WbTop, why = '', names: Names = NO_NAMES): { color?
         ? ` ${gib(m.gpu_bytes)} GiB on the GPU${m.cpu_bytes ? ` + ${gib(m.cpu_bytes)} on the CPU` : ''}` : ''
     // with its unit, as the history's `writes ~61 tok/s`: "writes ~61" said 61 of nothing (#1048's review)
     const facts = [m.write_tok_s ? `writes ~${Math.round(m.write_tok_s)}${NB}tok/s` : '', m.read_tok_s ? `reads ~${Math.round(m.read_tok_s)}${NB}tok/s` : '',
-      m.load_s ? `loads ~${secs(m.load_s)}` : '', m.state === 'remote' ? 'another machine: no telemetry' : m.why ?? ''].filter(Boolean)
+      m.load_s ? `loads ~${secs(m.load_s)}` : '', m.why ?? ''].filter(Boolean)
     out.push([{ color: RACK_COLOR[m.state], dim: !RACK_COLOR[m.state], text: `${RACK_MARK[m.state] ?? '•'} ` },
       { text: `${m.label || m.model} ` }, { color: RACK_COLOR[m.state], dim: !RACK_COLOR[m.state], text: `${m.state}${where}` },
       { dim: true, text: facts.length ? ` · ${facts.join(' · ')}` : '' },
       ...(m.tasks?.length ? [{ color: 'claude', text: ` ← ${m.tasks.join(', ')}` }] : [])])
   }
-  if (fold) out.push([{ dim: true, text: `+${fold} more models idle, can't run or remote (wb top)` }])
+  if (fold) out.push([{ dim: true, text: `+${fold} more (wb top)` }])
   for (const q of (s.queue ?? []) as Row[])
     out.push([{ color: 'warning', text: '◌ ' }, { text: `${q.task} ` },
       { dim: true, text: `waits for the GPU${typeof q.waited_s === 'number' ? ` (${secs(q.waited_s)})` : ''}` }])
@@ -1904,8 +1899,8 @@ const GUARD_WORDS: Record<string, string> = {
 const STATS_SHOWN = 3
 
 // The Stats tab's history as lines (a label in bold, then the text): what the feed holds, each
-// section left out when it has nothing, estimates said as such. A run of days that ended isn't
-// mentioned, only the best (the plan's rule: show what went right, never nag).
+// section left out when it has nothing, an estimate marked `~`. No streak, bests or milestones:
+// a score of the user's habits, which nobody acted on (#1322).
 export function statsLines(f: Record<string, any> | null, why = '', names: Names = NO_NAMES): { label: string; text: string }[] {
   // `why`: the last `wb stats --json` failed, said (#553): with no feed yet "Reading…" never ended
   if (!f) return [{ label: '', text: why ? `History unavailable: ${why} (wb stats --json)` : 'Reading the history…' }]
@@ -1918,11 +1913,10 @@ export function statsLines(f: Record<string, any> | null, why = '', names: Names
   const period = (name: string, label: string) => {
     const p = f.periods?.[name]
     if (!p) return
-    const s = p.score
     const saved = p.savings?.saved ?? 0
     const parts = [
-      s ? `score ${s.score}/100` : '',
-      p.savings ? (saved >= 0 ? `saved ~${kilo(saved)} Claude tokens (estimate)` : `cost ~${kilo(-saved)} more Claude tokens (estimate)`) : '',
+      // one figure for the saving: the score beside it was its percent again (#1322)
+      p.savings ? (saved >= 0 ? `saved ~${kilo(saved)} Claude tokens` : `cost ~${kilo(-saved)} more Claude tokens`) : '',
       `${p.tasks} task${p.tasks === 1 ? '' : 's'}`,
       `${p.landed} landed${p.accepted_pct !== undefined ? ` (${p.accepted_pct}%)` : ''}`,
       // left out of the count, not the saving: Claude's tokens were spent on them (#569)
@@ -1936,9 +1930,6 @@ export function statsLines(f: Record<string, any> | null, why = '', names: Names
   }
   period('week', 'This week')
   period('all', 'All time')
-  if (f.streak) out.push({ label: 'Streak', text: f.streak.current
-    ? `${f.streak.current} day${f.streak.current === 1 ? '' : 's'} in a row with a task landed · best ${f.streak.best}`
-    : `best: ${f.streak.best} day${f.streak.best === 1 ? '' : 's'} in a row with a task landed` })
   const ab = f.absorbed
   if (ab) {
     const parts = [
@@ -1999,16 +1990,6 @@ export function statsLines(f: Record<string, any> | null, why = '', names: Names
     const line = spark(f.days.map((d: any) => d.tasks))
     if (line) out.push({ label: 'Last 30 days', text: `${line}  tasks per day` })
   }
-  const bests = [
-    f.bests?.largest_first_try ? `largest landed first try: ${f.bests.largest_first_try.lines} lines (${f.bests.largest_first_try.task})` : '',
-    f.bests?.fastest ? `fastest landing: ${f.bests.fastest.minutes} min (${f.bests.fastest.task})` : '',
-  ].filter(Boolean)
-  if (bests.length) out.push({ label: 'Bests', text: bests.join(' · ') })
-  const last = (f.milestones ?? []).at(-1)
-  if (last) out.push({ label: 'Milestone', text: last.kind === 'landed'
-    ? `${last.n} task${last.n === 1 ? '' : 's'} landed${last.day ? ` (${last.day})` : ''}`
-    // "(estimate)", as each period and the footer say it ("saved, estimated" said it a second way)
-    : `~${kilo(last.n)} Claude tokens saved (estimate${last.day ? `, ${last.day}` : ''})` })
   const guards = Object.entries(f.guards ?? {}) as [string, number][]
   if (guards.length) out.push({ label: 'What stopped agents', text: guards.sort((a, b) => b[1] - a[1])
     .map(([g, n]) => `${GUARD_WORDS[g] ?? g} ${n}`).join(' · ') })
@@ -2925,7 +2906,7 @@ async function ears($: any) {
 // it buried the question Claude had just asked the person (the 2026-11-16 audit).
 const SCOUT_QUIET_MS = 60_000
 
-// `wb savings --json` as the pane's footer: "this week: saved ~1.2M Claude tokens (46%, estimate) · 0.9 kWh",
+// `wb savings --json` as the pane's footer: "this week: saved ~1.2M Claude tokens (46%) · 0.9 kWh",
 // with ", cost 0.27" once a price is set (as the Stats tab and `wb savings` label it: no currency
 // sign, the price is the user's); '' until a task can be compared, or when the output isn't wb's.
 export function savedLine(out: string): string {
@@ -2934,21 +2915,19 @@ export function savedLine(out: string): string {
   const api = apiMoney(t?.api)
   if (!t || typeof t.tasks !== 'number' || !t.tasks || typeof t.saved !== 'number') return api ? apiAlone(t.api, api) : ''
   const n = (x: number) => (Math.abs(x) >= 1e6 ? `${(x / 1e6).toFixed(1)}M` : `${Math.round(x / 1e3)}K`)
-  const pct = t.self_est > 0 ? ` (${Math.round((100 * t.saved) / t.self_est)}%, estimate)` : ' (estimate)'
-  const what = t.saved >= 0 ? `saved ~${n(t.saved)} Claude tokens${pct}` : `cost ~${n(-t.saved)} more Claude tokens (estimate)`
+  const pct = t.self_est > 0 ? ` (${Math.round((100 * t.saved) / t.self_est)}%)` : ''
+  const what = t.saved >= 0 ? `saved ~${n(t.saved)} Claude tokens${pct}` : `cost ~${n(-t.saved)} more Claude tokens`
   const cost = typeof t.cost === 'number' ? `, cost ${t.cost.toFixed(2)}` : ''
   const gpu = t.wh ? ` · ${t.wh >= 1000 ? `${(t.wh / 1000).toFixed(1)} kWh` : `${Math.round(t.wh)} Wh`}${cost}` : ''
   return `this week: ${what}${gpu}${api ? ` · API ${api}` : ''}`
 }
 
 // API dollars (#1022): OpenCode's unit, so a `$`, unlike the electricity's cost (the user's own
-// price, #609); a cent's fraction to two figures, written out ($0.00004), a free model's $0:
-// savings.usd's rule, so the CLI and the pane agree (toPrecision gave $0.000040 and $0.010)
+// price, #609): meter.usd's rule, so the CLI and the pane agree: $0.42, `<$0.01` under a cent,
+// a free model's $0 (#1322: one rule, where two said one cap two ways)
 export function usd(x: number): string {
   if (x === 0) return '$0'
-  if (Math.abs(x) >= 0.01) return `$${x.toFixed(2)}`
-  const r = Number(x.toPrecision(2))
-  return Math.abs(r) >= 0.01 ? `$${r.toFixed(2)}` : `$${r.toFixed(2 - Math.floor(Math.log10(Math.abs(r)))).replace(/0+$/, '')}`
+  return Math.abs(x) < 0.01 ? '<$0.01' : `$${x.toFixed(2)}`
 }
 
 // The words one model or provider goes by on every tab (#1048's review, seen live): a GPU model by
@@ -2979,21 +2958,21 @@ function namesNow(list: WbTask[], top: WbTop | null): Names {
 // #1135, 2026-11-23: the catalog ran about 2x DeepInfra's bill): `prices` is meter.basis's, missing
 // on rows from before it (the catalog's)
 export const isEst = (prices: unknown) => prices !== 'yours' && prices !== 'provider'
+// the `≈` alone says it: a "(catalog prices)" note after it said it twice (#1322)
 export const estUsd = (x: number, prices: unknown) => (x && isEst(prices) ? '≈' : '') + usd(x)
-const PRICES: Record<string, string> = { catalog: 'catalog prices', yours: 'your prices' }
-export const pricesNote = (prices: unknown) => PRICES[typeof prices === 'string' ? prices : 'catalog'] ?? ''
 
 // A period's API money as the footer says it: never $0 for tasks with no price; '' with none
 export function apiMoney(a: any): string {
   if (!a || !a.tasks) return ''
   const known = a.tasks - (a.unknown ?? 0) - (a.plan ?? 0)
-  return known > 0 ? estUsd(a.cost ?? 0, a.prices) : a.plan ? 'plan usage' : 'no price'
+  return known > 0 ? estUsd(a.cost ?? 0, a.prices) : a.plan ? 'plan usage' : 'no known cost'
 }
 
-// An API-only week: API $1.27 on 6 tasks, or 1 API task, no price (no dollars to put "on")
+// An API-only week: API $1.27 on 6 tasks, or 1 API task, no known cost (no dollars to put "on");
+// nothing about the GPU's comparison, which `wb savings` leaves out too (#1322)
 export function apiAlone(a: any, money: string): string {
   const tasks = `task${a.tasks === 1 ? '' : 's'}`
-  return `this week: ${/^≈?\$/.test(money) ? `API ${money} on ${a.tasks} ${tasks}` : `${a.tasks} API ${tasks}, ${money}`} (no GPU task to compare)`
+  return `this week: ${/^≈?<?\$/.test(money) ? `API ${money} on ${a.tasks} ${tasks}` : `${a.tasks} API ${tasks}, ${money}`}`
 }
 
 // A Stats period's API part (the feed's periods[*].api): API $1.27 (DeepSeek $0.84 · Anthropic $0.43)
@@ -3002,8 +2981,8 @@ export function apiPeriod(a: any, names: Names = NO_NAMES): string {
   if (!money) return ''
   const provs = Object.entries(a.by_provider ?? {}).filter(([, v]: any) => v.tasks > (v.unknown ?? 0) + (v.plan ?? 0))
     .sort((x: any, y: any) => y[1].cost - x[1].cost).map(([p, v]: any) => `${providerWord(p, names)} ${estUsd(v.cost, v.prices)}`)
-  const inside = [provs.join(' · '), a.cost ? pricesNote(a.prices) : ''].filter(Boolean).join('; ')
-  return `API ${money}${inside ? ` (${inside})` : ''}${a.unknown && money !== 'no price' ? ` + ${a.unknown} with no price` : ''}`
+  const inside = provs.join(' · ')
+  return `API ${money}${inside ? ` (${inside})` : ''}${a.unknown && money !== 'no known cost' ? ` + ${a.unknown} with no known cost` : ''}`
 }
 
 // An API task's RUNNING row's parts after its phase (wb top's `spend`, `waits`); its place and model
@@ -3229,15 +3208,14 @@ async function setCap($: any, text: string) {
   $.ui.invalidate('ui.render')
 }
 
-// Spend today, from `wb route --json`: `≈$0.42 of $5 (DeepSeek $0.28 · Anthropic $0.14; catalog prices)`; the dollars by
+// Spend today, from `wb route --json`: `≈$0.42 of $5 (DeepSeek $0.28 · Anthropic $0.14)`; the dollars by
 // `usd`, the Stats tab's (#1022), so the two never say one sum two ways (wave 2's merge), and each
 // provider by its name and the Stats tab's ` · ` (#1048's review: `deepseek $0.28, anthropic`)
 export function spendLine(r: WbRoutes): string {
   const s: WbRoutes['spend_today'] = r.spend_today ?? { usd: 0, by_provider: {} }
   const by = Object.entries(s.by_provider ?? {}).filter(([, v]) => v > 0).map(([p, v]) => `${r.providers?.[p]?.name || p} ${usd(v)}`)
-  // ≈ and "catalog prices" unless at the user's own (#1135): once, the providers' share it
-  const inside = [by.join(' · '), s.usd ? pricesNote(s.prices) : ''].filter(Boolean).join('; ')
-  const each = inside ? ` (${inside})` : ''
+  // ≈ unless at the user's own prices or the provider's figure (#1135): once, the providers' share it
+  const each = by.length ? ` (${by.join(' · ')})` : ''
   return `Spend today: ${estUsd(s.usd ?? 0, s.prices)}${r.day_usd != null ? ` of ${money(r.day_usd)}${each}` : `${each} · no day cap`}`
 }
 
@@ -4969,8 +4947,6 @@ export const register: Register = (on, options) => {
               v => runWb($, ['workflows', v]))}
             {roles.cap}
             {infoLine(kit, 'wake', `Wake Claude: ${mem.wake ? 'on' : 'off'} · change it in /plugin → workbench → options`)}
-            {settingRow(kit, $, 'record', 'Stats recording', RECORD_STOPS, st.recording ? 'on' : 'off', view,
-              v => picked(['stats', 'set', 'recording', v]))}
             {settingRow(kit, $, 'live', 'Live view', LIVE_STOPS, st.live ? 'on' : 'off', view,
               v => picked(['stats', 'set', 'live', v]))}
             {settingRow(kit, $, 'every', 'Live refresh', EVERY_STOPS, String(st.every), view,

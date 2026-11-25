@@ -370,15 +370,16 @@ async function run(engine, device) {
     if (!wb('chat', 'notice', '--done', id).startsWith('answered')) throw new Error('not settled')
     await until(async () => (await row.locator('.meta').textContent()).includes('answered in the terminal'))
   })
-  await check('the gear shows what the week\'s tasks saved Claude, as an estimate', async () => {
+  await check('the gear shows what the week\'s tasks saved Claude, once: the badge and its one line', async () => {
     const usage = { turns: 2, calls: 5, input: 1000, cache_write_5m: 0, cache_write_1h: 10000, cache_read: 200000, output: 3000 }
     writeFileSync(join(home, 'state/results.jsonl'), JSON.stringify({ ts: Date.now() / 1000, outcome: 'accepted',
       claude: usage, diff: { files: 4, added: 61, removed: 1 }, gpu_wh: 600 }) + '\n')
     await page.reload()
     await page.click('#gear')
-    await until(async () => (await page.textContent('#saved')).includes('In the last 7 days, 1 task: Claude used 56K tokens'))
+    await until(async () => (await page.textContent('#saved')).includes('The GPU used 600 Wh.'))
+    // #1322: the saving is the badge's alone, not said again in the paragraph
     const said = await page.textContent('#saved')
-    if (!said.includes('about 59K (an estimate). Saved about 3K (5%). The GPU used 600 Wh.')) throw new Error(said)
+    if (said.includes('3K') || said.includes('estimate')) throw new Error(said)
     // #845: a price in the user's own currency showed as dollars on the phone
     writeFileSync(env.WB_SAVINGS, JSON.stringify({ kwh_price: 0.3 }))
     await page.click('#gear')
@@ -398,7 +399,7 @@ async function run(engine, device) {
     await until(async () => await page.locator('#settings').isHidden())
     await page.reload()
     await page.click('#gear')
-    await until(async () => (await page.textContent('#saved')).includes('API models: 2 tasks, ≈$0.52 (deepseek ≈$0.42, deepinfra $0.10; catalog prices).'))
+    await until(async () => (await page.textContent('#saved')).includes('API models: 2 tasks, ≈$0.52 (deepseek ≈$0.42, deepinfra $0.10).'))
     if (!(await page.textContent('#saved')).includes('The GPU used 600 Wh, cost 0.18. API')) throw new Error(await page.textContent('#saved'))
     writeFileSync(env.WB_SAVINGS, '{}')  // no price again, for the next engine
     // #101: the badge, its number and its words, legible at phone width
@@ -406,7 +407,7 @@ async function run(engine, device) {
     const n = await page.textContent('#badge-n'), cls = await page.getAttribute('#badge-n', 'class')
     if (n !== '5 / 100' || cls !== 'badge-n red') throw new Error(`${n} ${cls}`)
     const s = await page.textContent('#badge-s')
-    if (s !== 'I used about 5% less Claude than if Claude had done this work alone.') throw new Error(s)
+    if (s !== '~3K Claude tokens saved this week') throw new Error(s)
     const box = await page.locator('#badge').boundingBox()
     if (box.width > (await page.evaluate(() => innerWidth))) throw new Error('wider than the phone')
     await page.click('#gear')

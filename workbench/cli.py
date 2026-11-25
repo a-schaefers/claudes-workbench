@@ -28,7 +28,7 @@ from types import SimpleNamespace
 from urllib.parse import urlparse
 
 from . import (__version__, ask_mcp, audio, bench, chat, context, gitops, hardware, images, lane, lessons,
-               media, models, optimize, patches, progress, results, router, routes, savings, scan, skills, spend, stats, store,
+               media, models, optimize, patches, progress, results, router, routes, savings, scan, skills, stats, store,
                transcript, tuning, verify, webpush)
 from .watch import Watcher, wait_exit
 from . import runner
@@ -3250,16 +3250,6 @@ def _route_gpu(wanted: str, role: str) -> str:
     return m.id
 
 
-def _prices_of(m, ahead: bool = False) -> str:
-    """Whose prices an API model's dollars are at (#1135): "your prices" (wb model price), else
-    "catalog prices", an estimate; "" for a plan, a free model or none. ``ahead``: its next
-    dollars' (the roles' listing, meter.next_basis), "" too when its last were the provider's own
-    figure (plain, as every provider figure: #1165's review, 2026-11-24); else the listed rate's."""
-    if m is None or getattr(m, "kind", "gpu") != "api" or meter.is_plan(m) or meter.is_free(m):
-        return ""
-    return meter.NOTE[meter.next_basis(m) if ahead else meter.model_basis(m)].strip(" ()")
-
-
 def _who(mid: str) -> str:
     m = models.lookup(mid)
     return models.provider_name(m) if m is not None and m.kind == "api" else mid.split("/", 1)[0]
@@ -3407,8 +3397,6 @@ def _route_show(as_json: bool) -> None:
         if made:
             ts, by = max(made, key=lambda x: x[0])
             bits.append(f"set by {'Claude' if by == 'claude' else 'you'} {time.strftime('%m-%d', time.localtime(ts))}")
-        if row["via"] == "api" and not gone and (p := _prices_of(models.lookup(row["api"]), ahead=True)):
-            bits.append(p)  # whose prices its dollars are at: the catalog's, an estimate, or yours (#1135)
         print(f"{r:<{width}}" + " · ".join(bits))
     if doc["day_usd"] is not None:
         print(f"day cap {routes.money(doc['day_usd'])}")
@@ -4059,10 +4047,11 @@ def cmd_accept(a):
               f"{note}: keep it current (update it if this change alters what it says)"
               if note == LOCAL_CLAUDE_MD else
               f"{note}: keep it current (update and commit it if this change alters what it says)")
+    # an API task's money on its line; the savings estimate isn't said on every close (#1322)
+    paid = f" · {p}" if (p := savings.paid(row)) else ""
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
-          (f", merged into {close['merge_into']} as {merged}" if merged else
-           "\n" + _merge_line(repo, spec, close, a)))
-    _say(savings.line(row) or spend.line(row.get("claude")))
+          (f", merged into {close['merge_into']} as {merged}{paid}" if merged else
+           f"{paid}\n" + _merge_line(repo, spec, close, a)))
     _say(checked)
     _say(lessons.nudge(task, "accepted"))
     if refused:  # accepted, not merged: a script or Claude reading 0 went on as if main had it
@@ -4632,8 +4621,7 @@ def cmd_discard(a):
     task.set_status(unrecorded=None)
     _ack_all(task)
     _closed(task)
-    print(f"discarded {a.name}{said}")
-    _say(savings.line(row) or spend.line(row.get("claude")))
+    print(f"discarded {a.name}{said}" + (f" · {p}" if (p := savings.paid(row)) else ""))
     _say(lessons.nudge(task, "discarded"))
 
 
@@ -4840,11 +4828,8 @@ def _api_list(text: str) -> None:
         cost = m.config.get("cost")
         rate = next((c for c in cost if isinstance(c, dict) and not c.get("tier")), None) \
             if isinstance(cost, list) else None
-        # whose prices only when there is a basis to say: a plan or a 0 entry has none, and its
-        # line ended in a bare ", " (#1135's review, 2026-11-23)
-        basis = _prices_of(m)
         price = f" · ${rate.get('input') or 0:g}/${rate.get('output') or 0:g} per 1M in/out" \
-            + (f", {basis}" if basis else "") if rate and not m.free else ""
+            if rate and not m.free else ""
         # the catalog's own window, the model's fact (#1017 plans every API task to API_WINDOW)
         own = (m.extra.get("catalog_limit") or m.config.get("limit") or {}).get("context")
         print(f"{m.id}  {_window(own)}{price}"
@@ -4878,7 +4863,7 @@ def cmd_stats(a):
     and shows (stats.py)."""
     if a.action == "set":
         if not (a.key and a.value):
-            die("wb stats set recording|live on|off, or wb stats set every 1|2|5")
+            die("wb stats set live on|off, or wb stats set every 1|2|5")
         try:
             stats.set_setting(a.key, a.value)
         except ValueError as e:
@@ -4894,12 +4879,9 @@ def cmd_stats(a):
     only = None if a.all or not shown else {v for x in shown.get("lines", []) for v in x["variants"]}
     # the newest stats.STATS_MODEL_LINES of them, the rest counted on one line (2026-11-21)
     more, old = (shown.get("more"), shown.get("older")) if only is not None else (None, None)
-    rest = "; ".join(([f"{more['models']} more model(s) used in the last {stats.OLD_DAYS} days: "
-                       f"{more['tasks']} task(s)"] if more else [])
-                     + ([f"{old['models']} older model(s), retired or idle {stats.OLD_DAYS}+ days: "
-                         f"{old['tasks']} task(s)"] if old else []))
+    rest = (more or {}).get("models", 0) + (old or {}).get("models", 0)
     print("\n".join(head + [""] if head else []) + results.table(only)
-          + (f"\n{rest} (wb stats --all)" if rest else ""))
+          + (f"\n(+{rest} more model{'' if rest == 1 else 's'}: wb stats --all)" if rest else ""))
 
 
 def cmd_savings(a):
@@ -4935,9 +4917,8 @@ def cmd_savings(a):
                           "api": savings.api_totals(store.results(trials=True), since)}))
     else:
         api_t = savings.api_totals(store.results(trials=True), since)
-        print(savings.summary(t, period, api_t["tasks"]))
-        if api := savings.api_summary(api_t):
-            print(api)
+        _say(savings.summary(t, period, api_t["tasks"]))
+        _say(savings.api_summary(api_t))
 
 
 def _api_savings(a, period: str, since: float) -> None:
@@ -4952,8 +4933,8 @@ def _api_savings(a, period: str, since: float) -> None:
 
 
 def cmd_backlog(a):
-    """A batch of tasks started with `--backlog`: each one's phase, rounds, minutes, branch and
-    saving, and the batch's saving (the morning summary). Without a name, the batches."""
+    """A batch of tasks started with `--backlog`: each one's phase, rounds, minutes and branch,
+    and the batch's saving (the morning summary). Without a name, the batches."""
     tasks = [t for t in store.all_tasks(archived=True) if t.spec.get("backlog")]  # #270
     if not a.name:
         names = {}
@@ -4982,8 +4963,7 @@ def cmd_backlog(a):
         since = t.spec.get("created_at") or store.now()
         out.append({"task": t.name, "phase": st.get("phase", "?"), "rounds": st.get("round", 1),
                     "minutes": row.get("minutes") or round((store.now() - since) / 60, 1),
-                    "branch": t.spec.get("branch") if st.get("phase") == "accepted" else None,
-                    "saving": savings.line(row) if row else None})
+                    "branch": t.spec.get("branch") if st.get("phase") == "accepted" else None})
     batch = savings.totals([r for t in tasks if (r := rows.get(t.name)) and not r.get("trial")])
     # the batch's API money, trials in as wb savings counts it: never summed (#1121, 2026-11-23)
     api_t = savings.api_totals([r for t in tasks if (r := rows.get(t.name))])
@@ -4996,11 +4976,9 @@ def cmd_backlog(a):
     print(f"backlog {a.name}: {len(out)} task(s) · "
           + " · ".join(f"{n} {p}" for p, n in phases.items()))
     for o in out:
-        tail = " · ".join(x for x in (o["branch"], o["saving"]) if x)
-        print(f"{o['task']:22} {o['phase']:9} {o['rounds']:>3} {o['minutes']:>5.0f}m  {tail}".rstrip())
-    print(savings.summary(batch, "the batch", api_t["tasks"]))
-    if api := savings.api_summary(api_t):
-        print(api)
+        print(f"{o['task']:22} {o['phase']:9} {o['rounds']:>3} {o['minutes']:>5.0f}m  {o['branch'] or ''}".rstrip())
+    _say(savings.summary(batch, "the batch", api_t["tasks"]))
+    _say(savings.api_summary(api_t))
 
 
 def cmd_tune(a):
@@ -5255,7 +5233,7 @@ def _api_record(mid: str, since: float) -> str:
         return "no real tasks yet"
     out = [f"{len(rows)} task(s)", f"{100 * sum(r.get('outcome') == 'accepted' for r in rows) // len(rows)}% accepted"]
     if paid := [c for r in rows if (c := results.task_cost(r)) is not None]:
-        out.append(f"~{savings.usd(sum(paid) / len(paid))}/task")  # as wb stats' `paid` (#1106)
+        out.append(f"~{meter.usd(sum(paid) / len(paid))}/task")  # as wb stats' `paid` (#1106)
     limited = set()
     for r in rows:
         evs, _ = store.read_jsonl(store.home() / "tasks" / str(r.get("task")) / "events.jsonl")
@@ -5292,12 +5270,12 @@ def scout_api_lines() -> list[str]:
     # tasks with no known cost are the closed rows' (#1022)
     since = now - SCOUT_SPEND_DAYS * 86400
     paid, t = savings.spent(since), savings.api_totals(store.results(trials=True), since)
-    # savings.usd, as wb savings --api and the pane say the same dollars: :.2f said $0.00 for a
+    # meter.usd, as wb savings --api and the pane say the same dollars: :.2f said $0.00 for a
     # task paid a fraction of a cent (wave 2's merge)
-    by = ", ".join(f"{p} {savings.usd(v)}" for p, v in sorted(paid["by_provider"].items(), key=lambda x: -x[1])
+    by = ", ".join(f"{p} {meter.usd(v)}" for p, v in sorted(paid["by_provider"].items(), key=lambda x: -x[1])
                    if v)
-    out.append(f"api spend, the last {SCOUT_SPEND_DAYS} days: {savings.money(paid['usd'], paid['prices'])} of {cap}"
-               + savings.inside(by, savings.note({"cost": paid["usd"], "prices": paid["prices"]}))  # #1135
+    out.append(f"api spend, the last {SCOUT_SPEND_DAYS} days: {meter.money(paid['usd'], paid['prices'])} of {cap}"
+               + (f" ({by})" if by else "")
                + (f"; task(s) {', '.join(u)}" if (u := savings.unknown_parts(t)) else ""))  # #1106
     by_prov: dict[str, list] = {}
     for m in hosted.values():
@@ -8207,7 +8185,7 @@ def parser() -> argparse.ArgumentParser:
     s.set_defaults(f=cmd_bench)
     s = sub.add_parser("stats", help="results by model; `set` changes the Stats tab's settings")
     s.add_argument("action", nargs="?", choices=["set"])
-    s.add_argument("key", nargs="?", metavar="KEY", help="recording, live or every")
+    s.add_argument("key", nargs="?", metavar="KEY", help="live or every")
     s.add_argument("value", nargs="?", metavar="VALUE", help="on|off, or 1|2|5 (seconds) for every")
     s.add_argument("--json", action="store_true", help="everything learned, as one object (the Stats tab's feed)")
     s.add_argument("--all", action="store_true",
