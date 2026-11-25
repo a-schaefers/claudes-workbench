@@ -14804,12 +14804,12 @@ class Lane(Base):
             self.assertFalse([p for p in w if p == str(venv) or p.startswith(f"{venv}/")])
             for n in context.CACHE_MADE:                              # made first, so granted
                 self.assertIn(str(home / ".cache" / n), w)
-            self.assertEqual(runner.lane_grant(f"{home}/.cache/ms-playwright/chromium-1/x"),
-                             f"{home}/.cache/ms-playwright")
+            self.assertEqual(runner.lane_grant(f"{home}/.cache/acme-tool/v1/x"),   # one not made first
+                             f"{home}/.cache/acme-tool")
             self.assertEqual(runner.lane_grant(f"{venv.parent}/other-AbCd/bin/python"),
                              f"{venv.parent}/other-AbCd")
             self.assertIsNone(runner.lane_grant(f"{venv}/lib/site.py"))   # the user's own: out
-        self.assertEqual(runner.lane_grant(f"{home}/.cache/ms-playwright/x"), f"{home}/.cache")
+        self.assertEqual(runner.lane_grant(f"{home}/.cache/acme-tool/x"), f"{home}/.cache")
 
     def test_the_agents_poetry_and_pipenv_make_their_venvs_in_its_worktree(self):
         # #825: their own homes are split around an active venv, where no new venv can be made,
