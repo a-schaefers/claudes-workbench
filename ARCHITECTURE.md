@@ -6471,7 +6471,9 @@ caller yet: #1325's M1 moves `register.tsx`'s `ACTIVE`/`NEEDS`/`RUNNING`/`waitsO
   edit; … inputs sha256:<hex> body sha256:<hex> purs <v> esbuild <v>` (the inputs: the sorted
   `kernel/src/**/*.purs`, `toolchain.json`, `spago.lock`). `lint`: no `foreign import`, no denied
   import (`Effect*`, `Control.Monad.ST*`, `Data.Array.ST*`, `Data.Array.Partial`, `Unsafe.*`,
-  `Partial.Unsafe`, `Record.Unsafe`, `Debug.*`), no `localeCompare`, in the source and the corefn.
+  `Partial.Unsafe`, `Record.Unsafe`, `Debug.*`), no `localeCompare`, in the source (read whole, so an
+  `import` whose module name is on the next line counts) and in the corefn of every module compiled from
+  `kernel/src`, whatever it is named. A failed `purs compile` shows purs's first error (its stdout).
   `check`: the offline checks below, two builds byte-equal to each other and to the commit.
   `relock`: spago 1.0.4 from npm (no install scripts) into the cache re-locks `spago.lock` from
   `spago.yaml` in a scratch copy; only a new package needs it, and npm.

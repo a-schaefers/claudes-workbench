@@ -84,8 +84,8 @@ Only `mod/hooks/core.ts` imports `./kernel.js`, across `mod/`, `opencode-plugin/
 ## Denied imports
 
 No FFI (`foreign import`) in `kernel/src`, and none of the imports below, in the source and in
-the compiler's corefn (a trailing `*`: any module starting so; `.*`: that module and those under
-it). Nor `localeCompare`.
+the compiler's corefn of every module under `kernel/src`, whatever it is named (a trailing `*`:
+any module starting so; `.*`: that module and those under it). Nor `localeCompare`.
 
 Denied: `Effect*`, `Control.Monad.ST*`, `Data.Array.ST*`, `Data.Array.Partial`, `Unsafe.*`,
 `Partial.Unsafe`, `Record.Unsafe`, `Debug.*`.

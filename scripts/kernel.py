@@ -360,29 +360,41 @@ def purs_files(root: Path = ROOT) -> list[Path]:
     return sorted(paths(root)["src"].rglob("*.purs"))
 
 
+# Read over the whole file, not line by line: PureScript lets `import` end a line and the module
+# name start the next, and a per-line match passed `import\n  Effect.Unsafe (…)` (the 2026-11-25
+# review of #1356's scaffolding)
+SRC_FOREIGN = re.compile(r"(?m)^[ \t]*foreign\s+import\b")
+SRC_IMPORT = re.compile(r"(?m)^[ \t]*import\s+([A-Z][\w.]*)")
+
+
 def lint_sources(root: Path = ROOT) -> list[str]:
     """kernel/src as text: no foreign import, no denied import, no locale call."""
     errors = []
     for f in purs_files(root):
-        for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
-            where = f"{rel(f, root)}:{n}"
-            if re.match(r"\s*foreign\s+import\b", line):
-                errors.append(f"{where}: a foreign import; kernel/src has no FFI (kernel/BOUNDARY.md)")
-            m = re.match(r"\s*import\s+([A-Z][\w.]*)", line)
-            if m and denied(m.group(1)):
-                errors.append(f"{where}: imports {m.group(1)}, denied (kernel/BOUNDARY.md, *Denied imports*)")
+        text = f.read_text(encoding="utf-8")
+        at = lambda i: f"{rel(f, root)}:{text.count(chr(10), 0, i) + 1}"  # noqa: E731
+        for m in SRC_FOREIGN.finditer(text):
+            errors.append(f"{at(m.start())}: a foreign import; kernel/src has no FFI (kernel/BOUNDARY.md)")
+        for m in SRC_IMPORT.finditer(text):
+            if denied(m.group(1)):
+                errors.append(f"{at(m.start())}: imports {m.group(1)}, denied (kernel/BOUNDARY.md, *Denied imports*)")
+        for n, line in enumerate(text.splitlines(), 1):
             for word in DENIED_TEXT:
                 if word in line:
-                    errors.append(f"{where}: {word} is locale-dependent, denied (kernel/BOUNDARY.md)")
+                    errors.append(f"{rel(f, root)}:{n}: {word} is locale-dependent, denied (kernel/BOUNDARY.md)")
     return errors
 
 
 def lint_corefn(output: Path) -> list[str]:
-    """The compiler's view of each kernel module: no foreign declarations, no denied import (the
-    compiler's own, such as Data.Eq for ==, included)."""
+    """The compiler's view of every module compiled from kernel/src (its corefn's modulePath under
+    src/, whatever the module is called; the packages' own are theirs): no foreign declarations, no
+    denied import (the compiler's own, such as Data.Eq for ==, included). Only Kernel.* was read,
+    and a helper module named otherwise imported Effect.Unsafe past it (the 2026-11-25 review)."""
     errors = []
-    for f in sorted(output.glob("Kernel.*/corefn.json")):
+    for f in sorted(output.glob("*/corefn.json")):
         core = json.loads(f.read_text(encoding="utf-8"))
+        if not core.get("modulePath", "").startswith("src/"):
+            continue
         mod = ".".join(core["moduleName"])
         if core.get("foreign"):
             errors.append(f"{mod}: foreign {', '.join(core['foreign'])}; kernel/src has no FFI")
@@ -549,8 +561,11 @@ def read_banner(data: bytes) -> tuple[str, str, str, str] | None:
 def _run(argv: list[str], cwd: Path, what: str) -> None:
     r = subprocess.run(argv, cwd=cwd, capture_output=True, text=True)
     if r.returncode:
-        tail = "\n".join((r.stderr or r.stdout).strip().splitlines()[-30:])
-        raise Refused(f"{what} failed (exit {r.returncode}):\n{tail}")
+        # purs writes its errors to stdout and its progress to stderr, so stderr's tail showed only
+        # "[n of m] Compiling …" lines and never the error (the 2026-11-25 review); esbuild writes
+        # its errors to stderr and nothing to stdout. purs's first error is the one to read: its head
+        out = r.stdout.strip().splitlines()[:60] or r.stderr.strip().splitlines()[-30:]
+        raise Refused(f"{what} failed (exit {r.returncode}):\n" + "\n".join(out))
 
 
 def compile_kernel(root: Path, cache: Path, work: Path) -> tuple[bytes, bytes]:

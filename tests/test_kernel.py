@@ -139,12 +139,37 @@ class Imports(unittest.TestCase):
             d = Path(out) / "Kernel.Bad"
             d.mkdir()
             (d / "corefn.json").write_text(json.dumps({
-                "moduleName": ["Kernel", "Bad"], "foreign": ["now"],
+                "moduleName": ["Kernel", "Bad"], "modulePath": "src/Kernel/Bad.purs", "foreign": ["now"],
                 "imports": [{"moduleName": ["Prelude"]}, {"moduleName": ["Effect", "Ref"]}]}))
             errors = kernel.lint_corefn(Path(out))
         self.assertEqual(len(errors), 2)
         self.assertIn("Kernel.Bad: foreign now", errors[0])
         self.assertIn("imports Effect.Ref, denied", errors[1])
+
+    def test_the_corefn_lint_reads_every_kernel_src_module_whatever_its_name_and_no_package(self):
+        # the 2026-11-25 review: only Kernel.* was read, so src/Helper/Clock.purs's Effect.Unsafe
+        # reached the bundle with lint, build and check all passing
+        def corefn(out, name, path, imports, foreign=()):
+            d = Path(out) / name
+            d.mkdir()
+            (d / "corefn.json").write_text(json.dumps({
+                "moduleName": name.split("."), "modulePath": path, "foreign": list(foreign),
+                "imports": [{"moduleName": m.split(".")} for m in imports]}))
+        with tempfile.TemporaryDirectory() as out:
+            corefn(out, "Helper.Clock", "src/Helper/Clock.purs", ["Prelude", "Effect.Unsafe"])
+            corefn(out, "Effect.Unsafe", "packages/effect-4.0.0/src/Effect/Unsafe.purs", ["Effect"], ["unsafePerformEffect"])
+            errors = kernel.lint_corefn(Path(out))
+        self.assertEqual(errors, ["Helper.Clock: imports Effect.Unsafe, denied (kernel/BOUNDARY.md, *Denied imports*)"])
+
+    def test_the_source_lint_reads_an_import_whose_module_name_is_on_the_next_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "kernel" / "src" / "Helper"
+            src.mkdir(parents=True)
+            (src / "Clock.purs").write_text("module Helper.Clock where\n\nimport Prelude\nimport\n  Effect.Unsafe (unsafePerformEffect)\n"
+                                            "foreign\n  import now :: Number\n")
+            errors = kernel.lint_sources(Path(tmp))
+        self.assertEqual(errors, ["kernel/src/Helper/Clock.purs:6: a foreign import; kernel/src has no FFI (kernel/BOUNDARY.md)",
+                                  "kernel/src/Helper/Clock.purs:4: imports Effect.Unsafe, denied (kernel/BOUNDARY.md, *Denied imports*)"])
 
 
 def con(q: str) -> dict:
@@ -200,6 +225,20 @@ class Build(unittest.TestCase):
 
 class Toolchain(unittest.TestCase):
     """fetch's checks: a bad hash, a link and a path escape are each refused by name."""
+
+    def test_a_failed_compile_shows_purss_error_not_its_progress(self):
+        # purs prints errors on stdout and "[n of m] Compiling" on stderr: the refusal showed only
+        # the progress, never what was wrong (the 2026-11-25 review)
+        prog = ("import sys; print('Error found:\\nin module Kernel.Bad'); "
+                "[print(f'[{i} of 99] Compiling M{i}', file=sys.stderr) for i in range(99)]; sys.exit(1)")
+        with tempfile.TemporaryDirectory() as cwd, self.assertRaises(kernel.Refused) as e:
+            kernel._run([sys.executable, "-I", "-c", prog], Path(cwd), "purs compile")
+        self.assertIn("purs compile failed (exit 1):\nError found:\nin module Kernel.Bad", str(e.exception))
+        self.assertNotIn("Compiling", str(e.exception))
+        with tempfile.TemporaryDirectory() as cwd, self.assertRaises(kernel.Refused) as e:
+            kernel._run([sys.executable, "-I", "-c", "import sys; print('x.js: error: bad', file=sys.stderr); sys.exit(1)"],
+                        Path(cwd), "esbuild")
+        self.assertIn("esbuild failed (exit 1):\nx.js: error: bad", str(e.exception))
 
     def test_every_supported_platform_has_both_tools_pinned_with_both_hashes(self):
         pin = kernel.load_pin()
@@ -335,6 +374,12 @@ class Checker(unittest.TestCase):
     def test_effect_ref_imported(self):
         self.edit("kernel/src/Kernel/Phase.purs", "import Prelude\n", "import Prelude\nimport Effect.Ref (new)\n")
         self.assertIn("Phase.purs:6: imports Effect.Ref, denied", self.errors())
+
+    def test_a_helper_module_importing_an_effect_across_two_lines(self):
+        (self.root / "kernel/src/Helper").mkdir()
+        (self.root / "kernel/src/Helper/Clock.purs").write_text(
+            "module Helper.Clock (sneaky) where\n\nimport\n  Effect.Unsafe (unsafePerformEffect)\n")
+        self.assertIn("kernel/src/Helper/Clock.purs:3: imports Effect.Unsafe, denied", self.errors())
 
     def test_a_foreign_import(self):
         self.edit("kernel/src/Kernel/Phase.purs", "import Prelude\n", "import Prelude\nforeign import now :: Number\n")
