@@ -118,7 +118,13 @@ def holds_credential(path) -> bool:
 # hex_metadata.config, on every start. So a directory's .txt, extensionless and .config files
 # aren't read; a dotfile or COPY_CONFIG_SUFFIXES file counts for a Bearer or Basic token, a
 # private key or a URL with a password, or a key that ends in a secret's name (COPY_SECRET_KEY:
-# `db_password`, `api_key`, `auth_token`, never `bos_token` or `max_tokens`) with a value.
+# `db_password`, `api_key`, `auth_token`, `GITHUB_TOKEN`, npm's `:_authToken`, never a
+# tokenizer's `bos_token` (COPY_SPECIAL_TOKEN) or `max_tokens`) with a value that isn't `<s>`-shaped.
+# The third review (2026-11-24) found the strong-signal pass let real credentials through: a
+# provider's `*_TOKEN`, an .npmrc's `//registry…:_authToken` line (read as a `//` comment), an
+# AWS `credentials` file and a web.config's connection-string `Password=` (neither file read). So
+# `//` is a comment only in JSON, COPY_CREDENTIAL_NAMES and any file under a dot-directory are
+# read, and a `Password=`/`Pwd=` inside a line counts (_CONN_PASSWORD).
 COPY_SKIP_DIRS = frozenset({"node_modules", "bower_components", "vendor", ".venv", "venv",
                             "site-packages", "__pycache__", ".git", "target", ".gradle", "Pods",
                             ".tox", ".mypy_cache", ".pytest_cache", ".cache", "deps", "_build",
@@ -127,8 +133,11 @@ COPY_CONFIG_SUFFIXES = frozenset({".env", ".ini", ".yml", ".yaml", ".toml", ".pr
                                   ".netrc", ".json", ".pem", ".key"})
 COPY_SECRET_KEY = re.compile(r"(?i)(?:password|passwd|passphrase|secret|api[_.-]?key|"
                              r"(?:secret|access|private|signing|encryption)[_.-]?key|"
-                             r"(?:auth|access|api|refresh|bearer|session|secret|client|personal)[_.-]?token"
-                             r"|^token|^_auth)$")
+                             r"token|^_auth)$")
+COPY_SPECIAL_TOKEN = re.compile(r"(?i)(?:^|[_.-])(?:bos|eos|pad|unk|sep|cls|mask)[_.-]?token$")
+COPY_CREDENTIAL_NAMES = frozenset({"credentials", ".git-credentials", "web.config", "app.config"})
+_PLACEHOLDER = re.compile(r"^(?:<[^<>]*>|\[[A-Z_]+\])$")
+_CONN_PASSWORD = re.compile(r"""(?i)(?:^|[;"'\s])(?:password|pwd)\s*=\s*(?![;"'\s$]|\$\{)[^;"'\s<>]+""")
 _COPY_VALUE = re.compile(r"(?i)\b(?:bearer|basic)\s+(?=[a-z0-9._~+/-]*\d)[a-z0-9._~+/=-]{12,}"
                          r"|-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|://[^\s/@:'\"<>]+:[^\s/@'\"<>]+@")
 _NETRC_LOGIN = re.compile(r"(?i)\bpassword\s+\S")
@@ -155,7 +164,10 @@ def copy_holds_credential(path) -> bool:
     for d, dirs, files in os.walk(p):           # links to directories aren't followed
         dirs[:] = [x for x in dirs if x not in COPY_SKIP_DIRS]
         for f in files:
-            if (f.startswith(".") or os.path.splitext(f)[1].lower() in COPY_CONFIG_SUFFIXES) \
+            under_dot = any(part.startswith(".") for part in os.path.relpath(d, p).split(os.sep)
+                            if part != ".")
+            if (f.startswith(".") or under_dot or f.lower() in COPY_CREDENTIAL_NAMES
+                    or os.path.splitext(f)[1].lower() in COPY_CONFIG_SUFFIXES) \
                     and _dir_file_holds(os.path.join(d, f)):
                 return True
     return False
@@ -189,28 +201,34 @@ def _dir_file_holds(p: str) -> bool:
     netrc = os.path.basename(p) in (".netrc", "_netrc") or p.endswith(".netrc")
     for line in text.splitlines():
         line = line.strip()
-        if not line or line[0] in "#;%!" or line.startswith("//"):
+        if not line or line[0] in "#;%!" or (line.startswith("//") and p.endswith(".json")):
             continue
-        if _COPY_VALUE.search(line) or (netrc and _NETRC_LOGIN.search(line)):
+        if _COPY_VALUE.search(line) or (netrc and _NETRC_LOGIN.search(line)) \
+                or _CONN_PASSWORD.search(line):
             return True
         m = re.search(r"=|:(?=\s|$)", line)
         if not m:
             continue
         key = line[:m.start()].strip().strip("\"'").removeprefix("export ").strip()
         value = line[m.end():].strip().rstrip(",").strip().strip("\"'")
-        if COPY_SECRET_KEY.search(key) and value and not _ENV_REF.match(value):
+        if _secret_key(key) and value and not _ENV_REF.match(value) and not _PLACEHOLDER.match(value):
             return True
     return False
 
 
+def _secret_key(key: str) -> bool:
+    return bool(COPY_SECRET_KEY.search(key)) and not COPY_SPECIAL_TOKEN.search(key)
+
+
 def _copy_json_holds(node, secret: bool) -> bool:
     if isinstance(node, dict):
-        return any(_copy_json_holds(v, bool(COPY_SECRET_KEY.search(k))) for k, v in node.items())
+        return any(_copy_json_holds(v, _secret_key(k)) for k, v in node.items())
     if isinstance(node, list):
         return any(_copy_json_holds(v, secret) for v in node)
     if isinstance(node, str):
         v = node.strip()
-        return bool(_COPY_VALUE.search(v)) or secret and bool(v) and not _ENV_REF.match(v)
+        return bool(_COPY_VALUE.search(v)) or secret and bool(v) and not _ENV_REF.match(v) \
+            and not _PLACEHOLDER.match(v)
     return False
 
 

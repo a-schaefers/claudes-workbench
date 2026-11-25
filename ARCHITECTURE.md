@@ -1466,11 +1466,16 @@ everywhere). In order:
   `copy` stays repo-relative.
 - For an API task, a standing `copy` entry of commands.json's `repos` that holds a credential
   (`privacy.copy_holds_credential`: a file if it is text under `CREDENTIAL_MAX` and the matcher flags it, so a
-  binary `test.db` or a big `.csv` goes along; a directory by its dotfiles and `COPY_CONFIG_SUFFIXES` files
-  (`.env`, `.ini`, `.yml`, `.yaml`, `.toml`, `.properties`, `.netrc`, `.json`, `.pem`, `.key`) outside
-  `COPY_SKIP_DIRS` such as `node_modules` or `deps`, whose code is full of `token = …`, and only by a strong
-  signal: a Bearer or Basic token, a private key, a URL with a password, or a key ending in a secret's name,
-  `COPY_SECRET_KEY` (`db_password`, `api_key`, `auth_token`, never `bos_token` or `max_tokens`), with a value;
+  binary `test.db` or a big `.csv` goes along; a directory by its dotfiles, the files under a dot-directory,
+  `COPY_CREDENTIAL_NAMES` (`credentials`, `.git-credentials`, `web.config`, `app.config`) and
+  `COPY_CONFIG_SUFFIXES` files (`.env`, `.ini`, `.yml`, `.yaml`, `.toml`, `.properties`, `.netrc`, `.json`,
+  `.pem`, `.key`) outside `COPY_SKIP_DIRS` such as `node_modules` or `deps`, whose code is full of
+  `token = …`, and only by a strong signal: a Bearer or Basic token, a private key, a URL with a password, a
+  connection string's `Password=`, or a key ending in a secret's name, `COPY_SECRET_KEY` (`db_password`,
+  `api_key`, `GITHUB_TOKEN`, an `.npmrc`'s `:_authToken`, never a tokenizer's `bos_token`,
+  `COPY_SPECIAL_TOKEN`, or `max_tokens`), with a value that isn't an env reference or `<s>`-shaped (`//`
+  is a comment only in JSON; #1322's third review found a provider's `*_TOKEN`, an `.npmrc`, AWS
+  `credentials` and a `web.config` password let through);
   the token-file matcher's bare keyword refused every API start for a `models/` copy's
   `tokenizer_config.json`, a `vocab.txt` or a prose `.txt`, #1322's second review) is
   refused, exit 3, named or not (`cli._standing_refusal`, its line `cli._standing_gap`,

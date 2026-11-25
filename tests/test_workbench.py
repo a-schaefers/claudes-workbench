@@ -38454,6 +38454,38 @@ class Privacy(_KeyholeTest):
         self.assertIn("commands.json copies models into every task and it holds a credential",
                       err.getvalue())
 
+    def test_a_copied_directory_holding_a_provider_token_an_npmrc_or_aws_credentials_stays_off_api(self):
+        # #1322's third review (2026-11-24): the strong-signal pass let these through: a provider's
+        # `*_TOKEN` in an .env, an .npmrc's `//registry…:_authToken` (skipped as a `//` comment),
+        # an AWS credentials file and a web.config's connection-string password (neither read)
+        (self.repo / ".gitignore").write_text("local/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
+        self.role(via="api", api=FLASH)
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"copy": ["local"]}}}))
+        cases = [(".env", "GITHUB_TOKEN=ghp_abcdefghijklmnop\n"),
+                 (".env", "HF_TOKEN=hf_abcdefghijklmnop\n"),
+                 (".npmrc", "//registry.npmjs.org/:_authToken=npm_abcdefghijklmnop\n"),
+                 (".aws/credentials", "[default]\naws_secret_access_key = abcdEFGH1234\n"),
+                 ("web.config", '<add name="db" connectionString="Server=x;Password=hunter2;"/>\n')]
+        for i, (name, text) in enumerate(cases):
+            with self.subTest(name=name, text=text):
+                shutil.rmtree(self.repo / "local", ignore_errors=True)
+                f = self.repo / "local" / name
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(text)
+                with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
+                    self.start_api(f"t-cpr{i}")
+                self.assertEqual(cm.exception.code, 3, err.getvalue())
+                self.assertIn("commands.json copies local into every task and it holds a credential",
+                              err.getvalue())
+        shutil.rmtree(self.repo / "local")
+        (self.repo / "local").mkdir()
+        (self.repo / "local" / ".env").write_text("GITHUB_TOKEN=${GITHUB_TOKEN}\nmax_tokens=100\n")
+        (self.repo / "local" / "special_tokens_map.json").write_text(
+            json.dumps({"bos_token": "<s>", "mask_token": "[MASK]"}))
+        self.start_api("t-cpr-ok")
+
     def test_an_api_task_takes_a_standing_sibling_and_a_big_copied_directory_as_configured(self):
         # #1322; a copied directory's package trees aren't read for a credential
         # (privacy.COPY_SKIP_DIRS): their code is full of `token = …`, which would refuse every
