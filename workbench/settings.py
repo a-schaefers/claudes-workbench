@@ -7,7 +7,7 @@ by kind: a `choice` its `value`, `choices` [{value, label, says}] and `says` (th
 current value), with `other: true` where any model id goes (the role command checks it); a
 `number` its `value` (a float, or None for off) and `unit` (`usd` or `per_kwh`); an `info` its
 `text`; an `action` its `text` and its `choices`, which are buttons; a `note` one line for the group
-(NO_PROVIDER, OLDER_WB or wb's own reason) that stands where the group's rows would be. A row may
+(NO_PROVIDER, OLDER_WB or wb's own reason), drawn in its place beside the group's other rows. A row may
 carry `help`: the note for Claude while the setting is on but can't work yet (probe not set up),
 which apply() also returns when that value was just chosen; the chat server records it, and the
 mod turns it into a [workbench] turn where Claude offers to help (#1279's addendum, the owner,

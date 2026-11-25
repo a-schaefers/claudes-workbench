@@ -114,7 +114,8 @@
         input.autocapitalize = 'off'; input.autocomplete = 'off'; input.spellcheck = false
         input.addEventListener('keydown', e => {
           if (e.key === 'Enter') { e.preventDefault(); const v = input.value.trim(); if (v) send(row.key, v) }
-          else if (e.key === 'Escape') draw()
+          // blurred first: draw() keeps a focused input's text and would open it again
+          else if (e.key === 'Escape') { e.preventDefault(); input.blur(); draw() }
         })
         sel.after(input)
         input.focus()
@@ -179,6 +180,9 @@
     box.dataset.key = row.key
     box.dataset.kind = row.kind
     if (row.kind === 'info') { box.append(el('p', 'small set-info', row.text || row.label)); return box }
+    // a line in its place, the group's other rows drawn too: with the routes unreadable the shared
+    // group's note sits beside Claude coding and the rest, still the owner's to change (#1286's review)
+    if (row.kind === 'note') { box.append(el('p', 'small set-note', row.text || row.label)); return box }
     if (row.label) box.append(el('div', 'set-label', row.label))
     if (row.kind === 'choice') choice(row, box)
     else if (row.kind === 'number') number(row, box)
@@ -205,9 +209,7 @@
         const card = el('section', 'card set-card')
         card.dataset.group = g
         card.append(el('h3', '', title))
-        const note = mine.find(r => r.kind === 'note')
-        if (note) card.append(el('p', 'small set-note', note.text))  // stands where the group's rows would be
-        else for (const r of mine) card.append(drawRow(r))
+        for (const r of mine) card.append(drawRow(r))
         out.append(card)
       }
     }

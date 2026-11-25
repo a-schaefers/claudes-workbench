@@ -46,6 +46,9 @@ const MOCK_ROWS = [
     choices: [{ value: 'off', label: 'Off (default)', says: 'One task at a time.' }, { value: 'on', label: 'On', says: 'Tasks at once.' }] },
   { key: 'cap', group: 'shared', label: 'API day cap', kind: 'number', value: 5, unit: 'usd', says: 'API tasks stop for the day at $5.' },
   { key: 'gpu-none', group: 'gpu', label: '', kind: 'note', text: 'No GPU model found (wb models)' },
+  // a choice beside the note, as settings.py sends it (the media rows after the no-GPU line): both drawn
+  { key: 'media-images', group: 'gpu', label: 'Image generation', kind: 'choice', value: 'off', other: false, says: 'No images.',
+    choices: [{ value: 'off', label: 'Off (default)', says: 'No images.' }, { value: 'on', label: 'On', says: 'Images.' }] },
   { key: 'api-connected', group: 'api', label: 'Connected', kind: 'info', text: 'Connected: Provider (key stored)' },
   { key: 'api-writing', group: 'api', label: 'English writing API model', kind: 'choice', value: null, other: true,
     says: 'English writing has no API model: it runs on the GPU.',
@@ -168,7 +171,7 @@ export async function check(page, ctx) {
       if (most !== 1 || posts.map(p => p.key).join() !== 'workflows,splash') throw new Error(JSON.stringify({ most, posts }))
     })
 
-    await ctx.check('"Other model…" opens a text input, and Enter sends the typed id; a note stands for its group, an info row is a line', async () => {
+    await ctx.check('"Other model…" opens a text input, Escape closes it, Enter sends the typed id; a note is a line beside its group\'s rows, an info row a line', async () => {
       let sent = null
       unmock()
       mock(async (method, body) => {
@@ -180,7 +183,9 @@ export async function check(page, ctx) {
       await reshow()
       await until(async () => (await row('api-writing').count()) === 1)
       const gpu = await page.textContent('#settings-rows .set-card[data-group="gpu"]')
-      if (!gpu.includes('No GPU model found') || await page.locator('#settings-rows .set-card[data-group="gpu"] .set-row').count()) throw new Error(gpu)
+      const kinds = await page.locator('#settings-rows .set-card[data-group="gpu"] .set-row').evaluateAll(rs => rs.map(r => r.dataset.kind).join())
+      if (!gpu.includes('No GPU model found') || kinds !== 'note,choice' || await row('media-images').locator('[role="radio"]').count() !== 2)
+        throw new Error(`${gpu} [${kinds}]`)
       if (!(await row('api-connected').textContent()).includes('Connected: Provider')) throw new Error('no info line')
       await fits(page.viewportSize().width)               // a select's long option stays inside (WebKit counted it past the view)
       const sel = row('api-writing').locator('select')
@@ -188,6 +193,11 @@ export async function check(page, ctx) {
       if (labels[labels.length - 1] !== 'Other model…') throw new Error(labels.join(' | '))
       await sel.selectOption({ label: 'Other model…' })
       const input = row('api-writing').locator('input[data-other]')
+      await input.fill('p/typed')
+      await input.press('Escape')                         // the row back: no input, the select on the row's value
+      await until(async () => (await input.count()) === 0).catch(() => { throw new Error('Escape left the input open') })
+      if ((await sel.inputValue()) !== '' || sent) throw new Error(`after Escape: ${JSON.stringify(await sel.inputValue())} ${JSON.stringify(sent)}`)
+      await sel.selectOption({ label: 'Other model…' })
       await input.fill('prov/typed-model-1')
       if (sent) throw new Error('sent before Enter: ' + JSON.stringify(sent))
       await input.press('Enter')

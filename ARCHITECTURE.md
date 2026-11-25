@@ -5796,8 +5796,9 @@ setting touches only Python. The chat server draws from it (#1280); nothing in i
 **A row** is JSON-safe: `key`, `group`, `label`, `kind` and by kind: `choice` (`value`, `choices`
 `[{value, label, says}]`, `says` for the current value, `other`); `number` (`value` a float or null
 for off, `unit` `usd` or `per_kwh`; `off`, `""` and null clear it); `info` (`text`); `action`
-(`text` and its `choices`, buttons); `note` (`text`: one line standing where its group's rows
-would be: `NO_PROVIDER`, `OLDER_WB`, `NO_GPU`, or wb's own reason when routes.json can't be read).
+(`text` and its `choices`, buttons); `note` (`text`: one line for its group, drawn in its place
+beside the group's other rows: `NO_PROVIDER`, `OLDER_WB`, `NO_GPU`, or wb's own reason when
+routes.json can't be read).
 `other: true` (the `api-<role>` rows) takes any id; `wb route` checks it (a value starting `-` or
 holding a space is refused here, never read as a flag). A row may carry `help`, the note for Claude
 while its setting is on but can't work yet, which `apply` also returns when that value was just
@@ -5852,13 +5853,16 @@ alone, and a generic renderer: a new setting touches only Python.
 - **Groups** are `.card`s (`.set-card[data-group]`, an `h3` each) in a `.cards` grid, in `GROUPS`
   order with their names: `shared` "Agents and roles", `gpu` "GPU", `api` "API", `terminal`
   "Terminal", `experimental` "Experimental"; a group the table adds later follows, under its key. A
-  `note` row stands where its group's rows would be; a group with no rows has no card.
+  `note` row is a muted line in its place, and the group's other rows are drawn beside it (with the
+  routes unreadable, the shared group's note sits over Claude coding and the rest); a group with no
+  rows has no card.
 - **Each kind** (`.set-row[data-key][data-kind]`, its `label` over the control, the current value's
   `says` under it):
   - `choice`: a segmented control (`.seg.set-seg`, radios, one column per choice) up to `SEG_MAX` 4
     choices, a `<select>` past it or with `other`. Such a select ends with "Other model…", which opens
-    a text input (`input[data-other]`); Enter sends the typed id, Escape puts the row back. A value
-    off the list (none, for an API role without a model) is the select's first option.
+    a text input (`input[data-other]`); Enter sends the typed id, Escape closes the input and the
+    select shows the row's value again. A value off the list (none, for an API role without a model)
+    is the select's first option.
   - `number`: a text input (`inputmode=decimal`) with its unit (`usd` `$` … `/day`, `per_kwh`
     `per kWh`) and an Off button (`.set-off`, pressed while the value is null). Enter or blur sends
     a changed value; an empty box sends nothing, since Off is the button's.
@@ -7247,8 +7251,9 @@ and `<code>`, the intro's `<code>`), `window.WB`, and the gear's old checks from
 then each view's own, `e2e_stats.mjs` and `e2e_settings.mjs` (`check(page, ctx)`, once per device). The Settings
 view's (#1286): the groups in order, "Agents and roles" first, above the device cards (the gear's old cards are
 `#settings`'s alone); Claude coding → "Ask me first" lit at once, then `coding.json` and `wb coding` say `ask`; a
-409 puts the control back and toasts, with a second click waiting for the first; "Other model…" and Enter send the
-typed id; a number's Enter and Off; `help`'s toast; the layout at the phone's width, and on the desktop at 1280 px
+409 puts the control back and toasts, with a second click waiting for the first; "Other model…": Escape closes
+the input, the select back on the row's value, and Enter sends the typed id; a note drawn beside a choice in its
+group; a number's Enter and Off; `help`'s toast; the layout at the phone's width, and on the desktop at 1280 px
 (two columns) and 390 px (one), nothing past the view's edge. Its calls to `/api/settings` go through a page-side
 `fetch` wrapper to a binding (`__wbSettings`), never `page.route`: the page is its service worker's client, and
 WebKit sends such a page's fetches past Playwright's routes. While the server answers that path 404, a stand-in
