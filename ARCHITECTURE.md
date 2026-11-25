@@ -1299,7 +1299,8 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   (`provider.invalid-output` with status 200, "stream ended without finish_reason", or any out of a
   queue) is an `outage` too ("<provider> cut its answers short (…)"); one with no status and no
   queue (2.3.2's "The model exceeded its output limit", a bad structured output) is the step's. Status `api_stop` (the keyhole's quota stop, shared with #1019's
-  spend stop, and its `setup` stop: this machine can't reach the provider, #1080; consumed by the
+  spend stop, its `setup` stop: this machine can't reach the provider, #1080, and its `refused` stop
+  for a 429 over the per-minute token limit by itself, #1380; consumed by the
   stop, and read first: the keyhole answers them with a 400) stops it at once, and so does an
   error: `provider.quota` (402) or a 400 in `keyhole.CREDIT`'s words (#1079: checked before
   `REFUSED_CODES`), guard `quota`; a 401, or a 403 or a
@@ -2502,7 +2503,7 @@ run again, #1080); a request http.client won't send
 (`InvalidURL`, a `ValueError`) is a 502 `keyhole: can't send this request on (<type>)`, the type
 only and never `unreachable`. Anything else a handler raises is one line in the log, `keyhole: a
 request failed (<type>)` (`_Server.handle_error`), never socketserver's traceback on stderr. Each outcome goes to
-`on_health(state, why, until)`: 2xx `ok`; a quota answer (below) or `insufficient_quota` `no_credit`; a 429 or 529
+`on_health(state, why, until)`: 2xx `ok`; a quota answer (below) or `insufficient_quota` `no_credit`; a 429 (not `too_large`, below: no mark) or 529
 `rate_limited` until `Retry-After`, else the hold's backoff while it holds (below), else `RATE_LIMIT_SECS` (60 s); 5xx and transport failures
 `unreachable` (the model's health record takes it with #1013). The start line, `keyhole:
 <provider> on 127.0.0.1:<port> for <id>`, the refusals and that failure line are all it logs (the runner's stdout,
@@ -2576,7 +2577,12 @@ such a model newer than the binary is still "Model unavailable" to the agent.
 balance or plan is spent (`QUOTA`: `insufficient_quota`, OpenRouter's `limit_source`, a 5-hour or
 weekly limit), or a 400, 403 or 429 in Anthropic's out-of-credit words (`CREDIT`: "Your credit
 balance is too low … Plans & Billing … purchase credits", a 400 `invalid_request_error`, read as the
-agent's failure before #1079; never a bare "billing"), is `quota`; 429 and 529 (Anthropic's overloaded) `rate_limited`; 500, 502, 503, 504
+agent's failure before #1079; never a bare "billing"), is `quota`; a 429 whose body says the
+request alone is over a per-minute limit (`_too_large`: `TOO_LARGE`, OpenAI's "Request too large
+for <model> … on tokens per min (TPM)", or `LIMIT_ASKED`'s "Limit N, Requested M" with M > N,
+never "Limit N, Used U, Requested M") is `too_large`, which no wait passes (OpenAI tier 1, under the
+pinned output cap: held, revived once and failed after ~20 minutes as "rate-limited", #1380);
+other 429s and 529 (Anthropic's overloaded) `rate_limited`; 500, 502, 503, 504
 `outage`, and so are Cloudflare's 520-524 in front of a provider, as transient (`HOLD_CODES`; another
 5xx, a 501, a 505, a 525, goes back at once, its health
 still `unreachable`), as are the transient transport failures (`_transient`: refused, reset,
@@ -2595,7 +2601,10 @@ never the body), and `last` (`rate-limited by <provider> (HTTP 429): waiting, re
 200 whose SSE carries only keep-alive comments for `QUEUED_AFTER_S` (30 s) is `queued`, marked again
 each 30 s; the first event (or a non-SSE body's first bytes) clears both keys (`answered`). `quota`
 writes status `api_stop {guard: "quota", text: "<provider> says the account is out of credit (HTTP
-402)"}` and answers OpenCode 400 `keyhole: <that>: the round stops`, which it doesn't retry. The
+402)"}` and answers OpenCode 400 `keyhole: <that>: the round stops`, which it doesn't retry.
+`too_large` the same (`Keyhole.too_large`) with guard `refused` and text `<provider> refused the
+request (HTTP 429): <its error.message, else its first line>`, so Claude reads the provider's
+words; no health mark either, so the provider's other tasks don't wait behind it. The
 cooldown file the issue named `api-cooldown.json` is #1013's `api-health.json` (`note_api`, through
 `on_health`), which `status()` already reads for "rate-limited by <Provider> until HH:MM", with no
 request.
@@ -7897,7 +7906,7 @@ doc needs its own `!/` line).
 - **The provider's wait** (#1020): `keyhole.RATE_HOLD_S` (300) stays under the layer's header guard (600 s, #1017),
   or OpenCode cuts a held request itself; `runner.PROVIDER_GUARDS` → the `provider` cause and `runner.SPEND` → the
   `spend` cause (`runner.stopped_by`, also status `infra`, the `stopped` event's `by`, `bench.replay`'s `error`), both
-  outside `results.THE_STEP`; `api_stop` is shared with #1019's spend stop (guard `spend`); `HOLD_CODES`/`QUOTA`/`CREDIT` → `note_api`'s states and
+  outside `results.THE_STEP`; `api_stop` is shared with #1019's spend stop (guard `spend`); `HOLD_CODES`/`QUOTA`/`CREDIT`/`TOO_LARGE` → `note_api`'s states and
   `_ProviderWait.on_retry`/`on_error`'s reading of OpenCode's `retry` and `error` (`REFUSED_CODES`, `REFUSED_KINDS`,
   `KEY_WORDS`, `CONTEXT_WORDS`: OpenCode's error types and the providers' words). `runner.HELD` is `models.HELD_STOPS`,
   the status `guard` `drive` writes with `infra` `provider` ↔ `models.held_told`; the keyhole's `rate_limited`/`unreachable`

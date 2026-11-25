@@ -30949,6 +30949,36 @@ class Keyhole(_KeyholeTest):
         self.assertAlmostEqual(seen[2][2], now + 60, delta=5)          # no Retry-After: 60 s
         self.assertAlmostEqual(seen[3][2], now + 120, delta=5)
 
+    def test_a_429_saying_the_request_is_too_large_for_the_tpm_limit_is_passed_on_at_once_not_held(self):
+        # #1380 (2026-11-25): OpenAI tier 1's 429 for one request over the TPM limit was held as a
+        # rate limit, sent again and again, and the round failed ~20 minutes on as "rate-limited"
+        seen = []
+        kh = self.keyhole(on_health=lambda *a: seen.append(a), hold=30)
+        self.up.mode, self.up.status, self.up.retry_after = "status", 429, "1"
+        self.up.message = ("Request too large for gpt-up-1101 in organization org-x on tokens per min "
+                           "(TPM): Limit 30000, Requested 45210. The input or output tokens must be reduced.")
+        began = time.monotonic()
+        code, _, text = self.post(kh)
+        self.assertEqual(code, 400, text)                                # OpenCode won't retry a 400
+        self.assertLess(time.monotonic() - began, 5)                     # never the hold
+        self.assertEqual(len(self.up.seen), 1)
+        stop = self.task.status["api_stop"]
+        self.assertEqual(stop["guard"], "refused")
+        self.assertEqual(stop["text"], "deepinfra refused the request (HTTP 429): " + self.up.message)
+        self.assertIn("the round stops", json.loads(text)["error"]["message"])
+        self.assertEqual(seen, [])                                       # no cooldown for other tasks
+        # "Limit N, Requested M" alone says it only when M > N: an ordinary TPM 429 is still held
+        self.task.set_status(api_stop=None)
+        kh = self.keyhole(on_health=lambda *a: seen.append(a), hold=0)
+        for message in ("Rate limit reached on tokens per min (TPM): Limit 30000, Used 29000, Requested 2000.",
+                        "Rate limit on tokens per min: Limit 30000, Requested 20000."):
+            self.up.message = message
+            self.assertEqual(self.post(kh)[0], 429)
+        self.assertEqual([s[0] for s in seen], ["rate_limited", "rate_limited"])
+        self.up.message = "Rate limit on tokens per min: Limit 6,000, Requested 8,000."
+        self.assertEqual(self.post(kh)[0], 400)
+        self.assertEqual(self.task.status["api_stop"]["guard"], "refused")
+
     def test_an_unreachable_upstream_is_a_502_that_says_so(self):
         seen = []
         m = self.model()
@@ -36905,6 +36935,28 @@ class RateLimits(Base):
                                  "message": "max_tokens: billing tier allows at most 8192"}})
         self.assertEqual(wait.fatal, ("refused", "deepseek refused the request (HTTP 400): "
                                                  "max_tokens: billing tier allows at most 8192"))
+
+    def test_a_tpm_too_large_stop_tells_claude_the_providers_words(self):
+        # #1380 (2026-11-25): a 429 for one request over the TPM limit was held 10 minutes, revived
+        # once, and stopped as "rate-limited … (HTTP 429)" with advice to carry on later
+        said = ("Request too large for deepseek-flash on tokens per min (TPM): Limit 30000, "
+                "Requested 45210. The input or output tokens must be reduced.")
+        task = self.api_task("t-tpm", "api", "--silence-timeout", "30")
+        self.up.rate_until, self.up.code, self.up.after, self.up.body = float("inf"), 429, "1", said
+        self.keyhole(task, hold=60)
+        began = time.monotonic()
+        runner.drive(task)
+        self.assertLess(time.monotonic() - began, 30)               # never the hold or the revive
+        st = task.status
+        self.assertEqual((st["phase"], st["last"], st.get("infra")),
+                         ("stuck", f"deepseek refused the request (HTTP 429): {said}", "provider"))
+        self.assertEqual(len(self.up.seen), 1)
+        self.assertFalse(self.events(task, "load"))                 # never revived
+        n = self.notice(task)
+        self.assertEqual(n["cause"], "provider")
+        self.assertIn(said, n["text"])
+        self.assertIn("once what deepseek said is fixed", n["text"])
+        self.assertIsNone(self.models.api_health("deepseek"))      # no cooldown for its other tasks
 
     def test_a_certificate_that_doesnt_verify_stops_the_round_at_once_as_this_machines(self):
         # #1080 (2026-11-23): the keyhole's 502 was retried, read as the provider's outage for
