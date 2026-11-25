@@ -63,10 +63,10 @@ only once committed, through `wb update` (it copies the clone's HEAD into the pl
 
 ## 3. Offering it upstream
 
-1. **Search first**: `gh issue list --repo a-schaefers/claudes-workbench --state all --search
+1. **Search first**: `gh issue list --repo a-schaefers/workbench --state all --search
    "<words from the error>"`. Comment on an existing issue rather than opening a second.
 2. **Open an issue** with the matching form (bug, feature, docs), filled from real output: the
-   commit, `wb doctor`, `wb patch list`. `gh issue create --repo a-schaefers/claudes-workbench
+   commit, `wb doctor`, `wb patch list`. `gh issue create --repo a-schaefers/workbench
    --web` opens the chooser; an agent without a browser writes the form's fields, in its order,
    under its labels as `### ` headings, into `--body-file`.
 3. **Prepare the branch**: `wb patch upstream <commit> --name <slug>` makes branch `pr/<slug>`

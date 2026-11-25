@@ -36,7 +36,7 @@ G = (0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296,
 # Chrome's are fcm.googleapis.com; Chromium's jmt17.google.com (seen 2026-11-18)
 PUSH_HOSTS = (".googleapis.com", ".google.com", ".push.apple.com", ".push.services.mozilla.com",
               ".notify.windows.com")
-SUBJECT = "https://github.com/a-schaefers/claudes-workbench"  # VAPID's contact: Apple wants one
+SUBJECT = "https://github.com/a-schaefers/workbench"  # VAPID's contact: Apple wants one
 TTL = 86400               # a phone off for a day still gets the news when it's back
 SEND_TIMEOUT = 10
 MAX_SUBS = 20             # a phone, a tablet, a laptop or two: more is someone else's loop

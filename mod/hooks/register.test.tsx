@@ -3977,7 +3977,7 @@ test('Claude\'s own calls in a task\'s worktree are kept for wb as they begin, e
 
 // The upstream gate's world (#1005): the patch clone, the user's project, a developer's own clone
 // of upstream, each with its origin; a dialog answered with `answer` (null: dismissed, or -p)
-const SLUG = 'a-schaefers/claudes-workbench'
+const SLUG = 'a-schaefers/workbench'
 const SOURCE = '/home/u/.local/share/workbench/source'
 const MARKET = '/home/u/.claude/plugins/marketplaces/workbench'
 function upstreamWorld(on: any, files: Record<string, string>) {
@@ -4281,20 +4281,24 @@ test('#1005: Monitor\'s command and the GitHub MCP tools pass the same gate', as
   expect((await call({ tool: 'Monitor', command: 'git push', description: 'x', timeout_ms: 1000 })).deny).toContain('not sent')
   w.cwd = '/home/u/project'
   const mcp = 'mcp__plugin_github_github__'
-  const issue = await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'claudes-workbench', title: 'T', body: 'B' })
+  const issue = await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'workbench', title: 'T', body: 'B' })
   expect([issue.asked, issue.deny]).toEqual([1, expect.stringContaining('not sent')])
   expect(issue.question).toContain(`Claude wants to send this to GitHub (${SLUG}), publicly: ${mcp}create_issue`)
   expect(issue.question).toContain('"title": "T"')
-  expect((await call({ tool: `${mcp}push_files`, owner: 'someone', repo: 'claudes-workbench', branch: 'x', files: [] })).asked).toBe(1)
+  expect((await call({ tool: `${mcp}push_files`, owner: 'someone', repo: 'workbench', branch: 'x', files: [] })).asked).toBe(1)
+  // the repo's former name (renamed from claudes-workbench, 2026-11-24): GitHub redirects it, so a
+  // send naming it lands upstream and asks first, by MCP or by gh
+  expect((await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'claudes-workbench', title: 'T' })).asked).toBe(1)
+  expect((await call({ tool: 'Bash', command: 'gh issue create -R a-schaefers/claudes-workbench --title T --body B' })).asked).toBe(1)
   expect((await call({ tool: `${mcp}add_issue_comment`, url: `https://github.com/${SLUG}/issues/3`, body: 'x' })).asked).toBe(1)
   for (const input of [
-    { tool: `${mcp}get_issue`, owner: 'a-schaefers', repo: 'claudes-workbench', issue_number: 3 },   // a read
+    { tool: `${mcp}get_issue`, owner: 'a-schaefers', repo: 'workbench', issue_number: 3 },   // a read
     { tool: `${mcp}create_issue`, owner: 'u', repo: 'project', title: 'T' },                       // the user's own
   ]) expect(await call(input)).toEqual({ deny: undefined, asked: 0, question: '' })
   w.cwd = MARKET                                         // Claude Code's clone, upstream its origin: no developer's
-  expect((await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'claudes-workbench', title: 'T' })).asked).toBe(1)
+  expect((await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'workbench', title: 'T' })).asked).toBe(1)
   w.cwd = '/home/u/repos/workbench'                                                            // a developer's clone
-  expect((await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'claudes-workbench', title: 'T' })).asked).toBe(0)
+  expect((await call({ tool: `${mcp}create_issue`, owner: 'a-schaefers', repo: 'workbench', title: 'T' })).asked).toBe(0)
   await clock.advance(1000)
 })
 

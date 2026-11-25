@@ -6347,7 +6347,7 @@ inside the plugins directory), which is no user's Claude. The gated directories 
 `patches.json`'s `source`, else `WB_SOURCE`, else `~/.local/share/workbench/source`; `$WB_HOME/upstream/`; and Claude
 Code's own `<CLAUDE_CONFIG_DIR or ~/.claude>/plugins/` (and `CLAUDE_CODE_PLUGIN_CACHE_DIR`) `marketplaces/workbench` and
 `cache/workbench`: the marketplace install's clone has upstream as its origin, and was once exempted as a developer's
-(the review of #1005). The upstream: `patches.json`'s `upstream`, else `UPSTREAM` (`a-schaefers/claudes-workbench`).
+(the review of #1005). The upstream: `patches.json`'s `upstream`, else `UPSTREAM` (`a-schaefers/workbench`); the gate matches each of those and the former names in `FORMER_UPSTREAM` (`a-schaefers/claudes-workbench`, renamed 2026-11-24: GitHub redirects it, so a send naming it, or a clone and `patches.json` still saying it, lands upstream and asks first).
 A GitHub MCP tool (`GITHUB_MCP`, `mcp__…github…__<name>`) not named `get_`/`list_`/`search_` whose input names the
 upstream, or a repository of its name (a fork), asks the same (`mcpAimsUpstream`), its input shown up to `MCP_CHARS`
 4000. With the user away on the web chat (`away`) it denies at once, as the dialog would wait at an empty terminal
@@ -6959,7 +6959,7 @@ on an API model `kind: "api"` and `paid {cost, source}` (`bench.paid`, from `res
 
 **Users** (README's quickstart):
 ```sh
-claude plugin marketplace add a-schaefers/claudes-workbench
+claude plugin marketplace add a-schaefers/workbench
 claude plugin install workbench@workbench
 "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/marketplaces/workbench/bin/wb setup
 ```
@@ -6998,7 +6998,7 @@ marketplace.
 
 **Developing**: the clone is the marketplace, so plugin, `wb` and skill read the working tree:
 ```sh
-git clone https://github.com/a-schaefers/claudes-workbench ~/repos/workbench
+git clone https://github.com/a-schaefers/workbench ~/repos/workbench
 cd ~/repos/workbench
 ln -s "$PWD/bin/wb" ~/.local/bin/wb
 ln -s "$PWD/skill/workbench" ~/.claude/skills/workbench
@@ -7620,8 +7620,8 @@ doc needs its own `!/` line).
   (toasts only `update available` and `LOCAL_CHANGES`, the opening of `patches.CHECK_LINE`) and `UPDATE` (reloads only
   after `updated`).
 - **`patches.json`'s keys** (`source`, `upstream`) **and `patches.source_dir`'s default** → the mod's `upstreamRefusal`.
-  **Where workbench lives on GitHub** → the mod's `UPSTREAM` (patches.py keeps no constant: `note_install` reads the
-  remote's URL), CONTRIBUTING.md's `gh issue` lines. **Workbench's contact** (`patches.UPSTREAM_CONTACT`, #1291) →
+  **Where workbench lives on GitHub** → the mod's `UPSTREAM` and, on a rename, the old name into `FORMER_UPSTREAM` (patches.py keeps no constant: `note_install` reads the
+  remote's URL), `webpush.SUBJECT`, `scripts/github-settings.sh`, `.github/ISSUE_TEMPLATE/config.yml`, the README's badges and CONTRIBUTING.md's `gh issue` lines. **Workbench's contact** (`patches.UPSTREAM_CONTACT`, #1291) →
   `wb patch zip`'s README.txt and output (its row in *Every `wb` command* quotes the line), CONTRIBUTING.md's
   contributing line (never the README: the owner's call), *Sending a patch without GitHub*; the skill names no address ("the address it
   printed"), so a new one never leaves Claude telling a user the old. **What sends** (`wb patch send`'s name, the gh and git commands it

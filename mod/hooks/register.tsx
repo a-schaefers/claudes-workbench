@@ -1321,7 +1321,11 @@ export function delegates(command: string): boolean {
 // `bash -c '…'` and `eval` are read inside; text a shell or an interpreter runs from a heredoc,
 // a here-string, a pipe or -c is caught by its words (OUTWARD_TEXT): `bash <<EOF … git push` once
 // went through (the review of #1005).
-const UPSTREAM = 'a-schaefers/claudes-workbench' // the GitHub home; patches.json's upstream when it has one (Couplings)
+const UPSTREAM = 'a-schaefers/workbench' // the GitHub home; patches.json's upstream when it has one (Couplings)
+// Its names before: the repo was renamed from claudes-workbench (the owner, 2026-11-24) and GitHub
+// redirects the old name, so a send naming it, or a clone whose origin and patches.json still say
+// it, still lands upstream and still asks first
+const FORMER_UPSTREAM = ['a-schaefers/claudes-workbench']
 const GH_WRITES: Record<string, Set<string>> = {
   pr: new Set(['create', 'comment', 'edit', 'merge', 'review', 'close', 'reopen', 'ready', 'update-branch', 'lock', 'unlock']),
   issue: new Set(['create', 'comment', 'edit', 'close', 'reopen', 'delete', 'lock', 'unlock', 'transfer', 'pin', 'unpin', 'develop']),
@@ -1434,10 +1438,12 @@ export function mentions(text: string, dir: string, home: string, root = ''): bo
 }
 
 // A git remote's URL is the upstream's (https, ssh or scp form, with or without .git)
-export function originIs(url: string, slug: string): boolean {
+export function originIs(url: string, slug: string | string[]): boolean {
   const u = url.trim().toLowerCase().replace(/\/+$/, '').replace(/\.git$/, '')
-  const s = slug.toLowerCase()
-  return u === s || u.endsWith(`/${s}`) || u.endsWith(`:${s}`)
+  return (Array.isArray(slug) ? slug : [slug]).some(one => {
+    const s = one.toLowerCase()
+    return u === s || u.endsWith(`/${s}`) || u.endsWith(`:${s}`)
+  })
 }
 
 // why: 'send' (wb patch send), 'dir' (it names, or runs in, a gated directory), 'plugin' (it runs
@@ -1462,7 +1468,7 @@ export type Aim = { why: '' | 'send' | 'dir' | 'plugin' | 'slug'; at: string; wo
 // in the whole line, whenever any command in it is outward: `export GH_REPO=<slug> && gh issue
 // create` or `gh repo set-default <slug> && …` named it outside the outward command and went
 // through (the review of #1005). `cd`, `cd --` and pushd are followed from `cwd`.
-export function upstreamAim(command: string, cwd: string, home: string, slug: string, dirs: string[], root = '',
+export function upstreamAim(command: string, cwd: string, home: string, slug: string | string[], dirs: string[], root = '',
   plugins: string[] = []): Aim {
   let here = cwd
   const lines = (src: string): string[][] => simpleCommands(src).flatMap(words => {
@@ -1474,7 +1480,7 @@ export function upstreamAim(command: string, cwd: string, home: string, slug: st
     return [words]
   })
   const textNames = dirs.some(d => mentions(command, d, home, root))
-  const named = command.toLowerCase().includes(slug.toLowerCase())
+  const named = (Array.isArray(slug) ? slug : [slug]).some(s => command.toLowerCase().includes(s.toLowerCase()))
   const outAt: string[] = []
   const inPlugins = (ps: string[]) => ps.find(p => plugins.some(d => inside(p, d)))
   let found: Aim | null = null
@@ -1585,13 +1591,13 @@ async function originOf($: any, dir: string): Promise<string> {
 // Claude Code's plugins directory: the marketplace install's own clone has that origin too, and
 // was exempted as a developer's (the review of #1005's blocker). Asked of git only once all
 // else matched.
-async function developerClone($: any, dir: string, slug: string, notIn: string[]): Promise<boolean> {
+async function developerClone($: any, dir: string, slug: string | string[], notIn: string[]): Promise<boolean> {
   if (notIn.some(d => inside(dir, d))) return false
   return originIs(await originOf($, dir), slug)
 }
 
 // What the gate reads each time: patches.json's clone and upstream, the gated directories
-type Gate = { home: string; cwd: string; slug: string; dirs: string[]; plugins: string[] }
+type Gate = { home: string; cwd: string; slug: string; slugs: string[]; dirs: string[]; plugins: string[] }
 async function gateConf($: any): Promise<Gate> {
   const conf = await readJson($, `${mem.root}/patches.json`)
   const home = (await $.env.get('HOME').catch(() => '')) || mem.home
@@ -1606,7 +1612,9 @@ async function gateConf($: any): Promise<Gate> {
   const cache = await $.env.get('CLAUDE_CODE_PLUGIN_CACHE_DIR').catch(() => '')
   const plugins = [`${absolutePath(cc, home, cwd)}/plugins`, ...(cache ? [absolutePath(cache, home, cwd)] : [])]
   const dirs = [source, `${mem.root}/upstream`, ...plugins.flatMap(p => [`${p}/marketplaces/workbench`, `${p}/cache/workbench`])]
-  return { home, cwd, slug, dirs, plugins }
+  // every name upstream answers to: the one in use and its former ones (FORMER_UPSTREAM)
+  const slugs = [...new Set([slug, UPSTREAM, ...FORMER_UPSTREAM].map(x => x.toLowerCase()))]
+  return { home, cwd, slug, slugs, dirs, plugins }
 }
 
 // The dialog, or its refusal: '' lets the call through on exactly 'Send it'
@@ -1624,7 +1632,7 @@ const realPath = async ($: any, p: string): Promise<string> =>
 async function upstreamRefusal($: any, command: string): Promise<string> {
   if (!/\b(?:gh|git|wb|workbench)\b/i.test(command)) return '' // most calls: no parse
   const g = await gateConf($)
-  let aim = upstreamAim(command, g.cwd, g.home, g.slug, g.dirs, mem.root, g.plugins)
+  let aim = upstreamAim(command, g.cwd, g.home, g.slugs, g.dirs, mem.root, g.plugins)
   if (!aim.why && aim.outAt.length) { // a symlinked spelling of a gated directory: by real path
     const dirs = await Promise.all(g.dirs.map(d => realPath($, d)))
     for (const p of aim.outAt) {
@@ -1633,8 +1641,8 @@ async function upstreamRefusal($: any, command: string): Promise<string> {
     }
   }
   if (!aim.why) return ''
-  if (aim.why === 'plugin' && !aim.named && !originIs(await originOf($, aim.at), g.slug)) return ''
-  if (aim.why === 'slug' && await developerClone($, aim.at, g.slug, [...g.dirs, ...g.plugins])) return ''
+  if (aim.why === 'plugin' && !aim.named && !originIs(await originOf($, aim.at), g.slugs)) return ''
+  if (aim.why === 'slug' && await developerClone($, aim.at, g.slugs, [...g.dirs, ...g.plugins])) return ''
   const q = await sendQuestion($, command, g.slug, aim, g.home)
   if ('deny' in q) return q.deny
   const no = await askToSend($, q.question)
@@ -1648,19 +1656,21 @@ async function upstreamRefusal($: any, command: string): Promise<string> {
 // repository of its name (a fork's), asks the same; Bash was the only gate, and patching.md
 // offers that plugin (the review of #1005)
 const GITHUB_MCP = /^mcp__.*github.*__(.+)$/i
-export function mcpAimsUpstream(tool: string, input: Row, slug: string): boolean {
+export function mcpAimsUpstream(tool: string, input: Row, slug: string | string[]): boolean {
   const m = GITHUB_MCP.exec(tool)
   if (!m || /^(?:get|list|search)_/i.test(m[1]!)) return false
-  const s = slug.toLowerCase()
-  const name = s.split('/')[1] ?? s
   const repo = String(input.repo ?? input.repository ?? '').toLowerCase()
-  return repo === s || repo === name || repo.endsWith(`/${name}`) || JSON.stringify(input).toLowerCase().includes(s)
+  return (Array.isArray(slug) ? slug : [slug]).some(one => {
+    const s = one.toLowerCase()
+    const name = s.split('/')[1] ?? s
+    return repo === s || repo === name || repo.endsWith(`/${name}`) || JSON.stringify(input).toLowerCase().includes(s)
+  })
 }
 
 async function mcpRefusal($: any, tool: string, input: Row): Promise<string> {
   const g = await gateConf($)
-  if (!mcpAimsUpstream(tool, input, g.slug)) return ''
-  if (await developerClone($, g.cwd, g.slug, [...g.dirs, ...g.plugins])) return ''
+  if (!mcpAimsUpstream(tool, input, g.slugs)) return ''
+  if (await developerClone($, g.cwd, g.slugs, [...g.dirs, ...g.plugins])) return ''
   const text = JSON.stringify(input, null, 1)
   const shown = text.length > MCP_CHARS ? `${text.slice(0, MCP_CHARS)}… (${text.length - MCP_CHARS} more characters not shown)` : text
   return askToSend($, `Claude wants to send this to GitHub (${g.slug}), publicly: ${tool} ${shown} — Send it?`)
