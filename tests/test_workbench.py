@@ -38095,7 +38095,11 @@ class OpenCodeDriver(Base):
         self.assertEqual(store.driver_state("ses_a", dict(d, machine="machine-b")), "unknown")  # #922
         self.beat("ses_a", machine="machine-b")                       # another machine's beat: not this one's
         self.assertEqual(store.driver_state("ses_a", d), "unknown")
-        self.beat("ses_a", ago=store.HEARTBEAT_FRESH + 5)              # the server stopped beating
+        self.beat("ses_a", ago=store.HEARTBEAT_FRESH + 5)              # stale, its server still running:
+        self.assertEqual(store.driver_state("ses_a", d), "unknown")   # asleep or stalled, not gone
+        self.beat(ago=store.HEARTBEAT_FRESH + 5)                       # nor a stale beat without it
+        self.assertEqual(store.driver_state("ses_a", d), "unknown")
+        self.beat()                                                    # a fresh one without it: deleted
         self.assertEqual(store.driver_state("ses_a", d), "gone")
         dead = subprocess.Popen(["true"]); dead.wait()
         gone = dict(d, pid=dead.pid, start=None)
@@ -38144,6 +38148,30 @@ class OpenCodeDriver(Base):
                 self.assertEqual(self.mine("opencode", "ses_a"), ["t1"])
             helper.kill(); helper.wait()                              # its pid dead, its beat left behind
         self.assertEqual(store.Task("t1").spec["session"], "ses_a")
+
+    def test_a_stale_beat_of_a_server_still_running_never_hands_its_task_to_another_session(self):
+        # the #1309 re-review (2026-11-25): a stale beat read as gone, so after a laptop's sleep, a
+        # stopped or busy service or a stalled timer, another session in the directory claimed the
+        # task, its bare `wb wait` took the notice (the owner never woken, #696's kind), and both
+        # adopts handed it over. A running server's stale beat says nothing of its sessions
+        b = subprocess.Popen(["sleep", "60"]); self.addCleanup(b.wait); self.addCleanup(b.kill)
+        self.beat("ses_a", ago=store.HEARTBEAT_FRESH + 5)              # A's server: this process, asleep
+        self.opencode_task("t1", "ses_a", phase="review")
+        store.append_jsonl(store.home() / "notify.jsonl", {"ts": store.now(), "task": "t1", "kind": "review",
+                                                            "round": 1, "text": "t1 is ready"})
+        os.environ["OPENCODE_SESSION_ID"] = "ses_b"
+        self.assertEqual(self.mine("opencode", "ses_b"), [])
+        self.assertEqual(self.wb("wait", "--timeout", "1")[0], 2)       # t1's notice stays A's
+        code, _, err = self.wb("adopt", "t1")
+        self.assertEqual(code, 1)
+        self.assertIn("t1 belongs to an OpenCode session (ses_a) not known to be gone", err)
+        code, _, err = self.wb("adopt", "t1", "--session", "sess-2", "--pid", str(b.pid))  # the mod's
+        self.assertEqual(code, 1)
+        self.assertIn("t1 belongs to an OpenCode session (ses_a) not known to be gone", err)
+        self.assertEqual(store.Task("t1").spec["session"], "ses_a")
+        self.beat("ses_a")                                             # A wakes: its notice is its own
+        os.environ["OPENCODE_SESSION_ID"] = "ses_a"
+        self.assertEqual(self.wb("wait", "--timeout", "1")[1], "[review] t1\nt1 is ready\n")
 
     def test_an_opencode_session_claims_a_gone_sessions_task_nearby_but_never_a_claude_codes(self):
         dead = subprocess.Popen(["true"]); dead.wait()
@@ -38211,7 +38239,7 @@ class OpenCodeDriver(Base):
         code, _, err = self.wb("adopt", "t-x", "--session", "sess-2", "--pid", str(b.pid))
         self.assertEqual(code, 1)
         self.assertIn("belongs to an OpenCode session (ses_old) not known to be gone", err)
-        self.beat("ses_old", ago=store.HEARTBEAT_FRESH + 5)
+        self.beat()                                               # its server's fresh beat: ses_old deleted
         self.assertEqual(self.wb("adopt", "t-x", "--session", "sess-2", "--pid", str(b.pid))[0], 0)
         spec = store.Task("t-x").spec
         self.assertEqual((spec["session"], spec["claude_pid"], "driver" in spec), ("sess-2", b.pid, False))

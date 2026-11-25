@@ -404,7 +404,7 @@ DRIVERS = "drivers"           # $WB_HOME/drivers/: the drivers' heartbeats
 # #1309 review, 2026-11-25; #693/#696's kind). So `opencode-<machine_tag>-<pid>.json`, and a task
 # is judged against the server it recorded (task.json `driver.pid`/`start`), never another's.
 BEAT_RE = re.compile(r"opencode-([0-9a-f]{8})-([1-9][0-9]{0,9})\.json")
-HEARTBEAT_FRESH = 120         # seconds: an older beat is a server gone (the plugin beats every 30)
+HEARTBEAT_FRESH = 120         # seconds: an older beat says nothing (the plugin beats every 30)
 SESSION_RE = re.compile(r"[\w-]{1,128}")  # a session id a file may hold, as the Claude ids
 
 
@@ -479,11 +479,15 @@ def driver_server(session, driver=None) -> tuple[str, dict | None]:
     """Whether an OpenCode driver session lives, and the beat that says so: (`live`, its server's
     beat) when a fresh beat of a running server lists it, the one it recorded or another (the
     service restarted, the session reopened in it); else (`gone`, None) when the server the task
-    recorded (``driver``, task.json `driver`: `pid`, `start`) has exited, or its beat is stale, or
-    its fresh beat leaves the session out; else (`unknown`, None): no server recorded (no plugin
-    beat at `wb start`), its process running with no beat, or the task another machine's (#922).
-    Another server's beat never makes a task gone (the #1309 review, 2026-11-25). Only `gone`
-    hands a task to another session: unknown is not gone, as a Claude task with no pid isn't."""
+    recorded (``driver``, task.json `driver`: `pid`, `start`) has exited, or its fresh beat leaves
+    the session out; else (`unknown`, None): no server recorded (no plugin beat at `wb start`), its
+    process running with no beat or a stale one, or the task another machine's (#922). Another
+    server's beat never makes a task gone (the #1309 review, 2026-11-25), nor does a stale beat
+    of a server still running (the #1309 re-review, 2026-11-25: a laptop's sleep, a stopped or
+    busy service, a stalled timer read as gone, and another session nearby took its tasks, their
+    notices and `wb adopt`): only positive evidence makes a task gone, as `cli._gone` never says
+    gone while Claude Code's process lives. Only `gone` hands a task to another session: unknown
+    is not gone, as a Claude task with no pid isn't."""
     d = driver if isinstance(driver, dict) else {}
     on = d.get("machine")
     if not isinstance(session, str) or not session or isinstance(on, str) and on and on != machine():
@@ -499,9 +503,9 @@ def driver_server(session, driver=None) -> tuple[str, dict | None]:
     if not models._alive(pid, start if isinstance(start, str) else None):
         return "gone", None  # the server exited: its file may be left, or removed on exit
     own = next((hb for hb in beats if hb["pid"] == pid), None)
-    if own is None:
-        return "unknown", None
-    return "gone", None  # a stale beat, or a fresh one without the session (live was checked above)
+    if own is None or not _beating(own):
+        return "unknown", None  # running, its beat missing or stale: it says nothing of the session
+    return "gone", None  # its fresh beat leaves the session out (live was checked above): deleted
 
 
 def driver_state(session, driver=None) -> str:

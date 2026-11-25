@@ -3597,10 +3597,14 @@ plugin can only fail to ask, never open a gate (`store.under_model`, *The gate*)
   against the server it recorded, never another's: `live` (a fresh beat, `store.HEARTBEAT_FRESH`
   120 s, of a running server lists the session: its own, or another after the service restarted
   and the session reopened there; that beat is returned), `gone` (the recorded server's process
-  has exited, its beat left or removed; or its beat is stale; or its fresh beat leaves the session
-  out), `unknown` (no server recorded, no plugin having beaten at `wb start`; the recorded
-  server running with no beat; another machine's task, #922's rule). Another server's beat never
-  makes a task `gone`, and only `gone` hands a task on (`store.driver_state`).
+  has exited, its beat left or removed; or its fresh beat leaves the session out: deleted),
+  `unknown` (no server recorded, no plugin having beaten at `wb start`; the recorded server
+  running with no beat, or a stale one: a laptop asleep, a stopped or busy service, a stalled
+  timer; another machine's task, #922's rule). Only positive evidence makes a task `gone`: never
+  another server's beat, never a stale beat of a server still running (the #1309 re-review,
+  2026-11-25: stale read as gone, and another session nearby took its tasks, their notices and
+  `wb adopt`), as `cli._gone` never says gone while Claude Code's process lives; and only `gone`
+  hands a task on (`store.driver_state`).
 - **Scope.** `cli._caller` from an OpenCode driver is the session's one id (an OpenCode session keeps
   it; no `claude-sessions/` ledger) and the directory, with the driver's kind; `cli._scope`'s
   directory rule claims a gone owner's task only for the same driver (`store.driver_of`), so neither
