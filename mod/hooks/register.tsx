@@ -3431,7 +3431,20 @@ async function measureIfDue($: any) {
 // an away setting answered permissions for an away user (#1350).
 const NOTICE_AFTER_MS = 30_000
 const DIALOG_KIND: Record<string, string> = { ExitPlanMode: 'plan', AskUserQuestion: 'question' }
-type TermDialog = { tool: string; agent: string; at: number; due: number; kind: string; text: string; id: string; sending: boolean; done: boolean }
+type TermDialog = { tool: string; agent: string; input: Record<string, unknown>; at: number; due: number; kind: string; text: string; id: string; sending: boolean; done: boolean }
+
+// Whether the tool.call input `e` is the call the dialog's `input` asked about: every argument both
+// carry is the same, and they share one unless the call has none of its own (the engine adds some
+// to the dialog's: ExitPlanMode's model input is empty, its dialog's carries the plan and its file).
+// By tool and loop alone, a Read allowed by a rule finishing beside one asking cleared that one's
+// line and marked an away user back, with the dialog still in a terminal nobody watched (the
+// #1042 review; again in #1350's review, which had dropped it with the cards)
+const CALL_KEYS = new Set(['tool', 'tool_use_id', 'agentId', 'consent', 'requestMeta'])
+export function sameCall(input: Record<string, unknown>, e: Record<string, unknown>): boolean {
+  const keys = Object.keys(input).filter(k => k in e)
+  return (keys.length > 0 || !Object.keys(e).some(k => !CALL_KEYS.has(k)))
+    && keys.every(k => JSON.stringify(input[k]) === JSON.stringify(e[k]))
+}
 
 function askText(input: unknown): string {
   const i = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
@@ -3458,11 +3471,12 @@ async function awayRefusal($: any, tool: string): Promise<string> {
 
 // A dialog came up in the terminal: noted, in the session the chat listens to (workbench mode,
 // the web chat on), for its line on the page
-async function dialogUp($: any, kind: string, tool: string, agent: string, text: string) {
+async function dialogUp($: any, kind: string, tool: string, agent: string, input: unknown, text: string) {
   const st = await read($, chat)
   if (!st.delegating || !st.web) return
   const at = await $.clock.now(), isAway = await away($, st)
-  mem.termDialogs.push({ tool, agent, at, due: at + (isAway ? 0 : NOTICE_AFTER_MS), kind, text, id: '', sending: false, done: false })
+  const args = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
+  mem.termDialogs.push({ tool, agent, input: args, at, due: at + (isAway ? 0 : NOTICE_AFTER_MS), kind, text, id: '', sending: false, done: false })
   if (isAway) void termNotices($, at)
 }
 
@@ -4448,7 +4462,8 @@ export const register: Register = (on, options) => {
     }
     // The engine's call settles its permission check, a dialog included, before it resolves: one
     // whose dialog came up at the terminal is over once it does, answered there (#959): the oldest
-    // dialog of that tool in that loop (another loop's call of the tool settles none of its)
+    // dialog of that call in that loop (sameCall: another call of the tool, or another loop's,
+    // settles none of its)
     let denied = false
     try {
       const r = await next(e)
@@ -4457,7 +4472,7 @@ export const register: Register = (on, options) => {
     } finally {
       if (kept.tasks.length && !denied) await noteCall($, kept.tasks, kept.row, at, id).catch(() => {})
       const agent = e.agentId ?? ''
-      const d = mem.termDialogs.find(d => d.tool === e.tool && d.agent === agent)
+      const d = mem.termDialogs.find(d => d.tool === e.tool && d.agent === agent && sameCall(d.input, e as Row))
       if (d) await termDialogDone($, d)
     }
   })
@@ -4468,7 +4483,7 @@ export const register: Register = (on, options) => {
     const r = await next(e)
     if (r.decision) return r
     const kind = DIALOG_KIND[e.tool_name] ?? 'permission'
-    await dialogUp($, kind, e.tool_name, (e as any).agent_id ?? '', kind === 'permission' ? askText(e.tool_input) : '')
+    await dialogUp($, kind, e.tool_name, (e as any).agent_id ?? '', e.tool_input, kind === 'permission' ? askText(e.tool_input) : '')
     return r
   })
 
@@ -4477,7 +4492,7 @@ export const register: Register = (on, options) => {
     const r = await next(e)
     if (r.block) return r
     const text = String(e.message ?? '')
-    await dialogUp($, 'elicitation', `mcp:${e.mcp_server_name}`, (e as any).agent_id ?? '', text.length > 1500 ? text.slice(0, 1500) + '…' : text)
+    await dialogUp($, 'elicitation', `mcp:${e.mcp_server_name}`, (e as any).agent_id ?? '', {}, text.length > 1500 ? text.slice(0, 1500) + '…' : text)
     return r
   })
   on('classic.ElicitationResult', async ($, e, next) => {

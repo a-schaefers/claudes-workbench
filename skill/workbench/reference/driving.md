@@ -150,8 +150,10 @@ run it as a backlog. Each task still gets the same review it would by day.
 - Review each wake as usual: accept, feedback, or discard. Accept without `--merge`: nothing
   reaches the user's branches unattended. Leave a hard call for the morning (`wb note`) rather
   than guessing.
-- The user stays away while a backlog task of this session's is open, so permission prompts
-  keep going to the web chat (*The web chat*).
+- The user stays away while a backlog task of this session's is open. No dialog is answered in
+  the web chat: one still waits in the terminal, and the chat shows at once the line that you wait
+  there; a question (AskUserQuestion) or a plan (ExitPlanMode) is refused instead, so ask in the
+  chat (`wb chat reply`) and end your turn (*The web chat*).
 - Each task keeps the machine from idle-sleeping while it runs (macOS, Linux, WSL2 through
   Windows' powershell.exe), and for half an hour after it stops for your review. A closed lid
   still sleeps it; on WSL2 without interop nothing can:

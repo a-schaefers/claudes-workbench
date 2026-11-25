@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { thinkStops, absolutePath, agentOf, isAbort, rolesRead, wbThrew, type WbRun, attachedLines, awayNow, chatPrompt, cardName, delegates, hangWords, liveLines, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, savedLine, spark, spendLine, apiParts, splashTarget, statsLines, taskOfPath, tasksNamed, usd, wrapParts, wrapWords } from './register.js'
+import { thinkStops, absolutePath, agentOf, isAbort, rolesRead, wbThrew, type WbRun, attachedLines, awayNow, chatPrompt, cardName, delegates, hangWords, liveLines, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, sameCall, savedLine, spark, spendLine, apiParts, splashTarget, statsLines, taskOfPath, tasksNamed, usd, wrapParts, wrapWords } from './register.js'
 import { pixels } from './apprentice.js'
 import { BAR, frameCells, frameCount, plan, ratio } from './splash.js'
 import { activity, loopLength, tickerCells } from './modeline.js'
@@ -2487,6 +2487,54 @@ test('#1350: a dialog in the terminal is one waiting line on the web chat, never
   expect(of('notice', n)).toEqual([])
   // nothing is ever put to the page to answer
   expect(runs.filter(a => a[1] === 'chat' && ['ask', 'wait', 'answer'].includes(a[2]))).toEqual([])
+  await clock.settle()
+})
+
+test('#1350 review: an away user\'s waiting line is cleared only by its own call, not by another call of the same tool finishing beside it', async ($, on) => {
+  // #1350 dropped sameCall with the cards, and matched by tool and loop alone: a Read allowed by a
+  // rule finishing beside one asking cleared the phone's line and marked the user back, so the
+  // next question came up as a dialog in an empty terminal instead of being refused (#1351)
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))
+  const runs: string[][] = []
+  let nid = 0
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    const [, cmd, act] = e.argv
+    if (cmd === 'chat' && act === 'notice') return { value: { exitCode: 0, stdout: e.argv[3] === '--done' ? 'answered\n' : `1800000000000-abc12${++nid}\n`, stderr: '' } }
+    return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
+  })
+  on('classic.PermissionRequest', () => ({}))
+  const of = (act: string) => runs.filter(a => a[1] === 'chat' && a[2] === act)
+  const until = async (ok: () => boolean) => { for (let i = 0; i < 200 && !ok(); i++) await new Promise(r => setTimeout(r, 5)) }
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  files['/wb/chat/away.json'] = JSON.stringify({ at: clock.now() / 1000, by: 'page' })
+  await $.classic.PermissionRequest({ tool_name: 'Read', tool_input: { file_path: '/var/log/app.log' } } as any)
+  await until(() => of('notice').length > 0)
+  expect(of('notice')).toHaveLength(1)
+  // another Read, allowed by a rule, finishes while the first one's dialog is still up
+  await $.tool.call({ tool: 'Read', file_path: '/home/u/project/README.md' } as any)
+  expect(of('notice').filter(a => a[3] === '--done')).toEqual([])          // the line stays up
+  expect(JSON.parse(files['/wb/chat/away.json']).at).toBeGreaterThan(0)    // still away
+  // so a question now is still refused into the chat
+  expect(((await $.tool.call({ tool: 'AskUserQuestion', questions: [] } as any)) as any).deny).toBeTruthy()
+  // its own call going on is the answer at the terminal: the line clears, the user is back
+  await $.tool.call({ tool: 'Read', file_path: '/var/log/app.log' } as any)
+  expect(of('notice').at(-1)).toEqual(['wb', 'chat', 'notice', '--done', '1800000000000-abc121'])
+  expect(JSON.parse(files['/wb/chat/away.json']).at).toBe(0)
+  expect(sameCall({ plan: 'p', planFilePath: '/x' }, { tool: 'ExitPlanMode', plan: 'p' })).toBe(true)
+  expect(sameCall({ command: 'ls' }, { tool: 'Bash', command: 'ls -la' })).toBe(false)
+  expect(sameCall({ plan: 'p', planFilePath: '/x' }, { tool: 'ExitPlanMode', tool_use_id: 'u1' })).toBe(true)
+  expect(sameCall({ file_path: '/a' }, { tool: 'Read', file_path: '/b', agentId: 'x' })).toBe(false)
   await clock.settle()
 })
 
