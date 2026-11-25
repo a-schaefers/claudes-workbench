@@ -42,7 +42,8 @@
   explore  FAKE_READS (41) reads of different files, each a small step, then FAKE_EXPLORE_PAUSE
          seconds (2: the runner sees the last read before the edit; a runner slower than that
          finds the file changed and lifts the guard) and writes "42" like ok: a one-shot still
-         exploring
+         exploring. FAKE_EXPLORE_ONCE: the reads, then an hour's wait; a continued session
+         (--session) behaves like ok: an agent the runner's explore nudge set to work (#1134)
   selfreads  behaves like ok; a run whose prompt is the self-review's (runner.SELF_REVIEW, in
          a continued session, a fresh one's handoff or a carry-on) breaks answer.txt ("41") and
          writes it back, then FAKE_READS (45) reads and goes on exploring for an hour: the tree
@@ -618,6 +619,8 @@ if scenario == "selfreads" and "Before Claude reviews this" not in (args[-1] if 
     scenario = "ok"  # #1168: round 1 is ok's
 if scenario == "selfreads" and os.environ.get("FAKE_SELF_API") in ("ratelimit", "down"):
     scenario = os.environ["FAKE_SELF_API"]  # #1261: the self-review's run ends on its provider's error
+if scenario == "explore" and os.environ.get("FAKE_EXPLORE_ONCE") and "--session" in args:
+    scenario = "ok"
 if (scenario in ("fill", "compact", "donefull") or scenario == "compactfail" and not os.environ.get("FAKE_REFAIL")) \
         and "picking this task up in a fresh session" in args[-1]:
     scenario = "ok"
@@ -843,7 +846,7 @@ elif scenario == "explore":  # #1087: many small reads before the first edit
     for i in range(int(os.environ.get("FAKE_READS", 41))):
         tool("read", {"filePath": os.path.abspath(f"src/f{i}.py")})
         emit("step_finish", reason="tool-calls", tokens={"input": 1000 + 100 * i, "output": 50})
-    time.sleep(float(os.environ.get("FAKE_EXPLORE_PAUSE", 2)))
+    time.sleep(3600 if os.environ.get("FAKE_EXPLORE_ONCE") else float(os.environ.get("FAKE_EXPLORE_PAUSE", 2)))
     with open("answer.txt", "w") as fh:
         fh.write("42\n")
     tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})

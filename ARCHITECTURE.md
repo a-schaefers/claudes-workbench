@@ -381,7 +381,7 @@ worktree, `OPENCODE_CONFIG` the layer. Later rounds continue the session until a
 |---|---|---|
 | the same tool call in a row (its input hashed, cut to 400 characters, #497) | 4; in a self-review round with the tree its tests passed on, the round's finish instead (`settled`, as below: #1250) | `events.StuckDetector` |
 | failing tool calls in a row | 6; the same (#1250) | |
-| calls since the last edit to the task's files (outside the worktree doesn't count: 2026-11-18; a relative path is the workdir's, and a `patch` counts if any file it wrote is the task's, #1148) | 40; an API task's 40 per 32K of the window, at most 160 (`runner.no_edit_limit`, #1087: 40 stopped 131K API one-shots still exploring); a GPU task's stays 40 at any window, as in 1.91.x; in a self-review round with the tree its tests passed on, the round's finish instead (`settled`, #1168; its fresh session after a full window too, #1188, the round a nudge or a note starts in it, #1207, and the round `wb resume` starts after it, #1228) | |
+| calls since the last edit to the task's files (outside the worktree doesn't count: 2026-11-18; a relative path is the workdir's, and a `patch` counts if any file it wrote is the task's, #1148): the first trip in a session is nudged (`runner.EXPLORE_NUDGE`), a second in it stops ("…, even after a nudge"; #1134), as does a fresh session's when no file changed since the nudge | 40; an API task's 40 per 32K of the window, at most 160 (`runner.no_edit_limit`, #1087: 40 stopped 131K API one-shots still exploring); a GPU task's stays 40 at any window, as in 1.91.x; in a self-review round with the tree its tests passed on, the round's finish instead (`settled`, #1168; its fresh session after a full window too, #1188, the round a nudge or a note starts in it, #1207, and the round `wb resume` starts after it, #1228) | |
 | no output (not while waiting on Claude; a background job gets the test timeout if longer) | 15 min; the self-review's finish instead, as every guard here (#1261) | `--silence-timeout` |
 | one round, waits on Claude excluded | 40 min | `--round-timeout` |
 | mid-round handovers in one review round | more than `HANDOVER_MAX` (5) | `runner.drive` |
@@ -392,7 +392,21 @@ worktree, `OPENCODE_CONFIG` the layer. Later rounds continue the session until a
 Past the think budget (7 min, `--think-timeout`, 0 off; from the round's first output, paused
 on a background command) the runner interrupts with `runner.NUDGE` and raises a check-in; the
 next round that stalls again is stuck; in a self-review on its green tree neither: the round's
-finish (`runner.settle`, #1261). Guards use the monotonic clock. Defaults were set on a 27B
+finish (`runner.settle`, #1261). The calls-without-an-edit guard's first trip in a session
+interrupts the same way with `runner.EXPLORE_NUDGE` ("N tool calls without changing a file: make
+the first edit now, one file per call, or finish and say what blocks you.") and a check-in ("the
+runner nudged it: N tool calls without changing a file"), unless a self-review's green tree
+settles it first; a second trip in the session it nudged (status `explore_nudged_session`; an
+unknown one stopped) stops the round as before; a fresh session is nudged again only after a
+change (status `explore_nudge_mark`, the worktree's `gitops.mark` at the nudge: a session that
+only read until OpenCode compacted it went fresh every round, each new session nudged, round 52
+in 40 s; #1134's review, 2026-11-24). Why (#1134, D1): of 52 big-repo GPU bench runs
+(2026-11-21/22), 9 of the 11 failures were this guard's stops, 5 of them self-review rounds whose
+visible test already passed, the agent only verifying; OpenHands' stuck detector nudges, then
+stops. Measured (E8, 2026-11-24, a 27B on the GPU, 3 big-repo cases twice, 6 pairs): against the
+stop at once the nudge took ×0.56 the minutes (lower on 6 of 6, sign p=0.03) and ×0.69 the
+tokens, 6/6 passing both ways; a retry from the base did nothing (×1.03 the minutes), and nudge
+and retry together fell between, so only the nudge is kept, always on. Guards use the monotonic clock. Defaults were set on a 27B
 at ~36 tokens/s; slower models get longer ones, never shorter (*Budgets and speed*).
 
 **6. The tests gate the round.** After a clean round the runner runs `--test` in the worktree
@@ -437,8 +451,9 @@ tree its tests passed on (status `self_review_tree`, `gitops.mark` as it was que
 counted (`settled` recorded, not `died`; a `settled {text}` event; the report's `self-review: N
 tool calls without changing a file in the task, the tree its tests passed on; stopped as its
 finish`, or the guard's own words: `no tool call or word for 7 minutes` for the nudge), then the tests and review: a green change woke Claude as stuck and its step was
-recorded stuck (#1168). A tree it changed is stopped as before, and so is a fresh, steered or
-resumed session's tree as the round before left it, a check maybe still commented out (#1188).
+recorded stuck (#1168). A tree it changed is the guards' as before (the explore guard's first
+trip in a session a nudge, *Guards*, #1134), and so is a fresh, steered or resumed session's tree
+as the round before left it, a check maybe still commented out (#1188).
 On by default because a feedback round costs a whole wake (2026-11-18); a model it doesn't help
 learns it off.
 
@@ -1175,7 +1190,7 @@ id, tool tally, `status.last`, texts, and per `step` the context (input + cache 
 output + reasoning) against the handover point. Every pass, in order, whatever the line was (a
 `continue` past them let unknown events outrun `--round-timeout` and `--now`, #195): asking (phase
 `asking`, time not counted), the round clock, silence, the think nudge, a guard stop (a no-edit stop
-checks `gitops.mark` first, so shell edits count; any guard's stop or the think nudge on a
+checks `gitops.mark` first, so shell edits count, then is the explore nudge once a session; any guard's stop or the think nudge on a
 self-review's green tree is its finish, `settled`, through `runner.settle`: #1168, #1250, #1261), a handover, a check-in, a `--now` note
 (`interrupted`). `_stop`: SIGTERM to the group, 10 s, SIGKILL. `status.agent_pid` lets `wb stop` end
 it; a round ending mid-question clears `asking`. Non-object JSON lines are skipped; `normalize`
@@ -1411,14 +1426,18 @@ machine's. A later runner resolves the model again and, on a catalog that lost i
 `drive`'s `continue`s too (`runner._go_on`, *Spend*).
 
 **Notes, nudges and interrupts.** `steer.jsonl` (`{ts, text, now}`) holds notes from `wb steer`,
-`wb allow` (to restart the agent under its rule) and the nudge (`by: workbench`);
+`wb allow` (to restart the agent under its rule) and the runner's nudges (`by: workbench`: the think
+and the explore nudge, both through `runner._runner_nudge`);
 `status.steer_taken` counts delivered ones. `_steer_round` opens with `INTERRUPT_HEAD` ("Claude,
 your reviewer, interrupted you. Stop what you were doing and do this first; it overrides anything
 earlier…") or `NOTE_HEAD` ("A note from Claude, your reviewer, before you go on…"). The nudge is a
 `now` note, once a round, ending it like an interrupt (`interrupted` `by: workbench`;
 `status.nudges`, a `checkin`: "the runner nudged it: N min of thinking with no tool call"). The
 next round passing the budget again is stuck ("… even after a nudge"; else a silent command was
-nudged, killed and rerun forever), only in the same session (`runner.renudged`, status `nudged_round`, #681). Nudge rounds are marked
+nudged, killed and rerun forever), only in the same session (`runner.renudged`, status `nudged_round`, #681). The explore
+nudge is the same kind of `now` note, once a session, a fresh one again only after a change (status `explore_nudged_session`,
+`explore_nudge_mark`, never `nudged_round`:
+*Guards*; its `checkin`: "the runner nudged it: N tool calls without changing a file"). Nudge rounds are marked
 `rounds/<n>/nudged` (`NUDGED`), skipped by `round_asks` (#681); a fresh nudge round keeps every
 earlier ask (#859). A note pending at exit is never delivered by that runner: the stuck report
 lists Claude's ("NOTE: not delivered…"), the next command marks them taken (`cli._stale_notes`);
@@ -1622,6 +1641,7 @@ by prefix; rewording one silently changes those:
 | `Step N of this task is done and committed` | `wb next` | `transcript` |
 | `INTERRUPT_HEAD`, `NOTE_HEAD` | `_steer_round` | `transcript`, the fake OpenCode (`FAKE_SELF_STALL`: `Claude, your reviewer`) |
 | `NUDGE` (`without a tool call. Stop planning`) | the think nudge | `transcript` (labelled the workbench's, not Claude's), the fake OpenCode (`FAKE_SELF_STALL`) |
+| `EXPLORE_NUDGE` (`without changing a file: make the first edit`) | the explore nudge (#1134) | `transcript` (labelled the workbench's, not Claude's) |
 | `RERUN` (`The round was cut off by the model's provider`) | `run_round`, a round run again (`_run_again`, #1235) | `transcript` (labelled the workbench's) |
 | `Claude picked these skills`, `Claude handed you more skills`, `Claude took back:` | `skills_note` | `transcript.SKILLS_HEADS` (skips the note to label what follows) |
 | `CARRY_ON`, `RESUME` (first 60 characters) | `_full_round`, `wb resume` | `round_asks` skips them (but their `notes.md`), `lessons.feedback` (none of their copied feedback), the fake OpenCode (`selfreads`, `FAKE_SELF_FILL`) |
@@ -2616,7 +2636,7 @@ the key `of_role` uses), so quick prose steps never mark coding steps slow; writ
 count toward `fresh_at`, one knob per model and window. The slice is shared (`router.slice`:
 decision 1, writing slices like significant).
 - **Unchanged**: the lane, the shell allowlist, the guards (the calls without an edit, `runner.no_edit_limit`, still stop a
-  writer that only reads), `NUDGE`, the ask server, handovers, feedback and resume (plain review
+  writer that only reads, after one nudge), `NUDGE`, the ask server, handovers, feedback and resume (plain review
   notes), the lessons (Claude's raw material, never handed to an agent by role), and the savings
   estimate.
 
@@ -6516,7 +6536,7 @@ $WB_HOME (~/.local/state/workbench)
     tree/<parents>/worktree/     the worktree instead, for a sibling more than one level up (task.json `worktree`)
     rounds/<n>/                  prompt.md instructions.md (before a handover rewrote it) summary.md tests.txt
                                  final.md (the agent's last message whole, which summary.md may cut: runner.write_report, #1186)
-                                 notes.md (Claude's notes folded into prompt.md: runner.folded_notes) nudged (prompt.md is the think nudge; round_asks skips it)
+                                 notes.md (Claude's notes folded into prompt.md: runner.folded_notes) nudged (prompt.md is a nudge, think or explore; round_asks skips it)
                                  resumed (a wb feedback after an infra stop: round_asks walks past it, #1169)
     ask/<id>.json  <id>.answer   questions and permission requests; answers
     opencode/{share,state}/      the agent's OpenCode's own data and state (0700, context.opencode_home, #1010): share/opencode/opencode.db
@@ -6689,7 +6709,7 @@ off), not `wb start`'s.
 | `window`, `load_secs`, `loads` | the window; load time summed (`runner._loaded`); each load |
 | `tuned`, `explored`, `tuned_max` | knob values (`tuning.tune`) |
 | `self_review_due`, `peak_share` | evidence for `tuning.acted`: tests passed; the fullest share of the window (`runner.peak`) |
-| `steer_taken`, `nudges`, `nudged_round`, `checkin_at` | notes delivered; nudges; the round that ended in one; last check-in |
+| `steer_taken`, `nudges`, `nudged_round`, `explore_nudged_session`, `explore_nudge_mark`, `checkin_at` | notes delivered; nudges (think and explore); the round that ended in a think nudge; the session the explore nudge went to and the worktree's `gitops.mark` then (a fresh session is nudged again only once it differs; #1134); last check-in |
 | `active_s`, `step_active_s` | active seconds, rounds less answers and a frozen machine (*Progress checks*); its value when the step began |
 | `progress_checks`, `progress_mark`, `progress_open`, `interventions` | checks this step; mark at the last; one open; the steers that answered one, `[{kind, ts, round, step}]` |
 | `skills`, `skills_ever`, `skills_rev`, `skills_told` | handed set; ever held; library revs; what this session was told |
@@ -7026,7 +7046,7 @@ else `[]`. It streams one JSON event per line (`step_start`, `tool_use`,
 `pwd`, its `opencode_db`, `xdg_data`, `xdg_state`, `shell`, `models_path` (`OPENCODE_MODELS_PATH`), and `shell_sees`: what a `$SHELL -c` command gets); knobs `FAKE_LATE`, `FAKE_SLEEP`,
 `FAKE_LESSON`, `FAKE_PAD` (that many characters before the Lesson line, #1186), `FAKE_BG`, `FAKE_STRAY`, `FAKE_SURROGATE`, `FAKE_LATIN1`, `FAKE_LINGER`, `FAKE_EXIT`. `FAKE_SCENARIO`:
 `ok`, `patch` (`ok` plus lib/helper.py in one `patch` call, its files in `state.metadata`: #1148), `shellwrite` (lib/util.py through a `bash` row's `cat > util.py <<X` with `workdir` lib/, main.py and answer.txt with `write`: #1210, its third review; a continued session adds a line to lib/util.py: #1259), `buildout` (dist/index.js and dist/index.d.ts behind a `bash` row `npm run build`, which names neither, then answer.txt: #1210's review), `pkgbuild` (a `bash` row `grep -n answer pkg/a.py`, then build/lib/pkg/{__init__,a,b}.py behind one `python -m build`, then answer.txt: #1210's second review), `fix`, `loop`, `hang`, `crash` (`FAKE_DOWN`), `crashtalk` (`FAKE_CRASH_HANG`), `devserver`, `slow`, `fill`,
-`read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087), `selfreads` (ok, then a self-review, told by its prompt, that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168; `FAKE_SELF_RERUN`: those calls rerun the acceptance command, `FAKE_SELF_MISS`: the reads fail, #1250; `FAKE_SELF_FILL`: its first session breaks it and fills 76%, the fresh one restores it, or with `FAKE_SELF_KEEP` only reads: #1188; `FAKE_SELF_STALL`: it breaks it and goes silent, the run after a nudge or a note restores it: #1207; `FAKE_READS` 0: it restores it and goes quiet, the think, silence and wall guards' case; `FAKE_SELF_API` `ratelimit` or `down`: its run plays that API scenario on the green tree, the provider's stop at OpenCode's exit; `FAKE_SELF_REFILL`: each of its sessions breaks or restores it, by turns, and fills 76%, the last past `HANDOVER_MAX` on the green tree: #1261; `FAKE_SELF_CRASH`: after its reads, a provider.http 500 and exit 1, the server still up: #1270), `floor` (`HANDOVER_ROOM`), `think` (a long think in a step's output, then a prompt that grew: no compaction, #1219), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151; `FAKE_COMPACT_KEPT`: the step after at 34%, over half, a kept tail: #1185), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
+`read`, `explore` (`FAKE_READS` small reads, then an edit after `FAKE_EXPLORE_PAUSE` s: #1087; `FAKE_EXPLORE_ONCE`: no edit, a continued session like `ok`: #1134), `selfreads` (ok, then a self-review, told by its prompt, that breaks and restores a file and reads on, `FAKE_READS` 45; `FAKE_SELF_KEEP` leaves it changed: #1168; `FAKE_SELF_RERUN`: those calls rerun the acceptance command, `FAKE_SELF_MISS`: the reads fail, #1250; `FAKE_SELF_FILL`: its first session breaks it and fills 76%, the fresh one restores it, or with `FAKE_SELF_KEEP` only reads: #1188; `FAKE_SELF_STALL`: it breaks it and goes silent, the run after a nudge or a note restores it: #1207; `FAKE_READS` 0: it restores it and goes quiet, the think, silence and wall guards' case; `FAKE_SELF_API` `ratelimit` or `down`: its run plays that API scenario on the green tree, the provider's stop at OpenCode's exit; `FAKE_SELF_REFILL`: each of its sessions breaks or restores it, by turns, and fills 76%, the last past `HANDOVER_MAX` on the green tree: #1261; `FAKE_SELF_CRASH`: after its reads, a provider.http 500 and exit 1, the server still up: #1270), `floor` (`HANDOVER_ROOM`), `think` (a long think in a step's output, then a prompt that grew: no compaction, #1219), `refill` (`HANDOVER_MAX`), `compact` (`FAKE_COMPACT_READ`, `FAKE_COMPACT_BURST`: tool rows with `state.output`; `FAKE_COMPACT_DONE`: the compacted step ends its turn, #1151; `FAKE_COMPACT_KEPT`: the step after at 34%, over half, a kept tail: #1185), `donefull` (its last step, reason `stop`, at 61%: #1151), `compactfail` (OpenCode
 2.3's `{"type": "error", …, "error": {"type": "compaction.failed", "message": "Compaction produced no summary"}}`;
 `FAKE_COMPACT_MSG`, `FAKE_COMPACT_EXIT`, `FAKE_COMPACT_EDIT`, `FAKE_REFAIL`), `bgwait` (`FAKE_BGWAIT`), `toolhang`,
 `retry` (`FAKE_RETRY_EVERY`), `say`, `stay` (as `ok`, then open and silent: #1160), `spend` (#1019: a read and a priced step every `FAKE_STEP_EVERY` s, `FAKE_STEPS` of

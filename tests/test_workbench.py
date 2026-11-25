@@ -7424,17 +7424,26 @@ class Context(Base):
         self.assertIn("the tree its tests passed on: stopped as its finish",
                       run_wb("watch", "t-srr", "--once", "--no-color"))
 
-    def test_a_self_review_that_changed_the_tree_is_still_stopped_by_the_explore_guard(self):
+    def assert_explore_nudged_not_settled(self, name: str, st: dict) -> None:
+        # the explore guard's first trip in the session, nudged (#1134), never #1168's finish
+        self.assertEqual(st["nudges"], 1)
+        steer = store.read_jsonl(store.Task(name).dir / "steer.jsonl")[0]
+        self.assertEqual([r["text"] for r in steer], [runner.EXPLORE_NUDGE.format(n=40)])
+        events = store.read_jsonl(store.Task(name).dir / "events.jsonl")[0]
+        self.assertFalse([e for e in events if e["kind"] == "settled"])
+
+    def test_a_self_review_that_changed_the_tree_is_nudged_by_the_explore_guard_not_settled(self):
         # #1168's finish is for a tree as the round began: one the self-review left changed is
-        # an agent lost mid-edit, stopped as before (90 reads: the first 40 meet its edit's mark,
-        # which the guard takes for a shell edit and counts again from)
+        # an agent lost mid-edit, the guard's as before (90 reads: the first 40 meet its edit's
+        # mark, which the guard takes for a shell edit and counts again from). Since #1134 the
+        # guard's first trip in a session is a nudge, whose round the fake plays as ok's
         os.environ.update(FAKE_SELF_KEEP="1", FAKE_READS="90")
         self.addCleanup(os.environ.pop, "FAKE_SELF_KEEP", None)
         self.addCleanup(os.environ.pop, "FAKE_READS", None)
         self.start("t-srk", "selfreads", "--test", TEST_CMD, "--self-review")
         st = wait_phase("t-srk", {"review", "stuck", "failed"}, timeout=60)
-        self.assertEqual((st["phase"], st["round"]), ("stuck", 2))
-        self.assertIn("tool calls without changing a file", st["last"])
+        self.assertEqual((st["phase"], st["round"], st["round_for"]), ("review", 3, "steer"), st.get("last"))
+        self.assert_explore_nudged_not_settled("t-srk", st)
 
     def test_a_self_review_that_reruns_the_acceptance_command_on_the_green_tree_goes_to_review(self):
         # #1250 (2026-11-24): a 9B's self-review ended "Now the final acceptance run:" four
@@ -7628,15 +7637,16 @@ class Context(Base):
         self.assertEqual([r["kind"] for r in rows], ["review"])
         self.assertIn("the tree its tests passed on; stopped as its finish", rows[0]["text"])
 
-    def test_a_self_review_handed_over_with_a_check_still_broken_is_stopped_by_the_explore_guard(self):
+    def test_a_self_review_handed_over_with_a_check_still_broken_is_nudged_by_the_explore_guard(self):
         # #1188's other half: the fresh session's tree is the one the round began with, but a
         # check is still commented out (the issue's "stop mid-mutation-check"): not the tree the
-        # tests passed on, so it is stopped as before
+        # tests passed on, so it is the guard's as before, since #1134 a nudge first (the fake
+        # plays its round as ok's)
         os.environ.update(FAKE_SELF_FILL="1", FAKE_SELF_KEEP="1")
         self.start("t-srb2", "selfreads", "--test", TEST_CMD, "--self-review")
         st = wait_phase("t-srb2", {"review", "stuck", "failed"}, timeout=60)
-        self.assertEqual((st["phase"], st["round"], st["round_for"]), ("stuck", 3, "fresh"))
-        self.assertIn("tool calls without changing a file", st["last"])
+        self.assertEqual((st["phase"], st["round"], st["round_for"]), ("review", 4, "steer"), st.get("last"))
+        self.assert_explore_nudged_not_settled("t-srb2", st)
 
     def test_a_self_review_nudged_mid_check_that_restores_the_green_tree_and_reads_on_goes_to_review(self):
         # #1207 (bar loop round 3, 2026-11-24): the runner's think nudge started a round with
@@ -35100,7 +35110,9 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.start("t-explore-gpu", "explore")
         st = wait_phase("t-explore-gpu", {"stuck"})
         self.assertEqual(st["window"], 32768)
-        self.assertEqual(st["last"], "40 tool calls without changing a file in the task")
+        # nudged once at the first trip, stopped at the second in that session (#1134, D1)
+        self.assertEqual(st["last"], "40 tool calls without changing a file in the task, even after a nudge")
+        self.assertEqual((st["nudges"], st["round"], st["explore_nudged_session"]), (1, 2, st["session"]))
         cfg_path = Path(os.environ["WB_OPENCODE_CONFIG"])
         cfg = json.loads(cfg_path.read_text())
         cfg["provider"]["ollama"]["models"]["mimo-v2.6:9b-q8_0"]["limit"]["context"] = 65536
@@ -35108,7 +35120,58 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.start("t-explore-gpu64", "explore")
         st = wait_phase("t-explore-gpu64", {"stuck"})
         self.assertEqual(st["window"], 65536)
-        self.assertEqual(st["last"], "40 tool calls without changing a file in the task")
+        self.assertEqual(st["last"], "40 tool calls without changing a file in the task, even after a nudge")
+
+    def test_the_first_explore_trip_in_a_session_nudges_and_the_round_goes_on_on_the_gpu_and_api(self):
+        # #1134 (D1): every no_edit trip stopped the round. Of 52 big-repo GPU bench runs
+        # (2026-11-21/22), 9 of the 11 failures were such stops, 5 of them self-review rounds with
+        # the test already passing, the agent only verifying. The first trip in a session now
+        # nudges (EXPLORE_NUDGE) and that session goes on; a second stops (the test above).
+        # Always on since E8 (2026-11-24, a 27B, 6 pairs): ×0.56 the minutes of the stop at once
+        # (6/6 lower, sign p=0.03), ×0.69 the tokens, 6/6 passing both ways; a retry did nothing
+        from workbench import transcript
+        os.environ["FAKE_EXPLORE_ONCE"] = "1"
+        for name, limit in (("t-nudge-gpu", 40), ("t-nudge-api", 160)):
+            if limit == 40:
+                self.start(name, "explore", "--test", TEST_CMD)
+            else:
+                os.environ["FAKE_READS"] = "170"  # past an API 131K window's 160
+                self.start_api(name, "explore", "--test", TEST_CMD, spawn=False)
+                self.drive_here(name)
+            st = wait_phase(name, {"review", "stuck", "failed"}, timeout=60)
+            self.assertEqual(st["phase"], "review", st.get("last"))
+            self.assertTrue(st["tests"]["ok"])
+            self.assertEqual((st["nudges"], st["round"], st["explore_nudged_session"]), (1, 2, st["session"]))
+            task = store.Task(name)
+            text = runner.EXPLORE_NUDGE.format(n=limit)
+            steer = store.read_jsonl(task.dir / "steer.jsonl")[0]
+            self.assertEqual([(r["text"], r["now"], r["by"]) for r in steer], [(text, True, "workbench")])
+            self.assertEqual(st["steer_taken"], 1)
+            prompt = task.round_dir(2).joinpath("prompt.md").read_text()
+            self.assertTrue(prompt.startswith(runner.INTERRUPT_HEAD) and text in prompt, prompt)
+            self.assertTrue(task.round_dir(2).joinpath(runner.NUDGED).exists())  # not an ask
+            self.assertEqual(transcript._user_message(prompt, False)[0],
+                             "workbench → agent · nudge: many calls without changing a file")
+            events = store.read_jsonl(task.dir / "events.jsonl")[0]
+            self.assertIn({"kind": "interrupted", "by": "workbench"},
+                          [{"kind": e["kind"], "by": e.get("by")} for e in events if e["kind"] == "interrupted"])
+            self.assertFalse([e for e in events if e["kind"] == "stopped"])
+            self.assertTrue(any(r["task"] == name and r.get("kind") == "checkin" and
+                                f"the runner nudged it: {limit} tool calls without changing a file" in r["text"]
+                                for r in store.read_jsonl(store.home() / "notify.jsonl")[0]))
+
+    def test_a_fresh_session_after_an_explore_nudge_with_no_file_changed_is_stopped_not_nudged_again(self):
+        # #1134 (D1)'s review, 2026-11-24: a session that only read until OpenCode compacted it
+        # went fresh the next round, and each new session earned its own nudge: a GPU task on
+        # `explore` looped to round 52 with 51 nudges in 40 s, where the old guard stopped in
+        # round 1. A fresh session is nudged again only once a file has changed since
+        os.environ.update(FAKE_EXPLORE_ONCE="1", FAKE_COMPACTED="1")  # no write: every session reads
+        self.start("t-nudge-loop", "explore")
+        st = wait_phase("t-nudge-loop", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"], st["nudges"]), ("stuck", 2, 1), st.get("last"))
+        self.assertEqual(st["last"], "40 tool calls without changing a file in the task, even after a nudge")
+        self.assertNotEqual(st["explore_nudged_session"], st["session"])  # round 2 was a fresh one
+        self.assertEqual(st["explore_nudge_mark"], gitops.mark(store.Task("t-nudge-loop").worktree))
 
     def test_a_request_the_provider_refuses_stops_as_the_providers_with_its_reason_and_no_key_remedy(self):
         # #1084: every 403 read as "refused the API key" with /connect, a moderation flag and the
