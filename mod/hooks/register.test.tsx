@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { absolutePath, agentOf, isAbort, linkOf, rolesRead, wbThrew, type WbRun, agentsFor, askForArgs, attachedLines, awayNow, chatPrompt, delegates, pageShape, quietForJobs, routeCalls, routesSummary, sameCall, settingSaid, splashTarget, taskOfPath, tasksNamed, usd, wrapWords } from './register.js'
+import { absolutePath, agentOf, isAbort, linkOf, rolesRead, wbThrew, type WbRun, attachedLines, awayNow, chatPrompt, delegates, pageShape, quietForJobs, routeCalls, routesSummary, sameCall, settingSaid, splashTarget, taskOfPath, tasksNamed, usd, wrapWords } from './register.js'
 import { pixels } from './apprentice.js'
 import { BAR, frameCells, frameCount, plan, ratio } from './splash.js'
 import { modeline } from './modeline.js'
@@ -2385,100 +2385,9 @@ test('a web message another session claimed first is not submitted here', async 
   expect(asked).toEqual(['[web chat] status?'])
 })
 
-test('a permission prompt while the user is away goes to the web chat, and their answer settles it', async ($, on) => {
-  // the dialog would wait for nobody (the user, 2026-11-18)
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = {}
-  fakeTasks(on, files, [])
-  chatOn(files)                                                   // the user turned the web chat on
-  const toasts: string[] = []
-  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
-  on('session.cwd', () => ({ value: '/home/u/project' }))
-  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
-  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
-  let said: any = { answer: 'allow' }, posted = 'ask-1-ab open'
-  const runs: string[][] = []
-  on('process.run', (_: any, e: any) => {
-    runs.push(e.argv)
-    const [, cmd, act] = e.argv
-    if (cmd === 'chat' && act === 'ask') return { value: { exitCode: 0, stdout: posted + '\n', stderr: '' } }
-    if (cmd === 'chat' && act === 'wait') return { value: { exitCode: said ? 0 : 1, stdout: JSON.stringify(said), stderr: '' } }
-    return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
-  })
-  on('classic.PermissionRequest', () => ({}))                 // no settings hook decides: the dialog
-  const ask = (tool_name: string, tool_input: unknown) =>
-    $.classic.PermissionRequest({ tool_name, tool_input } as any) as Promise<any>
-  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
-  await clock.advance(3000)
-  expect((await ask('Bash', { command: 'git push' })).decision).toBeUndefined()  // at the terminal: the dialog
-  expect(runs.some(a => a[2] === 'ask')).toBe(false)
-
-  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
-  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_003, from: 'user', text: 'hi' }) + '\n'
-  await clock.advance(3000)                                     // a web message: the user is away
-  expect((await ask('Bash', { command: 'git push origin main', description: 'Push the fix' })).decision).toEqual({ behavior: 'allow' })
-  expect(runs.find(a => a[2] === 'ask')).toEqual(['wb', 'chat', 'ask', '--tool=Bash', '--kind=permission',
-    '--text=git push origin main', '--pid=4242', '--detail={"purpose":"Push the fix"}'])  // the card leads with it (#103);
-  // the pid is this session's `wb events`: once it's gone wb expires the ask (#538)
-  expect(runs.find(a => a[2] === 'wait')?.slice(0, 4)).toEqual(['wb', 'chat', 'wait', 'ask-1-ab'])
-  expect(toasts.some(t => t.includes('waiting for you in the web chat'))).toBe(true)
-
-  said = { answer: 'deny', note: 'not on main' }
-  const no = (await ask('Write', { file_path: '/etc/hosts', content: 'x' })).decision
-  expect(no.behavior).toBe('deny')
-  expect(no.message).toContain('wb chat reply')                  // Claude asks the user what instead
-  expect(no.message).toContain('not on main')                    // with their words
-  expect(runs.filter(a => a[2] === 'ask').at(-1)).toContain('--text=/etc/hosts')
-
-  // a finished plan: approved, or sent back with a note
-  said = { answer: 'allow' }
-  expect((await ask('ExitPlanMode', {})).decision).toEqual({ behavior: 'allow' })
-  expect(runs.filter(a => a[2] === 'ask').at(-1)?.slice(3, 5)).toEqual(['--tool=ExitPlanMode', '--kind=plan'])
-  said = { answer: 'deny', note: 'split step 2' }
-  const back = (await ask('ExitPlanMode', {})).decision
-  expect([back.behavior, back.message.includes('split step 2'), back.message.includes('Revise the plan')]).toEqual(['deny', true, true])
-  // #253 (the audit of 1.2): the card is this session's plan, by its file, never the newest of any
-  // project's; one wb can't read is answered in the terminal, so the dialog comes up there
-  said = { answer: 'allow' }
-  await ask('ExitPlanMode', { planFilePath: '/home/u/.claude/plans/a-b-c.md' })
-  const plan = runs.filter(a => a[2] === 'ask').at(-1)!
-  expect(plan.find(a => a.startsWith('--detail='))).toBe('--detail={"plan_file":"/home/u/.claude/plans/a-b-c.md"}')
-  expect(plan.slice(-2)).toEqual(['--repo', '/home/u/project'])     // whose plan it is
-  posted = 'ask-3-ef expired'
-  const waited = runs.filter(a => a[2] === 'wait').length
-  expect((await ask('ExitPlanMode', {})).decision).toBeUndefined()
-  expect(runs.filter(a => a[2] === 'wait').length).toBe(waited)    // nothing to wait for on the page
-  posted = 'ask-1-ab open'
-
-  // a question: the options they picked become the tool's answers
-  const questions = [{ question: 'Which DB?', header: 'DB', options: [{ label: 'SQLite', description: '' }, { label: 'Postgres', description: '' }], multiSelect: false }]
-  said = { answer: 'allow', answers: { 'Which DB?': 'SQLite' } }
-  const picked = (await ask('AskUserQuestion', { questions })).decision
-  expect(picked).toEqual({ behavior: 'allow', updatedInput: { questions, answers: { 'Which DB?': 'SQLite' } } })
-  expect(JSON.parse(runs.filter(a => a[2] === 'ask').at(-1)!.at(-1)!.slice('--detail='.length))).toEqual({ questions })
-
-  // their setting says go ahead while away: allowed at once, no wait, no toast
-  posted = 'ask-2-cd allow'
-  const [waits, toastsBefore] = [runs.filter(a => a[2] === 'wait').length, toasts.length]
-  expect((await ask('Bash', { command: 'make' })).decision).toEqual({ behavior: 'allow' })
-  expect([runs.filter(a => a[2] === 'wait').length, toasts.length]).toEqual([waits, toastsBefore])
-  posted = 'ask-1-ab open'
-
-  said = ''                                                     // wb can't wait: it expires, the dialog comes
-  expect((await ask('Bash', { command: 'rm -rf build' })).decision).toBeUndefined()
-  expect(runs.at(-1)).toEqual(['wb', 'chat', 'answer', 'ask-1-ab', 'expired', '--by', 'timeout'])
-
-  await $.prompt.submit({ text: 'back now' } as any)            // typed in the terminal: back
-  const n = runs.length
-  said = { answer: 'allow' }
-  expect((await ask('Bash', { command: 'git push' })).decision).toBeUndefined()
-  expect(runs.slice(n).some(a => a[2] === 'ask')).toBe(false)
-})
-
-test('the user is away once the chat page is used after their last terminal input, not before it, and at the terminal the phone is told of a prompt still waiting, once (#959)', async ($, on) => {
-  // #959: the owner typed in the terminal, then picked up the phone with "Let Claude go ahead"
-  // set; only a web message counted as the phone, so the prompt stayed in the terminal, neither
-  // shown on the phone nor allowed, and the phone was told nothing
+test('#1350: a dialog in the terminal is one waiting line on the web chat, never a card: every kind, away or not, and settling it clears the line and brings the user back', async ($, on) => {
+  // #1340's decision (the owner: the terminal is where things get done, the chat is for a message
+  // in a pinch): nothing is answered on the phone; the page only says the driver waits there
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
@@ -2494,15 +2403,17 @@ test('the user is away once the chat page is used after their last terminal inpu
     runs.push(e.argv)
     const [, cmd, act] = e.argv
     if (cmd === 'chat' && act === 'url') return chatUrl(files)
-    if (cmd === 'chat' && act === 'ask') return { value: { exitCode: 0, stdout: 'ask-2-cd allow\n', stderr: '' } } // their setting
-    if (cmd === 'chat' && act === 'notice') return { value: { exitCode: 0, stdout: `1800000000000-abc12${++nid}\n`, stderr: '' } }
+    if (cmd === 'chat' && act === 'notice') return { value: { exitCode: 0, stdout: e.argv[3] === '--done' ? 'answered\n' : `1800000000000-abc12${++nid}\n`, stderr: '' } }
     return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
   })
-  on('classic.PermissionRequest', () => ({}))
+  on('classic.PermissionRequest', () => ({}))                    // no settings hook decides: the dialog
+  on('classic.Elicitation', () => ({}))
+  on('classic.ElicitationResult', () => ({}))
   const ask = (tool_name: string, tool_input: unknown) =>
     $.classic.PermissionRequest({ tool_name, tool_input } as any) as Promise<any>
-  const answered = (command: string) => $.tool.call({ tool: 'Bash', command } as any)  // its call goes on
+  const answered = (tool: string, input: Record<string, unknown> = {}) => $.tool.call({ tool, ...input } as any)  // its call goes on
   const of = (act: string, from = 0) => runs.slice(from).filter(a => a[1] === 'chat' && a[2] === act)
+  const until = async (ok: () => boolean) => { for (let i = 0; i < 200 && !ok(); i++) await new Promise(r => setTimeout(r, 5)) }
   await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
   await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
   await clock.advance(3000)
@@ -2510,59 +2421,78 @@ test('the user is away once the chat page is used after their last terminal inpu
   // at the terminal: the dialog stays; answered there within half a minute, the phone hears nothing
   expect((await ask('Bash', { command: 'ls build' })).decision).toBeUndefined()
   await clock.advance(5000)
-  await answered('ls build')
+  await answered('Bash', { command: 'ls build' })
   await clock.advance(40_000)
-  expect([of('notice'), of('ask')]).toEqual([[], []])
+  expect(of('notice')).toEqual([])
 
-  // still waiting past half a minute: told once, and settled when it is answered there
+  // still waiting past half a minute: one line, cleared when it is answered there
   expect((await ask('Bash', { command: 'rm -rf runs/*' })).decision).toBeUndefined()
   await clock.advance(10_000)
   expect(of('notice')).toEqual([])
   await clock.advance(25_000)
   expect(of('notice')).toEqual([['wb', 'chat', 'notice', '--tool=Bash', '--kind=permission', '--text=rm -rf runs/*']])
   await clock.advance(60_000)
-  expect(of('notice')).toHaveLength(1)                            // once per prompt
-  await answered('rm -rf runs/*')
+  expect(of('notice')).toHaveLength(1)                             // once per dialog
+  await answered('Bash', { command: 'rm -rf runs/*' })
   expect(of('notice').at(-1)).toEqual(['wb', 'chat', 'notice', '--done', '1800000000000-abc121'])
 
-  // the page used now, after the terminal's last input (wb chat serve's /api/active): away, and
-  // their setting allows it at once, with no notice
-  files['/wb/chat/away.json'] = JSON.stringify({ at: clock.now() / 1000, by: 'page' })
+  // a plan and a question get the line too, with no text of their own
   let n = runs.length
-  expect((await ask('Bash', { command: 'make' })).decision).toEqual({ behavior: 'allow' })
-  expect(of('ask', n)).toHaveLength(1)
-  await clock.advance(40_000)
-  expect(of('notice', n)).toEqual([])
+  expect((await ask('ExitPlanMode', { plan: 'step 1' })).decision).toBeUndefined()
+  await clock.advance(35_000)
+  expect(of('notice', n)).toEqual([['wb', 'chat', 'notice', '--tool=ExitPlanMode', '--kind=plan', '--text=']])
+  await answered('ExitPlanMode')
+  n = runs.length
+  expect((await ask('AskUserQuestion', { questions: [{ question: 'Which DB?' }] })).decision).toBeUndefined()
+  await clock.advance(35_000)
+  expect(of('notice', n)[0]?.slice(3, 5)).toEqual(['--tool=AskUserQuestion', '--kind=question'])
+  await answered('AskUserQuestion')
 
-  // typed in the terminal since: that page use is older than it, so not away
-  await $.prompt.submit({ text: 'back now' } as any)
-  expect(JSON.parse(files['/wb/chat/away.json']).at).toBe(0)
+  // an MCP server's form: its line until its answer
+  n = runs.length
+  await $.classic.Elicitation({ mcp_server_name: 'tracker', message: 'Sign in to the tracker' } as any)
+  await clock.advance(35_000)
+  expect(of('notice', n)).toEqual([['wb', 'chat', 'notice', '--tool=mcp:tracker', '--kind=elicitation', '--text=Sign in to the tracker']])
+  await $.classic.ElicitationResult({ mcp_server_name: 'tracker', action: 'accept' } as any)
+  expect(of('notice', n).at(-1)?.slice(3, 5)).toEqual(['--done', '1800000000000-abc124'])
+
+  // away (the page in use since the terminal's last input): the line at once, and the dialog
+  // still in the terminal; answering it there brings the user back
+  files['/wb/chat/away.json'] = JSON.stringify({ at: clock.now() / 1000, by: 'page' })
   n = runs.length
   expect((await ask('Bash', { command: 'make' })).decision).toBeUndefined()
-  expect(of('ask', n)).toEqual([])
-  await answered('make')
+  await until(() => of('notice', n).length > 0)
+  expect(of('notice', n)).toEqual([['wb', 'chat', 'notice', '--tool=Bash', '--kind=permission', '--text=make']])
+  await answered('Bash', { command: 'make' })
+  expect(JSON.parse(files['/wb/chat/away.json']).at).toBe(0)
+  expect(of('notice', n).at(-1)?.[3]).toBe('--done')
 
-  // only a permission is told (#959's ask): a plan or question at the terminal is not
+  // a dialog the user interrupted is over too: the turn's end settles it, and they are back
+  await $.turn.start({ text: 'deploy', turnId: 't1' })
+  files['/wb/chat/away.json'] = JSON.stringify({ at: clock.now() / 1000, by: 'page' })
   n = runs.length
-  expect((await ask('ExitPlanMode', {})).decision).toBeUndefined()
-  await clock.advance(40_000)
-  expect([of('ask', n), of('notice', n)]).toEqual([[], []])
-  await $.turn.complete(endTurn('t1'))                             // its turn ended: over
+  await ask('Bash', { command: 'git push' })
+  await until(() => of('notice', n).length > 0)
+  await $.turn.complete(endTurn('t1'))
+  expect(JSON.parse(files['/wb/chat/away.json']).at).toBe(0)
+  expect(of('notice', n).at(-1)?.[3]).toBe('--done')
 
-  // the chat turned off: neither
+  // the chat turned off: no line
   files['/wb/chat/switch.json'] = JSON.stringify({ on: false })
   await clock.advance(31_000)
   n = runs.length
   expect((await ask('Bash', { command: 'make' })).decision).toBeUndefined()
   await clock.advance(40_000)
-  expect([of('ask', n), of('notice', n)]).toEqual([[], []])
+  expect(of('notice', n)).toEqual([])
+  // nothing is ever put to the page to answer
+  expect(runs.filter(a => a[1] === 'chat' && ['ask', 'wait', 'answer'].includes(a[2]))).toEqual([])
   await clock.settle()
 })
 
-test('a dialog answered in the terminal after the phone was picked up for its notice brings the user back, so the next prompt is not allowed for them (the #959 review)', async ($, on) => {
-  // the #959 review: the notice's tap opened the page, which made the user away; they answered
-  // the dialog at the terminal, which submits no prompt, so they stayed away and the next prompt
-  // was allowed by "Let Claude go ahead" with them sitting at the terminal
+test('#1350 review: an away user\'s waiting line is cleared only by its own call, not by another call of the same tool finishing beside it', async ($, on) => {
+  // #1350 dropped sameCall with the cards, and matched by tool and loop alone: a Read allowed by a
+  // rule finishing beside one asking cleared the phone's line and marked the user back, so the
+  // next question came up as a dialog in an empty terminal instead of being refused (#1351)
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
@@ -2573,55 +2503,138 @@ test('a dialog answered in the terminal after the phone was picked up for its no
   on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
   on('tool.call', () => ({ result: { stdout: '' }, text: '' }))
   const runs: string[][] = []
+  let nid = 0
   on('process.run', (_: any, e: any) => {
     runs.push(e.argv)
     const [, cmd, act] = e.argv
     if (cmd === 'chat' && act === 'url') return chatUrl(files)
-    if (cmd === 'chat' && act === 'ask') return { value: { exitCode: 0, stdout: 'ask-2-cd allow\n', stderr: '' } } // their setting
-    if (cmd === 'chat' && act === 'notice') return { value: { exitCode: 0, stdout: '1800000000000-abc123\n', stderr: '' } }
+    if (cmd === 'chat' && act === 'notice') return { value: { exitCode: 0, stdout: e.argv[3] === '--done' ? 'answered\n' : `1800000000000-abc12${++nid}\n`, stderr: '' } }
     return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
   })
+  on('classic.PermissionRequest', () => ({}))
+  const of = (act: string) => runs.filter(a => a[1] === 'chat' && a[2] === act)
+  const until = async (ok: () => boolean) => { for (let i = 0; i < 200 && !ok(); i++) await new Promise(r => setTimeout(r, 5)) }
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
+  await clock.advance(3000)
+  files['/wb/chat/away.json'] = JSON.stringify({ at: clock.now() / 1000, by: 'page' })
+  await $.classic.PermissionRequest({ tool_name: 'Read', tool_input: { file_path: '/var/log/app.log' } } as any)
+  await until(() => of('notice').length > 0)
+  expect(of('notice')).toHaveLength(1)
+  // another Read, allowed by a rule, finishes while the first one's dialog is still up
+  await $.tool.call({ tool: 'Read', file_path: '/home/u/project/README.md' } as any)
+  expect(of('notice').filter(a => a[3] === '--done')).toEqual([])          // the line stays up
+  expect(JSON.parse(files['/wb/chat/away.json']).at).toBeGreaterThan(0)    // still away
+  // so a question now is still refused into the chat
+  expect(((await $.tool.call({ tool: 'AskUserQuestion', questions: [] } as any)) as any).deny).toBeTruthy()
+  // its own call going on is the answer at the terminal: the line clears, the user is back
+  await $.tool.call({ tool: 'Read', file_path: '/var/log/app.log' } as any)
+  expect(of('notice').at(-1)).toEqual(['wb', 'chat', 'notice', '--done', '1800000000000-abc121'])
+  expect(JSON.parse(files['/wb/chat/away.json']).at).toBe(0)
+  expect(sameCall({ plan: 'p', planFilePath: '/x' }, { tool: 'ExitPlanMode', plan: 'p' })).toBe(true)
+  expect(sameCall({ command: 'ls' }, { tool: 'Bash', command: 'ls -la' })).toBe(false)
+  expect(sameCall({ plan: 'p', planFilePath: '/x' }, { tool: 'ExitPlanMode', tool_use_id: 'u1' })).toBe(true)
+  expect(sameCall({ file_path: '/a' }, { tool: 'Read', file_path: '/b', agentId: 'x' })).toBe(false)
+  await clock.settle()
+})
+
+test('#1350: in an agent\'s turn a dialog is the same waiting line for the human, and a burst of dialogs is one line at a time', async ($, on) => {
+  // #1042's cards for an agent's request are gone with the relay: the human answers in the terminal
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  const runs: string[][] = []
+  let nid = 0
+  on('process.run', (_: any, e: any) => {
+    runs.push(e.argv)
+    const [, cmd, act] = e.argv
+    if (cmd === 'chat' && act === 'notice') return { value: { exitCode: 0, stdout: e.argv[3] === '--done' ? 'answered\n' : `1800000000000-abd12${++nid}\n`, stderr: '' } }
+    return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
+  })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))
   on('classic.PermissionRequest', () => ({}))
   const ask = (tool_name: string, tool_input: unknown) =>
     $.classic.PermissionRequest({ tool_name, tool_input } as any) as Promise<any>
   const of = (act: string, from = 0) => runs.slice(from).filter(a => a[1] === 'chat' && a[2] === act)
   await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: '', turnId: 't0' })
+  await $.tool.call({ tool: 'Bash', command: 'wb start t --spec s.md' })  // workbench mode: the chat listens
+  await $.turn.complete(endTurn('t0'))
+  await clock.advance(3000)
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'a1', ts: 1_800_000_003, from: 'my-agent', role: 'agent',
+    text: 'ship the parser fix' }) + '\n'
+  await clock.advance(31_000)
+  await $.turn.start({ text: '[agent my-agent] ship the parser fix', turnId: 't1' })
+  expect((await ask('Bash', { command: 'git push origin fix' })).decision).toBeUndefined()   // the terminal's
+  expect((await ask('Write', { file_path: '/etc/hosts', content: 'x' })).decision).toBeUndefined()
+  expect(files['/wb/chat/away.json']).toBeUndefined()               // an agent's message never makes the user away
+  await clock.advance(35_000)
+  expect(of('notice')).toEqual([['wb', 'chat', 'notice', '--tool=Bash', '--kind=permission', '--text=git push origin fix']])
+  await $.tool.call({ tool: 'Bash', command: 'git push origin fix' })
+  await clock.advance(3000)                                          // the next one's line once the first clears
+  expect(of('notice').map(a => a[3])).toEqual(['--tool=Bash', '--done', '--tool=Write'])
+  await $.turn.complete(endTurn('t1'))
+  expect(of('notice').at(-1)).toEqual(['wb', 'chat', 'notice', '--done', '1800000000000-abd122'])
+  await clock.settle()
+})
+
+test('#1351: while the user is away a question or a plan is refused into the web chat, and at the terminal both are ordinary dialogs', async ($, on) => {
+  // #1340 B and C: with no card on the phone (#1350), a question or plan raised while the user is
+  // away would block the turn in a terminal nobody watches, the phone's messages queued behind it
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/home/u/project' }))
+  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
+  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
+  let ran: string[] = []
+  on('tool.call', (_: any, e: any) => { ran.push(e.tool); return { result: { stdout: '' }, text: '' } })  // the engine's tool
+  on('process.run', (_: any, e: any) => e.argv[1] === 'chat' && e.argv[2] === 'url' ? chatUrl(files)
+    : ({ value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }))
+  const call = (tool: string, input: Record<string, unknown> = {}) => $.tool.call({ tool, ...input } as any) as Promise<any>
+  const questions = [{ question: 'Which DB?', header: 'DB', options: [{ label: 'SQLite' }, { label: 'Postgres' }], multiSelect: false }]
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
   await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
   await clock.advance(3000)
 
-  expect((await ask('Bash', { command: 'git push' })).decision).toBeUndefined()   // at the terminal
-  await clock.advance(35_000)
-  expect(of('notice')).toHaveLength(1)
-  files['/wb/chat/away.json'] = JSON.stringify({ at: clock.now() / 1000, by: 'page' })  // the notice tapped
-  await clock.advance(5000)
-  await $.tool.call({ tool: 'Bash', command: 'git push' } as any)  // answered in the terminal: its call went on
-  expect(JSON.parse(files['/wb/chat/away.json']).at).toBe(0)       // back
-  const n = runs.length
-  expect((await ask('Bash', { command: 'git push --force' })).decision).toBeUndefined()  // not allowed for them
-  expect(of('ask', n)).toEqual([])
+  // at the terminal: both go on to their dialogs
+  expect((await call('AskUserQuestion', { questions })).deny).toBeUndefined()
+  expect((await call('ExitPlanMode', { plan: '1. Read' })).deny).toBeUndefined()
+  expect(ran).toEqual(['AskUserQuestion', 'ExitPlanMode'])
 
-  // a subagent's call of the same tool is no answer to the main loop's dialog
-  await $.tool.call({ tool: 'Bash', command: 'ls', agentId: 'agent-1' } as any)
-  // a dialog the user interrupted is over too: the turn's end settles it
-  await clock.advance(35_000)
-  expect(of('notice', n)).toHaveLength(1)
+  // away (the page in use since the terminal's last input): refused, with what to do instead
   files['/wb/chat/away.json'] = JSON.stringify({ at: clock.now() / 1000, by: 'page' })
-  await $.turn.complete(endTurn('t2'))
-  expect(JSON.parse(files['/wb/chat/away.json']).at).toBe(0)
-  expect(of('notice', n).at(-1)).toEqual(['wb', 'chat', 'notice', '--done', '1800000000000-abc123'])
+  ran = []
+  expect((await call('AskUserQuestion', { questions })).deny)
+    .toBe('The user is away: ask in the web chat (`wb chat reply`) and end your turn.')
+  expect((await call('ExitPlanMode', { plan: '1. Read' })).deny)
+    .toBe('Post the plan in the web chat and end your turn; approval is at the terminal.')
+  expect(ran).toEqual([])                                           // neither dialog came up
+  expect((await call('Bash', { command: 'ls' })).deny).toBeUndefined()  // other tools as ever
+  expect(ran).toEqual(['Bash'])
 
-  // a page used before the dialog came up is no use during it: it stands (the user was away
-  // then, so the dialog went to the phone, not the terminal)
+  // back at the terminal: dialogs again
+  await $.prompt.submit({ text: 'back now' } as any)
+  ran = []
+  expect((await call('AskUserQuestion', { questions })).deny).toBeUndefined()
+  expect(ran).toEqual(['AskUserQuestion'])
+
+  // the chat off: never away, never refused
+  await $.turn.complete(endTurn('t0'))                            // the calls' turn over: the poll reads the switch
   files['/wb/chat/away.json'] = JSON.stringify({ at: clock.now() / 1000, by: 'page' })
-  const m = runs.length
-  expect((await ask('Bash', { command: 'make' })).decision).toEqual({ behavior: 'allow' })
-  await $.tool.call({ tool: 'Bash', command: 'make' } as any)
-  expect(JSON.parse(files['/wb/chat/away.json']).at).toBeGreaterThan(0)
-  expect(of('ask', m)).toHaveLength(1)
-  await clock.settle()                                            // the poll the call started
+  files['/wb/chat/switch.json'] = JSON.stringify({ on: false })
+  await clock.advance(31_000)
+  expect((await call('ExitPlanMode', { plan: '1. Read' })).deny).toBeUndefined()
+  await clock.settle()
 })
 
-test('a session that isn\'t listening treats the user as away too, relaying its dialogs and saying so in its wakes (#688)', async ($, on) => {
+test('a session that isn\'t listening treats the user as away too, posting its dialogs\' line at once and saying so in its wakes (#688)', async ($, on) => {
   // #688: only the listening session set its own `webAt`, so another session's overnight backlog
   // left its permission dialogs in the empty terminal (#110 again) and its wakes never said
   // to answer in the chat
@@ -2640,75 +2653,28 @@ test('a session that isn\'t listening treats the user as away too, relaying its 
   on('process.run', (_: any, e: any) => {
     runs.push(e.argv)
     const [, cmd, act] = e.argv
-    if (cmd === 'chat' && act === 'ask') return { value: { exitCode: 0, stdout: 'ask-1-ab open\n', stderr: '' } }
-    if (cmd === 'chat' && act === 'wait') return { value: { exitCode: 0, stdout: JSON.stringify({ answer: 'allow' }), stderr: '' } }
+    if (cmd === 'chat' && act === 'notice') return { value: { exitCode: 0, stdout: '1800000000000-abc123\n', stderr: '' } }
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
   })
   on('classic.PermissionRequest', () => ({}))
   const ask = (tool_name: string, tool_input: unknown) =>
     $.classic.PermissionRequest({ tool_name, tool_input } as any) as Promise<any>
+  const notices = (from = 0) => runs.slice(from).filter(a => a[1] === 'chat' && a[2] === 'notice')
+  const until = async (ok: () => boolean) => { for (let i = 0; i < 200 && !ok(); i++) await new Promise(r => setTimeout(r, 5)) }
   await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
   await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
   await clock.advance(3000)
   expect(files['/wb/chat/listener.json']).toContain('other-key')   // still the other's
   files['/wb/chat/away.json'] = JSON.stringify({ at: 1_800_000_000, by: 'other-key' }) // it took a web message
-  expect((await ask('Bash', { command: 'git push' })).decision).toEqual({ behavior: 'allow' })
-  expect(runs.some(a => a[2] === 'ask')).toBe(true)
+  expect((await ask('Bash', { command: 'git push' })).decision).toBeUndefined()
+  await until(() => notices().length > 0)
+  expect(notices()).toEqual([['wb', 'chat', 'notice', '--tool=Bash', '--kind=permission', '--text=git push']])
   notice(files, { ts: ts0 + 5, task: 'fix-it', kind: 'review', text: 'REPORT-fix-it' })
   await clock.advance(31_000)                                   // the safety poll reads it
   expect(woken.find(t => t.includes('REPORT-fix-it'))).toContain('wb chat reply')  // AWAY_NOTE
   await $.prompt.submit({ text: 'back now' } as any)             // typed here: back, for every session
   expect(JSON.parse(files['/wb/chat/away.json']).at).toBe(0)
-  const n = runs.length
-  expect((await ask('Bash', { command: 'git push' })).decision).toBeUndefined()
-  expect(runs.slice(n).some(a => a[2] === 'ask')).toBe(false)
-})
-
-test('a dialog wb chat ask refuses is announced on the phone, and a long plan or preview is cut to fit', async ($, on) => {
-  // #535 (the 2026-11-20 audit): a long or CJK plan was refused, and the dialog sat in the
-  // terminal with nothing posted and nothing said
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = {}
-  fakeTasks(on, files, [])
-  chatOn(files)
-  const toasts: string[] = []
-  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
-  on('session.cwd', () => ({ value: '/home/u/project' }))
-  on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
-  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
-  let refuse = true
-  const runs: string[][] = []
-  on('process.run', (_: any, e: any) => {
-    runs.push(e.argv)
-    const [, cmd, act] = e.argv
-    if (cmd === 'chat' && act === 'ask') return { value: refuse
-      ? { exitCode: 1, stdout: '', stderr: 'wb: wb chat ask: detail too long\n' }
-      : { exitCode: 0, stdout: 'ask-1-ab open\n', stderr: '' } }
-    if (cmd === 'chat' && act === 'wait') return { value: { exitCode: 0, stdout: JSON.stringify({ answer: 'deny' }), stderr: '' } }
-    return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
-  })
-  on('classic.PermissionRequest', () => ({}))
-  const ask = (tool_name: string, tool_input: unknown) =>
-    $.classic.PermissionRequest({ tool_name, tool_input } as any) as Promise<any>
-  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
-  await $.skill.prompt({ skill: 'workbench', text: 'x', frontmatter: {}, source: 'userSettings' })
-  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_003, from: 'user', text: 'hi' }) + '\n'
-  await clock.advance(3000)                                     // a web message: the user is away
-  const plan = '計画'.repeat(30_000)
-  expect((await ask('ExitPlanMode', { plan })).decision).toBeUndefined()  // refused: the dialog, here
-  const sent = runs.filter(a => a[2] === 'ask').at(-1)!
-  expect(JSON.parse(sent.find(a => a.startsWith('--detail='))!.slice(9)).plan).toBe(plan.slice(0, 40_001))
-  expect(runs.find(a => a[2] === 'reply')).toEqual(['wb', 'chat', 'reply',
-    "--text=Claude is waiting on a plan in the terminal: it couldn't be shown here.", '--to=user'])  // the user's, in an agent's turn too (#1042)
-  expect(toasts.some(t => t.includes("a plan couldn't go to the web chat (wb: wb chat ask: detail too long)"))).toBe(true)
-  refuse = false
-  const long = { label: 'A', description: '', preview: 'p'.repeat(5000) }
-  await ask('AskUserQuestion', { questions: [{ question: 'Which?', options: [long, { label: 'B' }] }] })
-  const q = JSON.parse(runs.filter(a => a[2] === 'ask').at(-1)!.at(-1)!.slice(9))
-  expect(q.questions[0].options[0].preview).toBe('p'.repeat(2000) + ' (cut: the rest is in the terminal)')
-  expect(q.questions[0].options[1]).toEqual({ label: 'B' })
-  await ask('Bash', { command: '--version' })                   // a value that starts with `-`
-  expect(runs.filter(a => a[2] === 'ask').at(-1)).toContain('--text=--version')
+  await clock.settle()
 })
 
 test('a task\'s wake while the user is away on the web chat tells Claude to answer them there, in full once a stretch, and stops once they type in the terminal (#540)', async ($, on) => {
@@ -3000,144 +2966,6 @@ test('a turn that ends before its start\'s look at the chat comes back records n
   await clock.advance(3000)
   await quickTurn('t2')
   expect(ended().slice(before)).toEqual([])
-})
-
-test('#1042: while Claude works on an agent\'s request its dialogs go to the human on the page too, for that agent, and whichever answers first settles it', async ($, on) => {
-  // the owner (2026-11-23): permission requests go to the human, never to the agent, even when
-  // the user is at the terminal; the terminal must never be left with a dialog the page answered,
-  // or the page with one the terminal answered
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = {}
-  fakeTasks(on, files, [])
-  chatOn(files)
-  const toasts: string[] = []
-  on('ui.toast', (_: any, e: any) => { toasts.push(String(e.text ?? '')); return { value: undefined } })
-  on('session.id', () => ({ value: 'sess-1' }))
-  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
-  let said: any = { answer: 'allow' }, hold: ((v: any) => void) | null = null, held = false, n = 0
-  const runs: string[][] = []
-  on('process.run', async (_: any, e: any) => {
-    runs.push(e.argv)
-    const [, cmd, act] = e.argv
-    if (cmd === 'chat' && act === 'ask') return { value: { exitCode: 0, stdout: `ask-${++n}-ab open\n`, stderr: '' } }
-    if (cmd === 'chat' && act === 'wait') {
-      if (held) await new Promise(r => { hold = r })                 // nobody has answered on the page yet
-      return { value: { exitCode: 0, stdout: JSON.stringify(said), stderr: '' } }
-    }
-    return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
-  })
-  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's tool, run once its dialog is answered
-  on('classic.PermissionRequest', () => ({}))                   // no settings hook decides: the dialog
-  const ask = (tool_name: string, tool_input: unknown) =>
-    $.classic.PermissionRequest({ tool_name, tool_input } as any) as Promise<any>
-  const of = (act: string, from = 0) => runs.slice(from).filter(a => a[1] === 'chat' && a[2] === act)
-  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
-  await $.turn.start({ text: '', turnId: 't0' })
-  await $.tool.call({ tool: 'Bash', command: 'wb start t --spec s.md' })  // workbench mode: the chat listens
-  await $.turn.complete(endTurn('t0'))
-  await clock.advance(3000)
-
-  // the user at the terminal, no agent's turn: the dialog stays there alone, as before
-  await $.turn.start({ text: 'make it', turnId: 'tu' })
-  expect((await ask('Bash', { command: 'make' })).decision).toBeUndefined()
-  expect(of('ask')).toEqual([])
-  await $.tool.call({ tool: 'Bash', command: 'make' })
-  await $.turn.complete(endTurn('tu'))
-
-  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'a1', ts: 1_800_000_003, from: 'my-agent', role: 'agent',
-    text: 'ship the parser fix' }) + '\n'
-  await clock.advance(31_000)
-  await $.turn.start({ text: '[agent my-agent] ship the parser fix', turnId: 't1' })
-  // the page's answer first: it settles the dialog, here at the terminal too (the hook's answer)
-  expect((await ask('Bash', { command: 'git push origin fix' })).decision).toEqual({ behavior: 'allow' })
-  expect(of('ask')).toEqual([['wb', 'chat', 'ask', '--tool=Bash', '--kind=permission', '--text=git push origin fix',
-    '--pid=4242', '--for=my-agent', '--here']])                   // for that agent; their away setting doesn't answer it
-  expect(toasts).toContain('workbench: a permission prompt for agent my-agent is in the web chat too: answer it here or there')
-  expect(files['/wb/chat/away.json']).toBeUndefined()            // still at the terminal
-  said = { answer: 'deny' }
-  const no = (await ask('Write', { file_path: '/etc/hosts', content: 'x' })).decision
-  expect([no.behavior, no.message.includes('wb chat reply --to user')]).toEqual(['deny', true])  // the user's thread, not the agent's
-  await $.tool.call({ tool: 'Write', file_path: '/etc/hosts' } as any)
-  expect(of('answer')).toEqual([])                               // answered on the page: nothing to withdraw
-
-  // the terminal's answer first: the engine's call goes on, and the card on the page is withdrawn
-  held = true
-  const waiting = ask('Bash', { command: 'rm -rf build' })
-  for (let i = 0; i < 100 && !hold; i++) await new Promise(r => setTimeout(r, 5))
-  expect(hold).not.toBeNull()
-  await $.tool.call({ tool: 'Bash', command: 'rm -rf build' })
-  expect(of('answer')).toEqual([['wb', 'chat', 'answer', 'ask-3-ab', 'expired', '--by', 'interrupted']])
-  said = { answer: 'expired', by: 'interrupted' };
-  (hold as any)(undefined)
-  expect((await waiting).decision).toBeUndefined()
-  held = false
-
-  // the turn ended: back to the terminal alone
-  await $.turn.complete(endTurn('t1'))
-  await clock.advance(3000)
-  const before = of('ask').length
-  expect((await ask('Bash', { command: 'make' })).decision).toBeUndefined()
-  expect(of('ask').length).toBe(before)
-  // and with the user away, an agent's turn's dialog says whose it is, and their setting stands
-  expect(agentsFor(new Map([['a2', 0], ['a3', 1]]), new Map([['a2', 'my-agent'], ['a3', 'other']]))).toEqual(['my-agent'])
-  expect(askForArgs({ for: ['my-agent'], here: false })).toEqual(['--for=my-agent'])
-  expect(askForArgs({ here: true })).toEqual([])
-  await clock.settle()
-})
-
-test('#1042 review: a card on the page is withdrawn only when its own call goes on, and settling one asked at the terminal there brings the user back', async ($, on) => {
-  // by tool and loop alone, a Read allowed by a rule finishing beside a Read whose card waited
-  // withdrew that card: a user away was left with the dialog in a terminal nobody watched
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = {}
-  fakeTasks(on, files, [])
-  chatOn(files)
-  on('ui.toast', () => ({ value: undefined }))
-  on('session.id', () => ({ value: 'sess-1' }))
-  on('prompt.submit', (_: any, e: any) => ({ text: e.text }))
-  let hold: ((v: any) => void) | null = null, n = 0
-  const runs: string[][] = []
-  on('process.run', async (_: any, e: any) => {
-    runs.push(e.argv)
-    const [, cmd, act] = e.argv
-    if (cmd === 'chat' && act === 'ask') return { value: { exitCode: 0, stdout: `ask-${++n}-ab open\n`, stderr: '' } }
-    if (cmd === 'chat' && act === 'wait') {
-      await new Promise(r => { hold = r })                       // nobody answers on the page
-      return { value: { exitCode: 0, stdout: JSON.stringify({ answer: 'expired', by: 'interrupted' }), stderr: '' } }
-    }
-    return { value: { exitCode: 0, stdout: 'no open tasks', stderr: '' } }
-  })
-  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))
-  on('classic.PermissionRequest', () => ({}))
-  const answers = () => runs.filter(a => a[1] === 'chat' && a[2] === 'answer')
-  const until = async (ok: () => boolean) => { for (let i = 0; i < 200 && !ok(); i++) await new Promise(r => setTimeout(r, 5)) }
-  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
-  await $.turn.start({ text: '', turnId: 't0' })
-  await $.tool.call({ tool: 'Bash', command: 'wb start t --spec s.md' })
-  await $.turn.complete(endTurn('t0'))
-  await clock.advance(3000)
-  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'a1', ts: 1_800_000_003, from: 'my-agent', role: 'agent',
-    text: 'read the logs' }) + '\n'
-  await clock.advance(31_000)
-  await $.turn.start({ text: '[agent my-agent] read the logs', turnId: 't1' })
-
-  const waiting = $.classic.PermissionRequest({ tool_name: 'Read', tool_input: { file_path: '/var/log/app.log' } } as any) as Promise<any>
-  await until(() => !!hold)
-  expect(hold).not.toBeNull()
-  await $.tool.call({ tool: 'Read', file_path: '/home/u/project/README.md' } as any)  // another Read, no dialog
-  expect(answers()).toEqual([])                                   // its card stays
-  files['/wb/chat/away.json'] = JSON.stringify({ at: clock.now() / 1000, by: 'page' })  // the push tapped
-  await $.tool.call({ tool: 'Read', file_path: '/var/log/app.log' } as any)          // answered here
-  expect(answers()).toEqual([['wb', 'chat', 'answer', 'ask-1-ab', 'expired', '--by', 'interrupted']])
-  expect(JSON.parse(files['/wb/chat/away.json']).at).toBe(0)     // at the terminal again
-  ;(hold as any)(undefined)
-  expect((await waiting).decision).toBeUndefined()
-  expect(sameCall({ plan: 'p', planFilePath: '/x' }, { tool: 'ExitPlanMode', plan: 'p' })).toBe(true)
-  expect(sameCall({ command: 'ls' }, { tool: 'Bash', command: 'ls -la' })).toBe(false)
-  expect(sameCall({ plan: 'p', planFilePath: '/x' }, { tool: 'ExitPlanMode', tool_use_id: 'u1' })).toBe(true)
-  expect(sameCall({ file_path: '/a' }, { tool: 'Read', file_path: '/b', agentId: 'x' })).toBe(false)
-  await $.turn.complete(endTurn('t1'))
-  await clock.settle()
 })
 
 test('a web message the turn didn\'t answer in the chat gets one follow-up, then a note on the phone (#767)', async ($, on) => {

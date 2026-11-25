@@ -162,7 +162,7 @@ export function quietForJobs(list: WbTask[], now: number, isMine: (t: WbTask) =>
 }
 // Away is the user's, not one session's (#688): the listening session records the last web
 // message in chat/away.json and a prompt typed in any session clears it, so every delegating
-// session relays its dialogs and says AWAY_NOTE. Kept in the listener's own state, only it did:
+// session posts its dialogs' waiting line at once and says AWAY_NOTE. Kept in the listener's own state, only it did:
 // another session's overnight backlog left its permission dialogs in the empty terminal (#110 again).
 // The chat server writes it too when a page is in use (#959): the owner typed in the terminal,
 // then picked up the phone, and a prompt neither reached it nor was allowed by their setting. So
@@ -1713,7 +1713,6 @@ async function sayRules($: any, delegating: boolean) {
 // The module's own memory: reset by a reload, which runs register and session.start again.
 const mem = {
   wake: true,
-  asksOpen: new Set<string>(),  // chat asks this session is waiting on (askOnChat)
   root: '',
   startedAt: 0,
   lastDrawn: '',
@@ -1762,8 +1761,6 @@ const mem = {
   chatOwed: new Map<string, Owed>(), // web messages passed to Claude with no reply in the chat yet (#767)
   chatTurn: new Map<string, number>(), // web messages given to Claude: turn ends to skip before theirs (#1042)
   chatTurnSize: Promise.resolve(-1), // messages.jsonl's size when the turn started, once read: grown, it may hold a reply (#1042)
-  agentTurn: new Map<string, string>(), // an agent's message given to Claude (id → its name): its turn's dialogs go to the page (#1042)
-  chatAsks: new Map<string, ChatAsk>(), // dialogs on the page this session waits on: whose call (#1042)
   listenerAt: new Map<string, number>(), // another session's chat listener (pid@start), when last seen alive (#839)
   submitted: false, // this mod submitted a prompt while Claude was idle, and no turn has started since (#837)
   chatChecking: false, // a `wb chat url --json` under way (chatLink)
@@ -1793,7 +1790,7 @@ const mem = {
   skill: '', // the /workbench skill's SKILL.md, for the workbench-mode block
   commandsFile: '', // commands.json ($WB_COMMANDS): Claude's edit never drops a repo's local_only (#1021)
   fold: false, // the session's directory is on a file system that ignores case (macOS): `within`
-  termDialogs: [] as TermDialog[], // dialogs up in the terminal while the user wasn't away (#959)
+  termDialogs: [] as TermDialog[], // dialogs up in the terminal, for the page's waiting line (#959, #1350)
 }
 
 // Whether path b is path a or inside it, by whole components: /x/ab is not inside /x/a. In lower
@@ -2451,18 +2448,36 @@ async function measureIfDue($: any) {
   if (ok && out.startsWith('measuring')) $.ui.toast(`workbench: ${out.trim()}`)  // else not due
 }
 
-// Claude Code's dialogs while the user is away on the web chat: the dialog would wait for nobody,
-// so it goes to the chat and the user's answer there settles it (the user, 2026-11-18): a
-// permission (Allow or Deny), a question (AskUserQuestion: the options they pick), a finished
-// plan (ExitPlanMode: Keep planning, with a note). Approving a plan stays in the terminal: Claude
-// Code ignores a hook's allow there, with or without a setMode (seen live, 2026-11-18), though it
-// takes a deny. Unanswered in ASK_WAIT_MS, or the
-// turn interrupted, it expires there and the dialog comes up as usual. It waits one `wb chat wait`
-// at a time (a hook's budget stands still while a `$` call runs, and one may take ten minutes at
-// most), so an interrupt is seen soon.
-const ASK_WAIT_MS = 30 * 60_000
-const ASK_CHUNK_S = 20
-const KIND: Record<string, string> = { ExitPlanMode: 'plan', AskUserQuestion: 'question' }
+// Claude Code's dialogs and the web chat (#1350, from #1340's decision, on the owner's bottom
+// line: the terminal is where things get done, the chat is for a message in a pinch). No dialog
+// is answered on the phone: a permission, a question, a plan or an MCP server's form waits in the
+// terminal, and the web app shows one line while it does, "Claude is waiting for you in the
+// terminal" (a permission's adds "Run it with permissions granted to work from the chat": the
+// driver's own modes and rules are the one permission policy, #1350's comment). Every kind, away
+// or not, an agent's turn too (#1042's cards are gone with the rest). At the terminal the line
+// goes only for a dialog still up after NOTICE_AFTER_MS: written at once, every prompt approved
+// in two seconds buzzed the phone ten seconds later saying it still waited (the #959 review);
+// while the user is away, at once. One open line at a time: a burst of prompts buzzed once per
+// prompt. The dialog settled (its call went on, the form answered, the turn ended) clears the
+// line and counts as the user being back (termDialogDone): they answered in the terminal, which
+// submits no prompt. The relay this replaces put each dialog on the page as a card to answer, and
+// an away setting answered permissions for an away user (#1350).
+const NOTICE_AFTER_MS = 30_000
+const DIALOG_KIND: Record<string, string> = { ExitPlanMode: 'plan', AskUserQuestion: 'question' }
+type TermDialog = { tool: string; agent: string; input: Record<string, unknown>; at: number; due: number; kind: string; text: string; id: string; sending: boolean; done: boolean }
+
+// Whether the tool.call input `e` is the call the dialog's `input` asked about: every argument both
+// carry is the same, and they share one unless the call has none of its own (the engine adds some
+// to the dialog's: ExitPlanMode's model input is empty, its dialog's carries the plan and its file).
+// By tool and loop alone, a Read allowed by a rule finishing beside one asking cleared that one's
+// line and marked an away user back, with the dialog still in a terminal nobody watched (the
+// #1042 review; again in #1350's review, which had dropped it with the cards)
+const CALL_KEYS = new Set(['tool', 'tool_use_id', 'agentId', 'consent', 'requestMeta'])
+export function sameCall(input: Record<string, unknown>, e: Record<string, unknown>): boolean {
+  const keys = Object.keys(input).filter(k => k in e)
+  return (keys.length > 0 || !Object.keys(e).some(k => !CALL_KEYS.has(k)))
+    && keys.every(k => JSON.stringify(input[k]) === JSON.stringify(e[k]))
+}
 
 function askText(input: unknown): string {
   const i = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
@@ -2471,155 +2486,42 @@ function askText(input: unknown): string {
   return text.length > 1500 ? text.slice(0, 1500) + '…' : text
 }
 
-// What a dialog sends wb, within an argument's size: a plan's first DETAIL_CHARS (one past wb's
-// budget, so wb cuts it and says so) and each option's preview to PREVIEW_CHARS. wb measures the
-// rest and cuts it to its own budget; a long plan was refused whole, and the dialog sat in the
-// terminal with the phone told nothing (#535)
-const DETAIL_CHARS = 40_001
-const PREVIEW_CHARS = 2000
-const CUT_NOTE = ' (cut: the rest is in the terminal)'
-export function askQuestions(questions: unknown): unknown {
-  if (!Array.isArray(questions)) return questions
-  return questions.map(q => !q || typeof q !== 'object' || !Array.isArray((q as any).options) ? q : {
-    ...q, options: (q as any).options.map((o: any) => o && typeof o.preview === 'string' && o.preview.length > PREVIEW_CHARS
-      ? { ...o, preview: o.preview.slice(0, PREVIEW_CHARS) + CUT_NOTE } : o),
-  })
+// While the user is away, a question or a plan is refused into the web chat, never a dialog (#1351,
+// #1340 B and C): with no card on the phone, one would block the turn in a terminal nobody
+// watches, and the phone's messages would queue behind it. The refusal tells Claude what to do
+// instead; at the terminal both stay ordinary dialogs. On the OpenCode path the same words come
+// from `execute.before` (a `permission.hook` deny loses the text, #1319); they move to the
+// shared texts with #1296's core.
+export const AWAY_QUESTION = 'The user is away: ask in the web chat (`wb chat reply`) and end your turn.'
+export const AWAY_PLAN = 'Post the plan in the web chat and end your turn; approval is at the terminal.'
+const AWAY_REFUSAL: Record<string, string> = { AskUserQuestion: AWAY_QUESTION, ExitPlanMode: AWAY_PLAN }
+async function awayRefusal($: any, tool: string): Promise<string> {
+  const why = AWAY_REFUSAL[tool]
+  if (!why) return ''
+  const st = await read($, chat)
+  return st.delegating && (await away($, st)) ? why : ''
 }
 
-// The PermissionRequest answer from the user's answer in the chat, else undefined (the dialog)
-async function askOnChat($: any, tool: string, input: unknown, signal?: AbortSignal, o: AskFor = {}) {
-  const kind = KIND[tool] ?? 'permission'
-  const i = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
-  // `--opt=value`: a value starting with `-` was read as a flag (#535)
-  const args = ['chat', 'ask', `--tool=${tool}`, `--kind=${kind}`, `--text=${kind === 'permission' ? askText(input) : ''}`]
-  // this session's `wb events` process: once it's gone wb expires the ask, so a card left by a
-  // crashed or closed session doesn't stay open for good, and pushes don't show it (#538)
-  if (mem.eventsPid) args.push(`--pid=${mem.eventsPid}`)
-  args.push(...askForArgs(o))
-  if (kind === 'question') args.push(`--detail=${JSON.stringify({ questions: askQuestions(i.questions) })}`)
-  // what the call is for, as Claude described it (Bash's description): the card leads with it
-  if (kind === 'permission' && typeof i.description === 'string' && i.description.trim())
-    args.push(`--detail=${JSON.stringify({ purpose: i.description.trim().slice(0, 300) })}`)
-  // a plan: its text, else its file, and whose it is; wb read the newest in the plans directory,
-  // any project's, so a card could show another session's plan (#253, the audit of 1.2)
-  if (kind === 'plan') {
-    if (typeof i.plan === 'string' && i.plan) args.push(`--detail=${JSON.stringify({ plan: i.plan.slice(0, DETAIL_CHARS) })}`)
-    else if (typeof i.planFilePath === 'string') args.push(`--detail=${JSON.stringify({ plan_file: i.planFilePath })}`)
-    const session = await $.session.id().catch(() => '')
-    if (session) args.push('--session', session)
-    if (mem.cwd) args.push('--repo', mem.cwd)
-  }
-  const posted = await runWb($, args, 15_000)
-  const [id, state] = (posted.out.split('\n').pop() || '').split(' ')
-  if (!posted.ok || !id?.startsWith('ask-')) { // the away user is told where it waits, not left guessing (#535)
-    const what = kind === 'plan' ? 'a plan' : kind === 'question' ? 'a question' : 'a permission'
-    await runWb($, ['chat', 'reply', `--text=Claude is waiting on ${what} in the terminal: it couldn't be shown here.`, '--to=user'], 15_000)
-    $.ui.toast(`workbench: ${what} couldn't go to the web chat (${brief(posted.out)}): answer it here`)
-    return undefined
-  }
-  if (state === 'allow') return { behavior: 'allow' as const }  // their setting: go ahead while away
-  if (state === 'expired') return undefined  // a plan wb can't show: the dialog, in the terminal
-  mem.asksOpen.add(id)
-  const unwatch = watchAsk($, id, { tool, agent: o.agent ?? '', input: i, here: !!o.here, at: await $.clock.now() }, signal)
-  try {
-    return await waitOnChat($, id, kind, i, signal, o)
-  } finally {
-    mem.asksOpen.delete(id)
-    unwatch()
-  }
+// A dialog came up in the terminal: noted, in the session the chat listens to (workbench mode,
+// the web chat on), for its line on the page
+async function dialogUp($: any, kind: string, tool: string, agent: string, input: unknown, text: string) {
+  const st = await read($, chat)
+  if (!st.delegating || !webOn(st)) return
+  const at = await $.clock.now(), isAway = await away($, st)
+  const args = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
+  mem.termDialogs.push({ tool, agent, input: args, at, due: at + (isAway ? 0 : NOTICE_AFTER_MS), kind, text, id: '', sending: false, done: false })
+  if (isAway) void termNotices($, at)
 }
 
-// Dialogs while Claude works on another agent's request (#1042, the owner's rule): from an
-// `[agent <name>]` prompt until that turn ends, Claude Code's dialogs go to the human on the web
-// page, with a push, as they do while the user is away, even when the user is at the terminal;
-// the terminal's dialog stands too, and whichever answers first settles it. An agent's token
-// can't answer them (wb chat serve's 403), and the page says whose request it is ("for <name>").
-// At the terminal the user's away setting ("Let Claude go ahead") doesn't answer it (`--here`).
-type AskFor = { for?: string[]; here?: boolean; agent?: string }
-
-// The agents whose message the running turn took: given now (grace 0), their turn not yet ended
-export function agentsFor(turn: Map<string, number>, agents: Map<string, string>): string[] {
-  return [...new Set([...agents].filter(([id]) => turn.get(id) === 0).map(([, name]) => name))]
-}
-
-export function askForArgs(o: AskFor): string[] {
-  return [...(o.for ?? []).map(n => `--for=${n}`), ...(o.for?.length && o.here ? ['--here'] : [])]
-}
-
-// An ask on the page is withdrawn once its dialog is settled elsewhere: the hook's signal aborts
-// (an interrupt), or the engine's call of it ends (askSettledHere, in tool.call's finally). The
-// page was left with a card the terminal had already answered, which the user could still tap.
-// A terminal answer doesn't abort the signal, and this engine has no event as the call starts
-// (`tool.run` came later; an unknown event stops the whole module loading), so a long command
-// allowed in the terminal keeps its card until it ends (the #1042 live check, 2026-11-23: 22 s). Withdrawn is `expired` by `interrupted`: the page says "settled in the
-// terminal". Returns the unwatch.
-type ChatAsk = { tool: string; agent: string; input: Record<string, unknown>; here: boolean; at: number }
-function watchAsk($: any, id: string, ask: ChatAsk, signal?: AbortSignal): () => void {
-  mem.chatAsks.set(id, ask)
-  const stop = () => { void withdrawAsk($, id) }
-  signal?.addEventListener?.('abort', stop, { once: true })
-  return () => {
-    mem.chatAsks.delete(id)
-    signal?.removeEventListener?.('abort', stop)
-  }
-}
-
-// One asked with the user at the terminal (`here`) and settled there counts as using the terminal,
-// as termDialogDone: the push it sent, tapped, made the user away, and the answer here submitted
-// no prompt, so later dialogs went to the phone, or "Let Claude go ahead", with them at the terminal.
-async function withdrawAsk($: any, id: string) {
-  if (!mem.asksOpen.has(id)) return // answered on the page, or expired already
-  const ask = mem.chatAsks.get(id)
-  mem.asksOpen.delete(id)
-  mem.chatAsks.delete(id)
-  await runWb($, ['chat', 'answer', id, 'expired', '--by', 'interrupted'], 15_000)
-  if (ask?.here && await webAt($) >= ask.at) await back($)
-}
-
-// The engine's call `e` went on past its permission check: its dialog, still open on the page, was
-// answered in the terminal. Its own dialog only, matched by its input too (sameCall): by tool and
-// loop alone, a Read allowed by a rule finishing beside one asking withdrew that one's card, and a
-// user away was left with the dialog in a terminal nobody watched (the #1042 review).
-async function askSettledHere($: any, e: Row) {
-  const agent = String(e.agentId ?? '')
-  const id = [...mem.chatAsks].find(([k, a]) => a.tool === e.tool && a.agent === agent && mem.asksOpen.has(k)
-    && sameCall(a.input, e))?.[0]
-  if (id) await withdrawAsk($, id)
-}
-
-// Whether the tool.call input `e` is the call the dialog's `input` asked about: every argument both
-// carry is the same, and they share one unless the call has none of its own (the engine adds some
-// to the dialog's: ExitPlanMode's model input is empty, its dialog's carries the plan and its file)
-const CALL_KEYS = new Set(['tool', 'tool_use_id', 'agentId', 'consent', 'requestMeta'])
-export function sameCall(input: Record<string, unknown>, e: Record<string, unknown>): boolean {
-  const keys = Object.keys(input).filter(k => k in e)
-  return (keys.length > 0 || !Object.keys(e).some(k => !CALL_KEYS.has(k)))
-    && keys.every(k => JSON.stringify(input[k]) === JSON.stringify(e[k]))
-}
-
-// A dialog while the user is at the terminal stays there, and the phone is told one waits (#959):
-// typing in the terminal and then picking up the phone left a prompt there with the phone told
-// nothing. A notice, not a card (only the terminal can answer it), pushed as Claude's messages
-// are; wb skips it for a user who doesn't use the chat. Only a permission, as the owner asked, and
-// only one still unanswered after NOTICE_AFTER_MS: written at once, every prompt approved at the
-// terminal in two seconds buzzed the phone ten seconds later saying it still waited (the #959
-// review). One open notice at a time: a burst of prompts buzzed once per prompt.
-// Answering the dialog is using the terminal (termDialogDone): tapping the notice opened the page,
-// which made the user away, and the answer at the terminal submitted no prompt, so the next
-// prompt went to the phone, or was allowed by "Let Claude go ahead", with the user at the
-// terminal (the #959 review).
-const NOTICE_AFTER_MS = 30_000
-type TermDialog = { tool: string; agent: string; at: number; kind: string; text: string; id: string; sending: boolean; done: boolean }
-
-// The poll's tick: each permission dialog still up past NOTICE_AFTER_MS gets its notice, unless
-// another notice of this session's is still open
+// The poll's tick: a dialog still up past its due time gets its line, unless another line of
+// this session's is still open
 async function termNotices($: any, now: number) {
   if (mem.termDialogs.some(d => d.sending || (d.id && !d.done))) return
-  const d = mem.termDialogs.find(d => d.kind === 'permission' && !d.done && !d.id && now - d.at >= NOTICE_AFTER_MS)
+  const d = mem.termDialogs.find(d => !d.done && !d.id && now >= d.due)
   if (!d) return
   d.sending = true
   try {
-    const { ok, out } = await runWb($, ['chat', 'notice', `--tool=${d.tool}`, '--kind=permission', `--text=${d.text}`], 15_000)
+    const { ok, out } = await runWb($, ['chat', 'notice', `--tool=${d.tool}`, `--kind=${d.kind}`, `--text=${d.text}`], 15_000)
     const id = (out.split('\n').pop() || '').trim()
     if (!ok) warnOnce($, 'chat-notice', `the web chat wasn't told of a dialog here (${brief(out)})`)
     d.id = ok && /^\d+-[0-9a-f]+$/.test(id) ? id : 'none' // 'none': wb skipped it, or failed: not again
@@ -2629,53 +2531,21 @@ async function termNotices($: any, now: number) {
   }
 }
 
-// The notice's dialog was answered here: no push owed for it, and the page says so
+// The line's dialog settled here: no push owed for it, and the page's line clears
 async function noticeDone($: any, d: TermDialog) {
   if (!d.id || d.id === 'none') return
   const { ok, out } = await runWb($, ['chat', 'notice', '--done', d.id], 15_000)
   if (!ok) warnOnce($, 'chat-notice-done', `the web chat wasn't told a dialog here was answered (${brief(out)})`)
 }
 
-// A dialog that came up at the terminal is over (its call went on, or the turn ended): the user
-// answered it there, so the phone used while it was up (the notice tapped) no longer counts as
-// the device last used, and its notice is settled
+// A dialog that came up at the terminal is over (its call went on, its form was answered, or the
+// turn ended): the user answered it there, so they are back (#1350; a phone used while it was
+// up, the line tapped, no longer counts as the device last used, #959), and its line clears
 async function termDialogDone($: any, d: TermDialog) {
   d.done = true
   mem.termDialogs = mem.termDialogs.filter(x => x !== d)
-  if (await webAt($) >= d.at) await back($)
+  await back($)
   if (!d.sending) void noticeDone($, d)
-}
-
-async function waitOnChat($: any, id: string, kind: string, i: Record<string, unknown>, signal?: AbortSignal, o: AskFor = {}) {
-  const what = kind === 'plan' ? 'the plan' : kind === 'question' ? "Claude's question" : 'a permission prompt'
-  $.ui.toast(o.here && o.for?.length ? `workbench: ${what} for agent ${o.for.join(', ')} is in the web chat too: answer it here or there`
-    : `workbench: ${what} is waiting for you in the web chat`)
-  const ask = o.for?.length ? 'wb chat reply --to user' : 'wb chat reply' // in an agent's turn, the user's thread (#1042)
-  const deadline = (await $.clock.now()) + ASK_WAIT_MS
-  while (!signal?.aborted) {
-    const left = deadline - (await $.clock.now())
-    if (left <= 0) break
-    const secs = Math.max(1, Math.min(ASK_CHUNK_S, Math.ceil(left / 1000)))
-    const { ok, out } = await runWb($, ['chat', 'wait', id, '--timeout', String(secs), '--json'], (secs + 15) * 1000)
-    let a: any = null
-    try { a = ok ? JSON.parse(out) : null } catch {}
-    if (!a) break
-    if (a.answer === 'allow') {
-      if (kind === 'question') return { behavior: 'allow' as const, updatedInput: { ...i, answers: a.answers } }
-      return { behavior: 'allow' as const }
-    }
-    if (a.answer === 'deny') {
-      const note = a.note ? ` They said: "${a.note}"` : ''
-      return { behavior: 'deny' as const, message: kind === 'plan'
-        ? `The user wants changes to the plan before you go ahead (from the web chat).${note} Revise the plan, then present it again.`
-        : kind === 'question'
-          ? `The user didn't pick an answer in the web chat.${note} Ask them there (${ask}) instead.`
-          : `The user said no in the web chat.${note} Ask them there (${ask}) what to do instead.` }
-    }
-    if (a.answer) break  // expired elsewhere
-  }
-  await runWb($, ['chat', 'answer', id, 'expired', '--by', signal?.aborted ? 'interrupted' : 'timeout'], 15_000)
-  return undefined
 }
 
 // wb's patches.CHECK_LINE: a marketplace clone whose local changes Claude Code's update would
@@ -3018,7 +2888,7 @@ async function listen($: any, now: number) {
       void sendWeb($, id, text, agentOf(m) && mem.submitted ? 'into' : 'now', st.key)
     }
     mem.chatTurn.set(id, mem.chatOwed.get(id)?.grace ?? 0) // its turn's end goes to turns.jsonl (#1042)
-    if (agentOf(m)) { mem.agentTurn.set(id, agentOf(m)); $.ui.toast(`workbench: a message from agent ${agentOf(m)}`); continue } // never the user away
+    if (agentOf(m)) { $.ui.toast(`workbench: a message from agent ${agentOf(m)}`); continue } // never the user away
     // no toast for the user's own message: they just sent it (#1322)
     await $.fs.write(awayFile(), JSON.stringify({ at: now / 1000, by: st.key })).catch(() => {})
   }
@@ -3148,8 +3018,6 @@ async function chatTurnEnd($: any) {
     if (grace > 0) mem.chatTurn.set(id, grace - 1)
     else { mem.chatTurn.delete(id); ids.push(id) }
   }
-  for (const id of [...mem.agentTurn.keys()]) if (!mem.chatTurn.has(id)) mem.agentTurn.delete(id) // their turn is over
-  for (const id of [...mem.chatAsks.keys()]) if (!mem.asksOpen.has(id)) mem.chatAsks.delete(id) // a hook dropped outright
   const start = mem.chatTurnSize
   mem.chatTurnSize = Promise.resolve(-1)
   const was = await start
@@ -3670,6 +3538,9 @@ export const register: Register = (on, options) => {
       mem.busy = true
       void poll($)
     }
+    // the user away: a question or a plan goes to the web chat instead of the terminal (#1351)
+    const awayWhy = await awayRefusal($, String(e.tool))
+    if (awayWhy) return { deny: awayWhy }
     // Claude coding (#92): Claude's own edit in a task's worktree waits for the user's choice
     const field = EDIT_TOOLS[e.tool]
     const path = field ? (e as any)[field] : undefined
@@ -3702,7 +3573,8 @@ export const register: Register = (on, options) => {
     }
     // The engine's call settles its permission check, a dialog included, before it resolves: one
     // whose dialog came up at the terminal is over once it does, answered there (#959): the oldest
-    // dialog of that tool in that loop (another loop's call of the tool settles none of its)
+    // dialog of that call in that loop (sameCall: another call of the tool, or another loop's,
+    // settles none of its)
     let denied = false
     try {
       const r = await next(e)
@@ -3711,31 +3583,33 @@ export const register: Register = (on, options) => {
     } finally {
       if (kept.tasks.length) await noteCall($, kept.tasks, kept.row, at, name, denied ? 'denied' : 'over').catch(() => {})
       const agent = e.agentId ?? ''
-      const d = mem.termDialogs.find(d => d.tool === e.tool && d.agent === agent)
+      const d = mem.termDialogs.find(d => d.tool === e.tool && d.agent === agent && sameCall(d.input, e as Row))
       if (d) await termDialogDone($, d)
-      await askSettledHere($, e as Row) // its card on the page too (#1042)
     }
   })
 
-  // A dialog while the user is away on the web chat goes there (askOnChat): the moment it would
-  // come up, in the session the chat listens to. A settings hook's own answer stands, and a
-  // failed hook leaves the dialog to come up as usual. At the terminal, the dialog stays there and
-  // is noted (mem.termDialogs, #959): a permission still up after NOTICE_AFTER_MS gets one notice
-  // on the phone (termNotices), and its answer here counts as terminal input (termDialogDone).
+  // A dialog in the terminal gets the page's waiting line (dialogUp, #1350): the moment it would
+  // come up. A settings hook's own answer stands, and shows no dialog.
   on('classic.PermissionRequest', async ($, e, next) => {
     const r = await next(e)
     if (r.decision) return r
-    const st = await read($, chat)
-    if (!st.delegating || !webOn(st)) return r
-    const isAway = await away($, st), forAgents = agentsFor(mem.chatTurn, mem.agentTurn) // an agent's turn: the page too (#1042)
-    if (!isAway && !forAgents.length) {
-      const kind = KIND[e.tool_name] ?? 'permission'
-      mem.termDialogs.push({ tool: e.tool_name, agent: (e as any).agent_id ?? '', at: await $.clock.now(), kind,
-        text: kind === 'permission' ? askText(e.tool_input) : '', id: '', sending: false, done: false })
-      return r
-    }
-    const decision = await askOnChat($, e.tool_name, e.tool_input, next.signal, { for: forAgents, here: !isAway, agent: (e as any).agent_id ?? '' })
-    return decision ? { ...r, decision } : r
+    const kind = DIALOG_KIND[e.tool_name] ?? 'permission'
+    await dialogUp($, kind, e.tool_name, (e as any).agent_id ?? '', e.tool_input, kind === 'permission' ? askText(e.tool_input) : '')
+    return r
+  })
+
+  // An MCP server's form (an elicitation) waits in the terminal too, until its answer (#1350)
+  on('classic.Elicitation', async ($, e, next) => {
+    const r = await next(e)
+    if (r.block) return r
+    const text = String(e.message ?? '')
+    await dialogUp($, 'elicitation', `mcp:${e.mcp_server_name}`, (e as any).agent_id ?? '', {}, text.length > 1500 ? text.slice(0, 1500) + '…' : text)
+    return r
+  })
+  on('classic.ElicitationResult', async ($, e, next) => {
+    const d = mem.termDialogs.find(d => d.kind === 'elicitation' && d.tool === `mcp:${e.mcp_server_name}`)
+    if (d) await termDialogDone($, d)
+    return next(e)
   })
 
   // Delegating with wb counts as workbench mode too (a session resumed mid-delegation, or one
@@ -3889,10 +3763,6 @@ export const register: Register = (on, options) => {
   })
   on('turn.complete', async ($, e, next) => {
     if (!e.agentId) {
-      // An interrupt drops a waiting PermissionRequest hook outright, so its own expiry never
-      // runs: the card would wait on the page for ever (seen live, 2026-11-18)
-      for (const id of mem.asksOpen) void runWb($, ['chat', 'answer', id, 'expired', '--by', 'interrupted'], 15_000)
-      mem.asksOpen.clear()
       // the dialogs at the terminal are over too, an interrupt's included (#959): the turn's
       // subagents ended with it, and one left open here would hold every later notice back
       for (const d of [...mem.termDialogs]) await termDialogDone($, d)

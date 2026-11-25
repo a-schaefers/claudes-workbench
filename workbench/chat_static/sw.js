@@ -17,27 +17,15 @@ const cut = (t, n) => t.length > n ? t.slice(0, n - 1) + '…' : t
 
 async function what() {
   const token = await key()
-  // the newest open ask and Claude's last word only: the whole state was up to a megabyte (#755)
+  // Claude's last word only: the whole state was up to a megabyte (#755)
   const r = await fetch('/api/latest', { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
   if (!r.ok) throw new Error('HTTP ' + r.status)
   const s = await r.json()
   const now = s.now || Date.now() / 1000
-  // an ask still open, not one past the mod's wait; and only if it's newer than Claude's last
-  // word: a dead session's card beat every later reply (#538)
-  const open = (s.asks || []).filter(a => !a.answer && !a.stale)
-  // Claude's last word, or a notice that a dialog waits in the terminal (#959)
+  // Claude's last word, or the line that it waits in the terminal (#959, #1350)
   const last = (s.messages || []).filter(m => m.from === 'claude' || m.from === 'notice').at(-1)
-  const newest = Math.max(open.at(-1)?.ts || 0, last?.ts || 0)
   const test = s.push && s.push.test
-  if (test && now - test < 120 && test >= newest) return { title: 'Notifications work', body: "You'll hear from Claude here while you're away." }
-  const a = open.at(-1)
-  if (a && !(last && last.ts > a.ts)) {
-    // for another agent's request (#1042): whose work it is, in the title
-    const whose = Array.isArray(a.for) && a.for.length ? ' (for ' + a.for.join(', ') + ')' : ''
-    if (a.kind === 'plan') return { title: "Claude's plan is ready" + whose, body: 'Send it back with a note, or approve it in the terminal.' }
-    if (a.kind === 'question') return { title: 'Claude asks' + whose, body: cut(plain((a.detail?.questions || [])[0]?.question), 180) }
-    return { title: 'Claude wants to use ' + a.tool + whose, body: cut(plain(a.text), 180) }
-  }
+  if (test && now - test < 120 && test >= (last?.ts || 0)) return { title: 'Notifications work', body: "You'll hear from Claude here while you're away." }
   // the command as it is: plain() would drop the `*` of `rm -rf runs/*`
   if (last && last.from === 'notice') return { title: last.text,
     body: cut(String(last.what || '').replace(/\s+/g, ' ').trim() || 'Answer it in the terminal.', 180) }

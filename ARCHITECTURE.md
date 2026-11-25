@@ -5593,18 +5593,29 @@ else `chat/serve.pid`, else 1337; `--port`, #349; the fragment never leaves the 
   and the answer submitted no prompt); at most 6 h after that use, longer while one of this
   session's `--backlog` tasks is open (#110). `chat/away.json` holds it, the user's, not one
   session's (#688).
-- **Claude Code's dialogs.** While away, every delegating session's mod puts them on the page
-  (`kind`): `permission` (Deny and Allow alike in weight, #103; with Bash's `description` as
-  `detail.purpose`, "Allow Claude to <purpose>? (Bash)"; a deny tells Claude to ask in the chat);
-  `question` (AskUserQuestion: options, a box, Skip/Answer; picks reach Claude as `answers`);
-  `plan` (ExitPlanMode: folded past 900 characters or 14 lines; Keep planning with a note; approving
-  stays in the terminal: Claude Code ignores a hook's allow there but takes a deny, checked live
-  2026-11-18). A tap settles the dialog; after 30 minutes or an interrupt it stays in the terminal.
-  `prefs.json` `away: "allow"` allows a permission at once; questions and plans still ask; deny
-  rules never reach a dialog. At the terminal, a permission unanswered after `NOTICE_AFTER_MS` 30 s
-  gets one notice and a push (no buttons; one open per session; never for plans or questions),
-  settled when answered so it is never pushed late (#959 review); only for a chat user (a page used
-  within `PAGE_RECENT`, a day, or push on). The mod's side: *The web chat listener*, under *The mod*.
+- **Claude Code's dialogs are answered in the terminal** (#1350, from #1340's decision on the
+  owner's bottom line: the terminal, local or ssh and tmux, is where things get done; the chat is
+  for a message in a pinch). Nothing is answered on the phone, on either driver: a permission, a
+  question (AskUserQuestion), a plan (ExitPlanMode) or an MCP server's form (an elicitation) waits
+  in the terminal, and the page shows one line while it does, a `notice` (`wb chat notice`): `Claude
+  is waiting for you in the terminal.`, a permission's adding `Run it with permissions granted to
+  work from the chat.` (`chat.WAITING`, `WAITING_GRANT`): the driver's own permission modes and
+  rules are the one permission policy, and run with them granted most work goes on from the chat
+  (#1350's comment). No buttons; every kind, away or not, an agent's turn too; pushed as Claude's
+  messages; at the terminal only for one still up after `NOTICE_AFTER_MS` 30 s, while away at once;
+  one open per session. The dialog settled (its call went on, the form answered, the turn ended)
+  clears the line (`chat.notice_done`: the thread leaves it out, it is never pushed late, the #959
+  review) and counts as the user being back. Only for a chat user (a page used within
+  `PAGE_RECENT`, a day, or push on). The answer cards, and the away setting that allowed an away
+  user's permissions, went with the relay.
+- **While away, a question or a plan goes to the chat, never a dialog** (#1351, #1340 B and C):
+  with no card on the phone it would block the turn in a terminal nobody watches, the phone's
+  messages queued behind it. The mod refuses AskUserQuestion with ``The user is away: ask in the
+  web chat (`wb chat reply`) and end your turn.`` (`AWAY_QUESTION`) and ExitPlanMode with `Post the
+  plan in the web chat and end your turn; approval is at the terminal.` (`AWAY_PLAN`); at the
+  terminal both are ordinary dialogs. On the OpenCode path (#1319) the same words come from
+  `execute.before`, since a `permission.hook` deny loses the text. The mod's side: *The web chat
+  listener*, under *The mod*.
 
 **Other agents** (#1042). The API is documented for other clients in `docs/chat-api.md` (every
 endpoint, the stream, the agent flow with curl; `test_docs` fails on a path in `chat.py` it doesn't
@@ -5624,9 +5635,8 @@ client; the server needs no browser.
   (`Handler._gate`: the token's 401, then 403), so an endpoint added later is the user's alone until
   named there (#1280: the deny-lists it replaced, `AGENT_DENIED` and `AGENT_UNREAD`, left every new
   one open to agents). Every other path is 403 `agent tokens can't use <path>` (`chat.agent_refusal`),
-  or the old wording where there was one (`AGENT_CANT`, wording only: `/api/answer` "answer Claude
-  Code's dialogs", `/api/prefs`, `/api/push`, `/api/active`, `/api/seen`, `/api/latest`, `/api/ask/`,
-  `/api/shot`, `/api/audio`); an unknown `/api/` path is 401 without a token, 404 with the user's. And 429 `{error, retry_after}` past
+  or the old wording where there was one (`AGENT_CANT`, wording only: `/api/push`, `/api/active`,
+  `/api/seen`, `/api/latest`, `/api/shot`, `/api/audio`); an unknown `/api/` path is 401 without a token, 404 with the user's. And 429 `{error, retry_after}` past
   `AGENT_SENDS_PER_MIN` 30 sends in any 60 s (`chat.RateLimit`, per agent, in the server's memory).
   No switch of its own: answered while the server runs and a token exists. With the chat off no
   session listens, so `/api/health` says `listening: false` and a message waits, unread, until one
@@ -5665,7 +5675,7 @@ client; the server needs no browser.
   (exit 1), or once the chat has been cut `OUTAGE_MOST` 120 s in a row (exit 2: off, asleep or
   out of reach, which a wait to the hour's deadline hid, the #1107 review); it ended at once with
   a bare error and no id (#1107). It also answers `waiting_on_user`
-  (`chat.waiting_on_user`: an open ask, or a notice not yet answered, under `ASK_STALE` old), and
+  (`chat.waiting_on_user`: a notice not yet settled, under `ASK_STALE` old), and
   returns when that turns true during the wait (once: true at its start, it holds). `wb chat reply
   --to user` addresses the user's thread whatever the turn took: a consent question during an
   agent's request went to that agent alone, pushed to no phone (the review). `GET /api/health`:
@@ -5676,25 +5686,20 @@ client; the server needs no browser.
   An agent's `about` is 400 `agent messages can't carry about` (what a message answers is the
   user's to say).
 - **An agent's view.** An agent reads only its own conversation: round one let its token read the
-  whole state and stream, the user's messages and dialogs included. `Handler._snap` gives it
+  whole state and stream, the user's messages included. `Handler._snap` gives it
   `chat.agent_snapshot` (`{api, messages, listener, uploads, expire, now}`, `messages` only the rows
   `chat.in_view` passes: its own, and Claude's whose `to` names it; `chat.thread(keep=…)`) for
-  `/api/state`, `/api/stream` and `/api/send`'s `state`; no asks, prefs, push, savings, build or tasks.
-  `/api/wait` on a row not in its view is 404 (`chat.wait_state`). `/api/latest`, `/api/ask/`,
+  `/api/state`, `/api/stream` and `/api/send`'s `state`; no push, savings, build or tasks.
+  `/api/wait` on a row not in its view is 404 (`chat.wait_state`). `/api/latest`,
   `/api/shot` and `/api/audio` are outside `AGENT_MAY` (403). Its upload keeps `by: <name>` in `.meta.json` (`save_upload(by=)`);
   a PUT on an id stored by anyone else is 409 `that upload id is another sender's`
   (`chat._not_theirs`: answered with the first upload, it read the user's file's name and path); a
   send naming another's upload is 400 `no upload <id>: …`; GET `/api/upload/<id>` and
   `/api/file/<id>` are 404 unless it uploaded the file or a row in its view carries it
   (`chat.agent_may_read`).
-- **Dialogs go to the human during an agent's work** (the owner, 2026-11-23). From an `[agent
-  <name>]` prompt until that turn ends, the mod puts Claude Code's dialogs on the page with a push,
-  as while the user is away, even at the terminal, where the dialog stands too; whichever answers
-  first settles it. The ask carries `for: [names]` (`wb chat ask --for <name>`), so the card says
-  `for <name>` (`.ask-for`) and the push's title `(for <name>)` (`sw.js`); with the user at the
-  terminal it also takes `--here`, and their away setting (`prefs.json` `away: "allow"`) doesn't
-  answer it (`chat.ask(here=)`). An agent's token still can't answer it (403), and
-  `waiting_on_user` counts it. The mod's side: *The web chat listener*.
+- **A dialog during an agent's work** is the same waiting line for the human (#1042's cards, which
+  the owner asked for on 2026-11-23, went with the relay, #1350): the user answers it in the
+  terminal, and `waiting_on_user` counts it.
 
 **Files** (`$WB_HOME/chat/`):
 - `messages.jsonl`: `{id: "<ms>-<6 hex>", ts, from: "user"|"claude"|"notice"|<agent name>, text, cid?, shots?,
@@ -5705,10 +5710,11 @@ client; the server needs no browser.
   `claude_start`, `claude_machine` beside it on a `wb chat reply` from Claude Code: the session
   that wrote it, whose mod takes the user's answer to it, #1096; `turn_by`: the listener's key, its
   `turns.jsonl` `by`, on a reply of the listening session's, `chat.caller_listens`: only that
-  session's turn end makes a wait on it done, #1303). A `notice` (`wb chat notice`) has `text: "Claude is waiting on a permission|plan|question in the
-  terminal"` and adds `tool, what?` (2000 characters): news like Claude's
-  (`chat.NEWS`: pushed, `/api/latest`) but not a reply, so the owed reply (#767) reads only `from:
-  claude`; `chat.thread` adds `answered` once settled. `files`: `[{id, name, size, type, path}]`.
+  session's turn end makes a wait on it done, #1303). A `notice` (`wb chat notice`) has `text: "Claude is waiting for you in the
+  terminal."` (a permission's adds `Run it with permissions granted to work from the chat.`) and adds
+  `tool, kind: "permission"|"plan"|"question"|"elicitation", what?` (2000 characters): news like
+  Claude's (`chat.NEWS`: pushed, `/api/latest`) but not a reply, so the owed reply (#767) reads only
+  `from: claude`; `chat.thread` leaves it out once settled (the page's line clears, #1350). `files`: `[{id, name, size, type, path}]`.
   A post whose `cid` is known returns that row (`_by_cid`, the newest `CIDS_KEPT` 5000, #199), and
   a user row so found missing from `open.json` without a receipt is put back (`_reopen`, #446).
   `shots` (`chat.shots`): `{task, n, step, round, viewport, base: {rev, image, exit?},
@@ -5720,17 +5726,17 @@ client; the server needs no browser.
 - `receipts.jsonl`: `{id, ts, by, how: "now"|"into"|"queued"}` from `wb chat ack` (newest per id stands;
   `into`: an agent's message that may not have opened its turn: delivered into a running one, #1175, queued, or submitted behind another prompt, #1212; `queued` is acked `now`, an agent's `into`, when its turn ends); `{by: "wb", how: "expired"}` (retired unread);
   `{by: "terminal", how: "answered"}` (`chat.notice_done`, which also marks it seen).
-- `open.json`: `{messages, asks, answered}`: the unreceipted user messages and unanswered asks
-  (`chat.open_work`), under `open.lock`, kept by send/ack/ask/answer, rebuilt once when missing
-  (`_open_rebuild`). Everything that asks what is open reads it, never the files' tails (#329).
-  `answered` keeps each ask's first answer `ANSWER_KEPT` (a day) for `chat.find_ask` (#447).
+- `open.json`: `{messages}`: the unreceipted user messages (`chat.open_work`), under `open.lock`,
+  kept by send and ack, rebuilt once when missing (`_open_rebuild`). Everything that asks what is
+  open reads it, never the files' tails (#329). An older wb's `asks` and `answered` there are
+  dropped at the next write; its ask and settings files are left unread (#1350).
 - `claims.json`: `{<id>: {by, ts}}` under `claims.lock`: `wb chat claim` gives a message to the
   first session, again to it, or to another after `CLAIM_STALE` 120 s; else exit 1, and for an
   expired one `<id> expired: over 6 hours unread, so not passed to Claude; the page offers to send
   it again`.
 - `away.json`: `{at, by}` (seconds), by the mod's listener on a web message (`by` its key) or the
   server on page use while on (`by: "page"`); `{at: 0}` on a prompt typed in any session, a terminal
-  dialog answered there after a later use, or the chat off.
+  dialog settled there, or the chat off.
 - `page.json`: `{at}`, the last page use, chat on or not (for `PAGE_RECENT`).
 - `listener.json`: `{session, cwd, pid, start, machine, parent, busy}` (from the `wb events` hello;
   `parent` its parent, the listening Claude Code, which `chat.caller_listens` checks against a
@@ -5738,28 +5744,14 @@ client; the server needs no browser.
   while its pid is this user's and started at `start` (`chat._alive` = `models._alive`: a root
   daemon on a recycled pid answered EPERM, #532), without a pid while its `ts` is under 15 s, and
   always when `machine` is another's (`chat.listener`, #922).
-- `asks.jsonl`: asks `{id: "ask-<ms>-<8 hex>", ts, tool (200), text (2000), kind:
-  "permission"|"plan"|"question", detail?, pid?, for?: [agent names]}` (no `kind`: a permission; `for`:
-  asked while Claude worked on those agents' request, #1042), then answers `{id, ts,
-  answer: "allow"|"deny"|"expired", by: "web"|"setting"|"timeout"|"interrupted"|"terminal"|"cli",
-  note?, answers?}` (`answers` keyed by the question's text). The first answer row wins, so the
-  page's tap and the mod's expiry can't both stand; `wb chat answer` prints the one that stands. Once `pid` (the session's `wb events`) fails `kill -0`, the next `chat.asks` expires it by
-  `interrupted` (`_orphaned`, #538); an ask without `pid` only goes `stale`. `detail` is at most `DETAIL_MAX` 40,000 bytes of UTF-8 JSON
-  (ASCII escapes refused a Japanese plan, #535); over it `chat.fit_detail` cuts the plan, else
-  previews, else descriptions, ending `CUT_NOTE` " (cut: the rest is in the terminal)"; only a question that can't fit is refused. A plan's
-  `{plan}` comes from the input, else `chat.session_plan`: `{plan_file}`, else the last plan file
-  the `--session`'s transcript names, only a `*.md` directly in `$CLAUDE_CONFIG_DIR/plans` (the
-  newest file there showed another project's plan, #253); none: `{plan: "", project}`, expired by
-  `terminal` at once, the page naming that project's terminal. The page lists the newest 20 plus every open one; `wb chat pending` lists
-  every unreceipted message (#265). Open past `ASK_STALE` (an hour): `stale: true`, no buttons. A
-  user message unread past `MESSAGE_EXPIRE` (6 h, the one threshold) is `expired: true`; claim
+- `wb chat pending` lists every unreceipted message (#265). A notice open past `ASK_STALE` (an
+  hour) no longer counts in `waiting_on_user` (a session that died with its dialog up). A user message unread past `MESSAGE_EXPIRE` (6 h, the one threshold) is `expired: true`; claim
   refuses it and the page offers *send again* (a new cid, the same uploads and `about`, #843). The
   first `chat.open_work` to see it retires it (`_retire`: out of `open.json`, an `expired`
   receipt that claim then reads, `_expired_receipt`, #536, #741).
 - `uploads/<id>/`: `<name>` and `.meta.json` `{id, name, size, type, sha256, ts, path, by?}`, written
   last (it marks the upload whole; `by`: the agent that uploaded it, #1042); `uploads.lock`: one
   finishing at a time.
-- `prefs.json`: `{away: "ask"|"allow"}` (else `ask`), read by `chat.ask`.
 - `turns.jsonl`: `{ids, ended, by}`: a main turn of a session ended (`by`, its mod's key), having taken the
   messages `ids` (none: messages.jsonl grew in it, maybe another session's write), from `wb chat ended` (the mod's
   `chatTurnEnd`, #1042); read from its last 4 MiB.
@@ -5804,12 +5796,11 @@ address (#534).
 - The API wants `Authorization: Bearer <token>` (constant time), the user's or an agent's
   (*Other agents*), else 401 "bad or missing token: open the link from `wb chat url`".
 - `GET /api/health` → `{api, listening}`; `GET /api/wait` (*Other agents*).
-- `GET /api/latest` (`chat.latest`): for a push: the newest open unstale ask (a plan without
-  `detail`), Claude's last message (from the last `LATEST_BYTES` 1 MiB; a settled notice skipped), `push`: the
-  snapshot's shape, which `sw.js` reads.
+- `GET /api/latest` (`chat.latest`): for a push: Claude's last message or an open notice (from
+  the last `LATEST_BYTES` 1 MiB; a settled notice skipped), `push`: the snapshot's shape, which
+  `sw.js` reads.
 - `GET /api/state`: `{api, messages (the last 200 from `THREAD_BYTES` 4 MiB, user rows with
-  `received`), asks (lean once settled, `chat.page_ask`: a plan cut at `PLAN_PREVIEW` 1,200 with
-  `detail.cut`; #755), prefs, push ({key or null, `chat._push_key_or_none`, #924; test}), listener,
+  `received`; a settled notice left out), push ({key or null, `chat._push_key_or_none`, #924; test}), listener,
   savings (`chat.week_saved`: `wb savings --json` over 7 days, no `period`; its `api` adds each
   provider's name, `names`, #1022), uploads (`{file,
   message, files}`), build, expire (`MESSAGE_EXPIRE` in seconds), tasks (`chat.open_tasks`, #1016: `[{name,
@@ -5824,14 +5815,13 @@ address (#534).
   stream sends it when the chat directory wakes it, or at the hub's idle bump (`IDLE_BUMP_S`, 60 s), not on a
   task's own status write), now}`. `build`
   (`chat.build`, a crc32 of the page files' names, mtimes, sizes) makes a stale page reload.
-- `GET /api/ask/<id>` (`chat.find_ask`): the whole ask, else 404 "no such prompt".
 - `GET /api/shot?task=&n=&side=base|candidate`: a PNG, only for a task passing `store.NAME_RE`, an
   `n` with shots.json and a capture that worked, `O_NOFOLLOW`, at most `SHOT_MAX` 16 MB; `pruned`
   (`store.SLIM_DAYS`, #821) 410 "expired"; else 404 "no such screenshot". `GET /api/audio?batch=&n=`: a take, the batch matching
   `BATCH_RE`, a real directory with audio.json, a regular file `O_NOFOLLOW`, at most `AUDIO_MAX` 64
   MiB; else 404 "no such take". The page shows both as blob URLs fetched with the token.
 - `GET /api/stream`: SSE: `event: state` at once, then `event: patch` (`chat.patch` against what
-  this stream sent: `messages`/`asks` as `{put, drop}`, every other field whole so a stale busy flag
+  this stream sent: `messages` as `{put, drop}`, every other field whole so a stale busy flag
   can't stick; #755), each event followed `NUDGE_AFTER` (50 ms) later by a blank line of its own
   (WebKit hands a streamed body over only to the first 8 KB of a read until more bytes come: a state
   past 8 KB waited 15 s for the ping, the #1284 review), `: ping` after 15 s idle. `MAX_STREAMS` 16: the oldest gives way (`evicted`),
@@ -5850,9 +5840,7 @@ address (#534).
   /api/upload/<id>`: `{upload}` or 404. `GET /api/file/<id>`: `SHOWN` images as themselves, else
   `application/octet-stream` as an attachment, so no upload renders as a page; cached for a year
   (`FILE_CACHE`, `Vary: Authorization`: an upload never changes under its id, #754).
-- `POST /api/answer` (the user's token only, as the four below): `{id, answer: "allow"|"deny", note?, answers?: ≤ 4}` (`expired` is the mod's
-  alone; `answers` only and always for an allowed question) → `{ask, state}`, the answer that stands.
-- `POST /api/prefs` `{away}`; `POST /api/active` `{}` (`chat.active`: `page.json`, and `away.json`
+- The user's token only, as the admin endpoints: `POST /api/active` `{}` (`chat.active`: `page.json`, and `away.json`
   while on); `POST /api/seen` `{ids: ≤ 200, endpoint?}`; `POST /api/push` `{endpoint, on}` (only
   `https`:443 at `webpush.PUSH_HOSTS`, so the token can't make this machine post anywhere) or
   `{test: true}` → `{sent, ok, hint, reasons}`.
@@ -5883,9 +5871,9 @@ after a reload had read as the reader going up, and the server's thread was draw
 at a time (XHR; `STALL_MS` 30 s without progress retries the same id); edit restores the files, the
 `about` (`setAbout`, #843) and the words before the box's (#958); thumbnails load near view
 (`whenNear`, #754), and before the server's thread is in only from this browser's bytes: the rest wait
-in `nearLater`, judged again by `nearAgain` where that thread put them (a photo the saved thread showed was fetched, 2026-11-24), and an entry measured before the last `render` (`drawnAt`) is observed afresh, not loaded (one delivered after the server's thread was drawn fetched that photo still, #1223); `sweepSoon` revokes unused object URLs (#746). The receipt texts, dialog cards
-(`makeAsk`), notices (`makeNotice`) and the Settings and Stats cards (`#away-when` states the away rule
-above; `drawSaved` shows no currency sign, as `wb savings`, #845, and after it `apiSaved`'s `API
+in `nearLater`, judged again by `nearAgain` where that thread put them (a photo the saved thread showed was fetched, 2026-11-24), and an entry measured before the last `render` (`drawnAt`) is observed afresh, not loaded (one delivered after the server's thread was drawn fetched that photo still, #1223); `sweepSoon` revokes unused object URLs (#746). The receipt texts, notices
+(`makeNotice`: the waiting line, no buttons, and no dialog cards since #1350) and the Settings and Stats cards (`#away-when` states the away rule
+above, `#away-prompts` that prompts are answered in the terminal and the line says one waits; `drawSaved` shows no currency sign, as `wb savings`, #845, and after it `apiSaved`'s `API
 models: 6 tasks, ≈$1.27 (DeepSeek ≈$0.84, Anthropic ≈$0.43).`, or that alone, #1022, #1135; the saving is the badge's
 one line, `~3K Claude tokens saved this week`, #1322) are in `app.js`. Over plain HTTP
 off localhost the page isn't a secure context: own ids, `copyText` (#745), no install or push.
@@ -5903,9 +5891,9 @@ tall (the composer drops its own safe-area pad, `#jump` sits 56 px higher), hidd
 none` under `hover: none`. From 601 px the body is a grid: a 76 px left rail, the header, banner and
 view beside it; the chat a 760 px column, Stats and Settings `.view-in` 1040 px of `.card`s, two
 columns (`.cards`) from 1100 px. The cards' type (`h3`, `p`, `code`, `.small`, `.plain`) is scoped
-to `.view-in`, never `.view`: `#view-chat` is a `.view` too, and its plan and ask cards and the
+to `.view-in`, never `.view`: `#view-chat` is a `.view` too, and its rows and the
 intro's `<code>` keep the chat's sizes. The Chat tab's `.tab-badge` counts Claude's messages and notices
-for the user and open asks newer than when the thread was left (`leftAt`, the server's clock; a
+for the user newer than when the thread was left (`leftAt`, the server's clock; a
 page opened on another view takes its first live state's `now`), `99+` at most, in its
 `aria-label` too (`Chat, 3 new`), cleared on Chat (`drawBadge`). The thread keeps its place while
 hidden (`toEnd` waits; `chatTop`). A notification's click posts `{kind: "view", view: "chat"}` to an
@@ -6398,7 +6386,7 @@ retried a minute later; two sessions both submitted one, #84): idle → `prompt.
 (`queued`, acked `now`, an agent's `into`, when that turn ends: `mem.chatQueued`, `readQueued`; acked `now`, the next wake turn's report went to the agent, #1212); `wb chat ack <id> --by
 <key> --how …` once it entered (a dropped prompt is retried a minute later); `chat/away.json` `{at:
 now, by: <key>}`. Away is read by every session (`away()`); a typed prompt writes `{at: 0}`
-(`back`), as does a terminal dialog answered there after that use (`termDialogDone`). Typed is
+(`back`), as does a terminal dialog settled there (`termDialogDone`). Typed is
 `byUser` on the engine's `origin.kind`: `composer`, `bridge`, `sdk`, `auto-continuation`, or an
 `unclassified` or unstamped one not `isMeta` (a /loop, another plugin's or a peer's prompt ended away
 for everyone, #835). **Whose a message is** (#1096; the page has no reply-to): the user's answers
@@ -6446,52 +6434,29 @@ at 0 are recorded with `wb chat ended <ids> --by <key>`, and with none, a turn i
 turn ending before its stat came back once read the size from the turn before, 2026-11-24; a
 reply, maybe a later report) is recorded with no ids. Nothing while the chat is off.
 
-Dialogs (`classic.PermissionRequest`; the terminal's dialog stands meanwhile and the hook's answer
-settles it), unless a settings hook decided or the session isn't delegating with the chat on. At
-the terminal: noted in `mem.termDialogs` (`{tool, agent, at, kind, text, id}`) and passed on;
-`termNotices` runs `wb chat notice --tool=<t> --kind=permission --text=<text>` for one past
-`NOTICE_AFTER_MS` while no other notice of the session's is open (a failure: `warnOnce`); the
-engine's `tool.call` ending (its permission check and its run) settles the oldest noted dialog of that tool in that
-loop (`agentId`, in the hook's `finally`), and `turn.complete` any left: `termDialogDone` drops it,
-runs `back` when `away.json`'s `at` is at or after the dialog's, and `wb chat notice --done <id>`.
-Away (`awayNow`: `at` within `AWAY_MS` 6 h, or a backlog task of this session's open): `askOnChat`
-runs `wb chat ask --tool=<t> --kind=<KIND[tool], else permission> --text=<the input's command,
-file_path, url, path or pattern, else its JSON, cut at 1500>` (each `--opt=value`, so a leading `-`
-isn't a flag; `--pid=<mem.eventsPid>`, #538; `--detail=` a question's `{questions}` with previews
-cut to `PREVIEW_CHARS` 2000 and CUT_NOTE, `askQuestions`, or a plan's `{plan}` (its first
-`DETAIL_CHARS` 40,001) else `{plan_file}` from `planFilePath`, with `--session <id> --repo <dir>`,
-#253). If it fails, the mod posts `Claude is waiting on a plan|question|permission in the terminal`
-(`wb chat reply --to=user`: the user's, in an agent's turn too, #1042), toasts and leaves the dialog (#535). It prints `<id> <state>`: `allow` (the
-setting) answers `{behavior: 'allow'}`; `expired` leaves the dialog; else the id goes in
-`mem.asksOpen` and `waitOnChat` runs `wb chat wait <id> --timeout 20 --json` (`ASK_CHUNK_S`)
-repeatedly, so an interrupt (`next.signal`) shows within 20 s, until `ASK_WAIT_MS` 30 min. `allow`
-→ `{behavior: 'allow'}` (a question's with `updatedInput: {...input, answers}`); `deny` →
-`{behavior: 'deny', message}` with the note (a plan: revise and present again; else ask the user
-there). Anything else writes `wb chat answer <id> expired --by timeout|interrupted` and passes the
-event on. Esc drops a waiting hook outright (seen live, 2026-11-18), so `turn.complete` expires every
-id left in `mem.asksOpen` by `interrupted`. A failing hook is skipped, leaving the dialog.
+**A question or a plan while away** (#1351): the `tool.call` hook's `awayRefusal`, before any other
+check, denies AskUserQuestion with `AWAY_QUESTION` and ExitPlanMode with `AWAY_PLAN` (`AWAY_REFUSAL`)
+while the session delegates with the chat on and the user is away (`away`), so neither dialog
+comes up; at the terminal both pass through.
 
-**Dialogs in an agent's turn** (#1042, the owner's rule: permission requests go to the human,
-never the agent). Each agent's message given to Claude goes into `mem.agentTurn` (id → name);
-`agentsFor` names those whose `mem.chatTurn` grace is 0 (the running turn took them), until
-`chatTurnEnd` drops them with their turn. While any is named, the `classic.PermissionRequest` hook
-sends the dialog through `askOnChat` as away does, even with the user at the terminal, adding
-`--for=<name>` for each (`askForArgs`) and, at the terminal, `--here` (their away setting doesn't
-answer it); the toast says `… for agent <name> is in the web chat too: answer it here or there`,
-and a deny's message names `wb chat reply --to user`. Whichever answers first settles it: the
-page's answer is the hook's decision, which settles the terminal's dialog; the terminal's withdraws
-the card (`watchAsk`: `mem.chatAsks` `{tool, agent, input, here, at}` by id; at the hook's
-`next.signal` abort (an interrupt: a terminal answer doesn't abort it), or when the engine's call
-of that tool in that loop with the dialog's input (`sameCall`: every argument both carry equal, at
-least one shared unless the call has none, as ExitPlanMode's) ends, `askSettledHere` in the
-`tool.call` hook's `finally`; so a long command allowed in the terminal keeps its card until it
-ends, 22 s in the live check of 2026-11-23: this engine has no `tool.run` event, and an unknown
-event stops the module loading), `withdrawAsk` writing `wb chat answer <id> expired --by interrupted`, which the page
-shows as "settled in the terminal"; one asked with `--here` and settled so runs `back` when
-`away.json`'s `at` is at or after the ask's (its push tapped), as `termDialogDone`. Matched by tool
-and loop alone, a Read a rule allowed, finishing beside one whose card waited, withdrew that card,
-leaving an away user's dialog in an empty terminal (the review). Away or not, the same withdrawal
-applies to every ask (a card left after the terminal answered could still be tapped).
+**Dialogs: the waiting line** (#1350). `classic.PermissionRequest` (its `kind` from `DIALOG_KIND`:
+ExitPlanMode a `plan`, AskUserQuestion a `question`, else a `permission` with the input's command,
+file_path, url, path or pattern, else its JSON, cut at 1500, `askText`) and `classic.Elicitation`
+(`elicitation`, its tool `mcp:<server>`, its message) note a dialog (`dialogUp`), unless a settings
+hook decided or the session isn't delegating with the chat on: `mem.termDialogs` (`{tool, agent,
+input, at, due, kind, text, id}`, `due` at once while away, else `NOTICE_AFTER_MS` 30 s on). The hook
+answers nothing: the dialog is the terminal's. `termNotices` (at once while away, else on the poll's
+tick) runs `wb chat notice --tool=<t> --kind=<kind> --text=<text>` (each `--opt=value`, so a
+leading `-` isn't a flag) for one due while no other line of the session's is open (a failure:
+`warnOnce`). The engine's `tool.call` ending (its permission check and its run) settles the oldest
+noted dialog of that call in that loop (`agentId`, and `sameCall`: every argument both carry the
+same, as ExitPlanMode's empty input matches its dialog's plan; by tool alone a Read allowed by a
+rule finishing beside one asking cleared an away user's line and marked them back, the #1042 and
+#1350 reviews; in the hook's `finally`),
+`classic.ElicitationResult` an elicitation's, and `turn.complete` any left (an interrupt drops a
+waiting hook): `termDialogDone` drops it, runs `back` (settling is the user at the terminal, #1350)
+and `wb chat notice --done <id>`. In an agent's turn the same (#1042's cards are gone). The relay it
+replaced answered the dialog from the page.
 
 **The weekly model check** (`scoutIfDue`): in a session delegating now or in this load, with wakes
 on (another project's session spent the offer, #919; such a session leaves scout.json alone), once
@@ -6761,7 +6726,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 |---|---|---|
 | `wb image "<prompt>"` | `--n` (4), `--size WxH` (1024x1024), `--seed`, `--ref <img>…`, `--out DIR`, `--engine`, `--list`, `--default NAME`, `--wait` | *Images*; refuses while the GPU is held (`--wait` queues), an engine off this GPU (`"gpu": false`, another host) runs beside tasks; a bare `list`/`ls` prompt is `--list`. `--default NAME` (no prompt) sets images.json's `"default"` (*The default engines*). |
 | `wb audio "<text>"` | `--kind speech\|sfx\|music`, `--n` (3), `--seconds S` (the entry's `seconds`, else `audio.DEFAULT_SECONDS`: 5 sfx, 30 music, 10 otherwise), `--voice NAME` (the entry's first of `voices`), `--ref <clip>…`, `--lyrics FILE\|-`, `--seed`, `--engine`, `--out DIR`, `--no-check`, `--list`, `--default NAME`, `--wait` | *Audio*; `--n` below 1 refused before any lease (exit 2, #592); a clip that isn't audio fails it; GPU as `wb image`; an option the engine lacks is refused. `--default NAME` (no text) sets audio.json's `"default_<its kind>"`; never the listener (*The default engines*). |
-| `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|ask\|notice\|wait\|answer\|token\|ended]` | `listen <clip>… [--text]`, `--port` (`chat/port.json`, else 1337), `--bind`, `--host`, `--text`, `--message <file\|->`, `-n` (10), `ack <id> --by --how`, `claim <id> --by`, `ask --tool --kind permission\|plan\|question --text --detail <json> --session --repo --pid --for <agent> --here` (last line `<id> open\|allow\|expired`, the mod parses it), `wait <id> --timeout` (30) `--json` (allow, deny, expired, or `open`), `answer <id> allow\|deny\|expired --by --note`, `notice --tool --kind --text` (its id, or `skipped: …`), `notice --done <id>` (`answered <id>`; exit 1 for no notice); `url --json` (`chat.ensure`'s `{url, state, why}`, exit 0: the mod's); `claim` exit 1: another session's; `reply --to <id>` (`user`: the user's thread; again for more; else what this turn took: `re`, `to`, #1042), `token add <name>` (prints it once), `token list`, `token revoke <name>`, `ended <id>… --by` (the mod's turn end) | The web chat (*The web chat*), on by default; `url` and `on` bring it up (`chat.ensure`); `on` refuses, the switch put back as it was, when something else answers the port (#690); `off` stops only a server `on` started. |
+| `wb chat [log\|on\|off\|serve\|url\|reply\|listen\|ack\|claim\|pending\|notice\|token\|ended]` | `listen <clip>… [--text]`, `--port` (`chat/port.json`, else 1337), `--bind`, `--host`, `--text`, `--message <file\|->`, `-n` (10), `ack <id> --by --how`, `claim <id> --by`, `notice --tool --kind permission\|plan\|question\|elicitation --text` (the mod's: the page's one line that Claude waits in the terminal, #1350; its id, or `skipped: …`), `notice --done <id>` (`answered <id>`; exit 1 for no notice); `url --json` (`chat.ensure`'s `{url, state, why}`, exit 0: the mod's); `claim` exit 1: another session's; `reply --to <id>` (`user`: the user's thread; again for more; else what this turn took: `re`, `to`, #1042), `token add <name>` (prints it once), `token list`, `token revoke <name>`, `ended <id>… --by` (the mod's turn end) | The web chat (*The web chat*), on by default; `url` and `on` bring it up (`chat.ensure`); `on` refuses, the switch put back as it was, when something else answers the port (#690); `off` stops only a server `on` started. |
 | `wb try` | `--model <id>` (a GPU model's fragment will do; an API id never matches one), `--queue` (accepted, a no-op: the sample queues behind the GPU's holders as any start does, #1251, #1322), `--force` (passed to wb start: the sample waits for a model whose server isn't up yet, else exit 3 with wb start's can't-run refusal, whose `--force` advice wb try once rejected as an unknown argument, #1297) | A sample trial (#112): `workbench/try/project/` copied to `~/.local/share/workbench/try/<n>` (not the state dir, hidden from the lane, #164), started as `try-<n>` on `workbench/try/spec.md`, `--size trivial --trial` (so the trivial role's model, an API one when the user put it there, #1016) and `--no-sign`, set up by `wb init --no-sign` (a locked key failed it or hung it on a prompt, #1226), its test `sys.executable` (#530); Claude's hidden check `workbench/try/check.py <worktree>`; a refusal removes the copy (#161). An API `--model`: exit 3, `<id> is an API model: wb try runs on GPU models only`, before the copy (#1014). A sample on the trivial role's API model (task.json `via`/`role`, #1016) says so in wb start's model line (#1322: its own line went). |
 | `wb init <dir>` | `--no-sign` (its commits unsigned, whatever `commit.gpgsign` says; else signed as accept's, `UNLOCK` at once for a locked key, #1226) | git, a first commit, AGENTS.md → CLAUDE.md (#931; nothing while `gitops.under_way`), no hooks run (#1254). Refuses home or above, inside another repo (but a home repo nests, #684), a repo git refuses (`gitops.NotARepo`), no git identity, likely secrets or uncovered installed directories. |
 | `wb setup` | `--force` (only the web app's service unit link pointing elsewhere replaced, which without it is kept and used: wb's own links are replaced without it since #1322), `--no-service` (no service for the web app) | Links `~/.local/bin/wb` and `skills/workbench` (a link pointing elsewhere replaced, `ok <at> → <to> (was <old>)`, #1322; a real file or directory left, `BAD … is already there: left as it is`), removes a dead `skills/delegate` link (the mod runs `wb setup` when it finds only that), exit 1 when something is in the way, PATH advice (`cli.path_advice`), the web app's systemd or launchd service (`cli.install_service`, *The web chat*), the optimize when due, then `first run:` (`cli.first_run`, with the API keys line `cli.api_key_lines`); names no model (*Installing*). |
@@ -6858,7 +6823,7 @@ $WB_HOME (~/.local/state/workbench)
   imports/<slug>/                wb skill import's fetches, for Claude to read
   images/<YYYYmmdd-HHMMSS>/      wb image's candidates (unless --out), .json sidecars, engine.log
   audio/<YYYYmmdd-HHMMSS>/       wb audio's clips: .wav, .json sidecar, .png spectrogram, engine.log
-  chat/                          messages.jsonl receipts.jsonl asks.jsonl prefs.json listener.json claims.json switch.json ({on})
+  chat/                          messages.jsonl receipts.jsonl open.json listener.json claims.json switch.json ({on})
                                  serve.pid ({pid, port, start}: chat.ensure waits on it) ensure.lock serve.log port.json ({port, pid, start})
                                  away.json ({at, by}; 0 once the user types in the terminal) page.json ({at})
                                  audio/<batch>/ (wb chat listen: <n>.<ext>, audio.json; newest 20) uploads/<id>/ (<name> 0600, .meta.json) uploads.lock
@@ -7598,8 +7563,7 @@ hosted.json, renamed the Stats check's providers, #1286), WebKit as an iPhone 13
 and Chromium (`$CHROMIUM`, `/usr/bin/chromium`, else Playwright's) as a Pixel 7, then at a desktop's 1280×800
 (`DESKTOP`: the checks through Settings', then the shell's alone). The shell (`shell`, #1284): the bar at the foot
 on a phone and the rail on the desktop, the hash and Back, the Chat tab's badge, the bar hidden with the keyboard
-(a visual viewport made short by hand), the cards' styles kept out of the chat (a plan card's `<p>`
-and `<code>`, the intro's `<code>`), `window.WB`, and the gear's old checks from Settings and Stats (`goTo`);
+(a visual viewport made short by hand), the cards' styles kept out of the chat (the intro's `<code>`), `window.WB`, and the gear's old checks from Settings and Stats (`goTo`);
 then each view's own, `e2e_stats.mjs` and `e2e_settings.mjs` (`check(page, ctx)`, once per device). `e2e_stats.mjs` (#1285): a fixture
 results.jsonl's task count under This week, the labels in `statsLines`' order and none of the rows
 #1322 took (Streak, Last 30 days, Bests, Milestone, Questions, a score or estimate); `/api/top` opened on showing Stats with Live view on, let go on leaving it, never opened
@@ -7618,11 +7582,10 @@ group; a number's Enter and Off; `help`'s toast; the layout at the phone's width
 WebKit sends such a page's fetches past Playwright's routes. While the server answers that path 404, a stand-in
 answers from `settings.rows()` and `settings.apply()` on the run's `WB_HOME`, with #1280's shapes and statuses, so
 the click still runs the real wb. Sends land exactly once through
-outages, reloads and a SIGSTOP past the 40 s watchdog; cards, plans, settings, install over https, `/api/seen` and
-`/api/active` only while in use, notices, shot pairs, listen's shortlist, the keyboard, uploads, an agent's message
+outages, reloads and a SIGSTOP past the 40 s watchdog; settings (no away setting, its old endpoint 404), install over https, `/api/seen` and
+`/api/active` only while in use, the waiting line (one line, no buttons, no answer card, cleared once settled, #1350), shot pairs, listen's shortlist, the keyboard, uploads, an agent's message
 shown with its name and its reply through `/api/wait`, that reply named `Claude to <agent>` and
-never counted unread (#1128), its state without the user's, a dialog for it saying so on the
-card and in the push (#1042), a 25-task backlog's strip at most three lines on a phone, the queued counted apart
+never counted unread (#1128), its state without the user's, a 25-task backlog's strip at most three lines on a phone, the queued counted apart
 (#1097); and `sw.js` in a node `vm` (`swSays`) for a push's text, and for a notification's click (to the chat). Each wait is `until` on its condition
 (20 s by default), never a fixed sleep: a sleep is only a claim that something does not happen or a span the
 page's own clock must pass, as a different check failed on each slow CI runner (#1223). The server's thread is
@@ -8003,9 +7966,6 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   same commit (`tests/test_settings.py`), and a new setting is a row there, never a page or a pane of its own.
   **`wb settings set`'s rule** (on the user's clear ask and yes) → `skill/workbench/SKILL.md`. **`/api/top`'s events** (`top`, `down` `{why, retry}`) → the web app's
   Stats view, docs/chat-api.md.
-- **An agent's turn** (`mem.agentTurn`, `agentsFor`) → the `classic.PermissionRequest` hook, `askForArgs`, `wb chat ask
-  --for --here`, the ask's `for` (`makeAsk`'s `.ask-for`, `sw.js`); **an ask settled elsewhere** (`watchAsk`,
-  `askSettledHere`, `sameCall`, `withdrawAsk`) → `expired` by `interrupted`, the page's "settled in the terminal".
 - **The turn-end record** (`turns.jsonl`: the mod's `chatTurnEnd`, `wb chat ended`; its `by`, the mod's chat key, is
   listener.json's `session` and a reply's `turn_by`) → `chat.taken`, `chat.wait_state`, `wb chat reply`'s default `re`; the `[agent <name>] … [message <id>: …]` prompt → `chatPrompt`, `AGENT`, the
   `prompt.submit` guard, the /workbench skill's *Agents on the web chat*.
@@ -8013,12 +7973,13 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   task.json's) → the mod's `answersTo` and `listen` (whose a user's message is, #1096), `ELSEWHERE_NOTE` ↔ reference/driving.md.
 - **What makes the user away** (`chat/away.json`: `listen`, `back`, `termDialogDone`, `chat.active`) → `awayNow`,
   AWAY_NOTE, `#away-when`, *The web chat*.
-- **When a notice is settled** (`tool.call` `finally`, `turn.complete`, `wb chat notice --done`) → `chat.notice_done`,
-  the `answered` receipt (`chat.thread`, `chat.latest`), `metaFor`.
+- **When a notice is settled** (`tool.call` `finally`, `classic.ElicitationResult`, `turn.complete`, `wb chat notice
+  --done`) → `chat.notice_done`, the `answered` receipt (`chat.thread` leaves it out, `chat.latest`), the page's line.
+- **The waiting line's words** (`chat.WAITING`, `WAITING_GRANT`) → `e2e_chat.mjs`, the WebChat tests, reference/driving.md
+  and SKILL.md's *the web chat*; **the away refusals** (`AWAY_QUESTION`, `AWAY_PLAN`) → the mod test, the shared texts
+  once #1296's core exists (`texts.ts`), #1319's `execute.before`, reference/driving.md and SKILL.md; **a dialog kind** (`DIALOG_KIND`, `chat.KINDS`) → `wb chat notice --kind`.
 - **A message's `about`** (`{task, n, step, round}`, `{audio, n, name, path}`) → `listen`'s prefix, `aboutTag`,
   `aboutBody`, `/api/send`'s check.
-- **`wb chat ask|wait|answer`'s output** (`<id> <state>` last, `wait --json`) → `askOnChat`, `waitOnChat`.
-- **AskUserQuestion's or ExitPlanMode's input** → `askOnChat` (`--detail`), app.js's `makeAsk`.
 - **`$` in `register.tsx`** → only through top-level functions, or `claude plugin validate mod` fails.
 - **The Claude Code version verified** → `CLAUDE_CODE_VERSION` in `check.yml`, `MIN_CLAUDE_CODE` (raise it for a newer
   call), `register.test.tsx`'s `TESTED`; the floor → *The tests*.

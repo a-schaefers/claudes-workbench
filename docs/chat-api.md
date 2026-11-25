@@ -16,7 +16,7 @@ does the whole flow below with the standard library alone.
 - [The agent flow, end to end](#the-agent-flow-end-to-end)
 - [An agent's view](#an-agents-view)
 - [Endpoints](#endpoints)
-- [Rows: messages and asks](#rows-messages-and-asks)
+- [Rows: messages](#rows-messages)
 - [The stream's events](#the-streams-events)
 - [Versions](#versions)
 
@@ -37,15 +37,14 @@ does the whole flow below with the standard library alone.
   - **An agent's** (`wb chat token add <name>`, printed once and kept only as its sha256 in
     `chat-agents.json` beside the user's token, mode 0600; `<name>` is 1 to 32 of `a-z`, `0-9`
     and `-`). It can check health, send, upload, wait for replies, and read its own conversation
-    (*An agent's view*): never the user's messages, Claude Code's dialogs or the user's settings.
+    (*An agent's view*): never the user's messages or the user's settings.
     - It works on an allow-list: `GET /api/health`, `/api/wait`, `/api/state`, `/api/stream`,
       `/api/upload/<id>` and `/api/file/<id>`; `PUT /api/upload/<id>`; `POST /api/send`. Every
       other path and method is `403 {"error": "agent tokens can't …"}`: `use <path>` for most,
-      the older wording where there was one (`answer Claude Code's dialogs` for `/api/answer`,
-      `change the user's settings` for `/api/prefs`, `change notifications` for `/api/push`,
+      the older wording where there was one (`change notifications` for `/api/push`,
       `mark the user away` for `/api/active`, `mark what the user has seen` for `/api/seen`,
-      `read Claude Code's dialogs` for `/api/ask/<id>`, `read the user's notifications` for
-      `/api/latest`, `read screenshots` for `/api/shot`, `read audio takes` for `/api/audio`). An
+      `read the user's notifications` for `/api/latest`, `read screenshots` for `/api/shot`,
+      `read audio takes` for `/api/audio`). An
       endpoint added later is the user's alone unless this list names it.
     - It works only from this machine: a request with an agent token from any other machine
       (a tailnet or LAN peer, when the chat is bound there for the user's phone) is ``403
@@ -117,17 +116,15 @@ curl -s "${auth[@]}" "$CLAUDE_WB_URL/api/wait?after=1795436900301-a1b2c3&timeout
   returned) has ended; another Claude Code session's turn never counts. Claude may still report later, after work it handed off: its reply says
   so, and `until=reply` waits for that report.
 - **`waiting_on_user: true`**: Claude is paused on the user (a permission, a plan, a question, or
-  a consent it asked in words). While Claude works on your request, Claude Code's dialogs go to
-  the user on the web page, with a push, marked as being for your agent, and stay in the
-  terminal: whichever the user answers first settles it. Only the user can answer it; your token
-  can't. Keep waiting.
+  a consent it asked in words). Claude Code's dialogs are answered in its terminal, by the user
+  alone; the web page shows a line while one waits. Keep waiting.
 - **Follow-ups** are new messages: send again, and wait on the new id.
 
 ## An agent's view
 
 An agent's token reads only its own conversation:
 - **`/api/state` and `/api/stream`** carry `{api, messages, listener, uploads, expire, now}`, and
-  `messages` holds only its own messages and Claude's rows whose `to` names it. No `asks`, `prefs`,
+  `messages` holds only its own messages and Claude's rows whose `to` names it. No
   `push`, `savings`, `build` or `tasks`: those are the user's. `/api/send`'s `state` is the same view.
 - **`/api/wait`** on an id that is neither its own message nor a reply to it is `404 {"error":
   "no such message"}`.
@@ -135,8 +132,7 @@ An agent's token reads only its own conversation:
   attached to a row in its view; any other id is 404, as if there were none. A `PUT` under an id
   someone else stored is `409 {"error": "that upload id is another sender's"}`, and a send can
   attach only its own uploads.
-- **403:** every path outside the allow-list (*Base URL and auth*): `/api/latest`,
-  `/api/ask/<id>`, `/api/shot`, `/api/audio`, the admin endpoints (`/api/settings`, `/api/stats`,
+- **403:** every path outside the allow-list (*Base URL and auth*): `/api/latest`, `/api/shot`, `/api/audio`, the admin endpoints (`/api/settings`, `/api/stats`,
   `/api/top`), and the user's `POST`s.
 - **`/api/health`** and the `listener` are as for the user.
 
@@ -154,12 +150,9 @@ mode, with the web chat on, is listening. An agent's first call.
 The whole state the page draws (an agent's token gets its own view: *An agent's view*):
 - `api`: this API's version (1).
 - `messages`: the thread's last 200 rows (*Rows*), each of the user's and agents' with
-  `received` (Claude's receipt, or null) and `expired: true` once unread past `expire`.
-- `asks`: Claude Code's dialogs for the user (while they are away, or while Claude works on an
-  agent's request): the newest 20 and every open one (*Rows*). A
-  settled plan's text is cut at 1,200 characters with `detail.cut` (the whole is `/api/ask/<id>`).
+  `received` (Claude's receipt, or null) and `expired: true` once unread past `expire`. A notice
+  (a dialog waiting in the terminal) is left out once it settles.
 - `listener`: the listening session `{session, cwd, pid, start, machine?, parent?, busy}`, or null.
-- `prefs`: `{away: "ask"|"allow"}`.
 - `push`: `{key: the VAPID public key or null, test: the last test push's time or null}`.
 - `savings`: the week's `wb savings` totals and `score`, and `api`: the week's API tasks apart
   (`tasks`, `cost` in dollars, `unknown`, `plan`, `trials`, `claude`, `self_est`, `by_provider`,
@@ -191,9 +184,9 @@ A long poll for Claude's replies after the message `after` (a message's or a rep
     or, for the user's token, `to` names `"user"` or is absent.
   - `done`: a turn has ended since the newest reply returned (one of the session that wrote it:
     its `turn_by`), or, with none, since `after` (for a message to Claude: the turn that took it).
-  - `waiting_on_user`: Claude is paused on the user: one of Claude Code's dialogs is open in the
-    chat, or one in the terminal that the phone was told of. The work is waiting on the human,
-    not stuck: keep waiting.
+  - `waiting_on_user`: Claude is paused on the user: one of Claude Code's dialogs waits in the
+    terminal, and the phone was told of it. The work is waiting on the human, not stuck: keep
+    waiting.
 - Errors: 400 for a bad `after`, `timeout` or `until`; `404 {"error": "no such message"}` for an
   id not in the thread's recent part (the last 4 MiB), or, for an agent, not in its view; `503`
   when 16 waits are open already.
@@ -240,12 +233,9 @@ The upload's bytes: a PNG, JPEG, GIF, WebP or AVIF image as itself, anything els
 `application/octet-stream` attachment. Cached for a year (an id's bytes never change). 404 `no
 such file` (for an agent, also when it isn't its own).
 
-### `GET /api/ask/<id>` (user only)
-One of Claude Code's dialogs whole, answered or not: `{"ask": {...}}`, else 404 `no such prompt`.
-
 ### `GET /api/latest` (user only)
-What a push notification shows: `{now, asks: [the newest open dialog, a plan without its text],
-messages: [Claude's last message for the user, or notice], push: {test}}`. A reply only to
+What a push notification shows: `{now, messages: [Claude's last message for the user, or an
+open notice], push: {test}}`. A reply only to
 agents is never pushed.
 
 ### `GET /api/shot?task=<task>&n=<n>&side=base|candidate` (user only)
@@ -254,15 +244,6 @@ else 404 `no such screenshot`.
 
 ### `GET /api/audio?batch=<batch>&n=<n>` (user only)
 One take of a `wb chat listen` shortlist, as its audio type (at most 64 MiB). 404 `no such take`.
-
-### `POST /api/answer` (user only)
-Answer a dialog: `{id, answer: "allow"|"deny", note?: ≤ 2000 characters, answers?: {question:
-answer} (≤ 4, a question's only)}` → `{"ask": the answer that stands, "state": {...}}`. 400 for a
-bad body or answers that don't fit the question; 404 `no such prompt`.
-
-### `POST /api/prefs` (user only)
-`{away: "ask"|"allow"}` (allow: Claude's permission prompts are allowed while the user is away) →
-`{"state": {...}}`. 400 otherwise.
 
 ### `POST /api/active` (user only)
 `{}`: a page is in use on this device, so the user is away from the terminal while the chat is
@@ -329,11 +310,13 @@ Any other `/api/` method or path wants the token too (401 without it, 403 for an
 is then `404 {"error": "not found"}`. Every `POST` takes JSON as above: a bad `Content-Length` is
 400 `bad length`, an unparsable body 400 `bad json`.
 
-## Rows: messages and asks
+## Rows: messages
 
 A **message** (`messages`, `replies`, `message`):
 - `id` (`<ms>-<6 hex>`), `ts` (seconds), `text`.
-- `from`: `"user"`, `"claude"`, `"notice"` (a dialog waits in the terminal), or an agent's name
+- `from`: `"user"`, `"claude"`, `"notice"` (a dialog waits in the terminal: `text` the waiting line,
+  `tool`, `kind`: `permission`, `plan`, `question` or `elicitation`, `what?`; no buttons, since
+  Claude Code's dialogs are answered in the terminal), or an agent's name
   with `role: "agent"`.
 - On a message to Claude: `cid?`, `files?: [{id, name, size, type, path}]`, `about?`, and in the
   state `received: {id, ts, by, how: "now"|"into"|"queued"} | null`, `expired?` (`into`: an
@@ -350,17 +333,12 @@ A **message** (`messages`, `replies`, `message`):
   it (the Claude Code session that wrote it, so the user's answer goes back to that session),
   `turn_by?` (on the listening session's reply: whose turn's end makes a wait on it `done`).
 
-An **ask** (`asks`, `/api/ask/<id>`): `{id: "ask-…", ts, tool, text, kind:
-"permission"|"plan"|"question", detail?, for?: [agent names], answer: null|"allow"|"deny"|"expired",
-answered?, by?, note?, answers?, stale?}`. `for`: Claude was working on those agents' request
-(the page says "for <name>"); `by: "interrupted"` on an expired one: settled in the terminal.
-
 ## The stream's events
 
 - `event: state`, `data: <the whole state, as GET /api/state>`: first, on every connection (so a
   reconnect is a resync).
-- `event: patch`, `data: {...}`: what changed since: `messages` and `asks` as `{put: [rows new or
-  changed], drop: [ids gone]}` (each only when it changed), every other field of the state whole,
+- `event: patch`, `data: {...}`: what changed since: `messages` as `{put: [rows new or
+  changed], drop: [ids gone]}` (only when it changed), every other field of the state whole,
   and `now`. Merge rows by `id`.
 - A blank line (an empty event: nothing to read) 50 ms after each event, on its own, so a browser
   that holds a body's last bytes until more come (WebKit, past 8 KB) hands the event over.
@@ -372,4 +350,5 @@ answered?, by?, note?, answers?, stale?}`. `for`: Claude was working on those ag
 bumps it; adding a field or an endpoint doesn't (the admin endpoints, `/api/settings`,
 `/api/stats` and `/api/top`, came in 2.0 under version 1).
 - **1** (2026-11-23): agent tokens, `/api/health`, `/api/wait`, `role`/`re`/`to` on rows, an
-  agent's view of its own conversation, `for` on asks.
+  agent's view of its own conversation. Before 2.0 shipped, the user's dialog cards and their
+  endpoints left it (#1350): Claude Code's dialogs are answered in the terminal.

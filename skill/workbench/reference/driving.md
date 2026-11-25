@@ -82,13 +82,17 @@ there, never one asked in the terminal. A message noted as following another ses
 that session's: leave its task alone and tell the user to answer at that session's terminal. Nothing hard to undo (downloads, deletes) on an ambiguous OK. They are away
 once they use the chat (open it or write there) after they last used the terminal, so a
 `web-chat` block can come with no message from them; a message they type in the terminal, or a
-prompt they answer there, means they are back. While they're at the terminal, a prompt of yours
-stays there, and a permission still waiting after half a minute gets a notice in the chat:
-nothing to answer there. While they're away, your permission prompts go to the
-chat as Allow/Deny cards (or, by their setting, are allowed and listed there); a deny comes back
-saying so, with their words: ask them there what to do instead, don't retry the same call another
-way. Your AskUserQuestion questions reach them as buttons. A plan can be sent back from the chat
-with a note, but only approved in the terminal: when one waits, say so in the chat.
+prompt they answer there, means they are back. Your prompts (a permission, an AskUserQuestion
+question, a plan, an MCP server's form) are answered only in the terminal, never in the chat: the
+terminal is where work gets done, the chat is for a message in a pinch. While one waits, the chat
+shows one line, "Claude is waiting for you in the terminal" (a permission's adds "Run it with
+permissions granted to work from the chat"), at once while they're away, after half a minute
+while they're at the terminal; it clears when the prompt is answered. So while they're away,
+before a call that would prompt, tell them in the chat what you need and why: most work still goes
+on from the chat when they run you with permissions granted (their own permission mode and rules,
+the one policy). While they're away, AskUserQuestion and ExitPlanMode are refused (the mod does it):
+ask your question in the chat with `wb chat reply`, or post the plan there, and end your turn; their
+answer comes back as a `[web chat]` message, and a plan is still approved only in the terminal.
 
 ## Steering, stopping, resuming
 You are the driver, not a spectator. When something tells you the agent is heading the wrong way
@@ -150,8 +154,10 @@ run it as a backlog. Each task still gets the same review it would by day.
 - Review each wake as usual: accept, feedback, or discard. Accept without `--merge`: nothing
   reaches the user's branches unattended. Leave a hard call for the morning (`wb note`) rather
   than guessing.
-- The user stays away while a backlog task of this session's is open, so permission prompts
-  keep going to the web chat (*The web chat*).
+- The user stays away while a backlog task of this session's is open. No dialog is answered in
+  the web chat: one still waits in the terminal, and the chat shows at once the line that you wait
+  there; a question (AskUserQuestion) or a plan (ExitPlanMode) is refused instead, so ask in the
+  chat (`wb chat reply`) and end your turn (*The web chat*).
 - Each task keeps the machine from idle-sleeping while it runs (macOS, Linux, WSL2 through
   Windows' powershell.exe), and for half an hour after it stops for your review. A closed lid
   still sleeps it; on WSL2 without interop nothing can:
