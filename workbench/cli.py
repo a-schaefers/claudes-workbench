@@ -923,6 +923,16 @@ def _claude_md_at(repo: Path, ref: str, under: str = "") -> str | None:
     return next((p for p in PROJECT_MEMORY if _has_file(repo, ref, f"{under}/{p}".lstrip("/"))), None)
 
 
+def _agents_md_at(repo: Path, ref: str, under: str = "") -> bool:
+    """Whether an AGENTS.md (a file, not a link) is committed at ``ref`` in directory ``under``:
+    the OpenCode and Codex convention, which the layer hands the agent (context.agents_files).
+    A repo with only that was refused as one whose agent "would start blind", and a package with
+    only its own ran at the root (#1394, 2026-11-25). A link counts only through what it names."""
+    out = subprocess.run(["git", "-C", str(repo), "ls-tree", ref, "--", f"{under}/AGENTS.md".lstrip("/")],
+                         capture_output=True, text=True).stdout
+    return out.startswith(("100644 ", "100755 "))
+
+
 def _package(repo: Path, given: Path, base: str) -> str | None:
     """The nearest directory from ``given`` up to (not including) the repo's top with a CLAUDE.md
     of its own at ``base``: a monorepo's package, where the agent, the setup and the tests then
@@ -938,7 +948,8 @@ def _package(repo: Path, given: Path, base: str) -> str | None:
         # not a `.claude` directory: its CLAUDE.md is its parent's .claude/CLAUDE.md, and from
         # .claude/skills/x the walk took the repo's own for a package at .claude (review of #606)
         if parts[n - 1] != ".claude" and (_claude_md_at(repo, base, sub := "/".join(parts[:n]))
-                                          or _local_package_md(repo, sub)):
+                                          or _local_package_md(repo, sub)
+                                          or _agents_md_at(repo, base, sub)):  # #1394
             return sub
     return None
 
@@ -951,12 +962,18 @@ def _local_package_md(repo: Path, sub: str) -> bool:
 
 
 def _need_claude_md(repo: Path, base: str, a, sub: str | None = None) -> None:
-    if sub and not _claude_md_at(repo, base, sub):  # a package's own, kept local (#785)
-        print(f"note: {sub}'s CLAUDE.md is gitignored: the agent gets your checkout's copy")
+    if sub and not _claude_md_at(repo, base, sub):
+        if _local_package_md(repo, sub):  # a package's own, kept local (#785)
+            print(f"note: {sub}'s CLAUDE.md is gitignored: the agent gets your checkout's copy")
+        else:  # its AGENTS.md alone (#1394)
+            print(f"note: {sub} has AGENTS.md and no CLAUDE.md: the agent gets it")
     if a.no_claude_md or sub:  # a package's own CLAUDE.md counts
         return
     if not _claude_md_at(repo, base) and (md := _local_claude_md(repo)):
         print(f"note: {md} is gitignored: the agent gets your checkout's copy")
+    elif not _claude_md_at(repo, base) and _agents_md_at(repo, base):  # #1394
+        print(f"note: AGENTS.md and no CLAUDE.md: the agent gets it; for Claude Code, wb init "
+              f"{shlex.quote(str(repo))} moves it to CLAUDE.md and links it back")
     elif not _claude_md_at(repo, base):
         die(f"{repo} has no CLAUDE.md (or .claude/CLAUDE.md) at {base}: the agent would start "
             "blind. Write it (what the project is, how to build and test it, its conventions), "

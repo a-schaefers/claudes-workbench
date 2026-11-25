@@ -24383,6 +24383,37 @@ class Projects(Base):
         run_wb("start", "t-ok", "--spec", str(self.spec), "--repo", str(self.repo), "--no-claude-md")
         self.assertTrue(store.Task("t-ok").exists)
 
+    def test_a_repo_whose_instructions_are_a_committed_agents_md_starts_and_its_agent_gets_it(self):
+        # #1394 (2026-11-25): OpenCode's and Codex's convention was refused as an agent that
+        # "would start blind", though the layer hands it AGENTS.md
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        g("mv", "CLAUDE.md", "AGENTS.md")
+        g("commit", "-qm", "the OpenCode way")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = run_wb("start", "t-ag", "--spec", str(self.spec), "--repo", str(self.repo), "--model", "mimo")
+        self.assertIn("note: AGENTS.md and no CLAUDE.md: the agent gets it; for Claude Code, wb init", out)
+        wait_phase("t-ag", {"review"})
+        task = store.Task("t-ag")
+        self.assertIn(task.worktree / "AGENTS.md", context.instruction_files(task)[0])
+
+    def test_a_package_with_only_its_own_agents_md_is_the_tasks_package(self):
+        # #1394 (2026-11-25): only a CLAUDE.md made a package, so from packages/app with only an
+        # AGENTS.md the agent, the setup and the tests ran at the root
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        app = self.repo / "packages" / "app"
+        app.mkdir(parents=True)
+        (app / "AGENTS.md").write_text("# app\nThe app package.\n")
+        g("add", "-A")
+        g("commit", "-qm", "a package with its AGENTS.md")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = run_wb("start", "t-pag", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo")
+        self.assertIn("package: packages/app", out)
+        self.assertIn("note: packages/app has AGENTS.md and no CLAUDE.md: the agent gets it", out)
+        wait_phase("t-pag", {"review"})
+        task = store.Task("t-pag")
+        self.assertEqual(task.spec["subdir"], "packages/app")
+        self.assertIn(task.worktree / "packages" / "app" / "AGENTS.md", context.instruction_files(task)[0])
+
     def refused(self, *argv) -> str:
         err = io.StringIO()
         with self.assertRaises(SystemExit), redirect_stderr(err):

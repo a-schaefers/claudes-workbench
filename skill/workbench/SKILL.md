@@ -139,7 +139,8 @@ it that way; the agents never write either.
   the plan and the next step in your own notes. An agent that loses its task takes up whatever
   CLAUDE.md says is next (seen: a compaction summary that recounted CLAUDE.md, and the agent
   built its "Next:" line instead of its spec). `wb start` refuses a repo without one (CLAUDE.md or
-  `.claude/CLAUDE.md`; `--no-claude-md` only for throwaway repos). It also refuses an unknown
+  `.claude/CLAUDE.md`; a committed AGENTS.md alone passes with a note: run `wb init` on it rather
+  than writing a second file; `--no-claude-md` only for throwaway repos). It also refuses an unknown
   `--base` and a repo with no git identity for the commits: fix those, don't work around them.
 - **Submodules** are filled read-only in the agent's worktree (and the scratch checkouts), at
   the commit the base records, so a test command needs no `git submodule update --init` (one
