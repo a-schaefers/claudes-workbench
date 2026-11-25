@@ -2244,9 +2244,7 @@ deliberately hostile process.
 `PYTHONPATH` (`python_path`, below) and credentials: `SECRET_ENV` (names holding `TOKEN`,
 `SECRET`, `PASSW`, `CREDENTIAL`, `API_KEY`, `WEBHOOK` and the like; the `ANTHROPIC_`, `CLAUDE_`,
 `GH_`, `GITHUB_`, `AWS_`, `GOOGLE_`, `OPENAI_`, `HF_`… prefixes; the SSH and GPG agents and the
-D-Bus addresses; an OpenTelemetry collector's headers, `OTEL_EXPORTER_OTLP_HEADERS` and its
-`_TRACES_`/`_LOGS_`/`_METRICS_` forms, which held a Honeycomb key or a Bearer token for every agent
-whose user had Claude Code's OTel on, #1205) and any value that is a URL with a password (`USERINFO`), except `ENV_KEEP`
+D-Bus addresses) and any value that is a URL with a password (`USERINFO`), except `ENV_KEEP`
 (configuration under those prefixes: `HF_HOME`, `AWS_REGION`…). `commands.json` `"env": [names]` passes a needed one through (a
 provider's key, `DATABASE_URL`). A proxy with a password is one too (#380: installs and tests
 failed with network errors that read as the project's): `wb start` notes each dropped `*_proxy`
@@ -2310,24 +2308,6 @@ of it. The tests' environment is `agent_env` too, `METADATA_OFF` and `REMOTE_CAC
 they run the agent's code. Nothing secret goes in OpenCode's environment (`/proc/<pid>/environ`
 is readable in the lane): a local server's stored key goes in the 0600 layer (*Found, loaded,
 chosen*).
-
-*OpenTelemetry* (#1205; OpenCode's own export, checked on 2.3.2, so wb has no exporter of its own
-and no setting). OpenCode exports whenever `OTEL_EXPORTER_OTLP_ENDPOINT` is in its environment:
-OTLP/HTTP JSON, its traces to `<endpoint>/v1/traces` and its log records to `/v1/logs`, with
-`OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_RESOURCE_ATTRIBUTES` merged into each record's resource (its
-config key `experimental.openTelemetry` is unsupported: only the environment switches it). Every
-`OTEL_*` the user set reaches it (the endpoint Claude Code's OTel or a local collector uses is the
-switch) but the headers, which `SECRET_ENV` drops (above): an authenticated collector's is named in
-`commands.json` `"env"`, which hands it to the agent's shell too; the usual local collector needs
-none. With an endpoint set, `runner.otel_env` (in `opencode_env`, the round's: not the tests')
-sets `OTEL_RESOURCE_ATTRIBUTES` to the user's entries then `wb.task`, `wb.run` (`WB_RUN`),
-`wb.round`, `wb.role` (task.json `role`, when set) and `wb.side` (`gpu` or `api`, `api_task`),
-each percent-encoded (`otel_resource`): OpenCode decodes each `key=value` with
-`decodeURIComponent` and drops the whole variable on one entry it can't read, so a user's entry
-it couldn't read (no key, a lone `%`, bytes that aren't UTF-8, raw or escaped) is left out rather than every tag
-lost; wb's come last and win a key both name. No endpoint, nothing is added. OpenCode's
-`cli starting` log record carries its argv, the round's prompt in it: a collector is a place the
-spec reaches, as it was before #1205 for anyone with an endpoint set.
 
 *The user's Python environment* (`context.python_env`, for the agent, setup, tests, base check and
 `wb verify`). The checkout's own active env made `import mypkg` load the checkout, so tests passed
@@ -7603,9 +7583,6 @@ runner on real OpenCode (`wb start --model cap`): argv, `run --format json` even
 an `--image` reaching the model as a `data:image/png;base64,` part through `run -f`, once in a continued session's
 requests (#1199; `ImageInput` has the rest on the fake: the checks, the copies, which round sends which)
 (CLAUDE.md's *OpenCode quirks* points here). They are the only checks of the quirks, interop and lane: a skip is not a pass.
-`OpenTelemetry`'s `test_real_opencode_*` is one too (#1205): OpenCode run with `opencode_env` and a
-collector's endpoint posts `/v1/logs` and `/v1/traces` there, every resource carrying the user's
-attribute decoded and wb's tags, no dropped header, the prompt in a log record.
 `ApiThinking`'s `test_real_opencode_*` is one too (#1018): a `wb-off` body variant and the catalog's `none` reach a DeepSeek-shaped server as `thinking: {type: disabled}` in the agent's request, and the npm provider's V1 `wb-off`.
 
 **The browser test** (`e2e_chat.mjs`): the real `bin/wb chat serve` on 13371 (`WB_E2E_PORT`), WebKit as an iPhone 13
@@ -7963,9 +7940,6 @@ doc needs its own `!/` line).
   `opencode/` (OpenCode's own home, read by wb only through `opencode session export`/`list` run in the task's lane,
   `transcript.stores`, parsed as data), checked by the runner (`ask_mcp.relay`): nothing the agent writes steers code
   outside its lane.
-- **The OTel tags** (`runner.otel_env`, `otel_resource`) ↔ OpenCode's `resourceAttributes` parser
-  (`decodeURIComponent` per side, the whole variable dropped on one bad entry) and its switch
-  (`OTEL_EXPORTER_OTLP_ENDPOINT` alone) → `OpenTelemetry`'s real-OpenCode test.
 - **Where the agent's OpenCode keeps its sessions** (`context.opencode_home_env`) → `runner.opencode_env` (the round),
   `transcript.stores` (`export`, `find_session`, and through them `finished_export`, `wb watch`, `context_state`,
   `measure_speed`, `last_words`), the fake's `<db>.sessions`, `RealOpenCodeRun`. A variable it moves → `runner.SHIM_RESTORES`,
