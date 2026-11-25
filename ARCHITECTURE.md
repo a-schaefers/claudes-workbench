@@ -5977,7 +5977,9 @@ hears the thread through `#say` (`role=log`, `.sr-only`), outside it: each new m
 whole (`say`, after the reveal), and "Claude is on it" once; the thread was the live region, and every update read
 each row's time and `copy` out again, a reply in its reveal's fragments (#1408). A row's `.meta` is made anew only
 when its words change (`dataset.said`), so its buttons keep the focus (#1409). The message box, focused, has a
-2 px ring, the accent toward `--fg` (3:1 on the page in light; the border's tint alone was 1.6:1, #1411). Use counts (`reportActive`, #959): on screen or a
+2 px ring, the accent toward `--fg` (3:1 on the page in light; the border's tint alone was 1.6:1, #1411). Claude's words are built as DOM, never HTML (`rich`): code fences,
+`code`, `**bold**`, links, and in each block every run of bullet lines a list, every run of other lines a paragraph
+(a lead-in line, then bullets with no blank line between, was one paragraph of '- ' lines, #1416). Use counts (`reportActive`, #959): on screen or a
 `pointerdown`/`keydown`, only while `!document.hidden` and `document.hasFocus()`, on the Chat view
 (and on switching to it; never a press on `#tabbar`, #1374), at most every
 `ACTIVE_MS` 30 s, never retried on a timer (#959 review). Attachments: chips (`drawTray`) in
@@ -7788,7 +7790,8 @@ outages, reloads and a SIGSTOP past the 40 s watchdog; settings (no away setting
 `/api/active` only while in use and on the Chat view (none from a click in Settings or Stats, #1374), the header's
 `computer unreachable` while the server is down, `listening` once it is back (#1415), the thread
 in no live region (a presence change re-adds no row's line, and a focused `copy` keeps the focus; a reply said once,
-whole, in `#say`, #1408, #1409), the message box's focus ring at 3:1 on the page (#1411), the waiting line (one line, no buttons, no answer card, cleared once settled, #1350), shot pairs, listen's shortlist, the keyboard, uploads (an upload check that never answers given up, #1390), an agent's message
+whole, in `#say`, #1408, #1409), the message box's focus ring at 3:1 on the page (#1411), a lead-in line and its bullets as a paragraph and a list
+(#1416), the waiting line (one line, no buttons, no answer card, cleared once settled, #1350), shot pairs, listen's shortlist, the keyboard, uploads (an upload check that never answers given up, #1390), an agent's message
 shown with its name and its reply through `/api/wait`, that reply named `Claude to <agent>` and
 never counted unread (#1128), its state without the user's, a 25-task backlog's strip at most three lines on a phone, the queued counted apart
 (#1097); and `sw.js` in a node `vm` (`swSays`) for a push's text, and for a notification's click (to the chat). Each wait is `until` on its condition

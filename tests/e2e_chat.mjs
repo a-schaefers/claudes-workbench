@@ -299,6 +299,16 @@ async function run(engine, device) {
     await page.evaluate(() => document.getElementById('input').blur())
     if (!got.visible || got.ratio < 3) throw new Error(JSON.stringify(got))
   })
+  await check("a reply's lead-in line, its bullets with no blank line between and a line after them show as a paragraph, a list and a paragraph (#1416)", async () => {
+    // #1416 (2026-11-25): a block was a list only when every line was a bullet, so Claude's usual
+    // lead-in and bullets showed as one paragraph of '- ' lines
+    wb('chat', 'reply', '--text', 'Two tasks done, one failed:\n- **config-loader** waits\n- **parser-fix** failed\nBoth wait for you.')
+    const bubble = page.locator('.row.claude .bubble').last()
+    await until(async () => (await bubble.textContent()).includes('Both wait for you.') && !(await bubble.getAttribute('class')).includes('flowing'))
+    const got = await bubble.evaluate(b => ({ kids: [...b.children].map(c => c.tagName).join(), items: [...b.querySelectorAll('li')].map(l => l.textContent),
+      dashes: [...b.querySelectorAll('p')].some(p => /(^|\n)- /.test(p.innerText)) }))
+    if (got.kids !== 'P,UL,P' || got.items.join('|') !== 'config-loader waits|parser-fix failed' || got.dashes) throw new Error(JSON.stringify(got))
+  })
   // the shell's views (#1284): a tap on the nav (the rail on a desktop), then the body shows it
   const goTo = async name => {
     await page.click(`#tabbar .tab[data-view="${name}"]`)

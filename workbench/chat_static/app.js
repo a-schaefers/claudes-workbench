@@ -155,16 +155,25 @@
       if (n % 2) { const pre = document.createElement('pre'), c = document.createElement('code'); c.textContent = part.replace(/\n$/, ''); pre.append(c); el.append(pre); return }
       for (const block of part.split(/\n{2,}/)) {
         if (!block.trim()) continue
+        // each run of bullet lines a list, each run of others a paragraph: a block was a list only
+        // when every line was a bullet, so Claude's usual lead-in line, then its bullets with no
+        // blank line between, showed as one paragraph of '- ' lines (#1416, 2026-11-25)
         const lines = block.split('\n')
         const bullet = /^\s*(?:[-*•]|\d+[.)])\s+/
-        if (lines.every(l => bullet.test(l))) {
-          const list = document.createElement(/^\s*\d/.test(lines[0]) ? 'ol' : 'ul')
-          for (const l of lines) { const li = document.createElement('li'); inline(li, l.replace(bullet, '')); list.append(li) }
-          el.append(list)
-        } else {
-          const p = document.createElement('p')
-          lines.forEach((l, j) => { if (j) p.append(document.createElement('br')); inline(p, l) })
-          el.append(p)
+        for (let i = 0; i < lines.length;) {
+          const listed = bullet.test(lines[i])
+          let j = i
+          while (j < lines.length && bullet.test(lines[j]) === listed) j++
+          const run = lines.slice(i, j); i = j
+          if (listed) {
+            const list = document.createElement(/^\s*\d/.test(run[0]) ? 'ol' : 'ul')
+            for (const l of run) { const li = document.createElement('li'); inline(li, l.replace(bullet, '')); list.append(li) }
+            el.append(list)
+          } else {
+            const p = document.createElement('p')
+            run.forEach((l, k) => { if (k) p.append(document.createElement('br')); inline(p, l) })
+            el.append(p)
+          }
         }
       }
     })
