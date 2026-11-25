@@ -7899,8 +7899,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--thinking", choices=routes.THINKING, help="the role's thinking (off by default)")
     s.add_argument("--order", metavar="NAME[,NAME]", help="an OpenRouter role's backends, which every "
                    "request goes to alone (the model's Providers tab on openrouter.ai): the user's choice")
-    s.add_argument("--day-usd", type=float, metavar="N", help="the day cap in dollars (asked when "
-                   f"the first role goes to API; suggest {routes.DAY_USD_SUGGEST})")
+    s.add_argument("--day-usd", type=float, metavar="N", help="the day cap in dollars ($"
+                   f"{routes.DAY_USD_SUGGEST:g} when the first role goes to API, unless set)")
     s.add_argument("--json", action="store_true", help="show: the roles as JSON, each API model's "
                    "status; --dry-run: the change, whether it needs the dialog, and its approval")
     s.add_argument("--dry-run", action="store_true", help="print the change line and write nothing "

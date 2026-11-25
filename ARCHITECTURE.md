@@ -4214,7 +4214,7 @@ the GPU (queued) for a role with an API model, no `--model` asked for and
 Agents not GPU (`routes.busy_api`) starts on the role's API model instead (`cli._busy_api`), and says
 `GPU busy: on the role's API model, as you set` (`routes.BUSY_LINE`) under its model line and in
 task.json's `route` (`busy: true`, `routes.busy_routed`, with an OpenRouter role's `order` as
-`routes.resolve`'s). A role with no API model queues or exits 4
+`routes.resolve`'s). A role with no API model queues
 as before; one whose API model can't take it now (not in the catalog, no key, its provider's slots
 full, a repo or task kept local, a standing commands.json `copy`/`siblings` the command line
 doesn't name, `cli._standing_gap`, the day cap reached, said without an API start's advice) does too, after `note: the GPU is busy, and the <role>

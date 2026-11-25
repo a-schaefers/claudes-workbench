@@ -3283,7 +3283,7 @@ async function roleRows(kit: Row, $: any, view: WbPane, role: PaneRoles) {
   ]
   const cap = [
     <kit.Input key="cap" label="▸ API day cap" value={r.day_usd != null ? String(r.day_usd) : ''}
-      placeholder="not set (needed before an API role; $5 suggested)" submitLabel="set" onSubmit={(v: string) => { void setCap($, v) }} />,
+      placeholder="not set: $5 when the first role goes to API" submitLabel="set" onSubmit={(v: string) => { void setCap($, v) }} />,
   ]
   const gpu: any[] = []
   if (!m) gpu.push(dim('gpu-why', OLDER_WB))
