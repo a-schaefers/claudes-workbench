@@ -41495,7 +41495,9 @@ class RateLimits(Base):
 
     def test_the_upstream_body_of_a_429_or_402_never_reaches_the_task_files(self):
         task = self.api_task("t-leak", "api", "--silence-timeout", "30")
-        self.up.rate_until, self.up.after = time.monotonic() + 2, "1"
+        # 429s until the thread below turns them into 402s: a 2 s window ran out first on a slow
+        # macOS runner, a request went through and the task reached review (the 2.1 nightly, 2026-11-25)
+        self.up.rate_until, self.up.after = float("inf"), "1"
         self.up.body = f"Rate limited for key {self.CANARY}"
         self.keyhole(task, hold=0)
         os.environ["FAKE_RETRY_EVERY"] = "1"
