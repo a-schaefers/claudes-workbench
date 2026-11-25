@@ -1036,6 +1036,25 @@ def pending_steer(task: store.Task) -> list[dict]:
     return rows[task.status.get("steer_taken", 0):]
 
 
+# What a smaller step's note says first (wb steer --step, #95), and what the runner knows it by.
+STEP_NOTE = ("A smaller step: do only this now, then stop and report; the rest of the task waits "
+             "for the next step.\n\n")
+# Why a round after a smaller step's note gets no auto-fix and no self-review: the acceptance
+# command still tests the whole task, so each auto-fix round told an agent that did only the part
+# "the bug is in this change", sending it on to the rest Claude said should wait, then to review
+# as auto-fix 2/2, tests FAIL (#1300, bar loop round 8, 2026-11-24). Not `THEN_FEEDBACK`'s words:
+# the feedback after it carries the step on, not the environment.
+STEP_SKIP = ("a smaller step (wb steer --step): the acceptance command may test the whole task, "
+             "which waits for the next step; review the part done and send the rest with wb "
+             "feedback (no review round counted)")
+
+
+def step_noted(notes: list[dict]) -> dict:
+    """Status for ``notes`` as they are delivered: `step_note` when one is a smaller step's
+    (STEP_NOTE), which holds until Claude's next wb feedback or wb next (#1300)."""
+    return {"step_note": True} if any(r.get("text", "").startswith(STEP_NOTE) for r in notes) else {}
+
+
 def steer_prompt(notes: list[dict], interrupted: bool) -> str:
     body = "\n\n".join(r["text"].strip() for r in notes)
     if interrupted:
@@ -5747,8 +5766,10 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                     return
                 continue
             text = summary_text(task, n, rnd, tests)
-            if skip := not_the_code(task, tests):  # first: what Claude must do about it
-                text = f"auto-fix skipped: {skip}\n" + text
+            # a failure after a smaller step's note is no bug in the part it did (#1300)
+            step = task.status.get("step_note")
+            if skip := not_the_code(task, tests) or (STEP_SKIP if step and tests and not tests["ok"] else ""):
+                text = f"auto-fix skipped: {skip}\n" + text  # first: what Claude must do about it
             if pending_steer(task):  # a note that came in while the report was written
                 _steer_round(task, n, False)
                 if not _go_on(task, n, "Claude's note"):
@@ -5771,8 +5792,8 @@ def _drive(task: store.Task, m: models.Model, say) -> None:
                 # of the knob, which a test-less one could turn off (tuning.acted, #816)
                 task.set_status(self_review_due=True)
             mark = [task.status.get("steps", 1), task.status.get("reviews", 0)]
-            if tuning.value(task, "self_review") and tests and tests["ok"] \
-                    and task.status.get("self_reviewed") != mark:
+            if tuning.value(task, "self_review") and tests and tests["ok"] and not step \
+                    and task.status.get("self_reviewed") != mark:  # a smaller step stops (#1300)
                 task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
                 task.round_dir(n + 1).joinpath("prompt.md").write_text(
                     SELF_REVIEW.format(cmd=task.spec["test_cmd"], aside=self_review_aside(task)))
@@ -5935,7 +5956,7 @@ def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
                     full_compacted=True if rnd.get("compacted") else None,  # #774: fresh_reason
                     full_compact_failed=True if failed else None,  # #969: and its reason
                     handovers=task.status.get("handovers", 0) + 1,
-                    steer_taken=task.status.get("steer_taken", 0) + len(notes))
+                    steer_taken=task.status.get("steer_taken", 0) + len(notes), **step_noted(notes))
 
 
 def _undelivered(task: store.Task) -> str:
@@ -5972,7 +5993,7 @@ def _early_notes(task: store.Task, n: int) -> None:
     if not (notes := pending_steer(task)):
         return
     add_to_round(task, n, steer_prompt(notes, False))
-    task.set_status(steer_taken=task.status.get("steer_taken", 0) + len(notes))
+    task.set_status(steer_taken=task.status.get("steer_taken", 0) + len(notes), **step_noted(notes))
 
 
 def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:
@@ -5984,7 +6005,8 @@ def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:
         if theirs := [r for r in notes if r.get("by") != "workbench"]:  # ... Claude's notes are
             folded_notes(task, n + 1, theirs)
     task.set_status(round=n + 1, steer_taken=task.status.get("steer_taken", 0) + len(notes),
-                    round_for="steer", self_review_tree=carried_tree(task))  # #1207, as a handover
+                    round_for="steer", self_review_tree=carried_tree(task),  # #1207, as a handover
+                    **step_noted(notes))  # #1300
 
 
 # What a task's children load from the clone afresh each round, beside this runner's code loaded

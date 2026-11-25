@@ -8413,6 +8413,38 @@ class Steering(Base):
         head, _ = transcript._user_message(note, False)    # how the session shows the note
         self.assertEqual(head, "Claude → agent · INTERRUPT, high priority")
 
+    def test_a_smaller_step_whose_tests_test_the_whole_task_goes_to_review_with_no_auto_fix(self):
+        # #1300 (bar loop round 8, 2026-11-24): after wb steer --step the runner spent both
+        # auto-fix rounds telling the agent "the bug is in this change", onto the rest Claude
+        # said should wait, then reached review as auto-fix 2/2, tests FAIL
+        self.spec.write_text("Write the answer to answer.txt, then write rest.txt.\n")
+        self.start("t-step", "slow", "--test", TEST_CMD + " && test -f rest.txt", "--auto-fix", "2",
+                   "--no-base-check", "--no-self-review")
+        self.wait_session("t-step")
+        run_wb("steer", "t-step", "--now", "--step", "--text", "Only write answer.txt now.")
+        st = wait_phase("t-step", {"review"}, timeout=30)
+        self.assertEqual((st["round"], st.get("auto_fixes", 0), st["step_note"]), (2, 0, True))
+        self.assertFalse(st["tests"]["ok"])
+        self.assertEqual(st["last"], "a smaller step (wb steer --step): Claude reviews next")
+        rows, _ = store.read_jsonl(store.Task("t-step").dir / "events.jsonl")
+        self.assertNotIn("autofix", [r["kind"] for r in rows])
+        self.assertIn("auto-fix skipped: " + runner.STEP_SKIP, run_wb("report", "t-step"))
+        out = run_wb("feedback", "t-step", "--text", "Now write rest.txt.")
+        self.assertIn("it follows a smaller step (wb steer --step), so no review round is counted", out)
+        st = wait_phase("t-step", {"review"}, timeout=30)
+        self.assertEqual((st.get("reviews", 0), st.get("step_note")), (0, None))  # the step ended there
+
+    def test_a_smaller_step_whose_tests_pass_goes_to_review_with_no_self_review(self):
+        # #1300: the step note says stop and report; a self-review round is one more round of it
+        self.start("t-steps", "slow", "--test", TEST_CMD, "--no-base-check", "--self-review")
+        self.wait_session("t-steps")
+        run_wb("steer", "t-steps", "--now", "--step", "--text", "Only write answer.txt now.")
+        st = wait_phase("t-steps", {"review"}, timeout=30)
+        self.assertEqual(st["round"], 2)
+        self.assertTrue(st["tests"]["ok"])
+        rows, _ = store.read_jsonl(store.Task("t-steps").dir / "events.jsonl")
+        self.assertNotIn("self_review", [r["kind"] for r in rows])
+
     def test_a_queued_note_waits_for_the_run_to_end_then_goes_before_the_tests(self):
         os.environ["FAKE_SLEEP"] = "2"
         self.start("t-note", "ok", "--test", TEST_CMD)
