@@ -5790,8 +5790,8 @@ setting touches only Python. The chat server draws from it (#1280); nothing in i
   it doesn't take (a read-only row, a value off its choices, a number not positive; nothing runs).
   `said` is the child's last non-empty stdout line, or its stderr's on failure (the price row says
   `electricity price: 0.3 per kWh` for its `--json` document).
-- `child_env()`: `os.environ` minus `CLAUDECODE`, `CLAUDE_PID`, `CLAUDE_CODE_SESSION_ID`, plus
-  `WB_ACTOR=web` (`ACTOR`).
+- `child_env()`: `os.environ` minus `chat.CLAUDE_VARS` (`CLAUDECODE`, `CLAUDE_PID`,
+  `CLAUDE_CODE_SESSION_ID`: the one list `chat.start` scrubs too), plus `WB_ACTOR=web` (`ACTOR`).
 
 **A row** is JSON-safe: `key`, `group`, `label`, `kind` and by kind: `choice` (`value`, `choices`
 `[{value, label, says}]`, `says` for the current value, `other`); `number` (`value` a float or null

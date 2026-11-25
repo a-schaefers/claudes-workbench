@@ -33,7 +33,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import cli, context, progress, routes, savings, stats
+from . import chat, cli, context, progress, routes, savings, stats
 
 GROUPS = ("shared", "gpu", "api", "terminal", "experimental")  # display order
 KINDS = ("choice", "number", "info", "action", "note")
@@ -41,7 +41,6 @@ ACTOR = "WB_ACTOR"  # env var; "web" stamps a role change by="web" (cli._route_a
 ROWS_CACHE_S = 10  # the pane's ROLES_CACHE_MS
 READ_TIMEOUT_S = 15  # wb route --json, wb models --json (the pane's 15 s)
 WRITE_TIMEOUT_S = 60
-SCRUBBED = ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_CODE_SESSION_ID")
 WB = Path(__file__).resolve().parent.parent / "bin" / "wb"  # the clone's launcher; tests swap it
 API_MENU = 12  # an API row lists at most this many models, the ones in use first (the pane's)
 
@@ -116,7 +115,7 @@ HELP = {"probe": _probe_help}
 def child_env() -> dict[str, str]:
     """The environment of every wb the server runs: never Claude's (a server started under Claude
     Code carries CLAUDECODE=1, and wb would then gate the user's own click), marked as the web's."""
-    env = {k: v for k, v in os.environ.items() if k not in SCRUBBED}
+    env = {k: v for k, v in os.environ.items() if k not in chat.CLAUDE_VARS}  # what chat.start scrubs
     env[ACTOR] = "web"
     return env
 
