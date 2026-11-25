@@ -1255,6 +1255,25 @@ async function run(engine, device) {
         if (g.tabs.some(t => !near(t.w, g.w / 3))) throw new Error('unequal tabs: ' + say())
       }
     })
+    if (desktop) await check('an iPhone held sideways, its notch on the left: the rail takes the inset beside its 76 px, each tab wide enough for its label, and the views pad for it no more (#1413)', async () => {
+      // #1413 (2026-11-25): inside a 76 px rail padded 59 px each tab was 16 px wide, its icon past
+      // the rail's edge, its label cut to 'C.'. No browser here has a notch: app.css with an
+      // iPhone's sideways insets written in for env()
+      const css = readFileSync(join(ROOT, 'workbench/chat_static/app.css'), 'utf8')
+        .replace(/env\(safe-area-inset-(left|right)\)/g, '59px').replace(/env\(safe-area-inset-bottom\)/g, '21px').replace(/env\(safe-area-inset-top\)/g, '0px')
+      const sc = await browser.newContext({ viewport: { width: 844, height: 390 }, serviceWorkers: 'block' })
+      await sc.route('**/app.css', r => r.fulfill({ contentType: 'text/css', body: css }))
+      const p = await sc.newPage()
+      try {
+        await p.goto(base + '#token=' + token)
+        await until(async () => await p.evaluate(() => getComputedStyle(document.body).display === 'grid'))
+        const g = await p.evaluate(() => ({ rail: document.getElementById('tabbar').getBoundingClientRect().right,
+          tabs: [...document.querySelectorAll('#tabbar .tab')].map(t => { const l = t.querySelector('.tab-lbl')
+            return { w: Math.round(t.getBoundingClientRect().width), cut: l.scrollWidth > l.clientWidth, icon: t.querySelector('svg').getBoundingClientRect().right } }),
+          pads: ['.top', '#thread', '#composer'].map(s => getComputedStyle(document.querySelector(s)).paddingLeft) }))
+        if (g.tabs.some(t => t.w < 44 || t.cut || t.icon > g.rail) || g.pads.join() !== '16px,16px,12px') throw new Error(JSON.stringify(g))
+      } finally { await sc.close() }
+    })
     await check('the card views\' styles stay out of the chat: a plan card\'s text and code, and the intro\'s code, as before', async () => {
       // the #1284 review: `.view .card p` and `.view code` matched #view-chat, a .view too, and
       // shrank a plan's <p> (its margins 0 and 8px) and code, and the intro's code, to 13px

@@ -6001,7 +6001,9 @@ over an 11 px `.tab-lbl`; the current one has `aria-current="true"`, colour and 
 phone (≤600 px) it is the body's last flex child, under the composer, `56px` plus the safe area
 tall (the composer drops its own safe-area pad, `#jump` sits 56 px higher), hidden under
 `body.kb-open` so the composer sits on the keyboard (`fit`'s visualViewport check), `user-select:
-none` under `hover: none`. From 601 px the body is a grid: a 76 px left rail, the header, banner and
+none` under `hover: none`. From 601 px the body is a grid: a 76 px left rail (and the left safe-area
+inset beside it, which the header, the thread, the composer and the views then don't pad for: inside
+76 px an iPhone held sideways had 16 px tabs and labels cut to 'C.', #1413), the header, banner and
 view beside it; the chat a 760 px column, Stats and Settings `.view-in` 1040 px of `.card`s, two
 columns (`.cards`) from 1100 px. The cards' type (`h3`, `p`, `code`, `.small`, `.plain`) is scoped
 to `.view-in`, never `.view`: `#view-chat` is a `.view` too, and its rows and the
@@ -7748,7 +7750,8 @@ whose roles, OpenCode config and OpenCode are its own too (`WB_ROUTES`, `WB_OPEN
 hosted.json, renamed the Stats check's providers, #1286), WebKit as an iPhone 13
 and Chromium (`$CHROMIUM`, `/usr/bin/chromium`, else Playwright's) as a Pixel 7, then at a desktop's 1280×800
 (`DESKTOP`: the checks through Settings', then the shell's alone). The shell (`shell`, #1284): the bar at the foot
-on a phone and the rail on the desktop, the hash and Back, the Chat tab's badge, the bar hidden with the keyboard
+on a phone and the rail on the desktop (and with an iPhone's sideways insets, app.css with them written in for
+`env()`, each tab 44 px or wider, #1413), the hash and Back, the Chat tab's badge, the bar hidden with the keyboard
 (a visual viewport made short by hand), the cards' styles kept out of the chat (the intro's `<code>`), `window.WB`, and the gear's old checks from Settings and Stats (`goTo`);
 then each view's own, `e2e_stats.mjs` and `e2e_settings.mjs` (`check(page, ctx)`, once per device). `e2e_stats.mjs` (#1285): a fixture
 results.jsonl's task count under This week, the labels in `statsLines`' order and none of the rows
