@@ -7607,7 +7607,8 @@ moves `register.tsx`'s `RUNNING`/`waitsOnClaude` and `tasks.ts`'s phase checks o
   `kernel/src/**/*.purs`, `toolchain.json`, `spago.lock`). `lint`: no `foreign import`, no denied
   import (`Effect*`, `Control.Monad.ST*`, `Data.Array.ST*`, `Data.Array.Partial`, `Unsafe.*`,
   `Partial.Unsafe`, `Record.Unsafe`, `Debug.*`), no `localeCompare`, in the source (read whole, so an
-  `import` whose module name is on the next line counts) and in the corefn of every module compiled from
+  `import` whose module name is on the next line counts, and again with its comments blanked, `kernel.uncommented`,
+  so `import {- -} Effect.Unsafe` counts too) and in the corefn of every module compiled from
   `kernel/src` or `kernel/test`, whatever it is named. A failed `purs compile` shows purs's first error (its stdout).
   `props`: `kernel/test/Props.purs` (module `Props`, under the same lint, outside the digest and the
   budget) compiled with `kernel/src` in a temp directory, bundled to `test/props.js` beside a copy

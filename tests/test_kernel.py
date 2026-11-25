@@ -181,6 +181,22 @@ class Imports(unittest.TestCase):
         self.assertEqual(errors, ["kernel/src/Helper/Clock.purs:6: a foreign import; kernel/src has no FFI (kernel/BOUNDARY.md)",
                                   "kernel/src/Helper/Clock.purs:4: imports Effect.Unsafe, denied (kernel/BOUNDARY.md, *Denied imports*)"])
 
+    def test_a_comment_inside_an_import_or_a_foreign_import_hides_neither_from_the_source_lint(self):
+        # the 2026-11-25 adversarial review: `import {- -} Effect.Unsafe` passed the offline lint,
+        # and only kernel.py's corefn lint, which needs the toolchain, caught it
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "kernel" / "src" / "Helper"
+            src.mkdir(parents=True)
+            (src / "Clock.purs").write_text(
+                "module Helper.Clock where\n\nimport Prelude\nimport {- {- nested -} -} Effect.Unsafe (unsafePerformEffect)\n"
+                "{- a -} import -- why\n  Unsafe.Coerce (unsafeCoerce)\nimport Data.Array ((-->))\n"
+                "foreign {- x -} import now :: Number\n")
+            errors = kernel.lint_sources(Path(tmp))
+        self.assertEqual(errors, ["kernel/src/Helper/Clock.purs:8: a foreign import; kernel/src has no FFI (kernel/BOUNDARY.md)",
+                                  "kernel/src/Helper/Clock.purs:4: imports Effect.Unsafe, denied (kernel/BOUNDARY.md, *Denied imports*)",
+                                  "kernel/src/Helper/Clock.purs:5: imports Unsafe.Coerce, denied (kernel/BOUNDARY.md, *Denied imports*)"])
+        self.assertEqual(kernel.uncommented("a -- b\nc {- d\n-} e --> f"), "a     \nc     \n   e --> f")
+
 
 def con(q: str) -> dict:
     *mod, name = q.split(".")

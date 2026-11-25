@@ -375,19 +375,57 @@ def test_files(root: Path = ROOT) -> list[Path]:
 # review of #1356's scaffolding)
 SRC_FOREIGN = re.compile(r"(?m)^[ \t]*foreign\s+import\b")
 SRC_IMPORT = re.compile(r"(?m)^[ \t]*import\s+([A-Z][\w.]*)")
+SYMBOL = set(":!#$%&*+./<=>?@\\^|-~")  # after `--` they make an operator, not a comment
+
+
+def uncommented(text: str) -> str:
+    """The text with its comments (`--` to the line's end, `{- -}` nested) blanked to spaces, the
+    newlines kept, so a match's offset is the same line in both. `import {- -} Effect.Unsafe` passed
+    the per-text lint (2026-11-25, the adversarial review of #1356); only the corefn caught it."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        if text.startswith("{-", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if text.startswith("{-", j):
+                    depth, j = depth + 1, j + 2
+                elif text.startswith("-}", j):
+                    depth, j = depth - 1, j + 2
+                else:
+                    j += 1
+        elif text.startswith("--", i):
+            j = i
+            while j < n and text[j] == "-":
+                j += 1
+            if j < n and text[j] in SYMBOL:
+                out.append(text[i:j])
+                i = j
+                continue
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+        else:
+            out.append(text[i])
+            i += 1
+            continue
+        out.append(re.sub(r"[^\n]", " ", text[i:j]))
+        i = j
+    return "".join(out)
 
 
 def lint_sources(root: Path = ROOT) -> list[str]:
-    """kernel/src and kernel/test as text: no foreign import, no denied import, no locale call."""
+    """kernel/src and kernel/test as text: no foreign import, no denied import, no locale call.
+    Read as written and with the comments blanked, each finding once: a comment can't hide one,
+    and a stray `{-` in a string can't either."""
     errors = []
     for f in [*purs_files(root), *test_files(root)]:
         text = f.read_text(encoding="utf-8")
         at = lambda i: f"{rel(f, root)}:{text.count(chr(10), 0, i) + 1}"  # noqa: E731
-        for m in SRC_FOREIGN.finditer(text):
-            errors.append(f"{at(m.start())}: a foreign import; kernel/src has no FFI (kernel/BOUNDARY.md)")
-        for m in SRC_IMPORT.finditer(text):
-            if denied(m.group(1)):
-                errors.append(f"{at(m.start())}: imports {m.group(1)}, denied (kernel/BOUNDARY.md, *Denied imports*)")
+        both = (text, uncommented(text))
+        for start in sorted({m.start() for t in both for m in SRC_FOREIGN.finditer(t)}):
+            errors.append(f"{at(start)}: a foreign import; kernel/src has no FFI (kernel/BOUNDARY.md)")
+        for start, name in sorted({(m.start(), m.group(1)) for t in both for m in SRC_IMPORT.finditer(t)}):
+            if denied(name):
+                errors.append(f"{at(start)}: imports {name}, denied (kernel/BOUNDARY.md, *Denied imports*)")
         for n, line in enumerate(text.splitlines(), 1):
             for word in DENIED_TEXT:
                 if word in line:
