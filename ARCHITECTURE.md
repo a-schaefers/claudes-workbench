@@ -6576,8 +6576,9 @@ commands, read as above (`runsIn`: `simpleCommands`, `bash -c` and `eval` inside
 `--settings` call); a show (`wb route`, `--json`) and a dry run
 change nothing. For each call, one after another (`routeDry`), the mod runs `wb route --dry-run --json <its args>` (a start's as `--start <wb start's
 args>`, parsed there by wb start's own parser: the task's name and an abbreviated `--model` as wb takes them; a
-Settings row's as `wb settings set <key> <value> --dry-run --json`, `settings.dry_run`: its row's own dry run, or
-nothing gated for a row that isn't a role's), 60 s,
+Settings row's as `wb settings set <key> <value> --dry-run --json`, `settings.dry_run`: its row's own `wb route` dry
+run word for word, a role's selector, API model, thinking or the cap alike (#1336), or nothing gated for a row whose call
+isn't a `wb route`), 60 s,
 a start's in the directory it runs in (`routeCalls`' `at`: `cd` and `pushd` followed from the session's, with
 `upstreamAim`'s `cdTarget`; wb start's `--repo` is `.` unless given, and a start after `cd other &&` was judged
 local-only, or not, by the session's repo, #1125). A `cd` the mod can't resolve (a word with `$` or a backquote, none,
@@ -7510,9 +7511,12 @@ opt-in runs there, `--api` on the GPU, the cap), a pin
 keeping the record of the user's yes, the flips, the refusals (a kept model checked again, one gone from the catalog, a
 provider's passing state), the Agents switch (its line, its gate, `use` alone set), a role's own move to the GPU
 saying its started tasks keep their model (#1213), the start refused before any dialog (`API_RUNS` patched off) and its gate, `wb try`'s
-refusal, an unreadable file; `Base` points `WB_ROUTES` at the
+refusal, an unreadable file, and `wb settings set --dry-run --json` on each row whose call is a `wb route` (#1336: a
+role's selector, the cap, thinking, an API model, a GPU pin) printing that call's own dry run, a refused one exiting 3,
+the cap's approval taken by the real `wb settings set` once; `Base` points `WB_ROUTES` at the
 test's own file, never the user's. The mod's half (the dialog, the file-tool denies, the echo, `said-3`) is in
-register.test.tsx (`routeProbe`). **Dynamic workflows** (`DynamicWorkflows`, #1041): off with no file, an unreadable
+register.test.tsx (`routeProbe`; #1287's and #1336's cases: a Settings row's `wb settings set` asking with its dry run's
+line, the cap, thinking and an API model row too, one wb's dry run refuses asking nothing). **Dynamic workflows** (`DynamicWorkflows`, #1041): off with no file, an unreadable
 or unknown one, `wb workflows on|off` kept, the skill's two rules, and a fan-out of three (one per role, under
 Claude Code, the API role set through the dialog's approval): the two GPU tasks on Ollamas on separate cards
 (`models.server_devices` patched; models that don't fit one card together) let in together, the API

@@ -34465,6 +34465,51 @@ class Routes(Base):
                 self.assertEqual(self.path.read_text(), was)
         self.assertFalse(self.dry("significant", "--thinking", "on")["gate"])   # thinking on the GPU: no yes
 
+    def test_wb_settings_set_dry_runs_each_route_row_as_that_rows_own_wb_route_dry_run(self):
+        # #1336 (#1296's G3): Claude's wb settings set on a row wb route gates reaches the mod's
+        # dialog, which shows what `wb settings set … --dry-run --json` prints. It must be that
+        # row's wb route dry run word for word, or the user approves a line the change isn't; only
+        # a role's selector was tested (#1287)
+        from workbench import settings
+
+        def settings_set(*argv):
+            out, err, code = io.StringIO(), io.StringIO(), 0
+            with redirect_stdout(out), redirect_stderr(err):
+                try:
+                    cli.main(["settings", "set", *argv])
+                except SystemExit as e:
+                    code = e.code
+            return code, out.getvalue(), err.getvalue()
+
+        self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        runner.models.hosted(fresh=True)
+        settings.drop()
+        self.addCleanup(settings.drop)
+        os.environ["CLAUDECODE"] = "1"
+        for key, value, gate in (("role-trivial", "gpu", True), ("cap", "9", True), ("think-trivial", "on", True),
+                                 ("api-writing", "anthropic/claude-haiku-5-5", True),
+                                 ("gpu-significant", "auto", False)):
+            with self.subTest(key=key):
+                code, out, err = settings_set("--dry-run", "--json", key, value)
+                argv = settings._argv(settings._row(key), value)
+                self.assertEqual((code, argv[0]), (0, "route"), err)
+                self.assertEqual(json.loads(out), self.dry(*argv[1:]))
+                self.assertEqual(json.loads(out)["gate"], gate)
+        self.assertFalse(self.ok.exists())
+        self.assertEqual(self.doc()["day_usd"], 5)                # a dry run writes nothing
+        # a change wb route refuses is refused by the dry run too (exit 3, wb's line): no dialog
+        code, out, err = settings_set("--dry-run", "--json", "api-writing", "nosuch/a-model")
+        self.assertEqual((code, out), (3, ""))
+        self.assertIn(cli.ROUTE_CATALOG, err)
+        # the dialog's Allow: the dry run's approval is the one the real call takes, once
+        q = json.loads(settings_set("--dry-run", "--json", "cap", "9")[1])
+        self.assertEqual(settings_set("cap", "9")[0], 3)          # no yes yet: not changed
+        self.approve(q["approval"])
+        code, out, err = settings_set("cap", "9")
+        self.assertEqual((code, out), (0, f"changed: {q['change']}\n"), err)
+        self.assertEqual(self.doc()["day_usd"], 9)
+        self.assertFalse(self.ok.exists())
+
     def test_thinking_on_a_gpu_role_that_runs_on_its_api_model_under_agents_api_or_busy_needs_the_dialog(self):
         # #1149 (2026-11-24): the gate read the role's own via, so with Agents on API (or the busy
         # opt-in on) a thinking change came with no dialog, and every API start of the role then

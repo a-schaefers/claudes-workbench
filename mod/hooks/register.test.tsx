@@ -4893,6 +4893,29 @@ test('#1287: wb settings set on a role row asks in the dialog with its dry run\'
   await clock.advance(1000)
 })
 
+test('#1336: the cap, thinking and an API model row ask with their own dry run\'s line; one wb refuses asks nothing', async ($, on) => {
+  // #1296's G3: only a role's selector was tested to reach the dialog through wb settings set
+  const { clock, bash, files, w } = await routeProbe($, on)
+  const dry = (key: string, value: string) => ['settings', 'set', key, value, '--dry-run', '--json']
+  w.answer = 'Allow'
+  for (const [key, value, line, argv] of [
+    ['cap', '9', 'day cap $5 → $9/day', ['route', 'cap', '9']],
+    ['think-trivial', 'on', 'trivial: thinking off → on', ['route', 'trivial', '--thinking', 'on']],
+    ['api-writing', 'acme/coder-flash', 'writing: API model none → acme/coder-flash (Acme), used once it goes to API',
+      ['route', 'writing', '--api', 'acme/coder-flash']]] as const) {
+    w.replyFor[dry(key, value).join(' ')] = { change: line, gate: true, approval: { argv, change: line } }
+    const r = await bash(`wb settings set ${key} ${value}`)
+    expect([key, r]).toEqual([key, { deny: undefined, asked: 1, question: line, dry: [dry(key, value)] }])
+    expect(JSON.parse(files['/wb/route-ok.json']!)).toEqual({ argv, change: line, at: expect.any(Number) })
+  }
+  delete files['/wb/route-ok.json']
+  w.code = 3                                                     // wb's dry run refuses the id: wb says why itself
+  expect(await bash('wb settings set api-writing nosuch/a-model')).toEqual({ deny: undefined, asked: 0, question: '',
+    dry: [dry('api-writing', 'nosuch/a-model')] })
+  expect('/wb/route-ok.json' in files).toBe(false)
+  await clock.advance(1000)
+})
+
 test('#1287: two Settings rows nothing gates pass in one line; a gated one beside another call is refused unasked', async ($, on) => {
   // the review of #1287 (2026-11-24): two ungated rows in one Bash call were refused before any
   // dry run, though only what wb route gates waits for the dialog
