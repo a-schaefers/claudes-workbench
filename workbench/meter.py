@@ -14,7 +14,8 @@ Two views of the same requests, each kept as high as the other says (never under
 - the keyhole's (`Meter.on_usage`, its thread): each upstream response's `usage`, every request
   the task's model got (titles and compaction too, which no `step_finish` carries). A
   provider's own figure (OpenRouter's `usage.cost`, DeepInfra's `usage.estimated_cost`) wins
-  over the catalog;
+  over the catalog; a response cut short (wb stopping OpenCode mid-stream) is the keyhole's
+  estimate, marked `cut` (#1276);
 - OpenCode's: live, each `step_finish.part.cost` (`Meter.step`); at each round's end the
   sessions' exported `info.cost` (`Meter.end_round`). With the keyhole metering, these only add
   a `reconcile` row when OpenCode says more than the keyhole saw, each at the same prices (a
@@ -594,7 +595,7 @@ class Meter:
         return _num(oc) and oc >= 0 and not (oc == 0 and (metered(self.prices, tok) or 0) > 0)
 
     def _book(self, kind: str, usd_: float | None, source: str, tok: dict | None = None,
-              mtr: float | None = None, own: str | None = None) -> None:
+              mtr: float | None = None, own: str | None = None, cut: bool = False) -> None:
         ts = time.time()
         row = {"ts": round(ts, 3), "day": day(ts), "kind": kind, "task": self.task.name,
                "round": self.n or self.task.status.get("round"), "provider": self.m.provider,
@@ -606,6 +607,8 @@ class Meter:
         row["source"] = source
         if own:
             row["own"] = own   # the provider's field: `cost` OpenCode reports too (#1234)
+        if cut:
+            row["cut"] = True  # a response cut short: the keyhole's estimate (#1276)
         if self.yours and not self.plan:
             row["prices"] = YOURS
         if tok is not None:
@@ -664,7 +667,8 @@ class Meter:
         # day cap ran at the catalog's, about 2x the bill, #1165, 2026-11-24)
         field = "cost" if _num(usage.get("cost")) else "estimated_cost"
         own = usage.get(field)
-        if _num(own) and own >= 0 and not (own == 0 and (mtr or 0) > 0):
+        cut = usage.get("cut") is True  # keyhole._cut_usage's estimate: a running cost is partial
+        if not cut and _num(own) and own >= 0 and not (own == 0 and (mtr or 0) > 0):
             value, source = float(own), PROVIDER
         else:
             value, source, field = mtr, "keyhole", None
@@ -672,7 +676,7 @@ class Meter:
             self.keyhole = True
             # what the keyhole saw at the prices OpenCode's step figure uses (_at_catalog)
             self.round_kh += _at_catalog(value or 0, source, mtr, field)
-        self._book("step", value, source, tok, mtr, field)
+        self._book("step", value, source, tok, mtr, field, cut)
 
     def step(self, part: dict) -> None:
         """A `step_finish` (the runner's thread): its own row, or OpenCode's figure reconciling

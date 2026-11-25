@@ -37389,6 +37389,112 @@ class ApiSpendKeyhole(_KeyholeTest):
         self.post(kh)                                           # a running total in every chunk
         self.assertEqual(usage, [{"prompt_tokens": 9, "completion_tokens": 3}])
 
+    def cut(self, kh, path="/chat/completions", read=120):
+        """A streamed request that OpenCode drops after ``read`` bytes of the answer, as wb's
+        _stop does mid-stream; its body's length back."""
+        body = json.dumps({"model": kh.model.name, "stream": True}).encode()
+        conn = http.client.HTTPConnection("127.0.0.1", kh.port, timeout=30)
+        conn.request("POST", urllib.parse.urlsplit(kh.base).path + path, body=body,
+                     headers={"Authorization": f"Bearer {kh.token}", "Content-Type": "application/json"})
+        r = conn.getresponse()
+        self.assertEqual(r.status, 200)
+        r.read1(read)
+        conn.sock.shutdown(socket.SHUT_RDWR)
+        conn.close()
+        return len(body)
+
+    def booked(self, usage, n=1):
+        deadline = time.monotonic() + 15
+        while len(usage) < n and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return usage
+
+    def test_a_response_cut_before_its_usage_is_booked_from_its_body_and_what_streamed(self):
+        # #1276 (bar loop round 7, 2026-11-24): Chat Completions and the Responses API send their
+        # usage only at the end, so a response wb cut mid-stream (the think nudge, steer --now,
+        # wb stop, a guard, the spend stop) booked $0, and OpenCode's step_finish and export said
+        # nothing either: the day cap and `paid` left out a request the provider bills
+        from workbench import meter
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {}})
+        m = self.model()
+        m.config = {"cost": [{"input": 3, "output": 15}]}
+        mt = meter.Meter(self.task, m)
+        mt.begin(1)
+        usage = []
+        kh = self.keyhole(m, on_usage=lambda u: (mt.on_usage(u), usage.append(u)))  # booked, then seen
+        self.up.chunks, self.up.gap = 60, 0.05                  # usage in the 60th chunk alone
+        size = self.cut(kh)
+        (u,) = self.booked(usage)
+        self.assertEqual((u["prompt_tokens"], u["cut"]), (-(-size // 4), True))
+        self.assertGreater(u["completion_tokens"], 0)           # what streamed before the cut
+        (row,) = store.read_jsonl(meter.ledger_path())[0]
+        self.assertEqual((row["kind"], row["source"], row["cut"]), ("step", "keyhole", True))
+        self.assertGreater(row["usd"], 0)
+        self.assertEqual(self.task.status["api"]["usd"], round(row["usd"], 6))
+        self.assertEqual(self.task.status["api"]["prices"], "catalog")      # shown as ≈
+        time.sleep(0.5)
+        self.assertEqual(len(usage), 1)                         # once
+        mt.end_round({"s1": {"info": {"cost": 0}}})             # OpenCode's export said 0
+        self.assertEqual(len(store.read_jsonl(meter.ledger_path())[0]), 1)
+        # a running provider figure in a cut stream is partial: the estimate is booked instead
+        mt.on_usage({"prompt_tokens": 1_000_000, "completion_tokens": 0, "cost": 0.01, "cut": True})
+        row = store.read_jsonl(meter.ledger_path())[0][-1]
+        self.assertEqual((row["usd"], row["source"], row["cut"]), (3.0, "keyhole", True))
+
+    def test_an_anthropic_response_cut_keeps_message_starts_input_and_adds_what_streamed(self):
+        # #1276: message_start's usage was all a cut Anthropic response booked, its output 1
+        usage = []
+        kh = self.keyhole(self.model("anthropic", "claude-haiku-5-5", "/v1", "anthropic"),
+                          on_usage=usage.append)
+        start = {"type": "message_start", "message": {"model": "served-model", "usage": {
+            "input_tokens": 7, "cache_read_input_tokens": 90_000, "output_tokens": 1}}}
+        delta = {"type": "content_block_delta", "index": 0,
+                 "delta": {"type": "text_delta", "text": "x" * 40}}
+        self.up.mode, self.up.status, self.up.ctype = "raw", 200, "text/event-stream"
+        self.up.pieces = [f"event: message_start\ndata: {json.dumps(start)}\n\n".encode()] + [
+            f"event: content_block_delta\ndata: {json.dumps(delta)}\n\n".encode()] * 60
+        self.cut(kh, "/messages", read=200)
+        (u,) = self.booked(usage)
+        self.assertEqual({k: u[k] for k in ("input_tokens", "cache_read_input_tokens", "cut")},
+                         {"input_tokens": 7, "cache_read_input_tokens": 90_000, "cut": True})
+        self.assertGreaterEqual(u["output_tokens"], 10)         # a delta's 40 characters at least
+        self.assertNotIn("prompt_tokens", u)
+
+    def test_a_request_cut_while_still_in_the_providers_queue_books_nothing(self):
+        # #1276's estimate is for a request the provider ran: keep-alives alone past
+        # QUEUED_AFTER_S are its queue (#1083), where nothing has run yet
+        usage = []
+        kh = self.keyhole(on_usage=usage.append)
+        self.up.mode, self.up.status, self.up.ctype = "raw", 200, "text/event-stream"
+        self.up.pieces = [b": keep-alive\n\n"] * 60
+        with mock.patch.object(self.kh_mod, "QUEUED_AFTER_S", 0):
+            self.cut(kh, read=20)
+            time.sleep(1.5)
+        self.assertEqual(usage, [])
+
+    def test_a_whole_answer_whose_last_byte_finds_opencode_gone_is_booked_once_and_not_as_cut(self):
+        # #1276's estimate is booked when a write fails before the end: the end's own last write
+        # failing (a body with no end marker, its usage booked just before) is no cut
+        usage = []
+        kh = self.keyhole(on_usage=usage.append)
+        self.up.mode, self.up.status, self.up.ctype = "raw", 200, "application/json"
+        self.up.pieces = [json.dumps({"model": "m", "usage": {"prompt_tokens": 9,
+                                                              "completion_tokens": 3}}).encode()]
+        handler = kh._server.RequestHandlerClass
+        real = handler.flush_usage
+
+        def flush_then_hang_up(h):
+            real(h)
+            if usage and not h.connection._closed:
+                h.connection.shutdown(socket.SHUT_WR)           # the last write now fails
+        with mock.patch.object(handler, "flush_usage", flush_then_hang_up):
+            try:
+                self.post(kh)
+            except (http.client.HTTPException, OSError):
+                pass
+        time.sleep(0.5)
+        self.assertEqual(usage, [{"prompt_tokens": 9, "completion_tokens": 3}])
+
     def test_deepinfras_own_estimated_cost_is_booked_and_opencodes_catalog_figure_tops_nothing_up(self):
         # #1165 (2026-11-24): DeepInfra sends its own cost as usage.estimated_cost, in a last
         # `choices: []` chunk (checked with one real request that day: 10 in, 2 out, 1.568e-6, its
