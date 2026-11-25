@@ -1373,7 +1373,8 @@ def ensure(port: int) -> dict:
     "blocked": something else answers there (why: blocked_why). Otherwise it starts the unit that
     keeps it (_unit_keeps_it), else a detached server (start), unless the one serve.pid names is
     still starting, and waits START_WAIT: "started", or "failed" (why: serve.log's last line). The
-    unit only for PORT, the one it serves.
+    unit only for PORT, the one it serves; a unit that doesn't answer then is followed by a
+    detached server once (#1343): "started" with why naming the unit, or "failed".
     `wb chat url` runs it, which the mod does at session start and every minute: a reboot, a
     crash, WSL without systemd, an install where setup never ran. One at a time (chat/ensure.lock):
     two sessions' at once started two servers, the second failing on the port."""
@@ -1401,9 +1402,16 @@ def ensure(port: int) -> dict:
                     pid = start(port)
             if wait_up(port, int(pid) if pid else None):
                 return {**out, "state": "started"}
-            why = (f"{service_name()} didn't answer within {START_WAIT} s ({service_hint('status')})"
-                   if unit else _log_tail())
-            return {**out, "state": "failed", "why": why}
+            if not unit:
+                return {**out, "state": "failed", "why": _log_tail()}
+            # a unit that never answers (exit 78 on a Python older than 3.11 on its PATH, which
+            # stops it for good) left the app down for good: only the unit was ever started
+            # again, every minute (#1343). wb's own server once; the unit's next try finds the
+            # port taken, and the app is up either way
+            unit_why = f"{service_name()} didn't answer within {START_WAIT} s ({service_hint('status')})"
+            if wait_up(port, start(port)):
+                return {**out, "state": "started", "why": f"{unit_why}: wb started its own server"}
+            return {**out, "state": "failed", "why": f"{unit_why}, nor did wb's own server: {_log_tail()}"}
     except (RuntimeError, OSError) as e:  # chat.json it can't follow, a state dir it can't write
         return {**out, "state": "failed", "why": str(e)}
 
