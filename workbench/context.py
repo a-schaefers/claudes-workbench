@@ -1858,7 +1858,12 @@ def writable(task: store.Task) -> list[str] | None:
     # lane, and notify.jsonl wakes Claude for every task (the 2026-11-16 audit: an agent could
     # rewrite its own spec and guards, forge any task's notice, and plant a link the runner
     # then wrote through)
-    kept = [str(task.worktree), str(ask_dir(task)), str(opencode_home(task))]
+    # A report task's worktree is read-only (#1278): out of the lane's writes, the kernel refuses
+    # every write there (Landlock, Seatbelt); it stays readable as the task's own directory
+    # (_read_walk's `own`). Without a lane the runner voids a result whose tree changed
+    # (runner.report_end)
+    kept = [*([] if task.spec.get("report") else [str(task.worktree)]), str(ask_dir(task)),
+            str(opencode_home(task))]
     for p in places:
         real = os.path.realpath(p)
         if not os.path.exists(p) or real in whole:
@@ -3180,6 +3185,20 @@ def read_only_rules(task: store.Task) -> list[dict]:
         [{"action": "edit", "resource": f"{q.rstrip('/')}/*", "effect": "allow"} for q in _both(inner)]
 
 
+def report_rules(task: store.Task) -> list[dict]:
+    """A report task's file tools (#1278), after every other rule: `read` edits nothing anywhere
+    (the kernel refuses the worktree's writes too, writable); `none` has no tool at all but
+    workbench's own (submit_result, ask_reviewer) and OpenCode's doom-loop guard, so a blind
+    judge reads only the text it was given. [] for a code task."""
+    if not task.spec.get("report"):
+        return []
+    if task.spec.get("tools") == "none":
+        return [{"action": "*", "resource": "*", "effect": "deny"},
+                {"action": "workbench_*", "resource": "*", "effect": "allow"},
+                {"action": "doom_loop", "resource": "*", "effect": "allow"}]
+    return [{"action": "edit", "resource": "*", "effect": "deny"}]
+
+
 def external_rules(task: store.Task) -> list[dict]:
     """OpenCode's `external_directory` rule: its file tools and the shell's working directory
     stay in the lane, READABLE and the read-only installs, and the skills handed to the task."""
@@ -3190,6 +3209,7 @@ def external_rules(task: store.Task) -> list[dict]:
     # and the rounds' prompts, read-only, where a prompt too long for one argument waits, and the
     # images Claude attached (--image, #1199), which the prompt says to read again there
     places = [*lane, *READABLE, *read_only(task, lane), task.dir / "rounds", task.dir / "images",
+              *([task.worktree] if task.spec.get("report") else []),  # read-only (#1278)
               *siblings(task),
               *(sibling_link(task.worktree, n) for n in task.spec.get("siblings") or ()),
               *(have[n]["path"] for n in task.status.get("skills") or [] if n in have)]
@@ -3671,6 +3691,30 @@ def handbook_for(task: store.Task) -> Path:
     return WRITING if task.spec.get("role") == "writing" else HANDBOOK
 
 
+# A report task with no card (#1278): HANDBOOK's coding rules (edit, test, leave it uncommitted)
+# are a report's wrong instructions and 5.8 KB of prefill, so these few lines stand in its place
+REPORT_HANDBOOK = """# Report task
+You read and report; you change nothing. The repository is read-only to you: to run anything,
+copy what it needs under $TMPDIR and run it there. Look before you claim: open each file you cite
+again and quote the line. Your result is one JSON object matching the task's schema, sent with
+the `submit_result` tool or as the last thing in your last message. Nothing you write is trusted
+by itself: Claude, the reviewer, checks it and has the final say.
+"""
+
+
+def handbook_text(task: store.Task) -> str:
+    """The text of rules/<task>/HANDBOOK.md before its spec note: a card's (#1278; a report
+    card's body alone, a code card's after the handbook under `## Your role`), a cardless report
+    task's REPORT_HANDBOOK, else handbook_for's."""
+    from . import cards
+    card = task.spec.get("card")
+    if isinstance(card, dict):
+        return cards.handbook(card, HANDBOOK.read_text())
+    if task.spec.get("report"):
+        return REPORT_HANDBOOK
+    return handbook_for(task).read_text()
+
+
 def spec_note(task: store.Task) -> str:
     """The handbook copy's last section: where the step's spec is (store.round_prompt of its
     first round, readable in the lane: the rounds' prompts). OpenCode's mid-round compaction keeps
@@ -3691,7 +3735,7 @@ def instruction_files(task: store.Task) -> tuple[list[Path], list[str]]:
     # the agent's own copy: OpenCode shows each instruction file's path, and a path into the
     # workbench repo once led a freshly started agent to go looking there for plans
     handbook = rules_dir(task) / "HANDBOOK.md"
-    handbook.write_text(handbook_for(task).read_text() + spec_note(task) + "".join(
+    handbook.write_text(handbook_text(task) + spec_note(task) + "".join(
         note for name, note in EXPERIMENT_NOTES.items() if experiment(task, name)))
     roots: list[tuple[Path, Path, bool]] = []  # (what OpenCode loads, read from, the user's own)
     # the user's AGENTS.md, never Claude's CLAUDE.md or rules (#1061, USER_AGENTS_MD); a copy: the
@@ -3926,6 +3970,7 @@ def layer(task: store.Task) -> dict:
     # the skill library is Claude's to write, with or without the kernel's lane
     rules += [{"action": "edit", "resource": f"{p.rstrip('/')}/*", "effect": "deny"}
               for p in _both([skills.library()])]
+    rules += report_rules(task)  # last: the last match wins (#1278)
     return {"instructions": [str(p) for p in files + ([note] if note else [])],
             "permissions": rules, "skills": [*handed, *map(str, own)],
             "agents": json.loads(json.dumps(AGENT_OFF))}  # made afresh in the content (AGENT)

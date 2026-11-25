@@ -23412,10 +23412,11 @@ class DynamicWorkflows(Base):
     """Dynamic workflows (#1041): off by default, `wb workflows on|off` keeps the choice in
     workflows.json beside coding.json, which the mod reads for its dynamic-workflows block."""
     def test_off_by_default_and_wb_workflows_keeps_the_choice_where_the_mod_reads_it(self):
-        self.assertEqual(run_wb("workflows"), "Dynamic workflows: Off (default). Claude runs one task "
-                                              "at a time.\n")
+        # #1278 named it deepmode: the label says both names, and wb workflows stays wb deepmode's
+        self.assertEqual(run_wb("workflows"), "Dynamic workflows (deepmode): Off (default). Claude runs one "
+                                              "task at a time; deepcode asks for a deep workflow once.\n")
         self.assertFalse((store.home() / "workflows.json").exists())
-        self.assertIn("Dynamic workflows: On. Claude may split a request into tasks that run at once",
+        self.assertIn("Dynamic workflows (deepmode): On. substantive requests run as deep workflows (wb run)",
                       run_wb("workflows", "on"))
         self.assertEqual(json.loads((store.home() / "workflows.json").read_text())["mode"], "on")
         self.assertEqual(cli.workflows_mode(), "on")

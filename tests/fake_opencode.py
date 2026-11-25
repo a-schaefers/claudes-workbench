@@ -74,6 +74,20 @@
          another), and the run ends, exiting 0 or FAKE_COMPACT_EXIT (1 in the bench replay,
          #969). FAKE_COMPACT_EDIT: it writes "41" first. A fresh session handed the task
          behaves like ok, unless FAKE_REFAIL (every session fails again)
+  report a report task's round (#1278), played whenever FAKE_SCENARIO is ok and the prompt
+         carries the report protocol ("(workbench report protocol)", cli.REPORT_PROTOCOL): it reads
+         a file, then ends its message with one JSON object after a line of prose: FAKE_RESULT
+         (JSON), else FAKE_RESULT_BY's (a JSON object of prompt substring -> object: the first
+         found in the prompt), else an object built from the task's schema (rules/<task>/
+         schema.json: each required key, an enum's first value, 0, "x", [] or {}). A repair
+         round (its prompt opens "rejected:", runner.SCHEMA_FIX) sends FAKE_RESULT_FIX instead,
+         when set. FAKE_RESULT_SEQ (a file holding a JSON list): each round takes its first
+         object, before all of these, while any is left. FAKE_SUBMIT: the object goes to the
+         workbench MCP server's submit_result (a tools/call, as OpenCode makes one) and the
+         message says only that it was sent;
+         FAKE_SUBMIT_LOG gets the server's reply text. FAKE_REPORT_WRITE: it writes
+         notes.txt in the worktree first (what the lane refuses a report task). FAKE_REPORT_PAD:
+         that many characters of prose before the object (past the report's cut, #1186)
 A `run` message must follow `--` when it starts with '-', or the fake prints its usage and exits
 1, as OpenCode does. FAKE_LATE: seconds before the first event (a model reading its prompt).
 FAKE_PROMPTS, if set, is a file each run appends its prompt to; FAKE_RUNS one that records
@@ -692,6 +706,9 @@ if scenario == "http" and args and args[0] == "run":  # a model request through 
         logged(f"error: {e}")
         fail("provider.transport", f"Unable to connect: {e}")
     scenario = "ok"
+if scenario == "ok" and args and args[0] == "run" and ("(workbench report protocol)" in args[-1] or (
+        "--session" in args and args[-1].startswith("rejected:"))):
+    scenario = "report"  # #1278: a report task's round; its repair round continues it
 if scenario == "slow":
     scenario = "ok" if "--session" in args else "hang"
 if scenario == "selfreads" and "Before Claude reviews this" not in (args[-1] if args else "") \
@@ -799,7 +816,91 @@ if scenario in ("ratelimit", "down") and os.environ.get("FAKE_RETRY_OK"):
 if scenario == "api":  # one request through a keyhole, then as ok (#1020)
     api_request()
     scenario = "ok"
-if scenario in ("ok", "fix", "stay"):
+if scenario == "report":  # #1278: a read, then prose and one object
+    def example(sch):
+        """A value the schema takes: the fake's default result."""
+        if not isinstance(sch, dict):
+            return None
+        if "enum" in sch:
+            return sch["enum"][0]
+        t = sch.get("type")
+        t = t[0] if isinstance(t, list) else t
+        if t == "object":
+            props = sch.get("properties") or {}
+            return {k: example(props.get(k, {})) for k in sch.get("required") or ()}
+        if t == "array":
+            return [example(sch.get("items") or {}) for _ in range(int(sch.get("minItems") or 0))]
+        return {"string": "x", "integer": 0, "number": 0, "boolean": False}.get(t)
+
+    prompt = args[-1] if args else ""
+    tool("read", {"filePath": os.path.abspath("README.md")})
+    if os.environ.get("FAKE_REPORT_WRITE"):
+        with open("notes.txt", "w") as fh:
+            fh.write("a report task writing its worktree\n")
+        tool("write", {"filePath": os.path.abspath("notes.txt"), "content": "notes"})
+    picked = None
+    if seq := os.environ.get("FAKE_RESULT_SEQ"):  # a JSON list in a file: each round takes the first
+        import fcntl
+        with open(seq, "r+") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            left = json.load(fh)
+            if left:
+                picked = left.pop(0)
+                fh.seek(0)
+                fh.truncate()
+                json.dump(left, fh)
+    if picked is not None:
+        pass
+    elif prompt.startswith("rejected:") and os.environ.get("FAKE_RESULT_FIX"):
+        picked = json.loads(os.environ["FAKE_RESULT_FIX"])
+    elif os.environ.get("FAKE_RESULT"):
+        picked = json.loads(os.environ["FAKE_RESULT"])
+    else:
+        for needle, obj in json.loads(os.environ.get("FAKE_RESULT_BY") or "{}").items():
+            if needle in prompt:
+                picked = obj
+                break
+    if picked is None:
+        try:
+            with open(os.path.join(os.environ.get("WB_HOME", ""), "rules", os.environ.get("WB_TASK", ""),
+                                   "schema.json")) as fh:
+                picked = example(json.load(fh))
+        except (OSError, ValueError):
+            picked = {}
+    said = "I read README.md and checked what the task asked."
+    if pad := int(os.environ.get("FAKE_REPORT_PAD") or 0):
+        said += "\n" + ("Looked at the next part. " * (pad // 25 + 1))[:pad]
+    if os.environ.get("FAKE_SUBMIT"):
+        import subprocess
+        with open(os.environ["OPENCODE_CONFIG"]) as fh:
+            server = json.load(fh)["mcp"]["servers"]["workbench"]
+        calls = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+                 {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                  "params": {"name": "submit_result", "arguments": picked}}]
+        # stdin held open until the call's reply, as OpenCode holds it: the server answers a
+        # tools/call on a thread of its own, which its end of input would cut short
+        srv = subprocess.Popen(server["command"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               env={**os.environ, **(server.get("environment") or {})}, text=True)
+        srv.stdin.write("".join(json.dumps(m) + "\n" for m in calls))
+        srv.stdin.flush()
+        reply = {}
+        for row in srv.stdout:
+            got = json.loads(row) if row.strip() else {}
+            if isinstance(got, dict) and got.get("id") == 2:
+                reply = got
+                break
+        srv.stdin.close()
+        srv.wait(30)
+        text = "".join(c.get("text", "") for c in (reply.get("result") or {}).get("content") or ())
+        if os.environ.get("FAKE_SUBMIT_LOG"):
+            with open(os.environ["FAKE_SUBMIT_LOG"], "a") as fh:
+                fh.write(json.dumps({"error": (reply.get("result") or {}).get("isError"), "text": text}) + "\n")
+        tool("workbench_submit_result", picked, output=text)
+        emit("text", text=said + "\nSent the result with submit_result.")
+    else:
+        emit("text", text=said + "\n\n```json\n" + json.dumps(picked, indent=1) + "\n```")
+    finish()
+elif scenario in ("ok", "fix", "stay"):
     value = "41" if scenario == "fix" and "--session" not in args else "42"
     with open("answer.txt", "w") as fh:
         fh.write(value + "\n")

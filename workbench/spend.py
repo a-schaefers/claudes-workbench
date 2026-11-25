@@ -17,9 +17,19 @@ from pathlib import Path
 from . import context, store
 
 # The mod's wake opening, at a prompt's start only, after the line Claude Code puts before a
-# plugin's message: matched anywhere, a summary quoting one charged later calls to it (#557)
+# plugin's message: matched anywhere, a summary quoting one charged later calls to it (#557).
+# A run's wake (#1278, `[workbench] Run `<run>``) is charged to the run's tasks, `<run>-…`
 WAKE = re.compile(r"\s*(?:The [\w .-]{1,60} plugin sent a message:\s*)?"
-                  r"\[workbench\] Task `([a-z0-9][a-z0-9-]{0,47})`")
+                  r"\[workbench\] (Task|Run) `([a-z0-9][a-z0-9-]{0,47})`")
+
+
+def _woken(m, names: set[str]) -> set[str]:
+    """The tasks a wake names: its task, or a run's every task."""
+    if m is None:
+        return set()
+    if m.group(1) == "Run":
+        return {n for n in names if n.startswith(m.group(2) + "-")}
+    return {m.group(2)} & names
 KINDS = ("input", "cache_write_5m", "cache_write_1h", "cache_read", "output")
 # Input-equivalent weights: the API's multipliers on the base input price (claude-api skill,
 # pricing, cached 2026-10-06): output 5x on every current model, a cache write 1.25x (5 minutes)
@@ -169,7 +179,7 @@ def _events(rows: list[dict], names: set[str]) -> list:
     events, by_id = [], {}  # an assistant message is a row per content block, each with its usage
     for row in rows:
         if (text := _prompt(row)) is not None:
-            events.append({m.group(1)} & names if (m := WAKE.match(text)) else set())
+            events.append(_woken(WAKE.match(text), names))
         elif row.get("type") == "assistant":
             does = _named(row, names)
             mid = (row.get("message") or {}).get("id") or ("row", len(events))  # not deduplicated

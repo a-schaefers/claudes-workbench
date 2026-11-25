@@ -358,6 +358,16 @@ def task_total(name: str) -> float:
     return round(sum(r["usd"] for r in _task_rows(name)), 10)
 
 
+def run_total(names) -> float:
+    """Everything the ledger books for a run's tasks (#1278), any day: one read of the ledger."""
+    want = set(names)
+    if not want:
+        return 0.0
+    rows, _ = store.read_jsonl(ledger_path())
+    return round(sum(r["usd"] for r in rows if isinstance(r, dict) and r.get("task") in want
+                     and r.get("kind") in ("step", "reconcile") and _num(r.get("usd"))), 10)
+
+
 def usd(x: float | None) -> str:
     """Every dollar figure wb prints: $5.00, $0.42; `<$0.01` under a cent, `$0` for none, and
     `unknown` for None. One rule here, the pane's and the chat's `usd` too: meter's "$5" and

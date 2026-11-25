@@ -137,6 +137,10 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
                         **_apart(steps, "deleted", ("files", "removed"))}}
               if outcome == "accepted" else {}),
            **({"trial": True} if spec.get("trial") else {}),
+           # a report task's (#1278): no coding step, so store.results leaves it out of the
+           # learners' evidence; its card and run, for a run's report
+           **({"report": True, "card": (spec.get("card") or {}).get("name"), "run": spec.get("run"),
+               "stage": spec.get("stage")} if spec.get("report") else {}),
            # on only: a task with every experiment off ran as main does
            **({"experiments": on} if (on := sorted(k for k, v in (spec.get("experiments") or {}).items()
                                                     if v)) else {}),

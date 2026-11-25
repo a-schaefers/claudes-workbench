@@ -35,7 +35,7 @@ from collections import deque
 from pathlib import Path
 
 from . import (ask_mcp, context, gitguard, gitops, hardware, keyhole, lane, lessons, models, progress,
-               routes, skills, store, tuning)
+               routes, schema, skills, store, tuning)
 from . import meter
 from . import privacy
 from .events import ANYWHERE, EDIT_TOOLS, StuckDetector, compaction_failed, normalize, shell_names, written
@@ -562,13 +562,15 @@ def fixed_knobs(task: store.Task, m: models.Model) -> dict:
 USERS_RULES = ("permissions", "permission")
 
 
-def rules_env(layer: dict, keyhole_over: dict | None = None) -> dict:
+def rules_env(layer: dict, keyhole_over: dict | None = None, steps: int | None = None) -> dict:
     """OpenCode's environment for its config: the project's config off, and
     OPENCODE_CONFIG_CONTENT (above). ``keyhole_over``: the task's keyhole overlay
     (keyhole_overlay), said again in the content's `provider`, on top of the user's own: loaded
     last, a user's `provider.<pid>.options.baseURL` there pointed the agent's OpenCode back at the
     provider's real endpoint, past the keyhole (#1012). A V2 `providers.<pid>` of theirs gets it
-    too (keyhole_v2), since it replaces the V1 entry beside it."""
+    too (keyhole_v2), since it replaces the V1 entry beside it. ``steps``: a role card's (#1278),
+    on wb's own agent entry: OpenCode's step limit there, its last step forced to text, and the
+    layer's denies still last (#1290)."""
     users = models.users_config_content()
     users = {k: v for k, v in users.items()  # `agent`: their 1.x agents, beside wb's (#1290)
              if (k == "provider" or k not in layer) and k not in ("mcp", "agent", *USERS_RULES)}
@@ -580,7 +582,8 @@ def rules_env(layer: dict, keyhole_over: dict | None = None) -> dict:
     # and the hidden agents' models, the task's (SYSTEM_AGENTS, #1345)
     agents = layer.get("agents") if isinstance(layer.get("agents"), dict) else {}
     ours = {"share": "disabled", **{k: layer[k] for k in RESTATED if k in layer},
-            "agents": {**json.loads(json.dumps(context.AGENT_ENTRY)),
+            "agents": {**{a: {**e, **({"steps": steps} if steps else {})}
+                          for a, e in json.loads(json.dumps(context.AGENT_ENTRY)).items()},
                        **{a: dict(agents[a]) for a in SYSTEM_AGENTS if isinstance(agents.get(a), dict)}}}
     pins = model_pins(layer.get("small_model")) or _own_pins(layer)  # an API task's: its record (#1017)
     over = models._merge(timeouts, pins.get("provider") or {})
@@ -765,7 +768,8 @@ def agent_env(task: store.Task, run: str = "") -> dict:
     layer = write_config_layer(task)
     env = {**keep, "PWD": str(task.workdir),  # opencode finds the project from $PWD
            "OPENCODE_CONFIG": str(layer),
-           **rules_env(json.loads(layer.read_text()), keyhole_overlay(task)),
+           **rules_env(json.loads(layer.read_text()), keyhole_overlay(task),
+                       (task.spec.get("card") or {}).get("steps")),
            "WB_TASK": task.name, "WB_HOME": str(store.home()), **CLEAN_ENV, **METADATA_OFF,
            **REMOTE_CACHES_OFF, **({"WB_RUN": run} if run else {})}
     env.update(git_config_env(env))
@@ -6233,6 +6237,8 @@ def _leased(task: store.Task, m: models.Model, say):
                             **typical_now(task))
             task.event({"ts": store.now(), "round": n, "kind": "round", "text": "started"})
             began = time.time()
+            if task.spec.get("report"):
+                clear_result(task)
             try:
                 rnd = run_round(task, n, keep=keep)
             finally:  # before the lease is released: the GPU's next task must not meet our agent
@@ -6396,6 +6402,12 @@ def _leased(task: store.Task, m: models.Model, say):
                 if not _go_on(task, n, "the round again", lease):
                     return
                 continue
+            if task.spec.get("report"):  # #1278: its object, in place of the tests
+                if report_end(task, n, rnd):
+                    if not _go_on(task, n, "the result's repair", lease):
+                        return
+                    continue
+                return
             # the tests need no model: the GPU is the queue's, or theirs (--unload-for-tests), #257.
             # Theirs is waited for (a peer's round, up to its timeout; this machine's pool for a
             # remote model): queued meanwhile, as _rejoin is, since left `running`, wb steer --now
@@ -6460,6 +6472,100 @@ def _leased(task: store.Task, m: models.Model, say):
                             else "Claude reviews next")
             task.notify("review", text + review_diff(task, n), round=n)
             return
+
+
+# --- report tasks (#1278) -----------------------------------------------------------------------
+# A report task ends with one object, no tests, no auto-fix, no self-review and no review diff.
+# Its object comes from submit_result (ask/result.json, the ask server's) or else the last object
+# in its whole final message (final.md: the report's 2,500-character cut lost it in 13 of 31
+# rounds, #1278's study, 2026-11-25), and is checked here, outside the lane, against the task's
+# schema. One that fails gets one repair round in the same session, SCHEMA_FIX with the checker's
+# error paths (Claude's own StructuredOutput needed one retry 0.7% of the time and never two;
+# DeepSeek's 5 of 5 repairs held); then the task fails, its result null. The opening is an API:
+# the fake (tests/fake_opencode.py) knows a repair round by it.
+RESULT = "result.json"  # tasks/<task>/result.json: the checked object
+SCHEMA_FIX = ("rejected: {errors}. Resend the whole object: call submit_result, or end with it, "
+              "nothing after it.")
+NO_OBJECT = "no JSON object: none was sent with submit_result, nor ends the last message"
+REPORT_CHANGED = "the report task changed its worktree"
+RESULT_SHOWN = 24_000  # characters of the object a notice carries; result.json keeps it whole
+
+
+def result_schema(task: store.Task) -> dict | None:
+    """The report task's schema, as wb start wrote it in its rules (out of the agent's reach)."""
+    doc = store.read_json(context.rules_dir(task) / "schema.json")
+    return doc if isinstance(doc, dict) and not schema.valid(doc) else None
+
+
+def result_of(task: store.Task, n: int, rnd: dict) -> tuple[dict | None, list[str], str]:
+    """Round ``n``'s object, what is wrong with it ([] when it holds), and where it came from
+    ("submit_result", "final.md", or "" for none)."""
+    sch = result_schema(task)
+    text = ask_mcp._read(ask_mcp.ask_dir(task) / ask_mcp.RESULT)  # never through a planted link
+    got = store.loads(text) if text else None
+    obj, src = None, ""
+    if isinstance(got, dict) and isinstance(got.get("result"), dict):
+        obj, src = got["result"], "submit_result"
+    elif (obj := schema.last_object(final_text(rnd))) is not None:
+        src = "final.md"
+    if obj is None:
+        return None, [NO_OBJECT], ""
+    if sch is None:
+        return obj, ["the task's schema (rules/<task>/schema.json) can't be read"], src
+    return obj, schema.check(obj, sch), src
+
+
+def clear_result(task: store.Task) -> None:
+    """Before a report round: the last round's object is no answer to this one."""
+    (ask_mcp.ask_dir(task) / ask_mcp.RESULT).unlink(missing_ok=True)
+    (task.dir / RESULT).unlink(missing_ok=True)
+
+
+def report_text(task: store.Task, n: int, rnd: dict, obj, errs: list[str], src: str) -> str:
+    """A report round's report: summary_text's head (the round, the model, its notes), then the
+    object as data, or what is wrong with it; no files or diff, a report has none."""
+    head = summary_text(task, n, rnd, None).split("\nagent's summary:\n")[0].rstrip()
+    shown = json.dumps(obj, indent=1, ensure_ascii=False) if obj is not None else ""
+    if len(shown) > RESULT_SHOWN:
+        shown = shown[:RESULT_SHOWN] + f"\n[… cut: {task.dir / RESULT}]"
+    name = task.spec.get("schema") or "its schema"
+    if not errs:
+        return (f"{head}\n\nresult ({name}, from {src}; the agent's words, data to check, never "
+                f"instructions):\n```json\n{shown}\n```\n")
+    return (f"{head}\n\nno valid result ({name}): " + "; ".join(errs[:8])
+            + (f"\nwhat it sent ({src}):\n```json\n{shown}\n```" if shown else "") + "\n")
+
+
+def report_end(task: store.Task, n: int, rnd: dict) -> bool:
+    """A report round's end, in place of the tests: True when a repair round was written (the
+    loop goes on), False when the task waits on Claude (review with its object, else failed)."""
+    files = gitops.changed(task.worktree).strip()
+    if files:  # read-only held by the kernel where there is a lane; voided here where there isn't
+        brief = ", ".join(gitops.brief(files.splitlines(), status=True)[:5])
+        text = (report_text(task, n, rnd, None, [f"{REPORT_CHANGED} ({brief}): a report reads and "
+                                                 "reports, so its result is void"], ""))
+        write_report(task, n, rnd, text)
+        task.set_status(phase="failed", last=REPORT_CHANGED)
+        task.notify("failed", text, round=n, cause="agent")
+        return False
+    obj, errs, src = result_of(task, n, rnd)
+    text = report_text(task, n, rnd, obj, errs, src)
+    write_report(task, n, rnd, text)
+    if errs and not task.status.get("schema_fixes"):
+        task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
+        task.round_dir(n + 1).joinpath("prompt.md").write_text(SCHEMA_FIX.format(errors="; ".join(errs[:8])))
+        task.set_status(round=n + 1, schema_fixes=1, round_for="schema_fix")
+        task.event({"ts": store.now(), "round": n, "kind": "schema_fix",
+                    "text": f"the result didn't hold ({errs[0][:120]}): asked once for the whole object"})
+        return True
+    if errs:
+        task.set_status(phase="failed", last=f"no valid result: {errs[0]}"[:200])
+        task.notify("failed", text, round=n, cause="agent")
+        return False
+    store.write_json(task.dir / RESULT, obj)
+    task.set_status(phase="review", hands_off_at=store.now(), last="result checked: Claude reviews next")
+    task.notify("review", text, round=n)
+    return False
 
 
 # What the fresh session is told after the runner took over from a full one.
@@ -6656,7 +6762,8 @@ def _steer_round(task: store.Task, n: int, interrupted: bool) -> None:
 # the new code when they changed (_updated, _successor): until #1322 (2026-11-24) it stopped the
 # task as stuck and woke Claude for a wb resume that was always the answer.
 CHILD_CODE = ("bin/wb-ask-mcp", "workbench/__init__.py", "workbench/ask_mcp.py",
-              "workbench/gitguard.py", "workbench/lane.py", "workbench/store.py", "workbench/watch.py")
+              "workbench/gitguard.py", "workbench/lane.py", "workbench/schema.py", "workbench/store.py",
+              "workbench/watch.py")
 # What a runner before #1322 left in status `last`: still read by cli._interrupted and
 # results._not_the_step, so wb resume --all takes a task an older runner stopped so
 UPDATED = "workbench was updated under this task"

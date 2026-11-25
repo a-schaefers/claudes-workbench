@@ -1,0 +1,27 @@
+{
+  "type": "object",
+  "description": "A finder's (or a critic's) findings, the strongest first",
+  "required": ["findings", "covered"],
+  "properties": {
+    "findings": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {
+        "type": "object",
+        "required": ["file", "line", "claim", "evidence", "fix", "severity", "score"],
+        "properties": {
+          "id": {"type": "string", "maxLength": 40},
+          "file": {"type": "string", "maxLength": 300},
+          "line": {"type": "integer", "minimum": 0},
+          "claim": {"type": "string", "maxLength": 600},
+          "evidence": {"type": "string", "maxLength": 2000},
+          "fix": {"type": "string", "maxLength": 800},
+          "test": {"type": "string", "maxLength": 600},
+          "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+          "score": {"type": "integer", "minimum": 0, "maximum": 10}
+        }
+      }
+    },
+    "covered": {"type": "array", "maxItems": 200, "items": {"type": "string", "maxLength": 300}}
+  }
+}

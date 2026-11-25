@@ -1,0 +1,15 @@
+{
+  "type": "object",
+  "description": "A skeptic's verdict on one finding",
+  "required": ["verdict", "confidence", "evidence"],
+  "properties": {
+    "verdict": {"type": "string", "enum": ["confirmed", "refuted", "unsure"]},
+    "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
+    "evidence": {"type": "string", "maxLength": 3000},
+    "reproduction": {
+      "type": "object",
+      "properties": {"command": {"type": "string", "maxLength": 1000},
+                     "observed": {"type": "string", "maxLength": 2000}}
+    }
+  }
+}
