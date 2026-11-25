@@ -1059,28 +1059,31 @@ def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu", whe
         _standing_refusal(conf, a, where, repo, sub, role)
     setup = a.setup if a.setup is not None else conf.get("setup") or ""
     copy, sibs = [], []
+    home = context.repo_conf_dir(repo, sub)
     for raw, given in [*((x, False) for x in conf.get("copy", [])), *((x, True) for x in a.copy or [])]:
-        # commands.json's paths stay the repo's; a --copy from a package is read from it (#1158)
-        p = (_copy_path(repo, raw, sub) if given else os.path.normpath(raw.strip())).rstrip("/")
+        # a --copy from a package is read from it (#1158), a commands.json entry from its key's
+        # directory (#1346); a standing entry's refusal names the entry, not a flag never given
+        p = _copy_path(repo, raw, sub if given else home).rstrip("/")
+        what = f"--copy {raw}" if given else f'commands.json "repos" copy {raw}'
         if os.path.isabs(p) or p == ".." or p.startswith("../") or p in (".", ""):
-            die(f"--copy {raw}: a path inside the repo, ignored there (e.g. node_modules)")
+            die(f"{what}: a path inside the repo, ignored there (e.g. node_modules)")
         parts = p.split("/")
         if any(x not in NOT_SECRET and any(fnmatch.fnmatch(x, pat) for pat in SECRET_FILES)
                for x in parts):
-            die(f"--copy {raw}: looks like a secret or a user's setting "
+            die(f"{what}: looks like a secret or a user's setting "
                 f"({', '.join(SECRET_FILES[:4])}…), which stays out of the agent's worktree")
         if not os.path.lexists(repo / p):
-            die(f"--copy {raw}: no {p} in {repo}")
+            die(f"{what}: no {p} in {repo}")
         # a virtualenv can't move: its activate and its scripts' shebangs name the checkout, so a
         # copied .venv ran the developer's environment, and its writes left the lane (#260, the
         # audit of 1.2)
         if venv := runner.venv_in(repo / p):
-            die(f"--copy {raw}: {venv.relative_to(repo)} is a Python virtualenv, which still runs "
+            die(f"{what}: {venv.relative_to(repo)} is a Python virtualenv, which still runs "
                 f"from {repo} once copied; recreate it with --setup instead, e.g. --setup "
                 f"'python3 -m venv {venv.relative_to(repo)} && {venv.relative_to(repo)}/bin/pip "
                 "install -r requirements.txt' or --setup 'uv sync'")
         if not gitops.ignored(repo, p):
-            die(f"--copy {raw}: not ignored in {repo}, so a copy would show in the review diff; "
+            die(f"{what}: not ignored in {repo}, so a copy would show in the review diff; "
                 "a tracked file is in the worktree already")
         # ignored in the checkout isn't untracked where the task starts: a tag given as --base
         # tracked generated/config, the developer's local copy went over it, and it reached the
@@ -1089,7 +1092,7 @@ def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu", whe
         held = [x for x in gitops.git(repo, "ls-tree", "-r", "--name-only", "-z", base, "--", p).split("\0")
                 + gitops.git(repo, "ls-files", "-z", "--", p).split("\0") if x]
         if held:
-            die(f"--copy {raw}: {held[0]} under it is tracked (at {a.base} or in the checkout's "
+            die(f"{what}: {held[0]} under it is tracked (at {a.base} or in the checkout's "
                 "index), and the copy would replace it in the task's worktree and its commit; "
                 "copy only the ignored files inside")
         if p not in copy:
@@ -1132,8 +1135,9 @@ def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu", whe
 
 
 def _copy_path(repo: Path, raw: str, sub: str | None) -> str:
-    """A --copy path as the repo-relative path it names. From a package (`sub`), read from the
-    package, where wb start's note names the ignored directories from and the setup runs: from
+    """A --copy path as the repo-relative path it names; a commands.json `copy` entry's too, with
+    ``sub`` its key's directory (context.repo_conf_dir, #1346). From a package (`sub`), read from
+    the package, where wb start's note names the ignored directories from and the setup runs: from
     packages/app, `--copy node_modules` copied the root's node_modules/, the package's stayed
     missing and every round ran against a worktree that couldn't pass, and the note's
     `../../node_modules` was refused (#1158, 2026-11-24). A path only the root has is still the
@@ -1162,13 +1166,14 @@ def _standing_gap(conf: dict, a, where: str, repo: Path, sub: str | None,
     """_standing_refusal's line, or '': also the busy opt-in's (#1023), which moves a GPU start to
     an API model after _worktree_setup checked it as a GPU one (wave 2's merge), and the mod's
     dry run's (_route_start). A --copy names the path it copies, from a package the package's
-    (_copy_path, #1158). Its other way out is the role's, or a GPU model for a --model start
-    (privacy.standing_refusal, #1227)."""
+    (_copy_path, #1158), a standing entry the path from its key's directory (#1346). Its other
+    way out is the role's, or a GPU model for a --model start (privacy.standing_refusal, #1227)."""
     asked = bool(getattr(a, "model", None))
     named_copy = {_copy_path(repo, x, sub).rstrip("/") for x in a.copy or []}
     named_sib = {x.strip().rstrip("/").removeprefix("../") for x in a.sibling or []}
+    home = context.repo_conf_dir(repo, sub)  # read as _worktree_setup reads it (#1346)
     for raw in conf.get("copy", []):
-        if (entry := os.path.normpath(raw.strip()).rstrip("/")) not in named_copy:
+        if (entry := _copy_path(repo, raw, home).rstrip("/")) not in named_copy:
             return privacy.standing_refusal("copy", raw, where, _copy_name(repo, entry, sub),
                                             role, asked, advice)
     for raw in conf.get("siblings", []):

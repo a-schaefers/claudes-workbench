@@ -6831,6 +6831,59 @@ class WorktreeSetup(Base):
                          "packages/app/node_modules")
         self.assertEqual(cli._copy_path(self.repo, "../../../x", "packages/app"), "../x")
 
+    def test_a_packages_own_commands_json_copy_is_read_from_the_package(self):
+        # #1346 (bar round 9, 2026-11-24; #1158 fixed only --copy): a package key's
+        # `copy: ["node_modules"]` copied the root's node_modules, so the base check and every
+        # auto-fix round ran without the package's; with no root node_modules the start died
+        # naming a --copy never given
+        self.ignore("node_modules/")
+        app = self.repo / "packages" / "app"
+        (self.repo / "node_modules" / "rootdep").mkdir(parents=True)
+        (app / "node_modules" / "appdep").mkdir(parents=True)
+        (app / "node_modules" / "appdep" / "index.js").write_text("42\n")
+        (app / "CLAUDE.md").write_text("# app\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "a package"], check=True)
+        conf = Path(os.environ["WB_COMMANDS"])
+        conf.write_text(json.dumps({"repos": {str(app): {"copy": ["node_modules"]}}}))
+        self.assertEqual(context.repo_conf_dir(self.repo, "packages/app/src"), "packages/app")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = run_wb("start", "t-pkgown", "--spec", str(self.spec), "--repo", str(app), "--model",
+                     "mimo", "--test", "test -f node_modules/appdep/index.js")
+        self.assertIn("copies packages/app/node_modules", out)
+        st = wait_phase("t-pkgown", {"review"})
+        wt = store.Task("t-pkgown").worktree
+        self.assertEqual(store.Task("t-pkgown").spec["copy"], ["packages/app/node_modules"])
+        self.assertTrue((wt / "packages/app/node_modules/appdep/index.js").is_file())
+        self.assertFalse((wt / "node_modules").exists())               # not the root's
+        self.assertIs(st["tests"]["ok"], True)
+        # an API start's consent check reads the entry the same way: the package's --copy names it
+        named = types.SimpleNamespace(copy=["node_modules"], sibling=None)
+        self.assertEqual(cli._standing_gap(context.repo_conf(self.repo, "packages/app"), named,
+                                           "DeepInfra", self.repo, "packages/app"), "")
+        # a refused standing entry names commands.json, not a flag never given
+        conf.write_text(json.dumps({"repos": {str(app): {"copy": ["dist"]}}}))
+        with self.assertRaises(SystemExit), redirect_stderr(err := io.StringIO()):
+            run_wb("start", "t-nodist", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo")
+        self.assertIn('commands.json "repos" copy dist: no packages/app/dist in', err.getvalue())
+        self.assertNotIn("--copy", err.getvalue())
+        # #1346's review (2026-11-24): a key on a linked worktree nested in the repo (Claude
+        # Code's .claude/worktrees/x) is the main checkout's root by git dir, but its depth was
+        # measured from the main top, three parts: the package's node_modules was read for the root's
+        wtx = self.repo / ".claude" / "worktrees" / "x"
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "-q", str(wtx)],
+                       check=True, capture_output=True)
+        conf.write_text(json.dumps({"repos": {str(wtx): {"copy": ["node_modules"]}}}))
+        self.assertEqual(context.repo_entries(self.repo, "packages/app")[0][0], str(wtx))
+        self.assertEqual(context.repo_conf_dir(self.repo, "packages/app"), "")
+        root_copy = types.SimpleNamespace(copy=["../../node_modules"], sibling=None)
+        self.assertEqual(cli._standing_gap(context.repo_conf(self.repo, "packages/app"), root_copy,
+                                           "DeepInfra", self.repo, "packages/app"), "")
+        why = cli._standing_gap(context.repo_conf(self.repo, "packages/app"), named, "DeepInfra",
+                                self.repo, "packages/app")
+        self.assertIn("copies node_modules into every task", why)
+        self.assertIn("--copy ../../node_modules", why)
+
     def test_a_repo_on_a_windows_drive_gets_a_note(self):
         # #201's finding 30: git is much slower on WSL's /mnt/c, and wb checks the worktree every step
         with mock.patch.object(context, "on_windows", return_value=True):

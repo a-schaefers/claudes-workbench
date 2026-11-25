@@ -1188,6 +1188,34 @@ def repo_conf(repo: str | Path, sub: str | None = None) -> dict:
     return next((v for _, v in repo_entries(repo, sub)), {})
 
 
+def repo_conf_dir(repo: str | Path, sub: str | None = None) -> str:
+    """The directory of repo_conf's key inside the repo, as ``sub`` names it: '' for the top (or
+    no key). The spot itself or a directory above it, so a prefix of ``sub``, matched by real path
+    or by git dir as repo_entries does. A package key's `copy` paths are read from it: from the
+    root they copied the root's node_modules into every task of the package (#1346, 2026-11-24)."""
+    entries = repo_entries(repo, sub)
+    if not entries or not sub:
+        return ""
+    fold = store.folds_case(repo)
+    real = lambda p: os.path.realpath(p).lower() if fold else os.path.realpath(p)  # noqa: E731
+    kp, top = Path(entries[0][0]).expanduser(), real(repo)
+    kr, spot = real(kp), real(Path(repo) / sub)
+    # by path only when the spot is at or under the key, repo_entries' `near`: a key on a linked
+    # worktree under the top (.claude/worktrees/x) matches the main checkout by git dir, and its
+    # depth from the top, three parts, read the root key's node_modules as the package's (#1346's
+    # review, 2026-11-24)
+    if (kr == top or kr.startswith(top.rstrip(os.sep) + os.sep)) \
+            and (spot == kr or spot.startswith(kr.rstrip(os.sep) + os.sep)):
+        rel = os.path.relpath(kr, top)
+    else:  # by git dir: the key's path inside its own worktree
+        try:
+            rel = os.path.relpath(kr, real(gitops.toplevel(kp)))
+        except gitops.GitError:
+            return ""
+    depth = 0 if rel == "." else len(Path(rel).parts)
+    return "/".join(Path(sub.strip("/")).parts[:depth])
+
+
 def repo_entries(repo: str | Path, sub: str | None = None,
                  whole: bool = False) -> list[tuple[str, dict]]:
     """Every commands.json `repos` entry for the task's spot, nearest first, as (key, entry):
