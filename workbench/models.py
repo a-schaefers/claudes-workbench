@@ -1163,6 +1163,11 @@ def _served_url(p: subprocess.Popen, deadline: float) -> str | None:
             continue
         chunk = os.read(fd, 65536)
         if not chunk:
+            # its stdout closes a moment before it exits: wait that out, or a loaded machine read
+            # an OpenCode that failed at once as one past the deadline (#1370's CI, 2026-11-25:
+            # "took over 30 s" for an immediate "Unable to connect")
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                p.wait(timeout=max(0.0, deadline - time.monotonic()))
             return None
         buf += chunk
         while b"\n" in buf:

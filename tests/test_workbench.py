@@ -33608,6 +33608,19 @@ class ApiDiscovery(Base):
         self.assertIn("acme/coder-flash", {f"{e['providerID']}/{e['id']}" for e in doc["data"]})
         self.assertLess(time.monotonic() - began, 10)
 
+    def test_an_opencode_that_fails_before_it_listens_says_its_error_even_if_its_exit_lags(self):
+        # #1370's CI, 2026-11-25: under load the exit trailed stdout's close, and wb called an
+        # immediate failure "took over 30 s"
+        lag = ("import os, sys, time\n"
+               "print('Error: Unable to connect.', file=sys.stderr, flush=True)\n"
+               "os.close(1)\n"
+               "time.sleep(1)\n"
+               "sys.exit(1)\n")
+        where, env = self.models._opencode_env()
+        doc, why = self.models.model_list(env, where, timeout=10, cmd=[sys.executable, "-c", lag])
+        self.assertIsNone(doc)
+        self.assertEqual(why, "Error: Unable to connect.")
+
     def test_a_failed_catalog_read_leaves_gpu_starts_alone(self):
         os.environ["FAKE_CATALOG_FAIL"] = "1"
         self.assertEqual(self.models.hosted(), {})
