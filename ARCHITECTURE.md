@@ -6221,7 +6221,9 @@ questions were answered in the terminal only for two releases): a `from: claude`
 given, of this Claude Code's (`claude_pid` its own, or none: an older wb's row; `chat.send` stamps
 every one, as another session's screenshot still settled it when only `reply` did, the #1129
 review) or answering it (`re` holds its id), or a typed prompt settles it (any session's row did:
-another's report kept the reply from going, #1129). At the end of the main turn that had it
+another's report kept the reply from going, #1129). The mod's own `auto` post settles only by
+`re`: it is always this Claude Code's, so the first of two messages given in one poll had its
+answer settle the second's, which never got one (the #1352 review). At the end of the main turn that had it
 (`grace` 1 when it was queued behind a running turn or behind a prompt the mod submitted that
 poll, `mem.submitted`, #837) with no reply, the mod posts that turn's own answer (`turn.complete`'s
 `answer`, at most `ANSWER_ARGV` 16,000 characters on the command line) with `wb chat reply

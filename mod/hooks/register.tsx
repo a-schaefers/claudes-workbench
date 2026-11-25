@@ -3952,8 +3952,10 @@ async function owedAtTurnEnd($: any, answer: string) {
   if (!mem.chatOwed.size) return
   const tail = await readTail($, `${mem.root}/chat/messages.jsonl`, NOTIFY_TAIL)
   // a reply settles it when it answers the message (`re`) or this Claude Code wrote it (`claude_pid`,
-  // unknown: yes): another session's report, posted meanwhile, read as the answer (#1129)
-  const mine = (m: any) => !mem.claudePid || !Number(m.claude_pid ?? 0) || Number(m.claude_pid) === mem.claudePid
+  // unknown: yes): another session's report, posted meanwhile, read as the answer (#1129). The
+  // mod's own post (`auto`) only by `re`: always this Claude Code's, m1's answer settled m2, given
+  // in the same poll, and m2's answer never went (the #1352 review, 2026-11-25)
+  const mine = (m: any) => !m.auto && (!mem.claudePid || !Number(m.claude_pid ?? 0) || Number(m.claude_pid) === mem.claudePid)
   const replied = parseLines(tail?.text ?? '').filter(m => m.from === 'claude')
   const due = new Map<string, string[]>() // an answer to post → the messages it answers
   for (const [id, o] of [...mem.chatOwed]) {

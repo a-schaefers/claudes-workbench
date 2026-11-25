@@ -3220,6 +3220,46 @@ test('a web message queued behind a task\'s wake is owed from its own turn, and 
   expect(posted.map(a => a.slice(2))).toEqual([['reply', '--turn-answer', '--text=One task in review.', '--to=m1']])
 })
 
+test('two web messages given in one poll each get their own turn\'s answer: the first\'s post doesn\'t settle the second (#1352)', async ($, on) => {
+  // the #1352 review: the mod's auto row is always this Claude Code's, so m1's answer, posted after
+  // m2 was given, counted as m2's reply, and two quick messages from the phone got one answer
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  fakeTasks(on, files, [])
+  chatOn(files)
+  on('ui.toast', () => ({ value: undefined }))
+  on('session.id', () => ({ value: 'sess-1' }))
+  const posted: string[][] = []
+  on('process.run', (_: any, e: any) => {
+    if (e.argv[1] === 'chat' && e.argv[2] === 'reply') {          // as wb does: the auto row lands in the thread
+      posted.push(e.argv)
+      const re = e.argv.filter((a: string) => a.startsWith('--to=')).map((a: string) => a.slice(5))
+      files['/wb/chat/messages.jsonl'] += JSON.stringify({ id: `r${posted.length}`, ts: clock.now() / 1000, from: 'claude', text: 'x', re, auto: true }) + '\n'
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '' } }
+  })
+  const asked: string[] = []
+  on('prompt.submit', (_: any, e: any) => { asked.push(e.text); return { text: e.text } })
+  on('tool.call', () => ({ result: { stdout: '' }, text: '' }))  // the engine's Bash
+  await $.session.start({ cwd: '/home/u/project', surface: 'terminal', isInteractive: true })
+  const turn = async (id: string, answer = '') => {
+    await $.turn.start({ text: '', turnId: id })
+    if (id === 't0') await $.tool.call({ tool: 'Bash', command: 'wb start t --spec s.md' })
+    await $.turn.complete({ ...endTurn(id), answer })
+    await clock.advance(3000)
+  }
+  await turn('t0')                                               // workbench mode: the chat listens
+  files['/wb/chat/messages.jsonl'] = JSON.stringify({ id: 'm1', ts: 1_800_000_000, from: 'user', text: 'Status' }) + '\n'
+    + JSON.stringify({ id: 'm2', ts: 1_800_000_001, from: 'user', text: 'And the GPU?' }) + '\n'
+  await clock.advance(31_000)                                    // one poll: both messages
+  expect(asked.filter(a => a.startsWith('[web chat]'))).toHaveLength(2)
+  await turn('t1', 'Two tasks run.')                             // m1's turn
+  await turn('t2', 'The GPU is free.')                           // m2's turn
+  expect(posted.map(a => a.slice(3))).toEqual([['--turn-answer', '--text=Two tasks run.', '--to=m1'], ['--turn-answer', '--text=The GPU is free.', '--to=m2']])
+  await turn('t3', 'Nothing new.')
+  expect(posted).toHaveLength(2)                                 // each posted once
+})
+
 test('a failed post of the turn\'s answer leaves the message owed, and the next turn\'s end posts that answer again (#1352)', async ($, on) => {
   // #1352: the nudge's note was posted once and forgotten, so a post that failed reached nobody;
   // a turn that said nothing (thinking only, an interrupt) has no answer to post yet either
