@@ -41977,12 +41977,17 @@ class FirstRunApi(Base):
         self.catalog(ROUTES_CATALOG[-3:], [key_row("deepseek", "DeepSeek", STORED)])
         runner.models.hosted(fresh=True)
         self.assertEqual(self.wb("route", "trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)
+        from workbench import meter
         now = store.now()
+        # every row on today's local day: two hours back crossed midnight between 00:00 and 02:00
+        # and read "(≈$2.00 today)" (run while checking nightly run 45454423406, 01:39 MST,
+        # 2026-11-25)
+        since = now - time.mktime(time.strptime(meter.day(now), "%Y-%m-%d"))
         store.append_jsonl(store.home() / "results.jsonl", {
-            "ts": now - 3600, "task": "closed", "outcome": "accepted", "model": "deepseek/deepseek-flash",
+            "ts": now - since / 2, "task": "closed", "outcome": "accepted", "model": "deepseek/deepseek-flash",
             "kind": "api", "role": "trivial", "provider": "deepseek", "api": {"cost": 3.0, "source": "opencode"}})
-        _ledger_step(3.0, now - 7200, "closed")
-        _ledger_step(2.0, now - 60, "open-one")
+        _ledger_step(3.0, now - since * 3 / 4, "closed")
+        _ledger_step(2.0, now - since / 4, "open-one")
         self.assertIn("api spend, the last 7 days: ≈$5.00 of $5/day at most (deepseek $5.00)",
                       cli.scout_api_lines())
         self.assertIn("api, the last 7 days: ≈$5.00 (≈$5.00 today)", run_wb("savings", "--api"))
