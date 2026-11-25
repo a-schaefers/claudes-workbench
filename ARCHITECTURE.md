@@ -3353,7 +3353,10 @@ at the new address (both probed at once, 1 s, only when the addresses differ), h
 stderr; one the user repointed (baseURL off its mark) stays theirs (#242). The probe because
 `windows_host()` is only the default gateway: under `networkingMode=mirrored` or a VPN in WSL it
 is the router, and a working provider was rewritten to it, every `wb start` then saying to start
-Ollama at the router (#1159's review). At Windows' address `wb remote` and `--remove` take the
+Ollama at the router (#1159's review). A mark still answering is kept that way (`models._STAYED`,
+per mark and new address) for `DOWN_SECS`, in-process: where the router drops packets every
+`discover()` paid a second, about 5 s a `wb models` (#1397); a silent mark is asked each time, as
+a runner waiting after a reboot needs. At Windows' address `wb remote` and `--remove` take the
 provider marked `wsl_host` whatever its id (`models._remote_pid_for`), and `wb remote <new>`
 repoints it if discovery hasn't yet (it probes the new address first, as every `wb remote` does).
 One wb can't rewrite stays, and `remedy` (`windows_moved`) names the new address where it said to
