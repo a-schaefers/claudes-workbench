@@ -25078,6 +25078,13 @@ class ConfigWrites(Base):
 class DiskRoom(Base):
     """#342 (the audit of 1.4): nothing watched the disk, and a full one wedged every task."""
     @staticmethod
+    def BUG(*_, **__):
+        """A fresh crash per call: one RuntimeError instance given as side_effect keeps its
+        traceback, so the in-process runner's frame, and its open runner lock, outlived main(),
+        and the next runner.main() said "another runner drives t-full" (#1293's CI, 2026-11-24)."""
+        raise RuntimeError("a bug")
+
+    @staticmethod
     def FULL(*_, **__):
         # a fresh one each time: one shared instance kept its traceback, and with it the frame
         # of the runner.main() that raised it, holding the runner's lock
@@ -25308,7 +25315,7 @@ class DiskRoom(Base):
         # a plain crash keeps no cause: a bug in the runner, which the failed wake's text covers
         task.set_status(phase="review")
         with mock.patch.object(sys, "argv", ["runner", "t-full"]), \
-                mock.patch.object(runner, "drive", side_effect=RuntimeError("a bug")):
+                mock.patch.object(runner, "drive", side_effect=self.BUG):
             runner.main()
         note = [r for r in store.notices() if r["task"] == "t-full"][-1]
         self.assertIn("the runner crashed", note["text"])
