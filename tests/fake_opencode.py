@@ -247,10 +247,21 @@ if args[:2] == ["serve", "--stdio"]:
             self.end_headers()
             self.wfile.write(body)
 
+    class Listens(ThreadingHTTPServer):
+        # listens at once, as the tests' own servers (_Listens, #950): HTTPServer's server_bind
+        # looks the address's name up (socket.getfqdn), 35 s on GitHub's macOS runners, past
+        # models.model_list's 30 s, so every catalog read there failed ("opencode model.list took
+        # over 30 s") and each macOS shard failed some 40 API tests (nightly run 45454423406,
+        # 2026-11-24)
+        def server_bind(self):
+            import socketserver
+            socketserver.TCPServer.server_bind(self)
+            self.server_name, self.server_port = self.server_address[:2]
+
     if os.environ.get("FAKE_SERVE_PID"):
         with open(os.environ["FAKE_SERVE_PID"], "w") as fh:
             fh.write(str(os.getpid()))
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = Listens(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(json.dumps({"url": f"http://127.0.0.1:{server.server_address[1]}"}), flush=True)
     sys.stdin.read()  # until the client closes it, as `serve --stdio` waits

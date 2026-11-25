@@ -11379,7 +11379,7 @@ class RealOpenCode(Base):
 
             def log_message(self, *a):
                 pass
-        collector = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Collector)
+        collector = ThreadingHTTPServer(("127.0.0.1", 0), Collector)  # listens at once (#950)
         threading.Thread(target=collector.serve_forever, daemon=True).start()
         self.addCleanup(collector.server_close)
         self.addCleanup(collector.shutdown)
@@ -33754,6 +33754,23 @@ class ApiDiscovery(Base):
         self.assertEqual((doc, why), (None, "opencode model.list took over 1 s"))
         with self.assertRaises(ProcessLookupError):                         # its server ended
             os.kill(int(Path(os.environ["FAKE_SERVE_PID"]).read_text()), 0)
+
+    def test_the_fakes_catalog_server_listens_without_looking_its_address_up(self):
+        # nightly run 45454423406 (2026-11-24): the fake's `serve --stdio` bound with HTTPServer's
+        # own server_bind, whose socket.getfqdn took 35 s on GitHub's macOS runners, past
+        # model_list's 30 s: every catalog read there failed and some 40 API tests per shard with
+        # it. The macOS lookup played here: one that fails the fake if it is asked at all
+        hang = ("import runpy, socket, sys\n"
+                "def looked_up(*a):\n"
+                "    raise SystemExit('socket.getfqdn asked: 35 s on the macOS runners')\n"
+                "socket.getfqdn = looked_up\n"
+                f"runpy.run_path({str(ROOT / 'tests' / 'fake_opencode.py')!r}, run_name='__main__')\n")
+        where, env = self.models._opencode_env()
+        began = time.monotonic()
+        doc, why = self.models.model_list(env, where, timeout=10, cmd=[sys.executable, "-c", hang])
+        self.assertEqual(why, "")
+        self.assertIn("acme/coder-flash", {f"{e['providerID']}/{e['id']}" for e in doc["data"]})
+        self.assertLess(time.monotonic() - began, 10)
 
     def test_a_failed_catalog_read_leaves_gpu_starts_alone(self):
         os.environ["FAKE_CATALOG_FAIL"] = "1"

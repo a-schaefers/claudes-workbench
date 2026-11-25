@@ -7203,7 +7203,9 @@ every workflow its own permissions, `check` never path-filtered and required fro
 (every command and flag in *Every `wb` command*, every module in CLAUDE.md's layout, every `WB_*` variable in CLAUDE.md,
 CLAUDE.md under 25,000 characters); `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`. The tests' own
 `HTTPServer`/`ThreadingHTTPServer` (`_Listens`, 0.02 s tick) listen at once: http.server's looked the name up first, 35 s
-on macOS runners (#950); not patched suite-wide, so `WebChat` still catches chat.py doing it.
+on macOS runners (#950), and the fake's `serve --stdio` server too, whose lookup outlasted `model_list`'s 30 s and
+failed every catalog read on macOS (nightly run 45454423406); not patched suite-wide, so `WebChat` still catches
+chat.py doing it.
 
 **The fixture** (`Base`): `WB_HOME=<tmp>/state`, `WB_OPENCODE_BIN` (the fake, `shlex`-split), `WB_FAKE_MODELS=1`,
 `WB_OPENCODE_CONFIG` (`ollama` on 127.0.0.1:11434 with `mimo-v2.6:9b-q8_0`, 32K, and `qwen3.8-27b` with no
@@ -7243,7 +7245,7 @@ them, then `ok`'s answer). A new fake behaviour is a new scenario.
 (`models.model_list`'s) prints `{"url"}` and serves `GET /api/plugin` and `GET /api/model` (the same `{location,
 data}`) on 127.0.0.1 behind Basic `opencode:<OPENCODE_PASSWORD>` until its stdin closes; `FAKE_COLD=<n>` plays 2.4's
 cold server (its first n plugin.list reads list none, model.list until then only the first entry), `FAKE_SERVE_PID`
-records its pid; `models` as
+records its pid; its server listens at once, without HTTPServer's name lookup (#950); `models` as
 `<provider>/<id>` lines, refusing a provider argument as 2.3.2 does; `auth list --format json` as `[{id, name,
 connections: [{type: "credential", id, label, method: "key"}]}]` per catalog provider. `run -m <provider>/<id>#<variant>`
 splits at the first `/` and the first `#` after it: a catalog provider's unknown model is `{"type": "error", "error":
