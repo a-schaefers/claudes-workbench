@@ -89,6 +89,20 @@ def run_wb(*argv) -> str:
     return buf.getvalue()
 
 
+@contextlib.contextmanager
+def fd_to_devnull(fd: int):
+    """This process's ``fd`` on /dev/null for the block, as `wb … 2>/dev/null` runs (#1308)."""
+    saved = os.dup(fd)
+    null = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(null, fd)
+        yield
+    finally:
+        os.dup2(saved, fd)
+        os.close(saved)
+        os.close(null)
+
+
 def not_merged(*argv) -> str:
     """run_wb for an accept --merge whose merge is refused: exit 5 (cli.NOT_MERGED, #247)."""
     buf = io.StringIO()
@@ -12546,6 +12560,27 @@ class Lane(Base):
                              capture_output=True, text=True, timeout=20)
         return out.stdout.split() or [out.stderr]
 
+    def test_the_read_lane_lists_no_link_to_wbs_own_output_when_that_goes_to_dev_null(self):
+        # #1308 (2026-11-24): /dev/stderr resolved to /dev/null under `wb verify 2>/dev/null`, so
+        # it was listed beside it, and the child, whose fd 2 is a pipe, had its lane refused
+        task = self.bare_task("t-fds", self.repo)
+        task.worktree.mkdir()
+        for fd in (1, 2):
+            with fd_to_devnull(fd):
+                listed = context.readable(task)
+            self.assertIn("/dev/null", listed)
+            self.assertEqual([p for p in listed if p in context.FD_LINKS
+                              or p.startswith("/dev/fd/")], [], fd)
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_a_read_rule_on_a_pipe_leaves_the_pipe_out_and_still_draws_the_lane(self):
+        # #1308 (2026-11-24): a listed /dev/stderr, a pipe in the child, was EBADFD to
+        # landlock_add_rule, and the whole lane was refused (exit 126)
+        out = subprocess.run(lane.wrap([], [sys.executable, "-c", "print('ran')"],
+                                       [sys.prefix, "/usr", "/lib", "/lib64", "/etc", "/dev/stderr"]),
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=20)
+        self.assertEqual((out.returncode, out.stdout.strip()), (0, "ran"))
+
     @unittest.skipUnless(lane.abi(), "needs Landlock")
     @home_outside_the_lane
     def test_a_config_home_outside_the_dotfiles_stays_readable_but_its_secrets_dont(self):
@@ -19989,6 +20024,32 @@ class Verify(Base):
         self.assertIn("AssertionError", Path(r["dir"], "base.txt").read_text())   # both outputs kept
         (self.wt / "calc.py").write_text("def kw(watts):\n    return watts // 1000\n")
         self.assertTrue(verify.last(store.Task("t"))["stale"])     # the candidate moved on since
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock: without it no lane is refused")
+    def test_verify_with_wbs_stderr_or_stdout_on_dev_null_still_proves_the_fix(self):
+        # #1308 (2026-11-24): under `wb verify 2>/dev/null` the lane was refused on both sides
+        # (exit 126) and verify said "the candidate fails it" for a fix whose tests passed
+        from workbench import verify
+        for fd in (2, 1):
+            with fd_to_devnull(fd):
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    cli.main(["verify", "t", "--test", "python3 -m unittest tests.test_calc"])
+            r = verify.last(store.Task("t"))
+            self.assertEqual((r["verdict"], r["candidate"]["exit"]), ("proven", 0),
+                             Path(r["dir"], "candidate.txt").read_text())
+            self.assertIn("proven: it fails on the base", buf.getvalue())
+
+    def test_a_run_the_lane_refused_is_inconclusive_never_the_candidate_failing(self):
+        # #1308 (2026-11-24): a refused lane's exit 126 was read as the candidate failing
+        from workbench import verify
+        said = f"{lane.REFUSED} ([Errno 1] landlock_restrict_self); not running /bin/sh\n"
+        with mock.patch.object(runner, "run_in_lane", return_value=(126, said)):
+            out = run_wb("verify", "t", "--test", "python3 -m unittest tests.test_calc")
+        self.assertIn("): inconclusive", out)
+        self.assertNotIn("the candidate fails it", out)
+        self.assertIn(f"  no test ran: {said.strip()}", out)
+        self.assertEqual(verify.last(store.Task("t"))["verdict"], "inconclusive")
 
     def test_verify_runs_the_big_text_file_accept_lands_and_proves_nothing_without_a_binary_it_lands(self):
         # #642 (Codex's audit of 1.90.6): the review snapshot's size limit also made verify's

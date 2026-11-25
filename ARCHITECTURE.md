@@ -2010,7 +2010,10 @@ deliberately hostile process.
   (`search_roots`: `SEARCH_PATH_VARS`, `PYTHONPATH` via `WB_USER_PYTHONPATH`, #667); not the user's
   documents or other projects. Running a program reads it, so one left out can't start (`Permission
   denied`; for OpenCode itself `workbench lane: can't run <cmd>`): add it to `commands.json`
-  `paths`. `readable()` walks down from `/` listing the entries beside each excluded one. Found by
+  `paths`. `readable()` walks down from `/` listing the entries beside each excluded one, never
+  `FD_LINKS` (`/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/fd`: wb's own descriptors, so
+  under `wb verify 2>/dev/null` `/dev/stderr` was `/dev/null` and was listed, and the child's pipe
+  refused the lane, #1308). Found by
   trying: `python3` running gh in the lane was logged in, and the SSH keys were readable.
   On WSL (`hardware.system()`) never the Windows drives (`windows_drives`: DrvFs mounts and any
   `/mnt/<letter>`): a Windows program runs through interop as the user, outside Landlock and
@@ -2103,8 +2106,10 @@ deliberately hostile process.
   directories, the network (*What TCP reaches*), and metadata (chmod, chown, utimes, xattrs on
   outside files: only the patterns).
   Fails closed: Landlock present but refusing prints `workbench lane: the kernel refused the lane
-  (<error>); not running <cmd>` and exits 126; an exec failure is `workbench lane: can't run <cmd>
-  (<reason>)`, 127 not found, else 126. Without Landlock (macOS, an old kernel, an architecture off
+  (<error>); not running <cmd>` (`lane.REFUSED`) and exits 126, but a file rule the kernel
+  rejects as `EBADFD` (a pipe or socket, nothing a rule grants) is left out instead (#1308); an
+  exec failure is `workbench lane: can't run <cmd> (<reason>)`, 127 not found, else 126. Without
+  Landlock (macOS, an old kernel, an architecture off
   `lane.UNIFIED`, whose syscall numbers it knows) it execs unrestricted but for no-new-privileges.
   Older ABIs hold less (`lane.gaps`): before ABI 3 truncation outside isn't refused; ABI 1 fails
   cross-directory moves and links even inside (EXDEV); before 6 signals, before 9 sockets aren't
@@ -5370,8 +5375,9 @@ user's checkout or the worktree:
   left out is never `proven`.
 
 The verdict: `proven` (the base fails on an assertion, the candidate passes), `base-passes`,
-`candidate-fails`, or `inconclusive` (a timeout, overrun, failed setup, left-out files, or a base
-failure that isn't proof). Proof is positive only: `--expect TEXT` in the base's output, else an
+`candidate-fails`, or `inconclusive` (a timeout, overrun, failed setup, left-out files, a run whose
+lane was refused, exit 126 and `lane.REFUSED`, said as `no test ran: …` and kept as `refused`, #1308,
+or a base failure that isn't proof). Proof is positive only: `--expect TEXT` in the base's output, else an
 `ASSERTION` line or `FAILED_TEST` header (#730), unless first a `SETUP` error (#326) or a `MISSING`
 file the candidate adds (#500). Never proof: `MISSING_API` (an API the candidate adds; a command
 not found in bash's words or dash's), or pytest
@@ -5380,7 +5386,7 @@ whose first `E` line (`PYTEST_E`) isn't `PYTEST_PROOF` (#729); a bare "expected"
 the first assertion line, never a `>` line, else the header). Runs are kept in
 `tasks/<task>/verify/<n>/` (`base.txt`, `candidate.txt`, `result.json` `{cmd, files, tree, ts, base:
 {rev, exit, assertion}, candidate: {…}, verdict, dir, expect?, uncopied?, removed, missing,
-code_copied, left_out?, filtered?}`); `verify.last` adds `stale`. `wb report` ends with the newest
+code_copied, left_out?, filtered?, refused?}`); `verify.last` adds `stale`. `wb report` ends with the newest
 check (#97); `wb accept` prints `verify.note` when it isn't `proven` or is stale.
 An API task's checks are the same, with no model call: with `--unload-for-tests`, `wb verify`, `wb
 shot` and the runner's tests (`_tests_gpu`, for a lease with no pool) take this machine's pool alone
@@ -7294,6 +7300,7 @@ doc needs its own `!/` line).
 ## Couplings: change one, change the other
 
 - **A file a round's children load** (lane, git shim, ask server, their imports) → `runner.CHILD_CODE`, so an update under a running task is caught.
+- **`lane.REFUSED`** (the refused lane's first words) → `verify.run`, which reads a run starting with it as no test run, never the candidate failing (#1308).
 - **An `ALLOWED_COMMANDS` entry spelled with its opt-out** (`REDOCLY_TELEMETRY=off redocly lint`) → the skill's
   `reference/checks.md` (*Spell it the way the agent's shell allows*) and the shell rules' step 2, so Claude's `--test` uses a spelling the agent may run. A tool listed by
   subcommands is `LIMITED` by itself (`_entry_tool`); one reaching out but unlisted → `OUTWARD_TOOLS` by hand. A tool a
