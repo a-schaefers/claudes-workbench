@@ -6938,7 +6938,7 @@ approve; outside it the user typing it is the yes. CONTRIBUTING.md is the contri
 `wb patch zip [<commit>…]` (#1291; the owner, 2026-11-24: "a lot of people dont have a github account and dont want to
 bother") is the way for a user with no GitHub account, or no wish to use one: their patches on `local` as a .zip of
 `git format-patch` files and a `README.txt`, which they email upstream themselves, to `patches.UPSTREAM_CONTACT`
-(`adam.schaefers@icloud.com`, the owner's address, in the git log already; README.md and CONTRIBUTING.md say the same),
+(`adam.schaefers@icloud.com`, the owner's address, in the git log already; CONTRIBUTING.md says the same, and the README doesn't: the owner, 2026-11-24, wanted it in CONTRIBUTING.md only),
 or send any way they like (*Every `wb` command* has its output). It is local: no fetch, no gh, nothing sent, so no
 dialog asks (*The consent gate* counts only `wb patch send` and the gh and git forms as outward: `sendsOut`). The
 patch files' `From:` lines carry each author's name and email from git: README.txt says so, and wb prints it once, in
@@ -7422,8 +7422,8 @@ doc needs its own `!/` line).
 - **`patches.json`'s keys** (`source`, `upstream`) **and `patches.source_dir`'s default** → the mod's `upstreamRefusal`.
   **Where workbench lives on GitHub** → the mod's `UPSTREAM` (patches.py keeps no constant: `note_install` reads the
   remote's URL), CONTRIBUTING.md's `gh issue` lines. **Workbench's contact** (`patches.UPSTREAM_CONTACT`, #1291) →
-  `wb patch zip`'s README.txt and output (its row in *Every `wb` command* quotes the line), README.md's and
-  CONTRIBUTING.md's contributing lines, *Sending a patch without GitHub*; the skill names no address ("the address it
+  `wb patch zip`'s README.txt and output (its row in *Every `wb` command* quotes the line), CONTRIBUTING.md's
+  contributing line (never the README: the owner's call), *Sending a patch without GitHub*; the skill names no address ("the address it
   printed"), so a new one never leaves Claude telling a user the old. **What sends** (`wb patch send`'s name, the gh and git commands it
   runs, any new outward command) → `sendsOut`, `GH_WRITES`, `OUTWARD_TEXT`, the gate's tests in `register.test.tsx`.
   **`wb patch send`'s flags** → the mod's `sendArgs` (it reads `--title`, `--body-file`, `--draft`, `--anyway` as
