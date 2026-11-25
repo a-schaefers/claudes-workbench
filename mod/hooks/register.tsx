@@ -2065,9 +2065,14 @@ const near = (t: { repo?: string; cwd?: string; subdir?: string }) => {
   return (!!t.cwd && within(mem.cwd, t.cwd)) ||
     (!!t.repo && (within(mem.cwd, t.repo) || within(spotOf(t), mem.cwd)))
 }
+// Where `wb start` ran (`cwd`) is this session's very directory. In ~ or /, where `near` claims
+// nothing, that still adopts a gone session's task: `claude` restarted in ~ after a `wb start
+// --repo ~/proj` there was woken for none (#1403, 2026-11-25). One without a session stays no ~
+// session's, as `wb`'s _scope judges.
+const ranHere = (t: { cwd?: string }) => !!mem.cwd && !!t.cwd && parts(t.cwd).join('/') === parts(mem.cwd).join('/')
 const mine = (t: { session?: string; repo?: string; cwd?: string; subdir?: string; claude_pid?: number; claude_start?: string }) => {
   if (t.session && mem.ids.size) {
-    return mem.ids.has(t.session) || (mem.deadPids.has(pidKey(t)) && near(t))
+    return mem.ids.has(t.session) || (mem.deadPids.has(pidKey(t)) && (near(t) || ranHere(t)))
   }
   if (!mem.cwd || (!t.cwd && !t.repo)) return true
   return near(t)
@@ -2110,7 +2115,7 @@ const ownPid = (t: { claude_pid?: number; claude_start?: string }) =>
 // task.json as it stands after the claim, whoever won.
 async function claim($: any, name: string, sp: Row): Promise<Row> {
   if (!mem.claudePid || !sp.session || !mem.ids.size || !mem.deadPids.has(pidKey(sp)) || ownPid(sp)) return sp
-  if (!mem.ids.has(sp.session) && !near(sp)) return sp
+  if (!mem.ids.has(sp.session) && !near(sp) && !ranHere(sp)) return sp
   const id = await $.session.id().catch(() => '')
   const ids = [...new Set([id, ...mem.ids].filter(Boolean))]
   const r = await runWb($, ['adopt', name, '--pid', String(mem.claudePid), ...ids.flatMap(i => ['--session', i])], 15_000)

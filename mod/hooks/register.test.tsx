@@ -431,6 +431,32 @@ test('a new Claude Code process in the project adopts the tasks of one that is g
   expect(kills.length - asked).toBeLessThanOrEqual(1)          // a live one, not at every poll
 })
 
+test('a new Claude Code process in ~ adopts a gone one\'s task wb start ran in ~, and only that (#1403)', async ($, on) => {
+  // #1403 (2026-11-25): `wb start --repo ~/proj` from a session in ~, then plain `claude` there
+  // after a crash: ~ claims nothing by directory, so the task was nobody's and woke no one
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'orphan', 'review', { repo: '/home/u/proj', cwd: '/home/u', session: 'sess-old', claude_pid: 4242 })
+  task(files, 'deeper', 'review', { repo: '/home/u/proj', cwd: '/home/u/proj', session: 'sess-old', claude_pid: 4242 })
+  task(files, 'live', 'review', { repo: '/home/u/proj', cwd: '/home/u', session: 'sess-other', claude_pid: 4343 })
+  task(files, 'byhand', 'review', { repo: '/home/u/proj', cwd: '/home/u' })     // no session: no ~ session's
+  const names = ['orphan', 'deeper', 'live', 'byhand']
+  for (const name of names) notice(files, { ts: ts0, task: name, kind: 'review', text: `REPORT-${name}` })
+  fakeTasks(on, files, names)
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('process.run', (_: any, e: any) =>
+    ({ value: { exitCode: e.argv[0] === 'kill' && e.argv[2] === '4242' ? 1 : 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('REPORT-orphan'))).toHaveLength(1)  // started right here
+  expect(woken.join('\n')).not.toContain('REPORT-deeper')     // under ~: not by directory
+  expect(woken.join('\n')).not.toContain('REPORT-live')       // a live session's stays its own
+  expect(woken.join('\n')).not.toContain('REPORT-byhand')
+})
+
 test('a task whose Claude Code process is gone is claimed by the first session to see it, and the others drop it (#687)', async ($, on) => {
   // #687: nothing recorded an adoption, so once the process that started a task ended, every
   // live session near it owned it for good, and the one back from `claude --resume` too: both

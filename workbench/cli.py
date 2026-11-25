@@ -2346,7 +2346,8 @@ def _scope(tasks, where, sessions=None):
     0.90), or with no `sessions` given (by hand), goes by directory: its `repo` is `where`
     or inside it, or `where` is inside the task's spot (its package, repo/subdir; else its `cwd`
     inside the repo; else the repo, #695), or its `cwd` (where wb start ran) is `where` or inside it. A session
-    in the home directory or / claims none by directory. A task with neither key is everyone's.
+    in the home directory or / claims none by directory, but for a gone session's task whose
+    `cwd` is exactly there (#1403). A task with neither key is everyone's.
     The others belong to another session, which its mod wakes and its quit commands stop (the
     2026-11-16 audit: two projects at once, one session's /workbench-quit stopped the other's
     agents; the 0.90 review: a task started from ~ belonged to every session under it, and one
@@ -2373,9 +2374,12 @@ def _scope(tasks, where, sessions=None):
         near = here is not None and not broad and bool(
             cwd and cwd.is_relative_to(here)
             or repo and (repo.is_relative_to(here) or here.is_relative_to(spot)))
+        # in ~ or /, a gone session's task started in that very directory: claude restarted
+        # there adopts it, which near (never there) left nobody's (#1403, 2026-11-25). Only
+        # here: a task without a session started in ~ stays no ~ session's (the 0.90 review)
         if sessions and sid:
-            ok = sid in sessions or near and _gone(t.spec.get("claude_pid"), t.spec.get("claude_start"),
-                                                   t.spec.get("claude_machine"))
+            ok = sid in sessions or (near or here is not None and cwd == here) and _gone(
+                t.spec.get("claude_pid"), t.spec.get("claude_start"), t.spec.get("claude_machine"))
         elif here is None or (not cwd and not repo):
             ok = True
         else:

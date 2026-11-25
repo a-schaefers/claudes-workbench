@@ -9222,6 +9222,21 @@ class Steering(Base):
         spec = store.Task("t-orphan").spec
         self.assertEqual((spec["session"], spec["claude_pid"]), ("sess-2", b.pid))  # its own id, new pid
 
+    def test_a_gone_sessions_task_started_in_home_is_adopted_by_a_new_session_there(self):
+        # #1403 (2026-11-25): `wb start --repo ~/proj` from a session in ~, then Claude Code
+        # restarted there: the new session claimed none in ~ by directory, so the task was nobody's
+        gone = subprocess.Popen(["true"]); gone.wait()
+        live = subprocess.Popen(["sleep", "60"]); self.addCleanup(live.kill)
+        home = str(Path.home())
+        t = lambda **spec: types.SimpleNamespace(name="t", spec={"repo": str(self.repo), **spec})  # noqa: E731
+        mine = lambda task: len(cli._scope([task], home, ["sess-c"])[0])  # noqa: E731
+        self.assertEqual(mine(t(cwd=home, session="sess-a", claude_pid=gone.pid)), 1)
+        self.assertEqual(mine(t(cwd=home, session="sess-a", claude_pid=live.pid)), 0)   # still its own
+        self.assertEqual(mine(t(cwd=str(Path(home) / "other"), session="sess-a", claude_pid=gone.pid)), 0)
+        self.assertEqual(mine(t(cwd=home)), 0)                     # by hand in ~: no ~ session's (0.90)
+        orphan = t(session="sess-a", claude_pid=gone.pid)              # no cwd, and no directory asked
+        self.assertEqual(len(cli._scope([orphan], None, ["sess-c"])[0]), 0)
+
     def test_a_claude_code_process_recorded_on_another_machine_is_never_gone_here(self):
         # #922: on a state directory two machines share, machine B read A's live session's pid as
         # dead (not in B's /proc), adopted A's task, and A adopted it back, over and over
