@@ -16287,6 +16287,8 @@ class Audio(Base):
         self.assertIn("licence: not noted (check it, then put it in notes)", section)
         self.assertIn("covers speech: tts; sfx: fx; none for music", section)
         self.assertIn("no listener: speech takes go unchecked", section)
+        # the licence step is wb scout's to say beside the engines, no longer the weekly prompt's (#1322)
+        self.assertIn("check its model's licence today against its licence text", section)
         self.engines({"tts": {"command": f"{sys.executable} {tone} --out {{out}}", "notes": "x"},
                       "ear": {"kind": "listen", "command": f"{sys.executable} {tone} {{in}}", "notes": "y"}})
         section = run_wb("scout")
@@ -16295,6 +16297,9 @@ class Audio(Base):
         self.assertNotIn("not noted", section)
         self.engines({})
         self.assertIn("none: describe one in", run_wb("scout"))
+        (Path(self.tmp.name) / "images.json").write_text("{}")
+        os.environ["WB_IMAGES"] = str(Path(self.tmp.name) / "images.json")
+        self.assertNotIn("licence today", run_wb("scout"))         # no engine, no step
 
 class Discovery(Base):
     def test_local_providers_only_with_overrides(self):

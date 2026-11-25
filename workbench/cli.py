@@ -5096,6 +5096,10 @@ def cmd_optimize(a):
 
 
 SCOUT_EVERY_DAYS = 7
+# the media engines' step of the weekly check, printed by wb scout when it lists one (#398, #1322)
+LICENCE_CHECK = ("  for each engine: check its model's licence today against its licence text, not its tag "
+                 "(one audio model went non-commercial mid-2026), keep its notes true, and recommend "
+                 "keep / add / retire as for the coding models")
 
 
 def scout_state() -> dict:
@@ -5144,6 +5148,8 @@ def cmd_scout(a):
     print(f"\nskill library: {len(have)} skill(s)" + (", all pulling their weight" if have and not flagged else ""))
     for n, w in flagged:
         print(f"  {n}: {w}")
+    if flagged:  # the step said here, only when it applies (#1322: it was the weekly prompt's)
+        print("  rewrite or retire (wb skill retire <name>) what is flagged")
     pending = lessons.survey()
     if pending:
         print(f"lessons waiting: {len(pending)}, {sum(bool(x['again']) for x in pending)} seen in "
@@ -5159,6 +5165,8 @@ def cmd_scout(a):
         print("\n".join(said))  # #753: one already running, before any install
     print("\naudio engines (wb audio)")
     print("\n".join(audio.lines()) or f"  none: describe one in {audio.config_path()}")
+    if images.engines() or audio.engines():  # #398's licence check, said only with an engine to check (#1322)
+        print(LICENCE_CHECK)
     if said := audio.coverage():
         print(said)
     provs = models.providers()

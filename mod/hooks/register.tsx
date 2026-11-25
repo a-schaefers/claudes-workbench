@@ -26,18 +26,20 @@ const KEEP_ON_COMPACT =
   'delegated (names, repos, branches, what each is for), which are open and what each needs ' +
   'next, and what was accepted, merged or discarded. Drop the diffs, reports and transcripts of ' +
   'finished tasks; `wb status` and `wb report <name>` bring back any detail.'
-// The weekly model check: once a week, in a quiet moment of a session the person is using,
-// Claude is asked to look at this machine, what is installed and how it has done, and what is
-// newest, and to recommend what to add or retire. /workbench-models asks for it now.
+// The weekly model check: once a week, in a quiet moment of a session the person is using, one
+// toast says it is due; /workbench-models asks Claude to look at this machine, what is installed
+// and how it has done, and what is newest, and to recommend what to add or retire. It was
+// submitted as a turn of its own, about 650 tokens, raised again daily until done (#1322).
 const SCOUT_EVERY_MS = 7 * 24 * 3600 * 1000
-const SCOUT_RETRY_MS = 24 * 3600 * 1000 // raised but never finished: ask again a day later
 const MODELS = 'workbench-models'
+const SCOUT_DUE = `workbench: the weekly model check is due: /${MODELS}`
+// what `wb scout` flags (the skill library, the media engines' licences) it says how to act on itself
 const SCOUT_NOTE =
   '[workbench] The weekly model check is due. As the driver, keep the agents on the best ' +
   'models for each role, GPU and API alike:\n' +
   '1. `wb scout`: this machine\'s hardware, what is installed, and how each model has done ' +
   '(real tasks), and its watch list: models set aside and what each needs ' +
-  'before it is tried again.\n' +
+  'before it is tried again. Act on what it flags.\n' +
   '2. Look up what is newest: open-weight coding models with tool calling, their sizes and ' +
   'quantizations, which fit this GPU\'s VRAM (with room for the context) and this RAM, and ' +
   'recent releases of the model server this machine runs (whichever it is: `wb scout` lists ' +
@@ -49,21 +51,9 @@ const SCOUT_NOTE =
   '3. Recommend in a few lines: keep, add (the model and quantization, why it should beat what ' +
   'is installed, its size and how it fits), retire (what it replaces, the disk it frees). ' +
   'Aim for the best results first, then efficiency. For each watch-list item, say whether ' +
-  'its conditions are met yet; `wb scout --unwatch N` once one is settled.\n' +
-  '4. Ask before downloading or deleting. With a yes: on Ollama `wb model add <provider/model> ' +
-  '--pull` in the background, on another server its own download then `wb model add`; ' +
-  '`wb model sizes <id> …` if it should only take some task sizes, and ' +
-  '`wb model retire <id> [--delete]` for what it replaces. Installed models that are not ' +
-  'registered may belong to other tools: ask first. API roles: recommend in chat only; never ' +
-  'run `wb route` or pass `--model` for an API model unasked (a role changes on the user\'s ' +
-  'words, through the dialog, or in the pane).\n' +
-  '5. The audio and image engines `wb scout` lists, if any (speech, sound effects, music, the ' +
-  'listener; images): check each model\'s licence today against its licence text, not its tag ' +
-  '(licences change: one audio model went non-commercial mid-2026), and whether a newer local ' +
-  'model of that kind fits this machine better. Recommend keep / add / retire as for the coding ' +
-  'models; keep each engine\'s `notes` (its licence) true.\n' +
-  '6. The skill library: rewrite or retire (`wb skill retire`) what `wb scout` flags.\n' +
-  '7. `wb scout --done --notes "<what you recommended or changed>"`.\n' +
+  'its conditions are met yet; `wb scout --unwatch N` once one is settled. Ask before ' +
+  'downloading or deleting (the skill\'s models reference says how).\n' +
+  '4. `wb scout --done --notes "<what you recommended or changed>"`.\n' +
   'Keep it short; if nothing is worth changing, say so in one line.'
 // Workbench mode: /workbench turns it on for the rest of the session and opens the pane, its sign.
 // The user then asks for things in plain words, and Claude hands the coding to OpenCode agents as
@@ -2730,14 +2720,16 @@ export function allowedLine(rows: unknown): string {
   return x.when ? `Claude may, once, if ${x.when}: ${x.edit}` : `Claude may: ${x.edit}`
 }
 
+// At most one toast while the check is due: raised since it fell due (by any session, or by
+// /workbench-models), not again until it is done and due once more
 async function scoutIfDue($: any, now: number): Promise<void> {
   const path = `${mem.root}/scout.json`
   const st = await readJson($, path)
   const done = Number(st.done_at ?? 0) * 1000
   const offered = Number(st.offered_at ?? 0) * 1000
-  if (now - done < SCOUT_EVERY_MS || now - offered < SCOUT_RETRY_MS) return
+  if (now - done < SCOUT_EVERY_MS || offered >= done + SCOUT_EVERY_MS) return
   await scoutOffered($, now)
-  void $.prompt.submit({ text: SCOUT_NOTE })
+  $.ui.toast(SCOUT_DUE)
 }
 
 // The model check is raised: not again in this load, nor by any session for a day. Also when

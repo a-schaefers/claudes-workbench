@@ -4017,14 +4017,16 @@ empty too except `CUDA_VISIBLE_DEVICES` (`EMPTY_IS_NONE`); each mask counts with
 Unknowns stay unknown; nothing about the machine is hard-coded.
 
 **The weekly model check.** Models change fast. Once a week, in a quiet moment of a session that
-delegates, with wakes on, the mod submits SCOUT_NOTE (see *The mod, inside*); `/workbench-models`
-asks now, and `/workbench` runs one first when no role can run (the skill's first run; once a role
-runs, on the GPU or on API, it never reruns on its own). It covers the GPU and API alike (#1024),
-recommending only for API roles. `wb scout` prints the facts
+delegates, with wakes on, the mod toasts that it is due (see *The mod, inside*); `/workbench-models`
+asks Claude (SCOUT_NOTE), and `/workbench` runs one first when no role can run (the skill's first run;
+once a role runs, on the GPU or on API, it never reruns on its own). It covers the GPU and API alike
+(#1024). `wb scout` prints the facts
 fresh: the machine (`hardware.report`), Ollama's default context, every registered model (size,
 quantization, context, slice, record), installed but unregistered models, the watch list
-(`watch.json`; `--watch TEXT`, `--unwatch N`), flagged skills, waiting lessons, media engines (an
-engine with no `notes` says "licence: not noted"; `audio.coverage`, #398), and its API section
+(`watch.json`; `--watch TEXT`, `--unwatch N`), flagged skills (then `rewrite or retire (wb skill retire
+<name>) what is flagged`), waiting lessons, media engines (an engine with no `notes` says "licence: not
+noted"; `audio.coverage`, #398; with any engine listed, `cli.LICENCE_CHECK`: check each model's licence
+against its licence text, keep its notes true: these two steps were SCOUT_NOTE's, #1322), and its API section
 (`cli.scout_api_lines`, when OpenCode lists an API provider or a role has an API model): the roles
 (`cli._role_where`: `GPU (router)`, `GPU <id> (pinned)`, `API <id>, set by you MM-DD, thinking off`, its
 thinking what the model does, `routes.thinking_said`, #1263),
@@ -5936,7 +5938,7 @@ first message would cost the prompt cache.
 **Commands.** All are `/workbench` (the skill) or start with `workbench-`, so `/workbench` lists
 them. `showPane` first closes a pane the engine holds but doesn't show. The quits: *Stopping
 everything*. `/workbench-models` records the check as raised (scout.json `offered_at`,
-`scoutAsked`) and queues SCOUT_NOTE. `/workbench-update` runs `wb update` and, when it updated,
+`scoutAsked`) and queues SCOUT_NOTE, the check's only turn. `/workbench-update` runs `wb update` and, when it updated,
 `/reload-plugins` (`$.command.run`). A command can't start a turn itself: it pushes onto
 `mem.queued`, which the next idle poll submits.
 
@@ -6129,13 +6131,14 @@ on (another project's session spent the offer, #919; such a session leaves scout
 `wb events` said hello, Claude idle `SCOUT_QUIET_MS` (a minute) after a main-loop turn (raised at
 once, it buried Claude's question), quiet (`quietForJobs`: no task anywhere active, none of this
 session's unparked ones waiting on Claude within `REWAKE_MAX_MS`, #541), once per load, when
-scout.json's `done_at` is 7+ days old and `offered_at` 1+ day: it writes `offered_at` and submits
-SCOUT_NOTE (`wb scout`, research, recommend keep/add/retire, nothing changed without a yes; GPU and
-API alike, #1024: for roles on API `wb scout`'s API section, newer or cheaper models from the same
-providers on their own pages, whether thinking would pay for significant, and recommend in chat
-only, never `wb route` or an API `--model` unasked; it names no model; the
-audio and image engines too, each licence checked and its `notes` kept true, #398; then `wb scout
---done --notes`).
+scout.json's `done_at` is 7+ days old and no `offered_at` since it fell due: it writes `offered_at` and
+toasts `SCOUT_DUE` (`workbench: the weekly model check is due: /workbench-models`), at most once a due
+period. It submitted SCOUT_NOTE as a turn of its own, about 650 tokens, again daily until done
+(#1322). SCOUT_NOTE (`/workbench-models`): `wb scout` and what it flags, research, recommend
+keep/add/retire, ask before downloading or deleting; GPU and API alike, #1024: for roles on API `wb
+scout`'s API section, newer or cheaper models from the same providers on their own pages, whether
+thinking would pay for significant; it names no model; then `wb scout --done --notes`. The skill
+library's and the media licences' steps are `wb scout`'s own lines, printed when they apply.
 
 **The weekly update check**: once a load, after the first main-loop turn once wb runs, beside the
 poll (a stalled fetch held every wake): `wb update --check --if-due` (origin fetched at most every `UPDATE_EVERY`, a

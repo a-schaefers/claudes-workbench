@@ -49,7 +49,7 @@ Asked to update it yourself: `wb update` (it refuses while tasks run; tell the u
 Claude Code or run `/reload-plugins` after). A refusal over local changes in the marketplace
 clone, or a local patch that no longer applies: `reference/patching.md`.
 
-**The weekly model check.** Once a week the mod asks you (or the user runs `/workbench-models`)
+**The weekly model check.** Once a week the mod toasts that it is due; `/workbench-models` asks you
 to check the models for each role, GPU and API alike; the GPU side against this machine. `wb scout` gives the facts: GPU and VRAM, RAM,
 disk, what is installed and registered, real-task results, and the watch list
 (models set aside, with what each needs before it is tried again: check each against what is

@@ -1962,11 +1962,14 @@ test('one very long transcript line is cut, and the lines before it still show',
   await ui.unmount()
 })
 
-test('the weekly model check comes once, in a quiet moment of a session in use; /workbench-models asks now', async ($, on) => {
+test('the weekly model check is one toast, in a quiet moment of a session in use; /workbench-models asks now', async ($, on) => {
+  // #1322: it was a turn of its own, about 650 tokens, raised again every day until done
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [], false)
-  on('ui.toast', () => ({ value: undefined }))
+  const toasts: string[] = []
+  const due = () => toasts.filter(t => t === 'workbench: the weekly model check is due: /workbench-models')
+  on('ui.toast', (_: any, e: any) => { toasts.push(e.text); return { value: undefined } })
   on('skill.prompt', (_: any, e: any) => ({ text: e.text }))
   const asked: string[] = []
   on('prompt.submit', (_: any, e: any) => {
@@ -1981,25 +1984,26 @@ test('the weekly model check comes once, in a quiet moment of a session in use; 
   await $.turn.start({ text: 'hi', turnId: 't1' })
   await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
   await clock.advance(2000)
-  expect(asked.length).toBe(0)                       // not at once: Claude may have just asked something
+  expect(due()).toEqual([])                          // not at once: Claude may have just asked something
   await clock.advance(90_000)                        // a quiet minute later
-  expect(asked.length).toBe(1)
-  expect(asked[0]).toContain('The weekly model check is due')
-  expect(asked[0]).toContain('`wb scout`')
-  // the audio engines too, licences first: they change (#398)
-  expect(asked[0]).toContain('audio and image engines')
-  expect(asked[0]).toContain('licence today against its licence text')
-  expect(JSON.parse(files['/wb/scout.json']).offered_at).toBeGreaterThan(1_800_000_000)  // raised: not again today
+  expect(due()).toHaveLength(1)
+  expect(asked).toEqual([])                          // no turn of its own
+  expect(JSON.parse(files['/wb/scout.json']).offered_at).toBeGreaterThan(1_800_000_000)  // raised
 
-  await clock.advance(10_000)
-  expect(asked.length).toBe(1)
+  await $.turn.start({ text: 'hi', turnId: 't2' })
+  await $.turn.complete({ answer: '', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(120_000)                       // still due, a quiet minute after another turn: no second toast
+  expect(due()).toHaveLength(1)
 
-  // done this week: nothing more, until the user asks for it
+  // the user asks for it: Claude's turn, the steps without what wb scout says itself
   files['/wb/scout.json'] = JSON.stringify({ done_at: 1_800_000_010 })
   await $.command.run({ command: 'workbench-models', args: '' })
   await clock.advance(2000)
-  expect(asked.length).toBe(2)
-  expect(asked[1]).toContain('The weekly model check is due')
+  expect(asked.length).toBe(1)
+  expect(asked[0]).toContain('The weekly model check is due')
+  expect(asked[0]).toContain('`wb scout`')
+  expect(asked[0]).toContain('`wb scout --done --notes')
+  expect(asked[0]).not.toContain('licence')          // wb scout says it beside the engines it lists
 })
 
 for (const [what, options, mode] of [['a session that never used workbench', {}, false],
@@ -2041,7 +2045,7 @@ test('/workbench-models when the weekly check is due raises it once, not twice',
   expect(asked.filter(t => t.includes('The weekly model check is due'))).toHaveLength(1)
 })
 
-test('#1024: the weekly model check covers GPU and API alike, recommends only for API roles and names no model', async ($, on) => {
+test('#1024: the weekly model check covers GPU and API alike and names no model', async ($, on) => {
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
@@ -2057,7 +2061,7 @@ test('#1024: the weekly model check covers GPU and API alike, recommends only fo
   expect(note).toContain('the best models for each role, GPU and API alike')
   expect(note).not.toContain('local agents')
   expect(note).toContain('`wb scout`\'s API section: each role\'s model, its record and spend')
-  expect(note).toContain('API roles: recommend in chat only; never run `wb route` or pass `--model` for an API model unasked')
+  expect(note).not.toContain('recommend in chat only')                  // the roles' dialog is the yes (#1322)
   // the convention: no model is named in code (only placeholders such as <provider/model>)
   expect(note).not.toMatch(/\b(deepseek|claude|haiku|sonnet|opus|gpt|grok|gemini|qwen|mimo|llama|mistral|kimi|glm)\b/i)
   expect(note.replace(/<[^>]*>/g, '')).not.toMatch(/\b[\w.-]+\/[\w.:-]+\b/)          // no provider/model id

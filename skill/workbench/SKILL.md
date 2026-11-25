@@ -251,7 +251,7 @@ and its tool works; with no lane, as on macOS, none is hidden and there's no not
 `wb start`'s note says a tool stops on every run there (Maven, Gradle, dotnet, Bundler…), that
 repo's task won't build on API: tell the user, and offer the GPU role.
 Model servers (none runnable, which server, a model on another machine), updating workbench, and
-**the weekly model check** (the mod asks once a week; `/workbench-models`): read
+**the weekly model check** (a toast says when it is due; `/workbench-models`): read
 `reference/models.md` beside this file first.
 When the user asks you to optimize or tune their setup (in any words): run `wb optimize
 estimate` (`--bench` too if they want models compared overnight), tell them how long it holds
