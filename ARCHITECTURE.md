@@ -1027,7 +1027,10 @@ verify` takes the tree accept would land (`landing=True`, #642). The snapshot an
 `runner.accept_writes`, the agent's edit tools', its shell's and Claude's, what git ignores; added
 `add -f` in the scratch index, `force=` on `gitops.diff`, `snapshot_left` and `with_new_files`):
 without them an agent's feedback-round change to its `lib/util.py` read "the diff since your last
-review: (no changes)" and `--include` committed code Claude never saw (#1259).
+review: (no changes)" and `--include` committed code Claude never saw (#1259). `wb verify`'s and
+`wb shot`'s candidate and `verify.last`'s staleness check hold them too, one helper
+(`verify.candidate_tree`): without them verify said "the candidate fails it" for a `lib/util.py`
+that passed in the worktree, and an edit to it left the check fresh (#1275).
 
 Reports and check-ins list 40 changed paths (`gitops.CHANGED_SHOWN`), the rest counted by
 top-level directory (a review notice's stat: 40 paths, then Git's total); a new top-level directory of 50+ untracked files is flagged (`BUILD_FILES`).
@@ -5317,11 +5320,13 @@ user's checkout or the worktree:
   #731; paths as `:(literal)`, #194) and its deleted tests deleted
   (`verify.removed_tests`, #643). No test file: refused. A non-test `--files` path is
   `code_copied`, said in the report.
-- **The candidate**: that clone with the tree accept would commit (`gitops.snapshot(landing=True)`,
-  also `wb shot`'s and the staleness check's, not the review snapshot, #431): only what accept
-  refuses without `--include` (a new binary of `BINARY_MAX` or more, directories past
-  `NEW_FILES_MAX`) is `left_out`, a big text file is in (the review's `SNAPSHOT_MAX` dropped one and
-  verify said proven, #642), and a check with anything left out is never `proven`.
+- **The candidate**: that clone with the tree accept would commit (`verify.candidate_tree`:
+  `gitops.snapshot_left(landing=True)`, also `wb shot`'s and the staleness check's, not the review
+  snapshot, #431): only what accept refuses without `--include` (a new binary of `BINARY_MAX` or
+  more, directories past `NEW_FILES_MAX`) is `left_out`, a big text file is in (the review's
+  `SNAPSHOT_MAX` dropped one and verify said proven, #642), and so are the ignored files the agent
+  wrote, which `--include` commits (`force=runner.ignored_to_commit`, #1275); a check with anything
+  left out is never `proven`.
 
 The verdict: `proven` (the base fails on an assertion, the candidate passes), `base-passes`,
 `candidate-fails`, or `inconclusive` (a timeout, overrun, failed setup, left-out files, or a base
