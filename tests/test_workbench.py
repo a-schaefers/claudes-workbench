@@ -27274,11 +27274,27 @@ class WebChat(Base):
         # user's phone answered an agent token from any peer on it
         tok = self._agent()
         self.assertEqual(self.call("/api/state", token=tok)[0], 200)
-        with mock.patch.object(self.chat.Handler, "_from_loopback", lambda self: False):
+        with mock.patch.object(self.chat.Handler, "_peer", lambda self: "100.64.0.7"):   # the tailnet peer
             code, r = self.call("/api/state", token=tok)
-            self.assertEqual((code, r["error"]), (403, "agent tokens work only from this machine (localhost)"))
+            self.assertEqual((code, r["error"]),
+                             (403, "agent tokens work only from this machine, at the address `wb chat url` prints"))
             self.assertEqual(self.call("/api/send", {"text": "hi"}, token=tok)[0], 403)
             self.assertEqual(self.call("/api/state", token=self.chat.token())[0], 200)  # the user's phone
+
+    def test_an_agent_token_from_this_machine_works_on_a_chat_bound_only_to_its_tailnet_or_lan_address(self):
+        # #1274 (2026-11-24): with `bind: ["tailscale"]` (no localhost served) an agent on this
+        # machine reaches the chat from the tailnet IP itself, not 127.*, and every agent token
+        # was refused with a 403 that sent it to localhost, which wasn't served
+        tok = self._agent()
+        with mock.patch.object(self.chat.Handler, "_peer", lambda self: "100.64.0.1"), \
+                mock.patch.object(self.chat.Handler, "_local", lambda self: "100.64.0.1"):
+            self.assertEqual(self.call("/api/health", token=tok), (200, {"api": 1, "listening": False}))
+        with mock.patch.object(self.chat.Handler, "_peer", lambda self: "100.64.0.7"), \
+                mock.patch.object(self.chat.Handler, "_local", lambda self: "100.64.0.1"):
+            self.assertEqual(self.call("/api/health", token=tok)[0], 403)        # another machine on it
+        with mock.patch.object(self.chat.Handler, "_peer", lambda self: ""), \
+                mock.patch.object(self.chat.Handler, "_local", lambda self: ""):
+            self.assertEqual(self.call("/api/health", token=tok)[0], 403)        # neither known: not here
 
     def test_a_revoked_agent_token_gets_401_and_names_are_checked(self):
         tok = self._agent()
