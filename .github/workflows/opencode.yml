@@ -2,6 +2,7 @@
 # through its CLI, its config and its JSON output, all of which can change between releases, so a
 # red run here means "a new OpenCode broke the interop", not "main is broken": check.yml is the
 # one pinned to the OpenCode the real-OpenCode tests were last verified with (OPENCODE_VERSION).
+# It also runs the kernel's goldens under the newest OpenCode's Bun (BUN_BE_BUN is undocumented).
 # The README shows this run's status as a badge (2026-11-17).
 #
 # "Newest" is the highest version among the releases, not GitHub's "Latest" (the 1.x line still
@@ -48,3 +49,5 @@ jobs:
         run: |
           python3 -c 'from workbench import lane; print("Landlock ABI", lane.abi() or "none here: the Lane tests skip")'
       - run: python3 -m unittest
+      # The kernel's goldens under this OpenCode's Bun (#1356): check.yml runs them on the pinned one
+      - run: BUN_BE_BUN=1 opencode test opencode-plugin/test

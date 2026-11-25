@@ -16,10 +16,13 @@ from pathlib import Path
 
 from . import context, store
 
-# The mod's wake opening, at a prompt's start only, after the line Claude Code puts before a
-# plugin's message: matched anywhere, a summary quoting one charged later calls to it (#557)
+# The mod's wake opening: the mod reads it from the kernel's Tables (scripts/kernel.py), so the
+# wake it writes and the one matched here are one string (#1356)
+WAKE_OPENING = "[workbench] Task"
+# ...at a prompt's start only, after the line Claude Code puts before a plugin's message: matched
+# anywhere, a summary quoting one charged later calls to it (#557)
 WAKE = re.compile(r"\s*(?:The [\w .-]{1,60} plugin sent a message:\s*)?"
-                  r"\[workbench\] Task `([a-z0-9][a-z0-9-]{0,47})`")
+                  + re.escape(WAKE_OPENING) + r" `([a-z0-9][a-z0-9-]{0,47})`")
 KINDS = ("input", "cache_write_5m", "cache_write_1h", "cache_read", "output")
 # Input-equivalent weights: the API's multipliers on the base input price (claude-api skill,
 # pricing, cached 2026-10-06): output 5x on every current model, a cache write 1.25x (5 minutes)

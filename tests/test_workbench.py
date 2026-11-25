@@ -25283,6 +25283,19 @@ class LocalPatches(Base):
         self.assertIn("already prepared", self.wb("patch", "upstream", fix, "--name", "fix-thing"))
         self.assertIn("lowercase letters", self.wb("patch", "upstream", fix, "--name", "Fix_It"))
 
+    def test_patch_upstream_names_the_kernels_check_for_a_patch_that_touches_kernel(self):
+        # #1356: python3 -m unittest holds the committed bundle offline, but only kernel.py check
+        # rebuilds it from kernel/src and runs the props, so a kernel patch's next step names it
+        self.as_clone()
+        (self.copy / "kernel/src").mkdir(parents=True)
+        fix = self.commit(self.copy, "kernel/src/Kernel.purs", "module Kernel where\n", "a kernel fix")
+        out = self.wb("patch", "upstream", fix, "--name", "kernel-fix")
+        wt = store.home() / "upstream/kernel-fix"
+        self.assertIn(f"cd {wt} && python3 -m unittest && python3 scripts/kernel.py check\n", out)
+        other = self.commit(self.copy, "mine.txt", "mine\n", "not the kernel")
+        self.assertIn(f"cd {store.home() / 'upstream/plain'} && python3 -m unittest\n",
+                      self.wb("patch", "upstream", other, "--name", "plain"))
+
     def test_patch_upstream_off_github_prints_no_url_for_gh_and_flags_a_personal_patch(self):
         # #1005 (2026-11-22): `gh repo fork <the origin's URL>` was printed for an origin off
         # GitHub, and a Scope: me patch was offered with no word that it is a personal one

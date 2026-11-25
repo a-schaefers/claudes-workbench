@@ -75,6 +75,7 @@ import type { Plan, Target } from './splash'
 import { modeline } from './modeline'
 import type { Link } from './modeline'
 import { ago, apiWorking, capRow, clip, compactWanted, taskLines } from './tasks'
+import { ACTIVE, CHAT_STALE_MS, NEEDS, NO_ANSWER, PARKS, WAKE_OPENING } from './core'
 import type { Part as RowPart } from './tasks'
 
 const PANE = 'workbench'
@@ -140,7 +141,6 @@ const STRIP_HINT = 'minimized · restore: click, or Ctrl+X Tab then Enter'
 // which starts the app if it isn't up), and again CHAT_RECHECK_MS after a start or a failure
 const CHAT_CHECK_MS = 60_000
 const CHAT_RECHECK_MS = 3_000
-const CHAT_STALE_MS = 15_000 // as wb's LISTENING_FOR: a listener silent this long has gone
 // the user counts as away this long after they last used the web chat: a web message, or a page
 // in use (chat/away.json's `at`, written by `wb chat serve`'s /api/active, #959)
 const AWAY_MS = 6 * 3600 * 1000
@@ -253,8 +253,6 @@ export function attachedLines(files: unknown): string {
     ? [`\n[attached: ${f.path} (${size(Number(f.size) || 0)}, ${String(f.type || 'unknown type')})]`] : []).join('')
 }
 
-const ACTIVE = new Set(['queued', 'running', 'testing', 'asking'])
-const NEEDS = new Set(['review', 'stuck', 'failed', 'asking'])
 // Waiting on Claude, unless parked: stopped by /workbench-quit (`wb stop --all`, status `parked`),
 // which the status line, rewake, the boundary and the jobs' gate don't count. It stayed "awaiting
 // review" and kept the weekly check off for good (#541); the pane and `wb status --all` still show it.
@@ -548,8 +546,6 @@ const OUTSIDE_NEXT = (n: string) => `${OUTSIDE_REMEDY} A notice that names no st
 // message, so one line says whose it is and that it can't wait for the turn to end.
 const MIDTURN_NOTE = '(The workbench mod delivered this into your running turn: the agent is ' +
   'blocked until it is answered, and gives up after a while. Answer it now, then carry on.)'
-// ask_mcp.NO_ANSWER's opening: what the runner answers a question nobody answered in time
-const NO_ANSWER = 'No answer arrived in time.'
 // A question held for a turn that could not take it, which then timed out: said after the turn
 // rather than acknowledged in silence (#542)
 const MISSED_NOTE = (n: string) => `No answer reached it in time (you were busy in a turn), so the ` +
@@ -2223,7 +2219,7 @@ async function claim($: any, name: string, sp: Row): Promise<Row> {
 const delegatedWork = (st: Row) => {
   const phase = String(st.phase ?? 'queued')
   if (ACTIVE.has(phase)) return true
-  return NEEDS.has(phase) && !(['review', 'stuck', 'failed'].includes(phase) && st.parked) && !st.taken_over
+  return NEEDS.has(phase) && !(PARKS.has(phase) && st.parked) && !st.taken_over
 }
 
 // This session's id joins the ids this process has had: at the start and at each poll, so a
@@ -2357,7 +2353,7 @@ async function scan($: any, root: string, now: number): Promise<WbTask[]> {
       session: String(sp.session ?? ''),
       claude_pid: Number(sp.claude_pid ?? 0), claude_start: String(sp.claude_start ?? ''),
       backlog: String(sp.backlog ?? ''),
-      parked: ['review', 'stuck', 'failed'].includes(phase) && !!st.parked, // as store.parked (#698)
+      parked: PARKS.has(phase) && !!st.parked, // as store.parked (#698)
       allowed: allowedLine((await readJson($, `${base}/coding.json`)).allowed),
       ...viewFacts(sp, st),
     })
@@ -3469,7 +3465,7 @@ async function deliver($: any, now: number) {
         // held through the turn and timed out unseen: said, not acknowledged in silence (#542)
         if (mem.heldAsks.delete(key) && row.id && (ACTIVE.has(status.phase) || NEEDS.has(status.phase))
           && (await $.fs.read(`${root}/tasks/${name}/ask/${row.id}.answer`).catch(() => '')).startsWith(NO_ANSWER)) {
-          void wake($, name, `[workbench] Task \`${name}\` asked a question while you were busy.\n\n${row.text}\n\n` +
+          void wake($, name, `${WAKE_OPENING} \`${name}\` asked a question while you were busy.\n\n${row.text}\n\n` +
             MISSED_NOTE(name), prev, row.ts)
         }
         continue
@@ -3588,7 +3584,7 @@ async function rewake($: any, now: number, list: WbTask[]) {
     // (#1384, 2026-11-25). One of a batch is its own resume; none in the tail: the phase's.
     const found = mem.notifyRows.rows.filter(r => r.task === t.name || batchOf(r)?.includes(t.name)).at(-1)
     const row = found?.kind === kind ? (batchOf(found) ? { ...found, tasks: [t.name] } : found) : null
-    void wake($, t.name, `[workbench] Task \`${t.name}\` ${row ? headlineOf(row) : HEADLINE[kind] ?? kind}, ` +
+    void wake($, t.name, `${WAKE_OPENING} \`${t.name}\` ${row ? headlineOf(row) : HEADLINE[kind] ?? kind}, ` +
       `${ago(now - t.updatedAt)} ago, and no notice reached Claude. \`wb report ${t.name}\` shows where it is.\n\n` +
       (row ? await nextOf($, row, t.name) : (NEXT[kind] ?? NEXT.failed)(t.name)), acked, now / 1000)
   }

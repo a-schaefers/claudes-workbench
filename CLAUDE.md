@@ -48,6 +48,8 @@ or comment without the user's yes for it.
 - Versions are cut by hand: the last number runs .1, .2, .3 at most, then the next minor (1.91,
   1.91.1, 1.91.2, 1.91.3, then 1.92, never 1.91.4); 2.0 only for a change big enough.
 - `chat.py`, `webpush.py`, `chat_static/`: CI's `chat.yml` runs the browser test (Playwright isn't a dependency).
+- `kernel/src`, or a value Tables copies: `python3 scripts/kernel.py check` (the toolchain once;
+  its props need Bun: `bun`, or OpenCode's).
 - How OpenCode is invoked or read (argv, event or export fields): `tests/fake_opencode.py` in the
   same commit, and one real run, `wb start --trial` (steps: ARCHITECTURE.md, *The tests*).
 
@@ -102,6 +104,10 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
   the writing role's, in its place in every writing prompt: keep it short too (under 3,000 bytes).
 - `skill/workbench/`: the `/workbench` procedure; `skill/agents/`: other agents' skill for the chat's API (`ask_claude.py`; `mcp_server.py`, the same over MCP, loopback only). `mod/`: the plugin (`hooks/register.tsx`, with
   the consent gates on sends to upstream and on the roles; `plugin.json` has no version, so installs track main).
+  `kernel/`: the PureScript kernel (`BOUNDARY.md`, its contract), built by `scripts/kernel.py` (its toolchain
+  fetched by hash into `~/.cache/workbench/kernel`) into the committed `mod/hooks/kernel.js`, imported only by
+  `mod/hooks/core.ts` (`register.tsx` and `tasks.ts` read its tables there); its seeded props in `kernel/test`;
+  a change to a value its Tables copy needs `python3 scripts/kernel.py build` (ARCHITECTURE.md, *The kernel*).
   `bin/`: the launchers. `tests/`: ARCHITECTURE.md's *The tests*. `.github/`, `scripts/`: CI and `ship.sh` (*Shipping to main*).
   `systemd/`, `launchd/`: keep the chat up. `docs/`: images (a replaced one gets a new name, for
   GitHub's cache), the release checklist and notes, `chat-api.md` (the chat's HTTP API; `chat-api.yaml`, its OpenAPI).

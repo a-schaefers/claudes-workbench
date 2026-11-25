@@ -13,6 +13,7 @@
 // time against this machine's typical length as words with a tilde, never a bar, and only with
 // TYPICAL_MIN timed tasks behind it. No percentage of a task: nobody knows how much of one is done.
 import type { WbTask } from '../types'
+import { CLOSED } from './core'
 
 /** One run of a row's text in one style. */
 export type Part = { text: string; color?: string; dim?: boolean; bold?: boolean; underline?: boolean }
@@ -37,7 +38,6 @@ export type TaskFacts = Pick<WbTask, 'name' | 'phase' | 'round' | 'model' | 'lab
 }
 
 const WORKING = new Set(['running', 'testing', 'asking']) // where the context and the estimate mean something
-const CLOSED = new Set(['accepted', 'discarded'])
 /** Each phase's colour; the glyph and the word say the same without it. */
 export const COLOR: Record<string, string> = {
   queued: 'subtle', running: 'claude', testing: 'suggestion', asking: 'warning',
