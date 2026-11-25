@@ -374,7 +374,12 @@ of the same kind for that provider stands told (`runner._told_stop`: `models.hel
 `locks/provider-stop-<provider>.lock`, held through its own status and notice: the stops land in the
 same second, and a look alone found none told for each); one told, a `load` event "<provider> stopped
 the round, as <task>'s stop told the user: the task waits as queued", `_run_again`, and the next
-load's wait above, with no stop of its own: each running task woke Claude with the same stop (#1344). It never
+load's wait above, with no stop of its own: each running task woke Claude with the same stop (#1344). A told
+stop counts only while that load has a mark to wait on (`runner._load_waits`: for a 402 the `no_credit` mark,
+not the task's own turn to ask; for a rate limit or outage `models.held_mark`): an outage whose answers were
+2xx (a queue held past `QUEUE_WAIT_S`, answers cut short) leaves none, the keyhole's `ok` clearing it, and
+the round ran into the same stop again with no end, `running` and untold (#1344's review); with none it
+stops and tells. It never
 appears in gpu.json, unloads nothing, has no `short_window` check and no server-down
 wait (`runner._down` is False), runs no `_Power` sampler and no keep-warm thread, and its first
 status says `last: starting`, not `waiting for the GPU`, and so does the base check's after it (#1112) (`runner._gpu_side`: from the config
@@ -7555,7 +7560,8 @@ doc needs its own `!/` line).
   `KEY_WORDS`, `CONTEXT_WORDS`: OpenCode's error types and the providers' words). `runner.HELD` is `models.HELD_STOPS`,
   the status `guard` `drive` writes with `infra` `provider` ↔ `models.held_told`; the keyhole's `rate_limited`/`unreachable`
   marks (`models.HELD_MARKS`) ↔ `models.held_mark` ↔ `NoLease._held_turn` and its probe flock ↔ `drive`'s held recheck (#1277);
-  `runner.TOLD_STOPS` (a stop's kind) ↔ `runner._told_stop` ↔ `models.held_told`'s `guards` ↔ the waits `NoLease.load` holds (#1344).
+  `runner.TOLD_STOPS` (a stop's kind) ↔ `runner._told_stop` ↔ `models.held_told`'s `guards` ↔ the waits `NoLease.load` holds (#1344);
+  `runner._load_waits` ↔ the marks `NoLease._turn` waits on (`credit_recheck`'s `no_credit`, `_held_turn`'s `held_mark`): a told stop with no mark looped.
 - **A model server's API fields** (`models.server_facts`, `ollama_served_context`, `weights`) → `test_portable.py`'s
   `Real` tests, *Running your own server*.
 - **What `wb top` reads** (`live_used`, `window`, `round`, `round_started_at`, `load_secs`, `last`; a `step` row's

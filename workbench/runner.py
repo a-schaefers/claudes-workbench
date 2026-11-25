@@ -5307,14 +5307,33 @@ def _told_stop(task: store.Task, rnd: dict):
     locks/provider-stop-<provider>.lock, held through the caller's own notice: the stops land in
     the same second, and a look alone let each find none told yet (#1344). A told one found, the
     round waits as queued instead, in the lease's next load (NoLease.load), with no stop of its
-    own. Any other round: '' and no lock."""
+    own. Any other round: '' and no lock. A told stop counts only while that load has a mark to
+    wait on (_load_waits): with none it returns at once and the round ran into the same stop
+    again, round after round, `running` with a slot held and no notice (#1344's review)."""
     family = TOLD_STOPS.get(rnd.get("guard")) if rnd.get("stuck") else None
     if not family:
         yield ""
         return
     p = provider_of(task)
     with store.locked(store.home() / "locks" / f"provider-stop-{models._slot_name(p)}.lock"):
-        yield models.held_told(p, task.name, family)
+        told = models.held_told(p, task.name, family)
+        yield told if told and _load_waits(task, p, rnd["guard"]) else ""
+
+
+def _load_waits(task: store.Task, p: str, guard: str) -> bool:
+    """Whether the lease's next load (NoLease.load) waits after a round ``guard`` stopped: for a
+    402 the provider's `no_credit` mark (models.api_health, not this task's own turn to ask,
+    credit_recheck's), for a rate limit or outage its held mark (models.held_mark, which
+    _held_turn waits on). An outage whose answers were 2xx (a queue held past QUEUE_WAIT_S, answers
+    cut short) leaves none, the keyhole's `ok` having cleared it: behind a told stop the round
+    ran again into it with no end, paying for each cut answer (#1344's review, 2026-11-24)."""
+    try:
+        if guard == "quota":
+            row = models.api_health(p)
+            return bool(row) and row.get("state") == "no_credit" and row.get("asked_by") != task.name
+        return models.held_mark(p) is not None
+    except Exception:  # an unreadable file: no wait to count on, so the stop tells
+        return False
 
 
 def _rejoin(task: store.Task, lease) -> None:

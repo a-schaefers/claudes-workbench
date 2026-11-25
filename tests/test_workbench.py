@@ -35582,6 +35582,62 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual(task.status["phase"], "review", task.status)
         self.assertEqual([r["task"] for r in store.notices() if r["kind"] != "review"], ["t-a", "t-a"])
 
+    def test_a_running_task_whose_outage_left_no_held_mark_stops_with_its_own_notice_behind_a_told_stop(self):
+        # #1344's review (2026-11-24): the told path ran the round again for the lease's next load
+        # to wait in, but an outage whose answers were 2xx (a queue held past QUEUE_WAIT_S, answers
+        # cut short) leaves no held mark, the keyhole's `ok` having cleared it: the load returned at
+        # once and the round met the same stop, 58 rounds in 20 s, `running`, a slot held, no notice
+        told, task = self.held_outage()
+        self.models.note_api("deepinfra", "ok")  # t-b's round already sent, past the lease's load
+        real, calls = runner.run_round, []
+
+        def answered_2xx(t, n, keep=False):
+            calls.append(n)
+            try:
+                return real(t, n, keep)
+            finally:  # what a 2xx's `ok` leaves: the stop, and no mark for a load to wait on
+                self.models.note_api("deepinfra", "ok")
+        p = mock.patch.object(runner, "run_round", answered_2xx)
+        p.start()
+        self.addCleanup(p.stop)
+        driver = threading.Thread(target=self.drive_here, args=("t-b",), daemon=True)
+        driver.start()
+        driver.join(30)
+        self.assertFalse(driver.is_alive(), (len(calls), task.status))
+        self.assertEqual(calls, [1, 1])                               # the round and its one revive
+        self.assertEqual((task.status["phase"], task.status.get("infra"), task.status.get("guard")),
+                         ("stuck", "provider", "outage"), task.status)
+        self.assertEqual([(r["task"], r["kind"]) for r in store.notices() if r["task"] == "t-b"],
+                         [("t-b", "stuck")])
+        self.assertNotIn("deepinfra stopped the round, as t-a's stop told the user: the task waits as queued",
+                         [e.get("text") for e in store.read_jsonl(task.dir / "events.jsonl")[0]])
+
+    def test_a_told_stop_holds_a_running_task_only_while_its_next_load_has_a_mark_to_wait_on(self):
+        # #1344's review (2026-11-24): a told stop counted with no mark sent the round into the
+        # same stop again and again; a 402's wait is its `no_credit` mark, an outage's its held mark
+        m = self.local_api_model()
+        for name in ("t-told", "t-run"):
+            t = store.Task(name)
+            t.dir.mkdir(parents=True)
+            store.write_json(t.dir / "task.json", {"model": m.id, "provider": "deepinfra", "via": "api"})
+        told, task = store.Task("t-told"), store.Task("t-run")
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")
+        for guard, mark in (("quota", "no_credit"), ("outage", "unreachable")):
+            self.models.note_api("deepinfra", "ok")
+            told.set_status(phase="stuck", infra="provider", guard=guard)
+            told.notify("stuck", f"t-told stopped: {guard}", cause="provider")
+            rnd = {"stuck": guard, "guard": guard}
+            with runner._told_stop(task, rnd) as found:
+                self.assertEqual(found, "", guard)                    # no mark: it stops and tells
+            self.models.note_api("deepinfra", mark, "the provider's")
+            with runner._told_stop(task, rnd) as found:
+                self.assertEqual(found, "t-told", guard)              # the load waits on it
+        self.models.note_api("deepinfra", "no_credit", "402")
+        self.assertTrue(self.models.credit_ask("deepinfra", "t-run"))  # its own turn to ask: no wait
+        told.set_status(guard="quota")
+        with runner._told_stop(task, {"stuck": "quota", "guard": "quota"}) as found:
+            self.assertEqual(found, "")
+
     def test_two_rounds_stopped_by_the_same_402_at_once_tell_claude_once(self):
         # #1344: the stops land in the same second, so a look for a told stop alone found none
         # for each; the claim is taken under the provider's lock, held through the notice
@@ -35592,6 +35648,8 @@ class ApiTasks(_ApiTask, _KeyholeTest):
             t.dir.mkdir(parents=True)
             store.write_json(t.dir / "task.json", {"model": m.id, "provider": "deepinfra", "via": "api"})
             tasks.append(t)
+        self.models.note_api("deepinfra", "no_credit", "402 Insufficient balance")  # the keyhole's, at the 402
+        self.addCleanup(self.models.note_api, "deepinfra", "ok")
         found = {}
 
         def stop(t):
