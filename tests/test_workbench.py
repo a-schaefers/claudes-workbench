@@ -19748,21 +19748,20 @@ class Try(Base):
             run_wb("try", "--model", "no-such-model")                     # refused: nothing left
         self.assertFalse((cli.try_dir() / "3").exists())          # (#161)
 
-    def test_a_wb_try_refused_for_a_busy_gpu_advises_a_flag_wb_try_accepts(self):
-        # #1251 (bar loop round 5): wb start's busy-GPU refusal says --queue starts it anyway,
-        # but wb try had no --queue, so the retry it advised died on argparse's exit 2
+    def test_a_wb_try_on_a_busy_gpu_queues_behind_it_and_still_takes_queue(self):
+        # #1251 (bar loop round 5): wb start's busy-GPU refusal said --queue starts it anyway,
+        # but wb try had no --queue, so the retry it advised died on argparse's exit 2. Since
+        # #1322 a start queues by default, and --queue stays accepted for old callers
         with mock.patch.object(cli, "spawn_runner", lambda task: 0), \
                 mock.patch.object(cli, "_gpu_wait", lambda m, me=None: (
                     {"gpu0": {"task": "other", "model": m.id}}, True)):
-            with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()) as err:
-                run_wb("try", "--model", "mimo")
-            self.assertEqual(e.exception.code, 4)
-            self.assertIn("--queue starts it anyway", err.getvalue())
-            self.assertFalse(list(cli.try_dir().glob("*")))                 # no copy left (#161)
-            out = run_wb("try", "--model", "mimo", "--queue")               # the advice, followed
-        self.assertIn("waits as queued until it's free", out)
+            out = run_wb("try", "--model", "mimo")
+            again = run_wb("try", "--model", "mimo", "--queue")
+        self.assertIn("note: the GPU is busy with other; this task waits as queued until it's free", out)
         self.assertIn("hidden check, at review: ", out)
         self.assertEqual(store.Task("try-1").status["phase"], "queued")
+        self.assertIn("waits as queued until it's free", again)
+        self.assertEqual(store.Task("try-2").status["phase"], "queued")
 
     def test_wb_try_refused_by_wb_init_leaves_no_sample_behind(self):
         # #530: with no git identity wb init refused, and try/1, try/2… were left at each retry.
@@ -21377,20 +21376,14 @@ class DynamicWorkflows(Base):
         self.assertEqual(sorted((h["task"], h["model"], bool(h.get("waiting"))) for h in models.holders().values()),
                          [("fan-logic", big, False), ("fan-tests", small, False)])   # both run, together
 
-        # the docs on the API, past the provider's slots: exit 4 without --queue, queued with it
+        # the docs on the API, past the provider's slots: queued, by default (#1322), naming the holders
         code, out, err = begin("fan-docs", "writing")
-        self.assertEqual((code, out), (4, ""))
-        self.assertIn("3 tasks already run on deepseek's API (api-1, api-2, api-3): workbench runs at most 3 "
-                      "at once per provider. --queue starts it anyway", err)
-        self.assertFalse(store.Task("fan-docs").dir.exists())
-        code, out, err = begin("fan-docs", "writing", "--queue")
         self.assertEqual(code, 0, err)
-        day = time.strftime("%m-%d", time.localtime(routes.read()["roles"]["writing"]["ts"]))
         self.assertTrue(out.startswith("started fan-docs on deepseek/deepseek-flash (API) · branch "), out)
-        # "you": the dialog's yes was the user's (routes.said: only the user sets a role)
-        self.assertIn(f"\nmodel: deepseek/deepseek-flash · API (DeepSeek) · writing role, set by you {day} · "
+        self.assertIn("\nmodel: deepseek/deepseek-flash · API (DeepSeek) · writing role · "
                       "thinking off · today $0.00 of $5 (catalog prices)\n", out)  # meter.tail (#1019, #1135)
-        self.assertIn("note: 3 tasks run on deepseek's API; this task waits as queued for a slot", out)
+        self.assertIn("note: 3 tasks run on deepseek's API (api-1, api-2, api-3); fan-docs waits as queued "
+                      "for a slot", out)
         self.assertNotIn("GPU", out)                          # never the GPU's wait, nor its notes
         got = threading.Event()
 
@@ -33965,16 +33958,14 @@ class Routes(Base):
                       mock.patch.object(runner.models, "api_holders", lambda p: ["a1", "a2", "a3"])):
             patch.start()
             self.addCleanup(patch.stop)
-        full = ("wb: 3 tasks already run on acme's API (a1, a2, a3): workbench runs at most 3 at once per "
-                "provider. --queue starts it anyway, to wait for a slot; or do this step yourself\n")
-        self.assertEqual(self.route("--dry-run", "--json", "--start", *argv), (4, "", full))
-        self.assertEqual(start(), (4, "", full))
+        # the provider's slots full only queue the start (#1322): the dialog line as ever
+        self.assertEqual(self.dry("--start", *argv), {"change": approval["change"], "gate": True,
+                                                      "approval": approval})
         self.assertTrue(self.ok.exists())
         self.assertFalse(store.Task("t-api").exists)
-        self.assertEqual(self.dry("--start", *argv, "--queue"), {"change": approval["change"], "gate": True,
-                                                                  "approval": approval})
-        code, out, err = start("--queue")                     # the start that runs takes the yes
+        code, out, err = start()                              # the start that runs takes the yes
         self.assertEqual(code, 0, err)
+        self.assertIn("note: 3 tasks run on acme's API (a1, a2, a3); t-api waits as queued for a slot", out)
         self.assertFalse(self.ok.exists())
         self.assertEqual(store.Task("t-api").spec["said"], "asked for, approved in the dialog")
 
@@ -39852,8 +39843,8 @@ class RoleResolution(Base):
                          {"model": "deepseek/deepseek-flash", "via": "api", "role": "trivial", "size": "trivial",
                           "provider": "deepseek", "provider_name": "DeepSeek", "thinking": "off",
                           "said": said["said"], "said_ts": said["ts"]})
-        day = time.strftime("%m-%d", time.localtime(said["ts"]))
-        self.assertIn(f"\nmodel: deepseek/deepseek-flash · API (DeepSeek) · trivial role, set by you {day} · "
+        # no `set by you MM-DD` stamp: only the user sets a role (#1322)
+        self.assertIn("\nmodel: deepseek/deepseek-flash · API (DeepSeek) · trivial role · "
                       "thinking off · today $0.00 of $5 (catalog prices)\n", out)  # with today's spend (meter.tail, #1019)
         self.assertTrue(out.startswith("started t-api on deepseek/deepseek-flash (API) · branch "), out)
         # the first API task in the repo for this provider: whose choice and where it goes (#1021's words)
@@ -39862,9 +39853,8 @@ class RoleResolution(Base):
         # wb watch --json: a routed line naming the provider and the role, after the meta line
         rows = [json.loads(x) for x in self.wb("watch", "t-api", "--json")[1].splitlines()]
         self.assertEqual([r["s"] for r in rows[:2]], ["meta", "routed"])
-        self.assertEqual(rows[1]["t"], f"routed: API deepseek/deepseek-flash (DeepSeek) · trivial role, set by "
-                                       f"you {day} · thinking off")
-        self.assertIn(f"  routed: API deepseek/deepseek-flash (DeepSeek) · trivial role, set by you {day}",
+        self.assertEqual(rows[1]["t"], "routed: API deepseek/deepseek-flash (DeepSeek) · trivial role · thinking off")
+        self.assertIn("  routed: API deepseek/deepseek-flash (DeepSeek) · trivial role · thinking off",
                       self.wb("watch", "t-api", "--once", "--no-color")[1])
         # the chat's snapshot: the open task, its model and provider
         from workbench import chat
@@ -39893,7 +39883,7 @@ class RoleResolution(Base):
         self.set_role("significant", mid, "--day-usd", "5")
         code, out, err = self.begin("t1", "--size", "significant")
         self.assertEqual(code, 0, err)
-        self.assertIn(f" · significant role, set by you {time.strftime('%m-%d')} · {does} · today $0.00 of $5", out)
+        self.assertIn(f" · significant role · {does} · today $0.00 of $5", out)
         self.assertNotIn("thinking off", out)
         sp = store.Task("t1").spec
         self.assertEqual((sp["opencode_model"], sp["thinking"], sp["thinking_shown"]), (mid, "off", does))
@@ -40130,15 +40120,10 @@ class RoleResolution(Base):
             self.assertEqual(self.begin(f"t-b{n}", "--role", "trivial")[0], 0)
             store.Task(f"t-b{n}").set_status(pid=4242 + n)    # its runner alive, no `leased` yet
         with mock.patch.object(cli, "runner_alive", lambda t: t.name.startswith("t-b")):
-            code, out, err = self.begin("t-b3", "--role", "trivial")
-            self.assertEqual((code, out), (4, ""))
-            self.assertEqual(err, "wb: 3 tasks already run on deepseek's API (t-b0, t-b1, t-b2): workbench runs "
-                                  "at most 3 at once per provider. --queue starts it anyway, to wait for a slot; "
-                                  "or do this step yourself\n")
-            self.assertFalse(store.Task("t-b3").exists)
-            code, out, err = self.begin("t-b3", "--role", "trivial", "--queue")
+            code, out, err = self.begin("t-b3", "--role", "trivial")    # queued by default (#1322)
             self.assertEqual(code, 0, err)
-            self.assertIn("\nnote: 3 tasks run on deepseek's API; this task waits as queued for a slot\n", out)
+            self.assertIn("\nnote: 3 tasks run on deepseek's API (t-b0, t-b1, t-b2); t-b3 waits as queued "
+                          "for a slot\n", out)
             # one reached its lease: its slot's flock counts it from then on (api_holders), never twice
             store.Task("t-b0").set_status(leased=4242)
             code, out, err = self.begin("t-b4", "--role", "trivial")
@@ -41127,30 +41112,32 @@ class BusyGpu(Base):
         self.assertIn("thinking_shown", sp)
         self.assertEqual(store.Task("t-busy").status["phase"], "queued")
 
-    def test_with_busy_wait_the_default_a_busy_gpu_exits_4_as_before(self):
+    def test_with_busy_wait_the_default_a_busy_gpu_queues_the_start_on_the_gpu(self):
         code, _, err = self.wb("route", "trivial", "--api", "deepseek/deepseek-flash", "--day-usd", "5")
         self.assertEqual(code, 0, err)
         code, out, err = self.begin("t-wait", "--role", "trivial")
-        self.assertEqual((code, out), (4, ""))
-        self.assertIn("can't run beside it", err)
+        self.assertEqual(code, 0, err)                     # queued, no exit 4 (#1322)
+        self.assertIn("waits as queued until it's free", out)
+        self.assertEqual(store.Task("t-wait").spec["via"], "gpu")
 
     def test_it_never_applies_with_agents_on_gpu_a_model_asked_for_or_a_free_gpu(self):
         self.opt_in()
         self.assertEqual(self.wb("route", "all", "gpu")[0], 0)
-        self.assertEqual(self.begin("t-agents", "--role", "trivial")[0], 4)   # Agents GPU: nothing spends
+        self.assertEqual(self.begin("t-agents", "--role", "trivial")[0], 0)   # Agents GPU: nothing spends
+        self.assertEqual(store.Task("t-agents").spec["via"], "gpu")           # it queues on the GPU
         self.assertEqual(self.wb("route", "all", "both")[0], 0)
         gpu = next(iter(runner.models.discover()))
-        self.assertEqual(self.begin("t-asked", "--role", "trivial", "--model", gpu)[0], 4)  # Claude named it
+        self.assertEqual(self.begin("t-asked", "--role", "trivial", "--model", gpu)[0], 0)  # Claude named it
+        self.assertEqual(store.Task("t-asked").spec["via"], "gpu")
         self.busy = False
         code, out, err = self.begin("t-free", "--role", "trivial")
         self.assertEqual(code, 0, err)
         self.assertEqual(store.Task("t-free").spec["via"], "gpu")   # never API while the GPU has room
         self.assertNotIn(routes.BUSY_LINE, out)
 
-    def test_a_role_with_no_api_model_queues_or_exits_4_as_before(self):
+    def test_a_role_with_no_api_model_queues_on_the_gpu_as_before(self):
         self.opt_in("trivial")
-        self.assertEqual(self.begin("t-none", "--role", "significant")[0], 4)
-        code, out, err = self.begin("t-queued", "--role", "significant", "--queue")
+        code, out, err = self.begin("t-queued", "--role", "significant")
         self.assertEqual(code, 0, err)
         self.assertEqual(store.Task("t-queued").spec["via"], "gpu")
         self.assertIn("waits as queued", out)
@@ -41160,7 +41147,7 @@ class BusyGpu(Base):
         self.catalog(ROLE_CATALOG, [r for r in ROLE_AUTH if r["id"] != "deepseek"])
         runner.models.hosted(fresh=True)
         code, out, err = self.begin("t-nokey", "--role", "trivial")
-        self.assertEqual(code, 4)
+        self.assertEqual(code, 0, err)                               # queued on the GPU (#1322)
         self.assertIn("note: the GPU is busy, and the trivial role's API model deepseek/deepseek-flash can't "
                       "take it: no key for deepseek", out)
 
@@ -41211,7 +41198,7 @@ class BusyGpu(Base):
             self.assertEqual(cli._busy_api("trivial", asked, self.repo, None),
                              why + f"{self.repo.name} is kept local ({self.repo})")
             code, out, err = self.begin("t-local", "--role", "trivial")
-        self.assertEqual(code, 4)                                    # exit 4 as before, after the note
+        self.assertEqual(code, 0, err)                               # queued on the GPU, after the note
         self.assertIn(f"note: {why}{self.repo.name} is kept local", out)
 
     def test_a_spent_cap_note_never_asks_for_more_spend_or_the_gpu_the_role_is_on(self):

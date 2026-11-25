@@ -724,7 +724,7 @@ def _routed_keys(routed: dict) -> dict:
 def _busy_api(role: str, a, repo: Path, sub: str | None, tokens: int | None = None):
     """When the GPU is busy and the user opted in (routes.json `busy` api, #1023): the role's API
     model as pick_model gives one, (m, state, why, routed); "" when the opt-in doesn't apply (off,
-    Agents GPU, a --model asked for, a role with no API model: it queues or exits 4 as before); a
+    Agents GPU, a --model asked for, a role with no API model: it queues as before); a
     line saying why the role's API model can't take it now, which never changes the start either.
     Only here, at a start: a running task never moves, and nothing goes from API to the GPU."""
     if a.model:
@@ -870,21 +870,14 @@ def _api_slots_free(m: models.Model, me: str | None = None) -> int:
     return max(0, models.api_slots_free(models.api_provider(m)) - len(_api_pending(m, me)))
 
 
-def _slots_full(m: models.Model, me: str | None = None) -> str:
-    """wb start's refusal (exit 4) when every one of an API provider's slots is held or claimed
-    by a task on its way to one."""
+def _slot_note(m: models.Model, me: str | None = None) -> str:
+    """An API task started past its provider's limit: it waits as queued for a slot, and the note
+    names who holds them (wb start queues it by default, #1322)."""
     p = models.api_provider(m)
     held = models.api_holders(p) + _api_pending(m, me)
-    return (f"{len(held) or models.API_PARALLEL} tasks already run on {p}'s API"
+    return (f"{models.API_PARALLEL} tasks run on {p}'s API"
             + (f" ({', '.join(held)})" if held else "")
-            + f": workbench runs at most {models.API_PARALLEL} at once per provider. --queue starts "
-            "it anyway, to wait for a slot; or do this step yourself")
-
-
-def _slot_note(m: models.Model, me: str | None = None) -> str:
-    """An API task sent on past its provider's limit: it waits as queued for a slot."""
-    return (f"{models.API_PARALLEL} tasks run on {models.api_provider(m)}'s API; "
-            f"{me or 'this task'} waits as queued for a slot")
+            + f"; {me or 'this task'} waits as queued for a slot")
 
 
 def _gpu_note(task: store.Task) -> str:
@@ -1516,15 +1509,14 @@ def cmd_start(a):
     setup = _worktree_setup(repo, a, sub, m.kind, models.provider_name(m), role)
     checkout_bytes = _disk_room(repo, a.base, setup)
     # Two projects, one GPU: a task that can't run beside the GPU's holders used to queue in
-    # silence behind them, maybe for hours (the 2026-11-16 audit). Say so before any worktree.
-    # An API model takes no GPU (#1015): no bench to stop, no holders to wait for, but one of its
-    # provider's slots (models.API_PARALLEL), whose limit is exit 4's other cause.
+    # silence behind them, maybe for hours (the 2026-11-16 audit), so its note names them. It
+    # queues by default: the refusal (exit 4) was always answered with --queue (#1322). An API
+    # model takes no GPU (#1015): no bench to stop, no holders to wait for, but one of its
+    # provider's slots (models.API_PARALLEL), whose note says it waits for one.
     api = m.kind == "api"
     slots_full = api and not _api_slots_free(m, a.name)
     if api:
         held, waits = {}, False
-        if slots_full and not a.queue:
-            die(_slots_full(m, a.name), 4)
     else:
         if not getattr(a, "bench", None):
             _say(_preempt_bench(m, a.name))
@@ -1534,9 +1526,6 @@ def cmd_start(a):
         api, held, waits, slots_full = True, {}, False, False
     elif waits and moved:
         print(f"note: {moved}")
-    if waits and not a.queue:
-        die(models.busy(held, f"{m.id} can't run beside {'it' if len(held) == 1 else 'them'}. "
-                        "--queue starts it anyway, to wait behind; or do this step yourself"), 4)
 
     try:
         task.dir.mkdir(parents=True)
@@ -1726,7 +1715,7 @@ def cmd_start(a):
         print(f"note: queued although {state['why']}")
     elif api:  # none of the GPU's notes: it takes no GPU
         if slots_full:
-            print(f"note: {_slot_note(m)}")
+            print(f"note: {_slot_note(m, a.name)}")
     elif waits:
         print(f"note: the GPU is busy with {holding}; this task waits as queued until it's free")
     elif held:
@@ -3342,8 +3331,8 @@ def _route_start(a) -> None:
     # no price, no cap, or today at the cap (#1019, #1089): wb start's too
     if why := meter.refusal(m, tokens=runner.first_tokens(prompt=spec_text), asked=True):
         die(why, 3)
-    # wb start's cheap refusals too, in place of a dialog for a start that then exits 1, 3 or 4
-    # (#1104, 2026-11-23): the model can't run, a --base naming no commit, the provider's slots
+    # wb start's cheap refusals too, in place of a dialog for a start that then exits 1 or 3
+    # (#1104, 2026-11-23): the model can't run, a --base naming no commit
     state = models.status(m)
     if not state["available"] and not state["why"].startswith(TRANSIENT) and not ns.force:
         die(_cant_run(m, state), 3)
@@ -3354,8 +3343,6 @@ def _route_start(a) -> None:
     if repo is not None and (why := _standing_gap(context.repo_conf(repo, sub), ns,
                                                   models.provider_name(m), repo, sub)):
         die(why, 3)
-    if not ns.queue and not _api_slots_free(m, ns.name):
-        die(_slots_full(m, ns.name), 4)
     line = start_line(ns.name, m)
     print(json.dumps({"change": line, "gate": True,
                       "approval": {"start": {"task": ns.name, "model": m.id}, "change": line}})
@@ -6826,10 +6813,7 @@ def cmd_try(a):
     # unlocking failed wb try at once, or with a terminal (WSL2) hung it on a prompt (#1226)
     argv = ["start", name, "--spec", str(TRY / "spec.md"), "--repo", str(d), "--size", "trivial",
             "--trial", "--no-sign", "--test", f"{py} -m unittest",
-            *(["--model", a.model] if a.model else []),
-            # wb start's busy-GPU refusal names --queue, which wb try once refused as an unknown
-            # argument: the setup check couldn't wait behind a task or a bench (#1251, 2026-11-24)
-            *(["--queue"] if a.queue else [])]
+            *(["--model", a.model] if a.model else [])]  # it queues behind the GPU's holders (#1322)
     try:
         # the copy and its init inside: wb init refusing (no git identity, a home that is a
         # git repo) left try/<n> behind, one more at each retry (#530)
@@ -7672,8 +7656,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--base", default="HEAD")
     s.add_argument("--force", action="store_true", help="queue the --model asked for even if it "
                    "can't run now")
-    s.add_argument("--queue", action="store_true", help="start even when the GPU's holders leave "
-                   "no room for its model: it waits behind them (else exit 4)")
+    # the default since #1322: a start that can't run yet queues; kept for old callers
+    s.add_argument("--queue", action="store_true", help=argparse.SUPPRESS)
     s.add_argument("--trial", action="store_true", help="a check of workbench itself (a scratch "
                    "repo): its result and lessons don't count as evidence")
     s.add_argument("--local-only", action="store_true", help="this task's code stays on this "
@@ -8159,8 +8143,7 @@ def parser() -> argparse.ArgumentParser:
                        "started as a trivial trial, and the hidden check to run at review")
     s.add_argument("--model", help="a model id (a GPU model's fragment will do; an API model "
                    "never matches one); default: the router's pick for a trivial task")
-    s.add_argument("--queue", action="store_true", help="start even when the GPU's holders leave "
-                   "no room for its model: it waits behind them (else exit 4)")
+    s.add_argument("--queue", action="store_true", help=argparse.SUPPRESS)  # the default (#1322)
     s.set_defaults(f=cmd_try)
     s = sub.add_parser("remote", help="use the Ollama on another machine (LAN, tailnet): its "
                        "provider, marked local, and its tool-capable models registered")

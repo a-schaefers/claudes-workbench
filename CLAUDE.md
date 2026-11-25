@@ -104,7 +104,7 @@ Linux). How each part works: ARCHITECTURE.md, from *The pieces*.
 Each step in full: ARCHITECTURE.md, *A task, start to finish*. What a change must not break:
 1. `wb start` resolves the role (`--role`, else from `--size`; unset: GPU): GPU through the router, API to the
    role's model, never the other side (exit 3). It checks (a committed CLAUDE.md, the model, GPU room, or for an API model a free
-   provider slot of `API_PARALLEL`: exit 4 unless `--queue`),
+   provider slot of `API_PARALLEL`: else it queues),
    writes round 1's prompt (spec plus `PROTOCOL`), spawns the runner and returns at once:
    anything slow (checkout, setup, base check) is the runner's, as Claude's Bash stops at 2 min.
 2. The runner holds the GPU (`GpuLease`) and loads the model before every round, or for an API

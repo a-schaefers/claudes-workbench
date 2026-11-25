@@ -184,8 +184,8 @@ if you can, and start nothing until the plan is approved; then write the first s
   you pick. Each task is a step as above (spec, size, role, acceptance command); give them one
   name prefix (`auth-logic`, `auth-tests`, `auth-docs`), pass `--group <prefix>` (`--group auth`)
   on each `wb start` so the pane draws them under one header, and say the plan in one line before
-  the first `wb start`. The GPU and the provider slots decide what runs together: `--queue` the rest
-  (exit 4). Review each result on its own; accept logic first, then tests, then UI or docs.
+  the first `wb start`. The GPU and the provider slots decide what runs together: the rest queue.
+  Review each result on its own; accept logic first, then tests, then UI or docs.
 - **What stays yours**, marked apart: git, CLAUDE.md, choices and setup only the user can make
   (downloads, licences, public repos), and the checks you run at review (a screenshot to look at,
   tests to break on purpose, a grader).
@@ -398,12 +398,11 @@ A model that reads prompts slowly, or one the runner must load first, can spend 
 its first reply. That is normal, not stuck. A task stopped with "no first output" has taught the
 runner how slowly the model reads: a new `wb start` on it waits longer (the stop says how long);
 `--silence-timeout <seconds>` gives it more, or pick a smaller model.
-**Exit 4: the GPU is taken** by another task (often another session's project) or `wb image`,
-which the model can't run beside. Don't wait silently: tell the user who holds it, then either
-do the step yourself or `--queue` it to start when the GPU is free (it may be hours).
-An API model's task needs no GPU and never waits for one; its exit 4 is "3 tasks already run on
-<provider>'s API": workbench runs at most three at once per provider. Do the step yourself, or
-`--queue` it to start when one of those finishes.
+**A start queues when the GPU is taken** by another task (often another session's project) or
+`wb image`, which the model can't run beside: its note names who holds it, and it starts when the
+GPU is free (it may be hours). Tell the user; do the step yourself if it can't wait (wb discard).
+An API task needs no GPU; it queues when 3 tasks already run on its provider's API (workbench
+runs at most three at once per provider), until one of those finishes.
 
 ## Driving a running task
 You are the driver, not a spectator: when a check-in, its log or the user says the agent is

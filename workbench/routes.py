@@ -45,8 +45,8 @@ USE_NAMES = {"gpu": "GPU", "api": "API", "both": "Both"}  # as the dialog and th
 AGENTS_GPU = "Agents is GPU, so nothing spends"
 AGENTS_STOPS = "an API task already started stops before its next round"  # the change line's clause
 AGENTS_BACK = "Ask the user: Agents back to Both or API (wb route all both)"
-# When the GPU is busy (#1023, the owner's opt-in): routes.json `busy`, missing is "wait" (queue, or
-# exit 4, as before); "api" starts a role that has an API model on it instead, at wb start only (a
+# When the GPU is busy (#1023, the owner's opt-in): routes.json `busy`, missing is "wait" (queue, as
+# before); "api" starts a role that has an API model on it instead, at wb start only (a
 # running task never moves, nor does anything go from API to the GPU). Agents GPU overrides it.
 BUSY = ("wait", "api")
 BUSY_LINE = "GPU busy: on the role's API model, as you set"  # wb start's line when it applies
@@ -723,16 +723,13 @@ def cant_run(role: str, mid: str, why: str, fix: str, doc: dict) -> str:
 
 
 def said_part(routed: dict) -> str:
-    """Why an API task runs where it does, as the start line and `routed` say it: `trivial role,
-    set by you 11-20` (only the user sets a role: the dialog, the pane or a terminal), or `asked
-    for, approved in the dialog` for a gated --model."""
+    """Why an API task runs where it does, as the start line and `routed` say it: `trivial role`
+    (only the user sets a role, so no stamp says who or when: the roles' listing has it, #1322),
+    or `asked for, approved in the dialog` for a gated --model."""
     said = routed.get("said") or ""
     if said.startswith("asked for"):
         return said
-    out = f"{routed.get('role')} role"
-    if isinstance(ts := routed.get("said_ts"), (int, float)):
-        out += f", set by you {time.strftime('%m-%d', time.localtime(ts))}"
-    return out
+    return f"{routed.get('role')} role"
 
 
 def _thinking_said(routed: dict) -> str:
@@ -749,8 +746,8 @@ def routed_line(model_id: str, routed: dict) -> str:
 
 
 def model_line(model_id: str, routed: dict) -> str:
-    """wb start's model line for an API task: `model: <id> · API (<provider>) · trivial role, set by
-    you 11-20 · thinking off`, which wb start ends with meter.tail (today's spend); a GPU task's
+    """wb start's model line for an API task: `model: <id> · API (<provider>) · trivial role ·
+    thinking off`, which wb start ends with meter.tail (today's spend); a GPU task's
     line is as before roles."""
     return (f"model: {model_id} · API ({routed.get('provider_name') or routed.get('provider')}) · "
             f"{said_part(routed)} · {_thinking_said(routed)}")
