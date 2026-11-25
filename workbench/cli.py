@@ -6946,11 +6946,42 @@ def _install_kind() -> str:
     where Claude Code keeps the marketplace clone when it is set: read there as the user's own,
     wb update skipped the rescue and Claude Code's re-clone wiped the local commits (#1099,
     2026-11-23)."""
+    here = PKG_ROOT.resolve()
+    return "marketplace" if any(here.is_relative_to((r / "marketplaces").resolve()) for r in _plugin_roots()) else "clone"
+
+
+def _plugin_roots() -> list[Path]:
     roots = [context.claude_home() / "plugins"]
     if cache := os.environ.get("CLAUDE_CODE_PLUGIN_CACHE_DIR"):
         roots.append(Path(os.path.expanduser(cache)))
-    here = PKG_ROOT.resolve()
-    return "marketplace" if any(here.is_relative_to((r / "marketplaces").resolve()) for r in roots) else "clone"
+    return roots
+
+
+def _marketplace_clone() -> Path | None:
+    """The git clone Claude Code's marketplace update re-clones: this copy on a marketplace
+    install; from any other, known_marketplaces.json's `workbench` installLocation (or the usual
+    place) when it is a git clone under a plugins root's marketplaces/. A developer clone's wb
+    update rescued only itself, and the re-clone wiped that clone's commits, exit 0, nothing in
+    rescued/ (#1326, 2026-11-24). A directory marketplace is never re-cloned, so it isn't one."""
+    if _install_kind() == "marketplace":
+        return PKG_ROOT
+    roots, here = _plugin_roots(), PKG_ROOT.resolve()
+    found = []
+    for r in roots:
+        try:
+            at = store.read_json(r / "known_marketplaces.json", {}).get("workbench", {}).get("installLocation")
+        except (OSError, ValueError, AttributeError):
+            at = None
+        found += [Path(os.path.expanduser(at))] if isinstance(at, str) and at else []
+    for d in [*found, *(r / "marketplaces" / "workbench" for r in roots)]:
+        d = d.resolve()
+        if d == here or not d.is_dir() or not any(d.is_relative_to((r / "marketplaces").resolve()) for r in roots):
+            continue
+        top = subprocess.run(["git", "-C", str(d), "rev-parse", "--show-toplevel"], capture_output=True,
+                             text=True, stdin=subprocess.DEVNULL)
+        if top.returncode == 0 and Path(top.stdout.strip()).resolve() == d:
+            return d
+    return None
 
 
 def _running(live, a) -> str:
@@ -7014,10 +7045,11 @@ def cmd_update(a):
             print("\n".join(later))
         later.clear()
 
-    if kind == "clone":  # a clone is its own marketplace: pull, then let Claude Code re-read it
+    if kind == "clone":  # a clone: pull, then let Claude Code re-read its marketplace
         if gitops.git(PKG_ROOT, "status", "--porcelain", "--untracked-files=no").strip():
             die(f"{PKG_ROOT} has uncommitted changes: commit or stash them, then wb update")
-    elif refusal := patches.marketplace_refusal(PKG_ROOT):  # saved first, then refused (#1005)
+    if (market := _marketplace_clone()) and (refusal := patches.marketplace_refusal(  # saved first,
+            market, None if market == PKG_ROOT else PKG_ROOT)):  # then refused (#1005, #1326)
         die(refusal)
     if not shutil.which("claude"):  # before the pull: a clone once pulled, then died (the audit)
         die("claude isn't on PATH: wb update refreshes the plugin through it (run /workbench-update "

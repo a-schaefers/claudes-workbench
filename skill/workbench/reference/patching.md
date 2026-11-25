@@ -144,5 +144,7 @@ git name and email): they may edit those first. Sending it is theirs; never emai
 ## When `wb update` refuses over the marketplace copy
 It found local changes in Claude Code's clone, which Claude Code's update would wipe (it
 re-clones), and saved them under the `rescued/` path it printed. Tell the user, and offer
-`wb patch init`: it carries the changes over. Never work around the refusal with Claude Code's
+`wb patch init`: it carries the changes over. Run from a developer's clone, the refusal names
+that clone instead: `git am` takes the saved patches into it, and `claude plugin marketplace add
+<that clone>` makes it the marketplace (#1326). Never work around the refusal with Claude Code's
 own `claude plugin marketplace update`.

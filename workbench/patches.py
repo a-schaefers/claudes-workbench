@@ -206,17 +206,21 @@ def rescue(root, found: Changes) -> Path:
     return d
 
 
-def marketplace_refusal(root) -> str | None:
-    """wb update on a marketplace install with local changes: they are saved first, and the
-    refusal says where. Claude Code's update re-clones, and `wb update` once printed "updated
-    marketplace <patched>..<upstream>", exit 0, having wiped the patch (#1005, 2026-11-22)."""
+def marketplace_refusal(root, runs_from=None) -> str | None:
+    """wb update with local changes in Claude Code's marketplace clone ``root``: they are saved
+    first, and the refusal says where. Claude Code's update re-clones, and `wb update` once printed
+    "updated marketplace <patched>..<upstream>", exit 0, having wiped the patch (#1005, 2026-11-22).
+    ``runs_from``: the developer clone wb runs from, when ``root`` is another copy (#1326)."""
     found = local_changes(root)
     if not found:
         return None
     saved = rescue(root, found)
+    fix = ("wb patch init moves workbench to a clone of your own that keeps them as patches and still "
+           "updates" if runs_from is None else
+           f"git am takes its patches into {runs_from}, and claude plugin marketplace add {runs_from} "
+           "makes that clone the marketplace, which Claude Code never re-clones")
     return (f"the marketplace clone {root} has {found.say()}: Claude Code's update re-clones it and "
-            f"would wipe them, so nothing was updated. Saved in {saved}; wb patch init moves workbench "
-            "to a clone of your own that keeps them as patches and still updates")
+            f"would wipe them, so nothing was updated. Saved in {saved}; {fix}")
 
 
 CHECK_LINE = ("local changes in the marketplace clone: wb update would refuse (Claude Code re-clones "

@@ -22282,6 +22282,40 @@ class LocalPatches(Base):
             os.environ.pop("CLAUDE_CODE_PLUGIN_CACHE_DIR")
             self.assertEqual(cli._install_kind(), "clone")                            # without it: as before
 
+    def test_a_developer_clones_update_rescues_the_git_marketplace_clone_claude_code_would_re_clone(self):
+        # #1326 (2026-11-24, #1321's finding 5): wb run from a developer clone rescued only that
+        # clone, and Claude Code's marketplace update re-cloned its git marketplace clone: exit 0,
+        # the commit there gone, nothing in rescued/
+        dev = Path(self.tmp.name) / "dev"
+        self.g(self.tmp.name, "clone", "-q", str(self.origin), str(dev))
+        self.ident(dev)
+        cc = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "plugins"
+        (cc / "known_marketplaces.json").write_text(json.dumps(
+            {"workbench": {"source": {"source": "github"}, "installLocation": str(self.market)}}))
+        claude = Path(self.tmp.name) / "fakebin/claude"
+        claude.write_text(  # Claude Code's update: the clone deleted, then cloned again
+            f'#!/bin/sh\necho "$*" >> {shlex.quote(str(self.calls))}\ncase "$*" in '
+            f'"plugin marketplace update"*) rm -rf {shlex.quote(str(self.market))} && '
+            f'git clone -q {shlex.quote(str(self.origin))} {shlex.quote(str(self.market))};; esac\n')
+        mine = self.commit(self.market, "mine.txt", "mine\n", "a local fix")
+        with mock.patch.object(cli, "PKG_ROOT", dev):
+            self.assertEqual(cli._install_kind(), "clone")
+            out = self.wb("update")
+            self.assertIn(f"the marketplace clone {self.market.resolve()} has 1 local commit(s)", out)
+            self.assertIn(f"git am takes its patches into {dev}, and claude plugin marketplace add {dev}", out)
+            saved = Path(re.search(r"Saved in (\S+);", out).group(1))
+            self.assertIn("a local fix", next(saved.glob("0001-*.patch")).read_text())
+            self.assertEqual(self.g(self.market, "rev-parse", "HEAD"), mine)      # nothing re-cloned
+            self.assertFalse(self.calls.exists())
+            self.g(self.market, "reset", "-q", "--hard", self.base)                  # nothing of its own:
+            out = self.wb("update")                                                  # it updates
+            self.assertIn("already up to date", out)
+            self.assertIn("plugin marketplace update workbench", self.calls.read_text())
+            # a directory marketplace (this clone itself) is never re-cloned: nothing to rescue
+            (cc / "known_marketplaces.json").write_text(json.dumps({"workbench": {"installLocation": str(dev)}}))
+            shutil.rmtree(self.market)
+            self.assertIsNone(cli._marketplace_clone())
+
     def test_a_marketplace_update_refuses_and_rescues_a_local_commit_an_edit_or_an_untracked_file(self):
         # #1005 (2026-11-22): Claude Code re-clones its clone over all three, and wb update said
         # "updated marketplace <patched>..<upstream>", exit 0
