@@ -12242,6 +12242,46 @@ class RealOpenCodeRun(Base):
         self.assertEqual((task.worktree / "canary-other").read_text(), "t-run", log)  # in the agent's run
         self.assertFalse((task.worktree / f"canary-{ocplugin.PLUGIN_ID}").exists(), log)
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock: the package cache read-only to the agent")
+    @home_outside_the_lane
+    def test_a_round_runs_with_a_git_installed_plugin_in_a_package_cache_the_agent_cant_write(self):
+        # #1311's review (2026-11-25): the lane keeps OpenCode's package cache out, where
+        # `opencode plugin add` put the OpenCode plugin from Git (an agent could rewrite what
+        # the user's OpenCode imports). The agent's own OpenCode still starts with that install
+        # in the user's global `plugins`, and a newer commit on the branch (its update check
+        # at start) changes nothing there. Outside the temp roots, which the lane writes whole
+        from workbench import ocplugin
+        tmp = Path(self.tmp.name)
+        cache = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-occache-"))
+        self.addCleanup(shutil.rmtree, cache, True)
+        repo = tmp / "plugin-repo"
+        shutil.copytree(ocplugin.DIR, repo / "opencode-plugin", ignore=shutil.ignore_patterns("test"))
+        git = lambda *a: subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t",
+                                         *a], check=True, capture_output=True)
+        git("init", "-q", "-b", "main")
+        git("add", "-A")
+        git("commit", "-qm", "the plugin")
+        spec = f"git+file://{repo}#main::path:opencode-plugin"
+        conf = tmp / "add-conf"                   # plugin add's own config: the entry is ours to write
+        out = subprocess.run(["opencode", "plugin", "add", spec], cwd=tmp, capture_output=True, text=True,
+                             timeout=120, env={**os.environ, "XDG_CACHE_HOME": str(cache),
+                                               "XDG_CONFIG_HOME": str(conf), "PWD": str(tmp)})
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        installed = sorted(cache.glob("opencode/npm/*/*/node_modules/opencode-workbench/server.ts"))
+        self.assertEqual(len(installed), 1, list(cache.rglob("*")))
+        before = {p: p.read_bytes() for p in (cache / "opencode/npm").rglob("*") if p.is_file()}
+        (repo / "opencode-plugin" / "server.ts").write_text(
+            (repo / "opencode-plugin" / "server.ts").read_text() + "\n// a newer commit\n")
+        git("commit", "-qam", "newer")
+        os.environ["XDG_CACHE_HOME"] = str(cache)
+        wbconf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        wbconf.write_text(json.dumps({**json.loads(wbconf.read_text()), "plugins": [spec]}))
+        task, st = self.answered([WRITE_42])
+        self.assertTrue(st["tests"]["ok"], (task.dir / "runner.log").read_text())
+        self.assertNotIn(str(cache / "opencode/npm"), context.writable(task))
+        after = {p: p.read_bytes() for p in (cache / "opencode/npm").rglob("*") if p.is_file()}
+        self.assertEqual(after, before)           # nothing the agent's OpenCode installed or moved
+
     def test_the_runner_reads_the_real_events_the_export_and_the_session(self):
         task, st = self.answered([WRITE_42])
         self.assertTrue(st["tests"]["ok"])                         # the write landed, in the lane
@@ -13046,7 +13086,8 @@ class Lane(Base):
         for d in (".cache/opencode", ".config/opencode"):
             self.assertTrue((fresh / d).is_dir(), d)
         self.assertIn(str(home), writable)
-        self.assertIn(str(fresh / ".cache"), writable)
+        bins = str(fresh / ".cache/opencode/bin")   # ~/.cache, split around OpenCode's npm/ (#1311)
+        self.assertTrue([q for q in writable if q == bins or bins.startswith(q + "/")], writable)
         for d in (".local/share/opencode", ".local/state/opencode"):
             self.assertFalse((fresh / d).exists(), d)
             self.assertNotIn(str(fresh / d), writable)
@@ -13649,8 +13690,10 @@ class Lane(Base):
         os.environ["RUSTUP_HOME"] = str(moved)          # no toolchains/ yet: made, so split out
         task = self.bare_task("t-uv", self.repo)
         w = context.writable(task)
-        for p in (".cache", ".rustup/downloads", ".rustup/settings.toml", "rustuphome/downloads"):
+        for p in (".rustup/downloads", ".rustup/settings.toml", "rustuphome/downloads"):
             self.assertIn(str(home / p), w)             # the caches and rustup's own state
+        uv = str(home / ".cache/uv")                    # ~/.cache's, split around OpenCode's npm/
+        self.assertTrue([q for q in w if q == uv or uv.startswith(q + "/")], w)  # (#1311)
         for p in (".local/share/uv", ".rustup/toolchains", "rustuphome/toolchains"):
             self.assertFalse([q for q in w if q == str(home / p) or q.startswith(f"{home / p}/")
                               or str(home / p).startswith(q + "/")], p)
@@ -14350,7 +14393,9 @@ class Lane(Base):
             self.assertEqual(runner.lane_grant(f"{venv.parent}/other-AbCd/bin/python"),
                              f"{venv.parent}/other-AbCd")
             self.assertIsNone(runner.lane_grant(f"{venv}/lib/site.py"))   # the user's own: out
-        self.assertEqual(runner.lane_grant(f"{home}/.cache/ms-playwright/x"), f"{home}/.cache")
+        # and without it the next directory down too: ~/.cache holds OpenCode's package cache,
+        # which a grant of it would be split around again (#1311's review, 2026-11-25)
+        self.assertEqual(runner.lane_grant(f"{home}/.cache/ms-playwright/x"), f"{home}/.cache/ms-playwright")
 
     def test_the_agents_poetry_and_pipenv_make_their_venvs_in_its_worktree(self):
         # #825: their own homes are split around an active venv, where no new venv can be made,
@@ -14895,6 +14940,72 @@ class Lane(Base):
                 self.assertIn(str(c / n), w)
 
     @home_outside_the_lane
+    def test_opencodes_package_cache_is_out_of_the_lane_on_both_kernels_made_or_not(self):
+        # #1311's review (2026-11-25): `opencode plugin add` installs the OpenCode plugin from
+        # Git into ~/.cache/opencode/npm, which the lane granted with ~/.cache whole, so an agent
+        # could rewrite its server.ts and the user's OpenCode imported it at its next start,
+        # outside the lane. Out wherever XDG_CACHE_HOME moves it too, and made first, so no
+        # generation can be planted before the install; OpenCode's own bin/ and the common
+        # tools' caches are made first beside it, since the split refuses a new entry
+        home = self.fake_home()
+        (home / ".cache" / "go-build").mkdir(parents=True)
+        moved = home / "xdg-cache"
+        moved.mkdir()
+        os.environ["XDG_CACHE_HOME"] = str(moved)
+        task = self.bare_task("t-1311-npm", self.repo)
+        npms = [home / ".cache/opencode/npm", moved / "opencode/npm"]
+        with mock.patch.object(lane, "kind", lambda: "landlock"):
+            w = context.writable(task)
+        for npm in npms:
+            self.assertTrue(npm.is_dir(), npm)                            # made first
+            self.assertFalse([q for q in w if q == str(npm) or str(npm).startswith(q + "/")], npm)
+            self.assertIsNotNone(context.kept_out(str(npm / "git-x")), npm)  # no grant reaches it
+            self.assertIsNone(runner.lane_grant(str(npm / "git-x" / "1" / "server.ts")), npm)
+            self.assertIn(str(npm), context.read_only(task, w))           # read, never edited
+        self.assertNotIn(str(home / ".cache"), w)                         # split around it
+        for p in (".cache/go-build", ".cache/uv", "xdg-cache/opencode/bin", "xdg-cache/uv"):
+            self.assertIn(str(home / p), w, p)                            # kept, or made first
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            w = context.writable(task)
+            text, params = lane.profile(w, context.read_rules(task), [], context.write_denied(w))
+        self.assertIn(str(home / ".cache"), w)                            # whole, denied by path
+        for npm in npms:
+            self.assertFalse(self.seatbelt_writes(text, params, npm / "git-x" / "server.ts"), npm)
+        self.assertTrue(self.seatbelt_writes(text, params, home / ".cache" / "new-tool" / "x"))
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock: the kernel refuses the writes")
+    @home_outside_the_lane
+    def test_with_landlock_an_agent_cant_write_opencodes_package_cache(self):
+        # #1311's review (2026-11-25): the refusal itself, in this machine's own lane
+        home = self.fake_home()
+        (home / ".cache" / "go-build").mkdir(parents=True)
+        task = self.bare_task("t-1311-write", self.repo)
+        task.worktree.mkdir()
+        context.writable(task)                     # makes npm/ first, as every round's lane does
+        plugin = home / ".cache/opencode/npm/git-x/1/node_modules/opencode-workbench"
+        plugin.mkdir(parents=True)                 # the user's own install, before the round
+        (plugin / "server.ts").write_text("export default {id: 'workbench'}\n")
+        script = textwrap.dedent("""\
+            import os, sys
+            for p in sys.argv[1:]:
+                try:
+                    os.makedirs(os.path.dirname(p), exist_ok=True)
+                    with open(p, "a") as f:
+                        f.write("planted")
+                    print("wrote")
+                except OSError:
+                    print("refused")
+            """)
+        cache = home / ".cache"
+        out = subprocess.run(context.lane_wrap(task)([
+            sys.executable, "-c", script, str(plugin / "server.ts"), str(cache / "opencode/npm/git-y/9/x"),
+            str(cache / "go-build" / "x"), str(cache / "opencode/bin/x")]),
+            cwd=task.worktree, capture_output=True, text=True, timeout=60)
+        self.assertEqual(out.stdout.split(), ["refused", "refused", "wrote", "wrote"], out.stderr)
+        self.assertEqual((plugin / "server.ts").read_text(), "export default {id: 'workbench'}\n")
+        self.assertFalse((cache / "opencode/npm/git-y").exists())
+
+    @home_outside_the_lane
     def test_with_seatbelt_a_linked_cargo_config_is_denied_by_its_own_name(self):
         # #1194's fifth review (2026-11-24): ~/.cargo/config.toml linked into ~/dotfiles (stow;
         # home-manager links it into /nix/store) was denied only at its target, outside the lane
@@ -14939,8 +15050,11 @@ class Lane(Base):
         self.assertIn(os.path.realpath(caches), map(os.path.realpath, w))   # whole
         self.assertFalse(bytecode.exists())                                # nothing made for it
         self.assertEqual(sorted(p.name for p in caches.iterdir()), ["com.example.app"])
-        self.assertEqual(denied, [os.path.realpath(bytecode)])
-        self.assertEqual(argv[argv.index("--deny-write") + 1], os.path.realpath(bytecode))
+        # beside OpenCode's package cache, denied in the whole ~/.cache the same way (#1311)
+        self.assertEqual(denied, sorted([os.path.realpath(home / ".cache/opencode/npm"),
+                                         os.path.realpath(bytecode)]))
+        self.assertIn(os.path.realpath(bytecode),
+                      [argv[i + 1] for i, a in enumerate(argv) if a == "--deny-write"])
         for f in (bytecode, bytecode / "lib" / "os.cpython-39.pyc"):
             self.assertFalse(self.seatbelt_writes(text, params, f), f)
         for n in ("com.example.app", "golangci-lint", "pipenv", "prisma-nodejs", "black",
@@ -23950,7 +24064,8 @@ class Setup(Base):
         conf = Path(os.environ["WB_OPENCODE_CONFIG"])
         out = self.setup(cmd="doctor")[1]
         self.assertIn(f"--  the OpenCode plugin (Workbench inside OpenCode) isn't installed (optional): "
-                      f"{ocplugin.ADD}, or wb setup --opencode from a clone", out)
+                      f"wb setup --opencode from this clone; or {ocplugin.ADD}, which brings the plugin "
+                      "but not wb (it runs the one a clone's wb setup --opencode names)", out)
         self.assertIn(f"BAD /workbench isn't in {home / '.claude/skills'}: wb setup links it", out)
         self.setup("--opencode")
         code, out = self.setup(cmd="doctor")
@@ -23966,12 +24081,24 @@ class Setup(Base):
         self.assertIn(f"ok  the OpenCode plugin {ocplugin.GIT_SPEC} (OpenCode's own install, from Git, "
                       f"in {conf}) runs wb by name from OpenCode's PATH", out)
         self.assertIn(f'--  "{ocplugin.PLUGIN_OFF}" in {conf} turns the OpenCode plugin off', out)
+        # #1311's review (2026-11-25): the Git install brings the plugin alone, never wb; with
+        # none on PATH it can only say so, and doctor says where wb comes from
+        real_which = shutil.which
+        with mock.patch.object(shutil, "which", lambda n, *a, **k: None if n == "wb" else real_which(n, *a, **k)):
+            code, out = self.setup(cmd="doctor")
+        self.assertIn(f"BAD the OpenCode plugin {ocplugin.GIT_SPEC} (OpenCode's own install, from Git, "
+                      f"in {conf}) runs wb by name, and there is none: the install brings only the "
+                      f"plugin; git clone https://github.com/a-schaefers/workbench, then run bin/wb "
+                      "setup --opencode in it", out)
+        self.assertEqual(code, 1)
+        self.assertIn(f"export const CLONE = '{ocplugin.CLONE}'",           # the toast's, word for word
+                      (ocplugin.DIR / "tui.ts").read_text())
         cfg["plugins"] = [{"package": ocplugin.GIT_SPEC, "options": {"wb": "/gone/bin/wb"}}]
         conf.write_text(json.dumps(cfg))
         code, out = self.setup(cmd="doctor")
         self.assertIn("BAD the OpenCode plugin github:a-schaefers/workbench#main::path:opencode-plugin "
                       f"(OpenCode's own install, from Git, in {conf}) runs /gone/bin/wb: "
-                      "it isn't there; wb setup --opencode from your clone", out)
+                      "it isn't there; wb setup --opencode from your Workbench clone", out)
         self.assertEqual(code, 1)
         # Claude Code's side unchanged beside it: the mod listed, the skill's line as always
         (home / ".claude/plugins").mkdir(parents=True)

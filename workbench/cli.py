@@ -8862,7 +8862,7 @@ def parser() -> argparse.ArgumentParser:
                                      "from this copy")
     s.add_argument("--opencode", action="store_true", help="for OpenCode alone: link wb and add this "
                    "copy's OpenCode plugin to OpenCode's config, with this wb in its options "
-                   f"(OpenCode's own install: {ocplugin.ADD})")
+                   f"({ocplugin.ADD} brings the plugin but not wb: run this after it too)")
     # a link that points elsewhere is replaced by default (#1322); kept for old callers
     s.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
     s.set_defaults(f=cmd_setup)

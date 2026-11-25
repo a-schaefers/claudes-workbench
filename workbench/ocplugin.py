@@ -4,8 +4,10 @@ OpenCode installs it itself, the owner's choice (#1357, 2026-11-25: "installs th
 own plugin mechanism, staying close to OpenCode"): `opencode plugin add` with GIT_SPEC, a Git
 package with npm's `::path:` subdirectory selector, which OpenCode 2.4.1 accepts and follows on its
 branch (its docs, plugins.mdx *Manage*; cli/src/commands/handlers/plugin/add.ts writes the
-`plugins` entry). `wb setup --opencode` is the fallback, for a clone: the entry points at this
-copy's opencode-plugin/, written through models.own_config, and either way it carries `options`
+`plugins` entry). That brings the plugin alone, never wb, so a clone's `wb setup --opencode` is
+needed either way (CLONE; #1311's review): alone it is a whole install, and after `opencode plugin
+add` it gives that entry its options. Alone, its entry points at this copy's opencode-plugin/,
+written through models.own_config, and either way it carries `options`
 with this copy's bin/wb and the WB_* paths set where setup ran, since OpenCode's background service
 starts without the user's shell (#1296's host-shape decision).
 
@@ -31,6 +33,10 @@ PACKAGE = "opencode-workbench"    # opencode-plugin/package.json's name: how a c
 REPO = "a-schaefers/workbench"
 GIT_SPEC = f"github:{REPO}#main::path:opencode-plugin"
 ADD = f"opencode plugin add '{GIT_SPEC}'"
+# The Git install brings opencode-plugin/ alone (package.json's `files`), never bin/wb, so the
+# plugin needs wb from a clone either way (#1311's review, 2026-11-25): every line naming ADD says
+# so, and the TUI's toast too (tui.ts's CLONE, word for word)
+CLONE = f"git clone https://github.com/{REPO}, then run bin/wb setup --opencode in it"
 GIT_SCHEMES = ("github:", "gitlab:", "bitbucket:", "git+", "git:", "git@")  # npm's Git specs
 
 
@@ -165,7 +171,8 @@ def doctor_lines() -> list[tuple[bool | None, str]]:
     on = [f for f in found if f["kind"] != "off"]
     if not on:
         return [(None, f"the OpenCode plugin (Workbench inside OpenCode) isn't installed (optional): "
-                       f"{ADD}, or wb setup --opencode from a clone")]
+                       f"wb setup --opencode from this clone; or {ADD}, which brings the plugin "
+                       f"but not wb (it runs the one a clone's wb setup --opencode names)")]
     out: list[tuple[bool | None, str]] = []
     which = shutil.which("wb")
     for f in on:
@@ -177,17 +184,20 @@ def doctor_lines() -> list[tuple[bool | None, str]]:
                else f"another copy's: {d}"}[f["kind"]]
         if d is not None and not is_copy(d):
             out.append((False, f"the OpenCode plugin in {f['where']} names {d}, which holds no copy of "
-                               f"it: wb setup --opencode from your clone"))
+                               f"it: wb setup --opencode from your Workbench clone"))
             continue
         wb = opts.get("wb") if isinstance(opts.get("wb"), str) else None
         if wb:
             good = os.path.isabs(wb) and os.path.isfile(wb) and os.access(wb, os.X_OK)
             out.append((good, f"the OpenCode plugin {f['spec']} ({how}, in {f['where']}) runs {wb}"
-                              + ("" if good else ": it isn't there; wb setup --opencode from your clone")))
+                              + ("" if good else ": it isn't there; wb setup --opencode from your Workbench clone")))
+        elif not which:  # a Git or npm install brings no wb: it needs a clone's (#1311's review)
+            out.append((False, f"the OpenCode plugin {f['spec']} ({how}, in {f['where']}) runs wb by "
+                               f"name, and there is none: the install brings only the plugin; {CLONE}"))
         else:
             out.append((True, f"the OpenCode plugin {f['spec']} ({how}, in {f['where']}) runs wb by "
-                              f"name from OpenCode's PATH ({which or 'none on this shell'}'s here; the "
-                              f"background service's may differ: wb setup --opencode names it)"))
+                              f"name from OpenCode's PATH ({which}'s here; the background "
+                              f"service's may differ: wb setup --opencode names it)"))
     for f in found:
         if f["kind"] == "off":
             out.append((None, f'"{PLUGIN_OFF}" in {f["where"]} turns the OpenCode plugin off'))

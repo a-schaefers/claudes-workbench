@@ -7,8 +7,18 @@ import { findWb, optionEnv, wbEnv, wbHome } from '../wb.ts'
 // The plugin's skeleton (#1311, 2026-11-25), under OpenCode's own Bun:
 // `BUN_BE_BUN=1 opencode test opencode-plugin/test`.
 
-// A context whose every use throws: setup under WB_TASK must touch none of it
-const untouchable = new Proxy({}, { get: (_, key) => { throw new Error(`setup used ctx.${String(key)}`) } })
+// A context that records every use (and throws at it): setup under WB_TASK must touch none of it.
+// The record is what the test asserts on, not the throw: tui.ts catches its RPC's failure, so a
+// throw alone let its WB_TASK guard be deleted with the test still passing (#1311's review,
+// 2026-11-25)
+function untouchable() {
+  const used: string[] = []
+  const ctx = new Proxy({}, {
+    get: (_, key) => { used.push(String(key)); throw new Error(`setup used ctx.${String(key)}`) },
+    has: (_, key) => { used.push(`in ${String(key)}`); return false },
+  })
+  return { ctx, used }
+}
 
 test('the server and TUI parts are plugins by OpenCode\'s own check: an id and a setup', () => {
   for (const part of [server, tui]) {
@@ -22,9 +32,11 @@ test('the server and TUI parts are plugins by OpenCode\'s own check: an id and a
 test('under WB_TASK neither part does anything at all (#1363)', async () => {
   const was = process.env.WB_TASK
   process.env.WB_TASK = 't-agent'
+  const { ctx, used } = untouchable()
   try {
-    expect(await server.setup(untouchable as never)).toBeUndefined()
-    expect(await tui.setup(untouchable as never)).toBeUndefined()
+    expect(await server.setup(ctx as never)).toBeUndefined()
+    expect(await tui.setup(ctx as never)).toBeUndefined()
+    expect(used).toEqual([])
   } finally {
     if (was === undefined) delete process.env.WB_TASK
     else process.env.WB_TASK = was

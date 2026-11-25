@@ -1412,15 +1412,28 @@ NOT_WRITABLE = (".cargo/bin", ".cargo/env", ".dotnet/tools", ".cabal/bin", ".ghc
                 # one planted in the writable Library/Caches ran as the user, outside the lane,
                 # at the next node-gyp, Xcode build script or shell's python3. Seatbelt denies
                 # its writes inside the whole Library/Caches (write_denied), made or not
-                "Library/Caches/com.apple.python")
+                "Library/Caches/com.apple.python",
+                # #1311's review (2026-11-25): OpenCode's package cache, where `opencode plugin
+                # add` installs the OpenCode plugin from Git (packages/util/src/npm.ts: global.cache
+                # /npm/<key>/<generation>/node_modules), and every npm plugin and provider package
+                # beside it. The user's OpenCode, outside the lane, imports what is there at its
+                # next start with no integrity check (npm.resolve; npm.add trusts an active
+                # generation), and the plugin holds the consent gates and runs wb as the user.
+                # Made first (MADE_FIRST), so a generation can't be planted before the install
+                ".cache/opencode/npm")
 # and the same places in the homes TOOL_HOME_VARS moved: nimble and cabal install programs into
-# their bin/ (#911)
+# their bin/ (#911); OpenCode's package cache where XDG_CACHE_HOME moves it (#1311's review)
 VAR_NOT_WRITABLE = {"CARGO_HOME": ("bin", "env", "config.toml", "config"),
-                    "RUSTUP_HOME": ("toolchains",), "NIMBLE_DIR": ("bin",), "CABAL_DIR": ("bin",)}
+                    "RUSTUP_HOME": ("toolchains",), "NIMBLE_DIR": ("bin",), "CABAL_DIR": ("bin",),
+                    "XDG_CACHE_HOME": ("opencode/npm",)}
 # a home holding one is made with it first, so the split keeps it out before the tool makes it
 # (else the agent could make it and plant a program there)
 MADE_FIRST = {".rustup": "toolchains", ".nimble": "bin", "RUSTUP_HOME": "toolchains",
-              "NIMBLE_DIR": "bin"}
+              "NIMBLE_DIR": "bin", ".cache": "opencode/npm", "XDG_CACHE_HOME": "opencode/npm"}
+# and what the agent's own OpenCode makes in its cache directory beside npm/ (ripgrep, downloaded
+# into bin/ when none is on PATH: core/src/ripgrep/binary.ts), made first: the cache directory is
+# split around npm/ and refuses a new entry (#1311's review)
+OPENCODE_CACHE_MADE = ("bin/",)
 # and what cargo makes at the top of its split home, made first so the split grants it: a split
 # home refuses a new entry (the 0.90 review: a fresh rustup's ~/.cargo, only bin/ and env, failed
 # every build with a dependency, and a git dependency failed wherever git/ didn't exist yet)
@@ -1822,15 +1835,6 @@ def writable(task: store.Task) -> list[str] | None:
         if os.path.isdir(c):  # split around bin/ whenever it exists (MADE_FIRST, below)
             _make_first(c, NIMBLE_MADE)
     hidden = _hidden() | {h for h in api_hidden(task) if os.path.lexists(h)}  # #1021
-    for d, names in SPLIT_MADE.items():  # only a home a secret splits: else it is granted whole
-        c = os.path.realpath(home / d)
-        if os.path.isdir(c) and any(_under(h, c) for h in hidden):
-            _make_first(c, names)
-    for v, sub, d in SPLIT_MADE_VARS:  # GRADLE_USER_HOME's, HEX_HOME's (#1021's review)
-        c = os.environ.get(v) or ""
-        c = os.path.realpath(os.path.join(c, sub)) if os.path.isabs(c) else ""
-        if c and os.path.isdir(c) and any(_under(h, c) for h in hidden):
-            _make_first(c, SPLIT_MADE[d])
     for k, n in MADE_FIRST.items():  # ~/.rustup's toolchains/, ~/.nimble's bin/ (#911)
         r = os.environ.get(k) if k.isupper() else str(home / k)
         if r and os.path.isabs(r) and os.path.isdir(r):  # made, so it is split out: else the
@@ -1838,6 +1842,20 @@ def writable(task: store.Task) -> list[str] | None:
                 os.makedirs(os.path.join(r, n), exist_ok=True)
             except OSError:
                 pass
+    if made[0].is_dir():  # OpenCode's cache, split around npm/ (MADE_FIRST): its own first
+        _make_first(str(made[0]), OPENCODE_CACHE_MADE)
+    # with Landlock a NOT_WRITABLE place splits its home like a secret (~/.cache around
+    # OpenCode's npm/, #1311's review): what the common tools make at its top is made first too
+    split_by = hidden | (set() if lane.kind() == "seatbelt" else not_writable())
+    for d, names in SPLIT_MADE.items():  # only a home something splits: else it is granted whole
+        c = os.path.realpath(home / d)
+        if os.path.isdir(c) and any(_under(h, c) for h in split_by):
+            _make_first(c, names)
+    for v, sub, d in SPLIT_MADE_VARS:  # GRADLE_USER_HOME's, HEX_HOME's (#1021's review)
+        c = os.environ.get(v) or ""
+        c = os.path.realpath(os.path.join(c, sub)) if os.path.isabs(c) else ""
+        if c and os.path.isdir(c) and any(_under(h, c) for h in split_by):
+            _make_first(c, SPLIT_MADE[d])
     # the user's active Python environments too: a venv in a tool home (poetry's, pipenv's,
     # WORKON_HOME) was the agent's to install into (#490)
     envs = set(python_envs())
