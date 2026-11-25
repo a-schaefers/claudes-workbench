@@ -8829,6 +8829,8 @@ start (task.json put back) leave the provider's stop. Each guard was deleted in 
 on port 0 (only `chat.tailscale` and Hardware's probes are mocked); a regression test cites the incident and date; task
 names `t-<slug>`; OpenCode-dependent tests through `run_calls`; kernel ones `@unittest.skipUnless(lane.abi(), …)`
 (Seatbelt's `lane.kind() == "seatbelt"`); a test meaning "no lane" mocks `lane.kind` to None, never `lane.abi` to 0 (a Mac has Seatbelt);
+a test of `writable()`'s split around NOT_WRITABLE's places pins `lane.kind` to `landlock` and checks Seatbelt's
+way too, the home whole and `write_denied` (`Lane.writable_as`, `seatbelt_keeps_out`: the 2.1 macOS nightly);
 reuse helpers by import or assignment, never by subclassing a class with tests; new classes above `__main__`.
 
 **Not hermetic.** The real HOME (the lane tests' `~/.wb-sec-test-*`, `~/.wb-lane-test-*`,
