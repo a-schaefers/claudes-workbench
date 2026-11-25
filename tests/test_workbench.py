@@ -21334,6 +21334,19 @@ class Stats(Base):
         self.assertIn("strata/strata", out)
         self.assertNotIn("more model", out)
 
+    def test_a_history_on_models_no_longer_configured_is_never_called_no_finished_tasks(self):
+        # #1400 (2026-11-25): with every model that ran gone from OpenCode's config, wb stats said
+        # "5 task(s), 5 landed" and then "no finished tasks yet"
+        now = time.time()
+        for _ in range(5):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": "gone/model", "size": "trivial", "outcome": "accepted", "ran": True, "ts": now})
+        out = run_wb("stats")
+        self.assertIn("5 task(s), 5 landed", out)
+        self.assertNotIn("no finished tasks yet", out)
+        self.assertIn("gone/model", out)
+        self.assertNotIn("more model", out)
+
     def test_thirty_recent_models_give_three_lines_and_the_rest_counted_as_more(self):
         # the owner, 2026-11-21: a machine with a ton of models drew a line each, and the Stats
         # tab's menu sat a long scroll below a new user's first look

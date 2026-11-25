@@ -4899,8 +4899,10 @@ def cmd_stats(a):
         return
     f = stats.feed(only=(*stats.SUMMARY, "model_lines"))  # the headline: none of the rest (#565)
     head, shown = stats.summary(f), f.get("model_lines") or {}
-    # the models OpenCode has now, as the Stats tab shows them; --all every one that ran (#638)
-    only = None if a.all or not shown else {v for x in shown.get("lines", []) for v in x["variants"]}
+    # the models OpenCode has now, as the Stats tab shows them; --all every one that ran (#638).
+    # None of them now (every one renamed, idle 90 days, a config it can't read): every one, or
+    # the table said "no finished tasks yet" under a headline of N tasks (#1400, 2026-11-25)
+    only = None if a.all or not shown.get("lines") else {v for x in shown["lines"] for v in x["variants"]}
     # the newest stats.STATS_MODEL_LINES of them, the rest counted on one line (2026-11-21)
     more, old = (shown.get("more"), shown.get("older")) if only is not None else (None, None)
     rest = (more or {}).get("models", 0) + (old or {}).get("models", 0)
