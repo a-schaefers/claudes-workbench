@@ -248,6 +248,26 @@ async function run(engine, device) {
     await ctx.unroute('**/api/**')
     await until(async () => (await page.textContent('#presence-text')).includes('listening'), 40000)
   })
+  await check('an update that changes no row re-adds none of their lines, and a new reply is said once, whole, outside the thread (#1408)', async () => {
+    // #1408 (2026-11-25): the thread was the live region, and each update re-added every row's
+    // time and `copy`, and a reply's reveal each growing fragment, for a screen reader to read out
+    await page.evaluate(() => {
+      window._metas = []
+      new MutationObserver(ms => { for (const m of ms) for (const n of m.addedNodes) if (n.nodeType === 1 && n.closest('.meta')) window._metas.push(n.textContent) })
+        .observe(document.getElementById('thread'), { childList: true, subtree: true })
+    })
+    if (await page.evaluate(() => !!document.getElementById('thread').closest('[aria-live]'))) throw new Error('the thread is in a live region')
+    listen(true)                                           // the presence alone changes
+    await until(async () => (await page.textContent('#presence-text')).includes('working in'))
+    listen(false)
+    await until(async () => (await page.textContent('#presence-text')).includes('listening in'))
+    const metas = await page.evaluate(() => window._metas)
+    if (metas.length) throw new Error('lines made again: ' + JSON.stringify(metas))
+    wb('chat', 'reply', '--text', 'Said once.\n\n- **whole** at the end')
+    await until(async () => (await page.locator('.row.claude .bubble strong').last().textContent()) === 'whole')
+    const said = await page.evaluate(() => [...document.querySelectorAll('#say p')].map(p => p.textContent).filter(t => t.includes('Said')))
+    if (JSON.stringify(said) !== JSON.stringify(['Said once.\n\n- whole at the end'])) throw new Error(JSON.stringify(said))
+  })
   // the shell's views (#1284): a tap on the nav (the rail on a desktop), then the body shows it
   const goTo = async name => {
     await page.click(`#tabbar .tab[data-view="${name}"]`)

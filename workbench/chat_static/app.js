@@ -166,6 +166,15 @@
     })
   }
 
+  // What a screen reader hears of the thread: each new message from Claude once, whole. The
+  // thread was the live region, and every update read out each row's time and `copy` again, and
+  // a reply in its reveal's growing fragments (#1408, 2026-11-25)
+  function say(text) {
+    const log = $('say')
+    log.append(Object.assign(document.createElement('p'), { textContent: text.replace(/\*\*|`/g, '') }))
+    while (log.childElementCount > 20) log.firstElementChild.remove()
+  }
+
   // ---- the paced reveal ----
   let flowTimer = 0
   function flowTick() {
@@ -187,6 +196,7 @@
     flows.delete(id)
     f.el.classList.remove('flowing')
     rich(f.el, f.text)
+    say(f.text)
     seen.add(id); save(K.seen, [...seen].slice(-500))
   }
   const finishAll = () => { for (const id of [...flows.keys()]) finishFlow(id); toEnd() }
@@ -354,7 +364,10 @@
       }
       if (w.m) {
         el.className = `row ${w.m.role === 'agent' ? 'agent' : w.m.from}${w.m.from === 'claude' && !forUser(w.m) ? ' to-agent' : ''}${w.same ? ' same' : ''}${w.m.local ? ' pending' : ''}${w.m.error ? ' failed' : ''}`
-        el.querySelector('.meta').replaceWith(metaFor(w.m))
+        // a row's line made anew only when it says something new: one made on every update was
+        // read out again and took the focus from its buttons (#1408, #1409)
+        const meta = metaFor(w.m), was = el.querySelector('.meta'), key = meta.textContent + '\n' + (w.m.text || '')
+        if (was.dataset.said !== key) { meta.dataset.said = key; was.replaceWith(meta) }
       }
       if (anchor.nextSibling !== el) anchor.after(el)
       anchor = el
@@ -446,6 +459,7 @@
     const b = document.createElement('div'); b.className = 'bubble'
     b.append(span('notice-text', m.text))
     if (m.what) { const c = document.createElement('code'); c.className = 'notice-what'; c.textContent = m.what; b.append(c) }
+    if (!seen.has(m.id) && !firstVisit) say(m.text + (m.what ? ' ' + m.what : ''))
     if (document.hidden && !seen.has(m.id) && !firstVisit) { unread++; document.title = `(${unread}) Workbench` }
     seen.add(m.id); save(K.seen, [...seen].slice(-500))
     row.append(b, document.createElement('div'))
@@ -462,7 +476,9 @@
     if (m.from === 'user' || m.role === 'agent') b.textContent = m.text
     else if (seen.has(m.id) || firstVisit || document.hidden || reduced.matches) {
       if (!seen.has(m.id) && !firstVisit && document.hidden && forUser(m)) { unread++; document.title = `(${unread}) Workbench` }
-      rich(b, m.text); seen.add(m.id); save(K.seen, [...seen].slice(-500))
+      rich(b, m.text)
+      if (!seen.has(m.id) && !firstVisit) say(m.text)
+      seen.add(m.id); save(K.seen, [...seen].slice(-500))
     } else {
       b.classList.add('flowing'); flows.set(m.id, { text: m.text, shown: 0, el: b })
       if (!flowTimer) flowTimer = setInterval(flowTick, FLOW_MS)
@@ -486,6 +502,7 @@
       const dots = document.createElement('span'); dots.className = 'dots'; dots.append(document.createElement('i'), document.createElement('i'), document.createElement('i'))
       working.append(dots, span('', ''))
       workTimer = setInterval(() => { if (working) working.lastChild.textContent = 'Claude is on it · ' + since(Number(working.dataset.from)) }, 1000)
+      say('Claude is on it')  // once, not its count each second (#1408)
     }
     working.dataset.from = last.received.ts
     working.lastChild.textContent = 'Claude is on it · ' + since(last.received.ts)

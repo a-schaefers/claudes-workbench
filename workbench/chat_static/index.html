@@ -33,7 +33,7 @@
     <p id="hint-text"></p>
     <button id="hint-x" type="button" aria-label="Dismiss this hint">✕</button>
   </div>
-  <main id="scroll" aria-live="polite" aria-relevant="additions">
+  <main id="scroll">
     <div class="thread" id="thread">
       <div class="intro" id="intro">
         <div class="intro-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><use href="/icon.svg#spark"/></svg></div>
@@ -112,6 +112,7 @@
   </div>
 </section>
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<div class="sr-only" id="say" role="log" aria-live="polite"></div>
 <nav id="tabbar" aria-label="Primary">
   <button type="button" class="tab" data-view="chat"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 11.5a8 8 0 0 1-11.7 7.1L4 20l1.4-4.6a8 8 0 1 1 15.1-3.9z"/></svg><span class="tab-lbl">Chat</span><span class="tab-badge" aria-hidden="true" hidden></span></button>
   <button type="button" class="tab" data-view="stats"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16M7 16.5V11M12 16.5V5.5M17 16.5V8.5"/></svg><span class="tab-lbl">Stats</span></button>
