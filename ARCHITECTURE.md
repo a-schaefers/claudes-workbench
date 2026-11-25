@@ -5893,7 +5893,8 @@ address (#534).
   `UNACKED_MS` 45 s. One `Hub` thread watches `chat/` and a pidfd on the listener and wakes every
   stream; without inotify it wakes them only for a change, the listener's pid failing `kill 0`, or
   `IDLE_BUMP_S` 60 s (#841). A `_watch` failure restarts a second later. It keeps its `chat/`
-  (`Hub.dir`) and stops at `close()` (#134).
+  (`Hub.dir`) and stops at `close()` (#134), which ends every stream before another snapshot: one
+  woken by a test's close made it in the next test's `WB_HOME` (nightly run 45577067512).
 - `POST /api/send`: JSON (415), ≤ 32 KB (413), `{text: ≤ 8000 (empty with files), cid?: ≤ 64,
   about?: {task, n} | {audio, n}, files?: ≤ 10 ids}` (400 "no such screenshots", "no such take",
   "no upload <id>: …"; over `upload_message_mb` 413; an agent past its rate 429) → `{message, listener, state}`
@@ -7230,7 +7231,9 @@ CLAUDE.md under 25,000 characters); `fake_opencode.py`, `capture_llm.py`, `e2e_c
 `HTTPServer`/`ThreadingHTTPServer` (`_Listens`, 0.02 s tick) listen at once: http.server's looked the name up first, 35 s
 on macOS runners (#950), and the fake's `serve --stdio` server too, whose lookup outlasted `model_list`'s 30 s and
 failed every catalog read on macOS (nightly run 45454423406); not patched suite-wide, so `WebChat` still catches
-chat.py doing it.
+chat.py doing it. `WebChat`'s tearDown closes its hub and waits up to 5 s for the hub's open streams to end, then fails
+by name ("a stream outlived its test's closed hub"): one left ran its snapshot in the next test's `WB_HOME`, or between
+tests in the user's own `~/.config/workbench` (nightly run 45577067512).
 
 **The fixture** (`Base`): `WB_HOME=<tmp>/state`, `WB_OPENCODE_BIN` (the fake, `shlex`-split), `WB_FAKE_MODELS=1`,
 `WB_OPENCODE_CONFIG` (`ollama` on 127.0.0.1:11434 with `mimo-v2.6:9b-q8_0`, 32K, and `qwen3.8-27b` with no
