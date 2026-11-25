@@ -383,7 +383,7 @@ Its own `then wb feedback`, once you've given the tool or the grant, counts no r
 Once the tests pass, the agent checks its own change against your review checks in one more
 round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it);
 one that only reads on, or goes quiet, on the tree its tests passed on is stopped as its finish,
-not stuck and no nudge check-in (`self-review: … stopped as its finish`).
+not stuck.
 On API it's off unless you pass `--self-review` (each round you don't see is paid).
 It returns at once; a detached runner does the work. **Don't poll.** With the workbench mod loaded
 the session is woken by a `[workbench]` prompt when the task needs you (review, question, stuck,
@@ -509,7 +509,7 @@ coding choice is the user's (`wb coding`), never changed by a check.
   the branch, and the report says how to accept them instead. A failed round's edits so far stay in the worktree (`wb resume` carries on). A setup or load failure before the agent ran: fix it, then `wb resume <name>`; one later ("round N never reached the agent"): fix it, then `wb feedback <name> --text "carry on"`, which sends round N's prompt first.
   A wake saying `(not its agent's doing)` (a model gone from OpenCode's catalog, a moved repo, a full disk…): do what the notice names; `wb feedback` only when it names it.
   A `rate_limited`, `outage`, `quota`, `auth` or `refused` stop is the API provider's, not the
-  agent's (the report says "the provider's stop"): tell the user so, and its remedy (wait, top
+  agent's (the STOPPED line says what the provider did): tell the user so, and its remedy (wait, top
   up, or /connect the key again), then `wb feedback <name> --text "carry on"` once it allows (no review round counted);
   the tasks queued behind a `quota` stop wait as queued, with no stop of their own, and go on once credit is back (resumed, the stopped task asks the provider at once, and its 2xx lets them go); behind a `rate_limited` or `outage` one too, one of them asking again now and then, and going on at the provider's first 2xx: one stop to tell the user, not one per task. A
   `refused` one (the provider turned the request down: a moderation flag, a schema, a model gone)

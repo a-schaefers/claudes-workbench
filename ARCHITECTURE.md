@@ -1200,8 +1200,9 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   headers with the first token, so a slow prompt read never hit the no-first-output stop). Now it
   neither counts nor resets, and takes back what its `step_start` (sent just before a retry)
   moved; `normalize` keeps it (`retry {text,
-  attempt}`), and the report says `OpenCode resent N request(s) to the model's server: <error>[; it
-  cut the request at the provider's timeout]`. The layer lifts both waits.
+  attempt}`), and the report of a round that died with no `STOPPED` line says `OpenCode resent N
+  request(s) to the model's server: <error>[; it cut the request at the provider's timeout]`
+  (#1322: elsewhere it never changed what Claude did). The layer lifts both waits.
 - **An API provider's wait** (#1020) is the third pause, beside Claude's answer and a freeze:
   `_Clock.step(t, asking, waiting)` pauses the round's time, silence and the think budget alike
   while `_ProviderWait.waiting` holds (an API task only, `api_task`: task.json `via`, else
@@ -1259,8 +1260,8 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   `provider` (a bench replay scores `error`), and `provider_remedy` under the STOPPED line (`wb
   feedback <task> --text "carry on"` once the provider allows, a round that counts no review, #1153, and `routes.off_api`'s command, `wb route <role> gpu (the user's
   yes)` or under Agents API `wb route all gpu`, when the task has a role and its next tasks aren't off API already, #1218; top up or wait for the plan's reset; /connect for a refused
-  key; for `setup`, "this machine's stop, not the agent's or <provider>'s: mend what the line
-  above says", #1080; for `refused`, `wb feedback` once what the provider said is fixed, and on a
+  key, each the remedy alone (#1322 dropped "the provider's stop, not the agent's:"); for `setup`,
+  "this machine's stop, not the agent's or <provider>'s: mend what the line above says", #1080; for `refused`, `wb feedback` once what the provider said is fixed, and on a
   404 `wb takeover` or `wb discard` if it no longer serves the model, which wb never switches). Its `stopped` event says `by: "provider"`, so it is never a lesson about the agent (the
   same limit on three tasks of one account read as a recurring one). An `api_stop` whose guard is
   `spend` (#1019's day cap) stops the round the same way but is the user's budget, not the
@@ -1273,8 +1274,8 @@ a pass over `FROZEN_SECS` (60 s) was a freeze and counts as nothing; `ask_mcp.Wa
   minutes); the round limit holds. Once the turn is over (last
   `step_finish` reason `stop`) and `BG_GRACE` (120 s, or less with a shorter silence timeout)
   passes, the round is done (a dev server never ends, #658): OpenCode stopped, `left_bg` recorded
-  (from `jobs[]`; not `died`), a `left_bg {text}` event, then the tests; the report says `the agent
-  left `<job>` running in the background when its turn ended; stopped`.
+  (from `jobs[]`; not `died`), a `left_bg {text}` event, then the tests; the report says nothing
+  of it (#1322).
 - **A finished turn is never a guard's stop** (#1160): once the turn is over (and no question
   is open), the round wall, silence or think guard coming due ends the round as the agent's
   finish, not stuck and no guard counted: with a job in the background as `left_bg` above (the
@@ -1299,7 +1300,8 @@ Claude read the diff.
   `status.session_floor` (its prompt, input and cache, at its first change: never the step's
   output, where a thinking model's long think is counted and never sent back, #1219) sits `HANDOVER_ROOM` (a quarter of the
   window) below the point (seen: twenty handovers with no edit). Otherwise it carries on and a
-  `reading_full` event (`_reading_full`, once a round) becomes the report's `reading:` line, waking
+  `reading_full` event (`_reading_full`, once a round; its `read`, the percent read before the
+  first edit) becomes the context line's `; N% read before its first edit: …` (#1322), waking
   no one. At most `HANDOVER_MAX` a runner, then stuck (2026-11-16 audit: hours of handovers, Claude
   told nothing; a self-review on its green tree settled instead, #1261); no handover wakes Claude (the one before the last did until #1322). Never on the step that
   ends the agent's turn (`step_finish` reason `stop`, `turn_over`): it is done, so the round ends
@@ -1336,8 +1338,8 @@ Claude read the diff.
   `full_compacted`/`full_compact_failed`); the export lists a completed compaction (a message `{type: "compaction", status: "completed", summary}`) → fresh; the
   last message with tokens (`context_state`, all-zero ones skipped, #481) at `fresh_at` or more →
   fresh, unless `no_room` (#781: `session_floor` unset or under `HANDOVER_ROOM` below the point, as
-  mid-round; not on a step's first round): it carries on, and the report says
-  "the next round carries on in this session" (`full_session`). A failed export
+  mid-round; not on a step's first round): it carries on, and the report says no more than its
+  context (#1322 dropped "the next round carries on in this session"). A failed export
   (`transcript.export(sid, strict=True)` None) uses status `live_used`, assumes no compaction, logs
   an `export` event (#262).
 
@@ -1489,7 +1491,7 @@ everywhere). In order:
   every scratch checkout too (#520). A venv it makes goes first on PATH (`context.own_venv`, *Its
   environment*).
 
-Output to `setup.txt`. Done: status `prepared` (never rerun), `setup_secs` (`setup: Ns, once`), and
+Output to `setup.txt`. Done: status `prepared` (never rerun), `setup_secs` (the Stats tab's; no report line since #1322), and
 `prepared.json` `paths` (`_ignored_paths`), `marks`, `bytes` (`runner.prepared_record`, which also
 reads older tasks' status `prepared_paths`/`_marks`/`_bytes`; in status they bloated every write,
 #867). Failed: `failed` before any round, its notice with the exit and tail ("the setup command
@@ -1529,8 +1531,7 @@ once on the base in a scratch checkout (`verify.on_base`, a `--shared` clone,
 `min(BASE_CHECK_SECS (120 s), --test-timeout)`; where its run wrote build or test output joins
 status `ran_wrote` (`verify._run`'s `ran`, `runner._note_ran`; #1211's review: `runner.hand_wrote`). Output to `base-tests.txt`; status `base_check`
 `{ok, exit, tail (8 lines, 1500 characters), limit, secs, cmd}` (`secs` excludes waits, #779).
-`base_check_line`: a note when it passes (Claude checks the diff adds tests that fail without the
-change), a warning plus an immediate `checkin` when `--test-timeout` cut it or the shell didn't find
+`base_check_line`: `passes already (only the step's new tests can fail it)` when it passes, a warning plus an immediate `checkin` when `--test-timeout` cut it or the shell didn't find
 its command (`missing_command`: exit 127, the tail's last line `NOT_FOUND`'s, bash's or zsh's
 `command not found` (`Command` in any case: macOS's make 3.81 says `make: <name>: Command not
 found` for a recipe it execs itself, #1262), dash's `: not found`; not `No such file or directory`, a script the step may
@@ -1565,8 +1566,9 @@ making it checked in falsely, #1209; a name the spec merely gives, `with pytest 
 #1209's review), the spec alone (`step_spec`), before `runner.PROTOCOL_FOLD`, never the
 protocol's acceptance line, which names --test's own `-m` and so made every dotted one the repo's:
 `python3 -m pkg.newcli` for a step adding `pkg/newcli.py`), which the step may make, as a script, #1181; under a task runner or a package manager's run wrapper, `make test`, `pnpm test`, the line before the runner's own, `RUNNER_TAIL` (one entry of `RUNNER_LINES` per runner: GNU make's `make: *** [Makefile:2: test] Error <n>`, exit 2, a sub-make's `Leaving directory`, `-k`'s `Target … not remade`, just's `Recipe … failed … with exit code <n>`; pnpm's `ELIFECYCLE`, `ERR_PNPM_…` with `-r`'s `<dir>:` and `spawn ENOENT`, and `WARN` lines; yarn 1's `error Command failed with exit code <n>.` and `info Visit https://yarnpkg.com/…`; npm's `npm error` lines in a workspace, `npm error code <n>`, npm 6's `npm ERR!`), at the recipe's exit, the first one up, a sub-make's, or for one that names none (pnpm exits 1) 127 when the line before is a shell's not-found line, #1243; and make's own `make: <name>: No such file or directory` for a recipe it runs without a shell, `MAKE_EXEC`, a name not on PATH, #1229; at any other exit, a wrapper's own (`poetry run`'s 1, a sourced venv's 1 in bash or 2 in dash, uv's), `missing_tool`, one rule for every wrapper, never its wording alone (each wrapper's pattern missed the next one: #1256, #1258, #1262): one of the tail's last `GONE_LINES` (3, not blank) lines says it couldn't start a name, `TOOL_GONE` (`command not found` in any case, `failed to spawn`: Poetry's `Command not found: <name>`, bundler's above its hint; never `no such command`, which names a subcommand the step may add: cargo's for `cargo xtask codegen`, an alias the step adds to `.cargo/config.toml`, Click's or Typer's `No such command '<sub>'.`, #1262's review), and the name, where the acceptance command puts a program (`command_programs`: each simple command's first word, past `X=1` and prefixes such as `env` or `timeout 60`, the word after a wrapper's run verb, `RUN_VERBS`, `poetry run`, `uv run`, `bundle exec`, never cargo's subcommand; never an argument, as `python3 cli.py frobnicate` for a step adding Click's `frobnicate` checked in falsely, #1262's review), doesn't resolve on the agent's PATH (`on_agent_path`: `context.python_env`'s, the worktree's venv first, `context.agent_path`'s; Poetry, uv and pipenv search it too) and isn't the step's own console script (`own_command`; the word after a run verb, `command_programs(cmd, run_only=True)`, even with no venv in the worktree yet: `poetry run` reads `[tool.poetry.scripts]` before PATH and `uv run` installs `[project.scripts]` as it syncs, so Poetry's `Command not found: mycli` on the base for a step adding it checked in falsely and skipped auto-fix, #1256's review); or couldn't open a path, `PATH_GONE` (`No such file or directory`, dash's `cannot open`), in `TOOL_DIRS` and not in the worktree, named by the command or under a task runner (`make test` sourcing `.venv/bin/activate`), worded as at 127; a bare name only a runner's recipe names, or plain `not found`, still needs 127, and a file the tests read (`cat answer.txt`, pytest's `file or directory not found`) is never one; and nothing at all, no tool, path or module, after an install or sync step of the command's own (`installs_before`: `INSTALLS`, `npm ci`/`install`, `pnpm install`, `yarn` and `bundle` bare or with `install`, `bun install`, `poetry`'s, `pdm`'s and `pipenv`'s `install`/`sync`, `uv sync`, `rye sync`, `pixi install`, `go mod download`, `cargo fetch`/`build`, pip's (`pip install`, `uv pip install`, `python3 -m pip install`) with the project or a requirements file, `PIP_PROJECT`, `-e`, `-r`, `--group`, `.[dev]`, `uv pip sync`, and a `uv run` that syncs, which it does unless `UV_NO_SYNC_FLAGS` `--no-sync`, `--no-project` come before its program or `UV_NO_SYNC_VARS` `UV_NO_SYNC`, `UV_NO_PROJECT` are set in the command or the environment), in a simple command before the one naming it, or anywhere for a name the command doesn't give (a recipe's), never the step's own program (`npm ci` with no npm, `python3 -m pip install` with no pip): the lane leaves the network open, so the round that declares the dependency is what installs it, and each review of #1256 found one more form read as missing after one (`poetry install && poetry run ruff`, the shell's own 127 line in `npm ci && npm test`, `poetry install && .venv/bin/pytest`, `pip install -e .[dev] && python3 -m pytest`), each checking in falsely and skipping auto-fix, worse than the missed check-in: one rule, #1256's review; the warning ends `GIVE_TOOL`, a
-module's fix the worktree's `.venv`), a note past 120 s
-(#496), not checked when the checkout failed or was `"filtered"`, else exit and tail. A passing base
+module's fix the worktree's `.venv`), `not checked, ran past 120s` past its own cap, `not checked, its
+setup failed (<task>/base-tests.txt)` when the checkout's setup failed (one line each since #1322),
+not checked when the checkout was `"filtered"`, else exit and tail. A passing base
 is a note, not a check-in (that cost a restart in one task of two, 2026-11-17). `--no-base-check`
 (task.json `no_base_check`) skips it.
 
@@ -1574,23 +1576,24 @@ is a note, not a check-in (that cost a restart in one task of two, 2026-11-17). 
 1. `task X · label · round n · M.m min · local tokens IN in / OUT out` (input excludes cache
    reads; an API task's says `agent tokens`: an API model's tokens are neither local nor free,
    #1022), for an API task then
-   `· ≈$0.12 so far (catalog prices)` (`results.spend_so_far`: the runner's meter, else the step
-   events' `cost`; `$0.12 so far (your prices)` at the user's own, #1135) or
+   `· ≈$0.12 so far` (`results.spend_so_far`: the runner's meter, else the step
+   events' `cost`; the ≈ marks the catalog's estimate, its `(catalog prices)` dropped in #1322;
+   `$0.12 so far (your prices)` at the user's own, #1135) or
    `· cost unknown` (`runner._spend_part`); ahead of it in the review notice and `summary.md`,
    `auto-fix skipped: <cause>`.
-2. `agent context: U.UK of WK (P%)[, compacted Nx][; the next round starts a fresh session | ;
-   the next round carries on in this session: …]` (#781).
+2. `agent context: U.UK of WK (P%)[, compacted Nx][; next round fresh][; N% read before its first
+   edit: name fewer files or put them in the spec]` (#781; the reading, `reading_full`, #1322);
+   `nudged once: …` for a round the think nudge began (`NUDGED`); `OpenCode now M.m` (`opencode_note`).
 3. `STOPPED: why` or `opencode exited N (see …/runner.log)`; past the first step, `steps 1-N
    committed on delegate/<task> (wb next): wb discard <task> drops this step and keeps that
    branch; to land them instead, …` (`steps_line`: reset the worktree, `wb accept --force`; #494; also in the `SIGNAL_STOP` notice). After
    a crash with changes, `opencode exited N: the round didn't finish; what it changed so far stays
    in the worktree (see …)`. Stopped by the runner once the agent was done (`left_bg`; `lingered`, #83's too;
-   `settled`): `the agent left `<job>` running in the background when its turn ended; stopped`, `OpenCode
-   was still open after the agent's output ended; stopped` (#1160), or `self-review: … the tree its
-   tests passed on; stopped as its finish` (#1168, #1250, #1261, #1270). `OpenCode resent N request(s) to the model's server: …` (#491).
+   `settled`: #1160, #1168, #1250, #1261, #1270): no line (#1322; the events keep them). `OpenCode
+   resent N request(s) to the model's server: …` (#491) only for a round that died with no `STOPPED`.
 4. `tests: PASS|FAIL (`cmd`, exit N)`, 25 lines on a failure; `base check: …` while on the first
    step with no review round; `auto-fix rounds used: a/b`.
-5. `tools: name×n …`, up to four `tool error:` lines.
+5. Up to four `tool error:` lines (#1322 dropped the `tools:` counts).
 6. `agent's summary:` and the last text: whole up to `SUMMARY_MAX` (2,500 characters), else its
    first `SUMMARY_HEAD` (1,650) and last `SUMMARY_TAIL` (800) around `[… N chars cut: <task>/rounds/<n>/final.md]`
    (`cut_final`): the end holds the assumptions and `Lesson:` lines; cut head-only, 75 of 409
@@ -1677,10 +1680,7 @@ An API provider's header wait is 600 s instead (`API_HEADER_S`, *An API task's w
   written to Claude, they named private tools and paths, and with 2.0 they left the machine with
   every API task (2026-11-23: the owner's, naming a private tool's folder, went to two providers
   with every calibration task; #1061). The copies an earlier wb made (`rules/<task>/CLAUDE.md`,
-  `user-rules/`) are deleted, and that round's report says so (`runner.RULES_GONE`: `note: until
-  this round this task's agent read ~/.claude/CLAUDE.md and ~/.claude/rules/; …`, status
-  `claude_rules_gone`, #1119): wb update runs the code it replaces, so it can't say it to a user
-  updating across #1061, and the task's spec assumed the agent saw them. #673's aim (Claude never reviews against a rule the agent never saw)
+  `user-rules/`) are deleted (the report's one-shot note of it, #1119, went in #1322). #673's aim (Claude never reviews against a rule the agent never saw)
   is now the skill's: such a rule goes in the spec, and one bearing on code Claude offers to add to
   this file. OpenCode would read `~/.claude/CLAUDE.md` itself, a global instruction beside
   `~/.config/opencode/AGENTS.md`, which only the lane's `SECRETS` kept out: with no lane (macOS,
@@ -6686,7 +6686,6 @@ off), not `wb start`'s.
 | `grants_kept` | `{allow, paths}` at close, for `context.grants` afterwards (`wb bench add`) |
 | `session`, `sessions`, `session_mark`, `session_floor` | the session; earlier ones; `gitops.mark` at its start; its prompt (input and cache) at its first change |
 | `unanswered` | `{round, session, at}`: that session holds the round's message already, so its next run sends `runner.RERUN`, not prompt.md, then prompt.md past `at` (its length as sent, stripped: notes folded in since) (`_run_again`, #1235); the next `run_round` clears it |
-| `claude_rules_gone` | the round whose layer deleted an earlier wb's copy of Claude's global files (`runner.write_config_layer`, #1119): that round's report adds `runner.RULES_GONE` |
 | `opencode_home` | `true` once a round ran in the task's own OpenCode home (`run_round`, #1010); a `session` without it began in the user's store, and the next round starts fresh (`fresh_reason`: `OLD_STORE`, the old session's last words exported from there) |
 | `context` | one-round instruction: `fresh`, `keep`, `full`; cleared when the round starts, so a round never sent keeps it through wb feedback's rerun (#1230) |
 | `full_pct`, `handovers`, `full_compacted`, `full_compact_failed` | fill at the last mid-round handover; count; compacted first, or failed to |

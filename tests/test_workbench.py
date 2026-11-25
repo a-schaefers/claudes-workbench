@@ -2004,7 +2004,7 @@ class Lifecycle(Base):
         rows, _ = store.read_jsonl(store.home() / "notify.jsonl")
         self.assertFalse([r for r in rows if r["task"] == "t-pass" and r["kind"] == "checkin"])
         report = run_wb("report", "t-pass")
-        self.assertIn("already passes on the base, so only the tests this step adds", report)
+        self.assertIn("base check: passes already (only the step's new tests can fail it)", report)
         self.assertNotIn("discard", report)
         self.start("t-skip", "ok", "--test", "true", "--no-base-check")
         self.assertTrue(store.Task("t-skip").spec["no_base_check"])
@@ -2720,8 +2720,7 @@ class Lifecycle(Base):
         st = wait_phase("t-dev", {"review", "stuck", "failed"}, timeout=60)
         self.assertEqual(st["phase"], "review", st.get("last"))
         self.assertTrue(st["tests"]["ok"])
-        self.assertIn("the agent left `npm run dev` running in the background when its turn "
-                      "ended; stopped", run_wb("report", "t-dev"))
+        self.assertNotIn("npm run dev", run_wb("report", "t-dev"))   # housekeeping, unsaid (#1322)
 
     def test_an_agent_done_when_the_rounds_wall_comes_ends_the_round_as_its_finish_not_stuck(self):
         # #1160 (2026-11-24): the agent's last step ended its turn (reason stop) and OpenCode
@@ -2744,7 +2743,7 @@ class Lifecycle(Base):
         self.assertNotIn("guards", results.for_stats(task))
         report = run_wb("report", "t-wall")
         self.assertNotIn("STOPPED", report)
-        self.assertIn("OpenCode was still open after the agent's output ended; stopped", report)
+        self.assertNotIn("opencode exited", report)                 # the runner's stop, unsaid (#1322)
 
     def test_an_agent_done_when_silence_or_the_think_budget_comes_is_neither_stopped_nor_nudged(self):
         # #1160 (2026-11-24): the same finished turn, met first by the silence or think guard
@@ -2764,8 +2763,7 @@ class Lifecycle(Base):
         self.assertEqual(st["phase"], "review", st.get("last"))
         self.assertTrue(st["tests"]["ok"])
         self.assertFalse(st.get("guards"))
-        self.assertIn("the agent left `npm run dev` running in the background when its turn "
-                      "ended; stopped", run_wb("report", "t-devwall"))
+        self.assertNotIn("npm run dev", run_wb("report", "t-devwall"))
 
     def test_an_agent_still_working_at_the_rounds_wall_is_stopped_as_stuck(self):
         # #1160's fix ends a finished turn as done: a turn still going (a tool call that prints
@@ -5945,14 +5943,13 @@ class AutoFix(Base):
         self.assertNotIn("the bug is in this change", prompt)
         self.assertNotIn("system work", prompt)
 
-    def test_a_base_check_cut_at_its_own_cap_says_the_full_run_may_outlast_it_too(self):
-        # #496: "ran past 120s on the base; not checked" said nothing of a suite that takes 18
-        # minutes under a 15-minute --test-timeout
+    def test_a_base_check_cut_at_its_own_cap_says_so_in_one_line(self):
+        # #496 added --test-timeout advice to it; #1322 (2026-11-24) cut it to what happened
         task = types.SimpleNamespace(spec={"test_timeout": 900}, dir=Path(self.tmp.name))
         line = runner.base_check_line({"exit": "timeout", "limit": 120}, task)
-        self.assertEqual(line, "note: the acceptance command ran past 120s on the base; not "
-                               "checked. If it runs that long, a round's run may pass "
-                               "--test-timeout (900s) too: raise it for a slow suite")
+        self.assertEqual(line, "not checked, ran past 120s")
+        line = runner.base_check_line({"exit": "setup failed", "tail": "boom\n"}, task)
+        self.assertEqual(line, f"not checked, its setup failed ({Path(self.tmp.name) / 'base-tests.txt'})")
 
 
 class RepoMoved(Base):
@@ -6173,7 +6170,7 @@ class WorktreeSetup(Base):
         self.assertEqual(made["paths"], ["deps"])
         self.assertNotIn("prepared_paths", st)                  # not in status.json (#867)
         self.assertEqual(made["bytes"], store.dir_size(t.worktree / "deps")[0])  # #860
-        self.assertIn("setup: ", run_wb("report", "t-once"))
+        self.assertNotIn("setup: ", run_wb("report", "t-once"))      # status setup_secs only (#1322)
         (t.worktree / "test_answer.sh").write_text(self.NEEDS_DEPS + "\n")
         out = run_wb("verify", "t-once", "--test", "sh test_answer.sh", "--files", "test_answer.sh")
         self.assertNotIn("setup failed", out)
@@ -6858,7 +6855,7 @@ class Context(Base):
         self.assertFalse(kinds & {"full", "fresh"}, kinds)
         report = run_wb("report", "t-1151")
         self.assertIn("Done: answer.txt = 42.", report)           # the agent's own summary
-        self.assertIn("the next round starts a fresh session", report)  # a later round still is
+        self.assertIn("; next round fresh", report)  # a later round still is
 
     def test_a_compaction_seen_on_the_step_that_ends_the_agents_turn_is_said_not_handed_over(self):
         # #1151: the compacted-between-steps branch (#774) handed over a finished agent too
@@ -6870,7 +6867,7 @@ class Context(Base):
                if e.get("kind") in ("compacted", "full", "fresh")]
         self.assertEqual([e["kind"] for e in evs], ["compacted"])
         self.assertIn("its turn ended there", evs[0]["text"])
-        self.assertIn("the next round starts a fresh session", run_wb("report", "t-1151c"))
+        self.assertIn("; next round fresh", run_wb("report", "t-1151c"))
 
     def test_a_full_windows_fresh_session_says_fresh_in_round_for(self):
         # #1048: the pane's stage reads `round 2 · fresh session` from it
@@ -7416,7 +7413,7 @@ class Context(Base):
         rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-srr"]
         self.assertEqual([r["kind"] for r in rows], ["review"])
         self.assertIn("tests: PASS", rows[0]["text"])
-        self.assertIn("the tree its tests passed on; stopped as its finish", rows[0]["text"])
+        self.assertNotIn("stopped as its finish", rows[0]["text"])   # the event says it (#1322)
         self.assertIn("the tree its tests passed on: stopped as its finish",
                       run_wb("watch", "t-srr", "--once", "--no-color"))
 
@@ -7445,7 +7442,9 @@ class Context(Base):
         rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-sre"]
         self.assertEqual([r["kind"] for r in rows], ["review"])
         self.assertIn("tests: PASS", rows[0]["text"])
-        self.assertIn("self-review: the same call 4 times in a row", rows[0]["text"])
+        self.assertIn("self-review: the same call 4 times in a row", [
+            e["text"] for e in store.read_jsonl(store.Task("t-sre").dir / "events.jsonl")[0]
+            if e.get("kind") == "settled"][0])
         from workbench import results
         self.assertFalse(results.step(store.Task("t-sre"), landed=False)["stuck"])  # the router's
 
@@ -7505,8 +7504,10 @@ class Context(Base):
         self.assertFalse(st.get("guards"))
         self.assertEqual([r["kind"] for r in rows], list(kinds))
         self.assertIn("tests: PASS", rows[-1]["text"])
-        self.assertIn(f"self-review: {said}", rows[-1]["text"])
-        self.assertIn("the tree its tests passed on; stopped as its finish", rows[-1]["text"])
+        [ev] = [e for e in store.read_jsonl(store.Task(name).dir / "events.jsonl")[0]
+                if e.get("kind") == "settled"]
+        self.assertIn(f"self-review: {said}", ev["text"])               # the event's, not the report's
+        self.assertNotIn("stopped as its finish", rows[-1]["text"])     # (#1322)
         from workbench import results
         self.assertFalse(results.step(store.Task(name), landed=False)["stuck"])  # the router's
 
@@ -7536,8 +7537,7 @@ class Context(Base):
         st, rows = self.quiet_self_review("t-sqn", "--think-timeout", "3", "--silence-timeout", "120",
                                           FAKE_SELF_STALL="1")
         self.assert_settled("t-sqn", st, rows, "0 minutes again with no tool call, even after a nudge",
-                            rounds=(3, "steer"),
-                            kinds=("checkin", "review"))
+                            rounds=(3, "steer"))                # the nudge wakes no one (#1322)
         self.assertEqual(st["nudges"], 1)
 
     def test_a_self_review_silent_on_a_changed_tree_is_still_stopped_as_stuck(self):
@@ -7587,7 +7587,9 @@ class Context(Base):
         rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-srx"]
         self.assertEqual([r["kind"] for r in rows if r["kind"] != "checkin"], ["review"])
         self.assertIn(f"self-review: handed over to a fresh session {runner.HANDOVER_MAX} times, "
-                      "the tree its tests passed on; stopped as its finish", rows[-1]["text"])
+                      "the tree its tests passed on: stopped as its finish", [
+                          e["text"] for e in store.read_jsonl(store.Task("t-srx").dir / "events.jsonl")[0]
+                          if e.get("kind") == "settled"][-1])
         self.assertNotIn("times in this round without finishing", rows[-1]["text"])
         from workbench import results
         self.assertFalse(results.step(store.Task("t-srx"), landed=False)["stuck"])
@@ -7622,7 +7624,7 @@ class Context(Base):
         self.assertNotIn("no_edit", st.get("guards") or {})
         rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-srh"]
         self.assertEqual([r["kind"] for r in rows], ["review"])
-        self.assertIn("the tree its tests passed on; stopped as its finish", rows[0]["text"])
+        self.assertNotIn("stopped as its finish", rows[0]["text"])   # the event says it (#1322)
 
     def test_a_self_review_handed_over_with_a_check_still_broken_is_stopped_by_the_explore_guard(self):
         # #1188's other half: the fresh session's tree is the one the round began with, but a
@@ -7648,8 +7650,8 @@ class Context(Base):
         self.assertTrue(st["tests"]["ok"])
         self.assertNotIn("no_edit", st.get("guards") or {})
         rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-srn"]
-        self.assertEqual([r["kind"] for r in rows], ["checkin", "review"])
-        self.assertIn("the tree its tests passed on; stopped as its finish", rows[-1]["text"])
+        self.assertEqual([r["kind"] for r in rows], ["review"])   # the nudge wakes no one (#1322)
+        self.assertNotIn("stopped as its finish", rows[-1]["text"])  # the event says it (#1322)
 
     def test_a_self_review_interrupted_by_claudes_note_that_reads_on_on_its_green_tree_goes_to_review(self):
         # #1207: `wb steer --now` mid-self-review, the same round_for `steer` as the nudge's
@@ -7777,9 +7779,8 @@ class Context(Base):
         # spec: as a check-in it came every round, even on a trivial task (2026-11-17)
         rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-c7"]
         self.assertEqual([r["kind"] for r in rows], ["review"])
-        self.assertIn("reading: the agent's session reached 76% of its window before it changed a "
-                      "file", rows[0]["text"])
-        self.assertIn("Name fewer files to read", rows[0]["text"])
+        self.assertRegex(rows[0]["text"], r"agent context: [^\n]*; 76% read before its first edit: "
+                         "name fewer files or put them in the spec")
 
     def test_a_session_whose_reading_leaves_a_successor_no_room_carries_on(self):
         self.start("t-c10", "floor", "--test", TEST_CMD)
@@ -7788,8 +7789,7 @@ class Context(Base):
         self.assertEqual(st["session_floor"], 16900)           # its prompt at its first change (#1219)
         rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-c10"]
         self.assertEqual([r["kind"] for r in rows], ["review"])
-        self.assertIn("reached 76% of its window and had read 51% before its first change",
-                      rows[0]["text"])
+        self.assertIn("; 51% read before its first edit", rows[0]["text"])
 
     def test_a_full_session_whose_reading_leaves_a_successor_no_room_carries_on_into_the_next_round(self):
         # #781 (the second 2026-11-21 audit): mid-round such a session carried on, but between
@@ -7803,7 +7803,7 @@ class Context(Base):
         self.assertTrue(second["session"])                  # the same session, not a re-read
         self.assertEqual(second["prompt"].split("\n")[0][:30], "The acceptance tests fail. Com")
         report = store.Task("t-781").round_dir(2).joinpath("summary.md").read_text()
-        self.assertIn("the next round carries on in this session", report)
+        self.assertNotIn("next round fresh", report)
         task = store.Task("t-781")
         self.assertIsNone(runner.fresh_reason(task, {**task.status, "round": 3}))
         # a new step's reading is its own (wb next), and a compacted session still goes fresh
@@ -10164,8 +10164,7 @@ class SlowFirstToken(Base):
         task = store.Task("t-retry")
         rows = [r for r in store.read_jsonl(task.dir / "events.jsonl")[0] if r["kind"] == "retry"]
         self.assertTrue(rows and rows[0]["text"] == "Timed out waiting for response headers", rows)
-        self.assertIn("OpenCode resent", run_wb("report", "t-retry"))
-        self.assertIn("cut the request at the provider's timeout", run_wb("report", "t-retry"))
+        self.assertNotIn("OpenCode resent", run_wb("report", "t-retry"))   # stuck: its STOPPED says why (#1322)
         self.assertIn("retry    Timed out waiting for response headers", run_wb("log", "t-retry"))
 
     def test_a_round_that_never_got_its_first_token_records_how_fast_it_read_at_most(self):
@@ -10310,24 +10309,18 @@ class AgentContext(Base):
         self.assertFalse((rules / "AGENTS.md").exists())
         self.assertEqual(files[1:], [self.repo / "CLAUDE.md"])        # the project's alone
 
-    def test_the_round_that_drops_an_earlier_wbs_copy_of_claudes_files_says_so_in_its_report(self):
-        # #1119 (audit 1 of 2.0): an open task updated across #1061 lost ~/.claude/CLAUDE.md at
-        # its next round, and nothing said so: wb update runs the code it replaces
+    def test_the_round_after_an_earlier_wbs_copy_of_claudes_files_deletes_it(self):
+        # #1061: an open task updated across it keeps no copy of ~/.claude/CLAUDE.md. Its report
+        # said so once (#1119) until #1322 (2026-11-24): a one-shot note that guarded nothing
         self.start("t-gone", "ok")
         wait_phase("t-gone", {"review"})
         task = store.Task("t-gone")
-        self.assertNotIn("note: until this round", task.round_dir(1).joinpath("summary.md").read_text())
         (context.rules_dir(task) / "CLAUDE.md").write_text("use uv\n")   # 1.91's copy
-        for n in (2, 3):
-            run_wb("feedback", "t-gone", "--text", "1. again")
-            wait_phase("t-gone", {"review"})
-            said = task.round_dir(n).joinpath("summary.md").read_text()
-            if n == 2:
-                self.assertIn("note: until this round this task's agent read ", said)
-                self.assertIn("/CLAUDE.md and ", said)
-                self.assertFalse((context.rules_dir(task) / "CLAUDE.md").exists())
-            else:                                                          # said once
-                self.assertNotIn("note: until this round", said)
+        run_wb("feedback", "t-gone", "--text", "1. again")
+        st = wait_phase("t-gone", {"review"})
+        self.assertFalse((context.rules_dir(task) / "CLAUDE.md").exists())
+        self.assertNotIn("claude_rules_gone", st)
+        self.assertNotIn("CLAUDE.md", task.round_dir(2).joinpath("summary.md").read_text())
 
     def test_rules_a_link_brings_into_the_projects_rules_reach_the_agent(self):
         # #828 (the second 2026-11-21 audit): Claude Code documents links in .claude/rules for
@@ -36826,7 +36819,7 @@ class ApiSpend(Base):
         m, row, line, report = task_at("t-est", 0.8)
         self.assertEqual((round(row["usd"], 9), row.get("prices")), (0.8, None))
         self.assertEqual(line, "paid meterco ≈$0.80 (meterco/flash-1, catalog prices)")
-        self.assertEqual(report, " · ≈$0.80 so far (catalog prices)")
+        self.assertEqual(report, " · ≈$0.80 so far")                        # the ≈ says it (#1322)
         self.assertEqual(self.meter.tail(m), " · today ≈$1.19 of $100 (catalog prices)")  # one estimate in it
         self.assertIn("$0.2/$0.6 per 1M in/out, catalog prices", run_wb("models", "--api", "flash"))
         week = savings.api_totals([{"kind": "api", "provider": "meterco", "ts": time.time(),
@@ -39533,11 +39526,11 @@ class ApiStats(Base):
             runner.drive(store.Task(task.name))
         first = lambda task: (task.dir / "rounds" / "1" / "summary.md").read_text().splitlines()[0]  # noqa: E731
         self.assertRegex(first(t), r" · local tokens \d+ in / \d+ out$")    # a GPU task: as before, no money
-        self.assertRegex(first(a), r" · agent tokens \d+ in / \d+ out · ≈\$0\.\d\d so far \(catalog prices\)$")
+        self.assertRegex(first(a), r" · agent tokens \d+ in / \d+ out · ≈\$0\.\d\d so far$")
         (a.dir / "events.jsonl").write_text("")                     # no cost known, no price
         self.assertEqual(runner._spend_part(store.Task(a.name)), " · cost unknown")
         a.set_status(api={"usd": 0.2})                              # the meter's key (#1019)
-        self.assertEqual(runner._spend_part(store.Task(a.name)), " · ≈$0.20 so far (catalog prices)")
+        self.assertEqual(runner._spend_part(store.Task(a.name)), " · ≈$0.20 so far")
 
     def test_a_step_event_keeps_opencodes_cost_and_the_cache_read_and_write_apart(self):
         from workbench import events

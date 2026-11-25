@@ -117,9 +117,8 @@ You are the driver, not a spectator. When something tells you the agent is headi
   restart", or a shutdown's signal to several runners, comes as one notice for the batch: `wb resume <a> <b> …`, as it names them, resumes them in the
   order they were started (`wb resume --all` takes every interrupted task in scope, `--backlog <name>` one backlog's); one that never ran a round
   starts round 1 again. A task a guard stopped isn't in `--all`: read its report first.
-- A check-in saying the session "reached N% of its window before it changed a file" (or "had
-  read N% before its first change": a fresh session would have little room after re-reading it):
-  the step needs more reading than the window holds. Let it carry on; next time name fewer files to read,
+- A report whose `agent context:` line ends `N% read before its first edit`: the step needs more
+  reading than the window holds. Let it carry on; next time name fewer files to read,
   or put what it needs (a signature, a constant) in the spec.
 Notes are instructions, like feedback: concrete and short.
 
