@@ -5903,7 +5903,8 @@ after a reload had read as the reader going up, and the server's thread was draw
 (and on switching to it; never a press on `#tabbar`, #1374), at most every
 `ACTIVE_MS` 30 s, never retried on a timer (#959 review). Attachments: chips (`drawTray`) in
 `wb-chat-files`, bytes in IndexedDB (`wb-chat`, `files`) until the message lands; `pump` uploads one
-at a time (XHR; `STALL_MS` 30 s without progress retries the same id); edit restores the files, the
+at a time (XHR; `STALL_MS` 30 s without progress retries the same id), after a `GET` asking whether the
+computer has it, given up after `POST_MS` (one that never answered held `pump` and `flush`, #1390); edit restores the files, the
 `about` (`setAbout`, #843) and the words before the box's (#958); thumbnails load near view
 (`whenNear`, #754), and before the server's thread is in only from this browser's bytes: the rest wait
 in `nearLater`, judged again by `nearAgain` where that thread put them (a photo the saved thread showed was fetched, 2026-11-24), and an entry measured before the last `render` (`drawnAt`) is observed afresh, not loaded (one delivered after the server's thread was drawn fetched that photo still, #1223); `sweepSoon` revokes unused object URLs (#746). The receipt texts, notices
@@ -7670,7 +7671,7 @@ the click still runs the real wb. What the chat is for (#1341): the empty state'
 thread the hint shows, dismisses, and stays dismissed after a reload, and where every storage call throws it still
 shows and dismisses with no page error. Sends land exactly once through
 outages, reloads and a SIGSTOP past the 40 s watchdog; settings (no away setting, its old endpoint 404), install over https, `/api/seen` and
-`/api/active` only while in use and on the Chat view (none from a click in Settings or Stats, #1374), the waiting line (one line, no buttons, no answer card, cleared once settled, #1350), shot pairs, listen's shortlist, the keyboard, uploads, an agent's message
+`/api/active` only while in use and on the Chat view (none from a click in Settings or Stats, #1374), the waiting line (one line, no buttons, no answer card, cleared once settled, #1350), shot pairs, listen's shortlist, the keyboard, uploads (an upload check that never answers given up, #1390), an agent's message
 shown with its name and its reply through `/api/wait`, that reply named `Claude to <agent>` and
 never counted unread (#1128), its state without the user's, a 25-task backlog's strip at most three lines on a phone, the queued counted apart
 (#1097); and `sw.js` in a node `vm` (`swSays`) for a push's text, and for a notification's click (to the chat). Each wait is `until` on its condition

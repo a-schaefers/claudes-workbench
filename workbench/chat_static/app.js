@@ -794,7 +794,12 @@
   function upload(f) {  // resolves once the computer has file f ({id, name, size, type})
     if (inflight.has(f.id)) return inflight.get(f.id)
     const p = (async () => {
-      const r = await fetch('/api/upload/' + encodeURIComponent(f.id), { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store' })
+      // the check under post()'s deadline: one that never answered (a phone changing networks)
+      // held this promise, so pump and flush with it, and every later message sat at Sending…
+      // until a reload (#1390, 2026-11-25, as #935 for /api/send). Only its status is read
+      const ctrl = new AbortController(), dog = setTimeout(() => ctrl.abort(), POST_MS)
+      const r = await fetch('/api/upload/' + encodeURIComponent(f.id), { headers: { Authorization: 'Bearer ' + token }, cache: 'no-store', signal: ctrl.signal })
+        .finally(() => clearTimeout(dog))
       if (r.ok) return                                   // already there: not a byte again
       if (r.status === 401) { keyless('That key was not accepted.'); throw new Error('key') }
       if (r.status !== 404) throw new Error('HTTP ' + r.status)

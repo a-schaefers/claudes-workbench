@@ -1117,6 +1117,32 @@ async function run(engine, device) {
       await until(async () => await page.locator('#tray').isHidden())
     } finally { await page.unroute('**/api/upload/*') }
   })
+  await check('an upload check that never answers is given up after POST_MS and tried again: its message and a plain one after it both land (#1390)', async () => {
+    // #1390: the GET that asks whether the computer has a file had no deadline, so one that never
+    // answered held pump and flush, and every later message sat at Sending… until a reload. Hung
+    // by the page's own fetch (WebKit routes none once the worker is registered), as a dead line
+    // hangs: until its signal aborts it
+    await page.evaluate(() => {
+      window._fetch = window.fetch; window._checks = 0
+      window.fetch = (u, o = {}) => {
+        if (!(/\/api\/upload\//.test(String(u)) && (o.method || 'GET') === 'GET' && !window._checks++)) return window._fetch(u, o)
+        return new Promise((_, rej) => o.signal && o.signal.addEventListener('abort', () => rej(new DOMException('aborted', 'AbortError'))))
+      }
+    })
+    try {
+      await page.setInputFiles('#pick', { name: 'hung.txt', mimeType: 'text/plain', buffer: Buffer.from('hung') })
+      await until(async () => await page.evaluate(() => window._checks) === 1)
+      await page.fill('#input', 'its file was checked on a dead line')
+      await page.click('#send')
+      await page.fill('#input', 'and a plain one after it')
+      await page.click('#send')
+      await until(() => messages().some(m => m.text === 'and a plain one after it'), 60000)
+      await until(() => messages().some(m => m.text === 'its file was checked on a dead line'), 30000)
+      const sent = messages().filter(m => m.text === 'its file was checked on a dead line')
+      if (sent.length !== 1 || !sent[0].files || sent[0].files.length !== 1) throw new Error(JSON.stringify(sent))
+      await until(async () => (await page.locator('.row.user.pending').count()) === 0)
+    } finally { await page.evaluate(() => { window.fetch = window._fetch }) }
+  })
   await check("another agent's message shows with its name, and Claude's reply to it, named and never counted unread, comes back through /api/wait (#1042, #1128)", async () => {
     const agent = wb('chat', 'token', 'add', `e2e-${engine}`).trim()
     const api = (path, body) => fetch(base + path.slice(1), { method: body ? 'POST' : 'GET',
