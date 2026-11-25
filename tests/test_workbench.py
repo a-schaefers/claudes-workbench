@@ -23845,6 +23845,22 @@ class Projects(Base):
         self.assertIn("CLAUDE.md is gitignored", self.start("t-local", "ok"))
         wait_phase("t-local", {"review"})
 
+    def test_a_gitignored_dot_claude_claude_md_lets_a_start_through_and_is_named(self):
+        # #1298 (2026-11-24): with .claude/ gitignored and the instructions in .claude/CLAUDE.md,
+        # every start was refused as having no CLAUDE.md, and Claude told to write and commit one,
+        # though context.instruction_files hands the agent the checkout's copy
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        g("rm", "-q", "--cached", "CLAUDE.md")
+        (self.repo / ".claude").mkdir()
+        (self.repo / "CLAUDE.md").rename(self.repo / ".claude" / "CLAUDE.md")
+        (self.repo / ".gitignore").write_text(".claude/\n")
+        g("add", ".gitignore")
+        g("commit", "-qm", "private .claude/CLAUDE.md")
+        self.assertEqual(cli.claude_md_status(self.repo), ".claude/CLAUDE.md" + cli.LOCAL_NOTE)
+        self.assertNotIn("next: write CLAUDE.md", run_wb("init", str(self.repo)))
+        self.assertIn("note: .claude/CLAUDE.md is gitignored", self.start("t-dot", "ok"))
+        wait_phase("t-dot", {"review"})
+
     def test_start_wants_a_claude_md(self):
         (self.repo / "CLAUDE.md").unlink()
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qam", "no docs"], check=True)
