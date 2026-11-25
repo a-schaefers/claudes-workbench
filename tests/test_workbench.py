@@ -23,6 +23,7 @@ import signal
 import socket
 import socketserver
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -13739,6 +13740,79 @@ class Lane(Base):
         out = subprocess.run([sys.executable, "-c", script, str(ROOT)], capture_output=True,
                              text=True, timeout=20)
         self.assertIn("NoNewPrivs:\\t1", out.stdout, out.stderr)
+
+    @staticmethod
+    def mountinfo_marking(path: str, fstype: str, at: str) -> str:
+        """A mount table with one row: `path`'s device mounted as `fstype` (as WSL2 shows drvfs)."""
+        dev = os.stat(path).st_dev
+        Path(at).write_text(f"99 1 {os.major(dev)}:{os.minor(dev)} / {path} rw,noatime shared:1 - "
+                            f"{fstype} C:\\134 rw,aname=drvfs;path=C:\\;uid=1000;gid=1000,mmap\n")
+        return at
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux")
+    def test_a_rule_on_uncached_9p_still_matches_after_the_exec_because_its_fd_stays_open(self):
+        # #1306 (2026-11-24): WSL2's drvfs is 9p without CACHE_META, so a dentry goes at its last
+        # close and the next lookup makes a new inode. Landlock ties a rule to the inode it was
+        # given, so once lane.py closed the fd, the rule on a repo's .git on /mnt/c matched nothing
+        # and every git call in an API task failed. The double: a kernel whose rules hold only
+        # while the fd they were added through is open and survives the exec, as on 9p.
+        d = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        git = os.path.join(d, "proj", ".git")
+        os.makedirs(git)
+        rules = {}
+
+        class Kernel:
+            def prctl(self, *a):
+                return 0
+
+            def syscall(self, nr, *a):
+                if nr == lane.CREATE_RULESET:
+                    return os.open(os.devnull, os.O_RDONLY)
+                if nr == lane.ADD_RULE:
+                    _, pfd = struct.unpack("=Qi", a[2].raw[:12])
+                    rules[os.readlink(f"/proc/self/fd/{pfd}")] = (pfd, os.fstat(pfd).st_ino)
+                return 0
+
+        def matches_after_exec(path):  # the inode the rule is on, still held into the exec
+            pfd, ino = rules[path]
+            try:
+                return (os.get_inheritable(pfd) and os.readlink(f"/proc/self/fd/{pfd}") == path
+                        and os.fstat(pfd).st_ino == ino)
+            except OSError:
+                return False
+
+        table = self.mountinfo_marking(d, "9p", os.path.join(self.tmp.name, "mountinfo"))
+        def unpin():
+            for fd in lane.PINNED:
+                os.close(fd)
+            lane.PINNED.clear()
+        self.addCleanup(unpin)
+        with mock.patch.object(lane, "abi", lambda: 6), mock.patch.object(lane, "_libc", Kernel), \
+                mock.patch.object(lane, "MOUNTINFO", table):
+            self.assertEqual(lane.restrict([d, os.devnull], [git]), 6)
+        self.assertTrue(matches_after_exec(git))
+        self.assertTrue(matches_after_exec(d))
+        self.assertFalse(matches_after_exec(os.devnull))  # not on 9p: its fd closed as before
+        self.assertEqual(len(lane.PINNED), 2)
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    def test_a_lane_rule_on_a_9p_mount_keeps_its_fd_open_in_the_command_it_execs(self):
+        # #1306: the fd must outlive lane.py's execvp into OpenCode (or a --test, --setup, the base
+        # check), which then holds the dentry for as long as it runs; off 9p none is left open
+        d = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        script = ("import os, sys; sys.path.insert(0, sys.argv[1]); from workbench import lane\n"
+                  "lane.MOUNTINFO = sys.argv[2]; lane.main(sys.argv[3:])\n")
+        fds = ("import os\nfor f in os.listdir('/proc/self/fd'):\n    try:\n"
+               "        print(os.readlink('/proc/self/fd/' + f))\n    except OSError:\n        pass\n")
+        for fstype, held in (("9p", True), ("ext4", False)):
+            table = self.mountinfo_marking(d, fstype, os.path.join(self.tmp.name, f"mountinfo-{fstype}"))
+            out = subprocess.run([sys.executable, "-c", script, str(ROOT), table, "--write", d,
+                                  "--", sys.executable, "-c", fds],
+                                 capture_output=True, text=True, timeout=20)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertEqual(d in out.stdout.split("\n"), held, (fstype, out.stdout))
 
     def test_doctor_names_what_an_old_landlock_cant_confine(self):
         self.assertEqual(lane.gaps(10), [])

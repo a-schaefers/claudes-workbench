@@ -2016,7 +2016,9 @@ deliberately hostile process.
   `/mnt/<letter>`): a Windows program runs through interop as the user, outside Landlock and
   no-new-privileges. With the lane on their directories leave the agent's `PATH`
   (`context.agent_path`, which also drops `WSL_INTEROP`) and `tool_roots`, and each drive is an
-  `ONLY_KEPT` root wherever mounted (#914); `execve` needs read, so one can't run by path. A Windows program
+  `ONLY_KEPT` root wherever mounted (#914); `execve` needs read, so one can't run by path. What
+  the lane does keep there (a repo's git directory, a `--path` grant) holds through the pinned fd
+  (*The kernel's side*, #1306). A Windows program
   inside the lane still runs outside it: `wb doctor` says so (`interop_gap`); `[interop]
   enabled=false` closes it (and stops wb reading Windows' GPUs: set `gpu_gb`, #702).
 - **API lanes hide the token files that hold a credential** (`API_HIDDEN`, `api_hidden_paths`,
@@ -2101,7 +2103,14 @@ deliberately hostile process.
   snap-confine, so no snap runs; `wb start` and `wb next` refuse a snap `--test` (`cli._snap_test`,
   #1271), `wb doctor` names those on PATH) is set on every Linux, Landlock or not. Free: listing
   directories, the network (*What TCP reaches*), and metadata (chmod, chown, utimes, xattrs on
-  outside files: only the patterns).
+  outside files: only the patterns). A rule's `O_PATH` fd is closed once added, but on a mount whose
+  inodes don't outlast their dentry (`lane.UNSTABLE_INODES`: 9p, so WSL2's drvfs on `/mnt/c`;
+  `unstable_devices` reads `/proc/self/mountinfo`) it stays open and inheritable into the exec
+  (`lane.PINNED`), so the command holds the inode the rule is on for as long as it runs: closed,
+  uncached 9p dropped the dentry, the next lookup made a new inode no rule was on, and a repo's
+  `.git` there was refused, every git call in an API task failing "gitfile does not point to a
+  valid repository" with no `Permission denied` to name it (#1306). An `O_PATH` fd reads and
+  writes nothing, and Landlock checks what is opened through it.
   Fails closed: Landlock present but refusing prints `workbench lane: the kernel refused the lane
   (<error>); not running <cmd>` and exits 126; an exec failure is `workbench lane: can't run <cmd>
   (<reason>)`, 127 not found, else 126. Without Landlock (macOS, an old kernel, an architecture off

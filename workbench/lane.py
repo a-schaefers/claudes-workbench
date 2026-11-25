@@ -41,6 +41,15 @@ MAKE = sum(1 << b for b in range(6, 13))        # char, dir, reg, sock, fifo, bl
 REFER, TRUNCATE = 1 << 13, 1 << 14               # ABI 2 and 3
 RESOLVE_UNIX = 1 << 16                           # ABI 9: connect to a socket made outside
 SCOPE_ABSTRACT_UNIX, SCOPE_SIGNAL = 1, 2         # ABI 6: ruleset_attr.scoped
+# Where a rule's inode lasts only while something holds it (#1306, 2026-11-24): uncached 9p, WSL2's
+# drvfs (/mnt/c), drops a dentry at its last close and gives the next lookup a new inode, which no
+# rule is on. Landlock ties a rule to the inode, so once the fd it was added through closed, the
+# repo's .git on /mnt/c was refused in an API task and every git call the agent made said "gitfile
+# does not point to a valid repository", with no "Permission denied" to name it. A rule's fd there
+# stays open across the exec (PINNED), holding the dentry, so every lookup beneath finds that inode.
+UNSTABLE_INODES = {"9p"}
+MOUNTINFO = "/proc/self/mountinfo"
+PINNED: list[int] = []
 
 
 def _libc():
@@ -58,12 +67,32 @@ def abi() -> int:
     return max(v, 0)
 
 
+def unstable_devices() -> set[int]:
+    """The devices (st_dev) of the mounts whose inodes don't outlast their dentry (UNSTABLE_INODES);
+    none when the mount table can't be read."""
+    out = set()
+    try:
+        with open(MOUNTINFO) as f:
+            for line in f:
+                # id parent major:minor root point options [optional...] - fstype source super
+                head, _, tail = line.partition(" - ")
+                fields, kind = head.split(), tail.split()[:1]
+                if len(fields) > 2 and kind and kind[0] in UNSTABLE_INODES:
+                    major, _, minor = fields[2].partition(":")
+                    if major.isdigit() and minor.isdigit():
+                        out.add(os.makedev(int(major), int(minor)))
+    except OSError:
+        pass
+    return out
+
+
 def restrict(writable: list[str], readable: list[str] | None = None,
              unix: list[str] | None = None) -> int:
     """Forbid this process and its children every write outside `writable` (directories, and
     files such as /dev/null) and, given `readable`, reading a file outside it and `writable`;
     connecting to a UNIX socket made outside the lane except beneath `unix`, and signalling a
-    process outside it. Returns the ABI used, 0 when Landlock isn't there."""
+    process outside it. A rule on a mount of UNSTABLE_INODES keeps its fd open into the exec
+    (PINNED). Returns the ABI used, 0 when Landlock isn't there."""
     version = abi()
     libc = _libc()
     # Before Landlock: no-new-privileges holds on any Linux, so sudo is refused even where the
@@ -99,6 +128,7 @@ def restrict(writable: list[str], readable: list[str] | None = None,
     fd = libc.syscall(CREATE_RULESET, ctypes.byref(attr), ctypes.c_size_t(size), ctypes.c_uint32(0))
     if fd < 0:
         raise OSError(ctypes.get_errno(), "landlock_create_ruleset")
+    unstable = unstable_devices()
     try:
         read = handled & READ_FILE
         sock = handled & RESOLVE_UNIX
@@ -111,6 +141,7 @@ def restrict(writable: list[str], readable: list[str] | None = None,
                 pfd = os.open(path, os.O_PATH | os.O_CLOEXEC)
             except OSError:
                 continue  # gone since the lane was drawn
+            pin = False
             try:
                 rights = base if os.path.isdir(path) else \
                     base & (WRITE_FILE | READ_FILE | TRUNCATE | RESOLVE_UNIX)
@@ -120,8 +151,13 @@ def restrict(writable: list[str], readable: list[str] | None = None,
                 if libc.syscall(ADD_RULE, fd, RULE_PATH_BENEATH, rule,
                                 ctypes.c_uint32(0)) < 0:
                     raise OSError(ctypes.get_errno(), f"landlock_add_rule {path}")
+                pin = os.fstat(pfd).st_dev in unstable
             finally:
-                os.close(pfd)
+                if pin:  # O_PATH: it reads and writes nothing, and the rules still hold through it
+                    os.set_inheritable(pfd, True)
+                    PINNED.append(pfd)
+                else:
+                    os.close(pfd)
         if libc.syscall(RESTRICT_SELF, fd, ctypes.c_uint32(0)) < 0:
             raise OSError(ctypes.get_errno(), "landlock_restrict_self")
     finally:
