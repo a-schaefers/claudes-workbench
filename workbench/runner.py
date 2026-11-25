@@ -2670,8 +2670,11 @@ def _copy(src: Path, dest: Path) -> None:
             shutil.rmtree(dest)
     clear()
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # GNU's, then macOS's (-c clones on APFS); their own error when neither runs
-    for argv in (["cp", "-a", "--reflink=auto"], ["cp", "-cRp"]):
+    # GNU's, then macOS's (-c clones on APFS); their own error when neither runs. macOS's first
+    # there: BSD cp refused GNU's flags, two cp a path (#1399, 2026-11-25); GNU's after it for a
+    # Homebrew gnubin cp, whose -c is something else
+    gnu, bsd = ["cp", "-a", "--reflink=auto"], ["cp", "-cRp"]
+    for argv in ((bsd, gnu) if sys.platform == "darwin" else (gnu, bsd)):
         try:
             if subprocess.run([*argv, str(src), str(dest)], capture_output=True).returncode == 0:
                 return
@@ -2711,11 +2714,28 @@ COPY_BATCH = 500
 def _copy_all(src: Path, dest: Path, paths: list[str]) -> None:
     """Each of ``paths`` from under ``src`` to the same place under ``dest``, as _copy does, in
     one GNU cp a batch (`--parents`): one cp per path forked tens of thousands of times for an
-    in-tree C build's object files before the base check ran (#867). A batch that fails (macOS's
-    or busybox's cp, a read error) is copied path by path."""
+    in-tree C build's object files before the base check ran (#867). macOS's cp has no
+    `--parents`: one `cp -cRp` a directory there, its paths into it (#1399). A batch that fails
+    (busybox's cp, a read error) is copied path by path."""
     for i in range(0, len(paths), COPY_BATCH):
         batch = paths[i:i + COPY_BATCH]
-        if len(batch) > 1 and sys.platform != "darwin":
+        if len(batch) > 1 and sys.platform == "darwin":
+            groups: dict = {}
+            for p in batch:  # `ls-files --directory` ends a directory in "/": BSD cp would copy its insides
+                groups.setdefault(Path(p.rstrip("/")).parent, []).append(p.rstrip("/"))
+            for parent, ps in groups.items():
+                if len(ps) > 1:
+                    try:
+                        (dest / parent).mkdir(parents=True, exist_ok=True)
+                        if subprocess.run(["cp", "-cRp", "--", *ps, f"{dest / parent}/"],
+                                          cwd=src, capture_output=True).returncode == 0:
+                            continue
+                    except OSError:
+                        pass
+                for p in ps:
+                    _copy(src / p, dest / p)  # what a failed group left is replaced
+            continue
+        if len(batch) > 1:
             try:
                 if subprocess.run(["cp", "-a", "--reflink=auto", "--parents", "-t", str(dest), "--", *batch],
                                   cwd=src, capture_output=True).returncode == 0:

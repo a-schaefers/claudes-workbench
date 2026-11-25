@@ -2392,7 +2392,8 @@ def _scope(tasks, where, sessions=None):
     0.90), or with no `sessions` given (by hand), goes by directory: its `repo` is `where`
     or inside it, or `where` is inside the task's spot (its package, repo/subdir; else its `cwd`
     inside the repo; else the repo, #695), or its `cwd` (where wb start ran) is `where` or inside it. A session
-    in the home directory or / claims none by directory. A task with neither key is everyone's.
+    in the home directory or / claims none by directory, but for a gone session's task whose
+    `cwd` is exactly there (#1403). A task with neither key is everyone's.
     The others belong to another session, which its mod wakes and its quit commands stop (the
     2026-11-16 audit: two projects at once, one session's /workbench-quit stopped the other's
     agents; the 0.90 review: a task started from ~ belonged to every session under it, and one
@@ -2419,9 +2420,12 @@ def _scope(tasks, where, sessions=None):
         near = here is not None and not broad and bool(
             cwd and cwd.is_relative_to(here)
             or repo and (repo.is_relative_to(here) or here.is_relative_to(spot)))
+        # in ~ or /, a gone session's task started in that very directory: claude restarted
+        # there adopts it, which near (never there) left nobody's (#1403, 2026-11-25). Only
+        # here: a task without a session started in ~ stays no ~ session's (the 0.90 review)
         if sessions and sid:
-            ok = sid in sessions or near and _gone(t.spec.get("claude_pid"), t.spec.get("claude_start"),
-                                                   t.spec.get("claude_machine"))
+            ok = sid in sessions or (near or here is not None and cwd == here) and _gone(
+                t.spec.get("claude_pid"), t.spec.get("claude_start"), t.spec.get("claude_machine"))
         elif here is None or (not cwd and not repo):
             ok = True
         else:
@@ -4977,8 +4981,10 @@ def cmd_stats(a):
         return
     f = stats.feed(only=(*stats.SUMMARY, "model_lines"))  # the headline: none of the rest (#565)
     head, shown = stats.summary(f), f.get("model_lines") or {}
-    # the models OpenCode has now, as the Stats tab shows them; --all every one that ran (#638)
-    only = None if a.all or not shown else {v for x in shown.get("lines", []) for v in x["variants"]}
+    # the models OpenCode has now, as the Stats tab shows them; --all every one that ran (#638).
+    # None of them now (every one renamed, idle 90 days, a config it can't read): every one, or
+    # the table said "no finished tasks yet" under a headline of N tasks (#1400, 2026-11-25)
+    only = None if a.all or not shown.get("lines") else {v for x in shown["lines"] for v in x["variants"]}
     # the newest stats.STATS_MODEL_LINES of them, the rest counted on one line (2026-11-21)
     more, old = (shown.get("more"), shown.get("older")) if only is not None else (None, None)
     rest = (more or {}).get("models", 0) + (old or {}).get("models", 0)
@@ -6644,6 +6650,10 @@ def _failed(argv: list[str], said: str) -> str:
 # edit`'s override.conf sorts after it and wins), the plist's EnvironmentVariables on macOS.
 SERVICE_DROPIN = "wb-chat.service.d/10-wb-setup.conf"
 SERVICE_MARK = "Written by `wb setup`"  # a plist that says so is wb's to rewrite; any other the user's
+# sha256 of launchd/workbench.chat.plist as releases before 2.0 shipped it, whose comment said to cp
+# it into ~/Library/LaunchAgents by hand: kept as the user's, the agent ran on without the PATH and
+# WB_* variables (#1406, 2026-11-25). A released change to that file adds its old sha256 here.
+SHIPPED_PLISTS = frozenset({"40c21dc91f5f2788cd015e2e2ee11545de9df4bfc8a6d6b4b5407e750b937001"})
 
 
 def service_env(manager_path: str = "") -> dict[str, str]:
@@ -6773,9 +6783,12 @@ def _install_launchd() -> str | None:
         was = at.read_bytes()
     except OSError:
         was = None
-    # an earlier setup's plain copy, or its own written one, is wb's to rewrite; a copy the user
-    # edited (and took the mark off) is theirs: kept
-    if was is None or was == shipped.read_bytes() or SERVICE_MARK.encode() in was:
+    # an earlier setup's plain copy, an earlier release's (SHIPPED_PLISTS), or its own written one,
+    # is wb's to rewrite; a copy the user edited (and took the mark off) is theirs: kept
+    import hashlib
+    theirs = not (was is None or was == shipped.read_bytes() or SERVICE_MARK.encode() in was
+                  or hashlib.sha256(was).hexdigest() in SHIPPED_PLISTS)
+    if not theirs:
         import plistlib
         with open(shipped, "rb") as f:
             base = plistlib.load(f).get("EnvironmentVariables", {}).get("PATH", "")
@@ -6796,7 +6809,7 @@ def _install_launchd() -> str | None:
             return _failed(argv, said)
     if down := _came_up(["launchctl", "bootout", target]):
         return down
-    return f"ok  web app kept up by launchd's {chat.LAUNCHD_LABEL} ({at}{made})"
+    return f"ok  web app kept up by launchd's {chat.LAUNCHD_LABEL} ({at}{', yours' if theirs else made})"
 
 
 def cmd_setup(a):
