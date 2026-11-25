@@ -5880,6 +5880,42 @@ class AutoFix(Base):
             "says nothing about the change"))
         self.assertFalse(store.Task("t-slow").round_dir(2).exists())
 
+    def test_a_suite_whose_output_passes_the_cap_checks_in_on_the_base_and_skips_auto_fix(self):
+        # #1301 (bar round 8 of 2.0): a passing but verbose suite (Maven's console logging,
+        # `pytest -s`) printing past 20 MB was stopped there, the base check said nothing, and
+        # round 1 and both auto-fix rounds ran on correct code, each told the bug was the change's
+        self.start("t-loud", "ok", "--auto-fix", "2", "--no-self-review", "--test",
+                   "head -c 25000000 /dev/zero | tr '\\0' x; sleep 30; grep -qx 42 answer.txt")
+        st = wait_phase("t-loud", {"review", "stuck", "failed"}, timeout=90)
+        self.assertEqual((st["phase"], st["round"], st.get("auto_fixes", 0)), ("review", 1, 0))
+        self.assertEqual((st["base_check"]["exit"], st["tests"]["exit"]), ("output limit", "output limit"))
+        checkins = [r["text"] for r in store.notices() if r["task"] == "t-loud" and r["kind"] == "checkin"]
+        self.assertEqual(checkins, ["task t-loud: warning: on the base the acceptance command's "
+                                    "output passed 20 MB, where wb stops it, so every round's tests "
+                                    "will stop there too: quiet it (-q, less logging) or narrow it "
+                                    "(wb discard, then start again)"])
+        self.assertEqual(st["last"], "the acceptance command's output passed 20 MB, where wb stops "
+                                     "it: Claude reviews next")
+        review = [r["text"] for r in store.notices() if r["task"] == "t-loud" and r["kind"] == "review"]
+        self.assertTrue(review[0].startswith(
+            "auto-fix skipped: the acceptance command's output passed 20 MB, where wb stops it: "
+            "its failure says nothing about the change; run it in the worktree yourself, or quiet "
+            "it (-q, less logging) or narrow it (wb next --test)"))
+        self.assertFalse(store.Task("t-loud").round_dir(2).exists())
+
+    def test_a_flood_from_a_command_that_passed_on_the_base_goes_back_to_the_agent(self):
+        # #1301: the cap still catches the change's own flood (a print in a retry loop, the
+        # 2026-11-16 audit) when the base check ran the same command to exit 0, under the cap
+        self.start("t-spew", "ok", "--auto-fix", "1", "--no-self-review", "--test",
+                   "if grep -qx 42 answer.txt 2>/dev/null; then yes; fi")
+        st = wait_phase("t-spew", {"review", "stuck", "failed"}, timeout=90)
+        self.assertTrue(st["base_check"]["ok"])
+        self.assertEqual((st["phase"], st["round"], st["auto_fixes"]), ("review", 2, 1))
+        prompt = store.Task("t-spew").round_dir(2).joinpath("prompt.md").read_text()
+        self.assertIn("(exit output limit)", prompt)
+        self.assertIn("the bug is in this change", prompt)
+        self.assertEqual([r["kind"] for r in store.notices() if r["task"] == "t-spew"], ["review"])
+
     @unittest.skipUnless(lane_device(), "needs Landlock and a device node this user may open")
     def test_a_test_run_past_the_limit_that_was_fast_on_the_base_goes_back_to_the_agent_as_a_hang(self):
         # #779 (the second 2026-11-21 audit): every timeout skipped auto-fix and said to raise

@@ -414,7 +414,11 @@ with the fix (`wb allow --path` of `lane_grant`'s grant, `shlex.quote`d, #670). 
 `wb feedback` after it and by `wb next`): the acceptance command may test the whole task, which
 waits, so the report leads `auto-fix skipped: ` with `runner.STEP_SKIP`, status `last`
 `a smaller step (wb steer --step): Claude reviews next`, and no self-review runs after one either
-(each auto-fix round told an agent that did the part "the bug is in this change", #1300). Except `hang`
+(each auto-fix round told an agent that did the part "the bug is in this change", #1300). A run
+stopped at `TEST_OUTPUT_CAP` (exit `output limit`) gets none either, `OUTPUT_CAPPED` and
+`QUIET_IT`: a passing but verbose suite printing past 20 MB went through both auto-fix rounds as
+the change's bug (#1301), unless the base check passed the same command, under the cap: that
+flood is the change's. Except `hang`
 (tests `hang {base, limit}`): a timeout where the base check passed the same command in
 `HANG_SHARE` (a quarter) of the limit or less is the change's, sent back saying so (#779). A
 dropped proxy (`proxy_gap`, #380) still auto-fixes, told not to change code for it; with tests
@@ -1443,7 +1447,8 @@ none).
 **Tests** (`run_tests`, `run_in_lane`): `<shell> -c` (zsh: `+o nomatch -c`) in the worktree, the agent's lane and
 environment, its own group, `--test-timeout` (900 s), the runner's `CURRENT`. Read as it comes
 (`_Capture`; a `setsid` server may hold the pipe): ends at the shell's exit, the timeout (exit
-`timeout`) or `TEST_OUTPUT_CAP` (20 MB, exit `output limit`), then group kill and `sweep`. Kept:
+`timeout`) or `TEST_OUTPUT_CAP` (20 MB, exit `output limit`, which `not_the_code` and the base
+check read as no verdict, #1301), then group kill and `sweep`. Kept:
 `KEEP_HEAD` (64 KB) and `KEEP_TAIL` (256 KB) around `[... N bytes of output cut ...]`.
 `status.tests` `{ok, exit, tail, round}`, tail `clip_tail(output, 40)` (40 lines, 300 characters a
 line, 4000 in all). `rounds/<n>/tests.txt`: `$ cmd`, `exit: N`, `shell: <path>`, output.
@@ -1535,7 +1540,8 @@ once on the base in a scratch checkout (`verify.on_base`, a `--shared` clone,
 status `ran_wrote` (`verify._run`'s `ran`, `runner._note_ran`; #1211's review: `runner.hand_wrote`). Output to `base-tests.txt`; status `base_check`
 `{ok, exit, tail (8 lines, 1500 characters), limit, secs, cmd}` (`secs` excludes waits, #779).
 `base_check_line`: a note when it passes (Claude checks the diff adds tests that fail without the
-change), a warning plus an immediate `checkin` when `--test-timeout` cut it or the shell didn't find
+change), a warning plus an immediate `checkin` when `--test-timeout` cut it, its output passed
+`TEST_OUTPUT_CAP` (every round's run stops there too: `QUIET_IT`, #1301) or the shell didn't find
 its command (`missing_command`: exit 127, the tail's last line `NOT_FOUND`'s, bash's or zsh's
 `command not found` (`Command` in any case: macOS's make 3.81 says `make: <name>: Command not
 found` for a recipe it execs itself, #1262), dash's `: not found`; not `No such file or directory`, a script the step may
