@@ -26368,6 +26368,23 @@ class WebChat(Base):
             with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
 
+    def test_a_switch_left_off_by_an_older_wbs_failed_chat_on_is_read_as_never_set(self):
+        # #1405 (2026-11-25): 1.91.x and 2.0 before #1281 wrote {"on": false} on a failed `wb chat
+        # on` (a port taken), and 2.0 read it as the user's off, so the web app never came up
+        chat = self.chat
+        switch, ran = chat.chat_dir() / "switch.json", chat.chat_dir() / "port.json"
+        self.assertFalse(ran.exists())                              # the test's own state
+        store.write_json(switch, {"on": False})                     # no server of ours ever ran
+        self.assertTrue(chat.is_on())
+        self.assertFalse(switch.exists())                           # rewritten once: as never set
+        store.write_json(ran, {"port": self.port})
+        self.assertTrue(chat.is_on())                               # a server since: still on
+        store.write_json(switch, {"on": False})                     # one ran: the user's off
+        self.assertFalse(chat.is_on())
+        ran.unlink()
+        chat.set_on(False)                                          # 2.0's own off, marked
+        self.assertFalse(chat.is_on())
+
     def test_without_inotify_the_hub_wakes_the_streams_only_for_a_change_or_the_listener_ending(self):
         # #841: the polling branch bumped every second, so each open stream rebuilt its snapshot
         # (a `ps` fork each on macOS) once a second with nothing new

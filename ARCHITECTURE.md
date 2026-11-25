@@ -5555,8 +5555,10 @@ else `chat/serve.pid`, else 1337; `--port`, #349; the fragment never leaves the 
   `final: true` for `FINAL_ERRNOS`; the page stops on `final` or the `SERVER_TRIES`-th (3) 5xx,
   else backs off (it re-sent forever, #742). `wb gc` drops uploads past `--days` whose message has
   a receipt (expired too, #741) or that no deliverable message names (`chat.drop_old_uploads`).
-- **The switch.** `chat/switch.json` `{on}` (absent: on, `chat.is_on`; `{"on": false}` only after
-  `wb chat off`, and the user's off stays off). `on` turns it on and runs `chat.ensure`; when that
+- **The switch.** `chat/switch.json` `{on, v}` (absent: on, `chat.is_on`; `{"on": false}` only after
+  `wb chat off`, and the user's off stays off; `v`, `chat.SWITCH_V`, marks 2.0's writes: a bare
+  `{"on": false}` with no `chat/port.json` is an older wb's failed `wb chat on`, read as never set
+  and removed once, #1405). `on` turns it on and runs `chat.ensure`; when that
   ends neither `up` nor `started` the switch goes back as it was (`web chat left off: …` from off,
   `web chat not up: …` from on: left on when it died, the pane read On and pinned a dead link,
   #690). `chat.start` runs `bin/wb chat serve --port <port>` detached (`chat/serve.log`,
@@ -6890,7 +6892,7 @@ $WB_HOME (~/.local/state/workbench)
   imports/<slug>/                wb skill import's fetches, for Claude to read
   images/<YYYYmmdd-HHMMSS>/      wb image's candidates (unless --out), .json sidecars, engine.log
   audio/<YYYYmmdd-HHMMSS>/       wb audio's clips: .wav, .json sidecar, .png spectrogram, engine.log
-  chat/                          messages.jsonl receipts.jsonl open.json listener.json claims.json switch.json ({on})
+  chat/                          messages.jsonl receipts.jsonl open.json listener.json claims.json switch.json ({on, v})
                                  serve.pid ({pid, port, start}: chat.ensure waits on it) ensure.lock serve.log port.json ({port, pid, start})
                                  away.json ({at, by}; 0 once the user types in the terminal) page.json ({at})
                                  audio/<batch>/ (wb chat listen: <n>.<ext>, audio.json; newest 20) uploads/<id>/ (<name> 0600, .meta.json) uploads.lock

@@ -1199,13 +1199,27 @@ def notice_done(msg_id: str) -> bool:
 # reversing 2026-11-19's off until `wb chat on`. Only `wb chat off` writes {"on": false}, and that
 # stays as the user left it. Off, the pane shows no link and no session listens or sends it their
 # prompts; a server already running (systemd's) is left alone, its messages waiting.
+# 2.0 marks what it writes ("v": 2). A bare {"on": false} is older: 1.91.x and 2.0 before #1281
+# wrote it on a failed `wb chat on` too (a port taken), so with no chat/port.json (no server of
+# this account ever ran) it is read as never set, and removed once, or the server that then runs
+# would write port.json and make it the user's off again (#1405, 2026-11-25). A 1.x `wb chat off`
+# before any server ran is turned on with it, as the on-by-default owner wants.
+SWITCH_V = 2
+
+
 def is_on() -> bool:
-    doc = store.read_json(chat_dir() / "switch.json", None)
-    return not isinstance(doc, dict) or bool(doc.get("on", True))
+    path = chat_dir() / "switch.json"
+    doc = store.read_json(path, None)
+    if not isinstance(doc, dict) or bool(doc.get("on", True)):
+        return True
+    if doc.get("v") is None and not (chat_dir() / "port.json").exists():
+        path.unlink(missing_ok=True)
+        return True
+    return False
 
 
 def set_on(on: bool) -> None:
-    store.write_json(chat_dir() / "switch.json", {"on": bool(on)})
+    store.write_json(chat_dir() / "switch.json", {"on": bool(on), "v": SWITCH_V})
     if not on:  # nobody listens now: the page would say a live session does
         (chat_dir() / "listener.json").unlink(missing_ok=True)
 
