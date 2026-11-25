@@ -206,17 +206,21 @@ def rescue(root, found: Changes) -> Path:
     return d
 
 
-def marketplace_refusal(root) -> str | None:
-    """wb update on a marketplace install with local changes: they are saved first, and the
-    refusal says where. Claude Code's update re-clones, and `wb update` once printed "updated
-    marketplace <patched>..<upstream>", exit 0, having wiped the patch (#1005, 2026-11-22)."""
+def marketplace_refusal(root, runs_from=None) -> str | None:
+    """wb update with local changes in Claude Code's marketplace clone ``root``: they are saved
+    first, and the refusal says where. Claude Code's update re-clones, and `wb update` once printed
+    "updated marketplace <patched>..<upstream>", exit 0, having wiped the patch (#1005, 2026-11-22).
+    ``runs_from``: the developer clone wb runs from, when ``root`` is another copy (#1326)."""
     found = local_changes(root)
     if not found:
         return None
     saved = rescue(root, found)
+    fix = ("wb patch init moves workbench to a clone of your own that keeps them as patches and still "
+           "updates" if runs_from is None else
+           f"git am takes its patches into {runs_from}, and claude plugin marketplace add {runs_from} "
+           "makes that clone the marketplace, which Claude Code never re-clones")
     return (f"the marketplace clone {root} has {found.say()}: Claude Code's update re-clones it and "
-            f"would wipe them, so nothing was updated. Saved in {saved}; wb patch init moves workbench "
-            "to a clone of your own that keeps them as patches and still updates")
+            f"would wipe them, so nothing was updated. Saved in {saved}; {fix}")
 
 
 CHECK_LINE = ("local changes in the marketplace clone: wb update would refuse (Claude Code re-clones "
@@ -409,7 +413,7 @@ def _on_patch_branch(root):
     b = branch(root)
     if b != PATCH_BRANCH:
         raise PatchError(f"{root} is on {b or 'a detached HEAD'}, not {PATCH_BRANCH}: patches are commits "
-                         f"on {PATCH_BRANCH} (git -C {root} switch {PATCH_BRANCH}, or switch -c {PATCH_BRANCH})")
+                         f"on {PATCH_BRANCH} (git -C {root} switch {PATCH_BRANCH}, or switch -c {PATCH_BRANCH} --track origin/main)")
 
 
 def _patches(root) -> list:
@@ -418,13 +422,38 @@ def _patches(root) -> list:
     return [tuple(r.split("\0")) for r in rows.splitlines() if r]
 
 
+def track_upstream(root) -> str | None:
+    """Make PATCH_BRANCH track origin's default branch when it tracks nothing; the line to print,
+    else None. One made with a plain `git switch -c local`, as the texts said, had no upstream:
+    wb update died "fatal: no upstream configured", wb doctor skipped its patches, and a reused
+    `local` stayed so (#1327, 2026-11-24). Only a branch that exists, with that ref fetched."""
+    ref = f"refs/heads/{PATCH_BRANCH}"
+    if (not _out(root, "rev-parse", "-q", "--verify", ref, check=False)
+            or _out(root, "config", f"branch.{PATCH_BRANCH}.merge", check=False)):
+        return None
+    head = _out(root, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD", check=False)
+    up = head or "origin/main"
+    if not _out(root, "rev-parse", "-q", "--verify", f"refs/remotes/{up}", check=False):
+        return None
+    _git(root, "branch", "-q", f"--set-upstream-to={up}", PATCH_BRANCH)
+    return f"branch {PATCH_BRANCH} tracked no upstream: it tracks {up} now"
+
+
+def no_upstream(root) -> str | None:
+    """None when HEAD's branch tracks one, else what to run, for a refusal or wb doctor (#1327)."""
+    b = branch(root)
+    if not b or _out(root, "config", f"branch.{b}.merge", check=False):
+        return None
+    return f"branch {b} tracks no upstream: git -C {root} branch -u origin/main {b}"
+
+
 def clone_note(root) -> str:
     b = branch(root) or "a detached HEAD"
     if b == PATCH_BRANCH:
         return (f"workbench already runs from a clone you own ({root}), on branch {b}: patches are its "
                 "commits (wb patch list)")
     return (f"workbench already runs from a clone you own ({root}), on branch {b}: patches are commits on "
-            f"branch {PATCH_BRANCH} (git -C {root} switch -c {PATCH_BRANCH} to start)")
+            f"branch {PATCH_BRANCH} (git -C {root} switch -c {PATCH_BRANCH} --track origin/main to start)")
 
 
 def list_patches(root, kind) -> None:
@@ -977,7 +1006,9 @@ def zip_patches(root, kind, commits=(), name=None) -> Path:
     ref = f"refs/heads/{PATCH_BRANCH}"
     if not _out(root, "rev-parse", "-q", "--verify", ref, check=False):
         raise PatchError(f"{root} has no branch {PATCH_BRANCH}: patches are commits on it "
-                         f"(git -C {root} switch -c {PATCH_BRANCH})")
+                         f"(git -C {root} switch -c {PATCH_BRANCH} --track origin/main)")
+    if line := track_upstream(root):
+        print(line)
     up = _upstream(root, PATCH_BRANCH)
     if not up:
         raise PatchError(f"{PATCH_BRANCH} tracks no upstream: git -C {root} branch -u origin/main {PATCH_BRANCH}")
@@ -1386,6 +1417,8 @@ def doctor_lines(root, kind) -> list[str]:
         lines = [f"ok  install: your own clone at {root}, branch {b} (wb patch init)" if own
                  else f"ok  install: developer clone at {root}, branch {b}"]
         rows = _patches(root) if b == PATCH_BRANCH and _upstream(root) else []
+        if b == PATCH_BRANCH and (fix := no_upstream(root)):  # its patches unseen, wb update failing (#1327)
+            lines.append(f"--  local patches: {fix} (wb update sets it)")
         if rows:
             lines.append(f"--  local patches: {len(rows)} ("
                          + ", ".join(scope or "no Scope" for _, _, scope in rows) + ")")
@@ -1526,6 +1559,8 @@ def init(root: Path, dest: Path) -> None:
             if branch(dest) != PATCH_BRANCH:
                 _git(dest, "switch", "-q", PATCH_BRANCH)  # git refuses it over changes of the user's
             print(f"{dest} already has branch {PATCH_BRANCH}: kept as it is, nothing carried over{keep}")
+            if line := track_upstream(dest):
+                print(line)
         else:
             if reuse and _out(dest, "status", "--porcelain", "--untracked-files=all"):
                 raise PatchError(f"{dest} has uncommitted changes: commit or stash them, then wb patch init")

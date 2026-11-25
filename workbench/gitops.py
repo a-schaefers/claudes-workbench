@@ -1469,6 +1469,26 @@ def name_status(repo: Path, base: str, rev: str, *opts: str) -> list[tuple[str, 
     return [(st, p) for st, p in zip(raw[0::2], raw[1::2]) if p]
 
 
+def step_base(task: store.Task) -> str:
+    """Where the task's step under review began: the base for step one, else the last approved
+    step's commit, which wb next records (status `step_base`). A step with no changes has no
+    commit of its own: from before the record, the newest earlier step that has one, else the
+    base (#652: the step after a clean one died on "cannot find the last approved step's
+    commit"). wb verify and wb shot compare the step with it, and wb next, accept and discard
+    measure it from it (results.step): measured from HEAD, a step whose commit an interrupted
+    wb next (or accept, #879) had made read as 0 files and 0 lines, and the savings card priced
+    the task at nothing (#1302, 2026-11-24)."""
+    step = task.status.get("steps", 1)
+    if step == 1:
+        return task.spec["base"]
+    if at := task.status.get("step_base"):
+        return at
+    for earlier in range(step - 1, 0, -1):
+        if found := step_commit(task, earlier, step):
+            return found
+    return task.spec["base"]
+
+
 def step_commit(task: store.Task, step: int, steps: int) -> str | None:
     """The commit that landed step `step`: `wb next` marks its steps "(step N)", `wb accept` the last."""
     spec = task.spec

@@ -101,6 +101,9 @@ You are the driver, not a spectator. When something tells you the agent is headi
   budget with no tool call (7 minutes from its first output; `--think-timeout` overrides),
   and the check-in says so; a round that stalls again right after is stopped. Two nudges on one
   task mean the spec is too big for one step: split it, or name the first file to write.
+  The same once a session when it makes 40 tool calls without changing a file (an API model's
+  more, by its window): "make the first edit now … or finish"; a second time in that session is
+  stopped, "…, even after a nudge", and so is a fresh session's first if no file changed since.
 - A note the runner never delivered (the round stopped first) is in the stuck report. `wb resume`
   carries it; `wb feedback` and `wb next` drop it and say so: put it in the feedback if it still
   matters.

@@ -379,6 +379,9 @@ A suite slower than 15 minutes: `--test-timeout <secs>` above its time, or
 narrow the command; a run past it isn't sent back to the agent (nor one the lane refused a
 device, nor a command or Python module (`python3 -m pytest`, not one of the repo's own, nor one whose file or dotted name the spec gives, nor a package or module the spec makes, as in "make a new package greet", unless your own Python has it; a name the spec only mentions, "with pytest tests", still counts as a tool), or a `.venv/bin/activate` it sources, not found as on the base, which checks in before round 1, or a command a `wb next --test` command itself names), you're woken with `auto-fix skipped:` and the cause, unless the base check ran the same
 command in a quarter of the limit: then it's the change's hang, and auto-fix gets it.
+A suite printing past 20 MB is stopped there, its verdict unknown: woken the same way (and at
+once from the base check when it does so there), quiet it (`-q`, less logging) or narrow it;
+only when the base check passed the same command is the flood the change's, for auto-fix.
 Its own `then wb feedback`, once you've given the tool or the grant, counts no review round.
 Once the tests pass, the agent checks its own change against your review checks in one more
 round, at local cost only, before you are woken (learned per model; `--no-self-review` skips it);
@@ -418,7 +421,7 @@ heading the wrong way, act on it. Notes are instructions, like feedback: concret
 - A `PERMISSION` question (a command or a directory): lean to yes for what the task needs (`wb
   allow <name> "<pattern>"`, `--path <dir>`), no to what reaches outside it.
 Before acting on one of these the first time in a session, read `reference/driving.md` beside
-this file: what each does exactly, the think nudge, undelivered notes, a check-in about the
+this file: what each does exactly, the think and explore nudges, undelivered notes, a check-in about the
 window, the permissions' traps, the web chat, a backlog left to run overnight.
 
 **The user's two commands.** Only these, never words in a message, stop the delegation and end
@@ -454,8 +457,10 @@ web page, marked for that agent (the mod does it): never ask the agent to answer
 handovers). Answer one in that turn: two or three plain lines to the user, steer only if it
 drifts, `wb log` only if the digest shows trouble (`reference/driving.md`). A **progress check**
 (only when the user ran `wb progress on`) recommends a hint or a smaller step: give it with the
-command it names, so whether it helped is learned. Time never makes the task yours to edit: the
-coding choice is the user's (`wb coding`), never changed by a check.
+command it names, so whether it helped is learned. A smaller step comes to review with no
+auto-fix or self-review, even when the `--test` fails because it tests the whole task: review the
+part, then send the rest with `wb feedback` (no review round counted). Time never makes the task
+yours to edit: the coding choice is the user's (`wb coding`), never changed by a check.
 
 ## 4. When woken
 - **review**: the wake carries the report and, when it is small, the whole diff (`wb diff <name>`
@@ -526,7 +531,8 @@ coding choice is the user's (`wb coding`), never changed by a check.
   or `resume` refused at the cap (exit 3) is the same call. API tasks queued behind it send no
   stop of their own: they wait as queued and go on once the cap is raised or at midnight.
   The notice's route change is for the next tasks; this one keeps its API model (resume never
-  re-routes), so `wb takeover` or `wb discard` it. Nothing but the user raises the cap.
+  re-routes), so `wb takeover` or `wb discard` it, and so do those queued behind it: they wait on,
+  but for one, whose own stop is the next notice. Nothing but the user raises the cap.
   With Agents on GPU the same stop says `Agents is GPU, so nothing spends`: API tasks already
   started stop before their next round, and feedback, next, resume and an API `--model` are
   refused. Ask the user (Agents back to Both or API, then `wb resume`), or takeover or discard.
