@@ -57,6 +57,7 @@ AUDIO_TYPES = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".ogg": "audio/ogg", "
 BATCH_RE = re.compile(r"^[0-9]{13}-[0-9a-f]{6}$")
 MAX_STREAMS = 16        # open /api/stream connections (each holds a thread)
 PING_EVERY = 15         # seconds between keep-alive comments on a stream
+NUDGE_AFTER = 0.05      # seconds after each event to its blank line, which hands WebKit its tail
 TIMEOUT = 30            # seconds a connection may stall (more than PING_EVERY: streams write by then)
 UNACKED_MS = 45_000     # a stream whose writes go unacknowledged this long is dead (Linux)
 RELOAD_EVERY = 10       # seconds between looks at the server's own code
@@ -2314,11 +2315,18 @@ class Handler(BaseHTTPRequestHandler):
             self._security_headers()
             self.send_header("X-Accel-Buffering", "no")
             self.end_headers()
-            seen, had, sent = -1, None, time.monotonic()
+            # An event is followed, NUDGE_AFTER later, by a blank line (an empty event, nothing
+            # for a reader). WebKit's network layer (Playwright's on Linux) hands a streamed body
+            # to the page's reader only up to the first 8 KB of what came in one read, the rest
+            # once more bytes come: a state past 8 KB on a reconnect waited for the next ping, 15 s,
+            # and the push's wake showed nothing (the #1284 review, 2026-11-24). Sent with the
+            # event, the byte comes in its read and is held with it, so it goes on its own
+            seen, had, sent, nudge = -1, None, time.monotonic(), False
             while True:
                 with hub.cond:
+                    due = sent + (NUDGE_AFTER if nudge else PING_EVERY)
                     woke = hub.cond.wait_for(lambda: hub.version != seen,
-                                             timeout=max(0.0, PING_EVERY - (time.monotonic() - sent)))
+                                             timeout=max(0.0, due - time.monotonic()))
                     seen = hub.version
                 if self.evicted or self._revoked():  # revoked: it ends, and its reconnect is 401
                     return
@@ -2334,13 +2342,18 @@ class Handler(BaseHTTPRequestHandler):
                     if event:
                         self.wfile.write(event.encode())
                         self.wfile.flush()
-                        sent = time.monotonic()
+                        sent, nudge = time.monotonic(), True
                         continue
-                    if time.monotonic() - sent < PING_EVERY:
+                    if time.monotonic() < due:
                         # Without inotify the hub wakes every second (how a dead listener is
                         # noticed): a ping only after PING_EVERY of silence, not one a second
                         # (the 2026-11-16 audit)
                         continue
+                if nudge:  # the event's tail, out of WebKit's buffer; the ping still PING_EVERY on
+                    self.wfile.write(b"\n")
+                    self.wfile.flush()
+                    nudge = False
+                    continue
                 self.wfile.write(b": ping\n\n")  # keeps the line (and the page's watchdog) alive
                 self.wfile.flush()
                 sent = time.monotonic()

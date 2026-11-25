@@ -498,8 +498,8 @@ period's closed tasks, the energy's `cost` at `price()` (`$WB_SAVINGS`, else `sa
 (A), rounded, held to 1–100; `BANDS` 1–9 red, 10–24 orange, 25–49 yellow, 50–100 green; the
 sentence "I used about 62% less Claude than if Claude had done this work alone", "about the same
 amount" or "about 20% more" (both score 1); else `NO_SCORE`. Energy and price stay out. `wb
-savings` ends `score N/100`, `--json` carries `{score, color, pct, sentence}`, the web chat's gear
-shows it; `wb savings --card FILE.svg` (`savings.card`) writes an
+savings` ends `score N/100`, `--json` carries `{score, color, pct, sentence}`, the web chat's Stats
+view shows it; `wb savings --card FILE.svg` (`savings.card`) writes an
 SVG (`CARD_COLORS`, each past 4.5:1) holding no name, path, host or account.
 
 The energy: the runner's `_Power` thread samples `hardware.gpu_power_w()` every `POWER_EVERY`
@@ -5656,7 +5656,9 @@ address (#534).
   MiB; else 404 "no such take". The page shows both as blob URLs fetched with the token.
 - `GET /api/stream`: SSE: `event: state` at once, then `event: patch` (`chat.patch` against what
   this stream sent: `messages`/`asks` as `{put, drop}`, every other field whole so a stale busy flag
-  can't stick; #755), `: ping` after 15 s idle. `MAX_STREAMS` 16: the oldest gives way (`evicted`),
+  can't stick; #755), each event followed `NUDGE_AFTER` (50 ms) later by a blank line of its own
+  (WebKit hands a streamed body over only to the first 8 KB of a read until more bytes come: a state
+  past 8 KB waited 15 s for the ping, the #1284 review), `: ping` after 15 s idle. `MAX_STREAMS` 16: the oldest gives way (`evicted`),
   the new one waits 5 s (503), since phones drop streams silently. Linux: `TCP_USER_TIMEOUT`
   `UNACKED_MS` 45 s. One `Hub` thread watches `chat/` and a pidfd on the listener and wakes every
   stream; without inotify it wakes them only for a change, the listener's pid failing `kill 0`, or
@@ -5680,7 +5682,7 @@ address (#534).
   `{test: true}` → `{sent, ok, hint, reasons}`.
 
 **The page** (`chat_static/`; no inline script, for the CSP). The token comes from the fragment (or
-`?token=`) into `localStorage` `wb-chat-token` and leaves the address bar (other keys: `wb-chat-thread`, the
+`?token=`) into `localStorage` `wb-chat-token` and leaves the address bar before anything else reads the hash (other keys: `wb-chat-thread`, the
   last 50 for a reload; `wb-chat-seen`, 500 ids not replayed; `wb-chat-draft`, `wb-chat-about`); over https the manifest
 link carries `?k=<token>`, since an iPhone app has its own storage. The stream is a `fetch` with the
 bearer header (EventSource can't send one): each connection starts with a whole state, patches
@@ -5706,10 +5708,46 @@ at a time (XHR; `STALL_MS` 30 s without progress retries the same id); edit rest
 `about` (`setAbout`, #843) and the words before the box's (#958); thumbnails load near view
 (`whenNear`, #754), and before the server's thread is in only from this browser's bytes: the rest wait
 in `nearLater`, judged again by `nearAgain` where that thread put them (a photo the saved thread showed was fetched, 2026-11-24), and an entry measured before the last `render` (`drawnAt`) is observed afresh, not loaded (one delivered after the server's thread was drawn fetched that photo still, #1223); `sweepSoon` revokes unused object URLs (#746). The receipt texts, dialog cards
-(`makeAsk`), notices (`makeNotice`) and the gear's sections (`#away-when` states the away rule
+(`makeAsk`), notices (`makeNotice`) and the Settings and Stats cards (`#away-when` states the away rule
 above; `drawSaved` shows no currency sign, as `wb savings`, #845, and after it `apiSaved`'s `API
 models: 6 tasks, ≈$1.27 (DeepSeek ≈$0.84, Anthropic ≈$0.43; catalog prices).`, or that alone, #1022, #1135) are in `app.js`. Over plain HTTP
 off localhost the page isn't a secure context: own ids, `copyText` (#745), no install or push.
+
+**The shell** (#1284; the owner, 2026-11-24: merecatholicity.com's three buttons at the foot). Three
+views, `<section id="view-chat">` (the strip `#tasks`, `main#scroll`, `#jump`, `#about`, `#tray`,
+`#composer`), `#view-stats` and `#view-settings`; `body[data-view]` shows one. The hash is the route:
+`#chat`, `#stats`, `#settings`, anything else (none too) the chat; `hashchange` switches (`setView`;
+a tab's press sets the hash, `go`), so Back walks them and a reload keeps its view. `<nav
+id="tabbar" aria-label="Primary">` holds three `button.tab[data-view]`, each a 24 px stroke icon
+over an 11 px `.tab-lbl`; the current one has `aria-current="true"`, colour and a 1 px lift. On a
+phone (≤600 px) it is the body's last flex child, under the composer, `56px` plus the safe area
+tall (the composer drops its own safe-area pad, `#jump` sits 56 px higher), hidden under
+`body.kb-open` so the composer sits on the keyboard (`fit`'s visualViewport check), `user-select:
+none` under `hover: none`. From 601 px the body is a grid: a 76 px left rail, the header, banner and
+view beside it; the chat a 760 px column, Stats and Settings `.view-in` 1040 px of `.card`s, two
+columns (`.cards`) from 1100 px. The cards' type (`h3`, `p`, `code`, `.small`, `.plain`) is scoped
+to `.view-in`, never `.view`: `#view-chat` is a `.view` too, and its plan and ask cards and the
+intro's `<code>` keep the chat's sizes. The Chat tab's `.tab-badge` counts Claude's messages and notices
+for the user and open asks newer than when the thread was left (`leftAt`, the server's clock; a
+page opened on another view takes its first live state's `now`), `99+` at most, in its
+`aria-label` too (`Chat, 3 new`), cleared on Chat (`drawBadge`). The thread keeps its place while
+hidden (`toEnd` waits; `chatTop`). A notification's click posts `{kind: "view", view: "chat"}` to an
+open page, else opens `/#chat` (`sw.js`). The gear and its sheet are gone: its sections are
+Settings' cards, While away, Notifications, The app, This chat, This device (`#settings` is their
+grid), under `#settings-rows`; What it saved (`#badge`, `#saved`) is a Stats card under `#stats-body`;
+the ids are as they were, and `drawShown` draws the cards of the view shown (`drawSettings`,
+`drawSaved`) on each state and switch. Forget the key goes to the chat. Over the views, `#toast`.
+The manifest has no shortcuts to the views: the keyed one is built in `chat.py`, and a shortcut without the key
+would open an iPhone app keyless.
+
+**The views' API** (`window.WB`, frozen, set by `app.js` before `stats.js` and `settings.js` run:
+`defer`, after it; `stats.css`, `settings.css` after `app.css`): `token()` (`''` without a key),
+`api(path, init?)` (`fetch` with the bearer header and `cache: 'no-store'`; a plain-object body is
+sent as JSON, and a JSON or string body gets `Content-Type: application/json`), `view(name, {mount(root),
+show(), hide()})` (`stats` gets `#stats-body`, `settings` `#settings-rows`; mounted once, at once,
+shown and hidden on each switch and on `visibilitychange`; a second registration is ignored),
+`toast(text)` (3.5 s), `on('state' | 'view', fn)` (each snapshot applied; each switch, its name),
+`current()`. Each view's files are its own, so the two are built apart.
 
 **The app and notifications.** The manifest ("Claude's Workbench", `short_name` "Workbench") is offered over https only (`app.js` removes its link
 over http: localhost counts as secure and one computer got two apps). The `badge` is
@@ -7157,13 +7195,18 @@ runner on real OpenCode (`wb start --model cap`): argv, `run --format json` even
 `ApiThinking`'s `test_real_opencode_*` is one too (#1018): a `wb-off` body variant and the catalog's `none` reach a DeepSeek-shaped server as `thinking: {type: disabled}` in the agent's request, and the npm provider's V1 `wb-off`.
 
 **The browser test** (`e2e_chat.mjs`): the real `bin/wb chat serve` on 13371 (`WB_E2E_PORT`), WebKit as an iPhone 13
-and Chromium (`$CHROMIUM`, `/usr/bin/chromium`, else Playwright's) as a Pixel 7: sends land exactly once through
+and Chromium (`$CHROMIUM`, `/usr/bin/chromium`, else Playwright's) as a Pixel 7, then at a desktop's 1280×800
+(`DESKTOP`: the checks through Settings', then the shell's alone). The shell (`shell`, #1284): the bar at the foot
+on a phone and the rail on the desktop, the hash and Back, the Chat tab's badge, the bar hidden with the keyboard
+(a visual viewport made short by hand), the cards' styles kept out of the chat (a plan card's `<p>`
+and `<code>`, the intro's `<code>`), `window.WB`, and the gear's old checks from Settings and Stats (`goTo`);
+then each view's own, `e2e_stats.mjs` and `e2e_settings.mjs` (`check(page, ctx)`, once per device). Sends land exactly once through
 outages, reloads and a SIGSTOP past the 40 s watchdog; cards, plans, settings, install over https, `/api/seen` and
 `/api/active` only while in use, notices, shot pairs, listen's shortlist, the keyboard, uploads, an agent's message
 shown with its name and its reply through `/api/wait`, that reply named `Claude to <agent>` and
 never counted unread (#1128), its state without the user's, a dialog for it saying so on the
 card and in the push (#1042), a 25-task backlog's strip at most three lines on a phone, the queued counted apart
-(#1097); and `sw.js` in a node `vm` (`swSays`) for a push's text. Each wait is `until` on its condition
+(#1097); and `sw.js` in a node `vm` (`swSays`) for a push's text, and for a notification's click (to the chat). Each wait is `until` on its condition
 (20 s by default), never a fixed sleep: a sleep is only a claim that something does not happen or a span the
 page's own clock must pass, as a different check failed on each slow CI runner (#1223). The server's thread is
 held back by the page's own `fetch` while sessionStorage has `e2e-hold` (Playwright's routes stopped holding
@@ -7501,7 +7544,8 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   never shown, #846, #861), *Files and formats*; `Watch` checks every `.event({… "kind": …})` literal (#865).
 - **A new tuned knob** → `tuning.KNOBS`, `tuning.value(task, name)`, a ceiling in `drive`; an evidence flag (`fills`,
   `passed`) → `tuning.acted` and its row field (`peak_share`, `self_review_due`).
-- **`chat.py` or `chat_static/`** → the browser test. **`/api/state`'s asks or messages** → `sw.js`. **A key of
+- **`chat.py` or `chat_static/`** → the browser test. **`window.WB`** (`app.js`) → `stats.js`, `settings.js`, *The
+  views' API*. **`/api/state`'s asks or messages** → `sw.js`. **A key of
   `chat.snapshot` or `week_saved`** → docs/chat-api.md's `GET /api/state` (`test_docs`: both had gone unlisted, #1127).
 - **listener.json's `parent`** (the mod's `listen`) → `chat.caller_listens`; **a Claude row's `claude_pid`** (`chat.send`)
   → the mod's `owedAtTurnEnd` (#1129).

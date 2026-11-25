@@ -305,6 +305,8 @@ answered?, by?, note?, answers?, stale?}`. `for`: Claude was working on those ag
 - `event: patch`, `data: {...}`: what changed since: `messages` and `asks` as `{put: [rows new or
   changed], drop: [ids gone]}` (each only when it changed), every other field of the state whole,
   and `now`. Merge rows by `id`.
+- A blank line (an empty event: nothing to read) 50 ms after each event, on its own, so a browser
+  that holds a body's last bytes until more come (WebKit, past 8 KB) hands the event over.
 - `: ping` (a comment) after 15 s with nothing to send.
 
 ## Versions

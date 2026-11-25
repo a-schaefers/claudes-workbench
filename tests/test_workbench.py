@@ -25886,7 +25886,7 @@ class WebChat(Base):
         c.close()
 
     def test_a_chat_on_localhost_answers_behind_tailscale_serve_under_the_machines_tailnet_name(self):
-        # #448 (the 2026-11-20 audit): `tailscale serve --bg 1337`, the https the gear advises, passes
+        # #448 (the 2026-11-20 audit): `tailscale serve --bg 1337`, the https Settings advises, passes
         # the tailnet name through as the Host, and the default localhost chat answered it 403
         chat, tok = self.chat, self.chat.token()
         me = {"ip": "100.64.0.9", "names": {"box", "box.tail1234.ts.net"}, "dns": "box.tail1234.ts.net"}
@@ -25994,7 +25994,10 @@ class WebChat(Base):
             self.assertEqual(self.call("/api/state")[0], 401)         # an empty header: refused
 
     def test_static_files_and_nothing_else(self):
+        # the views' own files (#1284): built apart, served by their suffix like the rest
         for path, kind in (("/", "text/html"), ("/app.js", "text/javascript"), ("/app.css", "text/css"),
+                           ("/stats.js", "text/javascript"), ("/stats.css", "text/css"),
+                           ("/settings.js", "text/javascript"), ("/settings.css", "text/css"),
                            ("/icon.svg", "image/svg+xml"), ("/manifest.webmanifest", "application/manifest+json")):
             import http.client
             c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -27110,12 +27113,32 @@ class WebChat(Base):
                 pass
             f.readline(), f.readline()
             s.settimeout(3)
+            self.assertEqual(f.readline(), b"\n")  # the state's own blank line, for WebKit (#1284)
             with self.assertRaises(TimeoutError):
                 f.readline()  # a ping would come within a second or two
             s.close()
         finally:
             srv.shutdown()
             srv.server_close()
+
+    def test_each_stream_event_is_followed_by_a_blank_line_of_its_own_so_webkit_hands_over_its_tail(self):
+        # the #1284 review (2026-11-24): WebKit gives a streamed body to the page only up to the
+        # first 8 KB of a read until more bytes come, so a state past 8 KB on a reconnect waited
+        # 15 s for the ping. The blank line comes apart, NUDGE_AFTER on (stretched here to tell)
+        tok = self.chat.token()
+        self.chat.send("x" * 9000, "claude")                     # a state past 8 KB
+        with mock.patch.object(self.chat, "NUDGE_AFTER", 0.6):
+            c = self._held_wait("/api/stream", tok)
+            got = b""
+            while not (b"event: state" in got and got.endswith(b"\n\n")):
+                got += c.recv(1 << 20)
+            self.assertEqual(c.recv(1 << 20), b"\n")             # on its own, after a pause
+            self.chat.reply("And a patch.")
+            got = b""
+            while not (b"event: patch" in got and got.endswith(b"\n\n")):
+                got += c.recv(1 << 20)
+            self.assertEqual(c.recv(1 << 20), b"\n")             # each event its own
+            c.close()
 
     def test_a_message_its_receipt_and_the_reply(self):
         tok = self.chat.token()
