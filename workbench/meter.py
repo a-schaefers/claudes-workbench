@@ -32,20 +32,30 @@ user's own prices (wb model price, models.json `cost`) says `prices: "yours"`.
 Every figure is an estimate unless the provider says its own or the user set the model's prices:
 the catalog's can be about twice a provider's bill (DeepInfra's, #1135, 2026-11-23). `basis`
 says which a figure is: "catalog" (shown `≈$0.42`), "yours" or "provider" (the provider's own
-`usage.cost` or `usage.estimated_cost`), both plain. A plan (OpenCode Go, an Ollama cloud model)
-is a quota, not dollars: its rows have `usd: null` and `plan`, and never count against the cap."""
+`usage.cost` or `usage.estimated_cost`), both plain. A plan (OpenCode Go, GitHub Copilot, an Ollama
+cloud model) is a quota, not dollars: its rows have `usd: null` and `plan`, and never count against
+the cap."""
 
 from __future__ import annotations
 
 import math
 import os
+import re
 import threading
 import time
 from pathlib import Path
 
 from . import keyhole, models, routes, store
 
-PLAN_PROVIDERS = ("opencode-go",)   # a plan's quota, not dollars (and m.cloud: Ollama cloud)
+# a plan's quota, not dollars (and m.cloud: Ollama cloud). GitHub Copilot's subscription counts
+# premium requests: its catalog lists the models' API prices all the same (OpenCode 2.3.2's bundled
+# catalog: $2/$10 for its Claude and GPT models), which would book dollars the user never pays
+# against the day cap (#1191)
+PLAN_PROVIDERS = ("opencode-go", "github-copilot")
+# a coding plan's provider (zai-coding-plan, kimi-code-plan-global, xiaomi-token-plan-sgp): a paid
+# subscription whose catalog prices are all 0, which read as free, "may train on your code" (#1396,
+# 2026-11-25). A segment anywhere: the regional ids go on past it (alibaba-coding-plan-cn)
+PLAN_ID = re.compile(r"-(?:coding|code|token|step)-plan(?:-|$)")
 EPS = 1e-9               # less than this between two figures is the same figure
 # status `api`'s figures are written to 6 places (Meter._book), an export's aren't: closer than
 # this to one is its rounding. Compared within EPS, a DeepInfra export a few 1e-7 past a rounded-down
@@ -138,9 +148,15 @@ def _num(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v
 
 
+def plan_provider(pid: str) -> bool:
+    """A provider whose usage is a plan's quota, not dollars: OpenCode Go, a coding plan."""
+    return pid in PLAN_PROVIDERS or bool(PLAN_ID.search(pid))
+
+
 def is_plan(m) -> bool:
-    """A plan's quota, not dollars: OpenCode Go, an Ollama cloud model."""
-    return bool(getattr(m, "cloud", False)) or m.provider in PLAN_PROVIDERS
+    """A plan's quota, not dollars: OpenCode Go, GitHub Copilot (#1191), a coding plan, an Ollama
+    cloud model."""
+    return bool(getattr(m, "cloud", False)) or plan_provider(m.provider)
 
 
 def is_free(m) -> bool:
@@ -232,9 +248,23 @@ def usage_tokens(u: dict) -> dict:
       `cache_creation_input_tokens` beside it, `output_tokens` with
       `output_tokens_details.thinking_tokens`. Told by its cache fields before the Responses
       API's details: its message_delta now carries `output_tokens_details` too, which read it as
-      the Responses API and booked every cache read and write as 0 (#1081, 2026-11-23).
+      the Responses API and booked every cache read and write as 0 (#1081, 2026-11-23);
+    - Gemini's `usageMetadata` (#1192): `promptTokenCount` holds the cache reads
+      (`cachedContentTokenCount`), `toolUsePromptTokenCount` is input beside it, and
+      `candidatesTokenCount` leaves out `thoughtsTokenCount` (OpenCode's gemini.ts mapUsage);
+    - Bedrock Converse's (#1192): `inputTokens` without the cache, `cacheReadInputTokens` and
+      `cacheWriteInputTokens` beside it, `outputTokens` (bedrock-converse.ts mapUsage).
     A cache read it doesn't name is priced as input: never under."""
     d = lambda k: u.get(k) if isinstance(u.get(k), dict) else {}  # noqa: E731
+    if "promptTokenCount" in u or "candidatesTokenCount" in u:
+        prompt = _n(u.get("promptTokenCount")) + _n(u.get("toolUsePromptTokenCount"))
+        read = min(prompt, _n(u.get("cachedContentTokenCount")))
+        return {"in": prompt - read, "cache_read": read, "cache_write": 0,
+                "out": _n(u.get("candidatesTokenCount")), "reasoning": _n(u.get("thoughtsTokenCount"))}
+    if "inputTokens" in u or "outputTokens" in u:
+        return {"in": _n(u.get("inputTokens")), "cache_read": _n(u.get("cacheReadInputTokens")),
+                "cache_write": _n(u.get("cacheWriteInputTokens")), "out": _n(u.get("outputTokens")),
+                "reasoning": 0}
     if "prompt_tokens" in u or "completion_tokens" in u:
         pd, cd = d("prompt_tokens_details"), d("completion_tokens_details")
         prompt = _n(u.get("prompt_tokens"))
@@ -256,6 +286,21 @@ def usage_tokens(u: dict) -> dict:
     return {"in": _n(u.get("input_tokens")), "cache_read": _n(u.get("cache_read_input_tokens")),
             "cache_write": _n(u.get("cache_creation_input_tokens")),
             "out": outp - think, "reasoning": think}
+
+
+def max_output(body) -> int | float:
+    """A request's output cap, wherever its API puts it: top-level `max_tokens` and the like,
+    Gemini's `generationConfig.maxOutputTokens`, Converse's `inferenceConfig.maxTokens` (#1192);
+    models.API_OUTPUT (the layer's cap) when it names none."""
+    if not isinstance(body, dict):
+        return models.API_OUTPUT
+    nested = [(body.get(o), k) for o, k in (("generationConfig", "maxOutputTokens"),
+                                            ("inferenceConfig", "maxTokens"))]
+    for v in [body.get(k) for k in ("max_tokens", "max_completion_tokens", "max_output_tokens")] + [
+            o.get(k) for o, k in nested if isinstance(o, dict)]:
+        if _num(v):
+            return v
+    return models.API_OUTPUT
 
 
 def _total(tok: dict) -> int:
@@ -354,6 +399,45 @@ def _plan_name(m) -> str:
 # / 4): OpenCode's system prompt and tools, the handbook, the protocol, the user's instructions.
 # A real task's first step read 16,161 input tokens, about 65 KB of body (#1173, 2026-11-24).
 FIRST_TOKENS = 16_384
+
+# An image in a request (#1199's review): OpenCode sends each `run -f` image, and the read tool's,
+# as base64, a data: URI (OpenAI's image_url, an OpenAI-compatible server's) or a `data` field
+# beside its image media type (Anthropic's source, Google's inlineData). At its bytes / 4 one
+# 10 MiB image read as 3.5M tokens, $10.49 at $3/M input: past a $10 cap every request carrying
+# it was refused, and wb start, counting no image, had let the task start (#1118's failure
+# again). A provider counts an image by its pixels after its own downscale, a few thousand
+# tokens (Anthropic's about 1,600, OpenAI's tiles about 1,100, a Qwen-VL's up to 16,384): the
+# room and runner.first_tokens count each at that worst, its base64 left out.
+IMAGE_TOKENS = 16_384
+MEDIA_KEYS = ("media_type", "mimeType", "mime_type", "mediaType")
+
+
+def images_in(body) -> tuple[int, int]:
+    """A request body's images: how many, and the characters of their base64 (each a data: URI,
+    or a `data` string beside an image/ media type), which the room leaves out of its bytes / 4."""
+    n = chars = 0
+    todo = [body]
+    while todo:
+        x = todo.pop()
+        if isinstance(x, dict):
+            data = x.get("data")
+            if isinstance(data, str) and any(isinstance(x.get(k), str) and x[k].startswith("image/")
+                                             for k in MEDIA_KEYS):
+                n, chars = n + 1, chars + len(data)
+            else:
+                todo.extend(x.values())
+        elif isinstance(x, list):
+            todo.extend(x)
+        elif isinstance(x, str) and x.startswith("data:image/") and ";base64," in x[:128]:
+            n, chars = n + 1, chars + len(x)
+    return n, chars
+
+
+def body_tokens(body, size: int) -> float:
+    """A request's input as the room reckons it: its bytes / 4, each image at IMAGE_TOKENS in
+    place of its base64 (images_in)."""
+    n, chars = images_in(body) if isinstance(body, (dict, list)) else (0, 0)
+    return max(size - chars, 0) / 4 + n * IMAGE_TOKENS
 
 
 def request_floor(m, tokens: int = FIRST_TOKENS) -> float | None:
@@ -683,7 +767,8 @@ class Meter:
 
     def room(self, body: dict, size: int) -> float | None:
         """The keyhole's check before each request: the cap less today less this request at its
-        worst (its body's length / 4 at the input price, its max output at the output price).
+        worst (its body's length / 4 at the input price, an image at IMAGE_TOKENS: body_tokens;
+        its max output at the output price).
         Negative: refused, and status `api_stop` (guard `spend`) stops the round on the next
         tick. None: nothing to keep (a plan, a free model). No cap at all is no room, and so is an
         unpriced model: wb start refuses one (refusal), and whichever path started it anyway, it
@@ -700,9 +785,8 @@ class Meter:
                 self.task.set_status(api_stop={"guard": "spend", "text": no_cap()})
             return -1.0
         top = self.prices[-1]  # the dearest tier: the worst case
-        out = next((body.get(k) for k in ("max_tokens", "max_completion_tokens", "max_output_tokens")
-                    if _num(body.get(k))), models.API_OUTPUT) if isinstance(body, dict) else models.API_OUTPUT
-        worst = (size / 4 * top["input"] + out * max(top["output"], top["reasoning"])) / 1e6
+        out = max_output(body)
+        worst = (body_tokens(body, size) * top["input"] + out * max(top["output"], top["reasoning"])) / 1e6
         t = today()["usd"]
         left = c - t - worst
         if left < 0 and not self.task.status.get("api_stop"):

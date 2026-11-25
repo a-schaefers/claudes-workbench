@@ -412,6 +412,9 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
                 "test_cmd": test_cmd, "test_timeout": spec.get("test_timeout") or 900,
                 "check_cmd": check, "hidden": picked, "allow": grants.get("allow") or [],
                 "paths": grants.get("paths") or [], "skills": st.get("skills_ever") or [],
+                # its `wb allow --port`s: without them each replay's tests were refused the port
+                # the original's passed with (#1197's review, 2026-11-24)
+                "ports": grants.get("ports") or [],
                 # the worktree's setup (#201), so the reference, the base and each replay are the
                 # project as the task had it: a task whose --setup made an ignored stamp had its
                 # own commit rejected, the scratch clone without it (#250, the audit of 1.2)
@@ -425,6 +428,9 @@ def add(name: str, step: int | None = None, hidden: list[str] | None = None,
                 # the package the task ran in (#375), where each replay runs, sets up and is
                 # graded: from the root, an answer written there passed a package's check (#425)
                 "subdir": spec.get("subdir") or "",
+                # where a commands.json setup ran, its key's directory (#1376), which a replay's
+                # --setup, run in the package, reaches by a cd
+                **({"setup_dir": spec["setup_dir"]} if spec.get("setup_dir") else {}),
                 "original": {"model": spec.get("model"), "rounds": row.get("rounds"),
                              "reviews": step_row.get("reviews", row.get("reviews")),
                              "minutes": row.get("minutes"), "steps": steps},
@@ -730,7 +736,11 @@ def _start_task(case: dict, model: str, name: str, repo: Path, skills: list[str]
     for pat in case.get("allow") or []:
         argv += ["--allow", pat]
     if case.get("setup"):
-        argv += ["--setup", case["setup"]]
+        cmd = case["setup"]
+        if at := case.get("setup_dir"):
+            up = os.path.relpath("/" + at.strip("/"), "/" + (subdir(case) or "").strip("/"))
+            cmd = f"cd {up} && {cmd}"
+        argv += ["--setup", cmd]
         if isinstance(secs := _kept(case, "setup_timeout"), int) and secs > 0:  # #735
             argv += ["--setup-timeout", str(secs)]
     if _kept(case, "unload_for_tests"):
@@ -746,6 +756,8 @@ def _start_task(case: dict, model: str, name: str, repo: Path, skills: list[str]
         argv += ["--sibling", s]
     for path in case.get("paths") or []:
         argv += ["--allow-path", path]
+    for port in case.get("ports") or []:
+        argv += ["--allow-port", str(port)]
     a = cli.parser().parse_args(argv)
     a.bench = meta
     a.f(a)

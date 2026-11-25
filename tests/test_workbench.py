@@ -1,4 +1,5 @@
 """End-to-end tests: real git, real runner processes, a fake opencode. Run: python3 -m unittest"""
+import argparse
 import ast
 import base64
 import collections
@@ -18,6 +19,7 @@ import queue
 import select
 import shlex
 import os
+import platform
 import shutil
 import signal
 import socket
@@ -387,8 +389,20 @@ class Base(unittest.TestCase):
                           # the user's file for agents (#1102, 2026-11-23): theirs went into the
                           # tests' prompts, and in an agent's lane, which hides it, every test
                           # that started a task failed on its read
-                          WB_AGENTS_MD=str(tmp / "wb-config" / "AGENTS.md"))
+                          WB_AGENTS_MD=str(tmp / "wb-config" / "AGENTS.md"),
+                          # the web app's token and settings (#1281's review, 2026-11-24): on by
+                          # default, every doctor test read the user's token, or made one in HOME
+                          WB_CHAT_TOKEN=str(tmp / "chat-token"),
+                          WB_CHAT_CONFIG=str(tmp / "chat.json"))
         (tmp / "opencode.json").write_text(json.dumps(OPENCODE_CONFIG))
+        # the suite's own cgroup is no service's: CI's runner is one (a .service), so after #1407
+        # every runner, chat and bench driver went through systemd-run's scope there, and tests
+        # that kill or wait on them failed (#1420's CI, 2026-11-25); LogoutStops patches its own
+        cgroup = mock.patch.object(cli, "SELF_CGROUP", tmp / "no-cgroup")
+        cgroup.start()
+        self.addCleanup(cgroup.stop)
+        cli.runner_scope.cache_clear()
+        self.addCleanup(cli.runner_scope.cache_clear)
         runner.models._AUTH.clear()  # OpenCode's stored keys, per process (models.auth_key)
         runner.models._STORED.clear()
         runner.models._KEYS.clear()
@@ -1116,7 +1130,9 @@ class Lifecycle(Base):
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "make"], check=True)
         self.start("t-mk", "ok", "--test", "make test", "--auto-fix", "2", "--no-self-review")
         st = wait_phase("t-mk", {"review"})
-        self.assertEqual((st["base_check"]["exit"], st["round"]), (2, 1))
+        # the tail said: it failed on macOS with no word of what its make printed (nightly runs
+        # 45454423406, 45577067512)
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (2, 1), st["base_check"].get("tail"))
         task = store.Task("t-mk")
         self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
         checkins = [r["text"] for r in store.notices() if r["task"] == "t-mk" and r["kind"] == "checkin"]
@@ -1145,13 +1161,16 @@ class Lifecycle(Base):
                               "make: Target 'test' not remade because of errors.\n"), "nosuch-tool-1229: command not found")
         self.assertEqual(said(f"make: .venv/bin/pytest: No such file or directory\n{err.format(127)}"),
                          ".venv/bin/pytest: not in the worktree (.venv/ is an install's, never checked out)")
+        # make's own exec line at Error 1 too: macOS's /usr/bin/make says it so (nightly run
+        # 45577067512, 2026-11-25), and only make's exec failure prints it
+        self.assertEqual(said(f"make: nosuch-tool-1229: No such file or directory\n{err.format(1)}"),
+                         "nosuch-tool-1229: command not found")
         self.assertEqual(said(f"/usr/bin/python3: No module named nosuch_mod\n{err.format(1)}"),
                          "/usr/bin/python3: No module named nosuch_mod")
         self.assertEqual(said("sh: 1: nosuch-tool-1229: not found\nerror: Recipe `test` failed on line 2 "
                               "with exit code 127", code=127), "nosuch-tool-1229: command not found")
         for tail in (f"make: ./made-by-the-step.sh: No such file or directory\n{err.format(127)}",
                      f"cat: answer.txt: No such file or directory\n{err.format(1)}",
-                     f"make: nosuch-tool-1229: No such file or directory\n{err.format(1)}",
                      "make: *** No rule to make target 'test'.  Stop.",
                      "python3: No module named x"):
             self.assertIsNone(said(tail), tail)
@@ -1171,6 +1190,18 @@ class Lifecycle(Base):
                          "pytest: command not found")
         # a recipe's own failure, not make's exec, still goes back
         self.assertIsNone(said("make: pytest: Command not found\nmake: *** [test] Error 1"))
+        # macOS's /usr/bin/make (Apple's 3.81) says `No such file or directory` at Error 1 for a
+        # recipe it can't exec, so #1229's test still ran both auto-fix rounds there (nightly
+        # runs 45454423406, 45577067512, 2026-11-24/25): make's own exec line is a 127 at any code
+        self.assertEqual(said("nosuch-tool-1229 --check answer.txt\nmake: nosuch-tool-1229: No such file or "
+                              "directory\nmake: *** [test] Error 1"), "nosuch-tool-1229: command not found")
+        self.assertEqual(said("make[1]: pytest: No such file or directory\nmake[1]: *** [test] Error 1\n"
+                              "make[1]: Leaving directory '/r/sub'\nmake: *** [all] Error 2"),
+                         "pytest: command not found")
+        self.assertEqual(said("make: .venv/bin/pytest: No such file or directory\nmake: *** [test] Error 1"),
+                         ".venv/bin/pytest: not in the worktree (.venv/ is an install's, never checked out)")
+        self.assertIsNone(said("make: ./made-by-the-step.sh: No such file or directory\nmake: *** [test] Error 1"))
+        self.assertIsNone(said("make: *** [test] Error 1"))           # a recipe failing on its own
 
     def test_a_package_managers_run_wrapper_lines_are_read_past_to_the_scripts(self):
         # #1243 (bar round 5 of 2.0): `pnpm test` and `yarn test` with jest not installed ended on
@@ -2342,6 +2373,8 @@ class Lifecycle(Base):
         runner.review_diff(task)
         tree = task.status["reviewed"]["tree"]
         (task.worktree / "fixed.txt").write_text("the fix\n")
+        # its ref pins it since #1198: a tree from before then, or one whose ref went, has none
+        gitops.drop_reviews(self.repo, "t-gc")
         subprocess.run(["git", "-C", str(self.repo), "prune", "--expire=now"], check=True)
         self.assertFalse(gitops.has_tree(task.worktree, tree))
         again = runner.review_diff(task)
@@ -2717,6 +2750,38 @@ class Lifecycle(Base):
         self.start("t-bgwait", "bgwait", "--test", TEST_CMD, "--think-timeout", "2")
         st = wait_phase("t-bgwait", {"review", "stuck"}, timeout=40)
         self.assertEqual((st["phase"], st.get("nudges", 0), st["round"]), ("review", 0, 1))
+
+    def test_a_command_running_in_the_foreground_is_neither_thinking_nor_silence(self):
+        # #1386 (2026-11-25): a suite the agent ran in the foreground with a long `timeout`
+        # printed nothing until it ended; the think nudge killed it, and the next round's run
+        # was stopped "even after a nudge"
+        self.start("t-fg", "fgcmd", "--test", TEST_CMD, "--think-timeout", "2",
+                   "--silence-timeout", "4")
+        st = wait_phase("t-fg", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st.get("nudges", 0), st["round"]), ("review", 0, 1),
+                         st.get("last"))
+        self.assertTrue(st["tests"]["ok"])
+        evs = store.read_jsonl(store.Task("t-fg").dir / "events.jsonl")[0]
+        self.assertFalse([e for e in evs if e.get("kind") == "stopped"])
+        self.assertIn("make test", [e.get("brief", "") for e in evs if e.get("kind") == "tool"][0])
+
+    def test_a_command_running_in_the_foreground_still_meets_the_rounds_wall(self):
+        # #1386: the command waits out the nudge and silence, never the round's limit
+        os.environ["FAKE_FG"] = "60"
+        self.start("t-fgwall", "fgcmd", "--test", TEST_CMD, "--think-timeout", "2",
+                   "--silence-timeout", "4", "--round-timeout", "8")
+        st = wait_phase("t-fgwall", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual(st["phase"], "stuck")
+        self.assertIn("limit", st["last"])
+        self.assertEqual(st.get("guards"), {"round": 1})
+
+    def test_a_job_left_in_the_background_spares_a_thinking_model_no_nudge(self):
+        # #1386's fix waits on a command in the foreground only: one a shell call left running
+        # (a dev server) is no wait, and the model thinking beside it is nudged, then stopped
+        self.start("t-bgthink", "bgthink", "--think-timeout", "2", "--silence-timeout", "120")
+        st = wait_phase("t-bgthink", {"stuck"}, timeout=40)
+        self.assertIn("even after a nudge", st["last"])
+        self.assertEqual((st["nudges"], st["round"]), (1, 2))
 
     def test_a_round_waiting_on_a_background_job_keeps_its_model_loaded(self):
         # #864 (the third 2026-11-21 audit): a test run past Ollama's 5-minute keep-alive (each
@@ -3613,6 +3678,12 @@ class Lifecycle(Base):
         runner._hands_on(t)
         self.assertEqual(t.status.get("hand_left"), [])
         self.assertLess(len((t.dir / "status.json").read_bytes()), before + 200)
+        # _hands_on stands for a runner's start, so accept's _stop_runner marks hands_off_at
+        # anew: what changed within CLOCK_SLACK before it is scanned again. Nightly run
+        # 45577067512 (2026-11-25) wrote the packages slower than that, so only the last 7 fell
+        # in the window, under BUILD_FILES, and were named as left out; a real runner's rounds
+        # outlast the slack
+        time.sleep(gitops.CLOCK_SLACK * 2)
         out = run_wb("accept", "t-pyc", "-m", "feat: one", "--merge")
         self.assertIn("accepted t-pyc", out)
         self.assertNotIn("note: git ignores", out)
@@ -6362,6 +6433,43 @@ class WorktreeSetup(Base):
         if sys.platform != "darwin":
             self.assertEqual(len(cps), 1, cps)                      # one cp, not thirty
 
+    def test_macos_copies_prepared_files_in_one_cp_per_directory(self):
+        # #1399 (2026-11-25): macOS skipped #867's batch, and each path tried GNU's flags first,
+        # which BSD cp refuses: two cp a file, 40,000 for an in-tree build's 20,000 objects
+        src, dest = Path(self.tmp.name) / "built", Path(self.tmp.name) / "scratch-1399"
+        paths = []
+        for d, n in (("a", 400), ("b/c", 400), ("d", 200)):
+            (src / d).mkdir(parents=True)
+            for i in range(n):
+                (src / d / f"f{i}.o").write_text(d)
+                paths.append(f"{d}/f{i}.o")
+        for d in ("build", "gen"):
+            (src / "e" / d).mkdir(parents=True)
+            (src / "e" / d / "x").write_text("x")
+            paths.append(f"e/{d}/")                      # ls-files --directory's form
+        dest.mkdir()
+        real, cps = subprocess.run, []
+
+        def bsd(argv, *a, **k):                          # BSD cp: no long flags; -c clones (here -R)
+            if argv[0] != "cp":
+                return real(argv, *a, **k)
+            cps.append(argv)
+            if any(x.startswith("--") and x != "--" for x in argv) or "d/f0.o" in argv:
+                return subprocess.CompletedProcess(argv, 1)   # d's group fails: path by path
+            return real(["cp", "-Rp" if argv[1] == "-cRp" else argv[1], *argv[2:]], *a, **k)
+        with mock.patch.object(runner.sys, "platform", "darwin"), \
+                mock.patch.object(runner.subprocess, "run", bsd):
+            runner._copy_all(src, dest, paths)
+        for p in paths[:-2]:
+            self.assertEqual((dest / p).read_text(), p.split("/f")[0], p)
+        self.assertEqual([(dest / "e" / d / "x").read_text() for d in ("build", "gen")], ["x", "x"])
+        # BSD cp copies a source ending in "/" as its insides
+        self.assertFalse([c for c in cps if any(x.endswith("/") for x in c[3:-1])])
+        # a cp per directory and batch (a: 1, b/c: 2, d: 1), e's 2 its own batch, then d's 200
+        # one by one, each macOS's flags first: never GNU's and then BSD's
+        self.assertEqual(len(cps), 1 + 2 + 1 + 1 + 200, [c[:3] for c in cps][:10])
+        self.assertFalse([c for c in cps if "--reflink=auto" in c])
+
     def test_commands_json_gives_a_repo_its_setup_for_every_task(self):
         self.ignore("deps/")
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
@@ -6429,6 +6537,19 @@ class WorktreeSetup(Base):
                       "and 2 more), before any round", note["text"])
         self.assertFalse((t.worktree / "gen").exists())        # removed, its directories too
         self.assertEqual(gitops.changed(t.worktree), "")
+
+    def test_a_setup_that_writes_an_uncommitted_lockfile_is_told_to_commit_it_or_write_none(self):
+        # #1379 (2026-11-25): `uv sync` in a project with no committed uv.lock writes one; the
+        # notice's remedy, `uv sync --locked`, then failed for want of a lockfile
+        self.start("t-uvlock", "ok", "--test", TEST_CMD, "--setup", "echo 'version = 1' > uv.lock")
+        wait_phase("t-uvlock", {"failed"})
+        note = [r for r in store.notices() if r["task"] == "t-uvlock"][-1]
+        self.assertIn("task t-uvlock: the setup wrote a lockfile the repo doesn't commit (uv.lock), "
+                      "before any round", note["text"])
+        self.assertIn("Commit the lockfile (and the setup may freeze to it: uv sync --locked, npm ci), "
+                      "or have the setup write none (python3 -m venv .venv && .venv/bin/pip install -e .); "
+                      "then wb discard t-uvlock and start again", note["text"])
+        self.assertFalse((store.Task("t-uvlock").worktree / "uv.lock").exists())
 
     def test_a_setup_that_writes_files_then_fails_has_them_undone_so_the_resume_is_told(self):
         # #1347's review (2026-11-24): only a setup that exited 0 was undone; a codegen then a
@@ -6560,6 +6681,22 @@ class WorktreeSetup(Base):
         wait_phase("t-build", {"review"}, timeout=60)
         lines = log.read_text().split()                       # (the round's tests log too)
         self.assertLess(lines.index("check-done"), lines.index("build-done"), lines)
+
+    def test_fanned_out_tasks_run_their_round_tests_one_at_a_time(self):
+        # #1378 (2026-11-25): two tasks of a fan-out ran their round tests at once, and a suite
+        # on a fixed port failed EADDRINUSE in all but one: a FAIL and an auto-fix for correct
+        # code. The directory stands in for the port: taken while one suite runs.
+        held = Path(self.tmp.name) / "port-3000"
+        suite = f"mkdir {held} || exit 98; sleep 2; rmdir {held}; {TEST_CMD}"
+        for who in ("a", "b"):
+            self.start(f"t-fan{who}", "ok", "--no-self-review", "--no-base-check", "--auto-fix", "0",
+                       "--test", suite)
+        for who in ("a", "b"):
+            wait_phase(f"t-fan{who}", {"review"}, timeout=60)
+            st = store.Task(f"t-fan{who}").status
+            self.assertTrue(st["tests"]["ok"], st["tests"])
+            self.assertEqual(st.get("auto_fixes", 0), 0)
+        self.assertEqual(json.loads((store.home() / "locks" / "prepare-check.json").read_text()), {})
 
     def test_a_task_whose_setup_failed_is_resumed_and_discarded_never_counts_against_its_model(self):
         # #581, the audit of 1.90: three discards of a lockfile problem scored the model 0/3 and
@@ -6900,6 +7037,65 @@ class WorktreeSetup(Base):
                          "packages/app/node_modules")
         self.assertEqual(cli._copy_path(self.repo, "../../../x", "packages/app"), "../x")
 
+    def test_a_root_entrys_setup_runs_from_the_root_for_a_package_task(self):
+        # #1376 (2026-11-25): the root key's setup ran in the package, so its
+        # ./scripts/bootstrap.sh failed every package task before round 1 (exit 127), while the
+        # same entry's copy paths were read from the root (#1346)
+        self.ignore(".boot", "where")
+        app = self.repo / "packages" / "app"
+        app.mkdir(parents=True)
+        (app / "CLAUDE.md").write_text("# app\n")
+        (self.repo / "scripts").mkdir()
+        (self.repo / "scripts" / "bootstrap.sh").write_text("#!/bin/sh\necho ok > .boot\n")
+        (self.repo / "scripts" / "bootstrap.sh").chmod(0o755)
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "a package"], check=True)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "setup": "./scripts/bootstrap.sh"}}}))
+        os.environ["FAKE_SCENARIO"] = "ok"
+        start = lambda name, *x: run_wb("start", name, "--spec", str(self.spec), "--repo", str(app),  # noqa
+                                        "--model", "mimo", "--no-base-check", *x)
+        out = start("t-rootsetup")
+        self.assertIn("setup from commands.json: runs `./scripts/bootstrap.sh` (from the repo's top)", out)
+        wait_phase("t-rootsetup", {"review"})
+        t = store.Task("t-rootsetup")
+        self.assertEqual(t.spec["setup_dir"], ".")
+        self.assertTrue((t.worktree / ".boot").is_file())
+        self.assertIn("\nexit: 0\n", (t.dir / "setup.txt").read_text())
+        # a --setup still runs at the spot, the package
+        start("t-spotsetup", "--setup", "pwd > where")
+        wait_phase("t-spotsetup", {"review"})
+        t = store.Task("t-spotsetup")
+        self.assertNotIn("setup_dir", t.spec)
+        self.assertTrue((t.worktree / "packages/app/where").is_file())
+        self.assertFalse((t.worktree / "where").exists())
+
+    def test_a_standing_copy_missing_in_a_linked_worktree_is_skipped_with_a_note(self):
+        # #1377 (2026-11-25): the main checkout's entry matches a linked worktree by git dir
+        # (#498), which has no node_modules of its own: every start there exited 1, and no flag
+        # got past it. A --copy Claude passed itself is still refused.
+        self.ignore("node_modules/", ".claude/")
+        (self.repo / "node_modules" / "x").mkdir(parents=True)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "copy": ["node_modules"]}}}))
+        feat = self.repo / ".claude" / "worktrees" / "feat"
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "-q", "-b", "feat", str(feat)],
+                       check=True, capture_output=True)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        start = lambda name, *x: run_wb("start", name, "--spec", str(self.spec), "--repo", str(feat),  # noqa
+                                        "--model", "mimo", "--no-base-check", *x)
+        out = start("t-lw1")
+        self.assertIn(f'note: commands.json "repos" copy node_modules: no node_modules in {feat}, so '
+                      "the task goes without it; --setup '<install command>' sets it up", out)
+        self.assertNotIn("copies node_modules", out)
+        self.assertNotIn("copy", store.Task("t-lw1").spec)
+        wait_phase("t-lw1", {"review"})
+        with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
+            start("t-lw2", "--copy", "node_modules")
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn(f"--copy node_modules: no node_modules in {feat}", err.getvalue())
+        self.assertFalse(store.Task("t-lw2").dir.exists())
+
     def test_a_packages_own_commands_json_copy_is_read_from_the_package(self):
         # #1346 (bar round 9, 2026-11-24; #1158 fixed only --copy): a package key's
         # `copy: ["node_modules"]` copied the root's node_modules, so the base check and every
@@ -6936,12 +7132,13 @@ class WorktreeSetup(Base):
         conf.write_text(json.dumps({"repos": {str(app): {"copy": ["localconf"]}}}))
         self.assertEqual(cli._standing_gap(context.repo_conf(self.repo, "packages/app"), self.repo,
                                            "packages/app"), "")
-        # a refused standing entry names commands.json, not a flag never given
+        # a missing standing entry's note names commands.json, not a flag never given (a note
+        # since #1377, not a refusal)
         conf.write_text(json.dumps({"repos": {str(app): {"copy": ["dist"]}}}))
-        with self.assertRaises(SystemExit), redirect_stderr(err := io.StringIO()):
-            run_wb("start", "t-nodist", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo")
-        self.assertIn('commands.json "repos" copy dist: no packages/app/dist in', err.getvalue())
-        self.assertNotIn("--copy", err.getvalue())
+        out = run_wb("start", "t-nodist", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo")
+        self.assertIn('note: commands.json "repos" copy dist: no packages/app/dist in', out)
+        self.assertNotIn("--copy", out)
+        wait_phase("t-nodist", {"review"})
         # #1346's review (2026-11-24): a key on a linked worktree nested in the repo (Claude
         # Code's .claude/worktrees/x) is the main checkout's root by git dir, but its depth was
         # measured from the main top, three parts: the package's node_modules was read for the root's
@@ -8194,6 +8391,44 @@ class Context(Base):
         self.assertTrue(subprocess.run(["git", "-C", str(self.repo), "rev-parse", "delegate/t-n"],
                                        capture_output=True).returncode == 0)
 
+    def test_an_accept_whose_last_step_changed_nothing_squashes_under_its_own_message_or_says_m_went_unused(self):
+        # #1393 (2026-11-25): the squash on main took step 1's subject and `(step 1)` trailer for
+        # the whole task, and a plain accept dropped -m and its provenance line without a word
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Check the answer again.\n")
+        main = lambda: subprocess.run(["git", "-C", str(self.repo), "log", "-1", "--format=%B", "main"],  # noqa
+                                      capture_output=True, text=True, check=True).stdout
+        for name, merge in (("t-pl", ()), ("t-sq", ("--merge-as", "squash"))):  # main unmoved first
+            self.start(name, "ok", "--test", TEST_CMD)
+            wait_phase(name, {"review"})
+            run_wb("next", name, "--spec", str(step2), "-m", "feat: step one")
+            wait_phase(name, {"review"})                       # step 2 rewrote the same answer
+            out = run_wb("accept", name, "-m", "feat: both steps", *merge)
+            if merge:
+                self.assertNotIn("-m unused", out)
+                body = main()
+                self.assertTrue(body.startswith("feat: both steps\n"), body)
+                self.assertIn(f"\nWorkbench-Task: {name}\n", body)
+                self.assertNotIn("(step", body)
+                self.assertIn("Delegated to ", body)
+            else:
+                self.assertRegex(out, r"\(-m unused: nothing changed since [0-9a-f]+\)")
+
+    def test_after_wb_next_the_review_notices_diffstat_is_the_steps_as_wb_diff_says(self):
+        # #1404 (2026-11-25): the stat line was the task's since its base, "2 files changed" beside
+        # a files list and a diff "(all of it)" that held step 2's one file
+        self.start("t-nst", "ok", "--test", TEST_CMD)
+        wait_phase("t-nst", {"review"})
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Now also add lib/helper.py.\n")
+        os.environ["FAKE_SCENARIO"] = "patch"
+        run_wb("next", "t-nst", "--spec", str(step2), "-m", "feat: the answer")
+        st = wait_phase("t-nst", {"review"})
+        report = store.Task("t-nst").round_dir(st["round"]).joinpath("summary.md").read_text()
+        stat = run_wb("diff", "t-nst", "--stat").strip().splitlines()[-1].strip()
+        self.assertEqual(stat, "1 file changed, 1 insertion(+)")
+        self.assertEqual(report.rstrip().splitlines()[-1].strip(), stat)
+
     def test_discarding_a_stuck_later_step_keeps_the_steps_wb_next_committed(self):
         # #494 (the audit of 1.90): steps landed with wb next, a later one stuck, and the
         # discard the notice suggested force-deleted the branch, the approved steps on no ref
@@ -9194,6 +9429,21 @@ class Steering(Base):
         self.assertIn("adopted", run_wb("adopt", "t-orphan", "--session", "sess-2", "--pid", str(b.pid)))
         spec = store.Task("t-orphan").spec
         self.assertEqual((spec["session"], spec["claude_pid"]), ("sess-2", b.pid))  # its own id, new pid
+
+    def test_a_gone_sessions_task_started_in_home_is_adopted_by_a_new_session_there(self):
+        # #1403 (2026-11-25): `wb start --repo ~/proj` from a session in ~, then Claude Code
+        # restarted there: the new session claimed none in ~ by directory, so the task was nobody's
+        gone = subprocess.Popen(["true"]); gone.wait()
+        live = subprocess.Popen(["sleep", "60"]); self.addCleanup(live.kill)
+        home = str(Path.home())
+        t = lambda **spec: types.SimpleNamespace(name="t", spec={"repo": str(self.repo), **spec})  # noqa: E731
+        mine = lambda task: len(cli._scope([task], home, ["sess-c"])[0])  # noqa: E731
+        self.assertEqual(mine(t(cwd=home, session="sess-a", claude_pid=gone.pid)), 1)
+        self.assertEqual(mine(t(cwd=home, session="sess-a", claude_pid=live.pid)), 0)   # still its own
+        self.assertEqual(mine(t(cwd=str(Path(home) / "other"), session="sess-a", claude_pid=gone.pid)), 0)
+        self.assertEqual(mine(t(cwd=home)), 0)                     # by hand in ~: no ~ session's (0.90)
+        orphan = t(session="sess-a", claude_pid=gone.pid)              # no cwd, and no directory asked
+        self.assertEqual(len(cli._scope([orphan], None, ["sess-c"])[0]), 0)
 
     def test_a_claude_code_process_recorded_on_another_machine_is_never_gone_here(self):
         # #922: on a state directory two machines share, machine B read A's live session's pid as
@@ -10467,6 +10717,320 @@ class ConfigLayer(Base):
         self.assertEqual(json.loads(out.stdout)["result"]["serverInfo"]["name"], "workbench")
 
 
+class UsersMcpServers(Base):
+    """#1202 (2026-11-24): an MCP server of the user's own that commands.json names reaches the
+    agent, run by its OpenCode in the lane; every other server stays stubbed and denied (the
+    2026-11-16 audit), and one that holds a credential is refused by name, never shown."""
+
+    def setUp(self):
+        super().setUp()
+        self.server = [sys.executable, str(ROOT / "tests" / "fake_mcp.py"), "lookup", "schema"]
+        self.servers({"docs": {"type": "local", "command": self.server},
+                      "other": {"type": "local", "command": self.server}})
+        self.mcp_log = Path(self.tmp.name) / "mcp.jsonl"
+        os.environ["FAKE_MCP_LOG"] = str(self.mcp_log)
+
+    def servers(self, servers: dict) -> None:
+        """The user's OpenCode config with these MCP servers beside the test's providers."""
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(
+            json.dumps({**OPENCODE_CONFIG, "mcp": {"servers": servers}}))
+
+    def commands(self, conf: dict) -> None:
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps(conf))
+
+    def refused(self, name: str) -> str:
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as e, redirect_stderr(err), redirect_stdout(io.StringIO()):
+            self.start(name, "ok")
+        self.assertEqual(e.exception.code, 3)
+        self.assertFalse(store.Task(name).exists)
+        return err.getvalue()
+
+    def test_a_listed_server_reaches_the_agent_with_its_allow_rule_and_the_rest_stay_stubbed(self):
+        from workbench import runner
+        self.commands({"mcp": ["docs"]})
+        out = self.start("t-mcp", "ok")
+        self.assertIn('MCP: docs (commands.json "mcp")', out)
+        wait_phase("t-mcp", {"review"})
+        task = store.Task("t-mcp")
+        self.assertEqual(task.spec["mcp"], ["docs"])
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        servers = layer["mcp"]["servers"]
+        self.assertEqual(servers["docs"], {"type": "local", "command": self.server})  # as written
+        self.assertEqual(servers["other"], {"type": "local", "command": ["false"], "enabled": False})
+        rules = layer["permissions"]
+        actions = [(r["action"], r["effect"]) for r in rules]
+        allow = actions.index(("docs_*", "allow"))
+        self.assertLess(actions.index(("*_*", "deny")), allow)          # after MCP_RULES' deny
+        self.assertGreater(actions.index(("opencode_*", "deny")), allow)  # the last match: denied
+        self.assertGreater(actions.index(("execute", "deny")), allow)
+        self.assertNotIn(("other_*", "allow"), actions)
+        # the agent's OpenCode started the listed server and listed its tools, and not the other
+        ran = [json.loads(line) for line in self.mcp_log.read_text().splitlines()]
+        self.assertEqual(ran[0]["docs"], ["lookup", "schema"])
+        self.assertNotIn("other", ran[0])
+        self.assertNotIn("never connected", (task.round_dir(1) / "summary.md").read_text())
+
+    def test_a_named_server_that_dies_at_its_start_is_noted_in_the_round_report(self):
+        # #1202's review (2026-11-24): a server whose venv the lane didn't read died at its start,
+        # wb start had said `MCP: docs`, and the report said nothing of the tools the agent lacked
+        self.servers({"docs": {"type": "local", "command": [
+            sys.executable, "-c", "import sys; sys.exit(\"ModuleNotFoundError: No module named 'schema_mcp'\")"]}})
+        self.commands({"mcp": ["docs"]})
+        self.start("t-dead", "ok")
+        wait_phase("t-dead", {"review"})
+        summary = (store.Task("t-dead").round_dir(1) / "summary.md").read_text()
+        self.assertIn("NOTE: the agent's OpenCode never connected to MCP server 'docs', so the agent "
+                      "had none of its tools: ModuleNotFoundError: No module named 'schema_mcp'", summary)
+        self.assertIn("opencode.log", summary)
+        from workbench import runner
+        task = store.Task("t-dead")
+        self.assertEqual(set(runner.mcp_unreached(task, 0)), {"docs"})
+        # the log is in the agent's lane: a link it leaves on the way is never followed
+        log_dir = runner.opencode_log(task).parent
+        elsewhere = Path(self.tmp.name) / "elsewhere"
+        shutil.copytree(log_dir, elsewhere)
+        shutil.rmtree(log_dir)
+        log_dir.symlink_to(elsewhere)
+        self.assertEqual(runner.mcp_unreached(task, 0), {})
+        log_dir.unlink()
+        # a round whose part of the log has no line for workbench's own server says nothing: the
+        # log is back, round 1's lines before where round 2 reads from, so only the guard keeps a
+        # false "never connected" out (with the log gone it said nothing for its absence alone:
+        # #1202's review, 2026-11-24)
+        shutil.copytree(elsewhere, log_dir)
+        self.assertEqual(set(runner.mcp_unreached(task, 0)), {"docs"})
+        os.environ["FAKE_NO_MCP"] = "1"
+        run_wb("feedback", "t-dead", "--text", "Again.")
+        wait_phase("t-dead", {"review"})
+        self.assertNotIn("never connected", (store.Task("t-dead").round_dir(2) / "summary.md").read_text())
+
+    def test_a_servers_venv_and_its_projects_node_modules_are_read_not_only_the_resolved_program(self):
+        # #1202's review (2026-11-24): the realpath'd program alone left out the venv
+        # (`srv/.venv/bin/python` resolves to the base interpreter) and srv/node_modules (`node
+        # srv/dist/index.js` read dist/), so either server died at its start in the lane
+        root = Path(os.path.realpath(self.tmp.name))
+        home = root / "home"
+        py = home / "src" / "py-srv"
+        (py / ".venv" / "bin").mkdir(parents=True)
+        (py / "pyproject.toml").write_text("[project]\nname = 'schema-mcp'\n")
+        (py / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        (py / ".venv" / "bin" / "python").symlink_to(os.path.realpath(sys.executable))
+        js = home / "src" / "js-srv"
+        (js / "dist").mkdir(parents=True)
+        (js / "node_modules").mkdir()
+        (js / "package.json").write_text("{}")
+        (js / "dist" / "index.js").write_text("")
+        bare = home / "tools"           # no project of its own: its directory, never the home
+        bare.mkdir()
+        (bare / "mcp.js").write_text("")
+        (home / ".git").mkdir()         # the home a dotfiles repo
+        base = os.path.realpath(sys.executable)
+        base_dir = os.path.dirname(os.path.dirname(base)) if \
+            os.path.basename(os.path.dirname(base)) == "bin" else os.path.dirname(base)
+        task = types.SimpleNamespace(spec={"mcp": ["docs"]})
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            for command, want in (([str(py / ".venv" / "bin" / "python"), "-m", "schema_mcp"], str(py)),
+                                  (["node", str(js / "dist" / "index.js")], str(js)),
+                                  (["node", str(bare / "mcp.js")], str(bare))):
+                self.servers({"docs": {"type": "local", "command": command}})
+                roots = context.mcp_roots(task)
+                self.assertIn(want, roots, command)
+                self.assertNotIn(str(home), roots)
+                self.assertFalse([r for r in roots if r != want and context._under(r, want)], roots)
+            self.servers({"docs": {"type": "local", "command": [
+                str(py / ".venv" / "bin" / "python"), "-m", "schema_mcp"]}})
+            self.assertIn(base_dir, context.mcp_roots(task))   # the base interpreter's install too
+            # on an API task never the checkout, which its lane hides (#1091), nor a directory in it
+            (py / ".venv" / "bin" / "mcp").write_text("")
+            api = types.SimpleNamespace(spec={"mcp": ["docs"], "via": "api", "repo": str(py)})
+            self.servers({"docs": {"type": "local", "command": [str(py / ".venv" / "bin" / "mcp")]}})
+            self.assertEqual(context.mcp_roots(api), set())
+
+    def test_on_an_api_task_no_root_is_the_checkout_lies_in_it_or_holds_it(self):
+        # #1202's review (2026-11-24): only the widening to a project was kept off the checkout,
+        # so a server in the repo gave its directory (tools/mcp, with its .env) and the repo named
+        # as an argument gave the whole checkout, which #1091 hides from an API task's provider
+        home = Path(os.path.realpath(self.tmp.name)) / "home"
+        app = home / "repos" / "app"
+        (app / "tools" / "mcp").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(app)], check=True)
+        (app / "package.json").write_text("{}")
+        (app / "tools" / "mcp" / "server.js").write_text("")
+        (app / "tools" / "mcp" / ".env").write_text("DB_PASSWORD=CANARY-VALUE\n")
+        servers = {"schema": ["node", str(app / "tools" / "mcp" / "server.js")],
+                   "fs": ["mcp-fs", str(app)], "up": ["mcp-fs", str(home / "repos")]}
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            self.servers({n: {"type": "local", "command": c} for n, c in servers.items()})
+            gpu = types.SimpleNamespace(spec={"mcp": list(servers), "repo": str(app)})
+            self.assertEqual(context.mcp_roots(gpu), {str(app), str(home / "repos")})  # its own lane reads it
+            for name in servers:
+                api = types.SimpleNamespace(spec={"mcp": [name], "via": "api", "repo": str(app)})
+                self.assertEqual(context.mcp_roots(api), set(), name)
+            notes = context.mcp_checkout_notes(list(servers), [app])
+        self.assertEqual(len(notes), 3, notes)
+        self.assertIn("MCP server 'schema' names", notes[0])
+        self.assertIn("name it relative to the repo: `tools/mcp/server.js`", notes[0])
+        self.assertIn("name it relative to the repo: `.`", notes[1])
+        self.assertIn("which holds the repo", notes[2])
+
+    def servers_in_the_repo(self, **conf) -> None:
+        """Two servers whose commands name the repo: 'schema' for every task, 'fs' for the repo's;
+        an API model with a key, for wb start."""
+        srv = self.repo / "tools" / "mcp" / "server.js"
+        srv.parent.mkdir(parents=True)
+        srv.write_text("")
+        self.servers({"schema": {"type": "local", "command": ["node", str(srv)]},
+                      "fs": {"type": "local", "command": ["mcp-fs", str(self.repo)]}})
+        self.commands({"mcp": ["schema"], "repos": {str(self.repo): {"mcp": ["fs"]}}, **conf})
+        ApiHarness.catalog(self, API_CATALOG)
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {}})
+        os.environ["FAKE_AUTH_EXPORT"] = json.dumps([
+            {"id": "cred_deepinfra", "integrationID": "deepinfra", "label": "main", "active": True,
+             "value": {"type": "key", "key": _ApiTask.CANARY}}])
+
+    def doctor(self) -> str:
+        buf = io.StringIO()
+        with redirect_stdout(buf), contextlib.suppress(SystemExit):
+            cli.main(["doctor"])
+        return buf.getvalue()
+
+    def test_wb_start_and_doctor_say_a_server_named_in_the_repo_goes_by_a_path_relative_to_it(self):
+        # #1202's review (2026-11-24): an API task's lane hides the checkout, so the server died
+        # at its start; OpenCode starts a local server in the task's worktree, where a path
+        # relative to the repo finds the worktree's copy. Landlock on, so it holds on a Mac too
+        self.servers_in_the_repo()
+        with mock.patch.object(lane, "abi", return_value=4):
+            out = _ApiTask.start_api(self, "t-mcp-api", "ok", spawn=False)
+            self.assertIn("note: MCP server 'schema' names", out)
+            self.assertIn("relative to the repo: `tools/mcp/server.js`", out)
+            self.assertIn("note: MCP server 'fs' names", out)
+            with mock.patch.object(cli, "spawn_runner"):   # a GPU task's lane reads the repo
+                self.assertNotIn("MCP server 'schema' names", self.start("t-mcp-gpu", "ok"))
+            out = self.doctor()
+        self.assertIn("--  MCP server 'schema' names", out)
+        self.assertIn("--  MCP server 'fs' names", out)
+
+    def test_with_no_lane_to_hide_the_checkout_neither_says_a_server_in_it_wont_be_reached(self):
+        # #1202's review (2026-11-24): with no lane or the lane off the server reads the
+        # checkout, yet both said it wouldn't, and Claude, as the skill says, told the user to
+        # change a config that works (api_hidden_note's gate, #1156). No lane is kind() None:
+        # Landlock off alone left a Mac its Seatbelt lane, which does hide the checkout, and the
+        # note was right there (the 2.1 macOS nightly, 2026-11-25)
+        self.servers_in_the_repo()
+        with mock.patch.object(lane, "kind", return_value=None):
+            out = _ApiTask.start_api(self, "t-no-landlock", "ok", spawn=False)
+            self.assertIn("MCP: ", out)
+            self.assertNotIn("note: MCP server", out)
+            self.assertNotIn("MCP server 'schema' names", self.doctor())
+        self.commands({"mcp": ["schema"], "repos": {str(self.repo): {"mcp": ["fs"]}}, "paths": ["*"]})
+        with mock.patch.object(lane, "abi", return_value=4):
+            out = _ApiTask.start_api(self, "t-lane-off", "ok", spawn=False)
+            self.assertIn("MCP: ", out)
+            self.assertNotIn("note: MCP server", out)
+            out = self.doctor()
+        self.assertNotIn("MCP server 'schema' names", out)
+        self.assertNotIn("MCP server 'fs' names", out)
+
+    def test_a_server_in_opencodes_1x_shape_is_stubbed_and_can_be_named_too(self):
+        from workbench import runner
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({**OPENCODE_CONFIG, "mcp": {
+            "legacy": {"type": "remote", "url": "https://mcp.example.com/",
+                       "headers": {"Authorization": "Bearer CANARY-VALUE"}},
+            "old-docs": {"type": "local", "command": self.server}}}))
+        self.commands({"mcp": ["old-docs"]})
+        self.start("t-v1", "ok")
+        wait_phase("t-v1", {"review"})
+        servers = json.loads(runner.write_config_layer(store.Task("t-v1")).read_text())["mcp"]["servers"]
+        self.assertEqual(servers["legacy"], {"type": "local", "command": ["false"], "enabled": False})
+        self.assertEqual(servers["old-docs"]["command"], self.server)
+
+    def test_a_repos_server_reaches_that_repos_tasks_alone(self):
+        other = Path(self.tmp.name) / "other-repo"
+        shutil.copytree(self.repo, other)
+        self.commands({"repos": {str(self.repo): {"mcp": ["docs"]}}})
+        self.start("t-mine", "ok")
+        wait_phase("t-mine", {"review"})
+        out = run_wb("start", "t-theirs", "--spec", str(self.spec), "--repo", str(other), "--model", "mimo")
+        self.assertNotIn("MCP:", out)
+        wait_phase("t-theirs", {"review"})
+        self.assertEqual(store.Task("t-mine").spec["mcp"], ["docs"])
+        self.assertNotIn("mcp", store.Task("t-theirs").spec)
+        ran = [json.loads(line) for line in self.mcp_log.read_text().splitlines()]
+        self.assertEqual([sorted(r) for r in ran], [["docs", "workbench"], ["workbench"]])
+
+    def test_a_listed_server_holding_a_credential_is_refused_by_name_never_its_value(self):
+        self.commands({"mcp": ["docs"]})
+        cases = {"environment": {"type": "local", "command": self.server,
+                                 "environment": {"DB_TOKEN": "CANARY-VALUE"}},
+                 "headers": {"type": "remote", "url": "https://mcp.example.com/",
+                             "headers": {"Authorization": "Bearer CANARY-VALUE"}},
+                 "oauth": {"type": "remote", "url": "https://mcp.example.com/",
+                           "oauth": {"clientSecret": "CANARY-VALUE"}},
+                 "a password": {"type": "local",
+                                "command": ["db-mcp", "postgres://me:CANARY-VALUE@db/app"]},
+                 "--api-key": {"type": "local", "command": ["mcp", "--api-key=CANARY-VALUE"]},
+                 "query": {"type": "remote", "url": "https://mcp.example.com/?api_key=CANARY-VALUE"},
+                 "{env:}": {"type": "local", "command": ["mcp", "{env:CANARY_VALUE}"]}}
+        for i, (key, entry) in enumerate(cases.items()):
+            self.servers({"docs": entry})
+            err = self.refused(f"t-cred-{i}")
+            self.assertIn("MCP server 'docs'", err)
+            self.assertIn(key, err)
+            self.assertNotIn("CANARY", err)
+        self.servers({})
+        self.assertIn("isn't in your OpenCode config", self.refused("t-missing"))
+        # none of it is a credential: a remote server without one starts
+        self.servers({"docs": {"type": "remote", "url": "https://mcp.example.com/mcp?page=1",
+                               "oauth": False, "headers": {}}})
+        self.start("t-clean-remote", "ok")
+        wait_phase("t-clean-remote", {"review"})
+
+    def test_commands_json_mcp_takes_a_list_of_server_names_and_never_workbenchs_own(self):
+        for bad in ("docs", ["docs", 3], ["my_docs"], ["workbench"], ["opencode"], ["a worktree"],
+                    ["my-worktree"]):
+            for conf in ({"mcp": bad}, {"repos": {str(self.repo): {"mcp": bad}}}):
+                self.commands(conf)
+                with self.assertRaises(RuntimeError) as e:
+                    context.commands_conf()
+                self.assertIn('"mcp"', str(e.exception))
+        self.commands({"mcp": ["docs", "Schema-2"]})
+        self.assertEqual(context.commands_conf()["mcp"], ["docs", "Schema-2"])
+        context.allow_always("allow", ["make *"])  # wb allow --always: allow and paths, never mcp
+        self.assertEqual(json.loads(Path(os.environ["WB_COMMANDS"]).read_text())["mcp"], ["docs", "Schema-2"])
+
+    def test_a_credential_added_after_wb_start_leaves_the_server_out_and_the_report_says_so(self):
+        from workbench import runner
+        self.commands({"mcp": ["docs"]})
+        self.start("t-later", "ok")
+        wait_phase("t-later", {"review"})
+        self.servers({"docs": {"type": "local", "command": self.server,
+                               "environment": {"DB_TOKEN": "CANARY-VALUE"}}})
+        run_wb("feedback", "t-later", "--text", "Again.")
+        wait_phase("t-later", {"review"})
+        task = store.Task("t-later")
+        summary = (task.round_dir(2) / "summary.md").read_text()
+        self.assertIn("note: MCP server 'docs'", summary)
+        self.assertIn("ran without it", summary)
+        self.assertNotIn("CANARY", summary)
+        layer = json.loads(runner.write_config_layer(task).read_text())
+        self.assertEqual(layer["mcp"]["servers"]["docs"]["command"], ["false"])
+        self.assertNotIn("docs_*", [r["action"] for r in layer["permissions"]])
+
+    def test_wb_doctor_lists_the_named_servers_and_flags_one_it_would_refuse(self):
+        self.commands({"mcp": ["docs"], "repos": {str(self.repo): {"mcp": ["vault"]}}})
+        self.servers({"docs": {"type": "local", "command": self.server},
+                      "vault": {"type": "remote", "url": "https://v.example.com/",
+                                "headers": {"X-Key": "CANARY-VALUE"}}})
+        buf = io.StringIO()
+        with redirect_stdout(buf), contextlib.suppress(SystemExit):
+            cli.main(["doctor"])
+        out = buf.getvalue()
+        self.assertIn("ok  MCP server docs (commands.json): the agents of every task", out)
+        self.assertIn("BAD MCP server 'vault' (commands.json \"mcp\") sets `headers`", out)
+        self.assertNotIn("CANARY", out)
+
+
 class SlowFirstToken(Base):
     """#491 (the audit of 1.90): OpenCode's 300 s header timeout cut every request a slow reader
     hadn't answered in 5 minutes, its retry lines reset the silence clock, and no read speed was
@@ -11313,11 +11877,11 @@ class RealOpenCode(Base):
             self.assertTrue("CANARY-PROJ-SKILL" in text, flag)  # (not assertIn: a prompt per failure)
 
 
-    def run_calls(self, name, calls, *extra, before=None, in_lane=True):
+    def run_calls(self, name, calls, *extra, before=None, in_lane=True, reads=False):
         """Run real opencode in a task's worktree, in its lane (unless not ``in_lane``: a machine
         without Landlock), against a fake model that makes these tool calls; returns the tool
         results it got back, in order. `before(task)` runs once the task is set up, before
-        OpenCode starts."""
+        OpenCode starts. ``reads``: the lane keeps its reads too, as the runner's does."""
         self.start(name, "ok", *extra)
         wait_phase(name, {"review"})
         task = store.Task(name)
@@ -11343,7 +11907,8 @@ class RealOpenCode(Base):
         cmd = ["opencode", "run", "--standalone", "--agent", context.AGENT, "-m", "cap/cap", "--auto",
                "--format", "json", "go"]                           # the runner's argv (#1290)
         if in_lane:
-            cmd = lane.wrap(context.writable(task), cmd)
+            cmd = lane.wrap(context.writable(task), cmd,
+                            *((context.readable(task), context.unix_paths(task)) if reads else ()))
         subprocess.run(cmd, cwd=task.worktree, env=env, capture_output=True, timeout=180)
         reqs = [json.loads(line) for line in out.read_text().splitlines()]
         last = max(reqs, key=lambda r: len(r.get("messages", [])))
@@ -11379,7 +11944,7 @@ class RealOpenCode(Base):
 
             def log_message(self, *a):
                 pass
-        collector = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Collector)
+        collector = ThreadingHTTPServer(("127.0.0.1", 0), Collector)  # listens at once (#950)
         threading.Thread(target=collector.serve_forever, daemon=True).start()
         self.addCleanup(collector.server_close)
         self.addCleanup(collector.shutdown)
@@ -11629,6 +12194,67 @@ class RealOpenCode(Base):
         self.assertEqual(runner.claude_files_changed("?? opencode.json\n?? .opencode/x.json\n"),
                          ["opencode.json", ".opencode/x.json"])
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_a_server_commands_json_names_reaches_the_agent_in_its_lane_and_no_other_does(self):
+        # #1202 (2026-11-24): the user's own MCP server, named in commands.json, is passed through
+        # as written, here in code mode (`codemode: true`): with `execute` denied, OpenCode 2.3.2
+        # sends its tools direct all the same. It is run by the agent's OpenCode in the lane: its
+        # program under a non-dot home directory read, its writes there refused, SECRET_ENV not in
+        # its environment; the unlisted one stubbed
+        home = Path(tempfile.mkdtemp(dir=Path.home(), prefix="wb-mcp-test-"))
+        self.addCleanup(shutil.rmtree, home, True)
+        shutil.copy(ROOT / "tests" / "fake_mcp.py", home / "fake_mcp.py")
+        planted = home / "planted"
+        command = [sys.executable, str(home / "fake_mcp.py"), "lookup"]
+        # and in a project's own venv, run as a module (#1202's review): the venv's python
+        # resolves to the base interpreter, so the lane read neither the venv nor the module,
+        # the server died at its start, and nothing said so; `broken` dies at its start anyway
+        srv = Path(tempfile.mkdtemp(dir=Path.home(), prefix="wb-mcp-venv-"))  # beside, not in, home
+        self.addCleanup(shutil.rmtree, srv, True)
+        (srv / "pyproject.toml").write_text("[project]\nname = 'fake-mcp-srv'\n")
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(srv / ".venv")], check=True)
+        site = srv / ".venv" / "lib" / f"python{sys.version_info[0]}.{sys.version_info[1]}" / "site-packages"
+        shutil.copy(ROOT / "tests" / "fake_mcp.py", site / "fake_mcp_srv.py")
+        in_venv = [str(srv / ".venv" / "bin" / "python"), "-m", "fake_mcp_srv", "schema"]
+        # `other` in OpenCode's 1.x shape, mcp.<name>, which 2.3.2 still starts: read in the 2.x
+        # shape alone, it was never stubbed and ran in every agent's OpenCode (found here)
+        # where the agent's OpenCode reads it too, as the user's global config
+        xdg = Path(self.tmp.name) / "xdg"
+        (xdg / "opencode").mkdir(parents=True)
+        Path(os.environ["WB_OPENCODE_CONFIG"]).unlink()
+        os.environ.update(WB_OPENCODE_CONFIG=str(xdg / "opencode" / "opencode.json"),
+                          XDG_CONFIG_HOME=str(xdg))
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps({**OPENCODE_CONFIG, "mcp": {
+            "servers": {"docs": {"type": "local", "command": command, "codemode": True},
+                        "venv-docs": {"type": "local", "command": in_venv},
+                        "broken": {"type": "local", "command": [
+                            sys.executable, "-c", "import wb_no_such_module"]}},
+            "other": {"type": "local", "command": [*command[:2], "leak"]}}}))
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"mcp": ["docs", "venv-docs", "broken"]}))
+        started = Path(self.tmp.name) / "mcp-started"
+        os.environ.update(WB_TEST_SECRET_TOKEN="CANARY-SECRET", FAKE_MCP_OUTSIDE=str(planted),
+                          FAKE_MCP_STARTED=str(started))
+        task, answers = self.run_calls("t-mcp-real", [{"name": "docs_lookup", "arguments": {}}],
+                                       reads=True)
+        self.assertIn("CANARY-MCP lookup secret=- write=refused", answers[0])
+        self.assertIn(str(home), context.readable(task))
+        self.assertFalse(planted.exists())
+        reqs = [json.loads(line) for line in
+                (Path(self.tmp.name) / "t-mcp-real-requests.jsonl").read_text().splitlines()]
+        tools = {t["function"]["name"] for r in reqs for t in r.get("tools", [])}
+        self.assertIn("docs_lookup", tools)
+        self.assertIn("venv-docs_schema", tools)
+        self.assertIn(str(srv), context.mcp_roots(task))
+        self.assertIn("workbench_ask_reviewer", tools)
+        self.assertFalse([t for t in tools if t.startswith("other_")], tools)
+        # OpenCode's own log names the one that never connected, and why (the round's note)
+        self.assertEqual(runner.mcp_unreached(task, 0),
+                         {"broken": "ModuleNotFoundError: No module named 'wb_no_such_module'"})
+        self.assertFalse({"execute", "question", "subagent"} & tools)
+        self.assertNotIn("leak", started.read_text().split())   # never started either
+        self.assertIn("lookup", started.read_text().split())
+
     def test_a_projects_agents_md_and_skills_reach_the_agent_and_its_config_lifts_nothing(self):
         # #994 (2026-11-22): the rules went again in OPENCODE_CONFIG_CONTENT, whose 120,000 bytes
         # a bare task's nearly filled; past them the fallback shut the project's config out, and
@@ -11800,6 +12426,34 @@ class RealOpenCodeRun(Base):
         self.assertEqual(st["phase"], "review", (task.dir / "runner.log").read_text())
         return task, st
 
+    def test_an_image_reaches_the_model_through_run_f_and_once_per_session(self):
+        # #1199: wb passes `-f <copy>` before `--`; OpenCode's client reads it in the lane and
+        # sends it as a data URI. A continued session has it in its history: never sent twice
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        cfg = json.loads(conf.read_text())
+        cfg["provider"]["cap"]["models"]["cap"]["modalities"] = {"input": ["text", "image"], "output": ["text"]}
+        conf.write_text(json.dumps(cfg))
+        png = image_png(3, 2)
+        shot = Path(self.tmp.name) / "shot.png"
+        shot.write_bytes(png)
+        self.serve([WRITE_42])
+        run_wb("start", "t-run", "--spec", str(self.spec), "--repo", str(self.repo),
+               "--model", "cap", "--test", TEST_CMD, "--image", str(shot))
+        st = wait_phase("t-run", {"review", "stuck", "failed"}, timeout=180)
+        task = store.Task("t-run")
+        self.assertEqual(st["phase"], "review", (task.dir / "runner.log").read_text())
+        uri = "data:image/png;base64," + base64.b64encode(png).decode()
+        reqs = [l for l in self.requests.read_text().splitlines() if uri in l]
+        self.assertTrue(reqs)                                      # the model saw it
+        self.assertIn("Attached: 1-shot.png", reqs[0])
+        seen = len(self.requests.read_text().splitlines())
+        run_wb("feedback", "t-run", "--text", "Say done.")
+        st = wait_phase("t-run", {"review", "stuck", "failed"}, timeout=180)
+        self.assertEqual(st["phase"], "review", (task.dir / "runner.log").read_text())
+        later = [l for l in self.requests.read_text().splitlines()[seen:] if '"tools"' in l]
+        self.assertTrue(later)
+        self.assertEqual(later[-1].count(uri), 1)                  # in its history, once
+
     def test_the_runner_reads_the_real_events_the_export_and_the_session(self):
         task, st = self.answered([WRITE_42])
         self.assertTrue(st["tests"]["ok"])                         # the write landed, in the lane
@@ -11813,10 +12467,12 @@ class RealOpenCodeRun(Base):
                         steps)                                     # step_finish: part.tokens
         self.assertIn("ok", [r["text"] for r in rows if r.get("kind") == "text"])
         msgs = transcript.export(st["session"], task=task).get("messages", [])  # its home (#1010)
-        # --agent (#1290) records an agent switch ahead of each round's prompt, to the agent the
-        # session already had too; every reader goes by a message's type, never its place
-        self.assertEqual([(m["type"], m.get("agent")) for m in msgs][:2],
-                         [("agent-switched", context.AGENT), ("user", None)])
+        # --agent (#1290) records an agent switch ahead of each round's prompt on 2.3, to the agent
+        # the session already had too; 2.4.1 records none (the opencode workflow, 2026-11-25):
+        # every reader goes by a message's type, never its place
+        kinds = [(m["type"], m.get("agent")) for m in msgs]
+        self.assertIn(kinds[:2], ([("agent-switched", context.AGENT), ("user", None)],
+                                  [("user", None), ("assistant", context.AGENT)]))
         self.assertEqual({m.get("agent") for m in msgs if m["type"] == "assistant"}, {context.AGENT})
         self.assertTrue(runner.context_state(task)["used"])        # an assistant message's tokens
         self.assertEqual(transcript.find_session(task), st["session"])  # session list, by title
@@ -11919,7 +12575,8 @@ class RealOpenCodeRun(Base):
         self.assertIs(st["opencode_home"], True)
         self.assertTrue((task.dir / "opencode/share/opencode/opencode.db").is_file())
         got = transcript.export(st["session"], task=task)
-        self.assertEqual([m["type"] for m in got.get("messages", [])][:2], ["agent-switched", "user"])
+        self.assertEqual([m["type"] for m in got.get("messages", []) if m["type"] != "agent-switched"][:1],
+                         ["user"])                                 # 2.3's switch first, 2.4.1 none
         self.assertTrue(runner.context_state(task)["used"])
         task.set_status(session=None)
         self.assertEqual(transcript.find_session(task), st["session"])  # by title, there
@@ -12958,6 +13615,29 @@ class Lane(Base):
         (task.dir / "task.json").write_text(json.dumps({"name": name, "repo": str(repo)}))
         return task
 
+    def writable_as(self, kind, task) -> list[str]:
+        """context.writable(task) as the lane `kind` draws it: Landlock's splits a toolchain home
+        around NOT_WRITABLE's places, Seatbelt's keeps it whole and denies them by path."""
+        with mock.patch.object(lane, "kind", lambda: kind):
+            return context.writable(task)
+
+    def seatbelt_keeps_out(self, task, places, writes=()):
+        """With Seatbelt, each of ``places`` is denied by path (write_denied) or outside the lane,
+        and each of ``writes`` written: the 2.1 macOS nightly (2026-11-25) ran the Landlock
+        split's assertions under Seatbelt, which keeps a cargo, rustup or nimble home whole."""
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            w = [os.path.realpath(q) for q in context.writable(task)]
+            denied = context.write_denied(w)
+
+        def written(p):
+            real = os.path.realpath(p)
+            return any(real == q or context._under(real, q) for q in w) and \
+                not any(real == d or context._under(real, d) for d in denied)
+        for p in places:
+            self.assertFalse(written(p), p)
+        for p in writes:
+            self.assertTrue(written(p), p)
+
     def reads_in_lane(self, task, files, extra=()):
         script = ("import sys\nfor f in sys.argv[1:]:\n    try:\n        open(f).read()\n"
                   "        print('read')\n    except PermissionError:\n        print('refused')\n")
@@ -13007,6 +13687,100 @@ class Lane(Base):
                                                    conf / "gh" / "hosts.yml", home / "letters" / "a.txt"]),
                          ["read", "read", "refused", "refused"])
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_a_handed_skill_is_readable_wherever_the_library_is_kept_and_the_rest_isnt(self):
+        # #1375 (2026-11-25): with WB_SKILLS=~/skills, or the default path linked into ~/src,
+        # the lane refused the handed skill, OpenCode dropped it without a word, and wb skill
+        # list advised retiring a skill that worked
+        home = self.fake_home()
+        default = home / ".local" / "share" / "workbench" / "skills"
+        default.parent.mkdir(parents=True)
+        (home / "src" / "wb-skills").mkdir(parents=True)
+        default.symlink_to(home / "src" / "wb-skills")
+        for i, lib in enumerate((home / "skills", default)):
+            for name in ("pydoc", "other"):
+                (lib / name).mkdir(parents=True)
+                (lib / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n")
+            if lib == default:
+                os.environ.pop("WB_SKILLS")
+            else:
+                os.environ["WB_SKILLS"] = str(lib)
+            task = self.bare_task(f"t-skill-{i}", self.repo)
+            task.set_status(skills=["pydoc"])
+            handed = Path(context.layer(task)["skills"][0])
+            self.assertEqual(handed, lib / "pydoc")
+            self.assertEqual(self.reads_in_lane(task, [handed / "SKILL.md", lib / "other" / "SKILL.md"]),
+                             ["read", "refused"], lib)
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_git_config_included_from_outside_the_dotfiles_is_read_in_the_lane_but_a_secret_isnt(self):
+        # #1382 (2026-11-25): the user's [includeIf "gitdir:~/work/"] path = ~/work/.gitconfig,
+        # a repo's include.path beside its checkout, or GIT_CONFIG_GLOBAL in ~/dotfiles was
+        # unreadable, and every git call in the lane died "bad config line", GPU and API
+        home = self.fake_home()
+        repo = home / "work" / "proj"
+        repo.mkdir(parents=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True,  # noqa: E731
+                                      capture_output=True)
+        g("init", "-q", "-b", "main")
+        g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init")
+        (home / "work" / ".gitconfig").write_text("[user]\n\temail = me@work\n")
+        (home / "work" / "team.gitconfig").write_text("[alias]\n\tlg = log\n")
+        (home / ".gitconfig").write_text('[includeIf "gitdir:~/work/"]\n\tpath = ~/work/.gitconfig\n')
+        g("config", "include.path", str(home / "work" / "team.gitconfig"))
+        script = ("import subprocess, sys\nfor k in ('user.email', 'alias.lg'):\n"
+                  "    r = subprocess.run(['git', '-C', sys.argv[1], 'config', k], capture_output=True, text=True)\n"
+                  "    print(r.stdout.strip() or r.stderr.replace(chr(10), ' '))\n")
+        for via in ("gpu", "api"):
+            task = store.Task(f"t-inc-{via}")
+            task.dir.mkdir(parents=True)
+            (task.dir / "task.json").write_text(json.dumps({"name": task.name, "repo": str(repo), "via": via}))
+            g("worktree", "add", "-q", "-b", f"delegate/{task.name}", str(task.worktree))
+            out = subprocess.run(lane.wrap(context.writable(task), [sys.executable, "-c", script, str(task.worktree)],
+                                           context.readable(task)), capture_output=True, text=True, timeout=20)
+            self.assertEqual(out.stdout.split("\n")[:2], ["me@work", "log"], (via, out.stderr))
+        (home / "dotfiles").mkdir()
+        (home / "dotfiles" / "gitconfig").write_text("[user]\n\temail = me@dotfiles\n")
+        os.environ["GIT_CONFIG_GLOBAL"] = str(home / "dotfiles" / "gitconfig")
+        out = subprocess.run(lane.wrap(context.writable(task), [sys.executable, "-c", script, str(task.worktree)],
+                                       context.readable(task)), capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.stdout.split("\n")[:2], ["me@dotfiles", "log"], out.stderr)
+        (home / ".ssh").mkdir()                                        # a secret stays hidden
+        (home / ".ssh" / "gitconfig").write_text("[user]\n\tname = x\n")
+        g("config", "--add", "include.path", str(home / ".ssh" / "gitconfig"))
+        self.assertNotIn(str(home / ".ssh" / "gitconfig"), context.read_repo_dirs(task))
+        self.assertFalse([p for p in context.readable(task) if p.startswith(str(home / ".ssh"))])
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_a_repo_that_borrows_its_objects_has_git_work_in_the_lane(self):
+        # #1383 (2026-11-25): a `git clone --shared` of a mirror, or a repo whose objects/ is a
+        # link out of its git dir, had every agent git call fail "unable to open loose object"
+        home = self.fake_home()
+        mirror = home / "mirror"
+        run = lambda *a: subprocess.run(["git", *a], check=True, capture_output=True)  # noqa: E731
+        run("init", "-q", "-b", "main", str(mirror))
+        run("-C", str(mirror), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
+            "--allow-empty", "-m", "one")
+        run("clone", "-q", "--shared", str(mirror), str(home / "work" / "shared"))
+        run("clone", "-q", str(mirror), str(home / "work" / "linked"))
+        objects = home / "work" / "linked" / ".git" / "objects"
+        shutil.move(objects, home / "objstore")
+        objects.symlink_to(home / "objstore")
+        for name in ("shared", "linked"):
+            repo = home / "work" / name
+            for via in ("gpu", "api"):
+                task = store.Task(f"t-alt-{name}-{via}")
+                task.dir.mkdir(parents=True)
+                (task.dir / "task.json").write_text(json.dumps({"name": task.name, "repo": str(repo), "via": via}))
+                run("-C", str(repo), "worktree", "add", "-q", "-b", f"delegate/{task.name}", str(task.worktree))
+                out = subprocess.run(lane.wrap(context.writable(task),
+                                               ["git", "-C", str(task.worktree), "log", "-1", "--format=%s"],
+                                               context.readable(task)), capture_output=True, text=True, timeout=20)
+                self.assertEqual((out.returncode, out.stdout.strip()), (0, "one"), (name, via, out.stderr))
+
     @home_outside_the_lane
     def test_toolchain_bins_user_site_and_a_repo_under_gopath_stay_out_of_the_lane(self):
         home = self.fake_home()
@@ -13019,14 +13793,18 @@ class Lane(Base):
         subprocess.run(["git", "init", "-q", str(home / "src" / "app")], check=True)
         os.environ["GOPATH"] = str(home / "src")      # a GOPATH that holds every project
         task = self.bare_task("t-tools", home / "src" / "app")
-        w = context.writable(task)
-        for p in (".cargo/registry", ".cargo/.package-cache", "go/pkg", ".pub-cache"):
+        w = self.writable_as("landlock", task)
+        caches = (".cargo/registry", ".cargo/.package-cache", "go/pkg", ".pub-cache")
+        for p in caches:
             self.assertIn(str(home / p), w)
-        for p in (".cargo/bin", ".cargo/env", ".cargo/credentials.toml", "go/bin", ".local/lib",
-                  "src"):                           # the PATH, the shell's startup, user site
+        out = (".cargo/bin", ".cargo/env", ".cargo/credentials.toml", "go/bin", ".local/lib",
+               "src")                               # the PATH, the shell's startup, user site
+        for p in out:
             self.assertFalse([q for q in w if q == str(home / p) or q.startswith(f"{home / p}/")
                               or str(home / p).startswith(q + "/")], p)
         self.assertFalse([q for q in w if str(home / "src" / "app").startswith(q + "/")])
+        self.seatbelt_keeps_out(task, [home / p for p in (*out, "src/app")],
+                                [home / p for p in caches])
         r = context.readable(task)
         self.assertIn(str(home / "R"), r)               # R's and Perl's user libraries
         self.assertIn(str(home / "perl5"), r)
@@ -13185,12 +13963,16 @@ class Lane(Base):
         os.environ["CARGO_HOME"] = str(moved)
         (home / ".dotnet").mkdir()                      # no bin or env: never made
         task = self.bare_task("t-cargo", self.repo)
-        w = context.writable(task)
+        w = self.writable_as("landlock", task)
+        made = ("registry", "git", ".package-cache", ".package-cache-mutate", ".global-cache")
         for c in (home / ".cargo", moved):
-            for n in ("registry", "git", ".package-cache", ".package-cache-mutate", ".global-cache"):
+            for n in made:
                 self.assertIn(str(c / n), w)
             self.assertFalse([q for q in w if q in (str(c), str(c / "bin"), str(c / "env"))])
         self.assertEqual(os.listdir(home / ".dotnet"), [])
+        self.seatbelt_keeps_out(task, [c / n for c in (home / ".cargo", moved)
+                                       for n in ("bin", "env", "config.toml", "config")],
+                                [c / n for c in (home / ".cargo", moved) for n in made])
 
     @home_outside_the_lane
     def test_uvs_tools_and_pythons_and_rustups_toolchains_stay_out_of_the_lane(self):
@@ -13206,13 +13988,16 @@ class Lane(Base):
         (home / ".rustup" / "settings.toml").write_text("")
         os.environ["RUSTUP_HOME"] = str(moved)          # no toolchains/ yet: made, so split out
         task = self.bare_task("t-uv", self.repo)
-        w = context.writable(task)
-        for p in (".cache", ".rustup/downloads", ".rustup/settings.toml", "rustuphome/downloads"):
+        w = self.writable_as("landlock", task)
+        kept = (".cache", ".rustup/downloads", ".rustup/settings.toml", "rustuphome/downloads")
+        for p in kept:
             self.assertIn(str(home / p), w)             # the caches and rustup's own state
-        for p in (".local/share/uv", ".rustup/toolchains", "rustuphome/toolchains"):
+        out = (".local/share/uv", ".rustup/toolchains", "rustuphome/toolchains")
+        for p in out:
             self.assertFalse([q for q in w if q == str(home / p) or q.startswith(f"{home / p}/")
                               or str(home / p).startswith(q + "/")], p)
         self.assertTrue((moved / "toolchains").is_dir())
+        self.seatbelt_keeps_out(task, [home / p for p in out], [home / p for p in kept])
 
     @home_outside_the_lane
     def test_nim_elm_and_clojure_homes_and_caches_moved_by_their_variables_are_in_the_lane(self):
@@ -13231,14 +14016,17 @@ class Lane(Base):
                "XDG_DATA_HOME": str(home / "data"), "XDG_STATE_HOME": str(home / "state")}
         task = self.bare_task("t-911", self.repo)
         with mock.patch.dict(os.environ, env):
-            w = context.writable(task)
-            for p in (".elm", "ccache", "hf", "jd1", "jd2", "data/pnpm/store", "state/cabal",
-                      ".nimble/pkgs2", "nimbledir/pkgs2"):
+            w = self.writable_as("landlock", task)
+            kept = (".elm", "ccache", "hf", "jd1", "jd2", "data/pnpm/store", "state/cabal",
+                    ".nimble/pkgs2", "nimbledir/pkgs2")
+            for p in kept:
                 self.assertIn(str(home / p), w, p)
-            for p in (".nimble/bin", "nimbledir/bin", "cabaldir/bin",   # made first, split out
-                      ".local/share/pnpm/store"):    # the XDG variable moved it
+            out = (".nimble/bin", "nimbledir/bin", "cabaldir/bin",   # made first, split out
+                   ".local/share/pnpm/store")    # the XDG variable moved it
+            for p in out:
                 self.assertFalse([q for q in w if q == str(home / p) or q.startswith(f"{home / p}/")
                                   or str(home / p).startswith(q + "/")], p)
+            self.seatbelt_keeps_out(task, [home / p for p in out], [home / p for p in kept])
             self.assertTrue((home / ".nimble" / "bin").is_dir())
             self.assertTrue((home / "nimbledir" / "bin").is_dir())
             # not made yet: the grant names the home, which wb allow --path then makes (#824)
@@ -13312,10 +14100,13 @@ class Lane(Base):
         (home / "nimbledir").mkdir()
         (home / "nimbledir" / "nimbledata2.json").write_text('{"version": 1, "reverseDeps": {"x": {}}}')
         task = self.bare_task("t-911b", self.repo)
+        made = ("pkgs2", "pkgcache", "buildtemp", "packages_temp.json", "nimbledata2.json")
         with mock.patch.dict(os.environ, {"NIMBLE_DIR": str(home / "nimbledir")}):
-            w = context.writable(task)
+            w = self.writable_as("landlock", task)
+            self.seatbelt_keeps_out(task, [home / d / "bin" for d in (".nimble", "nimbledir")],
+                                    [home / d / n for d in (".nimble", "nimbledir") for n in made])
         for d in (".nimble", "nimbledir"):
-            for n in ("pkgs2", "pkgcache", "buildtemp", "packages_temp.json", "nimbledata2.json"):
+            for n in made:
                 self.assertIn(str(home / d / n), w, f"{d}/{n}")
             self.assertNotIn(str(home / d), w)
             self.assertNotIn(str(home / d / "bin"), w)
@@ -13817,7 +14608,7 @@ class Lane(Base):
         os.chmod(locked, 0o700)
         with mock.patch.object(lane, "abi", lambda: 6):
             self.assertEqual(runner.lane_refused(task, out), [f"{locked}/data.db"])
-        with mock.patch.object(lane, "abi", lambda: 0):     # macOS, or no Landlock: no lane
+        with mock.patch.object(lane, "kind", lambda: None):  # no Landlock, no Seatbelt: no lane
             self.assertEqual(runner.lane_refused(task, out), [])
         if os.geteuid() == 0:
             return
@@ -14182,6 +14973,538 @@ class Lane(Base):
                              text=True, timeout=20)
         self.assertIn("NoNewPrivs:\\t1", out.stdout, out.stderr)
 
+    # macOS's lane (#1194, 2026-11-24): Seatbelt behind lane.wrap and lane.py's main, drawn from
+    # the same lists. These run anywhere (the profile is text); the last one needs a Mac
+    def seatbelt_reads(self, rules, writable, path):
+        """Whether Seatbelt would let `path` be read under `rules`: the last match wins."""
+        real, ok = os.path.realpath(path), True
+        for effect, p in [*rules, *(("allow", w) for w in writable)]:
+            p = os.path.realpath(p)
+            if real == p or real.startswith(p.rstrip("/") + "/"):
+                ok = effect == "allow"
+        return ok
+
+    def landlock_reads(self, readable, writable, path):
+        real = os.path.realpath(path)
+        return any(real == r or real.startswith(r.rstrip("/") + "/")
+                   for r in map(os.path.realpath, [*readable, *writable]))
+
+    def test_seatbelts_profile_writes_only_the_lane_and_passes_each_path_as_a_parameter(self):
+        # every path a -D parameter, so none is quoted into the profile's text, and its real
+        # path: Seatbelt matches the resolved one, and macOS's /tmp is /private/tmp
+        base = Path(self.tmp.name)
+        odd = base / 'a "quoted" dir (x)'
+        odd.mkdir()
+        link = base / "link"
+        link.symlink_to(odd)
+        hidden, kept, sock = base / "h", base / "h" / "k", base / "sock"
+        text, params = lane.profile([str(link), "/dev/null"],
+                                    [("deny", str(hidden)), ("allow", str(kept))], [str(sock)])
+        self.assertTrue(all(p.startswith("-D") for p in params))
+        values = [p[2:].split("=", 1) for p in params]
+        self.assertIn(str(odd), [v for _, v in values])
+        self.assertNotIn(str(link), [v for _, v in values])
+        self.assertNotIn("quoted", text)
+        self.assertEqual(text.count("("), text.count(")"))
+
+        def name(path):
+            return next(k for k, v in values if v == path)
+        lines = text.splitlines()
+        self.assertEqual(lines[:3], ["(version 1)", "(allow default)", "(deny file-write*)"])
+        self.assertIn(f'(subpath (param "{name(str(odd))}"))', lines[3])
+        self.assertTrue(lines[3].startswith("(allow file-write* "))
+        hide = lines.index(f'(deny file-read-data (subpath (param "{name(str(hidden))}")))')
+        keep = lines.index(f'(allow file-read-data (subpath (param "{name(str(kept))}")))')
+        self.assertLess(hide, keep)                       # the last match wins: kept is read
+        lane_read = next(i for i, ln in enumerate(lines) if ln.startswith("(allow file-read-data ")
+                         and name(str(odd)) in ln)
+        self.assertGreater(lane_read, keep)               # the lane is read, as with Landlock
+        unix = lines.index("(deny network-outbound (remote unix-socket))")
+        self.assertIn(f'"{name(str(sock))}"', lines[unix + 1])
+        self.assertIn(f'"{name("/private/var/run/mDNSResponder")}"', lines[unix + 1])  # lookups
+        for rule in ("(deny signal)", "(allow signal (target same-sandbox))",
+                     "(deny process-info*)", "(allow process-info* (target same-sandbox))",
+                     "(deny file-link)"):
+            self.assertIn(rule, lines)
+        refused = next(ln for ln in lines if ln.startswith("(deny process-exec "))
+        for prog in ("/usr/bin/sudo", "/usr/bin/su", "/usr/bin/login", "/usr/bin/open"):
+            self.assertIn(f'"{name(prog)}"', refused)
+
+    @home_outside_the_lane
+    def test_seatbelts_read_rules_hide_what_landlocks_read_lane_leaves_out(self):
+        # Seatbelt reads by a list of refusals, Landlock by one of grants: the rules are the
+        # read walk's complement, so the two lanes read the same files
+        home = self.fake_home()
+        for f in (".ssh/id_ed25519", ".config/gh/hosts.yml", ".config/tool/conf", "Documents/tax.pdf",
+                  "Library/Application Support/tool/conf", "Library/Keychains/login.keychain-db",
+                  "bin/tool", "code/other/main.py"):
+            (home / f).parent.mkdir(parents=True, exist_ok=True)
+            (home / f).write_text("x")
+        task = self.bare_task("t-1194", self.repo)
+        task.worktree.mkdir()
+        (task.worktree / "a.py").write_text("x")
+        rules, readable = context.read_rules(task), context.readable(task)
+        writable = context.writable(task)
+        self.assertTrue(rules)
+        self.assertTrue(all(e in ("deny", "allow") and os.path.isabs(p) for e, p in rules))
+        depths = [len(Path(p).parts) for _, p in rules]
+        self.assertEqual(depths, sorted(depths))          # ancestors first: each over the wider
+        files = [home / f for f in (".ssh/id_ed25519", ".config/gh/hosts.yml", ".config/tool/conf",
+                                    "Documents/tax.pdf", "Library/Application Support/tool/conf",
+                                    "Library/Keychains/login.keychain-db", "bin/tool",
+                                    "code/other/main.py")]
+        files += [task.worktree / "a.py", task.dir / "task.json", ROOT / "workbench" / "lane.py",
+                  Path(sys.executable), Path("/etc/hosts")]
+        for f in files:
+            self.assertEqual(self.seatbelt_reads(rules, writable, f),
+                             self.landlock_reads(readable, writable, f), f)
+        said = {f.relative_to(home).as_posix(): self.seatbelt_reads(rules, writable, f)
+                for f in files[:8]}
+        self.assertEqual(said, {".ssh/id_ed25519": False, ".config/gh/hosts.yml": False,
+                                ".config/tool/conf": True, "Documents/tax.pdf": False,
+                                "Library/Application Support/tool/conf": True,  # macOS's dotfiles
+                                "Library/Keychains/login.keychain-db": False, "bin/tool": True,
+                                "code/other/main.py": False})
+        self.assertTrue(self.seatbelt_reads(rules, writable, task.worktree / "a.py"))
+        self.assertTrue(self.seatbelt_reads(rules, writable, ROOT / "workbench" / "lane.py"))
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": ["*"]}))
+        self.assertIsNone(context.read_rules(task))
+
+    # #1194's review (2026-11-24): with Library readable, each of these tools' macOS logins was
+    # read while its Linux twin was hidden: each row is (macOS, Linux)
+    MAC_TWINS = [("Library/Application Support/sops/age/keys.txt", ".config/sops/age/keys.txt"),
+                 ("Library/Application Support/com.vercel.cli/auth.json",
+                  ".local/share/com.vercel.cli/auth.json"),
+                 ("Library/Preferences/.wrangler/config/default.toml",
+                  ".config/.wrangler/config/default.toml"),
+                 ("Library/Application Support/Bitwarden CLI/data.json", ".config/Bitwarden CLI/data.json"),
+                 ("Library/Preferences/helm/registry/config.json", ".config/helm/registry/config.json"),
+                 ("Library/Preferences/netlify/config.json", ".config/netlify/config.json"),
+                 ("Library/Application Support/dart/pub-credentials.json",
+                  ".config/dart/pub-credentials.json"),
+                 ("Library/Application Support/loadimpact/k6/config.json",
+                  ".config/loadimpact/k6/config.json"),
+                 ("Library/Application Support/doctl/config.yaml", ".config/doctl/config.yaml"),
+                 ("Library/Thunderbird/Profiles/p.default/logins.json",
+                  ".thunderbird/p.default/logins.json"),
+                 ("Library/Application Support/Chromium/Default/Login Data",
+                  ".config/chromium/Default/Login Data"),
+                 ("Library/Application Support/openstack/secure.yaml", ".config/openstack/secure.yaml"),
+                 ("Library/Application Support/openstack/clouds.yaml", ".config/openstack/clouds.yaml")]
+
+    @home_outside_the_lane
+    def test_on_macos_each_tools_login_is_hidden_where_its_linux_twin_is(self):
+        home = self.fake_home()
+        files = [f for pair in self.MAC_TWINS for f in pair] + ["Library/Application Support/tool/conf"]
+        for f in files:
+            (home / f).parent.mkdir(parents=True, exist_ok=True)
+            (home / f).write_text("x")
+        task = self.bare_task("t-1194-twins", self.repo)
+        rules, writable = context.read_rules(task), context.writable(task)
+        said = {f: self.seatbelt_reads(rules, writable, home / f) for f in files}
+        self.assertEqual(said, {**{f: False for f in files[:-1]}, files[-1]: True})
+        # and pip's macOS config in an API task's lane when it holds a credential, as its XDG one
+        pip = home / "Library/Application Support/pip/pip.conf"
+        pip.parent.mkdir(parents=True)
+        pip.write_text("[global]\nindex-url = https://u:tok@pypi.example/simple\n")
+        self.assertIn(os.path.realpath(pip), context.api_hidden_paths())
+        self.assertEqual(context._api_hidden_tools()[os.path.realpath(pip)], "pip")
+
+    def test_macos_volumes_are_read_only_where_something_is_kept_and_its_system_disk_link_reads_root(self):
+        # #1194's review: /Volumes holds the external disks and network shares, as /media and
+        # /mnt do; `Macintosh HD` there is a link to /, which must not deny the system
+        self.assertIn("/Volumes", context.ONLY_KEPT)
+        root = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-volumes-"))  # not in the lane
+        self.addCleanup(shutil.rmtree, root, True)
+        self.fake_home()
+        (root / "Macintosh HD").symlink_to("/")
+        (root / "Backup").mkdir()
+        (root / "Backup" / "photos.jpg").write_text("x")
+        task = self.bare_task("t-1194-volumes", self.repo)
+        # in its place, and /home (macOS's /Users) read as / is, so that its one deny shows: with
+        # /Users kept, the 2.1 macOS nightly (2026-11-25) found one deny of /Users above it
+        kept = tuple(str(root) if p == "/Volumes" else p for p in context.ONLY_KEPT
+                     if p not in ("/home", "/Users"))
+        with mock.patch.object(context, "ONLY_KEPT", kept):
+            rules, readable = context.read_rules(task), context.readable(task)
+        writable = context.writable(task)
+        real = os.path.realpath(root)
+        self.assertIn(("deny", real), rules)
+        self.assertFalse([p for _, p in rules if context._under(p, real)])    # one rule, no descent
+        for f in (root / "Backup" / "photos.jpg", root / "Macintosh HD" / "etc" / "hosts"):
+            self.assertEqual(self.seatbelt_reads(rules, writable, f),
+                             self.landlock_reads(readable, writable, f), f)
+        self.assertFalse(self.seatbelt_reads(rules, writable, root / "Backup" / "photos.jpg"))
+        self.assertTrue(self.seatbelt_reads(rules, writable, root / "Macintosh HD" / "etc" / "hosts"))
+
+    def seatbelt_writes(self, text, params, path, link=False):
+        """Whether the Seatbelt profile ``text`` with ``params`` lets `path` be written: its
+        file-write* rules in order, the last match winning; a `literal` filter is the path
+        alone, a `subpath` one the path and what is beneath it. ``link``: the path's own name,
+        its directory resolved (an unlink or a rename of a link)."""
+        values = dict(p[2:].split("=", 1) for p in params)
+        real = os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path)) \
+            if link else os.path.realpath(path)
+        ok = False
+        for line in text.splitlines():
+            if line.startswith(("(allow file-write*", "(deny file-write*")):
+                refs = re.findall(r'\((subpath|literal) \(param "([^"]+)"\)\)', line)
+                if not refs or any(real == values[n] or kind == "subpath" and
+                                   real.startswith(values[n].rstrip("/") + "/")
+                                   for kind, n in refs):
+                    ok = line.startswith("(allow")
+        return ok
+
+    @home_outside_the_lane
+    def test_with_seatbelt_a_lane_root_holding_a_denied_place_cant_be_renamed_or_replaced(self):
+        # #1194's third review (2026-11-24): with Seatbelt the lane keeps ~/.cargo, ~/.dotnet
+        # and Library/Caches whole and denies only bin/, tools/ and com.apple.python by path, but
+        # a subpath allow takes in the root itself: `mv ~/.cargo $TMPDIR/old`, a ~/.cargo made
+        # in the temp directory with a planted bin/cargo, then moved into its place, ran as the
+        # user at their next cargo, every rename on an allowed path. A rename's source and
+        # destination are writes on their paths: the root's own path, and each directory down
+        # to the place, are refused, what is in them is not
+        home = self.fake_home()
+        for d in (".cargo/bin", ".cargo/registry", ".dotnet/tools", "Library/Caches/com.example"):
+            (home / d).mkdir(parents=True)
+        task = self.bare_task("t-1194-rename", self.repo)
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            w = context.writable(task)
+            text, params = lane.profile(w, context.read_rules(task), [], context.write_denied(w))
+        real = {os.path.realpath(p) for p in w}
+        for root in (".cargo", ".dotnet", "Library/Caches"):
+            self.assertIn(os.path.realpath(home / root), real, root)         # whole, as before
+            self.assertFalse(self.seatbelt_writes(text, params, home / root), root)
+        for f in (".cargo/bin/x", ".cargo/bin", ".dotnet/tools/x", "Library/Caches/com.apple.python"):
+            self.assertFalse(self.seatbelt_writes(text, params, home / f), f)
+        for f in (".cargo/registry/x", ".cargo/new", ".cargo/registry", ".dotnet/x",
+                  "Library/Caches/com.example/x", "Library/Caches/golangci-lint"):
+            self.assertTrue(self.seatbelt_writes(text, params, home / f), f)
+        # a grant above the root: each directory between it and the place too, made or not
+        work = Path(os.path.realpath(self.tmp.name)) / "grant"
+        (work / "a").mkdir(parents=True)
+        text, params = lane.profile([str(work)], [], [], [str(work / "a" / "b" / "c")])
+        for f in (work, work / "a", work / "a" / "b", work / "a" / "b" / "c" / "x"):
+            self.assertFalse(self.seatbelt_writes(text, params, f), f)
+        for f in (work / "x", work / "a" / "x", work / "a" / "b" / "x"):
+            self.assertTrue(self.seatbelt_writes(text, params, f), f)
+
+    @home_outside_the_lane
+    def test_cargos_own_config_is_out_of_the_lane_on_both_kernels_made_or_not(self):
+        # #1194's fourth review (2026-11-24): with Seatbelt ~/.cargo was whole but bin/ and env,
+        # so the agent could make ~/.cargo/config.toml, whose build.rustc-wrapper or target
+        # linker cargo ran as the user at their next build, outside the lane; Landlock's split
+        # refused a new one but granted one already there. And a ~/.cargo holding only the
+        # user's config.toml is split around it with cargo's own entries made first
+        home = self.fake_home()
+        for d in (".cargo/bin", ".cargo/registry"):
+            (home / d).mkdir(parents=True)
+        (home / ".cargo" / "env").write_text("export PATH")
+        moved = home / "moved-cargo"                   # CARGO_HOME, outside the temp roots
+        moved.mkdir()
+        (moved / "config.toml").write_text("[build]\n")    # the user's own, and nothing else
+        os.environ["CARGO_HOME"] = str(moved)
+        task = self.bare_task("t-1194-cargo-config", self.repo)
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            w = context.writable(task)
+            text, params = lane.profile(w, context.read_rules(task), [], context.write_denied(w))
+        for f in (home / ".cargo/config.toml", home / ".cargo/config", moved / "config.toml",
+                  moved / "config"):
+            self.assertFalse(self.seatbelt_writes(text, params, f), f)
+        for f in (home / ".cargo/registry/x", home / ".cargo/git", moved / "registry"):
+            self.assertTrue(self.seatbelt_writes(text, params, f), f)
+        (home / ".cargo" / "config.toml").write_text("[build]\n")   # already there
+        with mock.patch.object(lane, "kind", lambda: "landlock"):
+            w = context.writable(task)
+        for f in (home / ".cargo/config.toml", home / ".cargo/config", moved / "config.toml",
+                  moved / "config"):
+            self.assertFalse([q for q in w if q == str(f) or str(f).startswith(q + "/")], f)
+            self.assertIsNotNone(context.kept_out(str(f)), f)       # no grant reaches it
+        self.assertIn(str(home / ".cargo/registry"), w)
+        self.assertIn(str(moved / "registry"), w)                   # made first, then granted
+
+    @home_outside_the_lane
+    def test_with_landlock_a_distros_cargo_home_is_split_so_no_config_can_be_made(self):
+        # #1194's fifth review (2026-11-24): a distro's cargo (Arch's rust, Debian's, Fedora's)
+        # makes only registry/, and writable() split a cargo home only when bin/, env or a
+        # config was there, so ~/.cargo (and a CARGO_HOME like it) was granted whole and the
+        # agent made a config.toml whose build.rustc-wrapper cargo ran at the user's next build
+        home = self.fake_home()
+        (home / ".cargo/registry").mkdir(parents=True)
+        moved = home / "moved-cargo"
+        (moved / "registry").mkdir(parents=True)
+        os.environ["CARGO_HOME"] = str(moved)
+        task = self.bare_task("t-1194-distro-cargo", self.repo)
+        with mock.patch.object(lane, "kind", lambda: "landlock"):
+            w = context.writable(task)
+        for c in (home / ".cargo", moved):
+            self.assertNotIn(str(c), w)                      # split, never whole
+            for n in ("config.toml", "config", "bin", "env"):
+                f = c / n
+                self.assertFalse([q for q in w if q == str(f) or str(f).startswith(q + "/")], f)
+            for n in ("registry", "git", ".package-cache"):  # cargo's own, made first
+                self.assertIn(str(c / n), w)
+
+    @home_outside_the_lane
+    def test_with_seatbelt_a_linked_cargo_config_is_denied_by_its_own_name(self):
+        # #1194's fifth review (2026-11-24): ~/.cargo/config.toml linked into ~/dotfiles (stow;
+        # home-manager links it into /nix/store) was denied only at its target, outside the lane
+        # and dropped, so the agent could unlink the link inside the whole ~/.cargo and write a
+        # config.toml whose build.rustc-wrapper ran as the user at their next build
+        home = self.fake_home()
+        for d in (".cargo/bin", ".cargo/registry", "dotfiles"):
+            (home / d).mkdir(parents=True)
+        (home / ".cargo/env").write_text("export PATH")
+        (home / "dotfiles/cargo.toml").write_text("[build]\n")
+        (home / ".cargo/config.toml").symlink_to(home / "dotfiles/cargo.toml")
+        task = self.bare_task("t-1194-linked-config", self.repo)
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            w = context.writable(task)
+            denied = context.write_denied(w)
+            text, params = lane.profile(w, context.read_rules(task), [], denied)
+        link = home / ".cargo/config.toml"
+        self.assertIn(os.path.join(os.path.realpath(home / ".cargo"), "config.toml"), denied)
+        self.assertFalse(self.seatbelt_writes(text, params, link, link=True))  # rm, mv onto it
+        self.assertTrue(self.seatbelt_writes(text, params, home / ".cargo/registry/x"))
+
+    @home_outside_the_lane
+    def test_with_seatbelt_apples_python_bytecode_is_denied_inside_a_whole_library_caches(self):
+        # #1194's review: Library/Caches was writable whole, and the Command Line Tools'
+        # /usr/bin/python3 loads its stdlib's .pyc from Library/Caches/com.apple.python: one the
+        # agent planted ran as the user, outside the lane, at the next python3 anywhere. And its
+        # second review: split around that folder, Library/Caches refused every tool's first
+        # cache folder (golangci-lint's, pipenv's, black's, Homebrew's) but a few made for it.
+        # Seatbelt denies the one place by path instead, made or not
+        home = self.fake_home()
+        caches = home / "Library" / "Caches"
+        (caches / "com.example.app").mkdir(parents=True)
+        bytecode = caches / "com.apple.python"
+        task = self.bare_task("t-1194-pyc", self.repo)
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            w = context.writable(task)
+            denied = context.write_denied(w)
+            argv = context.lane_wrap(task)(["true"])
+            text, params = lane.profile(w, context.read_rules(task), [], denied)
+            only = context.read_only(task, w)
+            rules = context.read_only_rules(task)
+        self.assertIn(os.path.realpath(caches), map(os.path.realpath, w))   # whole
+        self.assertFalse(bytecode.exists())                                # nothing made for it
+        self.assertEqual(sorted(p.name for p in caches.iterdir()), ["com.example.app"])
+        self.assertEqual(denied, [os.path.realpath(bytecode)])
+        self.assertEqual(argv[argv.index("--deny-write") + 1], os.path.realpath(bytecode))
+        for f in (bytecode, bytecode / "lib" / "os.cpython-39.pyc"):
+            self.assertFalse(self.seatbelt_writes(text, params, f), f)
+        for n in ("com.example.app", "golangci-lint", "pipenv", "prisma-nodejs", "black",
+                  "Homebrew", "pip", "go-build"):
+            self.assertTrue(self.seatbelt_writes(text, params, caches / n / "x"), n)
+        self.assertIsNotNone(context.kept_out(str(bytecode / "Library")))   # no grant reaches it
+        self.assertIn(os.path.realpath(bytecode), only)                    # read, as the toolchains
+        self.assertIn({"action": "edit", "resource": f"{os.path.realpath(bytecode)}/*",
+                       "effect": "deny"}, rules)                           # never the file tools'
+        # Landlock can only allow: there the lane is split around the place once it is made
+        bytecode.mkdir()
+        with mock.patch.object(lane, "kind", lambda: "landlock"):
+            w = context.writable(task)
+            self.assertEqual(context.write_denied(w), [])
+        real = os.path.realpath(bytecode)
+        self.assertFalse([p for p in w if os.path.realpath(p) == real
+                          or context._under(real, os.path.realpath(p))])
+        self.assertIn(str(caches / "com.example.app"), w)
+
+    def test_a_read_rule_isnt_drawn_through_a_link_but_a_grant_by_one_is(self):
+        # a link's way to a place says nothing of the place (Landlock rules sit on the files):
+        # ~/sys-etc, a home folder the lane doesn't read, mustn't deny /etc, and ~/.tools
+        # pointing into one (~/src/tools) grants it, whatever order the walk met them in. A home
+        # outside /home, as root's or a service's (/var/lib/<svc>), is read but its folders
+        home = self.fake_home()
+        (home / "sys-etc").symlink_to("/etc")
+        (home / "src" / "tools").mkdir(parents=True)
+        (home / "src" / "tools" / "t").write_text("x")
+        (home / "src" / "other").write_text("x")
+        (home / ".tools").symlink_to(home / "src" / "tools")
+        (home / ".claude").mkdir()
+        (home / ".claude" / "settings.json").write_text("{}")
+        task = self.bare_task("t-1194-link", self.repo)
+        with mock.patch.object(context, "ONLY_KEPT", ("/dev",)):
+            rules, readable = context.read_rules(task), context.readable(task)
+        writable = context.writable(task)
+        self.assertNotIn(("deny", "/etc"), rules)
+        for f in ("/etc/hosts", home / "src" / "tools" / "t", home / "src" / "other",
+                  home / ".claude" / "settings.json"):
+            self.assertEqual(self.seatbelt_reads(rules, writable, f),
+                             self.landlock_reads(readable, writable, f), f)
+        self.assertTrue(self.seatbelt_reads(rules, writable, "/etc/hosts"))
+        self.assertTrue(self.seatbelt_reads(rules, writable, home / "src" / "tools" / "t"))
+        self.assertFalse(self.seatbelt_reads(rules, writable, home / "src" / "other"))
+        self.assertFalse(self.seatbelt_reads(rules, writable, home / ".claude" / "settings.json"))
+
+    def test_on_macos_the_lane_execs_sandbox_exec_once_its_profile_holds(self):
+        work = Path(self.tmp.name) / "lane"
+        work.mkdir()
+        reads = [("deny", "/Users"), ("allow", str(work))]
+        no = str(work / "no")
+        argv = lane.wrap([str(work)], ["true", "x"], unix=[str(work)], reads=reads, deny_write=[no])
+        self.assertEqual(argv[:3], [sys.executable, "-I", os.path.abspath(lane.__file__)])
+        self.assertEqual(argv[argv.index("--hide") + 1], "/Users")
+        self.assertNotIn("--reads", argv)
+        text, params = lane.profile([str(work)], reads, [str(work)], [no])
+        self.assertFalse(self.seatbelt_writes(text, params, work / "no" / "x"))   # #1194
+        self.assertTrue(self.seatbelt_writes(text, params, work / "x"))
+        tried, execd, err = [], [], io.StringIO()
+
+        def run(code):
+            return lambda cmd, **kw: tried.append(cmd) or subprocess.CompletedProcess(
+                cmd, code, "", "sandbox-exec: profile rejected" if code else "")
+
+        def main(args, code=0):
+            with mock.patch.object(lane, "kind", lambda: "seatbelt"), \
+                    mock.patch.object(lane, "die_with_parent", lambda: None), \
+                    mock.patch.object(lane, "restrict", side_effect=AssertionError("Landlock")), \
+                    mock.patch.object(lane.subprocess, "run", run(code)), \
+                    mock.patch.object(lane.os, "execv", lambda *a: execd.append(a)), \
+                    redirect_stderr(err):
+                lane.main(args)
+        main(argv[3:])
+        self.assertEqual(tried, [[lane.SANDBOX_EXEC, "-p", text, *params, "/usr/bin/true"]])
+        self.assertEqual(execd, [(lane.SANDBOX_EXEC,
+                                  [lane.SANDBOX_EXEC, "-p", text, *params, "--", "true", "x"])])
+        # a profile sandbox-exec refuses: never run outside it, and lane.py's own message
+        with self.assertRaises(SystemExit) as stop:
+            main(argv[3:], code=65)
+        self.assertEqual(stop.exception.code, 126)
+        self.assertIn("workbench lane: macOS refused the lane (sandbox-exec: profile rejected); "
+                      "not running true", err.getvalue())
+        with self.assertRaises(SystemExit) as stop:      # 127, as Landlock's side says it
+            main(lane.wrap([str(work)], ["wb-no-such-command"])[3:])
+        self.assertEqual(stop.exception.code, 127)
+        self.assertIn("can't run wb-no-such-command", err.getvalue())
+        self.assertEqual(len(execd), 1)
+
+    def test_the_lane_is_seatbelt_on_a_mac_with_sandbox_exec_and_landlock_first(self):
+        darwin = mock.patch.object(lane.sys, "platform", "darwin")
+        there = mock.patch.object(lane.os, "access", lambda p, m: p == lane.SANDBOX_EXEC)
+        with mock.patch.object(lane, "abi", lambda: 0), darwin, there:
+            self.assertEqual((lane.kind(), lane.held()), ("seatbelt", True))
+        with mock.patch.object(lane, "abi", lambda: 0), darwin, \
+                mock.patch.object(lane.os, "access", lambda p, m: False):
+            self.assertEqual((lane.kind(), lane.held()), (None, False))
+        with mock.patch.object(lane, "abi", lambda: 6):
+            self.assertEqual((lane.kind(), lane.held()), ("landlock", True))
+        gaps = " ".join(lane.gaps("seatbelt"))
+        for said in ("--disable-sandbox", "--no-sandbox", "temp directory"):   # what it breaks, never
+            self.assertIn(said, gaps)                                          # what it can't confine (#1322)
+        for unsaid in ("deprecated", "TCP", "by a list"):
+            self.assertNotIn(unsaid, gaps)
+
+    def test_a_tasks_lane_hands_seatbelt_its_read_rules_and_its_own_sockets(self):
+        task = self.bare_task("t-1194-wrap", self.repo)
+        task.worktree.mkdir()
+        with mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            argv = context.lane_wrap(task)(["opencode", "run"])
+        self.assertEqual(argv[-3:], ["--", "opencode", "run"])
+        self.assertIn("--hide", argv)
+        self.assertNotIn("--reads", argv)
+        unix = [argv[i + 1] for i, a in enumerate(argv) if a == "--unix"]
+        self.assertIn(str(task.worktree), unix)              # its own sockets, never /tmp
+        self.assertNotIn(os.path.realpath("/tmp"), map(os.path.realpath, unix))
+        with mock.patch.object(lane, "kind", lambda: "landlock"):
+            argv = context.lane_wrap(task)(["opencode", "run"])
+        self.assertIn("--reads", argv)
+        self.assertNotIn("--hide", argv)
+        if lane.held():  # and what it draws runs here, in this machine's own lane
+            out = subprocess.run(context.lane_wrap(task)([sys.executable, "-c", "print('ran')"]),
+                                 cwd=task.worktree, capture_output=True, text=True, timeout=60)
+            self.assertEqual(out.stdout, "ran\n", out.stderr)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": ["*"]}))
+        self.assertEqual(context.lane_wrap(task)(["opencode", "run"]), ["opencode", "run"])
+
+    def test_with_seatbelt_a_socket_outside_the_tasks_own_places_is_named_with_its_grant(self):
+        # Seatbelt can't tell the agent's sockets from the user's in a temp directory (tmux's,
+        # the SSH agent's), so one there is refused like ABI 9's, and named
+        task = self.bare_task("t-1194-sock", self.repo)
+        task.worktree.mkdir()
+        d = Path(os.path.realpath(tempfile.mkdtemp(prefix="wb-1194-")))
+        self.addCleanup(shutil.rmtree, d, True)
+        socks = []
+        for where in (d / "s", task.worktree / "s"):
+            srv = socket.socket(socket.AF_UNIX)
+            srv.bind(str(where))
+            self.addCleanup(srv.close)
+            socks.append(str(where))
+        out = "".join(f"connect {s}: Operation not permitted\n" for s in socks)
+        with mock.patch.object(lane, "abi", lambda: 0), mock.patch.object(lane, "kind", lambda: "seatbelt"):
+            self.assertEqual(runner.lane_refused(task, out), socks[:1])
+        with mock.patch.object(lane, "abi", lambda: 0), mock.patch.object(lane, "kind", lambda: None):
+            self.assertEqual(runner.lane_refused(task, out), [])   # no lane, no refusal of its
+
+    @unittest.skipUnless(lane.kind() == "seatbelt", "needs macOS's sandbox-exec")
+    @home_outside_the_lane
+    def test_seatbelt_holds_the_lane_on_a_real_mac(self):
+        # the nightly macOS job runs this; a skip is not a pass
+        home = self.fake_home()
+        (home / ".ssh").mkdir()
+        (home / ".ssh" / "id_ed25519").write_text("secret")
+        (home / ".config" / "tool").mkdir(parents=True)
+        (home / ".config" / "tool" / "conf").write_text("conf")
+        (home / "Library" / "Caches").mkdir(parents=True)
+        (home / ".cargo" / "bin").mkdir(parents=True)
+        (home / ".cargo" / "registry").mkdir()
+        (home / "dotfiles").mkdir()                    # a stowed config, #1194's fifth review
+        (home / "dotfiles" / "cargo.toml").write_text("[build]\n")
+        (home / ".cargo" / "config.toml").symlink_to(home / "dotfiles" / "cargo.toml")
+        task = self.bare_task("t-1194-mac", self.repo)
+        task.worktree.mkdir()
+        d = Path(os.path.realpath(tempfile.mkdtemp(prefix="wb-1194-")))
+        self.addCleanup(shutil.rmtree, d, True)
+        sock = d / "s"
+        srv = socket.socket(socket.AF_UNIX)
+        srv.bind(str(sock))
+        srv.listen()
+        self.addCleanup(srv.close)
+        script = textwrap.dedent("""\
+            import os, socket, subprocess, sys
+            def say(what, f):
+                try:
+                    f(); print(what, "ok")
+                except (OSError, subprocess.CalledProcessError) as e:
+                    print(what, "refused", getattr(e, "errno", None))
+            home, wt, sock = sys.argv[1:4]
+            say("write-outside", lambda: open(os.path.join(home, "planted"), "w").close())
+            say("write-worktree", lambda: open(os.path.join(wt, "made"), "w").close())
+            caches = os.path.join(home, "Library", "Caches")
+            say("write-cache", lambda: os.makedirs(os.path.join(caches, "golangci-lint", "x")))
+            say("write-pyc", lambda: os.makedirs(os.path.join(caches, "com.apple.python", "x")))
+            # #1194's third review: a root holding a denied place can't be moved aside, into
+            # the temp directory the lane writes
+            import tempfile
+            aside = tempfile.mkdtemp()
+            say("mv-caches", lambda: os.rename(caches, os.path.join(aside, "caches")))
+            say("mv-cargo", lambda: os.rename(os.path.join(home, ".cargo"),
+                                              os.path.join(aside, "cargo")))
+            # #1194's fifth review: a linked config is unlinked on its own path
+            say("rm-linked-config", lambda: os.unlink(os.path.join(home, ".cargo", "config.toml")))
+            say("read-secret", lambda: open(os.path.join(home, ".ssh", "id_ed25519")).read())
+            say("read-dotfile", lambda: open(os.path.join(home, ".config", "tool", "conf")).read())
+            say("socket-outside", lambda: socket.socket(socket.AF_UNIX).connect(sock))
+            say("signal-outside", lambda: os.kill(os.getppid(), 0))
+            say("sudo", lambda: subprocess.run(["/usr/bin/sudo", "-n", "true"], check=True,
+                                               capture_output=True))
+            """)
+        out = subprocess.run(context.lane_wrap(task)([sys.executable, "-c", script, str(home),
+                                                      str(task.worktree), str(sock)]),
+                             cwd=task.worktree, capture_output=True, text=True, timeout=60)
+        said = dict(ln.split(" ", 1) for ln in out.stdout.splitlines())
+        no = f"refused {errno.EPERM}"   # Seatbelt's, which REFUSAL reads: not sudo's own failure
+        self.assertEqual(said, {"write-outside": no, "write-worktree": "ok", "write-cache": "ok",
+                                "write-pyc": no, "mv-caches": no, "mv-cargo": no,
+                                "rm-linked-config": no, "read-secret": no,
+                                "read-dotfile": "ok", "socket-outside": no, "signal-outside": no,
+                                "sudo": no}, out.stderr)
+        self.assertFalse((home / "planted").exists())
+        self.assertTrue((home / ".cargo" / "config.toml").is_symlink())
+        self.assertEqual(runner.lane_refused(task, f"connect {sock}: Operation not permitted\n"),
+                         [str(sock)])
+
     @staticmethod
     def mountinfo_marking(path: str, fstype: str, at: str) -> str:
         """A mount table with one row: `path`'s device mounted as `fstype` (as WSL2 shows drvfs)."""
@@ -14403,6 +15726,259 @@ class Lane(Base):
         self.assertEqual(env["K6_CONFIG"], str(context.runtime_dir(task) / "k6.json"))
         self.assertEqual(json.loads(Path(env["K6_CONFIG"]).read_text()), {})
 
+    # #1197 (2026-11-24): the lane left TCP open, so an agent reached a Docker API on 2375 (root
+    # on the host) or a debugger's port, and #993 only warned. Landlock lists the ports allowed,
+    # so the lane allows every port but the denied ones.
+    @unittest.skipUnless(lane.abi() >= context.NET_ABI, "needs Landlock's TCP rule (ABI 4)")
+    def test_the_lane_refuses_a_tcp_connect_to_a_denied_port_and_no_other(self):
+        import socket
+        probe = ("import socket, sys\nfor fam, host, port in ((socket.AF_INET, '127.0.0.1', "
+                 "int(sys.argv[1])), (socket.AF_INET, '127.0.0.1', int(sys.argv[2])), "
+                 "(socket.AF_INET6, '::1', int(sys.argv[3]))):\n    s = socket.socket(fam)\n"
+                 "    try:\n        s.connect((host, port))\n        print('ok')\n"
+                 "    except PermissionError:\n        print('refused')\n"
+                 "    except OSError as e:\n        print(e.errno)\n"
+                 "b = socket.socket(); b.bind(('127.0.0.2', int(sys.argv[2])))\n"
+                 "print('bound')\n")
+        with socket.socket() as open_, socket.socket() as denied, \
+                socket.socket(socket.AF_INET6) as denied6:
+            for s, host in ((open_, "127.0.0.1"), (denied, "127.0.0.1")):
+                s.bind((host, 0))
+                s.listen()
+            port = denied.getsockname()[1]
+            try:
+                denied6.bind(("::1", port))
+                denied6.listen()
+            except OSError:
+                self.skipTest("no IPv6 loopback")
+            inside = Path(self.tmp.name) / "inside"
+            inside.mkdir()
+            out = subprocess.run(lane.wrap([str(inside)], [sys.executable, "-c", probe,
+                                           str(open_.getsockname()[1]), str(port), str(port)],
+                                           deny_ports=[port]),
+                                 capture_output=True, text=True, timeout=30)
+        # the test's own server connects, the denied port is refused on either family, and
+        # binding stays free
+        self.assertEqual(out.stdout.split(), ["ok", "refused", "refused", "bound"], out.stderr)
+
+    def test_the_lane_denies_the_local_daemons_ports_less_the_grants_and_the_rounds_own(self):
+        task = self.bare_task("t-ports", self.repo)
+        denied = context.deny_ports(task)
+        self.assertEqual(denied, sorted(context.DAEMON_PORTS))
+        self.assertTrue({2375, 9222, 9229} <= set(denied))       # listening or not
+        context.grant(task, "ports", [9229])
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"ports": [2375]}))
+        self.assertEqual(context.granted_ports(task), {2375, 9229})
+        self.assertNotIn(2375, context.deny_ports(None))         # the user's, for every task
+        self.assertEqual(set(context.deny_ports(task, keep=[5037, None])),
+                         set(context.DAEMON_PORTS) - {2375, 9229, 5037})
+        # the model server's and the keyhole's ports stay open with no grant: runner.lane_ports
+        m = mock.Mock(base_url="http://127.0.0.1:3333/v1")
+        kh = mock.Mock(port=2331, task=task)
+        with mock.patch.dict(runner.CURRENT, {"model": m, "keyhole": kh}):
+            self.assertEqual(runner.lane_ports(task), [2376, 5037, 9222])
+        self.assertEqual(context.url_port("https://api.example/v1"), 443)
+        self.assertIsNone(context.url_port("http://h:notaport/"))
+        argv = lane.wrap(["/x"], ["opencode"], deny_ports=[9229, 2375])
+        self.assertEqual(argv[argv.index("--") - 4:argv.index("--")],
+                         ["--deny-port", "2375", "--deny-port", "9229"])
+        self.assertNotIn("--deny-port", lane.wrap(["/x"], ["opencode"]))
+        self.assertEqual(lane.wrap(None, ["opencode"], deny_ports=[9229]), ["opencode"])
+        for bad in ([0], ["9229"], [True], 9229):                 # refused, not read as none
+            Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"ports": bad}))
+            with self.assertRaisesRegex(RuntimeError, '"ports" must be a list of TCP port'):
+                context.commands_conf()
+
+    @unittest.skipUnless(lane.abi() >= context.NET_ABI, "needs Landlock's TCP rule (ABI 4)")
+    def test_the_tests_run_in_a_lane_that_refuses_the_denied_ports(self):
+        import socket
+        self.start("t-tcp", "ok")
+        wait_phase("t-tcp", {"review"})
+        task = store.Task("t-tcp")
+        with socket.socket() as srv:
+            srv.bind(("127.0.0.1", 0))
+            srv.listen()
+            port = srv.getsockname()[1]
+            cmd = (f"{shlex.quote(sys.executable)} -c \"import socket; "
+                   f"socket.create_connection(('127.0.0.1', {port}), 5); print('reached')\"")
+            with mock.patch.dict(context.DAEMON_PORTS, {port: "a test daemon"}):
+                code, text = runner.run_in_lane(task, cmd, 30)
+                self.assertNotEqual(code, 0)
+                self.assertIn("Permission denied", text)
+                context.grant(task, "ports", [port])              # wb allow --port
+                self.assertEqual(runner.run_in_lane(task, cmd, 30), (0, "reached\n"))
+
+    def test_a_port_request_names_wb_allow_port_and_wb_allow_grants_it(self):
+        task = self.bare_task("t-port", self.repo)
+        q = lambda p: {"question": "the suite drives Chrome", "command": "", "path": "",
+                       "port": p, "context": ""}
+        body = ask_mcp.notice(task, "q1", q("9222"))
+        self.assertTrue(body.startswith("PERMISSION to connect to TCP port 9222 (outside its lane)"))
+        self.assertIn("Chrome's DevTools", body)
+        self.assertIn("wb allow t-port --port 9222", body)
+        body = ask_mcp.notice(task, "q2", q("8080"))               # not one the lane refuses
+        self.assertIn("no grant lifts it", body)
+        self.assertNotIn("wb allow", body)
+        self.assertEqual(ask_mcp._judge(task, q("9222"), {}), ("p", None))
+        for bad in ("0", "65536", "80; rm", "９２２２"):
+            self.assertEqual(ask_mcp._judge(task, q(bad), {})[0], "x", bad)
+        task.set_status(phase="review")
+        self.assertIn("allowed TCP port 9229 on t-port", run_wb("allow", "t-port", "--port", "9229"))
+        self.assertEqual(context.grants(task)["ports"], [9229])
+        run_wb("allow", "t-port", "--port", "2375", "--always")
+        self.assertEqual(json.loads(Path(os.environ["WB_COMMANDS"]).read_text())["ports"], [2375])
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(err):
+            run_wb("allow", "t-port", "--port", "8080")          # nothing to lift
+        self.assertIn("doesn't refuse TCP port 8080", err.getvalue())
+        self.assertNotIn(8080, context.grants(task)["ports"])
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            run_wb("allow", "t-port", "--port", "http")
+
+    @unittest.skipUnless(lane.abi() >= context.NET_ABI, "needs Landlock's TCP rule (ABI 4)")
+    def test_an_abi_4_lane_packs_the_net_field_without_scopes_and_still_refuses_the_port(self):
+        # ABI 4-5's ruleset attr is 16 bytes (no `scoped`): drawn as an ABI 4 kernel would be
+        # asked, on this newer one, which takes the shorter struct
+        script = ("import socket, sys; sys.path.insert(0, sys.argv[1]); from workbench import lane\n"
+                  "srv = socket.socket(); srv.bind(('127.0.0.1', 0)); srv.listen()\n"
+                  "port = srv.getsockname()[1]\n"
+                  "lane.abi = lambda: 4; lane.restrict([sys.argv[2]], deny_ports=[port])\n"
+                  "try:\n    socket.create_connection(('127.0.0.1', port), 5); print('ok')\n"
+                  "except PermissionError:\n    print('refused')\n")
+        out = subprocess.run([sys.executable, "-c", script, str(ROOT), self.tmp.name],
+                             capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.stdout.split(), ["refused"], out.stderr)
+
+    @unittest.skipUnless(lane.abi() >= context.NET_ABI, "needs Landlock's TCP rule (ABI 4)")
+    def test_doctor_checks_the_lane_refuses_a_denied_port(self):
+        self.assertEqual(cli._tcp_refused(), (True, ""))
+        with mock.patch.object(lane, "wrap", lambda w, cmd, *a, **k: cmd):   # no lane at all
+            held, why = cli._tcp_refused()
+        self.assertFalse(held)
+        self.assertEqual(why, "the connect went through")
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"ports": [9229]}))
+        buf = io.StringIO()
+        with redirect_stdout(buf), contextlib.suppress(SystemExit):
+            cli.main(["doctor"])
+        n = len(context.DAEMON_PORTS) - 1
+        self.assertIn(f"ok  local daemons' TCP ports are out of the lane ({n} ports)", buf.getvalue())
+        # an MPTCP socket that connects is named (the lane's seccomp filter left out)
+        real = lane.wrap
+        no_filter = ("import sys; sys.path.insert(0, sys.argv[1]); from workbench import lane; "
+                     "lane.refuse_unseen_streams = lambda libc: None; lane.main(sys.argv[2:])")
+        if _mptcp_here():
+            with mock.patch.object(lane, "wrap", lambda *a, **k: [
+                    sys.executable, "-c", no_filter, str(ROOT), *real(*a, **k)[3:]]):
+                self.assertEqual(cli._tcp_refused(), (False, "an MPTCP socket connected"))
+
+    # #1197's review (2026-11-24): Landlock's TCP rule doesn't cover an MPTCP socket (protocol
+    # 262), which connected to a denied port and carried a full request and reply on Linux 7.2,
+    # ABI 10; the lane's seccomp filter refuses making one, as a kernel without MPTCP does
+    @unittest.skipUnless(lane.abi() >= context.NET_ABI, "needs Landlock's TCP rule (ABI 4)")
+    def test_an_mptcp_socket_to_a_denied_port_is_refused_as_a_plain_tcp_one_is(self):
+        probe = ("import ctypes, socket, sys\nport = int(sys.argv[1])\n"
+                 "for proto in (0, 262):\n    try:\n"
+                 "        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM, proto)\n"
+                 "        s.settimeout(5); s.connect(('127.0.0.1', port)); s.sendall(b'GET /')\n"
+                 "        print('got', s.recv(64))\n"
+                 "    except OSError as e:\n        print(e.errno)\n"
+                 "libc = ctypes.CDLL(None, use_errno=True)\n"
+                 "r = libc.syscall(425, 4, ctypes.create_string_buffer(120))\n"
+                 "print('uring', ctypes.get_errno() if r < 0 else 'made')\n"
+                 "socket.socket(socket.AF_INET, socket.SOCK_DGRAM).close(); print('udp')\n")
+        with socket.socket() as srv:
+            srv.bind(("127.0.0.1", 0))
+            srv.listen()
+            port = srv.getsockname()[1]
+            stop = threading.Event()
+
+            def echo():
+                srv.settimeout(0.2)
+                while not stop.is_set():
+                    try:
+                        c, _ = srv.accept()
+                    except OSError:
+                        continue
+                    with c:
+                        c.sendall(b"echo:" + c.recv(64))
+            t = threading.Thread(target=echo, daemon=True)
+            t.start()
+            inside = Path(self.tmp.name) / "inside"
+            inside.mkdir()
+            try:
+                run = lambda deny: subprocess.run(  # noqa: E731
+                    lane.wrap([str(inside)], [sys.executable, "-c", probe, str(port)],
+                              deny_ports=deny), capture_output=True, text=True, timeout=30)
+                out, free = run([port]), run([])
+            finally:
+                stop.set()
+                t.join()
+        # refused: plain TCP by Landlock, MPTCP's socket by the filter, io_uring (which makes
+        # sockets with no socket(2) to filter) as where it's off; UDP as it was
+        self.assertEqual(out.stdout.splitlines(), [str(errno.EACCES), str(errno.EPROTONOSUPPORT),
+                                                   f"uring {errno.ENOSYS}", "udp"], out.stderr)
+        # with no port to refuse there's no filter: the same probe reaches the server
+        got = "got b'echo:GET /'"
+        self.assertEqual(free.stdout.splitlines()[0], got, free.stderr)
+        if _mptcp_here():  # what the filter closes: an MPTCP socket reached it past the lane
+            self.assertEqual(free.stdout.splitlines()[1], got, free.stderr)
+
+    @unittest.skipUnless(sys.platform.startswith("linux")
+                         and platform.machine().lower() in lane.UNIFIED, "seccomp on Linux")
+    def test_the_stream_filter_refuses_mptcp_smc_and_io_uring_and_nothing_else(self):
+        # the filter alone (no-new-privileges, no Landlock), so a kernel before ABI 4 checks it
+        script = ("import ctypes, socket, sys; sys.path.insert(0, sys.argv[1]); "
+                  "from workbench import lane\nlibc = ctypes.CDLL(None, use_errno=True)\n"
+                  "libc.prctl(lane.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); "
+                  "lane.refuse_unseen_streams(libc)\n"
+                  "for args in ((2, 1, 262), (10, 1, 262), (2, 1, 256), (43, 1, 0), (2, 1, 0), "
+                  "(10, 1, 0), (2, 2, 0), (1, 1, 0)):\n    try:\n"
+                  "        socket.socket(*args).close(); print('ok')\n"
+                  "    except OSError as e:\n        print(e.errno)\n"
+                  "r = libc.syscall(425, 4, ctypes.create_string_buffer(120))\n"
+                  "print(ctypes.get_errno() if r < 0 else 'made')\n")
+        out = subprocess.run([sys.executable, "-c", script, str(ROOT)], capture_output=True,
+                             text=True, timeout=20)
+        no_proto, no_af = str(errno.EPROTONOSUPPORT), str(errno.EAFNOSUPPORT)
+        self.assertEqual(out.stdout.split(), [no_proto, no_proto, no_proto, no_af, "ok", "ok",
+                                              "ok", "ok", str(errno.ENOSYS)], out.stderr)
+        code = lane.stream_filter()
+        self.assertEqual(len(code) % 8, 0)
+        self.assertLess(len(code) // 8, 4096)                   # BPF_MAXINSNS
+
+    # #1197's review: nothing checked the round, the main path, got the refusal: run_round's
+    # lane and the transcript's reads could drop the ports and every test still passed
+    @unittest.skipUnless(lane.abi() >= context.NET_ABI, "needs Landlock's TCP rule (ABI 4)")
+    def test_the_agents_round_and_the_transcripts_reads_are_refused_the_denied_ports(self):
+        port = 2331                                      # J-Link's: no listener needed, a refusal
+        self.assertIn(port, context.DAEMON_PORTS)        # is EACCES before any packet is sent
+        runs = Path(self.tmp.name) / "runs.jsonl"
+        os.environ.update(FAKE_RUNS=str(runs), FAKE_CONNECT=str(port))
+        self.start("t-round-tcp", "ok")
+        wait_phase("t-round-tcp", {"review"})
+        rows = [json.loads(x) for x in runs.read_text().splitlines()]
+        self.assertEqual([r["connect"] for r in rows], [errno.EACCES])
+        task = store.Task("t-round-tcp")
+        probe = [sys.executable, "-c", "import socket\ntry:\n socket.create_connection("
+                 f"('127.0.0.1', {port}), 5); print('ok')\nexcept OSError as e:\n print(e.errno)"]
+        env, wrap = transcript.stores(task)[0]
+        out = subprocess.run(wrap(probe), capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.stdout.split(), [str(errno.EACCES)], out.stderr)
+        context.grant(task, "ports", [port])              # wb allow --port: lifted for both
+        env, wrap = transcript.stores(task)[0]
+        out = subprocess.run(wrap(probe), capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(out.stdout.split(), [str(errno.EACCES)], out.stderr)
+        self.assertNotIn(port, runner.lane_ports(task))
+
+
+def _mptcp_here() -> bool:
+    """Whether this kernel makes MPTCP sockets (net.mptcp.enabled)."""
+    try:
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM, 262).close()
+        return True
+    except OSError:
+        return False
+
 
 class CheckoutVenv(Base):
     """#490 (the audit of 1.90): the user's activated venv, when it is their checkout's, stays out
@@ -14464,8 +16040,8 @@ class CheckoutVenv(Base):
         bins = self.repo / "node_modules" / ".bin"
         os.environ["PATH"] = f"{os.environ['PATH']}{os.pathsep}{bins}"  # a direnv PATH_add
         out = self.start("t-novenv", "ok", "--test", self.TEST, "--auto-fix", "0", "--no-base-check")
-        self.assertIn(f"note: the agent leaves out your active venv ({user}): --setup 'uv sync' (or the "
-                      "project's install) gives the worktree its own\n", out)
+        self.assertIn(f"note: the agent leaves out your active venv ({user}): --setup 'python3 -m venv .venv "
+                      "&& .venv/bin/pip install -e .' (or the project's install) gives the worktree its own\n", out)
         st = wait_phase("t-novenv", {"review"})
         task = store.Task("t-novenv")
         said = task.round_dir(1).joinpath("tests.txt").read_text()
@@ -14479,11 +16055,26 @@ class CheckoutVenv(Base):
         # none active: pip installs where Landlock bounds it, else it asks
         rules = context.shell_rules(task)
         self.assertEqual(Permission.verdict(rules, "pip install -e ."),
-                         "allow" if lane.abi() else "deny")
+                         "allow" if lane.held() else "deny")
         # pipenv makes its own venv in the worktree: no lane needed for that (#950)
         self.assertEqual(Permission.verdict(rules, "pipenv install"), "allow")
-        with mock.patch.object(lane, "abi", return_value=0):
+        with mock.patch.object(lane, "kind", return_value=None):
             self.assertEqual(Permission.verdict(context.shell_rules(task), "pipenv install"), "allow")
+
+    def test_the_venv_note_advises_uv_sync_locked_only_where_the_base_commits_a_uv_lock(self):
+        # #1379 (2026-11-25): the note said `uv sync`, which writes an uncommitted uv.lock and
+        # fails the task before any round (#1347), and `uv sync --locked` fails with no lockfile
+        task = store.Task("t-uvnote")
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": "t-uvnote", "repo": str(self.repo),
+                                                        "base": "HEAD", "subdir": "pkg"}))
+        self.assertEqual(context.venv_setup(task), "python3 -m venv .venv && .venv/bin/pip install -e .")
+        (self.repo / "pkg").mkdir()
+        (self.repo / "pkg" / "uv.lock").write_text("version = 1\n")
+        self.assertEqual(context.venv_setup(task), context.VENV_SETUP)     # not committed yet
+        subprocess.run(["git", "-C", str(self.repo), "add", "pkg/uv.lock"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "lock"], check=True)
+        self.assertEqual(context.venv_setup(task), "uv sync --locked")
 
     def test_a_venv_the_missing_directories_note_names_gets_no_note_of_its_own(self):
         # #1322: the checkout's ignored .venv drew both notes, each with the same advice
@@ -16091,6 +17682,200 @@ with wave.open(out, 'wb') as w:
     w.writeframes(b''.join(struct.pack('<h', 0 if i / rate < 0.2 or 0.6 < i / rate < 1.8 else
                                        int(9000 * math.sin(i / 3))) for i in range(int(rate * secs))))
 """
+
+
+class ImageInput(Base):
+    """--image (#1199): Claude's chosen image goes to the agent through OpenCode's own `run -f`,
+    only for a model that takes images, once per session."""
+    MIMO = "mimo-v2.6:9b-q8_0"
+
+    def declare(self, inputs):
+        """The test model's OpenCode entry with `modalities.input` (None: no declaration)."""
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        entry = cfg["provider"]["ollama"]["models"][self.MIMO]
+        entry.pop("modalities", None)
+        if inputs is not None:
+            entry["modalities"] = {"input": inputs, "output": ["text"]}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+
+    def picture(self, name, data=None):
+        path = Path(self.tmp.name) / name
+        path.write_bytes(data if data is not None else image_png(4, 3))
+        return path
+
+    def refused(self, *argv) -> str:
+        err = io.StringIO()
+        with self.assertRaises(SystemExit) as e, redirect_stderr(err), redirect_stdout(io.StringIO()):
+            cli.main(list(argv))
+        self.assertEqual(e.exception.code, 1)
+        return err.getvalue()
+
+    def runs(self):
+        return [json.loads(l) for l in self.runs_file.read_text().splitlines()]
+
+    def setUp(self):
+        super().setUp()
+        self.runs_file = Path(self.tmp.name) / "runs.jsonl"
+        os.environ["FAKE_RUNS"] = str(self.runs_file)
+
+    def test_an_image_goes_with_the_first_round_and_a_feedback_image_with_its_own_alone(self):
+        self.declare(["text", "image"])
+        shot = self.picture("My Mockup (v2).PNG")
+        out = self.start("t-img", "ok", "--image", str(shot))
+        self.assertIn("images: 1-My-Mockup-v2.png go with the agent's message", out)
+        wait_phase("t-img", {"review"})
+        task = store.Task("t-img")
+        kept = task.dir / "images" / "1-My-Mockup-v2.png"
+        self.assertEqual(kept.read_bytes(), shot.read_bytes())   # a copy, its type's extension
+        first = self.runs()[0]
+        self.assertEqual(first["files"], [{"name": kept.name, "bytes": len(shot.read_bytes())}])
+        self.assertIn(f"Attached: {kept.name}, the image Claude gave you", first["prompt"])
+        self.assertIn(f"read it in {task.dir / 'images'}.", first["prompt"])
+        self.assertNotIn("images", run_wb("diff", "t-img"))       # never in the worktree
+        # a continued session has the image in its history: never sent again
+        run_wb("feedback", "t-img", "--text", "Tidy it.")
+        wait_phase("t-img", {"review"})
+        second = self.runs()[1]
+        self.assertTrue(second["session"])
+        self.assertEqual(second["files"], [])
+        self.assertNotIn("Attached:", second["prompt"])
+        # a feedback's image goes with its round, alone
+        err = self.picture("error.jpg", b"\xff\xd8\xff\xe0" + b"\0" * 64)
+        out = run_wb("feedback", "t-img", "--text", "Fix what this shows.", "--image", str(err))
+        self.assertIn("images: 2-error.jpg go with", out)
+        wait_phase("t-img", {"review"})
+        third = self.runs()[2]
+        self.assertTrue(third["session"])
+        self.assertEqual([f["name"] for f in third["files"]], ["2-error.jpg"])
+        self.assertEqual([(r["file"], r["round"]) for r in task.status["images"]],
+                         [("1-My-Mockup-v2.png", 1), ("2-error.jpg", 3)])
+
+    def test_a_fresh_session_gets_every_image_again(self):
+        self.declare(["text", "image"])
+        self.start("t-fresh", "ok", "--image", str(self.picture("a.png")))
+        wait_phase("t-fresh", {"review"})
+        run_wb("feedback", "t-fresh", "--text", "Again, from the start.", "--fresh",
+               "--image", str(self.picture("b.webp", b"RIFF\0\0\0\0WEBPVP8 " + b"\0" * 32)))
+        wait_phase("t-fresh", {"review"})
+        last = self.runs()[-1]
+        self.assertFalse(last["session"])
+        self.assertEqual([f["name"] for f in last["files"]], ["1-a.png", "2-b.webp"])
+        self.assertIn("Attached: 1-a.png, 2-b.webp, the images Claude gave you", last["prompt"])
+
+    def test_wb_next_sends_its_image_with_the_next_step(self):
+        self.declare(["text", "image"])
+        self.start("t-step", "ok")
+        wait_phase("t-step", {"review"})
+        nxt = Path(self.tmp.name) / "next.md"
+        nxt.write_text("Now match the mockup.\n")
+        out = run_wb("next", "t-step", "--spec", str(nxt), "-m", "feat: answer",
+                     "--image", str(self.picture("mock.gif", b"GIF89a" + b"\0" * 32)))
+        self.assertIn("images: 1-mock.gif go with", out)
+        wait_phase("t-step", {"review"})
+        self.assertEqual(self.runs()[0]["files"], [])
+        self.assertEqual([f["name"] for f in self.runs()[-1]["files"]], ["1-mock.gif"])
+
+    def test_a_text_only_model_is_refused_in_one_line_before_anything_is_written(self):
+        self.declare(["text"])
+        why = self.refused("start", "t-text", "--spec", str(self.spec), "--repo", str(self.repo),
+                           "--model", "mimo", "--image", str(self.picture("m.png")))
+        self.assertIn(f"ollama/{self.MIMO} takes no image input: describe the image in the spec", why)
+        self.assertNotIn("--model", why)                           # never another model
+        self.assertFalse(store.Task("t-text").dir.exists())
+
+    def test_an_undeclared_model_is_asked_of_ollama_and_another_server_is_unknown(self):
+        self.declare(None)
+        shot = str(self.picture("m.png"))
+        argv = ["start", "t-und", "--spec", str(self.spec), "--repo", str(self.repo), "--model", "mimo",
+                "--image", shot]
+        # the fake Ollama's /api/show says tools and thinking, no vision
+        self.assertIn("takes no image input", self.refused(*argv))
+        with mock.patch.object(runner.models, "ollama_show",
+                               return_value={"capabilities": ["tools", "vision"]}) as show:
+            os.environ["FAKE_SCENARIO"] = "ok"
+            self.assertIn("images: 1-m.png", run_wb(*argv))
+        self.assertEqual(show.call_args.args[1], self.MIMO)
+        wait_phase("t-und", {"review"})
+        self.assertIn("doesn't say it takes image input", self.refused(
+            "start", "t-srv", "--spec", str(self.spec), "--repo", str(self.repo), "--model", "strata",
+            "--image", shot))
+
+    def test_a_file_that_is_no_image_too_big_or_too_many_is_refused(self):
+        self.declare(["text", "image"])
+        base = ["start", "t-bad", "--spec", str(self.spec), "--repo", str(self.repo), "--model", "mimo"]
+        self.assertIn("not a PNG, JPEG, GIF or WebP image", self.refused(
+            *base, "--image", str(self.picture("notes.png", b"just text, named .png"))))
+        big = self.picture("big.png")
+        with big.open("r+b") as fh:
+            fh.truncate(cli.IMAGE_BYTES + 1)                       # OpenCode's 10 MiB, plus one
+        self.assertIn("over OpenCode's 10 MiB", self.refused(*base, "--image", str(big)))
+        self.assertIn("no such file", self.refused(*base, "--image", str(Path(self.tmp.name) / "gone.png")))
+        self.assertIn("not a file", self.refused(*base, "--image", self.tmp.name))
+        five = [x for i in range(5) for x in ("--image", str(self.picture(f"{i}.png")))]
+        self.assertIn("at most 4 images", self.refused(*base, *five))
+        # #1199's review (2026-11-24): two at 10 MiB each pass every check above, but their 26.7
+        # MiB of base64 passes OpenCode's 25 MiB, and it drops the older from every request unsaid
+        two = []
+        for name in ("a.png", "b.png"):
+            with (pic := self.picture(name)).open("r+b") as fh:
+                fh.truncate(cli.IMAGE_BYTES)
+            two += ["--image", str(pic)]
+        self.assertIn("20.0 MiB of images on this task, over 8 MiB in all", self.refused(*base, *two))
+        self.assertFalse(store.Task("t-bad").dir.exists())
+
+    def test_a_feedback_image_for_a_text_only_model_is_refused_and_no_round_written(self):
+        self.declare(["text", "image"])
+        self.start("t-later", "ok")
+        wait_phase("t-later", {"review"})
+        self.declare(["text"])
+        self.assertIn("takes no image input", self.refused(
+            "feedback", "t-later", "--text", "See this.", "--image", str(self.picture("m.png"))))
+        self.assertEqual(store.Task("t-later").status["round"], 1)
+        self.assertFalse((store.Task("t-later").dir / "images").exists())
+
+    def test_the_agents_read_tool_may_open_the_images_again(self):
+        self.declare(["text", "image"])
+        self.start("t-read", "ok", "--image", str(self.picture("m.png")))
+        wait_phase("t-read", {"review"})
+        task = store.Task("t-read")
+        if context.writable(task) is None:
+            self.skipTest("the lane is off: external_directory allows everything")
+        allowed = {r["resource"] for r in context.external_rules(task) if r["effect"] == "allow"}
+        self.assertIn(f"{task.dir / 'images'}/*", allowed)
+
+    def test_model_add_writes_what_ollama_says_it_reads_in_each_configs_shape(self):
+        cfg_path = Path(os.environ["WB_OPENCODE_CONFIG"])
+        with mock.patch.object(runner.models, "ollama_show", return_value={
+                "capabilities": ["completion", "tools", "vision"], "context_length": None, "num_ctx": None}):
+            out = run_wb("model", "add", "ollama/eyes:8b", "--context", "32768")
+        self.assertIn("images, 32K context", out)
+        entry = json.loads(cfg_path.read_text())["provider"]["ollama"]["models"]["eyes:8b"]
+        self.assertEqual(entry["modalities"], {"input": ["text", "image"], "output": ["text"]})
+        run_wb("model", "add", "ollama/blind:8b", "--context", "32768")   # the fake: no vision
+        entry = json.loads(cfg_path.read_text())["provider"]["ollama"]["models"]["blind:8b"]
+        self.assertEqual(entry["modalities"]["input"], ["text"])
+        self.assertIs(runner.models.takes_images(runner.models.discover()["ollama/blind:8b"]), False)
+        # a V2 config (`providers`) reads `capabilities.input`, and would drop `modalities` unsaid
+        cfg_path.write_text(json.dumps({"providers": {"ollama": {
+            "settings": {"baseURL": "http://127.0.0.1:11434/v1"},
+            "models": {"eyes:8b": {"capabilities": {"tools": True}}}}}}))
+        with mock.patch.object(runner.models, "ollama_show", return_value={
+                "capabilities": ["tools", "vision"], "context_length": None, "num_ctx": None}):
+            run_wb("model", "add", "ollama/eyes:8b", "--context", "32768")
+        entry = json.loads(cfg_path.read_text())["providers"]["ollama"]["models"]["eyes:8b"]
+        self.assertNotIn("modalities", entry)
+        self.assertEqual(entry["capabilities"], {"tools": True, "input": ["text", "image"], "output": ["text"]})
+        self.assertIs(runner.models.takes_images(runner.models.discover()["ollama/eyes:8b"]), True)
+
+    def test_takes_images_reads_the_catalog_for_an_api_model_and_v2_capabilities(self):
+        api = runner.models.Model(id="p/m", provider="p", name="m", base_url="https://x/v1",
+                                  engine="api", label="m", kind="api",
+                                  config={"capabilities": {"tools": True, "input": ["text", "image"]}})
+        self.assertIs(runner.models.takes_images(api), True)
+        api.config = {"capabilities": {"input": ["text"]}}
+        self.assertIs(runner.models.takes_images(api), False)
+        api.config = {}
+        self.assertIsNone(runner.models.takes_images(api))         # never asks Ollama for an API model
 
 
 class Audio(Base):
@@ -18371,6 +20156,35 @@ class Bench(Base):
         self.assertEqual(argv[argv.index("--setup") + 1], "mkdir -p deps && touch deps/stamp")
         self.assertEqual(argv[argv.index("--allow") + 1], "make check*")
 
+    def test_a_case_keeps_the_tasks_port_grants_and_each_replay_starts_with_them(self):
+        # #1197's review (2026-11-24): bench add kept `allow` and `paths` only, and wb start had
+        # no port option, so a case whose tests needed `wb allow --port` passed its checks
+        # (under the task's own name) and failed every replay with the port refused
+        from workbench import bench
+        self.start("t-cdp", "ok", "--test", "sh tests/check.sh")
+        wait_phase("t-cdp", {"review"})
+        wt = store.Task("t-cdp").worktree
+        (wt / "tests").mkdir()
+        (wt / "tests" / "check.sh").write_text("grep -qx 42 answer.txt\n")
+        run_wb("allow", "t-cdp", "--port", "9222")
+        run_wb("accept", "t-cdp", "-m", "feat: the answer")
+        run_wb("bench", "add", "t-cdp")
+        case = bench.cases()["t-cdp"]
+        self.assertEqual(case["ports"], [9222])
+        argv = []
+        with mock.patch.object(cli, "parser") as parser:
+            parser.return_value.parse_args.side_effect = lambda a: argv.extend(a) or mock.Mock()
+            bench._start_task(case, "m", "bench-x", Path(self.tmp.name), [], {})
+        self.assertEqual(argv[argv.index("--allow-port") + 1], "9222")
+        self.assertEqual(cli.parser().parse_args(argv).allow_port, [9222])
+        # and wb start grants it, so the replay's lane lets its tests connect
+        self.start("t-replayed", "ok", "--allow-port", "9222", "--allow-port", "9222")
+        replayed = store.Task("t-replayed")
+        self.assertEqual(context.grants(replayed)["ports"], [9222])
+        self.assertNotIn(9222, context.deny_ports(replayed))
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            self.start("t-badport", "ok", "--allow-port", "http")
+
     def test_a_replay_keeps_the_tasks_setup_limit_and_its_gpu_for_tests(self):
         # #735 (the 2026-11-21 audit): each replay's wb start got --setup without
         # --setup-timeout, so a long build stopped at 1800 s on every run, and lost
@@ -20159,6 +21973,331 @@ class Backlog(Base):
         self.start("t-n4", "ok", "--backlog", f"overnight-{time.strftime('%Y-%m-%d')}")
         self.assertTrue(store.Task("t-n4").exists)
 
+class ScheduledRuns(Base):
+    """Scheduled runs (#1204): wb start --after holds a task until its time; wb schedule writes the
+    user's timer, whose fire runs Claude headless on a backlog file and keeps a run history."""
+
+    def setUp(self):
+        super().setUp()
+        tmp = Path(self.tmp.name)
+        self.bin = tmp / "sched-bin"
+        self.bin.mkdir()
+        self.calls = tmp / "systemctl-calls"
+        # a systemctl that logs each call, exiting FAKE_SYSTEMCTL_EXIT (0): never the user's manager
+        (self.bin / "systemctl").write_text('#!/bin/sh\necho "$*" >> "$FAKE_SYSTEMCTL_LOG"\n'
+                                            'exit "${FAKE_SYSTEMCTL_EXIT:-0}"\n')
+        # and a launchctl the same, and the systemd side on every OS but in the tests that say
+        # macOS: on the 2.1 macOS nightly (2026-11-25) every add wrote its plist into the runner's
+        # real ~/Library/LaunchAgents and bootstrapped it with the real launchctl, and the
+        # systemd tests found no unit
+        (self.bin / "launchctl").write_text('#!/bin/sh\necho "launchctl $*" >> "$FAKE_SYSTEMCTL_LOG"\n'
+                                            'exit "${FAKE_SYSTEMCTL_EXIT:-0}"\n')
+        from workbench import schedule
+        linux = mock.patch.object(schedule, "_macos", return_value=False)
+        linux.start()
+        self.addCleanup(linux.stop)
+        # a claude that records its argv and environment, and prints a result as claude -p does
+        (self.bin / "claude").write_text(textwrap.dedent(f"""\
+            #!{sys.executable}
+            import json, os, sys
+            if os.environ.get("FAKE_CLAUDE_TASK"):  # a task headless Claude starts in its batch
+                import re, time
+                sys.path.insert(0, {str(ROOT)!r})
+                from workbench import store
+                batch = re.search(r"--backlog ([a-z0-9-]+)", sys.argv[-1])[1]
+                t = store.Task(os.environ["FAKE_CLAUDE_TASK"])
+                store.write_json(t.dir / "task.json", {{"name": t.name, "backlog": batch, "created_at": time.time()}})
+                t.set_status(phase="review")
+            with open(os.environ["FAKE_CLAUDE_LOG"], "w") as f:
+                json.dump({{"argv": sys.argv[1:], "cwd": os.getcwd(),
+                           "env": {{k: os.environ.get(k) for k in ("WB_SCHEDULE", "CLAUDECODE",
+                                                                  "CLAUDE_CODE_SESSION_ID", "WB_HOME")}}}}, f)
+            print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "num_turns": 7,
+                              "usage": {{"input_tokens": 100, "output_tokens": 2000,
+                                        "cache_read_input_tokens": 50000, "cache_creation_input_tokens": 3000}}}}))
+            """))
+        for p in self.bin.iterdir():
+            p.chmod(0o755)
+        os.environ.update(PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}", FAKE_SYSTEMCTL_LOG=str(self.calls),
+                          FAKE_CLAUDE_LOG=str(tmp / "claude-call.json"), XDG_CONFIG_HOME=str(tmp / "xdg"))
+        self.backlog = tmp / "backlog.md"
+        self.backlog.write_text("Fix issues #1 and #2.\n")
+        awake = mock.patch.object(cli, "keep_awake", return_value=False)  # no inhibitor on the test's pid
+        awake.start()
+        self.addCleanup(awake.stop)
+
+    def fire(self, name="night") -> int:
+        from workbench import schedule
+        with redirect_stdout(io.StringIO()):
+            return schedule.fire(name)
+
+    def add(self, name="night", at="Sun 02:00", *extra):
+        return run_wb("schedule", "add", name, "--file", str(self.backlog), "--repo", str(self.repo),
+                      "--at", at, *extra)
+
+    def test_after_is_the_next_such_local_time(self):
+        now = time.mktime((2026, 11, 24, 23, 30, 0, 0, 0, -1))
+        self.assertEqual(cli.after_time("23:45", now), now + 15 * 60)
+        self.assertEqual(time.localtime(cli.after_time("02:00", now))[:5], (2026, 11, 25, 2, 0))
+        self.assertEqual(time.localtime(cli.after_time("23:30", now)).tm_mday, 25)  # now is not ahead
+        for bad in ("24:00", "2:5", "2am", ""):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                cli.after_time(bad, now)
+
+    def test_a_task_started_after_a_time_waits_queued_before_its_checkout_and_holds_no_gpu(self):
+        at = time.strftime("%H:%M", time.localtime(time.time() + 7200))
+        out = self.start("t-later", "ok", "--test", TEST_CMD, "--after", at)
+        self.assertIn(f"note: held until {at}", out.replace("Mon ", "").replace("Tue ", ""))
+        task = store.Task("t-later")
+        self.assertGreater(task.spec["not_before"], time.time() + 3600)
+        deadline = time.time() + 20
+        while not (task.status.get("last") or "").startswith("waiting until") and time.time() < deadline:
+            time.sleep(POLL)
+        self.assertEqual(task.status["phase"], "queued")
+        self.assertIn("(--after)", task.status["last"])
+        self.assertFalse(task.worktree.exists())  # nothing before its time, the checkout neither
+        self.assertIsNotNone(runner.held_until(task))
+        # it holds nothing until then: a start now doesn't count it as on its way to the GPU
+        self.assertNotIn("task t-later", cli._gpu_holders())
+        # its time come (task.json read again on the change): it runs as any task
+        store.write_json(task.dir / "task.json", {**task.spec, "not_before": round(time.time()) - 1})
+        st = wait_phase("t-later", {"review"})
+        self.assertTrue(st["tests"]["ok"])
+        self.assertIsNone(runner.held_until(task))
+
+    def test_a_held_task_stops_as_any_queued_one_and_its_resume_holds_it_again(self):
+        at = time.strftime("%H:%M", time.localtime(time.time() + 7200))
+        self.start("t-held", "ok", "--after", at)
+        task = store.Task("t-held")
+        deadline = time.time() + 20
+        while not (task.status.get("last") or "").startswith("waiting until") and time.time() < deadline:
+            time.sleep(POLL)
+        run_wb("stop", "t-held")
+        self.assertEqual(task.status["phase"], "stuck")
+        run_wb("resume", "t-held")
+        deadline = time.time() + 20
+        while not (task.status.get("last") or "").startswith("waiting until") and time.time() < deadline:
+            time.sleep(POLL)
+        self.assertIn("(--after)", task.status["last"])
+        self.assertFalse(task.worktree.exists())
+        run_wb("stop", "t-held")
+
+    def test_at_takes_days_and_a_time_for_systemd_and_launchd_alike(self):
+        from workbench import schedule
+        got = schedule.parse_at("Mon..Fri 1:30")
+        self.assertEqual(got["calendar"], "Mon,Tue,Wed,Thu,Fri *-*-* 01:30:00")
+        self.assertEqual([w["Weekday"] for w in got["launchd"]], [1, 2, 3, 4, 5])
+        self.assertEqual(schedule.parse_at("daily 03:00")["launchd"], [{"Hour": 3, "Minute": 0}])
+        self.assertEqual(schedule.parse_at("Sat-Sun 02:05")["calendar"], "Sat,Sun *-*-* 02:05:00")
+        self.assertEqual(schedule.parse_at("sunday 02:00")["said"], "Sun 02:00")
+        with mock.patch.object(schedule, "_macos", return_value=True), \
+                self.assertRaises(schedule.ScheduleError):
+            schedule.parse_at("weekly")
+
+    def test_an_oncalendar_that_ends_in_a_time_goes_to_systemd_analyze_not_the_days_parser(self):
+        # the review of #1204: `*-*-* 02:00` was read as [DAYS] HH:MM, its front refused as days,
+        # and systemd's own forms the help names never reached systemd-analyze
+        from workbench import schedule
+        asked = []
+
+        def analyze(argv, **kw):
+            asked.append(argv)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        with mock.patch.object(schedule.shutil, "which", lambda name, **kw: f"/usr/bin/{name}"), \
+                mock.patch.object(schedule.subprocess, "run", analyze):
+            for text in ("*-*-* 02:00", "*-*-01 03:00", "Mon *-*-* 02:00", "Mon..Fri *-*-* 01:30"):
+                self.assertEqual(schedule.parse_at(text), {"said": text, "calendar": text, "launchd": None})
+            self.assertEqual(schedule.parse_at("Mon..Fri 01:30")["calendar"], "Mon,Tue,Wed,Thu,Fri *-*-* 01:30:00")
+        self.assertEqual([a[2] for a in asked], ["*-*-* 02:00", "*-*-01 03:00", "Mon *-*-* 02:00",
+                                                 "Mon..Fri *-*-* 01:30"])
+        # on macOS there is no OnCalendar to fall to: the days' own reason
+        with mock.patch.object(schedule, "_macos", return_value=True), \
+                self.assertRaisesRegex(schedule.ScheduleError, "is not a day"):
+            schedule.parse_at("*-*-* 02:00")
+        if shutil.which("systemd-analyze"):  # the real one, where there is one
+            self.assertEqual(schedule.parse_at("*-*-* 02:00")["calendar"], "*-*-* 02:00")
+
+    def test_add_writes_a_persistent_user_timer_and_rm_takes_it_away(self):
+        from workbench import schedule
+        out = self.add("night", "Sun 02:00", "--max-turns", "50")
+        self.assertIn("scheduled night: Sun 02:00", out)
+        units = Path(os.environ["XDG_CONFIG_HOME"]) / "systemd" / "user"
+        timer = (units / "wb-schedule-night.timer").read_text()
+        self.assertIn("OnCalendar=Sun *-*-* 02:00:00\n", timer)
+        self.assertIn("Persistent=true\n", timer)
+        service = (units / "wb-schedule-night.service").read_text()
+        self.assertIn('"schedule" "fire" "night"', service)
+        self.assertIn(f'"{ROOT / "bin" / "wb"}"', service)
+        self.assertIn(f'Environment="PATH={os.environ["PATH"]}"', service)  # where claude was found
+        self.assertIn(f'Environment="WB_HOME={store.home()}"', service)
+        self.assertIn("KillMode=process", service)
+        self.assertEqual(self.calls.read_text().splitlines(),
+                         ["--user daemon-reload", "--user enable --now wb-schedule-night.timer"])
+        self.assertEqual(schedule.read("night")["max_turns"], 50)
+        self.assertEqual(run_wb("schedule", "list").splitlines()[1], "  never fired yet")
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            self.add("night")  # a name is one schedule
+        self.assertIn("removed schedule night", run_wb("schedule", "rm", "night"))
+        self.assertFalse((units / "wb-schedule-night.timer").exists())
+        self.assertIn("--user disable --now wb-schedule-night.timer", self.calls.read_text())
+        self.assertIn("no schedules", run_wb("schedule", "list"))
+
+    def test_a_user_manager_that_refuses_the_timer_leaves_nothing_behind(self):
+        from workbench import schedule
+        os.environ["FAKE_SYSTEMCTL_EXIT"] = "1"
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            self.add()
+        self.assertIn("no systemd user manager takes the timer here", err.getvalue())
+        self.assertIn("wb schedule fire night", err.getvalue())
+        self.assertEqual(list((Path(os.environ["XDG_CONFIG_HOME"]) / "systemd" / "user").iterdir()), [])
+        self.assertIsNone(schedule.read("night"))
+
+    def test_on_macos_add_writes_a_launchd_agent_with_its_calendar(self):
+        import plistlib
+        from workbench import schedule
+        home = Path(self.tmp.name) / "home"
+        with mock.patch.object(schedule, "_macos", return_value=True), \
+                mock.patch.object(Path, "home", return_value=home):
+            self.add("night", "Sat,Sun 02:00")
+            plist = plistlib.loads((home / "Library/LaunchAgents/workbench.schedule.night.plist").read_bytes())
+            self.assertEqual(plist["StartCalendarInterval"], [{"Hour": 2, "Minute": 0, "Weekday": 6},
+                                                              {"Hour": 2, "Minute": 0, "Weekday": 0}])
+            self.assertEqual(plist["ProgramArguments"][-3:], ["schedule", "fire", "night"])
+            self.assertIn(f"launchctl bootstrap gui/{os.getuid()} ", self.calls.read_text())
+            run_wb("schedule", "rm", "night")
+            self.assertFalse((home / "Library/LaunchAgents/workbench.schedule.night.plist").exists())
+
+    def test_a_fire_runs_claude_headless_on_the_backlog_and_records_the_run(self):
+        from workbench import schedule
+        self.add()
+        os.environ.update(CLAUDECODE="1", CLAUDE_CODE_SESSION_ID="ses-day")  # fired from a session
+        batch = f"night-{time.strftime('%Y-%m-%d')}"
+        os.environ["FAKE_CLAUDE_TASK"] = "t-tonight"  # a task headless Claude starts in the batch
+        self.assertEqual(self.fire(), 0)
+        call = json.loads(Path(os.environ["FAKE_CLAUDE_LOG"]).read_text())
+        argv = call["argv"]
+        self.assertEqual(argv[:4], ["-p", "--output-format", "json", "--max-turns"])
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
+        self.assertEqual(argv[argv.index("--tools") + 1], "Bash,Read,Grep,Glob")
+        allowed = argv[argv.index("--allowedTools") + 1:argv.index("--disallowedTools")]
+        self.assertEqual(allowed, ["Bash(wb:*)", "Read", "Grep", "Glob"])
+        prompt = argv[argv.index("--") + 1]
+        self.assertIn("Fix issues #1 and #2.", prompt)
+        self.assertIn(f"--backlog {batch}", prompt)
+        self.assertIn(str(ROOT / "skill/workbench/SKILL.md"), prompt)
+        self.assertEqual(call["cwd"], str(self.repo))
+        # headless Claude's own: never the session it was fired from, and its wb accept never merges
+        self.assertEqual(call["env"], {"WB_SCHEDULE": "night", "CLAUDECODE": None,
+                                       "CLAUDE_CODE_SESSION_ID": None, "WB_HOME": str(store.home())})
+        row = schedule.runs("night")[-1]
+        self.assertEqual((row["outcome"], row["batch"]), ("ran", batch))
+        self.assertEqual(row["tasks"], [{"task": "t-tonight", "phase": "review"}])
+        self.assertEqual(row["claude"]["turns"], 7)
+        self.assertEqual(row["claude"]["cache_read"], 50000)
+        self.assertGreaterEqual(row["end"], row["ts"])
+        listed = run_wb("schedule", "list")
+        self.assertIn(f"ran · batch {batch} · 1 task(s) (1 review) · Claude 7 turns, 55K tokens", listed)
+        self.assertTrue(any(ok and "schedule night (Sun 02:00): last" in said
+                            for ok, said in schedule.doctor_lines()))
+
+    def test_a_fire_is_skipped_while_the_last_lives_and_without_room_for_api_money(self):
+        import fcntl
+        from workbench import schedule
+        self.add()
+        lock = schedule.lock_path("night")
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock, "a") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            self.assertEqual(self.fire(), 0)
+            self.assertIsNotNone(schedule.running("night"))
+        self.assertEqual(schedule.runs("night")[-1]["why"], "the last fire is still running")
+        self.assertFalse(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
+        # a role on API with no day cap: headless, nobody can be asked for one
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"roles": {"significant": {
+            "via": "api", "api": "deepinfra/x"}}}))
+        self.assertEqual(self.fire(), 0)
+        row = schedule.runs("night")[-1]
+        self.assertEqual(row["outcome"], "skipped")
+        self.assertIn("significant role", row["why"])
+        self.assertIn("skipped: significant role", run_wb("schedule", "list"))
+        self.assertFalse(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
+
+    def test_two_fires_on_one_day_each_get_a_batch_of_their_own(self):
+        # the review of #1204: every fire on a date was batch night-<date>, so a second one took
+        # the first's tasks (its row counted them again, its Claude was handed them to review),
+        # or, with them closed 6 h, had every wb start --backlog refused
+        from workbench import schedule
+        self.add()
+        day = f"night-{time.strftime('%Y-%m-%d')}"
+        os.environ["FAKE_CLAUDE_TASK"] = "t-first"
+        self.assertEqual(self.fire(), 0)
+        os.environ["FAKE_CLAUDE_TASK"] = "t-second"   # the first's task still open
+        self.assertEqual(self.fire(), 0)
+        first, second = schedule.runs("night")
+        self.assertEqual((first["batch"], first["tasks"]), (day, [{"task": "t-first", "phase": "review"}]))
+        self.assertEqual((second["batch"], second["tasks"]), (f"{day}-2", [{"task": "t-second", "phase": "review"}]))
+        prompt = json.loads(Path(os.environ["FAKE_CLAUDE_LOG"]).read_text())["argv"][-1]
+        self.assertIn(f"--backlog {day}-2.", prompt)
+        # both closed and 7 h old: the day's name is refused now, the next fire's is new
+        for n in ("t-first", "t-second"):
+            t = store.Task(n)
+            store.write_json(t.dir / "task.json", {**t.spec, "created_at": time.time() - 7 * 3600})
+            t.set_status(phase="accepted")
+        self.assertIsNotNone(cli._backlog_done(day))
+        os.environ.pop("FAKE_CLAUDE_TASK")
+        self.assertEqual(self.fire(), 0)
+        third = schedule.runs("night")[-1]
+        self.assertEqual((third["batch"], third["tasks"]), (f"{day}-3", []))
+        self.assertIsNone(cli._backlog_done(third["batch"]))
+        # a skip starts nothing, so its name is still free; the longest name's batch is a backlog name
+        Path(os.environ["WB_ROUTES"]).write_text(json.dumps({"roles": {"significant": {
+            "via": "api", "api": "deepseek/x"}}}))
+        self.assertEqual(self.fire(), 0)
+        self.assertEqual(schedule.runs("night")[-1]["outcome"], "skipped")
+        self.assertEqual(schedule.batch_name("night", time.time()), f"{day}-4")
+        self.assertTrue(store.NAME_RE.match(schedule.batch_name("n" * 34, time.time()) + "-99"))
+        self.assertFalse(schedule.NAME_RE.match("n" * 35))
+
+    def test_run_fires_now_in_the_background(self):
+        from workbench import schedule
+        self.add()
+        self.assertIn("fired night", run_wb("schedule", "run", "night"))
+        deadline = time.time() + 60
+        while not schedule.runs("night") and time.time() < deadline:
+            time.sleep(POLL)
+        self.assertEqual(schedule.runs("night")[-1]["outcome"], "ran")
+        self.assertTrue(Path(os.environ["FAKE_CLAUDE_LOG"]).exists())
+
+    def test_wait_on_a_backlog_takes_its_tasks_alone(self):
+        # headless Claude in the repo would otherwise take the daytime session's tasks there by
+        # directory, and review them
+        self.start("t-in", "ok", "--backlog", "night-b", "--queue")
+        self.start("t-day", "ok", "--queue")
+        for n in ("t-in", "t-day"):
+            wait_phase(n, {"review"})
+        self.assertTrue(run_wb("wait", "--backlog", "night-b", "--timeout", "5").startswith("[review] t-in"))
+        with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()):
+            run_wb("wait", "--backlog", "night-b", "--timeout", "1")
+        self.assertEqual(e.exception.code, 2)
+        self.assertNotIn("already delivered", run_wb("wait", "t-day", "--timeout", "2"))
+
+    def test_a_scheduled_runs_claude_accepts_but_never_merges(self):
+        os.environ["WB_SCHEDULE"] = "night"
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            run_wb("accept", "t-any", "--merge", "-m", "feat: x")
+        self.assertIn("never merges", err.getvalue())
+
+    def test_doctor_says_when_a_schedules_unit_is_gone(self):
+        from workbench import schedule
+        self.add()
+        (Path(os.environ["XDG_CONFIG_HOME"]) / "systemd/user/wb-schedule-night.timer").unlink()
+        [(ok, said)] = schedule.doctor_lines()
+        self.assertFalse(ok)
+        self.assertIn("its unit is gone", said)
+
+
 class Notes(Base):
     def test_notes_about_the_user_are_kept_short_and_numbered(self):
         self.assertIn("no notes yet", run_wb("notes"))
@@ -21036,6 +23175,11 @@ class Verify(Base):
         self.assertIn("proven: it fails on the base and passes on the candidate", rep)
         self.assertIn("base: exit 1: AssertionError: 250000 != 250", rep)
         self.assertIn("/verify/1/{base,candidate}.txt", rep)               # each run's output
+        from workbench import chat                    # the web chat's task sheet says the same (#1201)
+        checks = chat.task_summary(store.Task("t"))["verify"]
+        self.assertTrue(checks)                       # an empty list joins to "", in any string
+        self.assertIn("proven: it fails on the base", "\n".join(checks))
+        self.assertIn("\n".join(checks), rep)
         (self.wt / "calc.py").write_text("def kw(watts):\n    return watts / 1000.0\n")
         self.assertIn("stale: the worktree has changed since", run_wb("report", "t"))
         out = run_wb("accept", "t", "-m", "kW from W")
@@ -21305,6 +23449,19 @@ class Stats(Base):
         out = run_wb("stats", "--all")
         self.assertIn("gone/model", out)
         self.assertIn("strata/strata", out)
+        self.assertNotIn("more model", out)
+
+    def test_a_history_on_models_no_longer_configured_is_never_called_no_finished_tasks(self):
+        # #1400 (2026-11-25): with every model that ran gone from OpenCode's config, wb stats said
+        # "5 task(s), 5 landed" and then "no finished tasks yet"
+        now = time.time()
+        for _ in range(5):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": "gone/model", "size": "trivial", "outcome": "accepted", "ran": True, "ts": now})
+        out = run_wb("stats")
+        self.assertIn("5 task(s), 5 landed", out)
+        self.assertNotIn("no finished tasks yet", out)
+        self.assertIn("gone/model", out)
         self.assertNotIn("more model", out)
 
     def test_thirty_recent_models_give_three_lines_and_the_rest_counted_as_more(self):
@@ -21876,6 +24033,21 @@ class Progress(Base):
         self.assertIn("past its typical length", run_wb("progress", "on", "--after", "0"))
         self.assertNotIn("after", progress.settings())
 
+    def test_an_after_that_is_negative_or_not_finite_is_refused_and_a_stored_one_is_ignored(self):
+        # #1401 (2026-11-25): -5 and inf said "on" and no check ever came; NaN crashed every round
+        run_wb("progress", "on", "--after", "30")
+        before = progress.path().read_text()
+        for bad in ("-5", "nan", "inf"):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), mock.patch("sys.stderr", err):
+                run_wb("progress", "on", "--after", bad)
+            self.assertIn("a positive number, or 0 to clear it", err.getvalue())
+            self.assertEqual(progress.path().read_text(), before)
+        progress.path().write_text('{"on": true, "after": -5}')   # written by hand
+        self.assertEqual(progress.typical({"size": "trivial"}),
+                         (float(progress.DEFAULT_MIN["trivial"]), "default"))
+        self.assertIn("past its typical length", run_wb("progress"))
+
     def test_a_check_recommends_and_a_steer_that_answers_it_is_learned_from(self):
         run_wb("coding", "only")
         self.assertIn("on: a task past 0.05 min of active work", run_wb("progress", "on", "--after", "0.05"))
@@ -22034,14 +24206,14 @@ class Setup(Base):
         code, out = self.setup(cmd="doctor")
         self.assertEqual(code, 1)
         for want in ("BAD opencode opencode v1.9.0: workbench needs OpenCode 2.x",
-                     "BAD wb isn't on PATH: Claude runs it by name in Bash",
+                     "BAD wb isn't on PATH: Claude runs it by name in Bash; the mod runs WB_BIN=/x/wb;",
                      "WB_BIN=/x/wb covers only the mod's calls",
                      f"ok  state dir {home / '.local/state/workbench'}\n",
                      f"BAD /workbench isn't in {home / '.claude/skills'}: wb setup links it",
                      "--  the Claude Code mod (the pane, the wake-ups) isn't among",
                      "ok  python 3."):                                     # which one runs wb (#259)
             self.assertIn(want, out)
-        if lane.abi():
+        if lane.held():
             self.assertIn("ok  agents write only in their lane", out)
         self.assertEqual(self.setup()[0], 0)
         (home / ".claude/plugins").mkdir(parents=True)
@@ -22050,7 +24222,8 @@ class Setup(Base):
         os.environ.update(FAKE_VERSION="opencode v2.3.0")
         os.environ.pop("WB_BIN")
         code, out = self.setup(cmd="doctor")
-        for want in ("ok  opencode opencode v2.3.0", f"ok  wb on PATH: {home / '.local/bin/wb'}",
+        for want in ("ok  opencode opencode v2.3.0",
+                     f"ok  wb on PATH: {home / '.local/bin/wb'}; the mod runs it by name, else ~/.local/bin/wb where its PATH has no wb\n",
                      f"ok  /workbench skill at {home / '.claude/skills/workbench'}",
                      "ok  the Claude Code mod is installed"):
             self.assertIn(want, out)
@@ -22063,6 +24236,23 @@ class Setup(Base):
         os.environ.update(FAKE_VERSION="opencode v3.1.0")  # finding 26: past the tested range
         self.assertIn("--  OpenCode 3.1 is outside what workbench is tested with", self.setup(cmd="doctor")[1])
         self.assertIn("--  wb comes from /usr, not this copy", out)
+
+    def test_doctor_names_the_wb_the_mod_runs_and_wb_setups_link_when_its_path_has_none(self):
+        # #1200: a desktop app or an IDE started from the GUI may lack ~/.local/bin on its PATH; the
+        # mod (findWb in register.tsx) then runs wb setup's link, and doctor says which wb it runs
+        self.assertEqual(cli.mod_wb("/x/wb", "/usr/bin/wb", True), "WB_BIN=/x/wb")
+        self.assertEqual(cli.mod_wb(None, "/usr/bin/wb", False), "it by name")
+        self.assertEqual(cli.mod_wb(None, "/usr/bin/wb", True), "it by name, else ~/.local/bin/wb where its PATH has no wb")
+        self.assertEqual(cli.mod_wb(None, None, True), "~/.local/bin/wb (wb setup's link)")
+        self.assertEqual(cli.mod_wb(None, None, False), "nothing: no wb on PATH or in ~/.local/bin")
+        home = Path(self.tmp.name) / "home"
+        (home / ".local/bin").mkdir(parents=True)
+        (home / ".local/bin/wb").write_text("#!/bin/sh\n")
+        os.environ.update(HOME=str(home), WB_HOME=str(home / ".local/state/workbench"), FAKE_VERSION="opencode v2.3.0",
+                          PATH=os.path.dirname(shutil.which("git")))
+        os.environ.pop("WB_BIN", None)
+        out = self.setup(cmd="doctor")[1]
+        self.assertIn("BAD wb isn't on PATH: Claude runs it by name in Bash; the mod runs ~/.local/bin/wb (wb setup's link);", out)
 
     def test_doctor_exit_code_does_not_follow_the_keep_awake_probe(self):
         # #653: `ok, said = awake_line()` reassigned doctor's verdict: a Mac (caffeinate) exited 0
@@ -22130,6 +24320,95 @@ class Setup(Base):
         with mock.patch.object(cli.sys, "platform", "linux"):
             self.assertIn(">> ~/.bashrc", cli.path_advice())
 
+    def test_with_the_plugin_installed_setup_and_doctor_leave_path_to_the_users_own_terminal(self):
+        # #1190: the plugin's bin/ puts wb on Claude Code's Bash PATH and the mod runs the
+        # marketplace clone's, so a PATH edit and a restart of Claude Code are no longer needed
+        home = Path(self.tmp.name) / "home"
+        os.environ.update(HOME=str(home), PATH=os.path.dirname(shutil.which("git")), SHELL="/bin/zsh")
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        os.environ.pop("CLAUDE_CODE_PLUGIN_CACHE_DIR", None)
+        plugins = home / ".claude/plugins"
+        plugins.mkdir(parents=True)
+        (plugins / "installed_plugins.json").write_text(
+            json.dumps({"version": 2, "plugins": {"workbench@workbench": []}}))
+        line = next(x for x in self.setup()[1].splitlines() if "isn't on PATH" in x)
+        self.assertIn("Claude Code runs wb from the plugin's bin/", line)
+        self.assertIn(">> ~/.zshrc; then open a new terminal", line)
+        self.assertNotIn("quit Claude Code", line)
+        out = self.setup(cmd="doctor")[1]
+        self.assertIn("--  wb isn't on this shell's PATH: Claude Code gets it from the plugin's bin/", out)
+        self.assertNotIn("BAD wb isn't on PATH", out)
+        # Claude Code's Bash: the launcher on PATH runs the clone's wb, which is no other copy
+        cached = plugins / "cache/workbench/workbench/abc123"
+        shutil.copytree(runner.PKG_ROOT / "mod/.claude-plugin", cached / ".claude-plugin")
+        (cached / "bin").mkdir()
+        shutil.copy2(runner.PKG_ROOT / "mod/bin/wb", cached / "bin/wb")
+        os.environ["PATH"] = os.pathsep.join([os.environ["PATH"], str(cached / "bin")])
+        out = self.setup(cmd="doctor")[1]
+        self.assertIn(f"ok  wb on PATH: {cached / 'bin/wb'} (the plugin's bin/: it runs the marketplace clone's)", out)
+        self.assertNotIn("wb comes from", out)
+        # under CLAUDE_CODE_PLUGIN_CACHE_DIR Claude Code lists its plugins there instead
+        os.environ["CLAUDE_CODE_PLUGIN_CACHE_DIR"] = str(home / "cache")
+        self.assertFalse(cli.mod_listed())
+        (home / "cache").mkdir()
+        shutil.copy2(plugins / "installed_plugins.json", home / "cache/installed_plugins.json")
+        self.assertTrue(cli.mod_listed())
+
+    def test_the_plugins_bin_wb_runs_the_marketplace_clone_where_claude_code_keeps_it(self):
+        # #1190: Claude Code copies only mod/ into its plugin cache and puts its bin/ on the Bash
+        # tool's PATH; mod/bin/wb looks where the mod's marketplaceClone does, in its order
+        tmp = Path(self.tmp.name)
+        home = tmp / "home"
+        home.mkdir()
+
+        def clone(at: Path, name: str):
+            (at / "bin").mkdir(parents=True)
+            (at / "bin/wb").write_text(f"#!/bin/sh\nprintf '{name}'; printf ' [%s]' \"$@\"\n")
+            (at / "bin/wb").chmod(0o755)
+
+        def run(cwd=home, **env):
+            r = subprocess.run([str(runner.PKG_ROOT / "mod/bin/wb"), "a b", "c"], cwd=cwd, capture_output=True,
+                               text=True, env={"HOME": str(home), "PATH": os.environ["PATH"], **env})
+            return r.returncode, r.stdout, r.stderr
+
+        def known(plugins: Path, at: Path):
+            plugins.mkdir(parents=True, exist_ok=True)
+            (plugins / "known_marketplaces.json").write_text(json.dumps(
+                {"workbench": {"source": {"source": "directory", "path": str(at)}, "installLocation": str(at)}}, indent=2))
+
+        # none: one line naming the fix, the exit a missing command's
+        code, out, err = run()
+        self.assertEqual(code, 127)
+        self.assertIn(f"isn't in known_marketplaces.json or at {home}/.claude/plugins/marketplaces/workbench: "
+                      "claude plugin marketplace add a-schaefers/workbench", err)
+        # the git marketplace's clone under ~/.claude, each argument as given
+        clone(home / ".claude/plugins/marketplaces/workbench", "git")
+        self.assertEqual(run(), (0, "git [a b] [c]", ""))
+        # known_marketplaces.json's installLocation first (a directory marketplace); one without a bin/wb is passed over
+        known(home / ".claude/plugins", tmp / "gone")
+        self.assertEqual(run()[1], "git [a b] [c]")
+        clone(tmp / "dev", "dev")
+        known(home / ".claude/plugins", tmp / "dev")
+        self.assertEqual(run()[1], "dev [a b] [c]")
+        # CLAUDE_CONFIG_DIR, as Claude Code reads it: a ~ or a path relative to here
+        clone(home / "cc/plugins/marketplaces/workbench", "cc")
+        self.assertEqual(run(CLAUDE_CONFIG_DIR="~/cc")[1], "cc [a b] [c]")
+        self.assertEqual(run(CLAUDE_CONFIG_DIR="cc")[1], "cc [a b] [c]")
+        # CLAUDE_CODE_PLUGIN_CACHE_DIR holds the clone and its known_marketplaces.json when set
+        clone(home / "cache/marketplaces/workbench", "cache")
+        self.assertEqual(run(CLAUDE_CODE_PLUGIN_CACHE_DIR="~/cache")[1], "cache [a b] [c]")
+        known(home / "cache", tmp / "dev")
+        self.assertEqual(run(CLAUDE_CODE_PLUGIN_CACHE_DIR=str(home / "cache"))[1], "dev [a b] [c]")
+        # an unreadable known_marketplaces.json is passed over, not a failure
+        (home / "cache/known_marketplaces.json").write_text("{not json")
+        self.assertEqual(run(CLAUDE_CODE_PLUGIN_CACHE_DIR=str(home / "cache"))[1], "cache [a b] [c]")
+        # this clone, end to end: the real bin/wb runs from it
+        known(home / ".claude/plugins", runner.PKG_ROOT)
+        r = subprocess.run([str(runner.PKG_ROOT / "mod/bin/wb"), "--version"], capture_output=True, text=True,
+                           env={**os.environ, "HOME": str(home)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertRegex(r.stdout, r"\d+\.\d+")
+
     def test_setup_ends_with_a_first_run_checklist_that_names_each_fix_and_no_model(self):
         # #111: what a working setup still needs, each line with its fix
         home = Path(self.tmp.name) / "home"
@@ -22140,7 +24419,7 @@ class Setup(Base):
         self.assertRegex(tail, r"ok  opencode .*2\.3\.0")
         self.assertIn("ok  a model server answers", tail)
         self.assertIn("local model(s) registered", tail)
-        self.assertRegex(tail, r"(ok  Landlock ABI \d+|--  no Landlock here)")
+        self.assertRegex(tail, r"(ok  Landlock ABI \d+|ok  Seatbelt|--  no lane here)")
         os.environ["WB_OPENCODE_BIN"] = str(Path(self.tmp.name) / "no-such-opencode")
         with mock.patch.object(cli.models, "discover", return_value={}):
             lines = cli.first_run()
@@ -24326,6 +26605,37 @@ class Projects(Base):
         run_wb("start", "t-ok", "--spec", str(self.spec), "--repo", str(self.repo), "--no-claude-md")
         self.assertTrue(store.Task("t-ok").exists)
 
+    def test_a_repo_whose_instructions_are_a_committed_agents_md_starts_and_its_agent_gets_it(self):
+        # #1394 (2026-11-25): OpenCode's and Codex's convention was refused as an agent that
+        # "would start blind", though the layer hands it AGENTS.md
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        g("mv", "CLAUDE.md", "AGENTS.md")
+        g("commit", "-qm", "the OpenCode way")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = run_wb("start", "t-ag", "--spec", str(self.spec), "--repo", str(self.repo), "--model", "mimo")
+        self.assertIn("note: AGENTS.md and no CLAUDE.md: the agent gets it; for Claude Code, wb init", out)
+        wait_phase("t-ag", {"review"})
+        task = store.Task("t-ag")
+        self.assertIn(task.worktree / "AGENTS.md", context.instruction_files(task)[0])
+
+    def test_a_package_with_only_its_own_agents_md_is_the_tasks_package(self):
+        # #1394 (2026-11-25): only a CLAUDE.md made a package, so from packages/app with only an
+        # AGENTS.md the agent, the setup and the tests ran at the root
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        app = self.repo / "packages" / "app"
+        app.mkdir(parents=True)
+        (app / "AGENTS.md").write_text("# app\nThe app package.\n")
+        g("add", "-A")
+        g("commit", "-qm", "a package with its AGENTS.md")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = run_wb("start", "t-pag", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo")
+        self.assertIn("package: packages/app", out)
+        self.assertIn("note: packages/app has AGENTS.md and no CLAUDE.md: the agent gets it", out)
+        wait_phase("t-pag", {"review"})
+        task = store.Task("t-pag")
+        self.assertEqual(task.spec["subdir"], "packages/app")
+        self.assertIn(task.worktree / "packages" / "app" / "AGENTS.md", context.instruction_files(task)[0])
+
     def refused(self, *argv) -> str:
         err = io.StringIO()
         with self.assertRaises(SystemExit), redirect_stderr(err):
@@ -25924,6 +28234,19 @@ class LogoutStops(Base):
         self.assertEqual(len(said), 1)
         self.assertIn("loginctl enable-linger", said[0])
 
+    def test_what_a_service_starts_gets_a_scope_of_its_own_so_a_restart_of_the_unit_spares_it(self):
+        # #1407 (2026-11-25): the web app's Measure now ran wb optimize in wb-chat.service's
+        # cgroup, and wb setup's restart of the unit killed the run; a terminal's survived
+        from workbench import cli
+        scope = ("systemd-run", "--user", "--scope", "--quiet", "--collect")
+        cgroup = Path(self.tmp.name) / "cgroup"
+        for where, want in (("user@1000.service/app.slice/wb-chat.service", scope),
+                            ("user@1000.service/app.slice/app-konsole.scope/tab(1).scope", ())):
+            cgroup.write_text(f"0::/user.slice/user-1000.slice/{where}\n")
+            with mock.patch.object(cli, "SELF_CGROUP", cgroup), \
+                    self.fake_loginctl("yes", "no", scope="ok"):  # logind kills no session
+                self.assertEqual(cli.runner_scope(), want, where)
+
     def test_kill_user_processes_is_named_as_killing_running_tasks_without_a_scope_for_them(self):
         from workbench import cli
         with self.fake_loginctl("yes", "yes", scope="fails"):
@@ -25988,8 +28311,9 @@ class LogoutStops(Base):
         self.assertIn("wb bench and wb optimize runs and a chat wb chat on started", said[0])
 
     def test_doctor_names_the_chats_linger_only_with_the_chat_on(self):
-        # most desktops linger off, and the chat is off until turned on: no warning for that
+        # most desktops linger off: no warning for that while the user has turned the chat off
         from workbench import chat
+        chat.set_on(False)                                    # on by default (#1281)
         def doctor():
             buf = io.StringIO()
             with redirect_stdout(buf), self.fake_loginctl("no", "no"):
@@ -26225,8 +28549,18 @@ class WebChat(Base):
     def tearDown(self):
         self.srv.shutdown()
         self.srv.server_close()
-        self.srv.RequestHandlerClass.hub.close()  # or it outlives the test (#134)
+        hub = self.srv.RequestHandlerClass.hub
+        hub.close()  # or it outlives the test (#134)
+        # and its streams end before the next test's environment: one that outlived its test
+        # made a snapshot in the next one's WB_HOME, and the push key it cached there failed
+        # test_an_empty_or_broken_vapid_key_file_is_replaced… (nightly run 45577067512); woken
+        # between tests, with WB_CHAT_TOKEN unset, it read the user's own ~/.config/workbench
+        deadline = time.monotonic() + 5
+        while hub.open and time.monotonic() < deadline:
+            time.sleep(0.01)
+        left = len(hub.open)
         super().tearDown()
+        self.assertEqual(left, 0, "a stream outlived its test's closed hub")
 
     def test_the_server_binds_without_looking_its_host_name_up(self):
         # #236: HTTPServer's bind asks socket.getfqdn, which stalled on macOS past wb chat on's wait
@@ -26282,10 +28616,11 @@ class WebChat(Base):
                                     "machine": store.machine()})
         self.assertIsNone(self.chat.listener())                       # this machine's: asked here
 
-    def test_the_web_chat_is_off_until_turned_on_and_stays_as_left(self):
-        # The user, 2026-11-19: off by default, a switch in the pane, remembered across /workbench runs.
-        # On starts a server when none answers; off stops only one wb started, and nobody listens.
-        self.assertFalse(self.chat.is_on())
+    def test_the_web_chat_is_on_until_turned_off_and_stays_as_left(self):
+        # The owner, 2026-11-24 (#1281): on by default, reversing 2026-11-19's off until turned on;
+        # the user's off is remembered across /workbench runs. On starts a server when none
+        # answers; off stops only one wb started, and nobody listens.
+        self.assertTrue(self.chat.is_on())                             # no switch.json: on
         out = run_wb("chat", "on", "--port", str(self.port))           # one runs already: kept
         self.assertIn(f"web chat on: http://localhost:{self.port}/#token=", out)
         self.assertTrue(self.chat.is_on())
@@ -26315,6 +28650,23 @@ class WebChat(Base):
         finally:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
+
+    def test_a_switch_left_off_by_an_older_wbs_failed_chat_on_is_read_as_never_set(self):
+        # #1405 (2026-11-25): 1.91.x and 2.0 before #1281 wrote {"on": false} on a failed `wb chat
+        # on` (a port taken), and 2.0 read it as the user's off, so the web app never came up
+        chat = self.chat
+        switch, ran = chat.chat_dir() / "switch.json", chat.chat_dir() / "port.json"
+        self.assertFalse(ran.exists())                              # the test's own state
+        store.write_json(switch, {"on": False})                     # no server of ours ever ran
+        self.assertTrue(chat.is_on())
+        self.assertFalse(switch.exists())                           # rewritten once: as never set
+        store.write_json(ran, {"port": self.port})
+        self.assertTrue(chat.is_on())                               # a server since: still on
+        store.write_json(switch, {"on": False})                     # one ran: the user's off
+        self.assertFalse(chat.is_on())
+        ran.unlink()
+        chat.set_on(False)                                          # 2.0's own off, marked
+        self.assertFalse(chat.is_on())
 
     def test_without_inotify_the_hub_wakes_the_streams_only_for_a_change_or_the_listener_ending(self):
         # #841: the polling branch bumped every second, so each open stream rebuilt its snapshot
@@ -26394,7 +28746,7 @@ class WebChat(Base):
         store.write_json(d / "shots.json", {**store.read_json(d / "shots.json"),
                                             "candidate": {"rev": "def", "ok": True, "pruned": True}})
         self.assertEqual(self.call("/api/shot?task=t&n=1&side=candidate", token=tok),
-                         (410, {"error": "expired"}))
+                         (410, {"error": "expired", "code": "expired"}))
         code, r = self.call("/api/send", {"text": "the button moved", "cid": "c1",
                                           "about": {"task": "t", "n": 1, "step": 9}}, tok)
         self.assertEqual(code, 200)
@@ -26642,7 +28994,7 @@ class WebChat(Base):
         c.close()
 
     def test_a_chat_on_localhost_answers_behind_tailscale_serve_under_the_machines_tailnet_name(self):
-        # #448 (the 2026-11-20 audit): `tailscale serve --bg 1337`, the https the gear advises, passes
+        # #448 (the 2026-11-20 audit): `tailscale serve --bg 1337`, the https Settings advises, passes
         # the tailnet name through as the Host, and the default localhost chat answered it 403
         chat, tok = self.chat, self.chat.token()
         me = {"ip": "100.64.0.9", "names": {"box", "box.tail1234.ts.net"}, "dns": "box.tail1234.ts.net"}
@@ -26750,7 +29102,10 @@ class WebChat(Base):
             self.assertEqual(self.call("/api/state")[0], 401)         # an empty header: refused
 
     def test_static_files_and_nothing_else(self):
+        # the views' own files (#1284): built apart, served by their suffix like the rest
         for path, kind in (("/", "text/html"), ("/app.js", "text/javascript"), ("/app.css", "text/css"),
+                           ("/stats.js", "text/javascript"), ("/stats.css", "text/css"),
+                           ("/settings.js", "text/javascript"), ("/settings.css", "text/css"),
                            ("/icon.svg", "image/svg+xml"), ("/manifest.webmanifest", "application/manifest+json")):
             import http.client
             c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -26760,82 +29115,56 @@ class WebChat(Base):
         for path in ("/../chat.py", "/chat.py", "/nope.js", "/%2e%2e/store.py"):
             self.assertEqual(self.call(path)[0], 404, path)
 
-    def test_a_permission_prompt_is_answered_once_from_the_page_with_the_token(self):
-        # the mod puts Claude Code's prompts here while the user is away (the user, 2026-11-18)
-        chat, tok = self.chat, self.chat.token()
-        a = chat.ask("Bash", "git push origin main")
-        st = self.call("/api/state", token=tok)[1]
-        self.assertEqual([(x["id"], x["tool"], x["answer"]) for x in st["asks"]], [(a["id"], "Bash", None)])
-        self.assertEqual(self.call("/api/answer", {"id": a["id"], "answer": "allow"})[0], 401)
-        self.assertEqual(self.call("/api/answer", {"id": a["id"], "answer": "allow"}, token=tok,
-                                   host="evil.example")[0], 403)
-        self.assertEqual(self.call("/api/answer", {"id": a["id"], "answer": "maybe"}, token=tok)[0], 400)
-        self.assertEqual(self.call("/api/answer", {"id": a["id"], "answer": "expired"}, token=tok)[0], 400)
-        self.assertEqual(self.call("/api/answer", {"id": "ask-nope", "answer": "allow"}, token=tok)[0], 404)
-        code, r = self.call("/api/answer", {"id": a["id"], "answer": "deny"}, token=tok)
-        self.assertEqual((code, r["ask"]["answer"], r["ask"]["by"]), (200, "deny", "web"))
-        self.assertEqual(r["state"]["asks"][0]["answer"], "deny")
-        # the first answer stands: a late tap, or the mod's expiry, changes nothing
-        self.assertEqual(self.call("/api/answer", {"id": a["id"], "answer": "allow"}, token=tok)[1]["ask"]["answer"], "deny")
-        self.assertEqual(chat.answer(a["id"], "expired", "timeout")["answer"], "deny")
-        self.assertEqual(chat.wait_answer(a["id"], 0), "deny")
-
-    def test_a_plan_and_a_question_are_answered_from_the_page(self):
-        chat, tok = self.chat, self.chat.token()
-        plan = chat.ask("ExitPlanMode", "", "plan", {"plan": "1. Read\n2. Write"})
-        code, r = self.call("/api/answer", {"id": plan["id"], "answer": "deny", "note": "split step 2"}, token=tok)
-        self.assertEqual((code, r["ask"]["answer"], r["ask"]["note"]), (200, "deny", "split step 2"))
-        qs = [{"question": "Which DB?", "header": "DB", "multiSelect": False,
-               "options": [{"label": "SQLite", "description": ""}, {"label": "Postgres", "description": ""}]}]
-        q = chat.ask("AskUserQuestion", "", "question", {"questions": qs})
-        for bad in ({"id": q["id"], "answer": "allow"},                               # no answers
-                    {"id": q["id"], "answer": "allow", "answers": {"Other?": "x"}},     # not its question
-                    {"id": q["id"], "answer": "allow", "answers": {"Which DB?": ""}},   # empty
-                    {"id": q["id"], "answer": "allow", "answers": {"Which DB?": 7}}):
-            self.assertEqual(self.call("/api/answer", bad, token=tok)[0], 400, bad)
-        perm = chat.ask("Bash", "ls")
-        self.assertEqual(self.call("/api/answer", {"id": perm["id"], "answer": "allow",
-                                                   "answers": {"Which DB?": "SQLite"}}, token=tok)[0], 400)
-        code, r = self.call("/api/answer", {"id": q["id"], "answer": "allow",
-                                            "answers": {"Which DB?": "SQLite"}}, token=tok)
-        self.assertEqual((code, r["ask"]["answers"]), (200, {"Which DB?": "SQLite"}))
-        got = json.loads(run_wb("chat", "wait", q["id"], "--timeout", "0", "--json"))
-        self.assertEqual((got["kind"], got["answer"], got["answers"]), ("question", "allow", {"Which DB?": "SQLite"}))
-
-    def test_go_ahead_while_away_allows_permissions_at_once_and_still_asks_plans(self):
-        chat, tok = self.chat, self.chat.token()
-        self.assertEqual(self.call("/api/state", token=tok)[1]["prefs"], {"away": "ask"})
-        self.assertEqual(self.call("/api/prefs", {"away": "always"}, token=tok)[0], 400)
-        self.assertEqual(self.call("/api/prefs", {"away": "allow", "x": 1}, token=tok)[0], 400)
-        self.assertEqual(self.call("/api/prefs", {"away": "allow"})[0], 401)
-        self.assertEqual(self.call("/api/prefs", {"away": "allow"}, token=tok)[1]["state"]["prefs"], {"away": "allow"})
-        self.assertEqual(run_wb("chat", "ask", "--tool", "Bash", "--text", "make").split()[1], "allow")
-        self.assertEqual(chat.asks()[-1]["by"], "setting")           # listed, so the user sees what ran
-        self.assertEqual(run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan",
-                                "--detail", '{"plan": "x"}').split()[1], "open")
-
     def test_using_the_page_marks_the_user_away_as_a_web_message_does_959(self):
         # #959: the owner typed in the terminal, then picked up the phone with the chat open and
-        # "Let Claude go ahead" set; only a web message made them away, so the prompt stayed in
+        # its away setting on; only a web message made them away, so the prompt stayed in
         # the terminal, neither shown on the phone nor allowed
         chat, tok = self.chat, self.chat.token()
         d = chat.chat_dir()
-        self.assertEqual(self.call("/api/active", {})[0], 401)
-        self.assertEqual(self.call("/api/active", {"x": 1}, token=tok)[0], 400)
-        self.assertEqual(self.call("/api/active", {}, token=tok), (200, {}))
-        self.assertAlmostEqual(store.read_json(d / "page.json")["at"], store.now(), delta=5)
-        self.assertFalse((d / "away.json").exists())       # the chat off: no session sends it a dialog
-        chat.set_on(True)
-        store.write_json(d / "away.json", {"at": 0})        # the user typed in the terminal (the mod's back)
-        before = store.now()
-        self.assertEqual(self.call("/api/active", {}, token=tok)[0], 200)
-        away = store.read_json(d / "away.json")
-        self.assertEqual(away["by"], "page")
-        self.assertGreaterEqual(away["at"], before)          # newer than the terminal's: away
+        me = {"ip": "100.64.0.9", "names": {"box", "box.tail1234.ts.net"}, "dns": "box.tail1234.ts.net"}
+        with mock.patch.object(chat, "_tailnet", {"at": float("-inf"), "name": ""}), \
+                mock.patch.object(chat, "tailscale", return_value=me):
+            phone = "box.tail1234.ts.net"  # a phone through `tailscale serve`: from loopback, not localhost (#1374)
+            self.assertEqual(self.call("/api/active", {}, host=phone)[0], 401)
+            self.assertEqual(self.call("/api/active", {"x": 1}, token=tok, host=phone)[0], 400)
+            self.assertEqual(self.call("/api/active", {}, token=tok, host=phone), (200, {}))
+            self.assertAlmostEqual(store.read_json(d / "page.json")["at"], store.now(), delta=5)
+            self.assertTrue((d / "away.json").exists())        # on by default (#1281): away
+            (d / "away.json").unlink()
+            chat.set_on(False)
+            self.assertEqual(self.call("/api/active", {}, token=tok, host=phone), (200, {}))
+            self.assertFalse((d / "away.json").exists())       # the chat off: no session sends it a dialog
+            chat.set_on(True)
+            store.write_json(d / "away.json", {"at": 0})        # the user typed in the terminal (the mod's back)
+            before = store.now()
+            self.assertEqual(self.call("/api/active", {}, token=tok, host=phone)[0], 200)
+            away = store.read_json(d / "away.json")
+            self.assertEqual(away["by"], "page")
+            self.assertGreaterEqual(away["at"], before)          # newer than the terminal's: away
 
-    def test_a_dialog_at_the_terminal_is_a_notice_on_the_phone_only_for_a_user_of_the_chat_959(self):
+    def test_the_page_used_on_this_machine_by_its_localhost_link_never_marks_the_user_away_1374(self):
+        # #1374: the web app is the desk's admin too (Settings, Stats, from the modeline's
+        # localhost link), and using it there made the user at the terminal away, their next plan
+        # or question refused into the chat. Every request here comes from loopback, as a phone's
+        # through `tailscale serve` does: the Host tells them apart, never the peer
+        chat, tok = self.chat, self.chat.token()
+        d = chat.chat_dir()
+        store.write_json(d / "away.json", {"at": 0})            # the user typed in the terminal
+        for host in ("localhost", "127.0.0.1", "[::1]"):
+            before = store.now()
+            self.assertEqual(self.call("/api/active", {}, token=tok, host=host), (200, {}), host)
+            self.assertGreaterEqual(store.read_json(d / "page.json")["at"], before, host)  # a chat user still
+            self.assertEqual(store.read_json(d / "away.json"), {"at": 0}, host)             # not away
+        me = {"ip": "100.64.0.9", "names": {"box", "box.tail1234.ts.net"}, "dns": "box.tail1234.ts.net"}
+        with mock.patch.object(chat, "_tailnet", {"at": float("-inf"), "name": ""}), \
+                mock.patch.object(chat, "tailscale", return_value=me):
+            self.assertEqual(self.call("/api/active", {}, token=tok, host="box.tail1234.ts.net")[0], 200)
+        self.assertEqual(store.read_json(d / "away.json")["by"], "page")  # the phone's, from loopback too: away
+
+    def test_a_dialog_at_the_terminal_is_one_waiting_line_on_the_phone_only_for_a_user_of_the_chat_959_1350(self):
         # #959: at the terminal the prompt stays there, and the phone is told one waits, as a
-        # notice with no buttons (only the terminal can answer it), pushed as Claude's messages
+        # notice with no buttons (only the terminal can answer it), pushed as Claude's messages;
+        # #1350: one line for every kind, a permission's naming the way out (permissions granted)
         chat, tok = self.chat, self.chat.token()
         from workbench import webpush as wp
         never = run_wb("chat", "notice", "--tool=Bash", "--text=rm -rf runs/*")
@@ -26846,13 +29175,17 @@ class WebChat(Base):
         self.assertEqual(self.call("/api/active", {}, token=tok)[0], 200)   # a page in use today
         nid = run_wb("chat", "notice", "--tool=Bash", "--text=rm -rf runs/*").strip()
         row = chat.thread()[-1]
-        self.assertEqual((row["id"], row["from"], row["text"], row["tool"], row["what"]),
-                         (nid, "notice", "Claude is waiting on a permission in the terminal", "Bash", "rm -rf runs/*"))
-        self.assertEqual(chat.asks(), [])                     # not a card to answer
-        self.assertIn("notice: Claude is waiting on a permission in the terminal", run_wb("chat", "log"))
+        line = "Claude is waiting for you in the terminal. Run it with permissions granted to work from the chat."
+        self.assertEqual((row["id"], row["from"], row["text"], row["tool"], row["kind"], row["what"]),
+                         (nid, "notice", line, "Bash", "permission", "rm -rf runs/*"))
+        self.assertNotIn("asks", chat.snapshot())             # no card to answer (#1350)
+        self.assertIn("notice: " + line, run_wb("chat", "log"))
         self.assertEqual(chat.latest()["messages"][-1]["id"], nid)  # what the push shows
-        plan = chat.notice("ExitPlanMode", "", "plan")
-        self.assertEqual((plan["text"], "what" in plan), ("Claude is waiting on a plan in the terminal", False))
+        for kind, tool in (("plan", "ExitPlanMode"), ("question", "AskUserQuestion"), ("elicitation", "mcp:tracker")):
+            other = chat.notice(tool, "", kind)
+            self.assertEqual((other["text"], other["kind"]), ("Claude is waiting for you in the terminal.", kind))
+        self.assertRegex(run_wb("chat", "notice", "--tool=mcp:tracker", "--kind=elicitation", "--text=Sign in").strip(),
+                         r"^\d+-[0-9a-f]+$")
         with self.assertRaises(ValueError):
             chat.notice("Bash", "ls", "nonsense")
         # push on and no page in a day: still told, and pushed once, as news
@@ -26869,10 +29202,10 @@ class WebChat(Base):
         # the mod's owed-reply check reads only Claude's own rows: a notice is no reply (#767)
         self.assertNotIn(pushed["id"], [m["id"] for m in chat.thread() if m["from"] == "claude"])
 
-    def test_a_notice_whose_dialog_was_answered_in_the_terminal_is_never_pushed_and_says_answered_959(self):
+    def test_a_notice_whose_dialog_settled_in_the_terminal_is_never_pushed_and_its_line_clears_959_1350(self):
         # the #959 review: nothing settled a notice when its dialog was answered, so a prompt
         # approved at the terminal in two seconds still buzzed the phone ten seconds later,
-        # saying Claude waited, and the thread said so for good
+        # saying Claude waited, and the thread said so for good; #1350: the line clears
         chat = self.chat
         from workbench import webpush as wp
         wp.subscribe("https://fcm.googleapis.com/fcm/send/abc")
@@ -26884,8 +29217,7 @@ class WebChat(Base):
         pusher = chat.Pusher(hub, send=lambda eps: (sent.append(eps), {e: 201 for e in eps})[1])
         self.assertEqual(pusher.tick(row["ts"] + chat.PUSH_DELAY + 1), [])  # due, but settled: no push
         self.assertEqual(sent, [])
-        got = chat.thread()[-1]
-        self.assertEqual((got["id"], bool(got["answered"])), (row["id"], True))  # the page says answered
+        self.assertNotIn(row["id"], [m["id"] for m in chat.thread()])         # the page's line clears
         self.assertEqual(chat.latest()["messages"], [])                         # and no push shows it
         reply = chat.send("done", "claude")
         self.assertEqual(chat.latest()["messages"][-1]["id"], reply["id"])
@@ -27028,8 +29360,9 @@ class WebChat(Base):
         self.assertEqual(pusher.tick(missed["ts"] + chat.PUSH_DELAY + 1), [missed["id"]])
         self.assertEqual(pusher.tick(missed["ts"] + chat.PUSH_DELAY + 2), [])   # once
         self.assertEqual(len(sent), 1)
-        ask = chat.ask("Bash", "make")
-        self.assertEqual(pusher.tick(ask["ts"] + chat.PUSH_DELAY + 1), [ask["id"]])
+        store.write_json(chat.chat_dir() / "page.json", {"at": store.now()})  # a user of the chat
+        line = chat.notice("Bash", "make")                             # Claude waits in the terminal
+        self.assertEqual(pusher.tick(line["ts"] + chat.PUSH_DELAY + 1), [line["id"]])
         late = chat.send("old news", "claude")
         self.assertEqual(pusher.tick(late["ts"] + chat.PUSH_WINDOW + 1), [])  # never a backlog
 
@@ -27209,84 +29542,9 @@ class WebChat(Base):
         self.assertLess(sum(read), 1000)                                     # then only what was added
         self.assertIn("m59999", chat._seen())
 
-    def test_a_plan_card_shows_its_own_sessions_plan_and_never_another_projects(self):
-        # #253 (the audit of 1.2): with no plan text the card took the newest file in the plans
-        # directory, so with two projects planning, A's card showed B's plan for revisions
-        home = Path(self.tmp.name) / "claude"
-        plans, projects = home / "plans", home / "projects"
-        plans.mkdir(parents=True)
-        (plans / "alpha-plan.md").write_text("# A's plan")
-        (plans / "beta-plan.md").write_text("# B's plan")                      # the newest
-        os.utime(plans / "alpha-plan.md", (time.time() - 60, time.time() - 60))
-        (projects / "-a").mkdir(parents=True)
-        (projects / "-a" / "sess-a.jsonl").write_text(json.dumps({"message": {"content": [
-            {"type": "text", "text": f"A plan file exists from plan mode at: {plans}/alpha-plan.md"}]}}) + "\n")
-        (projects / "-a" / "sess-empty.jsonl").write_text("")
-
-        def card(*args):
-            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(home)}):
-                ask_id, state = run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan", *args).split()
-            return self.chat.find_ask(ask_id)["detail"], state
-
-        self.assertEqual(card("--session", "sess-a"), ({"plan": "# A's plan"}, "open"))    # its transcript
-        self.assertEqual(card("--detail", json.dumps({"plan_file": str(plans / "alpha-plan.md")})),
-                         ({"plan": "# A's plan"}, "open"))                                  # the tool's input
-        outside = Path(self.tmp.name) / "secret.md"
-        outside.write_text("not a plan")
-        for args in ((), ("--session", "sess-gone"), ("--session", "sess-empty"),
-                     ("--detail", json.dumps({"plan_file": str(outside)}))):
-            detail, state = card(*args, "--repo", "/home/u/alpha")
-            self.assertEqual((detail, state), ({"plan": "", "project": "alpha"}, "expired"), args)
-        self.assertEqual(self.chat.asks()[-1]["by"], "terminal")              # answered there
-
-    def test_a_long_or_cjk_plan_reaches_the_page_cut_to_fit_instead_of_refused(self):
-        # #535 (the 2026-11-20 audit, reproduced): the size was json.dumps' ASCII escapes, six bytes
-        # a CJK character, so a 7,700-character Japanese plan was refused, as was an ASCII plan
-        # file of 39,900 characters once its newlines were escaped
+    def test_unread_messages_outlast_the_display_window(self):
+        # #265 (the audit of 1.2): `wb chat pending` lost an unread message behind 200 newer replies
         chat = self.chat
-        stored = lambda a: len(json.dumps(chat.find_ask(a)["detail"], ensure_ascii=False).encode())
-        ja = "計画の手順。\n" * 1100                                          # 7,700 characters
-        a, state = run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan",
-                          "--detail", json.dumps({"plan": ja})).split()
-        self.assertEqual((chat.find_ask(a)["detail"]["plan"], state), (ja, "open"))  # whole
-        huge = "大きな計画。\n" * 10_000
-        a = run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan",
-                   "--detail", json.dumps({"plan": huge})).split()[0]
-        plan = chat.find_ask(a)["detail"]["plan"]
-        self.assertTrue(plan.endswith(chat.CUT_NOTE) and huge.startswith(plan[:-len(chat.CUT_NOTE)]))
-        self.assertLessEqual(stored(a), chat.DETAIL_MAX)
-        self.assertGreater(stored(a), chat.DETAIL_MAX - 100)                  # cut no more than it must
-        home = Path(self.tmp.name) / "claude"                                  # a plan file, newlines and all
-        (home / "plans").mkdir(parents=True)
-        (home / "plans" / "p.md").write_text(("step\n" * 8000)[:39_900])
-        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(home)}):
-            a = run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan", "--detail",
-                       json.dumps({"plan_file": str(home / "plans" / "p.md")})).split()[0]
-        self.assertTrue(chat.find_ask(a)["detail"]["plan"].endswith(chat.CUT_NOTE))
-        self.assertLessEqual(stored(a), chat.DETAIL_MAX)
-        opts = [{"label": f"opt {i}", "description": "d", "preview": "プレビュー" * 3000} for i in range(4)]
-        q = chat.ask("AskUserQuestion", "", "question", {"questions": [{"question": "Which?", "options": opts}]})
-        got = q["detail"]["questions"][0]["options"]
-        self.assertEqual([o["label"] for o in got], [o["label"] for o in opts])  # the choices whole
-        self.assertTrue(all(o["preview"].endswith(chat.CUT_NOTE) for o in got))
-        self.assertLessEqual(stored(q["id"]), chat.DETAIL_MAX)
-        with self.assertRaises(ValueError):                                    # only the questions can't be cut
-            chat.ask("AskUserQuestion", "", "question", {"questions": [{"question": "?" * 50_000}]})
-
-    def test_open_questions_and_unread_messages_outlast_the_display_windows(self):
-        # #265 (the audit of 1.2): an open question vanished from the page behind 20 newer answered
-        # ones, and `wb chat pending` lost an unread message behind 200 newer replies
-        chat = self.chat
-        first = chat.ask("AskUserQuestion", "", "question", {"questions": []})
-        for i in range(25):
-            chat.answer(chat.ask("Bash", f"cmd {i}")["id"], "deny", "web")
-        listed = chat.asks()
-        self.assertEqual(len(listed), 21)
-        self.assertEqual((listed[0]["id"], listed[0]["answer"]), (first["id"], None))
-        self.assertIn(first["id"], [a["id"] for a in chat.snapshot()["asks"]])   # on the page
-        self.assertNotIn("stale", listed[0])
-        with mock.patch.object(chat.store, "now", return_value=store.now() + chat.ASK_STALE + 1):
-            self.assertTrue(chat.asks()[0]["stale"])                                # past the wait
         unread = chat.send("are you there?", "user", "c-1")
         for i in range(205):
             chat.send(f"reply {i}", "claude")
@@ -27321,93 +29579,25 @@ class WebChat(Base):
 
     def test_open_work_outlasts_a_burst_past_the_files_tails(self):
         # #329 (the audit of 1.4, reproduced): 540 replies of 7,900 characters pushed an unread
-        # message out of the 4 MiB tail, and 120 plan cards an open question, which then could
-        # no longer be answered
+        # message out of the 4 MiB tail
         chat = self.chat
         unread = chat.send("are you there?", "user", "c-burst")
-        question = chat.ask("AskUserQuestion", "which?", "question",
-                            {"questions": [{"question": "Which?", "options": []}]})
         for i in range(540):
             chat.send(f"reply {i} " + "x" * 7900, "claude")
-        for i in range(120):
-            chat.ask("ExitPlanMode", f"plan {i}", "plan", {"plan": "p" * 39_000})
         self.assertGreater((chat.chat_dir() / "messages.jsonl").stat().st_size, chat.THREAD_BYTES)
-        self.assertGreater((chat.chat_dir() / "asks.jsonl").stat().st_size, chat.THREAD_BYTES)
         self.assertEqual([m["id"] for m in chat.pending()], [unread["id"]])
-        self.assertEqual(chat.find_ask(question["id"])["answer"], None)
-        self.assertIn(question["id"], [a["id"] for a in chat.asks()])
-        done = chat.answer(question["id"], "allow", "web", answers={"Which?": "this"})
-        self.assertEqual(done["answer"], "allow")
-        self.assertNotIn(question["id"], chat.open_work()["asks"])
         chat.ack(unread["id"], "s-1")
         self.assertEqual(chat.pending(), [])
         # a state directory from before the index: built once from the whole files
         late = chat.send("still there?", "user", "c-late")
         (chat.chat_dir() / "open.json").unlink()
         self.assertEqual([m["id"] for m in chat.pending()], [late["id"]])
-        self.assertEqual(len(chat.open_work()["asks"]), 120)       # the plan cards, still open
-
-    def test_an_old_prompt_answered_past_the_tail_still_gives_its_waiter_the_answer(self):
-        # #447 (the 2026-11-20 audit, reproduced): answering an open ask whose row had left the
-        # 4 MiB tail returned allow, and right after, its waiter got "no such ask"
-        chat = self.chat
-        old = chat.ask("Bash", "rm -rf build")
-        with open(chat.chat_dir() / "asks.jsonl", "a") as f:  # history the tail can't reach back past
-            for i in range(120):
-                f.write(json.dumps({"id": f"ask-{i}", "ts": store.now(), "tool": "Bash", "text": "x" * 39_000,
-                                    "kind": "permission"}) + "\n")
-                f.write(json.dumps({"id": f"ask-{i}", "ts": store.now(), "answer": "deny", "by": "web"}) + "\n")
-        self.assertGreater((chat.chat_dir() / "asks.jsonl").stat().st_size, chat.THREAD_BYTES)
-        self.assertIsNone(chat.find_ask(old["id"])["answer"])
-        self.assertEqual(chat.answer(old["id"], "allow", "web", note="go")["answer"], "allow")
-        got = chat.find_ask(old["id"])
-        self.assertEqual((got["answer"], got["by"], got["note"], got["text"]), ("allow", "web", "go", "rm -rf build"))
-        self.assertEqual(chat.wait_answer(old["id"], 1), "allow")
-        self.assertEqual(json.loads(run_wb("chat", "wait", old["id"], "--json"))["answer"], "allow")  # another process
-        self.assertEqual(chat.answer(old["id"], "deny", "timeout")["answer"], "allow")  # the first stands
-        (chat.chat_dir() / "open.json").unlink()                     # an index built again from the files
-        self.assertEqual(chat.find_ask(old["id"])["answer"], "allow")
-        with mock.patch.object(chat.store, "now", return_value=store.now() + chat.ANSWER_KEPT + 60):
-            chat.answer(chat.ask("Bash", "ls")["id"], "allow", "web")  # a day on, it is let go
-            self.assertNotIn(old["id"], chat.open_work()["answered"])
-
-    def test_a_prompt_whose_session_died_expires_and_takes_no_answer(self):
-        # #538 (the 2026-11-20 audit, reproduced): a Bash card whose session crashed stayed open
-        # for good, took an Allow nobody waited for, and every later push showed it
-        chat = self.chat
-        gone = subprocess.Popen(["true"])
-        gone.wait()
-        dead = run_wb("chat", "ask", "--tool", "Bash", "--text", "rm -rf build", "--pid", str(gone.pid)).split()[0]
-        live = chat.ask("Bash", "make", pid=os.getpid())
-        old = chat.ask("Bash", "ls")                                          # from a wb before the pid
-        listed = {a["id"]: a for a in chat.snapshot()["asks"]}
-        self.assertEqual((listed[dead]["answer"], listed[dead]["by"]), ("expired", "interrupted"))
-        self.assertIsNone(listed[live["id"]]["answer"])
-        self.assertIsNone(listed[old["id"]]["answer"])
-        self.assertEqual(chat.answer(dead, "allow", "web")["answer"], "expired")  # no answer for nobody
-        self.assertEqual(self.call("/api/answer", {"id": dead, "answer": "allow"}, token=chat.token())[1]["ask"]["answer"],
-                         "expired")
-        self.assertEqual(run_wb("chat", "wait", dead, "--timeout", "0.1").strip(), "expired")
-        self.assertNotIn(dead, chat.open_work()["asks"])
-        self.assertEqual(sum(r.get("id") == dead and "answer" in r              # expired once
-                             for r in store.read_jsonl(chat.chat_dir() / "asks.jsonl")[0]), 1)
-
-    def test_wb_chat_wait_blocks_until_the_answer_or_says_open(self):
-        chat = self.chat
-        a = chat.ask("Write", "/etc/hosts")
-        self.assertEqual(run_wb("chat", "wait", a["id"], "--timeout", "0.2").strip(), "open")
-        import threading
-        threading.Timer(0.3, chat.answer, (a["id"], "allow", "web")).start()
-        t0 = time.time()
-        self.assertEqual(run_wb("chat", "wait", a["id"], "--timeout", "20").strip(), "allow")
-        self.assertLess(time.time() - t0, 10)                  # woken by the answer, not the timeout
-        self.assertEqual(run_wb("chat", "answer", a["id"], "expired", "--by", "timeout").strip(), "allow")
-        with self.assertRaises(SystemExit):
-            run_wb("chat", "wait", "ask-nope")
-        b, state = run_wb("chat", "ask", "--tool", "Bash", "--text", "make deploy").split()
-        self.assertEqual(state, "open")
-        self.assertEqual(run_wb("chat", "answer", b, "expired", "--by", "interrupted").strip(), "expired")
-        self.assertEqual(chat.find_ask(b)["by"], "interrupted")
+        # an older wb's index, its asks with it: read, and the asks dropped at the next write (#1350)
+        store.write_json(chat.chat_dir() / "open.json", {"messages": chat.open_work()["messages"],
+                                                         "asks": {"ask-1": {"id": "ask-1"}}, "answered": {}})
+        self.assertEqual([m["id"] for m in chat.pending()], [late["id"]])
+        chat.ack(late["id"], "s-1")
+        self.assertEqual(store.read_json(chat.chat_dir() / "open.json", None), {"messages": {}})
 
     def open_stream(self, tok):
         import http.client
@@ -27617,34 +29807,36 @@ class WebChat(Base):
             run_wb("chat", "on", "--port", str(port))
         self.assertIn(f"another account's chat", err.getvalue())
         self.assertFalse((self.chat.chat_dir() / "serve.pid").exists())           # nothing started
+        # on by default (#1281): a failed `wb chat on` puts the switch back as it was, on
+        self.assertIn("web chat not up: another account's chat", err.getvalue())
+        self.assertTrue(self.chat.is_on())
+        self.chat.set_on(False)
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            run_wb("chat", "on", "--port", str(port))
         # #690: the switch stayed on when it died, so the pane read On and pinned a dead link
         self.assertIn("web chat left off", err.getvalue())
         self.assertFalse(self.chat.is_on())
         self.assertEqual(run_wb("chat", "off", "--port", str(port)).strip(), "web chat off")  # no unit named
 
-    def test_a_push_fetches_only_the_newest_open_ask_and_claudes_last_word(self):
+    def test_a_push_fetches_only_claudes_last_word_or_its_waiting_line(self):
         # #755 (the 2026-11-21 audit, finding 102): each push made the service worker fetch the
         # whole /api/state (922 KB with 300 messages and 30 plans) to pick one line
         chat = self.chat
-        for i in range(30):
-            done = chat.ask("ExitPlanMode", "", "plan", {"plan": f"plan {i}\n" + "step\n" * 4000})
-            chat.answer(done["id"], "deny", "web")
         for i in range(100):
             chat.send("x" * 1500, "user" if i % 2 else "claude")
         chat.send("Tests pass, ready for review", "claude")
         chat.send("thanks", "user")
-        old = chat.ask("Bash", "rm -rf build")
-        plan = chat.ask("ExitPlanMode", "", "plan", {"plan": "1. Read\n" + "2. Write\n" * 3000})
         got = chat.latest()
-        self.assertEqual([a["id"] for a in got["asks"]], [plan["id"]])        # the newest open one
-        self.assertNotIn("detail", got["asks"][0])                           # not its plan's text
         self.assertEqual([m["text"] for m in got["messages"]], ["Tests pass, ready for review"])
+        self.assertNotIn("asks", got)                                        # no cards (#1350)
         self.assertLess(len(json.dumps(got)), 2000)
         code, body = self.call("/api/latest", token=chat.token())
-        self.assertEqual((code, [a["id"] for a in body["asks"]]), (200, [plan["id"]]))
+        self.assertEqual((code, [m["text"] for m in body["messages"]]), (200, ["Tests pass, ready for review"]))
         self.assertEqual(self.call("/api/latest")[0], 401)
-        chat.answer(plan["id"], "allow", "web")
-        self.assertEqual([a["id"] for a in chat.latest()["asks"]], [old["id"]])
+        store.write_json(chat.chat_dir() / "page.json", {"at": store.now()})
+        line = chat.notice("Bash", "rm -rf build")                           # Claude waits in the terminal
+        self.assertEqual([m["id"] for m in chat.latest()["messages"]], [line["id"]])
         self.assertIn("/api/latest", (chat.STATIC / "sw.js").read_text())
 
     def test_on_macos_the_launchd_agent_is_checked_and_named_instead_of_systemd(self):
@@ -27670,7 +29862,8 @@ class WebChat(Base):
 
     def test_a_chat_wb_chat_on_started_comes_back_after_a_reboot_or_a_crash(self):
         # #449 (the 2026-11-20 audit): the switch stayed on and the pane showed the link, but nothing
-        # started the server again, so the phone said "Can't reach the computer" for good
+        # started the server again, so the phone said "Can't reach the computer" for good; since
+        # #1281 `wb chat url` runs chat.ensure, which revive was
         from workbench import cli
         chat = self.chat
         with socket.socket() as sk:
@@ -27678,14 +29871,12 @@ class WebChat(Base):
             free = sk.getsockname()[1]
         dead = subprocess.Popen([sys.executable, "-c", "pass"])
         dead.wait()
-        chat.set_on(True)
         store.write_json(chat.chat_dir() / "serve.pid", {"pid": dead.pid, "port": free})  # it died
-        self.assertIn(f"no server answers on port {free}: wb chat on starts one", cli.chat_gap())
-        with mock.patch.object(chat, "_unit_keeps_it", return_value=True):   # systemd's to restart
-            self.assertIsNone(chat.revive())
+        self.assertEqual(cli.chat_line(), (False, f"web app down: no server answers on port {free} (wb chat on)"))
         chat.set_on(False)
-        self.assertIsNone(chat.revive())                                       # off: left off
-        self.assertIsNone(cli.chat_gap())
+        self.assertEqual(chat.ensure(free)["state"], "off")                    # off: left off
+        self.assertEqual(cli.chat_line(), (None, "web app off (wb chat on)"))
+        self.assertEqual(store.read_json(chat.chat_dir() / "serve.pid")["pid"], dead.pid)
         chat.set_on(True)
         with mock.patch.object(chat, "_unit_keeps_it", return_value=False):
             out = run_wb("chat", "url")
@@ -27693,12 +29884,10 @@ class WebChat(Base):
         pid = store.read_json(chat.chat_dir() / "serve.pid")["pid"]
         self.assertNotEqual(pid, dead.pid)
         try:
-            deadline = time.time() + 10
-            while not chat.running(free) and time.time() < deadline:
-                time.sleep(0.1)
-            self.assertTrue(chat.running(free))
-            self.assertIsNone(cli.chat_gap())
-            self.assertIsNone(chat.revive())                                   # up: not a second
+            self.assertTrue(chat.running(free))                                # ensure waited for it
+            with mock.patch.object(chat, "_unit_keeps_it", return_value=False):
+                self.assertEqual(cli.chat_line(), (True, f"web app answers on localhost:{free} (started by wb)"))
+            self.assertEqual(chat.ensure(free)["state"], "up")                 # up: not a second
             run_wb("chat", "off", "--port", str(free))
             deadline = time.time() + 10
             while os.waitpid(pid, os.WNOHANG) == (0, 0) and time.time() < deadline:
@@ -27796,14 +29985,30 @@ class WebChat(Base):
         c.close()
         self.assertEqual(self.call("/api/stream")[0], 401)
 
+    def test_a_stream_ends_at_its_hubs_close_without_another_snapshot(self):
+        # nightly run 45577067512 (2026-11-25): woken by tearDown's hub.close, a test's stream made
+        # one more snapshot, by then in the next test's WB_HOME: the push key it cached there was
+        # the key test_an_empty_or_broken_vapid_key_file_is_replaced… expected to be None
+        hub = self.srv.RequestHandlerClass.hub
+        page = self._held_wait("/api/stream", self.chat.token())
+        got = b""
+        while b"event: state" not in got:
+            got += page.recv(1 << 20) or self.fail("the stream ended before its first state")
+        self.addCleanup(page.close)
+        made = []
+        with mock.patch.object(self.chat, "snapshot", side_effect=lambda: made.append(1) or {}):
+            hub.close()
+            deadline = time.monotonic() + 5
+            while hub.open and time.monotonic() < deadline:
+                time.sleep(0.01)
+        self.assertEqual(hub.open, [])                 # ended, not at its next ping's failed write
+        self.assertEqual(made, [])
+
     def test_after_its_first_state_the_stream_sends_only_what_changed(self):
         # #755 (the 2026-11-21 audit, finding 102): every receipt and busy flip sent the whole
         # state, the thread and 20 asks with their plans: 922 KB each, five times an exchange
         import http.client
         chat, tok = self.chat, self.chat.token()
-        for i in range(10):
-            done = chat.ask("ExitPlanMode", "", "plan", {"plan": f"plan {i}\n" + "step\n" * 4000})
-            chat.answer(done["id"], "deny", "web")
         for i in range(60):
             chat.send("x" * 1500, "user" if i % 2 else "claude")
         mine = chat.send("and the tests?", "user")
@@ -27824,12 +30029,7 @@ class WebChat(Base):
                 lines.append(line)
         kind, first, _ = event()
         self.assertEqual((kind, len(first["messages"])), ("state", 61))       # the whole state first
-        plans = [a for a in first["asks"] if a["kind"] == "plan"]
-        self.assertTrue(all(a["detail"]["cut"] and len(a["detail"]["plan"]) == chat.PLAN_PREVIEW for a in plans))
-        code, whole = self.call(f"/api/ask/{plans[0]['id']}", token=tok)    # unfolded: fetched
-        self.assertEqual((code, len(whole["ask"]["detail"]["plan"])), (200, len("plan 0\n" + "step\n" * 4000)))
-        self.assertEqual(self.call("/api/ask/ask-nope", token=tok)[0], 404)
-        self.assertEqual(self.call(f"/api/ask/{plans[0]['id']}")[0], 401)
+        self.assertEqual(self.call("/api/ask/ask-nope", token=tok)[0], 404)  # no cards to unfold (#1350)
         chat.ack(mine["id"], "s1")                                            # a receipt
         kind, got, size = event()
         self.assertEqual(kind, "patch")
@@ -27840,29 +30040,28 @@ class WebChat(Base):
                          {"session": "s1", "cwd": "/home/u/p", "ts": store.now(), "busy": True})
         kind, got, size = event()                                             # a busy flip
         self.assertEqual((kind, got["listener"]["busy"], "messages" in got), ("patch", True, False))
-        self.assertIn("prefs", got)                                           # the small fields whole
+        self.assertIn("push", got)                                            # the small fields whole
         self.assertLess(size, 3000)
-        open_ = chat.ask("Bash", "make test")
+        store.write_json(chat.chat_dir() / "page.json", {"at": store.now()})
+        line = chat.notice("Bash", "make test")                                # a waiting line comes
         kind, got, _ = event()
-        self.assertEqual([a["id"] for a in got["asks"]["put"]], [open_["id"]])
+        self.assertEqual([m["id"] for m in got["messages"]["put"]], [line["id"]])
+        chat.notice_done(line["id"])                                           # and clears (#1350)
+        kind, got, _ = event()
+        self.assertEqual(got["messages"]["drop"], [line["id"]])
         c.close()
 
     def test_a_patch_names_each_row_that_changed_or_left_and_nothing_when_nothing_did(self):
         # #755: the page merges these by id, so a row the window lost must be named
         chat, had = self.chat, {}
-        snap = {"messages": [{"id": "a", "text": "1"}, {"id": "b", "text": "2"}], "asks": [],
-                "listener": None, "now": 1}
+        snap = {"messages": [{"id": "a", "text": "1"}, {"id": "b", "text": "2"}], "listener": None, "now": 1}
         chat.patch(had, snap)
         self.assertIsNone(chat.patch(had, {**snap, "now": 2}))              # only the clock moved
         got = chat.patch(had, {**snap, "messages": [{"id": "b", "text": "2!"}, {"id": "c", "text": "3"}], "now": 3})
         self.assertEqual(got["messages"], {"put": [{"id": "b", "text": "2!"}, {"id": "c", "text": "3"}], "drop": ["a"]})
-        self.assertEqual((got["now"], got["listener"], "asks" in got), (3, None, False))
+        self.assertEqual((got["now"], got["listener"]), (3, None))
         self.assertEqual(chat.patch(had, {**snap, "messages": got["messages"]["put"], "listener": {"busy": True}})
                          ["listener"], {"busy": True})
-        self.assertNotIn("detail", chat.page_ask({"id": "x", "answer": None}))
-        q = {"id": "q", "answer": "allow", "detail": {"questions": [{"question": "Which?", "options": [{"label": "A", "preview": "p" * 9000}]}]}}
-        self.assertEqual(chat.page_ask(q)["detail"], {"questions": [{"question": "Which?"}]})
-        self.assertEqual(chat.page_ask({**q, "answer": None})["detail"], q["detail"])  # open: whole
 
     def test_without_inotify_the_stream_stays_quiet_between_changes(self):
         # the fallback hub wakes every second; each wake was a ping (the 2026-11-16 audit)
@@ -27883,12 +30082,32 @@ class WebChat(Base):
                 pass
             f.readline(), f.readline()
             s.settimeout(3)
+            self.assertEqual(f.readline(), b"\n")  # the state's own blank line, for WebKit (#1284)
             with self.assertRaises(TimeoutError):
                 f.readline()  # a ping would come within a second or two
             s.close()
         finally:
             srv.shutdown()
             srv.server_close()
+
+    def test_each_stream_event_is_followed_by_a_blank_line_of_its_own_so_webkit_hands_over_its_tail(self):
+        # the #1284 review (2026-11-24): WebKit gives a streamed body to the page only up to the
+        # first 8 KB of a read until more bytes come, so a state past 8 KB on a reconnect waited
+        # 15 s for the ping. The blank line comes apart, NUDGE_AFTER on (stretched here to tell)
+        tok = self.chat.token()
+        self.chat.send("x" * 9000, "claude")                     # a state past 8 KB
+        with mock.patch.object(self.chat, "NUDGE_AFTER", 0.6):
+            c = self._held_wait("/api/stream", tok)
+            got = b""
+            while not (b"event: state" in got and got.endswith(b"\n\n")):
+                got += c.recv(1 << 20)
+            self.assertEqual(c.recv(1 << 20), b"\n")             # on its own, after a pause
+            self.chat.reply("And a patch.")
+            got = b""
+            while not (b"event: patch" in got and got.endswith(b"\n\n")):
+                got += c.recv(1 << 20)
+            self.assertEqual(c.recv(1 << 20), b"\n")             # each event its own
+            c.close()
 
     def test_a_message_its_receipt_and_the_reply(self):
         tok = self.chat.token()
@@ -27926,6 +30145,23 @@ class WebChat(Base):
                           "claude_machine": store.machine() or None})
         self.assertFalse({"session", "claude_pid"} & set(plain))          # no session: the listener's
 
+    def test_a_turns_own_answer_posted_by_the_mod_is_an_auto_row_cut_to_a_screenful(self):
+        # #1352 (from #1340 F): a turn that had a web message and ended with no reply gets its own
+        # answer posted by the mod, where a nudge turn asked Claude to reply and cost it a turn
+        code, r = self.call("/api/send", {"text": "Status"}, token=self.chat.token())
+        self.assertEqual(code, 200)
+        mid = r["message"]["id"]
+        run_wb("chat", "reply", "--turn-answer", f"--to={mid}", "--text=  Two tasks run; done by six.\n")
+        run_wb("chat", "reply", "--turn-answer", f"--to={mid}", "--text=" + "word " * 2000)
+        run_wb("chat", "reply", "--text", "a reply of Claude's own")
+        short, long, own = [r for r in store.read_jsonl(self.chat.chat_dir() / "messages.jsonl")[0]
+                            if r["from"] == "claude"]
+        self.assertEqual((short["text"], short["auto"], short["re"]), ("Two tasks run; done by six.", True, [mid]))
+        self.assertTrue(self.chat.TURN_ANSWER_MAX - 50 < len(long["text"]) <= self.chat.TURN_ANSWER_MAX)
+        self.assertTrue(long["text"].endswith(self.chat.TURN_ANSWER_CUT))
+        self.assertTrue(long["auto"])
+        self.assertNotIn("auto", own)
+
     # ---- other agents (#1042): their own tokens, never the user's authority ----
 
     def _agent(self, name="my-agent"):
@@ -27938,7 +30174,7 @@ class WebChat(Base):
         store.write_json(self.chat.chat_dir() / "listener.json",
                          {"session": "s1", "cwd": "/home/u/project", "pid": me, "start": models._started(me)})
 
-    def test_an_agent_token_sends_and_reads_but_never_answers_dialogs_or_marks_the_user_away(self):
+    def test_an_agent_token_sends_and_reads_but_never_changes_settings_or_marks_the_user_away(self):
         tok = self._agent()
         self.assertTrue(tok.startswith("wba-"))
         kept = self.chat.agents_path()
@@ -27955,16 +30191,16 @@ class WebChat(Base):
         pending = [json.loads(x) for x in run_wb("chat", "pending").splitlines()]
         self.assertEqual([(m["from"], m["role"]) for m in pending], [("my-agent", "agent")])
         self.assertIn("agent my-agent: refactor the parser", run_wb("chat", "log"))
-        asks = self.chat.ask("Bash", "git push origin main")
-        for path, body in (("/api/answer", {"id": asks["id"], "answer": "allow"}), ("/api/prefs", {"away": "allow"}),
-                           ("/api/push", {"test": True}), ("/api/active", {}), ("/api/seen", {"ids": ["x"]})):
+        for path, body in (("/api/settings", {"key": "coding", "value": "ask"}), ("/api/push", {"test": True}),
+                           ("/api/active", {}), ("/api/seen", {"ids": ["x"]})):
             code, r = self.call(path, body, token=tok)
             self.assertEqual(code, 403, path)
             self.assertTrue(r["error"].startswith("agent tokens can't "), r)
-        self.assertIsNone(self.chat.find_ask(asks["id"])["answer"])      # the dialog still waits
-        self.assertEqual(self.chat.prefs()["away"], "ask")
         self.assertFalse((self.chat.chat_dir() / "away.json").exists())
-        self.assertEqual(self.call("/api/prefs", {"away": "ask"}, token=self.chat.token())[0], 200)  # the user's: all of it
+        self.assertEqual(self.call("/api/active", {}, token=self.chat.token())[0], 200)  # the user's: all of it
+        # #1350: no dialog is answered from the chat, by anyone
+        for path, body in (("/api/answer", {"id": "ask-1", "answer": "allow"}), ("/api/prefs", {"away": "allow"})):
+            self.assertEqual(self.call(path, body, token=self.chat.token())[0], 404, path)
         self.assertIn("my-agent  since ", run_wb("chat", "token", "list"))
 
     def test_an_agent_token_from_another_machine_is_refused_while_the_users_token_still_works(self):
@@ -28237,6 +30473,125 @@ class WebChat(Base):
         self.assertEqual(sorted(t["name"] for t in self.chat.open_tasks()), ["t-queued", "t-review"])
         self.assertEqual(sorted(t["name"] for t in self.chat.snapshot()["tasks"]), ["t-queued", "t-review"])
 
+    # ---- the task sheet (#1201) ----
+
+    def _sheet_task(self, name="fix-auth", phase="review", **status):
+        """An open task with a real worktree off self.repo: one file changed, one new."""
+        t = store.Task(name)
+        t.dir.mkdir(parents=True)
+        base = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "HEAD"], capture_output=True,
+                              text=True, check=True).stdout.strip()
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "-q", "-b", f"wb/{name}",
+                        str(t.dir / "worktree"), base], check=True, capture_output=True)
+        store.write_json(t.dir / "task.json", {"name": name, "model": "deepinfra/vendor/flash", "via": "api",
+                                               "provider_name": "DeepInfra", "repo": str(self.repo), "base": base,
+                                               "branch": f"wb/{name}", "created_at": store.now() - 90})
+        t.set_status(phase=phase, round=2, last="tests pass", **status)
+        (t.worktree / "README.md").write_text("hello\nworld\n")
+        (t.worktree / "new.py").write_text("x = 1\n")
+        return t
+
+    def test_the_task_sheet_shows_an_open_task_as_wb_status_report_diff_and_log_do(self):
+        t = self._sheet_task()
+        t.round_dir(2).mkdir(parents=True)
+        (t.round_dir(2) / "summary.md").write_text("## Done\nAdded new.py.\n")
+        for row in ({"kind": "round", "round": 2, "text": "round 2", "ts": store.now()},
+                    {"kind": "text", "round": 2, "text": "I'll add it.\nThen test.", "ts": store.now()},
+                    {"kind": "step", "round": 2, "ts": store.now()},         # held: wb log never shows one
+                    {"kind": "tool", "round": 2, "tool": "bash", "brief": "pytest", "ok": False,
+                     "error": "1 failed", "ts": store.now()}):
+            t.event(row)
+        tok, q = self.chat.token(), "/api/task?name=fix-auth&part="
+        code, s = self.call(q + "summary", token=tok)
+        self.assertEqual(code, 200, s)
+        self.assertEqual({k: s[k] for k in ("task", "part", "phase", "round", "step", "last", "model", "via",
+                                            "provider_name", "verify", "report_cut")},
+                         {"task": "fix-auth", "part": "summary", "phase": "review", "round": 2, "step": 1,
+                          "last": "tests pass", "model": "deepinfra/vendor/flash", "via": "api",
+                          "provider_name": "DeepInfra", "verify": [], "report_cut": False})
+        self.assertEqual(s["report"] + "\n", run_wb("report", "fix-auth"))  # print adds a newline
+        self.assertLess(s["created_at"], s["updated_at"])
+        self.assertLessEqual(s["updated_at"], s["now"])
+        # the diff: the stat first, then the whole, then one file, each as `wb diff` has it
+        code, d = self.call(q + "diff", token=tok)
+        self.assertEqual(code, 200, d)
+        self.assertEqual(d["stat"], run_wb("diff", "fix-auth", "--stat").rstrip("\n"))
+        self.assertEqual(d["files"], [{"path": "README.md", "added": 1, "deleted": 0},
+                                      {"path": "new.py", "added": 1, "deleted": 0}])
+        self.assertNotIn("diff", d)
+        code, d = self.call(q + "diff&full=1", token=tok)
+        self.assertEqual((d["diff"], d["cut"], d["lines_cut"], d["stat"]),
+                         (run_wb("diff", "fix-auth").rstrip("\n"), False, 0, ""))
+        code, d = self.call(q + "diff&full=1&path=new.py", token=tok)
+        self.assertEqual(d["diff"], run_wb("diff", "fix-auth", "--", "new.py").rstrip("\n"))
+        self.assertEqual(self.call(q + "diff&full=1&path=CLAUDE.md", token=tok),
+                         (404, {"error": "no such file in the diff", "code": "not_found"}))
+        # the log: wb log -v's lines after their time
+        code, lg = self.call(q + "log", token=tok)
+        self.assertEqual(code, 200, lg)
+        self.assertEqual([(r["kind"], r["round"], r["text"], r.get("ok")) for r in lg["rows"]],
+                         [("round", 2, "round    round 2", None), ("text", 2, "text     I'll add it.\nThen test.", None),
+                          ("tool", 2, "bash     pytest  ✗ 1 failed", False)])
+        self.assertEqual(run_wb("log", "fix-auth", "-v"),
+                         "".join(f"{time.strftime('%H:%M:%S', time.localtime(r['ts']))} r2 {r['text']}\n"
+                                 for r in lg["rows"]))
+        self.assertFalse(lg["more"])
+        code, lg = self.call(q + "log&n=1", token=tok)
+        self.assertEqual(([r["kind"] for r in lg["rows"]], lg["more"]), (["tool"], True))
+
+    def test_the_task_sheet_is_the_users_and_only_for_an_open_task(self):
+        # the diff and report are the user's work: an agent's token reads none of it (AGENT_UNREAD)
+        self._sheet_task()
+        tok = self.chat.token()
+        self.assertEqual(self.call("/api/task?name=fix-auth")[0], 401)
+        code, r = self.call("/api/task?name=fix-auth", token=self._agent())
+        self.assertEqual((code, r), (403, {"error": "agent tokens can't read tasks", "code": "agent_forbidden"}))
+        self.assertEqual(self.call("/api/task?name=fix-auth", token=tok)[1]["part"], "summary")  # the default
+        for bad in ("part=watch", "part=log&n=0", "part=log&n=abc", f"part=log&n={self.chat.TASK_LOG_MAX + 1}"):
+            self.assertEqual(self.call(f"/api/task?name=fix-auth&{bad}", token=tok)[0], 400, bad)
+        # none the strip leaves out: parked, a bench replay, closed, unknown, or no task name at all
+        self._sheet_task("t-parked", parked=store.now())
+        self._sheet_task("t-done", phase="accepted")
+        b = self._sheet_task("t-bench")
+        store.write_json(b.dir / "task.json", {**b.spec, "bench": True})
+        for name in ("t-parked", "t-done", "t-bench", "nope", "../fix-auth", ""):
+            self.assertEqual(self.call(f"/api/task?name={name}&part=diff", token=tok),
+                             (404, {"error": "no such open task", "code": "not_found"}), name)
+
+    def test_the_task_sheet_cuts_a_long_report_diff_and_line_and_follows_wb_next(self):
+        t = self._sheet_task(steps=2)
+        t.round_dir(2).mkdir(parents=True)
+        (t.round_dir(2) / "summary.md").write_text("r" * 100)
+        subprocess.run(["git", "-C", str(t.worktree), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(t.worktree), "commit", "-qm", "step 1"], check=True, capture_output=True)
+        (t.worktree / "new.py").write_text("x = 2\n" + "y" * 50 + "\n")
+        tok, q = self.chat.token(), "/api/task?name=fix-auth&part="
+        with mock.patch.object(self.chat, "TASK_REPORT_CHARS", 40), \
+                mock.patch("workbench.transcript.JSON_LINE_CHARS", 40):
+            s = self.call(q + "summary", token=tok)[1]
+            self.assertEqual((s["report"], s["report_cut"], s["step"]), ("r" * 40, True, 2))
+            # after `wb next`, the current step alone, as `wb diff` (gitops.diff_base: HEAD)
+            d = self.call(q + "diff&full=1", token=tok)[1]
+            self.assertEqual((d["base"], d["lines_cut"]), ("HEAD", 1))
+            self.assertIn("+" + "y" * 38 + "…", d["diff"].splitlines())
+            self.assertEqual([f["path"] for f in d["files"]], ["new.py"])
+            with mock.patch.object(self.chat, "TASK_DIFF_CHARS", 30):
+                d = self.call(q + "diff&full=1", token=tok)[1]
+                self.assertEqual((d["diff"], d["cut"]), (None, True))
+                self.assertEqual(d["files"], [{"path": "new.py", "added": 2, "deleted": 1}])
+
+    def test_a_reply_from_the_task_sheet_names_its_task_and_only_a_real_one(self):
+        # "Reply about this task": the message reaches Claude tagged with the task; acting on it
+        # (wb steer) stays Claude's, so the page never steers
+        self._sheet_task()
+        tok = self.chat.token()
+        code, r = self.call("/api/send", {"text": "is it on track?", "about": {"task": "fix-auth"}}, tok)
+        self.assertEqual((code, r["message"]["about"]), (200, {"task": "fix-auth"}))
+        for bad in ({"task": "nope"}, {"task": "../fix-auth"}, {"task": 7}):
+            self.assertEqual(self.call("/api/send", {"text": "x", "about": bad}, tok), (400, {"error": "no such task", "code": "bad_request"}), bad)
+        code, r = self.call("/api/send", {"text": "x", "about": {"task": "fix-auth"}}, token=self._agent())
+        self.assertEqual((code, r), (400, {"error": "agent messages can't carry about", "code": "bad_request"}))
+
     # ---- the #1042 review ----
 
     def _held_wait(self, path, token):
@@ -28271,7 +30626,8 @@ class WebChat(Base):
         t.start()
         time.sleep(0.5)
         self.assertTrue(t.is_alive())
-        a = self.chat.ask("Bash", "git push origin main")                  # a dialog for the user
+        store.write_json(self.chat.chat_dir() / "page.json", {"at": store.now()})
+        a = self.chat.notice("Bash", "git push origin main")               # a dialog waits on the user
         t.join(10)
         self.assertLess(time.monotonic() - began, 8)
         self.assertEqual((got["r"][1]["replies"], got["r"][1]["waiting_on_user"]), ([], True))
@@ -28279,13 +30635,8 @@ class WebChat(Base):
         _, r = self.call(f"/api/wait?after={mid}&timeout=2", token=tok)
         self.assertGreaterEqual(time.monotonic() - began, 1.5)
         self.assertTrue(r["waiting_on_user"])
-        self.chat.answer(a["id"], "deny", "web")
+        self.chat.notice_done(a["id"])                                    # settled in the terminal
         self.assertFalse(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
-        n = self.chat.notice("Bash", "rm -rf build")                       # one in the terminal, told
-        if n:
-            self.assertTrue(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
-            self.chat.notice_done(n["id"])
-            self.assertFalse(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
 
     def test_another_sessions_turn_end_leaves_a_wait_on_the_listeners_reply_not_done(self):
         # #1303: every session's mod records a turn end with no ids once messages.jsonl grew in
@@ -28330,7 +30681,7 @@ class WebChat(Base):
         tok, user = self._agent(), self.chat.token()
         mine = self.call("/api/send", {"text": "mine", "cid": "c-1"}, token=user)[1]["message"]
         code, r = self.call("/api/send", {"text": "theirs", "cid": "c-1"}, token=tok)
-        self.assertEqual((code, r), (409, {"error": "that cid is another sender's"}))
+        self.assertEqual((code, r), (409, {"error": "that cid is another sender's", "code": "conflict"}))
         self.assertEqual(self.call("/api/send", {"text": "mine", "cid": "c-1"}, token=user)[1]["message"]["id"], mine["id"])
         self.assertEqual([m["text"] for m in self.chat.thread()], ["mine"])
 
@@ -28443,16 +30794,17 @@ class WebChat(Base):
         self.chat.reply("To my-agent.", [mid])
         self.chat.reply("To both.", [mid, uid])
         self.chat.reply("To other.", [oid])
-        a = self.chat.ask("Bash", "git push origin main")
+        store.write_json(self.chat.chat_dir() / "page.json", {"at": store.now()})
+        a = self.chat.notice("Bash", "git push origin main")               # the user's waiting line
         code, st = self.call("/api/state", token=tok)
         self.assertEqual(code, 200)
         self.assertEqual([m["text"] for m in st["messages"]], ["refactor the parser", "To my-agent.", "To both."])
-        self.assertEqual(sorted(st), ["api", "expire", "listener", "messages", "now", "uploads"])  # no asks, prefs, savings, push
+        self.assertEqual(sorted(st), ["api", "expire", "listener", "messages", "now", "uploads"])  # no savings, push
         self.assertIsNone(st["messages"][0]["received"])
         code, r = self.call("/api/send", {"text": "and the tests"}, token=tok)
         self.assertEqual([m["text"] for m in r["state"]["messages"]][-1], "and the tests")
-        self.assertNotIn("asks", r["state"])
-        self.assertIn("asks", self.call("/api/state", token=user)[1])     # the user's: all of it
+        self.assertNotIn("push", r["state"])
+        self.assertIn("push", self.call("/api/state", token=user)[1])     # the user's: all of it
         # its stream: the same view, and a patch carries none of the user's
         c = self._held_wait("/api/stream", tok)
         c.settimeout(5)
@@ -28461,7 +30813,7 @@ class WebChat(Base):
             got += c.recv(1 << 20)
         first = json.loads(got.split(b"data: ", 1)[1].split(b"\n", 1)[0])
         self.assertEqual(first["messages"], self.call("/api/state", token=tok)[1]["messages"])
-        self.assertNotIn("asks", first)
+        self.assertNotIn("push", first)
         self.call("/api/send", {"text": "a secret of the user's"}, token=user)
         self.chat.reply("Again to my-agent.", [mid])
         while b"Again to my-agent." not in got:
@@ -28470,11 +30822,10 @@ class WebChat(Base):
         self.assertNotIn(b"a secret of the user's", got)
         self.assertNotIn(a["id"].encode(), got)
         # what only the user may read: 403, and the user's own still reads them
-        for path in ("/api/latest", f"/api/ask/{a['id']}", "/api/shot?task=t&n=1&side=base", "/api/audio?batch=b&n=1"):
+        for path in ("/api/latest", "/api/shot?task=t&n=1&side=base", "/api/audio?batch=b&n=1"):
             code, r = self.call(path, token=tok)
             self.assertEqual(code, 403, path)
             self.assertTrue(r["error"].startswith("agent tokens can't "), r)
-        self.assertEqual(self.call(f"/api/ask/{a['id']}", token=user)[0], 200)
         self.assertEqual(self.call("/api/latest", token=user)[0], 200)
         self.assertEqual(self.call("/api/latest")[0], 401)                 # no token: as before
         # a wait on another's message is no message to it; on its own, as before
@@ -28488,36 +30839,232 @@ class WebChat(Base):
         # what a message answers (a pair of screenshots, a take) is the user's to say
         tok = self._agent()
         code, r = self.call("/api/send", {"text": "keep this one", "about": {"audio": "x", "n": 1}}, token=tok)
-        self.assertEqual((code, r), (400, {"error": "agent messages can't carry about"}))
+        self.assertEqual((code, r), (400, {"error": "agent messages can't carry about", "code": "bad_request"}))
         code, r = self.call("/api/send", {"text": "about step 1", "about": {"task": "t", "n": 1}}, token=tok)
-        self.assertEqual((code, r), (400, {"error": "agent messages can't carry about"}))
+        self.assertEqual((code, r), (400, {"error": "agent messages can't carry about", "code": "bad_request"}))
         self.assertEqual(self.chat.thread(), [])
         code, r = self.call("/api/send", {"text": "about step 1", "about": {"task": "t", "n": 1}}, token=self.chat.token())
         self.assertEqual((code, r["error"]), (400, "no such screenshots"))  # the user's is read as before
 
-    def test_a_dialog_in_an_agents_turn_is_for_that_agent_and_the_users_away_setting_answers_it_only_while_away(self):
+    # ---- #1138: versioned paths, one error shape, retry safety ----
+
+    def _raw(self, method, path, body=b"", token=None, headers=None):
+        """(status, headers, JSON or bytes) for one request with any method and headers."""
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        h = {"Host": f"localhost:{self.port}", **({"Authorization": f"Bearer {token}"} if token else {}),
+             **(headers or {})}
+        c.request(method, path, body, h)
+        r = c.getresponse()
+        data = r.read()
+        c.close()
+        return r.status, r, (json.loads(data) if r.getheader("Content-Type") == "application/json" else data)
+
+    def _keyed(self, body, key, token):
+        """POST /api/send with an Idempotency-Key: (status, JSON, its Idempotent-Replayed header)."""
+        code, r, got = self._raw("POST", "/api/send", json.dumps(body), token,
+                                 {"Content-Type": "application/json", "Idempotency-Key": key})
+        return code, got, r.getheader("Idempotent-Replayed")
+
+    def test_every_api_path_answers_under_v1_too_with_the_same_handler_and_the_same_denials(self):
+        # #1138: versioned paths for other clients; /api/ stays for the page and old clients
+        tok, user = self._agent(), self.chat.token()
+        self.assertEqual(self.call("/api/v1/health", token=tok), self.call("/api/health", token=tok))
+        code, r = self.call("/api/v1/send", {"text": "hi from v1"}, token=tok)
+        self.assertEqual((code, r["message"]["from"]), (200, "my-agent"))
+        mid = r["message"]["id"]
+        self.assertEqual(self.call(f"/api/v1/wait?after={mid}&timeout=0", token=tok)[1]["replies"], [])
+        self.assertEqual(self.call("/api/v1/state", token=tok)[1]["messages"][-1]["id"], mid)
+        code, _, got = self._raw("PUT", "/api/v1/upload/abcdefgh-1", b"hello", tok,
+                                 {"X-File-Name": "a.txt", "Content-Type": "text/plain"})
+        self.assertEqual((code, got["new"]), (200, True))
+        self.assertEqual(self.call("/api/v1/upload/abcdefgh-1", token=tok)[1]["upload"]["name"], "a.txt")
+        self.assertEqual(self._raw("GET", "/api/v1/file/abcdefgh-1", token=tok)[::2], (200, b"hello"))
+        stream = self._held_wait("/api/v1/stream", tok)
+        got = b""
+        while b"event: state" not in got:
+            got += stream.recv(1 << 20)
+        stream.close()
+        for path, body in (("/api/v1/active", {}), ("/api/v1/settings", {"key": "coding", "value": "ask"}),
+                           ("/api/v1/latest", None), ("/api/v1/task", None), ("/api/v1/shot", None),
+                           ("/api/v1/transcribe/abcdefgh-1", {}), ("/api/v1/nope", None)):
+            code, r = self.call(path, body, token=tok)
+            self.assertEqual((code, r["code"]), (403, "agent_forbidden"), path)  # its allow-list holds
+            self.assertTrue(r["error"].startswith("agent tokens can't "), r)
+        self.assertFalse((self.chat.chat_dir() / "away.json").exists())
+        self.assertEqual(self.call("/api/v1/latest", token=user)[0], 200)
+        self.assertEqual(self.call("/api/v1/health")[0], 401)                   # the token, as ever
+        self.assertEqual(self.call("/api/v1/nope", token=user)[1]["code"], "not_found")
+        self.assertEqual(self.call("/api/v1/answer", {"id": "x", "answer": "allow"}, token=user)[0], 404)  # gone (#1350)
+
+    def test_every_error_answer_is_one_shape_with_a_code_for_each_kind_of_refusal(self):
+        # #1138: "error" stays the plain line the page and ask_claude.py show; "code" is what a
+        # client branches on: a bad token, a revoked one, an agent from another machine, a rate
+        # limit, not found and an expired message each its own
         tok = self._agent()
+
+        def refused(got, status, code):
+            self.assertEqual((got[0], got[1].get("code")), (status, code), got)
+            self.assertTrue(isinstance(got[1]["error"], str) and got[1]["error"], got)
+        refused(self.call("/api/health"), 401, "bad_token")
+        refused(self.call("/api/health", token="wba-" + "x" * 40), 401, "bad_token")
+        refused(self.call("/api/health", token=tok, host="elsewhere.example"), 403, "unknown_host")
+        refused(self.call("/api/nope", token=self.chat.token()), 404, "not_found")
+        refused(self.call("/api/wait?after=nope&timeout=0", token=tok), 404, "not_found")
+        refused(self.call("/api/push", {"test": True}, token=tok), 403, "agent_forbidden")
+        refused(self.call("/api/nope", token=tok), 403, "agent_forbidden")      # outside its allow-list
+        refused(self.call("/api/wait?after=x&timeout=9999", token=tok), 400, "bad_request")
+        with mock.patch.object(self.chat.Handler, "_peer", lambda self: "100.64.0.7"):  # a tailnet peer
+            refused(self.call("/api/health", token=tok), 403, "not_local")
+        with mock.patch.object(self.srv.RequestHandlerClass.sends, "per_min", 1):
+            code, r = self.call("/api/send", {"text": "the first"}, token=tok)
+            self.assertEqual(code, 200)
+            got = self.call("/api/send", {"text": "the second"}, token=tok)
+            refused(got, 429, "rate_limited")
+            self.assertTrue(1 <= got[1]["retry_after"] <= 60)
+        mid, now = r["message"]["id"], store.now()
         self._listening()
-        mid = self.call("/api/send", {"text": "ship it"}, token=tok)[1]["message"]["id"]
-        self.call("/api/prefs", {"away": "allow"}, token=self.chat.token())
-        out = run_wb("chat", "ask", "--tool", "Bash", "--text", "git push", "--for", "my-agent", "--here")
-        ask_id, state = out.split()
-        self.assertEqual(state, "open")                                   # at the terminal: the human decides
-        a = self.chat.find_ask(ask_id)
-        self.assertEqual(a["for"], ["my-agent"])
-        self.assertEqual([x["for"] for x in self.call("/api/state", token=self.chat.token())[1]["asks"]], [["my-agent"]])
-        self.assertEqual(self.chat.latest()["asks"][0]["for"], ["my-agent"])  # the push says whose
-        self.assertIn(ask_id, self.chat.news(store.now() + 20))            # and is pushed
-        self.assertTrue(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
-        self.assertEqual(self.call("/api/answer", {"id": ask_id, "answer": "allow"}, token=tok)[0], 403)
-        run_wb("chat", "answer", ask_id, "expired", "--by", "interrupted")   # settled in the terminal
-        self.assertFalse(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
-        self.assertEqual(self.call("/api/answer", {"id": ask_id, "answer": "allow"}, token=self.chat.token())[1]["ask"]["answer"],
-                         "expired")                                       # the page's tap changes nothing
-        out = run_wb("chat", "ask", "--tool", "Bash", "--text", "git push", "--for", "my-agent")
-        self.assertEqual(out.split()[1], "allow")                          # away: their setting stands
-        with self.assertRaises(ValueError):
-            self.chat.ask("Bash", "x", for_=["Not A Name"])
+        began = time.monotonic()
+        with mock.patch.object(store, "now", lambda: now + self.chat.MESSAGE_EXPIRE + 60):
+            refused(self.call(f"/api/wait?after={mid}&timeout=4", token=tok), 410, "expired")
+        self.assertLess(time.monotonic() - began, 3)                       # said at once, not held
+        # one Claude read, still at work 6 hours on with no reply yet, is no expired message:
+        # told "never passed on, send it again", the agent would ask Claude twice (the review)
+        code, r = self.call("/api/send", {"text": "the long one"}, token=tok)
+        self.assertEqual(code, 200)
+        read = r["message"]["id"]
+        self.chat.ack(read, "sess-1")
+        with mock.patch.object(store, "now", lambda: now + self.chat.MESSAGE_EXPIRE + 60):
+            code, r = self.call(f"/api/wait?after={read}&timeout=1", token=tok)
+        self.assertEqual((code, r.get("code"), r.get("replies")), (200, None, []))  # held as before
+        code, r, got = self._raw("DELETE", "/api/state", token=tok)         # http.server's own refusal
+        refused((code, got), 501, "not_implemented")
+        run_wb("chat", "token", "revoke", "my-agent")
+        refused(self.call("/api/health", token=tok), 401, "token_revoked")
+        refused(self.call("/api/send", {"text": "hi"}, token=tok), 401, "token_revoked")
+        self.assertNotIn(tok, self.chat.agents_path().read_text())         # only its hash is kept
+        doc = (ROOT / "docs/chat-api.md").read_text()
+        for c in set(self.chat.ERROR_CODES.values()) | set(self.chat.ERRORS_SAID):
+            self.assertTrue(f"`{c}`" in doc, c)                              # each code documented
+
+    def test_a_send_with_an_idempotency_key_lands_once_a_day_and_its_retry_gets_the_first_message(self):
+        # #1138: an agent whose send was cut can't tell whether it landed; sent again, Claude was
+        # asked twice and did the work twice
+        tok, user = self._agent(), self.chat.token()
+        with mock.patch.object(self.srv.RequestHandlerClass.sends, "per_min", 1):
+            code, first, again = self._keyed({"text": "refactor the parser"}, "k-1", tok)
+            self.assertEqual((code, again), (200, None))
+            code, r, again = self._keyed({"text": "refactor the parser"}, "k-1", tok)  # no 429: nothing sent
+            self.assertEqual((code, again, r["message"]), (200, "true", first["message"]))
+        self.assertEqual([m["text"] for m in self.chat.thread()], ["refactor the parser"])
+        code, r, again = self._keyed({"text": "refactor the parser"}, "k-1", user)   # another caller's key
+        self.assertEqual((code, again, r["message"]["from"]), (200, None, "user"))
+        code, r, _ = self._keyed({"text": "something else"}, "k-1", tok)
+        self.assertEqual((code, r["code"]), (422, "idempotency_key_reused"))        # never a silent drop
+        self.assertEqual(self._keyed({"text": "x"}, "a key", tok)[1]["code"], "bad_idempotency_key")
+        self.assertEqual(len(self.chat.thread()), 2)
+        kept = self.chat.idem_path()
+        self.assertNotIn("refactor", kept.read_text())                          # ids, never the text
+        rows = store.read_json(kept)
+        store.write_json(kept, {k: {**v, "ts": v["ts"] - self.chat.IDEM_FOR - 1} for k, v in rows.items()})
+        code, r, again = self._keyed({"text": "refactor the parser"}, "k-1", tok)    # a day on: sent anew
+        self.assertEqual((code, again), (200, None))
+        self.assertNotEqual(r["message"]["id"], first["message"]["id"])
+        with mock.patch.object(self.chat, "IDEM_KEPT", 3):
+            for i in range(5):
+                self.assertEqual(self._keyed({"text": f"n{i}"}, f"n-{i}", user)[0], 200)
+            self.assertEqual(len(store.read_json(kept)), 3)                      # pruned to the newest
+        self.assertEqual(self._keyed({"text": "n4"}, "n-4", user)[2], "true")
+        got = []
+        racers = [threading.Thread(target=lambda: got.append(self._keyed({"text": "race"}, "r-1", tok)))
+                  for _ in range(4)]
+        for t in racers:
+            t.start()
+        for t in racers:
+            t.join()
+        self.assertEqual([g[0] for g in got], [200] * 4)
+        self.assertEqual(len({g[1]["message"]["id"] for g in got}), 1)          # four racers, one send
+        self.assertEqual([m["text"] for m in self.chat.thread()].count("race"), 1)
+
+    def test_ask_claude_sends_again_after_a_cut_with_one_key_and_exits_2_on_an_expired_message(self):
+        # #1138: a send cut by the chat restarting ended the client with exit 1, and its rerun
+        # asked Claude twice; one Idempotency-Key and cid for every try makes the retry safe. A
+        # send cut for good exited 1 naming nothing (the review): exit 2 with its key, and the
+        # rerun with --key sends the same body, its files' upload ids included
+        import importlib.util
+        script = ROOT / "skill/agents/claude-workbench/scripts/ask_claude.py"
+        spec = importlib.util.spec_from_file_location("ask_claude_1138", script)
+        ac = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ac)
+        posts, answers, puts, bodies = [], [], [], []
+
+        class Stub(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _answer(self, code, body):
+                data = json.dumps(body).encode()
+                self.send_response(code)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                posts.append((self.headers.get("Idempotency-Key"), body.get("cid")))
+                bodies.append(body)
+                what = answers.pop(0) if answers else "drop"
+                if what == "drop":                       # the server going away mid-send
+                    return
+                if what == "502":
+                    return self._answer(502, {"error": "bad gateway"})
+                self._answer(200, {"message": {"id": "m1"}, "listener": {}})
+
+            def do_PUT(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                puts.append(self.path)
+                self._answer(200, {"upload": {}})
+
+            def do_GET(self):
+                if self.path.startswith("/api/health"):
+                    return self._answer(200, {"api": 1, "listening": True})
+                self._answer(410, {"error": "that message expired unread", "code": "expired"})
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Stub)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        env = {"CLAUDE_WB_URL": f"http://127.0.0.1:{srv.server_address[1]}", "CLAUDE_WB_TOKEN": "wba-x"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(ac, "RETRY_FIRST", 0.05):
+            answers[:] = ["drop", "502", "ok"]
+            self.assertEqual(ac.send("refactor the parser", [], "k-1138")["message"]["id"], "m1")
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                rc = ac.follow("m1", "done", time.monotonic() + 20)
+        self.assertEqual(len(posts), 3)
+        self.assertEqual(len(set(posts)), 1)                    # one key and cid, every try
+        self.assertEqual(posts[0], ("k-1138", "k-1138"))
+        self.assertEqual(rc, 2, err.getvalue())
+        self.assertIn("expired unread: message m1", err.getvalue())
+        notes = Path(self.tmp.name) / "notes.md"
+        notes.write_text("the parser's notes")
+        del posts[:], bodies[:]
+        with mock.patch.dict(os.environ, env), mock.patch.object(ac, "RETRY_FIRST", 0.05), \
+                mock.patch.object(ac, "OUTAGE_MOST", 0.3):
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                rc = ac.main(["refactor the parser", "--file", str(notes)])     # cut every try
+            self.assertEqual(rc, 2, err.getvalue())
+            key = posts[0][0]
+            self.assertEqual(set(posts), {(key, key)})
+            self.assertIn(f"--key {key}", err.getvalue())                       # what to rerun with
+            self.assertIn("may have landed", err.getvalue())
+            first = bodies[0]
+            answers[:] = ["ok"]
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                rc = ac.main(["refactor the parser", "--file", str(notes), "--key", key])
+        self.assertEqual(rc, 2)                                                  # sent; the wait: 410
+        self.assertEqual((posts[-1], bodies[-1]), ((key, key), first))           # the same request
+        self.assertEqual(len(set(puts)), 1, puts)                                # its file, one id
 
 
 FAKE_SMI = """import os, sys, time
@@ -28547,6 +31094,397 @@ while True:
         print("1, [N/A], [N/A], [N/A], [N/A]", flush=True)
     time.sleep(ms / 1000)
 """
+
+
+class AgentMcp(Base):
+    """The agents' MCP server (#1138): skill/agents/claude-workbench/scripts/mcp_server.py, run as
+    an MCP client runs it, on stdio, against this test's chat server; no network."""
+    SCRIPT = ROOT / "skill/agents/claude-workbench/scripts/mcp_server.py"
+
+    def setUp(self):
+        super().setUp()
+        os.environ["WB_CHAT_TOKEN"] = str(Path(self.tmp.name) / "chat-token")
+        os.environ["WB_CHAT_CONFIG"] = str(Path(self.tmp.name) / "chat.json")  # not the user's
+        from workbench import chat
+        self.chat = chat
+        fqdn = mock.patch("socket.getfqdn", lambda name="": name or socket.gethostname())  # WebChat's why
+        fqdn.start()
+        self.addCleanup(fqdn.stop)
+        servers, _ = chat.make_servers(0, ["127.0.0.1"])
+        self.srv = servers[0]
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+        self.srv.RequestHandlerClass.hub.close()
+        super().tearDown()
+
+    def _agent(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            return run_wb("chat", "token", "add", "my-agent").strip()
+
+    def _listening(self):
+        from workbench import models
+        me = os.getpid()
+        store.write_json(self.chat.chat_dir() / "listener.json",
+                         {"session": "s1", "cwd": "/home/u/project", "pid": me, "start": models._started(me)})
+
+    def _server(self, url=None, token="wba-x"):
+        """The MCP server as a client starts it; rpc(method, params) -> the reply's message."""
+        env = {"PATH": os.environ.get("PATH", ""), "CLAUDE_WB_URL": url or f"http://localhost:{self.port}",
+               "CLAUDE_WB_TOKEN": token}
+        proc = subprocess.Popen([sys.executable, "-I", str(self.SCRIPT)], env=env, text=True,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.addCleanup(lambda: (proc.kill(), proc.wait(), proc.stdout.close(), proc.stderr.close()))
+        waiting, lines, ids, lock = {}, queue.Queue(), iter(range(1, 10 ** 6)), threading.Lock()
+
+        def read():  # each reply to the call that waits on its id (calls overlap: a held get_reply)
+            for line in proc.stdout:
+                got = json.loads(line)
+                with lock:
+                    to = waiting.pop(got.get("id"), lines)
+                to.put(got)
+        threading.Thread(target=read, daemon=True).start()
+
+        def rpc(method, params=None, notify=False):
+            msg = {"jsonrpc": "2.0", "method": method, **({"params": params} if params is not None else {})}
+            if not notify:
+                with lock:
+                    msg["id"] = mid = next(ids)
+                    waiting[mid] = mine = queue.Queue()
+            with lock:
+                proc.stdin.write(json.dumps(msg) + "\n")
+                proc.stdin.flush()
+            return None if notify else mine.get(timeout=30)
+
+        def tool(name, **args):
+            return rpc("tools/call", {"name": name, "arguments": args})["result"]
+        rpc.tool, rpc.lines = tool, lines
+        return rpc
+
+    def test_the_mcp_server_initializes_and_lists_ask_claude_get_reply_and_list_requests(self):
+        rpc = self._server()
+        init = rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                  "clientInfo": {"name": "test", "version": "0"}})["result"]
+        self.assertEqual((init["protocolVersion"], init["serverInfo"]["name"]), ("2025-06-18", "claude-workbench"))
+        self.assertIn("tools", init["capabilities"])
+        rpc("notifications/initialized", notify=True)                    # no reply to a notification
+        tools = {t["name"]: t for t in rpc("tools/list")["result"]["tools"]}
+        self.assertEqual(set(tools), {"ask_claude", "get_reply", "list_requests"})
+        self.assertEqual(tools["ask_claude"]["inputSchema"]["required"], ["text"])
+        self.assertEqual(tools["get_reply"]["inputSchema"]["required"], ["id"])
+        self.assertEqual(rpc("ping")["result"], {})
+        self.assertTrue(rpc.lines.empty())                               # the notification had none
+        self.assertEqual(rpc("tools/call", {"name": "nope"})["error"]["code"], -32602)
+        self.assertEqual(rpc("resources/list")["error"]["code"], -32601)
+
+    def test_the_mcp_server_asks_claude_and_gets_the_reply_end_to_end_once_per_key(self):
+        # #1138: ask_claude returns the request's id at once; get_reply says "still working", then
+        # "waiting on the user" while a dialog of Claude Code's is open, then the reply once done
+        tok = self._agent()
+        rpc = self._server(token=tok)
+        rpc("initialize", {"protocolVersion": "2025-06-18"})
+        r = rpc.tool("ask_claude", text="fix it")
+        self.assertTrue(r["isError"])                                    # nobody listening: nothing sent
+        self.assertIn("Claude isn't listening", r["content"][0]["text"])
+        self.assertEqual(self.chat.thread(), [])
+        self._listening()
+        keys, handler = [], self.srv.RequestHandlerClass
+        post = handler.do_POST
+
+        def seen(h):  # the header part A's server reads; the cid already lands it once
+            keys.append(h.headers.get("Idempotency-Key"))
+            return post(h)
+        mock.patch.object(handler, "do_POST", seen).start()
+        self.addCleanup(mock.patch.stopall)
+        began = time.monotonic()
+        r = rpc.tool("ask_claude", text="In ~/src/app: add a --json flag.", key="retry-1")
+        self.assertLess(time.monotonic() - began, 10)
+        self.assertFalse(r["isError"], r)
+        rid = r["structuredContent"]["id"]
+        self.assertIn(f"request {rid}: sent", r["content"][0]["text"])
+        again = rpc.tool("ask_claude", text="In ~/src/app: add a --json flag.", key="retry-1")
+        self.assertEqual(again["structuredContent"]["id"], rid)          # a retry under its key lands once
+        self.assertEqual([m["id"] for m in self.chat.thread()], [rid])
+        self.assertEqual(self.chat.thread()[0]["cid"], "retry-1")
+        self.assertEqual(keys, ["retry-1", "retry-1"])
+        self.assertIn("key is 1 to 64", rpc.tool("ask_claude", text="x", key="a b")["content"][0]["text"])
+        r = rpc.tool("get_reply", id=rid, wait=0)
+        self.assertEqual(r["structuredContent"]["status"], "still working")
+        self.chat.ack(rid, "s1")
+        self.chat.reply("On it: a branch json-flag.", [rid])
+        store.write_json(self.chat.chat_dir() / "page.json", {"at": store.now()})
+        ask = self.chat.notice("AskUserQuestion", "Push the branch?", kind="question")  # waits in the terminal
+        r = rpc.tool("get_reply", id=rid, wait=0)
+        self.assertEqual(r["structuredContent"]["status"], "waiting on the user", r)
+        self.assertIn("On it: a branch json-flag.", r["content"][0]["text"])
+        self.chat.notice_done(ask["id"])                                 # settled there
+        got = {}
+        t = threading.Thread(target=lambda: got.update(r=rpc.tool("get_reply", id=rid, wait=20)))
+        t.start()
+        time.sleep(0.5)
+        self.assertTrue(t.is_alive())                                    # held for the turn's end
+        self.assertEqual(rpc("ping")["result"], {})                      # pings answered meanwhile
+        self.chat.reply("Done: branch json-flag, tests pass.", [rid])
+        self.chat.turn_ended([rid], "s1")
+        t.join(15)
+        r = got["r"]
+        self.assertEqual(r["structuredContent"]["status"], "done", r)
+        self.assertEqual([x["text"] for x in r["structuredContent"]["replies"]],
+                         ["On it: a branch json-flag.", "Done: branch json-flag, tests pass."])
+        listed = rpc.tool("list_requests")["structuredContent"]
+        self.assertTrue(listed["listening"])
+        self.assertEqual([(q["id"], q["status"]) for q in listed["requests"]], [(rid, "2 replies")])
+        # a later request Claude answers on its own: the first is still done, the second has its reply
+        r2 = rpc.tool("ask_claude", text="and a changelog line")["structuredContent"]["id"]
+        self.chat.ack(r2, "s1")
+        self.chat.reply("Adding it.", [r2])
+        self.assertEqual(rpc.tool("get_reply", id=rid, wait=0)["structuredContent"]["status"], "done")
+        r = rpc.tool("get_reply", id=r2, wait=0)["structuredContent"]
+        self.assertEqual((r["status"], [x["text"] for x in r["replies"]]), ("still working", ["Adding it."]))
+        self.assertIn("no request nope", rpc.tool("get_reply", id="nope", wait=0)["content"][0]["text"])
+        # a request unread past 6 hours is expired, listener or not: the chat retires it either
+        # way, and with one up it said "still working" for good, held each time (the #1138 review)
+        old = {"id": f"{int(time.time() * 1000) - 1}-abcdef", "ts": store.now() - 7 * 3600,
+               "from": "my-agent", "role": "agent", "text": "an old one"}
+        store.append_jsonl(self.chat.chat_dir() / "messages.jsonl", old)
+        began = time.monotonic()
+        self.assertEqual(rpc.tool("get_reply", id=old["id"], wait=5)["structuredContent"]["status"], "expired")
+        self.assertLess(time.monotonic() - began, 4)                     # no hold for a turn that won't come
+        (self.chat.chat_dir() / "listener.json").unlink()
+        self.assertEqual(rpc.tool("get_reply", id=old["id"], wait=5)["structuredContent"]["status"], "expired")
+
+    def test_the_mcp_server_calls_only_api_v1_lands_a_key_once_and_says_expired_on_the_chats_410(self):
+        # #1138: the MCP server spoke the unversioned /api/ and read nothing of the key's answers:
+        # a replay looked like a new send, the same key on another request was a bare "not sent",
+        # and the chat's 410 for a request unread past 6 hours was a refusal, never "expired"
+        tok = self._agent()
+        self._listening()
+        rpc = self._server(token=tok)
+        rpc("initialize", {"protocolVersion": "2025-06-18"})
+        handler, asked = self.srv.RequestHandlerClass, []
+        for name in ("do_GET", "do_POST", "do_PUT"):
+            real = getattr(handler, name)
+
+            def seen(h, real=real):  # the path as sent, before the handler reads /api/v1/ as /api/
+                asked.append(h.path.split("?")[0])
+                return real(h)
+            mock.patch.object(handler, name, seen).start()
+        self.addCleanup(mock.patch.stopall)
+        first = rpc.tool("ask_claude", text="In ~/src/app: add a --json flag.", key="k-1")
+        self.assertFalse(first["isError"], first)
+        self.assertFalse(first["structuredContent"]["replayed"])
+        again = rpc.tool("ask_claude", text="In ~/src/app: add a --json flag.", key="k-1")
+        rid = first["structuredContent"]["id"]
+        self.assertEqual((again["structuredContent"]["id"], again["structuredContent"]["replayed"]), (rid, True))
+        self.assertIn("not sent again", again["content"][0]["text"])
+        other = rpc.tool("ask_claude", text="something else", key="k-1")
+        self.assertTrue(other["isError"])
+        self.assertIn("key k-1 went with another request", other["content"][0]["text"])
+        self.assertEqual([m["id"] for m in self.chat.thread()], [rid])     # one send in all
+        self.assertEqual(rpc.tool("get_reply", id=rid, wait=0)["structuredContent"]["status"], "still working")
+        self.assertEqual(rpc.tool("list_requests")["structuredContent"]["requests"][0]["id"], rid)
+        now = store.now()
+        began = time.monotonic()
+        with mock.patch.object(store, "now", lambda: now + self.chat.MESSAGE_EXPIRE + 60):
+            r = rpc.tool("get_reply", id=rid, wait=5)
+        self.assertFalse(r["isError"], r)
+        self.assertEqual(r["structuredContent"]["status"], "expired")      # the chat's 410, said as such
+        self.assertLess(time.monotonic() - began, 4)
+        self.assertGreaterEqual(set(asked), {"/api/v1/health", "/api/v1/send", "/api/v1/wait", "/api/v1/state"})
+        self.assertEqual([p for p in asked if not p.startswith("/api/v1/")], [])
+        # a chat from before 2.1: 2.0's allow-list answers /api/v1/ 403 (it was "the token was
+        # refused", the merge of 2.0), an older chat 404
+        for may in (self.chat.agent_may, lambda m, p: True):
+            with mock.patch.object(handler, "_versioned", lambda h: None), \
+                    mock.patch.object(self.chat, "agent_may", may):
+                r = rpc.tool("ask_claude", text="hello")
+            self.assertTrue(r["isError"])
+            self.assertIn("no /api/v1/", r["content"][0]["text"])
+        self.assertEqual(len(self.chat.thread()), 1)                       # nothing sent
+
+    def test_get_reply_stays_done_for_a_request_answered_to_the_user_alone_without_polling_the_chat(self):
+        # #1138 review: a turn that took the user's message and the agent's replies to the user
+        # alone, so the request has no reply; once a later request was answered and its turn
+        # ended, get_reply on the first said "still working" for good, and its wait for the later
+        # reply's turn answered at once, over and over: 3,105 GET /api/wait in 2 s
+        tok = self._agent()
+        self._listening()
+        rpc = self._server(token=tok)
+        rpc("initialize", {"protocolVersion": "2025-06-18"})
+        handler = self.srv.RequestHandlerClass
+        waits, held = [], handler._wait
+
+        def counted(h):
+            waits.append(h.path)
+            return held(h)
+        mock.patch.object(handler, "_wait", counted).start()
+        self.addCleanup(mock.patch.stopall)
+        earlier = rpc.tool("ask_claude", text="a request from before")["structuredContent"]["id"]
+        time.sleep(0.01)
+        first = rpc.tool("ask_claude", text="add a --json flag")["structuredContent"]["id"]
+        user = self.chat.send("and the docs please", "user")["id"]
+        for i in (user, first):
+            self.chat.ack(i, "s1")
+        self.assertEqual(self.chat.reply("Both in hand.")["re"], [user])  # the user's alone
+        self.chat.turn_ended([user, first], "s1")
+        self.assertEqual(rpc.tool("get_reply", id=first, wait=0)["structuredContent"]["status"], "done")
+        # an earlier request's reply, its turn ended, says nothing of `first`... nor of a request
+        # sent after it, not taken yet: still working, held for a new reply, not polled
+        time.sleep(0.01)
+        second = rpc.tool("ask_claude", text="and a changelog line")["structuredContent"]["id"]
+        self.chat.reply("About the earlier one: done.", [earlier])
+        self.chat.turn_ended([earlier], "s1")
+        del waits[:]
+        began = time.monotonic()
+        r = rpc.tool("get_reply", id=second, wait=2)["structuredContent"]
+        self.assertEqual((r["status"], r["replies"]), ("still working", []))
+        self.assertGreater(time.monotonic() - began, 1.5)                # held, not answered at once
+        self.assertLessEqual(len(waits), 3, waits)
+        # the later request answered and its turn ended: `first` stays done, in a few waits
+        self.chat.ack(second, "s1")
+        self.chat.reply("Added.", [second])
+        self.chat.turn_ended([second], "s1")
+        del waits[:]
+        for wait in (0, 3):
+            r = rpc.tool("get_reply", id=first, wait=wait)["structuredContent"]
+            self.assertEqual((r["status"], r["replies"]), ("done", []))
+        self.assertLessEqual(len(waits), 4, waits)
+        self.assertEqual(rpc.tool("get_reply", id=second, wait=3)["structuredContent"]["status"], "done")
+
+    @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
+    def test_real_opencode_calls_the_mcp_servers_tools_end_to_end(self):
+        # #1138's acceptance: a real MCP client's tool calls, from the config line the docs give
+        # (`codemode: false`: by default OpenCode 2.3 offers MCP tools only behind `execute`),
+        # against this test's chat and a Claude played here; the model is capture_llm.py, which
+        # makes the calls. No network: every server is on 127.0.0.1
+        tok = self._agent()
+        self._listening()
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        tmp = Path(self.tmp.name)
+        out = tmp / "requests-1138.jsonl"
+        calls = [{"name": "claude-workbench_ask_claude", "arguments": {"text": "CANARY-MCP: add a --json flag"}},
+                 {"name": "claude-workbench_list_requests", "arguments": {}}]
+        llm = subprocess.Popen([sys.executable, str(ROOT / "tests" / "capture_llm.py"), str(port), str(out),
+                                json.dumps(calls)])
+        self.addCleanup(lambda: (llm.kill(), llm.wait()))
+        xdg = tmp / "xdg-1138"
+        (xdg / "opencode").mkdir(parents=True)
+        (xdg / "opencode" / "opencode.json").write_text(json.dumps({
+            "provider": {"cap": {"npm": "@ai-sdk/openai-compatible",
+                                 "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "x"},
+                                 "models": {"cap": {"name": "capture", "tool_call": True,
+                                                    "limit": {"context": 32768, "output": 1024}}}}},
+            "mcp": {"servers": {"claude-workbench": {
+                "type": "local", "command": [sys.executable, str(self.SCRIPT)], "codemode": False,
+                "environment": {"CLAUDE_WB_URL": f"http://localhost:{self.port}", "CLAUDE_WB_TOKEN": tok}}}}}))
+        proj = tmp / "proj-1138"
+        proj.mkdir()
+        # OpenCode in homes of the test's own: never the user's config, database or CLAUDE.md
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp / "home-1138"), "PWD": str(proj),
+               "XDG_CONFIG_HOME": str(xdg), "XDG_DATA_HOME": str(tmp / "share-1138"),
+               "XDG_STATE_HOME": str(tmp / "state-1138"), "XDG_CACHE_HOME": str(tmp / "cache-1138"),
+               "TMPDIR": tempfile.gettempdir(), "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+               "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT": "1", "OPENCODE_DISABLE_MODELS_FETCH": "1",
+               "OPENCODE_DISABLE_AUTOUPDATE": "1"}
+        stop = threading.Event()
+
+        def claude():
+            while not stop.is_set():
+                for m in self.chat.pending():
+                    self.chat.ack(m["id"], "s1")
+                    self.chat.reply("On it.", [m["id"]])
+                time.sleep(0.1)
+        t = threading.Thread(target=claude)
+        t.start()
+        try:
+            r = subprocess.run(["opencode", "run", "--standalone", "-m", "cap/cap", "--auto", "--format", "json",
+                                "go"], cwd=proj, env=env, capture_output=True, text=True, timeout=180)
+        finally:
+            stop.set()
+            t.join()
+        sent = [m for m in self.chat.thread() if m.get("role") == "agent"]
+        self.assertEqual([(m["from"], m["text"]) for m in sent], [("my-agent", "CANARY-MCP: add a --json flag")],
+                         r.stdout[-2000:] + r.stderr[-2000:])
+        seen = json.dumps([json.loads(line).get("messages") for line in out.read_text().splitlines()])
+        self.assertIn(f"request {sent[0]['id']}: sent (Claude is listening)", seen)   # ask_claude's result
+        self.assertIn(f"{sent[0]['id']}  ", seen)                                     # list_requests' row
+
+    def test_the_mcp_server_refuses_a_chat_url_that_isnt_this_machines_and_sends_nothing(self):
+        # #1138: local only by design; the token never goes to another machine's address
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("wb_mcp_1138", self.SCRIPT)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        for url in ("http://localhost:1337", "http://127.0.0.1:1337", "http://127.8.9.10", "http://[::1]:1337",
+                    "https://LOCALHOST.", "http://[::ffff:127.0.0.1]:1"):
+            self.assertTrue(m.this_machine(url), url)
+        for url in ("http://192.0.2.1:1337", "http://localhost.example.com", "http://[::ffff:192.0.2.1]",
+                    "http://100.64.0.1:1337", "http://0.0.0.0:1337", "http://[::]:1337", "http://224.0.0.1",
+                    "ftp://localhost", "localhost:1337", "http://localhost:99999", "http://my-host.tailnet.ts.net"):
+            self.assertFalse(m.this_machine(url), url)
+        # a chat bound only to this machine's tailnet or LAN IP serves no localhost, and an agent
+        # here reaches it there (the chat's #1274): that IP is this machine's, so it is taken
+        with mock.patch.object(m, "_own", lambda ip: str(ip) == "100.64.0.1"):
+            self.assertTrue(m.this_machine("http://100.64.0.1:1337"))
+            self.assertFalse(m.this_machine("http://100.64.0.2:1337"))
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
+            try:
+                sk.connect(("192.0.2.1", 9))                             # a route's source: sends nothing
+                mine = sk.getsockname()[0]
+            except OSError:
+                mine = ""
+        if mine and not mine.startswith("127."):
+            self.assertTrue(m.this_machine(f"http://{mine}:1337"), mine)   # the real check, a real own IP
+        rpc = self._server(url="http://192.0.2.1:1337")                  # TEST-NET-1: never reached
+        for name, args in (("ask_claude", {"text": "x"}), ("get_reply", {"id": "m1"}), ("list_requests", {})):
+            r = rpc.tool(name, **args)
+            self.assertTrue(r["isError"])
+            self.assertIn("must be this machine's chat", r["content"][0]["text"])
+        r = self._server(token="wba-nope").tool("list_requests")         # a token the chat refuses
+        self.assertTrue(r["isError"])
+        self.assertIn("the token was refused", r["content"][0]["text"])
+
+    def test_the_agents_client_never_follows_a_redirect_with_the_token(self):
+        # #1138: urllib sends Authorization on to wherever a 3xx points, past the loopback check
+        hits = []
+
+        class Away(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                hits.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+
+        away = HTTPServer(("127.0.0.1", 0), Away)
+        threading.Thread(target=away.serve_forever, daemon=True).start()
+        self.addCleanup(away.server_close)
+        self.addCleanup(away.shutdown)
+
+        class Redirect(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{away.server_address[1]}/api/state")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        srv = HTTPServer(("127.0.0.1", 0), Redirect)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        r = self._server(url=f"http://127.0.0.1:{srv.server_address[1]}", token="wba-secret").tool("list_requests")
+        self.assertTrue(r["isError"])
+        self.assertIn("HTTP 302", r["content"][0]["text"])
+        self.assertEqual(hits, [])
 
 
 class ChatUploads(Base):
@@ -28619,7 +31557,7 @@ class ChatUploads(Base):
         self.assertEqual(self.chat.upload_meta(theirs)["by"], "my-agent")
         self.assertNotIn("by", self.chat.upload_meta(mine))
         code, r = self.put(mine, b"other bytes")                          # the user's id: not answered with it
-        self.assertEqual((code, r), (409, {"error": "that upload id is another sender's"}))
+        self.assertEqual((code, r), (409, {"error": "that upload id is another sender's", "code": "conflict"}))
 
         def get(path, tok):
             c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -28630,8 +31568,8 @@ class ChatUploads(Base):
             return out
         self.assertEqual(get(f"/api/upload/{theirs}", agent)[0], 200)
         self.assertEqual(get(f"/api/file/{theirs}", agent), (200, b"notes"))
-        self.assertEqual(get(f"/api/upload/{mine}", agent), (404, b'{"error": "no such upload"}'))
-        self.assertEqual(get(f"/api/file/{mine}", agent), (404, b'{"error": "no such file"}'))
+        self.assertEqual(get(f"/api/upload/{mine}", agent), (404, b'{"error": "no such upload", "code": "not_found"}'))
+        self.assertEqual(get(f"/api/file/{mine}", agent), (404, b'{"error": "no such file", "code": "not_found"}'))
         self.assertEqual(get(f"/api/file/{mine}", user)[0], 200)            # the user's: everything
         self.assertEqual(get(f"/api/file/{theirs}", user)[0], 200)
         code, r = self.send({"text": "see this", "files": [mine]})       # another's upload: none to it
@@ -28666,7 +31604,8 @@ class ChatUploads(Base):
         self.put(b, b"same photo", name="copy.jpg")                          # picked twice
         self.put(c, b"%PDF-1.7", name="notes.pdf", ctype="application/pdf")
         self.assertEqual(self.send({"text": "look", "cid": "m1", "files": [a, "dddddddd-4"]}),
-                         (400, {"error": "no upload dddddddd-4: it must be uploaded before the message"}))
+                         (400, {"error": "no upload dddddddd-4: it must be uploaded before the message",
+                                "code": "bad_request"}))
         self.assertEqual(self.chat.thread(), [])                             # nothing logged
         code, r = self.send({"text": "", "cid": "m2", "files": [a, b, c]})   # files alone are a message
         self.assertEqual(code, 200)
@@ -28789,6 +31728,7 @@ class ChatUploads(Base):
             with mock.patch.object(self.chat, "save_upload", side_effect=OSError(err, os.strerror(err))):
                 got = self.put("ffffffff-1", b"x")
             self.assertEqual(got, (code, {"error": f"not saved: {os.strerror(err)}",
+                                          "code": "disk_full" if code == 507 else "server_error",
                                           **({"final": True} if final else {})}))
 
     def test_an_expired_message_leaves_the_open_index_once_and_gc_then_drops_its_uploads(self):
@@ -28809,6 +31749,148 @@ class ChatUploads(Base):
                 if r["id"] == sent["id"]]
         self.assertEqual([(r["by"], r["how"]) for r in rows], [("wb", "expired")])  # once
         self.assertFalse((self.uploads() / "eeeeeeee-1").exists())
+
+
+    # ---- dictation (#1203): the page's mic sends a clip, the listener's words come back ----
+    def listener(self, entry: dict | None) -> None:
+        path = Path(self.tmp.name) / "audio.json"
+        path.write_text(json.dumps({"ear": {"kind": "listen", **entry}} if entry else {}))
+        os.environ["WB_AUDIO"] = str(path)
+
+    def ear(self, said: str, code: int = 0) -> str:
+        """A listener command: logs each clip it gets (its path and first bytes), prints ``said``."""
+        fake = Path(self.tmp.name) / "ear.py"
+        fake.write_text("import json, sys\nclip = sys.argv[1]\n"
+                        "open(sys.argv[0] + '.calls', 'a').write(json.dumps([clip, open(clip, 'rb').read(12).hex()]) + '\\n')\n"
+                        f"print({said!r})\nsys.exit({code})\n")
+        return f"{sys.executable} {fake} {{in}}"
+
+    def calls(self) -> list:
+        log = Path(self.tmp.name) / "ear.py.calls"
+        return [json.loads(l) for l in log.read_text().splitlines()] if log.exists() else []
+
+    def transcribe(self, uid: str, tok: str | None = None):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        c.request("POST", f"/api/transcribe/{uid}", "{}", {"Host": f"localhost:{self.port}",
+                  "Authorization": f"Bearer {tok or self.tok}", "Content-Type": "application/json"})
+        r = c.getresponse()
+        out = r.status, json.loads(r.read())
+        c.close()
+        return out
+
+    def test_a_voice_clip_comes_back_as_its_words_once_and_a_retry_never_runs_the_listener_again(self):
+        # #1203: a voice memo attached in the chat reached Claude as audio it can't hear. The page's
+        # mic uploads the clip as any attachment and gets its words for the box; Claude gets text
+        self.listener(None)
+        self.assertFalse(self.chat.snapshot()["dictate"])                    # no listener: no mic
+        uid = "dddddddd-1203-4000-8000-000000000001"
+        self.assertEqual(self.put(uid, b"\x1aE\xdf\xa3 a webm clip", name='my "voice" -x.webm',
+                                  ctype="audio/webm;codecs=opus")[0], 200)
+        self.assertEqual(self.transcribe(uid)[0], 404)
+        self.listener({"gpu": False, "command": self.ear("  Fix the parser, then run the tests.  ")})
+        self.assertTrue(self.chat.snapshot()["dictate"])
+        self.assertNotIn("dictate", self.chat.agent_snapshot("x"))
+        self.assertEqual(self.transcribe(uid), (200, {"text": "Fix the parser, then run the tests."}))
+        self.assertEqual(self.transcribe(uid), (200, {"text": "Fix the parser, then run the tests."}))
+        calls = self.calls()
+        self.assertEqual(len(calls), 1)                                      # kept: never heard twice
+        self.assertEqual(Path(calls[0][0]).name, "clip.webm")                # a plain name, not the user's
+        self.assertEqual(calls[0][1], (b"\x1aE\xdf\xa3 a webm clip"[:12]).hex())  # not audio to ffmpeg: as sent
+        self.assertEqual(sorted(p.name for p in (self.uploads() / uid).iterdir()),
+                         [".meta.json", ".transcript.txt", 'my "voice" -x.webm'])
+        self.assertEqual(self.chat.thread(), [])                            # nothing sent: the words go to the box
+        # a file that isn't audio, an upload that isn't there, and an agent's token are refused
+        self.put("tttttttt-1", b"notes", name="notes.txt", ctype="text/plain")
+        self.assertEqual(self.transcribe("tttttttt-1"), (415, {"error": "not a voice clip (text/plain)", "code": "not_audio"}))
+        self.assertEqual(self.transcribe("nnnnnnnn-1"), (404, {"error": "no such upload", "code": "not_found"}))
+        with contextlib.redirect_stderr(io.StringIO()):
+            agent = run_wb("chat", "token", "add", "my-agent").strip()
+        self.assertEqual(self.transcribe(uid, agent),
+                         (403, {"error": "agent tokens can't transcribe the user's voice clips",
+                                 "code": "agent_forbidden"}))
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_a_listener_that_fails_is_a_502_with_its_words_and_the_next_try_runs_it_again(self):
+        self.listener({"gpu": False, "command": self.ear("", code=3)})
+        self.put("ffffffff-1203", b"RIFF a clip", name="memo.m4a", ctype="audio/mp4")
+        with redirect_stderr(io.StringIO()) as log:
+            code, got = self.transcribe("ffffffff-1203")
+            self.assertEqual((code, got["error"][:30]), (502, "the listener failed: listener "))
+            self.assertIn("exited 3", got["error"])
+            self.assertFalse((self.uploads() / "ffffffff-1203" / ".transcript.txt").exists())
+            self.assertEqual(self.transcribe("ffffffff-1203")[0], 502)
+        self.assertEqual(len(self.calls()), 2)
+        self.assertIn("wb chat: dictation: the listener failed", log.getvalue())   # serve.log
+
+    def test_a_gpu_listener_gives_way_to_a_task_on_the_gpu_at_once_and_runs_once_it_is_free(self):
+        # #1203: dictation must never queue behind a task (the page would hang for its whole
+        # round): a GPU listener is 409 at once while anything holds the GPU, and never runs
+        self.listener({"command": self.ear("hello")})                       # no "gpu": false: on the GPU
+        self.put("gggggggg-1203", b"OggS a clip", name="voice.ogg", ctype="audio/ogg")
+        held = subprocess.Popen([sys.executable, "-c", (
+            "import sys\nsys.path.insert(0, sys.argv[1])\nfrom workbench import models\n"
+            "with models.GpuLease(None, 't-busy', lambda *_: None):\n"
+            "    print('held', flush=True)\n    sys.stdin.read()\n"), str(ROOT)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: held.poll() is None and held.kill())
+        self.assertEqual(held.stdout.readline().strip(), "held")
+        began = time.monotonic()
+        code, got = self.transcribe("gggggggg-1203")
+        self.assertLess(time.monotonic() - began, 10)
+        self.assertEqual((code, got["error"], got["busy"]),
+                         (409, "the GPU is busy with a task", True))
+        self.assertIn("t-busy", got["why"])
+        self.assertEqual(self.calls(), [])
+        held.stdin.close()
+        held.wait(30)
+        self.assertEqual(self.transcribe("gggggggg-1203"), (200, {"text": "hello"}))
+        from workbench import models
+        self.assertEqual(models.holders(), {})                              # the turn was let go
+
+    def test_a_url_listener_nothing_answers_at_is_a_503_to_try_again_not_the_listeners_502(self):
+        # #1203: the page dropped a clip on any answer but a 408/425/429, so a url listener's server
+        # restarting lost what the user had just said: down for now is 503 `retry`, kept and asked again
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]                                     # nothing listens there now
+        self.listener({"gpu": False, "url": f"http://127.0.0.1:{port}/v1/audio/transcriptions"})
+        self.put("kkkkkkkk-1203", b"\x1aE\xdf\xa3 webm", name="voice.webm", ctype="audio/webm")
+        with redirect_stderr(io.StringIO()) as log:
+            code, got = self.transcribe("kkkkkkkk-1203")
+        self.assertEqual((code, got.get("retry")), (503, True))
+        self.assertIn("the listener isn't answering: listener ear: nothing answers at", got["error"])
+        self.assertIn("wb chat: dictation: the listener is down", log.getvalue())
+        # it answered the probe, then dropped the connection before the clip's reply: down too
+        with mock.patch.object(audio, "ready", return_value=""), \
+                mock.patch.object(audio, "_ffmpeg", return_value=None), redirect_stderr(io.StringIO()):
+            code, got = self.transcribe("kkkkkkkk-1203")
+        self.assertEqual((code, got.get("retry")), (503, True))
+
+    def test_a_server_listener_gets_the_clips_own_type_when_there_is_no_ffmpeg_to_convert_it(self):
+        # #1203: _multipart labelled every file audio/wav, so a phone's webm reached a
+        # /v1/audio/transcriptions server mislabelled when nothing here could convert it
+        from http.server import BaseHTTPRequestHandler
+        got = []
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(404); self.end_headers()
+
+            def do_POST(self):
+                got.append(self.rfile.read(int(self.headers["Content-Length"])))
+                self.send_response(200); self.end_headers(); self.wfile.write(b'{"text": "from the server"}')
+
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        self.listener({"gpu": False, "url": f"http://127.0.0.1:{srv.server_port}/v1/audio/transcriptions"})
+        self.put("hhhhhhhh-1203", b"\x1aE\xdf\xa3 webm", name="voice.webm", ctype="audio/webm")
+        with mock.patch.object(audio, "_ffmpeg", return_value=None):
+            self.assertEqual(self.transcribe("hhhhhhhh-1203"), (200, {"text": "from the server"}))
+        self.assertIn(b'filename="clip.webm"\r\nContent-Type: audio/webm\r\n\r\n\x1aE\xdf\xa3 webm', got[0])
 
 
 class Top(Base):
@@ -30695,10 +33777,50 @@ def _tls_upstream(tmp: Path, handler, server=None):
     return srv, cert
 
 
+def gemini_events(served: str) -> list[dict]:
+    """A Gemini stream as generativelanguage sends one (#1192): `usageMetadata` a running total
+    in every chunk, `modelVersion` the served model, the last candidate's `finishReason`."""
+    return [{"candidates": [{"content": {"role": "model", "parts": [{"text": "o"}]}, "index": 0}],
+             "usageMetadata": {"promptTokenCount": 9, "candidatesTokenCount": 1, "totalTokenCount": 10},
+             "modelVersion": served, "responseId": "r1"},
+            {"candidates": [{"content": {"role": "model", "parts": [{"text": "k"}]}, "index": 0,
+                             "finishReason": "STOP"}],
+             "usageMetadata": {"promptTokenCount": 9, "cachedContentTokenCount": 4,
+                               "candidatesTokenCount": 3, "thoughtsTokenCount": 5,
+                               "totalTokenCount": 17},
+             "modelVersion": served, "responseId": "r1"}]
+
+
+CONVERSE_EVENTS = [("messageStart", {"role": "assistant"}),
+                   ("contentBlockDelta", {"contentBlockIndex": 0, "delta": {"text": "ok"}}),
+                   ("contentBlockStop", {"contentBlockIndex": 0}),
+                   ("messageStop", {"stopReason": "end_turn"}),
+                   ("metadata", {"usage": {"inputTokens": 7, "outputTokens": 3, "totalTokens": 12,
+                                           "cacheReadInputTokens": 2}, "metrics": {"latencyMs": 5}})]
+
+
+def es_frame(event_type: str, payload: dict) -> bytes:
+    """One AWS event-stream frame, CRCs and all, as Bedrock's converse-stream sends it."""
+    import zlib
+
+    def header(name, value):
+        n, v = name.encode(), value.encode()
+        return bytes([len(n)]) + n + b"\x07" + len(v).to_bytes(2, "big") + v
+    heads = (header(":event-type", event_type) + header(":content-type", "application/json")
+             + header(":message-type", "event"))
+    body = json.dumps(payload).encode()
+    total = 12 + len(heads) + len(body) + 4
+    prelude = total.to_bytes(4, "big") + len(heads).to_bytes(4, "big")
+    prelude += zlib.crc32(prelude).to_bytes(4, "big")
+    msg = prelude + heads + body
+    return msg + zlib.crc32(msg).to_bytes(4, "big")
+
+
 class _Upstream(http.server.BaseHTTPRequestHandler):
     """A provider for the keyhole's tests: records each request (method, path, headers, body) on
     its server's `seen` and answers as its server's `mode` says: "ok" (an OpenAI SSE answer,
-    or Anthropic's for /messages), "status" (`status`, a body echoing part of the key the way
+    or Anthropic's for /messages, Gemini's for :streamGenerateContent, a Bedrock event stream for
+    /converse-stream), "status" (`status`, a body echoing part of the key the way
     OpenAI's 401 does, `retry_after`), "chunks" (`chunks` SSE pieces `gap` s apart; the
     Responses API's events for /responses), "raw" (the head `head` s late, `status`, `ctype`,
     then `pieces` sent as they are, one chunk each, the end `tail` s later), with `served` (the response's model) and `by` (OpenRouter's
@@ -30743,10 +33865,30 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path.split("?")[0].endswith("/converse-stream"):  # #1192: AWS event-stream frames
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.amazon.eventstream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            for kind, ev in CONVERSE_EVENTS:
+                frame = es_frame(kind, ev)
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(frame), frame))
+                self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+            return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
+        if ":streamGenerateContent" in self.path:  # #1192: running usage, and no [DONE]
+            for i, ev in enumerate(gemini_events(s.served)):
+                if i:
+                    time.sleep(s.gap)
+                line = f"data: {json.dumps(ev)}\r\n\r\n".encode()
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(line), line))
+                self.wfile.flush()
+            self.wfile.write(b"0\r\n\r\n")
+            return
         if "/messages" in self.path:
             events = [{"type": "message_start", "message": {
                 "id": "msg_up", "type": "message", "role": "assistant", "model": s.served,
@@ -30760,13 +33902,27 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
                  "usage": {"output_tokens": 2}},
                 {"type": "message_stop"}]
         elif self.path.endswith("/responses"):
-            events = [{"type": "response.created", "sequence_number": 0, "response": {
+            # the whole item lifecycle: OpenCode 2.3.2's Responses protocols (Azure's, Bedrock
+            # Mantle's: #1192) refuse a delta without its item_id, and a stream without the item
+            item = {"id": "msg_up", "type": "message", "role": "assistant", "status": "in_progress",
+                    "content": []}
+            text = {"type": "output_text", "text": "ok", "annotations": []}
+            at = {"item_id": "msg_up", "output_index": 0, "content_index": 0}
+            done = {**item, "status": "completed", "content": [text]}
+            events = [{"type": "response.created", "response": {
                 "id": "resp_up", "object": "response", "model": s.served, "status": "in_progress",
-                "usage": None}},
-                {"type": "response.output_text.delta", "sequence_number": 1, "delta": "ok"},
-                {"type": "response.completed", "sequence_number": 2, "response": {
-                    "id": "resp_up", "object": "response", "model": s.served,
-                    "status": "completed", "usage": {"input_tokens": 9, "output_tokens": 4}}}]
+                "output": [], "usage": None}},
+                {"type": "response.output_item.added", "output_index": 0, "item": item},
+                {"type": "response.content_part.added", **at, "part": {**text, "text": ""}},
+                {"type": "response.output_text.delta", **at, "delta": "ok"},
+                {"type": "response.output_text.done", **at, "text": "ok"},
+                {"type": "response.content_part.done", **at, "part": text},
+                {"type": "response.output_item.done", "output_index": 0, "item": done},
+                {"type": "response.completed", "response": {
+                    "id": "resp_up", "object": "response", "model": s.served, "status": "completed",
+                    "output": [done], "usage": {"input_tokens": 9, "output_tokens": 4}}}]
+            for i, ev in enumerate(events):
+                ev["sequence_number"] = i
         else:
             events = [{"model": s.served, **({"provider": s.by} if s.by else {}),
                        "choices": [{"index": 0, "delta": {"content": f"part {i}"}}]}
@@ -30907,6 +34063,58 @@ class Keyhole(_KeyholeTest):
                               "\n".join(self.lines), self.all_files(self.task.dir))
         with self.assertRaises(TypeError):
             __import__("pickle").dumps(kh._key)
+
+    def zen_free(self):
+        """OpenCode Zen's free model with no key stored, as discovery makes it (#1193)."""
+        m = self.model("opencode", "big-pickle-free", "/inference/openai/v1",
+                       "@opencode/ai/providers/openai-compatible")
+        m.kind, m.key, m.free, m.remote = "api", "none", True, True
+        return m
+
+    def test_opencode_zens_keyless_free_model_sends_public_upstream_and_nothing_redacts_it(self):
+        # #1193: OpenCode 2.3.2 serves Zen's free models with the apiKey "public" when no key is
+        # stored; the keyhole sends that, loading nothing (no `auth export`), and since it is no
+        # secret, never scrubs it: replaced in every answer, a model's `public class` read
+        # `[key redacted] class` in the agent's code
+        m = self.zen_free()
+        self.assertTrue(self.models.keyless_free(m))
+        with mock.patch.object(self.kh_mod, "_opencode", side_effect=AssertionError("auth export")):
+            kh = self.kh_mod.start(self.task, m, log=self.lines.append)
+        self.addCleanup(kh.close)
+        self.assertEqual(repr(kh._key), "Key(opencode, api key)")
+        self.assertTrue(kh.base.endswith("/inference/openai/v1"))
+        code = 'public class Main { public static void main(String[] a) {} }'
+        self.up.mode, self.up.status, self.up.ctype = "raw", 200, "text/event-stream"
+        self.up.pieces = [b"data: " + json.dumps({"model": m.name, "choices": [{"index": 0, "delta": {
+            "content": code}}]}).encode() + b"\n\n",
+            b"data: " + json.dumps({"error": {"message": "a public notice"}}).encode() + b"\n\n",
+            b"data: [DONE]\n\n"]
+        status, _, body = self.post(kh, headers={"x-opencode-client": "cli", "x-opencode-session": "ses_1"})
+        self.assertEqual(status, 200, body)
+        [req] = self.up.seen
+        self.assertEqual(req["path"], "/inference/openai/v1/chat/completions")
+        self.assertEqual(req["headers"]["Authorization"], "Bearer public")
+        self.assertNotIn(kh.token, json.dumps(req))
+        # Zen's "Free-tier chat models require OpenCode": its client headers go on
+        self.assertEqual((req["headers"]["x-opencode-client"], req["headers"]["x-opencode-session"]), ("cli", "ses_1"))
+        self.assertIn(json.dumps(code)[1:-1], body)
+        self.assertIn("a public notice", body)
+        self.assertNotIn(self.kh_mod.REDACTED, body)
+        self.up.ctype, self.up.pieces = "application/json", [b'{"model": "big-pickle-free", "x": "pub', b'lic"}']
+        self.assertIn('"pub', self.post(kh, body={"model": m.name})[2])
+        self.assertEqual(self.post(kh, body={"model": m.name})[2], '{"model": "big-pickle-free", "x": "public"}')
+        self.up.mode, self.up.status, self.up.message = "status", 400, "public models only"
+        self.assertIn("public models only", self.post(kh)[2])
+        self.assertEqual(self.kh_mod.redact("public", kh._key), "public")
+        self.assertEqual(self.kh_mod.redact(f"sk {self.CANARY}", self.kh_mod.Key("x", self.CANARY)),
+                         f"sk {self.kh_mod.REDACTED}")                    # a secret still is
+        # another provider's keyless free model is no Zen one: no "public" for it
+        other = self.zen_free()
+        other.provider, other.id = "freeco", "freeco/gratis-1"
+        self.assertFalse(self.models.keyless_free(other))
+        stored = self.zen_free()
+        stored.key = "stored"                                               # Zen with a key: that key
+        self.assertFalse(self.models.keyless_free(stored))
 
     def test_anthropic_gets_x_api_key(self):
         kh = self.keyhole(self.model("anthropic", "claude-haiku-5-5", "/v1",
@@ -31078,6 +34286,36 @@ class Keyhole(_KeyholeTest):
         self.assertAlmostEqual(seen[2][2], now + 60, delta=5)          # no Retry-After: 60 s
         self.assertAlmostEqual(seen[3][2], now + 120, delta=5)
 
+    def test_a_429_saying_the_request_is_too_large_for_the_tpm_limit_is_passed_on_at_once_not_held(self):
+        # #1380 (2026-11-25): OpenAI tier 1's 429 for one request over the TPM limit was held as a
+        # rate limit, sent again and again, and the round failed ~20 minutes on as "rate-limited"
+        seen = []
+        kh = self.keyhole(on_health=lambda *a: seen.append(a), hold=30)
+        self.up.mode, self.up.status, self.up.retry_after = "status", 429, "1"
+        self.up.message = ("Request too large for gpt-up-1101 in organization org-x on tokens per min "
+                           "(TPM): Limit 30000, Requested 45210. The input or output tokens must be reduced.")
+        began = time.monotonic()
+        code, _, text = self.post(kh)
+        self.assertEqual(code, 400, text)                                # OpenCode won't retry a 400
+        self.assertLess(time.monotonic() - began, 5)                     # never the hold
+        self.assertEqual(len(self.up.seen), 1)
+        stop = self.task.status["api_stop"]
+        self.assertEqual(stop["guard"], "refused")
+        self.assertEqual(stop["text"], "deepinfra refused the request (HTTP 429): " + self.up.message)
+        self.assertIn("the round stops", json.loads(text)["error"]["message"])
+        self.assertEqual(seen, [])                                       # no cooldown for other tasks
+        # "Limit N, Requested M" alone says it only when M > N: an ordinary TPM 429 is still held
+        self.task.set_status(api_stop=None)
+        kh = self.keyhole(on_health=lambda *a: seen.append(a), hold=0)
+        for message in ("Rate limit reached on tokens per min (TPM): Limit 30000, Used 29000, Requested 2000.",
+                        "Rate limit on tokens per min: Limit 30000, Requested 20000."):
+            self.up.message = message
+            self.assertEqual(self.post(kh)[0], 429)
+        self.assertEqual([s[0] for s in seen], ["rate_limited", "rate_limited"])
+        self.up.message = "Rate limit on tokens per min: Limit 6,000, Requested 8,000."
+        self.assertEqual(self.post(kh)[0], 400)
+        self.assertEqual(self.task.status["api_stop"]["guard"], "refused")
+
     def test_an_unreachable_upstream_is_a_502_that_says_so(self):
         seen = []
         m = self.model()
@@ -31208,7 +34446,7 @@ class Keyhole(_KeyholeTest):
         said = runner.keyhole_failure(e.exception)
         self.assertEqual(said, "can't read broken's key: opencode auth export exited 1: "
                                "Error: Database is locked")              # no /connect remedy
-        self.assertNotIn(self.kh_mod.REMEDY, said)
+        self.assertNotIn("opencode auth login", said)
 
     def test_a_python_with_no_ca_certificates_reaches_the_provider_through_macos_own_bundle(self):
         # #1080 (2026-11-23): the keyhole's bare default context had no CAs under python.org's
@@ -31240,6 +34478,67 @@ class Keyhole(_KeyholeTest):
                       text)
         self.assertIn("the round stops", text)                           # a 400: OpenCode won't retry
         self.assertEqual(self.task.status["api_stop"]["guard"], "setup")
+
+    def test_a_ca_without_critical_basic_constraints_or_trusted_through_node_extra_ca_certs_verifies_as_opencode_would(self):
+        # #1385 (2026-11-25): Python 3.13's default VERIFY_X509_STRICT failed every request on a
+        # chain OpenCode, curl and node accept (a TLS-inspecting proxy's CA, basicConstraints not
+        # critical, no key identifiers), and a CA trusted for OpenCode through NODE_EXTRA_CA_CERTS
+        # alone never verified, on any Python. The strict flag is set here as 3.13's default does.
+        import ssl
+        from workbench import webpush
+        if not shutil.which("openssl"):
+            self.skipTest("needs openssl")
+        tmp = Path(self.tmp.name)
+        ca, ca_key, key, cert, csr, ext = (tmp / n for n in ("ca.pem", "ca-k.pem", "k.pem", "c.pem",
+                                                              "c.csr", "ext"))
+        ext.write_text("subjectAltName=DNS:localhost,IP:127.0.0.1\n")
+        ec = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-config", os.devnull]
+        for argv in (["req", "-x509", *ec, "-keyout", ca_key, "-out", ca, "-days", "1", "-subj", "/CN=wb-ca",
+                      "-addext", "basicConstraints=CA:TRUE", "-addext", "keyUsage=keyCertSign"],
+                     ["req", *ec, "-keyout", key, "-out", csr, "-subj", "/CN=localhost"],
+                     ["x509", "-req", "-in", csr, "-CA", ca, "-CAkey", ca_key, "-CAcreateserial",
+                      "-out", cert, "-days", "1", "-extfile", ext]):
+            subprocess.run(["openssl", *argv], check=True, capture_output=True)
+        up = _QuietUpstream(("127.0.0.1", 0), _Upstream)
+        up.daemon_threads = True
+        up.seen, up.mode, up.status, up.message = [], "ok", 200, ""
+        up.retry_after, up.chunks, up.gap = None, 1, 0
+        up.served, up.by, up.ctype, up.pieces = "served-model", None, "application/json", []
+        served = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        served.load_cert_chain(cert, key)
+        up.socket = served.wrap_socket(up.socket, server_side=True)
+        threading.Thread(target=up.serve_forever, daemon=True).start()
+        self.addCleanup(up.server_close)
+        self.addCleanup(up.shutdown)
+        (tmp / "no-cas.pem").write_text("")
+        (tmp / "no-cas").mkdir()
+        made = ssl.create_default_context
+
+        def strict(*a, **kw):
+            ctx = made(*a, **kw)
+            ctx.verify_flags |= ssl.VERIFY_X509_STRICT
+            return ctx
+
+        m = self.model()
+        base = f"https://localhost:{up.server_port}/v1/openai"
+        for env, want in (({"SSL_CERT_FILE": str(ca)}, 200),              # the CA in Python's store
+                          ({"NODE_EXTRA_CA_CERTS": str(ca)}, 200),        # trusted for OpenCode alone
+                          ({}, 400)):                                     # trusted nowhere: the CA check stays
+            os.environ.update(SSL_CERT_FILE=str(tmp / "no-cas.pem"), SSL_CERT_DIR=str(tmp / "no-cas"))
+            os.environ.pop("NODE_EXTRA_CA_CERTS", None)
+            os.environ.update(env)
+            with mock.patch.object(webpush, "_ctx", []), mock.patch.object(webpush, "MAC_CAS", str(tmp / "none.pem")), \
+                    mock.patch.object(ssl, "create_default_context", strict):
+                kh = self.kh_mod.Keyhole(self.task, m, self.kh_mod.Key(m.provider, self.CANARY), base,
+                                         "bearer", log=self.lines.append)
+                self.addCleanup(kh.close)
+                code, _, text = self.post(kh)
+                ctx = webpush.tls()
+            self.assertEqual(code, want, (env, text))
+            self.assertTrue(ctx.check_hostname)
+            self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+        self.assertIn("its certificate didn't verify", text)
+        self.assertEqual(len(up.seen), 2)
 
     def test_anthropics_cache_writes_are_metered_when_its_message_delta_names_thinking_tokens(self):
         # #1081 (2026-11-23): Anthropic's message_delta now carries output_tokens_details
@@ -31324,7 +34623,8 @@ class Keyhole(_KeyholeTest):
         os.environ["OPENCODE_CONFIG_CONTENT"] = json.dumps(
             {"provider": {"incontent": {"options": {"apiKey": self.CANARY}}}})
         for provider, why in (("literal", f"written in {os.environ['WB_OPENCODE_CONFIG']}, which "
-                                          "agents can read: remove it there, and store the key with /connect"),
+                                          "agents can read: remove it there, and store the key with "
+                                          "`opencode auth login literal`"),
                               ("viaenv", "$VIAENV_KEY"),
                               ("incontent", "written in OPENCODE_CONFIG_CONTENT")):
             with self.assertRaises(self.kh_mod.KeyholeError) as e:
@@ -31486,12 +34786,11 @@ class Keyhole(_KeyholeTest):
         self.assertEqual((code, json.loads(text)["text"]), (200, f"{ident} [key redacted]"))
 
     def test_a_package_the_keyhole_cant_speak_cant_run(self):
-        # Google's x-goog-api-key and Gemini paths, Azure's api-key, Cohere's native /chat:
-        # every request was a 401 or 404 after a start that said nothing (the protocol review,
-        # 2026-11-23)
+        # Cohere's native /chat, Google's Interactions route: every request was a 401 or 404
+        # after a start that said nothing (the protocol review, 2026-11-23); Gemini's and Azure's
+        # are spoken since #1192
         need = "needs a key wb can hold outside the lane: "
-        for provider, package in (("google", "@opencode/ai/providers/google"),
-                                  ("azure", "@opencode/ai/providers/azure"),
+        for provider, package in (("google", "@opencode/ai/providers/google/interactions"),
                                   ("cohere", "@opencode/ai/providers/cohere"),
                                   ("someco", "")):
             self.assertIsNone(self.kh_mod.protocol_of(package))
@@ -31505,15 +34804,219 @@ class Keyhole(_KeyholeTest):
         for package, want in (("@opencode/ai/providers/anthropic", "anthropic"),
                               ("@opencode/ai/providers/meta/messages", "bearer"),
                               ("@opencode/ai/providers/openai", "bearer"),
-                              ("@opencode/ai/providers/deepinfra", "bearer")):
-            self.assertEqual(self.kh_mod.protocol_of(package), want)
+                              ("@opencode/ai/providers/deepinfra", "bearer"),
+                              ("@opencode/ai/providers/google", "google"),               # #1192
+                              ("@opencode/ai/providers/azure/responses", "api-key"),
+                              ("@opencode/ai/providers/azure/chat", "api-key"),
+                              ("@opencode/ai/providers/amazon-bedrock", "converse"),
+                              ("@opencode/ai/providers/amazon-bedrock/mantle/responses", "bearer"),
+                              ("@opencode/ai/providers/amazon-bedrock/mantle/messages", "bearer"),
+                              ("@opencode/ai/providers/google-vertex", None)):
+            self.assertEqual(self.kh_mod.protocol_of(package), want, package)
+
+    # #1192: Gemini, Azure OpenAI and Bedrock's API key through the keyhole
+
+    def gemini(self, **kw):
+        return self.keyhole(self.model("google", "gemini-x-flash", "/v1beta",
+                                       "@opencode/ai/providers/google"), **kw)
+
+    def test_gemini_gets_its_key_in_x_goog_api_key_on_its_model_path_and_its_usage_is_booked(self):
+        from workbench import meter
+        got = []
+        kh = self.gemini(on_usage=got.append)
+        self.up.served = "gemini-x-flash-001"
+        code, _, text = self.post(kh, "/models/gemini-x-flash:streamGenerateContent?alt=sse",
+                                  body={"contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                                        "generationConfig": {"maxOutputTokens": 8192}},
+                                  headers={"Authorization": None, "x-goog-api-key": kh.token})
+        self.assertEqual(code, 200, text)
+        [req] = self.up.seen
+        self.assertEqual(req["path"], "/v1beta/models/gemini-x-flash:streamGenerateContent?alt=sse")
+        heads = {k.lower(): v for k, v in req["headers"].items()}
+        self.assertEqual(heads["x-goog-api-key"], self.CANARY)
+        self.assertNotIn("authorization", heads)
+        self.assertNotIn(kh.token, json.dumps(req))
+        # the running total read once, at the stream's end (no [DONE], no end event)
+        self.assertEqual(got, [{"promptTokenCount": 9, "candidatesTokenCount": 3, "totalTokenCount": 17,
+                                "cachedContentTokenCount": 4, "thoughtsTokenCount": 5}])
+        self.assertEqual(meter.usage_tokens(got[0]), {"in": 5, "cache_read": 4, "cache_write": 0,
+                                                      "out": 3, "reasoning": 5})
+        self.assertEqual(self.task.status["served"], {"model": "gemini-x-flash-001", "by": None})
+        self.assertIn('"text": "k"', text)                                 # the stream went on whole
+        code, _, text = self.post(kh, "/models", method="GET",
+                                  headers={"Authorization": None, "x-goog-api-key": kh.token})
+        self.assertEqual((code, json.loads(text)["models"][0]["name"]), (200, "models/gemini-x-flash"))
+        self.assertEqual(meter.max_output({"generationConfig": {"maxOutputTokens": 512}}), 512)
+        self.assertEqual(meter.max_output({"inferenceConfig": {"maxTokens": 256}}), 256)
+        self.assertEqual(meter.max_output({"contents": []}), self.models.API_OUTPUT)
+
+    def test_gemini_refuses_another_model_in_the_path_and_a_key_in_the_query(self):
+        kh = self.gemini()
+        heads = {"Authorization": None, "x-goog-api-key": kh.token}
+        body = {"contents": []}
+        for path, body_, want in (
+                ("/models/gemini-x-pro:streamGenerateContent?alt=sse", body, 403),
+                ("/tunedModels/gemini-x-flash:streamGenerateContent?alt=sse", body, 403),
+                ("/models/gemini-x-flash/../gemini-x-pro:streamGenerateContent?alt=sse", body, 403),
+                ("/models/gemini-x-flash:streamGenerateContent?alt=sse", {**body, "model": "x"}, 403),
+                ("/models/gemini-x-flash:streamGenerateContent?alt=sse",
+                 {**body, "models": ["gemini-x-pro"]}, 403),
+                ("/models/gemini-x-flash:streamGenerateContent?alt=sse&key=AIzaOther", body, 400),
+                ("/models/gemini-x-flash:streamGenerateContent?KEY=AIzaOther", body, 400),
+                ("/models/gemini-x-flash:streamGenerateContent?alt=json", body, 400),
+                ("/models/gemini-x-flash:generateContent", body, 404),
+                ("/models/gemini-x-flash:countTokens", body, 404),
+                ("/chat/completions", {"model": "gemini-x-flash"}, 404)):
+            code, _, text = self.post(kh, path, body=body_, headers=heads)
+            self.assertEqual(code, want, (path, text))
+        self.assertEqual(self.up.seen, [])                                    # nothing went on
+        self.assertIn(f"keyhole: refused models/gemini-x-pro (this task runs {kh.model.id})", self.lines)
+        self.assertIn(f"keyhole: refused tunedModels/gemini-x-flash (this task runs {kh.model.id})", self.lines)
+        code, _, _ = self.post(kh, "/models/gemini-x-flash:streamGenerateContent?alt=sse", body=body,
+                               headers={"Authorization": None, "x-goog-api-key": "nope"})
+        self.assertEqual((code, self.up.seen), (401, []))
+
+    def test_geminis_per_minute_429_is_held_as_a_rate_and_its_daily_one_stops_the_round(self):
+        # Google's free tier says "You exceeded your current quota" of both: QUOTA read the
+        # per-minute one as a spent balance and stopped the round
+        told = []
+        kh = self.gemini(hold=0, on_health=lambda state, why, until: told.append((state, until)))
+        rpm = {"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": (
+            "You exceeded your current quota, please check your plan and billing details."),
+            "details": [{"@type": "type.googleapis.com/google.rpc.QuotaFailure", "violations": [{
+                "quotaMetric": "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+                "quotaId": "GenerateRequestsPerMinutePerProjectPerModel-FreeTier"}]},
+                {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "41s"}]}}
+        self.up.mode, self.up.status, self.up.ctype = "raw", 429, "application/json"
+        self.up.pieces = [json.dumps(rpm).encode()]
+        path, heads = ("/models/gemini-x-flash:streamGenerateContent?alt=sse",
+                       {"Authorization": None, "x-goog-api-key": kh.token})
+        code, _, _ = self.post(kh, path, body={"contents": []}, headers=heads)
+        self.assertEqual(code, 429)                                       # passed back after the hold
+        self.assertNotIn("api_stop", self.task.status)
+        [(state, until)] = told
+        self.assertEqual(state, "rate_limited")
+        self.assertAlmostEqual(until, time.time() + 41, delta=5)           # RetryInfo's wait
+        daily = json.loads(json.dumps(rpm).replace("PerMinute", "PerDay"))
+        self.up.pieces = [json.dumps(daily).encode()]
+        code, _, text = self.post(kh, path, body={"contents": []}, headers=heads)
+        self.assertEqual(code, 400, text)                                 # no wait helps: the round stops
+        self.assertEqual(self.task.status["api_stop"]["guard"], "quota")
+
+    def test_azure_openai_gets_api_key_and_its_api_version_on_the_path_opencode_posts(self):
+        # azure.ts: an `*.openai.azure.com` base gets `/v1` and `?api-version=v1`; the keyhole's
+        # on 127.0.0.1 gets neither, so the keyhole mirrors the one and adds the other
+        up = "https://myres.openai.azure.com/openai"
+        for package in ("@opencode/ai/providers/azure/responses", "@opencode/ai/providers/azure/chat"):
+            self.assertEqual(self.kh_mod.mirror_path(package, up), up + "/v1")
+            self.assertEqual(self.kh_mod.upstream_query(package, up), {"api-version": "v1"})
+        other = "https://gw.example.test/openai"                         # posted to as it is
+        self.assertEqual(self.kh_mod.mirror_path("@opencode/ai/providers/azure", other), other)
+        self.assertEqual(self.kh_mod.upstream_query("@opencode/ai/providers/azure", other), {})
+        self.assertEqual(self.kh_mod.upstream_query("@opencode/ai/providers/openai", up), {})
+        self.assertEqual(self.models.catalog_base("@opencode/ai/providers/azure/responses",
+                                                  {"resourceName": "myres"}), up)
+        self.assertEqual(self.models.catalog_base("@opencode/ai/providers/azure/responses",
+                                                  {"resourceName": "my.evil/host"}), "")
+        m = self.model("azure", "gpt-x-mini", "/openai/v1", "@opencode/ai/providers/azure/responses")
+        kh = self.keyhole(m, query={"api-version": "v1"})
+        code, _, text = self.post(kh, "/responses?api-version=2020-01-01", body={"model": "gpt-x-mini"},
+                                  headers={"Authorization": None, "api-key": kh.token})
+        self.assertEqual(code, 200, text)
+        [req] = self.up.seen
+        self.assertEqual(req["path"], "/openai/v1/responses?api-version=v1")
+        heads = {k.lower(): v for k, v in req["headers"].items()}
+        self.assertEqual(heads["api-key"], self.CANARY)
+        self.assertNotIn("authorization", heads)
+        self.assertEqual(self.post(kh, "/responses", body={"model": "gpt-x"},
+                                   headers={"Authorization": None, "api-key": kh.token})[0], 403)
+
+    def test_bedrocks_api_key_runs_converse_with_the_model_in_the_path_and_its_usage_is_booked(self):
+        from workbench import meter
+        # amazon-bedrock.ts sends a Bedrock API key as a bearer ahead of SigV4; Converse names
+        # the model in the path, encodeURIComponent'd, and frames its stream as AWS event-stream
+        got = []
+        name = "us.anthropic.claude-x-1:0"
+        kh = self.keyhole(self.model("amazon-bedrock", name, "", "@opencode/ai/providers/amazon-bedrock"),
+                          on_usage=got.append)
+        good = "/model/us.anthropic.claude-x-1%3A0/converse-stream"
+        conn = http.client.HTTPConnection("127.0.0.1", kh.port, timeout=30)
+        self.addCleanup(conn.close)
+        conn.request("POST", good, body=json.dumps({"modelId": name, "messages": []}),
+                     headers={"Authorization": f"Bearer {kh.token}"})
+        r = conn.getresponse()
+        self.assertEqual((r.status, r.read()), (200, b"".join(es_frame(*ev) for ev in CONVERSE_EVENTS)))
+        [req] = self.up.seen
+        self.assertEqual(req["path"], good)
+        self.assertEqual(req["headers"]["Authorization"], f"Bearer {self.CANARY}")
+        self.assertEqual(got, [CONVERSE_EVENTS[-1][1]["usage"]])
+        self.assertEqual(meter.usage_tokens(got[0]), {"in": 7, "cache_read": 2, "cache_write": 0,
+                                                      "out": 3, "reasoning": 0})
+        for path, body in (("/model/us.anthropic.claude-x-1:0/converse-stream", {"modelId": name}),
+                           ("/model/us.anthropic.claude-x-2%3A0/converse-stream", {"modelId": name}),
+                           (good, {"modelId": "us.anthropic.claude-x-2:0"}),
+                           (good, {"modelId": name, "model": "other"})):
+            self.assertEqual(self.post(kh, path, body=body)[0], 403, (path, body))
+        for path in ("/model/x/converse", "/model/x/invoke", "/chat/completions"):
+            self.assertEqual(self.post(kh, path, body={"modelId": name})[0], 404, path)
+        self.assertEqual(self.post(kh, "/models", method="GET")[0], 404)
+        self.assertEqual(len(self.up.seen), 1)
+        self.assertEqual(self.models.catalog_base("@opencode/ai/providers/amazon-bedrock",
+                                                  {"region": "eu-west-1"}),
+                         "https://bedrock-runtime.eu-west-1.amazonaws.com")
+        self.assertEqual(self.models.catalog_base("@opencode/ai/providers/amazon-bedrock/mantle/responses",
+                                                  {"region": "eu-west-1"}),
+                         "https://bedrock-mantle.eu-west-1.api.aws/v1")
+        self.assertEqual(self.models.catalog_base("@opencode/ai/providers/amazon-bedrock/mantle/messages",
+                                                  {"region": "eu-west-1"}),
+                         "https://bedrock-mantle.eu-west-1.api.aws/anthropic/v1")
+
+    def test_a_listed_mantle_base_gets_its_region_as_opencode_fills_it_and_any_other_variable_is_refused(self):
+        # #1192's review (2026-11-24): OpenCode 2.3.2's model.list prints every Mantle row's base
+        # as a template, filled only when it resolves the model (model-resolver.ts
+        # prepareProviderURL); passed on as it was, the keyhole's upstream host was
+        # `bedrock-mantle.${aws_region}.api.aws` and every request a 502 or a 10-minute outage
+        mantle = "@opencode/ai/providers/amazon-bedrock/mantle/responses"
+        row = {"providerID": "amazon-bedrock", "id": "openai.gpt-x", "package": mantle,  # as listed
+               "settings": {"region": "us-east-1",
+                            "baseURL": "https://bedrock-mantle.${AWS_REGION}.api.aws/openai/v1"}}
+        base = self.models.catalog_base(row["package"], row["settings"])
+        self.assertEqual(base, "https://bedrock-mantle.us-east-1.api.aws/openai/v1")
+        self.assertEqual(self.kh_mod.mirror_path(mantle, base), base)
+        template = {"baseURL": "https://bedrock-mantle.${AWS_REGION}.api.aws/v1"}
+        for env, want in (({"AWS_REGION": "eu-west-1", "AWS_DEFAULT_REGION": "ap-south-1"}, "eu-west-1"),
+                          ({"AWS_DEFAULT_REGION": "ap-south-1"}, "ap-south-1"), ({}, "us-east-1")):
+            with mock.patch.dict(os.environ, env), self.subTest(env):
+                for name in {"AWS_REGION", "AWS_DEFAULT_REGION"} - set(env):
+                    os.environ.pop(name, None)
+                self.assertEqual(self.models.catalog_base(mantle, template),
+                                 f"https://bedrock-mantle.{want}.api.aws/v1")
+        for settings in ({**template, "region": "us-east-1.evil.test/x"},   # not a host label
+                         {"baseURL": "https://${HOST}/v1", "region": "us-east-1"},
+                         {"baseURL": "https://bedrock-mantle.${AWS_REGION}.${DOMAIN}/v1"}):
+            self.assertEqual(self.models.catalog_base(mantle, settings), "", settings)
+        plain = "https://gw.example.test/v1"
+        self.assertEqual(self.models.catalog_base(mantle, {"baseURL": plain}), plain)
+
+    def test_bedrock_runs_on_a_stored_api_key_and_still_refuses_signing(self):
+        self.fake_auth({"amazon-bedrock": {"export": [self.key_row("amazon-bedrock", {
+            "type": "key", "key": self.CANARY})]}})
+        self.assertEqual(self.kh_mod.load_key("amazon-bedrock").value, self.CANARY)
+        auth = {"amazon-bedrock": {"connections": [{"type": "credential", "method": "key"}]},
+                "google-vertex": {"connections": [{"type": "credential", "method": "key"}]}}
+        self.assertEqual(self.models._key_source("amazon-bedrock", auth, None), "stored")
+        self.assertEqual(self.models._key_source("google-vertex", auth, None), "signing")
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:
+            self.kh_mod.start(self.task, self.model("google-vertex", "gemini-x", "/v1",
+                                                    "@opencode/ai/providers/google-vertex"))
+        self.assertIn("signs each request (Vertex)", str(e.exception))
 
     def test_an_ai_sdk_npm_runs_through_the_keyhole_as_its_opencode_package(self):
         # #1137 (2026-11-23): a config provider's npm `@ai-sdk/openai-compatible` read as its
         # scope, `@ai-sdk`, so a custom provider set up as OpenCode's docs say was refused
         for package, want in (("@ai-sdk/openai-compatible", "bearer"), ("@ai-sdk/anthropic", "anthropic"),
                               ("@ai-sdk/openai", "bearer"), ("@ai-sdk/deepinfra", "bearer"),
-                              ("@ai-sdk/foo", None), ("@ai-sdk/google", None), ("@acme/openai", None),
+                              ("@ai-sdk/foo", None), ("@ai-sdk/google", "google"), ("@acme/openai", None),
                               ("aisdk:@ai-sdk/openai", None), ("@ai-sdk", None)):
             self.assertEqual(self.kh_mod.protocol_of(package), want, package)
         # as OpenCode runs `@ai-sdk/deepinfra`: its own package, which appends /openai
@@ -31593,12 +35096,88 @@ class Keyhole(_KeyholeTest):
         conf["providers"] = {"envv2": {"settings": {"apiKey": "{env:ENVV2_KEY}"}}}  # not checked: still refused
         path.write_text(json.dumps(conf))
         self.assertEqual(self.kh_mod.load_key("envstored").value, self.CANARY)
-        for provider, why in (("envonly", "envonly's key is only in the environment ($ENVONLY_KEY)"),
-                              ("envv2", "envv2's key is only in the environment ($ENVV2_KEY)")):
+        # with none stored, the variable is read (#1189): here unset, so said, and a V2 one never
+        os.environ.pop("ENVONLY_KEY", None)
+        for provider, why in (("envonly", "$ENVONLY_KEY isn't set where wb start ran: export it, or "
+                                          "store the key with `opencode auth login envonly`"),
+                              ("envv2", "envv2's key is read from $ENVV2_KEY in a header or V2 `settings`")):
             with self.assertRaises(self.kh_mod.KeyholeError) as e:
                 self.kh_mod.load_key(provider)
             self.assertIn(why, str(e.exception))
             self.assert_no_canary(str(e.exception))
+
+    def test_with_none_stored_the_key_comes_from_the_variable_opencode_names_in_the_runners_environment(self):
+        # #1189: an exported key was refused ("only in the environment, which agents don't get")
+        # and the user sent to /connect in OpenCode's TUI, though the runner already carries the
+        # environment wb start ran in (context.detached_env) and the agent's drops the variable
+        self.fake_auth({"xenv": {"list": [{"type": "env", "name": "XENV_API_KEY"}]},
+                        "lone": {},
+                        "both": {"export": [self.key_row("both", {"type": "key", "key": self.CANARY})],
+                                 "list": [{"type": "env", "name": "BOTH_API_KEY"}]}})
+        path = Path(os.environ["WB_OPENCODE_CONFIG"])
+        conf = json.loads(path.read_text())
+        conf.setdefault("provider", {})["lone"] = {"options": {"apiKey": "{env:LONE_API_KEY}"}}
+        path.write_text(json.dumps(conf))
+        os.environ.update(XENV_API_KEY=self.CANARY + "\n", LONE_API_KEY=self.CANARY,
+                          BOTH_API_KEY="sk-the-other-" + "Z" * 30)
+        for provider, var in (("xenv", "XENV_API_KEY"), ("lone", "LONE_API_KEY")):
+            key = self.kh_mod.load_key(provider)
+            self.assertEqual((key.value, key.source), (self.CANARY, f"${var}"))   # trimmed, as a paste
+            self.assert_no_canary(repr(key), str(key))
+            self.assertEqual(self.models.env_why(provider, var), "")
+        key = self.kh_mod.load_key("both")                               # a stored key first
+        self.assertEqual((key.value, key.source), (self.CANARY, ""))
+        calls = [json.loads(x)["argv"][:3] for x in Path(os.environ["FAKE_AUTH_ARGV"]).read_text().splitlines()]
+        self.assertEqual(calls, [["auth", "export", "xenv"], ["auth", "list", "--format"],
+                                 ["auth", "export", "lone"], ["auth", "export", "both"]])  # lone: no list
+        # what the runner logs names the variable, never its value
+        m = self.model("xenv")
+        m.package = "@opencode/ai/providers/deepinfra"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            kh = self.kh_mod.start(self.task, m)
+        self.addCleanup(kh.close)
+        self.assertEqual(out.getvalue().strip(),
+                         f"keyhole: xenv on 127.0.0.1:{kh.port} for {m.id} (key from $XENV_API_KEY)")
+        self.assertEqual(self.post(kh)[0], 200)
+        self.assertEqual(self.up.seen[-1]["headers"]["Authorization"], f"Bearer {self.CANARY}")
+        self.assert_no_canary(json.dumps(self.kh_mod.layer_options(kh)))
+
+    def test_an_environment_key_the_agent_would_get_too_or_that_isnt_set_refuses(self):
+        # #1189's guard: the keyhole takes a variable only where the agent's environment drops it
+        # (runner.env_kept: SECRET_ENV by its name, and not passed through by commands.json
+        # `env`), and only when it is set where wb start ran; each refusal names the variable,
+        # never its value, and its own fix
+        self.fake_auth({"xenv": {"list": [{"type": "env", "name": "XENV_API_KEY"}]}, "plain": {}})
+        path = Path(os.environ["WB_OPENCODE_CONFIG"])
+        conf = json.loads(path.read_text())
+        conf.setdefault("provider", {})["plain"] = {"options": {"apiKey": "{env:PLAINVAR}"}}
+        path.write_text(json.dumps(conf))
+        need = "needs a key wb can hold outside the lane: "
+        os.environ.pop("XENV_API_KEY", None)
+        cases = [("xenv", {}, "$XENV_API_KEY isn't set where wb start ran: export it, or store the key "
+                              "with `opencode auth login xenv`"),
+                 ("xenv", {"XENV_API_KEY": "  "}, "$XENV_API_KEY isn't set where wb start ran: export it, or "
+                                                  "store the key with `opencode auth login xenv`"),
+                 ("xenv", {"XENV_API_KEY": self.CANARY, "commands": ["XENV_API_KEY"]},
+                  "$XENV_API_KEY is passed to agents (commands.json env): remove it there"),
+                 ("plain", {"PLAINVAR": self.CANARY}, "agents get $PLAINVAR too (wb keeps a variable from "
+                                                      "them by a key's name, such as *_API_KEY): rename it, or "
+                                                      "store the key with `opencode auth login plain`"),
+                 ("xenv", {"XENV_API_KEY": self.CANARY[:20] + "\x01" + self.CANARY[20:]},
+                  "$XENV_API_KEY holds a character an HTTP header can't carry: export it again, or store "
+                  "the key with `opencode auth login xenv`")]
+        for provider, env, why in cases:
+            with self.subTest(why=why):
+                Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": env.pop("commands", [])}))
+                with mock.patch.dict(os.environ, env):
+                    with self.assertRaises(self.kh_mod.KeyholeError) as e:
+                        self.kh_mod.load_key(provider)
+                    self.assertEqual(str(e.exception), need + why)
+                    self.assertEqual(runner.keyhole_failure(e.exception, provider), need + why)  # its own fix
+                    var = "PLAINVAR" if provider == "plain" else "XENV_API_KEY"
+                    self.assertEqual(self.models.env_why(provider, var), why)
+                    self.assert_no_canary(str(e.exception))
 
     def test_a_key_in_a_models_own_entry_or_the_v2_form_cant_run(self):
         # the review of #1015 (2026-11-23): only provider.<pid>.options was read, so a model's
@@ -31626,6 +35205,214 @@ class Keyhole(_KeyholeTest):
             self.assertIn("its key is written in OPENCODE_CONFIG_CONTENT", str(e.exception))
             self.assert_no_canary(str(e.exception))
         self.assertEqual(self.kh_mod.load_key("clean").value, self.CANARY)
+
+
+class _CopilotUser(http.server.BaseHTTPRequestHandler):
+    """GitHub's copilot_internal/user for copilot_endpoint's tests: its server's `answer` (a JSON
+    object, or a status number), each request's headers on `seen`."""
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        self.server.seen.append({"path": self.path, "headers": dict(self.headers)})
+        answer = self.server.answer
+        body = b"{}" if isinstance(answer, int) else json.dumps(answer).encode()
+        self.send_response(answer if isinstance(answer, int) else 200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class CopilotSignIn(_KeyholeTest):
+    """GitHub Copilot's sign-in held as a key (#1191): OpenCode 2.3.2's device login stores the
+    GitHub token as `access` and `refresh` with `expires: 0`, which never rotates; the keyhole
+    sends it to the account's own endpoint, Bearer on every route, and the meter counts a plan."""
+
+    def copilot_row(self, **value):
+        return self.key_row("github-copilot", {"type": "oauth", "methodID": "device",
+                                               "refresh": self.CANARY, "access": self.CANARY,
+                                               "expires": 0, **value})
+
+    def copilot_model(self, name="claude-haiku-4.5", base="https://api.githubcopilot.com/v1",
+                      package="@opencode/ai/providers/anthropic"):
+        m = self.models.Model(id=f"github-copilot/{name}", provider="github-copilot", name=name,
+                              base_url=base, engine="api", label=name, kind="api", key="copilot")
+        m.package = package
+        return m
+
+    def user_server(self, answer):
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), _CopilotUser)
+        srv.daemon_threads, srv.seen, srv.answer = True, [], answer
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        p = mock.patch.object(self.kh_mod, "copilot_user_url",
+                              return_value=f"http://127.0.0.1:{srv.server_port}/copilot_internal/user")
+        p.start()
+        self.addCleanup(p.stop)
+        return srv
+
+    def test_a_copilot_device_sign_in_is_held_as_a_key_with_its_endpoint_beside_it(self):
+        self.fake_auth({"github-copilot": {"export": [self.copilot_row(metadata={
+            "apiEndpoint": "https://api.business.githubcopilot.com", "other": "x"})]}})
+        key = self.kh_mod.load_key("github-copilot")
+        self.assertEqual(key.value, self.CANARY)
+        self.assertEqual(key.meta, {"apiEndpoint": "https://api.business.githubcopilot.com"})
+        self.assert_no_canary(repr(key), str(key))
+
+    def test_a_copilot_sign_in_that_rotates_or_holds_no_token_is_refused_with_its_own_fix(self):
+        for value, why in (({"expires": 1795522477438}, "expires and rotates its token"),
+                           ({"access": " "}, "holds no token"),
+                           ({"type": "external"}, "comes from an external source")):
+            self.fake_auth({"github-copilot": {"export": [self.copilot_row(**value)]}})
+            with self.assertRaises(self.kh_mod.KeyholeError) as e:
+                self.kh_mod.load_key("github-copilot")
+            self.assertIn(why, str(e.exception))
+            self.assertEqual(runner.keyhole_failure(e.exception), str(e.exception))  # no API key fix
+            self.assert_no_canary(str(e.exception))
+        self.fake_auth({"github-copilot": {"export": []}})
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:
+            self.kh_mod.load_key("github-copilot")
+        self.assertIn("no GitHub Copilot sign-in: /connect in OpenCode signs in", str(e.exception))
+
+    def test_the_active_copilot_credential_is_the_one_held(self):
+        other = self.key_row("github-copilot", {"type": "key", "key": "old-" + self.CANARY}, active=False)
+        self.fake_auth({"github-copilot": {"export": [other, self.copilot_row()]}})
+        self.assertEqual(self.kh_mod.load_key("github-copilot").value, self.CANARY)
+
+    def test_a_chatgpt_or_opencode_console_sign_in_says_its_own_cause(self):
+        oauth = {"type": "oauth", "methodID": "m", "refresh": "r", "access": "a", "expires": 1}
+        self.fake_auth({p: {"export": [self.key_row(p, oauth)]} for p in ("openai", "opencode-go")})
+        for provider, why in (("openai", "openai is signed in with ChatGPT: its tokens rotate, and a "
+                                         "copy wb refreshed would sign your own OpenCode out; an "
+                                         "OpenAI API key through /connect works"),
+                              ("opencode-go", "signed in with the OpenCode Console: its tokens rotate, "
+                                              "and the keyhole doesn't speak its API (SystemOne) yet")):
+            with self.assertRaises(self.kh_mod.KeyholeError) as e:
+                self.kh_mod.load_key(provider)
+            self.assertIn(why, str(e.exception))
+
+    def test_the_endpoint_is_the_accounts_own_as_github_says_it_else_the_stored_one(self):
+        key = self.kh_mod.Key("github-copilot", self.CANARY,
+                              meta={"apiEndpoint": "https://api.individual.githubcopilot.com"})
+        srv = self.user_server({"chat_enabled": True,
+                                "endpoints": {"api": "https://api.business.githubcopilot.com/"}})
+        self.assertEqual(self.kh_mod.copilot_endpoint(key), "https://api.business.githubcopilot.com")
+        [asked] = srv.seen
+        heads = {k.lower(): v for k, v in asked["headers"].items()}
+        self.assertEqual(heads["authorization"], f"Bearer {self.CANARY}")
+        self.assertEqual(heads["x-github-api-version"], "2025-04-01")
+        # an answer that isn't an https root, or no answer: the sign-in's stored endpoint
+        for answer in ({"endpoints": {"api": "http://evil.example"}},
+                       {"endpoints": {"api": "https://user@evil.example"}}, 401, {"x": 1}):
+            srv.answer = answer
+            self.assertEqual(self.kh_mod.copilot_endpoint(key),
+                             "https://api.individual.githubcopilot.com", answer)
+        self.assertIsNone(self.kh_mod.copilot_endpoint(self.kh_mod.Key("github-copilot", self.CANARY)))
+        srv.answer = {"chat_enabled": False}
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:
+            self.kh_mod.copilot_endpoint(key)
+        self.assertIn("no Copilot chat", str(e.exception))
+        self.assert_no_canary(str(e.exception))
+
+    def test_an_enterprise_sign_in_asks_its_own_domain(self):
+        url = self.kh_mod.copilot_user_url
+        self.assertEqual(url({}), "https://api.github.com/copilot_internal/user")
+        self.assertEqual(url({"enterpriseUrl": "https://company.ghe.com/"}),
+                         "https://api.company.ghe.com/copilot_internal/user")
+
+    def test_the_upstream_is_the_accounts_root_with_the_catalog_routes_path(self):
+        up = self.kh_mod.copilot_upstream
+        root = "https://api.business.githubcopilot.com"
+        self.assertEqual(up("https://api.githubcopilot.com/v1", root), f"{root}/v1")   # Messages
+        self.assertEqual(up("https://api.githubcopilot.com", root), root)               # OpenAI's
+        self.assertEqual(up("https://api.githubcopilot.com/", root), root)
+        self.assertEqual(up("https://api.githubcopilot.com/v1", None), "https://api.githubcopilot.com/v1")
+        self.assertEqual(up("https://x.example/odd/path", root), "https://x.example/odd/path")
+
+    def test_a_copilot_model_posts_bearer_to_the_accounts_endpoint_on_every_route(self):
+        # its Messages route as well: the plugin's applyHeaders sends Bearer there, never x-api-key
+        self.fake_auth({"github-copilot": {"export": [self.copilot_row()]}})
+        root = f"http://127.0.0.1:{self.up.server_port}"
+        with mock.patch.object(self.kh_mod, "copilot_endpoint", return_value=root):
+            kh = self.kh_mod.start(self.task, self.copilot_model(), log=self.lines.append)
+        self.addCleanup(kh.close)
+        self.assertEqual((kh.protocol, kh.base), ("bearer", f"http://127.0.0.1:{kh.port}/v1"))
+        self.assertIn("(the account's endpoint, 127.0.0.1)", self.lines[-1])
+        code, _, body = self.post(kh, "/messages", headers={"Authorization": None,
+                                                           "x-api-key": kh.token})
+        self.assertEqual(code, 200, body)
+        [req] = self.up.seen
+        self.assertEqual(req["path"], "/v1/messages")
+        self.assertEqual(req["headers"]["Authorization"], f"Bearer {self.CANARY}")
+        self.assertNotIn("x-api-key", {k.lower() for k in req["headers"]})
+        self.assertNotIn(kh.token, json.dumps(req))
+
+    def test_the_layer_says_a_copilot_models_package_so_its_plugin_routes_it(self):
+        # the task's catalog holds one model, so OpenCode gives its package to the provider and
+        # none to the model, and the plugin sent a Claude model to /chat/completions (#1191)
+        m = self.copilot_model()
+        kh = self.kh_mod.Keyhole(self.task, m, self.kh_mod.Key("github-copilot", self.CANARY),
+                                 f"http://127.0.0.1:{self.up.server_port}/v1", "bearer",
+                                 log=self.lines.append)
+        self.addCleanup(kh.close)
+        runner.CURRENT["keyhole"] = kh
+        self.addCleanup(runner.CURRENT.clear)
+        over = runner.keyhole_overlay(self.task)
+        entry = over["provider"]["github-copilot"]["models"][m.name]
+        self.assertEqual(entry["provider"], {"api": kh.base, "npm": "@opencode/ai/providers/anthropic"})
+        self.assertEqual(runner.keyhole_v2(over)["github-copilot"]["models"][m.name]["package"],
+                         "@opencode/ai/providers/anthropic")                 # V2's word for it
+        self.assert_no_canary(json.dumps(over))
+
+    def test_copilots_auto_model_is_refused_at_start_and_never_listed_as_runnable(self):
+        m = self.copilot_model("auto", "https://api.githubcopilot.com",
+                               "@opencode/ai/providers/openai-compatible")
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:
+            self.kh_mod.start(self.task, m, log=self.lines.append)
+        self.assertIn("Auto model picks another model each session", str(e.exception))
+        self.assertEqual(self.models.keyhole_refusal(m), self.models.COPILOT_AUTO_WHY)
+
+    def test_spent_premium_requests_stop_the_round_as_no_credit(self):
+        m = self.copilot_model("gpt-5.4-nano", f"http://127.0.0.1:{self.up.server_port}",
+                               "@opencode/ai/providers/openai-compatible-responses")
+        states = []
+        kh = self.kh_mod.Keyhole(self.task, m, self.kh_mod.Key("github-copilot", self.CANARY),
+                                 m.base_url, "bearer", log=self.lines.append,
+                                 on_health=lambda state, why, until: states.append(state))
+        self.addCleanup(kh.close)
+        self.up.mode, self.up.status = "status", 403
+        self.up.message = "You have exceeded your premium request allowance for this month."
+        code, _, body = self.post(kh, "/responses")
+        self.assertEqual(code, 400, body)
+        self.assertIn("out of credit", body)
+        self.assertEqual(states, ["no_credit"])
+        self.assertEqual(self.task.status["api_stop"]["guard"], "quota")
+
+    def test_a_copilot_sign_in_is_its_own_key_source_and_runs(self):
+        conns = [{"type": "credential", "id": "cred_1", "label": "default", "method": "oauth"}]
+        auth = {p: {"connections": conns} for p in ("github-copilot", "openai")}
+        self.assertEqual(self.models._key_source("github-copilot", auth, None), "copilot")
+        self.assertEqual(self.models._key_source("openai", auth, None), "oauth")
+        self.assertTrue(cli._runs_held(self.copilot_model()))
+        self.assertTrue(runner.needs_keyhole(self.copilot_model()))
+
+    def test_copilot_usage_is_a_plan_never_dollars_against_the_day_cap(self):
+        # OpenCode 2.3.2's catalog prices Copilot's models at their API rates ($2/$10 for its
+        # Claude ones): booked as dollars they'd stop tasks at a cap the subscription never spends
+        from workbench import meter
+        m = self.copilot_model()
+        m.config = {"cost": [{"input": 2, "output": 10}], "limit": {"context": 200000, "output": 64000}}
+        self.assertTrue(meter.is_plan(m))
+        self.assertIsNone(meter.refusal(m))                       # no cap asked for
+        mt = meter.Meter(self.task, m)
+        self.assertIsNone(mt.room({"model": m.name}, 4_000_000))  # never refused for spend
+        mt.on_usage({"input_tokens": 1000, "output_tokens": 50})
+        [row] = store.read_jsonl(meter.ledger_path())[0]
+        self.assertEqual((row["usd"], row["plan"]), (None, "github-copilot"))
+        self.assertEqual(row["tok"]["in"], 1000)
 
 
 @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
@@ -31752,6 +35539,123 @@ class RealOpenCodeAPI(_KeyholeTest):
             self.assertIn(kh.token, sent[header])                          # OpenCode had the token
             self.assert_no_canary(json.dumps(sent))                        # and never the key
 
+    def test_copilot_models_post_through_the_keyhole_with_the_plugins_headers_and_no_sign_in(self):
+        # #1191: the agent's OpenCode holds no Copilot credential, only the layer's base and
+        # token; its Copilot plugin still adds Copilot's headers (by provider, not by credential),
+        # each route posts under the keyhole's mirrored base (Messages under /v1), the keyhole
+        # sends the sign-in's token as Bearer to the account's endpoint, and the plugin asks
+        # nothing else (no /models, no Auto router, no GitHub lookup: it has no sign-in)
+        from workbench import keyhole
+        tmp = Path(self.tmp.name)
+        keys = {"disabled_providers": ["ollama"],
+                "provider": {"github-copilot": {"options": {"apiKey": "dummy-not-a-key"}}}}
+        (tmp / "copilot-keys.json").write_text(json.dumps(keys))
+        rows = [r for r in self.listed(tmp / "copilot-keys.json", "copilot-list")
+                if r["providerID"] == "github-copilot" and (r.get("capabilities") or {}).get("tools")]
+        routes_ = {"@opencode/ai/providers/anthropic": "/v1/messages",
+                   "@opencode/ai/providers/openai-compatible": "/chat/completions",
+                   "@opencode/ai/providers/openai-compatible-responses": "/responses"}
+        picked = {}
+        for r in rows:
+            picked.setdefault(r.get("package"), r)
+        self.assertEqual(set(routes_) - set(picked), set(), [r.get("package") for r in rows])
+        root = f"http://127.0.0.1:{self.up.server_port}"
+        for package, path in routes_.items():
+            row = picked[package]
+            self.up.seen.clear()
+            m = self.models.Model(id=f"github-copilot/{row['id']}", provider="github-copilot",
+                                  name=row.get("modelID") or row["id"], kind="api", engine="api",
+                                  base_url=row["settings"]["baseURL"], label=row["id"], key="copilot")
+            m.package = package
+            # as hosted() keeps the row, so the task's own catalog (catalog_doc) carries it
+            m.config = {"catalog": True, "api": m.base_url, "package": package, "type": "chat",
+                        "limit": row.get("limit") or {}, "cost": row.get("cost") or [],
+                        "capabilities": row.get("capabilities") or {}, "title": row.get("name")}
+            with mock.patch.object(keyhole, "load_key", return_value=keyhole.Key("github-copilot", self.CANARY)), \
+                    mock.patch.object(keyhole, "copilot_endpoint", return_value=root):
+                kh = keyhole.start(self.task, m, log=self.lines.append)
+            self.addCleanup(kh.close)
+            runner.CURRENT["keyhole"] = kh
+            self.addCleanup(runner.CURRENT.clear)
+            self.assertIsNotNone(runner.write_catalog(self.task))          # the task's own catalog
+            layer = tmp / f"copilot-layer-{len(picked)}-{path.strip('/').replace('/', '-')}.json"
+            over = runner.keyhole_overlay(self.task)                        # as the runner writes it
+            layer.write_text(json.dumps({"disabled_providers": ["ollama"], **over}))
+            env = {**self.scratch_env(layer, f"copilot-{path.strip('/').replace('/', '-')}",
+                                      runner.catalog_path(self.task)),
+                   "OPENCODE_CONFIG_CONTENT": runner.rules_env(json.loads(layer.read_text()), over)[
+                       "OPENCODE_CONFIG_CONTENT"]}
+            r = subprocess.run(["opencode", "run", "--standalone", "--title", "t", "-m", m.id,
+                                "--format", "json", "say ok"], cwd=self.repo, env=env,
+                               capture_output=True, text=True, timeout=180)
+            self.assertEqual(r.returncode, 0, f"{package}: {r.stdout[-2000:]}{r.stderr[-2000:]}")
+            self.assert_no_canary(layer.read_text(), json.dumps(env),
+                                  runner.catalog_path(self.task).read_text())
+            [req] = self.up.seen                                           # that request alone
+            heads = {k.lower(): v for k, v in req["headers"].items()}
+            self.assertEqual((req["method"], req["path"]), ("POST", path), package)
+            self.assertEqual(heads["authorization"], f"Bearer {self.CANARY}", package)
+            self.assertNotIn("x-api-key", heads)
+            self.assertEqual(req["body"]["model"], m.name)
+            for h in ("x-initiator", "openai-intent", "x-github-api-version", "x-interaction-type"):
+                self.assertIn(h, heads, f"{package}: the plugin's {h}")
+            self.assertNotIn(kh.token, json.dumps(req))
+
+    def test_gemini_azure_and_bedrock_post_through_the_keyhole_as_their_packages_do(self):
+        # #1192: what OpenCode 2.3.2's own packages send a keyhole base: Gemini's model path,
+        # `?alt=sse` and x-goog-api-key; Azure OpenAI's api-key, no `/v1` or api-version added to
+        # a base off `*.openai.azure.com` (the keyhole adds the version); a Bedrock API key as a
+        # bearer, ahead of SigV4, for Mantle's Responses and Converse's model path
+        from workbench import keyhole
+        tmp = Path(self.tmp.name)
+        keys = {"disabled_providers": ["ollama"], "provider": {
+            "google": {"options": {"apiKey": "dummy-not-a-key"}},
+            "azure": {"options": {"apiKey": "dummy-not-a-key", "resourceName": "wbtest"}},
+            "amazon-bedrock": {"options": {"apiKey": "dummy-not-a-key", "region": "us-east-1"}}}}
+        (tmp / "keys-1192.json").write_text(json.dumps(keys))
+        rows = self.listed(tmp / "keys-1192.json", "bundled-1192")
+        # each case's base is the listed row's, through catalog_base and mirror_path as
+        # keyhole.start takes it: a hand-written Mantle `/v1` hid that model.list prints Mantle's
+        # base as `https://bedrock-mantle.${AWS_REGION}.api.aws/openai/v1` (#1192's review)
+        cases = (("google", "@opencode/ai/providers/google", "generativelanguage.googleapis.com",
+                  "x-goog-api-key", self.CANARY, "/models/{name}:streamGenerateContent?alt=sse"),
+                 # Azure through its Chat route: its Responses one builds the same URL and auth
+                 # (azure.ts `endpoint`, `auth`), but OpenCode's OpenAI Responses parser ends this
+                 # test upstream's stream as incomplete, retrying for 90 s (2026-11-24)
+                 ("azure", "@opencode/ai/providers/azure/chat", "wbtest.openai.azure.com",
+                  "api-key", self.CANARY, "/chat/completions?api-version=v1"),
+                 ("amazon-bedrock", "@opencode/ai/providers/amazon-bedrock/mantle/responses",
+                  "bedrock-mantle.us-east-1.api.aws", "authorization", f"Bearer {self.CANARY}", "/responses"),
+                 ("amazon-bedrock", "@opencode/ai/providers/amazon-bedrock", "bedrock-runtime.us-east-1.amazonaws.com",
+                  "authorization", f"Bearer {self.CANARY}", "/model/{quoted}/converse-stream"))
+        for provider, package, host, header, want, upstream in cases:
+            row = next((r for r in rows if r["providerID"] == provider and r.get("package") == package), None)
+            if row is None:  # a newer OpenCode's catalog without one: said, not passed silently
+                self.fail(f"the bundled catalog lists no {provider} model on {package}")
+            name = row["id"]
+            base = self.models.catalog_base(package, row.get("settings") or {})
+            self.assertEqual(urllib.parse.urlsplit(base).hostname, host, (package, base))
+            mirrored = urllib.parse.urlsplit(keyhole.mirror_path(package, base))
+            self.up.seen.clear()
+            m = self.model(provider, name, mirrored.path, package)
+            kh = keyhole.Keyhole(self.task, m, keyhole.Key(provider, self.CANARY), m.base_url,
+                                 keyhole.protocol_of(package), log=self.lines.append,
+                                 query=keyhole.upstream_query(package, base) or None)
+            self.addCleanup(kh.close)
+            with self.subTest(package):
+                self.run_opencode(kh, provider)
+                self.check_1192(req=self.up.seen, header=header, want=want, upstream=mirrored.path + upstream.format(
+                    name=name, quoted=urllib.parse.quote(name, safe="-_.!~*'()")), token=kh.token)
+
+    def check_1192(self, req, header, want, upstream, token):
+        [req] = req                                                      # one request upstream
+        heads = {k.lower(): v for k, v in req["headers"].items()}
+        self.assertEqual(req["path"], upstream)
+        self.assertEqual(heads[header], want)
+        self.assertFalse({"authorization", "x-api-key", "api-key", "x-goog-api-key"} - {header}
+                         & set(heads))                                  # the key in one header only
+        self.assertNotIn(token, json.dumps(req))
+
     def test_a_custom_provider_on_an_ai_sdk_npm_posts_through_the_keyhole(self):
         # #1137 (2026-11-23): the documented form of a custom provider, V1 npm `@ai-sdk/...`,
         # was refused as a package the keyhole can't speak; OpenCode 2.3.2 runs it as its own
@@ -31821,11 +35725,35 @@ class RealOpenCodeAPI(_KeyholeTest):
         self.addCleanup(lambda: [os.kill(pid, signal.SIGKILL) for pid in ours()])
         service("set", "port", str(port))       # not the user's service's port
         self.assertEqual(service("status"), "stopped")
+        os.environ.pop("DEEPSEEK_API_KEY", None)  # one the caller exported is read now (#1189)
         with self.assertRaises(self.kh_mod.KeyholeError) as e:
             self.kh_mod.load_key("deepseek")                             # none stored here
         self.assertIn("OpenCode has no key stored for deepseek", str(e.exception))
         self.assertEqual(service("status"), "stopped")
         self.assertEqual(ours(), [])
+
+    def test_real_opencode_names_the_variable_the_keyhole_reads_a_key_from(self):
+        # #1189: with none stored, the keyhole reads the variable OpenCode's own `auth list`
+        # names (an `env` connection, listed only while it is set), never one wb guesses. No
+        # request goes anywhere: only the key's read, in a scratch home
+        tmp = Path(self.tmp.name)
+        env = {"PATH": os.environ["PATH"], "HOME": str(tmp / "home"),
+               "OPENCODE_DISABLE_MODELS_FETCH": "1",
+               **{f"XDG_{d.upper()}_HOME": str(tmp / "svc" / d)
+                  for d in ("config", "data", "state", "cache")}}
+        for k in ("OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR",
+                  "WB_OPENCODE_CONFIG", "WB_OPENCODE_BIN", "OPENCODE_DB"):
+            os.environ.pop(k, None)
+        os.environ.update(env, DEEPSEEK_API_KEY=self.CANARY)
+        key = self.kh_mod.load_key("deepseek")
+        self.assertEqual((key.value, key.source), (self.CANARY, "$DEEPSEEK_API_KEY"))
+        auth, _ = self.models._auth_rows()
+        self.assertEqual(self.models._key_source("deepseek", auth, None), "env:DEEPSEEK_API_KEY")
+        self.assertEqual(self.models.env_why("deepseek", "DEEPSEEK_API_KEY"), "")
+        os.environ.pop("DEEPSEEK_API_KEY")
+        with self.assertRaises(self.kh_mod.KeyholeError) as e:          # unset: OpenCode names none
+            self.kh_mod.load_key("deepseek")
+        self.assertIn("OpenCode has no key stored for deepseek", str(e.exception))
 
     def test_a_response_is_booked_before_opencode_prints_its_step_finish(self):
         # #1114 (2026-11-23): OpenCode prints step_finish when it reads [DONE], not at the body's
@@ -31923,6 +35851,45 @@ class RealOpenCodeAPI(_KeyholeTest):
         for row in rows:
             (row.get("settings") or {}).pop("apiKey", None)        # the layer's dummy, given back
         return rows
+
+    def test_zens_free_model_runs_through_the_keyhole_on_the_tokens_overlay_and_goes_up_with_public(self):
+        # #1193: OpenCode 2.3.2's Zen plugin turns its provider on with apiKey "public" only when it
+        # sees no key; the layer's overlay gives it the keyhole's token instead. Offline, the real
+        # OpenCode must still run the free model, send the token to the keyhole (else a 401
+        # there), and the keyhole Zen's own "public" upstream, OpenCode's client headers kept
+        from workbench import keyhole, models
+        tmp = Path(self.tmp.name)
+        (tmp / "zen-base.json").write_text(json.dumps({"disabled_providers": ["ollama"]}))
+        rows = [r for r in self.listed(tmp / "zen-base.json", "zen-bundled") if r["providerID"] == models.ZEN
+                and (r.get("capabilities") or {}).get("tools")
+                and all(not c.get("input") and not c.get("output") for c in r.get("cost") or [{"input": 1}])]
+        if not rows:
+            self.skipTest("this OpenCode's bundled catalog lists no free Zen model")
+        ApiHarness.catalog(self, rows[:1], [])                              # no key stored for Zen
+        m = models.hosted(fresh=True)[f"{models.ZEN}/{rows[0]['id']}"]
+        self.assertTrue(models.keyless_free(m), m)
+        path = urllib.parse.urlsplit(m.base_url).path
+        m.base_url = f"http://127.0.0.1:{self.up.server_port}{path}"
+        with mock.patch.object(keyhole, "_opencode", side_effect=AssertionError("auth export")):
+            kh = keyhole.start(self.task, m, log=self.lines.append)
+        self.addCleanup(kh.close)
+        runner.CURRENT["keyhole"] = kh
+        self.addCleanup(runner.CURRENT.clear)
+        catalog = runner.write_catalog(self.task)
+        over = runner.keyhole_overlay(self.task)
+        layer = {"disabled_providers": ["ollama"], **over}
+        (tmp / "zen-layer.json").write_text(json.dumps(layer))
+        env = {**self.scratch_env(tmp / "zen-layer.json", "zen-run", catalog),
+               "OPENCODE_CONFIG_CONTENT": runner.rules_env(layer, over)["OPENCODE_CONFIG_CONTENT"]}
+        r = subprocess.run(["opencode", "run", "--standalone", "--title", "t", "-m", m.id, "--format", "json",
+                            "say ok"], cwd=self.repo, env=env, capture_output=True, text=True, timeout=180)
+        self.assertEqual(r.returncode, 0, r.stdout[-2000:] + r.stderr[-2000:])
+        [req] = self.up.seen                                                # past the keyhole's token check
+        heads = {k.lower(): v for k, v in req["headers"].items()}
+        self.assertEqual((req["path"], heads["authorization"]), (f"{path}/chat/completions", "Bearer public"))
+        self.assertEqual(req["body"]["model"], m.name)
+        self.assertIn("x-opencode-client", heads)                           # "Free-tier chat models require OpenCode"
+        self.assertNotIn(kh.token, json.dumps(req))
 
     def test_the_tasks_own_catalog_is_read_as_the_bundled_one_and_carries_a_model_it_lacks(self):
         # #1015: the agent's OpenCode fetches no catalog (#1010), so wb hands it the model in a
@@ -33076,6 +37043,25 @@ class ApiHarness(Base):
         self.assertEqual(json.loads(self.fake("auth", "list", "--format", "json", "--standalone")[2])[0]["connections"],
                          [{"type": "env", "name": "XAI_API_KEY"}])  # the test's own rows
 
+    def test_the_fakes_env_state_lists_a_variable_only_while_it_is_set_and_exports_no_key(self):
+        # #1189, as 2.3.2 prints it (checked in a scratch home, 2026-11-24): a provider whose key
+        # is only in its variable has one `env` connection while the variable is set, none after
+        self.catalog()
+        os.environ["WB_FAKE_API"] = "deepinfra=env"
+        os.environ["FAKE_AUTH_EXPORT"] = json.dumps([{"id": "c", "integrationID": "deepinfra", "label": "x",
+                                                      "active": True, "value": {"type": "key", "key": "k"}}])
+        os.environ.pop("DEEPINFRA_API_KEY", None)
+
+        def listed():
+            return {a["id"]: a["connections"] for a in
+                    json.loads(self.fake("auth", "list", "--format", "json", "--standalone")[2])}
+        self.assertEqual(list(listed()), ["anthropic"])               # unset: not listed
+        os.environ["DEEPINFRA_API_KEY"] = "not-a-real-key"
+        self.assertEqual(listed()["deepinfra"], [{"type": "env", "name": "DEEPINFRA_API_KEY"}])
+        self.assertEqual(json.loads(self.fake("auth", "export", "deepinfra", "--standalone")[2]), [])
+        self.assertEqual([e["providerID"] for e in self.fake("api", "model.list")[1][0]["data"]],
+                         ["deepinfra", "anthropic"])                   # its models still listed
+
     def test_a_provider_without_a_key_drops_out_of_every_list_and_its_models_cant_run(self):
         self.catalog()
         os.environ["WB_FAKE_API"] = "anthropic=nokey"
@@ -33600,6 +37586,27 @@ class ApiDiscovery(Base):
         os.environ["WB_FAKE_API"] = "acme=nokey"                  # OpenCode can't authenticate it
         self.assertNotIn("acme/coder-flash", self.models.hosted_doc(fresh=True)["models"])
 
+    def test_a_coding_plans_zero_priced_models_read_as_a_plan_not_free(self):
+        # #1396 (2026-11-25): a paid coding plan lists every price 0, so wb called it free ("may
+        # keep or train on your code") and its start line said "today $0 of $5", never plan usage
+        from workbench import meter, results
+        zero = [{"input": 0, "output": 0, "cache": {"read": 0, "write": 0}}]
+        self.catalog(DISCOVERY_CATALOG + [api_entry("zai-coding-plan", "glm-9", cost=zero),
+                                          api_entry("kimi-code-plan-global", "k-9", cost=zero)],
+                     DISCOVERY_AUTH + [key_row("zai-coding-plan", "Z.AI Coding Plan", STORED)])
+        m = self.models.hosted()["zai-coding-plan/glm-9"]
+        self.assertEqual((m.free, m.key, meter.is_plan(m)), (False, "stored", True))
+        self.assertTrue(meter.tail(m).startswith(" · plan usage ("), meter.tail(m))
+        k = self.models.hosted()["kimi-code-plan-global/k-9"]   # a regional id goes on past it
+        self.assertEqual((k.free, k.key), (False, ""))         # no key stored: never keyless
+        self.assertEqual(results._plan(k.id), "kimi-code-plan-global")
+        self.assertEqual(run_wb("models", "--api", "glm-9").splitlines()[0],
+                         "zai-coding-plan/glm-9  200K · plan usage")
+        out = run_wb("models")
+        self.assertIn("kimi-code-plan-global 1, ", out)
+        self.assertIn("zai-coding-plan 1\n", out)
+        self.assertIn(f"opencode 1 (free: {cli.FREE_NOTE})", out)   # OpenCode's free one still is
+
     def test_discover_never_returns_an_api_model(self):
         # passes before #1013 too: it pins the rule that keeps the GPU paths on the GPU
         cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
@@ -33628,8 +37635,9 @@ class ApiDiscovery(Base):
         os.environ["WB_FAKE_API"] = "xenv=ratelimit"  # a run's state: status never runs one
         st, up, fix = self.state(FLASH)
         self.assertEqual((st["available"], st["why"], up),
-                         (False, "no key for deepinfra: run /connect in OpenCode and add it", False))
-        self.assertEqual(fix, "run /connect in OpenCode and add an API key for deepinfra")
+                         (False, "no key for deepinfra: run `opencode auth login deepinfra` in a terminal "
+                                 "and add it", False))
+        self.assertEqual(fix, "")                                  # the line says it (#1189)
         st, up, fix = self.state("oauthco/chat-1")
         self.assertEqual((st["available"], up), (False, False))
         self.assertEqual(st["why"], "can't run: needs a key wb can hold outside the lane (OAuthCo's is "
@@ -33685,7 +37693,8 @@ class ApiDiscovery(Base):
             self.assertFalse(st["available"])
             self.assertTrue(st["why"].startswith("can't run: needs a key wb can hold outside the lane"), st)
             self.assertFalse(self.models.may_come_up(st))
-        self.assertIn("(XEnv's is from the environment, XENV_API_KEY)", said["xenv/grok-9"]["why"])
+        # a variable OpenCode names that isn't set here (#1189: a set one runs)
+        self.assertIn("$XENV_API_KEY isn't set where wb start ran", said["xenv/grok-9"]["why"])
         self.assertIn(f"(literal's is written in {os.environ['WB_OPENCODE_CONFIG']})", said["literal/model-a"]["why"])
         self.assertNotIn("not-a-real-key", json.dumps(said) + (store.home() / "hosted.json").read_text())
 
@@ -33754,6 +37763,36 @@ class ApiDiscovery(Base):
         self.assertEqual((doc, why), (None, "opencode model.list took over 1 s"))
         with self.assertRaises(ProcessLookupError):                         # its server ended
             os.kill(int(Path(os.environ["FAKE_SERVE_PID"]).read_text()), 0)
+
+    def test_the_fakes_catalog_server_listens_without_looking_its_address_up(self):
+        # nightly run 45454423406 (2026-11-24): the fake's `serve --stdio` bound with HTTPServer's
+        # own server_bind, whose socket.getfqdn took 35 s on GitHub's macOS runners, past
+        # model_list's 30 s: every catalog read there failed and some 40 API tests per shard with
+        # it. The macOS lookup played here: one that fails the fake if it is asked at all
+        hang = ("import runpy, socket, sys\n"
+                "def looked_up(*a):\n"
+                "    raise SystemExit('socket.getfqdn asked: 35 s on the macOS runners')\n"
+                "socket.getfqdn = looked_up\n"
+                f"runpy.run_path({str(ROOT / 'tests' / 'fake_opencode.py')!r}, run_name='__main__')\n")
+        where, env = self.models._opencode_env()
+        began = time.monotonic()
+        doc, why = self.models.model_list(env, where, timeout=10, cmd=[sys.executable, "-c", hang])
+        self.assertEqual(why, "")
+        self.assertIn("acme/coder-flash", {f"{e['providerID']}/{e['id']}" for e in doc["data"]})
+        self.assertLess(time.monotonic() - began, 10)
+
+    def test_an_opencode_that_fails_before_it_listens_says_its_error_even_if_its_exit_lags(self):
+        # #1370's CI, 2026-11-25: under load the exit trailed stdout's close, and wb called an
+        # immediate failure "took over 30 s"
+        lag = ("import os, sys, time\n"
+               "print('Error: Unable to connect.', file=sys.stderr, flush=True)\n"
+               "os.close(1)\n"
+               "time.sleep(1)\n"
+               "sys.exit(1)\n")
+        where, env = self.models._opencode_env()
+        doc, why = self.models.model_list(env, where, timeout=10, cmd=[sys.executable, "-c", lag])
+        self.assertIsNone(doc)
+        self.assertEqual(why, "Error: Unable to connect.")
 
     def test_a_failed_catalog_read_leaves_gpu_starts_alone(self):
         os.environ["FAKE_CATALOG_FAIL"] = "1"
@@ -33887,8 +37926,8 @@ class ApiDiscovery(Base):
         doc["roles"]["trivial"]["api"] = "acme/coder-flash"
         routes.write(doc)
         self.assertEqual([x for x in cli.api_key_lines({}) if "no API key for" in x],
-                         ["--  no API key for acme, which trivial uses: /connect in OpenCode adds it "
-                          "(required: those tasks can't start without it)"])
+                         ["--  no API key for acme, which trivial uses: `opencode auth login acme` in a "
+                          "terminal adds it (required: those tasks can't start without it)"])
 
     def test_a_lan_server_not_opted_in_gets_its_local_true_hint_from_setup_and_route_never_connect(self):
         # #1109: wb setup said nothing of it, and wb route told the user to /connect a key, twice,
@@ -33906,7 +37945,7 @@ class ApiDiscovery(Base):
             cli.main(["route", "trivial", "lan/coder", "--day-usd", "1"])
         self.assertEqual((code.exception.code, err.getvalue()), (3, f"wb: lan/coder can't be a role's model: {hint}\n"))
 
-    def test_a_hosted_provider_added_by_hand_keeps_connect_and_a_tailnet_box_gets_the_hint(self):
+    def test_a_hosted_provider_added_by_hand_keeps_the_key_remedy_and_a_tailnet_box_gets_the_hint(self):
         # #1109's review (2026-11-23): the hint replaced /connect for any host off this machine,
         # so a cloud provider configured by hand (api.together.xyz) lost the key it needed, and
         # following the hint would make a cloud host count as a local model
@@ -33924,7 +37963,7 @@ class ApiDiscovery(Base):
         with self.assertRaises(SystemExit) as code, redirect_stderr(err):
             cli.main(["route", "trivial", "together/qwen-coder", "--day-usd", "1"])
         self.assertEqual(code.exception.code, 3)
-        self.assertIn("/connect", err.getvalue())
+        self.assertIn("`opencode auth login together`", err.getvalue())   # a hosted one's fix (#1189)
         self.assertNotIn("local", err.getvalue())
         err = io.StringIO()
         with self.assertRaises(SystemExit) as code, redirect_stderr(err):
@@ -34004,7 +38043,7 @@ class ApiDiscovery(Base):
             self.assertEqual((found["mix/zero"].key, found["mix/paid"].key), ("none", ""))
             self.assertTrue(self.models.status(found["mix/zero"])["available"])
             self.assertEqual(self.models.status(found["mix/paid"])["why"],
-                             "no key for mix: run /connect in OpenCode and add it")
+                             "no key for mix: run `opencode auth login mix` in a terminal and add it")
             self.models._AUTH_FRESH.clear()                     # the fresh check, from either one
             self.models.status(self.models.hosted()["mix/zero"])
             self.assertEqual(self.models.hosted()["mix/paid"].key, "")
@@ -34468,10 +38507,15 @@ class Routes(Base):
         runner.models.hosted(fresh=True)
         code, _, err = self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
         self.assertEqual(code, 3)
-        self.assertIn("deepseek/deepseek-flash can't be a role's model: no key for deepseek: run /connect in "
-                      "OpenCode and add it", err)
-        for mid, held in (("oauthco/chat-1", "an OAuth login"), ("xenv/grok-9", "from the environment, XENV_API_KEY"),
-                          ("opencode/big-pickle-free", "none: a free model takes no key")):
+        self.assertIn("deepseek/deepseek-flash can't be a role's model: no key for deepseek: run `opencode auth "
+                      "login deepseek` in a terminal and add it", err)
+        # a keyless free model of another provider than OpenCode Zen's has no key a task could send
+        # (#1193 lifted the refusal for Zen's alone: Routes.test_opencode_zens_free_model_…)
+        self.catalog([*ROUTES_CATALOG, api_entry("freeco", "gratis-1", cost=[{"input": 0, "output": 0}])],
+                     [r for r in ROUTES_AUTH if r["id"] != "deepseek"])
+        runner.models.hosted(fresh=True)
+        for mid, held in (("oauthco/chat-1", "an OAuth login"), ("xenv/grok-9", "$XENV_API_KEY isn't set where wb start ran"),
+                          ("freeco/gratis-1", "none: a free model takes no key")):
             with self.subTest(mid=mid):
                 code, _, err = self.route("trivial", mid, "--day-usd", "5")
                 self.assertEqual(code, 3)
@@ -34489,6 +38533,42 @@ class Routes(Base):
         self.assertEqual(self.route("trivial", "deepseek/deepseek-flash")[1], f"changed: {DEEPSEEK_LINE}\n")
         self.assertEqual(routes.read()["day_usd"], 5)
         self.assertEqual(self.route("cap", "7.5")[1], "changed: day cap $5 → $7.50/day\n")
+
+    def test_opencode_zens_free_model_takes_a_role_with_no_key_and_no_cap_and_the_line_says_it_may_train(self):
+        # #1193: a user with no GPU and no key could not run even wb try, as _runs_held refused
+        # OpenCode Zen's keyless free models ("none: a free model takes no key"); OpenCode serves
+        # them with its own "public" key, so the role takes one, asks no day cap (the guard keeps
+        # none for a free model), and the dialog's line says the provider may train on the code
+        from workbench import privacy
+        free = "opencode/big-pickle-free"
+        self.assertEqual(runner.models.lookup(free).key, "none")          # no key stored for Zen
+        os.environ["CLAUDECODE"] = "1"
+        asked = self.dry("trivial", free)
+        self.assertTrue(asked["gate"])                                     # the user's yes, as any API role
+        self.assertEqual(asked["change"], f"trivial: GPU → API {free} · your code goes to opencode · "
+                                          f"{privacy.FREE_LINE} · thinking off")
+        self.approve(asked["approval"])
+        self.assertEqual(self.route("trivial", free)[0], 0)
+        doc = self.doc()
+        self.assertEqual((doc["roles"]["trivial"]["api"], doc["roles"]["trivial"]["via"], doc["day_usd"]),
+                         (free, "api", None))
+        os.environ.pop("CLAUDECODE")
+        # a priced model later takes the cap then (the suggested one, #1322), the free one beside it or not
+        self.assertIn(f"cap {routes.money(routes.DAY_USD_SUGGEST)}/day",
+                      self.dry("significant", "deepseek/deepseek-flash")["change"])
+        # several roles in one question: the free mark once, for the free role, and no cap
+        self.route("trivial", "gpu")
+        pairs = self.dry("trivial", free, "writing", free)["change"]
+        self.assertEqual(pairs.count(privacy.FREE_LINE), 1)
+        self.assertIn(f"{privacy.FREE_LINE} (trivial, writing)", pairs)
+        self.assertNotIn("cap", pairs)
+        self.assertIn(f"cap {routes.money(routes.DAY_USD_SUGGEST)}/day",
+                      self.dry("trivial", free, "significant", "deepseek/deepseek-flash")["change"])
+        # the busy opt-in with only free API models: no cap either, the free mark said
+        self.route("trivial", "--api", free)
+        busy = self.dry("busy", "api")["change"]
+        self.assertIn(f"{privacy.FREE_LINE} (trivial)", busy)
+        self.assertNotIn("cap", busy)
 
     def test_with_api_runs_off_an_api_start_is_refused_before_any_dialog_and_a_gpu_model_starts_as_before(self):
         # 2026-11-23 review: the dialog asked the user to send their code to Acme for a start
@@ -34586,6 +38666,31 @@ class Routes(Base):
         self.assertFalse(self.ok.exists())
         self.assertEqual(store.Task("t-api").spec["said"], "asked for, approved in the dialog")
 
+    def test_the_start_dry_run_gives_no_dialog_for_a_taken_name_a_missing_spec_or_a_repo_with_no_claude_md(self):
+        # #1395 (2026-11-25): the dry run behind the dialog gated each of these, wb start then
+        # refused it, and the corrected retry asked the user again
+        store.write_json(self.path, {"v": 1, "day_usd": 5, "roles": {}})
+        os.environ["CLAUDECODE"] = "1"
+        m = runner.models.resolve("acme/coder-flash")
+        store.Task("t-old").dir.mkdir(parents=True)
+        store.write_json(store.Task("t-old").dir / "task.json", {"repo": str(self.repo)})
+        bare = Path(self.tmp.name) / "bare"
+        subprocess.run(["git", "init", "-q", str(bare)], check=True)
+        subprocess.run(["git", "-C", str(bare), "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+        spec, missing = str(self.spec), str(Path(self.tmp.name) / "nope.md")
+        for name, spec_at, repo, says in (
+                ("t-old", spec, self.repo, "task 't-old' exists"),
+                ("BAD_NAME", spec, self.repo, "a task name is lowercase letters"),
+                ("t-nospec", missing, self.repo, "nope.md"),
+                ("t-bare", spec, bare, "has no CLAUDE.md")):
+            argv = [name, "--spec", spec_at, "--repo", str(repo), "--model", m.id]
+            code, out, err = self.route("--dry-run", "--json", "--start", *argv)
+            self.assertEqual((code, out), (1, ""), name)
+            self.assertIn(says, err, name)
+            self.assertFalse(self.ok.exists())
+        self.assertTrue(self.dry("--start", "t-new", "--spec", spec, "--repo", str(self.repo),
+                                 "--model", m.id)["gate"])
+
     def test_wb_try_on_an_api_model_is_refused_plainly_before_any_sample_is_made(self):
         # 2026-11-23 review: it reached start_gate as try-<n>, a name no dialog could show, and
         # the refusal pointed at a dialog that never came
@@ -34645,6 +38750,82 @@ class Routes(Base):
                 self.assertFalse(self.ok.exists())
                 self.assertEqual(self.path.read_text(), was)
         self.assertFalse(self.dry("significant", "--thinking", "on")["gate"])   # thinking on the GPU: no yes
+
+    def test_a_roles_thinking_review_is_off_by_default_and_goes_on_on_api_only_on_the_dialogs_yes(self):
+        # #1059 (2026-11-25): the self-review thinking is one more paid round on API, so it takes
+        # the user's yes as thinking does; every view says "thinking: review only"
+        self.assertEqual(self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)
+        self.assertNotIn("thinking_review", self.doc()["roles"]["trivial"])        # off by default
+        os.environ["CLAUDECODE"] = "1"
+        asked = self.dry("trivial", "--thinking-review", "on")
+        self.assertEqual((asked["change"], asked["gate"]), (
+            "trivial: self-review thinking off → on (thinking: review only: the agent reviews its own change in "
+            "one more round before Claude)", True))
+        self.assertEqual(asked["approval"]["argv"], ["route", "trivial", "--thinking-review", "on"])
+        self.assertEqual(self.route("trivial", "--thinking-review", "on")[0], 3)    # no yes: unchanged
+        self.assertNotIn("thinking_review", self.doc()["roles"]["trivial"])
+        self.approve(asked["approval"])
+        self.assertEqual(self.route("trivial", "--thinking-review", "on")[0], 0)
+        self.assertFalse(self.dry("significant", "--thinking-review", "on")["gate"])  # a GPU role with no API model
+        os.environ.pop("CLAUDECODE")
+        self.assertEqual(self.doc()["roles"]["trivial"]["thinking_review"], "on")
+        self.assertIn("trivial      API deepseek/deepseek-flash (DeepSeek) · thinking: review only · ", self.route()[1])
+        self.assertEqual(routes.summary(routes.read()), "significant GPU (the router picks); trivial API "
+                         "deepseek/deepseek-flash, thinking: review only; writing GPU (the router picks)")
+        # with the role's thinking on every round thinks: said as thinking on, as before
+        self.assertEqual(routes.thinking_said({**routes.read()["roles"]["trivial"], "thinking": "on"}), "thinking on")
+        from workbench import settings  # the web app's thinking row says the coding rounds' alone
+        self.assertEqual(settings._think_stops(routes.read()["roles"]["trivial"])[0], settings.THINK[0])
+        self.assertEqual(self.route("trivial", "--thinking-review", "off")[0], 0)
+        self.assertNotIn("thinking_review", self.doc()["roles"]["trivial"])
+        self.path.write_text(json.dumps({"v": 1, "roles": {"trivial": {"thinking_review": "yes"}}}))
+        with self.assertRaisesRegex(routes.RoutesError, "trivial's thinking_review is 'yes', not off or on"):
+            routes.read()
+
+    def test_wb_settings_set_dry_runs_each_route_row_as_that_rows_own_wb_route_dry_run(self):
+        # #1336 (#1296's G3): Claude's wb settings set on a row wb route gates reaches the mod's
+        # dialog, which shows what `wb settings set … --dry-run --json` prints. It must be that
+        # row's wb route dry run word for word, or the user approves a line the change isn't; only
+        # a role's selector was tested (#1287)
+        from workbench import settings
+
+        def settings_set(*argv):
+            out, err, code = io.StringIO(), io.StringIO(), 0
+            with redirect_stdout(out), redirect_stderr(err):
+                try:
+                    cli.main(["settings", "set", *argv])
+                except SystemExit as e:
+                    code = e.code
+            return code, out.getvalue(), err.getvalue()
+
+        self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        runner.models.hosted(fresh=True)
+        settings.drop()
+        self.addCleanup(settings.drop)
+        os.environ["CLAUDECODE"] = "1"
+        for key, value, gate in (("role-trivial", "gpu", True), ("cap", "9", True), ("think-trivial", "on", True),
+                                 ("api-writing", "anthropic/claude-haiku-5-5", True),
+                                 ("gpu-significant", "auto", False)):
+            with self.subTest(key=key):
+                code, out, err = settings_set("--dry-run", "--json", key, value)
+                argv = settings._argv(settings._row(key), value)
+                self.assertEqual((code, argv[0]), (0, "route"), err)
+                self.assertEqual(json.loads(out), self.dry(*argv[1:]))
+                self.assertEqual(json.loads(out)["gate"], gate)
+        self.assertFalse(self.ok.exists())
+        self.assertEqual(self.doc()["day_usd"], 5)                # a dry run writes nothing
+        # a change wb route refuses is refused by the dry run too (exit 3, wb's line): no dialog
+        code, out, err = settings_set("--dry-run", "--json", "api-writing", "nosuch/a-model")
+        self.assertEqual((code, out), (3, ""))
+        self.assertIn(cli.ROUTE_CATALOG, err)
+        # the dialog's Allow: the dry run's approval is the one the real call takes, once
+        q = json.loads(settings_set("--dry-run", "--json", "cap", "9")[1])
+        self.assertEqual(settings_set("cap", "9")[0], 3)          # no yes yet: not changed
+        self.approve(q["approval"])
+        code, out, err = settings_set("cap", "9")
+        self.assertEqual((code, out), (0, f"changed: {q['change']}\n"), err)
+        self.assertEqual(self.doc()["day_usd"], 9)
+        self.assertFalse(self.ok.exists())
 
     def test_thinking_on_a_gpu_role_that_runs_on_its_api_model_under_agents_api_or_busy_needs_the_dialog(self):
         # #1149 (2026-11-24): the gate read the role's own via, so with Agents on API (or the busy
@@ -34808,38 +38989,123 @@ class Routes(Base):
             cli.main(["models", "--api", "haiku"])
         self.assertIn("anthropic/claude-haiku-5-5", out.getvalue())
 
+    def test_a_key_stored_after_the_catalog_read_an_oauth_or_env_one_routes_on_the_first_retry(self):
+        # #1388, 2026-11-25: only an empty cached key was asked again, so after the /connect wb
+        # advised, wb route kept saying "OAuth" or "from the environment" for HOSTED_TTL
+        runner.models.hosted(fresh=True)
+        # an exported key that isn't set here says so (#1189), an OAuth login to /connect a key
+        for mid, said in (("xenv/grok-9", "$XENV_API_KEY isn't set where wb start ran: export it, or store "
+                           "the key with `opencode auth login xenv`"), ("oauthco/chat-1", "store an API key with /connect")):
+            code, _, err = self.route("trivial", mid, "--day-usd", "1", "--dry-run")
+            self.assertEqual(code, 3)
+            self.assertIn(said, err)
+        self.catalog(ROUTES_CATALOG, [key_row(r["id"], r["name"], STORED) if r["id"] in ("xenv", "oauthco")
+                                      else r for r in ROUTES_AUTH])  # /connect: no stamp changes
+        runner.models._AUTH_FRESH.clear()                           # a retry past AUTH_FRESH_SECS
+        for mid in ("xenv/grok-9", "oauthco/chat-1"):
+            code, _, err = self.route("trivial", mid, "--day-usd", "1", "--dry-run")
+            self.assertEqual(code, 0, err)
+        provs = json.loads(self.route("--json")[1])["providers"]
+        self.assertEqual((provs["xenv"]["key"], provs["oauthco"]["key"]), ("stored", "stored"))
+
     def test_a_stored_key_on_a_package_the_keyhole_cant_speak_is_refused_before_the_dialog(self):
         # #1066: only keyhole.start checked the package, so a Gemini model was listed, offered,
-        # routed with the user's yes and started, then failed every time
-        gemini = {**api_entry("google", "gemini-2.5-flash"), "package": "@opencode/ai/providers/google"}
-        self.catalog([*ROUTES_CATALOG, gemini], [*ROUTES_AUTH, key_row("google", "Google", STORED)])
-        m = runner.models.hosted(fresh=True)["google/gemini-2.5-flash"]
+        # routed with the user's yes and started, then failed every time (Gemini runs since
+        # #1192: Cohere's native API is still one the keyhole doesn't speak)
+        cohere = {**api_entry("cohere", "command-x"), "package": "@opencode/ai/providers/cohere"}
+        self.catalog([*ROUTES_CATALOG, cohere], [*ROUTES_AUTH, key_row("cohere", "Cohere", STORED)])
+        m = runner.models.hosted(fresh=True)["cohere/command-x"]
         self.assertEqual(m.key, "stored")
         st = runner.models.status(m)
         self.assertEqual((st["available"], st["why"]), (False, (
-            "can't run: the keyhole doesn't speak Google's API (@opencode/ai/providers/google), so wb "
+            "can't run: the keyhole doesn't speak Cohere's API (@opencode/ai/providers/cohere), so wb "
             "can't hold its key outside the lane: a model of another provider can run")))
         self.assertEqual(runner.models.remedy(m, st), "")          # not "/connect": it can't help
-        code, _, err = self.route("trivial", "google/gemini-2.5-flash", "--day-usd", "1")
+        code, _, err = self.route("trivial", "cohere/command-x", "--day-usd", "1")
         self.assertEqual(code, 3)
-        self.assertIn("the keyhole doesn't speak Google's API", err)
+        self.assertIn("the keyhole doesn't speak Cohere's API", err)
         self.assertFalse(self.path.exists())
         out = io.StringIO()
         with redirect_stdout(out):
             cli.main(["models", "--json"])
         api = [x["id"] for x in json.loads(out.getvalue())["api"]]
         self.assertIn("deepseek/deepseek-flash", api)
-        self.assertNotIn("google/gemini-2.5-flash", api)
+        self.assertNotIn("cohere/command-x", api)
         lines = cli.api_key_lines({"deepseek": {"name": "DeepSeek", "key": "stored"},
-                                   "google": {"name": "Google", "key": "stored"}})
+                                   "cohere": {"name": "Cohere", "key": "stored"}})
         self.assertEqual(lines, ["ok  API keys: deepseek (stored via /connect); no role uses one yet",
-                                 "--  google (@opencode/ai/providers/google): the keyhole doesn't speak "
+                                 "--  cohere (@opencode/ai/providers/cohere): the keyhole doesn't speak "
                                  "its API, so wb can't run its models; another provider's key works"])
-        # and the Settings tab's Connected line: not "Google (key stored)"
+        # and the Settings tab's Connected line: not "Cohere (key stored)"
         provs = json.loads(self.route("--json")[1])["providers"]
-        self.assertEqual(provs["google"], {"name": "Google", "key": "none", "why": st["why"]})
+        self.assertEqual(provs["cohere"], {"name": "Cohere", "key": "none", "why": st["why"]})
         self.assertEqual(provs["deepseek"]["key"], "stored")
         self.assertTrue(runner.models.status(runner.models.hosted()["deepseek/deepseek-flash"])["available"])
+
+    def test_each_model_runs_through_its_own_package_and_base_and_gemini_and_azure_keys_run(self):
+        # #1192: one provider's models post through several packages (Google's Gemini and
+        # Interactions; Azure's Responses, Chat and Claude on Foundry), and the first model seen
+        # set the package and base for all; Azure's base is built from its resourceName
+        g = "@opencode/ai/providers/google"
+        gemini = {**api_entry("google", "gemini-x-flash"), "package": g,
+                  "settings": {"baseURL": "https://generativelanguage.googleapis.com/v1beta"}}
+        inter = {**api_entry("google", "deep-x"), "package": g + "/interactions",
+                 "settings": {"baseURL": "https://generativelanguage.googleapis.com/v1beta"}}
+        gpt = {**api_entry("azure", "gpt-x"), "package": "@opencode/ai/providers/azure/responses",
+               "settings": {"resourceName": "myres", "apiKey": LISTED_KEY}}
+        claude = {**api_entry("azure", "claude-x"), "package": "@opencode/ai/providers/anthropic-compatible",
+                  "settings": {"resourceName": "myres", "provider": "azure",
+                               "baseURL": "https://myres.services.ai.azure.com/anthropic/v1"}}
+        self.catalog([*ROUTES_CATALOG, inter, gemini, claude, gpt],
+                     [*ROUTES_AUTH, key_row("google", "Google", STORED), key_row("azure", "Azure", STORED)])
+        hosted = runner.models.hosted(fresh=True)
+        got = {mid: (hosted[mid].package, hosted[mid].base_url) for mid in
+               ("google/gemini-x-flash", "google/deep-x", "azure/gpt-x", "azure/claude-x")}
+        self.assertEqual(got, {
+            "google/gemini-x-flash": (g, "https://generativelanguage.googleapis.com/v1beta"),
+            "google/deep-x": (g + "/interactions", "https://generativelanguage.googleapis.com/v1beta"),
+            "azure/gpt-x": ("@opencode/ai/providers/azure/responses", "https://myres.openai.azure.com/openai"),
+            "azure/claude-x": ("@opencode/ai/providers/anthropic-compatible",
+                               "https://myres.services.ai.azure.com/anthropic/v1")})
+        for mid in ("google/gemini-x-flash", "azure/gpt-x", "azure/claude-x"):
+            self.assertTrue(runner.models.status(hosted[mid])["available"], mid)
+        self.assertIn("the keyhole doesn't speak Google's API", runner.models.status(hosted["google/deep-x"])["why"])
+        self.assertEqual(runner.models.unspoken_providers(["google", "azure"]), {})   # each runs a model
+
+    def test_a_providers_models_each_keep_their_own_package_and_base_not_its_first_ones(self):
+        # #1387 (2026-11-25): OpenCode Zen lists openai-compatible, anthropic and google models at
+        # different bases; every one took the first entry's, so its Claude models posted /messages
+        # to …/openai/v1 with a bearer key (a 404 every request), and its Gemini ones went as
+        # openai-compatible too
+        from workbench import keyhole
+        base = "https://opencode.test/zen"
+        zen = [api_entry("opencode", "big-pickle", settings={"baseURL": f"{base}/openai/v1"},
+                         package="@opencode/ai/providers/openai-compatible"),
+               api_entry("opencode", "claude-x-5", settings={"baseURL": f"{base}/anthropic/v1"},
+                         package="@opencode/ai/providers/anthropic"),
+               api_entry("opencode", "gemini-x-4", settings={"baseURL": f"{base}/google/v1beta"},
+                         package="@opencode/ai/providers/google")]
+        rest = [e for e in ROUTES_CATALOG if e["providerID"] != "opencode"]
+        self.catalog([*rest, *zen], [*ROUTES_AUTH, key_row("opencode", "OpenCode Zen", STORED)])
+        hosted = runner.models.hosted(fresh=True)
+        pickle, claude, gemini = (hosted[f"opencode/{n}"] for n in ("big-pickle", "claude-x-5", "gemini-x-4"))
+        self.assertEqual((pickle.package, pickle.base_url),
+                         ("@opencode/ai/providers/openai-compatible", f"{base}/openai/v1"))
+        self.assertEqual((claude.package, claude.base_url),
+                         ("@opencode/ai/providers/anthropic", f"{base}/anthropic/v1"))
+        self.assertEqual(keyhole.protocol_of(claude.package), "anthropic")
+        self.assertEqual(runner.models.keyhole_refusal(claude), "")
+        # its Gemini ones go as Google's API, which the keyhole speaks since #1192, never as the
+        # first entry's openai-compatible
+        self.assertEqual((gemini.package, gemini.base_url), ("@opencode/ai/providers/google", f"{base}/google/v1beta"))
+        self.assertEqual(keyhole.protocol_of(gemini.package), "google")
+        self.assertEqual(runner.models.keyhole_refusal(gemini), "")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.main(["models", "--json"])
+        api = [x["id"] for x in json.loads(out.getvalue())["api"]]
+        self.assertIn("opencode/claude-x-5", api)
+        self.assertIn("opencode/gemini-x-4", api)
 
     def test_a_role_out_of_credit_runs_again_once_the_recheck_time_has_passed(self):
         # #1068: no_credit had no `until` and only a 2xx cleared it, which only a running task
@@ -35001,6 +39267,82 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         p.start()
         self.addCleanup(p.stop)
         return m
+
+    def test_a_task_on_opencode_zens_free_model_runs_through_the_keyhole_on_public_with_no_day_cap(self):
+        # #1193: with no GPU and no key the first run tries wb on Zen's free models; the task goes
+        # through the keyhole (its hold, health record, meter, pin), which sends Zen's own
+        # "public" with no `auth export`, and starts with no day cap, a free model keeping none
+        from workbench import keyhole, meter
+        m = self.model("opencode", "big-pickle-free", "/inference/openai/v1",
+                       "@opencode/ai/providers/openai-compatible")
+        m.kind, m.key, m.free, m.remote = "api", "none", True, True
+        m.config = {"limit": {"context": 200000, "output": 8192}, "cost": [{"input": 0, "output": 0}]}
+        for name in ("resolve", "lookup"):  # discovery never lists a model on this machine's port
+            real = getattr(self.models, name)
+            p = mock.patch.object(self.models, name, lambda w, *a, _real=real, **k: m if w == m.id else _real(w, *a, **k))
+            p.start()
+            self.addCleanup(p.stop)
+        self.assertTrue(runner.needs_keyhole(m))
+        # the trivial role on it, as the free try routes it: no day cap
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "roles": {"trivial": {"via": "api", "api": m.id}}})
+        self.assertIsNone(meter.refusal(m))
+        os.environ["FAKE_SCENARIO"] = "http"
+        with mock.patch.object(keyhole, "_opencode", side_effect=AssertionError("auth export")), \
+                mock.patch.object(cli, "spawn_runner", lambda task: 0):
+            run_wb("start", "t-zen", "--spec", str(self.spec), "--repo", str(self.repo), "--role", "trivial",
+                   "--test", TEST_CMD)
+            log = self.drive_here("t-zen")
+        task = store.Task("t-zen")
+        self.assertEqual((task.spec["via"], task.spec["role"], task.spec["model"]), ("api", "trivial", m.id))
+        self.assertEqual(task.status["phase"], "review", (task.status, log))
+        self.assertIn("keyhole: opencode on 127.0.0.1:", log)
+        [req] = self.up.seen
+        self.assertEqual((req["path"], req["headers"]["Authorization"]),
+                         ("/inference/openai/v1/chat/completions", "Bearer public"))
+        self.assertEqual(req["body"]["model"], "big-pickle-free")
+
+    def test_thinking_review_runs_the_self_review_alone_on_the_thinking_variant_in_the_same_session(self):
+        # #1059 (2026-11-25): the role's `thinking_review` on runs the self-review round an API
+        # task skips (#1017) on the role's thinking variant (`#high`, _thinking_on's pick), and
+        # every coding round on the off one (`#none`), the variant changed in place: DeepInfra's
+        # DeepSeek took that in one tool-using session (the paid check, runner.round_model)
+        os.environ["FAKE_RUNS"] = runs = str(Path(self.tmp.name) / "runs.jsonl")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {
+            "trivial": {"via": "api", "api": FLASH, "thinking_review": "on"}}})
+        with mock.patch.object(cli, "spawn_runner", lambda task: 0):
+            out = run_wb("start", "api-rev", "--spec", str(self.spec), "--repo", str(self.repo),
+                         "--role", "trivial", "--test", TEST_CMD, "--no-base-check")
+        self.assertIn(" · thinking: review only (effort high)", out)               # the start line
+        sp = store.Task("api-rev").spec
+        self.assertEqual((sp["opencode_model"], sp["review_model"], sp["thinking_review"]),
+                         (f"{FLASH}#none", f"{FLASH}#high", "on"))
+        self.drive_here("api-rev")
+        st = store.Task("api-rev").status
+        self.assertEqual((st["phase"], st["round"], st["round_for"]), ("review", 2, "self_review"))
+        rows = [json.loads(x) for x in Path(runs).read_text().splitlines()]
+        self.assertEqual([(r["model"], r["session"]) for r in rows],
+                         [(f"{FLASH}#none", False), (f"{FLASH}#high", True)])          # in the same session
+        self.assertTrue(rows[1]["prompt"].startswith(runner.SELF_REVIEW[:40]), rows[1]["prompt"][:200])
+        with mock.patch.object(cli, "spawn_runner", lambda task: 0):             # Claude's feedback: coding
+            run_wb("feedback", "api-rev", "--text", "Also keep answer.txt as it is.")
+        self.drive_here("api-rev")
+        rows = [json.loads(x) for x in Path(runs).read_text().splitlines()]
+        self.assertEqual([r["model"] for r in rows[2:]], [f"{FLASH}#none", f"{FLASH}#high"])
+        from workbench import results  # the evidence the issue asks before it is ever recommended
+        self.assertEqual(results.record(store.Task("api-rev"), "discarded")["thinking_review"], "on")
+        # off (the default): no review variant, and the self-review stays off on API (#1017)
+        m = self.models.hosted()[FLASH]
+        self.assertEqual(runner.with_thinking(m, {}), {"opencode_model": f"{FLASH}#none", "thinking": "off",
+                                                       "thinking_shown": "thinking off"})
+        knobs = lambda spec: runner.fixed_knobs(types.SimpleNamespace(spec=spec), m)  # noqa: E731
+        self.assertEqual((knobs({}), knobs({"review_model": f"{FLASH}#high"}),
+                          knobs({"review_model": f"{FLASH}#high", "self_review": False})),
+                         ({"self_review": 0}, {"self_review": 1}, {"self_review": 0}))  # Claude's no wins
+        # thinking on thinks in every round already: no review variant, no self-review of its own
+        on = runner.with_thinking(m, {"thinking": "on", "thinking_review": "on"})
+        self.assertEqual((on["opencode_model"], on["thinking_shown"]), (f"{FLASH}#high", "thinking on (effort high)"))
+        self.assertNotIn("review_model", on)
 
     def test_an_api_task_never_says_it_waits_for_the_gpu_while_queued(self):
         # #1112: the base check wrote "waiting for the GPU" for an API task, wb watch printed
@@ -35437,6 +39779,33 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual([(r["task"], r["kind"], r.get("cause"))
                           for r in store.read_jsonl(store.home() / "notify.jsonl")[0]],
                          [("t-new", "stuck", "provider")])
+
+    def test_a_gemini_task_runs_through_the_keyhole_and_books_its_usage(self):
+        # #1192: a Gemini key stored with /connect runs a task, the model in the path, the key
+        # in x-goog-api-key, the usage read from usageMetadata at the stream's end
+        from workbench import meter
+        m = self.model("google", "gemini-x-flash", "/v1beta", "@opencode/ai/providers/google")
+        m.kind, m.key, m.remote = "api", "stored", True
+        m.config = {"limit": {"context": 200000, "output": 8192}, "cost": [{"input": 1.0, "output": 2.0}]}
+        real = self.models.resolve
+        p = mock.patch.object(self.models, "resolve", lambda w: m if w == m.id else real(w))
+        p.start()
+        self.addCleanup(p.stop)
+        os.environ["FAKE_AUTH_EXPORT"] = json.dumps([
+            {"id": "cred_g", "integrationID": "google", "label": "main", "active": True,
+             "value": {"type": "key", "key": self.CANARY}}])
+        self.start_api("api-gemini", "http", model=m.id, spawn=False)
+        self.drive_here("api-gemini")
+        task = store.Task("api-gemini")
+        self.assertEqual(task.status["phase"], "review", task.status)
+        [req] = self.up.seen
+        self.assertEqual(req["path"], "/v1beta/models/gemini-x-flash:streamGenerateContent?alt=sse")
+        self.assertEqual({k.lower(): v for k, v in req["headers"].items()}["x-goog-api-key"], self.CANARY)
+        self.assertNotIn("model", req["body"])
+        rows, _ = store.read_jsonl(meter.ledger_path())
+        [row] = [r for r in rows if r.get("task") == "api-gemini" and r.get("source") == "keyhole"]
+        self.assertEqual(row["tok"], {"in": 5, "cache_read": 4, "cache_write": 0, "out": 3, "reasoning": 5})
+        self.assert_no_canary(self.all_files(task.dir), (Path(os.environ["WB_HOME"]) / "spend-api.jsonl").read_text())
 
     def held_outage(self, retry_after=None):
         """#1277's setup: an upstream answering 503 (or, with ``retry_after``, 429 with that
@@ -35958,7 +40327,7 @@ class ApiTasks(_ApiTask, _KeyholeTest):
                 self.assertFalse(results.step(task, landed=False)["stuck"])  # never the step's
                 if guard == "auth":
                     self.assertEqual(st["last"], f"deepinfra refused the API key (HTTP {code})")
-                    self.assertIn("/connect", note["text"])
+                    self.assertIn("`opencode auth login deepinfra` in a terminal", note["text"])
                     continue
                 self.assertEqual(st["last"], f"deepinfra refused the request (HTTP {code}): {message}")
                 self.assertNotIn("API key", note["text"])
@@ -35977,6 +40346,24 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         wait.on_error({"error": {"type": "provider.auth", "status": 400,
                                  "message": "API key not valid. Please pass a valid API key."}})
         self.assertEqual(wait.stop(time.time()), ("auth", "deepinfra refused the API key (HTTP 400)"))
+
+    def test_an_ollama_cloud_task_whose_login_is_refused_says_ollama_signin_not_connect(self):
+        # #1389, 2026-11-25: the 401 stop said "store ollama's API key again with /connect", which
+        # Ollama never reads: this machine's Ollama holds the ollama.com login
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"] = {"ollama": {"options": {"baseURL": "http://127.0.0.1:11434/v1"},
+                                      "models": {"gpt-oss:120b-cloud": {"limit": {"context": 131072}}}}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        mid = "ollama/gpt-oss:120b-cloud"
+        os.environ["WB_FAKE_API"] = f"{mid}=auth"
+        self.start_api("t-ocloud", "ok", model=mid, spawn=False)
+        self.drive_here("t-ocloud")
+        st = store.Task("t-ocloud").status
+        self.assertEqual((st["phase"], st["last"]), ("stuck", "ollama refused this machine's ollama.com login (HTTP 401)"))
+        note = [r for r in store.notices() if r.get("task") == "t-ocloud"][-1]
+        self.assertIn("sign this machine's Ollama in to ollama.com again (ollama signin); then wb feedback "
+                      't-ocloud --text "carry on" resumes it', note["text"])
+        self.assertNotIn("/connect", note["text"])
 
     def test_a_proxy_in_the_agents_env_doesnt_catch_the_keyhole(self):
         self.local_api_model()
@@ -36035,8 +40422,50 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertEqual(content["theme"], "x")                      # the rest of theirs stays
         self.assert_no_canary(json.dumps(content), json.dumps(layer))
 
-    def test_oauth_and_env_keys_fail_the_task_with_the_connect_remedy(self):
-        # the /connect half of Keyhole.test_oauth_and_env_keys_cant_run, through the runner
+    def test_a_key_exported_where_wb_start_ran_reaches_only_the_keyhole_never_the_agent(self):
+        # #1189: the key only in DEEPINFRA_API_KEY (the fake's `env` state: auth list names the
+        # variable, auth export holds none), exported where wb start runs. wb start's check takes
+        # it as runnable, the runner's keyhole reads it from its own environment and sends it
+        # upstream, and the agent's OpenCode, its layer, its catalog and runner.log never get it
+        m = self.local_api_model()
+        m.key = "env:DEEPINFRA_API_KEY"
+        os.environ["WB_FAKE_API"] = "deepinfra=env"
+        runs = Path(self.tmp.name) / "runs.jsonl"
+        os.environ["FAKE_RUNS"] = str(runs)
+        os.environ.pop("DEEPINFRA_API_KEY", None)
+        with self.assertRaises(SystemExit) as e, redirect_stderr(io.StringIO()) as err:
+            self.start_api("api-unset", "http", spawn=False)      # unset: refused at start, no task
+        self.assertEqual(e.exception.code, 3, err.getvalue())          # a model that can't run
+        self.assertIn("$DEEPINFRA_API_KEY isn't set where wb start ran: export it, or store the key with "
+                      "`opencode auth login deepinfra`", err.getvalue())
+        self.assertFalse(store.Task("api-unset").dir.exists())
+        os.environ["DEEPINFRA_API_KEY"] = self.CANARY
+        self.start_api("api-envkey", "http", spawn=False)
+        log = self.drive_here("api-envkey")
+        task = store.Task("api-envkey")
+        self.assertEqual(task.status["phase"], "review", task.status.get("last"))
+        self.assertEqual(len(self.up.seen), 1)                       # through the keyhole
+        self.assertEqual(self.up.seen[0]["headers"]["Authorization"], f"Bearer {self.CANARY}")
+        self.assertIn(f"keyhole: deepinfra on 127.0.0.1:", log)
+        self.assertIn(f"for {m.id} (key from $DEEPINFRA_API_KEY)", log)
+        [run] = [json.loads(x) for x in runs.read_text().splitlines()]
+        self.assertNotIn("DEEPINFRA_API_KEY", run["env_names"])      # SECRET_ENV dropped it
+        self.assertIn("PATH", run["env_names"])
+        self.assertNotIn("DEEPINFRA_API_KEY", runner.agent_env(task))
+        self.assert_no_canary(log, self.all_files(task.dir), json.dumps(task.status), json.dumps(run),
+                              self.all_files(store.home() / "rules" / task.name))
+        # passed through to agents by commands.json `env`: the runner refuses, naming the fix
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": ["DEEPINFRA_API_KEY"]}))
+        self.start_api("api-through", "http", "--force", spawn=False)
+        self.drive_here("api-through")
+        last = store.Task("api-through").status["last"]
+        self.assertIn("$DEEPINFRA_API_KEY is passed to agents (commands.json env): remove it there", last)
+        self.assertEqual(len(self.up.seen), 1)                       # nothing went upstream
+        self.assert_no_canary(last, self.all_files(store.Task("api-through").dir))
+
+    def test_an_oauth_login_and_an_unset_env_key_fail_the_task_with_the_login_remedy(self):
+        # the remedy half of Keyhole.test_oauth_and_env_keys_cant_run, through the runner: OpenCode's
+        # one terminal command, the provider's id filled in (#1189)
         os.environ["FAKE_AUTH_EXPORT"] = json.dumps([self.key_row("deepinfra", {
             "type": "oauth", "methodID": "m", "refresh": self.CANARY, "access": self.CANARY,
             "expires": 1})])
@@ -36045,7 +40474,8 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         task = store.Task("api-oauth")
         last = task.status["last"]
         self.assertIn("needs a key wb can hold outside the lane: deepinfra is signed in with OAuth", last)
-        self.assertIn("store an API key with /connect in OpenCode", last)
+        self.assertIn("store an API key with `opencode auth login deepinfra` in a terminal (or /connect in "
+                      "OpenCode)", last)
         self.assertEqual(task.status.get("failed_before"), "load")
         note = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
                 if r.get("task") == "api-oauth"][-1]
@@ -36054,14 +40484,17 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.assertIn("wb resume api-oauth", note["text"])
         self.assertNotIn("could not load", note["text"])
         self.assert_no_canary(self.all_files(task.dir), json.dumps(task.status))
-        # a key only in the environment (auth list names the variable; nothing to export)
+        # a key only in a variable auth list names (nothing to export), unset where the runner
+        # runs (#1189: a set one is read): said once, with its own fix
+        os.environ.pop("DEEPINFRA_API_KEY", None)
         os.environ["FAKE_AUTH_EXPORT"] = "[]"
         self.catalog(API_CATALOG, [key_row("deepinfra", "DeepInfra", {"type": "env", "name": "DEEPINFRA_API_KEY"})])
         self.start_api("api-env", "ok", "--force")
         wait_phase("api-env", {"failed"})
         last = store.Task("api-env").status["last"]
-        self.assertIn("deepinfra's key is only in the environment ($DEEPINFRA_API_KEY)", last)
-        self.assertIn("store an API key with /connect in OpenCode", last)
+        self.assertIn("needs a key wb can hold outside the lane: $DEEPINFRA_API_KEY isn't set where wb start "
+                      "ran: export it, or store the key with `opencode auth login deepinfra`", last)
+        self.assertNotIn("/connect", last)
 
     def test_the_keyholes_answers_set_the_providers_health(self):
         self.local_api_model()
@@ -36960,6 +41393,28 @@ class RateLimits(Base):
         self.assertEqual(wait.fatal, ("refused", "deepseek refused the request (HTTP 400): "
                                                  "max_tokens: billing tier allows at most 8192"))
 
+    def test_a_tpm_too_large_stop_tells_claude_the_providers_words(self):
+        # #1380 (2026-11-25): a 429 for one request over the TPM limit was held 10 minutes, revived
+        # once, and stopped as "rate-limited … (HTTP 429)" with advice to carry on later
+        said = ("Request too large for deepseek-flash on tokens per min (TPM): Limit 30000, "
+                "Requested 45210. The input or output tokens must be reduced.")
+        task = self.api_task("t-tpm", "api", "--silence-timeout", "30")
+        self.up.rate_until, self.up.code, self.up.after, self.up.body = float("inf"), 429, "1", said
+        self.keyhole(task, hold=60)
+        began = time.monotonic()
+        runner.drive(task)
+        self.assertLess(time.monotonic() - began, 30)               # never the hold or the revive
+        st = task.status
+        self.assertEqual((st["phase"], st["last"], st.get("infra")),
+                         ("stuck", f"deepseek refused the request (HTTP 429): {said}", "provider"))
+        self.assertEqual(len(self.up.seen), 1)
+        self.assertFalse(self.events(task, "load"))                 # never revived
+        n = self.notice(task)
+        self.assertEqual(n["cause"], "provider")
+        self.assertIn(said, n["text"])
+        self.assertIn("once what deepseek said is fixed", n["text"])
+        self.assertIsNone(self.models.api_health("deepseek"))      # no cooldown for its other tasks
+
     def test_a_certificate_that_doesnt_verify_stops_the_round_at_once_as_this_machines(self):
         # #1080 (2026-11-23): the keyhole's 502 was retried, read as the provider's outage for
         # RATE_WAIT_S (600 s), run again and stopped again, the notice blaming the provider
@@ -37040,7 +41495,9 @@ class RateLimits(Base):
 
     def test_the_upstream_body_of_a_429_or_402_never_reaches_the_task_files(self):
         task = self.api_task("t-leak", "api", "--silence-timeout", "30")
-        self.up.rate_until, self.up.after = time.monotonic() + 2, "1"
+        # 429s until the thread below turns them into 402s: a 2 s window ran out first on a slow
+        # macOS runner, a request went through and the task reached review (the 2.1 nightly, 2026-11-25)
+        self.up.rate_until, self.up.after = float("inf"), "1"
         self.up.body = f"Rate limited for key {self.CANARY}"
         self.keyhole(task, hold=0)
         os.environ["FAKE_RETRY_EVERY"] = "1"
@@ -38162,6 +42619,118 @@ class ApiSpend(Base):
             run_wb(*role)                                     # the cap it named: it starts
         spawned.assert_called_once()
         self.assertEqual(store.Task("t-big").spec["role"], "significant")
+
+    def eyes(self):
+        """SPEND_TIER's prices on a model whose catalog entry takes images (#1199's review)."""
+        eyes = "meterco/eyes-1"
+        entry = {**next(e for e in SPEND_CATALOG if e["id"] == SPEND_TIER.split("/")[1]), "id": "eyes-1",
+                 "capabilities": {"tools": True, "input": ["text", "image"]}}
+        Path(os.environ["WB_FAKE_CATALOG"]).write_text(json.dumps([*SPEND_CATALOG, entry]))
+        return eyes, runner.models.lookup(eyes)
+
+    def png(self, name, mib):
+        """A PNG's first bytes, ``mib`` MiB in all (sparse): wb's checks read its head and size."""
+        path = Path(self.tmp.name) / name
+        path.write_bytes(image_png(2, 2))
+        with path.open("r+b") as fh:
+            fh.truncate(int(mib * 2**20))
+        return path
+
+    def test_a_tasks_images_in_all_stay_under_what_opencode_keeps_in_a_request(self):
+        # #1199's review (2026-11-24): OpenCode 2.3.2 sends each image of the session as base64
+        # (4/3) in every request and, past 25 MiB of it, swaps the oldest for "[This image was
+        # removed…]" unsaid (boundImages): two 10 MiB PNGs that passed every check left one
+        eyes, m = self.eyes()
+        b64 = 4 * -(-cli.IMAGE_TOTAL // 3)
+        self.assertLess(b64, cli.OPENCODE_IMAGE_TARGET)                    # kept whole after a cut
+        self.assertLess(2 * b64, cli.OPENCODE_IMAGE_TRIGGER)              # and one re-read
+        self.assertLess(2 * b64, runner.keyhole.BODY_CAP)                 # under the keyhole's 413
+        three = [x for i in range(3) for x in ("--image", str(self.png(f"{i}.png", 3)))]
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err), mock.patch.object(cli, "API_RUNS", True),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("start", "t-many", "--spec", str(self.spec), "--repo", str(self.repo), "--model", eyes,
+                   "--no-base-check", *three)
+        self.assertEqual(e.exception.code, 1)
+        self.assertIn("9.0 MiB of images on this task, over 8 MiB in all (OpenCode drops the oldest", err.getvalue())
+        spawned.assert_not_called()
+        self.assertFalse(store.Task("t-many").dir.exists())
+        # a GPU task's OpenCode drops them too: the same refusal, the model never asked
+        err = io.StringIO()
+        with self.assertRaises(SystemExit), redirect_stderr(err):
+            cli._images_room([(self.png("g.png", 9), ".png")] * 3)
+        self.assertIn("27.0 MiB of images on this task, over 8 MiB in all", err.getvalue())
+        # wb feedback counts the task's own images: a fresh session would send them all
+        task = self.api_task("t-own", eyes)
+        runner.drive(task)
+        self.assertEqual(task.status["phase"], "review")
+        runner.images_dir(task).mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(self.png("own.png", 6), runner.images_dir(task) / "1-own.png")
+        task.set_status(images=[{"file": "1-own.png", "round": 1}])
+        rnd = task.status["round"]
+        err = io.StringIO()
+        with (self.assertRaises(SystemExit) as e, redirect_stderr(err),
+              mock.patch.object(cli, "spawn_runner") as spawned):
+            run_wb("feedback", "t-own", "--text", "See this.", "--image", str(self.png("more.png", 3)))
+        self.assertEqual(e.exception.code, 1)
+        self.assertIn("9.0 MiB of images on this task with its own, over 8 MiB", err.getvalue())
+        spawned.assert_not_called()
+        self.assertEqual(task.status["round"], rnd)
+        with mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb("feedback", "t-own", "--text", "See this.", "--image", str(self.png("less.png", 1)))
+        spawned.assert_called_once()
+
+    def test_an_image_counts_at_a_providers_figure_in_the_room_and_in_wb_starts_look_ahead(self):
+        # #1199's review (2026-11-24): the room read a 10 MiB image's base64 as 3.5M tokens, $10.49
+        # at $3/M, so past a $10 cap every request with it was refused, while wb start, counting
+        # no image, let the task start (#1118's failure again)
+        need = lambda text: float(re.search(r"a cap of at least \$([\d.]+) ", text)[1])  # noqa: E731
+        eyes, m = self.eyes()
+        uri = "data:image/png;base64," + "A" * (4 << 20)
+        body = {"max_tokens": 32768, "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "x" * 60_000}]
+             + [{"type": "image_url", "image_url": {"url": uri}}] * 2},
+            {"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                                                      "data": uri[22:]}}]},
+            {"role": "user", "parts": [{"inlineData": {"mimeType": "image/png", "data": uri[22:]}}]}]}
+        size = len(json.dumps(body))
+        self.assertEqual(self.meter.images_in(body), (4, 2 * len(uri) + 2 * (len(uri) - 22)))
+        self.assertLess(self.meter.body_tokens(body, size), 20_000 + 4 * self.meter.IMAGE_TOKENS)
+        self.assertGreater(size / 4, 4_000_000)                   # what the room counted before
+        # wb start, and the dialog's dry run before it, count each --image at that figure too
+        self.assertEqual(runner.first_tokens(prompt="spec", images=4),
+                         runner.first_tokens(prompt="spec") + 4 * self.meter.IMAGE_TOKENS)
+        four = [x for i in range(4) for x in ("--image", str(self.png(f"{i}.png", 1)))]
+        start = ("start", "t-eyes", "--spec", str(self.spec), "--repo", str(self.repo), "--model", eyes,
+                 "--no-base-check", *four)
+        for args in (("route", "--dry-run", "--json", "--start", *start[1:]), start):
+            self.cap(5)
+            self.spent(4.55)          # one request without its images fits: with four it doesn't
+            self.assertIsNone(self.meter.refusal(m, tokens=runner.first_tokens(prompt=self.spec.read_text())))
+            err = io.StringIO()
+            with (self.assertRaises(SystemExit) as e, redirect_stderr(err), mock.patch.object(cli, "API_RUNS", True),
+                  mock.patch.object(cli, "spawn_runner") as spawned):
+                run_wb(*args)
+            self.assertEqual(e.exception.code, 3, args[0])
+            spawned.assert_not_called()
+            self.assertFalse(store.Task("t-eyes").dir.exists())
+            self.meter.ledger_path().unlink()
+        self.spent(4.55)
+        self.cap(need(err.getvalue()))
+        with mock.patch.object(cli, "API_RUNS", True), mock.patch.object(cli, "spawn_runner") as spawned:
+            run_wb(*start)
+        spawned.assert_called_once()
+        task = store.Task("t-eyes")
+        self.assertEqual(len(task.status["images"]), 4)
+        # the room lets its first request through, four images and all, at the cap wb start named
+        self.assertGreaterEqual(self.meter.for_task(task, m).room(body, 65_000 + 4 * len(uri)), 0)
+        self.assertIsNone(task.status.get("api_stop"))
+        # a later round's look ahead counts the task's own images (a fresh session resends them)
+        task.set_status(images=[])
+        with_none = runner.first_tokens(task, "carry on", fresh=True)
+        task.set_status(images=[{"file": f"{i}.png", "round": 1} for i in range(4)])
+        self.assertEqual(runner.first_tokens(task, "carry on", fresh=True) - with_none,
+                         4 * self.meter.IMAGE_TOKENS)
 
     def test_a_large_next_spec_counts_in_wb_nexts_look_ahead_so_the_cap_it_names_lets_the_step_through(self):
         # #1173's review (2026-11-24): with a small next spec only the carried context tipped the
@@ -39594,6 +44163,37 @@ class Privacy(_KeyholeTest):
             json.dumps({"bos_token": "<s>", "mask_token": "[MASK]"}))
         self.start_api("t-cpr-ok")
 
+    def test_a_copied_config_file_with_only_settings_named_like_tokens_does_not_refuse_an_api_start(self):
+        # #1381 (2026-11-25): a single copied file was judged by the token-file matcher, whose bare
+        # keyword refused every API start for settings, while the same file in a copied directory
+        # went along
+        d = Path(self.tmp.name) / "copied"
+        d.mkdir()
+        def holds(name, text):
+            (d / name).write_text(text)
+            return cli.privacy.copy_holds_credential(d / name)
+        for name, text in ((".env", "TOKENIZERS_PARALLELISM=false\nDEBUG=1\n"),
+                           ("llm.json", json.dumps({"model": "local", "max_tokens": 4096})),
+                           ("app.env", "PASSWORD_MIN_LENGTH=8\nSESSION_TIMEOUT=30\n"),
+                           ("settings.ini", "[auth]\npassword_reset_ttl = 3600\n")):
+            self.assertFalse(holds(name, text), name)
+        for name, text in ((".env", "OPENAI_API_KEY=sk-abcdef1234567890\n"),
+                           ("db.env", "DB_PASSWORD=hunter2\n"),
+                           (".npmrc", "//registry.npmjs.org/:_authToken=npm_abcdefghijklmnop\n"),
+                           ("settings.xml", "<server><id>x</id><password>hunter2</password></server>\n"),
+                           ("config", 'BUNDLE_GEMS__EXAMPLE__COM: "user:pass"\n')):
+            self.assertTrue(holds(name, text), name)
+        # end to end (a .env is never copied: cli.SECRET_FILES)
+        (self.repo / ".gitignore").write_text("llm.json\napp.env\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
+        (self.repo / "llm.json").write_text(json.dumps({"model": "local", "max_tokens": 4096}))
+        (self.repo / "app.env").write_text("TOKENIZERS_PARALLELISM=false\nPASSWORD_MIN_LENGTH=8\n")
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"copy": ["llm.json", "app.env"]}}}))
+        self.role(via="api", api=FLASH)
+        self.start_api("t-cpenv")
+        self.assertEqual(store.Task("t-cpenv").spec["copy"], ["llm.json", "app.env"])
+
     def test_an_api_task_takes_a_standing_sibling_and_a_big_copied_directory_as_configured(self):
         # #1322; a copied directory's package trees aren't read for a credential
         # (privacy.COPY_SKIP_DIRS): their code is full of `token = …`, which would refuse every
@@ -39964,7 +44564,7 @@ class Privacy(_KeyholeTest):
         (home / ".m2/settings.xml").write_text("<settings><servers><server><id>r</id>"
                                                "<password>p</password></server></servers></settings>")
         with mock.patch.dict(os.environ, {"HOME": str(home)}):
-            with mock.patch.object(lane, "abi", return_value=0):         # macOS, a kernel without it
+            with mock.patch.object(lane, "kind", return_value=None):    # no Landlock, no Seatbelt
                 out = self.start_api("t-nl1")
                 self.assertNotIn("can't read", out)
                 self.assertEqual(context.api_hidden_note(store.Task("t-nl1")), "")
@@ -40300,9 +44900,10 @@ class Writing(Base):
         self.assertEqual([r for r in store.results() if r.get("task") == "t-row"][-1]["role"], "writing")
 
     def record(self, model, role, outcome, n, minutes=2.0):
-        for _ in range(n):
+        for _ in range(n):  # a trivial task's size is trivial, as wb start records it (#1398)
             store.append_jsonl(store.home() / "results.jsonl", {
-                "model": model, "size": "significant", "outcome": outcome, "ran": True,
+                "model": model, "size": "trivial" if role == "trivial" else "significant",
+                "outcome": outcome, "ran": True,
                 "minutes": minutes, "active_minutes": minutes, **({"role": role} if role else {})})
 
     def test_wb_start_routes_a_writing_task_on_its_writing_record_and_a_coding_one_on_its_coding_one(self):
@@ -40361,6 +44962,21 @@ class Writing(Base):
         self.assertIn("(typically 40m)", transcript.clock_line(task))
         self.assertEqual(runner.typical_now(task)["typical"]["min"], 40.0)
         self.assertIn("(typically 40m)", runner.checkin_text(task, 1, {"texts": []}, since=0, active=0))
+
+    def test_a_coding_task_is_filed_under_the_size_it_was_routed_at_not_its_role(self):
+        # #1398 (2026-11-25): `--role trivial --size significant` ran on the significant pick, and
+        # its result moved the model's trivial record, never the significant one choose() reads
+        from workbench import router, tuning
+        m = cli.models.resolve("mimo")
+        for role, size in (("trivial", "significant"), ("significant", "trivial"),
+                           ("writing", "significant")):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": m.id, "role": role, "size": size, "outcome": "accepted", "ran": True,
+                "active_minutes": 10})
+        self.assertEqual([tuning.work(r) for r in store.results()], ["significant", "trivial", "writing"])
+        self.assertEqual(router.score(m, "significant").tries, 1)
+        self.assertEqual(router.score(m, "trivial").tries, 1)
+        self.assertEqual(router.score(m, "significant", role="writing").tries, 1)
 
     def test_prose_steps_leave_the_coding_rows_speed_reward_alone(self):
         # the review of #1025: tuning.record set each row's speed against the median step of its
@@ -41288,6 +45904,23 @@ class RoleResolution(Base):
             self.assertEqual(code, 0, err)
             self.assertNotIn("waits as queued for a slot", out)
 
+    def test_a_task_held_by_after_takes_no_slot_of_its_provider_until_its_time(self):
+        # #1204: a start --after holds nothing until then, so a start now may take the slot
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        at = time.strftime("%H:%M", time.localtime(time.time() + 7200))
+        code, _, err = self.begin("t-held", "--role", "trivial", "--after", at)
+        self.assertEqual(code, 0, err)
+        task = store.Task("t-held")
+        task.set_status(pid=4242)                              # its runner alive, waiting for its time
+        m = runner.models.lookup("deepseek/deepseek-flash")
+        with mock.patch.object(cli, "runner_alive", lambda t: t.name == "t-held"):
+            self.assertEqual(cli._api_pending(m), [])
+            self.assertEqual(cli._api_slots_free(m), runner.models.API_PARALLEL)
+            # its time come: on its way to a slot as any start
+            store.write_json(task.dir / "task.json", {**task.spec, "not_before": round(time.time()) - 1})
+            self.assertEqual(cli._api_pending(m), ["t-held"])
+            self.assertEqual(cli._api_slots_free(m), runner.models.API_PARALLEL - 1)
+
     def test_an_api_role_that_cant_run_exits_3_with_one_line_and_never_the_gpu(self):
         self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
         self.no_key_for("deepseek")
@@ -41297,8 +45930,8 @@ class RoleResolution(Base):
             code, out, err = self.begin("t-nokey", "--size", "trivial")
         self.assertEqual((code, out), (3, ""))
         self.assertEqual(err, "wb: trivial role: deepseek/deepseek-flash can't run: no key for deepseek: run "
-                              "/connect in OpenCode and add it. Ask the user: fix that, or put the role on the GPU "
-                              "(wb route trivial gpu)\n")
+                              "`opencode auth login deepseek` in a terminal and add it. Ask the user: fix that, or "
+                              "put the role on the GPU (wb route trivial gpu)\n")
         self.assertEqual(chose, [])                            # no fallback to the GPU
         self.assertFalse(store.Task("t-nokey").dir.exists())
         # --force is a --model's: a role's API model that can't run never starts anyway (#1016's review)
@@ -41602,19 +46235,68 @@ class FirstRunApi(Base):
         self.assertEqual(self.key_lines(), ["ok  API keys: deepseek (stored via /connect), anthropic (stored via "
                                             "/connect); significant uses deepseek, trivial uses deepseek"])
 
-    def test_an_env_key_or_an_oauth_login_is_never_shown_as_usable(self):
+    def test_a_copilot_sign_in_runs_with_no_setup_and_a_chatgpt_one_says_why_it_cant(self):
+        # #1191: Copilot's sign-in is held as a key, so wb setup, the pane and the role dialog
+        # offer it as they offer a stored key; ChatGPT's rotates, and its line says so
+        self.catalog([*ROUTES_CATALOG, api_entry("github-copilot", "gpt-5.4-nano")],
+                     [key_row("github-copilot", "GitHub Copilot", OAUTH)])
+        runner.models.hosted(fresh=True)
+        self.assertEqual(self.key_lines(), ["ok  API keys: github-copilot (signed in to Copilot); no role "
+                                            "uses one yet"])
+        self.assertEqual(cli._route_pane()["providers"]["github-copilot"],
+                         {"name": "GitHub Copilot", "key": "copilot", "why": "signed in to Copilot in OpenCode"})
+        m = runner.models.lookup("github-copilot/gpt-5.4-nano")
+        self.assertEqual((m.key, runner.models.status(m)["available"]), ("copilot", True))
+        self.keys(key_row("openai", "OpenAI", OAUTH))
+        self.assertEqual(self.key_lines(), ["--  openai is signed in with ChatGPT: its tokens rotate, and a copy wb "
+                                            "refreshed would sign your own OpenCode out, so wb can't hold it outside "
+                                            "the lane; an OpenAI API key through /connect works"])
+
+    def test_with_no_key_setup_offers_the_free_try_and_a_role_on_zens_free_model_needs_none(self):
+        # #1193: wb setup's first run named only /connect for a user with no key; it names the
+        # free try too, and a role on OpenCode Zen's free model reads `ok`, never "required"
+        from workbench import privacy
+        self.keys()
+        self.assertEqual(self.key_lines(), [cli.NO_KEY])
+        self.assertIn("/workbench can try it on OpenCode's free models, whose provider may keep or train on the code",
+                      cli.NO_KEY)
+        code, _, err = self.wb("route", "trivial", "opencode/big-pickle-free")   # no cap asked
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.key_lines(), [f"ok  no API key needed for opencode's free models, which trivial "
+                                            f"uses ({privacy.FREE_LINE})"])
+        # a priced role whose provider's key went is still required beside it
+        self.keys(key_row("deepseek", "DeepSeek", STORED))
+        self.assertEqual(self.wb("route", "significant", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)
+        self.keys()
+        lines = self.key_lines()
+        self.assertIn("--  no API key for deepseek, which significant uses: `opencode auth login deepseek` in a "
+                      "terminal adds it (required: those tasks can't start without it)", lines)
+        self.assertIn(f"ok  no API key needed for opencode's free models, which trivial uses ({privacy.FREE_LINE})",
+                      lines)
+
+    def test_an_oauth_login_or_an_env_key_wb_cant_read_is_never_shown_as_usable_and_one_it_can_is(self):
+        # #1189: a variable OpenCode names reads as the keyhole's when set here and dropped from
+        # the agent's environment; it said "wb can't hold it outside the lane yet" before
+        os.environ.pop("XAI_API_KEY", None)
         self.keys(key_row("xai", "xAI", {"type": "env", "name": "XAI_API_KEY"}))
-        self.assertEqual(self.key_lines(), ["--  xai's key is in XAI_API_KEY: wb can't hold it outside the lane "
-                                            "yet; /connect stores one it can"])
+        unset = ("--  xai's key is in $XAI_API_KEY, which wb can't use: $XAI_API_KEY isn't set where wb start "
+                 "ran: export it, or store the key with `opencode auth login xai`")
+        self.assertEqual(self.key_lines(), [unset])
+        with mock.patch.dict(os.environ, {"XAI_API_KEY": "xai-not-a-real-key"}):
+            self.assertEqual(self.key_lines(), ["ok  API keys: xai (key from $XAI_API_KEY); no role uses one yet"])
+            Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"env": ["XAI_API_KEY"]}))
+            self.assertEqual(self.key_lines(), ["--  xai's key is in $XAI_API_KEY, which wb can't use: $XAI_API_KEY "
+                                                "is passed to agents (commands.json env): remove it there"])
+            Path(os.environ["WB_COMMANDS"]).write_text("{}")
         self.keys(key_row("anthropic", "Anthropic", OAUTH))
         self.assertEqual(self.key_lines(), ["--  anthropic is signed in with OAuth: wb can't hold that outside the "
                                             "lane; an API key through /connect works"])
         self.keys(key_row("xai", "xAI", {"type": "env", "name": "XAI_API_KEY"}), key_row("anthropic", "Anthropic", OAUTH),
                   key_row("deepseek", "DeepSeek", STORED))
         lines = self.key_lines()
-        self.assertEqual(lines, ["ok  API keys: deepseek (stored via /connect); no role uses one yet",
-                                 "--  xai's key is in XAI_API_KEY, anthropic is signed in with OAuth: wb can't hold "
-                                 "those outside the lane; /connect stores a key it can"])
+        self.assertEqual(lines, ["ok  API keys: deepseek (stored via /connect); no role uses one yet", unset,
+                                 "--  anthropic is signed in with OAuth: wb can't hold that outside the lane; an "
+                                 "API key through /connect works"])
         self.keys()
         self.assertEqual(self.key_lines(), [cli.NO_KEY])
         # no `auth list` to read (OpenCode missing): its own line says so, and none of keys
@@ -41632,6 +46314,10 @@ class FirstRunApi(Base):
             self.assertEqual(cli.NO_LOCAL_OPTIONAL, "--  no local model registered (optional: an API role can do "
                                                     "the coding; run /workbench)")
             self.assertNotIn("Claude picks one for this machine", "\n".join(lines))
+            # unset here: since #1189 a key the keyhole reads from this environment runs, so the
+            # $XAI_API_KEY of the shell running the tests read the GPU lines as optional
+            self.enterContext(mock.patch.dict(os.environ))
+            os.environ.pop("XAI_API_KEY", None)
             for rows in ((), (key_row("xai", "xAI", {"type": "env", "name": "XAI_API_KEY"}),)):
                 self.keys(*rows)                                   # no key wb can hold: as before
                 with mock.patch.object(cli.models, "_fake", return_value=False):
@@ -41675,13 +46361,13 @@ class FirstRunApi(Base):
         code, out = doctor()
         self.assertEqual(code, 1)
         self.assertIn("BAD trivial role: deepseek/deepseek-flash can't run: no key for ", out)
-        self.assertIn("/connect", out)
+        self.assertIn("opencode auth login deepseek", out)
         with mock.patch.object(cli.models, "discover", return_value={}):
             lines = cli.first_run()                                  # wb setup: the key is required
         self.assertIn(cli.NO_LOCAL_OPTIONAL, lines)
         self.assertNotIn(cli.NO_KEY, lines)
-        self.assertIn("--  no API key for deepseek, which significant and trivial and writing use: /connect "
-                      "in OpenCode adds it (required: those tasks can't start without it)", lines)
+        self.assertIn("--  no API key for deepseek, which significant and trivial and writing use: `opencode "
+                      "auth login deepseek` in a terminal adds it (required: those tasks can't start without it)", lines)
 
     def test_setup_with_a_stored_key_and_an_opencode_config_that_doesnt_parse_still_prints_its_checklist(self):
         # the review of #1067 (2026-11-23): wb setup's catalog read for a stored key ran outside
@@ -41692,7 +46378,8 @@ class FirstRunApi(Base):
         lines = cli.first_run()
         self.assertTrue(lines[0].startswith("ok  "), lines)
         self.assertIn("ok  API keys: deepseek (stored via /connect); no role uses one yet", lines)
-        self.assertTrue(any("Landlock" in x for x in lines), lines)
+        # the lane's line, last: Seatbelt's on a Mac (the 2.1 macOS nightly, 2026-11-25)
+        self.assertTrue(any("Landlock" in x or "Seatbelt" in x for x in lines), lines)
 
     # wb route: several roles in one change
 
@@ -41767,7 +46454,7 @@ class FirstRunApi(Base):
         # wave 2's --order names one role's backends: never on several (wave 2's merge)
         code, _, err = self.wb("route", "trivial", "gpu", "significant", "gpu", "--order", "baseten")
         self.assertEqual(code, 1)
-        self.assertIn("--order, all, cap and busy go in a wb route of their own", err)
+        self.assertIn("--order, all, cap, busy and fallback go in a wb route of their own", err)  # #1196
         # a pair's `api` puts a kept OpenRouter model on API with no backends: OpenRouter's pick,
         # said in the line (#1322: it was refused until the user named backends)
         routes.write({"day_usd": 5, "roles": {"significant": {"api": "openrouter/deepseek/deepseek-v4.1-flash"}}})
@@ -41960,12 +46647,17 @@ class FirstRunApi(Base):
         self.catalog(ROUTES_CATALOG[-3:], [key_row("deepseek", "DeepSeek", STORED)])
         runner.models.hosted(fresh=True)
         self.assertEqual(self.wb("route", "trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)
+        from workbench import meter
         now = store.now()
+        # every row on today's local day: two hours back crossed midnight between 00:00 and 02:00
+        # and read "(≈$2.00 today)" (run while checking nightly run 45454423406, 01:39 MST,
+        # 2026-11-25)
+        since = now - time.mktime(time.strptime(meter.day(now), "%Y-%m-%d"))
         store.append_jsonl(store.home() / "results.jsonl", {
-            "ts": now - 3600, "task": "closed", "outcome": "accepted", "model": "deepseek/deepseek-flash",
+            "ts": now - since / 2, "task": "closed", "outcome": "accepted", "model": "deepseek/deepseek-flash",
             "kind": "api", "role": "trivial", "provider": "deepseek", "api": {"cost": 3.0, "source": "opencode"}})
-        _ledger_step(3.0, now - 7200, "closed")
-        _ledger_step(2.0, now - 60, "open-one")
+        _ledger_step(3.0, now - since * 3 / 4, "closed")
+        _ledger_step(2.0, now - since / 4, "open-one")
         self.assertIn("api spend, the last 7 days: ≈$5.00 of $5/day at most (deepseek $5.00)",
                       cli.scout_api_lines())
         self.assertIn("api, the last 7 days: ≈$5.00 (≈$5.00 today)", run_wb("savings", "--api"))
@@ -42021,7 +46713,14 @@ class SettingsRoles(Base):
         p = shown["providers"]
         self.assertEqual(p["deepseek"], {"name": "DeepSeek", "key": "stored"})
         self.assertEqual((p["xenv"]["key"], p["xenv"]["why"]),
-                         ("env", "can't run: needs a key wb can hold outside the lane (key in XENV_API_KEY)"))
+                         ("env", "can't run: $XENV_API_KEY isn't set where wb start ran: export it, or store "
+                                 "the key with `opencode auth login xenv`"))
+        self.assertNotIn("runs", p["xenv"])
+        with mock.patch.dict(os.environ, {"XENV_API_KEY": "xenv-not-a-real-key"}):  # set: it runs (#1189)
+            p = json.loads(self.wb("route", "--json")[1])["providers"]
+        self.assertEqual({k: p["xenv"][k] for k in ("key", "why", "runs")},
+                         {"key": "env", "why": "key from $XENV_API_KEY", "runs": True})
+        self.assertNotIn("xenv-not-a-real-key", json.dumps(p))
         self.assertEqual(p["oauthco"]["key"], "oauth")
         self.assertIn("needs a key wb can hold outside the lane (an OAuth login)", p["oauthco"]["why"])
         ledger.unlink()
@@ -42089,6 +46788,25 @@ class SettingsRoles(Base):
         with mock.patch.object(cli.subprocess, "Popen", side_effect=AssertionError("a read with a key")):
             self.wb("route", "--json")
 
+    def test_an_old_cache_listing_an_exported_key_that_runs_is_not_read_again_for_the_pane(self):
+        # #1189's review (2026-11-24): the re-read counted only a stored key, so through an API
+        # task whose only key was exported, every poll past a minute read the catalog again
+        def cache(key):
+            store.write_json(runner.models.hosted_path(), {
+                "v": 1, "ts": time.time() - cli.PANE_REREAD_SECS * 2, "models": {},
+                "providers": {"deepseek": {"name": "DeepSeek", "key": key,
+                                           "package": "@opencode/ai/providers/deepseek"}}})
+        with mock.patch.dict(os.environ, DEEPSEEK_API_KEY="dummy-not-a-key"), \
+                mock.patch.object(cli, "_read_catalog_later") as later:
+            for key in ("stored", "env:DEEPSEEK_API_KEY"):
+                cache(key)
+                cli._route_pane()
+                self.assertFalse(later.called, key)
+            self.assertTrue(cli._route_pane()["providers"]["deepseek"]["runs"])
+            cache("env:NO_SUCH_WB_TEST_VAR")                             # exported nowhere: read again
+            cli._route_pane()
+            self.assertTrue(later.called)
+
     def test_wb_setup_reads_the_catalog_again_when_a_stored_key_isnt_in_the_cache(self):
         # the review of #1069: wb setup read it only when hosted.json was missing
         self.catalog(ROLE_CATALOG, [])
@@ -42127,8 +46845,10 @@ class SettingsRoles(Base):
         self.assertEqual(api["deepseek/deepseek-flash"]["provider_name"], "DeepSeek")
         self.assertEqual(api["deepseek/deepseek-flash"]["price"], {"input": 0.2, "output": 0.6})
         self.assertIsInstance(api["deepseek/deepseek-flash"]["window"], int)
-        for kept_out in ("oauthco/chat-1", "xenv/grok-9", "opencode/big-pickle-free"):  # no key wb can hold
+        for kept_out in ("oauthco/chat-1", "xenv/grok-9"):  # no key wb can hold
             self.assertNotIn(kept_out, api)
+        # OpenCode Zen's keyless free model runs with Zen's own "public" (#1193): listed, marked free
+        self.assertTrue(api["opencode/big-pickle-free"]["free"])
         self.assertEqual(doc["used"], ["acme/coder-pro"])
         self.assertTrue(doc["free_line"])
         self.assertEqual(set(doc["optimize"]), {"done_at", "models", "running"})
@@ -42268,6 +46988,29 @@ class BusyGpu(Base):
                          ("off", "deepseek/deepseek-flash", cli.AUTO_FIX["api"]))
         self.assertIn("thinking_shown", sp)
         self.assertEqual(store.Task("t-busy").status["phase"], "queued")
+
+    def test_a_start_after_a_time_while_the_gpu_is_held_is_queued_not_refused(self):
+        # #1204: --after is "run it once I'm off the GPU": the GPU's holders now say nothing of
+        # then, so it queues (implied) rather than exit 4
+        at = time.strftime("%H:%M", time.localtime(time.time() + 7200))
+        code, out, err = self.begin("t-later", "--after", at)
+        self.assertEqual(code, 0, err)
+        task = store.Task("t-later")
+        self.assertEqual((task.status["phase"], task.spec["via"]), ("queued", "gpu"))
+        self.assertIn("note: held until ", out)
+        self.assertEqual(self.begin("t-now")[0], 0)            # without it, queued too (#1322)
+
+    def test_a_start_after_a_time_stays_on_its_gpu_role_with_busy_api(self):
+        # #1204: the busy opt-in reads the GPU now, which says nothing of the --after time
+        self.opt_in()
+        at = time.strftime("%H:%M", time.localtime(time.time() + 7200))
+        code, out, err = self.begin("t-later", "--role", "trivial", "--after", at)
+        self.assertEqual(code, 0, err)
+        sp = store.Task("t-later").spec
+        self.assertEqual((sp["via"], sp.get("busy")), ("gpu", None))
+        self.assertNotIn(routes.BUSY_LINE, out)
+        self.assertEqual(self.begin("t-now", "--role", "trivial")[0], 0)   # without it, the move
+        self.assertEqual(store.Task("t-now").spec["via"], "api")
 
     def test_with_busy_wait_the_default_a_busy_gpu_queues_the_start_on_the_gpu(self):
         code, _, err = self.wb("route", "trivial", "--api", "deepseek/deepseek-flash", "--day-usd", "5")
@@ -42418,6 +47161,493 @@ class BusyGpu(Base):
         new = routes.change(doc, "trivial", order=["deepinfra"]).doc
         self.assertEqual(routes._busy_newly(doc, new), ["trivial"])
         self.assertEqual(routes._busy_newly(doc, doc), [])
+
+
+HAIKU = "anthropic/claude-haiku-5-5"   # ROLE_CATALOG's other provider (API_CATALOG[1])
+# #1196's runner fixtures: the role's API model and a fallback on another priced provider
+FB_PRIMARY, FB_OTHER = SPEND_M, "otherco/coder-1"
+FB_CATALOG = [*SPEND_CATALOG, {**SPEND_CATALOG[0], "id": "coder-1", "providerID": "otherco",
+                               "settings": {"baseURL": "https://api.otherco.example/v1"},
+                               "cost": [{"input": 1, "output": 2, "cache": {"read": 0, "write": 0}}]}]
+
+
+class Fallbacks(Base):
+    """A fallback per role (#1196): routes.json `fallback`, an API id on another provider or
+    `gpu`, set by `wb route <role> fallback <id>|gpu|none` (an API one on the dialog's yes and a
+    cap); a role's API model its provider holds (out of credit, rate-limited, unreachable) starts
+    on it at wb start, and a round stopped as out of credit, or held again after its revive,
+    moves there once, in a fresh session."""
+    catalog = ApiHarness.catalog
+    wb = RoleResolution.wb
+    begin = RoleResolution.begin
+
+    def setUp(self):
+        super().setUp()
+        self.catalog(ROLE_CATALOG, ROLE_AUTH)
+        self.ok = store.home() / "route-ok.json"
+        p = mock.patch.object(cli, "spawn_runner", lambda task: 0)  # the start alone
+        p.start()
+        self.addCleanup(p.stop)
+
+    def set_role(self, *argv):
+        code, _, err = self.wb("route", *argv)
+        self.assertEqual(code, 0, err)
+
+    def on_api(self, fallback=HAIKU):
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        self.set_role("trivial", "fallback", fallback)
+
+    def test_a_roles_fallback_is_read_checked_and_said_in_the_summary(self):
+        self.assertNotIn("fallback", routes.read()["roles"]["trivial"])   # none by default
+        for bad in ("", "none", 3, ["gpu"]):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(routes.RoutesError, "trivial's fallback is"):
+                    routes.normalize({"roles": {"trivial": {"fallback": bad}}})
+        # register.test.tsx checks routesSummary on the same fixture (Couplings)
+        doc = routes.normalize({"roles": {
+            "trivial": {"via": "api", "api": "deepseek/deepseek-flash", "thinking": "off", "fallback": HAIKU},
+            "significant": {"via": "api", "api": "deepseek/deepseek-v4-pro", "fallback": "gpu"},
+            "writing": {"fallback": "gpu"}}})
+        self.assertEqual(routes.summary(doc), (
+            "significant API deepseek/deepseek-v4-pro, thinking off, fallback GPU; trivial API deepseek/deepseek-flash, "
+            f"thinking off, fallback {HAIKU}; writing GPU (the router picks), fallback GPU"))
+        self.assertEqual(routes.fallback_of(doc, "trivial"), HAIKU)
+        self.assertIsNone(routes.fallback_of({**doc, "use": "api"}, "significant"))  # Agents API: no GPU
+        self.assertEqual(routes.fallback_of({**doc, "use": "api"}, "trivial"), HAIKU)
+
+    def test_an_api_fallback_takes_the_dialogs_yes_and_a_cap_while_gpu_and_none_take_neither(self):
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        os.environ["CLAUDECODE"] = "1"
+        asked = json.loads(self.wb("route", "--dry-run", "--json", "trivial", "fallback", HAIKU)[1])
+        self.assertEqual((asked["gate"], asked["approval"]["argv"]), (True, ["route", "trivial", "fallback", HAIKU]))
+        self.assertEqual(asked["change"], f"trivial: fallback none → {HAIKU}: your code goes to Anthropic when its "
+                                          "API model's provider is down or out of credit · thinking off · cap $5/day")
+        code, _, err = self.wb("route", "trivial", "fallback", HAIKU)    # Claude, no yes: unchanged
+        self.assertEqual(code, 3)
+        self.assertIn("approved none for this change", err)
+        self.assertNotIn("fallback", routes.read()["roles"]["trivial"])
+        store.write_json(self.ok, {**asked["approval"], "at": time.time()})
+        code, out, err = self.wb("route", "trivial", "fallback", HAIKU)
+        self.assertEqual((code, out), (0, f"changed: {asked['change']}\n"), err)
+        row = routes.read()["roles"]["trivial"]
+        self.assertEqual((row["fallback"], row["by"], row["said"]), (HAIKU, "dialog", asked["change"]))
+        self.assertIn(f"fallback {HAIKU} (Anthropic)", self.wb("route")[1])
+        for target, line in (("gpu", f"trivial: fallback {HAIKU} → GPU (the router's pick) when its API model's "
+                                     "provider is down or out of credit"),
+                             ("none", "trivial: fallback GPU (the router's pick) → none")):
+            with self.subTest(target=target):
+                shown = json.loads(self.wb("route", "--dry-run", "--json", "trivial", "fallback", target)[1])
+                self.assertEqual((shown["gate"], shown["change"]), (False, line))
+                code, out, err = self.wb("route", "trivial", "fallback", target)   # no dialog: Claude's own
+                self.assertEqual((code, out), (0, f"changed: {line}\n"), err)
+        self.assertNotIn("fallback", routes.read()["roles"]["trivial"])
+        del os.environ["CLAUDECODE"]
+        self.routes = Path(os.environ["WB_ROUTES"])
+        self.routes.write_text(json.dumps({"roles": {"trivial": {"api": "deepseek/deepseek-flash"}}}))
+        code, out, err = self.wb("route", "trivial", "fallback", HAIKU)   # no cap yet: it takes $5 (#1322)
+        self.assertEqual(code, 0, err)
+        self.assertIn("cap $5/day", out)
+        self.assertEqual(routes.read()["day_usd"], routes.DAY_USD_SUGGEST)
+
+    def test_wb_route_refuses_a_fallback_on_the_roles_provider_its_own_model_or_openrouter(self):
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        for fb, said in (("deepseek/deepseek-v4-pro", "a provider down or out of credit stops both"),
+                         ("deepseek/deepseek-flash", "is the trivial role's own API model"),
+                         ("openrouter/deepseek/deepseek-v4.1-flash", "an OpenRouter model can't be a fallback"),
+                         ("nobody/nothing", "not in OpenCode's catalog")):
+            with self.subTest(fb=fb):
+                code, _, err = self.wb("route", "trivial", "fallback", fb)
+                self.assertEqual(code, 3)
+                self.assertIn(said, err)
+        self.assertNotIn("fallback", routes.read()["roles"]["trivial"])
+        self.set_role("trivial", "fallback", HAIKU)
+        code, _, err = self.wb("route", "trivial", HAIKU)              # the API model onto the fallback
+        self.assertEqual(code, 3)
+        self.assertIn(f"{HAIKU} is the trivial role's own API model", err)
+        self.assertEqual(routes.read()["roles"]["trivial"]["api"], "deepseek/deepseek-flash")
+        self.assertEqual(self.wb("route", "trivial", "fallback")[0], 1)            # no choice
+        self.assertEqual(self.wb("route", "trivial", "fallback", "gpu", "--day-usd", "9")[0], 1)
+
+    def test_a_kept_api_fallback_is_named_when_its_role_goes_to_api(self):
+        self.set_role("trivial", "--api", "deepseek/deepseek-flash", "--day-usd", "5")   # kept on the GPU
+        self.set_role("trivial", "fallback", HAIKU)
+        line = json.loads(self.wb("route", "--dry-run", "--json", "trivial", "api")[1])["change"]
+        self.assertIn(f"fallback {HAIKU} (Anthropic)", line)
+
+    def test_a_provider_out_of_credit_at_start_starts_the_task_on_the_roles_api_fallback(self):
+        from workbench import results
+        self.on_api()
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        code, out, err = self.begin("t-fb", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        sp = store.Task("t-fb").spec
+        self.assertEqual({k: sp.get(k) for k in ("model", "via", "role", "provider", "fallback", "fallback_from")},
+                         {"model": HAIKU, "via": "api", "role": "trivial", "provider": "anthropic",
+                          "fallback": True, "fallback_from": "deepseek/deepseek-flash"})
+        self.assertTrue(out.startswith(f"started t-fb on {HAIKU} (API) · "), out)
+        self.assertIn(f"model: {HAIKU} · API (Anthropic) · trivial role's fallback · ", out)   # no stamp (#1322)
+        self.assertIn(f"deepseek/deepseek-flash: out of credit or quota at DeepSeek", out)
+        self.assertIn(f"{routes.FALLBACK_LINE} ({HAIKU})\n", out)
+        self.assertIn(routes.FALLBACK_LINE, sp["route"])
+        self.assertEqual(sp["opencode_model"].split("#")[0], HAIKU)
+        row = results._with_route(store.Task("t-fb"), {})
+        self.assertEqual((row["fallback"], row["fallback_from"], row["provider"]),
+                         (True, "deepseek/deepseek-flash", "anthropic"))
+
+    def test_a_held_provider_at_start_starts_the_task_on_the_roles_gpu_fallback(self):
+        self.on_api("gpu")
+        runner.models.note_api("deepseek", "rate_limited", "HTTP 429", time.time() + 60)
+        code, out, err = self.begin("t-fbgpu", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        sp = store.Task("t-fbgpu").spec
+        self.assertEqual((sp["via"], sp["fallback"], sp["fallback_from"]), ("gpu", True, "deepseek/deepseek-flash"))
+        self.assertIn(sp["model"], runner.models.discover())
+        self.assertNotIn("provider", sp)
+        self.assertIn(f" · {routes.FALLBACK_LINE}\n", out)                 # the router's line, then it
+        self.assertNotIn("the round waits for it", out)
+        self.assertEqual(sp["auto_fix"], cli.AUTO_FIX["gpu"])
+
+    def test_with_no_fallback_or_one_that_cant_take_it_the_start_is_as_before(self):
+        self.set_role("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        code, _, err = self.begin("t-none", "--role", "trivial")
+        self.assertEqual(code, 3)                                         # no fallback: exit 3, as before
+        self.assertIn("trivial role: deepseek/deepseek-flash can't run: ", err)
+        self.set_role("trivial", "fallback", HAIKU)
+        runner.models.note_api("anthropic", "no_credit", "HTTP 402: Insufficient balance")
+        code, out, err = self.begin("t-both", "--role", "trivial")
+        self.assertEqual(code, 3)
+        self.assertIn(f"note: the trivial role's fallback {HAIKU} can't run: out of credit", out)
+        runner.models.note_api("anthropic", "ok")
+        runner.models.note_api("deepseek", "ok")
+        code, out, err = self.begin("t-fine", "--role", "trivial")      # its own model, while it runs
+        self.assertEqual(code, 0, err)
+        self.assertEqual(store.Task("t-fine").spec["model"], "deepseek/deepseek-flash")
+        self.assertNotIn("fallback", store.Task("t-fine").spec)
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        gpu = next(iter(runner.models.discover()))
+        code, _, _ = self.begin("t-asked", "--role", "trivial", "--model", "deepseek/deepseek-flash")
+        self.assertEqual(code, 3)                                         # a --model never moves
+        self.assertNotIn(gpu, [t.spec.get("model") for t in store.all_tasks() if t.name == "t-asked"])
+
+    def test_an_api_fallback_with_its_slots_taken_queues_for_one(self):
+        # the review of #1196 (2026-11-24): refused as "can't take it", the 4th --queue start of a
+        # backlog exited 3 saying wb never switches models; a start queues for a slot now (#1322)
+        self.on_api()
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        with mock.patch.object(cli.models, "api_slots_free", lambda provider: False):
+            code, out, err = self.begin("t-q", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("never switches", err)
+        self.assertEqual((store.Task("t-q").spec["model"], store.Task("t-q").spec["fallback"]), (HAIKU, True))
+        self.assertIn(f"{routes.FALLBACK_LINE} ({HAIKU})", out)
+
+    def test_a_held_provider_whose_api_fallback_has_no_free_slot_starts_on_the_roles_own_model(self):
+        # the second review of #1196 (2026-11-24): moved to the full fallback, a start that runs
+        # with no fallback, waiting out the limit in its round, exited 4 on anthropic's slots
+        self.on_api()
+        runner.models.note_api("deepseek", "rate_limited", "HTTP 429", time.time() + 60)
+        with mock.patch.object(cli.models, "api_slots_free", lambda provider: provider != "anthropic"):
+            code, out, err = self.begin("t-held", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        sp = store.Task("t-held").spec
+        self.assertEqual(sp["model"], "deepseek/deepseek-flash")
+        self.assertNotIn("fallback", sp)
+        self.assertIn(f"note: the trivial role's fallback {HAIKU} can't take it: every one of "
+                      "anthropic's", out)
+        self.assertNotIn(routes.FALLBACK_LINE, out)
+
+    def test_a_held_provider_whose_gpu_fallback_would_wait_starts_on_the_roles_own_model(self):
+        # the third review of #1196 (2026-11-24): moved to the GPU fallback behind a busy GPU, a
+        # start that runs with no fallback, waiting out the limit in its round, exited 4
+        self.on_api("gpu")
+        runner.models.note_api("deepseek", "rate_limited", "HTTP 429", time.time() + 60)
+        with mock.patch.object(cli, "_gpu_wait", lambda m, me=None: ({"gpu0": {"task": "other", "model": m.id}}, True)):
+            code, out, err = self.begin("t-hb", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        sp = store.Task("t-hb").spec
+        self.assertEqual((sp["model"], sp["via"]), ("deepseek/deepseek-flash", "api"))
+        self.assertNotIn("fallback", sp)
+        self.assertIn("note: the trivial role's fallback ", out)
+        self.assertIn(" can't take it: the GPU is in use by other: ", out)
+        self.assertNotIn(routes.FALLBACK_LINE, out)
+
+    def test_out_of_credit_onto_a_busy_gpu_fallback_queues_saying_it_was_the_fallback(self):
+        # the third review of #1196 (2026-11-24): exit 4 named a GPU model Claude never picked, and
+        # not that the role was out of credit or moved; a start queues behind the holders now, as
+        # any GPU start (#1322), the fallback line saying why it is on the GPU
+        self.on_api("gpu")
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        with mock.patch.object(cli, "_gpu_wait", lambda m, me=None: ({"gpu0": {"task": "other", "model": m.id}}, True)):
+            code, out, err = self.begin("t-cb", "--role", "trivial")
+        self.assertEqual(code, 0, err)
+        self.assertIn("deepseek/deepseek-flash: out of credit or quota at DeepSeek", out)
+        self.assertIn(routes.FALLBACK_LINE, out)
+        sp = store.Task("t-cb").spec
+        self.assertEqual((sp["via"], sp.get("fallback")), ("gpu", True))
+
+    def test_an_api_fallback_meets_the_cap_a_repo_kept_local_and_commands_jsons_standing_copy(self):
+        self.on_api()
+        runner.models.note_api("deepseek", "no_credit", "HTTP 402: Insufficient balance")
+        (self.repo / ".env.local").write_text("API_TOKEN=sk-abcdef0123456789\n")   # a standing copy with a credential (#1322)
+        with mock.patch.object(cli.context, "repo_conf", lambda repo, sub=None: {"copy": [".env.local"]}):
+            got = cli._fallback_start("trivial", "trivial", BusyGpu.asked(), self.repo, None, [],
+                                      runner.models.lookup("deepseek/deepseek-flash"),
+                                      {"via": "api", "role": "trivial"})
+        self.assertEqual(got, f"the trivial role's fallback {HAIKU} can't take it: "
+                              + cli.privacy.standing_refusal(".env.local"))
+        got = cli._fallback_start("trivial", "trivial", BusyGpu.asked(), self.repo, None, [],
+                                  runner.models.lookup("deepseek/deepseek-flash"),
+                                  {"via": "api", "role": "trivial", "busy": True})
+        self.assertEqual(got, "")                                       # a busy-routed start never falls back
+        with mock.patch.object(cli.privacy, "local_only", lambda repo, sub: str(repo)):
+            got = cli._fallback_start("trivial", "trivial", BusyGpu.asked(), self.repo, None, [],
+                                      runner.models.lookup("deepseek/deepseek-flash"),
+                                      {"via": "api", "role": "trivial"})
+        self.assertEqual(got, f"the trivial role's fallback {HAIKU} is an API model, and {self.repo.name} is kept "
+                              f"local ({self.repo})")
+        with mock.patch.object(cli.meter, "refusal", lambda m, role=None, advice=True, tokens=None: "at the cap"):
+            got = cli._fallback_start("trivial", "trivial", BusyGpu.asked(), self.repo, None, [],
+                                      runner.models.lookup("deepseek/deepseek-flash"),
+                                      {"via": "api", "role": "trivial"})
+        self.assertEqual(got, f"the trivial role's fallback {HAIKU} can't take it: at the cap")
+
+
+class FallbackMoves(Base):
+    """The runner's move to the role's fallback (#1196): a round its provider stops as out of
+    credit, or holds again after its one revive, runs again on the fallback the user set, once,
+    in a fresh session, the keyhole serving the fallback alone; with none, or one that can't take
+    it, the stop stands as before."""
+    api_task = ApiSpend.api_task
+    events = RateLimits.events
+
+    def setUp(self):
+        super().setUp()
+        from workbench import meter
+        path = Path(self.tmp.name) / "catalog.json"
+        path.write_text(json.dumps(FB_CATALOG))
+        os.environ["WB_FAKE_CATALOG"] = str(path)
+        os.environ["FAKE_AUTH_EXPORT"] = json.dumps([
+            {"id": f"cred_{p}", "integrationID": p, "label": "main", "active": True,
+             "value": {"type": "key", "key": "sk-fallback-test"}} for p in ("meterco", "otherco")])
+        meter._METERS.clear()
+        self.addCleanup(meter._METERS.clear)
+        self.addCleanup(runner.CURRENT.pop, "keyhole", None)
+
+    def roles(self, fallback, **row):
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, "day_usd": 100, "roles": {"significant": {
+            "via": "api", "api": FB_PRIMARY, "thinking": "off", "fallback": fallback, "ts": time.time(), **row}}})
+
+    def test_a_round_out_of_credit_moves_once_to_the_roles_api_fallback_in_a_fresh_session(self):
+        self.roles(FB_OTHER)
+        served = []
+        real = runner.start_keyhole
+        with mock.patch.object(runner, "start_keyhole",
+                               lambda task, m: served.append(m.id) or real(task, m)):
+            task = self.api_task("t-move", FB_PRIMARY, "ok", WB_FAKE_API="meterco=quota")
+            runner.drive(task)
+        st, sp = task.status, task.spec
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertEqual(served, [FB_PRIMARY, FB_OTHER])                 # one model a keyhole, each
+        self.assertEqual({k: sp.get(k) for k in ("model", "via", "provider", "fallback", "fallback_from")},
+                         {"model": FB_OTHER, "via": "api", "provider": "otherco", "fallback": True,
+                          "fallback_from": FB_PRIMARY})
+        [ev] = self.events(task, "fallback")
+        self.assertEqual((ev["moved"], ev["from"], ev["to"], ev["round"]), (True, FB_PRIMARY, FB_OTHER, 1))
+        [fresh] = self.events(task, "fresh")
+        self.assertFalse(fresh["overflow"])                              # no handover the window caused
+        self.assertTrue(task.round_dir(1).joinpath("prompt.md").read_text().startswith(
+            f"You are picking this task up in a fresh session ({runner.FALLBACK_SAID}"))
+        self.assertEqual(st["fallback_moved"]["to"], FB_OTHER)
+        self.assertIn(f"the task moved to the significant role's fallback {FB_OTHER}",
+                      task.round_dir(1).joinpath("summary.md").read_text())
+        self.assertEqual(json.loads(runner.catalog_path(task).read_text()).keys(), {"otherco"})
+
+    def test_with_no_fallback_the_stop_stands_and_a_moved_task_never_moves_again(self):
+        self.roles(None)
+        task = self.api_task("t-stays", FB_PRIMARY, "ok", WB_FAKE_API="meterco=quota")
+        runner.drive(task)
+        self.assertEqual((task.status["phase"], task.status.get("infra")), ("stuck", "provider"))
+        self.assertEqual(task.spec["model"], FB_PRIMARY)
+        self.assertFalse(self.events(task, "fallback"))
+        self.roles(FB_OTHER)                                             # on the fallback already
+        moved = self.api_task("t-moved", FB_OTHER, "ok", WB_FAKE_API="otherco=quota")
+        store.write_json(moved.dir / "task.json", {**moved.spec, "fallback": True, "fallback_from": FB_PRIMARY})
+        runner.drive(moved)
+        self.assertEqual((moved.status["phase"], moved.spec["model"]), ("stuck", FB_OTHER))
+
+    def test_a_fallback_that_cant_take_it_leaves_the_providers_stop_and_says_why(self):
+        self.roles(FB_OTHER)
+        task = self.api_task("t-both", FB_PRIMARY, "ok", WB_FAKE_API="meterco=quota")
+        runner.models.note_api("otherco", "no_credit", "HTTP 402")
+        runner.drive(task)
+        self.assertEqual((task.status["phase"], task.spec["model"]), ("stuck", FB_PRIMARY))
+        [ev] = self.events(task, "fallback")
+        self.assertFalse(ev["moved"])
+        self.assertIn(f"the significant role's fallback {FB_OTHER} can't run: ", ev["text"])
+
+    def test_a_task_with_images_never_moves_to_a_fallback_that_doesnt_say_it_takes_them(self):
+        # #1196 met #1199 in the 2.1 merges: the fallback's fresh session sends every image again,
+        # and a model that takes none fails each request, so the provider's stop stands
+        self.roles(FB_OTHER)
+        task = self.api_task("t-images", FB_PRIMARY, "ok", WB_FAKE_API="meterco=quota")
+        task.set_status(images=[{"file": "1-mockup.png", "round": 1}])
+        runner.drive(task)
+        self.assertEqual((task.status["phase"], task.spec["model"]), ("stuck", FB_PRIMARY))
+        [ev] = self.events(task, "fallback")
+        self.assertFalse(ev["moved"])
+        self.assertIn(f"the significant role's fallback {FB_OTHER} doesn't take image input", ev["text"])
+
+    def test_a_round_held_again_after_its_revive_moves_to_the_roles_gpu_fallback(self):
+        os.environ.update(FAKE_RETRIES="200", FAKE_RETRY_EVERY="0.5")
+        gpu = sorted(runner.models.discover())
+        task = self.api_task("t-held", FB_PRIMARY, "ok", "--silence-timeout", "2", "--think-timeout", "2",
+                             WB_FAKE_API="meterco=ratelimit")
+        other = next(g for g in gpu if g != task.spec["model"])
+        self.roles("gpu", gpu=other)
+        with mock.patch.object(runner, "RATE_WAIT_S", 2), mock.patch.object(runner.models, "RATE_LIMIT_SECS", 1):
+            runner.drive(task)
+        st, sp = task.status, task.spec
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertEqual((sp["model"], sp["via"], sp["fallback"]), (other, "gpu", True))
+        for key in ("provider", "thinking", "said"):
+            self.assertNotIn(key, sp)
+        self.assertEqual(len(self.events(task, "load")), 1)              # revived once, then moved
+        self.assertTrue(self.events(task, "fallback")[0]["moved"])
+        self.assertFalse(runner.catalog_path(task).exists())             # the GPU's: no API catalog
+        self.assertIsNone(st.get("api_entry"))
+        # the lane keeps the fallback's server port open, not the first model's (#1197 met
+        # #1196 in the 2.1 merges: a fallback on a DAEMON_PORTS port was refused to OpenCode)
+        self.assertEqual(runner.CURRENT["model"].id, other)
+        port = next(iter(runner.context.DAEMON_PORTS))
+        with mock.patch.object(runner.context, "url_port", lambda url: port):
+            self.assertNotIn(port, runner.lane_ports(task))
+
+    def test_a_task_whose_provider_went_out_of_credit_after_its_start_moves_before_its_round_rather_than_wait(self):
+        # the review of #1196 (2026-11-24): it waited in NoLease.load on credit_turn, so a --queue
+        # backlog queued before the 402 drained one task each CREDIT_RECHECK_SECS
+        self.roles(FB_OTHER)
+        served = []
+        real = runner.start_keyhole
+        task = self.api_task("t-wait", FB_PRIMARY, "ok")
+        runner.models.note_api("meterco", "no_credit", "HTTP 402", time.time() + 600)
+        with mock.patch.object(runner, "start_keyhole", lambda task, m: served.append(m.id) or real(task, m)):
+            t = threading.Thread(target=runner.drive, args=(task,), daemon=True)
+            t.start()
+            t.join(25)
+        self.assertFalse(t.is_alive(), task.status.get("last"))
+        st, sp = task.status, task.spec
+        self.assertEqual(st["phase"], "review", st.get("last"))
+        self.assertEqual((sp["model"], sp["provider"], sp["fallback"]), (FB_OTHER, "otherco", True))
+        self.assertEqual(served, [FB_PRIMARY, FB_OTHER])
+        [ev] = self.events(task, "fallback")
+        self.assertEqual((ev["moved"], ev["from"], ev["to"], ev["round"]), (True, FB_PRIMARY, FB_OTHER, 1))
+        self.assertEqual({k: st["fallback_moved"].get(k) for k in ("round", "before", "fresh")},
+                         {"round": 1, "before": True, "fresh": False})
+        self.assertFalse(self.events(task, "fresh"))                     # round 1 had no session to leave
+        self.assertFalse(task.round_dir(1).joinpath("prompt.md").read_text().startswith("You are picking"))
+        self.assertIn(f"fallback: before round 1 {FB_PRIMARY} couldn't run (meterco is out of credit",
+                      task.round_dir(1).joinpath("summary.md").read_text())
+
+    def test_a_task_waiting_for_a_slot_when_its_provider_runs_out_of_credit_moves_once_it_holds_the_slot(self):
+        # the review of #1196 (2026-11-24): a backlog past API_PARALLEL is in NoLease.__enter__
+        # when the running tasks meet the 402, past the check before the slot; without the one in
+        # it each waited ~900 s in NoLease.load
+        self.roles(FB_OTHER)
+        task = self.api_task("t-slotwait", FB_PRIMARY, "ok")
+        real = runner.models.NoLease.__enter__
+
+        def enter(lease):  # the 402 another task met while this one waited for the slot
+            if lease.m.id == FB_PRIMARY:
+                runner.models.note_api("meterco", "no_credit", "HTTP 402", time.time() + 600)
+            return real(lease)
+        with mock.patch.object(runner.models.NoLease, "__enter__", enter):
+            t = threading.Thread(target=runner.drive, args=(task,), daemon=True)
+            t.start()
+            t.join(25)
+        self.assertFalse(t.is_alive(), task.status.get("last"))
+        self.assertEqual(task.spec["model"], FB_OTHER)
+        [ev] = self.events(task, "fallback")
+        self.assertEqual((ev["moved"], ev["to"], ev["round"]), (True, FB_OTHER, 1))
+
+    def test_a_provider_marked_out_of_credit_between_rounds_moves_the_next_round_in_a_fresh_session(self):
+        self.roles(FB_OTHER)
+        task = self.api_task("t-between", FB_PRIMARY, "ok", "--test", "false", "--auto-fix", "1")
+        real = runner.run_round
+
+        def then_402(task, n, **kw):
+            try:
+                return real(task, n, **kw)
+            finally:  # another task's 402, while this one's tests run
+                runner.models.note_api("meterco", "no_credit", "HTTP 402", time.time() + 600)
+        with mock.patch.object(runner, "run_round", then_402):
+            t = threading.Thread(target=runner.drive, args=(task,), daemon=True)
+            t.start()
+            t.join(60)
+        self.assertFalse(t.is_alive(), task.status.get("last"))
+        [ev] = self.events(task, "fallback")
+        self.assertEqual((ev["moved"], ev["to"], ev["round"]), (True, FB_OTHER, 2))
+        self.assertEqual(task.status["fallback_moved"]["fresh"], True)
+        self.assertEqual([e["round"] for e in self.events(task, "fresh")], [2])
+        self.assertEqual(task.spec["model"], FB_OTHER)
+
+    def test_before_a_round_a_mark_that_is_this_tasks_turn_or_a_fallback_that_cant_take_it_leaves_the_wait(self):
+        self.roles(FB_OTHER)
+        task = self.api_task("t-turn", FB_PRIMARY, "ok")
+        m = runner.models.resolve(FB_PRIMARY)
+        runner.models.note_api("meterco", "no_credit", "HTTP 402", time.time() + 600)
+        runner.models.credit_ask("meterco", "t-turn")                   # the user's resume: its turn to ask
+        self.assertIsNone(runner._credit_move(task, m))
+        runner.models.note_api("meterco", "no_credit", "HTTP 402", time.time() + 600)
+        runner.models.note_api("otherco", "no_credit", "HTTP 402")
+        self.assertIsNone(runner._credit_move(task, m))
+        self.assertIsNone(runner._credit_move(task, m))                 # before the slot and in it
+        [ev] = self.events(task, "fallback")                            # said once
+        self.assertFalse(ev["moved"])
+        self.assertTrue(ev["text"].endswith("the round waits for meterco's credit"), ev["text"])
+        self.assertEqual(task.spec["model"], FB_PRIMARY)
+
+    def test_a_repo_made_local_only_after_the_start_never_moves_to_an_api_fallback(self):
+        # the review of #1196: deleting _fallback_move's local-only check survived every test
+        self.roles(FB_OTHER)
+        task = self.api_task("t-local", FB_PRIMARY, "ok")
+        with mock.patch.object(runner.privacy, "local_only", lambda repo, sub: str(repo)):
+            self.assertIsNone(runner._fallback_move(task, 1, {"guard": "quota", "stuck": "out of credit"}))
+        [ev] = self.events(task, "fallback")
+        self.assertFalse(ev["moved"])
+        self.assertIn(f"{FB_OTHER} is an API model, and {self.repo.name} is kept local", ev["text"])
+        self.assertEqual(task.spec["model"], FB_PRIMARY)
+        store.write_json(task.dir / "task.json", {**task.spec, "local_only": True})   # --local-only
+        self.assertIsNone(runner._fallback_move(task, 1, {"guard": "quota", "stuck": "out of credit"}))
+        self.assertIn("this task is kept local (--local-only)", self.events(task, "fallback")[-1]["text"])
+
+    def test_a_moved_task_never_moves_again_even_to_another_providers_fallback(self):
+        # the review of #1196: the never-again guard's test passed on the same-provider refusal alone
+        self.roles(HAIKU)
+        task = self.api_task("t-again", FB_OTHER, "ok")
+        store.write_json(task.dir / "task.json", {**task.spec, "fallback": True, "fallback_from": FB_PRIMARY})
+        with mock.patch.object(routes, "fallback_pick", lambda *a, **k: self.fail("a moved task looked for one")):
+            self.assertIsNone(runner._fallback_move(task, 1, {"guard": "quota", "stuck": "out of credit"}))
+        self.assertEqual(task.spec["model"], FB_OTHER)
+
+    def test_a_fallback_on_the_roles_own_provider_is_refused_by_the_pick(self):
+        doc = {"roles": {"significant": {"via": "api", "api": FB_PRIMARY, "gpu": "auto", "thinking": "off",
+                                         "fallback": FB_PRIMARY}}}
+        primary = types.SimpleNamespace(id="meterco/other", provider="meterco")
+        got = routes.fallback_pick(doc, "significant", "significant", [], "t", primary)
+        self.assertEqual(got, f"the significant role's fallback {FB_PRIMARY} is on meterco too")
+
+    def test_a_fallback_whose_keyhole_cant_start_puts_task_json_back(self):
+        self.roles(FB_OTHER)
+        task = self.api_task("t-kh", FB_PRIMARY, "ok")
+        before = task.spec
+
+        def refuse(task, m):
+            raise runner.keyhole.KeyholeError("no key")
+        with mock.patch.object(runner, "start_keyhole", refuse):
+            self.assertIsNone(runner._fallback_move(task, 1, {"guard": "quota", "stuck": "out of credit"}))
+        self.assertEqual(task.spec, before)
+        self.assertIn(f"the significant role's fallback {FB_OTHER} can't start: ", self.events(task, "fallback")[-1]["text"])
 
 
 class MediaDefaults(Base):
@@ -42691,8 +47921,9 @@ class ApiCompat(Base):
         self.assertIn("  significant  gpu (no local model: none can run)", out)
         self.assertIn("  trivial      acme/coder-flash  ready · thinking off · set by you 11-20", out)
         self.assertIn("keys: acme (stored), deepinfra (stored), nolimit (stored), oauthco (OAuth login: "
-                      "can't run, needs a key wb can hold outside the lane), xenv (environment: can't run, "
-                      "needs a key wb can hold outside the lane)", out)
+                      "can't run, needs a key wb can hold outside the lane), xenv (key from $XENV_API_KEY: "
+                      "can't run: $XENV_API_KEY isn't set where wb start ran: export it, or store the key "
+                      "with `opencode auth login xenv`)", out)
         self.assertIn(f"opencode 1 (free: {cli.FREE_NOTE})", out)
         self.assertNotIn("coder-pro", out)                          # counts, never ids
         Path(os.environ["WB_ROUTES"]).unlink()
@@ -42716,6 +47947,16 @@ class ApiCompat(Base):
         skill = (Path(cli.__file__).resolve().parent.parent / "skill/workbench/SKILL.md").read_text()
         first = " ".join(skill[skill.index("  2. **No GPU model"):skill.index("  3. **No GPU model")].split())
         self.assertIn("`wb models --api <provider>` lists that provider's ids", first)
+
+    def test_wb_models_api_marks_a_model_the_catalog_says_has_no_tool_calls(self):
+        # #1193: the first run's free pick needs tool calls, which the listing never said
+        self.catalog([api_entry("opencode", "big-pickle-free", cost=[{"input": 0, "output": 0}]),
+                      api_entry("opencode", "chatty-free", cost=[{"input": 0, "output": 0}],
+                                capabilities={"tools": False})], [])
+        self.models.hosted(fresh=True)
+        out = run_wb("models", "--api", "opencode").splitlines()
+        self.assertEqual(out, [f"opencode/big-pickle-free  200K · free: {cli.FREE_NOTE}",
+                               f"opencode/chatty-free  200K · free: {cli.FREE_NOTE} · no tool calls"])
 
     def test_wb_models_names_an_api_roles_state_and_a_gpu_user_gets_two_lines(self):
         self.catalog([api_entry("opencode", "big-pickle-free", cost=[{"input": 0, "output": 0}])], [])
@@ -42879,6 +48120,229 @@ class ApiCompat(Base):
             with runner._tests_gpu(task, types.SimpleNamespace(pool=None)):   # an API task's NoLease (#1015)
                 pass
         self.assertEqual(took, [("t", True)] * 2)
+
+
+class Rewind(Base):
+    """wb rewind: a task's files back to an earlier review round's tree in the step (#1198)."""
+    def setUp(self):
+        super().setUp()
+        self.runs_file = Path(self.tmp.name) / "runs.jsonl"
+        os.environ["FAKE_RUNS"] = str(self.runs_file)
+
+    def reviewed(self, task, rnd, write=(), delete=(), tests="0"):
+        """Round ``rnd`` as the runner ends one: its files, its tests.txt, its review notice's tree."""
+        for path, text in dict(write).items():
+            (task.worktree / path).parent.mkdir(parents=True, exist_ok=True)
+            (task.worktree / path).write_bytes(text if isinstance(text, bytes) else text.encode())
+        for path in delete:
+            (task.worktree / path).unlink()
+        task.round_dir(rnd).mkdir(parents=True, exist_ok=True)
+        task.round_dir(rnd).joinpath("tests.txt").write_text(f"$ {TEST_CMD}\nexit: {tests}\nshell: sh\n\n")
+        task.set_status(round=rnd, phase="review")
+        runner.review_diff(task, rnd)
+
+    def refs(self, name):
+        return subprocess.run(["git", "-C", str(self.repo), "for-each-ref", "--format=%(refname)",
+                               f"refs/workbench/review/{name}/"], capture_output=True, text=True,
+                              check=True).stdout.split()
+
+    def refused(self, *argv) -> str:
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            run_wb(*argv)
+        return err.getvalue()
+
+    def test_a_rewind_restores_round_twos_files_after_round_three_broke_one(self):
+        name = "t-rw"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        self.assertEqual(self.refs(name), [f"refs/workbench/review/{name}/1"])  # the runner's own
+        head = subprocess.run(["git", "-C", str(task.worktree), "rev-parse", "HEAD"],
+                              capture_output=True, text=True).stdout
+        self.reviewed(task, 2, {"lib/good.py": "def f():\n    return 2\n"})
+        self.reviewed(task, 3, {"answer.txt": "41\n", "lib/good.py": "def f(:\n", "junk/x.txt": "x\n"},
+                      delete=["README.md"], tests="1")
+        # the trees are pinned: git gc prunes what nothing reaches (#795)
+        subprocess.run(["git", "-C", str(self.repo), "prune", "--expire=now"], check=True)
+        out = run_wb("rewind", name, "2")
+        self.assertIn(f"rewound {name} to round 2's files (step 1); undone:", out)
+        self.assertIn("round 2's tests on these files: passed", out)
+        self.assertEqual((task.worktree / "answer.txt").read_text(), "42\n")
+        self.assertEqual((task.worktree / "lib/good.py").read_text(), "def f():\n    return 2\n")
+        self.assertEqual((task.worktree / "README.md").read_text(), "hello\n")  # a deletion undone
+        self.assertFalse((task.worktree / "junk").exists())                     # a new file gone
+        git = lambda *a: subprocess.run(["git", "-C", str(task.worktree), *a],  # noqa
+                                        capture_output=True, text=True).stdout
+        self.assertEqual(git("rev-parse", "HEAD"), head)                         # nothing committed
+        self.assertEqual(git("diff", "--cached", "--name-only"), "")             # nor staged
+        st = task.status
+        self.assertEqual(st["reviewed"]["tree"], st["review_trees"]["2"]["tree"])  # the next diff's base
+        self.assertEqual((st["rewound_to"], st["context"], st["phase"]), (2, "fresh", "review"))
+        self.assertIn("Claude rewound the files to round 2's", run_wb("log", name))
+        out = run_wb("rewind", name, "3")                                        # and forward again
+        self.assertIn("round 3's tests on these files: failed (exit 1)", out)
+        self.assertEqual((task.worktree / "answer.txt").read_text(), "41\n")
+        self.assertFalse((task.worktree / "README.md").exists())
+        self.assertIn("no review of round 4 in step 1 (its reviewed rounds: 1, 2, 3",
+                      self.refused("rewind", name, "4"))
+
+    def test_a_rewind_from_a_stuck_round_keeps_its_files_for_a_rewind_back(self):
+        name = "t-rws"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        (task.worktree / "half.txt").write_text("half done\n")   # round 2 stopped, never reviewed
+        task.set_status(round=2, phase="stuck")
+        out = run_wb("rewind", name, "1")
+        self.assertIn(f"round 2's files (not reviewed) are kept: wb rewind {name} 2", out)
+        self.assertIn(f"wb accept {name} --force", out)          # not in review: accept says so
+        self.assertFalse((task.worktree / "half.txt").exists())
+        run_wb("rewind", name, "2")
+        self.assertEqual((task.worktree / "half.txt").read_text(), "half done\n")
+
+    def test_a_rewind_leaves_a_file_the_snapshot_left_out_untouched_and_names_it(self):
+        name = "t-rwk"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        big = b"\0" * gitops.BINARY_MAX
+        self.reviewed(task, 2, {"data.bin": big, "notes.txt": "two\n"})
+        self.assertEqual(task.status["review_trees"]["2"]["keep"], ["data.bin"])
+        # round 3 shrinks it: now in the worktree's snapshot, though round 2's tree has no copy
+        self.reviewed(task, 3, {"data.bin": b"small\n", "notes.txt": "three\n"})
+        out = run_wb("rewind", name, "2")
+        self.assertEqual((task.worktree / "notes.txt").read_text(), "two\n")
+        self.assertEqual((task.worktree / "data.bin").read_bytes(), b"small\n")  # never deleted
+        self.assertIn("left as they are, in no review snapshot: data.bin (1 MB)\n", out)
+
+    def test_a_rewind_never_writes_over_a_file_grown_past_the_snapshot_and_says_so_truly(self):
+        # #1198's review: round 2's 10 KB data.bin was written over the 2 MB one no tree held,
+        # while the rewind said it was left as it was, and wb rewind 4 couldn't bring it back
+        name = "t-rwg"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        self.reviewed(task, 2, {"data.bin": b"\1" * 10240, "notes.txt": "two\n"})
+        grown = b"\2" * (2 << 20)
+        (task.worktree / "data.bin").write_bytes(grown)           # round 3, left out of `now`
+        (task.worktree / "notes.txt").write_text("three\n")
+        task.set_status(round=4, phase="stuck")
+        out = run_wb("rewind", name, "2")
+        self.assertEqual((task.worktree / "notes.txt").read_text(), "two\n")
+        self.assertEqual((task.worktree / "data.bin").read_bytes(), grown)   # never written over
+        self.assertIn("left as they are, in no review snapshot: data.bin (2 MB)\n", out)
+        # not in the stat as undone: --stat pads each name to the longest, so `data.bin |` never
+        # matched, and the test passed with the exclusion gone (#1198's review)
+        stat = out.split("undone:\n", 1)[1].split("round 2's tests", 1)[0]
+        self.assertIn("notes.txt", stat)
+        self.assertNotIn("data.bin", stat)
+        self.assertIn(f"round 4's files (not reviewed) are kept: wb rewind {name} 4", out)
+        run_wb("rewind", name, "4")
+        self.assertEqual((task.worktree / "notes.txt").read_text(), "three\n")
+        self.assertEqual((task.worktree / "data.bin").read_bytes(), grown)
+
+    def test_a_file_too_big_for_the_second_snapshot_is_not_named_as_differing_when_the_tree_has_it(self):
+        # #1198's review: round 3's .gitignore, undone, unignored logs/ and pushed the second
+        # snapshot past SNAPSHOT_MAX, which left a.txt out: named as not round 2's, though it was
+        name = "t-rwb"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        with mock.patch.object(gitops, "SNAPSHOT_MAX", 30000):
+            self.reviewed(task, 2, {"a.txt": "a" * 20000})
+            self.reviewed(task, 3, {".gitignore": "logs/\n", "logs/big.log": "b" * 15000})
+            out = run_wb("rewind", name, "2")
+        self.assertEqual((task.worktree / "a.txt").read_text(), "a" * 20000)
+        self.assertFalse((task.worktree / ".gitignore").exists())
+        self.assertFalse((task.worktree / "logs/big.log").exists())   # unignored: deleted
+        self.assertIn("deleted, not in round 2's files (a later .gitignore hid them): logs/big.log", out)
+        self.assertNotIn("not as round 2's files", out)
+
+    def test_a_rewind_deletes_a_file_a_later_rounds_gitignore_hid_so_accept_cant_commit_it(self):
+        # #1198's review: round 2's .gitignore back, round 3's ignored secret.env was a new file
+        # wb accept's `add -A` would commit, though the rewind said only `.gitignore | 1 +`
+        name = "t-rwi"
+        self.start(name, "ok", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        self.reviewed(task, 2, {"notes.txt": "two\n"})
+        self.reviewed(task, 3, {".gitignore": "secret.env\nbig.bin\n", "secret.env": "KEY=x\n",
+                                "big.bin": b"\0" * gitops.BINARY_MAX})
+        out = run_wb("rewind", name, "2")
+        self.assertIn("deleted, not in round 2's files (a later .gitignore hid them): secret.env",
+                      out)
+        self.assertIn("not as round 2's files, left as they are: big.bin\n", out)  # too big to hash
+        self.assertFalse((task.worktree / "secret.env").exists())
+        self.assertEqual(gitops.snapshot(task.worktree), task.status["review_trees"]["2"]["tree"])
+        status = subprocess.run(["git", "-C", str(task.worktree), "status", "--porcelain"],
+                                capture_output=True, text=True, check=True).stdout
+        self.assertNotIn("secret.env", status)
+
+    def test_a_rewind_puts_back_an_ignored_file_the_agent_wrote_and_says_nothing_false_of_it(self):
+        # the merge of 2.1 into main (2026-11-25): main's review trees hold the ignored files the
+        # agent wrote (#1259's force), wb rewind's own snapshots didn't, so a rewind from a
+        # reviewed round said "your edits since the last review … kept nowhere" and named the
+        # restored lib/util.py as "not as round 2's files"
+        (self.repo / ".gitignore").write_text("lib/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore lib"], check=True)
+        name = "t-rwl"
+        self.start(name, "shellwrite", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        self.reviewed(task, 2, {"lib/util.py": "def answer():\n    return 42  # two\n"})
+        self.reviewed(task, 3, {"lib/util.py": "def answer(:\n", "notes.txt": "three\n"}, tests="1")
+        out = run_wb("rewind", name, "2")
+        self.assertEqual((task.worktree / "lib/util.py").read_text(), "def answer():\n    return 42  # two\n")
+        self.assertFalse((task.worktree / "notes.txt").exists())
+        self.assertNotIn("kept nowhere", out)
+        self.assertNotIn("not as round 2's files", out)
+        self.assertIn("lib/util.py", out.split("undone:\n", 1)[1])
+
+    def test_feedback_after_a_rewind_says_so_and_starts_a_fresh_session(self):
+        from workbench import lessons
+        name = "t-rwf"
+        self.start(name, "fix", "--test", TEST_CMD, "--no-base-check", "--auto-fix", "0")
+        wait_phase(name, {"review"})                     # round 1: 41, tests fail
+        run_wb("feedback", name, "--text", "1. The answer is 42.")
+        wait_phase(name, {"review"})                     # round 2: 42, on the same session
+        task = store.Task(name)
+        self.assertEqual((task.worktree / "answer.txt").read_text(), "42\n")
+        run_wb("rewind", name, "1")
+        self.assertEqual((task.worktree / "answer.txt").read_text(), "41\n")
+        out = run_wb("feedback", name, "--text", "1. Write 42 to answer.txt.")
+        self.assertIn("from round 1's files", out)
+        st = wait_phase(name, {"review"})
+        last = [json.loads(x) for x in self.runs_file.read_text().splitlines()][-1]
+        self.assertFalse(last["session"])                                    # a fresh session
+        self.assertIn(cli.REWOUND_LINE.format(1), last["prompt"])
+        self.assertIsNone(st.get("rewound_to"))                              # said once
+        self.assertEqual(lessons.items(lessons.round_feedback(task, 3)[0]), ["Write 42 to answer.txt."])
+        run_wb("rewind", name, "2")
+        run_wb("feedback", name, "--text", "1. Keep it.", "--keep-context")
+        wait_phase(name, {"review"})
+        last = [json.loads(x) for x in self.runs_file.read_text().splitlines()][-1]
+        self.assertTrue(last["session"])                                     # as asked
+
+    def test_the_review_refs_are_gone_after_next_accept_or_discard(self):
+        for name in ("t-rwa", "t-rwd", "t-rwn"):
+            self.start(name, "ok", "--test", TEST_CMD, "--no-base-check", "--queue")
+        for name in ("t-rwa", "t-rwd", "t-rwn"):
+            wait_phase(name, {"review"})
+            self.reviewed(store.Task(name), 2, {"more.txt": "more\n"})
+            self.assertEqual(len(self.refs(name)), 2)
+        run_wb("accept", "t-rwa", "-m", "feat: answer")
+        run_wb("discard", "t-rwd", "--reason", "test")
+        self.assertEqual((self.refs("t-rwa"), self.refs("t-rwd")), ([], []))
+        self.assertIsNone(store.Task("t-rwa").status.get("review_trees"))
+        self.spec.write_text("Step two.\n")
+        run_wb("next", "t-rwn", "--spec", str(self.spec), "-m", "feat: step one")
+        self.assertEqual(self.refs("t-rwn"), [])
+        st = wait_phase("t-rwn", {"review"})
+        self.assertEqual(list(st["review_trees"]), [str(st["round"])])       # step 2's alone
+        self.assertIn("a rewind never goes back past wb next's commit",
+                      self.refused("rewind", "t-rwn", "1"))
 
 
 if __name__ == "__main__":

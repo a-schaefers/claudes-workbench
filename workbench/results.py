@@ -118,6 +118,8 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
            # an API task's thinking, off or on (the weekly check's evidence, #1018); a GPU task
            # thinks as its OpenCode entry says, so it has none
            **({"thinking": spec["thinking"]} if spec.get("thinking_shown") and spec.get("thinking") else {}),
+           # its self-review on the thinking variant: the evidence #1059 asks before recommending it
+           **({"thinking_review": "on"} if spec.get("review_model") else {}),
            "tuned": st.get("tuned") or {}, "explored": st.get("explored") or [],  # tuning.py
            "tuned_max": st.get("tuned_max") or {},
            **({"peak_share": st["peak_share"]} if "peak_share" in st else {}),  # tuning (#721)
@@ -155,7 +157,6 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
 # --- API tasks (#1022): what the row says of the route, and the money -------------------------
 
 TOKEN_KEYS = ("in", "out", "cache_read", "cache_write", "reasoning")
-PLAN_PROVIDERS = meter.PLAN_PROVIDERS  # a quota, not dollars: the meter's one list (#1019)
 
 
 def api_row(row: dict) -> bool:
@@ -178,7 +179,10 @@ def _with_route(task: store.Task, row: dict) -> dict:
     spec = task.spec
     kind, model = task_kind(spec), str(spec.get("model") or "")
     row = {**row, "kind": kind, "role": spec.get("role"),
-           "provider": spec.get("provider") or (model.split("/", 1)[0] if "/" in model else None)}
+           "provider": spec.get("provider") or (model.split("/", 1)[0] if "/" in model else None),
+           # on the role's fallback (#1196): `model` is the one that finished, which the router,
+           # slices and tuning credit; the role's API model it stood in for keeps its stats
+           **({"fallback": True, "fallback_from": spec.get("fallback_from")} if spec.get("fallback") else {})}
     if kind == "api":
         row.pop("gpu_wh", None)
         row.pop("remote_gpu", None)
@@ -222,12 +226,12 @@ def catalog_price(model_id: str) -> float | None:
 
 
 def _plan(model_id: str) -> str | None:
-    """The plan a model's usage counts against (OpenCode Go, an Ollama cloud model): its provider,
+    """The plan a model's usage counts against (OpenCode Go, a coding plan, an Ollama cloud model): its provider,
     else None. An Ollama cloud model by the catalog's `cloud` flag (#1013), never by its name: any
     provider's model may end in `-cloud`, and its dollars would go uncounted (#1022's review)."""
     from . import models
     pid = model_id.partition("/")[0]
-    if pid in PLAN_PROVIDERS:
+    if meter.plan_provider(pid):
         return pid
     try:
         m = models.lookup(model_id, cached=True)

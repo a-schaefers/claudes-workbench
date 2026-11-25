@@ -66,6 +66,10 @@
   devserver  writes "42", starts `npm run dev` in the background, ends its turn (reason stop),
          then `background_wait` on that job for an hour (a server never ends: #658)
   toolhang  one tool call, then silent (a command that prints nothing for long)
+  fgcmd  runs `$SHELL -c 'sleep FAKE_FG'` (12) in the foreground, silent until it ends, as
+         OpenCode prints a shell call only then (a long `timeout`, #1386); then writes "42"
+  bgthink  one shell call whose `$SHELL -c 'sleep 300'` it leaves running, as OpenCode moves a
+         call past its timeout to the background, then silent for an hour (thinking, #1386)
   retry  no answer from the model's server: a `retry` line every FAKE_RETRY_EVERY seconds (1),
          OpenCode cutting the request at its provider timeout and sending it again (#491)
   say    a few words and no tool call ("I will inspect the files")
@@ -87,9 +91,13 @@ stays alive (a shutdown that hangs). FAKE_EXIT: after its last event a run exits
 FAKE_SURROGATE: a run first reads a file whose name and text end in half an emoji (an
 unpaired surrogate escaped, which is valid JSON).
 FAKE_LATIN1: a run first prints a line that isn't UTF-8 (`caf\xe9`, Latin-1).
-FAKE_RUNS rows also say what OpenCode's environment had (`opencode_db`, `xdg_data`, `xdg_state`,
-`shell`) and what a command the agent runs through `$SHELL -c` sees (`shell_sees`: its
-XDG_DATA_HOME, XDG_STATE_HOME, OPENCODE_DB and SHELL, `-` for one unset).
+FAKE_RUNS rows also say the run's `-m` (`model`, #1059) and what OpenCode's environment had (`opencode_db`, `xdg_data`, `xdg_state`,
+`shell`, and `env_names`: every variable's name, never a value) and what a command the agent runs through `$SHELL -c` sees (`shell_sees`: its
+XDG_DATA_HOME, XDG_STATE_HOME, OPENCODE_DB and SHELL, `-` for one unset); with FAKE_CONNECT (a
+port) the run connects to it on 127.0.0.1 first, its row's `connect` "ok" or the errno (13: the
+lane refused it, #1197); and `files`: each `run -f/--file` it attached, `{name, bytes}`, read as
+OpenCode's client reads it (one it can't open is "File not found", exit 1; a directory or one over
+10 MiB "Cannot attach", #1199).
 A run with OPENCODE_DB set records its new session in that home (`<db>.sessions`), as OpenCode
 keeps it in its database (#1010). `session export` prints one finished step, its `info.home` the
 database it read: FAKE_FILL sets the context it read, FAKE_COMPACTED adds a completed compaction;
@@ -99,8 +107,12 @@ does when another service holds the managed port, and so does `auth list` or `au
 (#1070). `auth export <provider>` prints the rows of
 FAKE_AUTH_EXPORT (a JSON list, as OpenCode 2.3.2 prints them) for that provider, or `[]`, and
 appends the provider to FAKE_AUTH_LOG when set. `--version` says
-`FAKE_VERSION` (2.3.0). A `run` starts the config's workbench MCP server and lists its tools,
-as OpenCode does, unless FAKE_NO_MCP.
+`FAKE_VERSION` (2.3.0). A `run` starts the config's local MCP servers (the workbench one, and
+a user's the layer passes through: tests/fake_mcp.py) and lists their tools, as OpenCode does,
+unless FAKE_NO_MCP; FAKE_MCP_LOG gets one line a run, {server: [tool, ...]}. Each server's
+connection goes in OpenCode's own log, $XDG_DATA_HOME/opencode/log/opencode.log (with that set
+alone), as 2.3.2 writes it: `message="mcp connected" server=<name> tools=<n>`, or `message="mcp connect failed"
+server=<name> status.error="<its stderr>"` for one that listed no tools.
 
 API models (#1011), as the spike for #1009 saw OpenCode 2.3.2 print them:
   ratelimit  a 429: `retry` events (attempts 2 to FAKE_RETRIES+1, 10 by default, FAKE_RETRY_EVERY
@@ -124,6 +136,9 @@ WB_FAKE_API sets a model's or a provider's state, `<provider>[/<id>]=<state>,…
 one of the API scenarios above (or `ok`): a run of that model (a config model's too) plays it,
 its own state before its provider's, and a `nokey` provider
 drops out of `api model.list`, `models` and `auth list`, as one OpenCode can't authenticate does.
+An `env` provider (#1189) has its key only in `<PROVIDER>_API_KEY` (env_var): `auth list` gives it
+one connection, `{type: "env", name}`, while that variable is set (and drops it otherwise), as
+2.3.2 does, and `auth export` prints no row of it; its runs play `ok`.
 `api model.list` prints `{location, data}`; `serve --stdio` (how wb reads the catalog: models.model_list)
 prints `{"url": ...}`, a server on 127.0.0.1 asking Basic `opencode:<OPENCODE_PASSWORD>` (401
 otherwise), until its stdin closes: GET /api/plugin `{location, data: [plugins]}`, GET /api/model
@@ -156,7 +171,10 @@ OPENCODE_CONFIG, then OPENCODE_CONFIG_CONTENT; `disabled: true` removes it), els
   http   a model request as OpenCode makes one, through its config (#1015): the run's provider's
          options from OPENCODE_CONFIG, then OPENCODE_CONFIG_CONTENT over them; POST
          <baseURL>/chat/completions with `Authorization: Bearer <apiKey>` (an `anthropic`
-         provider: <baseURL>/messages?beta=true with `x-api-key`), through urllib, so the
+         provider: <baseURL>/messages?beta=true with `x-api-key`; `google`, as 2.3.2's Gemini
+         route: <baseURL>/models/<id>:streamGenerateContent?alt=sse with `x-goog-api-key` and
+         no `model` in the body; `azure`: <baseURL>/chat/completions with `api-key`, as its
+         package posts to a base that isn't `*.openai.azure.com`), through urllib, so the
          environment's http_proxy and no_proxy apply as they do to OpenCode's fetch. A 2xx is
          `ok` (it writes 42); another status is OpenCode's error for it, the upstream's message
          verbatim (`provider.auth` for 401/403 or, as 2.3.2, "Incorrect API key provided",
@@ -192,6 +210,12 @@ def api_state(provider: str, mid: str = "") -> str:
         name, _, state = item.rpartition("=")
         states[name] = state
     return states.get(f"{provider}/{mid}") or states.get(provider) or "ok"
+
+
+def env_var(provider: str) -> str:
+    """The variable an `env` provider's key is in: `<PROVIDER>_API_KEY`, as the catalog names
+    DeepSeek's DEEPSEEK_API_KEY."""
+    return re.sub(r"[^A-Z0-9]", "_", provider.upper()) + "_API_KEY"
 
 
 def reachable() -> list:
@@ -247,10 +271,21 @@ if args[:2] == ["serve", "--stdio"]:
             self.end_headers()
             self.wfile.write(body)
 
+    class Listens(ThreadingHTTPServer):
+        # listens at once, as the tests' own servers (_Listens, #950): HTTPServer's server_bind
+        # looks the address's name up (socket.getfqdn), 35 s on GitHub's macOS runners, past
+        # models.model_list's 30 s, so every catalog read there failed ("opencode model.list took
+        # over 30 s") and each macOS shard failed some 40 API tests (nightly run 45454423406,
+        # 2026-11-24)
+        def server_bind(self):
+            import socketserver
+            socketserver.TCPServer.server_bind(self)
+            self.server_name, self.server_port = self.server_address[:2]
+
     if os.environ.get("FAKE_SERVE_PID"):
         with open(os.environ["FAKE_SERVE_PID"], "w") as fh:
             fh.write(str(os.getpid()))
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = Listens(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(json.dumps({"url": f"http://127.0.0.1:{server.server_address[1]}"}), flush=True)
     sys.stdin.read()  # until the client closes it, as `serve --stdio` waits
@@ -279,6 +314,10 @@ if args[:2] == ["auth", "list"]:
                                                       "label": "default", "method": "key"}]}
                 for p in dict.fromkeys(e["providerID"] for e in doc["data"])]
     rows = [r for r in rows if api_state(r["id"]) != "nokey"]
+    # `env`: the key only in the provider's variable, as 2.3.2 lists it (#1189): an `env`
+    # connection, and only while the variable is set in OpenCode's environment
+    rows = [{**r, "connections": [{"type": "env", "name": env_var(r["id"])}]} if api_state(r["id"]) == "env"
+            else r for r in rows if api_state(r["id"]) != "env" or os.environ.get(env_var(r["id"]))]
     print(json.dumps(rows) if "json" in args else "\n".join(r["id"] for r in rows))
     sys.exit(0)
 if args == ["--version"]:  # wb doctor; FAKE_VERSION plays an older or odder build
@@ -290,7 +329,8 @@ if args[:2] == ["auth", "export"]:  # models.auth_key: OpenCode 2.x's credential
         with open(os.environ["FAKE_AUTH_LOG"], "a") as f:
             f.write(f"{pid}\n")
     rows = json.loads(os.environ.get("FAKE_AUTH_EXPORT") or "[]")
-    print(json.dumps([r for r in rows if pid is None or r.get("integrationID") == pid]))
+    print(json.dumps([r for r in rows if (pid is None or r.get("integrationID") == pid)
+                      and api_state(r.get("integrationID") or "") != "env"]))  # none stored (#1189)
     sys.exit(0)
 
 
@@ -518,6 +558,25 @@ def finish(reason="stop"):  # FAKE_STEP_IN: the step's input tokens (what it cos
 if args and args[0] == "run" and args[-1].startswith("-") and args[-2:-1] != ["--"]:
     print("opencode run [flags] [<message...>]", file=sys.stderr)  # OpenCode 2.3 took it for a flag
     sys.exit(1)
+# `run -f/--file <path>` (repeatable, before `--`), as 2.3.2's run.ts prepareFile: a path not
+# there is "File not found: <path>", one not a regular file or over 10 MiB "Cannot attach …", exit
+# 1 before any event; each opened here, in the lane, as OpenCode's client opens it (#1199)
+attached = []
+if args and args[0] == "run":
+    flags = args[:args.index("--")] if "--" in args else args
+    for i, flag in enumerate(flags[:-1]):
+        if flag in ("-f", "--file"):
+            want = os.path.join(os.environ.get("PWD") or os.getcwd(), flags[i + 1])
+            try:
+                with open(want, "rb") as fh:
+                    if not os.path.isfile(want) or os.fstat(fh.fileno()).st_size > 10 * 1024 * 1024:
+                        print(f"Error: Cannot attach a directory, special file, or file larger than "
+                              f"10 MiB: {flags[i + 1]}", file=sys.stderr)
+                        sys.exit(1)
+                    attached.append({"name": os.path.basename(want), "bytes": len(fh.read())})
+            except OSError:
+                print(f"Error: File not found: {flags[i + 1]}", file=sys.stderr)
+                sys.exit(1)
 if os.environ.get("FAKE_PROMPTS") and args and args[0] == "run":
     with open(os.environ["FAKE_PROMPTS"], "a") as fh:
         fh.write(json.dumps(args[-1]) + "\n")
@@ -536,9 +595,18 @@ if os.environ.get("FAKE_RUNS") and args and args[0] == "run":  # which runs cont
                               capture_output=True, text=True, timeout=30).stdout
     except (OSError, subprocess.TimeoutExpired):
         sees = None
+    connect = None
+    if os.environ.get("FAKE_CONNECT"):  # a TCP connect the agent makes in its round (#1197)
+        import socket
+        try:
+            socket.create_connection(("127.0.0.1", int(os.environ["FAKE_CONNECT"])), 5).close()
+            connect = "ok"
+        except OSError as e:
+            connect = e.errno
     with open(os.environ["FAKE_RUNS"], "a") as fh:
-        fh.write(json.dumps({"session": "--session" in args, "prompt": args[-1],
+        fh.write(json.dumps({"session": "--session" in args, "prompt": args[-1], "connect": connect,
                              "agent": args[args.index("--agent") + 1] if "--agent" in args else None,
+                             "model": args[args.index("-m") + 1] if "-m" in args else None,
                              "cwd": os.getcwd(), "pwd": os.environ.get("PWD"),
                              "opencode_db": os.environ.get("OPENCODE_DB"),
                              "xdg_data": os.environ.get("XDG_DATA_HOME"),
@@ -547,6 +615,8 @@ if os.environ.get("FAKE_RUNS") and args and args[0] == "run":  # which runs cont
                              "fetch_off": os.environ.get("OPENCODE_DISABLE_MODELS_FETCH"),
                              "models_path": os.environ.get("OPENCODE_MODELS_PATH"),
                              "content": os.environ.get("OPENCODE_CONFIG_CONTENT"),
+                             "env_names": sorted(os.environ),  # names only, never a value (#1189)
+                             "files": attached,
                              "shell_sees": sees}) + "\n")
 if args and args[0] == "run" and "--agent" in args:  # OpenCode 2.3.2's: built in, or the config's
     known = {"build", "general", "explore", "compaction", "title", "summary"}
@@ -600,12 +670,18 @@ if scenario == "http" and args and args[0] == "run":  # a model request through 
         opts.update(((doc.get("provider") or {}).get(pid) or {}).get("options") or {})
     base = str(opts.get("baseURL") or "").rstrip("/")
     key = str(opts.get("apiKey") or "")
+    msgs = {"model": rest.partition("#")[0], "stream": True,
+            "messages": [{"role": "user", "content": args[-1][:200]}]}
     if pid == "anthropic":
         url, heads = f"{base}/messages?beta=true", {"x-api-key": key, "anthropic-version": "2023-06-01"}
+    elif pid == "google":  # #1192: the model in the path, SSE pinned by the query
+        url, heads = f"{base}/models/{msgs['model']}:streamGenerateContent?alt=sse", {"x-goog-api-key": key}
+        msgs = {"contents": [{"role": "user", "parts": [{"text": args[-1][:200]}]}]}
+    elif pid == "azure":
+        url, heads = f"{base}/chat/completions", {"api-key": key}
     else:
         url, heads = f"{base}/chat/completions", {"Authorization": f"Bearer {key}"}
-    body = json.dumps({"model": rest.partition("#")[0], "stream": True,
-                       "messages": [{"role": "user", "content": args[-1][:200]}]}).encode()
+    body = json.dumps(msgs).encode()
     req = urllib.request.Request(url, data=body, method="POST",
                                  headers={**heads, "Content-Type": "application/json"})
 
@@ -660,20 +736,55 @@ if scenario == "crash":
     sys.exit(1)
 if args and args[0] == "run" and not os.environ.get("FAKE_NO_MCP"):
     # as OpenCode does when a session starts: each local MCP server in the config is started and
-    # its tools listed (the workbench one here; the user's are commands that do nothing)
+    # its tools listed: the workbench one, and a user's the layer passes through (#1202); the
+    # user's others are commands that do nothing. FAKE_MCP_LOG gets {server: [tool, ...]}
     import subprocess
     try:
         with open(os.environ["OPENCODE_CONFIG"]) as fh:
-            server = json.load(fh)["mcp"]["servers"]["workbench"]
+            servers = json.load(fh)["mcp"]["servers"]
     except (KeyError, OSError, ValueError, TypeError):
-        server = None
-    if server and server.get("type") == "local":
+        servers = {}
+    listed = {}
+    for name, server in (servers.items() if isinstance(servers, dict) else ()):
+        if not isinstance(server, dict) or server.get("type") != "local" or \
+                server.get("command") == ["false"]:
+            continue
         hello = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
                  {"jsonrpc": "2.0", "method": "notifications/initialized"},
                  {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}]
-        subprocess.run(server["command"], input="".join(json.dumps(m) + "\n" for m in hello),
-                       env={**os.environ, **(server.get("environment") or {})},
-                       capture_output=True, text=True, timeout=30)
+        try:
+            ran = subprocess.run(server["command"], input="".join(json.dumps(m) + "\n" for m in hello),
+                                 env={**os.environ, **(server.get("environment") or {})},
+                                 capture_output=True, text=True, timeout=30)
+            out, err = ran.stdout, ran.stderr or f"MCP server process exited with code {ran.returncode}"
+        except (OSError, subprocess.TimeoutExpired) as e:
+            out, err = "", str(e)
+        for row in out.splitlines():
+            try:
+                reply = json.loads(row)
+            except ValueError:
+                continue
+            if isinstance(reply, dict) and reply.get("id") == 2:
+                listed[name] = [t.get("name") for t in (reply.get("result") or {}).get("tools") or ()]
+        # only in a data home given (the task's): never the user's own OpenCode's
+        oclog = os.path.join(os.environ.get("XDG_DATA_HOME") or "", "opencode", "log")
+        try:
+            if not os.environ.get("XDG_DATA_HOME"):
+                raise OSError
+            os.makedirs(oclog, exist_ok=True)
+            with open(os.path.join(oclog, "opencode.log"), "a") as fh:
+                if name in listed:
+                    fh.write(f'level=INFO message="mcp connected" server={name} '
+                             f'tools={len(listed[name])} role=server server={name}\n')
+                else:
+                    fh.write(f'level=WARN message="mcp connect failed" server={name} '
+                             f'status.status=failed status.error={json.dumps(err.strip())} '
+                             f'role=server server={name}\n')
+        except OSError:
+            pass
+    if os.environ.get("FAKE_MCP_LOG"):
+        with open(os.environ["FAKE_MCP_LOG"], "a") as fh:
+            fh.write(json.dumps(listed) + "\n")
 if os.environ.get("FAKE_STRAY"):
     for stray in ("42", "[1, 2]", "null", '{"type": "step_finish", "part": {"tokens": 5}}',
                   '{"type": "tool_use", "part": "x"}', '{"type": "text", "part": {"text": 7}}',
@@ -813,6 +924,22 @@ elif scenario == "say":
 elif scenario == "toolhang":
     tool("bash", {"command": "make check"})
     time.sleep(3600)
+elif scenario in ("fgcmd", "bgthink"):
+    import subprocess
+    sh = [os.environ.get("SHELL") or "sh", "-c"]
+    if scenario == "fgcmd":
+        emit("text", text="Running the suite.")
+        subprocess.run([*sh, f"sleep {os.environ.get('FAKE_FG') or 12}"])
+        tool("bash", {"command": "make test", "timeout": 1800000}, output="OK")
+        with open("answer.txt", "w") as fh:
+            fh.write("42\n")
+        tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
+        emit("text", text="Wrote answer.txt = 42.")
+        finish()
+    else:
+        subprocess.Popen([*sh, "sleep 300"])
+        tool("bash", {"command": "make test"}, output="moved to the background")
+        time.sleep(3600)
 elif scenario == "bgwait":
     tool("bash", {"command": "make test"})
     emit("text", text="The tests run in the background; waiting for them.")

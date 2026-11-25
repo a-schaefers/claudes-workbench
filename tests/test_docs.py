@@ -4,6 +4,8 @@ What a test can see is checked here: every command and flag is in ARCHITECTURE.m
 reference, every module in CLAUDE.md's layout, every environment variable in CLAUDE.md. What it
 can't (a default, a behaviour) is CLAUDE.md's rule: the commit that changes it updates the docs."""
 import argparse
+import ast
+import json
 import re
 import sys
 import unittest
@@ -54,6 +56,74 @@ def section(text: str, heading: str) -> str:
     return text[start:end if end > 0 else None]
 
 
+# A key, then ": value" or nothing (a block follows): a key is plain or double-quoted, never ":"
+_KEY = re.compile(r'("(?:[^"\\]|\\.)*"|[^\s"\[{#-][^:]*?|-[^\s:][^:]*?):(?: (.*))?')
+
+
+def read_yaml(text: str):
+    """docs/chat-api.yaml as data, without PyYAML (standard library only): the subset its header
+    names, block mappings and lists, one-line scalars, flow lists, {} and folded ">-" blocks. A
+    line outside it fails here rather than reading as something else (#1138)."""
+    lines = [(len(raw) - len(raw.lstrip(" ")), raw.strip()) for raw in text.splitlines()
+             if raw.strip() and not raw.strip().startswith("#")]
+
+    def scalar(v: str):
+        if v.startswith('"'):
+            return json.loads(v)
+        if v.startswith("["):
+            items = re.findall(r'"(?:[^"\\]|\\.)*"|[^,\s][^,]*', v[1:-1])
+            return [scalar(x.strip()) for x in items]
+        if v.startswith(("{", "'", "|", "&", "*", "!")) and v != "{}":
+            raise ValueError(f"outside the subset: {v}")
+        return ({} if v == "{}" else {"true": True, "false": False, "null": None}.get(v, v)
+                if not re.fullmatch(r"-?\d+", v) else int(v))
+
+    def block(i: int, ind: int):
+        if lines[i][1].startswith("- "):
+            out = []
+            while i < len(lines) and lines[i][0] == ind and lines[i][1].startswith("- "):
+                rest = lines[i][1][2:]
+                if _KEY.fullmatch(rest):  # "- key: value": a mapping whose keys sit 2 further in
+                    lines[i] = (ind + 2, rest)
+                    v, i = block(i, ind + 2)
+                else:
+                    v, i = scalar(rest), i + 1
+                out.append(v)
+            return out, i
+        out = {}
+        while i < len(lines) and lines[i][0] == ind:
+            m = _KEY.fullmatch(lines[i][1])
+            if not m:
+                raise ValueError(f"outside the subset: {lines[i][1]}")
+            key, v = json.loads(m[1]) if m[1].startswith('"') else m[1], m[2]
+            if key in out:
+                raise ValueError(f"{key} twice")
+            i += 1
+            if v == ">-":
+                parts = []
+                while i < len(lines) and lines[i][0] > ind:
+                    parts.append(lines[i][1])
+                    i += 1
+                out[key] = " ".join(parts)
+            elif v is None:
+                out[key], i = block(i, lines[i][0])
+            else:
+                out[key] = scalar(v)
+        if i < len(lines) and lines[i][0] > ind:
+            raise ValueError(f"indented out of place: {lines[i][1]}")
+        return out, i
+
+    got, end = block(0, 0)
+    if end != len(lines):
+        raise ValueError(f"left over: {lines[end][1]}")
+    return got
+
+
+def v1(route: str) -> str:
+    """chat.ROUTES's /api/<x> as the OpenAPI file names it: /api/v1/<x>, an id-taking one {id}."""
+    return "/api/v1/" + route[len("/api/"):] + ("{id}" if route.endswith("/") else "")
+
+
 class DocsMatchTheCode(unittest.TestCase):
     """CLAUDE.md and ARCHITECTURE.md name everything a reader looks up."""
 
@@ -71,12 +141,12 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertEqual(missing, [], "add these to ARCHITECTURE.md's *Every `wb` command*")
 
     def test_the_quickstart_finds_the_marketplace_where_claude_code_keeps_it(self):
-        # the 2026-11-19 audit: ~/.claude hard-coded, wrong for CLAUDE_CONFIG_DIR users
+        # the 2026-11-19 audit: ~/.claude hard-coded, wrong for CLAUDE_CONFIG_DIR users. Since
+        # #1190 the quickstart has no such line (the mod runs wb setup): only where one appears
         for text in ((ROOT / "README.md").read_text(), ARCH):
-            setup = [line for line in text.splitlines() if "marketplaces/workbench/bin/wb setup" in line]
-            self.assertTrue(setup)
-            for line in setup:
-                self.assertIn('"${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/', line)
+            for line in text.splitlines():
+                if "marketplaces/workbench/bin/wb setup" in line:
+                    self.assertIn('"${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/', line)
 
     def test_every_module_is_in_the_layout(self):
         layout = section(CLAUDE, "## Layout")
@@ -100,15 +170,13 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertIn(f"{models.MIN_WINDOW // 1024}K at the least", readme)
         self.assertIn("32K context window recommended", readme)
 
-    def test_the_panes_probe_row_names_the_line_count_the_code_holds(self):
-        # the review of #857's off and on (2026-11-22): the pane's "On (large files only)" sentence
-        # copies context.PROBE_FILE_LINES, which it can't import, so a change to one is caught here
-        from workbench import context
-        said = f"one function of a file over {context.PROBE_FILE_LINES:,} lines with probe"
+    def test_the_pane_keeps_no_copy_of_a_setting_wb_owns(self):
+        # the review of #857's off and on (2026-11-22) caught the pane's probe sentence copying
+        # context.PROBE_FILE_LINES; since #1283 (the owner, 2026-11-24) the settings are the web
+        # app's and the pane is Tasks only, so it keeps no copy of a setting's words to fall behind
         pane = (ROOT / "mod/hooks/register.tsx").read_text()
-        stops = pane[pane.index("const PROBE_STOPS"):]
-        self.assertIn(said, stops[:stops.index("]\n")], "the pane's PROBE_STOPS on sentence")
-        self.assertIn(said, " ".join(ARCH.split()), "ARCHITECTURE.md's pane row")
+        for copy in ("const PROBE_STOPS", "const CODING_STOPS", "const SETTING_ROWS", "const TABS"):
+            self.assertNotIn(copy, pane)
 
     def test_wb_start_role_and_the_agents_switch_are_in_the_command_reference(self):
         # #1016: the role Claude picks per task, and the user's Agents switch
@@ -147,6 +215,19 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertTrue(callable(cli.start_gate))
         self.assertIn("calls.push(['--start'", (ROOT / "mod/hooks/register.tsx").read_text())
 
+    def test_the_skill_changes_a_setting_only_on_the_users_clear_ask_and_yes(self):
+        # #1287 (the owner, 2026-11-24: "it should just require a clear ask and yes from the
+        # user"; "We trust Claude"): the rule wb settings set runs by, in the terminal or the web chat
+        skill = " ".join((ROOT / "skill/workbench/SKILL.md").read_text().split())
+        for said in ("explain it from `wb settings`",
+                     "Change one only when they have clearly asked for that change and said yes: `wb settings set "
+                     "<key> <value>`", "One yes covers the change asked for and nothing more.",
+                     "Never change a setting unasked, and after a no don't ask again.",
+                     "installing nothing without their yes", "A role moved to API still goes through the mod's dialog",
+                     "The same holds from the web chat: answer there and run the same command."):
+            self.assertIn(said, skill)
+        self.assertIn("calls.push(['--settings'", (ROOT / "mod/hooks/register.tsx").read_text())
+
     def test_the_skills_question_bullet_sends_a_files_text_never_a_path_outside_the_lane(self):
         # #1133 (2026-11-23): an answer naming ~/.claude/plans/x.md (hidden from the lane whole)
         # or another repo got the agent a denied read and another question, another wake
@@ -156,6 +237,17 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertIn("never a path you name elsewhere (a plan under ~/.claude, another repo)", bullet)
         self.assertIn("`wb answer <name> --file <path>`, which sends the file's contents", bullet)
         self.assertIn("Path(a.file).read_text(", (ROOT / "workbench/cli.py").read_text())   # cmd_answer's
+
+    def test_the_macos_ollama_install_puts_the_window_in_the_model_not_a_launchctl_setenv(self):
+        # #1195's review (2026-11-24): `launchctl setenv OLLAMA_CONTEXT_LENGTH` is lost at logout or
+        # reboot; Ollama then served its 4K default and short_window failed every GPU task
+        ref = " ".join((ROOT / "skill/workbench/reference/models.md").read_text().split())
+        mac = ref[ref.index("- Ollama on macOS"):ref.index("- Ollama on Linux")]
+        self.assertIn("Never `launchctl setenv OLLAMA_CONTEXT_LENGTH`", mac)
+        self.assertNotIn("&& launchctl setenv", mac)
+        self.assertIn('"parameters":{"num_ctx":<N>}', mac)
+        self.assertIn("wb model add ollama/<family>:<tag>-<K>k", mac)
+        self.assertIn("a `launchctl setenv` is lost at logout or reboot", " ".join(ARCH.split()))
 
     def test_the_backlog_promises_start_order_for_the_gpu_only_not_for_api_slots(self):
         # #1130 (2026-11-23): driving.md promised start order and sent-back-first, which only
@@ -176,6 +268,80 @@ class DocsMatchTheCode(unittest.TestCase):
         self.assertGreater(len(paths), 10)
         missing = sorted(p for p in paths if p not in doc)
         self.assertEqual(missing, [], "add these to docs/chat-api.md")
+
+    def test_the_openapi_file_describes_exactly_the_routes_chat_py_serves(self):
+        # #1138: docs/chat-api.yaml is what another tool reads the API from; a route chat.py
+        # serves that it lacks (or one it describes that chat.py doesn't) is a broken client.
+        # chat.ROUTES is what is served (a path off it is 404), and each route in it is a branch
+        # of its do_<method>, read from the source
+        from workbench import chat
+        spec = read_yaml((ROOT / "docs/chat-api.yaml").read_text())
+        self.assertTrue(str(spec["openapi"]).startswith("3.1"), spec["openapi"])
+        described = {(m.upper(), p) for p, item in spec["paths"].items() for m in item
+                     if m in ("get", "put", "post", "delete", "patch", "head", "options")}
+        served = {(m, v1(r)) for m, routes in chat.ROUTES.items() for r in routes}
+        self.assertEqual(sorted(described - served), [], "not served by chat.py: drop from chat-api.yaml")
+        self.assertEqual(sorted(served - described), [], "add these to docs/chat-api.yaml")
+        handler = next(n for n in ast.parse((ROOT / "workbench/chat.py").read_text()).body
+                       if isinstance(n, ast.ClassDef) and n.name == "Handler")
+        for fn in (n for n in handler.body if isinstance(n, ast.FunctionDef) and n.name.startswith("do_")):
+            branches = {n.value for n in ast.walk(fn) if isinstance(n, ast.Constant)
+                        and isinstance(n.value, str) and re.fullmatch(r"/api/[a-z]+/?", n.value)}
+            self.assertEqual(sorted(branches), sorted(chat.ROUTES[fn.name[3:]]), fn.name)
+
+    def test_the_openapi_file_is_whole_with_one_error_shape_bearer_auth_and_the_idempotency_key(self):
+        # #1138: every $ref resolves, every refusal is the one Error schema, its codes are
+        # chat.py's, what an agent may not call is marked so, and a send takes the key
+        from workbench import chat
+        spec = read_yaml((ROOT / "docs/chat-api.yaml").read_text())
+
+        def refs(node):
+            if isinstance(node, dict):
+                yield from ([node["$ref"]] if "$ref" in node else [])
+                for v in node.values():
+                    yield from refs(v)
+            elif isinstance(node, list):
+                for v in node:
+                    yield from refs(v)
+
+        def follow(ref):
+            node = spec
+            for part in ref.removeprefix("#/").split("/"):
+                node = node[part]
+            return node
+        for ref in set(refs(spec)):
+            self.assertTrue(ref.startswith("#/components/"), ref)
+            follow(ref)                                                  # a KeyError names a dangling one
+        self.assertEqual(spec["security"], [{"bearer": []}])
+        self.assertEqual(spec["components"]["securitySchemes"]["bearer"]["scheme"], "bearer")
+        error = spec["components"]["schemas"]["Error"]
+        self.assertEqual(error["required"], ["error", "code"])
+        self.assertEqual(sorted(error["properties"]["code"]["enum"]),
+                         sorted(set(chat.ERROR_CODES.values()) | set(chat.ERRORS_SAID)))
+        user_only = set()
+        for path, item in spec["paths"].items():
+            names = {p.get("name") for p in [*item.get("parameters", []), *(
+                o.get("parameters", []) for o in item.values() if isinstance(o, dict))] for p in (
+                    [follow(p["$ref"])] if isinstance(p, dict) and "$ref" in p else p if isinstance(p, list) else [p])}
+            for name in re.findall(r"{(\w+)}", path):
+                self.assertIn(name, names, path)                         # a path's id is declared
+            for method, op in ((m, o) for m, o in item.items() if m != "parameters"):
+                if op.get("x-user-only"):
+                    user_only.add((method.upper(), path))
+                for status, answer in op["responses"].items():
+                    if int(status) >= 400:
+                        answer = follow(answer["$ref"])
+                        self.assertEqual(answer["content"]["application/json"]["schema"],
+                                         {"$ref": "#/components/schemas/Error"}, (path, status))
+        self.assertEqual(sorted(user_only), sorted((m, v1(r)) for m, routes in chat.ROUTES.items()
+                                                   for r in routes if not chat.agent_may(m, r)))
+        send = spec["paths"]["/api/v1/send"]["post"]
+        key = follow(send["parameters"][0]["$ref"])
+        self.assertEqual((key["name"], key["in"]), ("Idempotency-Key", "header"))
+        self.assertIn("Idempotent-Replayed", send["responses"]["200"]["headers"])
+        self.assertEqual(sorted(send["responses"]), ["200", "400", "401", "403", "409", "413", "415", "422", "429"])
+        with self.assertRaises(ValueError):                              # off the subset: said, not misread
+            read_yaml("a:\n  b: |\n    c\n")
 
     def test_every_key_of_the_users_chat_state_is_in_the_api_reference(self):
         # #1127 (2026-11-23): snapshot() gained `tasks` (#1016) and week_saved `api` (#1022), and
@@ -259,13 +425,10 @@ class DocsFor20(unittest.TestCase):
         # stays (cli._coding_gate); the mod's ask rule went to a dialog at the edit (#1322)
         self.assertIn("Unanswered, the work stays with the agent", (ROOT / "workbench/cli.py").read_text())
 
-    def test_wb_coding_and_the_pane_say_the_same_sentence_for_each_choice(self):
-        # *Couplings*: cli.CODING → the mod's CODING_STOPS (#1027 changed both in one word)
-        stops = (ROOT / "mod/hooks/register.tsx").read_text()
-        stops = stops[stops.index("const CODING_STOPS"):]
-        stops = stops[:stops.index("]\n")]
+    def test_no_wb_coding_sentence_calls_the_agent_local(self):
+        # #1027 changed cli.CODING and the pane's copy in one word; the copy went with the pane's
+        # Settings (#1283), and the sentences stay free of "local"
         for mode, (_, sentence) in cli.CODING.items():
-            self.assertIn(f"'{sentence}'", stops, mode)
             self.assertNotIn("local", sentence, mode)
 
     def test_architecture_md_defines_the_agent_as_a_gpu_or_an_api_model(self):
@@ -287,6 +450,46 @@ class DocsFor20(unittest.TestCase):
         keys = " ".join(section(ARCH, "## Files and formats").split())
         keys = keys[keys.index("**task.json**"):]
         self.assertIn("a task from before it has neither, and reads as GPU", keys[:keys.index("`size`")])
+
+
+class DocsForTheWebApp(unittest.TestCase):
+    """#1288: 2.0 moved the pane's Stats and Settings to the web app (#1279), and the owner locked in
+    (2026-11-24) that the terminal stays primary, the web chat a second lane, the web app's Settings
+    the settings' home, with Claude helping on a clear ask."""
+
+    def test_the_readme_quickstart_names_the_web_apps_settings_and_stats_and_its_link(self):
+        readme = (ROOT / "README.md").read_text()
+        quick = readme[readme.index("## Quickstart"):readme.index("## License")]
+        self.assertIn("Settings and Stats live in the web app", quick)
+        self.assertIn("`[•_•] Claude's Workbench - http://localhost:1337/#token=…`", quick)
+        self.assertIn("`bind: tailscale`", quick)
+
+    def test_what_people_and_claude_read_names_no_pane_tab(self):
+        # the pane is Tasks only since #1283: a Settings or Stats tab there no longer exists
+        for path in ("README.md", "skill/workbench/SKILL.md", "skill/workbench/reference/driving.md"):
+            text = (ROOT / path).read_text()
+            for gone in ("Settings tab", "Stats tab"):
+                self.assertNotIn(gone, text, path)
+
+    def test_the_terminal_is_primary_where_claude_and_the_maintainers_read(self):
+        skill = " ".join((ROOT / "skill/workbench/SKILL.md").read_text().split())
+        self.assertIn("The terminal is primary", skill)
+        self.assertIn("the web chat is a second lane", skill)
+        self.assertIn("the settings live in the web app's Settings", skill.replace("The settings", "the settings"))
+        driving = " ".join((ROOT / "skill/workbench/reference/driving.md").read_text().split())
+        self.assertIn("The terminal stays primary; the chat is a second lane", driving)
+        self.assertIn("**The terminal is primary; the web chat is a second lane**", " ".join(ARCH.split()))
+
+    def test_the_agent_tokens_allow_list_in_the_api_reference_is_agent_may(self):
+        # docs/chat-api.md is what another agent is handed: each (method, path) chat.AGENT_MAY lets
+        # an agent token use is on its allow-list line, a trailing / as its <id>
+        from workbench import chat
+        doc = " ".join((ROOT / "docs/chat-api.md").read_text().split())
+        allow = doc[doc.index("It works on an allow-list:"):]
+        allow = allow[:allow.index("Every other path")]
+        for method, path in sorted(chat.AGENT_MAY):
+            self.assertIn(method, allow)
+            self.assertIn(f"{path}<id>`" if path.endswith("/") else f"{path}`", allow, (method, path))
 
 
 class ContactInOnePlace(unittest.TestCase):

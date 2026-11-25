@@ -83,15 +83,14 @@ def stores(task: store.Task | None) -> list[tuple[dict | None, object]]:
     there (state/, log/, the database's -wal) had OpenCode, run by wb outside the lane, write
     through it to any file of the user's (the #1010 review, 2026-11-22). The user's store is
     out of every lane, and read outside it."""
-    from . import context, lane
+    from . import context
     if task is None or not context.opencode_db(task).is_file():
         return [(None, _same)]
     env = {**os.environ, **context.opencode_home_env(task)}
     writable = context.writable(task)
     if writable is None:  # no lane: the agent's commands reach every file of the user's anyway
         return [(env, _same), (None, _same)]
-    readable, unix = context.readable(task), context.unix_paths(task)
-    return [(env, lambda cmd: lane.wrap(writable, cmd, readable, unix)), (None, _same)]
+    return [(env, context.lane_wrap(task)), (None, _same)]
 
 
 def export(session: str, strict: bool = False, task: store.Task | None = None) -> dict | None:
@@ -364,7 +363,28 @@ EVENT_KINDS = frozenset({
     "round", "tests", "autofix", "self_review", "ask", "answer", "captain", "steer", "skills",
     "allow", "interrupted", "fresh", "full", "load", "left_bg", "lingered", "settled", "reading_full",
     "compacted", "limits", "export", "resumed", "coding", "spec_gap", "next_step", "takeover",
-    "stopped", "error", "retry", "gpu", "served", "rate_limited", "backend"})
+    "stopped", "error", "retry", "gpu", "served", "rate_limited", "backend", "rewound",
+    "fallback"})  # a role's fallback model (#1196)
+
+
+# What `wb log` prints, and the web chat's task sheet (#1201): the agent's text, its tool calls,
+# and every kind wb watch shows (a fixed nine once left out the runner's own rows, #861).
+LOG_KINDS = frozenset({"text", "tool"}) | EVENT_KINDS
+
+
+def log_body(r: dict, verbose: bool = False) -> str | None:
+    """A `wb log` line after its time and round, None for a row it doesn't show. Not ``verbose``,
+    the agent's text is its first line, cut to 110 characters."""
+    k = r.get("kind")
+    if k == "tool":
+        mark = "" if r.get("ok") else "  ✗ " + str(r.get("error") or "")[:100]
+        return f"{r.get('tool', ''):8} {r.get('brief', '')}{mark}"
+    if k not in LOG_KINDS:
+        return None
+    body = str(r.get("text") or "")
+    if k == "text" and not verbose:
+        body = body.strip().splitlines()[0][:110] if body.strip() else ""
+    return f"{k:8} {body}"
 
 
 def task_entries(task: store.Task) -> list[Entry]:
@@ -415,11 +435,12 @@ def task_entries(task: store.Task) -> list[Entry]:
                       "lingered",  # the agent's turn over, OpenCode still open: stopped (#1160)
                       "settled",  # a self-review at a guard, the tree its tests passed on: stopped (#1168, #1250, #1261)
                       "served",  # served: the keyhole, an API model's provider changed what ran
-                      "rate_limited"):  # an API provider's wait, the clocks paused (#1020)
+                      "rate_limited",  # an API provider's wait, the clocks paused (#1020)
+                      "fallback"):  # the role's fallback model took the task, or couldn't (#1196)
             out.append(Entry(ts, key, [("sys", f"■ {r.get('text', '')}")]))
         elif kind == "backend":  # OpenRouter served a backend outside the role's order (#1021)
             out.append(Entry(ts, key, [("bad", f"■ {r.get('text', '')}")]))
-        elif kind in ("resumed", "coding"):  # the text says who: Claude, or the user's allowance
+        elif kind in ("resumed", "coding", "rewound"):  # the text says who: Claude, or the user's allowance
             out.append(Entry(ts, key, [("claude", f"■ {r.get('text', '')}")]))
         elif kind == "spec_gap":
             out.append(Entry(ts, key, [("claude", f"■ Claude: the spec missed: {r.get('text', '')}")]))

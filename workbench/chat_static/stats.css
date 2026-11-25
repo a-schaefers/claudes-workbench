@@ -1,0 +1,52 @@
+/* The Stats view (#1285): Now and the history, after app.css. Every colour is a page token, so
+   the charts follow light and dark with the rest */
+#stats-body { min-width: 0; }
+.st-h { margin: 4px 2px 8px; font: 600 12px/1.3 var(--sans); letter-spacing: .06em; text-transform: uppercase; color: var(--dim); }
+.st-hist-box .st-h { margin-top: 16px; }
+.view-in .st-retry { margin: 0 0 8px; }
+.st-now-box[hidden] + .st-hist-box .st-h { margin-top: 4px; }
+.st-dim, .view-in .dim { color: var(--dim); }
+.view-in .ok { color: var(--ok); }
+.view-in .warn { color: var(--warn); }
+.view-in .bad { color: var(--bad); }
+.view-in .claude { color: var(--accent); }
+
+/* Now: a card per GPU (and RAM), Running, Models, Queue */
+.st-gpu-h { overflow-wrap: anywhere; }
+.st-meter { display: grid; grid-template-columns: 4.5em minmax(0, 1fr) 7.5em; align-items: center; gap: 10px;
+  margin: 8px 0; font-size: 13.5px; }
+.st-meter-l { color: var(--dim); }
+.st-meter-n { font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
+.st-track { position: relative; height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; }
+.st-fill { position: absolute; inset: 0 auto 0 0; border-radius: 4px; background: var(--ok); transition: width .4s ease; }
+.st-fill.warn { background: var(--warn); }
+.st-fill.bad { background: var(--bad); }
+.st-spark { display: block; width: 100%; height: 32px; margin: 6px 0 2px; overflow: visible; }
+.st-spark-line { fill: none; stroke: var(--accent); stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round;
+  vector-effect: non-scaling-stroke; }
+.st-spark-fill { fill: var(--accent-soft); stroke: none; opacity: .7; }
+.view-in .card p.st-facts { margin: 4px 0 0; }
+.st-list { list-style: none; margin: 0; padding: 0; font-size: 14px; line-height: 1.45; }
+.st-list li { display: block; padding: 5px 0 5px 1.4em; text-indent: -1.4em; overflow-wrap: anywhere; }
+.st-list li + li { border-top: 1px solid var(--line); }
+.st-mark { display: inline-block; width: 1.4em; text-indent: 0; }
+.st-mark.dim { color: var(--faint); }
+.st-run b { font-weight: 600; }
+.st-fold { font-size: 13px; }
+
+/* the history: label and text a row, the label above on a phone, beside from 601px */
+.st-rows { margin: 0; }
+.st-row { padding: 8px 0; }
+.st-row + .st-row { border-top: 1px solid var(--line); }
+.st-row:first-child { padding-top: 0; }
+.st-row:last-child { padding-bottom: 0; }
+.st-rows dt { font: 600 13px/1.35 var(--sans); }
+.st-rows dd { margin: 2px 0 0; font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
+.st-rows dd .st-spark { height: 22px; max-width: 160px; margin: 4px 0 0; }
+.view-in .card p.st-note { margin-bottom: 10px; color: var(--warn); }
+@media (min-width: 601px) {
+  .st-row { display: grid; grid-template-columns: minmax(9em, 13em) minmax(0, 1fr); gap: 14px; align-items: start; }
+  .st-rows dd { margin: 0; }
+}
+/* the history card spans both columns: its rows are the length of the pane's lines */
+@media (min-width: 1100px) { .st-hist .st-history { grid-column: 1 / -1; } }

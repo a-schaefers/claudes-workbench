@@ -95,7 +95,8 @@ class Model:
     # For an API model base_url is the catalog's settings.baseURL (the upstream), engine "api",
     # name the id at the provider, config the catalog entry (limit, cost, variants, capabilities).
     kind: str = "gpu"
-    # an API model's key source (never the key): "stored" (/connect saved one), "oauth",
+    # an API model's key source (never the key): "stored" (/connect saved one), "copilot"
+    # (GitHub Copilot's sign-in, whose token never rotates: HELD_KEYS, #1191), "oauth",
     # "env:<NAME>", "config" (an apiKey in a config file or OPENCODE_CONFIG_CONTENT), "signing"
     # (SigV4/Vertex), "ollama" (Ollama's own login), "none" (a keyless free model), "" (no key)
     key: str = ""
@@ -1003,6 +1004,34 @@ CATALOG_TIMEOUT = 30     # a read past it fails, cached as one for DOWN_SECS
 OLLAMA_CLOUD = "Ollama cloud (ollama.com)"
 # Providers that sign each request with cloud credentials (SigV4, Vertex): no key wb can hold
 SIGNING = frozenset({"amazon-bedrock", "google-vertex", "google-vertex-anthropic"})
+# of those, the ones whose stored API key OpenCode sends as a bearer ahead of signing (Bedrock's,
+# #1192): "stored", which the keyhole holds; any other login still signs
+KEYED_SIGNING = frozenset({"amazon-bedrock"})
+# GitHub Copilot's sign-in (#1191): OpenCode 2.3.2's device login stores the GitHub token as
+# `access` and `refresh` alike with `expires: 0` (core/src/plugin/provider/github-copilot.ts), a
+# token that never rotates, so the keyhole holds it as it holds a key (Model.key "copilot")
+COPILOT = "github-copilot"
+HELD_KEYS = ("stored", "copilot")  # the key sources a task runs with through the keyhole
+COPILOT_AUTO = "auto"  # the plugin's Auto model (github-copilot/models.ts `auto`)
+COPILOT_AUTO_WHY = ("can't run: Copilot's Auto model picks another model each session, and a task "
+                    "keeps to one: pick a Copilot model by name")
+
+
+def signin(pid: str) -> tuple[str, str, str] | None:
+    """(what, why, fix) of a provider's own OAuth login wb can't hold (#1191), or None for any
+    other (its callers' generic OAuth line): ChatGPT's and the OpenCode Console's rotate their
+    refresh tokens, so a copy wb refreshed would sign the user's own OpenCode out (OpenCode
+    refreshes only inside its own lock, which no command exposes), and the OpenCode Console's
+    models speak SystemOne, which the keyhole doesn't."""
+    if pid == "openai":
+        return ("ChatGPT", "its tokens rotate, and a copy wb refreshed would sign your "
+                "own OpenCode out", "an OpenAI API key through /connect works")
+    if pid in ("opencode", "opencode-go"):
+        return ("the OpenCode Console", "its tokens rotate, and the keyhole doesn't speak "
+                "its API (SystemOne) yet", "a model of another provider can run")
+    return None
+
+
 API_STATES = ("no_credit", "rate_limited", "unreachable")
 RATE_LIMIT_SECS = 60     # a 429 without Retry-After: how long its provider reads rate-limited
 # A 402 or a plan limit with no `until` held forever: only a 2xx cleared it, and wb start refused
@@ -1163,6 +1192,11 @@ def _served_url(p: subprocess.Popen, deadline: float) -> str | None:
             continue
         chunk = os.read(fd, 65536)
         if not chunk:
+            # its stdout closes a moment before it exits: wait that out, or a loaded machine read
+            # an OpenCode that failed at once as one past the deadline (#1370's CI, 2026-11-25:
+            # "took over 30 s" for an immediate "Unable to connect")
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                p.wait(timeout=max(0.0, deadline - time.monotonic()))
             return None
         buf += chunk
         while b"\n" in buf:
@@ -1248,19 +1282,39 @@ def _key_source(pid: str, auth: dict, prov: dict | None) -> str:
         source = ""  # the keyhole's _lone_env: only V1 options, as checked
     if not source and stored:
         source = "stored"
+    # Copilot's sign-in: the keyhole holds its never-rotating token as a key (#1191);
+    # keyhole.load_key checks the credential's shape (`expires: 0`) when a task starts
+    if not source and pid == COPILOT and any(c.get("type") == "credential" for c in conns):
+        source = "copilot"
     if not source and any(c.get("type") == "credential" for c in conns):
         source = "oauth"
     if not source and (env := next((c for c in conns if c.get("type") == "env"), None)):
         source = f"env:{env.get('name') or '?'}"
-    if source and pid in SIGNING:
+    if source and pid in SIGNING and not (source == "stored" and pid in KEYED_SIGNING):
         return "signing"
     return source
 
 
+def env_why(pid: str, var: str) -> str:
+    """Why the keyhole can't take ``pid``'s key from ``$var`` in this process's environment, which
+    a runner wb start spawns inherits (keyhole.env_source, #1189), or "" when it can."""
+    from . import keyhole  # keyhole imports this module lazily too
+    return keyhole.env_source(pid, var)
+
+
+def key_runs(pid: str, key: str) -> bool:
+    """Whether a provider's key source (Model.key, connected()'s `key`) is one a task runs with:
+    a stored key or Copilot's sign-in (HELD_KEYS, #1191), or an environment variable the keyhole
+    can read and the agent can't (#1189)."""
+    return key in HELD_KEYS or (key.startswith("env:") and not env_why(pid, key[4:]))
+
+
 def connected() -> dict[str, dict] | None:
     """The API providers OpenCode holds a key for, read fresh from `auth list` (never a secret):
-    {provider id: {"name", "key"}}, `key` as Model.key says it (_key_source: "stored" is the only
-    one the keyhole can hold; "oauth", "env:<NAME>", "config", "signing" can't run). Providers
+    {provider id: {"name", "key"}}, `key` as Model.key says it (_key_source: "stored" and
+    "copilot", HELD_KEYS, are the ones the keyhole can hold, and "env:<NAME>" when key_runs says
+    so, #1189; "oauth", "config",
+    "signing" can't run). Providers
     configured on this machine (the GPU side) are left out. None when `auth list` can't be read
     (OpenCode missing, or its error): wb setup and the router then say nothing of keys (#1024)."""
     auth, _ = _auth_rows()
@@ -1281,7 +1335,10 @@ def connected() -> dict[str, dict] | None:
 
 def _is_free(pid: str, entry: dict) -> bool:
     """An OpenCode free model: `opencode/*-free`, or every price 0 (marked only; child 13 warns
-    of its data use)."""
+    of its data use). Never a plan's (a coding plan lists every price 0: #1396)."""
+    from . import meter  # meter imports this module
+    if meter.plan_provider(pid):
+        return False
     if pid == "opencode" and str(entry.get("id") or "").endswith("-free"):
         return True
     cost = entry.get("cost")
@@ -1303,6 +1360,47 @@ def _sides(cfg: dict, extra: dict, dirs: dict | None = None) -> tuple[set, dict]
 
 def _dict(value) -> dict:
     return value if isinstance(value, dict) else {}
+
+
+_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,62}")
+
+
+def catalog_base(package: str, settings: dict) -> str:
+    """A catalog model's API base: its `settings.baseURL`, else the one its package builds from
+    the settings, as OpenCode 2.3.2 does (#1192): Azure's `https://<resourceName>.openai.azure.com
+    /openai` (azure.ts), Bedrock's `https://bedrock-runtime.<region>.amazonaws.com` for Converse
+    and `https://bedrock-mantle.<region>.api.aws/v1` (`/anthropic/v1` for Messages) for Mantle.
+    A listed baseURL's `${AWS_REGION}` is filled as model-resolver.ts `prepareProviderURL` fills
+    it: model.list prints every Mantle row's base as that template, and passed on as it was it was
+    the keyhole's upstream host, so every request failed (#1192's review, 2026-11-24). Any other
+    `${...}` is refused (""): OpenCode fills it from its own environment, which isn't wb's. The
+    region is `settings.region`, else AWS_REGION, AWS_DEFAULT_REGION, us-east-1 (bedrock-auth.ts
+    resolveRegion; plugin/provider/amazon-bedrock.ts sets it so). Not a secret: model.list prints
+    these beside the key, which wb never reads."""
+    if base := str(settings.get("baseURL") or ""):
+        if "${AWS_REGION}" in base:
+            region = _aws_region(settings)
+            base = base.replace("${AWS_REGION}", region) if region else ""
+        return "" if "${" in base else base
+    from . import keyhole  # keyhole imports this module lazily too
+    path = keyhole._package_path(package)
+    if path.split("/")[0] == "azure":
+        res = str(settings.get("resourceName") or "").strip()
+        return f"https://{res}.openai.azure.com/openai" if _NAME.fullmatch(res) else ""
+    if keyhole._bedrock("", path):
+        if not (region := _aws_region(settings)):
+            return ""
+        if "mantle" not in path:
+            return f"https://bedrock-runtime.{region}.amazonaws.com"
+        return f"https://bedrock-mantle.{region}.api.aws/{'anthropic/v1' if path.endswith('/messages') else 'v1'}"
+    return ""
+
+
+def _aws_region(settings: dict) -> str:
+    """catalog_base's Bedrock region, or "" when it isn't a plain host label."""
+    region = str(settings.get("region") or os.environ.get("AWS_REGION")
+                 or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1")
+    return region if _NAME.fullmatch(region) else ""
 
 
 def _off_machine(pid: str, url: str, extra: dict) -> bool:
@@ -1345,7 +1443,7 @@ def _build_hosted() -> dict:
         pid = e["providerID"]
         mid = f"{pid}/{e['id']}"
         settings, caps = _dict(e.get("settings")), _dict(e.get("capabilities"))
-        api = str(settings.get("baseURL") or "")
+        api = catalog_base(e.get("package") if isinstance(e.get("package"), str) else "", settings)
         # a server on this machine that OpenCode found by itself (2.3.2 lists a running Ollama at
         # 127.0.0.1 with no config): GPU work, added through wb model add, never an API model that
         # would be told to /connect (#1013's review). No DNS: a catalog lists dozens of hosts.
@@ -1418,13 +1516,20 @@ def _read_hosted() -> dict:
 def hosted_doc(fresh: bool = False) -> dict:
     """hosted.json's document, rebuilt when missing, foreign, past HOSTED_TTL (a failed read
     past DOWN_SECS), its stamp changed, or ``fresh``. Two processes rebuilding at once both
-    write atomically: the last wins, equally fresh."""
+    write atomically: the last wins, equally fresh. A failed read by a process that finds no
+    OpenCode binary never replaces a good document: that one is answered (#1342)."""
     doc = _read_hosted()
     ts = doc.get("ts")
     ttl = DOWN_SECS if doc.get("error") else HOSTED_TTL
     if fresh or not isinstance(ts, (int, float)) or not 0 <= time.time() - ts < ttl \
             or doc.get("stamp") != _stamp():
-        doc = _build_hosted()
+        new = _build_hosted()
+        # a process with no OpenCode on its PATH (the web app's service under the manager's PATH)
+        # overwrote the terminal's good catalog with "opencode not found", and every read after
+        # it, the web Settings' too, failed (#1342): it keeps the good one, unwritten
+        if new.get("error") and not new["stamp"]["opencode"] and doc.get("models") and not doc.get("error"):
+            return doc
+        doc = new
         try:
             store.write_json(hosted_path(), doc)
         except OSError:  # a read-only state directory: still answer
@@ -1504,13 +1609,19 @@ def _api_model(mid: str, entry: dict, prov: dict, extra: dict) -> Model:
         over = {**over, "catalog_cost": config.get("cost"), "cost": mine}
         config = {**config, "cost": mine}
     config = api_limits(config)
+    # the model's own package and base before its provider's, which is the catalog's first entry:
+    # one provider's models post through several (Azure's Responses, Chat and Claude on Foundry;
+    # Google's Gemini and Interactions: #1192), and OpenCode Zen's Claude models (anthropic,
+    # …/anthropic/v1) went out as its first one's (openai-compatible, …/openai/v1), every request a
+    # 404, and its Gemini ones read ready (#1387, 2026-11-25)
+    own = lambda k: entry[k] if isinstance(entry.get(k), str) and entry[k] else prov.get(k)  # noqa: E731
     return Model(id=mid, provider=pid, name=str(entry.get("name") or mid.split("/", 1)[1]),
-                 base_url=str(prov.get("api") or ""), engine="api",
+                 base_url=str(own("api") or ""), engine="api",
                  label=over.get("label") or (OLLAMA_CLOUD if cloud else f"{prov.get('name') or pid} (API)"),
                  extra=over, config=config, remote=True, cloud=cloud, kind="api",
                  key=str(prov.get("key") or ("none" if entry.get("free") else "")),
                  free=bool(entry.get("free")),
-                 package=str(prov.get("package") or ""))
+                 package=str(own("package") or ""))
 
 
 PRICE_KEYS = ("input", "output")  # per million tokens; cache read and write go in `cache`
@@ -1858,19 +1969,37 @@ def _key_file(pid: str) -> str:
 
 
 def unspoken(pid: str, package: str) -> bool:
-    """Whether the keyhole can't carry a provider's requests (keyhole.protocol_of: Google's
-    x-goog-api-key, Azure's api-key, Cohere's native API, no package at all). A signing provider
-    isn't one: its key source says "signing"."""
+    """Whether the keyhole can't carry a provider's requests (keyhole.protocol_of None: Cohere's
+    native API, Google's Interactions route, no package at all). Vertex's packages are None too,
+    but a signing provider isn't one: its key source says "signing" (#1192)."""
     from . import keyhole  # keyhole imports this module lazily too
     return keyhole.protocol_of(package) is None and not keyhole._signs(pid, package)
+
+
+ZEN = "opencode"  # OpenCode's own provider (Zen): its free models run keyless (#1193)
+
+
+def keyless_free(m) -> bool:
+    """One of OpenCode Zen's free models with no key stored (#1193): OpenCode 2.3.2 serves those
+    with the apiKey "public" (plugin/provider/opencode.ts), so a task runs it through the keyhole
+    with that in place of a key (keyhole.PUBLIC), for its rate-limit and quota hold, the meter
+    and the pin to the task's model. Only Zen's: another provider's $0 model with no key ("none")
+    has no key a task could send, and stays refused (cli._runs_held)."""
+    return (getattr(m, "kind", "gpu") == "api" and not getattr(m, "cloud", False)
+            and m.provider == ZEN and m.key == "none" and bool(m.free))
 
 
 def keyhole_refusal(m: Model) -> str:
     """Why ``m`` can't run through the keyhole for its package, or "". Only keyhole.start checked
     it, so a Gemini, Azure or Cohere model was listed, offered, approved in the dialog and started,
     then failed every time (#1066, 2026-11-23). A model needing no keyhole (an Ollama cloud one,
-    a keyless free one: runner.needs_keyhole) is never refused here."""
-    if m.cloud or m.key == "none" or (m.free and not m.key) or not unspoken(m.provider, m.package):
+    a keyless free one other than Zen's: runner.needs_keyhole) is never refused here; Zen's goes
+    through the keyhole (#1193), so its package is checked as any. Copilot's Auto model is
+    (#1191): its router picks another model each session, which the keyhole can't hold to one."""
+    if m.provider == COPILOT and m.name == COPILOT_AUTO:
+        return COPILOT_AUTO_WHY
+    if m.cloud or ((m.key == "none" or (m.free and not m.key)) and not keyless_free(m)) \
+            or not unspoken(m.provider, m.package):
         return ""
     return unspoken_why(provider_name(m), m.package)
 
@@ -1887,11 +2016,22 @@ def unspoken_providers(pids) -> dict[str, str]:
     any when the catalog can't be built: a config that doesn't parse stopped wb setup's checklist
     (#1067's guard, which this read came after, 2026-11-23), and wb doctor names the config."""
     try:
-        provs = _dict(hosted_doc().get("providers")) if pids else {}
+        doc = hosted_doc() if pids else {}
     except (RuntimeError, OSError):
         return {}
-    return {p: str(provs[p].get("package") or "") for p in pids
-            if isinstance(provs.get(p), dict) and unspoken(p, str(provs[p].get("package") or ""))}
+    provs, listed = _dict(doc.get("providers")), _dict(doc.get("models"))
+    out = {}
+    for p in pids:
+        if not isinstance(provs.get(p), dict):
+            continue
+        own = str(provs[p].get("package") or "")
+        # each model's own package (#1192): Google's lists Gemini and Interactions ones, and
+        # the provider runs if any of its models can
+        pkgs = {str(e.get("package") or own) for mid, e in listed.items()
+                if mid.split("/", 1)[0] == p and isinstance(e, dict)} or {own}
+        if all(unspoken(p, k) for k in pkgs):
+            out[p] = own
+    return out
 
 
 def _api_status(m: Model, down=frozenset()) -> dict:
@@ -1913,15 +2053,29 @@ def _api_status(m: Model, down=frozenset()) -> dict:
     if why := keyhole_refusal(m):  # before the key: /connect can't fix it
         return _no(why)
     key = m.key
-    if not key:
-        key, who = _fresh_key(m)
-    if not key:
-        return _no(f"no key for {who}: run /connect in OpenCode and add it")
-    if key == "oauth" or key == "signing" or key == "config" or key.startswith("env:"):
+    # any key a task can't run with is asked again, not only none: /connect changes no stamp, so
+    # a cached OAuth or environment key stood for HOSTED_TTL after the user stored one (#1388,
+    # 2026-11-25; #1076 was ids missing from the cache). An exported key the keyhole can read
+    # runs as it is (key_runs, #1189)
+    if key not in ("ollama", "none") and not key_runs(m.provider, key):
+        fresh, who = _fresh_key(m)
+        # an exported key still unset says so (env_why), not "no key": `auth list` lists no
+        # variable the reader's environment lacks
+        key = fresh or (key if key.startswith("env:") else "")
+    from . import keyhole  # keyhole imports this module lazily too
+    if not key:  # OpenCode's one terminal command, not its TUI's /connect (#1189)
+        return _no(f"no key for {who}: run `{keyhole.login(m.provider)}` in a terminal and add it")
+    if key.startswith("env:"):  # the runner's own environment holds it (#1189): runs, unless
+        if why := env_why(m.provider, key[4:]):
+            return _no(f"can't run: {keyhole.NEEDS}: {why}")
+    elif key == "oauth" or key == "signing" or key == "config":
+        if key == "oauth" and (own := signin(m.provider)):  # the provider's own cause (#1191)
+            what, why, fix = own
+            return _no(f"can't run: needs a key wb can hold outside the lane ({who} is signed in "
+                       f"with {what}: {why}): {fix}")
         held = ("an OAuth login" if key == "oauth" else
                 "a cloud login that signs each request" if key == "signing" else
-                f"written in {_key_file(m.provider)}" if key == "config" else
-                f"from the environment, {key[4:]}")
+                f"written in {_key_file(m.provider)}")
         # a key written in a file: /connect alone changed nothing while the apiKey stayed (#1075)
         fix = "remove its apiKey there, and store the key with /connect" if key == "config" else \
             "store an API key with /connect"
@@ -2184,8 +2338,9 @@ def remedy(m: Model, state: dict) -> str:
     why = state.get("why", "")
     if m.kind == "api":
         who = provider_name(m)
-        if why.startswith("no key for "):
-            return f"run /connect in OpenCode and add an API key for {who}"
+        if why.startswith("no key for ") or (why.startswith("can't run: needs a key") and (
+                "opencode auth login" in why or "remove it there" in why)):
+            return ""  # the reason says its own fix (#1189)
         if why.startswith("can't run: needs a key") and "remove its apiKey there" in why:
             return f"remove options.apiKey for {who} from {_key_file(m.provider)}, and store the key with /connect in OpenCode"
         if why.startswith("can't run: needs a key"):
@@ -3910,7 +4065,8 @@ def api_provider(m: Model) -> str:
 class NoLease:
     """What an API task holds in place of the GPU lease (#1015): one of its provider's
     API_PARALLEL slots, and nothing of the GPU. The interface drive and _tests_gpu use:
-    load() loads nothing (it waits while the provider is out of credit, its slot let go, #1178), step_aside
+    load() loads nothing (it waits while the provider is out of credit, its slot let go, #1178;
+    runner._credit_move moves a task its role's fallback takes first, #1196), step_aside
     and rejoin do nothing, `aside` False, `pool` None (so
     _tests_gpu takes this machine's pool for --unload-for-tests, where the tests run), `loaded`
     True. Past the limit it waits as queued, looking again after API_WAIT's backoff (a slot let
@@ -4484,15 +4640,28 @@ def _answers(base: str) -> bool:
     return _models_at("", 1, url=f"{base}/models") is not None
 
 
+# (mark, root, ollama) still answering at the mark, and when: under mirrored networking or a VPN
+# windows_host() is another address for good, and one that drops packets cost every discover() a
+# second, about 5 s a wb models (#1397, 2026-11-25). Asked again after DOWN_SECS, or at once when
+# windows_host() changes (the root is at it). Never kept while the mark is silent: a runner
+# waiting after a reboot asks each pass for the server at Windows' new address (#1167).
+_STAYED: dict[tuple, float] = {}
+
+
 def _moved_to(mark: str, root: str, ollama: bool = True) -> bool:
     """Whether Windows' Ollama left ``mark`` for ``root``: the old root silent, the new answering;
     with ``ollama`` False, any OpenAI-compatible server, ``mark`` and ``root`` baseURLs probed on
     /models (Ollama's /api/version had them all read as never moving, #1167). Both probed at
     once, briefly, so a dead provider costs discovery a second, not three."""
     from concurrent.futures import ThreadPoolExecutor
+    key = (mark, root, ollama)
+    if time.monotonic() - _STAYED.get(key, -DOWN_SECS) < DOWN_SECS:
+        return False
     probe = (lambda r: ollama_answers(r, timeout=1)) if ollama else _answers
     with ThreadPoolExecutor(2) as pool:
         old, new = pool.map(probe, (mark, root))
+    if old:
+        _STAYED[key] = time.monotonic()
     return new and not old
 
 
@@ -4817,6 +4986,36 @@ def ollama_installed(root: str) -> list[dict]:
             for x in (_get(f"{root}/api/tags") or {}).get("models", [])]
 
 
+# What a model's OpenCode entry says it reads (#1199): V1 config's `modalities.input`, V2 config's
+# and the catalog's (hosted.json) `capabilities.input`. Ollama says `vision` (/api/show).
+IMAGE_INPUT = "image"
+
+
+def declared_input(m: Model) -> list[str] | None:
+    """The input kinds ``m``'s entry declares (["text", "image"]), or None when it says none."""
+    for key in ("modalities", "capabilities"):
+        got = (m.config or {}).get(key)
+        if isinstance(got, dict) and isinstance(got.get("input"), list):
+            return [str(x) for x in got["input"]]
+    return None
+
+
+def takes_images(m: Model) -> bool | None:
+    """Whether ``m`` takes image input: its entry's declaration (declared_input), else for a GPU
+    model on Ollama what /api/show says now (5 s at most). None when nothing says. An entry with
+    no declaration is not "no": OpenCode then reads it as text and image (Capabilities.default,
+    2.3.2) and sends the image, and a text-only server fails the request, every later one in
+    the session too, since the image stays in its history (#1199, read in 2.3.2's source 2026-11-24)."""
+    if (said := declared_input(m)) is not None:
+        return IMAGE_INPUT in said
+    if m.kind != "gpu" or m.engine != "ollama":
+        return None
+    try:
+        return "vision" in (ollama_show(m.root, m.name, timeout=5).get("capabilities") or [])
+    except Exception:  # not answering: unknown, as for any server that doesn't say
+        return None
+
+
 def ollama_show(root: str, name: str, timeout: float = 30) -> dict:
     """Ollama's own facts about a pulled model: its capabilities, trained context length, and
     the num_ctx its Modelfile sets, if any."""
@@ -4960,6 +5159,10 @@ def write_entry(provider: str, name: str, entry: dict | None) -> None:
             entries.pop(name, None)
         else:  # keys added by hand (variants, options) stay; an option given as None goes
             old = entries.get(name) or {}
+            if "modalities" in entry and mine is (own.get("providers") or {}).get(provider):
+                # V2 reads `capabilities.input`, and drops a V1 `modalities` unsaid (#1199)
+                caps = {**(old.get("capabilities") or {}), **entry["modalities"]}
+                entry = {**{k: v for k, v in entry.items() if k != "modalities"}, "capabilities": caps}
             opts = {**(old.get("options") or {}), **(entry.get("options") or {})}
             entries[name] = {**old, **entry, "options": {k: v for k, v in opts.items() if v is not None}}
             if not entries[name]["options"]:
