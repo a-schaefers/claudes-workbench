@@ -8221,6 +8221,21 @@ class Context(Base):
         self.assertTrue(subprocess.run(["git", "-C", str(self.repo), "rev-parse", "delegate/t-n"],
                                        capture_output=True).returncode == 0)
 
+    def test_after_wb_next_the_review_notices_diffstat_is_the_steps_as_wb_diff_says(self):
+        # #1404 (2026-11-25): the stat line was the task's since its base, "2 files changed" beside
+        # a files list and a diff "(all of it)" that held step 2's one file
+        self.start("t-nst", "ok", "--test", TEST_CMD)
+        wait_phase("t-nst", {"review"})
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Now also add lib/helper.py.\n")
+        os.environ["FAKE_SCENARIO"] = "patch"
+        run_wb("next", "t-nst", "--spec", str(step2), "-m", "feat: the answer")
+        st = wait_phase("t-nst", {"review"})
+        report = store.Task("t-nst").round_dir(st["round"]).joinpath("summary.md").read_text()
+        stat = run_wb("diff", "t-nst", "--stat").strip().splitlines()[-1].strip()
+        self.assertEqual(stat, "1 file changed, 1 insertion(+)")
+        self.assertEqual(report.rstrip().splitlines()[-1].strip(), stat)
+
     def test_discarding_a_stuck_later_step_keeps_the_steps_wb_next_committed(self):
         # #494 (the audit of 1.90): steps landed with wb next, a later one stuck, and the
         # discard the notice suggested force-deleted the branch, the approved steps on no ref

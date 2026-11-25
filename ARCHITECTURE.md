@@ -1713,7 +1713,8 @@ is a note, not a check-in (that cost a restart in one task of two, 2026-11-17). 
 7. `files changed:` (`git status --porcelain`), NOTEs for files outside the spec, Claude's files
    (`claude_files_changed`: CLAUDE.md, CLAUDE.local.md, AGENTS.md, `.claude/`), `NOTE: edits in
    submodule <path> can't land: …` (`gitops.submodule_edits`, #419), `NOTE: new files in submodule
-   <path> won't be committed: …` (`gitops.submodule_check`, #889), and the diffstat's last line.
+   <path> won't be committed: …` (`gitops.submodule_check`, #889), and the diffstat's last line
+   (after `wb next`, the step's, from HEAD, as the files list and `wb diff` are: #1404).
 
 **Speed** (`measure_speed`): after each round the export's new messages give write and read samples
 (`router.record_speed`; a cut-short request with a first token still gives a read sample). A round
