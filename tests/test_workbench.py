@@ -19718,7 +19718,7 @@ class ClaudeSpend(Base):
                        "cache_read": 0, "output": 0}})
         stats = run_wb("stats")
         self.assertIn("2K", stats)
-        self.assertIn("(1 had no session or transcript)", stats)
+        self.assertNotIn("had no session or transcript", stats)  # precision nobody acted on (#1322)
 
 
 class Savings(Base):
