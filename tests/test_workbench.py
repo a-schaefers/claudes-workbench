@@ -393,6 +393,14 @@ class Base(unittest.TestCase):
                           WB_CHAT_TOKEN=str(tmp / "chat-token"),
                           WB_CHAT_CONFIG=str(tmp / "chat.json"))
         (tmp / "opencode.json").write_text(json.dumps(OPENCODE_CONFIG))
+        # the suite's own cgroup is no service's: CI's runner is one (a .service), so after #1407
+        # every runner, chat and bench driver went through systemd-run's scope there, and tests
+        # that kill or wait on them failed (#1420's CI, 2026-11-25); LogoutStops patches its own
+        cgroup = mock.patch.object(cli, "SELF_CGROUP", tmp / "no-cgroup")
+        cgroup.start()
+        self.addCleanup(cgroup.stop)
+        cli.runner_scope.cache_clear()
+        self.addCleanup(cli.runner_scope.cache_clear)
         runner.models._AUTH.clear()  # OpenCode's stored keys, per process (models.auth_key)
         runner.models._STORED.clear()
         runner.models._KEYS.clear()
