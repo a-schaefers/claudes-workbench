@@ -683,7 +683,20 @@ keyhole saw is what went out, so the ledger is the higher of the two, and a prov
 is never topped up to the catalog's. **Never a false 0:** an OpenCode cost of
 0 for tokens whose price isn't 0 is not trusted (the step keeps the metered figure, `source:
 "metered (opencode said 0)"`; an export saying 0 reconciles nothing), and an export that failed
-reconciles nothing. What isn't counted: a response cut before its usage arrived, by either view.
+reconciles nothing. **A response cut short** (#1276, 2026-11-24): wb stops OpenCode mid-stream on
+purpose (the think nudge, `wb steer --now`, `wb stop`, the silence and round-wall guards, the spend
+stop itself), and Chat Completions and the Responses API put their usage only at the stream's end,
+so a cut response booked $0 by both views (no `step_finish`, an export `info.cost` of 0) for a
+request the provider bills. Now when the keyhole's write to OpenCode (or its read from the
+provider) fails before the end marker, it books an estimate (`keyhole._cut_usage`): the input at
+least the request body's length / 4 (as the room reckons it; Anthropic's `message_start` input and
+cache kept where it came), the output at least what streamed (the characters under each event's
+`delta` / 4, at least one token per such event; a body that isn't SSE, its bytes / 4), marked
+`cut`, which `Meter.on_usage` books as a `step` row with `cut: true` at the meter's prices (a
+running provider figure in it is partial, so never that), shown `≈`. Erring high: every input token
+at the input price, cache reads too. The end's own last write failing is no cut (its usage was
+booked just before), and a request still in the provider's queue (keep-alives only, `queued`) never
+ran, so books nothing.
 Without the keyhole's view (a model `runner.needs_keyhole` starts none for: an Ollama cloud
 model, a keyless free one), OpenCode's compaction requests count only as far as its `info.cost` does. A catalog price below a backend's
 (an OpenRouter endpoint priced over its listing, without `usage.cost`) meters under. The day cap's
@@ -6351,7 +6364,8 @@ $WB_HOME (~/.local/state/workbench)
   spend-api.jsonl  .lock .checkin.lock  the API ledger (meter.py, #1019; *Spend*), one row each, every row {ts, day (local
                                  %Y-%m-%d)}: step {task, round, provider, model, usd (null: a plan or unpriced), metered,
                                  source (keyhole|provider (the provider's own usage.cost or estimated_cost, #1165)|opencode|metered|metered (opencode said 0)), own? (a provider row's field:
-                                 cost|estimated_cost; OpenCode reports a cost as its own figure, #1234), plan?, prices? ("yours":
+                                 cost|estimated_cost; OpenCode reports a cost as its own figure, #1234), cut? (true: a response cut short,
+                                 the keyhole's estimate, #1276), plan?, prices? ("yours":
                                  at wb model price's, #1135), tok {in, out,
                                  cache_read, cache_write, reasoning}}; reconcile {task, round, provider, model, usd (OpenCode
                                  said more, compared at its prices: a provider row at its metered, a usage.cost one as booked, #1165, #1234), source opencode, prices?}; checkin {task, usd_today, cap}: today's one check-in at half
@@ -6985,7 +6999,8 @@ naming its role and model (the runners are the test's: the leases taken as a run
 **The spend cap's tests** (#1019): `ApiSpend` writes a task the way `wb start` will (#1016: started on a GPU model with
 `spawn_runner` patched, task.json then naming the API model) and runs `runner.drive` in the test's process, the keyhole `drive`
 starts (#1015) recording each `close` told a reason (`record_closes`); `ApiSpendKeyhole` drives the keyhole's `close(reason)`, `room` and one usage per
-response against `_KeyholeTest`'s upstream (DeepInfra's own stream shape too, from a real request on
+response against `_KeyholeTest`'s upstream (a stream OpenCode drops mid-answer, `cut`: its estimate in the
+ledger and status `api`, Anthropic's `message_start` input kept, none for a queued one or a whole answer's last write, #1276; DeepInfra's own stream shape too, from a real request on
 2026-11-24: `usage: null` until a last `choices: []` chunk with `estimated_cost`, its raw `pieces`
 into a real `Meter`, then OpenCode's catalog figure booking no top-up, #1165; then the review's: a
 `step_finish` ahead of its response's usage leaving `paid` at the meter, a second `Meter` for round
