@@ -424,7 +424,8 @@ class Keyhole:
     localhost, which may be ::1 first). ``on_usage(usage)`` gets each response's usage, once,
     before its end marker (`[DONE]`, `message_stop`, `response.completed`) or else its last byte
     goes to OpenCode (the meter, #1019, #1114), and a response cut before its end an estimate
-    marked `cut` (_cut_usage, #1276); ``on_health(state, why, until)``
+    marked `cut` (_cut_usage, #1276), and close() books each still in flight so (#1349);
+    ``on_health(state, why, until)``
     each outcome (ok, no_credit, rate_limited, unreachable); ``room(body, size)`` is asked before
     each request is sent on (the meter's spend room: negative is refused); ``log`` the start and
     refusal lines (runner.log: the runner's stdout)."""
@@ -458,6 +459,10 @@ class Keyhole:
         self._marked = False  # status ratelimit written and not yet cleared
         self._refused: set[str] = set()
         self._lock = threading.Lock()
+        # the requests sent on and not yet answered in full (Handler.lift): close() books each as
+        # cut (#1349); bookings one at a time, so a handler's own and close()'s never both land
+        self._flying: set = set()
+        self._booking = threading.RLock()
         st = task.status if task is not None else {}
         self.served = st.get("served") if isinstance(st.get("served"), dict) else None
         self._server = _Server(("127.0.0.1", 0), _handler(self))
@@ -484,9 +489,18 @@ class Keyhole:
         if reason is not None:
             self.stopped = reason
             return
-        self.closed = True  # a held request stops holding
+        with self._lock:
+            self.closed = True  # a held request stops holding, and none goes out from now on
+            flying = list(self._flying)
         self._server.shutdown()
         self._server.server_close()
+        # a response still in flight dies with the runner, whose finally this is (wb stop, wb
+        # discard, wb stop --all): its handler books its cut only when a write to OpenCode fails,
+        # which waits for the provider's next chunk, and the handler threads are daemons. While
+        # DeepInfra wrote a tool call it doesn't stream, nothing came, and the request was never
+        # booked (#1349, bar loop round 9, 2026-11-24): booked here, before the runner exits
+        for h in flying:
+            h.book_cut(closing=True)
 
     def __enter__(self):
         return self
@@ -762,8 +776,53 @@ def _handler(kh: Keyhole):
         server_version = "workbench-keyhole"
         sys_version = ""
 
+        # one request's answer (lift): its usage so far, its end marker seen, what streamed
+        flight = False  # sent on and not yet answered in full or with an error: in kh._flying
+        settled = False  # booked by kh.close(): nothing more of it is booked (#1349)
+        used, ended, sse, size = None, False, False, 0
+        said = deltas = streamed = 0
+        started = queued = False
+
         def log_message(self, *args):  # nothing about a request reaches runner.log
             pass
+
+        def lift(self, size: int) -> bool:
+            """A request about to go out, ``size`` its body's length: in flight (kh._flying)
+            until land(); False once the keyhole is closed (it isn't sent)."""
+            with kh._lock:
+                if kh.closed:
+                    return False
+                self.used, self.ended, self.sse, self.size = {}, False, False, size
+                self.said = self.deltas = self.streamed = 0
+                self.started = self.queued = False
+                self.flight = True
+                kh._flying.add(self)
+            return True
+
+        def land(self):
+            """Answered in full, or with an error (no cut to book): out of flight."""
+            with kh._lock:
+                self.flight = False
+                kh._flying.discard(self)
+
+        def book_cut(self, closing: bool = False):
+            """This answer cut before its end booked as the usage it is billed at least (#1276),
+            once: from its own failed write or read, or from kh.close() (``closing``) when the
+            runner exits with it waiting on a silent provider, or on the head of an answer the
+            provider is still thinking over (#1349). One still in the provider's queue never ran,
+            so isn't billed; usage that came after its end marker is booked as it came."""
+            with kh._booking:
+                if self.settled:
+                    return
+                if self.flight and not self.ended and not (self.queued and not self.started):
+                    out = (max(self.deltas, -(-self.said // 4)) if self.sse
+                           else -(-self.streamed // 4))
+                    self.used = _cut_usage(self.used, -(-self.size // 4), out)
+                    self.ended = True  # its cut booked: never a second
+                self.settled = closing
+                used, self.used = self.used, {}
+                if used:
+                    kh.usage(used)
 
         def handle(self):
             try:
@@ -925,12 +984,15 @@ def _handler(kh: Keyhole):
                     kh.held("rate_limited", 429, cool)
                     if not self.nap(min(cool, left)):
                         return self.drop()
+                if not self.lift(size or len(raw)):  # closed: the runner is going (#1349)
+                    return self.drop()
                 conn = kh.connection()
                 try:
                     try:
                         conn.request("POST", target, body=raw, headers=heads)
                         resp = conn.getresponse()
                     except Exception as e:
+                        self.land()  # nothing answered: nothing billed
                         if isinstance(e, (OSError, http.client.HTTPException)) and not isinstance(
                                 e, http.client.InvalidURL):
                             why = kh.redact(_unreachable_why(kh, e))
@@ -954,7 +1016,8 @@ def _handler(kh: Keyhole):
                         return self.send_json(502, f"keyhole: can't send this request on "
                                                    f"({type(e).__name__})", etype="api_error")
                     if 200 <= resp.status < 300:
-                        return self.stream(resp, size or len(raw))
+                        return self.stream(resp)
+                    self.land()  # an error answer: not billed
                     # without Retry-After, the provider's cooldown is the backoff this keyhole
                     # waits itself, not RATE_LIMIT_SECS: its own next pass reads it back (cooldown)
                     status, sent, text, kind = self.read_error(
@@ -972,6 +1035,7 @@ def _handler(kh: Keyhole):
                             return self.drop()
                     return self.send_error(status, sent, text)
                 finally:
+                    self.land()
                     conn.close()
 
         def hold_on(self, kind: str, code, wait: float, deadline: float, why: str = "") -> str:
@@ -1044,20 +1108,18 @@ def _handler(kh: Keyhole):
             self.end_headers()
             self.wfile.write(out)
 
-        def stream(self, resp, size: int = 0):
-            """A 2xx answer on to OpenCode, its usage to kh.usage once. ``size``: the request's
-            body length, the input of a response cut short (_cut_usage, #1276)."""
+        def stream(self, resp):
+            """A 2xx answer on to OpenCode, its usage to kh.usage once (lift's state: `used`,
+            merged, booked before its end, #1114; `ended`, its end marker seen; `said`, `deltas`,
+            its output so far; `streamed`, a body that isn't SSE, its bytes; `started`, its first
+            data; `queued`, keep-alives alone past QUEUED_AFTER_S, in the provider's queue), or
+            cut short, book_cut's (#1276)."""
             kh.health("ok")
-            sse = "event-stream" in (resp.getheader("Content-Type") or "")
-            self.used = {}  # this response's usage, merged: kh.usage once, before its end (#1114)
-            self.ended = False  # its end marker seen, its usage booked there
-            self.said = self.deltas = 0  # its output streamed so far: characters, events
+            sse = self.sse = "event-stream" in (resp.getheader("Content-Type") or "")
             key = kh._key.value.encode()
             hold = bytearray()  # SSE: a partial line; else the last len(key) - 1 bytes
             whole = bytearray()
-            streamed = 0  # a body that isn't SSE: its bytes so far
-            started, marked = False, time.monotonic()  # the first data; the queue's last mark
-            queued = False  # keep-alives alone past QUEUED_AFTER_S: in the provider's queue
+            marked = time.monotonic()  # the queue's last mark
 
             def send(data: bytes):
                 if data:
@@ -1080,7 +1142,7 @@ def _handler(kh: Keyhole):
                     if not piece:
                         break
                     hold += piece
-                    streamed += len(piece)
+                    self.streamed += len(piece)
                     if sse:  # whole lines on: an error event's line goes through redact
                         *done, rest = bytes(hold).split(b"\n")
                         if len(rest) > SNIFF_CAP:  # no line end in sight: pass it on, key out
@@ -1088,15 +1150,16 @@ def _handler(kh: Keyhole):
                         hold = bytearray(rest)
                         if done:
                             send(b"\n".join(self.data_line(ln) for ln in done) + b"\n")
-                        if not started and any(ln.strip() and not ln.startswith(b":") for ln in done):
-                            started = True  # an event, not a keep-alive comment: it has begun
+                        if not self.started and any(ln.strip() and not ln.startswith(b":")
+                                                    for ln in done):
+                            self.started = True  # an event, not a keep-alive comment: it has begun
                             kh.answered()
-                        elif not started and time.monotonic() - marked >= QUEUED_AFTER_S:
-                            marked, queued = time.monotonic(), True  # keep-alives only: its queue
+                        elif not self.started and time.monotonic() - marked >= QUEUED_AFTER_S:
+                            marked, self.queued = time.monotonic(), True  # keep-alives only: its queue
                             kh.held("queued", resp.status, None)
                     else:  # the key never passes, even split across two pieces
-                        if not started:
-                            started = True
+                        if not self.started:
+                            self.started = True
                             kh.answered()
                         if len(whole) < SNIFF_CAP:
                             whole += piece
@@ -1122,20 +1185,18 @@ def _handler(kh: Keyhole):
                 self.wfile.flush()
             except (OSError, http.client.HTTPException):
                 self.close_connection = True  # the client or the upstream went away mid-answer
-                if not self.ended and not (queued and not started):
-                    # cut before its end, where Chat Completions and the Responses API put their
-                    # usage: wb stopping OpenCode (the think nudge, steer --now, wb stop, a guard,
-                    # the spend stop) booked $0 for a request the provider bills (#1276, 2026-11-24);
-                    # one still in the provider's queue never ran, so it isn't billed
-                    out = max(self.deltas, -(-self.said // 4)) if sse else -(-streamed // 4)
-                    self.used = _cut_usage(self.used, -(-size // 4), out)
-                self.flush_usage()  # what the provider counted so far is still spent
+                # cut before its end, where Chat Completions and the Responses API put their
+                # usage: wb stopping OpenCode (the think nudge, steer --now, wb stop, a guard, the
+                # spend stop) booked $0 for a request the provider bills (#1276, 2026-11-24); what
+                # the provider counted so far is still spent
+                self.book_cut()
                 return
 
         def flush_usage(self):
-            used, self.used = getattr(self, "used", None), {}
-            if used:
-                kh.usage(used)
+            with kh._booking:  # never alongside book_cut, nor after kh.close() booked it (#1349)
+                used, self.used = self.used, {}
+                if used and not self.settled:
+                    kh.usage(used)
 
         def data_line(self, ln: bytes) -> bytes:
             """One SSE line read for the model and usage, and as it goes on: with the key out,
@@ -1161,7 +1222,7 @@ def _handler(kh: Keyhole):
                 return safe
             self.sniff(obj)
             if n := _said(obj):
-                self.said, self.deltas = getattr(self, "said", 0) + n, getattr(self, "deltas", 0) + 1
+                self.said, self.deltas = self.said + n, self.deltas + 1
             if isinstance(obj, dict) and obj.get("type") in ("message_stop", "response.completed"):
                 self.ended = True
                 self.flush_usage()  # the end of Anthropic's and the Responses API's stream (#1114)
@@ -1185,7 +1246,7 @@ def _handler(kh: Keyhole):
             if isinstance(usage, dict) and usage:
                 # one response, one usage: Anthropic's message_start and message_delta each carry
                 # part, and some servers send a running total in every chunk (counts only grow)
-                self.used = _merged(getattr(self, "used", None) or {}, usage)
+                self.used = _merged(self.used or {}, usage)
 
     return Handler
 
