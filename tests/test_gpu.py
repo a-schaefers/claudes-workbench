@@ -571,13 +571,16 @@ with models.GpuLease(None, optimize.HOLDER, wait=False):
         # the rival checks its base first, then waits ("checking the acceptance command on the
         # base", "waiting for the GPU", then who holds it): a fixed 2 s sleep, then a wait for the
         # first to pass, both lost that race on macOS's runner (nightlies of f744898 and 5678530)
-        want = "waiting for the GPU (held by t-gpu)"
+        # since #1378 (2026-11-25) its base check takes the one-suite-at-a-time turn t-gpu's tests
+        # hold, so it may wait there instead: either way it is kept out from beside the tests
+        want = ("waiting for the GPU (held by t-gpu)", "waiting for t-gpu's tests (one at a time on this machine)")
         deadline = time.time() + 60
-        while time.time() < deadline and store.Task("t-rival").status.get("last") != want:
+        while time.time() < deadline and store.Task("t-rival").status.get("last") not in want:
             time.sleep(0.1)
         time.sleep(1)                                # and stay there, not let in beside the tests
         st = store.Task("t-rival").status
-        self.assertEqual((st["phase"], st["last"]), ("queued", "waiting for the GPU (held by t-gpu)"))
+        self.assertEqual(st["phase"], "queued")
+        self.assertIn(st["last"], want)
         flag.write_text("")
         self.assertEqual(wait_phase("t-gpu", {"review", "stuck", "failed"})["phase"], "review")
         self.assertEqual(wait_phase("t-rival", {"review", "stuck", "failed"})["phase"], "review")
