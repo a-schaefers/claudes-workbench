@@ -189,7 +189,9 @@ still runs `run --standalone` (off Linux it outlives its parent), and `runner.sw
 it left; on Linux `lane.py` sets `PR_SET_PDEATHSIG`.
 
 On a shared state directory, a runner whose status `machine` isn't `store.machine()`
-(`/etc/machine-id`, macOS's hardware UUID, else the host name) is alive to `runner_alive`, never
+(`/etc/machine-id`, macOS's hardware UUID, else the host name; on macOS `ioreg` and `sysctl`
+run by absolute path, `store.mac_tool`, so every process on one Mac reads the same machine and
+boot whatever its PATH: #1305) is alive to `runner_alive`, never
 reaped nor signalled (#849: each machine failed the other's live runners): `_stop_runner` refuses
 it, `stop --all` and `update --stop` skip it, `wb status` shows "on <host>:". Runners beat
 (`locks/<task>.runner.lock` touched every `runner.BEAT_SECS`, 60 s, by `runner._beat`; `.lock` is
@@ -5426,7 +5428,8 @@ runs in its own scope (`cli.detach`, `cli.runner_scope`: `systemd-run --user --s
 --collect`, which execs, so the pid is the command's; #531); `wb doctor` warns when that scope
 can't be had (`cli.logout_stops`), and `wb chat on`/`wb doctor` say when logind reports
 `Linger=no`. macOS: `launchd/workbench.chat.plist` (`RunAtLoad`, `KeepAlive`, `exec
-"$HOME/.local/bin/wb" chat serve` through `/bin/sh`, Homebrew's `python3` first; it retries even
+"$HOME/.local/bin/wb" chat serve` through `/bin/sh`, Homebrew's `python3` first, `/usr/sbin:/sbin`
+for macOS's system tools, #1305; it retries even
 exit 78; unchecked on a Mac, #449). Messages name the OS's service (`chat.service_name`,
 `service_hint`, #756). Without a service manager the revive below restarts a chat `wb chat on`
 started. `wb chat url` prints `http://localhost:<port>/#token=…` (the port from `chat/port.json`,

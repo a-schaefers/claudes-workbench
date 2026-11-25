@@ -10,8 +10,9 @@
   (wb setup's link), since launchd expands neither ~ nor $HOME. PATH puts Homebrew's python3 first:
   /usr/bin/python3 is Apple's 3.9, which bin/wb refuses (exit 78). launchd can't exempt that exit
   from KeepAlive, so a broken install retries every ThrottleInterval seconds: fix it, then
-  `launchctl kickstart -k gui/$(id -u)/workbench.chat`. Set WB_HOME or WB_CHAT_* here too if you
-  export them.
+  `launchctl kickstart -k gui/$(id -u)/workbench.chat`. /usr/sbin and /sbin hold macOS's system
+  tools (system_profiler, sysctl: wb's hardware reads, #1305). Set WB_HOME or WB_CHAT_* here too
+  if you export them.
 -->
 <plist version="1.0">
 <dict>
@@ -26,7 +27,7 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
