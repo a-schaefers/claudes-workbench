@@ -1725,7 +1725,7 @@ and takes the same `.format` fields. Only the code bullets differ: prose only, n
 An agent should start knowing what Claude would know in the same repo (Claude's own global
 files aside: they are Claude's, #1061), and nothing that would distract it. The per-task config layer (`<state>/rules/<task>/opencode.json`, written before every
 round by `runner.write_config_layer` from `context.layer`) gives it `instructions`, `permissions`,
-`skills`, `agents` (wb's agent removed by name, `AGENT_OFF`, and made afresh in the content, #1290), `compaction`, the `ask_reviewer` server and the providers OpenCode wouldn't load itself
+`skills`, `agents` (wb's agent removed by name, `AGENT_OFF`, and made afresh in the content, #1290; the hidden `SYSTEM_AGENTS` on the task's model, #1345), `compaction`, the `ask_reviewer` server and the providers OpenCode wouldn't load itself
 (`models.agent_providers`). For the task's provider it sets `options.headerTimeout: false` and
 `chunkTimeout` at the larger of 900 s and `--silence-timeout` + 60 s (`runner.provider_timeouts`,
 `PROVIDER_TIMEOUTS`): OpenCode 2.3's 300 s header wait cut every slow request (a `retry` line);
@@ -2593,7 +2593,15 @@ merges onto an earlier one of that name, so a user's own `wb-code` would keep it
 defaults (allow, `.env` reads ask) and takes every top-level rule, as the default `build` agent did (its
 own `question: allow` the layer denies anyway). The user's content loses `agents` (the layer sets it)
 and its 1.x `agent`. Titles go to the hidden `title` agent and `small_model` as before (wb passes
-`--title`, so a round makes none). Each `--agent` run records an `agent-switched` message (`{type,
+`--title`, so a round makes none). OpenCode's hidden agents that send the session to a model of
+their own, `compaction` (the whole session), `summary` and `title` (`runner.SYSTEM_AGENTS`), are
+each pinned to the task's model, variant and all (`agents.<name>.model`, `runner.system_agents`;
+an agent's `model` takes `#<variant>`), in the layer and again in the content: `small_model` pins
+only the title's, so a user's global `agent.compaction.model` on a cloud model got every
+compaction of a wb task, the spec, CLAUDE.md and the code read so far, a `local_only` repo's too,
+and an API task's past the keyhole, the meter and the day cap (#1345, 2026-11-24, checked on
+2.3.2: a layer's V2 entry overrides a global V1 `agent.<name>.model` or V2 one, the rest of the
+user's entry merged; `test_the_users_own_compaction_summary_and_title_models_get_no_request_of_a_wb_task`). Each `--agent` run records an `agent-switched` message (`{type,
 agent, previous}`, no text, tokens or cost) in the session ahead of its prompt, even to the agent it
 had, so a session's export starts with one and has one per round; the `run --format json` events carry
 none. Every reader of the export goes by a message's `type` (`user`, `assistant`, `compaction`), never
@@ -2616,8 +2624,8 @@ rules: its `permissions` and 1.x `permission` (`USERS_RULES`) move into the laye
 rules (left in the content, a user's `{"*": "allow"}` lifted every rule: #994's review,
 `test_the_users_own_config_contents_old_style_permission_lifts_no_rule`); its other keys stay but
 `mcp` and those the layer sets; `provider` merges, the layer's timeouts on top (#491); `share` is
-`disabled`. `RESTATED` (`small_model`, `autoupdate`, `compaction`, `tool_output`) goes in the
-content too (#519), so should a release load a project's config despite the switch it still
+`disabled`. `RESTATED` (`small_model`, `autoupdate`, `compaction`, `tool_output`) and the
+`SYSTEM_AGENTS` entries go in the content too (#519, #1345), so should a release load a project's config despite the switch it still
 can't change them (a project's `compaction.auto: false` left no backstop past the handover; its
 `autoupdate` moved OpenCode past `OPENCODE_TESTED`); so do the task model's `limit` and
 `options.max_tokens` (`model_pins`, never a `baseURL` or key: a wider window moved compaction off
@@ -2657,7 +2665,8 @@ process beyond the lane and `SECRET_ENV`. The layer replaces each with one that 
 (`runner.users_servers_off`: `{"type": "local", "command": ["false"], "enabled": false}`; OpenCode
 2.3 starts a server saying `"enabled": false` all the same), and its permissions start with
 `MCP_RULES`: deny `*_*`, allow `workbench_*`, allow `doom_loop`. It sets `"share": "disabled"`,
-`small_model` to the task's model (a user's cloud one would get the task's text for titles) and
+`small_model` and the hidden agents' models (`SYSTEM_AGENTS`, #1345) to the task's model (a
+user's cloud one would get the task's text for titles, or the whole session for a compaction) and
 `"autoupdate": false` (#353). The user's plugins still load: theirs, not the agent's to change.
 
 **What the agent writes is not trusted.** The lane writes only the worktree and `ask/`; grants,
@@ -7316,7 +7325,8 @@ runner on real OpenCode (`wb start --model cap`): argv, `run --format json` even
 (`context_state`), `session list` (`find_session`), `--session`, a real compaction (and the tail it keeps, `compaction.keep`, #1185), the task's own OpenCode home
 (no credentials in it, the user's store given no session, its commands seeing the user's `XDG_DATA_HOME`, #1010),
 wb's agent (a user's `default_agent` and own `wb-code` lift no deny, in either round; the export's
-`agent-switched` message ahead of the prompt and its assistant messages' `agent`, #1290)
+`agent-switched` message ahead of the prompt and its assistant messages' `agent`, #1290), the
+user's own compaction, summary and title models given no request (#1345)
 (CLAUDE.md's *OpenCode quirks* points here). They are the only checks of the quirks, interop and lane: a skip is not a pass.
 `ApiThinking`'s `test_real_opencode_*` is one too (#1018): a `wb-off` body variant and the catalog's `none` reach a DeepSeek-shaped server as `thinking: {type: disabled}` in the agent's request, and the npm provider's V1 `wb-off`.
 
@@ -7616,7 +7626,8 @@ doc needs its own `!/` line).
   `context_state`, `context_fill`, `last_words`, `speed_samples`, `_session_cost`) and the fake's export.
 - **The layer's `permissions`** → the layer file alone, the project's config shut out (`rules_env`,
   `PROJECT_CONFIG_OFF`, #994); never `OPENCODE_CONFIG_CONTENT` (`CONFIG_CONTENT_MAX`); the user's own (`USERS_RULES`)
-  before them. A key a project config mustn't change → `RESTATED`.
+  before them. A key a project config mustn't change → `RESTATED`. A hidden OpenCode agent that sends the session to
+  a model of its own → `runner.SYSTEM_AGENTS` (the layer and `rules_env` both read it).
 - **What OpenCode reads from a project** → `context.PROJECT_SKILL_DIRS`, `agents_files`, `PROJECT_CONFIGS`,
   `project_config_instructions`; RealOpenCode's #994 test; *What the project's own config gave, handed back*.
 - **The roles** (#1014): **routes.json's keys** (`routes.normalize`) → the mod's reader (`readRoutes`, `routesValid`,
