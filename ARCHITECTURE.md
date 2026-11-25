@@ -491,8 +491,7 @@ session's tasks:
 Charging whole turns was wrong (2026-11-17: 5.5M cached tokens of other work on one task). The
 row keeps `input`, `cache_write_5m`, `cache_write_1h`, `cache_read`, `output`, `turns`, `calls`;
 `spend.weighted` gives input-equivalent tokens (`WEIGHTS`: output 5, cache write 1.25 or 2 for an
-hour, read 0.1), which `wb accept`/`discard` (beside the estimate, `savings.line`), `wb stats`
-and the router (`_cheaper`) use. Nothing
+hour, read 0.1), which `wb savings`, `wb stats` and the router (`_cheaper`) use. Nothing
 to read: the row has no `claude`, never a zero (#718: zeros skewed `_cheaper`).
 
 **Each step's share** (`spend.usage_by_step`, #558): `steps[i].claude`, so a one-step bench case
@@ -506,25 +505,32 @@ step counts disagree.
 (2026-11-17): `SELF_CALLS` 4.9 + lines changed / `SELF_LINES_PER_CALL` 69 calls, each priced at
 this task's own cost per call less output (`per_call`), plus `SELF_OUT_PER_LINE` 36 output tokens
 a line. Rechecked 2026-11-19 on five `wb bench self` runs: mean error 19%, mostly low; a refit
-didn't hold out of sample, so the constants stand (#120); single tasks −36% to +48%, always
-called an estimate. `estimate_self(lines, per_call)` is that sum; `of_row(row)` needs `claude`
-(with `calls`) and `diff`, gives `{claude, self_est, saved, wh}`; a discarded task saves nothing
+didn't hold out of sample, so the constants stand (#120); single tasks −36% to +48%, its figures
+marked `~` (no "(estimate)" words after them, #1322). `estimate_self(lines, per_call)` is that sum; `of_row(row)` needs `claude`
+(with `calls`) and `diff`, gives `{claude, self_est, saved, wh}` (`wh` None for another machine's
+GPU, `remote_gpu`: nothing is said for it, #1322); a discarded task saves nothing
 (`self_est` 0, `saved` −claude). Lockfiles and generated files (`gitops.generated`:
 `gitops.LOCKFILES`, `linguist-generated` or `-diff`) are out of `diff`'s lines, and whole
 deletions price as one call (#725: a deleted 2,400-line module "saved ~725K"); `savings.COUNTS`
-says so. `line(row)` is the per-task line; `totals(rows, since)` sums them, `of` counting the
-period's closed tasks, the energy's `cost` at `price()` (`$WB_SAVINGS`, else `savings.json`
-`kwh_price`; `set_price` through `store.edit_config`). `wb savings` prints `summary` (`PERIODS`, default a week): `the last
-7 days: 3 task(s) · claude 160K · writing it yourself ~390K (estimate) · saved ~230K (59%) · GPU
-1.2 kWh, cost 0.36`.
+says so. `totals(rows, since)` sums them (`{tasks, claude, self_est, saved, wh, cost}`), the
+energy's `cost` at `price()` (`$WB_SAVINGS`, else `savings.json` `kwh_price`; `set_price` through
+`store.edit_config`). `wb savings` prints `summary` (`PERIODS`, default a week): `the last 7 days:
+3 task(s) · claude 160K · writing it yourself ~390K · saved ~230K (59%) · GPU 1.2 kWh, cost 0.36`,
+the percent its one figure (no score beside it, #1322); with nothing to compare `the last 7 days:
+nothing to compare yet`, or nothing at all when an API line follows (#1121, #1322). No saving is
+printed on `wb accept` or `wb discard` (#1322: a line of estimates on every close cost Claude
+tokens and changed nothing it did).
 
 **The badge** (`savings.score`, #101): 100·(B−A)/B over the summed `self_est` (B) and `claude`
 (A), rounded, held to 1–100; `BANDS` 1–9 red, 10–24 orange, 25–49 yellow, 50–100 green; the
 sentence "I used about 62% less Claude than if Claude had done this work alone", "about the same
-amount" or "about 20% more" (both score 1); else `NO_SCORE`. Energy and price stay out. `wb
-savings` ends `score N/100`, `--json` carries `{score, color, pct, sentence}`, the web chat's gear
-shows it; `wb savings --card FILE.svg` (`savings.card`) writes an
-SVG (`CARD_COLORS`, each past 4.5:1) holding no name, path, host or account.
+amount" or "about 20% more" (both score 1); else `NO_SCORE`. Energy and price stay out. The text
+output never prints it (the percent again, #1322): `--json` carries `{score, color, pct,
+sentence}`; the web chat's gear shows the badge's number with one line under it, `~3K Claude
+tokens saved this week`, and the GPU's energy and the API line in the paragraph below (the
+saving there only when there is no badge); `wb savings --card FILE.svg` (`savings.card`) writes an
+SVG (`CARD_COLORS`, each past 4.5:1) holding no name, path, host or account, its footer `Last 7
+days · 3 tasks · estimated`.
 
 The energy: the runner's `_Power` thread samples `hardware.gpu_power_w()` every `POWER_EVERY`
 (10) s of a round into status `gpu_wh` (`runner.measures_power`: not a remote model, `remote_gpu`;
@@ -537,43 +543,41 @@ row's `diff`.
 
 **API tasks: their own line, never in the score** (#1022). The score answers `savings.QUESTION`,
 "How much Claude did my GPU save me?": `of_row` returns None for a `kind: "api"` row, so `totals`,
-`score`, `card`, `share`, the milestones and the badge stay GPU-only (that check is what keeps
-them so), and `of` leaves API rows out. An API task's paid tokens are on the other side, which the
+`score`, `card`, `share` and the badge stay GPU-only (that check is what keeps them so). An API
+task's paid tokens are on the other side, which the
 score can't see: it would read "saved 60%" for a task that cost $3. Its money goes beside it,
 never netted against Claude's tokens. `api_totals(rows, since)` sums the API rows, trials and
-discards included (money spent is spent): `{tasks, cost, unknown, unrecorded, plan, trials, claude,
-self_est, by_provider: {p: {tasks, cost, unknown, unrecorded?, plan?}}}` (`unknown`: no known cost;
-`unrecorded`, of them, a priced model whose figure never came back, #1106; closed tasks only: a row is written at accept or
-discard; `claude`/`self_est`
+discards included (money spent is spent): `{tasks, cost, unknown, plan, trials, claude,
+self_est, by_provider: {p: {tasks, cost, unknown, plan?}}}` (`unknown`: no known cost, no price or
+a priced model whose figure never came back, #1106, said alike, #1322; closed tasks only: a row is
+written at accept or discard; `claude`/`self_est`
 side by side through `_compare`, of_row's comparison of any kind). Dollars are OpenCode's unit
-(`Money.USD`), printed with `$` (`savings.usd`: `$0.42`, a cent's fraction to two figures written
-out, `$0.0041`, `$0.00004`, never `4e-05`, and 0.009999 as `$0.01`; a free model's `$0`; the mod's
-`usd` and the chat's `apiSaved` follow the same rule); the electricity's cost keeps none (#609, #845). A task with no price counts as `N
-with no price`, one of a priced model with no figure as `N with no figure recorded` (`unknown_parts`;
-a provider's `no price`, `no figure` or `unknown` when both, `unpriced`: it said `no price` for a
-model the catalog prices, #1106), never `$0.00`; a plan model's (`opencode-go`, an Ollama cloud model) as `on plan
-usage`. `line(row)` gives an API row `api_line`: `claude: 56K · writing it yourself: ~59K
-(estimate) · paid DeepSeek ≈$0.12 (deepseek/deepseek-flash, catalog prices)` (the name from hosted.json,
-`provider_labels`; `$0.12 (…, your prices)` at the user's own, *Estimates or your prices*;
-`· paid: unknown (no price for this model)` (`unrecorded`: `· paid: unknown
-(no figure recorded)`, #1106) or `· plan usage (opencode-go)`;
-so `wb accept`, `wb discard` and `wb backlog` print it. With API rows and no GPU one to compare,
-`summary` says `no GPU task to compare (API tasks are below, apart from the score)`, not that a
-task lacks its Claude usage and diff (#1121). `wb savings` adds, when the period has API
-rows, `api: 6 task(s) · ≈$1.27 (deepseek ≈$0.84, anthropic ≈$0.43; catalog prices) + 1 with no price · claude 210K ·
-writing it yourself ~520K (estimate)` (`api_summary`); `--json` gains `api` (api_totals), which the
-chat reads. **`wb savings --api`** (`api_report`, with `--week`/`--month`/`--all`):
-`api, the last 7 days: 6 task(s) closed, ≈$1.27 at catalog prices, 1 with no price (incl. 1 trial)`, then `by provider:`
-(the closed tasks'), then the day ledger's (`savings.spent(since)`: spend-api.jsonl's `step` and
-`reconcile` rows since then, open tasks and bench replays in, each on its own `day`; `today` is
-`meter.today()`, the pane's): `spent: ≈$1.57, ≈$0.73 today (the day ledger: open tasks and bench
-replays in, catalog prices)` and `by day:`. The money by day once came from the results rows, dated by their close:
-a task spent overnight and accepted in the morning, and every open one, read wrong against the
-ledger the cap and the pane count (#1094). Then `bench replays: $0.30 (2)` (`bench.paid_since`,
-only when there are any: a replay writes no results row; its money is in `spent` already);
-`--api --json` is api_totals plus `bench` and `spent` (`{usd, today, prices, by_day: {YYYY-MM-DD: $},
-by_provider: {p: $}}`); api_totals, each of its providers, `bench` and `spent` carry `prices`
-(`meter.basis`, *Estimates or your prices*). The first line names no provider (`_counts`): the `by provider:` line does.
+(`Money.USD`), printed with `$` by one formatter, `meter.usd` (savings imports it): `$0.42`,
+`$5.00`, `<$0.01` under a cent, a free model's `$0`, `unknown` for None; `meter.money` puts `≈`
+in front of a catalog estimate. The mod's `usd` and the chat's `apiSaved` follow the same rule
+(#1322: `$5` from meter and `$5.00` from savings said one cap two ways); the electricity's cost
+keeps none (#609, #845). A task with no known cost counts as `N with no known cost`, whatever the
+cause (`unknown_parts`; a provider's `unknown`, `unpriced`, #1106, one wording since #1322), never
+`$0.00`; a plan model's (`opencode-go`, an Ollama cloud model) as `on plan usage` (a quota, not
+dollars). `paid(row)` is an API task's money at its close, on `wb accept`'s and `wb discard`'s
+line: `· paid ≈$0.12` (plain at the user's prices or the provider's figure, *Estimates or your
+prices*), `· paid: unknown` or `· plan usage (opencode-go)`; "" for a GPU task. `wb savings` adds,
+when the period has API rows, `api: 6 task(s) · ≈$1.27 (deepseek ≈$0.84, anthropic ≈$0.43) + 1
+with no known cost · claude 210K · writing it yourself ~520K` (`api_summary`); `--json` gains
+`api` (api_totals), which the chat reads. **`wb savings --api`**
+(`api_report`, with `--week`/`--month`/`--all`) reports the day ledger only (`savings.spent(since)`:
+spend-api.jsonl's `step` and `reconcile` rows since then, open tasks and bench replays in, each on
+its own `day`; `today` is `meter.today()`, the pane's): `api, the last 7 days: ≈$1.57 (≈$0.73
+today) · 6 task(s) closed (incl. 1 trial), 1 with no known cost` (no dollars when the ledger booked
+none: a plan-only week never reads `$0`), then `by provider:` and `by
+day:`, the ledger's. The closed tasks' dollars are `--json`'s alone: a second total for the same
+period disagreed with the first (#1322). The money by day once came from the results rows, dated
+by their close: a task spent overnight and accepted in the morning, and every open one, read wrong
+against the ledger the cap and the pane count (#1094). Then `bench replays: $0.30
+(2)` (`bench.paid_since`, only when there are any: a replay writes no results row; its money is in
+the ledger's total already); `--api --json` is api_totals plus `bench` and `spent` (`{usd, today,
+prices, by_day: {YYYY-MM-DD: $}, by_provider: {p: $}}`); api_totals, each of its providers,
+`bench` and `spent` carry `prices` (`meter.basis`, *Estimates or your prices*).
 
 **What an API task cost** (#1022, `results.api_usage`, at its close; `bench.paid` for a replay).
 `kind` is task.json `via` (`results.task_kind`: anything but `"api"` is GPU), `provider` task.json's
@@ -733,8 +737,8 @@ bill: DeepInfra's flash model at $0.20/$0.60 per M where DeepInfra billed $0.098
 figure read 2x high (Anthropic's matched). DeepInfra does put its own cost in `usage`
 (`estimated_cost`), which wb dropped until #1165 (2026-11-24): its rows are now the provider's own
 (`source: provider`, plain `$`), and only a model with no provider figure reads at the catalog's.
-For those nothing changes by default but the labels: every API money figure says it is an estimate, `≈$0.42` and `catalog
-prices`; nothing to set, nothing asked, and wb never fetches or guesses a price. Opt in: **`wb model
+For those nothing changes by default but the mark: every API money figure at the catalog's is `≈$0.42` (the `≈` alone:
+a `(catalog prices)` note after it said it twice, #1322); nothing to set, nothing asked, and wb never fetches or guesses a price. Opt in: **`wb model
 price <exact id> --input X --output Y [--cache-read Z] [--cache-write W]`** (dollars per M, as the
 provider bills) writes models.json `cost` (`[{input, output, cache?: {read?, write?}}]`,
 `models.own_cost`) on that model; `models._api_model` puts it in `config["cost"]` (the catalog's
@@ -746,30 +750,23 @@ catalog.json (`models.catalog_doc`, OPENCODE_MODELS_PATH) price alike: OpenCode'
 agrees and `reconcile` books no difference back. `--clear` goes back to the catalog's. Refused for an
 id not in the catalog, a plan, a free model, one `catalog_doc` can't carry (its OpenCode would
 price from elsewhere), or prices all 0 (that is `meter.is_free`: the day cap would stop counting it,
-the review's catch). The basis (`meter.basis`): `catalog` (shown `≈`), `yours` (`your prices`, no
-`≈`) or `provider` (OpenRouter's `usage.cost`, DeepInfra's `usage.estimated_cost`, plain); a ledger row at the user's prices says
-`prices: "yours"` (`meter.row_basis`: `source: provider` first; none, `catalog`), any catalog one
-makes a sum an estimate, `$0` gets no `≈` (`meter.money`, `savings.money`). Status `api.prices`,
-`meter.today()`'s `basis`, results `api.prices`, `bench.paid`'s, api_totals', `spent`'s and the
-roles' JSON `spend_today.prices` carry it to the start line (` · today ≈$0.42 of $5 (catalog
-prices)`: today's rows and the starting model's next figures, `meter.next_basis`: the user's prices,
-else its last `step` row's in the ledger, the provider's own when its provider sent one, else the
-catalog's; `meter.model_basis`, which knows only the last two, said `catalog prices` for every
-DeepInfra start once its rows were DeepInfra's own, #1165's review, 2026-11-24), `wb accept`'s `paid`, the round report, `wb savings`,
-`wb stats` (and `paid` `≈$0.12`),
-`wb top`, scout, the stop and check-in texts, the pane (`isEst`, `estUsd`, `pricesNote`; a narrow
-Tasks row drops the `≈` before its place) and the chat (`apiSaved`). The roles' listing ends an API
-role's row with `catalog prices` or `your prices` (`cli._prices_of(m, ahead=True)`: its next
-figures', `meter.next_basis`, nothing when they are the provider's own), `wb models --api` each
-listed price (the catalog's or the user's rate, `meter.model_basis`),
-`wb models --json` gives `prices`. The day cap counts the figure shown: a catalog that runs high
+the review's catch). The basis (`meter.basis`, its values `meter.BASES`): `catalog` (shown `≈`),
+`yours` or `provider` (OpenRouter's `usage.cost`, DeepInfra's `usage.estimated_cost`), both plain;
+a ledger row at the user's prices says `prices: "yours"` (`meter.row_basis`: `source: provider`
+first; none, `catalog`), any catalog one makes a sum an estimate, `$0` gets no `≈` (`meter.money`).
+Status `api.prices`, `meter.today()`'s `basis`, results `api.prices`, `bench.paid`'s, api_totals',
+`spent`'s and the roles' JSON `spend_today.prices` carry it to the start line (` · today ≈$0.42 of
+$5.00`: today's rows' basis, `meter.today()`, no ledger scan for the model's next figures, #1322),
+`wb accept`'s `paid`, the round report, `wb savings`, `wb stats` (and `paid` `≈$0.12`; no footnote under the table, #1322), `wb top`, scout, the stop texts, the pane
+(`isEst`, `estUsd`; a narrow Tasks row drops the `≈` before its place) and the chat (`apiSaved`).
+`wb models --json` gives `prices` (`meter.model_basis`). The day cap counts the figure shown: a catalog that runs high
 stops tasks early (the safe side); one that runs low lets real spend pass the cap, which the opt-in
 tightens.
 
 **The ledger**, `$WB_HOME/spend-api.jsonl` (`store.append_jsonl`, locked; *Files and formats*):
-`step`, `reconcile` and `checkin` rows, each with its local `day` (`meter.day`: a round past
-midnight books its later steps on the new day). `meter.today()` gives `{usd, unpriced_tok,
-plan_tok: {provider: n}, checkin, basis, bases}` from today's rows, read on from the last offset (the file's
+`step` and `reconcile` rows, each with its local `day` (`meter.day`: a round past midnight books
+its later steps on the new day; a `checkin` row from before #1322 is ignored). `meter.today()` gives
+`{usd, unpriced_tok, plan_tok: {provider: n}, basis, bases}` from today's rows, read on from the last offset (the file's
 inode and size tell a new or rewritten one), so the 5 s tick never re-reads it whole. Status `api`
 (`{usd, metered, at_catalog, source, tok, prices}`, per row through `Task.set_status`, under the meter's lock: the
 keyhole's thread and the runner's book at once, and a total written after a newer one would leave
@@ -829,7 +826,7 @@ cap (wb route cap <usd>) or tomorrow, then try again; or the role on the GPU (wb
 tasks, with wb takeover <task> or wb discard <task> for this one (it keeps its API model)` (the way off API
 `routes.off_api`'s) (`a cap of at least
 $5.17` within one request of it), as `meter.stop_text` says (#1095): offered as this task's remedy, the role on
-the GPU had the user say yes and the retry refused with the same line (#1171). `meter.tail(m)` is the start line's part, ` · today ≈$0.42 of $5 (catalog prices)` (plain `$0.42 of $5` when today's rows and the model's last are the provider's own, `meter.next_basis`, #1165), or a plan's ` · plan
+the GPU had the user say yes and the retry refused with the same line (#1171). `meter.tail(m)` is the start line's part, ` · today ≈$0.42 of $5.00` (plain `$0.42 of $5.00` when today's rows are all the provider's own or at the user's prices, #1165), or a plan's ` · plan
 usage (OpenCode Go): 1.2M tokens today`, which wb start's model line ends with (`cli.cmd_start`).
 
 **The guard `spend`, inside a round** (`runner._spend_guard`, each tick after the stuck checks, an
@@ -878,7 +875,7 @@ gone (resumed, taken over, discarded), it goes on, and round 1's own stop is the
 wait untold. A backlog queued behind the cap each took its slot, ran round 1 into the guard and
 woke Claude with the same stop, one ask of the user per task, as #1178's 402 did. Both notices
 (in a round, between rounds) have `cause` `spend`, not the step's own (`results.THE_STEP`), so the slice isn't shrunk, and lead
-with `meter.stop_text`: `<task> stopped: the day's API spend cap is reached (≈$5.02 of $5 today; catalog prices). Its
+with `meter.stop_text`: `<task> stopped: the day's API spend cap is reached (≈$5.02 of $5.00 today). Its
 work so far is in the worktree. Ask the user: a higher cap (wb route cap <usd>) or tomorrow, then wb
 resume <task>; or the role on the GPU (wb route <role> gpu) for the next tasks, with wb takeover <task>
 or wb discard <task> for this one (resume keeps its API model).` (the way off API `routes.off_api`'s, #1218;
@@ -886,7 +883,7 @@ none left to offer: `… then wb resume <task>; or wb takeover <task> or wb disc
 model).`; with no cap: `meter.no_cap()`, then
 `wb resume`; never tomorrow). Under the cap (the room's stop, or `_go_on`'s look ahead) it never says the
 cap is reached, which had Claude resume into the same stop (#1150): `<task> stopped: too near the day's API
-spend cap for its next request (up to $0.33; ≈$4.80 of $5 today; catalog prices). Its work so far is in the
+spend cap for its next request (up to $0.33; ≈$4.80 of $5.00 today). Its work so far is in the
 worktree. Ask the user: a cap of at least $5.13 (wb route cap <usd>) or tomorrow, then wb resume <task>; …`
 (`meter._near`: the room's `worst`, else `request_floor` with `_go_on`'s `tokens`,
 `stop_text(task, tokens=)`, #1173). The round's stop
@@ -917,11 +914,9 @@ restating the notice's remedy and that Claude never changes a role or lifts loca
 refused or a runner that failed at once followed (#1247), so every such stop's notice names its own remedy and carries
 its cause; one with a dedicated text (`spend`, `provider`, `local_only`) or a batch (`tasks`) keeps that.
 
-**The check-in at half** (`CHECKIN_SHARE` 0.5): a priced row that leaves today at or past half the
-cap, with no `checkin` row today, appends one (under `spend-api.jsonl.checkin.lock`, so tasks in
-parallel add one) and raises `checkin`: `API spend today has passed half the day cap: ≈$2.51 of $5
-(<task> ≈$0.88 so far; catalog prices). Nothing to do unless the user wants to change it.` Once a day across every
-task.
+No check-in at half the cap: it woke Claude for money with nothing to do, under the checkin
+prompt's "tell the user how it is going" (#1322); the pane's cap row turns warning at half
+(tasks.ts `WARN_SHARE`), which wakes nobody.
 
 **Plans** (`meter.is_plan`: `opencode-go/*`, an Ollama cloud model): a quota, not dollars. Their
 rows have `usd: null`, `plan: "<provider>"` and the tokens; they never count against the cap, never
@@ -1580,8 +1575,7 @@ is a note, not a check-in (that cost a restart in one task of two, 2026-11-17). 
    reads; an API task's says `agent tokens`: an API model's tokens are neither local nor free,
    #1022), for an API task then
    `· ≈$0.12 so far` (`results.spend_so_far`: the runner's meter, else the step
-   events' `cost`; the ≈ marks the catalog's estimate, its `(catalog prices)` dropped in #1322;
-   `$0.12 so far (your prices)` at the user's own, #1135) or
+   events' `cost`; plain `$0.12 so far` at the user's own prices or the provider's figure, #1135) or
    `· cost unknown` (`runner._spend_part`); ahead of it in the review notice and `summary.md`,
    `auto-fix skipped: <cause>`.
 2. `agent context: U.UK of WK (P%)[, compacted Nx][; next round fresh][; N% read before its first
@@ -2724,25 +2718,22 @@ no check came, and a 1.5-minute typical made every 1.5 minutes a wake). The pane
   `progress.helped(model)` / `helped_by_model(rows)` (over `tuning.judged` rows) count tries and
   landings without a takeover (`tuning.agent_landed`); the next check cites them.
 
-**Stats recording** (`workbench/stats.py`, #404) keeps what only the Stats tab reads. The user's
-rule (2026-11-20): a free measurement is on by default, and each can be turned off. On unless
-stats.json says `recording: false`. With it on: a `round_end {secs, how, guard?}` event (`how`:
+**Stats recording** (`workbench/stats.py`, #404) keeps what only the Stats tab reads, always: it
+costs nothing, and the `recording` switch that could turn it off guarded nothing (#1322; a
+`recording` key in stats.json is ignored). A `round_end {secs, how, guard?}` event (`how`:
 `done`, `stuck`, `handover`, `interrupted`, `failed`; `runner._round_end`); the stopping guard named
 (`repeat`, `errors`, `no_edit`, `round`, `silence`, `think`, `handovers`, `spend`) and counted in status
 `guards`; speed samples with time to first token (`router.speed_samples`) in status `speeds`; and
 `results.for_stats` in the row (`started_at`, `load_secs`, `setup_secs`, `nudges`, `asks` by kind,
 `answered`, `guards`, median `speed`, `gpu_w` `{mean, peak}` from status `gpu_w_*`, each only when
-measured; `_Power` keeps `gpu_w_*` on or off). Off, none of these is written; the `how` is shown by
-no reader. What the router, tuning, savings and progress read is outside the setting. `live` and
-`every` drive the live view (`wb top`).
+measured); the `how` is shown by no reader. `live` and `every`, the settings left, drive the live
+view (`wb top`).
 
 **The Stats feed** (`stats.feed`, `wb stats --json`, #405): one object of what was learned. Rows:
 `store.results()` kept by `tuning.judged`. An empty section is left out, never zeros (a new install:
 `{ts, until, settings, tasks: 0}`); `until` is the next local midnight (`_midnight`), when the pane
 re-reads. Keys: `periods` (`week`, `month`, `all`, `savings.PERIODS`: tasks, landed, `accepted_pct`,
-`active_minutes`, `api`, below), `bests` (`largest_first_try` by `tuning.agent_reviews`, #550;
-`fastest`; neither with a `took_over` step, #566), `milestones` `[{kind: landed, n, day}]`, `models`
-(the `wb stats` columns, `speed`, `write_trend`, and from `TREND_MIN` 6 rows `write_change_pct`),
+`active_minutes`, `api`, below), `models` (the `wb stats` columns, `speed`, `write_trend`, and from `TREND_MIN` 6 rows `write_change_pct`),
 `model_lines` (#638: `{lines: [{model, variants, windows, last, …}], more, older}`: models OpenCode
 has now, `wb optimize` variants under their source via `variant_of`, renamed ids under the current
 one via `renamed_from` or the Ollama digest, #818; at most `stats.STATS_MODEL_LINES` 3, the rest in
@@ -2752,9 +2743,9 @@ recently used first; `models` keeps every id split), `sizes`, `stacks` `{tasks, 
 day, passed, of}`, a newer one beside it, never in its place, as `partial` `{…, planned, running}`,
 #570; a run is finished once every replay in its plan.json, times `repeat`, is graded or failed to
 start; one with no plan is finished), `optimized` (optimize.json's `{window, fits, spill, ts}`).
-results.jsonl is read once and the snapshot passed down (#565: 16 reads a feed, 3 s at 20,000 rows). `feed(only=...)` builds just those sections; plain `wb stats` uses `stats.SUMMARY` (`periods`, `guards`).
+results.jsonl is read once and the snapshot passed down (#565: 16 reads a feed, 3 s at 20,000 rows). `feed(only=...)` builds just those sections; plain `wb stats` uses `stats.SUMMARY`, `("periods",)`: `stats.summary` prints each period's tasks and landings, no saving, no score, no API line (`wb savings` has them) and none of the tab's other sections (#1322).
 Gone (#1322: precision nobody acted on): each period's `savings` and `score`, `spec_gaps` and `energy`
-`{wh, cost?}`, `streak`, `absorbed`, `questions`, the saved-tokens milestones, `days` and each model's
+`{wh, cost?}`, `streak`, `bests`, `milestones`, `absorbed`, `questions`, `days` and each model's
 `claude`; `wb savings` still says the saving and its energy.
 
 **API tasks in the feed** (#1022). `periods[*].api` is `{tasks, cost, unknown, plan, by_provider:
@@ -2765,12 +2756,11 @@ plan-only week never reads `API $0`. `model_lines` and `models` take an API mode
 then as an API one (an Ollama `:cloud` id, #1013) gives two lines; each has `kind`, an API one
 `paid`, its mean dollars a task over the known costs (none known: no `paid`; a task that sent
 nothing is none, `results.task_cost`, #1106). The trial-free rows
-(`tuning.judged`) give those lines. Plain `wb stats`' headline adds `api this week: 6 task(s), ≈$1.27
-(deepseek ≈$0.84, anthropic ≈$0.43; catalog prices)`, then `N with no price` and `N on plan usage`
-(`stats.api_week_line`; `N with no figure recorded` apart, `unknown_parts`). The Stats tab: each period adds `API ≈$1.27 (DeepSeek ≈$0.84 · Anthropic
-≈$0.43; catalog prices)` (`apiPeriod`, each provider by its name, `providerWord`; `API plan usage` or `API no price`
-with no known dollars, `apiMoney`), and an API model's line (`API DeepSeek deepseek-flash: …`) says
-`paid ~$0.12/task` in place of its write speed.
+(`tuning.judged`) give those lines. The Stats tab: each period adds `API ≈$1.27 (DeepSeek ≈$0.84 ·
+Anthropic ≈$0.43)` (`apiPeriod`, each provider by its name, `providerWord`; `API plan usage` or `API
+no known cost` with no known dollars, `apiMoney`; `+ N with no known cost` beside known ones), and
+an API model's line (`API DeepSeek deepseek-flash: …`) says `paid ~$0.12/task` in place of its
+write speed.
 
 **Taking over.** `wb takeover <task>` stops the agent and sets `review` ("Claude took over"):
 Claude finishes in the worktree uncommitted (accept adds the trailers; a commit made by hand is
@@ -3023,9 +3013,9 @@ user sees.
   PATH: offer to install its release binary (github.com/probelabs/probe/releases), then \`wb experiment probe\`.`),
   with no toast either way: the row says it (#1322). **Progress checks**,
   a `wb` command (the mod writes no setting itself): `PROGRESS_STOPS`, `progressSettings`,
-  `progressStops` (`On, after N min` with a kept `after`). Stats recording, Live view, Live refresh
-  and the electricity price per kWh had rows too (#1322: they stay on, 2 s and unset unless `wb stats
-  set` or `wb savings --price` says otherwise; `statsSettings` still reads stats.json's `live` for the
+  `progressStops` (`On, after N min` with a kept `after`). Live view, Live refresh and the electricity
+  price per kWh had rows too (#1322: on, 2 s and unset unless `wb stats set` or `wb savings --price`
+  says otherwise; the Stats recording switch is gone altogether, the rows always recorded; `statsSettings` still reads stats.json's `live` for the
   live view). `parsePrice` reads the day cap as typed (`parseUsd`: one comma or point, a sign or code of
   up to three characters, decimal digits only, #609). **Opening animation** (`SPLASH_STOPS`, `splash:on|off`): `wb splash on|off`, `splash.json`
   (`splashOn`). The ring follows `SETTING_ROWS`. Order: under **Shared** the Agents switch, the busy
@@ -3071,8 +3061,8 @@ key `ollama`, #1077) and no role holding an API model, the
   `thinks`: `Off (default): thinking as the model's default (it lists no lower setting)`, `This model
   can't turn thinking off, so it isn't cheaper; …` (or, at `thinking at its lowest effort`, `This
   model can't turn thinking off, but its lowest effort is still cheaper than On; …`), or `On: thinking
-  off (the model doesn't reason)`, #1263), and `Spend today: ≈$0.42 of $5 (DeepSeek $0.28 · Anthropic $0.14; catalog prices)`, without a
-  cap `Spend today: ≈$0.42 (DeepSeek $0.42; catalog prices) · no day cap` (`spendLine`, `your prices` and no `≈` at the user's, #1135, its dollars by the Stats
+  off (the model doesn't reason)`, #1263), and `Spend today: ≈$0.42 of $5 (DeepSeek $0.28 · Anthropic $0.14)`, without a
+  cap `Spend today: ≈$0.42 (DeepSeek $0.42) · no day cap` (`spendLine`, no `≈` at the user's prices, #1135, its dollars by the Stats
   tab's `usd`, each provider by its name from `providers`, the Stats tab's ` · `). A press goes
   through `paneRoute`: `wb route --dry-run --json <args>`, and when it is gated the mod writes its
   `approval` to route-ok.json with `by: pane` (the press is the user's yes; no dialog, no flag
@@ -3107,8 +3097,8 @@ key `ollama`, #1077) and no role holding an API model, the
   (kept `ROLES_CACHE_MS`), so the names are there on a first look. By size says `trivial` and
   `complex` (`ROLE_WORDS`), What stopped agents `the API day cap` (`GUARD_WORDS.spend`, Settings'
   word); a period says tasks, landed and its API dollars, a model line its tasks, landed share,
-  rounds, minutes and write speed or paid a task, never a score, a saving, a streak or Claude's
-  tokens a task (#1322; an older wb's tokens-saved milestone isn't drawn). The pane caps model lines at `STATS_SHOWN` 3 itself, since the mod
+  rounds, minutes and write speed or paid a task, never a score, a saving, a streak, bests, a
+  milestone or Claude's tokens a task (#1322: an older wb's bests and milestones aren't drawn). The pane caps model lines at `STATS_SHOWN` 3 itself, since the mod
   tracks main while `wb` runs from the user's clone (an older wb sends every line, or no
   `model_lines`); What helps, Bench and Optimized name only the shown lines' models. A feed with no
   section says to delegate with /workbench (#549). It is read (`refreshStats`) only while the tab is
@@ -3224,7 +3214,7 @@ On a terminal: the alternate screen, redrawn each tick, bars in eighths, the car
 (`top.short`, the pane's `cardName` alike, #576), cbreak stdin for `q`. Ctrl-Z restores the
 terminal before stopping and SIGCONT retakes it and redraws (a wake pipe, #607); the handlers write
 straight to the fd (`os.write`), never `sys.stdout` (#950: a reentrant write quit wb top). Too tall,
-it folds idle, `can't run` and `remote` models (`top.FOLD`), then cuts the middle with `… N more
+it folds idle, `can't run` and `remote` models (`top.FOLD`) into `+N more`, then cuts the middle with `… N more
 lines`, keeping the QUEUE (`top.lines(snap, rows)`, #608). Not on a terminal: one pass, then exit.
 
 ## Models: found, loaded, chosen
@@ -3867,7 +3857,7 @@ the section is two lines: `none set up, every role on the GPU` and the catalog's
 model, the GPU part is `no local models: <why_none()>` and the section still prints, exit 0, when a
 role is on API or a key is stored; otherwise it dies as before. `--api TEXT` (`_api_list`) lists the
 catalog ids containing TEXT (any case), sorted, at most `API_LIST_MAX` 30, each with the catalog's own window (`catalog_limit`),
-`$in/$out per 1M in/out, catalog prices` (`your prices` once `wb model price` set them, #1135; no basis for a plan or a 0 entry) from its first untiered price and the free note, then `and N more: a longer
+`$in/$out per 1M in/out` (the catalog's rate, or the user's once `wb model price` set them, #1135; none for a plan or a 0 entry) from its first untiered price and the free note, then `and N more: a longer
 text narrows it`; nothing matching reads the catalog again once when `models.miss_rereads()` (as
 `_hosted_exact`: a just-connected provider, #1076); it lists only, never sets a role. `--set-default` stays GPU (`router.choose` over
 `discover()`): never an API model as OpenCode's default.
@@ -4035,9 +4025,9 @@ thinking what the model does, `routes.thinking_said`, #1263),
 each role's API model's record over `SCOUT_API_DAYS` 30 (`cli._api_record`: tasks, accepted share,
 `~$/task` from `results.task_cost`, #1022's `row_cost` less the nothing-sent rows (#1106), rate-limited rounds from the tasks' `rate_limited` events),
 the spend over `SCOUT_SPEND_DAYS` 7 beside the day cap (the day ledger's, `savings.spent`, as
-`wb savings --api`'s `spent:`, open tasks and bench replays in, per provider: the closed tasks'
+`wb savings --api`'s total, open tasks and bench replays in, per provider: the closed tasks'
 said $3.00 for a week the ledger said $5.00, #1094; then the closed rows' `; task(s) N with no
-price, M with no figure recorded`, `savings.api_totals`, trials included, `unknown_parts`, #1106; its dollars and `~$/task` by `savings.usd`, as `wb savings --api` and the pane say them), and one line per connected provider counting its models with tool calls
+known cost`, `savings.api_totals`, trials included, `unknown_parts`, #1106; its dollars and `~$/task` by `meter.usd`, as `wb savings --api` and the pane say them), and one line per connected provider counting its models with tool calls
 (free ones, those the catalog doesn't say, a key wb can't hold): never each id, as a provider may list
 hundreds. Only hosted.json's catalog: no network beyond it. Claude researches primary
 sources, recommends keep / add / retire and changes nothing without the user's yes; `wb scout --done
@@ -4241,8 +4231,7 @@ longer found exits 3, never the router's other pick nor a model its id is a frag
 `API <id> (<provider>) · thinking off` (what the model does with it: `routes.thinking_said`, *What a role's thinking does*), `API kept: <id>`, `set by you|Claude MM-DD`: on API from
 `by`/`ts`, who sent its code there, which a GPU pin since never replaces; on the GPU the newer of
 `by`/`ts` and `gpu_by`/`gpu_ts`,
-`(not in OpenCode's catalog now)` for an API model the catalog no longer lists; an API row ends `catalog
-prices` or `your prices`, whose prices its dollars are at, `cli._prices_of`, #1135) and the cap,
+`(not in OpenCode's catalog now)` for an API model the catalog no longer lists; no prices note after it, #1322) and the cap,
 under a first line while Agents isn't Both (`cli._agents_line`: `Agents: GPU (every role runs on the
 GPU; wb route all both goes back to each role's own below)`); `--json` the normalized document (its
 `use` and `busy` too) plus `summary`, per role `thinks` (from the cached catalog),
@@ -5766,7 +5755,8 @@ at a time (XHR; `STALL_MS` 30 s without progress retries the same id); edit rest
 in `nearLater`, judged again by `nearAgain` where that thread put them (a photo the saved thread showed was fetched, 2026-11-24), and an entry measured before the last `render` (`drawnAt`) is observed afresh, not loaded (one delivered after the server's thread was drawn fetched that photo still, #1223); `sweepSoon` revokes unused object URLs (#746). The receipt texts, dialog cards
 (`makeAsk`), notices (`makeNotice`) and the gear's sections (`#away-when` states the away rule
 above; `drawSaved` shows no currency sign, as `wb savings`, #845, and after it `apiSaved`'s `API
-models: 6 tasks, ≈$1.27 (DeepSeek ≈$0.84, Anthropic ≈$0.43; catalog prices).`, or that alone, #1022, #1135) are in `app.js`. Over plain HTTP
+models: 6 tasks, ≈$1.27 (DeepSeek ≈$0.84, Anthropic ≈$0.43).`, or that alone, #1022, #1135; the saving is the badge's
+one line, `~3K Claude tokens saved this week`, #1322) are in `app.js`. Over plain HTTP
 off localhost the page isn't a secure context: own ids, `copyText` (#745), no install or push.
 
 **The app and notifications.** The manifest ("Claude's Workbench", `short_name` "Workbench") is offered over https only (`app.js` removes its link
@@ -6019,7 +6009,7 @@ apprentice, the tabs and the modeline under 12 rows. A press on a task's first r
 keyed `task-<name>`) follows it (`followTask`, `mem.picked`, which `focusOf` keeps while the task is
 listed). While an API task works (running, testing or asking: not one queued for its slot, the
 owner's "only while an API task runs"), `API today ≈$0.42 of the $5 day cap  ▉░░░░░░░░░` (no `≈` at the user's prices, #1135) sits above the
-saving (`capRow`: warning from `meter.CHECKIN_SHARE`, error at the cap), from `wb route --json` as
+saving (`capRow`: warning from `WARN_SHARE`, half the cap, its own, error at the cap), from `wb route --json` as
 `rolesNow` caches it, read again past `ROLES_CACHE_MS` off the render's path (`capNow`).
 
 **The web chat listener** (`listen`: workbench mode, chat on, an events child). Another session's
@@ -6338,9 +6328,9 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb verify <task>` | `--test CMD`, `--files PATH…`, `--expect TEXT`, `--timeout N` (300), `--setup` | *Verifying a fix against the base*; refused while the agent runs. SIGTERM/SIGHUP end it cleanly (`cli._ends_cleanly`, #372), like `wb image`, `wb audio`, `wb bench add`, `wb bench self` (`media.run_group`: the child's whole process group killed, since killing only a wrapper left its worker holding the GPU, #589). |
 | `wb stop [<task> \| --all]` | `--repo DIR`, `--session ID`, `--all-sessions`, `--park-waiting` | Status `stopping`, SIGTERM (15 s, `wait_exit`, then SIGKILL to its session and the agent's), `runner.sweep`, phase `stuck`, acked; worktree kept. `--all` (`stop_everything`): a `stopped` event, `last` `cli.BAIL_OUT`, status `infra` `stopped` (not the step's: `cli.stopped_outside`, #1260), status `parked` (`store.parked`: out of `wb status` and the mod's counts until `spawn_runner` or a takeover clears it, #541); `--park-waiting` (with `--all`, the mod's quit) parks review/stuck/failed too, acking their news (`_park_waiting`, #698); unscoped, `bench.stop_driver` first (another host's left, #876). Others: `left running (other sessions'): …`. |
 | `wb resume <task> [<task>…]` | several names (start order, failures said, exit 1, #692), `--all` (`last` in `cli.INTERRUPTED` or starting `runner.UPDATED`: `cli._interrupted`, #788; never a guard's stop or a crash; in `store.all_tasks` order, each under its command lock, #544; a worktree problem or an API task whose repo became local-only is said and skipped, the rest go on), `--repo DIR`, `--session ID…`, `--all-sessions`, `--backlog NAME` | Reaps first. Stuck/failed, no live runner; an API task whose repo became local-only exits 3 (`_local_only_since`, #1021). Round n+1 on a fresh session (`runner.RESUME`), undelivered notes as `NOTE_HEAD`; a self-review's green tree carried on (`self_review_tree`, `runner.carried_tree`, #1228); after a provider's stop (`infra: provider`) its provider's `no_credit` mark becomes its turn to ask (`cli._credit_turn`, #1178). Never ran a round: round 1 again (`_early_notes`); checkout cut short: remade (`_rechecks_out`). |
-| `wb accept <task> -m "…"` | `--include`, `--no-sign`, `--merge`, `--merge-as merge\|ff\|squash` (implies `--merge`; commands.json `repos` `merge` sets the default, without implying it), `--force` (any open phase; stops a live runner), `--spec-gap`, `--take-claude-md` | Reaps; a moved repo refused first (#498). Review only; a closed one only when status `unrecorded` (`_finish_record`, #88). A live task with nothing changed on its first step is refused before its runner stops; a failed commit leaves it `stuck`, not live with no runner. Commits `<m>` + "Delegated to <label> via OpenCode: R round(s), F automatic test-fix, V review round(s)." + `Workbench-Task:` + `OpenCode-Session:` (no AI co-author line); a retry past it (`cli._accept_landed`) measures from `HEAD~1` (#879) and puts `delegate/<task>` on that commit (`gitops.put_on_branch`, refused when the branch holds commits it lacks, #417). Ignored files changed since the agent stopped, or by its shell (#1210), that the commit leaves out are copied to `left-out/` first and named (`cli._keep_left`, #1179's review). Removes the worktree and runtime dir, records `tip`, keeps base..tip in `steps.bundle` (`gitops.bundle_steps`; `refs/workbench/accepted/<task>`, `gitops.keep_accepted`, only if it fails, #799, deleted once a merge lands the tip, else by gc). `--merge`: *Git, commits and projects* (`gitops.merge_lock`; failure: the accept stands, exit 5 `NOT_MERGED`, #247). A retry resumes from status `closing` (#246) while the worktree is gone or clean (`cli._gained_work`); meanwhile (`cli._accepting`) discard, feedback, next, resume and takeover refuse it (#878: discard recorded committed work as discarded); a merge already made is found by ancestry (`gitops.contains`), a squash by `closing`'s `merge_from` (#432); what a SIGKILLed merge left in the checkout is quit or backed out first (`gitops.clear_killed_merge`, #1231), once that try's signing git, if still waiting, is ended (`closing`'s `merge_git`, #1246). Writes the row, drops the rules (`_closed`), says how far CLAUDE.md is behind and the `claude:` cost. |
+| `wb accept <task> -m "…"` | `--include`, `--no-sign`, `--merge`, `--merge-as merge\|ff\|squash` (implies `--merge`; commands.json `repos` `merge` sets the default, without implying it), `--force` (any open phase; stops a live runner), `--spec-gap`, `--take-claude-md` | Reaps; a moved repo refused first (#498). Review only; a closed one only when status `unrecorded` (`_finish_record`, #88). A live task with nothing changed on its first step is refused before its runner stops; a failed commit leaves it `stuck`, not live with no runner. Commits `<m>` + "Delegated to <label> via OpenCode: R round(s), F automatic test-fix, V review round(s)." + `Workbench-Task:` + `OpenCode-Session:` (no AI co-author line); a retry past it (`cli._accept_landed`) measures from `HEAD~1` (#879) and puts `delegate/<task>` on that commit (`gitops.put_on_branch`, refused when the branch holds commits it lacks, #417). Ignored files changed since the agent stopped, or by its shell (#1210), that the commit leaves out are copied to `left-out/` first and named (`cli._keep_left`, #1179's review). Removes the worktree and runtime dir, records `tip`, keeps base..tip in `steps.bundle` (`gitops.bundle_steps`; `refs/workbench/accepted/<task>`, `gitops.keep_accepted`, only if it fails, #799, deleted once a merge lands the tip, else by gc). `--merge`: *Git, commits and projects* (`gitops.merge_lock`; failure: the accept stands, exit 5 `NOT_MERGED`, #247). A retry resumes from status `closing` (#246) while the worktree is gone or clean (`cli._gained_work`); meanwhile (`cli._accepting`) discard, feedback, next, resume and takeover refuse it (#878: discard recorded committed work as discarded); a merge already made is found by ancestry (`gitops.contains`), a squash by `closing`'s `merge_from` (#432); what a SIGKILLed merge left in the checkout is quit or backed out first (`gitops.clear_killed_merge`, #1231), once that try's signing git, if still waiting, is ended (`closing`'s `merge_git`, #1246). Writes the row, drops the rules (`_closed`), says how far CLAUDE.md is behind, and for an API task what it paid (`savings.paid`: `paid ≈$0.12` on its line; no savings line, #1322). |
 | `wb relocate <task> --repo <dir>` | | Refuses a repo without the base or a linked worktree; refuses a `.git` naming another git dir; repairs the link (`git worktree repair`), rewrites `gitdir.json`, task.json `repo`, `git_common`, `cwd`, `submodules.json` (`gitops.relocate`, #498, #682). |
-| `wb discard <task>` | `--reason "…"`, `--spec-gap`, `--keep-branch`, `--drop-steps` | Stops, records, removes worktree, runtime dir, rules (`_closed`) and branch (`deleted (was <sha>)`, status `tip`, in the repo `gitops.repo_of` finds), not with `--keep-branch`, a moved repo, or committed steps unless `--drop-steps` (#494; then accept's merge line for them, #1174); a cut-short checkout's only while `branch_made` holds (#416). Closed: refused unless `unrecorded`. |
+| `wb discard <task>` | `--reason "…"`, `--spec-gap`, `--keep-branch`, `--drop-steps` | Stops, records, removes worktree, runtime dir, rules (`_closed`) and branch (`deleted (was <sha>)`, status `tip`, in the repo `gitops.repo_of` finds), not with `--keep-branch`, a moved repo, or committed steps unless `--drop-steps` (#494; then accept's merge line for them, #1174); a cut-short checkout's only while `branch_made` holds (#416). Closed: refused unless `unrecorded`. An API task's `paid` ends its line, as accept's. |
 
 ### Watching
 | Command | Flags | What it does |
@@ -6365,7 +6355,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb remote <host>` | `--port N` (11434), `--context N`, `--remove` | Provider `ollama-<host>` (WSL2's Windows host: `ollama-windows`, followed to its next address, #1159), `local: true`, its tool models added (IPv6 bracketed, #707); exit 1 when it doesn't answer; `--remove` not while `model`/`small_model` is one (#708). |
 | `wb model retire <id>` | `--delete` | Not OpenCode's `model` or `small_model` (#708); keeps `variant_of`, `replaces` (#723); `--delete` drops Ollama's weights; an API id refused (`cli.API_SIZES`, #1013). |
 | `wb model rename <old id> <new id>` | | models.json `renamed_from` (#818); refused while the old id is configured, or for an API id. |
-| `wb model price <exact id>` | `--input X`, `--output Y`, `--cache-read Z`, `--cache-write W`, `--clear` | An API model's own prices per M (models.json `cost`, *Estimates or your prices*, #1135): its figures say `your prices`, no `≈`; `--clear` the catalog's again. Needs `--input` and `--output`; a cache price left out is the catalog's ratio to input, printed (`models.own_cache`, #1155); refused for an id not in the catalog, a plan, a free model, one `models.catalog_doc` can't carry, prices all 0 (free, outside the cap); another action's flag refused. |
+| `wb model price <exact id>` | `--input X`, `--output Y`, `--cache-read Z`, `--cache-write W`, `--clear` | An API model's own prices per M (models.json `cost`, *Estimates or your prices*, #1135): its figures are plain, no `≈`, from the model's next task; `--clear` the catalog's again. Needs `--input` and `--output`; a cache price left out is the catalog's ratio to input, printed (`models.own_cache`, #1155); refused for an id not in the catalog, a plan, a free model, one `models.catalog_doc` can't carry, prices all 0 (free, outside the cap); another action's flag refused. |
 | `wb model sizes <id> [trivial] [significant]` | | The sizes it's routed; another action's flag refused (#602); an API id refused: `sizes are for GPU models; API models run by role`. |
 | `wb route [<role> gpu\|api\|<provider/model>] [<role> <choice>…]` (several roles, one change, #1024) / `wb route all gpu\|api\|both` (the Agents switch, `use`) / `wb route cap <usd>\|off` / `wb route busy wait\|api` (#1023) | `--gpu ID\|auto`, `--api ID`, `--thinking on\|off`, `--day-usd N`, `--order NAME[,NAME]` (an OpenRouter role's backends, `privacy.parse_order`; an OpenRouter model set or switched to without them exits 3, `privacy.order_refusal`, #1021), `--json` (show: the roles, `busy`, `summary`, each API model's `api_status`, `spend_today`, `providers`; with `--dry-run`: `{change, gate, approval}`), `--dry-run` (the change line, nothing written, no approval needed), `--start ARGS` (with `--dry-run`: the dialog line for `wb start ARGS` on an API `--model`, the mod's; exit 3 with `API_NOT_YET` while `cli.API_RUNS` is off) | *Roles*. No role: shows them. A change prints `changed: <line>` (`unchanged: <summary>` for none); exit 3 for an API id not in the catalog, a GPU id, one with no key wb can hold, `api` with none kept, the first API role with no cap, and under Claude Code a gated change the mod's dialog didn't approve (`route-ok.json`). A GPU pin needs no dialog. |
 | `wb scout` | `--done [--notes "…"]` (`--notes` alone refused, #602), `--due` (7 days), `--watch "…"`, `--unwatch N` (1-based) | The weekly facts: `cli.gpu_line`, `cli.ollama_line`, `cli.server_lines` (`models.SERVER_COMMANDS`, `models.SERVER_PORTS`, `NEEDS_KEY`, `models.WSL_NAT`, `models.server_key`), `audio.coverage`, `cli.image_server_lines`; the API section (`cli.scout_api_lines`: roles, API records, spend, a count per provider, #1024). |
@@ -6383,8 +6373,8 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb bench self <case>` | `--yes` (required), `--turns N` (40) | `claude -p` on the case; a row `arm: claude` and the cost ratio. |
 | `wb bench run` | `--model ID…` (default: every GPU model that can run and takes the case's size), `--case NAME…`, `--skill NAME…`, `--label TEXT`, `--repeat N` (1) | A detached driver, one replay at a time behind real tasks, preempted by one; refused while another run runs; trims runs past `RUNS_KEPT` 20 (`bench.prune_runs`), `bench.sweep`s; skips what the label already passed or failed (an `error` runs again); an API `--model` refused (#1013). |
 | `wb backlog [NAME]` | `--json` | A `--backlog` batch, archived included: per task, then `savings.summary`, then the batch's `api:` line when it has API tasks (`api_summary`, trials in, #1121); `--json` `{backlog, tasks, totals}` (`totals.api`: api_totals), unnamed `[{backlog, tasks, open}]`. Unknown: exit 1. |
-| `wb savings` | `--week` \| `--month` \| `--all`, `--json`, `--share`, `--card FILE.svg`, `--price X\|off`, `--api` | `savings.totals`, trials out, then the `api:` line when the period has API tasks; `--json` `{period, tasks, of, claude, self_est, saved, wh, cost, remote, score, price, api}` (the same totals as the web chat's Savings, `chat.week_saved`); `--api`: the closed API tasks' money by provider, trials in, and the day ledger's spend and by day, open tasks and bench replays in (`savings.spent`, #1094), `--json` api_totals plus `bench` and `spent` (*What a task saved*, #1022); `--price` (positive, finite, else exit 1) writes savings.json `kwh_price` (`off`: `set_price(None)`, #609). |
-| `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set recording\|live on\|off`, `set every 1\|2\|5`, `--json` (*The Stats feed*), `--all` | `set`: stats.json; `wb stats`: `stats.summary`, then results by model, kind and role (a row before roles by size; the model column as wide as the longest id, never cut, the role cut to 11) with columns `tasks`, `accepted`, `rounds`, `autofix`, `reviews`, `min`, `claude`; with an API row shown also `kind`, `role`, `agent tok` and `paid` (mean $ a task over the known costs: `-` GPU, `plan` all plan usage, `?` none known, `~$0.12` some unknown, plan rows and those that sent nothing aside, #1106; `results.paid_cell`), within 120 columns for ids up to 30 (`stats.STATS_MODEL_LINES` 3, #638, #1022); a GPU-only table is as before #1022: `size` (`role` once a writing row shows) and `local tok`; `tune`: the knobs; `trial`: closed tasks' rows marked, lessons dropped (an open task refused: it has no row). Beneath the table one line, `left out: N trials, N spec gaps, N outside stops, N never ran`, each kind counted apart and only the nonzero ones (`results.table`, #817, #1245; one line, no `claude` or `≈` footnote, #1322). |
+| `wb savings` | `--week` \| `--month` \| `--all`, `--json`, `--share`, `--card FILE.svg`, `--price X\|off`, `--api` | `savings.totals`, trials out, then the `api:` line when the period has API tasks; `--json` `{period, tasks, claude, self_est, saved, wh, cost, score, price, api}` (the same totals as the web chat's Savings, `chat.week_saved`); `--api`: the day ledger's spend, today's, by provider and by day, open tasks and bench replays in (`savings.spent`, #1094), and the closed API tasks counted, trials in, `--json` api_totals plus `bench` and `spent` (*What a task saved*, #1022); `--price` (positive, finite, else exit 1) writes savings.json `kwh_price` (`off`: `set_price(None)`, #609). |
+| `wb stats [set KEY VALUE]` / `wb tune` / `wb trial <task…>` | `set live on\|off`, `set every 1\|2\|5`, `--json` (*The Stats feed*), `--all` | `set`: stats.json; `wb stats`: `stats.summary`, then results by model, kind and role (a row before roles by size; the model column as wide as the longest id, never cut, the role cut to 11) with columns `tasks`, `accepted`, `rounds`, `autofix`, `reviews`, `min`, `claude`; with an API row shown also `kind`, `role`, `agent tok` and `paid` (mean $ a task over the known costs: `-` GPU, `plan` all plan usage, `?` none known, `~$0.12` some unknown, plan rows and those that sent nothing aside, #1106; `results.paid_cell`), within 120 columns for ids up to 30 (`stats.STATS_MODEL_LINES` 3, #638, #1022); a GPU-only table is as before #1022: `size` (`role` once a writing row shows) and `local tok`; `tune`: the knobs; `trial`: closed tasks' rows marked, lessons dropped (an open task refused: it has no row). Beneath the table one line, `left out: N trials, N spec gaps, N outside stops, N never ran`, each kind counted apart and only the nonzero ones (`results.table`, #817, #1245; one line, no `claude` or `≈` footnote, #1322). |
 | `wb gc` | `--days N` (`ARCHIVE_DAYS` 30) | `cli.gc`, writing `gc.json`: archives tasks closed N days (`store.archive`); old handled notices to `notify.old.jsonl` (`_rotate_notices`; `_cap_old_notices` at `NOTIFY_OLD_MAX` 8 MiB); rules of gone tasks (`RULES_GRACE` 1 h); `context.drop_stale_runtime_dirs`; `store.SCRATCH_PREFIXES` scratches (named `<prefix><maker's pid>.<start tag>.<machine tag>-` by `store.scratch`; `wb bench add`'s `.<case>.<pid>.tmp`) `SCRATCH_AGE` old whose maker is gone (`_drop_scratches`, `_maker_alive`: a reused pid with another start is gone, #532; `_scratch_homes`, #589; another machine's after `FAR_SCRATCH_AGE`, as its pid isn't in this process table, #876); half-made starts (`_dead_start`, `_drop_start`: worktree unlocked and removed, and the branch only when `starting.json` says this start made it and it still points at `branch_at`, `delete_branch(at=)`, #416, #376); chat uploads (`chat.drop_old_uploads`); landed `delegate/` branches (`_merged_branches`, `gitops.drop_landed_branch`, never one checked out, `gitops.checked_out_in`, nor one moved past the recorded tip, #930; status `branch_gone`, #686; one squash-merged elsewhere holds commits its target lacks and stays); accepted refs (`_released_refs`, `gitops.drop_accepted`, `accepted_ref_gone`: deleted when the tip is in `base_branch`, else moved into `steps.bundle` first; a `steps.bundle` stays as long as its task, #940); archived tasks past `store.SLIM_DAYS` 90 slimmed (`store.slim_archive`, `SLIM_GLOBS`: logs, test outputs, old exports, shot PNGs with shots.json marked `pruned` first, #821; task.json, status, prompts, summaries, events and asks stay: names stay taken, bench add and the lessons read them); `_drop_leftovers` (old `imports/`, dead `claude-sessions/<pid>`). Then (not in `cli.gc`) `bench.sweep` (#511). Accept and discard run it without the branches once per `GC_EVERY`. |
 
 ### Other
@@ -6453,14 +6443,14 @@ $WB_HOME (~/.local/state/workbench)
                                  runner holding it, its task's name inside (models.api_holders); never in gpu.json
   api/<provider>.probe.lock      empty: flocked by the one runner asking the provider again past a held mark, or going into one,
                                  from its load to the next (NoLease._probe, #1277); the waiters behind a told stop wait for its answer
-  spend-api.jsonl  .lock .checkin.lock  the API ledger (meter.py, #1019; *Spend*), one row each, every row {ts, day (local
+  spend-api.jsonl  .lock          the API ledger (meter.py, #1019; *Spend*), one row each, every row {ts, day (local
                                  %Y-%m-%d)}: step {task, round, provider, model, usd (null: a plan or unpriced), metered,
                                  source (keyhole|provider (the provider's own usage.cost or estimated_cost, #1165)|opencode|metered|metered (opencode said 0)), own? (a provider row's field:
                                  cost|estimated_cost; OpenCode reports a cost as its own figure, #1234), cut? (true: a response cut short,
                                  the keyhole's estimate, #1276), plan?, prices? ("yours":
                                  at wb model price's, #1135), tok {in, out,
                                  cache_read, cache_write, reasoning}}; reconcile {task, round, provider, model, usd (OpenCode
-                                 said more, compared at its prices: a provider row at its metered, a usage.cost one as booked, #1165, #1234), source opencode, prices?}; checkin {task, usd_today, cap}: today's one check-in at half
+                                 said more, compared at its prices: a provider row at its metered, a usage.cost one as booked, #1165, #1234), source opencode, prices?}; an old checkin row (the half-cap check-in, gone in #1322) is ignored
   update.json                    wb update's last check
   patches.json                   {source (the clone install), upstream (owner/repo on GitHub, else null)}: patches.note_install, by wb patch init, upstream, send and wb update (not --check) on `local`; the mod's consent gate reads it.
                                  prepared {<slug>: {author, email, date (unix), subject}}: the local commit wb patch upstream picked;
@@ -6685,8 +6675,8 @@ off), not `wb start`'s.
 | `experiment_use`, `long_reads` | `{name: calls}` (`context.experiment_use`, `events.shell_programs`); whole reads of files over `context.LONG_FILE_LINES` (300) |
 | `live_used` | `{session, used}` from the round's last `step_finish`: the between-rounds check when the export fails |
 | `gpu_wh`; `gpu_w_sum`, `gpu_w_n`, `gpu_w_peak` | GPU energy (`_Power`, its share when sharing); the watt samples for the row's `gpu_w` |
-| `speeds` | `{write, read, ttft}` (`router.speed_samples`), newest `TASK_SPEED_KEEP` (200), stats recording on |
-| `guards` | `{<guard>: n}`, stats recording on |
+| `speeds` | `{write, read, ttft}` (`router.speed_samples`), newest `TASK_SPEED_KEEP` (200) |
+| `guards` | `{<guard>: n}` |
 | `opencode` | OpenCode's `M.m` when the runner last started; `runner.opencode_moved` stops the task below 2.0 and takes a 2.x change here |
 | `opencode_note` | `{round, text}`: "OpenCode now M.m" (and `untested()`'s line) for that round's report, set by `runner.opencode_moved` on a 2.x change (#1322) |
 | `leased` | the pid of the runner that entered its lease (`drive`): alive and not in gpu.json, it stepped aside (its tests, a server's wait) and `cli._gpu_holders` doesn't count it |
@@ -6727,7 +6717,7 @@ out, cache, cache_read, cache_write, reasoning?, cost?}` (reasoning apart from `
 which the handover check reads; `cost` OpenCode's `part.cost` in USD, only when a number: missing is unknown, never 0, #1022; the meter's step price too, #1019), `error {text}`, `retry {text, attempt}` (OpenCode resent a request). From the runner: `round`, `stopped {text}`, `steer
 {now, by: "workbench"}` (a nudge), `interrupted`, `tests {ok, text}`, `skills`, `fresh {overflow, compacted}` (`compacted` after a failed compaction too),
 `autofix`, `self_review`, `reading_full`, `full`, `compacted {text}` (mid-round, and it carried on), `load` (a reload before a round), `limits {text}` (stretched),
-`left_bg {text}` (a job left in the background), `lingered {text}` (the turn over, OpenCode still open: stopped, #1160), `settled {text}` (a self-review round at any guard or the think nudge, on the tree its tests passed on: stopped as its finish, `runner.settle`, #1168, #1188, #1207, #1228, #1250, #1261), `round_end {secs, how, guard?}` (stats recording on), `export` (the
+`left_bg {text}` (a job left in the background), `lingered {text}` (the turn over, OpenCode still open: stopped, #1160), `settled {text}` (a self-review round at any guard or the think nudge, on the tree its tests passed on: stopped as its finish, `runner.settle`, #1168, #1188, #1207, #1228, #1250, #1261), `round_end {secs, how, guard?}` (*Stats recording*), `export` (the
 export failed: judged by `live_used`), `stopped {by: "signal"|"provider"|"spend"|"local_only"}` (`provider`: an API provider's stop, #1020; `spend`: the day's spend cap, #1019; `local_only`: an API task's repo marked local-only, `runner.LOCAL_ONLY`, #1215; `lessons.gather` skips any with `by`), `gpu {text}` (a load warning), `ask {id}`, `answer {id}`, `served {model, by, text}` (the keyhole: the served model changed; `wb watch` and `wb log` show the text), `rate_limited {provider, code, state, since, secs, text}` (a run of an API provider's waiting ended, or the round stopped: #1020), `backend {by, text}` (the keyhole: OpenRouter served a backend outside the task's `order`, `OpenRouter served <x>, not <order>`; a line in the round's report too, #1021). From
 `wb`: `spec_gap`, `next_step`, `stopped` (bail out), `resumed`, `allow`, `steer {now}`, `captain`, `takeover`, `coding` (the user allowed Claude an edit), `error`
 (`reap`: the runner died without a report).
@@ -6746,7 +6736,7 @@ calls, input, cache_write_5m, cache_write_1h, cache_read, output}`), `gpu_wh`, `
 `provider` (task.json `provider`, else the model id before its first `/`), and for an API row `api` (`results.api_usage`:
 `{cost (USD or null, never 0 for no price), tokens {in, out, cache_read, cache_write, reasoning}, source (opencode | mixed |
 metered | plan | none | unknown | unrecorded), plan?, backend?, served_model?}`) and no `gpu_wh` or `remote_gpu` (#1022),
-`probe_long` (task.json `probe_files` named any; old rows' `probe_level`, `probe_setting`, `probe_aggressive`: unread); stats recording on
+`probe_long` (task.json `probe_files` named any; old rows' `probe_level`, `probe_setting`, `probe_aggressive`: unread); for the Stats tab, always
 (`results.for_stats`): `started_at`, `load_secs`, `setup_secs`, `nudges`, `asks` (`{questions, permissions, refused,
 answered}`), `guards`, `speed` (medians of status `speeds`), `gpu_w` (`{mean, peak}`); `commit`, `merged`, `merge_refused` on accept, `reason` on
 discard. A step (`results.step`): `files`, `lines` (added against HEAD, new files included), `removed`, `window`, `landed`, `compacted`, `handovers` (with
@@ -6775,7 +6765,7 @@ on an API model `kind: "api"` and `paid {cost, source}` (`bench.paid`, from `res
 - `lessons.jsonl`: `{ts, task, repo, skills, id, kind, round, text}`; a close `{close: id, ts, how: "skill:<name>"|"dropped", why}`.
 - `speed.json`: `{"<model id>": {"write": [tok/s…], "read": [tok/s…]}}`, last 60 each.
 - `speed-api.json`: `{"<API model id>": {"write": [tok/s…], "ttft": [s…]}}`, last 60 each; in `$WB_HOME`, not `machine_dir`.
-- `stats.json`: `{recording, live, every, ts}`; `every` 1, 2 or 5 s; bad or missing key: `stats.DEFAULTS` (on, on, 2); `set_setting` changes
+- `stats.json`: `{live, every, ts}`; `every` 1, 2 or 5 s; bad or missing key: `stats.DEFAULTS` (on, 2); an old `recording` key ignored (#1322); `set_setting` changes
   one key under `stats.lock` (#564).
 - `gpu.json`: `{"<pid>": {model, task, since, start, uid, user, waiting?, waiting_since?, tests?}}` (`uid`, `user`: for a lease accounts share; `tests`: unload-for-
   tests holds the GPU, `model` null; `since`: queue place, the task's `created_at`; `waiting_since`: kept across rewrites until admitted, `wb top`'s
@@ -7502,7 +7492,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `viewFacts` and tasks.ts; the queued `last` texts (the runner's and `models`' `say`: `waiting for the GPU`, `waiting
   for an API slot`, `checking out`, `setting up`, `checking the acceptance command`, `loading`…) → tasks.ts's `QUEUED`
   and `transcript.activity`; the role words (`complex`, `trivial`, `writing`) → tasks.ts's `ROLE_WORDS` and
-  Settings' `ROLE_LABELS`, `SIZE_STOPS` and the Stats tab's By size (#1048: a size is said in them); `progress.TYPICAL_MIN` and `meter.CHECKIN_SHARE` → tasks.ts's copies; `savings.usd` → the
+  Settings' `ROLE_LABELS`, `SIZE_STOPS` and the Stats tab's By size (#1048: a size is said in them); `progress.TYPICAL_MIN` → tasks.ts's copy; `meter.usd` → the
   `usd` the mod passes to `taskLines` and `capRow`; **the modeline's look** (`MODELINE`, `claude`) →
   splash.ts's `BAR`, modeline.ts's `BAR`, the room `register.tsx` counts; **a task phase** → modeline.ts's `SAID`.
 - **Stats tab folds**: `top.FOLD` → `RACK_FOLD`; `stats.STATS_MODEL_LINES` → `STATS_SHOWN`; `model_lines`'
@@ -7510,10 +7500,10 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **`cli.CODING`** → the mod's `CODING_STOPS`, `CODING_RULES`, the skill's *Claude coding* bullet.
 - **`savings.totals`' keys** → `drawSaved` (the chat); the cost's label (no currency sign) → `wb savings`,
   `drawSaved`.
-- **API money** (#1022): `savings.of_row`'s `kind` check is what keeps the score, card, share, milestones and badge
-  GPU-only; `savings.api_totals`' keys → `stats._api_period`, `savings.api_summary`/`api_report`, `stats.api_week_line`, the mod's `apiMoney`,
-  `apiPeriod`, the chat's `apiSaved`; `savings.usd` → the mod's `usd`, `apiSaved`'s; `meter.basis`' values
-  (`catalog`, `yours`, `provider`) and `meter.NOTE`'s words → the mod's `isEst`/`pricesNote`, tasks.ts' `est`, `apiSaved`'s `est`/`note`
+- **API money** (#1022): `savings.of_row`'s `kind` check is what keeps the score, card, share and badge
+  GPU-only; `savings.api_totals`' keys → `stats._api_period`, `savings.api_summary`/`api_report`, the mod's `apiMoney`,
+  `apiPeriod`, the chat's `apiSaved`; `meter.usd` → the mod's `usd`, `apiSaved`'s; `meter.basis`' values
+  (`meter.BASES`: `catalog`, `yours`, `provider`) → the mod's `isEst`, tasks.ts' `est`, `apiSaved`'s `est`
   (#1135); the `kind` default (`gpu`) →
   `results.api_row` (a row; `models.is_api` takes an id), `router.same_kind` (score, expected, slice, `tuning._rows`). `local tok` → `agent tok` (with an API row shown) in `results.table`, the bench
   table and the round report's `agent tokens` (an API task's) together. `WbTop`'s type is unchanged (the API fields are optional keys of `running` rows): `top-1` stays.

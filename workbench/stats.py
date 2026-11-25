@@ -1,16 +1,16 @@
-"""The pane's Stats tab: its settings (stats.json, `wb stats set`), read by the runner (what a
-task records for it) and by `wb top` and the mod (the live view). The user's rule (2026-11-20):
-a measurement that costs nothing is on by default, and every one can be turned off. The feed:
-everything workbench has learned, for the tab's history (`wb stats --json`, #405)."""
+"""The pane's Stats tab: its settings (stats.json, `wb stats set`), read by `wb top` and the mod
+(the live view: `live`, `every`). What a task records for the tab is always recorded: it costs
+nothing, and a `recording` switch to stop it guarded nothing (#1322). The feed: everything
+workbench has learned, for the tab's history (`wb stats --json`, #405)."""
 import time
 from collections import Counter, defaultdict
 from statistics import median
 
 from . import store
 
-DEFAULTS = {"recording": True, "live": True, "every": 2}
+DEFAULTS = {"live": True, "every": 2}
 EVERY = (1, 2, 5)  # seconds between the live view's samples (wb top)
-SWITCHES = ("recording", "live")
+SWITCHES = ("live",)
 
 
 def path():
@@ -19,7 +19,7 @@ def path():
 
 def settings() -> dict:
     """The settings, each its default unless stats.json says otherwise (a value of the wrong
-    type, hand-edited, is ignored rather than trusted)."""
+    type, hand-edited, is ignored rather than trusted; a `recording` key from before #1322 too)."""
     data = store.read_json(path(), {})
     if not isinstance(data, dict):  # the runner reads this every round: never a reason to fail
         data = {}
@@ -30,12 +30,6 @@ def settings() -> dict:
     if data.get("every") in EVERY:
         out["every"] = data["every"]
     return out
-
-
-def recording() -> bool:
-    """Whether a task records what only the Stats tab reads (its row's speeds, watts, guards and
-    timings; the round_end event). What the router, tuning and savings read is always kept."""
-    return settings()["recording"]
 
 
 def set_setting(key: str, value: str) -> dict:
@@ -51,7 +45,7 @@ def set_setting(key: str, value: str) -> dict:
             raise ValueError(f"every is one of {', '.join(map(str, EVERY))} (seconds)")
         change = {"every": int(value)}
     else:
-        raise ValueError(f"no setting {key!r}: recording, live or every")
+        raise ValueError(f"no setting {key!r}: live or every")
     with store.locked(path().with_suffix(".lock")):
         data = store.read_json(path(), {})
         data = data if isinstance(data, dict) else {}
@@ -61,16 +55,14 @@ def set_setting(key: str, value: str) -> dict:
 
 def line() -> str:
     s = settings()
-    return (f"stats: recording {'on' if s['recording'] else 'off'} · live view "
-            f"{'on' if s['live'] else 'off'} · every {s['every']} s")
+    return f"stats: live view {'on' if s['live'] else 'off'} · every {s['every']} s"
 
 
 # The feed (#405): what workbench has learned, as one object for the Stats tab (`wb stats
 # --json`). Built from what already computes it; a section with no data is left out, never a
-# zero. The score, the savings estimate, the streak, the work absorbed, the questions, spec-gap
-# discards, the energy and its cost and the 30 days' line were in it too: precision nobody acted
-# on (#1322); `wb savings` still says the saving.
-MILESTONES_LANDED = (1, 10, 25, 50, 100, 250, 500, 1000)
+# zero. The score, the savings estimate, the streak, the bests, the milestones, the work
+# absorbed, the questions, spec-gap discards, the energy and its cost and the 30 days' line were
+# in it too: precision nobody acted on (#1322); `wb savings` still says the saving.
 TREND_MIN = 6  # speed samples (tasks) before a model's trend is given
 
 
@@ -94,39 +86,6 @@ def _mean(xs: list) -> float | None:
     return round(sum(xs) / len(xs), 1) if xs else None
 
 
-def _bests(rows: list[dict]) -> dict:
-    """The most lines landed first try, and the fastest landing. First try is skills.py's: landed
-    with no review round the agent caused. Not the runner's round counter: self-review, a handover
-    and a steer each add a round Claude never saw, so a default `--test` task never qualified
-    (#550)."""
-    from . import tuning
-    out = {}
-    # the agent's own landings: a task Claude finished after wb takeover is Claude's work (#566),
-    # as progress.helped leaves it out
-    rows = [r for r in rows if not tuning.took_over(r)]
-    first_try = [r for r in rows if _landed(r) and not tuning.agent_reviews(r) and r.get("diff")]
-    if first_try:
-        big = max(first_try, key=lambda r: r["diff"].get("added", 0) + r["diff"].get("removed", 0))
-        out["largest_first_try"] = {"task": big.get("task"), "ts": big.get("ts"),
-                                    "lines": big["diff"].get("added", 0) + big["diff"].get("removed", 0)}
-    timed = [r for r in rows if _landed(r) and isinstance(r.get("minutes"), (int, float))]
-    if timed:
-        fast = min(timed, key=lambda r: r["minutes"])
-        out["fastest"] = {"task": fast.get("task"), "ts": fast.get("ts"), "minutes": fast["minutes"]}
-    return out
-
-
-def _milestones(rows: list[dict]) -> list[dict]:
-    """Each milestone of tasks landed reached, with its day (Claude tokens saved were one too,
-    #1322)."""
-    out, landed = [], 0
-    marks = list(MILESTONES_LANDED)
-    for r in sorted(rows, key=lambda r: r.get("ts") or 0):
-        if _landed(r):
-            landed += 1
-            while marks and landed >= marks[0]:
-                out.append({"kind": "landed", "n": marks.pop(0), "day": _day(r.get("ts"))})
-    return out
 
 
 def _models(rows: list[dict]) -> dict:
@@ -316,7 +275,9 @@ def _helps(rows: list[dict]) -> dict:
             if m and any(n for _, n in h.values())}
 
 
-SUMMARY = ("periods", "guards")  # what `wb stats` shows of the feed
+# what `wb stats` shows of the feed: its periods. The rest (guards and the like) is the tab's:
+# headline lines above the table cost Claude tokens on every `wb stats` (#1322)
+SUMMARY = ("periods",)
 
 
 def feed(now: float | None = None, only: tuple | None = None) -> dict:
@@ -343,8 +304,6 @@ def feed(now: float | None = None, only: tuple | None = None) -> dict:
                              **({"api": api} if api else {})}
     sections = {
         "periods": lambda: periods,
-        "bests": lambda: _bests(rows),
-        "milestones": lambda: _milestones(rows),
         "models": lambda: _models(rows),
         "model_lines": lambda: _model_lines(rows, now),
         "sizes": lambda: _by(rows, lambda r: [r["size"]] if r.get("size") else []),
@@ -362,7 +321,8 @@ def feed(now: float | None = None, only: tuple | None = None) -> dict:
 
 
 def summary(f: dict) -> list[str]:
-    """`wb stats`' lines above its table: the feed's headline, short (Claude reads it too)."""
+    """`wb stats`' lines above its table: each period's tasks and landings, short (Claude reads it
+    too). The saving is `wb savings`', and the week's API dollars too (#1322)."""
     lines = []
     for name in ("week", "all"):
         p = f.get("periods", {}).get(name)
@@ -370,25 +330,4 @@ def summary(f: dict) -> list[str]:
             continue
         lines.append(f"{'this week' if name == 'week' else 'all time'}: {p['tasks']} task(s), "
                      f"{p['landed']} landed" + (f" ({p['accepted_pct']}%)" if "accepted_pct" in p else ""))
-    if api := (f.get("periods", {}).get("week") or {}).get("api"):
-        lines.append(api_week_line(api))
-    if g := f.get("guards"):
-        lines.append("what stopped agents: " + " · ".join(f"{k} {v}" for k, v in
-                                                        sorted(g.items(), key=lambda kv: -kv[1])))
     return lines
-
-
-def api_week_line(api: dict) -> str:
-    """`wb stats`' API line: api this week: 6 task(s), ≈$1.27 (deepseek ≈$0.84, anthropic ≈$0.43;
-    catalog prices), then the tasks with no price, no figure recorded and on plan usage, each
-    said apart (never a false $0, #1106); `≈` and the basis by meter.basis (#1135)."""
-    from . import savings
-    plan = api.get("plan") or 0
-    priced = {p: v for p, v in api["by_provider"].items() if v["tasks"] > v["unknown"] + v.get("plan", 0)}
-    known = api["tasks"] - api["unknown"] - plan
-    return (f"api this week: {api['tasks']} task(s)"
-            + (f", {savings.money_of(api)}" + savings.inside(", ".join(
-                f"{p} {savings.money_of(v)}" for p, v in sorted(priced.items(), key=lambda kv: -kv[1]["cost"])),
-                savings.note(api)) if known else "")
-            + "".join(f", {u}" for u in savings.unknown_parts(api))
-            + (f", {plan} on plan usage" if plan else ""))

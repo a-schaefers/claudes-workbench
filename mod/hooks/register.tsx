@@ -760,8 +760,8 @@ async function probeMode($: any): Promise<string> {
 }
 
 // Progress checks, off by default since each one wakes Claude: wb's choice, `wb progress`
-// (progress.json). Stats recording, the live view and its refresh had rows here too, on by
-// default, each wb's (`wb stats set`): the pane keeps them on (#1322).
+// (progress.json). The live view and its refresh had rows here too, on by default, each wb's
+// (`wb stats set`): the pane keeps them on, and Stats recording is always on (#1322).
 const PROGRESS_OFF: [string, string, string] = ['off', 'Off (default)', 'No progress checks: each one wakes Claude, which spends its tokens.']
 const PROGRESS_STOPS: [string, string, string][] = [
   PROGRESS_OFF,
@@ -858,11 +858,11 @@ async function setWeb($: any, value: string) {
 
 // stats.json's settings as wb reads them (stats.py): each its default unless the file says
 // otherwise, a mistyped value ignored
-async function statsSettings($: any): Promise<{ recording: boolean; live: boolean; every: number }> {
+async function statsSettings($: any): Promise<{ live: boolean; every: number }> {
   let d: any = {}
   try { d = JSON.parse(await $.fs.read(`${mem.root}/stats.json`)) } catch { /* the defaults */ }
   const on = (v: unknown) => (typeof v === 'boolean' ? v : true)
-  return { recording: on(d?.recording), live: on(d?.live), every: [1, 2, 5].includes(d?.every) ? d.every : 2 }
+  return { live: on(d?.live), every: [1, 2, 5].includes(d?.every) ? d.every : 2 }
 }
 
 // progress.json as wb reads it (progress.py): on only when it says so; a fixed threshold when
@@ -1059,7 +1059,6 @@ export function liveLines(t: WbTop, why = '', names: Names = NO_NAMES): { color?
     } else if (g.total) row.push({ dim: true, text: `${gib(g.total)} GiB${g.unified ? ' unified' : ''} ` })
     // an Apple GPU: its bar is the RAM, and the most of it the GPU may wire is said here (#701)
     if (typeof g.limit === 'number' && g.limit) row.push({ dim: true, text: `· GPU may wire ${gib(g.limit)} GiB ` })
-    if (g.stale) row.push({ dim: true, text: 'no reading ' })            // known, not read just now (#547)
     if (typeof g.busy === 'number')
       row.push({ dim: true, text: '· busy ' }, { color: g.busy > 80 ? 'warning' : 'success', text: bar(g.busy / 100, 8) },
         { text: ` ${g.busy}% ` })
@@ -1086,13 +1085,13 @@ export function liveLines(t: WbTop, why = '', names: Names = NO_NAMES): { color?
         ? ` ${gib(m.gpu_bytes)} GiB on the GPU${m.cpu_bytes ? ` + ${gib(m.cpu_bytes)} on the CPU` : ''}` : ''
     // with its unit, as the history's `writes ~61 tok/s`: "writes ~61" said 61 of nothing (#1048's review)
     const facts = [m.write_tok_s ? `writes ~${Math.round(m.write_tok_s)}${NB}tok/s` : '', m.read_tok_s ? `reads ~${Math.round(m.read_tok_s)}${NB}tok/s` : '',
-      m.load_s ? `loads ~${secs(m.load_s)}` : '', m.state === 'remote' ? 'another machine: no telemetry' : m.why ?? ''].filter(Boolean)
+      m.load_s ? `loads ~${secs(m.load_s)}` : '', m.why ?? ''].filter(Boolean)
     out.push([{ color: RACK_COLOR[m.state], dim: !RACK_COLOR[m.state], text: `${RACK_MARK[m.state] ?? '•'} ` },
       { text: `${m.label || m.model} ` }, { color: RACK_COLOR[m.state], dim: !RACK_COLOR[m.state], text: `${m.state}${where}` },
       { dim: true, text: facts.length ? ` · ${facts.join(' · ')}` : '' },
       ...(m.tasks?.length ? [{ color: 'claude', text: ` ← ${m.tasks.join(', ')}` }] : [])])
   }
-  if (fold) out.push([{ dim: true, text: `+${fold} more models idle, can't run or remote (wb top)` }])
+  if (fold) out.push([{ dim: true, text: `+${fold} more (wb top)` }])
   for (const q of (s.queue ?? []) as Row[])
     out.push([{ color: 'warning', text: '◌ ' }, { text: `${q.task} ` },
       { dim: true, text: `waits for the GPU${typeof q.waited_s === 'number' ? ` (${secs(q.waited_s)})` : ''}` }])
@@ -1947,13 +1946,6 @@ export function statsLines(f: Record<string, any> | null, why = '', names: Names
     ? kept.join(' · ') + (rest ? ` · ${rest} more (${report})` : '') : `${rest} model${rest === 1 ? '' : 's'} (${report})`
   const sized = Object.entries(f.sizes ?? {}) as [string, any][]
   if (sized.length) out.push({ label: 'By size', text: sized.map(([k, v]) => `${ROLE_WORDS[k] ?? k} ${v.tasks} (${v.accepted_pct}%)`).join(' · ') })
-  const bests = [
-    f.bests?.largest_first_try ? `largest landed first try: ${f.bests.largest_first_try.lines} lines (${f.bests.largest_first_try.task})` : '',
-    f.bests?.fastest ? `fastest landing: ${f.bests.fastest.minutes} min (${f.bests.fastest.task})` : '',
-  ].filter(Boolean)
-  if (bests.length) out.push({ label: 'Bests', text: bests.join(' · ') })
-  const last = (f.milestones ?? []).filter((m: any) => m.kind === 'landed').at(-1) // an older wb's tokens-saved one: not shown
-  if (last) out.push({ label: 'Milestone', text: `${last.n} task${last.n === 1 ? '' : 's'} landed${last.day ? ` (${last.day})` : ''}` })
   const guards = Object.entries(f.guards ?? {}) as [string, number][]
   if (guards.length) out.push({ label: 'What stopped agents', text: guards.sort((a, b) => b[1] - a[1])
     .map(([g, n]) => `${GUARD_WORDS[g] ?? g} ${n}`).join(' · ') })
@@ -2878,13 +2870,11 @@ async function ears($: any) {
 const SCOUT_QUIET_MS = 60_000
 
 // API dollars (#1022): OpenCode's unit, so a `$`, unlike the electricity's cost (the user's own
-// price, #609); a cent's fraction to two figures, written out ($0.00004), a free model's $0:
-// savings.usd's rule, so the CLI and the pane agree (toPrecision gave $0.000040 and $0.010)
+// price, #609): meter.usd's rule, so the CLI and the pane agree: $0.42, `<$0.01` under a cent,
+// a free model's $0 (#1322: one rule, where two said one cap two ways)
 export function usd(x: number): string {
   if (x === 0) return '$0'
-  if (Math.abs(x) >= 0.01) return `$${x.toFixed(2)}`
-  const r = Number(x.toPrecision(2))
-  return Math.abs(r) >= 0.01 ? `$${r.toFixed(2)}` : `$${r.toFixed(2 - Math.floor(Math.log10(Math.abs(r)))).replace(/0+$/, '')}`
+  return Math.abs(x) < 0.01 ? '<$0.01' : `$${x.toFixed(2)}`
 }
 
 // The words one model or provider goes by on every tab (#1048's review, seen live): a GPU model by
@@ -2915,15 +2905,14 @@ function namesNow(list: WbTask[], top: WbTop | null): Names {
 // #1135, 2026-11-23: the catalog ran about 2x DeepInfra's bill): `prices` is meter.basis's, missing
 // on rows from before it (the catalog's)
 export const isEst = (prices: unknown) => prices !== 'yours' && prices !== 'provider'
+// the `≈` alone says it: a "(catalog prices)" note after it said it twice (#1322)
 export const estUsd = (x: number, prices: unknown) => (x && isEst(prices) ? '≈' : '') + usd(x)
-const PRICES: Record<string, string> = { catalog: 'catalog prices', yours: 'your prices' }
-export const pricesNote = (prices: unknown) => PRICES[typeof prices === 'string' ? prices : 'catalog'] ?? ''
 
-// A period's API money as the footer says it: never $0 for tasks with no price; '' with none
+// A period's API money as the Stats tab says it: never $0 for tasks with no price; '' with none
 export function apiMoney(a: any): string {
   if (!a || !a.tasks) return ''
   const known = a.tasks - (a.unknown ?? 0) - (a.plan ?? 0)
-  return known > 0 ? estUsd(a.cost ?? 0, a.prices) : a.plan ? 'plan usage' : 'no price'
+  return known > 0 ? estUsd(a.cost ?? 0, a.prices) : a.plan ? 'plan usage' : 'no known cost'
 }
 
 // A Stats period's API part (the feed's periods[*].api): API $1.27 (DeepSeek $0.84 · Anthropic $0.43)
@@ -2932,8 +2921,8 @@ export function apiPeriod(a: any, names: Names = NO_NAMES): string {
   if (!money) return ''
   const provs = Object.entries(a.by_provider ?? {}).filter(([, v]: any) => v.tasks > (v.unknown ?? 0) + (v.plan ?? 0))
     .sort((x: any, y: any) => y[1].cost - x[1].cost).map(([p, v]: any) => `${providerWord(p, names)} ${estUsd(v.cost, v.prices)}`)
-  const inside = [provs.join(' · '), a.cost ? pricesNote(a.prices) : ''].filter(Boolean).join('; ')
-  return `API ${money}${inside ? ` (${inside})` : ''}${a.unknown && money !== 'no price' ? ` + ${a.unknown} with no price` : ''}`
+  const inside = provs.join(' · ')
+  return `API ${money}${inside ? ` (${inside})` : ''}${a.unknown && money !== 'no known cost' ? ` + ${a.unknown} with no known cost` : ''}`
 }
 
 // An API task's RUNNING row's parts after its phase (wb top's `spend`, `waits`); its place and model
@@ -3130,15 +3119,14 @@ async function setCap($: any, text: string) {
   $.ui.invalidate('ui.render')
 }
 
-// Spend today, from `wb route --json`: `≈$0.42 of $5 (DeepSeek $0.28 · Anthropic $0.14; catalog prices)`; the dollars by
+// Spend today, from `wb route --json`: `≈$0.42 of $5 (DeepSeek $0.28 · Anthropic $0.14)`; the dollars by
 // `usd`, the Stats tab's (#1022), so the two never say one sum two ways (wave 2's merge), and each
 // provider by its name and the Stats tab's ` · ` (#1048's review: `deepseek $0.28, anthropic`)
 export function spendLine(r: WbRoutes): string {
   const s: WbRoutes['spend_today'] = r.spend_today ?? { usd: 0, by_provider: {} }
   const by = Object.entries(s.by_provider ?? {}).filter(([, v]) => v > 0).map(([p, v]) => `${r.providers?.[p]?.name || p} ${usd(v)}`)
-  // ≈ and "catalog prices" unless at the user's own (#1135): once, the providers' share it
-  const inside = [by.join(' · '), s.usd ? pricesNote(s.prices) : ''].filter(Boolean).join('; ')
-  const each = inside ? ` (${inside})` : ''
+  // ≈ unless at the user's own prices or the provider's figure (#1135): once, the providers' share it
+  const each = by.length ? ` (${by.join(' · ')})` : ''
   return `Spend today: ${estUsd(s.usd ?? 0, s.prices)}${r.day_usd != null ? ` of ${money(r.day_usd)}${each}` : `${each} · no day cap`}`
 }
 

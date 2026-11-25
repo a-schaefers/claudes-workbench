@@ -19176,9 +19176,8 @@ class ClaudeSpend(Base):
         from workbench import spend
         self.assertIsNone(spend.usage(self.task("t-none", session=None)))
         self.assertIsNone(spend.usage(self.task("t-gone")))         # Claude Code cleaned it up
-        self.assertIsNone(spend.line(None))
 
-    def test_accept_records_and_reports_what_the_task_cost_claude(self):
+    def test_accept_records_what_the_task_cost_claude_and_wb_stats_reports_it(self):
         os.environ["CLAUDE_CODE_SESSION_ID"] = self.SID
         self.start("t-cost", "ok")
         wait_phase("t-cost", {"review"})
@@ -19187,15 +19186,16 @@ class ClaudeSpend(Base):
                          _turn("[workbench] Task `t-cost` is ready for review.", "2026-11-17T10:09:00Z"),
                          *_call("m2", "2026-11-17T10:09:01Z", 700, "wb accept t-cost -m x")])
         out = run_wb("accept", "t-cost", "-m", "feat: answer")
-        # beside the estimate of writing it; no GPU part: a fake model's energy isn't measured
-        self.assertIn("claude: 7K · writing it yourself: ~5K (estimate) · cost ~2K more\n", out)
+        # #1322: no savings line on every close; wb savings says it
+        self.assertNotIn("claude:", out)
         row = store.results()[-1]
         self.assertEqual(row["claude"]["cache_read"], 20000)
         stats = run_wb("stats")
         self.assertIn("claude", next(line for line in stats.splitlines() if line.startswith("model")))
         self.assertIn("7K", stats)
-        # #1322: the savings headline left wb stats; wb accept's line above says the estimate
-        self.assertNotIn("Claude tokens (estimate)", stats)
+        # #1322: the savings headline left wb stats, and wb accept's line too: wb savings says it
+        self.assertNotIn("Claude tokens", stats)
+        self.assertNotIn("estimate", stats)
 
     def test_stats_shows_the_claude_column_only_once_a_task_has_it(self):
         self.start("t-old", "ok")
@@ -19225,10 +19225,7 @@ class Savings(Base):
         self.assertEqual(savings.estimate_self(62, 8200.0), 58708)
         row = {"claude": usage, "diff": {"files": 4, "added": 61, "removed": 1}}
         self.assertEqual(savings.of_row(row),
-                         {"claude": 56000, "self_est": 58708, "saved": 2708, "wh": None,
-                          "remote": False})
-        self.assertEqual(savings.line(row),
-                         "claude: 56K · writing it yourself: ~59K (estimate) · saved ~3K")
+                         {"claude": 56000, "self_est": 58708, "saved": 2708, "wh": None})
 
     def test_a_row_with_energy_reads_its_watt_hours_and_a_negative_saving_reads_more(self):
         from workbench import savings
@@ -19236,15 +19233,14 @@ class Savings(Base):
                  "cache_write_1h": 4000, "cache_read": 80000, "output": 1000}
         row = {"claude": usage, "diff": {"files": 1, "added": 0, "removed": 0}, "gpu_wh": 12.4}
         self.assertEqual(savings.of_row(row),
-                         {"claude": 21500, "self_est": 40425, "saved": 18925, "wh": 12.4,
-                          "remote": False})
-        self.assertTrue(savings.line(row).endswith("· GPU 12 Wh"))
+                         {"claude": 21500, "self_est": 40425, "saved": 18925, "wh": 12.4})
+        self.assertIn("· GPU 12 Wh", savings.summary(savings.totals([row]), "week"))
         # A mostly-output row has a tiny per-call cost, so writing it yourself
         # is cheaper: the saving goes negative and reads "cost … more".
         costly = {"turns": 1, "calls": 1, "input": 0, "cache_write_5m": 0,
                   "cache_write_1h": 0, "cache_read": 0, "output": 1000}
         big = {"claude": costly, "diff": {"files": 1, "added": 0, "removed": 0}}
-        self.assertIn("cost ~5K more", savings.line(big))
+        self.assertIn("cost ~5K more", savings.summary(savings.totals([big]), "week"))
 
     def test_the_shared_summary_has_the_machine_and_model_sizes_but_never_a_name(self):
         # #119: users pool evidence by pasting it; a model's name and the repo stay here
@@ -19263,15 +19259,15 @@ class Savings(Base):
                             [{"name": "Radeon RX 7900 XTX", "vram": 24 * 10 ** 9}],
                             {"ollama/secret-coder:27b": 17 * 10 ** 9}, "linux")
         self.assertEqual(out.splitlines(), [
-            "workbench savings, the last 7 days (an estimate: `wb savings --share`)",
+            "workbench savings, the last 7 days (`wb savings --share`)",
             "- machine: linux; GPU: Radeon RX 7900 XTX (24 GB VRAM)",
             "- local models: 2 (size unknown, 17 GB of weights)",
-            "- tasks: 2; Claude used 112K input-equivalent tokens, writing them itself ~100K (estimate); handoff/self 1.12",
+            "- tasks: 2; Claude used 112K input-equivalent tokens, writing them itself ~100K; handoff/self 1.12",
             "- the estimate prices the lines Claude would type: not lockfiles or generated files, and "
             "a file deleted whole as one call",
             "- score: 1/100. I used about 12% more Claude.",
             "- by size: significant 0.95 (1), trivial 1.36 (1)",
-            "- GPU energy: 600 Wh (1 task(s) on another machine's GPU, not measured)"])
+            "- GPU energy: 600 Wh"])
         for private in ("secret", "acme", "fix-", "other:9b"):
             self.assertNotIn(private, out)
         self.assertIn("workbench savings, the last 7 days", run_wb("savings", "--share"))
@@ -19310,8 +19306,8 @@ class Savings(Base):
     def test_the_badge_scores_the_summed_saving_from_1_to_100_and_says_it_in_words(self):
         # #101: one number, about the percent of Claude saved; the colour never says it alone
         from workbench import savings
-        tot = lambda c, b, n=1: {"tasks": n, "of": n, "claude": c, "self_est": b, "saved": b - c,  # noqa: E731
-                                 "wh": 0, "cost": None, "remote": 0}
+        tot = lambda c, b, n=1: {"tasks": n, "claude": c, "self_est": b, "saved": b - c,  # noqa: E731
+                                 "wh": 0, "cost": None}
         s = savings.score(tot(380_000, 1_000_000))
         self.assertEqual((s["score"], s["color"]), (62, "green"))
         self.assertEqual(s["sentence"], "I used about 62% less Claude than if Claude had done this work alone.")
@@ -19333,11 +19329,13 @@ class Savings(Base):
                 {"ts": 1, "outcome": "accepted"}]                             # nothing to compare
         t = savings.totals(rows)
         parts = [savings.of_row(r) for r in rows[:2]]
-        self.assertEqual((t["tasks"], t["of"]), (2, 3))                       # coverage
+        self.assertEqual(t["tasks"], 2)
         want = round(100 * sum(p["saved"] for p in parts) / sum(p["self_est"] for p in parts))
         self.assertEqual(savings.score(t)["pct"], round(100 * t["saved"] / t["self_est"], 1))
         self.assertEqual(round(savings.score(t)["pct"]), want)
-        self.assertTrue(savings.summary(t, "week").endswith(f" · score {savings.score(t)['score']}/100"))
+        # #1322: the text says the percent once, never a score beside it
+        self.assertNotIn("score", savings.summary(t, "week"))
+        self.assertIn(f"({want}%)", savings.summary(t, "week"))
 
     def test_the_card_is_made_here_with_the_counts_and_no_name_in_it(self):
         from workbench import savings
@@ -19353,28 +19351,29 @@ class Savings(Base):
         self.assertIn("5/100. I used about 5% less Claude", out)
         svg = card.read_text()
         self.assertTrue(svg.startswith('<svg xmlns="http://www.w3.org/2000/svg" width="360"'))
-        for said in (">How much Claude did my GPU</text>", ">save me?</text>", ">5<tspan", "Last 7 days · 1 of 2 tasks counted · estimated",
+        for said in (">How much Claude did my GPU</text>", ">save me?</text>", ">5<tspan", "Last 7 days · 1 task · estimated",
                      "Claude alone: about 59,000 weighted tokens.", "With Workbench: 56,000."):
             self.assertIn(said, svg)
         for private in ("acme", "secret", "fix-", "/home", socket.gethostname(), "http://", "https://www.w3.org/2000/svg\" "):
             self.assertNotIn(private, svg.replace('xmlns="http://www.w3.org/2000/svg"', ""))
-        self.assertIn("score 5/100", run_wb("savings"))                     # the text agrees
+        self.assertIn("(5%)", run_wb("savings"))                            # the text agrees, once (#1322)
         self.assertEqual(json.loads(run_wb("savings", "--json"))["score"]["score"], 5)
         self.assertIn(">No score yet: we need a task we</text>", savings.card(savings.totals([]), "month"))
         self.assertNotIn("/ 100", savings.card(savings.totals([]), "month"))
 
-    def test_a_task_on_another_machines_gpu_says_its_energy_was_not_measured(self):
-        # #117: nothing here reads a remote GPU's power, and a line without energy read as free
+    def test_a_task_on_another_machines_gpu_adds_no_energy_and_says_nothing_of_it(self):
+        # #117: nothing here reads a remote GPU's power; #1322: a "not measured" note on every
+        # line changed nothing anyone did
         from workbench import savings
         usage = {"turns": 1, "calls": 2, "input": 500, "cache_write_5m": 0,
                  "cache_write_1h": 4000, "cache_read": 80000, "output": 1000}
         row = {"claude": usage, "diff": {"files": 1, "added": 0, "removed": 0}, "remote_gpu": True,
-               "ts": 1}
-        self.assertTrue(savings.line(row).endswith("· GPU energy not measured (another machine's)"))
-        self.assertIn("not measured", savings.line({**row, "outcome": "discarded"}))
+               "gpu_wh": 9, "ts": 1}
+        self.assertIsNone(savings.of_row(row)["wh"])
         t = savings.totals([row, {**row, "remote_gpu": False, "gpu_wh": 5}])
-        self.assertEqual((t["remote"], t["wh"]), (1, 5))
-        self.assertIn("1 on another machine's GPU, not measured", savings.summary(t, "week"))
+        self.assertEqual((t["tasks"], t["wh"]), (2, 5))
+        self.assertNotIn("remote", t)
+        self.assertNotIn("machine", savings.summary(t, "week"))
 
     def test_of_row_is_none_without_both_sides_or_a_call_count(self):
         from workbench import savings
@@ -19385,10 +19384,6 @@ class Savings(Base):
         self.assertIsNone(savings.of_row({"claude": dict(usage, calls=0),
                                           "diff": {"added": 1, "removed": 0}}))
         self.assertIsNone(savings.per_call(None))
-        self.assertIsNone(savings.line({"diff": {"added": 1, "removed": 0}}))
-        self.assertIsNone(savings.line({"claude": usage}))
-        self.assertIsNone(savings.line({"claude": dict(usage, calls=0),
-                                        "diff": {"added": 1, "removed": 0}}))
 
     def test_the_kwh_price_lives_only_in_the_config_file(self):
         from workbench import savings
@@ -19413,8 +19408,8 @@ class Savings(Base):
         ]
         t = savings.totals(rows, since=1500)
         self.assertEqual(t["tasks"], 1)
-        self.assertEqual(t, {"tasks": 1, "of": 1, "claude": 21500, "self_est": 40425,
-                             "saved": 18925, "wh": 12.4, "cost": None, "remote": 0})
+        self.assertEqual(t, {"tasks": 1, "claude": 21500, "self_est": 40425,
+                             "saved": 18925, "wh": 12.4, "cost": None})
         savings.set_price(0.25)
         self.assertEqual(savings.totals(rows, since=1500)["cost"], 0.0)
         t2 = savings.totals(rows, since=0)
@@ -19539,15 +19534,9 @@ class Savings(Base):
               "cache_write_1h": 4000, "cache_read": 80000, "output": 1000}
         row = {"outcome": "discarded", "claude": u2, "gpu_wh": 12.4}
         self.assertEqual(savings.of_row(row),
-                         {"claude": 21500, "self_est": 0, "saved": -21500, "wh": 12.4, "remote": False})
-        self.assertEqual(savings.line(row),
-                         "claude: 22K · discarded, nothing saved · GPU 12 Wh")
-        # no energy measured: the line drops the GPU part
-        self.assertEqual(savings.line({"outcome": "discarded", "claude": u2}),
-                         "claude: 22K · discarded, nothing saved")
+                         {"claude": 21500, "self_est": 0, "saved": -21500, "wh": 12.4})
         # a discarded row with no claude usage is not comparable
         self.assertIsNone(savings.of_row({"outcome": "discarded", "gpu_wh": 1.0}))
-        self.assertIsNone(savings.line({"outcome": "discarded", "gpu_wh": 1.0}))
 
 
     def test_wb_savings_sums_the_period_and_sets_the_price(self):
@@ -19562,14 +19551,14 @@ class Savings(Base):
         store.append_jsonl(store.home() / "results.jsonl", {**row, "ts": now, "trial": True})
         self.assertEqual(run_wb("savings").strip(),
                          "the last 7 days: 1 task(s) · claude 56K · writing it yourself ~59K "
-                         "(estimate) · saved ~3K (5%) · GPU 600 Wh · score 5/100")
+                         "· saved ~3K (5%) · GPU 600 Wh")
         self.assertIn("2 task(s)", run_wb("savings", "--month"))
         self.assertIn("GPU 1.2 kWh", run_wb("savings", "--all"))
         out = json.loads(run_wb("savings", "--price", "0.25", "--json"))
         self.assertEqual((out["period"], out["tasks"], out["cost"]), ("week", 1, 0.15))
         self.assertEqual(savings.price(), 0.25)
         # no currency sign: the price is the user's (#609, the audit of v1.90)
-        self.assertTrue(run_wb("savings").strip().endswith("GPU 600 Wh, cost 0.15 · score 5/100"))
+        self.assertTrue(run_wb("savings").strip().endswith("GPU 600 Wh, cost 0.15"))
         for bad in ("0", "cheap", "inf", "nan"):
             with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
                 run_wb("savings", "--price", bad)
@@ -19596,8 +19585,8 @@ class Savings(Base):
         example = re.search(r"`the last 7 days: 3 task\(s\)[^`]*`", " ".join(doc.split())).group(0)
         self.assertIn(f"GPU {tail}`", example)
 
-    def test_wb_savings_with_nothing_to_compare_says_why(self):
-        self.assertIn("no task to compare yet", run_wb("savings"))
+    def test_wb_savings_with_nothing_to_compare_says_so_in_one_line(self):
+        self.assertEqual(run_wb("savings").strip(), "the last 7 days: nothing to compare yet")
 
 
 class Backlog(Base):
@@ -20725,14 +20714,14 @@ class Stats(Base):
 
     def test_the_settings_default_on_and_change_through_wb_stats_set(self):
         from workbench import stats
-        self.assertEqual(stats.settings(), {"recording": True, "live": True, "every": 2})
-        self.assertIn("recording off", run_wb("stats", "set", "recording", "off"))
+        self.assertEqual(stats.settings(), {"live": True, "every": 2})
+        self.assertIn("live view off", run_wb("stats", "set", "live", "off"))
         self.assertIn("every 5 s", run_wb("stats", "set", "every", "5"))
-        self.assertEqual(stats.settings(), {"recording": False, "live": True, "every": 5})
-        for bad in (("recording", "maybe"), ("every", "3"), ("colour", "on")):
+        self.assertEqual(stats.settings(), {"live": False, "every": 5})
+        for bad in (("live", "maybe"), ("every", "3"), ("colour", "on"), ("recording", "off")):
             with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
                 run_wb("stats", "set", *bad)
-        for text in ('{"recording": "no", "every": 7}', '[1]', 'not json'):  # hand-edited: ignored
+        for text in ('{"live": "no", "every": 7}', '[1]', 'not json'):  # hand-edited: ignored
             stats.path().write_text(text)
             self.assertEqual(stats.settings(), stats.DEFAULTS)
 
@@ -20762,11 +20751,11 @@ class Stats(Base):
         out = run_wb("stats")
         self.assertIn("ollama/qwen3.8-27b-40k", out)              # wb stats keeps the variants
         self.assertNotIn("gone/model", out)
-        self.assertIn("2 older model(s), retired or idle 90+ days: 2 task(s) (wb stats --all)", out)
+        self.assertIn("(+2 more models: wb stats --all)", out)
         out = run_wb("stats", "--all")
         self.assertIn("gone/model", out)
         self.assertIn("strata/strata", out)
-        self.assertNotIn("older model", out)
+        self.assertNotIn("more model", out)
 
     def test_thirty_recent_models_give_three_lines_and_the_rest_counted_as_more(self):
         # the owner, 2026-11-21: a machine with a ton of models drew a line each, and the Stats
@@ -20796,7 +20785,7 @@ class Stats(Base):
         out = run_wb("stats")
         self.assertIn("ollama/exp-2", out)
         self.assertNotIn("ollama/exp-3 ", out)
-        self.assertIn("27 more model(s) used in the last 90 days: 41 task(s) (wb stats --all)", out)
+        self.assertIn("(+27 more models: wb stats --all)", out)
         out = run_wb("stats", "--all")
         self.assertTrue(all(f"ollama/{k} " in out for k in ids))  # every model, none folded
         self.assertNotIn("more model", out)
@@ -20853,14 +20842,14 @@ class Stats(Base):
                         time.sleep(0.01)
                 return got
             store.read_json = slow
-            stats.set_setting(sys.argv[2], sys.argv[3])
+            stats.set_setting(sys.argv[2], sys.argv[6])
         """)
         tmp = Path(self.tmp.name)
         procs = [subprocess.Popen([sys.executable, "-c", code, str(ROOT), key, "off",
-                                   str(tmp / f"read-{key}"), str(tmp / f"read-{other}")])
-                 for key, other in (("live", "recording"), ("recording", "live"))]
+                                   str(tmp / f"read-{key}"), str(tmp / f"read-{other}"), value])
+                 for key, other, value in (("live", "every", "off"), ("every", "live", "5"))]
         self.assertEqual([p.wait(timeout=30) for p in procs], [0, 0])
-        self.assertEqual((stats.settings()["live"], stats.settings()["recording"]), (False, False))
+        self.assertEqual((stats.settings()["live"], stats.settings()["every"]), (False, 5))
 
     def test_a_round_stopped_by_a_guard_says_which_and_the_row_keeps_it(self):
         self.start("t-loop", "loop")
@@ -20886,16 +20875,18 @@ class Stats(Base):
         self.assertNotIn("guards", row)  # never measured: left out, not zero
         self.assertEqual(row["outcome"], "accepted")
 
-    def test_with_recording_off_nothing_new_is_written(self):
-        run_wb("stats", "set", "recording", "off")
+    def test_an_old_recording_off_key_is_ignored_and_the_tabs_rows_are_still_written(self):
+        # #1322: the switch turned off a measurement that costs nothing, which guarded nothing
+        store.write_json(store.home() / "stats.json", {"recording": False})
         self.start("t-loop", "loop")
         wait_phase("t-loop", {"stuck"})
-        self.assertEqual(self.events("t-loop", "round_end"), [])
+        self.assertTrue(self.events("t-loop", "round_end"))
         run_wb("discard", "t-loop")
         row = store.results()[-1]
-        for key in ("started_at", "load_secs", "guards", "speed", "gpu_w", "asks", "nudges"):
-            self.assertNotIn(key, row)
-        self.assertIn("rounds", row)  # what the router and the savings read is kept
+        self.assertIn("started_at", row)
+        self.assertIn("guards", row)
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            run_wb("stats", "set", "recording", "off")
 
     def test_the_row_keeps_the_tasks_medians_watts_and_asks_by_kind(self):
         from workbench import results
@@ -20941,7 +20932,7 @@ class Stats(Base):
         self.assertEqual(stats.summary(f), [])
         self.assertIn("no finished tasks yet", run_wb("stats"))
 
-    def test_the_feed_counts_landings_bests_guards_sizes_and_models_and_no_score_streak_or_savings(self):
+    def test_the_feed_counts_landings_guards_sizes_and_models_and_no_score_streak_bests_or_savings(self):
         from workbench import stats
         day, now = 86400, time.mktime((2026, 11, 20, 12, 0, 0, 0, 0, -1))
         self.rows(
@@ -20959,16 +20950,13 @@ class Stats(Base):
         self.assertEqual(f["tasks"], 4)
         self.assertEqual((f["periods"]["week"]["tasks"], f["periods"]["week"]["landed"]), (4, 3))
         self.assertEqual(f["periods"]["week"]["accepted_pct"], 75)
-        self.assertEqual(f["bests"]["largest_first_try"]["lines"], 312)
-        self.assertEqual(f["bests"]["fastest"]["minutes"], 4)
         self.assertEqual(f["guards"], {"repeat": 2, "silence": 1})
-        self.assertEqual([(m["kind"], m["n"]) for m in f["milestones"]], [("landed", 1)])
         self.assertEqual(f["sizes"]["large"], {"tasks": 2, "accepted_pct": 50})
         self.assertEqual(f["stacks"], {"python": {"tasks": 1, "accepted_pct": 100}})
         self.assertEqual(f["models"]["m"]["tasks"], 4)
         self.assertEqual(f["models"]["m"]["write_trend"], [[now - 2 * day, 30]])
         # #1322: precision nobody acted on is gone from the feed and from wb stats
-        for gone in ("streak", "absorbed", "questions", "days"):
+        for gone in ("streak", "bests", "milestones", "absorbed", "questions", "days"):
             self.assertNotIn(gone, f)
         for gone in ("score", "savings", "spec_gaps", "energy"):
             self.assertNotIn(gone, f["periods"]["week"])
@@ -21014,23 +21002,6 @@ class Stats(Base):
         self.assertEqual(time.localtime(until)[:6], (2026, 11, 21, 0, 0, 0))
         self.assertGreater(until, now)
 
-    def test_a_task_landed_with_no_review_is_first_try_whatever_rounds_the_runner_added(self):
-        # #550: self-review (on by default), a handover or a steer each add a round Claude never
-        # saw, and "largest landed first try" stayed empty for every default --test task
-        from workbench import stats
-        (store.home() / "tuning.json").write_text("{}")  # the default: self-review on
-        self.start("t-a", "ok", "--test", TEST_CMD)
-        wait_phase("t-a", {"review"})
-        run_wb("accept", "t-a", "-m", "feat: answer")
-        row = store.results()[-1]
-        self.assertGreater(row["rounds"], 1)  # its self-review round
-        self.assertEqual(stats.feed()["bests"]["largest_first_try"]["task"], "t-a")
-        self.rows({"task": "t-b", "ts": time.time(), "outcome": "accepted", "rounds": 2, "reviews": 0,
-                   "steps": [{"handovers": 1}], "diff": {"files": 3, "added": 400, "removed": 0}},
-                  {"task": "t-c", "ts": time.time(), "outcome": "accepted", "rounds": 2, "reviews": 1,
-                   "diff": {"files": 3, "added": 900, "removed": 0}})  # Claude sent it back: not first try
-        self.assertEqual(stats.feed()["bests"]["largest_first_try"], {
-            "task": "t-b", "ts": store.results()[-2]["ts"], "lines": 400})
 
     def test_only_questions_wb_answer_answered_are_recorded_answered(self):
         # #562: a timed-out question (NO_ANSWER) counted as "answered mid-task", under "Without
@@ -21049,18 +21020,6 @@ class Stats(Base):
         ask_mcp.relay(task, opened)
         (context.ask_dir(task) / "cccccccc.answer").write_text("x")  # the agent's own: not Claude's
         self.assertEqual(results.for_stats(task)["asks"], {"questions": 2, "answered": 1})
-
-    def test_a_task_claude_finished_after_a_takeover_is_no_best_of_the_agents(self):
-        # #566: Claude wrote 251 lines after wb takeover, and the pane called it the largest
-        # landed first try and the fastest landing
-        from workbench import stats
-        self.rows({"task": "t-b", "ts": time.time(), "outcome": "accepted", "rounds": 1, "reviews": 0,
-                   "minutes": 3, "steps": [{"took_over": True}], "diff": {"files": 4, "added": 251, "removed": 0}},
-                  {"task": "t-a", "ts": time.time(), "outcome": "accepted", "rounds": 1, "reviews": 0,
-                   "minutes": 9, "steps": [{"took_over": False}], "diff": {"files": 1, "added": 20, "removed": 0}})
-        bests = stats.feed()["bests"]
-        self.assertEqual((bests["largest_first_try"]["task"], bests["largest_first_try"]["lines"]), ("t-a", 20))
-        self.assertEqual(bests["fastest"]["task"], "t-a")
 
     def test_a_discarded_chain_stopped_from_outside_its_step_credits_its_landed_steps_whole(self):
         # #1245: the step the day cap (or the provider, a restart) ended isn't the agent's to fail;
@@ -21315,7 +21274,7 @@ class DynamicWorkflows(Base):
         self.assertTrue(out.startswith("started fan-docs on deepseek/deepseek-flash (API) · branch "), out)
         # "you": the dialog's yes was the user's (routes.said: only the user sets a role)
         self.assertIn(f"\nmodel: deepseek/deepseek-flash · API (DeepSeek) · writing role, set by you {day} · "
-                      "thinking off · today $0.00 of $5 (catalog prices)\n", out)  # meter.tail (#1019, #1135)
+                      "thinking off · today $0 of $5.00\n", out)  # meter.tail (#1019, #1135)
         self.assertIn("note: 3 tasks run on deepseek's API; this task waits as queued for a slot", out)
         self.assertNotIn("GPU", out)                          # never the GPU's wait, nor its notes
         got = threading.Event()
@@ -28301,8 +28260,10 @@ class Top(Base):
             t.close()
         self.assertEqual(gone, [{"name": "NVIDIA Fake 4090", "driver": "nvidia", "index": 0, "stale": True},
                                 {"name": "NVIDIA Fake Old", "driver": "nvidia", "index": 1, "stale": True}])
-        self.assertIn("no reading", top.render({"ts": 0, "every": 2, "gpus": gone, "running": [], "rack": [],
-                                                "queue": []}, 200, color=False))
+        shown = top.render({"ts": 0, "every": 2, "gpus": gone, "running": [], "rack": [],
+                            "queue": []}, 200, color=False)
+        self.assertIn("GPU 1 NVIDIA Fake Old", shown)              # the card stays, a row of its own
+        self.assertNotIn("no reading", shown)                      # #1322: nothing said of the gap
         os.environ["FAKE_SMI_MODE"] = "flaky"     # it exits once, then streams: started again
         t = self.top(nodrm, smi=smi)
         t.every = 0.2
@@ -28627,7 +28588,7 @@ class Top(Base):
         self.assertLessEqual(len(text), 24)
         self.assertIn("QUEUE", text)
         self.assertTrue(any("waiter" in x for x in text))
-        self.assertTrue(any("+11 idle, can't run or remote" in x for x in text))
+        self.assertTrue(any(x.strip() == "+11 more" for x in text))
         self.assertTrue(any(x.strip().startswith("A ") for x in text))       # the one in use stays
         many = {**snap, "running": snap["running"] * 6}                         # still too tall
         text = top.render(many, 80, color=False, height=24).split("\n")
@@ -36163,7 +36124,7 @@ class RateLimits(Base):
         # its stop is the user's budget, neither the provider's nor the step's
         from workbench import lessons, models, results, router
         task = self.api_task("t-spend", "ok", "--silence-timeout", "30")
-        why = "the day's API spend cap is reached: $5.02 of $5 today"
+        why = "the day's API spend cap is reached: $5.02 of $5.00 today"
         waiting = runner._ProviderWait.waiting
 
         def capped(pw, now):  # mid-round, as the keyhole's side writes it
@@ -36368,7 +36329,7 @@ class ApiSpend(Base):
         self.spent(3.0)
         self.spent(2.03)
         self.spent(9.0, day="2000-01-01")                        # another day's: not today's
-        for model, said in ((SPEND_M, f"{SPEND_M}: API spend today is ≈$5.03 of the $5 day cap (it "
+        for model, said in ((SPEND_M, f"{SPEND_M}: API spend today is ≈$5.03 of the $5.00 day cap (it "
                                       "resets at local midnight). Ask the user: a higher cap (wb route cap "
                                       "<usd>), a GPU model, or tomorrow"),  # a --model start's (#1233)
                             (SPEND_NONE, f"{SPEND_NONE}: OpenCode's catalog gives no price for it, so the "
@@ -36382,7 +36343,7 @@ class ApiSpend(Base):
             self.assertFalse(store.Task("t-cap").dir.exists())
         m = runner.models.lookup(SPEND_M)
         self.assertTrue(self.meter.refusal(m, "trivial").startswith(
-            "trivial role: API spend today is ≈$5.03 of the $5 day cap"))
+            "trivial role: API spend today is ≈$5.03 of the $5.00 day cap"))
         with mock.patch.object(cli, "spawn_runner"):          # a GPU model starts as ever
             self.assertIn("started t-gpu", self.start("t-gpu", "ok"))
         self.assertFalse(task_rows := self.rows("t-gpu"), task_rows)
@@ -36455,7 +36416,7 @@ class ApiSpend(Base):
         self.spent(0.12)
         self.spent(4.0, day="2000-01-01")
         m = runner.models.lookup(SPEND_M)
-        self.assertEqual(self.meter.tail(m), " · today ≈$0.42 of $5 (catalog prices)")  # #1135
+        self.assertEqual(self.meter.tail(m), " · today ≈$0.42 of $5.00")  # #1135
         self.assertEqual(self.meter.tail(runner.models.lookup("ollama/mimo-v2.6:9b-q8_0")), "")
 
     def test_the_spend_guard_stops_the_round_within_a_tick_of_the_crossing_step(self):
@@ -36472,7 +36433,7 @@ class ApiSpend(Base):
         st = task.status
         self.assertEqual(st["phase"], "stuck")
         self.assertEqual(len(self.rows("t-guard", "step")), 3)  # stopped at the crossing step
-        why = "the day's API spend cap is reached: ≈$5.30 of $5 today"
+        why = "the day's API spend cap is reached: ≈$5.30 of $5.00 today"
         self.assertEqual(st["last"], why)
         self.assertEqual(calls[:2], [("close", why), ("stop", None)])  # the keyhole refuses first
         (notice,) = self.notices("t-guard", "stuck")
@@ -36480,7 +36441,7 @@ class ApiSpend(Base):
         from workbench import results
         self.assertNotIn(notice["cause"], results.THE_STEP)       # the slice isn't shrunk for it
         self.assertTrue(notice["text"].startswith(
-            "t-guard stopped: the day's API spend cap is reached (≈$5.30 of $5 today; catalog prices). Its work so far is "
+            "t-guard stopped: the day's API spend cap is reached (≈$5.30 of $5.00 today). Its work so far is "
             "in the worktree. Ask the user: a higher cap (wb route cap <usd>) or tomorrow, then wb resume "
             "t-guard; or the role on the GPU (wb route significant gpu) for the next tasks, with wb takeover "
             "t-guard or wb discard t-guard for this one (resume keeps its API model)."))
@@ -36665,16 +36626,17 @@ class ApiSpend(Base):
         self.assertIn("Round 1's report (wb report t-lo-fix --round 1):\n"
                       + task.round_dir(1).joinpath("summary.md").read_text(), notice["text"])
 
-    def test_half_the_cap_wakes_claude_once_a_day_across_every_task(self):
+    def test_half_the_cap_wakes_nobody_and_an_old_checkin_row_is_ignored(self):
+        # #1322: the half-cap check-in woke Claude for money with nothing to do
         self.cap(2)
-        for name in ("t-half1", "t-half2", "t-half3"):          # $0.60 each: the second crosses $1
+        store.append_jsonl(self.meter.ledger_path(), {"ts": time.time(), "day": self.meter.day(),
+                                                      "kind": "checkin", "task": "old", "usd_today": 1.5, "cap": 2})
+        for name in ("t-half1", "t-half2", "t-half3"):          # $0.60 each: past $1 on the second
             runner.drive(self.api_task(name, SPEND_M, "ok", FAKE_STEP_IN="120"))
-        self.assertEqual(len(self.rows(kind="checkin")), 1)
-        said = [n for t in ("t-half1", "t-half2", "t-half3") for n in self.notices(t, "checkin")]
-        self.assertEqual([n["task"] for n in said], ["t-half2"])
-        self.assertEqual(said[0]["text"], "API spend today has passed half the day cap: ≈$1.20 of $2 "
-                                          "(t-half2 ≈$0.60 so far; catalog prices). Nothing to do unless the user wants to change it.")
-        self.assertEqual(self.rows(kind="checkin")[0]["usd_today"], 1.2)
+        self.assertEqual(len(self.rows(kind="checkin")), 1)     # the old one alone
+        self.assertEqual([n for t in ("t-half1", "t-half2", "t-half3") for n in self.notices(t, "checkin")], [])
+        self.assertNotIn("checkin", self.meter.today())
+        self.assertEqual(round(self.meter.today()["usd"], 2), 1.8)
 
     def test_a_plans_tokens_are_its_usage_never_dollars_nor_a_spend_stop(self):
         self.cap(1)
@@ -36736,8 +36698,8 @@ class ApiSpend(Base):
             mt.on_usage(a_million)
             mt.end_round({"s1": {"info": {"cost": info_cost}}})
             (row,) = self.rows(name)                      # OpenCode agrees: no reconcile row
-            line = savings.api_line({"kind": "api", "provider": "meterco", "model": SPEND_FLASH,
-                                     "api": results.api_usage(task)})
+            line = savings.paid({"kind": "api", "provider": "meterco", "model": SPEND_FLASH,
+                                 "api": results.api_usage(task)})
             return m, row, line, runner._spend_part(task)
 
         out = run_wb("model", "price", SPEND_FLASH, "--input", "0.098", "--output", "0.294", "--cache-read", "0.00294")
@@ -36745,10 +36707,10 @@ class ApiSpend(Base):
                       "tokens (cache write at the catalog's ratio to input: --cache-write to set)", out)
         m, row, line, report = task_at("t-mine", 0.392)
         self.assertEqual((round(row["usd"], 9), row.get("prices")), (0.392, "yours"))
-        self.assertEqual(line, "paid meterco $0.39 (meterco/flash-1, your prices)")
-        self.assertEqual(report, " · $0.39 so far (your prices)")
-        self.assertEqual(self.meter.tail(m), " · today $0.39 of $100 (your prices)")
-        self.assertIn("$0.098/$0.294 per 1M in/out, your prices", run_wb("models", "--api", "flash"))
+        self.assertEqual(line, "paid $0.39")                # the user's prices: no ≈, no note (#1322)
+        self.assertEqual(report, " · $0.39 so far")
+        self.assertEqual(self.meter.tail(m), " · today $0.39 of $100.00")
+        self.assertIn("$0.098/$0.294 per 1M in/out", run_wb("models", "--api", "flash"))
         runner.CURRENT["keyhole"] = types.SimpleNamespace(task=store.Task("t-mine"), model=m)
         catalog = json.loads(runner.write_catalog(store.Task("t-mine")).read_text())  # OPENCODE_MODELS_PATH's
         self.assertEqual(catalog["meterco"]["models"]["flash-1"]["cost"]["text"],
@@ -36758,16 +36720,15 @@ class ApiSpend(Base):
         self.assertIn("back to the catalog's prices", run_wb("model", "price", SPEND_FLASH, "--clear"))
         m, row, line, report = task_at("t-est", 0.8)
         self.assertEqual((round(row["usd"], 9), row.get("prices")), (0.8, None))
-        self.assertEqual(line, "paid meterco ≈$0.80 (meterco/flash-1, catalog prices)")
-        self.assertEqual(report, " · ≈$0.80 so far")                        # the ≈ says it (#1322)
-        self.assertEqual(self.meter.tail(m), " · today ≈$1.19 of $100 (catalog prices)")  # one estimate in it
-        self.assertIn("$0.2/$0.6 per 1M in/out, catalog prices", run_wb("models", "--api", "flash"))
+        self.assertEqual(line, "paid ≈$0.80")
+        self.assertEqual(report, " · ≈$0.80 so far")
+        self.assertEqual(self.meter.tail(m), " · today ≈$1.19 of $100.00")  # one estimate in it
+        self.assertIn("$0.2/$0.6 per 1M in/out", run_wb("models", "--api", "flash"))
         week = savings.api_totals([{"kind": "api", "provider": "meterco", "ts": time.time(),
                                     "api": results.api_usage(store.Task(n))} for n in ("t-mine", "t-est")])
-        self.assertEqual(savings.api_summary(week), "api: 2 task(s) · ≈$1.19 (meterco ≈$1.19; catalog prices)")
+        self.assertEqual(savings.api_summary(week), "api: 2 task(s) · ≈$1.19 (meterco ≈$1.19)")
         self.assertIn("by day: ", savings.api_report(week, "week", None, savings.spent()))
-        self.assertIn("≈$1.19 today (the day ledger: open tasks and bench replays in, catalog prices)",
-                      savings.api_report(week, "week", None, savings.spent()))
+        self.assertIn("≈$1.19 (≈$1.19 today)", savings.api_report(week, "week", None, savings.spent()))
 
     def test_prices_set_with_only_input_and_output_meter_cache_reads_at_the_catalogs_ratio_to_input(self):
         # #1155 (2026-11-24): `wb model price <id> --input X --output Y`, the skill's form, priced
@@ -36786,9 +36747,8 @@ class ApiSpend(Base):
         mt.begin(1)
         mt.on_usage(usage)
         self.assertAlmostEqual(mt.total, (615959 * 0.098 + 35793792 * 0.00294 + 129380 * 0.294) / 1e6, places=6)
-        self.assertEqual(savings.api_line({"kind": "api", "provider": "meterco", "model": SPEND_FLASH,
-                                           "api": results.api_usage(task)}),
-                         "paid meterco $0.20 (meterco/flash-1, your prices)")
+        self.assertEqual(savings.paid({"kind": "api", "provider": "meterco", "model": SPEND_FLASH,
+                                       "api": results.api_usage(task)}), "paid $0.20")
         runner.CURRENT["keyhole"] = types.SimpleNamespace(task=task, model=m)
         catalog = json.loads(runner.write_catalog(task).read_text())  # OpenCode's estimate agrees
         self.assertEqual(catalog["meterco"]["models"]["flash-1"]["cost"]["text"]["input"]["cache"],
@@ -36819,7 +36779,7 @@ class ApiSpend(Base):
         self.assertLess(mt.room(body, 4000), 0)                 # 1000 tokens at $5000/M: $5
         self.assertEqual(task.status["api_stop"]["guard"], "spend")
         self.assertTrue(self.meter.stop_reason(task).startswith(  # under the cap: not "reached" (#1150)
-            "too near the day's API spend cap for its next request: ≈$4 of $5 today, and its next request "
+            "too near the day's API spend cap for its next request: ≈$4.00 of $5.00 today, and its next request "
             "could cost up to $5"))
         out = {"stuck": None, "guard": None}
         runner._spend_guard(task, out)
@@ -36858,7 +36818,7 @@ class ApiSpend(Base):
         worst = (m.config["options"]["max_tokens"] * 10 + self.meter.FIRST_TOKENS * 2) / 1e6
         self.assertAlmostEqual(self.meter.request_floor(m), worst, places=9)
         need = -(-(self.meter.today()["usd"] + worst) * 100 // 1) / 100  # up to the cent
-        line = ("trivial role: API spend today is ≈$4.80 of the $5 day cap, and one request on it can cost "
+        line = ("trivial role: API spend today is ≈$4.80 of the $5.00 day cap, and one request on it can cost "
                 f"up to $0.36 (it resets at local midnight). Ask the user: a cap of at least ${need:.2f} "
                 "(wb route cap <usd>), the role on the GPU (wb route trivial gpu), or tomorrow")
         self.assertEqual(self.meter.refusal(m, "trivial"), line)
@@ -36898,11 +36858,11 @@ class ApiSpend(Base):
         mt = self.meter.for_task(task, runner.models.lookup(SPEND_TIER))
         self.assertLess(mt.room({"model": "tiered-1", "max_tokens": 32768}, 400), 0)
         self.assertTrue(self.meter.stop_reason(task).startswith(
-            "too near the day's API spend cap for its next request: ≈$4.80 of $5 today"))
+            "too near the day's API spend cap for its next request: ≈$4.80 of $5.00 today"))
         text = self.meter.stop_text(task)
         self.assertTrue(text.startswith(
             "t-near-room stopped: too near the day's API spend cap for its next request (up to $0.33; ≈$4.80 "
-            "of $5 today; catalog prices). Its work so far is in the worktree. Ask the user: a cap of at "
+            "of $5.00 today). Its work so far is in the worktree. Ask the user: a cap of at "
             "least $5.13 (wb route cap <usd>) or tomorrow, then wb resume t-near-room;"), text)
         self.assertNotIn("cap is reached", text)
         mt.begin(2)                                              # a new round clears the room's stop
@@ -37301,28 +37261,6 @@ class ApiSpend(Base):
         self.assertAlmostEqual(total, 1.5, places=9)
         self.assertAlmostEqual(store.Task("t-race").status["api"]["usd"], total, places=9)
 
-    def test_the_checkin_is_checked_again_under_its_lock(self):
-        # the review of #1019: another task's check-in landing between this one's look at today
-        # and its lock gave two rows and two wakes; only the look again under the lock stops it
-        self.cap(2)
-        task = self.api_task("t-half-lock", SPEND_M)
-        mt = self.meter.for_task(task, runner.models.lookup(SPEND_M))
-        self.spent(1.5)
-        store.append_jsonl(self.meter.ledger_path(), {"ts": time.time(), "day": self.meter.day(),
-                                                      "kind": "checkin", "task": "other",
-                                                      "usd_today": 1.5, "cap": 2})
-        real, looks = self.meter.today, []
-
-        def before_it_landed():                 # the two looks before the lock miss that row
-            looks.append(1)
-            return {**real(), "checkin": False} if len(looks) <= 2 else real()
-
-        with mock.patch.object(self.meter, "today", before_it_landed):
-            mt._checkin()
-        self.assertGreater(len(looks), 2)
-        self.assertEqual(len(self.rows(kind="checkin")), 1)
-        self.assertEqual(self.notices("t-half-lock", "checkin"), [])
-
     def test_a_task_without_via_reads_as_a_gpu_one(self):
         # the brief: every task before #1016 has no `via`, and reads as a GPU task (no meter)
         runner.models.lookup(SPEND_M)                             # hosted.json, as a runner left it
@@ -37382,7 +37320,7 @@ class ApiSpend(Base):
         task = self.api_task("t-goon-sr", SPEND_M, "ok", "--test", TEST_CMD, "--self-review", FAKE_STEP_IN="100")
         with mock.patch.object(runner, "_spend_guard"):
             runner.drive(task)
-        why = "the day's API spend cap is reached: ≈$1.10 of $1 today"
+        why = "the day's API spend cap is reached: ≈$1.10 of $1.00 today"
         self.assertEqual((task.status["phase"], task.status["guard"]), ("stuck", "spend"))
         self.assertEqual(calls, [("close", why)])
         (notice,) = self.notices("t-goon-sr", "stuck")
@@ -37403,7 +37341,7 @@ class ApiSpend(Base):
         task = self.api_task("t-goon-full", SPEND_M, "ok", FAKE_STEP_IN="100")
         with mock.patch.object(runner, "_spend_guard"), mock.patch.object(runner, "run_round", full):
             runner.drive(task)
-        why = "the day's API spend cap is reached: ≈$1.60 of $1 today"
+        why = "the day's API spend cap is reached: ≈$1.60 of $1.00 today"
         self.assertEqual((task.status["phase"], task.status["guard"], task.status["handovers"]),
                          ("stuck", "spend", 1))
         self.assertEqual(calls, [("close", why)])
@@ -37450,9 +37388,10 @@ class ApiSpend(Base):
         self.assertEqual(savings.api_totals(rows)["cost"], 1.5)               # the totals keep them
         self.assertEqual(savings.api_totals(rows)["tasks"], 5)
 
-    def test_a_priced_model_whose_figure_never_came_back_says_so_not_no_price(self):
+    def test_a_priced_model_whose_figure_never_came_back_is_unknown_never_no_price(self):
         # #1106: a response named its model (it may have been billed), yet no figure reached the
-        # meter or the steps: unknown, but the model has a price
+        # meter or the steps: unknown, but the model has a price; #1322: one wording for every
+        # unknown cost, whatever its cause
         from workbench import results, savings
         runner.models.hosted(fresh=True)
         t = self.api_task("t-cut", SPEND_M, "ok")
@@ -37461,21 +37400,19 @@ class ApiSpend(Base):
             u = results.api_usage(t)
         self.assertEqual((u["cost"], u["source"]), (None, "unrecorded"))
         row = {"kind": "api", "provider": "meterco", "model": SPEND_M, "api": u}
-        self.assertEqual(savings.line(row), "paid: unknown (no figure recorded)")
-        # #1106, the review: the totals still said "1 with no price" and "meterco no price (1)"
-        from workbench import cli, stats
+        self.assertEqual(savings.paid(row), "paid: unknown")
+        # #1106, the review: the totals said "1 with no price" of a priced model
+        from workbench import cli
         bare = {"kind": "api", "provider": "bareco", "model": "bareco/x", "api": {"cost": None, "source": "unknown"}}
         a = savings.api_totals([{**row, "ts": store.now()}, {**bare, "ts": store.now()}])
-        self.assertEqual((a["unknown"], a["unrecorded"]), (2, 1))
-        self.assertEqual(savings.api_summary(a), "api: 2 task(s) · 1 with no price + 1 with no figure recorded")
-        report = savings.api_report(a, "week")
-        self.assertIn("2 task(s) closed, 1 with no price, 1 with no figure recorded", report)
-        self.assertIn("by provider: bareco no price (1) · meterco no figure (1)", report)
-        self.assertEqual(stats.api_week_line(a),
-                         "api this week: 2 task(s), 1 with no price, 1 with no figure recorded")
+        self.assertEqual(a["unknown"], 2)
+        self.assertNotIn("unrecorded", a)
+        self.assertEqual(savings.api_summary(a), "api: 2 task(s) · 2 with no known cost")
+        self.assertEqual(savings.api_report(a, "week"), "api, the last 7 days: 2 task(s) closed, 2 with no known cost")
+        self.assertEqual(savings.unpriced(a["by_provider"]["meterco"]), "unknown")
         with mock.patch.object(cli.store, "results", return_value=[{**row, "ts": store.now()}]):
             scout = "\n".join(cli.scout_api_lines())
-        self.assertIn("; task(s) 1 with no figure recorded", scout)
+        self.assertIn("; task(s) 1 with no known cost", scout)
         self.assertNotIn("no price", scout)
 
     def test_a_plan_task_whose_model_left_hosted_json_stays_plan_usage(self):
@@ -37497,11 +37434,11 @@ class ApiSpendKeyhole(_KeyholeTest):
     def test_close_with_a_reason_refuses_every_request_with_a_400_opencode_doesnt_retry(self):
         kh = self.keyhole()
         self.assertEqual(self.post(kh)[0], 200)
-        kh.close("the day's API spend cap is reached: $5.02 of $5 today")
+        kh.close("the day's API spend cap is reached: $5.02 of $5.00 today")
         code, _, body = self.post(kh)
         self.assertEqual(code, 400)
         self.assertEqual(json.loads(body)["error"]["message"],
-                         "workbench: the day's API spend cap is reached: $5.02 of $5 today")
+                         "workbench: the day's API spend cap is reached: $5.02 of $5.00 today")
         self.assertEqual(len(self.up.seen), 1)                  # nothing more went upstream
 
     def test_a_negative_room_refuses_the_request_before_it_goes_out(self):
@@ -37765,7 +37702,7 @@ class ApiSpendKeyhole(_KeyholeTest):
                          [("step", "provider", "cost")] * 2)
         self.assertEqual({k: self.task.status["api"][k] for k in ("usd", "at_catalog", "prices")},
                          {"usd": 2.4, "at_catalog": 2.4, "prices": "provider"})
-        self.assertEqual(meter.tail(m), " · today $2.40 of $100")
+        self.assertEqual(meter.tail(m), " · today $2.40 of $100.00")
         self.task.set_status(session="ses_1")
         with mock.patch.object(results, "_session_cost", return_value=2.4):     # the export's
             got = results.api_usage(self.task)
@@ -37819,27 +37756,24 @@ class ApiSpendKeyhole(_KeyholeTest):
         self.assertEqual([(r["usd"], r["source"]) for r in store.read_jsonl(meter.ledger_path())[0]],
                          [(0.8, "keyhole")] * 2)
 
-    def test_the_start_line_and_the_roles_row_say_the_providers_own_figures_once_its_rows_are(self):
+    def test_the_start_line_says_the_providers_own_figures_plain_once_its_rows_are(self):
         # #1165's review (2026-11-24): with today all DeepInfra's own rows, wb start's line said
-        # `(catalog prices)` and the roles' row `catalog prices`: model_basis knew only the
-        # catalog's and the user's
+        # `(catalog prices)`; #1322: today's rows' basis alone, no note and no ledger scan
         from workbench import meter
         m, mt = self._deepinfra_meter()
         with mock.patch.object(meter.models, "own_price", return_value=None):
-            self.assertEqual(cli._prices_of(m, ahead=True), "catalog prices")   # nothing booked yet
+            self.assertEqual(meter.tail(m), " · today $0 of $100.00")              # nothing booked yet
             mt.on_usage({**self.MTOK, "estimated_cost": 0.392})
-            self.assertEqual(meter.tail(m), " · today $0.39 of $100")
-            self.assertEqual(cli._prices_of(m, ahead=True), "")
-            self.assertEqual(cli._prices_of(m), "catalog prices")        # wb models --api's rate
+            self.assertEqual(meter.tail(m), " · today $0.39 of $100.00")
             mt.on_usage(dict(self.MTOK))                                  # no figure: the catalog's
-            self.assertEqual(meter.tail(m), " · today ≈$1.19 of $100 (catalog prices)")
-            self.assertEqual(cli._prices_of(m, ahead=True), "catalog prices")
+            self.assertEqual(meter.tail(m), " · today ≈$1.19 of $100.00")
+        self.assertFalse(hasattr(cli, "_prices_of"))
 
     @unittest.skipUnless(shutil.which("opencode"), "needs the real opencode")
     def test_real_opencode_takes_the_spend_refusal_at_once_without_a_retry(self):
         # the review of #1019: the spike checked 401, 402 and 403 for no retry, never the 400 the
         # keyhole answers a spend stop with; through the keyhole itself, for both protocols
-        why = "the day's API spend cap is reached: $5.02 of $5 today"
+        why = "the day's API spend cap is reached: $5.02 of $5.00 today"
         tmp = Path(self.tmp.name)
         for provider, name, path, package in (
                 ("deepinfra", "deepseek-ai/DeepSeek-V4.1-Flash-1017", "/v1/openai",
@@ -39193,11 +39127,11 @@ class ApiStats(Base):
         self.booked(2.0, now, task="open-one", provider="deepinfra")
         self.rows(self.api_row(cost=3.0, ts=now, task="night", provider="deepinfra"))
         out = run_wb("savings", "--api").splitlines()
-        self.assertEqual(out[0], "api, the last 7 days: 1 task(s) closed, ≈$3.00 at catalog prices")  # #1135
-        self.assertEqual(out[2], "  spent: ≈$5.00, ≈$2.00 today (the day ledger: open tasks and bench replays in, "
-                                 "catalog prices)")
+        # #1322: the ledger's total alone, no second one from the closed tasks
+        self.assertEqual(out[0], "api, the last 7 days: ≈$5.00 (≈$2.00 today) · 1 task(s) closed")
+        self.assertEqual(out[1], "  by provider: deepinfra ≈$5.00")
         yesterday, today = meter.day(now - 86400)[5:], meter.day(now)[5:]
-        self.assertEqual(out[3], f"  by day: {yesterday} ≈$3.00 · {today} ≈$2.00")
+        self.assertEqual(out[2], f"  by day: {yesterday} ≈$3.00 · {today} ≈$2.00")
         j = json.loads(run_wb("savings", "--api", "--json"))["spent"]
         self.assertEqual((j["usd"], j["today"], j["by_provider"]), (5.0, 2.0, {"deepinfra": 5.0}))
         self.assertEqual(j["today"], cli._spend_today()["usd"])            # the pane's figure
@@ -39213,24 +39147,24 @@ class ApiStats(Base):
         self.assertEqual(savings.score(both), savings.score(alone))
         out = run_wb("savings").splitlines()
         self.assertEqual(out[0], gpu_line)               # the GPU line's saved unchanged
-        self.assertEqual(out[1], "api: 1 task(s) · ≈$0.42 (deepseek ≈$0.42; catalog prices) · claude 56K · "
-                                 "writing it yourself ~59K (estimate)")
+        self.assertEqual(out[1], "api: 1 task(s) · ≈$0.42 (deepseek ≈$0.42) · claude 56K · "
+                                 "writing it yourself ~59K")
         self.assertIsNone(savings.of_row(self.api_row()))
 
-    def test_an_api_task_with_no_price_counts_as_one_with_no_price_never_as_0_dollars(self):
+    def test_an_api_task_with_no_price_counts_as_one_with_no_known_cost_never_as_0_dollars(self):
         from workbench import savings
         self.rows(self.api_row(cost=None, source="unknown"))
         a = savings.api_totals(store.results(trials=True))
         self.assertEqual((a["tasks"], a["cost"], a["unknown"]), (1, 0.0, 1))
         out = run_wb("savings") + run_wb("savings", "--api") + run_wb("stats")
-        self.assertIn("api: 1 task(s) · 1 with no price", out)
-        self.assertIn("1 with no price", run_wb("savings", "--api"))
+        self.assertIn("api: 1 task(s) · 1 with no known cost", out)
+        self.assertIn("1 with no known cost", run_wb("savings", "--api"))
         self.assertNotIn("$0.00", out)
         self.assertNotIn("$0 ", out)
-        self.assertEqual(savings.line(self.api_row(cost=None, source="unknown")),
-                         "claude: 56K · writing it yourself: ~59K (estimate) · paid: unknown (no price for this model)")
-        self.assertEqual(savings.line(self.api_row()), "claude: 56K · writing it yourself: ~59K (estimate) · "
-                                                      "paid deepseek ≈$0.42 (deepseek/flash, catalog prices)")
+        # wb accept's and discard's money: short, the dollars alone (#1322)
+        self.assertEqual(savings.paid(self.api_row(cost=None, source="unknown")), "paid: unknown")
+        self.assertEqual(savings.paid(self.api_row()), "paid ≈$0.42")
+        self.assertEqual(savings.paid(self.gpu_row()), "")
 
     def test_wb_savings_api_says_the_week_by_provider_and_day_with_trials_and_bench_replays_in(self):
         from workbench import bench
@@ -39244,14 +39178,12 @@ class ApiStats(Base):
         for ago, usd_ in ((2, 0.30), (1, 0.54), (0, 0.43), (0, 0.3), (20, 9.0)):   # the ledger's
             self.booked(usd_, now - ago * 86400)
         out = run_wb("savings", "--api", "--week").splitlines()
-        # the providers once, on their own line (#1022's review: the header said them too)
-        self.assertEqual(out[0], "api, the last 7 days: 3 task(s) closed, ≈$1.27 at catalog prices (incl. 1 trial)")
-        self.assertEqual(out[1], "  by provider: deepseek ≈$0.84 (2) · anthropic ≈$0.43 (1)")
-        self.assertEqual(out[2], "  spent: ≈$1.57, ≈$0.73 today (the day ledger: open tasks and bench "
-                                 "replays in, catalog prices)")
-        self.assertTrue(out[3].startswith("  by day: "), out)
-        self.assertEqual(out[3].count("$"), 3)
-        self.assertEqual(out[4], "  bench replays: ≈$0.30 (1)")
+        # the ledger's, the closed tasks counted (#1322: their own dollars were a second total)
+        self.assertEqual(out[0], "api, the last 7 days: ≈$1.57 (≈$0.73 today) · 3 task(s) closed (incl. 1 trial)")
+        self.assertEqual(out[1], "  by provider: deepseek ≈$1.57")
+        self.assertTrue(out[2].startswith("  by day: "), out)
+        self.assertEqual(out[2].count("$"), 3)
+        self.assertEqual(out[3], "  bench replays: ≈$0.30 (1)")
         j = json.loads(run_wb("savings", "--api", "--week", "--json"))
         self.assertEqual(j["by_provider"]["deepseek"], {"tasks": 2, "cost": 0.84, "unknown": 0, "prices": "catalog"})
         self.assertEqual(round(sum(j["spent"]["by_day"].values()), 2), 1.57)
@@ -39274,7 +39206,7 @@ class ApiStats(Base):
         self.assertEqual(lines["zai/flash"][-2], "?")
         self.assertEqual(lines["zen/flash"][-2], "~$0.20")
         self.assertTrue(all(len(x) <= 120 for x in out.splitlines() if x.startswith(("model ", "ollama/"))))
-        self.assertIn("api this week: 5 task(s), ≈$0.44 (deepseek ≈$0.24, zen ≈$0.20; catalog prices), 2 with no price", out)
+        self.assertNotIn("api this week", out)   # #1322: wb savings says the money
 
     def test_a_served_model_other_than_the_one_asked_reaches_the_results_row(self):
         # #1122 (2026-11-23): only `served.by` reached the row, so a provider's swap was lost at close
@@ -39293,18 +39225,18 @@ class ApiStats(Base):
         for name, cost in (("n-1", 0.81), ("n-2", 0.42)):
             self.api_task(name, {"phase": "accepted"}, backlog="night")
             self.rows(self.api_row(cost=cost, task=name, provider="deepinfra"))
-        first = run_wb("savings").splitlines()[0]
-        self.assertEqual(first, "the last 7 days: no GPU task to compare (API tasks are below, apart "
-                                "from the score)")
+        # #1322: with no GPU task to compare, the API line alone
+        out = run_wb("savings").splitlines()
+        self.assertEqual(len(out), 1, out)
+        self.assertTrue(out[0].startswith("api: 2 task(s) · ≈$1.23 (deepinfra ≈$1.23)"), out)
         out = run_wb("backlog", "night").splitlines()
-        self.assertEqual(out[-2], "the batch: no GPU task to compare (API tasks are below, apart from "
-                                  "the score)")
-        self.assertTrue(out[-1].startswith("api: 2 task(s) · ≈$1.23 (deepinfra ≈$1.23; catalog prices)"), out)
+        self.assertFalse(any(x.startswith("the batch") for x in out), out)
+        self.assertTrue(out[-1].startswith("api: 2 task(s) · ≈$1.23 (deepinfra ≈$1.23)"), out)
         j = json.loads(run_wb("backlog", "night", "--json"))
         self.assertEqual((j["totals"]["tasks"], j["totals"]["api"]["tasks"], j["totals"]["api"]["cost"]),
                          (0, 2, 1.23))
-        from workbench import savings                     # no task at all: the reason stands
-        self.assertIn("needs its Claude usage", savings.summary(savings.totals([]), "week"))
+        from workbench import savings                     # no task at all: one short line
+        self.assertEqual(savings.summary(savings.totals([]), "week"), "the last 7 days: nothing to compare yet")
 
     def test_the_stats_feed_has_the_weeks_api_money_by_provider_trials_in(self):
         self.rows(self.gpu_row(gpu_wh=30.0), self.api_row(gpu_wh=500.0),   # a stray reading: not ours
@@ -39544,12 +39476,10 @@ class ApiStats(Base):
         self.assertEqual((a["tasks"], a["plan"], a["unknown"], a["cost"]), (1, 1, 0, 0.0))
         week = json.loads(run_wb("stats", "--json"))["periods"]["week"]["api"]
         self.assertEqual((week["tasks"], week["plan"]), (1, 1))
-        self.assertEqual(stats.api_week_line(week), "api this week: 1 task(s), 1 on plan usage")
-        self.assertEqual(run_wb("savings", "--api").splitlines()[:2],
-                         ["api, the last 7 days: 1 task(s) closed, 1 on plan usage",
-                          "  by provider: opencode-go plan usage (1)"])
+        self.assertEqual(run_wb("savings", "--api").splitlines(),
+                         ["api, the last 7 days: 1 task(s) closed, 1 on plan usage"])
         self.assertIn("api: 1 task(s) · 1 on plan usage", run_wb("savings"))
-        self.assertTrue(savings.line(store.results()[0]).endswith("· plan usage (opencode-go)"))
+        self.assertEqual(savings.paid(store.results()[0]), "plan usage (opencode-go)")
         self.assertNotIn("$0", run_wb("savings") + run_wb("savings", "--api") + run_wb("stats"))
 
     def test_only_the_catalogs_cloud_flag_makes_an_ollama_model_plan_usage_never_a_cloud_suffix(self):
@@ -39666,16 +39596,21 @@ class ApiStats(Base):
         self.assertEqual(router.slice(m), before)
         self.assertEqual([r.get("kind") for r in tuning._rows(m.id, None)], ["gpu"])
 
-    def test_a_cost_under_a_cent_is_written_out_never_in_scientific_notation(self):
-        # #1022's review: `:.2g` printed $4e-05; the pane and the chat say the same as this
-        from workbench.savings import usd
-        self.assertEqual([usd(x) for x in (4e-5, 4.1e-5, 0.0041, 0.009999, 0.01, 0.42, 0)],
-                         ["$0.00004", "$0.000041", "$0.0041", "$0.01", "$0.01", "$0.42", "$0"])
+    def test_one_dollar_rule_everywhere_cents_under_a_cent_and_zero_and_never_scientific_notation(self):
+        # #1022's review: `:.2g` printed $4e-05; #1322: meter's "$5" and savings' "$5.00" said one
+        # cap two ways, so one rule, which the pane and the chat say too
+        from workbench import meter, savings
+        self.assertIs(savings.usd, meter.usd)
+        self.assertIs(savings.money, meter.money)
+        self.assertEqual([meter.usd(x) for x in (4e-5, 0.0041, 0.009999, 0.01, 0.42, 5, 5.034, 0, None)],
+                         ["<$0.01", "<$0.01", "<$0.01", "$0.01", "$0.42", "$5.00", "$5.03", "$0", "unknown"])
+        self.assertEqual((meter.money(0.0041), meter.money(0), meter.money(0.42, meter.YOURS)),
+                         ("≈<$0.01", "$0", "$0.42"))
         js = (ROOT / "workbench" / "chat_static" / "app.js").read_text()
         tsx = (ROOT / "mod" / "hooks" / "register.tsx").read_text()
         for src in (js, tsx):
-            self.assertNotIn("toPrecision(2)}", src)                # the old $0.000040 rule
-            self.assertIn("r.toFixed(2 - Math.floor(Math.log10(Math.abs(r)))).replace(/0+$/, '')", src)
+            self.assertNotIn("toPrecision(2)", src)                 # the old two-figure rule
+            self.assertIn("'<$0.01'", src)
 
     def test_a_bench_replay_on_an_api_task_writes_its_paid_to_runs_jsonl(self):
         # acceptance 11, driven through replay (#1022's review: dropping **paid(task) left it green).
@@ -39767,7 +39702,7 @@ class RoleResolution(Base):
                           "said": said["said"], "said_ts": said["ts"]})
         day = time.strftime("%m-%d", time.localtime(said["ts"]))
         self.assertIn(f"\nmodel: deepseek/deepseek-flash · API (DeepSeek) · trivial role, set by you {day} · "
-                      "thinking off · today $0.00 of $5 (catalog prices)\n", out)  # with today's spend (meter.tail, #1019)
+                      "thinking off · today $0 of $5.00\n", out)  # with today's spend (meter.tail, #1019)
         self.assertTrue(out.startswith("started t-api on deepseek/deepseek-flash (API) · branch "), out)
         # the first API task in the repo for this provider: whose choice and where it goes (#1021's words)
         self.assertIn("\nnote: this task sends the repo, its spec, CLAUDE.md files", out)
@@ -39806,7 +39741,7 @@ class RoleResolution(Base):
         self.set_role("significant", mid, "--day-usd", "5")
         code, out, err = self.begin("t1", "--size", "significant")
         self.assertEqual(code, 0, err)
-        self.assertIn(f" · significant role, set by you {time.strftime('%m-%d')} · {does} · today $0.00 of $5", out)
+        self.assertIn(f" · significant role, set by you {time.strftime('%m-%d')} · {does} · today $0 of $5.00", out)
         self.assertNotIn("thinking off", out)
         sp = store.Task("t1").spec
         self.assertEqual((sp["opencode_model"], sp["thinking"], sp["thinking_shown"]), (mid, "off", does))
@@ -40263,8 +40198,8 @@ class RoleResolution(Base):
         self.assertEqual(code, 0, err)                         # a terminal: no dialog
         sp = store.Task("t-asked").spec
         self.assertEqual((sp["via"], sp["said"], sp["role"]), ("api", "asked for", "significant"))
-        self.assertIn("\nmodel: deepseek/deepseek-v4-pro · API (DeepSeek) · asked for · thinking off · today $0.00 "
-                      "of $5 (catalog prices)\n", out)
+        self.assertIn("\nmodel: deepseek/deepseek-v4-pro · API (DeepSeek) · asked for · thinking off · today $0 "
+                      "of $5.00\n", out)
         self.assertIn(" to DeepSeek (asked for; data policy: ", out)  # the first-API note
 
     def test_a_model_that_left_the_catalog_mid_task_is_never_replaced(self):
@@ -40699,7 +40634,7 @@ class FirstRunApi(Base):
                                       "  deepseek/deepseek-flash  3 task(s) · 66% accepted"
                                       + " · ~$0.10/task · 1 rate-limited round(s)"])
         # the money over 7 days, beside the cap (the day ledger's, savings.spent, #1094)
-        self.assertIn("api spend, the last 7 days: ≈$0.30 of $5/day at most (deepseek $0.30; catalog prices)", lines)
+        self.assertIn("api spend, the last 7 days: ≈$0.30 of $5/day at most (deepseek $0.30)", lines)
         at = lines.index("connected providers (models with tool calls)")
         self.assertEqual(lines[at + 1:], ["  anthropic: 1 (can't run: anthropic is signed in with OAuth)",
                                           "  bigrouter: 300", "  cloud: 0, 1 the catalog doesn't say (can't run: no key)",
@@ -40721,9 +40656,9 @@ class FirstRunApi(Base):
             "kind": "api", "role": "trivial", "provider": "deepseek", "api": {"cost": 0.004, "source": "opencode"}})
         _ledger_step(0.004, store.now() - 3600, "t-0")
         lines = cli.scout_api_lines()
-        self.assertIn("  deepseek/deepseek-flash  1 task(s) · 100% accepted · ~$0.004/task", lines)
-        self.assertIn("api spend, the last 7 days: ≈$0.004 of $5/day at most (deepseek $0.004; catalog prices)", lines)
-        self.assertIn("$0.004", run_wb("savings", "--api"))
+        self.assertIn("  deepseek/deepseek-flash  1 task(s) · 100% accepted · ~<$0.01/task", lines)
+        self.assertIn("api spend, the last 7 days: ≈<$0.01 of $5/day at most (deepseek <$0.01)", lines)
+        self.assertIn("<$0.01", run_wb("savings", "--api"))
 
     def test_scouts_api_spend_is_the_day_ledgers_as_wb_savings_api_says_it(self):
         # #1094, the review (2026-11-23): wb savings --api took the ledger's figure ($5.00: an open
@@ -40737,9 +40672,9 @@ class FirstRunApi(Base):
             "kind": "api", "role": "trivial", "provider": "deepseek", "api": {"cost": 3.0, "source": "opencode"}})
         _ledger_step(3.0, now - 7200, "closed")
         _ledger_step(2.0, now - 60, "open-one")
-        self.assertIn("api spend, the last 7 days: ≈$5.00 of $5/day at most (deepseek $5.00; catalog prices)",
+        self.assertIn("api spend, the last 7 days: ≈$5.00 of $5/day at most (deepseek $5.00)",
                       cli.scout_api_lines())
-        self.assertIn("  spent: ≈$5.00,", run_wb("savings", "--api"))
+        self.assertIn("api, the last 7 days: ≈$5.00 (≈$5.00 today)", run_wb("savings", "--api"))
 
     def test_scout_has_no_api_section_with_no_provider_and_no_api_role(self):
         cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
@@ -41034,7 +40969,7 @@ class BusyGpu(Base):
         self.assertNotIn("waits as queued", out)
         # wave 2's merge: the start line's spend part and the thinking read the busy path's model
         self.assertIn("model: deepseek/deepseek-flash · API (DeepSeek) · ", out)
-        self.assertIn(" · thinking off · today $0.00 of $5 (catalog prices)\n", out)
+        self.assertIn(" · thinking off · today $0 of $5.00\n", out)
         self.assertEqual((sp["thinking"], sp["opencode_model"].split("#")[0], sp["auto_fix"]),
                          ("off", "deepseek/deepseek-flash", cli.AUTO_FIX["api"]))
         self.assertIn("thinking_shown", sp)
@@ -41100,9 +41035,9 @@ class BusyGpu(Base):
                              why + f"every one of deepseek's {cli.models.API_PARALLEL} slots is taken")
         with mock.patch.object(cli.meter, "refusal",
                                lambda m, role, advice=True, tokens=None:  # round 1's input (#1173)
-                               f"{role} role: API spend today is $5 of the $5 day cap"):
+                               f"{role} role: API spend today is $5.00 of the $5.00 day cap"):
             self.assertEqual(cli._busy_api("trivial", asked, self.repo, None),
-                             why + "trivial role: API spend today is $5 of the $5 day cap")
+                             why + "trivial role: API spend today is $5.00 of the $5.00 day cap")
         # round 1's input (#1173's review): the start's own, else a fresh session's least
         seen = []
         real = cli.meter.refusal
@@ -41138,7 +41073,7 @@ class BusyGpu(Base):
         code, out, err = self.begin("t-capped", "--role", "trivial")
         self.assertEqual(code, 4, err)
         self.assertIn("note: the GPU is busy, and the trivial role's API model deepseek/deepseek-flash can't "
-                      "take it: trivial role: API spend today is ≈$5 of the $5 day cap (it resets at local "
+                      "take it: trivial role: API spend today is ≈$5.00 of the $5.00 day cap (it resets at local "
                       "midnight)\n", out)
         self.assertNotIn("Ask the user", out)
         self.assertIn("Ask the user: a higher cap", cli.meter.refusal(runner.models.lookup("deepseek/deepseek-flash"),
@@ -41550,7 +41485,7 @@ class ApiCompat(Base):
         self.assertEqual(len(out), cli.API_LIST_MAX + 1)
         self.assertEqual(out[-1], "and 16 more: a longer text narrows it")
         self.assertEqual(out[0], f"opencode/deep-free  200K · free: {cli.FREE_NOTE}")
-        self.assertEqual(out[1], "openrouter/deepseek/deep-000  200K · $0.2/$0.6 per 1M in/out, catalog prices")
+        self.assertEqual(out[1], "openrouter/deepseek/deep-000  200K · $0.2/$0.6 per 1M in/out")
         self.assertEqual(out[1:-1], sorted(out[1:-1]))
         self.assertNotIn("acme/other", "\n".join(out))
         self.assertIn("no API model in OpenCode's catalog contains 'zzz'", run_wb("models", "--api", "zzz"))

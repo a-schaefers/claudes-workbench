@@ -4580,13 +4580,12 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
 })
 
 const FEED = {
-  ts: 1_800_000_000, tasks: 9, settings: { recording: true, live: true, every: 2 },
+  ts: 1_800_000_000, tasks: 9, settings: { live: true, every: 2 },
   periods: {
     week: { tasks: 4, landed: 3, accepted_pct: 75, savings: { saved: 1_230_000, wh: 600, cost: null }, score: { score: 62 },
       energy: { wh: 900 } },
     all: { tasks: 9, landed: 8, accepted_pct: 89 },
   },
-  streak: { current: 0, best: 3, days: 5 },
   absorbed: { auto_fixes: 7, auto_fixed_tasks: 3 },
   questions: { asked: 2, answered: 1 },
   models: { 'ollama/m': { tasks: 9, accepted_pct: 89, rounds: 1.4, minutes: 14, speed: { write: 38 },
@@ -5051,10 +5050,10 @@ test('a live view the engine put away starts again as soon as the pane is back, 
   await ui.unmount()
 })
 
-test('a card wb top knows but has no reading for says so, not nothing (#547)', () => {
+test('a card wb top knows but cannot read just now keeps its row, with nothing said of the gap (#547, #1322)', () => {
   const text = (gpus: any[]) => liveLines({ snap: { ts: 0, every: 2, gpus, running: [], rack: [], queue: [] }, busy: {} } as any)
     .map(r => r.map(p => p.text).join(''))
-  expect(text([{ index: 0, name: 'NVIDIA GeForce RTX 4090', driver: 'nvidia', stale: true }])[0]).toBe('GPU 0 NVIDIA GeForce RTX 4090 no reading ')
+  expect(text([{ index: 0, name: 'NVIDIA GeForce RTX 4090', driver: 'nvidia', stale: true }])[0]).toBe('GPU 0 NVIDIA GeForce RTX 4090 ')
 })
 
 test('an idle Apple silicon Mac draws its RAM in use against all its RAM and names the GPU limit beside it (#701)', () => {
@@ -5105,11 +5104,11 @@ test('the history says nothing it has no data for, and a new install how to begi
     expect(parsePrice(typed)).toBe(null)
 })
 
-test('the history says no score, saving, streak, work absorbed, questions or 30 days\' line (#1322)', () => {
+test('the history says no score, saving, streak, bests, milestones, work absorbed, questions or 30 days\' line (#1322)', () => {
   const said = statsLines({ tasks: 1, streak: { current: 2, best: 3 }, absorbed: { auto_fixes: 2 }, questions: { asked: 1 },
     days: [{ tasks: 1 }, { tasks: 2 }], milestones: [{ kind: 'landed', n: 1, day: 'd1' }, { kind: 'saved', n: 100_000, day: 'd2' }],
     model_lines: { lines: [{ model: 'm', tasks: 1, accepted_pct: 100, claude: 40_000 }] } }).map(l => `${l.label}: ${l.text}`)
-  expect(said).toEqual(['m: 1 task · 100% landed', 'Milestone: 1 task landed (d1)'])
+  expect(said).toEqual(['m: 1 task · 100% landed'])
 })
 
 test('a bench run still going or cut short shows beside the last finished one, never in its place', () => {
@@ -5202,13 +5201,12 @@ const MANY = (n: number) => Array.from({ length: n }, (_, i) => `ollama/m${i}`)
 const tabFeed = (ids: string[], more?: any) => ({
   ts: 1, until: 2, settings: {}, tasks: 400,
   periods: { week: { tasks: 12, landed: 10, accepted_pct: 83 }, all: { tasks: 400, landed: 330, accepted_pct: 83 } },
-  streak: { current: 3, best: 9 }, absorbed: { auto_fixes: 4, auto_fixed_tasks: 2 }, questions: { asked: 2 },
+  absorbed: { auto_fixes: 4, auto_fixed_tasks: 2 }, questions: { asked: 2 },
   models: Object.fromEntries(ids.map(m => [m, { tasks: 13, accepted_pct: 80 }])),
   model_lines: { lines: ids.slice(0, 3).map((m, i) => ({ model: m, variants: [m], windows: [32768], last: 100 - i, tasks: 13, accepted_pct: 80 })),
     ...(more ? { more } : {}) },
   sizes: { trivial: { tasks: 300, accepted_pct: 90 }, small: { tasks: 100, accepted_pct: 60 } },
   days: [{ day: '2026-11-20', tasks: 3, landed: 2 }, { day: '2026-11-21', tasks: 5, landed: 4 }],
-  bests: { fastest: { minutes: 2, task: 'quick' } }, milestones: [{ kind: 'landed', n: 300, day: '2026-11-19' }],
   guards: { repeat: 3 },
   helps: Object.fromEntries(ids.map(m => [m, { hint: [2, 3] }])),
   bench: Object.fromEntries(ids.map(m => [m, { run: 'r1', day: '2026-11-20', passed: 7, of: 10 }])),
@@ -5226,7 +5224,7 @@ test('the stats tab stays under 25 rows with 30 models, the rest folded and coun
   const now = text(liveLines(tabTop(ids)))
   const history = statsLines(tabFeed(ids, { models: 27, tasks: 351 })).map(l => `${l.label}: ${l.text}`)
   expect(now.length + history.length).toBeLessThanOrEqual(25)
-  expect(now).toContain("+29 more models idle, can't run or remote (wb top)")
+  expect(now).toContain('+29 more (wb top)')
   expect(now.some(r => r.includes('ollama/m0 resident') && r.includes('← fix-it'))).toBe(true)
   expect(now.some(r => r.startsWith('○ ollama/m1 '))).toBe(false)
   expect(history).toContain('Other models: 27 more models: 351 tasks (wb stats --all)')
@@ -6210,14 +6208,15 @@ test('#1126: an OpenRouter role\'s backends are in the roles\' summary, so a cha
   expect(rows.at(-1)).toContain('The roles changed: routes.json can\'t be read (wb route says why)')  // as wb refuses it
 })
 
-test('API dollars at the catalog\'s prices read as estimates and at the user\'s own say so (#1135)', () => {
-  // the catalog ran about 2x DeepInfra's bill (2026-11-23): a figure says which prices it is at
+test('API dollars at the catalog\'s prices read ≈ and at the user\'s own plain, with no note after them (#1135, #1322)', () => {
+  // the catalog ran about 2x DeepInfra's bill (2026-11-23): a figure says which prices it is at,
+  // by its ≈ alone (#1322: a "(catalog prices)" note said it twice)
   const mine = { tasks: 2, cost: 0.2, unknown: 0, plan: 0, prices: 'yours', by_provider: { deepinfra: { tasks: 2, cost: 0.2, unknown: 0, prices: 'yours' } } }
   expect(statsLines({ tasks: 2, periods: { week: { tasks: 2, landed: 2, api: mine } } })[0].text)
-    .toContain('API $0.20 (deepinfra $0.20; your prices)')
+    .toContain('API $0.20 (deepinfra $0.20)')
   const routes = (prices?: string) => ({ v: 1, day_usd: 5, roles: {}, providers: {}, spend_today: { usd: 0.42, by_provider: { deepinfra: 0.42 }, ...(prices ? { prices } : {}) } }) as any
-  expect(spendLine(routes('yours'))).toBe('Spend today: $0.42 of $5 (deepinfra $0.42; your prices)')
-  expect(spendLine(routes())).toBe('Spend today: ≈$0.42 of $5 (deepinfra $0.42; catalog prices)')
+  expect(spendLine(routes('yours'))).toBe('Spend today: $0.42 of $5 (deepinfra $0.42)')
+  expect(spendLine(routes())).toBe('Spend today: ≈$0.42 of $5 (deepinfra $0.42)')
   expect(apiParts({ via: 'api', spend: 0.12 })).toEqual(['≈$0.12', ''])
   expect(apiParts({ via: 'api', spend: 0.12, prices: 'yours' })).toEqual(['$0.12', ''])
 })
@@ -6225,14 +6224,14 @@ test('API dollars at the catalog\'s prices read as estimates and at the user\'s 
 test('an API week says its dollars on the Stats tab, never $0 for no price or plan usage (#1022)', () => {
   const api = { tasks: 6, cost: 1.27, unknown: 0, plan: 0, by_provider: { deepseek: { tasks: 4, cost: 0.84, unknown: 0 }, anthropic: { tasks: 2, cost: 0.43, unknown: 0 } } }
   expect(statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, api: { tasks: 1, cost: 0, unknown: 1, plan: 0 } } } })[0].text)
-    .toContain('API no price')                                                              // never $0 for no price
+    .toContain('API no known cost')                                                         // never $0 for no price
   // the feed's plan count (stats._api_period) keeps a plan-only week from reading API $0 (#1022's review)
   expect(statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, api: { tasks: 1, cost: 0, unknown: 0, plan: 1,
     by_provider: { 'opencode-go': { tasks: 1, cost: 0, unknown: 0, plan: 1 } } } } } })[0].text).toContain('API plan usage')
-  // savings.usd's rule: a cent's fraction written out, never 4e-05 nor $0.010
-  expect([usd(4e-5), usd(4.1e-5), usd(0.0041), usd(0.009999), usd(0.42), usd(0)]).toEqual(['$0.00004', '$0.000041', '$0.0041', '$0.01', '$0.42', '$0'])
+  // meter.usd's rule (#1322): cents, `<$0.01` under one, a free model's $0, never 4e-05
+  expect([usd(4e-5), usd(0.009999), usd(0.01), usd(0.42), usd(0), usd(5)]).toEqual(['<$0.01', '<$0.01', '$0.01', '$0.42', '$0', '$5.00'])
   const week = statsLines({ tasks: 6, periods: { week: { tasks: 6, landed: 6, api } } })[0].text
-  expect(week).toContain('API ≈$1.27 (deepseek ≈$0.84 · anthropic ≈$0.43; catalog prices)')
+  expect(week).toContain('API ≈$1.27 (deepseek ≈$0.84 · anthropic ≈$0.43)')
   const model = statsLines({ tasks: 2, model_lines: { lines: [{ model: 'deepseek/deepseek-flash', tasks: 2, accepted_pct: 100,
     kind: 'api', paid: 0.12, speed: { write: 80 } }] } }).find(l => l.label === 'API deepseek deepseek-flash')!
   expect(model.text).toContain('paid ~$0.12/task')
@@ -6556,7 +6555,7 @@ test('#1263: a role\'s thinking row and the roles\' summary say what its API mod
 
 test('#1023: thinking runs wb route <role> --thinking, the day cap takes $5, 5,00 and 5 USD as 5 and empty as off, and spend today reads from wb route --json', { timeoutMs: 20_000 }, async ($, on) => {
   const { ui, w, texts, ran } = await settingsTab($, on)
-  expect(await texts()).toContain('Spend today: ≈$0.42 of $5 (DeepSeek $0.42; catalog prices)')  // #1135
+  expect(await texts()).toContain('Spend today: ≈$0.42 of $5 (DeepSeek $0.42)')  // #1135
   await ui.press({ key: 'think-writing' })
   expect(JSON.stringify(await ui.findAll({ type: 'Text' }))).toContain('for tasks started after this')
   await ui.press({ key: 'think-writing:on' })
@@ -6573,7 +6572,7 @@ test('#1023: thinking runs wb route <role> --thinking, the day cap takes $5, 5,0
   await ui.input({ key: 'cap', text: '' })
   expect(ran('wb route cap off')).toBe(true)
   expect((await ui.find({ key: 'cap' }))?.props.value).toBe('')
-  expect(await texts()).toContain('Spend today: ≈$0.42 (DeepSeek $0.42; catalog prices) · no day cap')
+  expect(await texts()).toContain('Spend today: ≈$0.42 (DeepSeek $0.42) · no day cap')
   await ui.unmount()
 })
 
@@ -6919,18 +6918,17 @@ test('#1048: the Stats tab names models and providers as the Tasks view does, a 
     model_lines: { lines: [{ model: 'ollama/qwen3-coder:30b', kind: 'gpu', tasks: 24, accepted_pct: 83, speed: { write: 61 } },
       { model: 'deepseek/deepseek-v4.1-flash', kind: 'api', tasks: 4, accepted_pct: 100, paid: 0.21 }] },
     sizes: { trivial: { tasks: 17, accepted_pct: 94 }, significant: { tasks: 24, accepted_pct: 71 } },
-    milestones: [{ kind: 'saved', n: 5_000_000, day: '2026-11-20' }],
     guards: { spend: 1 },
     helps: { 'ollama/qwen3-coder:30b': { hint: [3, 5] } },
     bench: { 'ollama/qwen3-coder:30b': { run: 'r7', day: '2026-11-19', passed: 17, of: 20 } },
     optimized: { 'ollama/qwen3-coder:30b': { window: 65536, spill: 0 } },
   }
   const said = statsLines(f, '', names).map(l => `${l.label}: ${l.text}`)
-  expect(said[0]).toContain('API ≈$1.27 (DeepSeek ≈$0.84 · Anthropic ≈$0.43; catalog prices)')  // names, not ids
+  expect(said[0]).toContain('API ≈$1.27 (DeepSeek ≈$0.84 · Anthropic ≈$0.43)')  // names, not ids
   expect(said).toContain(`qwen3-coder 30B: 24 tasks · 83% landed · writes ~61${NB}tok/s`)  // Now's label, not ollama/…
   expect(said).toContain('API DeepSeek deepseek-v4.1-flash: 4 tasks · 100% landed · paid ~$0.21/task')  // the Tasks view's place and model
   expect(said).toContain('By size: trivial 17 (94%) · complex 24 (71%)')             // "Complex coding", not significant
-  expect(said.some(l => l.startsWith('Milestone'))).toBe(false)                    // a tokens-saved one isn't said (#1322)
+  expect(said.some(l => l.startsWith('Milestone') || l.startsWith('Bests'))).toBe(false)  // neither is said (#1322)
   expect(said).toContain('What stopped agents: the API day cap 1')                  // Settings' "API day cap"
   expect(said).toContain('What helps (qwen3-coder 30B): a hint helped 3 of 5')
   expect(said).toContain('Bench: qwen3-coder 30B 17/20 (2026-11-19)')

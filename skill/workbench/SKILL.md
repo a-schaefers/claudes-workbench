@@ -649,20 +649,16 @@ this file first; you write the patch yourself.
 ## Report to the user
 Short and honest: what was built, on which model (GPU, or API and its provider), the role and
 who set it (`model:` at start, `routed:` in `wb watch`), rounds (automatic and review), test result,
-what you fixed, sent back or flagged, the branch. For an API task, pass on the `paid` part of the
-line `wb accept` prints; never call API dollars a saving. Report the agent's misses plainly; they are
-evidence about the model, and the router learns from accept and discard. Pass on the
-`claude:` line `wb accept` prints: what the task cost you, measured, beside the estimate of
-writing it yourself and the GPU energy. For a task on an API model that line ends with what the
-provider was paid (`paid … ≈$0.12 (…, catalog prices)`, `paid: unknown`, or `plan usage`): pass
-that part on as a cost, an estimate when it says `≈`, never as a saving, and never subtract it from
-your tokens or the other way round (the live
-figure while it runs is `api.usd` in its `status.json`, under `$WB_HOME/tasks/<name>/`).
-Call the estimate an estimate. `wb savings` gives the
-week's total and its score out of 100 when the user asks what it's saving; `wb savings --card
+what you fixed, sent back or flagged, the branch. Report the agent's misses plainly; they are
+evidence about the model, and the router learns from accept and discard. For a task on an API
+model, `wb accept` (and `wb discard`) ends its line with what the provider was paid (`paid ≈$0.12`,
+`paid: unknown`, or `plan usage …`): pass that on as a cost, an estimate when it says `≈`, never as
+a saving, and never subtract it from your tokens or the other way round (the live figure while it
+runs is `api.usd` in its `status.json`, under `$WB_HOME/tasks/<name>/`). `wb savings` gives the
+week's saving when the user asks what it's saving (an estimate: call it one); `wb savings --card
 <file>.svg` makes the badge as an image for them to keep or post (made here, nothing sent). The
-score is the GPU's alone; `wb savings --api` gives what API tasks cost: the closed ones by
-provider, and what was spent (open tasks too) by day, as the day cap counts it. Only when the user
+saving is the GPU's alone; `wb savings --api` gives what API tasks cost: what was spent (open
+tasks too) by provider and by day, as the day cap counts it, and the tasks closed. Only when the user
 compares a figure with their provider's bill, or asks why they differ: `wb model price <id> --input X
 --output Y [--cache-read Z] [--cache-write W]` sets the prices they are billed (a cache price left
 out is the catalog's ratio to input) (`--clear` undoes it); never suggest it otherwise.
