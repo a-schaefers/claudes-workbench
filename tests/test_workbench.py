@@ -31363,18 +31363,31 @@ class AgentMcp(Base):
         self.assertIn(f"{sent[0]['id']}  ", seen)                                     # list_requests' row
 
     def test_the_mcp_server_refuses_a_chat_url_that_isnt_this_machines_and_sends_nothing(self):
-        # #1138: local only by design; the token never goes to a tailnet, LAN or public address
+        # #1138: local only by design; the token never goes to another machine's address
         import importlib.util
         spec = importlib.util.spec_from_file_location("wb_mcp_1138", self.SCRIPT)
         m = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(m)
         for url in ("http://localhost:1337", "http://127.0.0.1:1337", "http://127.8.9.10", "http://[::1]:1337",
                     "https://LOCALHOST.", "http://[::ffff:127.0.0.1]:1"):
-            self.assertTrue(m.loopback(url), url)
+            self.assertTrue(m.this_machine(url), url)
         for url in ("http://192.0.2.1:1337", "http://localhost.example.com", "http://[::ffff:192.0.2.1]",
-                    "http://100.64.0.1:1337", "http://0.0.0.0:1337", "ftp://localhost", "localhost:1337",
-                    "http://localhost:99999", "http://my-host.tailnet.ts.net"):
-            self.assertFalse(m.loopback(url), url)
+                    "http://100.64.0.1:1337", "http://0.0.0.0:1337", "http://[::]:1337", "http://224.0.0.1",
+                    "ftp://localhost", "localhost:1337", "http://localhost:99999", "http://my-host.tailnet.ts.net"):
+            self.assertFalse(m.this_machine(url), url)
+        # a chat bound only to this machine's tailnet or LAN IP serves no localhost, and an agent
+        # here reaches it there (the chat's #1274): that IP is this machine's, so it is taken
+        with mock.patch.object(m, "_own", lambda ip: str(ip) == "100.64.0.1"):
+            self.assertTrue(m.this_machine("http://100.64.0.1:1337"))
+            self.assertFalse(m.this_machine("http://100.64.0.2:1337"))
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
+            try:
+                sk.connect(("192.0.2.1", 9))                             # a route's source: sends nothing
+                mine = sk.getsockname()[0]
+            except OSError:
+                mine = ""
+        if mine and not mine.startswith("127."):
+            self.assertTrue(m.this_machine(f"http://{mine}:1337"), mine)   # the real check, a real own IP
         rpc = self._server(url="http://192.0.2.1:1337")                  # TEST-NET-1: never reached
         for name, args in (("ask_claude", {"text": "x"}), ("get_reply", {"id": "m1"}), ("list_requests", {})):
             r = rpc.tool(name, **args)

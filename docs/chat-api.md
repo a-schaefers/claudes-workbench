@@ -216,7 +216,8 @@ library only, started by the agent's MCP client. It reads the same `CLAUDE_WB_UR
 It is for the user's own agents on this machine, talking to the user's own Claude Code session.
 It calls only the `/api/v1/` paths, so it needs a chat from workbench 2.1 or later (an older one
 is said so, nothing sent). It listens on nothing but stdio. It refuses a `CLAUDE_WB_URL` whose host isn't this machine's
-(`localhost`, `127.*`, `::1`): every tool says so, and nothing is sent. It follows no redirect.
+(`localhost`, `127.*`, `::1`, or an IP address of its own, such as the tailnet or LAN address a
+chat bound only there is reached at): every tool says so, and nothing is sent. It follows no redirect.
 
 - **`ask_claude {text, key?}`**: checks `/api/v1/health` (not listening: refused, nothing sent),
   sends the request and returns its id at once. `key` (optional, 1 to 64 of `A-Z a-z 0-9 . _ :

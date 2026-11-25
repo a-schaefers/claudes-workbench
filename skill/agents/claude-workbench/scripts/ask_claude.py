@@ -45,7 +45,7 @@ OUTAGE_MOST = 120.0
 class _Stay(urllib.request.HTTPRedirectHandler):
     """No redirect is followed: urllib sends the Authorization header on to wherever a 3xx points,
     so a redirect could carry the token off this machine (the chat never sends one: a 3xx comes
-    back as its status; #1138, the MCP server's loopback-only check is moot otherwise)."""
+    back as its status; #1138, the MCP server's this-machine-only check is moot otherwise)."""
     def redirect_request(self, *args, **kwargs):
         return None
 

@@ -6466,10 +6466,12 @@ client; the server needs no browser.
   - `list_requests {}`: the newest `LISTED` 20 of its own messages from `/api/state`, each with
     `N replies`, `received`, `queued` or `expired`, and whether Claude listens.
 
-  Local only, by design: `loopback` takes `localhost`, `127.0.0.0/8` and `::1` (IPv4-mapped too)
-  over http or https, and anything else (a tailnet or LAN address, any other name: its address
-  could be anywhere) makes every tool refuse, nothing sent, as the chat refuses an agent token
-  from another address anyway. `ask_claude.py`'s opener follows no redirect (`_Stay`): urllib
+  Local only, by design: `this_machine` takes `localhost`, `127.0.0.0/8` and `::1` (IPv4-mapped
+  too) over http or https, or an IP of this machine's own (`_own`: a socket binds to it;
+  `0.0.0.0`, `::` and multicast never), as a chat bound only to the tailnet or LAN IP serves no
+  localhost and an agent here reaches it there (#1274); anything else (another machine's address,
+  any other name: its address could be anywhere) makes every tool refuse, nothing sent, as the
+  chat refuses an agent token from another machine anyway. `ask_claude.py`'s opener follows no redirect (`_Stay`): urllib
   sends `Authorization` on to wherever a 3xx points. Its config line for OpenCode needs
   `codemode: false`, or OpenCode 2.3 offers MCP tools only behind `execute` (docs/chat-api.md,
   *An MCP server*).
@@ -8654,7 +8656,7 @@ exit 2 naming the key, and `--key` sending the same body, upload ids included) a
 (and a wait on a message Claude read 6 hours ago held, never `410`), and four racers under one key landing one
 message (#1138).
 `AgentMcp` runs the agents' MCP server as a subprocess on stdio against its own
-chat server (`initialize`, `tools/list`, each tool, the loopback refusal, a redirect never followed, a request
+chat server (`initialize`, `tools/list`, each tool, the refusal of a URL not this machine's (its own IP taken), a redirect never followed, a request
 answered to the user alone staying done in a bounded number of waits, an expired one with a listener up, every call
 on `/api/v1/` with a key's replay, its 422 and the chat's 410 each said as such, a chat without `/api/v1/` refused, 2.0's 403 and an older one's 404 alike), and, with
 `opencode` on PATH, real OpenCode with the docs' config line, `capture_llm.py` making the tool calls (#1138).

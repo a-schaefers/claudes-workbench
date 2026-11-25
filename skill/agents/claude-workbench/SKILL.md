@@ -65,7 +65,8 @@ Do small, local edits yourself: a round trip costs more than they do.
 
 Pass the same `key` again only to retry a send you aren't sure landed: it lands once, and the
 answer says it was not sent again. It works only with a chat on this machine (`localhost`,
-`127.*`, `::1`) from workbench 2.1 on (it calls `/api/v1/`). The config, one line, for
+`127.*`, `::1`, or an address of its own, as `wb chat url` prints for a chat bound only there)
+from workbench 2.1 on (it calls `/api/v1/`). The config, one line, for
 OpenCode's `opencode.json`:
 
 ```json
