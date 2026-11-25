@@ -20837,16 +20837,16 @@ class Stats(Base):
         self.assertIn("(1 discard put down to the spec left out)", out)
         self.assertIn("(2 discards put down to the spec left out)", results.table())
 
-    def test_a_spec_gap_discard_after_a_stop_from_outside_counts_as_a_spec_gap_in_both_views(self):
+    def test_a_spec_gap_discard_after_a_stop_from_outside_counts_as_a_spec_gap_in_wb_stats(self):
         # #1245 (2026-11-24): a wb discard --spec-gap taken after the day cap stopped the task was
         # left out of the Stats feed's spec_gaps while wb stats' table counted it: one history, two
-        # answers
+        # answers. The feed says no spec gaps any more (#1322): the table's is the one answer
         from workbench import results, stats
         self.rows({"ts": time.time(), "outcome": "accepted", "ran": True},
                   {"ts": time.time(), "outcome": "discarded", "ran": True, "spec_gaps": ["x"],
                    "infra": "spend"})
         self.assertTrue(results.table().endswith("(1 discard put down to the spec left out)"))
-        self.assertEqual(stats.feed()["periods"]["all"].get("spec_gaps"), 1)
+        self.assertNotIn("spec_gaps", stats.feed()["periods"]["all"])
 
     def test_two_settings_changed_at_once_both_stay(self):
         # #564: each wrote back the snapshot it read, so one change was lost while both said it took.
@@ -20956,7 +20956,7 @@ class Stats(Base):
         self.assertEqual(stats.summary(f), [])
         self.assertIn("no finished tasks yet", run_wb("stats"))
 
-    def test_the_feed_counts_landings_streaks_bests_and_what_the_agents_absorbed(self):
+    def test_the_feed_counts_landings_bests_guards_sizes_and_models_and_no_score_streak_or_savings(self):
         from workbench import stats
         day, now = 86400, time.mktime((2026, 11, 20, 12, 0, 0, 0, 0, -1))
         self.rows(
@@ -20974,24 +20974,20 @@ class Stats(Base):
         self.assertEqual(f["tasks"], 4)
         self.assertEqual((f["periods"]["week"]["tasks"], f["periods"]["week"]["landed"]), (4, 3))
         self.assertEqual(f["periods"]["week"]["accepted_pct"], 75)
-        self.assertEqual(f["streak"], {"current": 2, "best": 2, "days": 3})
         self.assertEqual(f["bests"]["largest_first_try"]["lines"], 312)
         self.assertEqual(f["bests"]["fastest"]["minutes"], 4)
-        self.assertEqual(f["absorbed"], {"auto_fixes": 2, "auto_fixed_tasks": 1, "handovers_landed": 1})
-        self.assertEqual(f["questions"], {"asked": 2})  # never said answered: not recorded so
         self.assertEqual(f["guards"], {"repeat": 2, "silence": 1})
         self.assertEqual([(m["kind"], m["n"]) for m in f["milestones"]], [("landed", 1)])
         self.assertEqual(f["sizes"]["large"], {"tasks": 2, "accepted_pct": 50})
         self.assertEqual(f["stacks"], {"python": {"tasks": 1, "accepted_pct": 100}})
         self.assertEqual(f["models"]["m"]["tasks"], 4)
         self.assertEqual(f["models"]["m"]["write_trend"], [[now - 2 * day, 30]])
-        self.assertEqual(len(f["days"]), 30)
-        self.assertEqual(f["days"][-1], {"day": "2026-11-20", "tasks": 1, "landed": 0})
-        self.assertNotIn("savings", f["periods"]["week"])  # nothing to compare
-        # two days on, the run has ended: only the best is said, never that it broke
-        later = stats.summary(stats.feed(now + 3 * day))
-        self.assertIn("best streak: 2 day(s) in a row with a task landed", later)
-        self.assertFalse(any("streak: 0" in line for line in later))
+        # #1322: precision nobody acted on is gone from the feed and from wb stats
+        for gone in ("streak", "absorbed", "questions", "days"):
+            self.assertNotIn(gone, f)
+        for gone in ("score", "savings", "spec_gaps", "energy"):
+            self.assertNotIn(gone, f["periods"]["week"])
+        self.assertEqual(stats.summary(f)[0], "this week: 4 task(s), 3 landed (75%)")
 
     def test_the_feed_reads_results_jsonl_once_however_many_models_and_periods(self):
         # #565: each period's savings and each model's helps read the whole file again: 16 reads
@@ -21033,26 +21029,6 @@ class Stats(Base):
         self.assertEqual(time.localtime(until)[:6], (2026, 11, 21, 0, 0, 0))
         self.assertGreater(until, now)
 
-    def test_a_daylight_saving_day_neither_skips_nor_repeats_a_date_nor_breaks_the_streak(self):
-        # #563: now - i * 86400 across a 23- or 25-hour day landed two days back or on the same one
-        from workbench import stats
-        before = os.environ.get("TZ")
-        def restore():
-            os.environ.pop("TZ", None) if before is None else os.environ.update(TZ=before)
-            time.tzset()
-        self.addCleanup(restore)
-        os.environ["TZ"] = "America/Denver"
-        time.tzset()
-        for now, yesterday in ((time.mktime((2026, 3, 9, 0, 15, 0, 0, 0, -1)), (2026, 3, 8)),    # after a 23-hour day
-                               (time.mktime((2026, 11, 1, 23, 30, 0, 0, 0, -1)), (2026, 10, 31))):  # a 25-hour day
-            days = [d["day"] for d in stats._days([], now)]
-            self.assertEqual(len(days), 30)
-            self.assertEqual(days[-1], date.fromtimestamp(now).isoformat())
-            self.assertEqual({(date.fromisoformat(b) - date.fromisoformat(a)).days
-                              for a, b in zip(days, days[1:])}, {1})  # consecutive, each once
-            landed = time.mktime((*yesterday, 12, 0, 0, 0, 0, -1))
-            self.assertEqual(stats._streak([{"ts": landed, "outcome": "accepted"}], now)["current"], 1)
-
     def test_a_task_landed_with_no_review_is_first_try_whatever_rounds_the_runner_added(self):
         # #550: self-review (on by default), a handover or a steer each add a round Claude never
         # saw, and "largest landed first try" stayed empty for every default --test task
@@ -21071,10 +21047,11 @@ class Stats(Base):
         self.assertEqual(stats.feed()["bests"]["largest_first_try"], {
             "task": "t-b", "ts": store.results()[-2]["ts"], "lines": 400})
 
-    def test_only_questions_wb_answer_answered_are_counted_answered_and_none_as_absorbed(self):
+    def test_only_questions_wb_answer_answered_are_recorded_answered(self):
         # #562: a timed-out question (NO_ANSWER) counted as "answered mid-task", under "Without
-        # waking Claude", though its notice wakes Claude; failed auto-fixes read as "fixed"
-        from workbench import results, stats
+        # waking Claude", though its notice wakes Claude (the Stats tab's rows went, #1322; the
+        # row keeps the count)
+        from workbench import results
         self.start("t-q", "ok", "--ask-budget", "3")
         wait_phase("t-q", {"review"})
         task, opened = store.Task("t-q"), {}
@@ -21087,15 +21064,6 @@ class Stats(Base):
         ask_mcp.relay(task, opened)
         (context.ask_dir(task) / "cccccccc.answer").write_text("x")  # the agent's own: not Claude's
         self.assertEqual(results.for_stats(task)["asks"], {"questions": 2, "answered": 1})
-        self.rows({"ts": time.time(), "outcome": "discarded", "auto_fixes": 2, "tests_ok": False,
-                   "asks": {"questions": 1}},                         # failed fixes, a question left
-                  {"ts": time.time(), "outcome": "accepted", "auto_fixes": 1, "tests_ok": True,
-                   "asks": {"questions": 2, "answered": 1}})
-        f = stats.feed()
-        self.assertEqual(f["absorbed"], {"auto_fixes": 3, "auto_fixed_tasks": 1})
-        self.assertEqual(f["questions"], {"asked": 3, "answered": 1})
-        self.assertIn("questions: 3 asked mid-task, 1 answered", stats.summary(f))
-        self.assertIn("without waking Claude: 3 auto-fix round(s), 1 task(s) then green", stats.summary(f))
 
     def test_a_task_claude_finished_after_a_takeover_is_no_best_of_the_agents(self):
         # #566: Claude wrote 251 lines after wb takeover, and the pane called it the largest
@@ -21121,48 +21089,6 @@ class Stats(Base):
         self.assertFalse(tuning.judged({**row, "landed_steps": 0}))
         self.assertFalse(tuning.judged({"outcome": "discarded", "steps": [{}], "infra": "local_only",
                                         "ran": True}))
-
-    def test_a_spec_gap_discard_counts_in_the_saved_milestone_as_in_the_saving(self):
-        # #569: the milestone left out the discard's cost, so "100K saved" showed above an
-        # all-time saving of ~11K; and a period of only spec-gap discards said "0 tasks" beside a cost
-        from workbench import savings, stats
-        now = time.time()
-        gap = {"ts": now - 40 * 86400, "outcome": "discarded", "spec_gaps": ["unclear"],
-               "claude": {"input": 115_000, "output": 0, "calls": 10}}
-        won = {"ts": now - 86400, "outcome": "accepted", "rounds": 1,
-               "claude": {"input": 4_000, "output": 0, "calls": 2}, "diff": {"files": 3, "added": 700, "removed": 0}}
-        self.assertGreater(savings.of_row(won)["saved"], 100_000)                    # alone: past 100K
-        self.assertLess(savings.of_row(won)["saved"] + savings.of_row(gap)["saved"], 100_000)
-        self.rows(gap, won)
-        f = stats.feed(now)
-        self.assertEqual([m["kind"] for m in f["milestones"]], ["landed"])          # never reached
-        self.assertEqual(f["periods"]["all"]["savings"]["saved"],
-                         savings.of_row(won)["saved"] + savings.of_row(gap)["saved"])
-        self.assertEqual((f["periods"]["all"]["tasks"], f["periods"]["all"]["spec_gaps"]), (1, 1))
-        self.assertNotIn("spec_gaps", f["periods"]["week"])
-        self.assertTrue(stats.summary(f)[1].startswith("all time: 1 task(s), 1 landed (100%), and 1 discard(s) put down to the spec"))
-
-    def test_a_periods_energy_counts_every_task_that_measured_it(self):
-        # #568: of three tasks (180, 95 and 12 Wh) only the one with a Claude session could be
-        # compared, and the period's energy was its 12 Wh
-        from workbench import stats
-        now = time.time()
-        claude = {"input": 4_000, "output": 0, "calls": 2}
-        self.rows({"ts": now - 3600, "outcome": "accepted", "gpu_wh": 180, "diff": {"added": 10}},
-                  {"ts": now - 3600, "outcome": "accepted", "gpu_wh": 95, "diff": {"added": 10}},
-                  {"ts": now - 3600, "outcome": "accepted", "gpu_wh": 12, "diff": {"added": 10}, "claude": claude},
-                  {"ts": now - 3600, "outcome": "accepted", "gpu_wh": 50, "remote_gpu": True},  # not ours
-                  {"ts": now - 20 * 86400, "outcome": "discarded", "gpu_wh": 40})          # none to compare
-        f = stats.feed(now)
-        self.assertEqual(f["periods"]["week"]["energy"], {"wh": 287})
-        self.assertEqual(f["periods"]["week"]["savings"]["wh"], 12)  # wb savings' compared-only, kept
-        self.assertEqual(f["periods"]["month"]["energy"], {"wh": 327})
-        (Path(self.tmp.name) / "savings.json").write_text('{"kwh_price": 0.3}')
-        with mock.patch.dict(os.environ, WB_SAVINGS=str(Path(self.tmp.name) / "savings.json")):
-            self.assertEqual(stats.feed(now)["periods"]["week"]["energy"], {"wh": 287, "cost": 0.09})
-        (store.home() / "results.jsonl").write_text("")
-        self.rows({"ts": now - 3600, "outcome": "accepted", "gpu_wh": 30})               # no session at all
-        self.assertEqual(stats.feed(now)["periods"]["week"]["energy"], {"wh": 30})
 
     def test_the_bench_line_keeps_the_last_finished_run_beside_a_newer_partial_one(self):
         # #570: a newer run's one graded case replaced the finished run's 8/10 with "1/1"
@@ -39406,15 +39332,13 @@ class ApiStats(Base):
         from workbench import savings                     # no task at all: the reason stands
         self.assertIn("needs its Claude usage", savings.summary(savings.totals([]), "week"))
 
-    def test_the_stats_feed_has_the_weeks_api_money_by_provider_and_energy_leaves_api_rows_out(self):
+    def test_the_stats_feed_has_the_weeks_api_money_by_provider_trials_in(self):
         self.rows(self.gpu_row(gpu_wh=30.0), self.api_row(gpu_wh=500.0),   # a stray reading: not ours
                   self.api_row(cost=0.1, trial=True))                     # money spent is spent
         f = json.loads(run_wb("stats", "--json"))
         week = f["periods"]["week"]
         self.assertEqual(round(week["api"]["by_provider"]["deepseek"]["cost"], 2), 0.52)
         self.assertEqual((week["api"]["tasks"], week["api"]["plan"]), (2, 0))
-        self.assertEqual(week["energy"]["wh"], 30.0)
-        self.assertEqual(week["savings"]["tasks"], 1)
         line = next(m for m in f["model_lines"]["lines"] if m["model"] == "deepseek/flash")
         self.assertEqual((line["kind"], line["paid"]), ("api", 0.42))    # the router's view: no trial
 

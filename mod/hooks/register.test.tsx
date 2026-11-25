@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { thinkStops, absolutePath, agentOf, isAbort, rolesRead, wbThrew, type WbRun, agentsFor, askForArgs, attachedLines, awayNow, chatPrompt, cardName, delegates, hangWords, liveLines, pageShape, parsePrice, priceOf, quietForJobs, routeCalls, routesSummary, sameCall, savedLine, spark, spendLine, apiParts, splashTarget, statsLines, taskOfPath, tasksNamed, usd, wrapParts, wrapWords } from './register.js'
+import { thinkStops, absolutePath, agentOf, isAbort, rolesRead, wbThrew, type WbRun, agentsFor, askForArgs, attachedLines, awayNow, chatPrompt, cardName, delegates, hangWords, liveLines, pageShape, parsePrice, quietForJobs, routeCalls, routesSummary, sameCall, spark, spendLine, apiParts, splashTarget, statsLines, taskOfPath, tasksNamed, usd, wrapParts, wrapWords } from './register.js'
 import { pixels } from './apprentice.js'
 import { BAR, frameCells, frameCount, plan, ratio } from './splash.js'
 import { activity, loopLength, tickerCells } from './modeline.js'
@@ -3768,12 +3768,13 @@ test('the bubble wraps its words into lines that fit, never cutting a line short
   expect(wrapWords('', 30)).toEqual([''])
 })
 
-test('the Tasks tab ends with the week\'s saving, read from wb savings; the web chat link is the Settings tab\'s', async ($, on) => {
+test('the Tasks tab ends with the modeline, no saving above it, and never runs wb savings; the web chat link is the Settings tab\'s', async ($, on) => {
+  // #1322: the week's saving was the Tasks tab's footer, wb savings read every ten minutes
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   fakeTasks(on, chatOn({}))
-  const week = { period: 'week', tasks: 3, claude: 160000, self_est: 1390000, saved: 1230000, wh: 900, cost: null }
+  const runs: string[][] = []
   on('process.run', (_: any, e: any) => {
-    if (e.argv[1] === 'savings') return { value: { exitCode: 0, stdout: JSON.stringify(week), stderr: '' } }
+    runs.push(e.argv)
     if (e.argv[1] === 'chat' && e.argv[2] === 'url')
       return { value: { exitCode: 0, stdout: 'https://box.tail.ts.net/#token=abc\n', stderr: '' } }
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
@@ -3782,24 +3783,14 @@ test('the Tasks tab ends with the week\'s saving, read from wb savings; the web 
   await clock.advance(3000)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-  const at = texts.indexOf('this week: saved ~1.2M Claude tokens (88%, estimate) · 900 Wh')
-  expect(at).toBeGreaterThan(-1)
-  expect(texts.slice(at + 1)).toEqual(["[•_•] Claude's Workbench"])          // never under the tasks (the user, 2026-11-19): only the modeline
+  expect(texts.at(-1)).toBe("[•_•] Claude's Workbench")
+  expect(texts.some(t => t.startsWith('this week:'))).toBe(false)
+  expect(runs.some(r => r[1] === 'savings')).toBe(false)
   await ui.press({ key: 'tab-settings' })
   expect((await ui.findAll({ type: 'Text' })).map(t => t.text).slice(-4, -1)).toEqual(['web chat https://box.tail.ts.net/#token=abc',
     'web chat ', 'https://box.tail.ts.net/#token=abc'])                      // then the tabs and the modeline
   await ui.press({ key: 'tab-tasks' })
   await ui.unmount()
-})
-
-test('the saving reads in thousands or millions, says when it cost more, and is empty with nothing to show', () => {
-  const t = (o: object) => JSON.stringify({ tasks: 1, claude: 50000, self_est: 80000, saved: 30000, wh: 0, ...o })
-  expect(savedLine(t({}))).toBe('this week: saved ~30K Claude tokens (38%, estimate)')
-  expect(savedLine(t({ wh: 1500 }))).toBe('this week: saved ~30K Claude tokens (38%, estimate) · 1.5 kWh')
-  expect(savedLine(t({ wh: 1500, cost: 0.45 }))).toBe('this week: saved ~30K Claude tokens (38%, estimate) · 1.5 kWh, cost 0.45')
-  expect(savedLine(t({ saved: -4000 }))).toBe('this week: cost ~4K more Claude tokens (estimate)')
-  expect(savedLine(t({ tasks: 0 }))).toBe('')
-  expect(savedLine('usage: wb …')).toBe('')
 })
 
 test('a night\'s backlog keeps the user away past six hours; without one, away lapses', () => {
@@ -4603,8 +4594,8 @@ test('the Stats tab draws the history, read from wb stats only while it is shown
   await clock.advance(10)
   expect(reads.length).toBe(1)
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
-  expect(texts).toContain('This week: score 62/100 · saved ~1.2M Claude tokens (estimate) · 4 tasks · 3 landed (75%) · 900 Wh')
-  expect(texts).toContain('Streak: best: 3 days in a row with a task landed')          // a run that ended isn't said
+  expect(texts).toContain('This week: 4 tasks · 3 landed (75%)')                     // no score, saving or energy (#1322)
+  expect(texts.some(t => t.startsWith('Streak'))).toBe(false)
   expect(texts.some(t => t.includes('the same call repeated 2 · silence 1'))).toBe(true)
   expect(texts.some(t => t.includes(`writes ~38${NB}tok/s ▆█ (+12%)`))).toBe(true)
   await clock.advance(31_000)
@@ -4709,17 +4700,19 @@ test('the Stats tab reads the history again after wb optimize, a bench run, a pr
   expect(reads.length).toBe(1)
   await clock.advance(31_000)
   expect(reads.length).toBe(1)                                           // nothing changed
-  const steps: [string, string][] = [['/wb/optimize.json', '{"models": {}}'], ['/wb/bench/runs.jsonl', '{}\n'],
-    ['/home/u/.config/workbench/savings.json', '{"kwh_price": 0.3}']]
+  const steps: [string, string][] = [['/wb/optimize.json', '{"models": {}}'], ['/wb/bench/runs.jsonl', '{}\n']]
   for (const [i, [path, text]] of steps.entries()) {
     files[path] = text
     await clock.advance(31_000)
     expect(reads.length).toBe(2 + i)
   }
+  files['/home/u/.config/workbench/savings.json'] = '{"kwh_price": 0.3}' // the feed costs no energy now (#1322)
+  await clock.advance(31_000)
+  expect(reads.length).toBe(3)
   await ui.press({ key: 'tab-tasks' })
   await ui.press({ key: 'tab-stats' })                                   // pressed: read, files unchanged
   await clock.advance(10)
-  expect(reads.length).toBe(5)
+  expect(reads.length).toBe(4)
   await ui.press({ key: 'tab-tasks' })
   await ui.unmount()
 })
@@ -4752,53 +4745,23 @@ test('the Stats tab reads the history again after a machine of a network home me
   await ui.unmount()
 })
 
-test('the Stats tab\'s settings pick through wb, progress checks stay off by default, and the price is typed', async ($, on) => {
+test('progress checks pick through wb and stay off by default; the Stats tab\'s own knobs and the price have no row', async ($, on) => {
+  // #1322: Stats recording, Live view and Live refresh (each on, or 2 s, by default) and the
+  // electricity price input were rows nobody needed; wb stats set and wb savings --price keep them
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
   fakeTasks(on, files, [])
   const runs: string[][] = []
-  on('process.run', (_: any, e: any) => {
-    runs.push(e.argv)
-    if (e.argv[1] === 'stats' && e.argv[2] === 'set')
-      files['/wb/stats.json'] = JSON.stringify({ [e.argv[3]]: e.argv[3] === 'every' ? Number(e.argv[4]) : e.argv[4] === 'on' })
-    if (e.argv[1] === 'savings' && e.argv[2] === '--price')
-      return { value: { exitCode: 0, stdout: JSON.stringify(e.argv[3] === 'off' ? { tasks: 0, price: null } :
-        { tasks: 1, claude: 50000, self_est: 80000, saved: 30000, wh: 1500, cost: 0.45, price: Number(e.argv[3]) }), stderr: '' } }
-    return { value: { exitCode: 0, stdout: '', stderr: '' } }
-  })
+  on('process.run', (_: any, e: any) => { runs.push(e.argv); return { value: { exitCode: 0, stdout: '', stderr: '' } } })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.advance(1000)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'tab-settings' })
-  expect((await ui.find({ key: 'record' }))?.props.label).toBe('▸ Stats recording: On (default)')
-  expect((await ui.find({ key: 'live' }))?.props.label).toBe('▸ Live view: On (default)')
-  expect((await ui.find({ key: 'every' }))?.props.label).toBe('▸ Live refresh: 2 s (default)')
+  for (const key of ['record', 'live', 'every', 'price']) expect([key, await ui.find({ key })]).toEqual([key, undefined])
   expect((await ui.find({ key: 'progress' }))?.props.label).toBe('▸ Progress checks: Off (default)')
-  await ui.press({ key: 'record' })
-  await ui.press({ key: 'record:off' })
-  expect(runs.some(r => r.join(' ') === 'wb stats set recording off')).toBe(true)
-  expect((await ui.find({ key: 'record' }))?.props.label).toBe('▸ Stats recording: Off')
-  await ui.press({ key: 'every' })
-  await ui.press({ key: 'every:5' })
-  expect(runs.some(r => r.join(' ') === 'wb stats set every 5')).toBe(true)
   await ui.press({ key: 'progress' })
   await ui.press({ key: 'progress:on' })
   expect(runs.some(r => r.join(' ') === 'wb progress on')).toBe(true)
-  await ui.input({ key: 'price', text: 'cheap' })                        // not a number: wb isn't asked
-  expect(runs.some(r => r[2] === '--price')).toBe(false)
-  await ui.input({ key: 'price', text: '$0.30' })
-  expect(runs.some(r => r.join(' ') === 'wb savings --price 0.3 --json')).toBe(true)
-  expect((await ui.find({ key: 'price' }))?.props.value).toBe('0.3')
-  runs.length = 0
-  await ui.input({ key: 'price', text: '0,30' })                         // #609: a decimal comma
-  expect(runs.some(r => r.join(' ') === 'wb savings --price 0.3 --json')).toBe(true)
-  await ui.press({ key: 'tab-tasks' })                                  // the footer shows the cost
-  expect((await ui.findAll({ type: 'Text' })).some(t => String(t.text).includes('1.5 kWh, cost 0.45'))).toBe(true)
-  await ui.press({ key: 'tab-settings' })
-  runs.length = 0
-  await ui.input({ key: 'price', text: '' })                             // an empty submit clears it
-  expect(runs.some(r => r.join(' ') === 'wb savings --price off --json')).toBe(true)
-  expect((await ui.find({ key: 'price' }))?.props.value).toBe('')
   await ui.press({ key: 'tab-tasks' })
   await ui.unmount()
 })
@@ -5104,50 +5067,26 @@ test('the history says nothing it has no data for, and a new install how to begi
     optimized: { 'ollama/x': { window: 32768, fits: true } }, bench: { 'ollama/x': { run: 'r1', day: '2026-11-20', passed: 3, of: 4 } } })
   expect(early).toEqual([{ label: 'Bench', text: 'ollama/x 3/4 (2026-11-20)' },
     { label: 'Optimized', text: 'ollama/x 32K all on the GPU' }])
-  // #609: the energy's cost labelled as the footer and `wb savings` label it, no bare "(0.27)"
-  expect(statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, energy: { wh: 900, cost: 0.27 } } } })[0].text)
-    .toContain('900 Wh, cost 0.27')
+  // #1322: a period's energy, its cost and the savings estimate are not said
+  expect(statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, energy: { wh: 900, cost: 0.27 },
+    savings: { saved: 5000 }, score: { score: 62 }, spec_gaps: 1 } } })[0].text).toBe('1 task · 1 landed')
   const lines = statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, accepted_pct: 100 } } })
   expect(lines).toEqual([{ label: 'This week', text: '1 task · 1 landed (100%)' }])   // no savings, no zeros
   expect(spark([0, 0])).toBe('')
   expect(spark([1, 4, 8])).toBe('▂▅█')
-  expect(priceOf('{"price": 0.3}')).toBe(0.3)
   // #609: a decimal comma and a currency sign or code before or after; empty clears; no hex
   for (const typed of ['0,30', '€0.30', '0.30 EUR', '$0.3', ' 0.3 ', '0.30€', 'kr 0,3', '.3'])
     expect(parsePrice(typed)).toBe(0.3)
   expect(parsePrice('')).toBe('off')
   for (const typed of ['0x10', '1e3', 'cheap', '0', '-0.3', '1,000.50', '0.3.1'])
     expect(parsePrice(typed)).toBe(null)
-  expect(priceOf('{"price": null}')).toBe(null)
-  expect(priceOf('not json')).toBe(null)
 })
 
-test('the history claims no more fixed or answered than the feed confirms', () => {
-  // #562: two failed auto-fix rounds read "fixed by the agent", a timed-out question "answered"
-  const said = (f: any) => statsLines({ tasks: 1, ...f }).map(l => `${l.label}: ${l.text}`)
-  const lines = said({ absorbed: { auto_fixes: 2 }, questions: { asked: 1 } })
-  expect(lines).toContain('Without waking Claude: 2 test failures sent back to the agent')
-  expect(lines).toContain('Questions: 1 asked mid-task')
-  expect(lines.join('\n')).not.toMatch(/fixed|answered/)
-  expect(said({ absorbed: { auto_fixes: 3, auto_fixed_tasks: 1 }, questions: { asked: 3, answered: 1 } }))
-    .toEqual(['Without waking Claude: 3 test failures sent back to the agent (1 task then green)',
-      'Questions: 3 asked mid-task · 1 answered'])
-})
-
-test('a period says the spec-gap discards its saving counts beside its task count', () => {
-  // #569: "cost ~115K more Claude tokens · 0 tasks · 0 landed" for a period of one such discard
-  const lines = statsLines({ tasks: 0, periods: { week: { tasks: 0, landed: 0, spec_gaps: 1,
-    savings: { saved: -115_000, tasks: 1 } } } })
-  expect(lines[0]).toEqual({ label: 'This week',
-    text: 'cost ~115K more Claude tokens (estimate) · 0 tasks · 0 landed · and 1 discard put down to the spec' })
-})
-
-test('a period\'s energy is every task\'s, compared by the saving or not', () => {
-  // #568: three tasks used 287 Wh and the tab said 12, the one task the saving could compare
-  const week = (p: any) => statsLines({ tasks: 3, periods: { week: { tasks: 3, landed: 3, accepted_pct: 100, ...p } } })[0].text
-  expect(week({ savings: { saved: 5000, wh: 12, cost: 0 }, energy: { wh: 287, cost: 0.09 } }))
-    .toBe('saved ~5K Claude tokens (estimate) · 3 tasks · 3 landed (100%) · 287 Wh, cost 0.09')
-  expect(week({ energy: { wh: 1500 } })).toBe('3 tasks · 3 landed (100%) · 1.5 kWh')  // nothing compared
+test('the history says no score, saving, streak, work absorbed, questions or 30 days\' line (#1322)', () => {
+  const said = statsLines({ tasks: 1, streak: { current: 2, best: 3 }, absorbed: { auto_fixes: 2 }, questions: { asked: 1 },
+    days: [{ tasks: 1 }, { tasks: 2 }], milestones: [{ kind: 'landed', n: 1, day: 'd1' }, { kind: 'saved', n: 100_000, day: 'd2' }],
+    model_lines: { lines: [{ model: 'm', tasks: 1, accepted_pct: 100, claude: 40_000 }] } }).map(l => `${l.label}: ${l.text}`)
+  expect(said).toEqual(['m: 1 task · 100% landed', 'Milestone: 1 task landed (d1)'])
 })
 
 test('a bench run still going or cut short shows beside the last finished one, never in its place', () => {
@@ -5716,29 +5655,28 @@ test('the words fall into the modeline\'s row: the page\'s last when it fits, th
     claude_pid: 0, claude_start: '', backlog: '', parked: false, allowed: '', ...extra })
   const none = { task: '', lines: [] }
   // the empty page: the stage's margin, the apprentice and a bubble of three lines, the tabs' margin, the tabs, the modeline
-  const empty = pageShape([], none, true, '', 0, 60)
+  const empty = pageShape([], none, true, 0, 60)
   expect(empty).toEqual({ rows: 11, atLeast: 11, stage: 1, tail: 10 })
   expect(splashTarget(empty, 27)).toEqual({ stage: 1, bar: 10 })
   // one closed task, out of the mode: its folded line (#1048), the list's margin, the stage's
-  // margin, a bubble of two lines beside the apprentice, the saving, the tabs' margin, the tabs,
-  // the modeline
-  const one = pageShape([t('fix-it', 'accepted')], none, false, 'this week: saved ~1.2M Claude tokens', 0, 60)
-  expect(one).toEqual({ rows: 2 + 1 + 6 + 1 + 3, atLeast: 13, stage: 3, tail: 10 })
-  expect(splashTarget(one, 27)).toEqual({ stage: 3, bar: 12 })
+  // margin, a bubble of two lines beside the apprentice, the tabs' margin, the tabs, the modeline
+  const one = pageShape([t('fix-it', 'accepted')], none, false, 0, 60)
+  expect(one).toEqual({ rows: 2 + 1 + 6 + 3, atLeast: 12, stage: 3, tail: 9 })
+  expect(splashTarget(one, 27)).toEqual({ stage: 3, bar: 11 })
   // a review waiting with its last line: its two rows, none wrapping, so the page is still exact
-  const review = pageShape([t('fix-it', 'review', { last: 'auto-fix skipped: the base fails the same test' })], none, false, '', 0, 60)
+  const review = pageShape([t('fix-it', 'review', { last: 'auto-fix skipped: the base fails the same test' })], none, false, 0, 60)
   expect([review.rows, review.stage]).toEqual([3 + 1 + 6 + 1 + 2, 4])
   // many: the page overflows, the pane follows its end, the modeline is its last row (closed
   // tasks fold into one line, and so many open ones draw one row each: compactWanted)
-  const many = pageShape(Array.from({ length: 20 }, (_, i) => t(`task-${i}`, 'review')), none, false, '', 0, 60)
+  const many = pageShape(Array.from({ length: 20 }, (_, i) => t(`task-${i}`, 'review')), none, false, 0, 60)
   expect(splashTarget(many, 27)).toEqual({ stage: 27 - many.tail!, bar: 26 })
   // a line wider than the pane, or one of wide characters: its height isn't known, so no bar row
-  const wide = pageShape([t('fix-it', 'accepted', { last: 'x' })], { task: 'fix-it', lines: [{ s: 'out', t: 'y'.repeat(61) }] }, false, '', 0, 60)
+  const wide = pageShape([t('fix-it', 'accepted', { last: 'x' })], { task: 'fix-it', lines: [{ s: 'out', t: 'y'.repeat(61) }] }, false, 0, 60)
   expect([wide.rows, splashTarget(wide, 27).bar]).toEqual([null, null])
-  const cjk = pageShape([t('fix-it', 'review', { last: '完成した' })], none, false, '', 0, 60)
+  const cjk = pageShape([t('fix-it', 'review', { last: '完成した' })], none, false, 0, 60)
   expect([cjk.rows, splashTarget(cjk, 27).bar]).toEqual([null, null])
   // ...unless the page surely overflows anyway
-  const long = pageShape([t('fix-it', 'running')], { task: 'fix-it', lines: Array.from({ length: 40 }, () => ({ s: 'out', t: 'y'.repeat(70) })) }, false, '', 0, 60)
+  const long = pageShape([t('fix-it', 'running')], { task: 'fix-it', lines: Array.from({ length: 40 }, () => ({ s: 'out', t: 'y'.repeat(70) })) }, false, 0, 60)
   expect(splashTarget(long, 27).bar).toBe(26)
 })
 
@@ -6253,8 +6191,6 @@ test('#1126: an OpenRouter role\'s backends are in the roles\' summary, so a cha
 test('API dollars at the catalog\'s prices read as estimates and at the user\'s own say so (#1135)', () => {
   // the catalog ran about 2x DeepInfra's bill (2026-11-23): a figure says which prices it is at
   const mine = { tasks: 2, cost: 0.2, unknown: 0, plan: 0, prices: 'yours', by_provider: { deepinfra: { tasks: 2, cost: 0.2, unknown: 0, prices: 'yours' } } }
-  const t = (o: object) => JSON.stringify({ tasks: 0, claude: 0, self_est: 0, saved: 0, wh: 0, ...o })
-  expect(savedLine(t({ api: mine }))).toBe('this week: API $0.20 on 2 tasks (no GPU task to compare)')
   expect(statsLines({ tasks: 2, periods: { week: { tasks: 2, landed: 2, api: mine } } })[0].text)
     .toContain('API $0.20 (deepinfra $0.20; your prices)')
   const routes = (prices?: string) => ({ v: 1, day_usd: 5, roles: {}, providers: {}, spend_today: { usd: 0.42, by_provider: { deepinfra: 0.42 }, ...(prices ? { prices } : {}) } }) as any
@@ -6264,21 +6200,15 @@ test('API dollars at the catalog\'s prices read as estimates and at the user\'s 
   expect(apiParts({ via: 'api', spend: 0.12, prices: 'yours' })).toEqual(['$0.12', ''])
 })
 
-test('an API task\'s dollars sit beside the saving, never in it, and an API-only week says there was no GPU task (#1022)', () => {
+test('an API week says its dollars on the Stats tab, never $0 for no price or plan usage (#1022)', () => {
   const api = { tasks: 6, cost: 1.27, unknown: 0, plan: 0, by_provider: { deepseek: { tasks: 4, cost: 0.84, unknown: 0 }, anthropic: { tasks: 2, cost: 0.43, unknown: 0 } } }
-  const t = (o: object) => JSON.stringify({ tasks: 1, claude: 50000, self_est: 80000, saved: 30000, wh: 0, ...o })
-  expect(savedLine(t({ api }))).toBe('this week: saved ~30K Claude tokens (38%, estimate) · API ≈$1.27')
-  expect(savedLine(t({ tasks: 0, saved: 0, api }))).toBe('this week: API ≈$1.27 on 6 tasks (no GPU task to compare)')
-  expect(savedLine(t({ tasks: 0, saved: 0, api: { tasks: 1, cost: 0, unknown: 1, plan: 0 } })))
-    .toBe('this week: 1 API task, no price (no GPU task to compare)')                    // never $0 for no price
-  expect(savedLine(t({ tasks: 0, saved: 0, api: { tasks: 2, cost: 0, unknown: 0, plan: 2 } })))
-    .toBe('this week: 2 API tasks, plan usage (no GPU task to compare)')                 // a quota, not $0
+  expect(statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, api: { tasks: 1, cost: 0, unknown: 1, plan: 0 } } } })[0].text)
+    .toContain('API no price')                                                              // never $0 for no price
   // the feed's plan count (stats._api_period) keeps a plan-only week from reading API $0 (#1022's review)
   expect(statsLines({ tasks: 1, periods: { week: { tasks: 1, landed: 1, api: { tasks: 1, cost: 0, unknown: 0, plan: 1,
     by_provider: { 'opencode-go': { tasks: 1, cost: 0, unknown: 0, plan: 1 } } } } } })[0].text).toContain('API plan usage')
   // savings.usd's rule: a cent's fraction written out, never 4e-05 nor $0.010
   expect([usd(4e-5), usd(4.1e-5), usd(0.0041), usd(0.009999), usd(0.42), usd(0)]).toEqual(['$0.00004', '$0.000041', '$0.0041', '$0.01', '$0.42', '$0'])
-  expect(savedLine(t({ api: { tasks: 0, cost: 0, unknown: 0, plan: 0 } }))).toBe('this week: saved ~30K Claude tokens (38%, estimate)')
   const week = statsLines({ tasks: 6, periods: { week: { tasks: 6, landed: 6, api } } })[0].text
   expect(week).toContain('API ≈$1.27 (deepseek ≈$0.84 · anthropic ≈$0.43; catalog prices)')
   const model = statsLines({ tasks: 2, model_lines: { lines: [{ model: 'deepseek/deepseek-flash', tasks: 2, accepted_pct: 100,
@@ -6482,12 +6412,10 @@ test('#1023: the Settings tab draws Shared, GPU, API and Experimental in order, 
   const rows = (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => l.startsWith('▸ '))
   expect(rows.slice(0, 7)).toEqual(['▸ Agents: Both (default)', '▸ When the GPU is busy: Wait (default)', '▸ Complex coding: GPU',
     '▸ Trivial coding: GPU', '▸ English writing: GPU', '▸ Claude coding: Let Claude decide (default)', '▸ Dynamic workflows: Off (default)'])
-  for (const [key, was] of [['coding', '▸ Claude coding: Let Claude decide (default)'], ['record', '▸ Stats recording: On (default)'],
-    ['live', '▸ Live view: On (default)'], ['every', '▸ Live refresh: 2 s (default)'], ['progress', '▸ Progress checks: Off (default)'],
+  for (const [key, was] of [['coding', '▸ Claude coding: Let Claude decide (default)'], ['progress', '▸ Progress checks: Off (default)'],
     ['splash', '▸ Opening animation: Enabled (default)'], ['chat', '▸ Web chat: Off (default)'], ['probe', '▸ Agent code navigation: Off (default)']])
     expect([key, await label(key)]).toEqual([key, was])
   expect(rows.slice(-2)).toEqual(['▸ Web chat: Off (default)', '▸ Agent code navigation: Off (default)'])  // Experimental last
-  expect((await ui.find({ key: 'price' }))?.props.label).toBe('▸ Electricity price per kWh')
   expect((await ui.find({ key: 'cap' }))?.props.value).toBe('5')
   // wake: the plugin option's value, read-only
   expect(await texts()).toContain('Wake Claude: on · change it in /plugin → workbench → options')
@@ -6979,7 +6907,7 @@ test('#1048: the Stats tab names models and providers as the Tasks view does, a 
   expect(said).toContain(`qwen3-coder 30B: 24 tasks · 83% landed · writes ~61${NB}tok/s`)  // Now's label, not ollama/…
   expect(said).toContain('API DeepSeek deepseek-v4.1-flash: 4 tasks · 100% landed · paid ~$0.21/task')  // the Tasks view's place and model
   expect(said).toContain('By size: trivial 17 (94%) · complex 24 (71%)')             // "Complex coding", not significant
-  expect(said).toContain('Milestone: ~5.0M Claude tokens saved (estimate, 2026-11-20)')
+  expect(said.some(l => l.startsWith('Milestone'))).toBe(false)                    // a tokens-saved one isn't said (#1322)
   expect(said).toContain('What stopped agents: the API day cap 1')                  // Settings' "API day cap"
   expect(said).toContain('What helps (qwen3-coder 30B): a hint helped 3 of 5')
   expect(said).toContain('Bench: qwen3-coder 30B 17/20 (2026-11-19)')

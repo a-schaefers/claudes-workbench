@@ -561,7 +561,7 @@ so `wb accept`, `wb discard` and `wb backlog` print it. With API rows and no GPU
 task lacks its Claude usage and diff (#1121). `wb savings` adds, when the period has API
 rows, `api: 6 task(s) · ≈$1.27 (deepseek ≈$0.84, anthropic ≈$0.43; catalog prices) + 1 with no price · claude 210K ·
 writing it yourself ~520K (estimate)` (`api_summary`); `--json` gains `api` (api_totals), which the
-pane's footer and the chat read. **`wb savings --api`** (`api_report`, with `--week`/`--month`/`--all`):
+chat reads. **`wb savings --api`** (`api_report`, with `--week`/`--month`/`--all`):
 `api, the last 7 days: 6 task(s) closed, ≈$1.27 at catalog prices, 1 with no price (incl. 1 trial)`, then `by provider:`
 (the closed tasks'), then the day ledger's (`savings.spent(since)`: spend-api.jsonl's `step` and
 `reconcile` rows since then, open tasks and bench replays in, each on its own `day`; `today` is
@@ -2728,31 +2728,26 @@ measured; `_Power` keeps `gpu_w_*` on or off). Off, none of these is written; th
 no reader. What the router, tuning, savings and progress read is outside the setting. `live` and
 `every` drive the live view (`wb top`).
 
-**The Stats feed** (`stats.feed`, `wb stats --json`, #405): one object of everything learned. Rows:
-`store.results()` kept by `tuning.judged`, except where Claude's cost is counted (savings, saved
-milestones): every non-trial row. An empty section is left out, never zeros (a new install: `{ts,
-until, settings, tasks: 0}`); `until` is the next local midnight (`_midnight`), when the pane
+**The Stats feed** (`stats.feed`, `wb stats --json`, #405): one object of what was learned. Rows:
+`store.results()` kept by `tuning.judged`. An empty section is left out, never zeros (a new install:
+`{ts, until, settings, tasks: 0}`); `until` is the next local midnight (`_midnight`), when the pane
 re-reads. Keys: `periods` (`week`, `month`, `all`, `savings.PERIODS`: tasks, landed, `accepted_pct`,
-`active_minutes`, `savings` with `score`, `spec_gaps` (one after a stop that wasn't the step's
-counted too, as `results.table` does, #1245), `energy` `{wh, cost?}` from every row's
-`gpu_wh` that measured them, another machine's GPU and API rows left out, #568, #569; `api`, below), `streak` `{current, best,
-days}` (local days with a task landed; the current run ends today or yesterday, else 0, and an
-ended run is never mentioned), `bests`
-(`largest_first_try` by `tuning.agent_reviews`, #550; `fastest`; neither with a `took_over` step,
-#566), `milestones` `[{kind: landed|saved, n, day}]`, `absorbed` (`auto_fixes`, `auto_fixed_tasks`,
-`handovers_landed`), `questions` `{asked, answered}` (only `wb answer`'s, #562), `models` (the `wb
-stats` columns, `claude`, `speed`, `write_trend`, and from `TREND_MIN` 6 rows `write_change_pct`),
+`active_minutes`, `api`, below), `bests` (`largest_first_try` by `tuning.agent_reviews`, #550;
+`fastest`; neither with a `took_over` step, #566), `milestones` `[{kind: landed, n, day}]`, `models`
+(the `wb stats` columns, `speed`, `write_trend`, and from `TREND_MIN` 6 rows `write_change_pct`),
 `model_lines` (#638: `{lines: [{model, variants, windows, last, …}], more, older}`: models OpenCode
 has now, `wb optimize` variants under their source via `variant_of`, renamed ids under the current
 one via `renamed_from` or the Ollama digest, #818; at most `stats.STATS_MODEL_LINES` 3, the rest in
 `more`, idle past `stats.OLD_DAYS` 90 or unconfigured in `older`, each only when nonzero; the most
 recently used first; `models` keeps every id split), `sizes`, `stacks` `{tasks, accepted_pct}`,
-`days` (30 local days `{day, tasks, landed}`; local-date arithmetic, never `now - 86400`, #563),
 `guards`, `helps` (`progress.helped_by_model`), `bench` (each model's newest finished run `{run,
 day, passed, of}`, a newer one beside it, never in its place, as `partial` `{…, planned, running}`,
 #570; a run is finished once every replay in its plan.json, times `repeat`, is graded or failed to
 start; one with no plan is finished), `optimized` (optimize.json's `{window, fits, spill, ts}`).
-results.jsonl is read once and the snapshot passed down (#565: 16 reads a feed, 3 s at 20,000 rows). `feed(only=...)` builds just those sections; plain `wb stats` uses `stats.SUMMARY`.
+results.jsonl is read once and the snapshot passed down (#565: 16 reads a feed, 3 s at 20,000 rows). `feed(only=...)` builds just those sections; plain `wb stats` uses `stats.SUMMARY` (`periods`, `guards`).
+Gone (#1322: precision nobody acted on): each period's `savings` and `score`, `spec_gaps` and `energy`
+`{wh, cost?}`, `streak`, `absorbed`, `questions`, the saved-tokens milestones, `days` and each model's
+`claude`; `wb savings` still says the saving and its energy.
 
 **API tasks in the feed** (#1022). `periods[*].api` is `{tasks, cost, unknown, plan, by_provider:
 {p: {tasks, cost, unknown, plan?}}}` (`stats._api_period`, from `savings.api_totals` over every
@@ -2767,9 +2762,7 @@ nothing is none, `results.task_cost`, #1106). The trial-free rows
 (`stats.api_week_line`; `N with no figure recorded` apart, `unknown_parts`). The Stats tab: each period adds `API ≈$1.27 (DeepSeek ≈$0.84 · Anthropic
 ≈$0.43; catalog prices)` (`apiPeriod`, each provider by its name, `providerWord`; `API plan usage` or `API no price`
 with no known dollars, `apiMoney`), and an API model's line (`API DeepSeek deepseek-flash: …`) says
-`paid ~$0.12/task` in place of its write speed. The footer's API-only
-week reads `this week: API ≈$1.27 on 6 tasks (no GPU task to compare)`, or `this week: 1 API task,
-no price (…)` / `2 API tasks, plan usage (…)` (`apiAlone`).
+`paid ~$0.12/task` in place of its write speed.
 
 **Taking over.** `wb takeover <task>` stops the agent and sets `review` ("Claude took over"):
 Claude finishes in the worktree uncommitted (accept adds the trailers; a commit made by hand is
@@ -2990,10 +2983,9 @@ user sees.
   else the newest started running/testing/asking, then queued, else the newest waiting for Claude
   (never by latest status write, which flipped on every tool call). At its foot the apprentice
   shows the phase and says what it does and the time left, or who acts next ("Claude reviews
-  next.", #103), as do the transcript's last line and status `last`. Then the week's saving
-  (`savedLine` of `wb savings --json`, read every 10 minutes and when a task closes; no currency
-  sign, #609), then ` · API ≈$1.27` when its `api` has tasks (`apiMoney`; an API-only week: `this
-  week: API ≈$1.27 on 6 tasks (no GPU task to compare)`, #1022; no `≈` at the user's prices, #1135). The web chat's link is on Settings
+  next.", #103), as do the transcript's last line and status `last`. Then the API day cap's row
+  while an API task works, the tabs and the modeline: the week's saving had a footer line here
+  (`wb savings --json` every 10 minutes, #107), gone with #1322. The web chat's link is on Settings
   only.
   The Settings tab (`settingRow`; Buttons, since a Select opened on a click and could pick nothing,
   2026-11-19): a Button per setting naming its value, capitalized, the default option saying `(default)` (`▸
@@ -3020,17 +3012,16 @@ user sees.
   old level, `PROBE_OLD_LEVELS`, is on). `(recommended)` only when wb's line ends `; on is
   recommended` (`context.PROBE_RECOMMENDED`). `probeStatus` asks `wb experiment probe` at most every
   `PROBE_RECHECK_MS` (30 s) and after each pick, so on reads `, working` or `, not set up`
-  (`probeStops`; 2026-11-20); on but not set up queues `PROBE_SETUP_NOTE` once. The Stats rows, each
-  a `wb` command (the mod writes no setting itself): **Stats recording** (`RECORD_STOPS`), **Live view** (`LIVE_STOPS`), **Live
-  refresh** (`EVERY_STOPS`), read from stats.json (`statsSettings`); **Progress checks**
-  (`PROGRESS_STOPS`, `progressSettings`, `progressStops`: `On, after N min` with a kept `after`);
-  **Electricity price per kWh**, an Input (key `price`, its label with no colon: the Input draws
-  one, and `per kWh: : 0.3` said two; `setPrice` via `parsePrice`: one comma or
-  point, a sign or code of up to three characters, decimal digits only; empty runs `--price off`;
-  #609). **Opening animation** (`SPLASH_STOPS`, `splash:on|off`): `wb splash on|off`, `splash.json`
+  (`probeStops`; 2026-11-20); on but not set up queues `PROBE_SETUP_NOTE` once. **Progress checks**,
+  a `wb` command (the mod writes no setting itself): `PROGRESS_STOPS`, `progressSettings`,
+  `progressStops` (`On, after N min` with a kept `after`). Stats recording, Live view, Live refresh
+  and the electricity price per kWh had rows too (#1322: they stay on, 2 s and unset unless `wb stats
+  set` or `wb savings --price` says otherwise; `statsSettings` still reads stats.json's `live` for the
+  live view). `parsePrice` reads the day cap as typed (`parseUsd`: one comma or point, a sign or code of
+  up to three characters, decimal digits only, #609). **Opening animation** (`SPLASH_STOPS`, `splash:on|off`): `wb splash on|off`, `splash.json`
   (`splashOn`). The ring follows `SETTING_ROWS`. Order: under **Shared** the Agents switch, the busy
-  row, the three roles, Claude coding, Dynamic workflows, the day cap, wake, the Stats rows, the
-  animation, the price; then **GPU**, **API** (*The roles in Settings*), and last under `Experimental ·
+  row, the three roles, Claude coding, Dynamic workflows, the day cap, wake, progress checks, the
+  animation; then **GPU**, **API** (*The roles in Settings*), and last under `Experimental ·
   may change or go away` Web chat and Agent code navigation (the two that may change or go away,
   2026-11-21). A failed `wb` call toasts its last line.
   **The roles in Settings** (#1023): read through `rolesNow` (`wb route --json` and `wb models
@@ -3106,13 +3097,15 @@ key `ollama`, #1077) and no role holding an API model, the
   `providerWord` a provider (`DeepSeek`). `refreshStats` runs `rolesNow` when it reads the feed
   (kept `ROLES_CACHE_MS`), so the names are there on a first look. By size says `trivial` and
   `complex` (`ROLE_WORDS`), What stopped agents `the API day cap` (`GUARD_WORDS.spend`, Settings'
-  word), the milestone `~5.0M Claude tokens saved (estimate, 2026-11-20)`. The pane caps model lines at `STATS_SHOWN` 3 itself, since the mod
+  word); a period says tasks, landed and its API dollars, a model line its tasks, landed share,
+  rounds, minutes and write speed or paid a task, never a score, a saving, a streak or Claude's
+  tokens a task (#1322; an older wb's tokens-saved milestone isn't drawn). The pane caps model lines at `STATS_SHOWN` 3 itself, since the mod
   tracks main while `wb` runs from the user's clone (an older wb sends every line, or no
   `model_lines`); What helps, Bench and Optimized name only the shown lines' models. A feed with no
   section says to delegate with /workbench (#549). It is read (`refreshStats`) only while the tab is
   shown: on a tab press; at a poll when the size or mtime of a source changed (`$.fs.stat`:
-  results.jsonl, stats.json, optimize.json, bench/runs.jsonl, speed.json, savings.json
-  `mem.savingsFile`, each `machines/<id>/`'s optimize.json and speed.json; #549, #894); past the
+  results.jsonl, stats.json, optimize.json, bench/runs.jsonl, speed.json, each `machines/<id>/`'s
+  optimize.json and speed.json; #549, #894); past the
   feed's `until` (#575); after a Stats pick; once per load (`mem.statsLoaded`). A failed read keeps
   the last feed, retries after `STATS_RETRY_MS` 60 s doubling to `RETRY_MAX_MS`, and says why
   (#553: each 1.5 s poll reran a full history read). No timer: hidden it costs nothing, shown a stat
@@ -5840,7 +5833,7 @@ window, freshAt, autoFixes, autoFixMax, roundFor, reviews, steps, activeS, round
 spend, est: the spend at catalog prices, #1135), `live` (`live-1`, {task, lines: {s, t}[]}), `chat`
 (`chat-4`, {key, delegating, url, web}: workbench mode, also kept by session id in `$.store`
 `modes`, #689), `pane` (`pane-1`, {tab, open, focus, minimized}), `sessions` (`sessions-1`,
-string[]: the process's session ids), `savings` (`savings-1`, string: the pane's saving line), `stats` (`stats-1`, {key,
+string[]: the process's session ids), `stats` (`stats-1`, {key,
 feed}: `wb stats --json` and its files' stamp), `top` (`top-1`, {snap, busy}: `wb top --json`'s
 newest tick, each GPU's busy %), `said` (`said-3`, WbSaid | null, {notes, wakeOff, coding, routes, workflows}:
 an atom since #697 (`routes` since #1014, `workflows` since #1041: a stored `said-1` or `said-2` is declined, read as nothing said), as in `mem` a reload emptied it and `sayRules` waited for good), `splash`
@@ -7488,7 +7481,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   `pageParts` (left out of the history, as `meta`) and `pageShape`; **`routes.routed_line`** → `transcript.routed_text`
   and `routes.model_line`; **`routes.USES`/`use`** → the mod's `routesValid` and `routesSummary`; a role's **`order`**
   (#1021) → `routes.summary`, `routesSummary` (`, backends …`) and `routesValid` (#1126).
-- **A `$.state` atom's type** → its tag (`tasks-11`, `live-1`, `chat-4`, `sessions-1`, `savings-1`, `pane-1`,
+- **A `$.state` atom's type** → its tag (`tasks-11`, `live-1`, `chat-4`, `sessions-1`, `pane-1`,
   `stats-1`, `top-1`, `said-3`, `splash-1`).
 - **The Tasks page's layout** → `pageParts`, `pageShape` (#963);
 - **The Tasks view** (#1048): the status keys `round_for`, `typical`, `late_min`, `cards`, `api` and task.json `group` →
@@ -7501,14 +7494,14 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
 - **Stats tab folds**: `top.FOLD` → `RACK_FOLD`; `stats.STATS_MODEL_LINES` → `STATS_SHOWN`; `model_lines`'
   `more`/`older`/`variants` → `statsLines`, `cli.cmd_stats`.
 - **`cli.CODING`** → the mod's `CODING_STOPS`, `CODING_RULES`, the skill's *Claude coding* bullet.
-- **`savings.totals`' keys** → `savedLine`, `drawSaved`; the cost's label (no currency sign) → `wb savings`, the Stats
-  tab, `savedLine`, `drawSaved`.
+- **`savings.totals`' keys** → `drawSaved` (the chat); the cost's label (no currency sign) → `wb savings`,
+  `drawSaved`.
 - **API money** (#1022): `savings.of_row`'s `kind` check is what keeps the score, card, share, milestones and badge
   GPU-only; `savings.api_totals`' keys → `stats._api_period`, `savings.api_summary`/`api_report`, `stats.api_week_line`, the mod's `apiMoney`,
   `apiPeriod`, the chat's `apiSaved`; `savings.usd` → the mod's `usd`, `apiSaved`'s; `meter.basis`' values
   (`catalog`, `yours`, `provider`) and `meter.NOTE`'s words → the mod's `isEst`/`pricesNote`, tasks.ts' `est`, `apiSaved`'s `est`/`note`
   (#1135); the `kind` default (`gpu`) →
-  `results.api_row` (a row; `models.is_api` takes an id), `router.same_kind` (score, expected, slice, `tuning._rows`), `stats._energy`. `local tok` → `agent tok` (with an API row shown) in `results.table`, the bench
+  `results.api_row` (a row; `models.is_api` takes an id), `router.same_kind` (score, expected, slice, `tuning._rows`). `local tok` → `agent tok` (with an API row shown) in `results.table`, the bench
   table and the round report's `agent tokens` (an API task's) together. `WbTop`'s type is unchanged (the API fields are optional keys of `running` rows): `top-1` stays.
 - **Which session a task is** → the mod's `mine` and `cli._scope`: the same rule, the home-or-`/` exception included;
   `scope()` passes every id.
