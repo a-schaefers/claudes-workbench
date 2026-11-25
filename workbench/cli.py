@@ -736,9 +736,8 @@ def _busy_api(role: str, a, repo: Path, sub: str | None, tokens: int | None = No
                                                          lane_places(repo, sub, a))):
         why = (f"{privacy.home_path(kept[0])}, which the task's lane reads ({kept[1]}), is kept local"
                if kept[1] else f"{repo.name} is kept local ({kept[0]})")
-    if why is None:  # commands.json's standing copy/siblings, unnamed (#1021), as an API start's
-        why = _standing_gap(context.repo_conf(repo, sub), a, models.provider_name(m), repo, sub,
-                            role, advice=False) or None
+    if why is None:  # commands.json's standing copy that holds a credential, as an API start's
+        why = _standing_gap(context.repo_conf(repo, sub), repo, advice=False) or None
     if why is None:  # no price, or today at the day cap (#1019), without an API start's advice:
         # the role is on the GPU and this start only waits for it (wave 2's merge)
         why = meter.refusal(m, role, advice=False,  # round 1's input too (#1173)
@@ -1019,16 +1018,15 @@ CACHE_DIRS = ("__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".to
               ".cache", ".idea", ".vscode")
 
 
-def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu", where: str = "",
-                    role: str | None = None) -> dict:
+def _worktree_setup(repo: Path, a, sub: str | None = None, via: str = "gpu") -> dict:
     """The task's `setup`, `copy` and `siblings`: commands.json's `repos` entry for the repo,
     with --setup in its place and --copy/--sibling added, each checked (#201, the 2026-11-19
     audit). A copied path must be ignored in the checkout (else it shows in the review diff) and
     no secret (SECRET_FILES): the user's settings stay theirs. A sibling is a directory beside
     the repo the lane may read."""
     conf = context.repo_conf(repo, sub)  # the package's entry, not the repo's first (#778)
-    if via == "api":  # nothing standing goes to a provider unnamed (#1021)
-        _standing_refusal(conf, a, where, repo, sub, role)
+    if via == "api":  # no standing copy that holds a credential (#1021, #1322)
+        _standing_refusal(conf, repo)
     setup = a.setup if a.setup is not None else conf.get("setup") or ""
     copy, sibs = [], []
     for raw, given in [*((x, False) for x in conf.get("copy", [])), *((x, True) for x in a.copy or [])]:
@@ -1120,44 +1118,24 @@ def _copy_path(repo: Path, raw: str, sub: str | None) -> str:
     return p
 
 
-def _standing_refusal(conf: dict, a, where: str, repo: Path, sub: str | None,
-                      role: str | None = None) -> None:
-    """An API task takes commands.json's standing `copy` and `siblings` only when this command
-    line names them too: a `.env.local` copied into every worktree, or a `../shared` the lane
-    reads, would reach the provider unasked (#1021). Exit 3, the entry and how to name it."""
-    if why := _standing_gap(conf, a, where, repo, sub, role):
+def _standing_refusal(conf: dict, repo: Path) -> None:
+    """An API task takes commands.json's standing `copy` and `siblings` as configured (the setup
+    line says so), but a copied file that holds a credential: exit 3 (#1021, #1322)."""
+    if why := _standing_gap(conf, repo):
         die(why, 3)
 
 
-def _standing_gap(conf: dict, a, where: str, repo: Path, sub: str | None,
-                  role: str | None = None, advice: bool = True) -> str:
+def _standing_gap(conf: dict, repo: Path, advice: bool = True) -> str:
     """_standing_refusal's line, or '': also the busy opt-in's (#1023), which moves a GPU start to
     an API model after _worktree_setup checked it as a GPU one (wave 2's merge), and the mod's
-    dry run's (_route_start). A --copy names the path it copies, from a package the package's
-    (_copy_path, #1158). Its other way out is the role's, or a GPU model for a --model start
-    (privacy.standing_refusal, #1227)."""
-    asked = bool(getattr(a, "model", None))
-    named_copy = {_copy_path(repo, x, sub).rstrip("/") for x in a.copy or []}
-    named_sib = {x.strip().rstrip("/").removeprefix("../") for x in a.sibling or []}
+    dry run's (_route_start), so the dialog never asks for a start wb start then refuses (#1227).
+    Only a file is read (privacy.holds_credential): a copied node_modules/ counts as one by its
+    size alone. Naming the entry once let it through, which every start then repeated (#1322)."""
     for raw in conf.get("copy", []):
-        if (entry := os.path.normpath(raw.strip()).rstrip("/")) not in named_copy:
-            return privacy.standing_refusal("copy", raw, where, _copy_name(repo, entry, sub),
-                                            role, asked, advice)
-    for raw in conf.get("siblings", []):
-        if raw.strip().rstrip("/").removeprefix("../") not in named_sib:
-            return privacy.standing_refusal("siblings", raw, where, None, role, asked, advice)
+        entry = os.path.normpath(raw.strip()).rstrip("/")
+        if os.path.isfile(repo / entry) and privacy.holds_credential(repo / entry):
+            return privacy.standing_refusal(entry, advice)
     return ""
-
-
-def _copy_name(repo: Path, entry: str, sub: str | None) -> str:
-    """How to type commands.json's repo-relative `copy` entry as a --copy from the package `sub`,
-    so that _copy_path reads it back as the entry: from packages/app the refusal advised
-    `--copy node_modules`, read as the package's, and refused the same start again and again
-    (#1158's review, 2026-11-24). The entry as written when it already reads back, else the path
-    from the package (`../../node_modules`)."""
-    if not sub or _copy_path(repo, entry, sub).rstrip("/") == entry:
-        return entry
-    return os.path.relpath(entry, sub.strip("/"))
 
 
 def _role(a) -> str:
@@ -1243,31 +1221,13 @@ def _local_only_since(task: store.Task) -> None:
         die(why, 3)
 
 
-def _api_notes(task_name: str, repo: Path, m: models.Model, a, routed: dict) -> list[str]:
-    """An API task's start notes: on the repo's first task to this provider, what goes, to whom
-    and whose choice it was (privacy.where_note, #1016's first-task note with #1021's words), and
-    the token files its lane hides: those holding a credential (#1021), when it has a lane (#1156).
-    ``routed``: what task.json holds (_routed_keys): the backends named are the ones the keyhole
-    routes by, never routes.json's (an `order` the note named once never reached the task: wave
-    2's review). Everything else the lane reads is named too, the start's grants and
-    commands.json's standing `paths` (#1269: "the repo, its spec, CLAUDE.md files" while the
-    lane read and sent ~/notes), and on any task that sends more than the repo, not only the
-    repo's first: a later task's --sibling or a path added since went unsaid."""
+def _api_notes(task_name: str, repo: Path) -> list[str]:
+    """An API task's start notes: the token files its lane hides that this checkout's build
+    reads (context.api_hidden_note, #1021), when it has a lane (#1156), and a token in a remote
+    URL (#1072). Where the code goes is the role's dialog's, said once when the user agreed:
+    a note on every start that named the provider and its policy again guarded nothing (#1322)."""
     notes = []
-    task = store.Task(task_name)
-    granted = set(context.grants(task).get("paths") or [])
-    named = [f"{c} (--copy)" for c in a.copy or []] + [f"{x} (--sibling)" for x in a.sibling or []] \
-        + [("every file your account reads" if p == "*" else privacy.home_path(p))
-           + (" (--allow-path)" if p in granted else ' (commands.json "paths")')
-           for p in dict.fromkeys(context.lane_paths(task))]
-    if privacy.first_for(repo, m.provider, task_name) or named:
-        info = privacy.where(m, routed.get("order"))
-        rules = context.user_agents_md().is_file()  # Claude's own files go to no agent (#1061)
-        whose = ("asked for" if (routed.get("said") or "").startswith("asked for")
-                 else f"the {routed.get('role') or _role(a)} role's model")
-        subs = bool(gitops.submodule_sources(repo, task.spec.get("base") or "HEAD"))  # #1267
-        notes.append(privacy.where_note(info, rules, named, whose, subs))
-    if gap := context.api_hidden_note(task):  # none with no lane (#1156)
+    if gap := context.api_hidden_note(store.Task(task_name)):  # none with no lane (#1156)
         notes.append(gap)
     if gap := context.git_url_note(repo):  # a token in a remote URL (#1072)
         notes.append(gap)
@@ -1500,7 +1460,7 @@ def cmd_start(a):
         print(f"package: {sub} (its own CLAUDE.md): the agent, the setup and the tests run there")
     if not a.no_sign:  # said now, not after the whole task at wb accept (#374)
         _say(gitops.sign_problem(repo, a.base))
-    setup = _worktree_setup(repo, a, sub, m.kind, models.provider_name(m), role)
+    setup = _worktree_setup(repo, a, sub, m.kind)
     checkout_bytes = _disk_room(repo, a.base, setup)
     # Two projects, one GPU: a task that can't run beside the GPU's holders used to queue in
     # silence behind them, maybe for hours (the 2026-11-16 audit). Say so before any worktree.
@@ -1694,7 +1654,7 @@ def cmd_start(a):
     print(routes.model_line(m.id, routed) + meter.tail(m) if api else f"model: {why}" if why != "asked for"
           else f"model: {m.id} (asked for)")
     _say(routes.BUSY_LINE if routed.get("busy") else "")
-    for note in _api_notes(a.name, repo, m, a, routed) if api else ():  # #1016, #1021
+    for note in _api_notes(a.name, repo) if api else ():  # #1016, #1021
         print(f"note: {note}")
     print(f"slice: {router.slice(m).line()}")
     if gaps := results.spec_gap_line():
@@ -3336,10 +3296,9 @@ def _route_start(a) -> None:
         die(_cant_run(m, state), 3)
     if repo is not None and (why := _no_base(repo, ns.base)):
         die(why)
-    # commands.json's standing copy/siblings this start doesn't name: wb start's exit 3, here
-    # before the dialog, which had the user approve a start wb start then refused (#1227)
-    if repo is not None and (why := _standing_gap(context.repo_conf(repo, sub), ns,
-                                                  models.provider_name(m), repo, sub)):
+    # commands.json's standing copy that holds a credential: wb start's exit 3, here before
+    # the dialog, which had the user approve a start wb start then refused (#1227)
+    if repo is not None and (why := _standing_gap(context.repo_conf(repo, sub), repo)):
         die(why, 3)
     if not ns.queue and not _api_slots_free(m, ns.name):
         die(_slots_full(m, ns.name), 4)
@@ -3583,23 +3542,9 @@ def cmd_route(a):
             if routes.effective_via(ch.doc, r) == "api" and (kept := ch.doc["roles"][r].get("api")) \
                     and kept != api and routes.effective_via(doc, r) != "api":
                 _route_api(kept, r)
-        _order_check(doc, ch.doc)
         return ch
 
     _route_apply(a, argv, changed)
-
-
-def _order_check(doc: dict, new: dict) -> None:
-    """An OpenRouter model run without its backends (#1021): exit 3, no dialog, for a role a
-    change newly sends there, on its own side or the Agents switch, or by the busy opt-in (#1023:
-    `wb route busy api` reached one that no check saw, wave 2's merge)."""
-    busy = routes._busy_newly(doc, new)
-    for r in routes.ROLES:
-        row = new["roles"][r]
-        if (routes.effective_via(new, r) == "api" and (
-                row.get("api") != doc["roles"][r].get("api") or routes.effective_via(doc, r) != "api")
-                or r in busy) and (why := privacy.order_refusal(str(row.get("api") or ""), row.get("order"))):
-            die(why, 3)
 
 
 def _route_pairs(a) -> None:
@@ -3640,7 +3585,6 @@ def _route_pairs(a) -> None:
         for r, via, mid in pairs:  # a kept API model a role newly runs on must still be one it may run
             if mid is None and routes.effective_via(ch.doc, r) == "api" and routes.effective_via(doc, r) != "api":
                 _route_api(ch.doc["roles"][r]["api"], r)
-        _order_check(doc, ch.doc)  # a kept OpenRouter model, put on API with no backends
         return ch
 
     _route_apply(a, argv, changed)

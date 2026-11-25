@@ -1,15 +1,12 @@
-"""Privacy for API roles (#1021): where a task's code goes, the per-repo `local_only`, and what
-an API task may not take along unasked.
+"""Privacy for API roles (#1021): the per-repo `local_only`, what an API task may not take
+along, and the OpenRouter routing the keyhole enforces.
 
 With a GPU model everything the agent reads stays on this machine. With an API model every file
 it reads and every command's output is model input, sent to the provider. Setting a role is the
-user's consent (its dialog says where the code goes, from `where`); this module says the same
-wherever else it matters, refuses an API model for a repo the user marked local-only, and holds
-the OpenRouter routing the keyhole enforces. The route command's preview (#1014's
-`wb route … --dry-run --json`) and the roles module re-export `where`.
+user's consent (its dialog says where the code goes); this module refuses an API model for a
+repo the user marked local-only, and a standing copy that holds a credential.
 
-Standard library only.
-"""
+Standard library only."""
 from __future__ import annotations
 
 import json
@@ -19,63 +16,8 @@ from pathlib import Path
 
 from . import store
 
-# Each provider's own data-policy page, for the providers OpenCode's /connect offers. URLs only,
-# never a claim about what the policy says: the user reads it there. Checked 2026-11-23 (each
-# fetched and its title read; x.ai's behind Cloudflare, read through a headless browser, now
-# titled SpaceXSI's). A provider not here gets None, and the line says "see <name>'s data policy".
-PRIVACY_PAGES = {
-    "anthropic": "https://www.anthropic.com/legal/privacy",
-    "openai": "https://openai.com/enterprise-privacy/",
-    "deepseek": "https://cdn.deepseek.com/policies/en-US/deepseek-privacy-policy.html",
-    "deepinfra": "https://docs.deepinfra.com/account/data-privacy",
-    "openrouter": "https://openrouter.ai/docs/features/privacy-and-logging",
-    "opencode": "https://opencode.ai/docs/zen/",   # its Privacy section: the free models' exceptions
-    "xai": "https://x.ai/legal/privacy-policy",
-    "google": "https://aistudio.google.com/docs/terms",
-    "mistral": "https://legal.mistral.ai/terms/privacy-policy",
-    "groq": "https://groq.com/privacy-policy/",
-    "togetherai": "https://www.together.ai/privacy",
-    "fireworks": "https://fireworks.ai/privacy-policy",
-    "cerebras": "https://www.cerebras.ai/privacy-policy",
-}
-OLLAMA_PAGE = "https://ollama.com/privacy"  # an Ollama cloud model's (its provider id is the user's)
-
 FREE_LINE = "free: the provider may keep or train on your code"
 OPENROUTER = "openrouter"
-OPENROUTER_ACCOUNT = "(OpenRouter's account setting decides whether backends may keep it)"
-
-
-def where(m, order=None) -> dict:
-    """Where an API model's task sends the code: {provider, name, line, policy, free, backends}.
-    ``m`` is a models.Model of kind "api"; ``order`` the OpenRouter backends the role chose.
-    The one wording for the route dialog, `wb route` and the start note (the mod reads it from
-    `wb route … --dry-run --json`, never words of its own)."""
-    from . import models
-    pid = m.provider
-    name = "ollama.com" if m.cloud else models.provider_name(m)
-    policy = OLLAMA_PAGE if m.cloud else PRIVACY_PAGES.get(pid)
-    backends = [str(b) for b in order or ()] if pid == OPENROUTER else []
-    parts = [f"your code goes to {name}"]
-    if pid == OPENROUTER:
-        parts.append(f"via OpenRouter to {', '.join(backends) or 'its choice of backend'}, no fallbacks "
-                     f"{OPENROUTER_ACCOUNT}")
-    if not policy:
-        parts.append(f"see {name}'s data policy")
-    if m.free:
-        parts.append(FREE_LINE)
-    return {"provider": pid, "name": name, "line": " · ".join(parts), "policy": policy,
-            "free": bool(m.free), "backends": backends}
-
-
-def order_refusal(model_id: str, order) -> str | None:
-    """Why `wb route <role> <OpenRouter id>` is refused without `--order`: one id is served by
-    many backends that differ in quantization and data policy, and the role must never show a
-    backend nobody chose. None for any other provider, or with an order."""
-    if model_id.split("/", 1)[0] != OPENROUTER or [b for b in order or () if str(b).strip()]:
-        return None
-    rest = model_id.split("/", 1)[1] if "/" in model_id else model_id
-    return (f"{model_id} is served by many backends that differ in quantization and data policy: "
-            f"pick them with --order <name>[,<name>] (openrouter.ai/{rest}, Providers tab)")
 
 
 def parse_order(text: str | None) -> list[str]:
@@ -325,60 +267,11 @@ def is_api_task(task) -> bool:
     return task.spec.get("via") == "api"
 
 
-# the where-note: the first task of each repo and provider
-
-def first_for(repo, provider: str, me: str | None = None) -> bool:
-    """Whether no earlier API task of this repo went to this provider: none in tasks/ or the
-    archive (wb gc would otherwise make the note come back). Not results.jsonl: rows before #1022
-    don't say a task was on API (no `kind`), and every closed task's directory stays, archived."""
-    repo = os.path.realpath(str(repo))
-    for t in store.all_tasks(archived=True):
-        if t.name == me or not is_api_task(t):
-            continue
-        if os.path.realpath(t.spec.get("repo") or "") == repo and _provider_of(t.spec) == provider:
-            return False
-    return True
-
-
-def _provider_of(row: dict) -> str:
-    return str(row.get("provider") or str(row.get("model") or "").split("/", 1)[0])
-
-
-def where_note(info: dict, rules: bool, named: list[str], whose: str = "",
-               submodules: bool = False) -> str:
-    """The start's note on a repo's first API task: what goes and to whom. ``rules``: the user
-    has a ~/.config/workbench/AGENTS.md the agent is handed (never Claude's files, #1061);
-    ``named``: everything else the lane reads, which goes too: the copies and siblings named on
-    the command line, its `--allow-path` and commands.json's standing `paths` (those once went
-    unsaid, #1269); ``submodules``: the repo's, filled in its worktree (#1267); ``whose``: whose
-    choice the model is (`the trivial role's model`, `asked for`, #1016)."""
-    what = ("the repo with its submodules" if submodules else "the repo") + ", its spec, CLAUDE.md files" \
-        + (" and your workbench AGENTS.md" if rules else "")
-    if named:
-        what = what.replace(" and your", ", your") + " and " + ", ".join(named)
-    policy = f"data policy: {info['policy']}" if info.get("policy") else f"see {info['name']}'s data policy"
-    extra = "".join(f"; {p}" for p in info["line"].split(" · ")[1:] if not p.startswith("see "))
-    return f"this task sends {what} to {info['name']} ({whose + '; ' if whose else ''}{policy}){extra}"
-
-
-def standing_refusal(kind: str, entry: str, name: str, given: str | None = None,
-                     role: str | None = None, asked: bool = False, advice: bool = True) -> str:
-    """_worktree_setup's exit-3 line for a commands.json `copy` or `siblings` entry an API task
-    would take along unnamed. `given`: the --copy that names it, from a package its path from
-    there (cli._copy_name, #1158). The other way out is local_only_line's: for a --model start
-    (``asked``) a GPU model, else the role's way off API (routes.off_api). A fixed "or put the
-    role on the GPU" had Claude move a role, which changed nothing under Agents API or for a
-    --model start, and the retry was refused the same way (#1227, 2026-11-24). ``advice``
-    False: the busy opt-in's note, its role on the GPU already (as meter.refusal's)."""
-    from . import routes  # routes imports this module
-    flag = f"--copy {given or entry}" if kind == "copy" else f"--sibling {entry}"
-    did = f"copies {entry} into every task" if kind == "copy" else f"links {entry} beside every task"
-    if not advice:
-        fix = ""
-    elif asked:
-        fix = ", or a GPU model"
-    else:
-        off = routes.off_api(role) or routes.off_api(None)  # a start on API: never None
-        fix = f", or {off[1]} ({off[2]})"
-    return (f'commands.json "repos" {did}, and this one is on API ({name}): '
-            f"name it ({flag}) to send it{fix}")
+def standing_refusal(entry: str, advice: bool = True) -> str:
+    """_worktree_setup's exit-3 line for a commands.json `copy` entry that holds a credential
+    (holds_credential): an API task never takes it, named or not (#1322; naming every standing
+    entry on every start was #1021's way, a step that guarded nothing the user hadn't set up).
+    ``advice`` False: the busy opt-in's note, its role on the GPU already."""
+    fix = " (run on the GPU, or keep the secret in an environment variable)" if advice else ""
+    return (f"commands.json copies {entry} into every task and it holds a credential: "
+            f"an API task doesn't take it{fix}")

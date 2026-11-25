@@ -77,10 +77,10 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
      significant and writing? Your code goes to `<provider>`. Day cap $5?" On a yes, the one
      command `wb route trivial <id> significant <id> writing <significant id> --day-usd 5` (their
      cap if they named one): the dialog shows it, and its Allow is the consent. **OpenRouter** (an
-     `openrouter/…` id) serves one id from many backends, and which is the user's choice: the same
-     question asks which (the model's Providers tab on openrouter.ai), and each OpenRouter role is a
-     `wb route <role> <id> --order <name>[,<name>]` of its own, `--day-usd` on the first (in a
-     several-role `wb route` it exits 3); any others still go in one. Another answer: do what they said. A "not changed" (the
+     `openrouter/…` id) serves one id from many backends and, with no `--order`, picks one (the
+     dialog says so); offer `--order <name>[,<name>]` if they care which. Each OpenRouter role is a
+     `wb route <role> <id>` of its own, `--day-usd` on the first (in a several-role `wb route` it
+     exits 3); any others still go in one. Another answer: do what they said. A "not changed" (the
      dialog's Don't): say which roles it left on the GPU (after an earlier Allow in the OpenRouter
      routes, `wb route` shows what is set) and that their tasks need a GPU model; ask again only if
      they bring it up. Ask nothing before it: no server install, no `wb scout`.
@@ -240,13 +240,11 @@ replay the bench on it first (`wb bench run --model <id>`, §6), then give it it
 real tasks with `--model` (ones you'd review closely anyway).
 **API models and privacy.** An API model sends the repo, its spec, the CLAUDE.md files and the
 user's `~/.config/workbench/AGENTS.md` to its provider (never their `~/.claude` files), and
-whatever else its lane reads (submodules, siblings, granted paths: the start's note names them). When you propose an API role, say where the code goes
-(the provider, as `wb route --dry-run`'s line names it; its data-policy page comes in the note
-of the repo's first task there). Never remove a `local_only`
+whatever else its lane reads (submodules, siblings, granted paths). When you propose an API role, say where the code goes
+(the provider, as `wb route --dry-run`'s line names it). Never remove a `local_only`
 from commands.json (a repo the user keeps off API models, nor may an API task's sibling or
 granted path be one: `wb start` and `wb allow --path` exit 3 with the choices, and a task
-already on API stops before its next round: wb takeover or wb discard; ask the user). Never name a free model first (the provider may keep or train on the code), and
-never pick an OpenRouter backend (`--order`) for the user: ask which. An API task's lane hides
+already on API stops before its next round: wb takeover or wb discard; ask the user). Never name a free model first (the provider may keep or train on the code). An API task's lane hides
 each registry config that holds a credential (a token, password, key; one without stays readable
 and its tool works; with no lane, as on macOS, none is hidden and there's no note); when
 `wb start`'s note says a tool stops on every run there (Maven, Gradle, dotnet, Bundler…), that

@@ -5422,8 +5422,7 @@ def _cap_wait(task: store.Task, lease) -> bool:
     return waited
 
 
-# #1215: a repo marked local-only after its API task started (wb start's where-note invites it on
-# the first one) had wb next, feedback and resume refuse the task, but the runner sent the repo to
+# #1215: a repo marked local-only after its API task started had wb next, feedback and resume refuse the task, but the runner sent the repo to
 # the provider all the same, and billed it: round 1 after a slot wait or the setup, and every round
 # it starts itself (auto-fix, self-review, a handover, a rerun) (the bar loop, 2026-11-24)
 LOCAL_ONLY = "local_only"

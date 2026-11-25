@@ -10,6 +10,7 @@ itself are hidden, leaving the project's own; so is `question`, which nobody ans
 """
 from __future__ import annotations
 
+import fnmatch
 import glob
 import hashlib
 import json
@@ -2247,6 +2248,18 @@ API_HIDDEN_STOPS = frozenset({"Yarn", "Maven", "Gradle", "dotnet", "poetry", "Co
 # and what fails for a tool that installs nothing (#1092): huggingface_hub takes a token file it
 # can't read as no token, so only a gated or private model's download fails
 API_HIDDEN_FAILS = {"Hugging Face": "Hugging Face's gated and private models don't download"}
+# What says a checkout builds with each tool: a manifest at its top or in the task's package
+# (fnmatch patterns; poetry's pyproject.toml only with a [tool.poetry] table, _uses). The note
+# named every hidden file on every API start, whatever the repo built with, and the skill had
+# Claude tell the user the repo wouldn't build on API (#1322)
+API_HIDDEN_USES = {"npm": ("package.json",), "Yarn": ("package.json",), "bun": ("package.json",),
+                   "Maven": ("pom.xml",),
+                   "Gradle": ("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"),
+                   "dotnet": ("*.csproj", "*.fsproj", "*.vbproj", "*.sln", "nuget.config", "NuGet.Config"),
+                   "poetry": ("pyproject.toml",), "Composer": ("composer.json",), "Bundler": ("Gemfile",),
+                   "dart pub get": ("pubspec.yaml",), "Hex": ("mix.exs",),
+                   "pip": ("pyproject.toml", "requirements*.txt", "setup.py", "setup.cfg"),
+                   "Hugging Face": ("pyproject.toml", "requirements*.txt", "setup.py", "setup.cfg")}
 # Of the home directory's own entries, the dotfiles (tools' configs, caches, toolchains) stay
 # readable, and these (R's and Perl's user libraries); the user's documents and other projects
 # don't, beyond the task's repo, workbench itself, the programs on PATH and what Claude allowed.
@@ -2658,18 +2671,47 @@ def api_hidden_refusal(task: store.Task, raw: str) -> str | None:
     return None
 
 
+def _uses(task: store.Task) -> set[str]:
+    """The tools of API_HIDDEN_USES whose manifest the task's checkout has, at its top or in its
+    package (task.json `subdir`)."""
+    repo = os.path.realpath(task.spec["repo"])
+    at = os.path.join(repo, task.spec["subdir"]) if task.spec.get("subdir") else repo
+    names = set()
+    for d in {repo, at}:
+        try:
+            names.update(os.listdir(d))
+        except OSError:
+            pass
+    used = {tool for tool, pats in API_HIDDEN_USES.items()
+            if any(fnmatch.fnmatch(n, pat) for n in names for pat in pats)}
+    if "poetry" in used and not any(_reads(os.path.join(d, "pyproject.toml"), "[tool.poetry")
+                                    for d in {repo, at}):
+        used.discard("poetry")
+    return used
+
+
+def _reads(path: str, text: str) -> bool:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return text in f.read(1 << 20)
+    except OSError:
+        return False
+
+
 def api_hidden_note(task: store.Task) -> str:
-    """wb start's note for an API task when a file API_HIDDEN names holds a credential, else '': the files,
-    then the tools that don't run in its lane (API_HIDDEN_STOPS), those whose private-registry
-    installs fail and what else fails (API_HIDDEN_FAILS: Hugging Face's gated models, #1092).
-    '' where ``task`` has no lane to hide them: no Landlock, or the lane off."""
+    """wb start's note for an API task when a file API_HIDDEN names holds a credential and the
+    checkout builds with its tool (_uses), else '': the files, then the tools that don't run in
+    its lane (API_HIDDEN_STOPS), those whose private-registry installs fail and what else fails
+    (API_HIDDEN_FAILS: Hugging Face's gated models, #1092). '' where ``task`` has no lane to
+    hide them: no Landlock, or the lane off."""
     # Without a lane nothing is hidden: the agent reads the file and Maven runs. On macOS every
     # API start said otherwise, so Claude, as the skill says, told the user the repo won't build
     # on API and that the token couldn't reach the provider (#1156, 2026-11-24)
     if not lane.abi() or writable(task) is None:
         return ""
     home = os.path.realpath(Path.home())
-    tools = _api_hidden_tools()
+    uses = _uses(task)
+    tools = {p: tool for p, tool in _api_hidden_tools().items() if tool in uses}
     there = sorted(tools)  # each there and holding a credential (a file, or NuGet's config/)
     if not there:
         return ""
