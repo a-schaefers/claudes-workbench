@@ -2850,8 +2850,13 @@ def _by_hand(task: store.Task) -> tuple[list[str], list[str]]:
 
 # rules/<task>/claude-calls/<id>.json: the mod's row of each of Claude's own tool calls in the
 # task's worktree (a Bash command that names the task's directory or runs in it, an edit tool's
-# file there), {tool, at, end (epoch seconds), command and cwd, or path} (#1211)
+# file there), {tool, at, end (epoch seconds; null while the call runs), command and cwd, or path,
+# denied (a call that never ran)} (#1211, #1272)
 CLAUDE_CALLS = "claude-calls"
+# A row still running (end null) as wb reads it ends now, at most this long after it began: a
+# Bash call's limit in Claude Code is 10 minutes, and a session that died in a call never ends
+# its row (#1272)
+CALL_RUNS = 600.0
 CLAUDE_EDIT_TOOLS = ("Edit", "MultiEdit", "Write", "NotebookEdit")
 # A file's times may be whole seconds (HFS+, a FAT or 9p mount): what a call wrote can read up to
 # that much before the call began
@@ -2861,16 +2866,24 @@ CALL_NAMES = 5000  # words of a Claude command read for names: a heredoc of a mo
 
 def claude_calls(task: store.Task) -> list[dict]:
     """The mod's rows of Claude's own tool calls in the worktree (CLAUDE_CALLS); [] without the
-    mod, or before it kept them."""
+    mod, or before it kept them. A row still running (`end` null) ends now, at most CALL_RUNS
+    after it began: a build and `wb accept` in one Bash call, as the skill says, is that call's
+    own row while accept reads it, and the build's dist/ was refused as files written by hand
+    while the mod wrote rows only once a call was over (#1272, 2026-11-24). A denied call's
+    is none."""
     d = context.rules_dir(task) / CLAUDE_CALLS
     try:
         names = sorted(os.listdir(d))
     except OSError:
         return []
-    out = []
+    out, now = [], time.time()
     for n in names:
         r = store.read_json(d / n) if n.endswith(".json") else None
-        if isinstance(r, dict) and all(isinstance(r.get(k), (int, float)) for k in ("at", "end")):
+        if not isinstance(r, dict) or r.get("denied") or not isinstance(r.get("at"), (int, float)):
+            continue
+        if "end" in r and r["end"] is None:
+            r["end"] = max(r["at"], min(now, r["at"] + CALL_RUNS))
+        if isinstance(r.get("end"), (int, float)):
             out.append(r)
     return out
 

@@ -3846,7 +3846,7 @@ test('the tasks a shell command of Claude\'s runs in or names, by any spelling o
   expect(taskOfPath('/home/u/project/a.py', '/wb')).toBe('')
 })
 
-test('Claude\'s own calls in a task\'s worktree are kept for wb, each with when it ran (#1211)', async ($, on) => {
+test('Claude\'s own calls in a task\'s worktree are kept for wb as they begin, each with when it ran (#1211, #1272)', async ($, on) => {
   // #1211 (2026-11-24): `mvn test` that Claude ran beside a --test of grep wrote reports that wb
   // accept refused as files written by hand; wb tells them apart by these rows
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
@@ -3858,7 +3858,10 @@ test('Claude\'s own calls in a task\'s worktree are kept for wb, each with when 
   fakeTasks(on, files)
   on('session.cwd', () => ({ value: '/home/u/project' }))
   on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }))
-  on('tool.call', async () => { await clock.sleep(3000); return { result: {}, text: '' } })  // the engine's, 3 s
+  on('tool.call', async (_: any, e: any) => {                                                // the engine's, 3 s
+    await clock.sleep(3000)
+    return String(e.command).includes('rm -rf') ? { deny: 'the user said no' } : { result: {}, text: '' }
+  })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.advance(1000)
   const rows = () => Object.keys(files).filter(p => p.startsWith('/wb/rules/fix-it/claude-calls/'))
@@ -3869,12 +3872,23 @@ test('Claude\'s own calls in a task\'s worktree are kept for wb, each with when 
     return done
   }
   const began = clock.now() / 1000
-  await call({ tool: 'Bash', command: 'cd /wb/tasks/fix-it/worktree && mvn -q test', tool_use_id: 'toolu_1' })
+  // kept as it begins, running (end null): a build and `wb accept` in one call read no row of
+  // the build's while it ran (#1272, 2026-11-24)
+  const running = $.tool.call({ tool: 'Bash', command: 'cd /wb/tasks/fix-it/worktree && mvn -q test', tool_use_id: 'toolu_1' } as any)
+  await clock.advance(1000)
+  expect(rows()).toEqual([{ tool: 'Bash', command: 'cd /wb/tasks/fix-it/worktree && mvn -q test',
+    cwd: '/home/u/project', at: began, end: null }])
+  await clock.advance(2000)
+  await running
   expect(rows()).toEqual([{ tool: 'Bash', command: 'cd /wb/tasks/fix-it/worktree && mvn -q test',
     cwd: '/home/u/project', at: began, end: began + 3 }])
+  // one the user refused at its dialog never ran: marked so (#1272)
+  await call({ tool: 'Bash', command: 'rm -rf /wb/tasks/fix-it/worktree/dist', tool_use_id: 'toolu_2' })
+  expect(rows().find(r => r.command?.startsWith('rm -rf'))).toMatchObject({ denied: true })
+  expect(rows().filter(r => !r.denied).length).toBe(1)
   await call({ tool: 'Bash', command: 'mvn -q test' })                         // the user's project: none
   await call({ tool: 'Bash', command: 'cat /wb/tasks/gone/worktree/a' })       // no such task: none, no directory
-  expect(rows().length).toBe(1)
+  expect(rows().length).toBe(2)
   expect(Object.keys(files).some(p => p.startsWith('/wb/rules/gone'))).toBe(false)
   await call({ tool: 'Write', file_path: '/wb/tasks/fix-it/worktree/lib/a.py', content: 'x = 1\n' })
   expect(rows().map(r => r.path ?? r.command)).toContain('/wb/tasks/fix-it/worktree/lib/a.py')
