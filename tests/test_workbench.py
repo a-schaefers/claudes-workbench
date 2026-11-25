@@ -46863,6 +46863,27 @@ class Rewind(Base):
                                 capture_output=True, text=True, check=True).stdout
         self.assertNotIn("secret.env", status)
 
+    def test_a_rewind_puts_back_an_ignored_file_the_agent_wrote_and_says_nothing_false_of_it(self):
+        # the merge of 2.1 into main (2026-11-25): main's review trees hold the ignored files the
+        # agent wrote (#1259's force), wb rewind's own snapshots didn't, so a rewind from a
+        # reviewed round said "your edits since the last review … kept nowhere" and named the
+        # restored lib/util.py as "not as round 2's files"
+        (self.repo / ".gitignore").write_text("lib/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore lib"], check=True)
+        name = "t-rwl"
+        self.start(name, "shellwrite", "--test", TEST_CMD, "--no-base-check")
+        wait_phase(name, {"review"})
+        task = store.Task(name)
+        self.reviewed(task, 2, {"lib/util.py": "def answer():\n    return 42  # two\n"})
+        self.reviewed(task, 3, {"lib/util.py": "def answer(:\n", "notes.txt": "three\n"}, tests="1")
+        out = run_wb("rewind", name, "2")
+        self.assertEqual((task.worktree / "lib/util.py").read_text(), "def answer():\n    return 42  # two\n")
+        self.assertFalse((task.worktree / "notes.txt").exists())
+        self.assertNotIn("kept nowhere", out)
+        self.assertNotIn("not as round 2's files", out)
+        self.assertIn("lib/util.py", out.split("undone:\n", 1)[1])
+
     def test_feedback_after_a_rewind_says_so_and_starts_a_fresh_session(self):
         from workbench import lessons
         name = "t-rwf"

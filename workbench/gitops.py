@@ -1317,7 +1317,7 @@ def _unlink_in(top: bytes, paths: list[bytes]) -> list[bytes]:
 
 
 def restore_tree(worktree: Path, tree: str, keep=(), now: str | None = None,
-                 now_keep=()) -> dict:
+                 now_keep=(), force=()) -> dict:
     """Put the worktree's files back to ``tree``, a review snapshot (wb rewind, #1198). Only what
     differs from the worktree now (its own snapshot) is touched: a file the tree has and the
     worktree lacks or holds otherwise is written from a scratch index (`read-tree` and
@@ -1327,7 +1327,9 @@ def restore_tree(worktree: Path, tree: str, keep=(), now: str | None = None,
     review_snapshot's third value) is never written over either: no tree holds that copy, and a
     2 MB file the agent grew from round 2's 10 KB got round 2's copy, gone for good, while the
     rewind said it was left as it was (#1198's review). Ignored files, nested repositories and
-    submodules are in neither tree, and stay; but the tree's .gitignore, written back, can stop
+    submodules are in neither tree, and stay, but for ``force``: the ignored files the agent
+    wrote, which the runner's review trees hold (#1259) and both snapshots here take too. The
+    tree's .gitignore, written back, can stop
     ignoring a file a later round made and ignored (a secret.env wb accept would then have
     committed, in no round's review): the worktree is snapshotted again, and a file new in it
     that neither tree has is deleted. Nothing is committed and the worktree's own index is left
@@ -1341,7 +1343,7 @@ def restore_tree(worktree: Path, tree: str, keep=(), now: str | None = None,
     that the tree lacks (one it has is as it has it: written, or alike in both snapshots)."""
     wt = Path(worktree)
     if now is None:
-        now, _, now_keep = review_snapshot(wt)
+        now, _, now_keep = review_snapshot(wt, force=force)
     out = {k: [] for k in ("written", "deleted", "kept", "left", "unignored", "differs")}
     if now == tree:
         return out
@@ -1363,7 +1365,7 @@ def restore_tree(worktree: Path, tree: str, keep=(), now: str | None = None,
             _run(wt, ("read-tree", tree), env=env)
             _run(wt, ("checkout-index", "-f", "-z", "--stdin"), env=env,
                  input=b"".join(p + b"\0" for p in write))
-    after, _, after_keep = review_snapshot(wt)
+    after, _, after_keep = review_snapshot(wt, force=force)
     unignored, differs = [], []
     if after != tree:
         seen, expected, new = {p for _, p in first}, set(kept) | set(left), []

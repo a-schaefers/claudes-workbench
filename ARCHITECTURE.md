@@ -1259,7 +1259,11 @@ tree's `keep` names it, since the tree has no copy (those, and the worktree's ow
 files, are named); a file the worktree's own snapshot left out (its `keep`, `now_keep`) is never
 written over, even when the tree has an older copy, and stays out of the stat: round 2's 10 KB
 copy went over the agent's 2 MB one, which no tree held, while the rewind said it was left as it
-was (#1198's review). Ignored files, nested repos and submodules are in neither tree and stay;
+was (#1198's review). Ignored files, nested repos and submodules are in neither tree and stay,
+but for the ignored files the agent wrote (`runner.ignored_to_commit`), which the review trees
+hold (#1259) and both of the rewind's snapshots take too (`restore_tree`'s `force`): without
+them a rewind from a reviewed round said `your edits … kept nowhere` and named the file it had
+just put back as `not as round N's files` (the merge of 2.1 into main, 2026-11-25);
 but the tree's `.gitignore`, written back, can stop ignoring a file a later round made and hid
 (a `secret.env` accept's `add -A` would have committed), so the worktree is snapshotted again
 and a file new in it that neither tree has is deleted (`deleted, not in round N's files (a
@@ -8435,7 +8439,8 @@ doc needs its own `!/` line).
 - **Permissions or the config layer** (`context.py`, `write_config_layer`) → the real-OpenCode tests, unskipped.
 - **`runner.TELEMETRY_ENV`** ↔ the variables through which OpenCode exports (2.3.2: `OTEL_EXPORTER_OTLP_ENDPOINT`,
   `OTEL_EXPORTER_OTLP_HEADERS`; packages/util/src/observability) and any telemetry it adds by default: re-check its
-  source on each OpenCode bump, and RealOpenCode's OTel test.- **The user's MCP servers** (commands.json `mcp`, `context.mcp_refusal`, `mcp_servers`, `mcp_roots`, the `<name>_*`
+  source on each OpenCode bump, and RealOpenCode's OTel test.
+- **The user's MCP servers** (commands.json `mcp`, `context.mcp_refusal`, `mcp_servers`, `mcp_roots`, the `<name>_*`
   allow between `MCP_RULES` and `DENIED_TOOLS`) → `UsersMcpServers`, RealOpenCode's #1202 test (its `run_calls(…,
   reads=True)` keeps the lane's reads, as the runner's lane does; a server in its own venv, one that dies at its start; one in an API task's repo: no root, `wb start`'s and `wb doctor`'s note, none with no lane, `lane.abi` mocked either way so a Mac's CI runs both), the fake's MCP start (`FAKE_MCP_LOG`, its OpenCode log lines), `wb doctor`.
   OpenCode's log line for an MCP connection (`runner.MCP_LOG_LINE`, `MCP_LOG_ERROR`) → the fake's lines and that real test.

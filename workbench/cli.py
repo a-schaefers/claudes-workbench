@@ -2150,8 +2150,12 @@ def cmd_rewind(a):
     if not gitops.has_tree(wt, want["tree"]):  # its ref deleted by hand, and gc pruned it
         die(f"round {a.round}'s tree is gone from the repo (its ref "
             f"{gitops.REVIEW_REF.format(a.name, a.round)} was deleted)")
+    # the ignored files the agent wrote, as the runner's review trees hold them (#1259): without
+    # them every rewind from a reviewed round said "your edits … kept nowhere" and named the
+    # restored file "not as round N's" (the merge of 2.1 into main, 2026-11-25)
+    ignored = runner.ignored_to_commit(task)
     try:
-        now, now_left, now_keep = gitops.review_snapshot(wt)
+        now, now_left, now_keep = gitops.review_snapshot(wt, force=ignored)
     except (gitops.GitError, OSError) as e:
         die(f"can't read the worktree: {e}")
     saved = ""
@@ -2171,7 +2175,7 @@ def cmd_rewind(a):
         return
     try:
         done = gitops.restore_tree(wt, want["tree"], want.get("keep") or [], now=now,
-                                   now_keep=now_keep)
+                                   now_keep=now_keep, force=ignored)
     except (gitops.GitError, OSError) as e:
         die(f"the rewind stopped partway ({e}): wb rewind {a.name} {a.round} again")
     # the stat names no file left as it is: a grown file the tree has read as deleted (#1198)
