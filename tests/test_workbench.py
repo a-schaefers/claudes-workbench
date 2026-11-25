@@ -22515,8 +22515,8 @@ if a[:2] == ["auth", "status"]:
     sys.stdout.write(open(os.environ["FAKE_GH_AUTH"]).read())
 elif a[0] == "api":
     api = json.load(open(os.environ["FAKE_GH_API"])) if os.path.exists(os.environ["FAKE_GH_API"]) else {}
-    fork = {"full_name": "someone/claudes-workbench", "parent": {"full_name": "a-schaefers/claudes-workbench"}}
-    code, out = api.get(a[1], [0, json.dumps(fork)] if a[1] == "repos/someone/claudes-workbench" else
+    fork = {"full_name": "someone/workbench", "parent": {"full_name": "a-schaefers/workbench"}}
+    code, out = api.get(a[1], [0, json.dumps(fork)] if a[1] == "repos/someone/workbench" else
                         [1, "gh: Not Found (HTTP 404)"])
     (sys.stdout if code == 0 else sys.stderr).write(out + "\n")
     sys.exit(code)
@@ -22531,8 +22531,8 @@ elif a[:2] == ["pr", "create"]:
         sys.exit("pull request create failed: GraphQL: github_pat_11ABCDEF_xyz789 lacks access")
     if fail == "exists":
         sys.exit('a pull request for branch "someone:pr/fix-thing" into branch "main" already exists:\n'
-                 "https://github.com/a-schaefers/claudes-workbench/pull/1")
-    print("https://github.com/a-schaefers/claudes-workbench/pull/7")
+                 "https://github.com/a-schaefers/workbench/pull/1")
+    print("https://github.com/a-schaefers/workbench/pull/7")
 elif a[:2] == ["pr", "view"]:
     state = os.environ.get("FAKE_GH_PR_STATE", "OPEN")
     if state == "fail":
@@ -22551,7 +22551,7 @@ class LocalPatches(Base):
     re-clones its clone whenever HEAD differs from upstream's, so a local commit or edit there was
     wiped while wb update said "updated marketplace", exit 0. A real origin and clone stand in for
     this copy, as in Update; a fake `claude` records its calls."""
-    URL = "https://github.com/a-schaefers/claudes-workbench.git"
+    URL = "https://github.com/a-schaefers/workbench.git"
 
     def setUp(self):
         super().setUp()
@@ -22995,7 +22995,7 @@ class LocalPatches(Base):
         self.assertEqual(self.gh_argv(), [])                    # gh's state read, nothing done
         self.assertEqual(self.g(self.origin, "branch", "--list", "pr/*"), "")   # nothing pushed
         noted = store.read_json(store.home() / "patches.json")
-        self.assertEqual((noted["source"], noted["upstream"]), (str(self.copy), "a-schaefers/claudes-workbench"))
+        self.assertEqual((noted["source"], noted["upstream"]), (str(self.copy), "a-schaefers/workbench"))
         self.assertEqual(noted["prepared"], {"fix-thing": {
             "author": "t", "email": "t@t", "subject": "fix the thing",
             "date": int(self.g(self.copy, "log", "-1", "--format=%at", fix))}})   # what wb update drops later
@@ -23301,26 +23301,26 @@ class LocalPatches(Base):
         self.assertEqual(self.gh_argv(), [])
         self.assertFalse(self.sent())
         self.gh_auth(protocol="ssh")                            # over ssh the scope isn't asked for
-        self.g(self.copy, "config", f"url.{self.fork}.insteadOf", "git@github.com:someone/claudes-workbench.git")
-        self.assertIn("opened https://github.com/a-schaefers/claudes-workbench/pull/7", send())
+        self.g(self.copy, "config", f"url.{self.fork}.insteadOf", "git@github.com:someone/workbench.git")
+        self.assertIn("opened https://github.com/a-schaefers/workbench/pull/7", send())
 
     def test_patch_send_on_the_owners_own_repository_pushes_to_origin_and_forks_nothing(self):
         wt, body = self.prepared()
         self.gh_auth(login="a-schaefers")
         out = self.wb("patch", "send", "fix-thing", "--title", "Fix the thing", "--body-file", str(body))
-        self.assertIn("pushed pr/fix-thing to a-schaefers/claudes-workbench\n", out)
-        self.assertIn("opened https://github.com/a-schaefers/claudes-workbench/pull/7", out)
+        self.assertIn("pushed pr/fix-thing to a-schaefers/workbench\n", out)
+        self.assertIn("opened https://github.com/a-schaefers/workbench/pull/7", out)
         self.assertIn("the next wb update drops the local patch", out)
         self.assertEqual(self.g(self.origin, "rev-parse", "pr/fix-thing"), self.g(wt, "rev-parse", "HEAD"))
         self.assertFalse(self.fork.exists())
-        self.assertEqual(self.gh_argv(), [["pr", "create", "-R", "a-schaefers/claudes-workbench", "--base", "main",
+        self.assertEqual(self.gh_argv(), [["pr", "create", "-R", "a-schaefers/workbench", "--base", "main",
                                            "--head", "a-schaefers:pr/fix-thing", "--title", "Fix the thing",
                                            "--body-file", str(body)]])
 
     def test_patch_send_forks_then_pushes_to_the_fork_in_the_users_protocol_and_opens_the_pr(self):
         # #1005 (2026-11-22): never gh repo fork --remote, which renames the user's origin
-        for protocol, url in (("https", "https://github.com/someone/claudes-workbench.git"),
-                              ("ssh", "git@github.com:someone/claudes-workbench.git")):
+        for protocol, url in (("https", "https://github.com/someone/workbench.git"),
+                              ("ssh", "git@github.com:someone/workbench.git")):
             with self.subTest(protocol):
                 slug = f"fix-{protocol}"
                 wt, body = self.prepared(slug=slug) if protocol == "https" else self.prepared_again(slug)
@@ -23329,22 +23329,22 @@ class LocalPatches(Base):
                 self.gh_calls.unlink(missing_ok=True)
                 out = self.wb("patch", "send", slug, "--title", "Fix the thing", "--body-file", str(body),
                               *(["--draft"] if protocol == "ssh" else []))
-                self.assertIn(f"pushed pr/{slug} to someone/claudes-workbench (forked from "
-                              "a-schaefers/claudes-workbench)", out)
-                self.assertIn("opened https://github.com/a-schaefers/claudes-workbench/pull/7"
+                self.assertIn(f"pushed pr/{slug} to someone/workbench (forked from "
+                              "a-schaefers/workbench)", out)
+                self.assertIn("opened https://github.com/a-schaefers/workbench/pull/7"
                               + (" (a draft)" if protocol == "ssh" else ""), out)
                 self.assertEqual(self.g(self.fork, "rev-parse", f"pr/{slug}"), self.g(wt, "rev-parse", "HEAD"))
                 self.assertEqual(self.gh_argv(), [
-                    ["repo", "fork", "a-schaefers/claudes-workbench", "--clone=false", "--remote=false"],
-                    ["api", "repos/someone/claudes-workbench"],          # which repository the fork is
-                    ["pr", "create", "-R", "a-schaefers/claudes-workbench", "--base", "main", "--head",
+                    ["repo", "fork", "a-schaefers/workbench", "--clone=false", "--remote=false"],
+                    ["api", "repos/someone/workbench"],          # which repository the fork is
+                    ["pr", "create", "-R", "a-schaefers/workbench", "--base", "main", "--head",
                      f"someone:pr/{slug}", "--title", "Fix the thing", "--body-file", str(body),
                      *(["--draft"] if protocol == "ssh" else [])]])
                 self.assertEqual(self.g(self.copy, "remote"), "origin")          # the user's remotes as they were
                 self.assertEqual(self.g(self.copy, "config", "remote.origin.url"), self.URL)
                 self.assertEqual(self.g(self.origin, "branch", "--list", "pr/*"), "")
         noted = store.read_json(store.home() / "patches.json")       # the mod's keys kept as they were
-        self.assertEqual((noted["source"], noted["upstream"]), (str(self.copy), "a-schaefers/claudes-workbench"))
+        self.assertEqual((noted["source"], noted["upstream"]), (str(self.copy), "a-schaefers/workbench"))
 
     def prepared_again(self, slug):
         """A second pr/<slug> from the same clone (prepared() already made it a clone install)."""
@@ -23357,7 +23357,7 @@ class LocalPatches(Base):
     def test_patch_send_waits_for_a_new_fork_that_is_not_there_yet(self):
         # #1005: GitHub makes a fork asynchronously, so the first pushes can find no repository
         wt, body = self.prepared()
-        self.g(self.copy, "config", f"url.{self.fork}.insteadOf", "https://github.com/someone/claudes-workbench.git")
+        self.g(self.copy, "config", f"url.{self.fork}.insteadOf", "https://github.com/someone/workbench.git")
         real, tries = patches._git, []
 
         def git(cwd, *args, **kw):
@@ -23370,13 +23370,13 @@ class LocalPatches(Base):
         with mock.patch.object(patches, "_git", git), mock.patch.object(patches, "PUSH_WAITS", (0, 0, 0, 0)):
             out = self.wb("patch", "send", "fix-thing", "--title", "Fix it", "--body-file", str(body))
         self.assertEqual(len(tries), 3)
-        self.assertIn("opened https://github.com/a-schaefers/claudes-workbench/pull/7", out)
+        self.assertIn("opened https://github.com/a-schaefers/workbench/pull/7", out)
         self.assertEqual(self.g(self.fork, "rev-parse", "pr/fix-thing"), self.g(wt, "rev-parse", "HEAD"))
 
     def test_a_failing_gh_step_says_what_is_done_already_and_never_prints_a_token(self):
         # #1005 (2026-11-22): gh's errors can carry a token; the user is told what is done
         wt, body = self.prepared()
-        self.g(self.copy, "config", f"url.{self.fork}.insteadOf", "https://github.com/someone/claudes-workbench.git")
+        self.g(self.copy, "config", f"url.{self.fork}.insteadOf", "https://github.com/someone/workbench.git")
         send = lambda: self.wb("patch", "send", "fix-thing", "--title", "Fix it", "--body-file", str(body))  # noqa: E731
         os.environ["FAKE_GH_FAIL"] = "fork"
         out = send()
@@ -23387,8 +23387,8 @@ class LocalPatches(Base):
         os.environ["FAKE_GH_FAIL"] = "pr"
         out = send()
         self.assertIn("gh pr create failed: pull request create failed: GraphQL: <token> lacks access", out)
-        self.assertIn("done already: forked a-schaefers/claudes-workbench to someone/claudes-workbench, "
-                      "pushed pr/fix-thing to someone/claudes-workbench", out)
+        self.assertIn("done already: forked a-schaefers/workbench to someone/workbench, "
+                      "pushed pr/fix-thing to someone/workbench", out)
         self.assertIn("wb patch send fix-thing again goes on from there", out)
         self.assertNotIn("github_pat_", out)
         self.assertEqual(patches.scrub("token gho_AbC123 and\nghs_x9 github_pat_11A_b"), "token <token> and <token> <token>")
@@ -23501,12 +23501,12 @@ class LocalPatches(Base):
         self.g(self.copy, "config", f"url.{self.origin}.insteadOf", self.URL)
         self.wb("update")
         self.assertEqual(store.read_json(store.home() / "patches.json"),
-                         {"source": str(self.copy), "upstream": "a-schaefers/claudes-workbench"})
+                         {"source": str(self.copy), "upstream": "a-schaefers/workbench"})
 
     def send(self, body, *more, slug="fix-thing", title="Fix it"):
         return self.wb("patch", "send", slug, "--title", title, "--body-file", str(body), *more)
 
-    def to_fork(self, name="someone/claudes-workbench"):
+    def to_fork(self, name="someone/workbench"):
         """The fork's https URL leads to the stand-in fork (and only it)."""
         self.g(self.copy, "config", "--replace-all", f"url.{self.fork}.insteadOf", f"https://github.com/{name}.git")
 
@@ -23534,8 +23534,8 @@ class LocalPatches(Base):
         with mock.patch.object(patches, "_git", git), mock.patch.object(patches, "PUSH_WAITS", (0, 0, 0, 0)):
             out = self.send(body)
         self.assertEqual(len(tries), 1)
-        self.assertIn("git push to someone/claudes-workbench failed: git@github.com: Permission denied (publickey)", out)
-        self.assertIn("done already: forked a-schaefers/claudes-workbench to someone/claudes-workbench", out)
+        self.assertIn("git push to someone/workbench failed: git@github.com: Permission denied (publickey)", out)
+        self.assertIn("done already: forked a-schaefers/workbench to someone/workbench", out)
 
     def test_a_push_with_no_answer_still_says_what_is_done_already(self):
         # #1005, 2026-11-22 (the review): git's timeout raised past send's report of the steps done
@@ -23548,31 +23548,31 @@ class LocalPatches(Base):
             return real(cwd, *args, **kw)
         with mock.patch.object(patches, "_git", git):
             out = self.send(body)
-        self.assertIn("git push to someone/claudes-workbench failed: git push: no answer in 600s; done already: "
-                      "forked a-schaefers/claudes-workbench to someone/claudes-workbench", out)
+        self.assertIn("git push to someone/workbench failed: git push: no answer in 600s; done already: "
+                      "forked a-schaefers/workbench to someone/workbench", out)
 
     def test_patch_send_pushes_to_the_users_fork_by_its_real_name_and_never_into_another_repository(self):
         # #1005, 2026-11-22 (the review): a fork renamed, or one GitHub named <name>-1 beside an
         # unrelated repository of the user's, was taken for <login>/<name>
         wt, body = self.prepared()
         api = Path(os.environ["FAKE_GH_API"])
-        mine = json.dumps({"full_name": "someone/claudes-workbench", "fork": False})
-        api.write_text(json.dumps({"repos/someone/claudes-workbench": [0, mine], "repos/a-schaefers/claudes-workbench"
+        mine = json.dumps({"full_name": "someone/workbench", "fork": False})
+        api.write_text(json.dumps({"repos/someone/workbench": [0, mine], "repos/a-schaefers/workbench"
                                    "/forks?sort=newest&per_page=100": [0, json.dumps([
-                                       {"full_name": "other/claudes-workbench", "owner": {"login": "other"}},
-                                       {"full_name": "someone/claudes-workbench-1", "owner": {"login": "someone"}}])]}))
-        self.to_fork("someone/claudes-workbench-1")
+                                       {"full_name": "other/workbench", "owner": {"login": "other"}},
+                                       {"full_name": "someone/workbench-1", "owner": {"login": "someone"}}])]}))
+        self.to_fork("someone/workbench-1")
         out = self.send(body)
-        self.assertIn("pushed pr/fix-thing to someone/claudes-workbench-1 (forked from a-schaefers/claudes-workbench)", out)
+        self.assertIn("pushed pr/fix-thing to someone/workbench-1 (forked from a-schaefers/workbench)", out)
         self.assertEqual(self.g(self.fork, "rev-parse", "pr/fix-thing"), self.g(wt, "rev-parse", "HEAD"))
-        self.assertIn(["pr", "create", "-R", "a-schaefers/claudes-workbench", "--base", "main", "--head",
+        self.assertIn(["pr", "create", "-R", "a-schaefers/workbench", "--base", "main", "--head",
                        "someone:pr/fix-thing", "--title", "Fix it", "--body-file", str(body)], self.gh_argv())
         # no fork of theirs listed beside that unrelated repository: nothing pushed anywhere
         wt2, body2 = self.prepared_again("fix-two")
-        api.write_text(json.dumps({"repos/someone/claudes-workbench": [0, mine]}))
+        api.write_text(json.dumps({"repos/someone/workbench": [0, mine]}))
         self.gh_calls.unlink()
         out = self.send(body2, slug="fix-two")
-        self.assertIn("finding the fork failed: someone/claudes-workbench isn't a fork of a-schaefers/claudes-workbench", out)
+        self.assertIn("finding the fork failed: someone/workbench isn't a fork of a-schaefers/workbench", out)
         self.assertNotIn("pushed", out)
         self.assertFalse([c for c in self.gh_argv() if c[:2] == ["pr", "create"]])
         self.assertEqual(self.g(self.fork, "branch", "--list", "pr/fix-two"), "")
@@ -23584,7 +23584,7 @@ class LocalPatches(Base):
         self.to_fork()
         os.environ["FAKE_GH_FAIL"] = "exists"
         out = self.send(body)
-        self.assertIn("opened https://github.com/a-schaefers/claudes-workbench/pull/1 (already open)", out)
+        self.assertIn("opened https://github.com/a-schaefers/workbench/pull/1 (already open)", out)
         self.assertNotIn("failed", out)
 
     def test_a_remote_off_github_is_never_printed_with_its_credentials(self):
@@ -23623,7 +23623,7 @@ class LocalPatches(Base):
                 self.assertFalse(ok.exists())                   # consumed, matching or not
         self.assertFalse(self.sent())
         approve()
-        self.assertIn("opened https://github.com/a-schaefers/claudes-workbench/pull/7", self.send(body))
+        self.assertIn("opened https://github.com/a-schaefers/workbench/pull/7", self.send(body))
         self.assertFalse(ok.exists())                           # one yes, one send
         self.assertEqual(self.g(self.fork, "rev-parse", "pr/fix-thing"), self.g(wt, "rev-parse", "HEAD"))
 
@@ -23687,7 +23687,7 @@ class LocalPatches(Base):
         """prepared(), then sent as the owner (pushed to origin, no fork): pull request #7."""
         wt, body = self.prepared()
         self.gh_auth(login="a-schaefers")
-        self.assertIn("opened https://github.com/a-schaefers/claudes-workbench/pull/7", self.send(body))
+        self.assertIn("opened https://github.com/a-schaefers/workbench/pull/7", self.send(body))
         self.gh_calls.unlink(missing_ok=True)
         return wt, body
 
@@ -23710,12 +23710,12 @@ class LocalPatches(Base):
                 fix = self.g(wt, "rev-parse", "HEAD")
                 n = 7 if case == "new" else 1
                 self.assertEqual(self.noted_sent()[slug], {
-                    "repo": "a-schaefers/claudes-workbench", "pr": n,
-                    "url": f"https://github.com/a-schaefers/claudes-workbench/pull/{n}",
+                    "repo": "a-schaefers/workbench", "pr": n,
+                    "url": f"https://github.com/a-schaefers/workbench/pull/{n}",
                     "author": "t", "email": "t@t", "subject": self.g(wt, "log", "-1", "--format=%s"),
                     "date": int(self.g(wt, "log", "-1", "--format=%at", fix))})
         noted = store.read_json(store.home() / "patches.json")
-        self.assertEqual((noted["source"], noted["upstream"]), (str(self.copy), "a-schaefers/claudes-workbench"))
+        self.assertEqual((noted["source"], noted["upstream"]), (str(self.copy), "a-schaefers/workbench"))
 
     def test_a_squash_merged_pull_request_drops_its_local_patch_and_retires_its_branch(self):
         # #1005, 2026-11-22: upstream squashed it, reworded and edited, so neither a clean
@@ -23735,11 +23735,11 @@ class LocalPatches(Base):
         self.assertFalse(wt.exists() or body.exists())
         self.assertEqual(self.g(self.copy, "branch", "--list", "pr/*"), "")
         self.assertIn(old, self.g(self.copy, "reflog", "show", "--format=%H", patches.BEFORE).splitlines())
-        self.assertEqual(self.pr_views(), [["pr", "view", "7", "-R", "a-schaefers/claudes-workbench",
+        self.assertEqual(self.pr_views(), [["pr", "view", "7", "-R", "a-schaefers/workbench",
                                             "--json", "state,mergeCommit"]])
         self.assertEqual(self.worktrees(), 1)
         self.assertIn("already up to date", self.wb("update"))  # nothing left to ask about
-        self.assertEqual(self.pr_views(), [["pr", "view", "7", "-R", "a-schaefers/claudes-workbench",
+        self.assertEqual(self.pr_views(), [["pr", "view", "7", "-R", "a-schaefers/workbench",
                                             "--json", "state,mergeCommit"]])
 
     def test_a_merge_not_in_the_fetched_upstream_yet_keeps_the_patch_until_it_is(self):
