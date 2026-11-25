@@ -10881,6 +10881,26 @@ class SkillLibrary(Base):
         task.set_status(skills_told=None)                                # what _start_fresh does
         self.assertIn("`alpha`", r.skills_note(task, 2))
 
+    def test_a_skill_handed_after_the_last_run_is_not_recorded_as_offered(self):
+        # #1348: wb start's hint is followed once round 1 is under way; the task passed on that
+        # run and was accepted, and the skill no agent saw counted as offered, so three such
+        # tasks made wb skill list say rewrite or retire it (bar loop round 9, 2026-11-24)
+        from workbench import skills
+        run_wb("skill", "add", "alpha", "--from", str(self.draft("alpha", "Use when ALPHA.")), "-m", "a")
+        run_wb("skill", "add", "beta", "--from", str(self.draft("beta", "Use when BETA.")), "-m", "b")
+        for t in ("t-h1", "t-h2", "t-h3"):
+            self.start(t, "ok", "--skill", "beta")
+            wait_phase(t, {"review"})
+            self.assertIn("is told from its next run", run_wb("skill", "hand", t, "alpha"))
+            run_wb("accept", t, "-m", "feat: answer")
+        rows = store.read_jsonl(store.home() / "results.jsonl")[0][-3:]
+        self.assertEqual([r["skills_offered"] for r in rows], [["beta"]] * 3)  # told in round 1
+        use = skills.usage()
+        self.assertNotIn("alpha", use)
+        self.assertEqual(skills.advice(use.get("alpha"), store.now()), "never offered yet")
+        self.assertIn("alpha: Use when ALPHA.\n  offered 0 · loaded 0 · never offered yet",
+                      run_wb("skill", "list"))
+
     def test_the_record_says_which_skills_earn_their_place(self):
         from workbench import skills
         row = events.normalize({"type": "tool_use", "part": {"tool": "skill", "state": {

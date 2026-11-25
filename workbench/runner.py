@@ -4647,7 +4647,13 @@ def skills_note(task: store.Task, n: int) -> str:
     if gone:
         lines.append("Claude took back: " + ", ".join(f"`{x}`" for x in gone)
                      + ". They no longer apply to this work; don't follow them.")
-    task.set_status(skills_told=list(now))
+    # skills_shown, what any of its sessions was ever told, is results' skills_offered: a skill
+    # handed after the last run (wb start's hint lands once round 1 is under way) reached no
+    # agent, yet as offered it made wb skill list say rewrite or retire a good skill (#1348,
+    # 2026-11-24)
+    shown = st.get("skills_shown") or []
+    task.set_status(skills_told=list(now),
+                    skills_shown=[*shown, *(x for x in now if x in have and x not in shown)])
     if not lines:
         return ""
     task.event({"ts": store.now(), "round": n, "kind": "skills", "text": "\n".join(lines)})

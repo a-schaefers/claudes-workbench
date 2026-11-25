@@ -4854,8 +4854,11 @@ it. `hand`/`take <task> <name…>` change a task's skills from its next run (han
 take doesn't); `wb start --skill` hands at start, `wb next --skill` replaces the set
 (`cli._skill_names` dies on an unknown name before anything is created).
 
-**Handed to a task.** Status `skills` (the set), `skills_ever` (results' `skills_offered`),
-`skills_rev` (each one's rev when handed), `skills_told`. `context.layer` lists each skill's library
+**Handed to a task.** Status `skills` (the set), `skills_ever` (every skill it held),
+`skills_rev` (each one's rev when handed), `skills_told` (this session's), `skills_shown` (what any
+of its sessions was told: results' `skills_offered`, so a skill handed after the last run, wb
+start's hint followed once round 1 is under way, counts as offered nowhere, #1348; a task begun
+before it was kept records its `skills_told`). `context.layer` lists each skill's library
 directory in the config layer's `skills`, one directory each, and allows it for the file tools
 (`external_rules`). `runner.skills_note` prepends to the round's prompt argument (not prompt.md) the
 set at a session's start ("Claude picked these skills…"), then only changes, logging a `skills`
@@ -6814,7 +6817,7 @@ off), not `wb start`'s.
 | `steer_taken`, `nudges`, `nudged_round`, `explore_nudged_session`, `explore_nudge_mark`, `checkin_at` | notes delivered; nudges (think and explore); the round that ended in a think nudge; the session the explore nudge went to and the worktree's `gitops.mark` then (a fresh session is nudged again only once it differs; #1134); last check-in |
 | `active_s`, `step_active_s` | active seconds, rounds less answers and a frozen machine (*Progress checks*); its value when the step began |
 | `progress_checks`, `progress_mark`, `progress_open`, `interventions` | checks this step; mark at the last; one open; the steers that answered one, `[{kind, ts, round, step}]` |
-| `skills`, `skills_ever`, `skills_rev`, `skills_told` | handed set; ever held; library revs; what this session was told |
+| `skills`, `skills_ever`, `skills_rev`, `skills_told`, `skills_shown` | handed set; ever held; library revs; what this session was told; what any session was told (results' `skills_offered`, #1348) |
 | `asking`, `agent_pid` | oldest open question; the agent's pid in a round (cleared by `_end_agent` or `reap`) |
 | `tip` | the branch tip at `wb accept` (or `wb gc`): `gitops.step_commit`, `_landed` read it once the branch is gone; accept keeps base..tip in `steps.bundle` (`gitops.bundle_steps`), from which `wb bench add` restores pruned commits (no bundle, or before #799: `refs/workbench/accepted/<task>`, `gitops.ACCEPTED_REF`) |
 | `branch_gone`, `accepted_ref_gone` | later `wb gc` runs skip the task (`_merged_branches`, `_released_refs`) |
