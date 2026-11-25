@@ -289,5 +289,28 @@ class DocsFor20(unittest.TestCase):
         self.assertIn("a task from before it has neither, and reads as GPU", keys[:keys.index("`size`")])
 
 
+class ContactInOnePlace(unittest.TestCase):
+    """#1291: `patches.UPSTREAM_CONTACT` is the one place the contact lives; every doc that also
+    spells it out is in *Couplings*, so a new address reaches each. The skill once held the literal
+    the Couplings entry didn't list (the #1291 review): Claude would have told users the old one."""
+
+    def test_every_file_spelling_out_the_contact_is_in_its_couplings_entry_and_the_skill_names_none(self):
+        from workbench import patches
+        contact = patches.UPSTREAM_CONTACT
+        couplings = " ".join(section(ARCH, "## Couplings").split())
+        entry = couplings[couplings.index("**Workbench's contact**"):]
+        entry = entry[:entry.index("**", len("**Workbench's contact**"))]
+        holders = sorted(str(p.relative_to(ROOT)) for p in ROOT.rglob("*")
+                         if p.is_file() and p.suffix in (".md", ".txt", ".tsx", ".ts", ".json")
+                         and ".git" not in p.parts and "tests" not in p.parts
+                         and contact in p.read_text(errors="replace"))
+        self.assertFalse([h for h in holders if h.startswith("skill/")], "the skill says 'the address it printed'")
+        for holder in holders:
+            if holder != "ARCHITECTURE.md":
+                self.assertIn(holder, entry)
+        self.assertIn("its row in *Every `wb` command*", entry)
+        self.assertIn("*Sending a patch without GitHub*", entry)
+
+
 if __name__ == "__main__":
     unittest.main()

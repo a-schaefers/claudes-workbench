@@ -119,9 +119,8 @@ send` refusing over a missing gh or login says so too. On a yes: `wb patch zip` 
 `local` upstream lacks) or `wb patch zip <commit>…` (just those), `--name <slug>` for the file's
 name. It is local: no fetch, no gh, nothing sent, so no dialog asks; it needs no `wb patch upstream`
 first. Tell the user the path it printed (`~/Downloads`, else `$WB_HOME/patches/out/`) and the
-address, adam.schaefers@icloud.com, and pass on its one line that the patch files name the commit
-author (their git name and email): they may edit those first. Sending it is theirs; never email it
-yourself.
+address it printed, and pass on its one line that the patch files name the commit author (their
+git name and email): they may edit those first. Sending it is theirs; never email it yourself.
 
 ## gh, GitHub's CLI
 `wb patch upstream`, `wb patch send` and `wb doctor` say gh's state (`gh: ready as <login> over

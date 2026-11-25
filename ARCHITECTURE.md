@@ -7422,8 +7422,9 @@ doc needs its own `!/` line).
 - **`patches.json`'s keys** (`source`, `upstream`) **and `patches.source_dir`'s default** → the mod's `upstreamRefusal`.
   **Where workbench lives on GitHub** → the mod's `UPSTREAM` (patches.py keeps no constant: `note_install` reads the
   remote's URL), CONTRIBUTING.md's `gh issue` lines. **Workbench's contact** (`patches.UPSTREAM_CONTACT`, #1291) →
-  `wb patch zip`'s README.txt and output, README.md's and CONTRIBUTING.md's contributing lines, *Sending a patch
-  without GitHub*. **What sends** (`wb patch send`'s name, the gh and git commands it
+  `wb patch zip`'s README.txt and output (its row in *Every `wb` command* quotes the line), README.md's and
+  CONTRIBUTING.md's contributing lines, *Sending a patch without GitHub*; the skill names no address ("the address it
+  printed"), so a new one never leaves Claude telling a user the old. **What sends** (`wb patch send`'s name, the gh and git commands it
   runs, any new outward command) → `sendsOut`, `GH_WRITES`, `OUTWARD_TEXT`, the gate's tests in `register.test.tsx`.
   **`wb patch send`'s flags** → the mod's `sendArgs` (it reads `--title`, `--body-file`, `--draft`, `--anyway` as
   written: keep `allow_abbrev=False`). **`send-ok.json`'s keys** (`slug`, `title`, `body_file`, `body`, `draft`,
