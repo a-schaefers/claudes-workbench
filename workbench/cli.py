@@ -7746,12 +7746,16 @@ def _mod_behind() -> str | None:
 
 
 def _install_kind() -> str:
-    """"marketplace": this copy is Claude Code's own clone, which its update re-clones; "clone":
+    """"marketplace": this copy is Claude Code's own clone, which its update re-clones; "opencode":
+    OpenCode's install, a package in its package cache that OpenCode replaces, no git clone
+    (ocplugin.runs_from_cache: git's errors were said for it, #1311's third review); "clone":
     one the user owns (a developer's, or wb patch init's). Under either plugins root the mod's
     gateConf counts: <CLAUDE_CONFIG_DIR or ~/.claude>/plugins, and CLAUDE_CODE_PLUGIN_CACHE_DIR,
     where Claude Code keeps the marketplace clone when it is set: read there as the user's own,
     wb update skipped the rescue and Claude Code's re-clone wiped the local commits (#1099,
     2026-11-23)."""
+    if ocplugin.runs_from_cache():
+        return "opencode"
     here = PKG_ROOT.resolve()
     return "marketplace" if any(here.is_relative_to((r / "marketplaces").resolve()) for r in _plugin_roots()) else "clone"
 
@@ -7802,6 +7806,10 @@ def cmd_update(a):
     and a clone's patches on branch `local` rebased onto the news (#1005).
     --check only says whether there is news; --if-due asks the network at most weekly."""
     kind = _install_kind()
+    if kind == "opencode":  # nothing of wb's to pull or rebase: never a git error (#1311's third review)
+        print(f"OpenCode's install at {PKG_ROOT}: {ocplugin.UPDATED_BY}" if a.check else
+              f"wb update leaves OpenCode's install at {PKG_ROOT} to OpenCode: {ocplugin.UPDATED_BY}")
+        return
     if kind == "clone" and not a.check and patches.branch(PKG_ROOT) == patches.PATCH_BRANCH:
         patches.note_install(PKG_ROOT)  # the mod reads which clone holds the patches (#1005)
     path = store.home() / "update.json"
@@ -7983,6 +7991,10 @@ def cmd_patch(a):
     """wb patch: the user's own fixes to workbench, as commits on branch `local` of a clone they
     own, kept across wb update and offered upstream (#1005)."""
     kind = _install_kind()
+    if kind == "opencode":  # every action reads or moves a clone's branch `local`
+        die(f"wb patch works on a clone of workbench: this wb is OpenCode's install at {PKG_ROOT}, "
+            f"which OpenCode replaces when it updates (git clone https://github.com/{ocplugin.REPO}, "
+            f"then bin/wb setup --opencode there)")
     if a.action == "init":
         if kind == "clone":
             print(patches.clone_note(PKG_ROOT))
@@ -8487,11 +8499,14 @@ def cmd_doctor(a):
             print(f"--  {said}")
         else:
             line(good, said)
-    try:  # how workbench is installed, its local patches, and gh when they need it (#1005)
-        for row in patches.doctor_lines(PKG_ROOT, _install_kind()):
-            print(row)
-    except (gitops.GitError, OSError) as e:
-        print(f"--  install: {PKG_ROOT}, which git can't read: {e}")
+    if (kind := _install_kind()) == "opencode":  # no clone: git's error was said (#1311's third review)
+        print(f"ok  install: OpenCode's, at {PKG_ROOT}: {ocplugin.UPDATED_BY}")
+    else:
+        try:  # how workbench is installed, its local patches, and gh when they need it (#1005)
+            for row in patches.doctor_lines(PKG_ROOT, kind):
+                print(row)
+        except (gitops.GitError, OSError) as e:
+            print(f"--  install: {PKG_ROOT}, which git can't read: {e}")
     for row in experiment_lines():
         print(f"--  experiment {row}")
     sys.exit(0 if ok else 1)

@@ -46,6 +46,9 @@ GET_WB = f"{ADD} brings it, or bin/wb setup --opencode in a clone"
 # npm's `::path:` subdirectory selector on opencode-plugin/: a Git install of the plugin alone, no
 # wb (this module's first form, and a fork's that copies it)
 SUBDIR = "::path:opencode-plugin"
+# the directories of OpenCode's config directory whose entries it loads as plugins
+# (core/src/plugin/source-directory.ts `names`)
+DISCOVERED = ("plugin", "plugins")
 GIT_SCHEMES = ("github:", "gitlab:", "bitbucket:", "git+", "git:", "git@")  # npm's Git specs
 
 
@@ -123,6 +126,39 @@ def _git_key(spec: str) -> str:
     return f"git-{slug}-{hashlib.sha256(spec.encode()).hexdigest()[:12]}"
 
 
+def runs_from_cache(root: Path | None = None) -> bool:
+    """Whether this wb is OpenCode's install: a package in OpenCode's package cache, which
+    OpenCode fetches and replaces, not a git clone. wb update and wb doctor said git's error
+    for it (#1311's third review, 2026-11-25)."""
+    try:
+        here = (root or PKG_ROOT).resolve()
+        return any(here.is_relative_to(npm.resolve()) for npm in package_caches())
+    except OSError:
+        return False
+
+
+# what wb update and wb doctor say of OpenCode's install (runs_from_cache)
+UPDATED_BY = f"OpenCode updates it (it follows {GIT_SPEC}, checked at its start and daily)"
+
+
+def brought_wb(d: Path) -> Path | None:
+    """The wb the plugin in directory ``d`` runs without options (wb.ts's OWN: ../bin/wb from the
+    server part's own file, as Bun resolves it through links): read from d's package.json
+    `exports`, so the repository root (the root package.json, `opencode plugin add <clone>`) is
+    d/bin/wb and opencode-plugin/ is its parent's. ``d.parent / "bin/wb"`` named the wrong one for
+    a root entry and for a copy in OpenCode's plugins/ directory (#1311's third review)."""
+    try:
+        real = d.resolve()
+        exports = json.loads((real / "package.json").read_text()).get("exports")
+    except (OSError, ValueError, AttributeError):
+        return None
+    entry = exports if isinstance(exports, str) else (
+        exports.get("./server") or exports.get(".")) if isinstance(exports, dict) else None
+    if not isinstance(entry, str):
+        return None
+    return (real / entry).resolve().parent.parent / "bin" / "wb"
+
+
 def copy_of(spec: str) -> Path | None:
     """The package OpenCode installed for the Git ``spec``: its newest generation's (not one it
     rejected), or None before OpenCode has installed it."""
@@ -176,15 +212,16 @@ def installs() -> list[dict]:
     """Every entry or discovered directory that loads the plugin, in OpenCode's load order: each
     `{where, spec, kind ("git", "package", "local", "discovered"), dir, options}`; and the
     removals, `{where, spec: PLUGIN_OFF, kind: "off"}`. Read from the files models layers and the
-    user's OPENCODE_CONFIG_CONTENT, plus the global plugins/ directory OpenCode discovers."""
+    user's OPENCODE_CONFIG_CONTENT, plus the global plugin/ and plugins/ directories OpenCode discovers."""
     out = []
-    plugins_dir = models._config_dir() / "plugins"
-    try:
-        found = sorted(d for d in plugins_dir.iterdir() if d.is_dir() and is_copy(d))
-    except OSError:
-        found = []
-    out += [{"where": str(plugins_dir), "spec": str(d), "kind": "discovered", "dir": d, "options": {}}
-            for d in found]
+    for name in DISCOVERED:
+        plugins_dir = models._config_dir() / name
+        try:
+            found = sorted(d for d in plugins_dir.iterdir() if d.is_dir() and is_copy(d))
+        except OSError:
+            found = []
+        out += [{"where": str(plugins_dir), "spec": str(d), "kind": "discovered", "dir": d, "options": {}}
+                for d in found]
     try:
         read = models._layers()
     except OSError as e:  # unreadable: wb doctor said BAD for its traceback (#1311's review)
@@ -261,11 +298,12 @@ def doctor_lines() -> list[tuple[bool | None, str]]:
     which = shutil.which("wb")
     for f in on:
         d, opts = f["dir"], f["options"]
+        mine = d is not None and d.resolve() in (DIR.resolve(), PKG_ROOT.resolve())
         how = {"git": "OpenCode's own install, from Git",
                "package": "OpenCode's own install, from npm",
                "discovered": "found in OpenCode's plugins directory",
-               "local": "this clone's opencode-plugin/" if d and d.resolve() == DIR.resolve()
-               else f"another copy's: {d}"}[f["kind"]]
+               "local": ("this clone's opencode-plugin/" if d.resolve() == DIR.resolve() else "this clone")
+               if mine else f"another copy's: {d}"}[f["kind"]]
         if d is not None and not is_copy(d):
             out.append((False, f"the OpenCode plugin in {f['where']} names {d}, which holds no copy of "
                                f"it: wb setup --opencode from your Workbench clone"))
@@ -275,7 +313,7 @@ def doctor_lines() -> list[tuple[bool | None, str]]:
         # a clone's, or the Git install's in OpenCode's package cache (#1311's review)
         brings = f["kind"] in ("git", "package") and brings_wb(f["spec"])
         pkg = copy_of(f["spec"]) if brings else None   # the root package: bin/wb inside it
-        own = d.parent / "bin" / "wb" if d is not None else pkg / "bin" / "wb" if pkg else None
+        own = brought_wb(d) if d is not None else brought_wb(pkg) if pkg else None
         if wb:
             good = os.path.isabs(wb) and os.path.isfile(wb) and os.access(wb, os.X_OK)
             out.append((good, f"the OpenCode plugin {f['spec']} ({how}, in {f['where']}) runs {wb}"

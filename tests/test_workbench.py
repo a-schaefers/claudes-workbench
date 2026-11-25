@@ -12525,6 +12525,45 @@ class RealOpenCodeRun(Base):
         after = {p: p.read_bytes() for p in (cache / "opencode/npm").rglob("*") if p.is_file()}
         self.assertEqual(after, before)           # nothing the agent's OpenCode installed or moved
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock: the package cache read-only to the agent")
+    @home_outside_the_lane
+    def test_a_round_runs_with_wb_itself_from_opencodes_package_cache(self):
+        # #1311's third review (2026-11-25): the Git install's own wb, no clone. Its runner, lane,
+        # git shim and ask server all run from a directory the lane keeps read-only; the round
+        # still writes its answer and runs its test there, and that wb's update and doctor say
+        # OpenCode updates it, never git's error
+        tmp = Path(self.tmp.name)
+        cache = Path(tempfile.mkdtemp(dir=Path.home(), prefix=".wb-occache-"))
+        self.addCleanup(shutil.rmtree, cache, True)
+        repo, _ = plugin_repo(tmp / "plugin-repo")
+        spec = f"git+file://{repo}#main"
+        out = subprocess.run(["opencode", "plugin", "add", spec], cwd=tmp, capture_output=True, text=True,
+                             timeout=120, env={**os.environ, "XDG_CACHE_HOME": str(cache),
+                                               "XDG_CONFIG_HOME": str(tmp / "add-conf"), "PWD": str(tmp)})
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        [pkg] = [p.resolve() for p in cache.glob("opencode/npm/*/*/node_modules/opencode-workbench")]
+        wb = pkg / "bin" / "wb"
+        os.environ["XDG_CACHE_HOME"] = str(cache)
+        wbconf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        wbconf.write_text(json.dumps({**json.loads(wbconf.read_text()), "plugins": [spec]}))
+        self.serve([WRITE_42])
+        r = subprocess.run([str(wb), "start", "t-run", "--spec", str(self.spec), "--repo", str(self.repo),
+                            "--model", "cap", "--test", TEST_CMD], capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        st = wait_phase("t-run", {"review", "stuck", "failed"}, timeout=180)
+        task = store.Task("t-run")
+        log = (task.dir / "runner.log").read_text()
+        self.assertEqual(st["phase"], "review", log)
+        self.assertTrue(st["tests"]["ok"], log)
+        layer = json.loads((store.home() / "rules" / "t-run" / "opencode.json").read_text())
+        self.assertIn(str(pkg / "bin" / "wb-ask-mcp"), json.dumps(layer))    # its ask server, from there
+        self.assertNotIn(str(cache / "opencode/npm"), context.writable(task))
+        r = subprocess.run([str(wb), "update", "--check"], capture_output=True, text=True, timeout=60)
+        self.assertEqual((r.returncode, r.stdout.split(":")[0]), (0, f"OpenCode's install at {pkg}"), r.stderr)
+        r = subprocess.run([str(wb), "doctor"], capture_output=True, text=True, timeout=120)
+        self.assertIn(f"ok  install: OpenCode's, at {pkg}: OpenCode updates it", r.stdout, r.stderr)
+        self.assertNotIn("git can't read", r.stdout)
+
     def test_the_runner_reads_the_real_events_the_export_and_the_session(self):
         task, st = self.answered([WRITE_42])
         self.assertTrue(st["tests"]["ok"])                         # the write landed, in the lane
@@ -24604,7 +24643,7 @@ class Setup(Base):
         pkg = home / ".cache/opencode/npm" / ocplugin._git_key(ocplugin.GIT_SPEC) / "1795604320757" / \
             "node_modules" / ocplugin.PACKAGE
         (pkg / "bin").mkdir(parents=True)
-        (pkg / "package.json").write_text(json.dumps({"name": ocplugin.PACKAGE}))
+        shutil.copy(ROOT / "package.json", pkg / "package.json")    # its exports: bin/wb beside them
         (pkg / "bin/wb").write_text("#!/bin/sh\n")
         (pkg / "bin/wb").chmod(0o755)
         out = self.setup(cmd="doctor")[1]
@@ -24639,6 +24678,57 @@ class Setup(Base):
         out = self.setup(cmd="doctor")[1]
         self.assertIn("ok  the Claude Code mod is installed", out)
         self.assertIn(f"BAD /workbench isn't in {home / '.claude/skills'}: wb setup links it", out)
+
+    def test_doctor_names_the_wb_an_entry_naming_the_clone_or_a_copy_in_opencodes_plugins_directory_runs(self):
+        # #1311's third review (2026-11-25): doctor took the plugin's wb as d.parent/bin/wb, right
+        # only for opencode-plugin/. An entry naming the clone itself (`opencode plugin add
+        # <clone>`) runs <clone>/bin/wb, as does a link to it in OpenCode's plugin/ directory
+        # (which it discovers beside plugins/); a copy of opencode-plugin/ alone there brings none
+        from workbench import ocplugin
+        home = self.opencode_home()
+        conf = Path(os.environ["WB_OPENCODE_CONFIG"])
+        cfg = json.loads(conf.read_text())
+        conf.write_text(json.dumps({**cfg, "plugins": [str(ROOT)]}))
+        out = self.setup(cmd="doctor")[1]
+        self.assertIn(f"ok  the OpenCode plugin {ROOT} (this clone, in {conf}) runs the wb it brings, "
+                      f"{ROOT / 'bin/wb'}\n", out)
+        conf.write_text(json.dumps(cfg))
+        os.environ["XDG_CONFIG_HOME"] = str(home / "xdg")
+        found = home / "xdg/opencode/plugin"
+        found.mkdir(parents=True)
+        (found / "workbench").symlink_to(ROOT)
+        out = self.setup(cmd="doctor")[1]
+        self.assertIn(f"ok  the OpenCode plugin {found / 'workbench'} (found in OpenCode's plugins directory, "
+                      f"in {found}) runs the wb it brings, {ROOT / 'bin/wb'}\n", out)
+        (found / "workbench").unlink()
+        shutil.copytree(ocplugin.DIR, found / "workbench")
+        self.assertIn(f"ok  the OpenCode plugin {found / 'workbench'} (found in OpenCode's plugins directory, "
+                      f"in {found}) runs wb by name", self.setup(cmd="doctor")[1])
+
+    def test_a_wb_in_opencodes_package_cache_says_opencode_updates_it_never_a_git_error(self):
+        # #1311's third review (2026-11-25): wb run from OpenCode's Git install, no clone: wb update
+        # --check died "fatal: not a git repository", doctor said "which git can't read", and wb
+        # patch read a branch there is none of
+        from workbench import ocplugin
+        home = self.opencode_home()
+        pkg = (home / ".cache/opencode/npm" / ocplugin._git_key(ocplugin.GIT_SPEC) / "1" / "node_modules"
+               / ocplugin.PACKAGE)
+        pkg.mkdir(parents=True)
+        said = f"OpenCode updates it (it follows {ocplugin.GIT_SPEC}, checked at its start and daily)"
+        with mock.patch.object(cli, "PKG_ROOT", pkg), mock.patch.object(ocplugin, "PKG_ROOT", pkg):
+            self.assertEqual(run_wb("update", "--check"), f"OpenCode's install at {pkg}: {said}\n")
+            self.assertEqual(run_wb("update", "--stop"),
+                             f"wb update leaves OpenCode's install at {pkg} to OpenCode: {said}\n")
+            out = self.setup(cmd="doctor")[1]
+            self.assertIn(f"ok  install: OpenCode's, at {pkg}: {said}\n", out)
+            self.assertNotIn("git can't read", out)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(self.setup("list", cmd="patch")[0], 1)
+            self.assertIn(f"wb patch works on a clone of workbench: this wb is OpenCode's install at {pkg}",
+                          err.getvalue())
+        self.assertFalse(ocplugin.runs_from_cache())             # this clone isn't
+        self.assertIn("ok  install: developer clone at", self.setup(cmd="doctor")[1])
 
     def test_doctor_survives_an_opencode_config_that_isnt_an_object_or_cant_be_read(self):
         # #1311's review (2026-11-25): installs() called .get on a top level that is a list
