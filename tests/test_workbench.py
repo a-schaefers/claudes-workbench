@@ -1735,7 +1735,8 @@ class Lifecycle(Base):
         # as wb start writes it: the spec, then the protocol, whose acceptance line names --test's
         # own module, which counts for nothing (#1181's second review)
         proto = cli.PROTOCOL.format(branch="delegate/t-own", budget=0, experiment_protocol="",
-                                    test_line=cli.test_line("python3 -m elsewhere.cli tests"))
+                                    test_line=cli.test_line("python3 -m elsewhere.cli tests"),
+                                    spec=task.round_dir(1) / "prompt.md")
         self.assertIn("python3 -m elsewhere.cli", proto)
         prompt.write_text("Add tool1181/__main__.py, and newpkg/cli.py as python3 -m newpkg.cli. "
                           "Test it with pytest.\n" + proto)
@@ -7448,17 +7449,26 @@ class Context(Base):
         self.assertIn("the tree its tests passed on: stopped as its finish",
                       run_wb("watch", "t-srr", "--once", "--no-color"))
 
-    def test_a_self_review_that_changed_the_tree_is_still_stopped_by_the_explore_guard(self):
+    def assert_explore_nudged_not_settled(self, name: str, st: dict) -> None:
+        # the explore guard's first trip in the session, nudged (#1134), never #1168's finish
+        self.assertEqual(st["nudges"], 1)
+        steer = store.read_jsonl(store.Task(name).dir / "steer.jsonl")[0]
+        self.assertEqual([r["text"] for r in steer], [runner.EXPLORE_NUDGE.format(n=40)])
+        events = store.read_jsonl(store.Task(name).dir / "events.jsonl")[0]
+        self.assertFalse([e for e in events if e["kind"] == "settled"])
+
+    def test_a_self_review_that_changed_the_tree_is_nudged_by_the_explore_guard_not_settled(self):
         # #1168's finish is for a tree as the round began: one the self-review left changed is
-        # an agent lost mid-edit, stopped as before (90 reads: the first 40 meet its edit's mark,
-        # which the guard takes for a shell edit and counts again from)
+        # an agent lost mid-edit, the guard's as before (90 reads: the first 40 meet its edit's
+        # mark, which the guard takes for a shell edit and counts again from). Since #1134 the
+        # guard's first trip in a session is a nudge, whose round the fake plays as ok's
         os.environ.update(FAKE_SELF_KEEP="1", FAKE_READS="90")
         self.addCleanup(os.environ.pop, "FAKE_SELF_KEEP", None)
         self.addCleanup(os.environ.pop, "FAKE_READS", None)
         self.start("t-srk", "selfreads", "--test", TEST_CMD, "--self-review")
         st = wait_phase("t-srk", {"review", "stuck", "failed"}, timeout=60)
-        self.assertEqual((st["phase"], st["round"]), ("stuck", 2))
-        self.assertIn("tool calls without changing a file", st["last"])
+        self.assertEqual((st["phase"], st["round"], st["round_for"]), ("review", 3, "steer"), st.get("last"))
+        self.assert_explore_nudged_not_settled("t-srk", st)
 
     def test_a_self_review_that_reruns_the_acceptance_command_on_the_green_tree_goes_to_review(self):
         # #1250 (2026-11-24): a 9B's self-review ended "Now the final acceptance run:" four
@@ -7652,15 +7662,16 @@ class Context(Base):
         self.assertEqual([r["kind"] for r in rows], ["review"])
         self.assertIn("the tree its tests passed on; stopped as its finish", rows[0]["text"])
 
-    def test_a_self_review_handed_over_with_a_check_still_broken_is_stopped_by_the_explore_guard(self):
+    def test_a_self_review_handed_over_with_a_check_still_broken_is_nudged_by_the_explore_guard(self):
         # #1188's other half: the fresh session's tree is the one the round began with, but a
         # check is still commented out (the issue's "stop mid-mutation-check"): not the tree the
-        # tests passed on, so it is stopped as before
+        # tests passed on, so it is the guard's as before, since #1134 a nudge first (the fake
+        # plays its round as ok's)
         os.environ.update(FAKE_SELF_FILL="1", FAKE_SELF_KEEP="1")
         self.start("t-srb2", "selfreads", "--test", TEST_CMD, "--self-review")
         st = wait_phase("t-srb2", {"review", "stuck", "failed"}, timeout=60)
-        self.assertEqual((st["phase"], st["round"], st["round_for"]), ("stuck", 3, "fresh"))
-        self.assertIn("tool calls without changing a file", st["last"])
+        self.assertEqual((st["phase"], st["round"], st["round_for"]), ("review", 4, "steer"), st.get("last"))
+        self.assert_explore_nudged_not_settled("t-srb2", st)
 
     def test_a_self_review_nudged_mid_check_that_restores_the_green_tree_and_reads_on_goes_to_review(self):
         # #1207 (bar loop round 3, 2026-11-24): the runner's think nudge started a round with
@@ -11065,6 +11076,15 @@ class RealOpenCode(Base):
         answers = [json.dumps(m["content"]) for m in last["messages"] if m.get("role") == "tool"]
         self.assertEqual(len(answers), len(calls), "not every fake call came back")
         return task, answers
+
+    def test_the_prompt_file_the_protocol_names_is_one_the_agent_reads_in_its_lane(self):
+        # E11 (#1134): the path every round's protocol names must be one OpenCode reads in the
+        # lane with no ask, or the pointer sends a compacted agent to a "Permission denied"
+        spec = store.Task("t-sf-lane").round_dir(1) / "prompt.md"
+        task, answers = self.run_calls("t-sf-lane", [{"name": "read", "arguments": {"path": str(spec)}}])
+        self.assertIn(f"saved in `{spec}`", spec.read_text())
+        self.assertIn("Write the answer to answer.txt", answers[0])
+        self.assertIn("session is compacted", answers[0])
 
     def test_the_users_opentelemetry_collector_hears_from_no_agent_unless_commands_json_names_it(self):
         # found by #1205's research (2026-11-24): OpenCode 2.3.2 exports OTLP/HTTP traces and
@@ -31931,7 +31951,7 @@ class ProbeOn(Base):
         prompt = task.round_dir(1).joinpath("prompt.md").read_text()
         self.assertEqual(prompt, self.spec.read_text().rstrip() + cli.PROTOCOL.format(
             branch=task.spec["branch"], test_line=cli.test_line(None), budget=task.spec["ask_budget"],
-            experiment_protocol=""))                                      # byte for byte
+            experiment_protocol="", spec=task.round_dir(1) / "prompt.md"))  # byte for byte
         self.assertNotIn("outline", task.status)                          # no probe symbols run
         self.assertNotIn("tool_output", json.loads((context.rules_dir(task) / "opencode.json").read_text()))
         run_wb("discard", "t-off")
@@ -33154,7 +33174,7 @@ class ApiDiscovery(Base):
     def test_a_connected_model_is_an_api_model_with_its_catalog_window(self):
         m = self.models.hosted()["acme/coder-flash"]
         self.assertEqual((m.kind, m.key, m.engine, m.name, m.provider), ("api", "stored", "api", "coder-flash", "acme"))
-        self.assertEqual(m.config["limit"]["context"], 131072)                # capped (#1017)
+        self.assertEqual(m.config["limit"]["context"], 200000)                # its own, under 256K (#1134)
         self.assertEqual(m.extra["catalog_limit"]["context"], 200000)        # the catalog's
         self.assertEqual((m.base_url, m.package, m.label),
                          ("https://api.acme.test/v1", "@opencode/ai/providers/openai-compatible", "Acme (API)"))
@@ -35276,7 +35296,7 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.start_api("t-explore", "explore", spawn=False)
         self.drive_here("t-explore")
         st = store.Task("t-explore").status
-        self.assertEqual((st["window"], st["phase"]), (131072, "review"), st.get("last"))
+        self.assertEqual((st["window"], st["phase"]), (262144, "review"), st.get("last"))
         # the GPU tasks are stopped at the 40th read, so the fake waits as long as it takes: its
         # 2 s were too short for a loaded macOS runner, which read the 40th read after the write
         # and lifted the guard for the edit (as it should, for an edit made through the shell),
@@ -35285,7 +35305,9 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.start("t-explore-gpu", "explore")
         st = wait_phase("t-explore-gpu", {"stuck"})
         self.assertEqual(st["window"], 32768)
-        self.assertEqual(st["last"], "40 tool calls without changing a file in the task")
+        # nudged once at the first trip, stopped at the second in that session (#1134, D1)
+        self.assertEqual(st["last"], "40 tool calls without changing a file in the task, even after a nudge")
+        self.assertEqual((st["nudges"], st["round"], st["explore_nudged_session"]), (1, 2, st["session"]))
         cfg_path = Path(os.environ["WB_OPENCODE_CONFIG"])
         cfg = json.loads(cfg_path.read_text())
         cfg["provider"]["ollama"]["models"]["mimo-v2.6:9b-q8_0"]["limit"]["context"] = 65536
@@ -35293,7 +35315,58 @@ class ApiTasks(_ApiTask, _KeyholeTest):
         self.start("t-explore-gpu64", "explore")
         st = wait_phase("t-explore-gpu64", {"stuck"})
         self.assertEqual(st["window"], 65536)
-        self.assertEqual(st["last"], "40 tool calls without changing a file in the task")
+        self.assertEqual(st["last"], "40 tool calls without changing a file in the task, even after a nudge")
+
+    def test_the_first_explore_trip_in_a_session_nudges_and_the_round_goes_on_on_the_gpu_and_api(self):
+        # #1134 (D1): every no_edit trip stopped the round. Of 52 big-repo GPU bench runs
+        # (2026-11-21/22), 9 of the 11 failures were such stops, 5 of them self-review rounds with
+        # the test already passing, the agent only verifying. The first trip in a session now
+        # nudges (EXPLORE_NUDGE) and that session goes on; a second stops (the test above).
+        # Always on since E8 (2026-11-24, a 27B, 6 pairs): ×0.56 the minutes of the stop at once
+        # (6/6 lower, sign p=0.03), ×0.69 the tokens, 6/6 passing both ways; a retry did nothing
+        from workbench import transcript
+        os.environ["FAKE_EXPLORE_ONCE"] = "1"
+        for name, limit in (("t-nudge-gpu", 40), ("t-nudge-api", 160)):
+            if limit == 40:
+                self.start(name, "explore", "--test", TEST_CMD)
+            else:
+                os.environ["FAKE_READS"] = "170"  # past an API 131K window's 160
+                self.start_api(name, "explore", "--test", TEST_CMD, spawn=False)
+                self.drive_here(name)
+            st = wait_phase(name, {"review", "stuck", "failed"}, timeout=60)
+            self.assertEqual(st["phase"], "review", st.get("last"))
+            self.assertTrue(st["tests"]["ok"])
+            self.assertEqual((st["nudges"], st["round"], st["explore_nudged_session"]), (1, 2, st["session"]))
+            task = store.Task(name)
+            text = runner.EXPLORE_NUDGE.format(n=limit)
+            steer = store.read_jsonl(task.dir / "steer.jsonl")[0]
+            self.assertEqual([(r["text"], r["now"], r["by"]) for r in steer], [(text, True, "workbench")])
+            self.assertEqual(st["steer_taken"], 1)
+            prompt = task.round_dir(2).joinpath("prompt.md").read_text()
+            self.assertTrue(prompt.startswith(runner.INTERRUPT_HEAD) and text in prompt, prompt)
+            self.assertTrue(task.round_dir(2).joinpath(runner.NUDGED).exists())  # not an ask
+            self.assertEqual(transcript._user_message(prompt, False)[0],
+                             "workbench → agent · nudge: many calls without changing a file")
+            events = store.read_jsonl(task.dir / "events.jsonl")[0]
+            self.assertIn({"kind": "interrupted", "by": "workbench"},
+                          [{"kind": e["kind"], "by": e.get("by")} for e in events if e["kind"] == "interrupted"])
+            self.assertFalse([e for e in events if e["kind"] == "stopped"])
+            self.assertTrue(any(r["task"] == name and r.get("kind") == "checkin" and
+                                f"the runner nudged it: {limit} tool calls without changing a file" in r["text"]
+                                for r in store.read_jsonl(store.home() / "notify.jsonl")[0]))
+
+    def test_a_fresh_session_after_an_explore_nudge_with_no_file_changed_is_stopped_not_nudged_again(self):
+        # #1134 (D1)'s review, 2026-11-24: a session that only read until OpenCode compacted it
+        # went fresh the next round, and each new session earned its own nudge: a GPU task on
+        # `explore` looped to round 52 with 51 nudges in 40 s, where the old guard stopped in
+        # round 1. A fresh session is nudged again only once a file has changed since
+        os.environ.update(FAKE_EXPLORE_ONCE="1", FAKE_COMPACTED="1")  # no write: every session reads
+        self.start("t-nudge-loop", "explore")
+        st = wait_phase("t-nudge-loop", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st["round"], st["nudges"]), ("stuck", 2, 1), st.get("last"))
+        self.assertEqual(st["last"], "40 tool calls without changing a file in the task, even after a nudge")
+        self.assertNotEqual(st["explore_nudged_session"], st["session"])  # round 2 was a fresh one
+        self.assertEqual(st["explore_nudge_mark"], gitops.mark(store.Task("t-nudge-loop").worktree))
 
     def test_a_request_the_provider_refuses_stops_as_the_providers_with_its_reason_and_no_key_remedy(self):
         # #1084: every 403 read as "refused the API key" with /connect, a moderation flag and the
@@ -35590,7 +35663,7 @@ class ApiThinking(Base):
         self.assertEqual(json.loads(runner.write_config_layer(task).read_text())["small_model"],
                          "deepseek/deepseek-flash#none")
         out = transcript.model_line(store.Task("t-flash"), {})
-        self.assertEqual(out, "deepseek/deepseek-flash (deepseek, API) · thinking off · 128K context")   # task.json's (#1078), no variant; #1017's window
+        self.assertEqual(out, "deepseek/deepseek-flash (deepseek, API) · thinking off · 256K context")   # task.json's (#1078), no variant; #1134's window
         from workbench import results
         row = results.record(task, "discarded")
         self.assertEqual(row["thinking"], "off")                  # the weekly check's evidence
@@ -39166,6 +39239,34 @@ class Privacy(_KeyholeTest):
         self.assertIn(cli.privacy.FREE_LINE, cli.privacy.where(self.api_model("opencode/a-free", free=True))["line"])
 
 
+class SpecFile(Base):
+    """E11 of #1134 (ARCHITECTURE.md, *The runner, inside*): 6 of the 16 asks on record were the
+    agent asking Claude for its spec again after OpenCode compacted its session. Every round's
+    protocol names the step's prompt file, and the handbook's "if you lose the thread" line points
+    there; measured on the GPU (3 pairs, 2026-11-24), tokens x0.40 (3/3 lower), minutes x0.81."""
+
+    def test_each_steps_protocol_names_its_own_prompt_file_and_the_handbook_sends_the_agent_there(self):
+        self.start("t-sf", "ok")
+        wait_phase("t-sf", {"review"})
+        task = store.Task("t-sf")
+        first = task.round_dir(1) / "prompt.md"
+        prompt = first.read_text()
+        self.assertTrue(prompt.startswith(self.spec.read_text().rstrip()))
+        self.assertIn(f"is saved in `{first}`. If your\n  session is compacted", prompt)
+        handbook = (context.rules_dir(task) / "HANDBOOK.md").read_text()
+        self.assertNotIn("start of this conversation", handbook)  # after a compaction: the summary
+        self.assertIn("read your task's file again (\"Your task\", below, names it)", handbook)
+        self.assertTrue(handbook.endswith(context.spec_note(task)))         # #1071's note, below
+        self.assertNotIn("spec_file", task.spec["experiments"])             # no switch: always on
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Write the second answer to answer2.txt.\n")
+        run_wb("next", "t-sf", "--spec", str(step2), "-m", "feat: step one")
+        wait_phase("t-sf", {"review"})
+        second = task.round_dir(2) / "prompt.md"
+        self.assertIn(f"is saved in `{second}`.", second.read_text())        # the step's own file
+        self.assertIn(f"`{second}`", (context.rules_dir(task) / "HANDBOOK.md").read_text())
+
+
 class Writing(Base):
     """The writing role (#1025): prose under its own short handbook and protocol, not the coding
     rules; self-review and probe off unless asked; `--test` optional; its record apart in the
@@ -39187,9 +39288,10 @@ class Writing(Base):
         self.addCleanup(patch.stop)
         self.spec.write_text("Write the answer to answer.txt, for the README's readers.\n")
 
-    def protocol(self, task, protocol, test=None):
+    def protocol(self, task, protocol, test=None, n=1):
         return protocol.format(branch=task.spec["branch"], test_line=cli.test_line(test),
-                               budget=task.spec["ask_budget"], experiment_protocol="")
+                               budget=task.spec["ask_budget"], experiment_protocol="",
+                               spec=task.round_dir(n) / "prompt.md")
 
     def test_a_writing_task_gets_the_writing_handbook_and_protocol_and_a_coding_one_the_coding_ones(self):
         for name, role, handbook, protocol in (("t-w", "writing", context.WRITING, cli.WRITING_PROTOCOL),
@@ -39266,7 +39368,7 @@ class Writing(Base):
         run_wb("next", "t-next", "--spec", str(step2), "-m", "docs: the answer")
         task = store.Task("t-next")
         prompt = task.round_dir(2).joinpath("prompt.md").read_text()
-        self.assertTrue(prompt.endswith(self.protocol(task, cli.WRITING_PROTOCOL)))
+        self.assertTrue(prompt.endswith(self.protocol(task, cli.WRITING_PROTOCOL, n=2)))
         self.assertNotIn("No unrelated refactors", prompt)
         wait_phase("t-next", {"review"})
 
@@ -41778,7 +41880,7 @@ class ApiCompat(Base):
         want = self.models.hosted()["acme/coder-flash"]
         role = out.index("  trivial      acme/coder-flash  ready")
         self.assertEqual(out[role:].splitlines()[1], f"  {'':12} slice: {cli.router.slice(want).line()}")
-        self.assertIn("a guess from its 128K window", out[role:].splitlines()[1])
+        self.assertIn("a guess from its 195K window", out[role:].splitlines()[1])   # its own 200000
         self.assertEqual(out.count("slice: "), 1)                   # none for a model not in the catalog
         skill = (Path(cli.__file__).resolve().parent.parent / "skill/workbench/SKILL.md").read_text()
         first = " ".join(skill[skill.index("  2. **No GPU model"):skill.index("  3. **No GPU model")].split())

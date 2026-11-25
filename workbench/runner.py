@@ -1031,6 +1031,30 @@ NOTE_HEAD = "A note from Claude, your reviewer, before you go on."
 NUDGE = ("You have been thinking for {mins} minutes without a tool call. Stop planning and act "
          "now: make the next edit, one file per tool call, smallest first, and run the tests "
          "as soon as there is something to test. Keep each thought short; decide as you go.")
+# The runner's own steer when the explore guard (events.StuckDetector's `no_edit`) first trips in
+# a session; a second trip in that session stops the round (#1134, D1). Of 52 big-repo GPU bench
+# runs (2026-11-21/22), 9 of the 11 failures were no_edit stops: 5 of them self-review rounds with
+# the visible test already passing, the agent only verifying, stopped at 40 calls, and 4 round-1
+# stops still reading. OpenHands' stuck detector nudges, then stops: this does the same, once a
+# session. Worded for both: the reader who has not started and the reviewer who is done. Measured
+# (#1134's E8, 2026-11-24, a 27B on the GPU, 3 big-repo cases twice): against the stop at once it
+# took ×0.56 the minutes (lower on 6 of 6 pairs, sign p=0.03) and ×0.69 the tokens, 6/6 passing
+# both ways; a retry from the base instead did nothing (×1.03), so only the nudge is kept.
+EXPLORE_NUDGE = ("{n} tool calls without changing a file: make the first edit now, one file per "
+                 "call, or finish and say what blocks you.")
+
+
+def _runner_nudge(task: store.Task, n: int, text: str) -> int:
+    """Queue the runner's own --now note (the think or the explore nudge), which ends the round
+    like an interrupt (`by: workbench`: _steer_round marks the next round NUDGED); returns the
+    task's nudge count."""
+    store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text,
+                                                 "now": True, "by": "workbench"})
+    task.event({"ts": store.now(), "round": n, "kind": "steer", "now": True,
+                "by": "workbench", "text": text})
+    nudges = task.status.get("nudges", 0) + 1
+    task.set_status(nudges=nudges)
+    return nudges
 
 
 def pending_steer(task: store.Task) -> list[dict]:
@@ -1845,6 +1869,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         # the steer check below. Those `continue`d past them, and a stream of unknown progress
         # events ran past the round's limit, ignored `wb steer --now` and held the GPU lease
         # (#195, the 2026-11-19 audit).
+        explore = None  # the explore guard's first trip in this session: nudged below (#1134)
         for raw in got:
             if raw.get("type") == "background_wait":
                 waiting_bg = True
@@ -1975,6 +2000,24 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 m = gitops.mark(task.worktree)
                 if detector.guard == "no_edit" and m != edit_mark:  # a shell edit: an edit, not a repeat
                     edit_mark, detector.since_edit, why = m, 0, None
+            if why and detector.guard == "no_edit":
+                # The first trip in a session nudges (EXPLORE_NUDGE, sent below unless a
+                # self-review's green tree settles it) and the round goes on as a steer round in
+                # it; a second in the session it nudged stops, as every trip did before (#1134,
+                # D1: EXPLORE_NUDGE's evidence). Its own status key: the think nudge's
+                # `nudged_round` means "the last round ended in a think nudge" (renudged). No
+                # session known: stopped, or a run that never names one would be nudged forever.
+                # A fresh session is nudged again only after a change (`explore_nudge_mark`): a
+                # session that only read until OpenCode compacted it went fresh every round, each
+                # new session earned a nudge, and a GPU task looped to round 52 in 40 s where the
+                # old guard stopped in round 1 (#1134's review, 2026-11-24).
+                sess = task.status.get("session")
+                if sess and task.status.get("explore_nudged_session") != sess \
+                        and m != task.status.get("explore_nudge_mark"):
+                    explore = (why, detector.since_edit, m)
+                    why, detector.since_edit = None, 0
+                elif sess:
+                    why += ", even after a nudge"
             if why:  # on a self-review's green tree, settled below with the other guards' (#1168)
                 out["stuck"], out["guard"] = why, detector.guard
         quiet = clock.quiet(mono)
@@ -2035,20 +2078,22 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
         # Any guard's stop, and the nudge, of a self-review on its green tree: its finish (#1261:
         # the think nudge woke Claude with a check-in, and silence, the wall or the stop after a
         # nudge set stuck, past #1168/#1250's settle, which was the detector's alone)
-        if (out["stuck"] or nudge) and settle(
-                task, n, out, began, f"no tool call or word for {_span(quiet)}"):
+        if (out["stuck"] or nudge or explore) and settle(
+                task, n, out, began, explore[0] if explore else f"no tool call or word for {_span(quiet)}"):
             _stop(proc)
             break
+        if explore and not out["stuck"]:  # another guard's stop this pass: stopped, not nudged
+            _, calls, here = explore
+            task.set_status(explore_nudged_session=task.status.get("session"), explore_nudge_mark=here)
+            nudges = _runner_nudge(task, n, EXPLORE_NUDGE.format(n=calls))
+            task.notify("checkin", checkin_text(task, n, out, max(started, float(
+                task.status.get("checkin_at") or 0)), step_prior + clock.ran(mono))
+                + f"\nthe runner nudged it: {calls} tool calls without changing a file "
+                f"(nudge {nudges} this task; limit {detector.no_edit})", round=n)
         if nudge:
             nudged = True
-            text = NUDGE.format(mins=mins)
             task.set_status(nudged_round=n)
-            store.append_jsonl(task.dir / "steer.jsonl", {"ts": store.now(), "text": text,
-                                                         "now": True, "by": "workbench"})
-            task.event({"ts": store.now(), "round": n, "kind": "steer", "now": True,
-                        "by": "workbench", "text": text})
-            nudges = task.status.get("nudges", 0) + 1
-            task.set_status(nudges=nudges)
+            nudges = _runner_nudge(task, n, NUDGE.format(mins=mins))
             task.notify("checkin", checkin_text(task, n, out, max(started, float(
                 task.status.get("checkin_at") or 0)), step_prior + clock.ran(mono)) + f"\nthe runner nudged it: {mins} min of "
                 f"thinking with no tool call (nudge {nudges} this task; budget {int(think)}s)",
@@ -5809,9 +5854,9 @@ RESUME = ("Claude stopped your last session and is resuming the task in a fresh 
           "then finish them and run the tests.{asked}")
 
 
-# A round whose prompt is the runner's own think nudge (_steer_round): round_asks skips it, or a
-# later fresh session was told, under "What you were asked to do", that Claude interrupted it
-# after 12 minutes of thinking it never did (#681).
+# A round whose prompt is the runner's own nudge, think or explore (_steer_round): round_asks
+# skips it, or a later fresh session was told, under "What you were asked to do", that Claude
+# interrupted it after 12 minutes of thinking it never did (#681).
 NUDGED = "nudged"
 
 

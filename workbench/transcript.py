@@ -215,6 +215,8 @@ def _user_message(text: str, verbose: bool) -> tuple[str, list[tuple[str, str]]]
         head = "Claude → agent · next step"
     elif text.startswith(INTERRUPT_HEAD) and "without a tool call. Stop planning" in text:
         head = "workbench → agent · nudge: thinking too long without acting"  # runner.NUDGE
+    elif text.startswith(INTERRUPT_HEAD) and "without changing a file: make the first edit" in text:
+        head = "workbench → agent · nudge: many calls without changing a file"  # runner.EXPLORE_NUDGE
     elif text.startswith(INTERRUPT_HEAD):
         head = "Claude → agent · INTERRUPT, high priority"
     elif text.startswith(NOTE_HEAD):
