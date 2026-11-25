@@ -2776,6 +2776,7 @@ def _scope(tasks, where, sessions=None, kind=None):
             cwd and cwd.is_relative_to(here)
             or repo and (repo.is_relative_to(here) or here.is_relative_to(spot)))
         if sessions and sid:
+            store.driver_fill(t)  # an OpenCode task with no server recorded, from today's beat
             ok = sid in sessions or near and store.driver_of(t.spec) == (kind or "claude") \
                 and _owner_gone(t.spec)
         elif here is None or (not cwd and not repo):

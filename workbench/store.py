@@ -573,6 +573,36 @@ def driver_record(session: str) -> dict:
             **{k: row[k] for k in ("model", "variant") if isinstance(row.get(k), str) and row[k]}}
 
 
+def driver_fill(task) -> None:
+    """Fill in an OpenCode task's server later (task.json `driver`: `pid`, `start`, `store`,
+    `seen`) when it recorded no store, from the fresh beat that lists its session now: a task
+    started or adopted with no beat to read (the plugin not yet loaded, a stalled service) read
+    `unknown` for good, so no session could ever take it, its own deleted (the #1309 re-review).
+    Under the task's command lock, never waited for: a command that holds it fills it next time."""
+    from . import models  # here: models imports store
+    spec = task.spec
+    d = spec.get("driver")
+    if driver_of(spec) != "opencode" or not isinstance(d, dict) or _store_of(d):
+        return
+    state, hb = driver_server(spec.get("session"), d)
+    if state != "live" or not (st := _store_of(hb)):
+        return
+    try:
+        with locked(task_lock(task.name, "cmd"), blocking=False):
+            spec = dict(task.spec)
+            if spec.get("driver") != d:
+                return
+            row = hb["sessions"].get(spec.get("session"))
+            row = {k: row[k] for k in ("model", "variant")
+                   if isinstance(row, dict) and isinstance(row.get(k), str) and row[k]}
+            new = {k: v for k, v in d.items() if k != "start"}  # a start of another pid's misleads
+            spec["driver"] = {**row, **new, "pid": hb["pid"], "store": st, "seen": hb["ts"],
+                              **({"start": s} if (s := models._started(hb["pid"])) else {})}
+            write_json(task.dir / "task.json", spec)
+    except BlockingIOError:
+        pass
+
+
 def driver_of(spec: dict) -> str | None:
     """Which driver a task belongs to (task.json): `opencode` (its `driver.tool`), `claude` (a
     `session` and no `driver`: every task before 2.2's), or None (no session: by directory)."""
