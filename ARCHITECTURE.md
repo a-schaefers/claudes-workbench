@@ -4101,11 +4101,14 @@ read as a wrong id, Claude hunted for the "right" one).
   | `unreachable` | `can't reach <host> (<reason>)` | yes |
   | ok | `{"available": True, "resident": True, "why": "API (<Provider>)"}` | |
 
-  Any cached key a task can't run with (none, `oauth`, `env:`, `config`, `signing`: all but
-  `stored`, `ollama` and a free model's `none`) is checked fresh first (`_fresh_key`: `auth list`
+  Any cached key a task can't run with (none, `oauth`, `config`, `signing`, an `env:` one
+  `models.key_runs` refuses: all but `stored`, `copilot`, `ollama`, a free model's `none` and an
+  exported key the keyhole can read, #1189) is checked fresh first (`_fresh_key`: `auth list`
   again, ignoring the cache, once per state directory each `AUTH_FRESH_SECS` 5 s, written back to
   hosted.json): a user who just ran `/connect` isn't told to run it again (an OAuth or environment
-  key cached before it stood for `HOSTED_TTL`, as /connect changes no stamp, #1388). `remedy` gives `/connect`, top up, or wait;
+  key cached before it stood for `HOSTED_TTL`, as /connect changes no stamp, #1388). A fresh read
+  with no key keeps a cached `env:` one, so its `env_why` (`$VAR isn't set where wb start ran`) is
+  said, not "no key". `remedy` gives `/connect`, top up, or wait;
   `may_come_up` follows the table (a rate limit or an outage is waited out, never a missing key: an
   API start goes on through either with a note, `cli.TRANSIENT`, #1088).
 - `note_api(pid, state, why="", until=None)` writes `$WB_HOME/api-health.json` under

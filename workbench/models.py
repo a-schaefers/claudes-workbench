@@ -2058,7 +2058,10 @@ def _api_status(m: Model, down=frozenset()) -> dict:
     # 2026-11-25; #1076 was ids missing from the cache). An exported key the keyhole can read
     # runs as it is (key_runs, #1189)
     if key not in ("ollama", "none") and not key_runs(m.provider, key):
-        key, who = _fresh_key(m)
+        fresh, who = _fresh_key(m)
+        # an exported key still unset says so (env_why), not "no key": `auth list` lists no
+        # variable the reader's environment lacks
+        key = fresh or (key if key.startswith("env:") else "")
     from . import keyhole  # keyhole imports this module lazily too
     if not key:  # OpenCode's one terminal command, not its TUI's /connect (#1189)
         return _no(f"no key for {who}: run `{keyhole.login(m.provider)}` in a terminal and add it")

@@ -38295,10 +38295,12 @@ class Routes(Base):
         # #1388, 2026-11-25: only an empty cached key was asked again, so after the /connect wb
         # advised, wb route kept saying "OAuth" or "from the environment" for HOSTED_TTL
         runner.models.hosted(fresh=True)
-        for mid in ("xenv/grok-9", "oauthco/chat-1"):
+        # an exported key that isn't set here says so (#1189), an OAuth login to /connect a key
+        for mid, said in (("xenv/grok-9", "$XENV_API_KEY isn't set where wb start ran: export it, or store "
+                           "the key with `opencode auth login xenv`"), ("oauthco/chat-1", "store an API key with /connect")):
             code, _, err = self.route("trivial", mid, "--day-usd", "1", "--dry-run")
             self.assertEqual(code, 3)
-            self.assertIn("store an API key with /connect", err)
+            self.assertIn(said, err)
         self.catalog(ROUTES_CATALOG, [key_row(r["id"], r["name"], STORED) if r["id"] in ("xenv", "oauthco")
                                       else r for r in ROUTES_AUTH])  # /connect: no stamp changes
         runner.models._AUTH_FRESH.clear()                           # a retry past AUTH_FRESH_SECS
