@@ -4,16 +4,20 @@ import io
 import json
 import os
 import subprocess
+import sys
+import threading
 import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from workbench import ask_mcp, cards, cli, context, runner, runs, schema, store
-from tests.test_workbench import Base, run_wb, wait_phase
+from workbench import ask_mcp, cards, cli, context, meter, models, runner, runs, schema, store
+from workbench.watch import wait_exit
+from tests.test_workbench import SPEND_FLASH, SPEND_FREE, SPEND_NONE, Base, run_wb, wait_phase
 
 ROOT = Path(__file__).resolve().parent.parent
+
 VERDICT = {"verdict": "confirmed", "confidence": 90, "evidence": "ran it: it lost the row"}
 
 
@@ -297,10 +301,6 @@ class ReportTasks(Base):
         self.assertEqual(content["agents"][context.AGENT]["steps"], 30)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 def finding(fid: str, claim: str) -> dict:
     return {"id": fid, "file": "README.md", "line": 1, "claim": claim, "evidence": "README.md:1",
             "fix": "say so", "severity": "medium", "score": 7}
@@ -489,6 +489,12 @@ class Runs(Base):
         self.assertEqual(code.status["round"], 2)
         self.assertIn("name the answer file in the README", code.round_dir(2).joinpath("prompt.md").read_text())
         self.assertIn("1 change(s) at review", self.run_notices("bld")[-1]["text"])
+        # the driver took each item's notice (_ack_items): the code at review is no news for the
+        # mod's idle net, which reads `acked` against `noticed` (the review of #1278, 2026-11-25)
+        for n in runs.run_tasks(runs.Run("bld")):
+            t = store.Task(n)
+            self.assertGreaterEqual(cli._acked(t), float((t.dir / "noticed").read_text()), n)
+        self.assertEqual([r for r in store.notices() if r["task"].startswith("bld-")], [])
         rc, _, err = wb("run", "close", "bld")
         self.assertEqual(rc, 1)
         self.assertIn("has code waiting on you: bld-code-1", err)
@@ -549,6 +555,112 @@ class Runs(Base):
         self.assertIn("resumed dead", run_wb("run", "resume", "dead"))
         self.assertEqual(self.wait_run("dead", ("review", "failed"))["phase"], "review")
 
+    def wait_item(self, name, check, timeout=60):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            t = store.Task(name)
+            if t.exists and check(t.status):
+                return t
+            time.sleep(0.2)
+        self.fail(f"{name}: {store.Task(name).status if store.Task(name).exists else 'never started'}")
+
+    def test_a_reboot_under_a_run_resumes_its_item_in_flight_and_the_run_ends_with_its_result(self):
+        # the review of #1278 (2026-11-25): resume took up only the items a stop stopped, and a
+        # reboot's item in flight, failed RESTARTED, was taken as null by the next tick
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Audit area": {"findings": [], "covered": ["README.md"]}})
+        os.environ["FAKE_SLEEP"] = "600"  # the item's agent still at work when the machine goes
+        run_wb("run", "start", "boot", "--plan", self.plan({**AUDIT, "name": "boot"}), "--param", "areas=a",
+               "--repo", str(self.repo))
+        item = self.wait_item("boot-find-1", lambda st: st.get("phase") == "running" and st.get("agent_pid"))
+        run = runs.Run("boot")
+        runs._stop_driver(run)  # then as a reboot leaves them: the runner and the driver gone
+        runner_pid, agent = item.status["pid"], item.status["agent_pid"]
+        for kill in (lambda: os.kill(runner_pid, 9), lambda: os.killpg(agent, 9)):
+            try:
+                kill()
+            except ProcessLookupError:
+                pass
+        wait_exit(runner_pid, 10)
+        st = item.status
+        st.update(boot="old-boot", updated_at=time.time() - 60)
+        store.write_json(item.dir / "status.json", st)
+        st = run.set_status(phase="running", pid=2 ** 22 + 7)
+        st["updated_at"] = time.time() - 60
+        store.write_json(run.dir / "status.json", st)
+        with mock.patch.object(store, "boot_id", return_value="this-boot"):
+            self.assertIn("run boot · flow boot · stopped", run_wb("status"))
+        self.assertEqual(item.status["last"], cli.RESTARTED)
+        (told,) = [r for r in store.notices() if r["task"] == "boot-find-1"]
+        self.assertIn("wb run resume boot continues its run, them first", told["text"])
+        self.assertEqual(self.run_notices("boot"), [])  # one notice: the items', which says the run
+        os.environ["FAKE_SLEEP"] = "0"
+        self.assertIn("resumed boot", run_wb("run", "resume", "boot"))
+        self.assertEqual(self.wait_run("boot", ("review", "failed", "checkpoint"))["phase"], "review")
+        rep = runs.report_of("boot")
+        self.assertEqual(rep["null"], [], rep)
+        (found,) = runs.state(run)["find"]
+        self.assertEqual((found.state, found.output), ("done", {"findings": [], "covered": ["README.md"]}))
+        self.assertEqual([(r["task"], r["by"], r["ok"]) for r in run.journal() if r.get("kind") == "resumed"],
+                         [("boot-find-1", "resume", True)])
+
+    def test_wb_run_stop_stops_its_items_and_resume_takes_them_up_where_they_were(self):
+        os.environ["FAKE_RESULT_BY"] = json.dumps({"Audit area": {"findings": [], "covered": ["README.md"]}})
+        os.environ["FAKE_SLEEP"] = "600"
+        run_wb("run", "start", "stp", "--plan", self.plan({**AUDIT, "name": "stp"}), "--param", "areas=a",
+               "--repo", str(self.repo))
+        self.wait_item("stp-find-1", lambda st: st.get("phase") == "running" and st.get("agent_pid"))
+        out = run_wb("run", "stop", "stp")
+        self.assertIn("stopped stp and 1 item(s): stp-find-1. Done work is kept", out)
+        run = runs.Run("stp")
+        self.assertEqual(run.status["phase"], "stopped")
+        self.assertFalse(runs.driver_alive(run))
+        self.assertEqual(store.Task("stp-find-1").status["last"], runs.STOPPED_BY_CLAUDE)
+        os.environ["FAKE_SLEEP"] = "0"
+        run_wb("run", "resume", "stp")
+        self.assertEqual(self.wait_run("stp", ("review", "failed", "checkpoint"))["phase"], "review")
+        self.assertEqual(runs.report_of("stp")["null"], [])
+
+    def test_attempts_run_an_item_n_times_and_a_batch_hands_a_barrier_its_inputs_as_one_item(self):
+        os.environ["FAKE_RESULT_BY"] = json.dumps({
+            "Audit area alpha": {"findings": [finding("A1", "claim-one")], "covered": ["README.md"]}})
+        flow = {"v": 1, "name": "ab", "params": {}, "stages": [
+            {"id": "find", "card": "find", "items": ["alpha"], "attempts": 2, "prompt": "Audit area {item} now."},
+            {"id": "judge", "card": "judge", "from": "find", "flow": "barrier", "batch": 2,
+             "prompt": "Judge these:\n{item}"},
+            {"id": "claude", "final": True, "from": "judge"}]}
+        run_wb("run", "start", "ab", "--plan", self.plan(flow), "--repo", str(self.repo))
+        self.assertEqual(self.wait_run("ab", ("review", "failed", "checkpoint", "paused"))["phase"], "review")
+        st = runs.state(runs.Run("ab"))
+        self.assertEqual([(i.key, i.state) for i in st["find"]], [("1#a1", "done"), ("1#a2", "done")])
+        (judged,) = st["judge"]
+        self.assertEqual(judged.key, "b1")
+        self.assertEqual([o["findings"][0]["id"] for o in judged.input], ["A1", "A1"])
+        self.assertEqual(sorted(runs.run_tasks(runs.Run("ab"))), ["ab-find-1", "ab-find-2", "ab-judge-1"])
+        self.assertIn("A1", store.Task("ab-judge-1").round_dir(1).joinpath("prompt.md").read_text())
+        self.assertEqual(len(runs.report_of("ab")["final"]), 1)
+
+    def test_a_skipped_stage_and_items_past_max_items_are_not_run_and_named(self):
+        flow = {"v": 1, "name": "cap", "params": {"areas": "list"}, "stages": [
+            {"id": "find", "card": "find", "items": "{params.areas}", "max_items": 2},
+            {"id": "judge", "card": "judge", "items": ["x"]},
+            {"id": "claude", "final": True, "from": "find"}]}
+        with mock.patch.object(runs, "spawn", return_value=0):  # no driver: the state alone
+            run_wb("run", "start", "cap", "--plan", self.plan(flow), "--param", "areas=a,b,c",
+                   "--repo", str(self.repo))
+        run = runs.Run("cap")
+        self.assertEqual([(i.key, i.state, i.why) for i in runs.state(run)["find"]],
+                         [("1", "pending", ""), ("2", "pending", ""),
+                          ("3", "not_run", "past the stage's max_items (2)")])
+        self.assertIn("amended cap: skip judge", run_wb("run", "amend", "cap", "--skip", "judge"))
+        self.assertEqual([(i.state, i.why) for i in runs.state(run)["judge"]],
+                         [("not_run", "skipped (wb run amend --skip)")])
+        code, _, err = wb("run", "amend", "cap", "--skip", "claude")
+        self.assertEqual(code, 1)
+        self.assertIn("no stage claude to skip (its stages: find, judge)", err)
+        self.assertEqual(runs.report_of("cap")["not_run"],
+                         [{"key": "find:3", "why": "past the stage's max_items (2)"},
+                          {"key": "judge:1", "why": "skipped (wb run amend --skip)"}])
+
     def test_a_name_is_a_run_or_a_task_never_both(self):
         os.environ["FAKE_RESULT_BY"] = json.dumps({"Audit area": {"findings": [], "covered": ["README.md"]}})
         run_wb("run", "start", "nm", "--plan", self.plan({**AUDIT, "name": "nm"}), "--param", "areas=a",
@@ -567,29 +679,261 @@ class Runs(Base):
         self.assertFalse(runs.run_dir("nm2").exists())
 
 
+class RunsApi(Base):
+    """A run on an API role (#1278), on the fake's catalog (WB_FAKE_CATALOG, tests.test_workbench's
+    SPEND_CATALOG): the day cap, the run's dollar budget, exit 3's two meanings and the provider
+    slots. The driver's pass (runs.tick) runs here; each item's wb start is the real command."""
+
+    def setUp(self):
+        super().setUp()
+        from tests.test_workbench import SPEND_CATALOG
+        path = Path(self.tmp.name) / "catalog.json"
+        path.write_text(json.dumps(SPEND_CATALOG))
+        os.environ["WB_FAKE_CATALOG"] = str(path)
+        os.environ["FAKE_AUTH_EXPORT"] = json.dumps([
+            {"id": "cred_meterco", "integrationID": "meterco", "label": "main", "active": True,
+             "value": {"type": "key", "key": "sk-run-test"}}])
+        self.roles(SPEND_FLASH, 5)
+        self.assertEqual(models.lookup(SPEND_FLASH).kind, "api")  # hosted.json, which stage_model reads
+
+    def roles(self, model, cap):
+        """routes.json: the significant role (every AUDIT stage's card's) on ``model``, the cap."""
+        store.write_json(Path(os.environ["WB_ROUTES"]), {"v": 1, **({"day_usd": cap} if cap else {}),
+                                                         "roles": {"significant": {"via": "api", "api": model}}})
+        meter._CAP.clear()
+
+    def spent(self, usd, task="other"):
+        store.append_jsonl(meter.ledger_path(), {
+            "ts": time.time(), "day": meter.day(), "kind": "step", "task": task, "round": 1,
+            "provider": "meterco", "model": SPEND_FLASH, "usd": usd, "metered": usd, "source": "opencode",
+            "tok": {"in": 1, "out": 0, "cache_read": 0, "cache_write": 0, "reasoning": 0}})
+
+    def start(self, name, *extra, flow=AUDIT):
+        p = Path(self.tmp.name) / f"{name}.json"
+        p.write_text(json.dumps({**flow, "name": name}))
+        with mock.patch.object(runs, "spawn", return_value=0):  # the passes run here
+            code, out, err = wb("run", "start", name, "--plan", str(p), "--param", "areas=a", "--repo",
+                                str(self.repo), *extra)
+        self.assertEqual(code, 0, err)
+        return runs.Run(name), out
+
+    def notices(self, name):
+        return [r for r in store.notices(runs=True) if r.get("run") == name and "task" not in r]
+
+    def test_an_api_stage_with_no_day_cap_is_refused_before_any_file_is_written(self):
+        self.roles(SPEND_FLASH, None)
+        code, _, err = wb("run", "start", "nocap", "--flow", "audit", "--param", "areas=a", "--param", "focus=x",
+                          "--repo", str(self.repo))
+        self.assertEqual(code, 1)
+        self.assertIn(f"stage find runs on {SPEND_FLASH} (role significant), and {meter.NO_CAP}", err)
+        self.assertFalse(runs.run_dir("nocap").exists())
+
+    def test_the_runs_dollar_budget_counts_its_tasks_and_the_next_requests_worst_then_pauses(self):
+        m = models.lookup(SPEND_FLASH)
+        floor = meter.request_floor(m)
+        self.assertGreater(floor, 0)
+        run, out = self.start("bud", "--budget-usd", "1")
+        self.assertIn("budget $1.00", out)
+        run.log(kind="item", stage="find", key="0", n=9, task="bud-find-9")  # an earlier item's spend
+        self.spent(0.5, "bud-find-9")
+        self.spent(3.0)                                                  # another task's: not the run's
+        stage = runs.stages(run.flow)[0]
+        run.amend(budget_usd=0.5 + floor * 2)
+        self.assertIsNone(runs._budget_stop(run, stage, m))
+        run.amend(budget_usd=round(0.5 + floor / 2, 6))
+        why = runs._budget_stop(run, stage, m)
+        self.assertTrue(why.startswith("the run's budget: $0.50 spent of $"), why)
+        self.assertIn(f"the next request can cost up to {meter.usd(floor)}", why)
+        self.assertIsNone(runs._budget_stop(run, stage, models.lookup(SPEND_FREE)))  # a free model: $0
+        runs.tick(run)
+        self.assertEqual(run.status["phase"], "paused")
+        self.assertEqual([r.get("task") for r in run.journal() if r.get("kind") == "item"], ["bud-find-9"])
+        (told,) = self.notices("bud")
+        self.assertTrue(told["text"].startswith("[workbench] Run `bud` is paused: paused at the run's budget"))
+
+    def test_the_day_cap_pauses_the_run_and_an_overnight_run_tries_again_with_no_wake(self):
+        self.spent(5.03)                                                 # today at the $5 cap
+        run, out = self.start("capr", "--budget-usd", "1")
+        self.assertIn("today's cap leaves $0", out)
+        runs.tick(run)
+        st = run.status
+        self.assertEqual(st["phase"], "paused")
+        self.assertIn(meter.RESETS, st["why"])
+        (told,) = self.notices("capr")
+        self.assertIn("is paused: paused: significant role: API spend today is", told["text"])
+        self.assertEqual([r["kind"] for r in run.journal() if r.get("stage") == "find"], ["item", "retry"])
+        self.assertFalse(store.Task("capr-find-1").exists)
+        night, _ = self.start("night", "--budget-usd", "1", "--overnight")
+        for _ in range(2):
+            runs.tick(night)
+        self.assertEqual(night.status["phase"], "running")
+        self.assertEqual(self.notices("night"), [])
+        self.assertEqual([r["kind"] for r in night.journal() if r.get("stage") == "find"],
+                         ["item", "retry", "item", "retry"])
+        (it,) = runs.state(night)["find"]
+        self.assertEqual(it.state, "pending")                            # tried again past midnight
+
+    def test_any_other_exit_3_is_not_run_and_an_overnight_run_never_tries_it_again(self):
+        # the review of #1278 (2026-11-25): "day cap" matched NO_PRICE, NO_CAP and UNREADABLE too,
+        # and an --overnight run retried a refusal that never clears every tick, silently
+        self.roles(SPEND_NONE, 5)
+        self.assertEqual(models.lookup(SPEND_NONE).kind, "api")
+        run, out = self.start("nopr", "--budget-usd", "1", "--overnight")
+        self.assertIn("estimate unpriced", out)
+        runs.tick(run)
+        (it,) = runs.state(run)["find"]
+        self.assertEqual(it.state, "not_run")
+        self.assertIn(meter.NO_PRICE, it.why)
+        self.assertNotIn("retry", [r["kind"] for r in run.journal()])
+        self.assertEqual(run.status["phase"], "review")                 # nothing else to run: Claude's
+        self.assertEqual([r["kind"] for r in self.notices("nopr")], ["run_done"])
+        self.assertEqual(runs.report_of("nopr")["not_run"][0]["key"], "find:1")
+
+    def test_the_providers_slots_and_a_users_task_waiting_for_one_come_before_a_runs_next_item(self):
+        run, _ = self.start("slot", "--budget-usd", "1")
+        m = models.lookup(SPEND_FLASH)
+        stage = runs.stages(run.flow)[0]
+        st = runs.state(run)
+        user = store.Task("users-own")
+        user.dir.mkdir(parents=True)
+        store.write_json(user.dir / "task.json", {"name": "users-own"})
+        mate = store.Task("slot-find-7")
+        mate.dir.mkdir(parents=True)
+        store.write_json(mate.dir / "task.json", {"name": "slot-find-7", "run": "slot"})
+        with mock.patch.object(cli, "_api_slots_free", return_value=0):
+            self.assertEqual(runs._room(run, stage, st, m), "meterco's slots are taken")
+        with mock.patch.object(cli, "_api_slots_free", return_value=2), \
+                mock.patch.object(cli, "_api_pending", return_value=["users-own"]):
+            self.assertEqual(runs._room(run, stage, st, m), "a task of the user's waits for a slot first")
+            with mock.patch.object(runs, "_start") as started:
+                runs.tick(run)
+            started.assert_not_called()                                  # the user's goes first
+        with mock.patch.object(cli, "_api_slots_free", return_value=2), \
+                mock.patch.object(cli, "_api_pending", return_value=["slot-find-7"]):
+            self.assertIsNone(runs._room(run, stage, st, m))             # another of the run's: no wait
+        flying = {"find": [runs.Item("find", str(i), state="running") for i in range(runs.IN_FLIGHT)]}
+        self.assertEqual(runs._room(run, stage, flying, m), f"{runs.IN_FLIGHT} items in flight")
+
+
 class Wiring(Base):
     """The run's pieces in the rest of wb (#1278)."""
 
-    def open_run(self, name="wr"):
+    def open_run(self, name="wr", alive=True, flow=AUDIT):
+        """A run, open; ``alive``: with a driver, a process whose command line is one's (sleeping,
+        reaped by a thread of this test's as it ends)."""
         d = runs.run_dir(name)
         d.mkdir(parents=True)
-        store.write_json(d / "run.json", {"name": name, "flow": AUDIT})
-        runs.Run(name).set_status(phase="running")
-        return runs.Run(name)
+        store.write_json(d / "run.json", {"name": name, "flow": flow, "cwd": "/x", "session": "S1"})
+        run = runs.Run(name)
+        run.set_status(phase="running")
+        if alive:
+            proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)",
+                                     "-m", "workbench.runs", "drive", name])
+            threading.Thread(target=proc.wait, daemon=True).start()
+            self.addCleanup(lambda: proc.poll() is None and proc.kill())
+            run.set_status(pid=proc.pid, start=models._started(proc.pid), machine=store.machine())
+            self.assertTrue(runs.driver_alive(run))
+        return run
+
+    def item(self, name, run="wr", status=None, **spec):
+        t = store.Task(name)
+        t.dir.mkdir(parents=True)
+        store.write_json(t.dir / "task.json", {"name": name, **({"run": run, "stage": "find", "item": "1"}
+                                                                if run else {}), **spec})
+        if status is not None:
+            store.write_json(t.dir / "status.json", status)
+        return t
 
     def test_an_open_runs_item_wakes_its_driver_but_its_question_still_wakes_claude(self):
-        self.open_run()
-        t = store.Task("wr-find-1")
-        t.dir.mkdir(parents=True)
-        store.write_json(t.dir / "task.json", {"name": t.name, "run": "wr", "stage": "find", "item": "1"})
+        run = self.open_run()
+        t = self.item("wr-find-1")
         t.notify("review", "the report")
         t.notify("question", "which file?", id="q1")
         self.assertEqual([r["kind"] for r in store.notices() if r["task"] == t.name], ["question"])
-        self.assertEqual([r["kind"] for r in store.read_jsonl(runs.run_dir("wr") / "notify.jsonl")[0]], ["review"])
-        self.assertFalse((t.dir / "noticed").read_text() == "")
+        (routed,) = store.read_jsonl(runs.run_dir("wr") / "notify.jsonl")[0]
+        self.assertEqual(routed["kind"], "review")
         runs.Run("wr").set_status(phase="review")
         t.notify("review", "again")  # the run no longer open: Claude's again
         self.assertEqual([r["kind"] for r in store.notices() if r["task"] == t.name], ["question", "review"])
+        self.assertTrue(run.exists)
+
+    def test_a_routed_notice_leaves_its_noticed_mark_and_the_driver_acknowledges_it(self):
+        # the review of #1278 (2026-11-25): with no mark the mod's idle net read `acked` against
+        # the status written after the notice, and woke Claude a minute into a code item's review
+        run = self.open_run()
+        t = self.item("wr-code-1")
+        t.notify("review", "the change")
+        (routed,) = store.read_jsonl(run.dir / "notify.jsonl")[0]
+        self.assertEqual(float((t.dir / "noticed").read_text()), routed["ts"])
+        self.assertLess(cli._acked(t), routed["ts"])
+        runs._ack_items(run)
+        self.assertGreaterEqual(cli._acked(t), float((t.dir / "noticed").read_text()))
+        self.assertEqual(store.notices(), [])
+
+    def test_a_dead_drivers_items_wake_claude_until_a_driver_lives(self):
+        # the review of #1278: a driver killed left the run open, and every item notice, a code
+        # item's stuck or failed too, went to a file nobody read until a wb run status reaped it
+        run = self.open_run(alive=False)
+        run.set_status(pid=2 ** 22 + 9)
+        t = self.item("wr-code-1")
+        t.notify("stuck", "the agent stopped")
+        self.assertEqual([r["kind"] for r in store.notices() if r["task"] == t.name], ["stuck"])
+        self.assertFalse((run.dir / "notify.jsonl").exists())
+
+    def reboot(self, alive):
+        """A restart under a run's item and a task of the user's, both of session S1 in /x: the
+        runners recorded under another boot; the run's driver dead (or, ``alive``, still up)."""
+        run = self.open_run("aa", alive=alive)
+        if not alive:
+            st = run.set_status(pid=2 ** 22 + 7)
+            st["updated_at"] = time.time() - 60
+            store.write_json(run.dir / "status.json", st)
+        old = {"phase": "running", "boot": "old-boot", "pid": 2 ** 22 + 3, "updated_at": time.time() - 60}
+        item = self.item("aa-find-1", run="aa", status=old, session="S1", cwd="/x", repo="/x")
+        mine = self.item("mine", run=None, status=old, session="S1", cwd="/x", repo="/x")
+        with mock.patch.object(store, "boot_id", return_value="this-boot"):
+            for t in (item, mine):  # as wb status reaps them, the run's first
+                self.assertTrue(cli.reap(t))
+        return run, mine
+
+    def test_a_reboot_tells_claude_of_the_users_tasks_apart_from_a_runs_items(self):
+        # the review of #1278 (2026-11-25): one batch held both (a run's driver inherits the
+        # session and the directory); led by a run item, its notice went to the run's file and
+        # `mine` was acknowledged with it, Claude never told
+        run, mine = self.reboot(alive=False)
+        rows = {r["task"]: r for r in store.notices()}
+        self.assertEqual(sorted(rows), ["aa-find-1", "mine"])
+        self.assertEqual(rows["mine"]["tasks"], ["mine"])
+        self.assertIn("wb resume mine", rows["mine"]["text"])
+        self.assertLess(cli._acked(mine), rows["mine"]["ts"])  # news still: the mod wakes Claude for it
+        self.assertEqual(rows["aa-find-1"]["tasks"], ["aa-find-1"])
+        self.assertIn("wb run resume aa continues its run, them first", rows["aa-find-1"]["text"])
+        # the run is stopped, said by its items' notice alone
+        self.assertEqual(run.status["phase"], "stopped")
+        self.assertEqual([r for r in store.notices(runs=True) if "task" not in r], [])
+        self.assertEqual(store.Task("aa-find-1").status["last"], cli.RESTARTED)
+
+    def test_a_reboot_under_a_live_driver_gives_it_the_items_and_claude_the_users_tasks(self):
+        run, mine = self.reboot(alive=True)
+        self.assertEqual([r["task"] for r in store.notices()], ["mine"])
+        self.assertEqual([r["task"] for r in store.read_jsonl(run.dir / "notify.jsonl")[0]], ["aa-find-1"])
+        self.assertLess(cli._acked(mine), store.notices()[0]["ts"])
+        self.assertEqual(run.status["phase"], "running")
+
+    def test_update_stop_stops_a_runs_driver_and_tells_claude_of_its_items_apart(self):
+        # the same root as a reboot's (the review of #1278): one batch per owner held a run's items
+        # with the user's tasks, and a live driver would have taken the stopped items as null
+        run = self.open_run("up")
+        item = self.item("up-find-1", run="up", status={"phase": "running"}, session="S1", cwd="/x", repo="/x")
+        mine = self.item("mine", run=None, status={"phase": "running"}, session="S1", cwd="/x", repo="/x")
+        self.assertIn("stopped for the update: up-find-1", cli._stop_for_update([item, mine]))
+        self.assertEqual((run.status["phase"], run.status["why"]), ("stopped", cli.UPDATE_STOP))
+        self.assertFalse(runs.driver_alive(run))
+        rows = {r["task"]: r for r in store.notices()}
+        self.assertEqual(sorted(rows), ["mine", "up-find-1"])
+        self.assertIn("wb resume mine continues it in a fresh session", rows["mine"]["text"])
+        self.assertIn("wb run resume up continues its run, it first", rows["up-find-1"]["text"])
+        self.assertLess(cli._acked(mine), rows["mine"]["ts"])
 
     def test_run_notices_are_kept_apart_from_task_notices_and_rotated_once_taken(self):
         run = self.open_run()
@@ -600,17 +944,92 @@ class Wiring(Base):
         run.claim_ack(row["ts"])
         self.assertEqual(cli._rotate_notices(-1), 1)
 
-    def test_a_runs_wake_is_charged_to_its_tasks(self):
+    def test_a_runs_wake_is_charged_to_its_tasks_by_its_journal_never_by_their_prefix(self):
+        # the review of #1278 (2026-11-25): by the `<run>-` prefix, a user's own `wr-x` was
+        # charged for run wr's wakes
         from workbench import spend
+        run = self.open_run(alive=False)
+        for n in ("wr-find-1", "wr-find-2"):
+            run.log(kind="item", stage="find", key=n[-1], n=int(n[-1]), task=n)
         m = spend.WAKE.match("[workbench] Run `wr` needs Claude: stage merge is yours")
-        self.assertEqual(spend._woken(m, {"wr-find-1", "wr-find-2", "other"}), {"wr-find-1", "wr-find-2"})
+        self.assertEqual(spend._woken(m, {"wr-find-1", "wr-find-2", "wr-x", "other"}), {"wr-find-1", "wr-find-2"})
         m = spend.WAKE.match("[workbench] Task `other` is ready for review")
         self.assertEqual(spend._woken(m, {"wr-find-1", "other"}), {"other"})
+        run.set_status(phase="closed", updated_at=0)
+        st = run.status
+        st["updated_at"] = 0
+        store.write_json(run.dir / "status.json", st)
+        self.assertEqual(runs.archive(30), 1)  # an old transcript's wake, its run archived since
+        m = spend.WAKE.match("[workbench] Run `wr` is done: 2 result(s)")
+        self.assertEqual(spend._woken(m, {"wr-find-1", "wr-x"}), {"wr-find-1"})
+
+    def test_wb_top_json_carries_each_run_not_closed_with_its_drivers_life(self):
+        # plan §5 (#1278, S8): the seam the pane's and the web's run strip read
+        live = self.open_run("live")
+        live.set_status(stages={"find": {"done": 1, "running": 2}}, spent_usd=0.25, budget_usd=2.0)
+        self.open_run("gone", alive=False).set_status(phase="closed")
+        (row,) = runs.snapshot()
+        self.assertEqual({k: row[k] for k in ("run", "phase", "alive", "stages", "spent_usd", "budget_usd",
+                                               "session", "cwd")},
+                         {"run": "live", "phase": "running", "alive": True,
+                          "stages": {"find": {"done": 1, "running": 2}}, "spent_usd": 0.25, "budget_usd": 2.0,
+                          "session": "S1", "cwd": "/x"})
+        from workbench import top
+        drm = Path(self.tmp.name, "empty")
+        drm.mkdir()
+        self.assertEqual([r["run"] for r in top.Top(1, drm=drm).tick()["runs"]], ["live"])
+
+    def test_wb_run_feed_never_reopens_a_closed_run(self):
+        # the review of #1278: feed skipped resume's check, and on a closed run set the phase
+        # back to running and spawned a driver
+        flow = {"v": 1, "name": "chk", "params": {"areas": "list"}, "stages": [
+            AUDIT["stages"][0], {"id": "merge", "claude": True, "from": "find"},
+            {"id": "end", "final": True, "from": "merge"}]}
+        run = self.open_run("chk", alive=False, flow=flow)
+        run.set_status(phase="closed")
+        feed = Path(self.tmp.name) / "feed.json"
+        feed.write_text("[]")
+        with mock.patch.object(runs, "spawn") as spawned:
+            code, _, err = wb("run", "feed", "chk", "merge", "--file", str(feed))
+        self.assertEqual((code, err.strip()), (1, "wb: run chk is closed"))
+        self.assertEqual(run.status["phase"], "closed")
+        self.assertFalse((run.dir / "inbox" / "merge-feed").exists())
+        spawned.assert_not_called()
+
+    def test_flow_import_makes_a_commands_arguments_each_item_and_keeps_its_braces(self):
+        # plan §3 (#1278): `wb flow import X.md` maps $ARGUMENTS to {item}
+        os.environ["WB_FLOWS"] = str(Path(self.tmp.name) / "flows")
+        cmd = Path(self.tmp.name) / "Sec-Review.md"
+        cmd.write_text("---\ndescription: A security pass over one area\nallowed-tools: Bash\n---\n"
+                       "Review $ARGUMENTS for injection, and say each {finding} with its line.\n")
+        out = run_wb("flow", "import", str(cmd))
+        self.assertIn("imported Sec-Review.md as flow sec-review (", out)
+        self.assertIn("Run it: wb run start <run> --flow sec-review --param items=<a,b,…>", out)
+        flow = runs.load_flow("sec-review")
+        self.assertEqual(flow["description"], "A security pass over one area")
+        self.assertEqual(flow["params"], {"items": "list"})
+        stage = runs.stages(flow)[0]
+        self.assertEqual((stage["kind"], stage["items"]), ("code", "{params.items}"))
+        self.assertEqual(runs.render(stage["prompt"], {"item": "auth/"}),
+                         "Review auth/ for injection, and say each {finding} with its line.")
+        self.assertIn(("sec-review", "yours", "A security pass over one area"), runs.flow_names())
+        code, _, err = wb("flow", "import", str(cmd))
+        self.assertEqual(code, 1)
+        self.assertIn("exists (--force replaces it)", err)
+        cmd.write_text("Fix $1 in $2\n")
+        code, _, err = wb("flow", "import", str(cmd), "--name", "pos", "--card", "find")
+        self.assertIn("$1: an imported command takes only $ARGUMENTS", err)
+        cmd.write_text("Audit the parser.\n")  # no $ARGUMENTS: the item comes after the command's text
+        run_wb("flow", "import", str(cmd), "--name", "aud2", "--card", "find")
+        stage = runs.stages(runs.load_flow("aud2"))[0]
+        self.assertEqual(stage["card"], "find")
+        self.assertEqual(runs.render(stage["prompt"], {"item": "lexer.py"}), "Audit the parser.\n\nlexer.py")
 
     def test_wb_stop_all_stops_a_runs_driver_first(self):
         run = self.open_run()
         self.assertIn("wb run wr", run_wb("stop", "--all"))
         self.assertEqual(run.status["phase"], "stopped")
+        self.assertFalse(runs.driver_alive(run))
 
     def test_deepmode_is_workflows_new_name_and_prints_the_deepcode_rule(self):
         self.assertEqual(run_wb("deepmode"), "Dynamic workflows (deepmode): Off (default). Claude runs one task at "
@@ -620,7 +1039,7 @@ class Wiring(Base):
         self.assertEqual(run_wb("deepmode", "--rule"), runs.DEEPCODE_RULE + "\n")
 
     def test_gc_archives_a_closed_run_and_keeps_its_name_taken(self):
-        run = self.open_run("old")
+        run = self.open_run("old", alive=False)
         run.set_status(phase="closed")
         st = run.status
         st["updated_at"] = time.time() - 40 * 86400
@@ -628,3 +1047,7 @@ class Wiring(Base):
         self.assertEqual(runs.archive(30), 1)
         self.assertFalse(run.exists)
         self.assertIn("run names are never reused", runs.taken("old"))
+
+
+if __name__ == "__main__":  # at the end: partway, a run as a script skipped every class after it
+    unittest.main()

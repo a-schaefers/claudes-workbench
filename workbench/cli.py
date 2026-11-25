@@ -572,21 +572,36 @@ _owner = store.owner
 def _restart_notice(task: store.Task) -> None:
     """One notice for the tasks one restart interrupted in task's session (its others reaped
     here, quietly), raised on the first started, the rest acknowledged with it: the mod woke
-    Claude once per task (#544)."""
+    Claude once per task (#544). A run's items are a batch of their own (_batch_key)."""
+    key = _batch_key(task)
     batch = [t for t in store.all_tasks() if t.name == task.name or (
-        _owner(t) == _owner(task) and t.status.get("phase") in LIVE
+        _batch_key(t) == key and t.status.get("phase") in LIVE
         and _restarted(t.status) and reap(t, quiet=True))]
     ts = store.now()
+    run = runs.Run(key[1]) if key[1] else None
+    if run is not None:
+        runs.reap(run, quiet=True)  # its driver died in the restart too: this notice says so
     # the batch by name: `wb resume --all --repo <cwd>` resumed nothing for a session in ~ (a
     # broad directory claims no task) and, in a repo two sessions share, the other's tasks too (#692)
+    then = (f". wb run resume {run.name} continues its run, them first"
+            if run is not None and run.exists and not runs._ended(run) else f". wb resume {' '.join(t.name for t in batch)} continues them in the order they were "
+            "started (one that never ran a round starts it again)")
     row = batch[0].notify("failed", (f"task {task.name}: {RESTARTED}" if len(batch) == 1 else
                                f"{len(batch)} tasks were {RESTARTED.replace('it)', 'them)')}: "
-                               + ", ".join(t.name for t in batch))
-                    + f". wb resume {' '.join(t.name for t in batch)}"
-                    + " continues them in the order they were started (one that never ran a "
-                    "round starts it again)", round=batch[0].status.get("round"), ts=ts,
-                    tasks=[t.name for t in batch], cause="died")  # not the step's size (#582)
+                               + ", ".join(t.name for t in batch)) + then,
+                          round=batch[0].status.get("round"), ts=ts,
+                          tasks=[t.name for t in batch], cause="died")  # not the step's size (#582)
     store.ack_batch(batch, row, ts)  # had with the first's notice: neither wb wait nor the mod wakes for it
+
+
+def _batch_key(t) -> tuple:
+    """Which one-notice batch a stopped task joins: its owner's (store.owner), and a run's items
+    (task.json `run`, #1278) apart from the user's own. One batch held both, as a run's driver
+    inherits the session and the directory: led by a run item, its notice went to the run's
+    notify.jsonl and the user's own tasks were acknowledged with it, Claude never told of them
+    (the review of #1278, 2026-11-25)."""
+    run = t.spec.get("run")
+    return _owner(t), run if isinstance(run, str) and runs.RUN_RE.match(run) else None
 
 
 def _whose(t) -> str:
@@ -599,8 +614,13 @@ def _stop_for_update(tasks) -> str:
     """`wb update --stop`: every running agent stopped, each task left stuck with UPDATE_STOP and
     a notice per owner (store.owner, as a restart's batch) naming `wb resume`, so each session,
     this one or another, is woken to continue its own. `wb stop --all` parked them and
-    acknowledged their news: another session's Claude waited for a wake that never came (#694)."""
+    acknowledged their news: another session's Claude waited for a wake that never came (#694).
+    A run's items (#1278): its driver stopped first, so it neither takes them as null nor resumes
+    them under the update, and their batch apart from the user's own (_batch_key)."""
     stopped = []
+    for name in dict.fromkeys(k for t in tasks if (k := _batch_key(t)[1])):
+        if runs.Run(name).open():
+            runs.stop(runs.Run(name), UPDATE_STOP, items=False)
     for t in tasks:
         with store.locked(runner.lock_file(t.name, "cmd")):
             if t.status.get("phase") in store.CLOSED or (t.status.get("pid") and store.elsewhere(
@@ -615,13 +635,16 @@ def _stop_for_update(tasks) -> str:
             stopped.append(t)
     groups: dict = {}
     for t in stopped:
-        groups.setdefault(store.owner(t), []).append(t)
-    for batch in groups.values():
+        groups.setdefault(_batch_key(t), []).append(t)
+    for (_, run), batch in groups.items():
         names, ts = [t.name for t in batch], store.now()
         row = batch[0].notify("stuck", (f"task {names[0]}: {UPDATE_STOP}" if len(batch) == 1 else
                                   f"{len(batch)} tasks were {UPDATE_STOP}: " + ", ".join(names))
-                        + f". wb resume {' '.join(names)} continues "
-                        + ("it" if len(batch) == 1 else "them") + " in a fresh session",
+                        + (f". wb run resume {run} continues its run, "
+                           + ("it" if len(batch) == 1 else "them") + " first"
+                           if run and runs.Run(run).exists and not runs._ended(runs.Run(run))
+                           else f". wb resume {' '.join(names)} continues "
+                           + ("it" if len(batch) == 1 else "them") + " in a fresh session"),
                         round=batch[0].status.get("round"), ts=ts, tasks=names, cause="update")
         store.ack_batch(batch, row, ts)  # had with the first's notice, as a restart's batch (#544)
     return "stopped for the update: " + (", ".join(f"{t.name} ({_whose(t)})" for t in stopped)
@@ -8779,6 +8802,16 @@ def parser() -> argparse.ArgumentParser:
     x = rs.add_parser("flows", help="the flows a run can take: yours, the shipped ones, a repo's")
     x.add_argument("--repo", metavar="DIR")
     s.set_defaults(f=cmd_run)
+    s = sub.add_parser("flow", help="deep workflows' flows (#1278): import a slash command's file as one")
+    fs = s.add_subparsers(dest="flow_cmd", required=True)
+    x = fs.add_parser("import", help="a command's Markdown (its prompt, $ARGUMENTS as each item) as a flow "
+                      "of yours: one task per item of --param items")
+    x.add_argument("file", help="the command's .md (Claude Code's .claude/commands/, OpenCode's command/)")
+    x.add_argument("--name", help="the flow's name (default: the file's)")
+    x.add_argument("--card", help="a role card for its stage (default: a code task)")
+    x.add_argument("--out", metavar="FILE", help="where to write it (default: $WB_FLOWS/<name>.json)")
+    x.add_argument("--force", action="store_true", help="replace a flow file already there")
+    s.set_defaults(f=runs.cmd_flow_import)
     s = sub.add_parser("route", help="the roles: which model each kind of work goes to (show, or "
                        "change one on the user's yes)")
     s.add_argument("what", nargs="?", metavar="role|all|cap|busy",

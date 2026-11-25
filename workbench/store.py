@@ -1009,11 +1009,6 @@ class Task:
         replay's, which wakes no one."""
         if self.spec.get("bench"):  # a replay of wb bench's: no one is to be woken
             return None
-        if kind not in RUN_GLOBAL and self.spec.get("run"):
-            from . import runs  # only here: runs imports store
-            if runs.item_open(self.spec):  # #1278: an open run's item wakes its driver, never Claude
-                return append_jsonl(runs.run_dir(self.spec["run"]) / "notify.jsonl",
-                                    {"ts": now(), "task": self.name, "kind": kind, "text": text, **extra})
         # stamped after every notice before it and after the task's acknowledgement, whatever
         # the clock did since: corrected backwards (a dual boot with a local-time RTC), a notice
         # raised after a mark came out at or before it, and wb wait, the mod's wake and its idle
@@ -1022,12 +1017,19 @@ class Task:
             acked = float((self.dir / "acked").read_text() or 0)
         except (OSError, ValueError):
             acked = 0.0
-        row = append_jsonl(home() / "notify.jsonl",
-                           {"ts": now(), "task": self.name, "kind": kind, "text": text, **extra},
+        path = home() / "notify.jsonl"
+        if kind not in RUN_GLOBAL and self.spec.get("run"):
+            from . import runs  # only here: runs imports store
+            if runs.item_open(self.spec):  # #1278: an open run's item wakes its live driver, never Claude
+                path = runs.run_dir(self.spec["run"]) / "notify.jsonl"
+        row = append_jsonl(path, {"ts": now(), "task": self.name, "kind": kind, "text": text, **extra},
                            after=acked if math.isfinite(acked) else 0.0)
         # each named task's newest notice, in its own directory: the mod's idle net read it from
         # notify.jsonl's last 1 MiB only, and after a reload woke Claude again for a review whose
-        # notice it had acknowledged, pushed out of that tail by later ones (#844)
+        # notice it had acknowledged, pushed out of that tail by later ones (#844). A run item's
+        # too, whose notice its driver acknowledges (runs._ack_items): with no mark the idle net
+        # read `acked` against the status written after the notice, and woke Claude a minute into
+        # each code item's review mid-run (the review of #1278, 2026-11-25)
         for name in dict.fromkeys([self.name, *(extra.get("tasks") or [])]):
             if not isinstance(name, str) or "/" in name or name.startswith("."):
                 continue  # a batch names tasks wb named: nothing outside tasks/

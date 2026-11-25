@@ -648,13 +648,16 @@ const CODING_RULES: Record<string, string> = {
 
 // Dynamic workflows (#1041), the user's choice (`wb workflows`): whether Claude may run several
 // tasks at once for one request. Off (the default) adds nothing: the skill says one at a time.
-const WORKFLOWS_RULE = 'Dynamic workflows are on (the user\'s choice; `wb workflows` shows it): you may split a ' +
-  'request into several tasks that run at once, mixing roles and the GPU and API sides; each runs on its own ' +
-  'role\'s model, never one you pick. Plan the fan-out as a handoff plan (each task its own spec, size, role and ' +
-  'acceptance command), name its tasks with one shared prefix and pass it as `--group <prefix>` on each `wb start` ' +
-  '(the pane draws them under one header), and say the plan in one line before you start them. ' +
-  'The GPU lease and the provider slots decide what runs together (the rest queue). Review each result on its ' +
-  'own merits; merge logic first, then tests, then UI or docs.'
+// #1278: on, a substantive request is a deep workflow (wb run), its fan-out the run's, not tasks
+// Claude starts at once; and the mod wakes Claude for no run row yet, so the wake is a background
+// `wb wait <run>` (the review of #1278, 2026-11-25: told "don't poll", Claude was never woken)
+const WORKFLOWS_RULE = 'Dynamic workflows are on (the user\'s choice; `wb deepmode` shows it): run a substantive ' +
+  'request as a deep workflow on their agents, as the /workbench skill\'s *Deep workflows* says: pick a flow ' +
+  '(`wb run flows`), say it in at most three lines, start it once with `wb run start`, then wait for its notices ' +
+  'with `wb wait <run>` in the background, again after each. Never fan out by starting several tasks at once ' +
+  'yourself: the run starts its items, each on its own role\'s model, never one you pick, and the GPU lease, the ' +
+  'provider slots and the day cap decide what runs together. Review each result on its own merits; merge logic ' +
+  'first, then tests, then UI or docs.'
 const WORKFLOWS_OFF = 'Dynamic workflows are now off (the user\'s choice; `wb workflows` shows it): run one task ' +
   'at a time again, as the /workbench skill says.'
 

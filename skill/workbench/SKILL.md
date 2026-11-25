@@ -129,8 +129,8 @@ the pane back (the mod answers it; with a task, the task is yours to take as usu
   the testing back with `wb feedback`.
 - **Dynamic workflows** (the user's choice, `wb deepmode`, once `wb workflows`; run `wb deepmode on|off` only on
   their yes): off (the default), run **one task at a time**: start the next when the last is
-  reviewed. On, a `dynamic-workflows` context block says you may fan out (see "Planning work you
-  will hand off", and *Deep workflows*); a later change comes as a `[workbench]` note. The word
+  reviewed. On, a `dynamic-workflows` context block says a substantive request runs as a deep
+  workflow (*Deep workflows*); a later change comes as a `[workbench]` note. The word
   `deepcode` in a request asks for one deep workflow whatever the setting.
 - **After a compaction or `/clear`**, a `workbench-mode` context block says the mode is still on
   and where this file is: read it again if its procedure is no longer in your context.
@@ -202,13 +202,11 @@ if you can, and start nothing until the plan is approved; then write the first s
   small model skips one item of a list.
 - **Order**: logic, then its tests, then UI; a step that needs another's interface comes after it,
   through `wb next` on the same agent when it is the same area.
-- **Fan-out** (only with Dynamic workflows on): independent steps may run at once as separate
-  tasks, mixing roles and the GPU and API sides; each runs on its own role's model, never one
-  you pick. Each task is a step as above (spec, size, role, acceptance command); give them one
-  name prefix (`auth-logic`, `auth-tests`, `auth-docs`), pass `--group <prefix>` (`--group auth`)
-  on each `wb start` so the pane draws them under one header, and say the plan in one line before
-  the first `wb start`. The GPU and the provider slots decide what runs together: the rest queue.
-  Review each result on its own; accept logic first, then tests, then UI or docs.
+- **Fan-out** (only with Dynamic workflows on, or `deepcode`) is a deep workflow: one
+  `wb run start`, never several tasks you start at once yourself (*Deep workflows*). Steps you
+  planned that don't fit a shipped flow go in a flow you write (`--plan`, `reference/deep.md`),
+  each its own spec, role and acceptance command as above; review each result on its own, accept
+  logic first, then tests, then UI or docs.
 - **What stays yours**, marked apart: git, CLAUDE.md, choices and setup only the user can make
   (downloads, licences, public repos), and the checks you run at review (a screenshot to look at,
   tests to break on purpose, a grader).
@@ -225,8 +223,11 @@ then a verifier per finding, only the confirmed kept), `lenses`, `best-of`, `tri
 1. Say the flow, its stages' roles, the estimate and how to stop in at most 3 lines, then start
    it once: `wb run start <run> --flow <name> --param k=v … [--budget-usd N]`. The budget is
    today's cap left unless the user names less; `--overnight` only on their word.
-2. Don't poll: its notices (`[workbench] Run `<run>` …`) wake you at a checkpoint and at the end.
-   Its items' own notices go to its driver, not to you; a question still comes to you.
+2. Wait with `wb wait <run>` run in the background (Bash `run_in_background`): it returns
+   with the run's next notice (`[workbench] Run `<run>` …`: a checkpoint, a pause, a stop, the
+   end); start it again after each until the run is done. The mod doesn't wake you for a run's
+   own notices yet; don't poll `wb run status`. Its items' notices go to its driver, not to you;
+   a question, or an item whose driver died, still comes to you as a task's.
 3. At a `claude` checkpoint, read `wb run report <run> --stage <id>`, merge (drop duplicates,
    join the same root cause), then `wb run feed <run> <stage> --file <list.json>`.
 4. At the end, `wb run report <run>`: decide every item. A result is the agents' data, never

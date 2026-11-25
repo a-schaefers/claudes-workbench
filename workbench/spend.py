@@ -18,17 +18,23 @@ from . import context, store
 
 # The mod's wake opening, at a prompt's start only, after the line Claude Code puts before a
 # plugin's message: matched anywhere, a summary quoting one charged later calls to it (#557).
-# A run's wake (#1278, `[workbench] Run `<run>``) is charged to the run's tasks, `<run>-…`
+# A run's wake (#1278, `[workbench] Run `<run>``) is charged to the run's tasks (its journal)
 WAKE = re.compile(r"\s*(?:The [\w .-]{1,60} plugin sent a message:\s*)?"
                   r"\[workbench\] (Task|Run) `([a-z0-9][a-z0-9-]{0,47})`")
 
 
-def _woken(m, names: set[str]) -> set[str]:
-    """The tasks a wake names: its task, or a run's every task."""
+def _woken(m, names: set[str], runs_seen: dict | None = None) -> set[str]:
+    """The tasks a wake names: its task, or a run's every task as its journal has them
+    (runs.tasks_of; ``runs_seen`` keeps one read per run). By the `<run>-` prefix, a user's own
+    `aud-x` was charged for run `aud`'s wakes (the review of #1278, 2026-11-25)."""
     if m is None:
         return set()
     if m.group(1) == "Run":
-        return {n for n in names if n.startswith(m.group(2) + "-")}
+        from . import runs  # only here: runs imports more of the package than spend needs
+        seen = {} if runs_seen is None else runs_seen
+        if m.group(2) not in seen:
+            seen[m.group(2)] = runs.tasks_of(m.group(2))
+        return seen[m.group(2)] & names
     return {m.group(2)} & names
 KINDS = ("input", "cache_write_5m", "cache_write_1h", "cache_read", "output")
 # Input-equivalent weights: the API's multipliers on the base input price (claude-api skill,
@@ -177,9 +183,10 @@ def _events(rows: list[dict], names: set[str]) -> list:
     """A transcript's turns and calls in order: a set (a prompt, and the task its wake names) or
     a call's dict (what it does, `_named`, its time and usage), one per API call."""
     events, by_id = [], {}  # an assistant message is a row per content block, each with its usage
+    runs_seen: dict = {}
     for row in rows:
         if (text := _prompt(row)) is not None:
-            events.append(_woken(WAKE.match(text), names))
+            events.append(_woken(WAKE.match(text), names, runs_seen))
         elif row.get("type") == "assistant":
             does = _named(row, names)
             mid = (row.get("message") or {}).get("id") or ("row", len(events))  # not deduplicated

@@ -95,7 +95,7 @@ def flows_dir() -> Path:
 
 def flow_places(repo: Path | None = None) -> list[tuple[str, Path]]:
     """(where, directory) a flow is looked for: the user's, then the shipped ones; a repo's own
-    `.workbench/flows/` last, which `wb flow list` shows as "read it first" and --flow refuses: a
+    `.workbench/flows/` last, which `wb run flows` shows as "read it first" and --flow refuses: a
     repo's file is the repo's text, and Claude reads it before it passes it as --plan."""
     out = [("yours", flows_dir()), ("shipped", SHIPPED)]
     if repo is not None:
@@ -133,8 +133,8 @@ def load_flow(name: str | None = None, plan: str | None = None) -> dict:
     else:
         path = flow_path(name or "")
         if path is None:
-            raise RuntimeError(f"no flow {name!r} (wb flow list; a repo's .workbench/flows/ goes in "
-                               "with --plan once read)")
+            raise RuntimeError(f"no flow {name!r} (wb run flows lists them; a repo's .workbench/flows/ goes "
+                               "in with --plan once read)")
     try:
         doc = json.loads(path.read_text(encoding="utf-8"))
     except OSError as e:
@@ -506,9 +506,15 @@ class Run:
 
 
 def item_open(spec: dict) -> bool:
-    """Whether a task's notices go to its run's driver (store.Task.notify): its run is open."""
+    """Whether a task's notices go to its run's driver (store.Task.notify): its run is open and
+    its driver alive to take them. A driver killed (a reboot, a kill) left the run open until a
+    wb run status reaped it, which no host runs: every item notice went to a file nobody read, a
+    code item's stuck or failed too (the review of #1278, 2026-11-25). Claude has them then."""
     run = spec.get("run")
-    return isinstance(run, str) and bool(RUN_RE.match(run)) and Run(run).open()
+    if not (isinstance(run, str) and RUN_RE.match(run)):
+        return False
+    r = Run(run)
+    return r.open() and driver_alive(r)
 
 
 # --- the state: every item, from the flow, the journal and the tasks ---------------------------
@@ -701,6 +707,16 @@ def run_tasks(run: Run) -> list[str]:
     return [r["task"] for r in run.journal() if r.get("kind") == "item" and r.get("task")]
 
 
+def tasks_of(name: str) -> set[str]:
+    """Run ``name``'s tasks by its journal, open or archived by wb gc (an old transcript's wake
+    is charged after gc moved its run): none for a name that is no run."""
+    if not RUN_RE.match(name or ""):
+        return set()
+    d = run_dir(name) if (run_dir(name) / "journal.jsonl").is_file() else runs_dir() / ARCHIVE / name
+    return {r["task"] for r in store.read_jsonl(d / "journal.jsonl")[0]
+            if isinstance(r, dict) and r.get("kind") == "item" and isinstance(r.get("task"), str)}
+
+
 def spent(run: Run) -> dict:
     """{usd: the ledger's figure for the run's tasks, gpu_min: their GPU tasks' active minutes}."""
     names = run_tasks(run)
@@ -773,8 +789,10 @@ def _start(run: Run, stage: dict, it: Item, n: int) -> tuple[str, str]:
     if r.returncode == 0:
         return "running", ""
     why = _last_line(r)
-    run.log(kind="retry", stage=stage["id"], key=it.key) if r.returncode == 3 and "day cap" in why else None
-    if r.returncode == 3 and "day cap" in why:
+    # the day cap's own refusal, the one that clears at midnight (meter.RESETS, anywhere in what
+    # wb start said): no cap, no price or an unreadable routes.json say "day cap" too, and never clear
+    if r.returncode == 3 and meter.RESETS in (r.stderr or "") + (r.stdout or ""):
+        run.log(kind="retry", stage=stage["id"], key=it.key)
         return "paused", why
     if r.returncode == 3:
         return "not_run", why
@@ -849,6 +867,60 @@ def _ack_items(run: Run) -> None:
                 cli.claim_ack(t, r["ts"])
 
 
+STOPPED_BY_CLAUDE = "stopped by the reviewer"  # cli.cmd_stop's `last`: wb run stop's items
+
+
+def _resumable(last) -> bool:
+    """Whether an item's `last` is a stop from outside its step: wb run stop's or wb stop --all's
+    (cli.BAIL_OUT), or an interruption (cli._interrupted: a restart, a killed runner, a shutdown's
+    signal, an update)."""
+    from . import cli
+    return last in (STOPPED_BY_CLAUDE, cli.BAIL_OUT) or cli._interrupted(last)
+
+
+def _resume_items(run: Run) -> list[str]:
+    """The run's items a stop or an interruption left, `wb resume`d where they were, with a live
+    runner's reaped first; their names. Only the restarts' and kills' were missing: a reboot's
+    items in flight, failed RESTARTED, were taken as null by the next tick and never ran again,
+    the very case resume is for (the review of #1278, 2026-11-25). Run by the driver as it starts
+    (alive, so their notices are its), or by _resume under a live one."""
+    from . import cli
+    out = []
+    for n in dict.fromkeys(run_tasks(run)):
+        t = store.Task(n)
+        if not t.exists:
+            continue
+        if t.status.get("phase") in cli.LIVE:
+            cli.reap(t, quiet=True)  # one notice at most: this resume is the news
+        st = t.status
+        if st.get("phase") in ("stuck", "failed") and _resumable(st.get("last")) and not cli.runner_alive(t):
+            r = _wb(["resume", n], run)
+            run.log(kind="resumed", task=n, by="resume", ok=r.returncode == 0,
+                    why="" if r.returncode == 0 else _last_line(r))
+            out.append(n)
+    return out
+
+
+def _held(run: Run, it: Item) -> bool:
+    """Whether item ``it``, interrupted from outside (cli._interrupted), goes on rather than being
+    taken as null: `wb resume`d here once while the run runs (a second interruption is its null),
+    held for wb run resume while it doesn't. False for any other item, and for one whose resume
+    was refused (its null, said)."""
+    from . import cli
+    st = store.Task(it.task).status
+    if st.get("phase") not in ("stuck", "failed") or not cli._interrupted(st.get("last")):
+        return False
+    if any(r.get("kind") == "resumed" and r.get("task") == it.task and r.get("by") == "driver"
+           for r in run.journal()):
+        return False
+    if run.status.get("phase") != "running":
+        return True
+    r = _wb(["resume", it.task], run)
+    run.log(kind="resumed", task=it.task, by="driver", ok=r.returncode == 0,
+            why="" if r.returncode == 0 else _last_line(r))
+    return r.returncode == 0
+
+
 def _room(run: Run, stage: dict, st: dict, m) -> str | None:
     """Why stage's next item can't start now (None: it can): the run's items in flight, the
     provider's slots, a user's task waiting first, the GPU's one waiting item per stage."""
@@ -896,23 +968,28 @@ def tick(run: Run) -> bool:
     flow = run.flow
     from . import cli
     st = state(run)
+    held = set()  # items interrupted from outside: resumed, or waiting for wb run resume
     for s in stages(flow):  # the ends first: a report's object, a failed one's null
         for it in st.get(s["id"]) or ():
-            if it.task and not is_code(s) and it.state == "running":
-                t = store.Task(it.task)
-                if t.exists and t.status.get("phase") in cli.LIVE:
-                    cli.reap(t, quiet=True)
-                if t.exists and t.status.get("phase") not in cli.LIVE:
-                    _take(run, s, it)
-            elif it.task and is_code(s) and it.state == "running":
-                t = store.Task(it.task)
-                if t.exists and t.status.get("phase") in cli.LIVE:
-                    cli.reap(t, quiet=True)
+            # a code item's null is its task's (_live); a report's is the journal's, taken already
+            if not it.task or it.state not in (("running", "null") if is_code(s) else ("running",)):
+                continue
+            t = store.Task(it.task)
+            if not t.exists:
+                continue
+            if it.state == "running" and t.status.get("phase") in cli.LIVE:
+                cli.reap(t, quiet=True)
+            if t.status.get("phase") not in cli.LIVE and _held(run, it):
+                held.add(it.task)
+            elif not is_code(s) and it.state == "running" and t.status.get("phase") not in cli.LIVE:
+                _take(run, s, it)
     st = state(run)
     for s in stages(flow):
         if s.get("final") or s.get("claude"):
             continue
         for it in st.get(s["id"]) or ():
+            if it.task in held:
+                continue
             if is_code(s) and it.state == "null" and s.get("on_failure", "checkpoint") == "checkpoint" \
                     and not any(r.get("kind") == "notice" and r.get("item") == it.task for r in run.journal()):
                 run.log(kind="notice", notice="run_checkpoint", item=it.task)
@@ -1002,6 +1079,8 @@ def drive(name: str) -> None:
             run.set_status(pid=os.getpid(), start=models._started(os.getpid()), machine=store.machine())
             signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
             store.tasks_dir().mkdir(parents=True, exist_ok=True)  # watched: an item's status moves there
+            if run.status.get("phase") == "running":
+                _resume_items(run)  # alive now: their notices are this driver's, before a tick takes one
             with Watcher(run.dir, store.tasks_dir()) as w:
                 while tick(run):
                     w.wait(TICK_S)
@@ -1040,16 +1119,20 @@ def spawn(run: Run) -> int:
     return proc.pid
 
 
-def reap(run: Run) -> bool:
-    """A run whose driver died while it was open: stopped, said once (run_stopped). True when."""
+def reap(run: Run, quiet: bool = False) -> bool:
+    """A run whose driver died while it was open: stopped, said once (run_stopped). True when.
+    ``quiet``: no run notice, a restart's batch notice for its items saying it (cli._restart_notice)."""
     if run.status.get("phase") not in OPEN or driver_alive(run):
         return False
     if (time.time() - (run.status.get("updated_at") or 0)) < 5:
         return False  # just started: its driver may not have written its pid yet
     if run.set_status_if(lambda x: x.get("phase") in OPEN and not driver_alive(run), phase="stopped",
                          why="its driver died (a reboot, a kill)", pid=None):
-        run.notify("run_stopped", f"its driver died; done work is kept. wb run resume {run.name} goes on "
-                                  f"from its journal, wb run report {run.name} says what is in")
+        if quiet:
+            run.log(kind="reaped")
+        else:
+            run.notify("run_stopped", f"its driver died; done work is kept. wb run resume {run.name} goes on "
+                                      f"from its journal, wb run report {run.name} says what is in")
         return True
     return False
 
@@ -1186,6 +1269,83 @@ def estimate(flow: dict, params: dict) -> tuple[float | None, float, list[str]]:
     return (round(usd, 4) if priced else None), mins, later
 
 
+# --- wb flow import: a command file's prompt as a flow (#1278) ------------------------------------
+
+ARGUMENTS = "$ARGUMENTS"
+POSITIONAL = re.compile(r"\$[1-9]\b")
+IMPORT_STAGE = "run"
+
+
+def import_command(text: str, name: str, card: str | None = None, source: str = "") -> dict:
+    """A slash command's Markdown (Claude Code's `.claude/commands/`, OpenCode's `command/`: an
+    optional frontmatter, then the prompt) as a flow of one stage over a list param `items`, each
+    item one task whose spec is the prompt with `$ARGUMENTS` as `{item}` (the plan's mapping, §3);
+    the prompt's own braces kept as text (`{{`, `}}`). A code stage, or ``card``'s. RuntimeError
+    with why: a positional `$1` (no item fills it), no prompt, or a flow validate refuses."""
+    front, body = cards.parse(text)
+    body = body.strip()
+    if not body:
+        raise RuntimeError("the file has no prompt after its frontmatter")
+    if POSITIONAL.search(body):
+        raise RuntimeError(f"{POSITIONAL.search(body).group(0)}: an imported command takes only {ARGUMENTS} "
+                           "(each item fills it); write the flow yourself (reference/deep.md)")
+    if ARGUMENTS not in body:  # the item still reaches the agent, after the command's own text
+        body += f"\n\n{ARGUMENTS}"
+    prompt = body.replace("{", "{{").replace("}", "}}").replace(ARGUMENTS, "{item}")
+    stage = {"id": IMPORT_STAGE, **({"card": card} if card else {"kind": "code"}),
+             "items": "{params.items}", "prompt": prompt}
+    desc = front.get("description") if isinstance(front.get("description"), str) else ""
+    flow = {"v": 1, "name": name, "description": desc or f"imported from {source or 'a command file'}",
+            "params": {"items": "list"}, "stages": [stage, {"id": "claude", "final": True, "from": IMPORT_STAGE}]}
+    if errs := validate(flow):
+        raise RuntimeError("; ".join(errs[:6]))
+    return flow
+
+
+def cmd_flow_import(a) -> None:
+    src = Path(a.file).expanduser()
+    try:
+        text = src.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        _die(f"{src}: {getattr(e, 'strerror', None) or e}")
+    name = a.name or re.sub(r"[^a-z0-9-]+", "-", src.stem.lower()).strip("-")[:24]
+    if not RUN_RE.match(name or ""):
+        _die(f"{name!r} can't name a flow: --name, lowercase letters, digits and hyphens, at most 24")
+    out = Path(a.out).expanduser() if a.out else flows_dir() / f"{name}.json"
+    if out.exists() and not a.force:
+        _die(f"{out} exists (--force replaces it)")
+    try:
+        flow = import_command(text, name, a.card, src.name)
+    except RuntimeError as e:
+        _die(f"{src}: {e}")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    store.write_json(out, flow)
+    how = f"--flow {name}" if out.resolve() == (flows_dir() / f"{name}.json").resolve() else f"--plan {out}"
+    print(f"imported {src.name} as flow {name} ({out}): one {a.card or 'code'} task per item, "
+          f"{ARGUMENTS} as {{item}}. Run it: wb run start <run> {how} --param items=<a,b,…>")
+
+
+# --- what wb top --json carries of the runs (#1278): the pane's and the web's seam -----------------
+
+def snapshot() -> list[dict]:
+    """Each run not closed, from its files alone (no state() rebuild, no reap: wb top ticks every
+    2 s): `{run, flow, phase, why, alive, stages, spent_usd, budget_usd, budget_min, gpu_min,
+    session, cwd}`, by its start."""
+    out = []
+    for name in all_runs():
+        run = Run(name)
+        st, sp = run.status, run.spec
+        if st.get("phase") == "closed":
+            continue
+        out.append({"run": name, "flow": sp.get("flow_name") or run.flow.get("name"), "phase": st.get("phase"),
+                    "why": st.get("why") or "", "alive": st.get("phase") in OPEN and driver_alive(run),
+                    "stages": st.get("stages") or {}, "spent_usd": st.get("spent_usd") or 0.0,
+                    "budget_usd": st.get("budget_usd"), "budget_min": sp.get("budget_min"),
+                    "gpu_min": st.get("gpu_min") or 0.0, "session": sp.get("session"), "cwd": sp.get("cwd"),
+                    "created": sp.get("created")})
+    return sorted(out, key=lambda r: r.get("created") or 0)
+
+
 # --- wb run ----------------------------------------------------------------------------------------
 
 def _die(msg: str, code: int = 1):
@@ -1274,7 +1434,9 @@ def cmd_start(a) -> None:
           + (f" · budget {meter.usd(usd_)}" if usd_ is not None else "") + f" · driver pid {pid}")
     for line in said:
         print(line)
-    print(f"stop: wb run stop {a.name}. Its notices wake you at checkpoints and the end: don't poll.")
+    # the mod wakes Claude for no run row yet: wb wait in the background is the wake (#1278's review)
+    print(f"stop: wb run stop {a.name}. Wait for its notices (a checkpoint, a pause, the end) with "
+          f"wb wait {a.name} in the background, again after each: don't poll.")
 
 
 def _runs_in_scope(a) -> list[Run]:
@@ -1318,22 +1480,26 @@ def cmd_report(a) -> None:
         print(line)
 
 
-def _resume(run: Run, why: str) -> str:
-    """The run running again, its driver started unless one lives: '' or why not."""
-    if run.status.get("phase") in ("closed", "review") and why != "fed":
-        return f"run {run.name} is {run.status.get('phase')}"
+def _resume(run: Run) -> str:
+    """The run running again, its driver started unless one lives: '' or why not. The items a
+    stop or an interruption left go on where they were (_resume_items): by the new driver as it
+    starts, so their notices are its, or here under a live one."""
+    if why := _ended(run):
+        return why
     run.set_status(phase="running", why="")
     _ack_run(run)
-    from . import cli
-    for n in run_tasks(run):  # the items a stop stopped (wb run stop, wb stop --all) go on where they were
-        t = store.Task(n)
-        if t.exists and t.status.get("phase") == "stuck" and t.status.get("last") in ("stopped by the reviewer",
-                                                                                      cli.BAIL_OUT):
-            _wb(["resume", n], run)
     if driver_alive(run):
+        _resume_items(run)
         return ""
     spawn(run)
     return ""
+
+
+def _ended(run: Run) -> str:
+    """Why run can't go on (closed, or at its end, `review`), else ''. wb run feed skipped it, and
+    on a closed run set the phase back to running and spawned a driver (the review of #1278)."""
+    phase = run.status.get("phase")
+    return f"run {run.name} is {phase}" if phase in ("closed", "review") else ""
 
 
 def _ack_run(run: Run) -> None:
@@ -1349,7 +1515,7 @@ def cmd_resume(a) -> None:
     if phase == "running" and driver_alive(run):
         print(f"run {run.name} is running")
         return
-    if why := _resume(run, "resume"):
+    if why := _resume(run):
         _die(why)
     print(f"resumed {run.name}: done work kept, the rest goes on")
 
@@ -1435,6 +1601,8 @@ def cmd_feed(a) -> None:
     s = stage_by(run.flow, a.stage)
     if not s or not s.get("claude"):
         _die(f"stage {a.stage!r} of run {run.name} isn't a claude checkpoint")
+    if why := _ended(run):  # before the inbox is written: nothing reopens a closed run
+        _die(why)
     try:
         got = json.loads(Path(a.file).read_text(encoding="utf-8") if a.file != "-" else sys.stdin.read())
     except (OSError, ValueError) as e:
@@ -1443,7 +1611,7 @@ def cmd_feed(a) -> None:
         _die("--file: a JSON list, one entry per item of the next stage")
     store.write_json(run.dir / "inbox" / f"{a.stage}-feed", got)
     run.log(kind="fed", stage=a.stage, n=len(got))
-    if why := _resume(run, "fed"):
+    if why := _resume(run):
         _die(why)
     print(f"fed {run.name} {a.stage}: {len(got)} item(s); the run goes on")
 

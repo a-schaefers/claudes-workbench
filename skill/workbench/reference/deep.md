@@ -32,6 +32,12 @@ The last stage is `{"id": "...", "final": true, "from": "<stage>"}`: yours. Afte
 comes only a report over its `{diff}`, or the final: nothing builds on code you haven't accepted.
 `wb run start` refuses a flow that breaks any of this, naming each problem.
 
+## A slash command as a flow
+`wb flow import X.md [--name N] [--card C]`: a command file's prompt (Claude Code's
+`.claude/commands/`, OpenCode's `command/`) as a flow of yours, one task per item of
+`--param items=a,b`, `$ARGUMENTS` as `{item}`; a code task, or card C's report. A positional `$1`
+is refused: write that flow yourself.
+
 ## Role cards
 Markdown with a frontmatter: `description`, `tools` (read, none, code), `schema`, `steps`,
 `skills`, `ask` (0 for reports), `role`, `est` (`{in, out, min}`: one item's tokens and minutes,

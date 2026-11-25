@@ -88,8 +88,8 @@ Seatbelt on macOS). How each part works: ARCHITECTURE.md, from *The pieces*.
   one-shot approval (`approved`); `use`, the Agents switch (`effective_via`); `busy`, the busy-GPU
   opt-in (`busy_api`); `resolve`, wb start's model.
   `hardware.py`: read fresh, unknowns stay unknown, nothing hard-coded.
-- `runs.py`: deep workflows (#1278): `wb run`, flows (`agent/flows/`, `$WB_FLOWS`), the detached driver
-  starting each item with `wb start`, run notices, the keywords' reference (`keywords`, `tests/fixtures/
+- `runs.py`: deep workflows (#1278): `wb run`, `wb flow import`, flows (`agent/flows/`, `$WB_FLOWS`), the detached
+  driver starting each item with `wb start` (its items' notices its own only while it lives), run notices, the keywords' reference (`keywords`, `tests/fixtures/
   keywords.json`). `cards.py`: role cards (`agent/roles/`, `$WB_ROLES`). `schema.py`: a report task's
   object, checked outside the lane (ARCHITECTURE.md, *Deep workflows*).
 - `skills.py`: the agents' skill library; `scan.py`, its scan (from Hermes Agent's: keep its MIT
