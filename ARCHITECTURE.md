@@ -5452,8 +5452,16 @@ client; the server needs no browser.
   `list`, `revoke` (`chat.agent_revoke`). `Handler._authed` returns `"user"` or `"agent <name>"`
   (`chat.agent_for`, constant time, the file read per request so a revoke is at once) and sets
   `Handler.agent`; an agent token from a peer that isn't loopback (`Handler._from_loopback`: `127.*`, `::1`) is 403 `agent tokens work only from this machine (localhost)` whatever the bind, as agents are this machine's own (owner, 2026-11-23), while the user's token still works from the tailnet or LAN; a held wait or open stream checks again at every wake (`Handler._revoked`:
-  both went on reading its replies after a revoke, the #1042 review). An agent gets 403 `agent tokens can't …` on `AGENT_DENIED` (`/api/answer`,
-  `/api/prefs`, `/api/push`, `/api/active`, `/api/seen`), and 429 `{error, retry_after}` past
+  both went on reading its replies after a revoke, the #1042 review). An agent's token is on an
+  allow-list, `AGENT_MAY` (`(method, path)` pairs, a trailing `/` matching by prefix: GET `/api/health`,
+  `/api/wait`, `/api/state`, `/api/stream`, `/api/upload/`, `/api/file/`; PUT `/api/upload/`; POST
+  `/api/send`; `chat.agent_may`), checked for every `/api/` request before its path's own handler
+  (`Handler._gate`: the token's 401, then 403), so an endpoint added later is the user's alone until
+  named there (#1280: the deny-lists it replaced, `AGENT_DENIED` and `AGENT_UNREAD`, left every new
+  one open to agents). Every other path is 403 `agent tokens can't use <path>` (`chat.agent_refusal`),
+  or the old wording where there was one (`AGENT_CANT`, wording only: `/api/answer` "answer Claude
+  Code's dialogs", `/api/prefs`, `/api/push`, `/api/active`, `/api/seen`, `/api/latest`, `/api/ask/`,
+  `/api/shot`, `/api/audio`); an unknown `/api/` path is 401 without a token, 404 with the user's. And 429 `{error, retry_after}` past
   `AGENT_SENDS_PER_MIN` 30 sends in any 60 s (`chat.RateLimit`, per agent, in the server's memory).
   No switch of its own: answered while the server runs and a token exists. With the chat off no
   session listens, so `/api/health` says `listening: false` and a message waits, unread, until one
@@ -5505,9 +5513,8 @@ client; the server needs no browser.
   `chat.agent_snapshot` (`{api, messages, listener, uploads, expire, now}`, `messages` only the rows
   `chat.in_view` passes: its own, and Claude's whose `to` names it; `chat.thread(keep=…)`) for
   `/api/state`, `/api/stream` and `/api/send`'s `state`; no asks, prefs, push, savings, build or tasks.
-  `/api/wait` on a row not in its view is 404 (`chat.wait_state`). `AGENT_UNREAD` (`/api/latest`,
-  `/api/ask/`, `/api/shot`, `/api/audio`) is 403 `agent tokens can't …` (`Handler._agent_unread`,
-  before the path's own handler). Its upload keeps `by: <name>` in `.meta.json` (`save_upload(by=)`);
+  `/api/wait` on a row not in its view is 404 (`chat.wait_state`). `/api/latest`, `/api/ask/`,
+  `/api/shot` and `/api/audio` are outside `AGENT_MAY` (403). Its upload keeps `by: <name>` in `.meta.json` (`save_upload(by=)`);
   a PUT on an id stored by anyone else is 409 `that upload id is another sender's`
   (`chat._not_theirs`: answered with the first upload, it read the user's file's name and path); a
   send naming another's upload is 400 `no upload <id>: …`; GET `/api/upload/<id>` and
@@ -5837,6 +5844,42 @@ dropped. No approval file is written: the child isn't Claude, so `wb route` does
 the user's own terminal, and wb stamps a role change `by: "web"` (*Roles*, the gate). A server started
 from Claude's Bash carries `CLAUDECODE=1`; `child_env` is what keeps the user's click from being
 gated as Claude's. `tests/test_settings.py` covers it.
+
+### The admin endpoints (#1280)
+
+The chat server's side of the web app's Stats and Settings views, the user's token alone (outside
+`AGENT_MAY`; docs/chat-api.md has the shapes):
+- `GET /api/settings`: `{rows: settings.rows(), ts}`. `POST /api/settings` `{key, value}` (a
+  string, a number or null; JSON only, 415 otherwise) → `chat.admin_set` → `settings.apply`: 200
+  `{ok: true, said, rows, help?}`; 400 `no such setting` (a `KeyError`) or `not one of its choices`
+  (a `ValueError`, or a value neither string, number nor null); 409 `{ok: false, error: <wb's line>,
+  rows}` when wb refused. `rows` are read again after the write (apply dropped the cache).
+- **The record.** A change that went through appends `{ts, key, label, from (the row's value
+  before), to (the value posted), said, help?, by: "web"}` to `$WB_HOME/settings-changes.jsonl`
+  (`chat.CHANGES`, `chat.changes_path`, `store.append_jsonl`), for the mod to tell Claude in the
+  terminal (#1283): the terminal stays primary, and a setting whose value needs Claude's help to
+  work (`help`, `settings.HELP`) still gets Claude's offer, which installs nothing without a yes
+  (the owner, 2026-11-24). The server only returns `help` and records it; showing it on the page
+  is the Settings view's job (`chat_static/settings.js`, #1286).
+- `GET /api/stats`: `{feed: stats.feed() (wb stats --json, in-process), routes, models}`, the last two
+  `settings.reads()` (the rows' cache of the two `--json` reads, or null), so the page names models
+  as the pane's `namesNow` did.
+- `GET /api/top`, server-sent events (`Handler._top`): `event: top` with one `wb top --json` line
+  verbatim (the newest at once on connect), `event: down` `{why, retry}` (the child's last stderr
+  line or `wb top ended (exit N)`, and the seconds until it is tried again), the 50 ms blank line
+  after each event (`NUDGE_AFTER`, as `_stream`'s), `: ping` after `PING_EVERY` 15 s of silence;
+  at most `TOP_STREAMS` 4 open (503 `too many live views open`, its own semaphore). A client that
+  hung up is noticed within `WAIT_LOOK` 1 s (`Handler._gone`).
+- **`TopFeed`** (`Handler.top`, one per server, made in `make_servers`): one shared `wb top --json`
+  child (`settings.WB` with `settings.child_env()`), driven by a thread of its own that the first
+  viewer starts (`join`) and that kills the child `TOP_LINGER_S` 15 s after the last viewer leaves
+  (`leave`; a tab switched back within it finds it running). A child that ends by itself (or can't
+  start) is `down`, and tried again after `TOP_RETRY_S` 30 s, doubling to `TOP_RETRY_MAX_S` 10 min, the
+  backoff reset by a tick (the pane's `TOP_RETRY_MS`, `RETRY_MAX_MS`). Its viewers wait on its own
+  condition, woken by the child's lines, never on the `Hub`; `wb top` also ends once its parent goes.
+- **CSRF and origin.** The token rides an `Authorization: Bearer` header, with no cookies and no
+  CORS headers; a JSON body forces a preflight the server never answers, so a cross-site page
+  can't write; the Host check (`Handler._allowed`) stops DNS rebinding. Nothing more is added.
 
 ## Stopping everything
 
@@ -6444,6 +6487,8 @@ $WB_HOME (~/.local/state/workbench)
   gc.json                        the last gc: {at, archived, notices, rules, runtime, scratch, starts, uploads, branches, refs, …}
   archive/<task>/                a task closed and untouched for ARCHIVE_DAYS (30), moved by gc
   coding.json                    {mode: only|ask|decide, ts}; none: decide
+  settings-changes.jsonl  .lock  a web app Settings change that went through (chat.admin_set, #1280): {ts, key, label, from, to, said, help?,
+                                 by: "web"}; `help` the note asking Claude to offer to set it up (settings.HELP); the mod tells Claude (#1283)
   experiments.json  .lock        wb experiment: {<name>: "on"|"off"}; probe's old levels adaptable|moderate|aggressive, or true: on; else off
   probe-languages.json           {probe (real path), version, languages, at} from `probe search --help`; re-read when path or version differs (context.probe_languages)
   progress.json                  progress checks' opt-in: {on, after?, ts}; none: off
@@ -7016,6 +7061,11 @@ fallbacks for `merge-tree --write-tree`, 2.38, and `GIT_NO_LAZY_FETCH`, 2.44; `w
 **Files.** `test_workbench.py` (end to end, one class per feature); `test_gpu.py` (sharing, `can_share`, the budget);
 `test_portable.py` (discovery against real HTTP servers on port 0, `ServerAway`, the polling watcher, the launchers);
 `test_chat_default.py` (the web app on by default: the switch, `chat.ensure`, `wb setup`'s service, #1281);
+`test_chat_admin.py` (*The admin endpoints*, a real `wb chat serve` on a temp `WB_HOME`: GET and POST /api/settings
+round-tripping a `coding` change and its settings-changes.jsonl row, probe turned on without `probe` carrying `help`,
+415 without the JSON type, /api/stats' feed, an agent token 403 on the four and on every path and method outside
+`AGENT_MAY`, /api/top's `top` event and its child gone within `TOP_LINGER_S`+5 s of the viewer hanging up; a refusal's
+409 with `settings.apply` stood in for);
 `test_sizing.py` (the slice guess, corrected from real steps); `test_workflows.py` (the merge gate in plain text: every action pinned to a commit with its version,
 every workflow its own permissions, `check` never path-filtered and required from GitHub Actions, green only when every
 `suite` shard and `mod` are, the shards dealing each test once, the ruleset without bypass, the plugin without
@@ -7554,9 +7604,12 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   mod's `unread`/`agentOf`/`chatPrompt` and `owedAtTurnEnd` (`claude` only), docs/chat-api.md.
 - **The web chat's API** (a path, a field, an error, a limit) → docs/chat-api.md (`test_docs` checks the paths),
   `skill/agents/claude-workbench/` (SKILL.md, `ask_claude.py`); a change that breaks a client → `chat.API_VERSION` and
-  the doc's *Versions*. **What an agent token may do** → `chat.AGENT_DENIED`, the doc, the agents' skill. **What an
-  agent may read** → `chat.in_view`, `chat.agent_snapshot`, `chat.AGENT_UNREAD`, `chat.agent_may_read`, the doc's
-  *An agent's view*.
+  the doc's *Versions*. **What an agent token may do** → `chat.AGENT_MAY` (and `AGENT_CANT`'s wording), the doc, the
+  agents' skill; a new endpoint stays out of `AGENT_MAY` unless an agent needs it. **What an agent may read** →
+  `chat.in_view`, `chat.agent_snapshot`, `chat.agent_may_read`, the doc's *An agent's view*.
+- **settings-changes.jsonl's rows** (`chat.admin_set`: `key`, `label`, `from`, `to`, `said`, `help`, `by`) → the mod's
+  reader of it (#1283), *Files and formats*. **`/api/top`'s events** (`top`, `down` `{why, retry}`) → the web app's
+  Stats view, docs/chat-api.md.
 - **An agent's turn** (`mem.agentTurn`, `agentsFor`) → the `classic.PermissionRequest` hook, `askForArgs`, `wb chat ask
   --for --here`, the ask's `for` (`makeAsk`'s `.ask-for`, `sw.js`); **an ask settled elsewhere** (`watchAsk`,
   `askSettledHere`, `sameCall`, `withdrawAsk`) → `expired` by `interrupted`, the page's "settled in the terminal".

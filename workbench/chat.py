@@ -133,18 +133,39 @@ def token() -> str:
 # Other agents (another harness driving Claude through workbench) get tokens of their own: `wb chat
 # token add <name>` prints one once and keeps only its sha256 in chat-agents.json, beside the
 # user's token file (0600). An agent token reaches what a teammate needs (send, upload, read the
-# state and the stream, wait for replies) and never what only the user may do: Claude Code's
-# dialogs, the page's settings, push, and marking the user away (AGENT_DENIED, 403). Its messages
-# are stored `from: <name>, role: "agent"` and reach Claude as `[agent <name>] …`, never with the
-# user's authority. Revoked, it is 401 at once (the file is read per request).
+# state and the stream, wait for replies) and nothing else: AGENT_MAY is an allow-list, so an
+# endpoint added later is the user's alone until it is named there (#1280: the deny-lists it
+# replaced, AGENT_DENIED and AGENT_UNREAD, left every new endpoint open to agents by default).
+# Its messages are stored `from: <name>, role: "agent"` and reach Claude as `[agent <name>] …`,
+# never with the user's authority. Revoked, it is 401 at once (the file is read per request).
 AGENT_NAME = re.compile(r"[a-z0-9-]{1,32}")
 AGENT_RESERVED = ("user", "claude", "notice", "agent", "wb")  # `from` values the thread already uses
 AGENT_PREFIX = "wba-"  # how an agent token looks, so a leaked one is recognised
-AGENT_DENIED = {"/api/answer": "answer Claude Code's dialogs",
-                "/api/prefs": "change the user's settings",
-                "/api/push": "change notifications",
-                "/api/active": "mark the user away",
-                "/api/seen": "mark what the user has seen"}
+# (method, path) an agent token may call; a path ending in "/" covers what starts with it
+AGENT_MAY = {("GET", "/api/health"), ("GET", "/api/wait"), ("GET", "/api/state"), ("GET", "/api/stream"),
+             ("GET", "/api/upload/"), ("PUT", "/api/upload/"), ("GET", "/api/file/"), ("POST", "/api/send")}
+# Only the wording of a refusal, kept from the deny-lists for the paths they named ("agent tokens
+# can't <this>"); any other path is "agent tokens can't use <path>". AGENT_MAY alone decides.
+AGENT_CANT = {"/api/answer": "answer Claude Code's dialogs", "/api/prefs": "change the user's settings",
+              "/api/push": "change notifications", "/api/active": "mark the user away",
+              "/api/seen": "mark what the user has seen", "/api/latest": "read the user's notifications",
+              "/api/ask/": "read Claude Code's dialogs", "/api/shot": "read screenshots",
+              "/api/audio": "read audio takes"}
+
+
+def _covers(rule: str, path: str) -> bool:
+    return path == rule or rule.endswith("/") and path.startswith(rule)
+
+
+def agent_may(method: str, path: str) -> bool:
+    """Whether an agent token may call ``method`` ``path`` (AGENT_MAY)."""
+    return any(m == method and _covers(p, path) for m, p in AGENT_MAY)
+
+
+def agent_refusal(path: str) -> str:
+    """The 403's error for an agent token on a path outside AGENT_MAY."""
+    what = next((v for k, v in AGENT_CANT.items() if _covers(k, path)), None)
+    return f"agent tokens can't {what or 'use ' + path[:100]}"
 
 
 def agents_path() -> Path:
@@ -785,11 +806,7 @@ def wait_state(after: str, caller: str) -> dict | None:
 # replies to the user, Claude Code's dialogs, the settings. An agent reads only its own messages
 # and Claude's rows whose `to` names it (`in_view`), the listener, the upload limits and the
 # clock; files only of its own uploads (`by`) or attached to rows in its view; never an ask, a
-# screenshot, an audio take or a push's summary (AGENT_UNREAD, 403).
-AGENT_UNREAD = {"/api/latest": "read the user's notifications",
-                "/api/ask/": "read Claude Code's dialogs",
-                "/api/shot": "read screenshots",
-                "/api/audio": "read audio takes"}
+# screenshot, an audio take or a push's summary (outside AGENT_MAY, 403).
 
 
 def in_view(row: dict, agent: str) -> bool:
@@ -2047,6 +2064,179 @@ def _read_meta_path(d: Path) -> dict | None:
 
 # ---- the server ----
 
+# ---- the web app's admin (#1280): Settings, Stats, the live view; the user's token alone ----
+# A Settings change runs its wb command as a child that isn't Claude (settings.child_env): the
+# user's click is the yes, as a command typed at their terminal is. Each change that went
+# through is recorded in settings-changes.jsonl, for the mod to tell Claude in the terminal
+# (#1283): the terminal stays primary (the owner, 2026-11-24), and a setting that needs Claude's
+# help to work (`help`, settings.HELP: probe not set up) still gets Claude's offer.
+CHANGES = "settings-changes.jsonl"  # under $WB_HOME
+TOP_LINGER_S = 15        # the live view's child outlives its last viewer this long (a tab switched back)
+TOP_STREAMS = 4          # GET /api/top streams open at once (each holds a thread)
+TOP_RETRY_S = 30         # a child that ended by itself is tried again this long after, doubling (the pane's)
+TOP_RETRY_MAX_S = 600    # to this
+TOP_LINE_MAX = 4 << 20   # a child's line longer than this is dropped, not kept growing
+
+
+def changes_path() -> Path:
+    return store.home() / CHANGES
+
+
+def admin_set(key, value) -> tuple[int, dict]:
+    """POST /api/settings: (status, body). 200 {ok, said, rows, help?}; 400 for no such row or a
+    value it doesn't take (nothing runs); 409 {ok: false, error, rows} when wb refused. A change
+    that went through appends {ts, key, label, from, to, said, help?, by: "web"} to CHANGES."""
+    from . import settings as admin
+    if not isinstance(key, str):
+        return 400, {"error": "no such setting"}
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, type(None))):
+        return 400, {"error": "not one of its choices"}
+    before = next((r for r in admin.rows() if r["key"] == key), {})
+    try:
+        done = admin.apply(key, value)
+    except KeyError:
+        return 400, {"error": "no such setting"}
+    except ValueError:
+        return 400, {"error": "not one of its choices"}
+    rows = admin.rows()
+    if not done["ok"]:
+        return 409, {"ok": False, "error": done["said"], "rows": rows}
+    helps = {"help": done["help"]} if done.get("help") else {}
+    store.append_jsonl(changes_path(), {"ts": store.now(), "key": key, "label": before.get("label") or key,
+                                        "from": before.get("value"), "to": value, "said": done["said"],
+                                        **helps, "by": "web"})
+    return 200, {"ok": True, "said": done["said"], "rows": rows, **helps}
+
+
+class TopFeed:
+    """GET /api/top's one `wb top --json` child per server, shared by every viewer: started with
+    the first, killed TOP_LINGER_S after the last leaves; one that ends by itself is said
+    (`down`) and tried again after TOP_RETRY_S, doubling to TOP_RETRY_MAX_S, as the pane's was.
+    Its viewers wake on the child's lines, through `cond`, never through the Hub. `event` is the
+    newest: ("top", the line verbatim) or ("down", why); `seq` counts them."""
+
+    def __init__(self):
+        self.cond = threading.Condition()
+        self.slots = threading.BoundedSemaphore(TOP_STREAMS)
+        self.viewers = 0
+        self.left_at = 0.0     # monotonic: when the last viewer left
+        self.driving = False   # a driver thread runs (at most one)
+        self.closed = False
+        self.seq = 0
+        self.event: tuple[str, str] | None = None
+        self.backoff = 0.0
+        self.retry_at = 0.0    # monotonic: no child before then
+        self.pid: int | None = None  # the child's, while one runs
+
+    def join(self) -> None:
+        with self.cond:
+            self.viewers += 1
+            if not self.driving:
+                self.driving = True
+                threading.Thread(target=self._drive, daemon=True, name="wb-top").start()
+
+    def leave(self) -> None:
+        with self.cond:
+            self.viewers -= 1
+            if not self.viewers:
+                self.left_at = time.monotonic()
+            self.cond.notify_all()
+
+    def close(self) -> None:
+        """Ends the driver and its child (a test's server going away)."""
+        with self.cond:
+            self.closed = True
+            self.cond.notify_all()
+
+    def down(self) -> dict:
+        """The `down` event's data: why the child ended, and the seconds until it is tried again."""
+        with self.cond:
+            why = self.event[1] if self.event and self.event[0] == "down" else ""
+            return {"why": why, "retry": max(0, round(self.retry_at - time.monotonic()))}
+
+    def _wanted(self) -> bool:
+        """Under the lock: whether a child should run; False ends the driver, at once (`driving`
+        off), so a viewer who comes next starts the next one."""
+        if not self.closed and (self.viewers or time.monotonic() - self.left_at < TOP_LINGER_S):
+            return True
+        self.driving = False
+        return False
+
+    def _drive(self) -> None:
+        while True:
+            with self.cond:
+                if not self._wanted():
+                    return
+                if (wait := self.retry_at - time.monotonic()) > 0:
+                    self.cond.wait(min(wait, 1.0))
+                    continue
+            if not self._child():
+                return
+
+    def _publish(self, kind: str, data: str) -> None:
+        with self.cond:
+            self.event = (kind, data)
+            self.seq += 1
+            if kind == "top":
+                self.backoff = 0.0
+            else:
+                self.backoff = min(self.backoff * 2 if self.backoff else TOP_RETRY_S, TOP_RETRY_MAX_S)
+                self.retry_at = time.monotonic() + self.backoff
+            self.cond.notify_all()
+
+    def _child(self) -> bool:
+        """One child, until it ends (True: tried again later) or nobody wants it (False: the
+        driver is over, the child killed)."""
+        from . import settings as admin
+        try:
+            proc = subprocess.Popen([sys.executable, "-X", "utf8", str(admin.WB), "top", "--json"],
+                                    env=admin.child_env(), stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except OSError as e:
+            self._publish("down", f"wb couldn't run: {e}")
+            return True
+        self.pid = proc.pid
+        out, err = proc.stdout.fileno(), proc.stderr.fileno()
+        open_fds, buf, tail = [out, err], b"", b""
+        try:
+            while out in open_fds:
+                with self.cond:
+                    if not self._wanted():
+                        return False
+                ready, _, _ = select.select(open_fds, [], [], 1.0)
+                for fd in ready:
+                    chunk = os.read(fd, 1 << 16)
+                    if not chunk:
+                        open_fds.remove(fd)
+                    elif fd == err:
+                        tail = (tail + chunk)[-2000:]  # why it ended, should it
+                    else:
+                        *lines, buf = (buf + chunk).split(b"\n")
+                        buf = buf if len(buf) <= TOP_LINE_MAX else b""
+                        for line in lines:
+                            text = line.decode("utf-8", "replace").strip()
+                            try:
+                                ok = isinstance(json.loads(text), dict)
+                            except ValueError:
+                                ok = False
+                            if ok:
+                                self._publish("top", text)
+        finally:
+            self.pid = None
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            proc.wait()
+            proc.stdout.close()
+            proc.stderr.close()
+        said = next((ln.strip() for ln in reversed(tail.decode("utf-8", "replace").splitlines()) if ln.strip()), "")
+        self._publish("down", said[:300] or f"wb top ended (exit {proc.returncode})")
+        return True
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "wb-chat"
     timeout = TIMEOUT  # an idle or half-open connection holds a thread no longer than this
@@ -2056,6 +2246,7 @@ class Handler(BaseHTTPRequestHandler):
     streams: threading.BoundedSemaphore
     waits: threading.BoundedSemaphore
     sends: RateLimit  # an agent token's sends (#1042)
+    top: TopFeed  # GET /api/top's one child (#1280)
     agent: str | None = None  # the agent calling, by its token; None for the user's own
     agent_token = ""  # that token, so a held wait or stream ends once it is revoked (_revoked)
 
@@ -2146,17 +2337,15 @@ class Handler(BaseHTTPRequestHandler):
         """The state for whoever calls: the whole of it for the user, an agent's own view (#1042)."""
         return agent_snapshot(self.agent) if self.agent else snapshot()
 
-    def _agent_unread(self, path: str) -> bool:
-        """For a path an agent may not read (AGENT_UNREAD): answered here (401, or 403 for an
-        agent) unless the user's token calls. True when answered."""
-        if not (key := next((k for k in AGENT_UNREAD if path == k or k.endswith("/") and path.startswith(k)), None)):
-            return False
+    def _gate(self, method: str, path: str) -> bool:
+        """Every /api/ request, before its path's own handler: the token (401), then for an
+        agent's the allow-list (AGENT_MAY, else 403). True when the request may go on."""
         if not self._authed():
-            return True
-        if self.agent:
-            self._json(403, {"error": f"agent tokens can't {AGENT_UNREAD[key]}"})
-            return True
-        return False
+            return False
+        if self.agent and not agent_may(method, path):
+            self._json(403, {"error": agent_refusal(path)})
+            return False
+        return True
 
     def _wait(self) -> None:
         """GET /api/wait?after=<message id>&timeout=<s>&until=done|reply (#1042): Claude's replies
@@ -2212,7 +2401,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._allowed():
             return
         path = self.path.split("?")[0]
-        if self._agent_unread(path):  # the user's alone (#1042)
+        if path.startswith("/api/") and not self._gate("GET", path):  # the token; agents' allow-list
             return
         if path == "/manifest.webmanifest":  # with the key, it opens the installed app keyed
             k = (parse_qs(urlsplit(self.path).query).get("k") or [""])[0]
@@ -2221,62 +2410,45 @@ class Handler(BaseHTTPRequestHandler):
                 m["start_url"] = f"/?token={k}"
             return self._send(200, json.dumps(m).encode(), TYPES[".webmanifest"])
         if path == "/api/shot":  # one side of wb shot's pair (#99), behind the token like the rest
-            if self._authed():
-                q = parse_qs(urlsplit(self.path).query)
-                n = (q.get("n") or [""])[0]
-                body = shot_png((q.get("task") or [""])[0], int(n) if n.isdigit() else 0,
-                                (q.get("side") or [""])[0])
-                if body is None:  # 410: dropped with its archived task, the message still names it (#821)
-                    pair = shots((q.get("task") or [""])[0], int(n) if n.isdigit() else 0)
-                    side = (pair or {}).get((q.get("side") or [""])[0])
-                    gone = isinstance(side, dict) and side.get("pruned")
-                    self._json(410 if gone else 404, {"error": "expired" if gone else "no such screenshot"})
-                else:
-                    self._send(200, body, "image/png")
-            return
+            q = parse_qs(urlsplit(self.path).query)
+            n = (q.get("n") or [""])[0]
+            body = shot_png((q.get("task") or [""])[0], int(n) if n.isdigit() else 0,
+                            (q.get("side") or [""])[0])
+            if body is None:  # 410: dropped with its archived task, the message still names it (#821)
+                pair = shots((q.get("task") or [""])[0], int(n) if n.isdigit() else 0)
+                side = (pair or {}).get((q.get("side") or [""])[0])
+                gone = isinstance(side, dict) and side.get("pruned")
+                return self._json(410 if gone else 404, {"error": "expired" if gone else "no such screenshot"})
+            return self._send(200, body, "image/png")
         if path == "/api/audio":  # one take of Claude's shortlist (#397), behind the token too
-            if self._authed():
-                q = parse_qs(urlsplit(self.path).query)
-                n = (q.get("n") or [""])[0]
-                got = audio_take((q.get("batch") or [""])[0], int(n) if n.isdigit() else 0)
-                if got is None:
-                    self._json(404, {"error": "no such take"})
-                else:
-                    self._send(200, *got)
-            return
+            q = parse_qs(urlsplit(self.path).query)
+            n = (q.get("n") or [""])[0]
+            got = audio_take((q.get("batch") or [""])[0], int(n) if n.isdigit() else 0)
+            return self._json(404, {"error": "no such take"}) if got is None else self._send(200, *got)
         if path.startswith(("/api/upload/", "/api/file/")):  # an attachment (#623)
-            if self._authed():
-                self._get_upload(path)
-            return
+            return self._get_upload(path)
         if path == "/api/state":
-            if self._authed():
-                self._json(200, self._snap())
-            return
+            return self._json(200, self._snap())
         if path == "/api/health":  # an agent's first call: is anyone listening (#1042)
-            if self._authed():
-                self._json(200, {"api": API_VERSION, "listening": listener() is not None})
-            return
+            return self._json(200, {"api": API_VERSION, "listening": listener() is not None})
         if path == "/api/wait":  # send, then wait for the answer (#1042)
-            if self._authed():
-                self._wait()
-            return
+            return self._wait()
         if path.startswith("/api/ask/"):  # a settled plan's whole text, when it is unfolded (#755)
-            if self._authed():
-                ask_id = path[len("/api/ask/"):]
-                got = find_ask(ask_id) if 0 < len(ask_id) <= 64 else None
-                if got is None:
-                    self._json(404, {"error": "no such prompt"})
-                else:
-                    self._json(200, {"ask": got})
-            return
+            ask_id = path[len("/api/ask/"):]
+            got = find_ask(ask_id) if 0 < len(ask_id) <= 64 else None
+            return self._json(404, {"error": "no such prompt"}) if got is None else self._json(200, {"ask": got})
         if path == "/api/latest":  # the service worker's, at a push (#755)
-            if self._authed():
-                self._json(200, latest())
-            return
+            return self._json(200, latest())
         if path == "/api/stream":
-            if self._authed():
-                self._stream()
-            return
+            return self._stream()
+        if path == "/api/settings":  # the web app's Settings view: settings.py's rows (#1280)
+            from . import settings as admin
+            return self._json(200, {"rows": admin.rows(), "ts": store.now()})
+        if path == "/api/stats":  # the Stats view: wb stats --json in-process, and the names' reads
+            from . import settings as admin, stats
+            return self._json(200, {"feed": stats.feed(), **admin.reads()})
+        if path == "/api/top":  # the Stats view's live part: wb top --json's ticks (TopFeed)
+            return self._top()
         name = "index.html" if path in ("/", "/index.html") else path.lstrip("/")
         f = STATIC / name
         if "/" in name or f.suffix not in TYPES or not f.is_file():
@@ -2364,6 +2536,51 @@ class Handler(BaseHTTPRequestHandler):
                 hub.open.remove(self)
             self.streams.release()
 
+    def _top(self) -> None:
+        """GET /api/top: `event: top` with each of wb top --json's lines verbatim (the newest at
+        once), `event: down` {why, retry} when its child ended, `: ping` after PING_EVERY of
+        silence. A client that hung up is noticed within WAIT_LOOK, so the child's linger starts."""
+        feed = self.top
+        if not feed.slots.acquire(blocking=False):
+            return self._json(503, {"error": "too many live views open"})
+        feed.join()
+        try:
+            if hasattr(socket, "TCP_USER_TIMEOUT"):  # a peer gone silent fails the next write
+                try:
+                    self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, UNACKED_MS)
+                except OSError:
+                    pass
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self._security_headers()
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            self.wfile.flush()
+            seen, sent = -1, time.monotonic()
+            while True:
+                with feed.cond:
+                    feed.cond.wait_for(lambda: feed.seq != seen, timeout=WAIT_LOOK)
+                    changed, seen, event = feed.seq != seen, feed.seq, feed.event
+                if changed and event:
+                    data = event[1] if event[0] == "top" else json.dumps(feed.down())
+                    self.wfile.write(f"event: {event[0]}\ndata: {data}\n\n".encode())
+                    self.wfile.flush()
+                    time.sleep(NUDGE_AFTER)  # the event's tail out of WebKit's buffer, as _stream's
+                    self.wfile.write(b"\n")
+                    self.wfile.flush()
+                    sent = time.monotonic()
+                elif self._gone():
+                    return
+                elif time.monotonic() - sent >= PING_EVERY:
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    sent = time.monotonic()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            feed.leave()
+            feed.slots.release()
+
     def _get_upload(self, path: str) -> None:
         """GET /api/upload/<id>: whether it is stored ({upload}, else 404), so a page asks before it
         sends a byte again; GET /api/file/<id>: the file, an image as itself, anything else as a
@@ -2398,12 +2615,10 @@ class Handler(BaseHTTPRequestHandler):
         """PUT /api/upload/<id>: the file's bytes as the body, its name (URI-encoded) in
         X-File-Name, its type in Content-Type. 200 {upload, new}; the same id again stores nothing
         and answers with the first. Refusals say why, for the page's chip (#623)."""
-        if not self._allowed():
+        if not self._allowed() or not self._gate("PUT", self.path.split("?")[0]):
             return
         if not self.path.startswith("/api/upload/"):
             return self._json(404, {"error": "not found"})
-        if not self._authed():
-            return
         try:
             n = int(self.headers.get("Content-Length") or -1)
         except ValueError:
@@ -2446,14 +2661,11 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def do_POST(self):
-        if not self._allowed():
+        if not self._allowed() or not self._gate("POST", self.path.split("?")[0]):
             return
-        if self.path not in ("/api/send", "/api/answer", "/api/prefs", "/api/seen", "/api/push", "/api/active"):
+        if self.path not in ("/api/send", "/api/answer", "/api/prefs", "/api/seen", "/api/push", "/api/active",
+                             "/api/settings"):
             return self._json(404, {"error": "not found"})
-        if not self._authed():
-            return
-        if self.agent and self.path in AGENT_DENIED:  # the user's alone (#1042)
-            return self._json(403, {"error": f"agent tokens can't {AGENT_DENIED[self.path]}"})
         if self.agent and self.path == "/api/send" and (wait := self.sends.hit(self.agent)):
             return self._json(429, {"error": f"over {AGENT_SENDS_PER_MIN} sends a minute", "retry_after": wait})
         if (self.headers.get("Content-Type") or "").split(";")[0] != "application/json":
@@ -2517,6 +2729,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(400, {"error": "prefs are {away: ask|allow}"})
             set_prefs(**body)
             return self._json(200, {"state": snapshot()})
+        if self.path == "/api/settings":  # one of the web app's Settings, through its wb command
+            return self._json(*admin_set(body.get("key"), body.get("value")))
         if self.agent and body.get("about") is not None:  # what it answers is the user's (#1042)
             return self._json(400, {"error": "agent messages can't carry about"})
         files = body.get("files")
@@ -2627,7 +2841,7 @@ def make_servers(port: int, binds: list[str] | None = None,
     handler = type("ChatHandler", (Handler,), {
         "hosts": p["hosts"], "secret": token(), "hub": Hub(),
         "streams": threading.BoundedSemaphore(MAX_STREAMS), "waits": threading.BoundedSemaphore(MAX_WAITS),
-        "sends": RateLimit(AGENT_SENDS_PER_MIN)})
+        "sends": RateLimit(AGENT_SENDS_PER_MIN), "top": TopFeed()})
     servers = []
     for addr in p["binds"]:
         try:

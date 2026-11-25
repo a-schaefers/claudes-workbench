@@ -38,11 +38,13 @@ does the whole flow below with the standard library alone.
     `chat-agents.json` beside the user's token, mode 0600; `<name>` is 1 to 32 of `a-z`, `0-9`
     and `-`). It can check health, send, upload, wait for replies, and read its own conversation
     (*An agent's view*): never the user's messages, Claude Code's dialogs or the user's settings.
-    - It can't answer Claude Code's dialogs (`/api/answer`), change the user's settings
-      (`/api/prefs`), change notifications (`/api/push`), or mark the user away or what they have
-      seen (`/api/active`, `/api/seen`); nor read a dialog (`/api/ask/<id>`), a push's summary
-      (`/api/latest`), a screenshot (`/api/shot`) or an audio take (`/api/audio`). Each is `403
-      {"error": "agent tokens can't …"}`.
+    - It works on an allow-list: `GET /api/health`, `/api/wait`, `/api/state`, `/api/stream`,
+      `/api/upload/<id>` and `/api/file/<id>`; `PUT /api/upload/<id>`; `POST /api/send`. Every
+      other path and method is `403 {"error": "agent tokens can't …"}`: `use <path>` for most,
+      the older wording where there was one (`answer Claude Code's dialogs` for `/api/answer`,
+      `change the user's settings` for `/api/prefs`, `read Claude Code's dialogs` for
+      `/api/ask/<id>`, and so on). An endpoint added later is the user's alone unless this list
+      names it.
     - It works only from this machine: a request with an agent token from any other address
       (a tailnet or LAN peer, when the chat is bound there for the user's phone) is `403
       {"error": "agent tokens work only from this machine (localhost)"}`. The user's token is
@@ -61,6 +63,10 @@ does the whole flow below with the standard library alone.
   `listening: false`, and a message sent waits, unread, until a session listens with the chat on,
   or is never passed on past 6 hours. `wb chat off` stops a server it started; one a service keeps
   up runs on until the service is stopped.
+- **CSRF and origin:** the token rides an `Authorization: Bearer` header, never a cookie, and
+  the server sends no CORS headers. A JSON body (every `POST`) forces a browser's preflight,
+  which the server never answers, so a page on another site can't write; the Host check stops
+  DNS rebinding. Nothing more is added.
 - **Transport:** HTTP/1.0, one request per connection, no CORS. A connection that sends nothing
   for 30 s is closed. Every response has `Cache-Control: no-store` (but `/api/file`) and a
   `X-Workbench-Chat` header naming whose chat it is.
@@ -126,7 +132,9 @@ An agent's token reads only its own conversation:
   attached to a row in its view; any other id is 404, as if there were none. A `PUT` under an id
   someone else stored is `409 {"error": "that upload id is another sender's"}`, and a send can
   attach only its own uploads.
-- **403:** `/api/latest`, `/api/ask/<id>`, `/api/shot`, `/api/audio`, and the user's `POST`s.
+- **403:** every path outside the allow-list (*Base URL and auth*): `/api/latest`,
+  `/api/ask/<id>`, `/api/shot`, `/api/audio`, the admin endpoints (`/api/settings`, `/api/stats`,
+  `/api/top`), and the user's `POST`s.
 - **`/api/health`** and the `listener` are as for the user.
 
 The user's own token reads everything, as below.
@@ -266,12 +274,55 @@ sent for it (to every device, or with `endpoint` to that one) → `{}`.
 `{"on": bool}`; `{test: true}` pushes every device → `{sent, ok, hint, reasons}` (`hint`:
 `cert`, `clock`, `unreached`, `refused`, or "" when one went through).
 
+### `GET /api/settings` (user only)
+The web app's Settings: `{"rows": [...], "ts": <seconds>}`. Each row is `{key, group, label, kind,
+…}`: `group` one of `shared`, `gpu`, `api`, `terminal`, `experimental` (in that order); `kind` one
+of `choice` (`value`, `choices: [{value, label, says}]`, `says`, `other`: any id is taken),
+`number` (`value`: a number or null for off, `unit`: `usd` or `per_kwh`, `says`), `info`
+(`text`), `action` (`text`, `choices` as buttons) or `note` (`text`, standing where its group's
+rows would be). A row may carry `help` (*POST /api/settings*). Read at most every 10 s; a write
+reads them again.
+
+### `POST /api/settings` (user only)
+`{key, value}` (`value`: a string, a number, or null for a number row's off), JSON only (else 415
+`json only`). It runs that row's `wb` command as the user, not as Claude:
+- 200 `{"ok": true, "said": <wb's line>, "rows": [...], "help"?: <note>}`. `help` comes when the
+  value just chosen needs Claude's help to work (Agent code navigation on with probe not set up).
+  The server returns it and records it (below), and Claude in the terminal offers to set it up
+  (installing nothing without the user's yes); showing it is the Settings view's job.
+- 400 `{"error": "no such setting"}` for an unknown `key`; 400 `{"error": "not one of its
+  choices"}` for a value the row doesn't take (nothing runs for either).
+- 409 `{"ok": false, "error": <wb's line>, "rows": [...]}` when wb refused.
+
+A change that went through is recorded (`settings-changes.jsonl` in the state directory: `{ts,
+key, label, from, to, said, help?, by: "web"}`), so Claude in the terminal hears of it.
+
+### `GET /api/stats` (user only)
+The Stats view's history: `{"feed": <wb stats --json>, "routes": <wb route --json, or null>,
+"models": <wb models --json, or null>}`. `routes` and `models` name the models; both come from
+the Settings rows' cache (10 s), null when wb couldn't read them.
+
+### `GET /api/top` (user only)
+The live view, as server-sent events (`text/event-stream`; send the bearer header, so `fetch`,
+not `EventSource`):
+- `event: top`, `data: <one wb top --json object, verbatim>`: the newest at once on connect, then
+  each tick (every 1, 2 or 5 s: Live refresh). Each event is followed by a blank line, as on
+  `/api/stream`.
+- `event: down`, `data: {"why": str, "retry": <seconds>}`: the server's `wb top` ended; it is
+  tried again after `retry` (30 s, doubling to 10 minutes), and `top` events come again once it
+  runs.
+- `: ping` after 15 s with nothing to send.
+
+One `wb top` runs per server, whoever watches; it stops 15 s after the last viewer leaves. At most
+4 streams are open: a 5th is `503 {"error": "too many live views open"}`.
+
 ### The page itself (no token)
 `GET /` (or `/index.html`) and the page's files (`/app.js`, `/app.css`, `/sw.js`, icons,
 `/manifest.webmanifest`); anything else is 404.
 
-Any other `/api/` method or path is `404 {"error": "not found"}`. Every `POST` takes JSON as
-above: a bad `Content-Length` is 400 `bad length`, an unparsable body 400 `bad json`.
+Any other `/api/` method or path wants the token too (401 without it, 403 for an agent's) and
+is then `404 {"error": "not found"}`. Every `POST` takes JSON as above: a bad `Content-Length` is
+400 `bad length`, an unparsable body 400 `bad json`.
 
 ## Rows: messages and asks
 
@@ -312,6 +363,7 @@ answered?, by?, note?, answers?, stale?}`. `for`: Claude was working on those ag
 ## Versions
 
 `api` in `/api/state` and `/api/health` is this API's version. A change that breaks a client
-bumps it; adding a field or an endpoint doesn't.
+bumps it; adding a field or an endpoint doesn't (the admin endpoints, `/api/settings`,
+`/api/stats` and `/api/top`, came in 2.0 under version 1).
 - **1** (2026-11-23): agent tokens, `/api/health`, `/api/wait`, `role`/`re`/`to` on rows, an
   agent's view of its own conversation, `for` on asks.
