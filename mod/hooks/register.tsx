@@ -144,12 +144,14 @@ const CHAT_STALE_MS = 15_000 // as wb's LISTENING_FOR: a listener silent this lo
 // the user counts as away this long after they last used the web chat: a web message, or a page
 // in use (chat/away.json's `at`, written by `wb chat serve`'s /api/active, #959)
 const AWAY_MS = 6 * 3600 * 1000
-// ...or for as long as this session has a backlog task open: a night's batch outlasts six hours,
-// and its permission prompts then waited in the terminal until morning (#110, 2026-11-18)
+// ...or for as long as this session has a task open: a night's batch outlasts six hours, and its
+// permission prompts then waited in the terminal until morning (#110, 2026-11-18). Backlog tasks
+// alone held it, so one long task asked for from the phone that finished past six hours was
+// reported in the terminal only, its question a dialog there (#1402, 2026-11-25).
 export function awayNow(webAt: number, now: number, list: WbTask[], isMine: (t: WbTask) => boolean): boolean {
   if (!webAt) return false
   if (now - webAt < AWAY_MS) return true
-  return list.some(t => t.backlog && isMine(t) && (ACTIVE.has(t.phase) || waitsOnClaude(t)))
+  return list.some(t => isMine(t) && (ACTIVE.has(t.phase) || waitsOnClaude(t)))
 }
 // Whether the weekly model check and the automatic optimize may run: no task anywhere active (the
 // GPU's, and a check's question beside a running task's), and none of this session's waiting on

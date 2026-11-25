@@ -5625,7 +5625,8 @@ else `chat/serve.pid`, else 1337; `--port`, #349; the fragment never leaves the 
   in the terminal (a web message, or a page shown, focused and in use: `POST /api/active`), until
   they type or answer a dialog in the terminal (answering counts: a tapped notice made the user away
   and the answer submitted no prompt); at most 6 h after that use, longer while one of this
-  session's `--backlog` tasks is open (#110). `chat/away.json` holds it, the user's, not one
+  session's tasks is open (#110; `--backlog` ones alone until #1402: one long task asked for from
+  the phone was then reported in the terminal only). `chat/away.json` holds it, the user's, not one
   session's (#688).
 - **Claude Code's dialogs are answered in the terminal** (#1350, from #1340's decision on the
   owner's bottom line: the terminal, local or ssh and tmux, is where things get done; the chat is
