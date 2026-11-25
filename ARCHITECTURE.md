@@ -7960,6 +7960,9 @@ $WB_HOME (~/.local/state/workbench)
 ~/.local/share/workbench/skills/ ($WB_SKILLS) the skill library, its own git repo; retired/
 ~/.local/share/workbench/try/<n>/ wb try's sample projects (task try-<n>; beside $WB_SKILLS)
 ~/.local/share/workbench/source/ ($WB_SOURCE) wb patch init's clone: branch local, the patches; refs/workbench/before-update, the tip before wb moved it (its reflog: every earlier one)
+~/.cache/workbench/kernel/<pin>/ ($XDG_CACHE_HOME/workbench/kernel when absolute; kernel.py --into DIR instead) scripts/kernel.py's toolchain, for a
+                                 kernel change only (*The kernel*): purs-<v>/purs, esbuild-<v>/esbuild, packages/<name>-<v>.tar.gz; <pin> a
+                                 digest of kernel/toolchain.json and spago.lock, each file checked again every run; beside it spago-<v>/ and spago-home/, relock's
 ~/.config/workbench/             writes to models.json, commands.json, savings.json, routes.json, images.json, audio.json, OpenCode's config (models.own_config): store.edit_config
   models.json ($WB_MODELS)       what OpenCode can't say about each model or provider
   images.json ($WB_IMAGES)  audio.json ($WB_AUDIO)   image engines; audio engines (speech, sfx, music, a listener);
