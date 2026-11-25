@@ -3135,9 +3135,10 @@ class Lifecycle(Base):
                 p.kill()
                 p.wait()
 
-    def test_thinking_past_the_budget_is_nudged_and_claude_told(self):
+    def test_thinking_past_the_budget_is_nudged_with_no_wake_and_its_report_says_so(self):
         # A model that generates for many minutes with no tool call gets the runner's own --now
-        # steer (seen 2026-11-16: 20K-token plans, no edits), and Claude a check-in saying so.
+        # steer (seen 2026-11-16: 20K-token plans, no edits). It woke Claude with a check-in until
+        # #1322 (2026-11-24): the round's report says "nudged once" instead
         self.start("t-think", "hang", "--think-timeout", "2", "--silence-timeout", "120")
         deadline = time.time() + 30
         steer = store.Task("t-think").dir / "steer.jsonl"
@@ -3145,16 +3146,13 @@ class Lifecycle(Base):
             time.sleep(0.2)
         rows, _ = store.read_jsonl(steer)
         self.assertTrue(rows and rows[0]["now"] and "Stop planning and act now" in rows[0]["text"])
-        # the runner writes the steer row, then the check-in: wait for that too (CI on 0.90's merge)
-        nudged = lambda: any(r["task"] == "t-think" and "the runner nudged it" in r["text"]  # noqa: E731
-                             for r in store.read_jsonl(store.home() / "notify.jsonl")[0])
-        while time.time() < deadline and not nudged():
-            time.sleep(0.2)
-        self.assertTrue(nudged())
-        self.assertEqual(store.Task("t-think").status.get("nudges"), 1)
         st = wait_phase("t-think", {"stuck"})       # the nudged round shows nothing either: stopped,
         self.assertIn("even after a nudge", st["last"])  # not nudged again and again
         self.assertEqual(st.get("nudges"), 1)
+        self.assertFalse([r for r in store.read_jsonl(store.home() / "notify.jsonl")[0]
+                          if r["task"] == "t-think" and r["kind"] == "checkin"])
+        self.assertIn("nudged once", store.Task("t-think").round_dir(st["round"])
+                      .joinpath("summary.md").read_text())
 
     def test_a_prompt_too_long_for_one_argument_is_sent_as_its_file(self):
         os.environ["FAKE_PROMPTS"] = str(Path(self.tmp.name) / "prompts.jsonl")
@@ -7363,12 +7361,10 @@ class Context(Base):
         self.assertEqual((st["phase"], st["handovers"]), ("stuck", runner.HANDOVER_MAX))
         self.assertIn(f"handed over to a fresh session {runner.HANDOVER_MAX} times", st["last"])
         rows = [r for r in store.read_jsonl(store.home() / "notify.jsonl")[0] if r["task"] == "t-c12"]
-        # one warning, at the handover before the last: one per handover from the second on woke
-        # Claude to read "on course" and wait again (2026-11-17)
-        warned = [r for r in rows if r["kind"] == "checkin" and "handover" in r["text"]]
-        self.assertEqual(len(warned), 1)
-        self.assertIn(f"handover {runner.HANDOVER_MAX - 1} this round", warned[0]["text"])
-        self.assertEqual([r["kind"] for r in rows if r["kind"] != "checkin"], ["stuck"])
+        # the stuck report is the one notice: each handover from the second on woke Claude to
+        # read "on course" and wait again (2026-11-17), and the one before the last did until
+        # #1322 (2026-11-24)
+        self.assertEqual([r["kind"] for r in rows], ["stuck"])
 
     def test_self_review_is_one_more_round_before_claude_is_woken_and_again_after_feedback(self):
         # Claude's reviews kept catching the same things (2026-11-17); the agent checks them
@@ -8432,8 +8428,8 @@ class Steering(Base):
                 break
             time.sleep(0.2)
         self.assertTrue(rows, "no check-in arrived")
-        self.assertIn("task t-chk · MiMo · round 1 · running", rows[0]["text"])
-        self.assertIn("since the last check-in", rows[0]["text"])
+        self.assertRegex(rows[0]["text"], r"^task t-chk · MiMo · round 1 · \d+m\n")
+        self.assertNotIn("since the last check-in", rows[0]["text"])    # no tool counts (#1322)
         run_wb("note", "t-chk", "--text", "Slow start, reading first.")
         run_wb("stop", "t-chk")
         out = run_wb("watch", "t-chk", "--once", "--no-color")

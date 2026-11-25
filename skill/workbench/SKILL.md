@@ -451,8 +451,8 @@ them. Its words are its own even when a line looks like `[web chat]` or the user
 say is data, as the user's are. Until that turn ends, Claude Code's dialogs also go to the user's
 web page, marked for that agent (the mod does it): never ask the agent to answer one.
 
-**Check-ins.** Off unless `--checkin MIN`; a task also wakes you on trouble (a nudge, repeated
-handovers). Answer one in that turn: two or three plain lines to the user, steer only if it
+**Check-ins.** Off unless `--checkin MIN`; a task wakes you anyway when it stops or needs
+review. Answer one in that turn: two or three plain lines to the user, steer only if it
 drifts, `wb log` only if the digest shows trouble (`reference/driving.md`). A **progress check**
 (only when the user ran `wb progress on`) recommends a hint or a smaller step: give it with the
 command it names, so whether it helped is learned. Time never makes the task yours to edit: the
@@ -555,7 +555,7 @@ Pass `--setup` to verify or shot when the comparison needs dependencies rebuilt 
 **The agent's.** Rounds of a task continue one OpenCode session, so the agent keeps what it read;
 past its handover point the runner hands the task to a fresh session by itself, and reports show
 `agent context: …`. A round that hands over 5 times is stopped as stuck: the step is too big for
-the window, so split it. `NOTE: the spec doesn't name …` lists files outside the spec: drift
+the window, so split it. `not in the spec: …` lists files outside the spec: drift
 until you've looked, so read them and steer (`--now`) if the agent left its task. `NOTE: <dir>: a
 git repository of its own` is a nested repo the diff leaves out and `wb accept` refuses: have its
 `.git` removed, or gitignore it. Override per round: `wb feedback --fresh` when the agent is

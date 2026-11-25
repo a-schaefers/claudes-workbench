@@ -1163,8 +1163,8 @@ def _event(line: str) -> list[dict]:
     return [raw] if isinstance(raw, dict) else []
 
 
-def _clock(secs: float) -> str:
-    return f"{int(secs // 60)}m{int(secs % 60):02d}s"
+def _mins(secs: float) -> str:
+    return f"{round(secs / 60)}m"
 
 
 def active_so_far(task: store.Task, now: float | None = None) -> float:
@@ -1229,29 +1229,17 @@ def checkin_text(task: store.Task, n: int, out: dict, since: float, active: floa
     eta = ""
     if typical:  # active work against active work: the wall clock held queues and reviews (#543)
         left = typical * 60 - (active_so_far(task, now) if active is None else active)
-        eta = (f" · ~{_clock(left)} left (typically {typical:.0f}m)" if left > 0 else
-               f" · {_clock(-left)} past its typical {typical:.0f}m")
+        eta = (f" · ~{_mins(left)} left (typically {typical:.0f}m)" if left > 0 else
+               f" · ~{_mins(-left)} past its typical {typical:.0f}m")
     rows = [r for r in store.read_jsonl(task.dir / "events.jsonl")[0] if r.get("ts", 0) > since]
-    tools: dict = {}
-    for r in rows:
-        if r.get("kind") == "tool":
-            tools[r["tool"]] = tools.get(r["tool"], 0) + 1
     errs = [r for r in rows if r.get("kind") == "tool" and not r.get("ok")]
-    tok_in = sum(r.get("in", 0) for r in rows if r.get("kind") == "step")
-    tok_out = sum(r.get("out", 0) for r in rows if r.get("kind") == "step")
-    lines = [f"task {task.name} · {spec['model_label']} · round {n} · running {_clock(took)}{eta}",
-             f"since the last check-in ({_clock(now - since)}): "
-             + (", ".join(f"{k}×{v}" for k, v in sorted(tools.items())) or "no tool calls")
-             + (f", {len(errs)} failed" if errs else "")
-             + f"; {tok_in} tokens read, {tok_out} written",
+    # whole minutes, no tool or token counts (#1322, 2026-11-24): nothing Claude acted on
+    lines = [f"task {task.name} · {spec['model_label']} · round {n} · {_mins(took)}{eta}"
+             + (f" · {len(errs)} failed" if errs else ""),
              f"now: {st.get('last') or '?'}"]
     if out["texts"]:
         lines.append("its latest words: " + out["texts"][-1].strip().replace("\n", " ")[:400])
-    files = gitops.changed(task.worktree)
-    lines.append("files changed so far: " + gitops.brief_paths(files))
-    if extra := outside_spec(task, files):
-        lines.append("NOTE: the spec doesn't name " + ", ".join(gitops.brief(extra))
-                     + ": check it is still on its task")
+    lines.append("files changed so far: " + gitops.brief_paths(gitops.changed(task.worktree)))
     return "\n".join(lines)
 
 
@@ -2019,7 +2007,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             if waiting_bg:
                 out["stuck"] += ", waiting on a background job"
         # Generating with nothing to show past the budget: interrupt with a nudge (once a round)
-        # and tell Claude. The nudge starts a new round, and that round stalling again is
+        # (its round's report says so). The nudge starts a new round, and that round stalling again is
         # stopped, whatever it did first: else a model that never answers, or a command that
         # prints nothing for longer than the budget, would be nudged and rerun forever.
         nudge = False
@@ -2050,12 +2038,9 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                                                          "now": True, "by": "workbench"})
             task.event({"ts": store.now(), "round": n, "kind": "steer", "now": True,
                         "by": "workbench", "text": text})
-            nudges = task.status.get("nudges", 0) + 1
-            task.set_status(nudges=nudges)
-            task.notify("checkin", checkin_text(task, n, out, max(started, float(
-                task.status.get("checkin_at") or 0)), step_prior + clock.ran(mono)) + f"\nthe runner nudged it: {mins} min of "
-                f"thinking with no tool call (nudge {nudges} this task; budget {int(think)}s)",
-                round=n)
+            # no wake: the next round's report says "nudged once" (#1322, 2026-11-24), as
+            # _reading_full became an event on 2026-11-17
+            task.set_status(nudges=task.status.get("nudges", 0) + 1)
         if out["stuck"]:
             # by: the provider's or the spend cap's stop is no lesson about the agent
             # (lessons.gather; #1020)
@@ -4273,6 +4258,8 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
             if e.get("kind") == "reading_full" and e.get("round") == n]
     if full:
         lines.append("reading: " + full[-1]["text"])
+    if task.round_dir(n).joinpath(NUDGED).exists():  # the think nudge's, no wake of its own (#1322)
+        lines.append("nudged once: it thought past its budget with no tool call")
     lines += backend_lines(task, n)  # #1021
     if (oc := st.get("opencode_note") or {}).get("round") == n:  # opencode_moved (#1322)
         lines.append(oc.get("text") or "")
@@ -4344,8 +4331,7 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
     for d, k in gitops.build_dirs(task.worktree, files)[:gitops.CHANGED_SHOWN]:
         lines.append(f"NOTE: {d} holds {k:,} new files the project doesn't ignore: build output?")
     if extra := outside_spec(task, files):
-        lines.append("NOTE: the spec doesn't name " + ", ".join(gitops.brief(extra))
-                     + ": needed for the task, or drift?")
+        lines.append("not in the spec: " + ", ".join(gitops.brief(extra)))
     if mine := claude_files_changed(files):
         lines.append(f"NOTE: the agent changed your files ({', '.join(gitops.brief(mine))}): instructions and "
                      ".claude/ are yours to write; keep, rewrite or revert them")
@@ -5910,8 +5896,8 @@ def _reading_full(task: store.Task, n: int, used: int, window: int,
 # Mid-round handovers in one review round before it is stopped as stuck. A session that changes
 # something early and then fills up reading handed over again and again, for hours, with Claude
 # told nothing (the 2026-11-16 audit). A big step needs a few; past this it is too big for the
-# window. The one before the last is a check-in, so Claude can steer or stop it; each before it
-# woke Claude to read "on course" and wait again (2026-11-17), and the last is a stuck report.
+# window. The last is a stuck report, the one notice: each before it woke Claude to read "on
+# course" and wait again (2026-11-17), and the one before the last did until #1322 (2026-11-24).
 HANDOVER_MAX = 5
 
 
@@ -5926,11 +5912,6 @@ def _full_round(task: store.Task, n: int, rnd: dict, handed: int = 1) -> None:
             + (", then OpenCode compacted it" if rnd.get("compacted") else "")  # #774
             + ": a fresh one takes over")
     task.event({"ts": store.now(), "round": n, "kind": "full", "text": text})
-    if handed == HANDOVER_MAX - 1:
-        files = gitops.changed(task.worktree)
-        task.notify("checkin", f"task {task.name}: {text} (handover {handed} this round; "
-                    f"stopped as stuck past {HANDOVER_MAX}); files changed so far: "
-                    + gitops.brief_paths(files), round=n)
     last = "\n\n".join(t.strip() for t in rnd["texts"][-2:] if t.strip())[-1200:]
     task.round_dir(n + 1).mkdir(parents=True, exist_ok=True)
     asks = round_asks(task, n)

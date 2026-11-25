@@ -1301,7 +1301,7 @@ Claude read the diff.
   window) below the point (seen: twenty handovers with no edit). Otherwise it carries on and a
   `reading_full` event (`_reading_full`, once a round) becomes the report's `reading:` line, waking
   no one. At most `HANDOVER_MAX` a runner, then stuck (2026-11-16 audit: hours of handovers, Claude
-  told nothing; a self-review on its green tree settled instead, #1261); only the handover before the last raises a `checkin`. Never on the step that
+  told nothing; a self-review on its green tree settled instead, #1261); no handover wakes Claude (the one before the last did until #1322). Never on the step that
   ends the agent's turn (`step_finish` reason `stop`, `turn_over`): it is done, so the round ends
   as it would and the between-rounds check starts any next round fresh (#1151: a finished agent
   was killed there and a fresh session paid to redo the round). A compaction between steps
@@ -1421,7 +1421,7 @@ machine's. A later runner resolves the model again and, on a catalog that lost i
 your reviewer, interrupted you. Stop what you were doing and do this first; it overrides anything
 earlier…") or `NOTE_HEAD` ("A note from Claude, your reviewer, before you go on…"). The nudge is a
 `now` note, once a round, ending it like an interrupt (`interrupted` `by: workbench`;
-`status.nudges`, a `checkin`: "the runner nudged it: N min of thinking with no tool call"). The
+`status.nudges`; no wake since #1322: the next round's report, marked `NUDGED`, says "nudged once"). The
 next round passing the budget again is stuck ("… even after a nudge"; else a silent command was
 nudged, killed and rerun forever), only in the same session (`runner.renudged`, status `nudged_round`, #681). Nudge rounds are marked
 `rounds/<n>/nudged` (`NUDGED`), skipped by `round_asks` (#681); a fresh nudge round keeps every
@@ -1431,10 +1431,9 @@ lists Claude's ("NOTE: not delivered…"), the next command marks them taken (`c
 ("not delivered, dropped …"); nudges drop silently.
 
 **Check-ins** (`checkin_text`), every `checkin` minutes, not while asking: `task X · label · round
-n · running <time> · ~Xm left (typically Nm)` (*Progress checks*), then since the last: tools used
-and failed, tokens, `now:`, the latest words (400), files changed, and a NOTE for changed files the
-spec never names (`outside_spec`: path or basename not in the step's prompt; silent when it names
-none).
+n · <M>m · ~Xm left (typically Nm)` in whole minutes (*Progress checks*), ` · N failed` when tool
+calls failed since the last, then `now:`, the latest words (400) and files changed (#1322 dropped
+the tool and token counts and the spec-drift NOTE).
 
 **Tests** (`run_tests`, `run_in_lane`): `<shell> -c` (zsh: `+o nomatch -c`) in the worktree, the agent's lane and
 environment, its own group, `--test-timeout` (900 s), the runner's `CURRENT`. Read as it comes
@@ -2691,8 +2690,8 @@ stuck report; `wb resume` carries it, `wb feedback`/`wb next` drop it and say so
 **Check-ins.** `--checkin MIN` raises a `checkin` notice every MIN minutes of a round with a digest
 (*The runner, inside*); Claude reports briefly, logs with `wb note` (a `captain` event), steers if
 needed. Off by default: each wake re-reads Claude's whole context (the 10-minute default cost 500K
-of a task's 1.2M tokens, 2026-11-17). Nudges, repeated handovers and a cut-short base check raise
-one regardless; a session that fills up reading is a `reading:` report line.
+of a task's 1.2M tokens, 2026-11-17). A cut-short base check raises one regardless; a nudge is a
+report line, "nudged once", and so is a session that fills up reading (#1322).
 
 **Progress checks** (`workbench/progress.py`, #95): opt-in, `wb progress on [--after MIN]` / `off`,
 `$WB_HOME/progress.json` `{on, after?, ts}`; `after` survives a bare `on`/`off` (`set_enabled`,
@@ -2798,8 +2797,8 @@ lines (`results.step`): bad when compacted, filled up reading first, stuck, or `
 agent-caused review rounds (a `--spec-gap` round is Claude's); a handover isn't held against it.
 The latest steps decide: the smallest bad one lowers the slice, the size most good ones reached
 raises it unless steps that big mostly went badly (#720: the biggest good step ever set it for good). `wb models`, `wb start`, `wb scout` show
-it. Check-ins and reports name changed files the spec never mentions (`NOTE: the spec doesn't name
-src/util.c`; `src/io.{h,c}` names each file).
+it. Reports name changed files the spec never mentions (`not in the spec: src/util.c`, `outside_spec`:
+path or basename not in the step's prompt, silent when it names none; `src/io.{h,c}` names each file).
 The window is what the server serves (*Managing the set*): `wb model add` writes it with an
 eighth as output budget; `wb doctor` flags a mismatch or none.
 
@@ -2864,7 +2863,7 @@ in its CLAUDE.md.
 
 Notices go to `$WB_HOME/notify.jsonl` (`Task.notify`: `{ts, task, kind, text, round?, id?, cause?,
 guard?, tasks?}`; `guard` `agents` on a `spend` stop for the Agents switch, #1213). Kinds: `review` (report and `review_diff`), `stuck`, `failed`, `question` (with `id`),
-`checkin` (periodic, a nudge, a mid-round handover before the last allowed, a base check cut short
+`checkin` (periodic, a base check cut short
 or whose command wasn't found).
 `cause` (`stuck`/`failed` with a round): `guard`, `agent`, `server` (#657), `provider` (an API provider's
 `rate_limited`/`outage` after its one revive, `quota`, `auth`: #1020; `refused`: #1082, #1084; the
