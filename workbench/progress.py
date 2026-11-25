@@ -33,11 +33,21 @@ def settings() -> dict:
     return s if isinstance(s, dict) else {}
 
 
+def user_after(s: dict) -> float | None:
+    """The user's fixed threshold in settings `s`, when it is a finite positive number of minutes.
+    A -5 or inf said "on" and no check ever came, and a NaN crashed every task's round loop
+    (#1401, 2026-11-25): progress.json is hand-editable, so a stored one is read this way too."""
+    a = s.get("after")
+    if isinstance(a, bool) or not isinstance(a, (int, float)) or not math.isfinite(a) or a <= 0:
+        return None
+    return float(a)
+
+
 def set_enabled(on: bool, after: float | None = None) -> None:
     """On or off, with the user's fixed threshold: None keeps the one stored, 0 clears it. The
     pane's Progress checks row runs a bare `wb progress on|off`, and each rewrote the file without
     `after`: a `--after 30` went at the next pick, and checks came at the typical length (#578)."""
-    kept = settings().get("after") if after is None else after
+    kept = user_after(settings() if after is None else {"after": after})
     store.write_json(path(), {"on": on, **({"after": kept} if kept else {}), "ts": store.now()})
 
 
@@ -50,9 +60,8 @@ def typical(spec: dict) -> tuple[float, str]:
     """(minutes, where from): the user's --after ("user"), else the typical length of a task
     this size on this model (router.expected: "measured" from TYPICAL_MIN timed tasks, at least
     FLOOR_MIN), else the size's DEFAULT_MIN ("default")."""
-    s = settings()
-    if s.get("after"):
-        return float(s["after"]), "user"
+    if (after := user_after(settings())) is not None:
+        return after, "user"
     from . import router  # router -> models: only when on
     size = spec.get("size", "significant")
     mins, n = router.expected(spec.get("model", ""), size, spec.get("weights_id"),

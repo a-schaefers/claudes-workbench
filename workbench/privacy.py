@@ -144,21 +144,13 @@ _NETRC_LOGIN = re.compile(r"(?i)\bpassword\s+\S")
 
 
 def copy_holds_credential(path) -> bool:
-    """Whether a standing `copy` entry at ``path`` holds a credential: a file, if it is text under
-    CREDENTIAL_MAX and the matcher flags it; a directory, if one of its dotfiles or
-    COPY_CONFIG_SUFFIXES files, outside COPY_SKIP_DIRS, shows a strong signal (_dir_file_holds).
-    A binary file, one over the cap, a FIFO or one that can't be read goes along as configured."""
+    """Whether a standing `copy` entry at ``path`` holds a credential: a file, whatever its name,
+    or one of a directory's dotfiles or COPY_CONFIG_SUFFIXES files outside COPY_SKIP_DIRS, if it
+    shows a strong signal (_copy_file_holds, _dir_file_holds). A binary file, one over the cap, a
+    FIFO or one that can't be read goes along as configured."""
     p = str(path)
     if not os.path.isdir(p):
-        text = _copied_text(p)
-        if text is None:
-            return False
-        if p.endswith(".json"):
-            try:
-                return _json_holds(json.loads(text), False)
-            except ValueError:
-                pass                             # tsconfig's comments: line by line
-        return any(_line_holds(line.strip()) for line in re.sub(r"(?s)<!--.*?-->", "", text).splitlines())
+        return _copy_file_holds(p)
     if os.path.basename(os.path.normpath(p)) in COPY_SKIP_DIRS:
         return False
     for d, dirs, files in os.walk(p):           # links to directories aren't followed
@@ -214,6 +206,29 @@ def _dir_file_holds(p: str) -> bool:
         if _secret_key(key) and value and not _ENV_REF.match(value) and not _PLACEHOLDER.match(value):
             return True
     return False
+
+
+# A copied file is judged as a copied directory's are: holds_credential's matcher, its bare
+# keyword, refused every API start for a .env of TOKENIZERS_PARALLELISM=false, an llm.json's
+# "max_tokens": 4096 or a PASSWORD_MIN_LENGTH=8, settings and no secret (#1381, 2026-11-25). Two
+# signals a named file can carry that _dir_file_holds doesn't read stay: an XML element whose tag
+# ends in a secret's name (Maven's <password>hunter2</password>) and a Bundler host's login.
+_XML_ELEMENT = re.compile(r"<([\w.:-]+)>([^<]*)</\1>")
+
+
+def _copy_file_holds(p: str) -> bool:
+    """A file a standing `copy` entry names: a strong signal only (_dir_file_holds), with the
+    XML and Bundler ones above."""
+    text = _copied_text(p)
+    if text is None:
+        return False
+    if _dir_file_holds(p):
+        return True
+    text = re.sub(r"(?s)<!--.*?-->", "", text)
+    if any(_secret_key(tag) and (v := value.strip()) and not v.startswith("$")
+           and not _PLACEHOLDER.match(v) for tag, value in _XML_ELEMENT.findall(text)):
+        return True
+    return any(_BUNDLE_HOST.match(line.strip()) for line in text.splitlines())
 
 
 def _secret_key(key: str) -> bool:

@@ -2,17 +2,19 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   The web chat on macOS (wb chat serve), kept up the way systemd/wb-chat.service keeps it on Linux:
-  started at login, started again whenever it exits (#449). Install it as a copy (launchd reads
-  LaunchAgents at login):
+  started at login, started again whenever it exits (#449). `wb setup` installs it as a copy in
+  ~/Library/LaunchAgents/ (launchd reads LaunchAgents at login), with EnvironmentVariables set to
+  the PATH (its python3's directory first) and WB_* variables setup ran with (#1342, #1343), then
+  bootstraps it (setup's no-service flag skips both). Setup rewrites the copy it wrote, which says so in a
+  comment; take that comment out and the copy is yours, kept as it is. By hand:
     cp launchd/workbench.chat.plist ~/Library/LaunchAgents/
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/workbench.chat.plist
-  and remove it with `launchctl bootout gui/$(id -u)/workbench.chat`. A shell runs ~/.local/bin/wb
-  (wb setup's link), since launchd expands neither ~ nor $HOME. PATH puts Homebrew's python3 first:
-  /usr/bin/python3 is Apple's 3.9, which bin/wb refuses (exit 78). launchd can't exempt that exit
-  from KeepAlive, so a broken install retries every ThrottleInterval seconds: fix it, then
-  `launchctl kickstart -k gui/$(id -u)/workbench.chat`. /usr/sbin and /sbin hold macOS's system
-  tools (system_profiler, sysctl: wb's hardware reads, #1305). Set WB_HOME or WB_CHAT_* here too
-  if you export them.
+  Remove it with `launchctl bootout gui/$(id -u)/workbench.chat`. A shell runs ~/.local/bin/wb
+  (wb setup's link), since launchd expands neither ~ nor $HOME. This PATH puts Homebrew's python3
+  first: /usr/bin/python3 is Apple's 3.9, which bin/wb refuses (exit 78). launchd can't exempt that
+  exit from KeepAlive, so a broken install retries every ThrottleInterval seconds: setup stops an
+  agent whose chat doesn't answer and starts wb's own server instead. /usr/sbin and /sbin hold
+  macOS's system tools (system_profiler, sysctl: wb's hardware reads, #1305).
 -->
 <plist version="1.0">
 <dict>
