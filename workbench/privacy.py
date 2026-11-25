@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from pathlib import Path
 
 from . import store
@@ -103,6 +104,61 @@ def holds_credential(path) -> bool:
             return _json_holds(json.loads(text), False)
         except ValueError:
             return True
+    return any(_line_holds(line.strip()) for line in re.sub(r"(?s)<!--.*?-->", "", text).splitlines())
+
+
+# commands.json's standing `copy` entries an API task takes (cli._standing_gap, #1322's review):
+# holds_credential reads any file it can't read or that is over the cap as holding one, right for
+# a token file the lane hides but not for a copy, where it refused every API start for a test.db,
+# a .so or a big .csv. A directory is walked (an entry like config/local/ went along unread), but
+# not the package trees in it, whose code is others' and full of `token = …`; in it, only the
+# config-shaped files are read, as source files spell secret keys as variables.
+COPY_SKIP_DIRS = frozenset({"node_modules", "bower_components", "vendor", ".venv", "venv",
+                            "site-packages", "__pycache__", ".git", "target", ".gradle", "Pods",
+                            ".tox", ".mypy_cache", ".pytest_cache", ".cache"})
+COPY_CONFIG_SUFFIXES = frozenset({"", ".yml", ".yaml", ".json", ".toml", ".ini", ".cfg", ".conf",
+                                  ".config", ".properties", ".xml", ".env", ".txt", ".pem", ".key",
+                                  ".netrc", ".npmrc", ".pypirc", ".local"})
+
+
+def copy_holds_credential(path) -> bool:
+    """Whether a standing `copy` entry at ``path`` holds a credential: a file, if it is text under
+    CREDENTIAL_MAX and the matcher flags it; a directory, if one of its config-shaped files (a
+    dotfile, or COPY_CONFIG_SUFFIXES) does, outside COPY_SKIP_DIRS. A binary file, one over the
+    cap, a FIFO or one that can't be read goes along as configured."""
+    p = str(path)
+    if not os.path.isdir(p):
+        return _text_holds(p)
+    if os.path.basename(os.path.normpath(p)) in COPY_SKIP_DIRS:
+        return False
+    for d, dirs, files in os.walk(p):           # links to directories aren't followed
+        dirs[:] = [x for x in dirs if x not in COPY_SKIP_DIRS]
+        for f in files:
+            if (f.startswith(".") or os.path.splitext(f)[1].lower() in COPY_CONFIG_SUFFIXES) \
+                    and _text_holds(os.path.join(d, f)):
+                return True
+    return False
+
+
+def _text_holds(p: str) -> bool:
+    """holds_credential for one copied file, but what isn't text under the cap holds none, and a
+    JSON file that doesn't parse (tsconfig's comments) is read line by line."""
+    try:
+        st = os.stat(p)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > CREDENTIAL_MAX:
+            return False
+        with open(p, "rb") as f:
+            data = f.read(CREDENTIAL_MAX + 1)
+        if len(data) > CREDENTIAL_MAX or b"\0" in data:
+            return False
+        text = data.decode("utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return False
+    if p.endswith(".json"):
+        try:
+            return _json_holds(json.loads(text), False)
+        except ValueError:
+            pass
     return any(_line_holds(line.strip()) for line in re.sub(r"(?s)<!--.*?-->", "", text).splitlines())
 
 

@@ -38400,9 +38400,35 @@ class Privacy(_KeyholeTest):
         self.assertEqual(store.Task("t-cp4").spec["copy"], ["local.cfg"])
         wait_phase("t-cp4", ("review",))
 
+    def test_an_api_task_takes_a_standing_binary_or_big_copy_but_not_a_directory_holding_a_credential(self):
+        # #1322's review: holds_credential read a binary test.db or a 1.6 MB .csv as holding a
+        # credential, refusing every API start for the repo, and a copied directory went unread
+        (self.repo / ".gitignore").write_text("test.db\nbig.csv\nconfig/local/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
+        (self.repo / "test.db").write_bytes(b"SQLite format 3\0" + bytes(range(256)) * 8)
+        (self.repo / "big.csv").write_text("id,password\n" + "1,x\n" * 400_000)
+        local = self.repo / "config" / "local"
+        local.mkdir(parents=True)
+        (local / "tsconfig.json").write_text("{ // a comment\n}\n")
+        (local / "app.js").write_text("const token = load()\n")       # source: not read
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"copy": ["test.db", "big.csv",
+                                                                             "config/local"]}}}))
+        self.role(via="api", api=FLASH)
+        self.start_api("t-cpb1")
+        self.assertEqual(store.Task("t-cpb1").spec["copy"], ["test.db", "big.csv", "config/local"])
+        (local / "settings.local.yml").write_text("db:\n  password: hunter2\n")
+        with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
+            self.start_api("t-cpb2")
+        self.assertEqual(cm.exception.code, 3)
+        self.assertIn("commands.json copies config/local into every task and it holds a credential",
+                      err.getvalue())
+        self.assertFalse(store.Task("t-cpb2").exists)
+
     def test_an_api_task_takes_a_standing_sibling_and_a_big_copied_directory_as_configured(self):
-        # #1322; a directory isn't read for a credential: holds_credential counts one of over 200
-        # files as holding one, which would refuse every standing node_modules
+        # #1322; a copied directory's package trees aren't read for a credential
+        # (privacy.COPY_SKIP_DIRS): their code is full of `token = …`, which would refuse every
+        # standing node_modules
         (self.repo / ".gitignore").write_text("node_modules/\n")
         subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)

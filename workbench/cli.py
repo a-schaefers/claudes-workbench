@@ -1129,11 +1129,13 @@ def _standing_gap(conf: dict, repo: Path, advice: bool = True) -> str:
     """_standing_refusal's line, or '': also the busy opt-in's (#1023), which moves a GPU start to
     an API model after _worktree_setup checked it as a GPU one (wave 2's merge), and the mod's
     dry run's (_route_start), so the dialog never asks for a start wb start then refuses (#1227).
-    Only a file is read (privacy.holds_credential): a copied node_modules/ counts as one by its
-    size alone. Naming the entry once let it through, which every start then repeated (#1322)."""
+    A file is read if it is text under the cap, a directory's config-shaped files outside its
+    package trees (privacy.copy_holds_credential): only files were, by holds_credential, which
+    refused a binary test.db and let config/local/ go unread (#1322's review). Naming the entry
+    once let it through, which every start then repeated (#1322)."""
     for raw in conf.get("copy", []):
         entry = os.path.normpath(raw.strip()).rstrip("/")
-        if os.path.isfile(repo / entry) and privacy.holds_credential(repo / entry):
+        if privacy.copy_holds_credential(repo / entry):
             return privacy.standing_refusal(entry, advice)
     return ""
 

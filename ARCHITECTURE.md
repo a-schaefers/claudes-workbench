@@ -1464,8 +1464,10 @@ everywhere). In order:
   lacks and the root has from the root; task.json `copy` and the start line hold it
   repo-relative (`cli._copy_path`; it copied the root's node_modules for the package's, #1158). commands.json's
   `copy` stays repo-relative.
-- For an API task, a standing `copy` entry of commands.json's `repos` whose file holds a credential
-  (`privacy.holds_credential`; a directory isn't read, as one of over 200 files counts as holding one) is
+- For an API task, a standing `copy` entry of commands.json's `repos` that holds a credential
+  (`privacy.copy_holds_credential`: a file if it is text under `CREDENTIAL_MAX` and the matcher flags it, so a
+  binary `test.db` or a big `.csv` goes along; a directory by its config-shaped files, a dotfile or one of
+  `COPY_CONFIG_SUFFIXES`, outside `COPY_SKIP_DIRS` such as `node_modules`, whose code is full of `token = …`) is
   refused, exit 3, named or not (`cli._standing_refusal`, its line `cli._standing_gap`,
   `privacy.standing_refusal`; #1021, #1322): `commands.json copies .env.local into every task and it holds a
   credential: an API task doesn't take it (run on the GPU, or keep the secret in an environment variable)`;
