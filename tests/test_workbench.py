@@ -26214,6 +26214,19 @@ class LogoutStops(Base):
         self.assertEqual(len(said), 1)
         self.assertIn("loginctl enable-linger", said[0])
 
+    def test_what_a_service_starts_gets_a_scope_of_its_own_so_a_restart_of_the_unit_spares_it(self):
+        # #1407 (2026-11-25): the web app's Measure now ran wb optimize in wb-chat.service's
+        # cgroup, and wb setup's restart of the unit killed the run; a terminal's survived
+        from workbench import cli
+        scope = ("systemd-run", "--user", "--scope", "--quiet", "--collect")
+        cgroup = Path(self.tmp.name) / "cgroup"
+        for where, want in (("user@1000.service/app.slice/wb-chat.service", scope),
+                            ("user@1000.service/app.slice/app-konsole.scope/tab(1).scope", ())):
+            cgroup.write_text(f"0::/user.slice/user-1000.slice/{where}\n")
+            with mock.patch.object(cli, "SELF_CGROUP", cgroup), \
+                    self.fake_loginctl("yes", "no", scope="ok"):  # logind kills no session
+                self.assertEqual(cli.runner_scope(), want, where)
+
     def test_kill_user_processes_is_named_as_killing_running_tasks_without_a_scope_for_them(self):
         from workbench import cli
         with self.fake_loginctl("yes", "yes", scope="fails"):

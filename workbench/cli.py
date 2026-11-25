@@ -284,14 +284,31 @@ def kills_sessions() -> bool:
         _loginctl("show-session", "-p", "KillUserProcesses", "--value") == "yes"
 
 
+SELF_CGROUP = Path("/proc/self/cgroup")
+
+
+def in_service() -> bool:
+    """This process runs in a systemd service's own cgroup (wb-chat.service's, for every wb the
+    web app runs), which a stop or restart of the unit kills whole. A terminal's is a scope; an
+    INVOCATION_ID alone says nothing, as terminals pass theirs on. False off Linux."""
+    try:
+        lines = SELF_CGROUP.read_text().splitlines()
+    except OSError:
+        return False
+    return any(ctl in ("", "name=systemd") and path.rstrip().endswith(".service")
+               for _, ctl, path in (ln.split(":", 2) for ln in lines if ln.count(":") >= 2))
+
+
 @functools.cache
 def runner_scope() -> tuple[str, ...]:
     """What starts a detached process (`detach`) in a scope of its own under the user's systemd
     manager, where logind kills a login session's processes at logout: a runner started from an
     SSH or desktop session died with it, and the night's backlog too (#351, the audit of 1.4).
-    `--scope` execs the command, so the pid is the command's. Empty anywhere else, or when the
-    manager doesn't answer."""
-    if not kills_sessions() or not shutil.which("systemd-run"):
+    So does one started from a service (`in_service`): the web app's Measure now ran wb optimize
+    in wb-chat.service's cgroup, and wb setup's restart of the unit killed the run (#1407,
+    2026-11-25). `--scope` execs the command, so the pid is the command's. Empty anywhere else,
+    or when the manager doesn't answer."""
+    if not (in_service() or kills_sessions()) or not shutil.which("systemd-run"):
         return ()
     argv = ("systemd-run", "--user", "--scope", "--quiet", "--collect")
     try:
