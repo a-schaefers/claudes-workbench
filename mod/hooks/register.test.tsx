@@ -1216,7 +1216,8 @@ test('#1124: a stop by the task\'s API provider wakes Claude to pass on its reme
   await clock.advance(3000)
   expect(woken).toHaveLength(1)
   expect(woken[0]).toContain('[workbench] Task `a` was stopped by its API provider.')
-  expect(woken[0]).toContain('once they say it is fixed (or the rate limit has passed), `wb feedback a --text "carry on"`')
+  expect(woken[0]).toContain('Not the agent\'s doing: its remedy is the notice\'s, above; tell the user when it needs them.')     // the notice says the remedy (#1322)
+  expect(woken[0]).not.toContain('nor change its model or role yourself')
   expect(woken[0]).not.toContain('Steer it')
   expect(woken[0]).not.toContain('got stuck')
   expect(woken[0]).not.toContain('wb discard')
@@ -1242,7 +1243,8 @@ test('#1232: a stop for a repo marked local-only wakes Claude to takeover or dis
   await clock.advance(3000)
   expect(woken).toHaveLength(1)
   expect(woken[0]).toContain('[workbench] Task `a` was stopped: its repo became local-only.')
-  expect(woken[0]).toContain('then `wb takeover a` to finish it yourself or `wb discard a`')
+  expect(woken[0]).toContain('Not the agent\'s doing: its remedy is the notice\'s, above; tell the user when it needs them.')     // the notice names takeover or discard (#1322)
+  expect(woken[0]).not.toContain('never you')
   expect(woken[0]).not.toContain('Steer it')
   expect(woken[0]).not.toContain('got stuck')
   expect(woken[0]).not.toContain('wb feedback a')
@@ -1277,7 +1279,7 @@ test('#1247: a stop outside the step wakes Claude to do as its notice says, neve
   const [a, b, c] = ['a', 'b', 'c'].map(n => woken.find(w => w.includes(`Task \`${n}\``)) ?? '')
   for (const [w, n] of [[a, 'a'], [b, 'b']]) {
     expect(w).toContain(`[workbench] Task \`${n}\` failed (not its agent's doing).`)
-    expect(w).toContain('its remedy is the notice\'s own, above: do what it names')
+    expect(w).toContain('Not the agent\'s doing: its remedy is the notice\'s, above; tell the user when it needs them.')
     expect(w).not.toContain(`then \`wb feedback ${n} --message <file>\``)
   }
   expect(a).toContain('wb takeover a to finish it, or wb discard a')
@@ -1317,7 +1319,7 @@ test('two wakes due in one turn both arrive, the second after the first one\'s t
   expect(woken.join('\n')).not.toContain('no notice reached Claude')
 })
 
-test('two questions asked at once both reach Claude, each with its own id', async ($, on) => {
+test('two questions asked at once both reach Claude, each with its own id, and a plain question gets no wb allow paragraph', async ($, on) => {
   // the 2026-11-16 audit: the newest alone was delivered, and the first stayed blocked
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   const files: Record<string, string> = {}
@@ -1335,6 +1337,7 @@ test('two questions asked at once both reach Claude, each with its own id', asyn
   await clock.advance(3000)
   expect(woken.filter(t => t.includes('Q: q1?') && t.includes('wb answer fix-it --id q1'))).toHaveLength(1)
   expect(woken.filter(t => t.includes('Q: q2?') && t.includes('wb answer fix-it --id q2'))).toHaveLength(1)
+  expect(woken.join('\n')).not.toContain('PERMISSION request')   // only a PERMISSION notice's (#1322)
 })
 
 test('a question whose task no longer asks is acknowledged without a wake', async ($, on) => {
@@ -2715,7 +2718,7 @@ test('a dialog wb chat ask refuses is announced on the phone, and a long plan or
   expect(runs.filter(a => a[2] === 'ask').at(-1)).toContain('--text=--version')
 })
 
-test('a task\'s wake while the user is away on the web chat tells Claude to answer them there, and stops once they type in the terminal (#540)', async ($, on) => {
+test('a task\'s wake while the user is away on the web chat tells Claude to answer them there, in full once a stretch, and stops once they type in the terminal (#540)', async ($, on) => {
   // the web-chat block comes once per conversation: a user who went to the web chat after the
   // first message was never said to be away, and a task's news reached only the terminal
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
@@ -2744,13 +2747,20 @@ test('a task\'s wake while the user is away on the web chat tells Claude to answ
   expect(wakes()[0]).toContain('REPORT-1')
   expect(wakes()[0]).toContain('they last used the web chat')
   expect(wakes()[0]).toContain('wb chat reply')
+  notice(files, { ts: ts0 + 8, task: 'fix-it', kind: 'review', text: 'REPORT-1b' })
+  await clock.advance(31_000)
+  expect(wakes()).toHaveLength(2)                               // still away: one line, not the paragraph (#1322)
+  expect(wakes()[1]).toContain('REPORT-1b')
+  expect(wakes()[1]).toContain('(User away: answer with `wb chat reply`.)')
+  expect(wakes()[1]).not.toContain('they last used the web chat')
 
   await $.prompt.submit({ text: 'back now' } as any)            // typed in the terminal: back
   notice(files, { ts: ts0 + 12, task: 'fix-it', kind: 'review', text: 'REPORT-2' })
   await clock.advance(31_000)                                   // nothing runs: the safety poll reads it
-  expect(wakes()).toHaveLength(2)
-  expect(wakes()[1]).toContain('REPORT-2')
-  expect(wakes()[1]).not.toContain('web chat')
+  expect(wakes()).toHaveLength(3)
+  expect(wakes()[2]).toContain('REPORT-2')
+  expect(wakes()[2]).not.toContain('web chat')
+  expect(wakes()[2]).not.toContain('User away')
 })
 
 test('running wb counts as workbench mode, and a web message reaches a running turn', async ($, on) => {
@@ -3587,7 +3597,7 @@ test('/workbench alone turns workbench mode on for the session: the pane opens, 
   expect((await $.prompt.context({ blocks: [] })).blocks.map((b: any) => b.name)).not.toContain('user-notes')
   files['/wb/notes.md'] = '- Review strictly: reject any diff without tests\n'
   const notes = (await $.prompt.context({ blocks: [] })).blocks.find((b: any) => b.name === 'user-notes')
-  expect(notes?.text).toContain('reject any diff without tests')
+  expect(notes?.text).toBe("The user's delegation notes (`wb notes`):\n- Review strictly: reject any diff without tests")
 
   await $.command.run({ command: 'workbench-quit', args: '' })
   await clock.advance(2000)
@@ -4379,15 +4389,11 @@ test('the probe row says whether it works, and turned on without probe it asks C
   expect(checks).toBe(1)                                            // off: asked once (it runs no probe then)
   await ui.press({ key: 'probe' })
   await ui.press({ key: 'probe:on' })
-  expect(toasts.filter(t => t.includes('code navigation'))).toEqual([
-    "workbench: Agent code navigation is on but not set up: probe isn't installed. Claude will offer to set it up."])
+  expect(toasts.filter(t => t.includes('code navigation'))).toEqual([])   // the row says it (#1322)
   expect(await row(ui)).toBe('▸ Agent code navigation: On (large files only), not set up')
   await clock.advance(5000)                                         // the next poll starts Claude's turn
-  expect(asked).toHaveLength(1)
-  expect(asked[0]).toContain('The user just turned on Agent code navigation')
-  expect(asked[0]).toContain(missing('on'))
-  expect(asked[0]).toContain('github.com/probelabs/probe/releases')
-  expect(asked[0]).toContain('install nothing without their yes')
+  expect(asked).toEqual(["[workbench] probe isn't on PATH: offer to install its release binary " +
+    '(github.com/probelabs/probe/releases), then `wb experiment probe`.'])
 
   found = true                                                      // Claude installed it
   await clock.advance(31_000)
@@ -4400,8 +4406,7 @@ test('the probe row says whether it works, and turned on without probe it asks C
   expect(await row(ui)).toBe('▸ Agent code navigation: Off (default)')
   await ui.press({ key: 'probe' })
   await ui.press({ key: 'probe:on' })
-  expect(toasts.filter(t => t.includes('code navigation'))).toHaveLength(2)
-  expect(toasts.at(-1)).toBe('workbench: Agent code navigation is on and working (probe-code 0.6.0): tasks started from now use it.')
+  expect(toasts.filter(t => t.includes('code navigation'))).toEqual([])   // working: no toast either
   await clock.advance(5000)
   expect(asked).toHaveLength(1)                                     // working: nothing for Claude
   await ui.unmount()
@@ -4518,8 +4523,9 @@ test('the settings rows open to Buttons, pick through wb, and say the sentence o
     expect((await ui.find({ key: 'probe' }))?.props.label).toBe('▸ Agent code navigation: Off (default)')  // opt-in
     expect(await ui.find({ key: 'coding:ask' })).toBeUndefined()                                       // one row each at rest
     const labels = (await ui.findAll({ type: 'Button' })).map(b => String(b.props.label)).filter(l => l.startsWith('▸ '))
-    expect(labels.slice(-2)).toEqual(['▸ Web chat: Off (default)', '▸ Agent code navigation: Off (default)'])  // last, apart (the user, 2026-11-21)
-    expect(await ui.find({ type: 'Text', text: /^Experimental · may change or go away$/ })).toBeDefined()   // under their own heading
+    expect(labels.slice(-2)).toEqual(['▸ Web chat: Off (default)', '▸ Agent code navigation: Off (default)'])  // the probe last, apart (the user, 2026-11-21)
+    expect(await ui.find({ type: 'Text', text: /^Experimental$/ })).toBeDefined()   // under its own heading, no caveat (#1322)
+    expect(await ui.find({ type: 'Text', text: /Click a row|may change or go away/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /web chat / })).toBeUndefined()                         // and no link
     await ui.press({ key: 'tab-tasks' })
     await ui.unmount()
@@ -6405,7 +6411,7 @@ async function settingsTab($: any, on: any, files: Record<string, string> = {}) 
   return { clock, files, w, ui, label, options, texts, ran }
 }
 
-test('#1023: the Settings tab draws Shared, GPU, API and Experimental in order, the Agents switch first, the old rows as they were', { timeoutMs: 20_000 }, async ($, on) => {
+test('#1023: the Settings tab draws Shared, GPU, API and Experimental in order, the Agents switch first, the web chat last of Shared, the probe alone under Experimental', { timeoutMs: 20_000 }, async ($, on) => {
   const { ui, texts, label } = await settingsTab($, on)
   const heads = (await texts()).filter(t => ['Shared', 'GPU', 'API', 'Experimental'].includes(t))
   expect(heads).toEqual(['Shared', 'GPU', 'API', 'Experimental'])
@@ -6415,7 +6421,8 @@ test('#1023: the Settings tab draws Shared, GPU, API and Experimental in order, 
   for (const [key, was] of [['coding', '▸ Claude coding: Let Claude decide (default)'], ['progress', '▸ Progress checks: Off (default)'],
     ['splash', '▸ Opening animation: Enabled (default)'], ['chat', '▸ Web chat: Off (default)'], ['probe', '▸ Agent code navigation: Off (default)']])
     expect([key, await label(key)]).toEqual([key, was])
-  expect(rows.slice(-2)).toEqual(['▸ Web chat: Off (default)', '▸ Agent code navigation: Off (default)'])  // Experimental last
+  expect(rows.at(-1)).toBe('▸ Agent code navigation: Off (default)')  // the probe alone, last
+  expect(rows[rows.indexOf('▸ Web chat: Off (default)') - 1]).toBe('▸ Opening animation: Enabled (default)')  // Shared's last (#1322)
   expect((await ui.find({ key: 'cap' }))?.props.value).toBe('5')
   // wake: the plugin option's value, read-only
   expect(await texts()).toContain('Wake Claude: on · change it in /plugin → workbench → options')

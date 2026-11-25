@@ -900,17 +900,15 @@ and its wake for a `cause` `spend` notice ends with `SPEND_NEXT` (the same choic
 notice names, if any`, never its own `wb route <role> gpu`, a no-op under Agents API, #1218; with `guard` `agents`, the Agents
 switch's stop, `AGENTS_NEXT`: Agents back to Both or API, then `wb resume`, or takeover or discard, #1213), not the stuck wake's
 feedback line: feedback would run a round the cap stops again at once. A `cause` `provider` notice (a quota, key, rate-limit
-or outage stop) wakes as `was stopped by its API provider` (`PROVIDER_HEADLINE`, the toast's too) and ends with
-`PROVIDER_NEXT`: pass the notice's remedy on, `wb feedback <task> --text "carry on"` once the user says it is fixed,
-never discard it; it once ended with the stuck wake's "Steer it … or wb discard" (#1124). A `cause` `local_only`
-notice (`runner._local_only_stop`, #1215) wakes as `was stopped: its repo became local-only` (`LOCAL_ONLY_HEADLINE`,
-the toast's too) and ends with `LOCAL_ONLY_NEXT`: tell the user, then `wb takeover` or `wb discard` as they choose,
-since wb feedback and resume are refused while the repo stays local-only and only the user lifts it; it once ended with
-the stuck wake's feedback line, which exit 3 refused (#1232). Any other `cause` outside `results.THE_STEP`
+or outage stop) wakes as `was stopped by its API provider` (`PROVIDER_HEADLINE`, the toast's too); it once ended with
+the stuck wake's "Steer it … or wb discard" (#1124). A `cause` `local_only` notice (`runner._local_only_stop`, #1215)
+wakes as `was stopped: its repo became local-only` (`LOCAL_ONLY_HEADLINE`, the toast's too); it once ended with the
+stuck wake's feedback line, which exit 3 refused (#1232). Any other `cause` outside `results.THE_STEP`
 (`outsideTheStep`, the same allowlist: `catalog`, `repo`, `checkout`, `setup`, `model`, `disk`, `server`, a lone `died`)
-wakes as `failed (not its agent's doing)` or `was stopped (not its agent's doing)` (`OUTSIDE_HEADLINE`, the toast's too)
-and ends with `OUTSIDE_NEXT`: do what the notice names, `wb feedback` only when it names it, else `--text "carry on"` once
-the cause is gone. A model gone from the catalog and a moved repo woke with the failed wake's feedback line, which exit 3
+wakes as `failed (not its agent's doing)` or `was stopped (not its agent's doing)` (`OUTSIDE_HEADLINE`, the toast's
+too). All three end with `OUTSIDE_NEXT`: `Not the agent's doing: its remedy is the notice's, above; tell the user when
+it needs them.` (the provider's and the local-only stop had next steps of their own, restating the notice's remedy and
+that Claude never changes a role or lifts local-only, #1322). A model gone from the catalog and a moved repo woke with the failed wake's feedback line, which exit 3
 refused or a runner that failed at once followed (#1247), so every such stop's notice names its own remedy and carries
 its cause; one with a dedicated text (`spend`, `provider`, `local_only`) or a batch (`tasks`) keeps that.
 
@@ -2845,8 +2843,9 @@ open tasks from `wb status --repo <its directory> --session <id>…`.
 
 **What Claude learns about the user** (`wb notes`): cross-project preferences, `wb notes add "…"`
 (at most 300 characters, 20 notes) in `$WB_HOME/notes.md` (`- ` lines, `notes.lock`), handed to
-every workbench-mode session in a `user-notes` block (#540); `wb notes drop N…`. One repo's facts go
-in its CLAUDE.md.
+every workbench-mode session in a `user-notes` block (#540: `NOTES_NOTE`, `The user's delegation notes
+(\`wb notes\`):` and the notes; when to add or drop one is the skill's, no longer said with them, #1322);
+`wb notes drop N…`. One repo's facts go in its CLAUDE.md.
 
 ## Waking Claude, exactly once
 
@@ -2988,7 +2987,7 @@ user sees.
   (`wb savings --json` every 10 minutes, #107), gone with #1322. The web chat's link is on Settings
   only.
   The Settings tab (`settingRow`; Buttons, since a Select opened on a click and could pick nothing,
-  2026-11-19): a Button per setting naming its value, capitalized, the default option saying `(default)` (`▸
+  2026-11-19; no hint line above them, #1322): a Button per setting naming its value, capitalized, the default option saying `(default)` (`▸
   Claude coding: Let Claude decide (default)`, key `coding`); a row wider than the pane is folded
   to `mem.settingsCols` (the tab's `bodyColumns`) by `hangWords`, its lines after the first two in,
   under its words, a Text child of the Button (an option's four in; the label stays the control's
@@ -3012,7 +3011,9 @@ user sees.
   old level, `PROBE_OLD_LEVELS`, is on). `(recommended)` only when wb's line ends `; on is
   recommended` (`context.PROBE_RECOMMENDED`). `probeStatus` asks `wb experiment probe` at most every
   `PROBE_RECHECK_MS` (30 s) and after each pick, so on reads `, working` or `, not set up`
-  (`probeStops`; 2026-11-20); on but not set up queues `PROBE_SETUP_NOTE` once. **Progress checks**,
+  (`probeStops`; 2026-11-20); on but not set up queues `PROBE_SETUP_NOTE` once (`[workbench] probe isn't on
+  PATH: offer to install its release binary (github.com/probelabs/probe/releases), then \`wb experiment probe\`.`),
+  with no toast either way: the row says it (#1322). **Progress checks**,
   a `wb` command (the mod writes no setting itself): `PROGRESS_STOPS`, `progressSettings`,
   `progressStops` (`On, after N min` with a kept `after`). Stats recording, Live view, Live refresh
   and the electricity price per kWh had rows too (#1322: they stay on, 2 s and unset unless `wb stats
@@ -3021,9 +3022,9 @@ user sees.
   up to three characters, decimal digits only, #609). **Opening animation** (`SPLASH_STOPS`, `splash:on|off`): `wb splash on|off`, `splash.json`
   (`splashOn`). The ring follows `SETTING_ROWS`. Order: under **Shared** the Agents switch, the busy
   row, the three roles, Claude coding, Dynamic workflows, the day cap, wake, progress checks, the
-  animation; then **GPU**, **API** (*The roles in Settings*), and last under `Experimental ·
-  may change or go away` Web chat and Agent code navigation (the two that may change or go away,
-  2026-11-21). A failed `wb` call toasts its last line.
+  animation, Web chat; then **GPU**, **API** (*The roles in Settings*), and last under
+  `Experimental` Agent code navigation alone (2026-11-21; the web chat was there too, under `·
+  may change or go away`, until #1322). A failed `wb` call toasts its last line.
   **The roles in Settings** (#1023): read through `rolesNow` (`wb route --json` and `wb models
   --json`, neither asking a server; kept `ROLES_CACHE_MS` 10 s in `mem.roles`, dropped after a pick).
   Only wb's answer is kept (`rolesRead`, #1142): the roles, or `wb is older than the mod`; a failed
@@ -4460,7 +4461,7 @@ goes on with the rest, as for a worktree problem. The runner checks the same (`r
 a slot, or in checkout, setup or the base check, sent round 1 to the provider anyway and billed it, and so did the
 rounds the runner starts itself): `stuck` before anything more is sent, status `infra` `local_only` (`runner.LOCAL_ONLY`),
 a `stopped` event `by` it, a `stuck` notice with `cause` `local_only`, `task <t>: round N didn't run, so nothing more went
-to its provider: ` + that line, and the latest round's report, as `_go_on`'s (the mod wakes Claude with `LOCAL_ONLY_HEADLINE` and `LOCAL_ONLY_NEXT`, #1232). A round already running finishes. `wb route all api` is global and reads no repo: the check is per start.
+to its provider: ` + that line, and the latest round's report, as `_go_on`'s (the mod wakes Claude with `LOCAL_ONLY_HEADLINE` and `OUTSIDE_NEXT`, #1232). A round already running finishes. `wb route all api` is global and reads no repo: the check is per start.
 Only the user lifts one: the mod's tool.call hook refuses Claude's Edit, MultiEdit or Write of commands.json
 (`$WB_COMMANDS`, else `~/.config/workbench/commands.json`, matched by real path: `/./` or a linked config directory is
 the same file) whose new text drops a `"local_only": true` the old text had, or gives an entry a `local_only` other than
@@ -5790,7 +5791,7 @@ A change to `chat.py` or `chat_static/` also gets the browser test, in CI (*The 
 Only the user's two slash commands stop the delegation, never words in a message:
 
 - **`/workbench-quit`**: `wb stop --all --park-waiting` with `scope()` (`--repo <the session's
-  directory> --session <id>…`, every id the process has had): each task keeps its worktree; a toast and QUIT_NOTE (don't finish,
+  directory> --session <id>…`, every id the process has had): each task keeps its worktree; QUIT_NOTE, and a toast only when it failed (#1322) (don't finish,
   restart or clean up unless asked; tasks left alone are another session's; on failure, the agents
   may still run); no turn. Every stopped task, and each of the session's already waiting on Claude,
   is `parked` with its news acknowledged (`cli._park_waiting`, #698): out of the status line's
@@ -5897,10 +5898,13 @@ toasted once (`workbench: <name> <headline>`); a task not `mine` (its `session` 
 by directory) gets nothing more. Busy: a question goes into the turn (`intoTurn`: `acked` first, put
 back if refused, `mem.heldAsks`), anything else waits; a held question whose `<id>.answer` opens
 with ask_mcp's NO_ANSWER gets the MISSED_NOTE wake. Else `acked = row.ts` and `wake` submits
-`[workbench] Task \`<n>\` <headline>.\n\n<row.text>\n\n<NEXT[kind]>`, plus `\n\n<AWAY_NOTE>`
-while away (every wake and `intoTurn`: `awayToo`, #540) (HEADLINE and NEXT at the top of
-register.tsx; a question's NEXT is `wb answer <n> --id <id>`, a PERMISSION request's the `wb allow`
-it names). A dropped submit (`{drop}`) puts `acked` back if unchanged, records `mem.dropped`,
+`[workbench] Task \`<n>\` <headline>.\n\n<row.text>\n\n<NEXT[kind]>`, plus, while away (each wake and
+`intoTurn`: `awayToo`, #540), `\n\n<AWAY_NOTE>` once an away stretch (the `web-chat` block or the first
+wake: `mem.awayNoted`, cleared by `back` and once a poll finds the user not away, `awayEnded`) and
+`(User away: answer with \`wb chat reply\`.)` (`AWAY_TAIL`) after it; every wake carried the whole
+paragraph (#1322). HEADLINE and NEXT are at the top of register.tsx; a question's NEXT is `wb answer
+<n> --id <id>`, and only a notice opening `PERMISSION to ` (`PERMISSION`, ask_mcp.notice's openings)
+adds the `wb allow` paragraph (#1322: every question carried it). A dropped submit (`{drop}`) puts `acked` back if unchanged, records `mem.dropped`,
 toasts once. With `wake` off it is only toasted and `acked` isn't written, so `wb wait` still gets
 it. `rewake`: idle, wake on, a `mine` task waiting on Claude whose status changed between
 `REWAKE_MS` 60 s and `REWAKE_MAX_MS` 12 h ago, whose news Claude hasn't had and whose wake wasn't
@@ -5958,7 +5962,7 @@ load) appends KEEP_ON_COMPACT: keep the user's goals and decisions, the tasks an
 what was accepted, merged or discarded; drop finished tasks' diffs, reports, transcripts. At a task
 boundary in the mode (a task of the last open set gone, Claude idle, none waiting on Claude) it
 compacts once usage reaches `WB_COMPACT_AT`% (default `COMPACT_AT` 0.5; 0 off) of the auto-compact
-threshold (or the window).
+threshold (or the window), with no toast of its own (Claude Code shows the compaction, #1322).
 
 **Status line and pane.** `⚒ wb · <name> <phase> r<round>` for queued/running/testing, `<name>
 asks`, `<N> awaiting review`, `<N> stuck`, `<N> failed` (each counted apart: one review and one stuck
@@ -6064,7 +6068,7 @@ was sent here." --to=<id>`) goes to the chat, once per message (`--to`, so an ag
 wb makes (`agentOf`: `[a-z0-9-]{1,32}`) is delivered as the user's are but submitted as `[agent
 <name>] <words>` (with `about` and attachments as above) and a last line `[message <id>: answer
 with wb chat reply --to <id>]` (`chatPrompt`; mid-turn with AGENT_NOTE), toasts `a message from
-agent <name>`, and writes no `away.json` (an agent never makes the user away); a prompt starting
+agent <name>` (the user's own message toasts nothing: they just sent it, #1322), and writes no `away.json` (an agent never makes the user away); a prompt starting
 `[agent ` is never the user typing (`prompt.submit`). Each message given to Claude goes into
 `mem.chatTurn` with its `grace`, as `mem.chatOwed`; at each main turn's end (`chatTurnEnd`) those
 at 0 are recorded with `wb chat ended <ids> --by <key>`, and with none, a turn in which
@@ -7505,7 +7509,7 @@ start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --m
   table and the round report's `agent tokens` (an API task's) together. `WbTop`'s type is unchanged (the API fields are optional keys of `running` rows): `top-1` stays.
 - **Which session a task is** → the mod's `mine` and `cli._scope`: the same rule, the home-or-`/` exception included;
   `scope()` passes every id.
-- **A notice kind or its text** → the mod's `HEADLINE`, `NEXT` (a `cause` `provider` notice: `PROVIDER_HEADLINE`, `PROVIDER_NEXT`; `local_only`, `runner.LOCAL_ONLY` ↔ `LOCAL_ONLY_HEADLINE`, `LOCAL_ONLY_NEXT` ↔ `privacy.since_start_line`, #1232; any other `cause` outside `results.THE_STEP` ↔ the mod's `THE_STEP`, `OUTSIDE_HEADLINE`, `OUTSIDE_NEXT`, and its notice's text names its remedy, #1247), both still-true rules (`_ack_all`'s, the mod's), `wb wait`.
+- **A notice kind or its text** → the mod's `HEADLINE`, `NEXT` (a `cause` `provider` notice: `PROVIDER_HEADLINE`, `OUTSIDE_NEXT`; `local_only`, `runner.LOCAL_ONLY` ↔ `LOCAL_ONLY_HEADLINE`, `OUTSIDE_NEXT` ↔ `privacy.since_start_line`, #1232; a question notice's `PERMISSION to ` opening ↔ the mod's `PERMISSION`; any other `cause` outside `results.THE_STEP` ↔ the mod's `THE_STEP`, `OUTSIDE_HEADLINE`, `OUTSIDE_NEXT`, and its notice's text names its remedy, #1247), both still-true rules (`_ack_all`'s, the mod's), `wb wait`.
 - **A task.json or status key** → *Files and formats*; a results key a reader uses → `results.record` and defaults for
   old rows.
 - **The GPU admission rule** (`models.admits`, `can_share`) → the lease, `wb start`'s refusal, `cli._gpu_holders`,

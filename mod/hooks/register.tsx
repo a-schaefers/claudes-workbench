@@ -153,7 +153,6 @@ const TOP_RETRY_MS = 30_000 // a `wb top` that ended by itself (wb missing, fail
 // RETRY_MAX_MS; each poll ran it again, a full-history read a core kept busy on a slow host (#553)
 const STATS_RETRY_MS = 60_000
 const RETRY_MAX_MS = 10 * 60_000
-const SETTINGS_HINT = 'Click a row to see its options, then click one; or Tab to it and press Enter. A change applies at once.'
 const CHAT_STALE_MS = 15_000 // as wb's LISTENING_FOR: a listener silent this long has gone
 // the user counts as away this long after they last used the web chat: a web message, or a page
 // in use (chat/away.json's `at`, written by `wb chat serve`'s /api/active, #959)
@@ -200,17 +199,31 @@ async function away($: any, st: WbChat): Promise<boolean> {
   return st.web && awayNow(await webAt($), await $.clock.now(), await read($, tasks), mine)
 }
 async function back($: any) {
+  mem.awayNoted = false
   if (await webAt($)) await $.fs.write(awayFile(), JSON.stringify({ at: 0 })).catch(() => {})
 }
-// Said in the context blocks while away, and in each wake while away (#540): those blocks come once
+// Said in the context blocks while away, and in a wake while away (#540): those blocks come once
 // per conversation, so a user who went to the web chat later was never told of, and a task's
-// news reached only the terminal they had left.
+// news reached only the terminal they had left. In full once an away stretch (the block or the
+// first wake), then a line: every wake carried the whole paragraph (#1322). `mem.awayNoted`
+// ends with the stretch (awayEnded).
 const AWAY_NOTE =
   'The user is away from the terminal: they last used the web chat. Tell them ' +
   'there (`wb chat reply --text "…"`) when something they asked for is done or needs them; ' +
   '`wb chat log` shows the thread. Typing in the terminal, or answering a prompt there, ends this.'
+const AWAY_TAIL = '(User away: answer with `wb chat reply`.)'
 async function awayToo($: any, text: string): Promise<string> {
-  return (await away($, await read($, chat))) ? `${text}\n\n${AWAY_NOTE}` : text
+  if (!(await away($, await read($, chat)))) {
+    mem.awayNoted = false
+    return text
+  }
+  const said = mem.awayNoted
+  mem.awayNoted = true
+  return `${text}\n\n${said ? AWAY_TAIL : AWAY_NOTE}`
+}
+// The stretch ended (the user back, here or in another session): the next one says it in full
+async function awayEnded($: any) {
+  if (mem.awayNoted && !(await away($, await read($, chat)))) mem.awayNoted = false
 }
 const WEB = '[web chat]'
 // Only for a delivery into a running turn, which the engine frames as another session's message:
@@ -499,13 +512,16 @@ const HEADLINE: Record<string, string> = {
   failed: 'failed',
   checkin: 'check-in (still running)',
 }
-const NEXT: Record<string, (n: string, id?: string) => string> = {
+// A question's notice opens `Q: ` or `PERMISSION to ` (ask_mcp.notice: an API); only a permission
+// request gets the `wb allow` paragraph, which every question once carried (#1322)
+const PERMISSION = 'PERMISSION to '
+const NEXT: Record<string, (n: string, id?: string, text?: string) => string> = {
   review: n => `Review it as /workbench says, from the diff above (\`wb diff ${n}\` when it was too ` +
     `big to include), then \`wb accept ${n} -m "…"\` or \`wb feedback ${n} --message <file>\`.`,
-  question: (n, id) => `Answer with \`wb answer ${n}${id ? ` --id ${id}` : ''} --text "…"\`; it is blocked until then. A ` +
-    `PERMISSION request (a refused command or directory): the \`wb allow ${n}\` it names ` +
-    `(\`--always\` to keep it) when it is reasonable, which answers it and restarts the agent ` +
-    `with it; else answer with another way.`,
+  question: (n, id, text) => `Answer with \`wb answer ${n}${id ? ` --id ${id}` : ''} --text "…"\`; it is blocked until then.` +
+    (text?.startsWith(PERMISSION) ? ` A PERMISSION request (a refused command or directory): the \`wb allow ${n}\` it ` +
+      `names (\`--always\` to keep it) when it is reasonable, which answers it and restarts the agent ` +
+      `with it; else answer with another way.` : ''),
   stuck: n => `Steer it with \`wb feedback ${n} --message <file>\`, or \`wb discard ${n}\`.`,
   failed: n => `Look at \`wb log ${n}\`; then \`wb feedback ${n} --message <file>\` or ` +
     `\`wb discard ${n}\`.`,
@@ -545,36 +561,30 @@ const AGENTS_NEXT = (n: string) =>
 // outage held 10 minutes, a quota or a refused key) isn't the agent's, yet it woke as "was stopped:
 // it got stuck" ending "Steer it with wb feedback …, or wb discard": a feedback round a quota or
 // key stop fails again at once, or work that is fine thrown away, next to the notice's own remedy
-// (#1124, 2026-11-23). The headline is the toast's too.
+// (#1124, 2026-11-23). The headline is the toast's too; its next step is OUTSIDE_NEXT.
 const PROVIDER_HEADLINE = 'was stopped by its API provider'
-const PROVIDER_NEXT = (n: string) => 'Tell the user it is the provider\'s stop and its remedy, as the ' +
-  `notice says; once they say it is fixed (or the rate limit has passed), \`wb feedback ${n} --text ` +
-  '"carry on"`. Never discard it for this, nor change its model or role yourself.'
 // A stop because the task's repo was marked local-only after it started (cause `local_only`:
 // runner._local_only_stop, #1215) isn't the agent's either, yet it woke as "was stopped: it got
 // stuck" ending "Steer it with wb feedback …", which wb refuses (exit 3) while the repo stays
-// local-only: the task's API model is fixed per task (the bar loop, #1232, 2026-11-24)
+// local-only: the task's API model is fixed per task (the bar loop, #1232, 2026-11-24). Its next
+// step is OUTSIDE_NEXT: the notice names takeover or discard.
 const LOCAL_ONLY_HEADLINE = 'was stopped: its repo became local-only'
-const LOCAL_ONLY_NEXT = (n: string) => 'Tell the user its repo is local-only now, so its API model can\'t ' +
-  `go on (only they lift that, never you); then \`wb takeover ${n}\` to finish it yourself or \`wb discard ${n}\`, ` +
-  'as they choose. `wb feedback` and `wb resume` are refused while the repo stays local-only.'
 // Every other stop outside the step (a `cause` not in results.THE_STEP, the allowlist of the
 // agent's own: a model that left OpenCode's catalog, a repo that moved, a setup, checkout, load,
 // full disk, model server or reaped runner) has its remedy in the notice itself, from wb, which
 // knows it: the wake ended with the failed or stuck one's "wb feedback …", which wb refused
 // (exit 3) for a model gone from the catalog, and for a moved repo ran a runner that failed at
 // once, next to the notice's own takeover or relocate (the bar loop, #1247, 2026-11-24; #1232's
-// shape). One rule for them all, so a new such stop needs only its cause.
+// shape). One rule for them all, so a new such stop needs only its cause. The provider's and the
+// local-only stop had next steps of their own, restating the notice and that Claude never changes
+// a role or lifts local-only (#1322): wb's notice says each remedy.
 const THE_STEP = new Set(['guard', 'agent'])
 const outsideTheStep = (row: Row) => typeof row.cause === 'string' && !THE_STEP.has(row.cause)
 const OUTSIDE_HEADLINE: Record<string, string> = {
   stuck: 'was stopped (not its agent\'s doing)',
   failed: 'failed (not its agent\'s doing)',
 }
-const OUTSIDE_NEXT = (n: string) => 'It stopped on something outside its agent\'s work, so its ' +
-  'remedy is the notice\'s own, above: do what it names (telling the user when it needs them). ' +
-  `Not \`wb feedback ${n}\` unless the notice names it: wb refuses it or runs into the same stop. ` +
-  `A notice that names no step: \`wb feedback ${n} --text "carry on"\` once that cause is gone.`
+const OUTSIDE_NEXT = 'Not the agent\'s doing: its remedy is the notice\'s, above; tell the user when it needs them.'
 
 // A question delivered into a running turn (#542): the engine frames it as another session's
 // message, so one line says whose it is and that it can't wait for the turn to end.
@@ -605,10 +615,8 @@ const MODE_NOTE = (skill: string) =>
 
 // What Claude learned about how this user wants delegation run (`wb notes`), in any project:
 // Claude Code's own memory is per project, so these come back wherever workbench mode is on.
-const NOTES_NOTE = (notes: string) =>
-  'How this user wants delegation run, learned across their projects (`wb notes`; ' +
-  '`wb notes add "…"` when they tell you something that holds in any repo, `wb notes drop N` ' +
-  `when one no longer does):\n${notes}`
+// The add and drop housekeeping is the skill's (#1322: it was said in every conversation).
+const NOTES_NOTE = (notes: string) => `The user's delegation notes (\`wb notes\`):\n${notes}`
 
 // Every slash command is /workbench or starts with it, so typing /workbench lists them all.
 // /workbench is the skill; once the mode is on, running it again brings the pane back
@@ -719,33 +727,19 @@ function probeStops(s: ProbeState, mode: string): [string, string, string][] {
 }
 
 // Claude's turn when the user turns it on and probe isn't there: offer to set it up (the user,
-// 2026-11-20: "let Claude offer to help the user get it fully set up"), with wb's own line
-const PROBE_SETUP_NOTE = (said: string) =>
-  "[workbench] The user just turned on Agent code navigation (the probe experiment) in the " +
-  `pane's Settings, but it can't work yet. wb says: ${said}\n` +
-  'Offer to set it up, and install nothing without their yes. probe (github.com/probelabs/probe) ' +
-  'is a code-search command-line tool; the agents need its release binary, whose `probe --help` ' +
-  "lists `symbols` (crates.io's probe-code 0.6.0 doesn't, though it reports the same version). " +
-  'Pick the asset for this OS and CPU from github.com/probelabs/probe/releases, put `probe` in a ' +
-  'directory on the PATH you and wb run with (such as ~/.local/bin), then run `wb experiment ' +
-  'probe` until it says "and working". Tasks started from then use it; running ones keep ' +
-  'what they started with. If they would rather not, `wb experiment probe off`.'
+// 2026-11-20: "let Claude offer to help the user get it fully set up"). It was about 150 tokens,
+// with a toast beside it, and a toast for one that worked too (#1322): the row says which.
+const PROBE_SETUP_NOTE = "[workbench] probe isn't on PATH: offer to install its release binary " +
+  '(github.com/probelabs/probe/releases), then `wb experiment probe`.'
 
-// Turns the probe experiment on or off through wb, then says how it came out: on and working, or
-// on but not set up, which also asks Claude to offer the setup (once while it's queued)
+// Turns the probe experiment on or off through wb; on but not set up, it asks Claude to offer the
+// setup (once while it's queued). The row says the rest (`, working` or `, not set up`).
 async function setProbe($: any, value: string) {
   const { ok, out } = await runWb($, ['experiment', 'probe', value])
   mem.probe = null // the row asks wb again
   if (!ok) { $.ui.toast(`workbench: ${brief(out)}`); return }
   if (value === 'off') return
-  const s = probeSaid(out)
-  if (s.state === 'missing') {
-    $.ui.toast("workbench: Agent code navigation is on but not set up: probe isn't installed. Claude will offer to set it up.")
-    const line = out.split('\n').find(l => l.startsWith('probe:')) ?? out
-    if (!mem.queued.some(q => q.startsWith(PROBE_SETUP_NOTE('').slice(0, 60)))) mem.queued.push(PROBE_SETUP_NOTE(line))
-  } else if (s.state === 'ready') {
-    $.ui.toast(`workbench: Agent code navigation is ${value} and working${s.version ? ` (${s.version})` : ''}: tasks started from now use it.`)
-  }
+  if (probeSaid(out).state === 'missing' && !mem.queued.includes(PROBE_SETUP_NOTE)) mem.queued.push(PROBE_SETUP_NOTE)
 }
 
 // experiments.json's probe setting as wb reads it (context.setting): "on", true or an old level
@@ -828,9 +822,9 @@ function infoLine(kit: Row, key: string, text: string) {
 }
 
 // A section's heading, on both tabs as Stats' Now: bold, in the theme's claude colour; `note` dim after it
-function heading(kit: Row, text: string, note = '') {
+function heading(kit: Row, text: string) {
   const { Text } = kit
-  return note ? <Text><Text bold color="claude">{text}</Text><Text dimColor>{note}</Text></Text> : <Text bold color="claude">{text}</Text>
+  return <Text bold color="claude">{text}</Text>
 }
 
 // A line in lines of at most `n`, each after the first indented `indent`, as Now's rows (wrapParts)
@@ -2265,6 +2259,7 @@ const mem = {
   statsReading: false, // a `wb stats --json` under way (refreshStats)
   statsLoaded: false, // the history was read in this load: the atom's feed may be an older load's
   statsWhy: '', // why the last `wb stats --json` failed ('' when it didn't): said on the tab (#553)
+  awayNoted: false, // AWAY_NOTE said in full this away stretch (awayToo)
   statsRetryAt: 0, // not again before then, unless the tab is pressed
   statsBackoff: 0, // the wait after the last failure, doubling
   topWhy: '', // why the last `wb top` ended by itself: its stderr's last line
@@ -2702,11 +2697,7 @@ async function compactAtBoundary($: any): Promise<void> {
   const limit = b?.isAutoCompactEnabled && b.autoCompactThreshold ? b.autoCompactThreshold : context.window
   if (!context.tokens || context.tokens < at * limit) return
   try {
-    const r = await $.session.compact({ instructions: KEEP_ON_COMPACT })
-    if (!r.skip) {
-      $.ui.toast(`workbench: a task closed; compacted Claude's context ` +
-        `(${Math.round(context.tokens / 1000)}K tokens) to make room`)
-    }
+    await $.session.compact({ instructions: KEEP_ON_COMPACT }) // no toast: Claude Code shows it (#1322)
   } catch {
     // a turn began meanwhile: the next boundary tries again
   }
@@ -3310,6 +3301,7 @@ async function poll($: any) {
     await listen($, now)
     await readSwitch($)
     await chatLink($)
+    await awayEnded($)
   } finally {
     mem.polling = false
   }
@@ -3793,8 +3785,8 @@ async function listen($: any, now: number) {
     }
     mem.chatTurn.set(id, mem.chatOwed.get(id)?.grace ?? 0) // its turn's end goes to turns.jsonl (#1042)
     if (agentOf(m)) { mem.agentTurn.set(id, agentOf(m)); $.ui.toast(`workbench: a message from agent ${agentOf(m)}`); continue } // never the user away
+    // no toast for the user's own message: they just sent it (#1322)
     await $.fs.write(awayFile(), JSON.stringify({ at: now / 1000, by: st.key })).catch(() => {})
-    $.ui.toast('workbench: a message from the web chat')
   }
 }
 
@@ -4019,10 +4011,8 @@ async function deliver($: any, now: number) {
       if (!own || !mem.wake) continue // the toast only: the notice stays for its session or wb wait
       // a batch's wake ends with its resume, not the failure's next step (#544)
       const next = batch ? BATCH_NEXT(batch) : row.cause === 'spend' ? (row.guard === 'agents' ? AGENTS_NEXT(name) : SPEND_NEXT(name, (await readRoutes($)).cap !== null))
-        : row.cause === 'provider' ? PROVIDER_NEXT(name)
-        : row.cause === 'local_only' ? LOCAL_ONLY_NEXT(name)
-        : outsideTheStep(row) && OUTSIDE_HEADLINE[row.kind] ? OUTSIDE_NEXT(name)
-        : (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined)
+        : row.cause === 'provider' || row.cause === 'local_only' || (outsideTheStep(row) && OUTSIDE_HEADLINE[row.kind]) ? OUTSIDE_NEXT
+        : (NEXT[row.kind] ?? NEXT.failed)(name, row.id ? String(row.id) : undefined, String(row.text ?? ''))
       const who = batch && batch.length > 1 ? `Tasks ${batch.map(n => `\`${n}\``).join(', ')} were interrupted`
         : `Task \`${name}\` ${headline}`
       const text = `[workbench] ${who}.\n\n${row.text}\n\n${next}`
@@ -4608,8 +4598,7 @@ export const register: Register = (on, options) => {
     // waiting tasks too, as they stand: a review left at the quit stayed "awaiting review" and in
     // every new conversation's pick-up block (#698)
     const { ok, out } = await runWb($, ['stop', '--all', '--park-waiting', ...(await scope($))])
-    $.ui.toast(ok ? 'workbench: this session\'s delegated agents are stopped'
-      : `workbench: wb stop --all failed: ${brief(out)}`)
+    if (!ok) $.ui.toast(`workbench: wb stop --all failed: ${brief(out)}`) // success: the reply says it (#1322)
     return { text: ok ? `Delegation stopped. ${out}` : `Delegation not stopped: ${out}`, context: [QUIT_NOTE(out, ok)] }
   })
 
@@ -4673,7 +4662,10 @@ export const register: Register = (on, options) => {
     if (want.coding !== 'decide' && had?.coding !== want.coding) blocks.push({ name: 'claude-coding', text: CODING_RULES[want.coding] })
     if (want.notes && !had?.notes) blocks.push({ name: 'user-notes', text: NOTES_NOTE(want.notes) })
     if (want.workflows === 'on' && had?.workflows !== 'on') blocks.push({ name: 'dynamic-workflows', text: WORKFLOWS_RULE })
-    if (isAway) blocks.push({ name: 'web-chat', text: AWAY_NOTE })
+    if (isAway) {
+      blocks.push({ name: 'web-chat', text: AWAY_NOTE })
+      mem.awayNoted = true
+    }
     if (want.wakeOff && !had?.wakeOff) blocks.push({ name: 'workbench-wake', text: WAKE_OFF_NOTE })
     if (want.routes && had?.routes !== want.routes) { // read while delegating or with a task open, as `wanted` does
       const routes = await readRoutes($) // once any role has an API model (#1014)
@@ -4845,7 +4837,8 @@ export const register: Register = (on, options) => {
     // coding, #93; Dynamic workflows, #1041; the day cap and wake; progress checks, the opening
     // animation), one row each at rest; the day cap is typed (an Input: wb checks it). Then GPU and
     // API (#1023; API left out with no provider and no API role but its one line). Last, apart
-    // under Experimental, the web chat and the probe experiment (the user, 2026-11-21)
+    // under Experimental, the probe experiment (the user, 2026-11-21); the web chat is Shared's
+    // last row, and the headings say no caveat (#1322)
     if (view.tab === 'settings') {
       const probe = await probeStatus($)
       const probeAt = await probeMode($)
@@ -4854,8 +4847,7 @@ export const register: Register = (on, options) => {
       const roles = await roleRows(kit, $, view, await rolesNow($)) // Shared, GPU and API (#1023)
       return (
         <Box flexDirection="column">
-          <Text dimColor>{SETTINGS_HINT}</Text>
-          <Box flexDirection="column" marginTop={1}>
+          <Box flexDirection="column">
             {heading(kit, 'Shared')}
             {roles.top}
             {settingRow(kit, $, 'coding', 'Claude coding', CODING_STOPS, await codingMode($), view,
@@ -4868,6 +4860,7 @@ export const register: Register = (on, options) => {
               v => runWb($, ['progress', v]))}
             {settingRow(kit, $, 'splash', 'Opening animation', SPLASH_STOPS, (await splashOn($)) ? 'on' : 'off', view,
               v => runWb($, ['splash', v]).then(({ ok, out }) => { if (!ok) $.ui.toast(`workbench: ${brief(out)}`) }))}
+            {settingRow(kit, $, 'chat', 'Web chat', CHAT_STOPS, web ? 'on' : 'off', view, v => setWeb($, v))}
           </Box>
           <Box flexDirection="column" marginTop={1}>
             {heading(kit, 'GPU')}
@@ -4880,8 +4873,7 @@ export const register: Register = (on, options) => {
             </Box>
           ) : null}
           <Box flexDirection="column" marginTop={1}>
-            {heading(kit, 'Experimental', ' · may change or go away')}
-            {settingRow(kit, $, 'chat', 'Web chat', CHAT_STOPS, web ? 'on' : 'off', view, v => setWeb($, v))}
+            {heading(kit, 'Experimental')}
             {settingRow(kit, $, 'probe', 'Agent code navigation', probeStops(probe, probeAt), probeAt, view,
               v => setProbe($, v))}
           </Box>
