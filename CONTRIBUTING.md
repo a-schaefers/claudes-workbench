@@ -29,7 +29,8 @@ wb patch init            # a full clone at ~/.local/share/workbench/source (--di
 
 It carries over any changes the marketplace copy had as the first patches, points Claude Code's
 marketplace, `wb` and the `/workbench` skill at the new clone, and refreshes the plugin; then
-`/reload-plugins` in Claude Code. A developer's clone needs no init: `git switch -c local` in it.
+`/reload-plugins` in Claude Code. A developer's clone needs no init: `git switch -c local --track origin/main` in it
+(one made without `--track` gets that upstream from the next `wb update` or `wb patch init`).
 
 A patch is a commit on branch `local`, with a scope trailer:
 

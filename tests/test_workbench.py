@@ -22670,8 +22670,29 @@ class LocalPatches(Base):
         out = self.wb("patch", "init")
         self.assertIn("already runs from a clone you own", out)
         self.assertIn("branch main-copy", out)
-        self.assertIn("switch -c local", out)
+        self.assertIn("switch -c local --track origin/main", out)
         self.assertFalse(self.calls.exists())
+
+    def test_a_local_branch_made_with_a_plain_switch_gets_origins_upstream_and_doctor_says_so(self):
+        # #1327 (2026-11-24): `git switch -c local`, as the texts said, tracks nothing: wb update
+        # --check died "fatal: no upstream configured" and wb doctor skipped the row
+        os.environ["CLAUDE_CONFIG_DIR"] = str(Path(self.tmp.name) / "elsewhere")
+        self.g(self.copy, "switch", "-q", "-c", "local")
+        merge = lambda: subprocess.run(["git", "-C", str(self.copy), "config", "--get", "branch.local.merge"],
+                                       capture_output=True, text=True).stdout.strip()
+        self.assertIn(f"--  local patches: branch local tracks no upstream: git -C {self.copy} branch -u "
+                      "origin/main local (wb update sets it)", patches.doctor_lines(self.copy, "clone"))
+        out = self.wb("update", "--check")
+        self.assertTrue(out.startswith("update available: 1 new commit(s)"), out)  # the mod's toast
+        self.assertIn("branch local tracked no upstream: it tracks origin/main now", out)
+        self.assertEqual(merge(), "refs/heads/main")
+        self.assertNotIn("tracks no upstream", "\n".join(patches.doctor_lines(self.copy, "clone")))
+        self.g(self.copy, "branch", "-q", "--unset-upstream", "local")
+        self.assertIn("it tracks origin/main now", self.wb("patch", "init"))  # init adopts it too
+        self.assertEqual(merge(), "refs/heads/main")
+        self.g(self.copy, "switch", "-q", "-c", "side")   # not local: named, not changed
+        self.assertIn(f"couldn't check for an update: branch side tracks no upstream: git -C {self.copy} "
+                      "branch -u origin/main side", self.wb("update", "--check"))
 
     def sent(self):
         """Whether anything reached upstream or a fork: a pr/ branch on either."""

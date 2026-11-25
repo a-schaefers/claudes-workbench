@@ -6971,6 +6971,11 @@ def cmd_update(a):
     last = store.read_json(path, {})
     if a.if_due and not a.check:  # it pulled and updated at once, weekly or not (#602)
         die("--if-due goes with --check: wb update --check --if-due")
+    # a `local` made with a plain `git switch -c local`, as the texts said, tracked nothing: both
+    # paths died raw, "fatal: no upstream configured" (#1327, 2026-11-24). Set, else named
+    tracked = patches.track_upstream(PKG_ROOT) if kind == "clone" else None
+    if kind == "clone" and (fix := patches.no_upstream(PKG_ROOT)):
+        die(f"couldn't check for an update: {fix}")
     if a.check:
         quiet = os.environ.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
         if a.if_due and (quiet or time.time() - last.get("checked_at", 0) < UPDATE_EVERY):
@@ -6995,7 +7000,10 @@ def cmd_update(a):
         news = (f"update available: {behind} new commit(s); /workbench-update (or wb update) installs it"
                 if behind else f"update available: Claude Code runs the mod as of {stale}, older than "
                 "this clone's; /workbench-update (or wb update) installs it" if stale else None)
+        # the news first: the mod toasts only output that starts "update available"
         print("\n".join(x for x in (news, patches.CHECK_LINE if mine else None) if x) or "up to date")
+        if tracked:
+            print(tracked)
         return
     # every check that can refuse comes before any task is stopped: --stop stopped every
     # session's tasks, then died on a dirty clone, a missing claude, a failed fetch, or found
@@ -7007,7 +7015,7 @@ def cmd_update(a):
     settled = patches.Settled(set(), [], [], [])  # what became of the pull requests wb patch send opened
     # what wb update says of them once the update is said: the mod reloads the plugin only on output
     # that starts "updated", and these lines first hid that (#1005, 2026-11-22)
-    later = []
+    later = [tracked] if tracked else []
 
     def say_later():  # before a refusal too, so a line isn't lost to it
         if later:
@@ -7140,6 +7148,8 @@ def cmd_patch(a):
     if a.action == "init":
         if kind == "clone":
             print(patches.clone_note(PKG_ROOT))
+            if line := patches.track_upstream(PKG_ROOT):  # a plain switch -c local tracks nothing (#1327)
+                print(line)
             return
         if not shutil.which("claude"):
             die("claude isn't on PATH: wb patch init switches Claude Code's marketplace through it "
