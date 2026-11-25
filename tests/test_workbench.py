@@ -6429,6 +6429,43 @@ class WorktreeSetup(Base):
         if sys.platform != "darwin":
             self.assertEqual(len(cps), 1, cps)                      # one cp, not thirty
 
+    def test_macos_copies_prepared_files_in_one_cp_per_directory(self):
+        # #1399 (2026-11-25): macOS skipped #867's batch, and each path tried GNU's flags first,
+        # which BSD cp refuses: two cp a file, 40,000 for an in-tree build's 20,000 objects
+        src, dest = Path(self.tmp.name) / "built", Path(self.tmp.name) / "scratch-1399"
+        paths = []
+        for d, n in (("a", 400), ("b/c", 400), ("d", 200)):
+            (src / d).mkdir(parents=True)
+            for i in range(n):
+                (src / d / f"f{i}.o").write_text(d)
+                paths.append(f"{d}/f{i}.o")
+        for d in ("build", "gen"):
+            (src / "e" / d).mkdir(parents=True)
+            (src / "e" / d / "x").write_text("x")
+            paths.append(f"e/{d}/")                      # ls-files --directory's form
+        dest.mkdir()
+        real, cps = subprocess.run, []
+
+        def bsd(argv, *a, **k):                          # BSD cp: no long flags; -c clones (here -R)
+            if argv[0] != "cp":
+                return real(argv, *a, **k)
+            cps.append(argv)
+            if any(x.startswith("--") and x != "--" for x in argv) or "d/f0.o" in argv:
+                return subprocess.CompletedProcess(argv, 1)   # d's group fails: path by path
+            return real(["cp", "-Rp" if argv[1] == "-cRp" else argv[1], *argv[2:]], *a, **k)
+        with mock.patch.object(runner.sys, "platform", "darwin"), \
+                mock.patch.object(runner.subprocess, "run", bsd):
+            runner._copy_all(src, dest, paths)
+        for p in paths[:-2]:
+            self.assertEqual((dest / p).read_text(), p.split("/f")[0], p)
+        self.assertEqual([(dest / "e" / d / "x").read_text() for d in ("build", "gen")], ["x", "x"])
+        # BSD cp copies a source ending in "/" as its insides
+        self.assertFalse([c for c in cps if any(x.endswith("/") for x in c[3:-1])])
+        # a cp per directory and batch (a: 1, b/c: 2, d: 1), e's 2 its own batch, then d's 200
+        # one by one, each macOS's flags first: never GNU's and then BSD's
+        self.assertEqual(len(cps), 1 + 2 + 1 + 1 + 200, [c[:3] for c in cps][:10])
+        self.assertFalse([c for c in cps if "--reflink=auto" in c])
+
     def test_commands_json_gives_a_repo_its_setup_for_every_task(self):
         self.ignore("deps/")
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
@@ -9388,6 +9425,21 @@ class Steering(Base):
         self.assertIn("adopted", run_wb("adopt", "t-orphan", "--session", "sess-2", "--pid", str(b.pid)))
         spec = store.Task("t-orphan").spec
         self.assertEqual((spec["session"], spec["claude_pid"]), ("sess-2", b.pid))  # its own id, new pid
+
+    def test_a_gone_sessions_task_started_in_home_is_adopted_by_a_new_session_there(self):
+        # #1403 (2026-11-25): `wb start --repo ~/proj` from a session in ~, then Claude Code
+        # restarted there: the new session claimed none in ~ by directory, so the task was nobody's
+        gone = subprocess.Popen(["true"]); gone.wait()
+        live = subprocess.Popen(["sleep", "60"]); self.addCleanup(live.kill)
+        home = str(Path.home())
+        t = lambda **spec: types.SimpleNamespace(name="t", spec={"repo": str(self.repo), **spec})  # noqa: E731
+        mine = lambda task: len(cli._scope([task], home, ["sess-c"])[0])  # noqa: E731
+        self.assertEqual(mine(t(cwd=home, session="sess-a", claude_pid=gone.pid)), 1)
+        self.assertEqual(mine(t(cwd=home, session="sess-a", claude_pid=live.pid)), 0)   # still its own
+        self.assertEqual(mine(t(cwd=str(Path(home) / "other"), session="sess-a", claude_pid=gone.pid)), 0)
+        self.assertEqual(mine(t(cwd=home)), 0)                     # by hand in ~: no ~ session's (0.90)
+        orphan = t(session="sess-a", claude_pid=gone.pid)              # no cwd, and no directory asked
+        self.assertEqual(len(cli._scope([orphan], None, ["sess-c"])[0]), 0)
 
     def test_a_claude_code_process_recorded_on_another_machine_is_never_gone_here(self):
         # #922: on a state directory two machines share, machine B read A's live session's pid as
@@ -21613,6 +21665,19 @@ class Stats(Base):
         self.assertIn("strata/strata", out)
         self.assertNotIn("more model", out)
 
+    def test_a_history_on_models_no_longer_configured_is_never_called_no_finished_tasks(self):
+        # #1400 (2026-11-25): with every model that ran gone from OpenCode's config, wb stats said
+        # "5 task(s), 5 landed" and then "no finished tasks yet"
+        now = time.time()
+        for _ in range(5):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": "gone/model", "size": "trivial", "outcome": "accepted", "ran": True, "ts": now})
+        out = run_wb("stats")
+        self.assertIn("5 task(s), 5 landed", out)
+        self.assertNotIn("no finished tasks yet", out)
+        self.assertIn("gone/model", out)
+        self.assertNotIn("more model", out)
+
     def test_thirty_recent_models_give_three_lines_and_the_rest_counted_as_more(self):
         # the owner, 2026-11-21: a machine with a ton of models drew a line each, and the Stats
         # tab's menu sat a long scroll below a new user's first look
@@ -26692,6 +26757,23 @@ class WebChat(Base):
         finally:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
+
+    def test_a_switch_left_off_by_an_older_wbs_failed_chat_on_is_read_as_never_set(self):
+        # #1405 (2026-11-25): 1.91.x and 2.0 before #1281 wrote {"on": false} on a failed `wb chat
+        # on` (a port taken), and 2.0 read it as the user's off, so the web app never came up
+        chat = self.chat
+        switch, ran = chat.chat_dir() / "switch.json", chat.chat_dir() / "port.json"
+        self.assertFalse(ran.exists())                              # the test's own state
+        store.write_json(switch, {"on": False})                     # no server of ours ever ran
+        self.assertTrue(chat.is_on())
+        self.assertFalse(switch.exists())                           # rewritten once: as never set
+        store.write_json(ran, {"port": self.port})
+        self.assertTrue(chat.is_on())                               # a server since: still on
+        store.write_json(switch, {"on": False})                     # one ran: the user's off
+        self.assertFalse(chat.is_on())
+        ran.unlink()
+        chat.set_on(False)                                          # 2.0's own off, marked
+        self.assertFalse(chat.is_on())
 
     def test_without_inotify_the_hub_wakes_the_streams_only_for_a_change_or_the_listener_ending(self):
         # #841: the polling branch bumped every second, so each open stream rebuilt its snapshot

@@ -431,6 +431,32 @@ test('a new Claude Code process in the project adopts the tasks of one that is g
   expect(kills.length - asked).toBeLessThanOrEqual(1)          // a live one, not at every poll
 })
 
+test('a new Claude Code process in ~ adopts a gone one\'s task wb start ran in ~, and only that (#1403)', async ($, on) => {
+  // #1403 (2026-11-25): `wb start --repo ~/proj` from a session in ~, then plain `claude` there
+  // after a crash: ~ claims nothing by directory, so the task was nobody's and woke no one
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  const files: Record<string, string> = {}
+  task(files, 'orphan', 'review', { repo: '/home/u/proj', cwd: '/home/u', session: 'sess-old', claude_pid: 4242 })
+  task(files, 'deeper', 'review', { repo: '/home/u/proj', cwd: '/home/u/proj', session: 'sess-old', claude_pid: 4242 })
+  task(files, 'live', 'review', { repo: '/home/u/proj', cwd: '/home/u', session: 'sess-other', claude_pid: 4343 })
+  task(files, 'byhand', 'review', { repo: '/home/u/proj', cwd: '/home/u' })     // no session: no ~ session's
+  const names = ['orphan', 'deeper', 'live', 'byhand']
+  for (const name of names) notice(files, { ts: ts0, task: name, kind: 'review', text: `REPORT-${name}` })
+  fakeTasks(on, files, names)
+  on('session.id', () => ({ value: 'sess-new' }))
+  on('process.run', (_: any, e: any) =>
+    ({ value: { exitCode: e.argv[0] === 'kill' && e.argv[2] === '4242' ? 1 : 0, stdout: '', stderr: '' } }))
+  on('ui.toast', () => ({ value: undefined }))
+  const woken: string[] = []
+  on('prompt.submit', (_: any, e: any) => { woken.push(e.text); return { text: e.text } })
+  await $.session.start({ cwd: '/home/u', surface: 'terminal', isInteractive: true })
+  await clock.advance(3000)
+  expect(woken.filter(t => t.includes('REPORT-orphan'))).toHaveLength(1)  // started right here
+  expect(woken.join('\n')).not.toContain('REPORT-deeper')     // under ~: not by directory
+  expect(woken.join('\n')).not.toContain('REPORT-live')       // a live session's stays its own
+  expect(woken.join('\n')).not.toContain('REPORT-byhand')
+})
+
 test('a task whose Claude Code process is gone is claimed by the first session to see it, and the others drop it (#687)', async ($, on) => {
   // #687: nothing recorded an adoption, so once the process that started a task ended, every
   // live session near it owned it for good, and the one back from `claude --resume` too: both
@@ -3716,9 +3742,9 @@ test('the bubble wraps its words into lines that fit, never cutting a line short
   expect(wrapWords('', 30)).toEqual([''])
 })
 
-test('a night\'s backlog keeps the user away past six hours; without one, away lapses', () => {
+test('an open task of this session\'s keeps the user away past six hours; without one, away lapses', () => {
   // #110 (2026-11-18): away lapsed after 6 h, and an overnight batch's permission prompts then
-  // waited in the terminal until morning
+  // waited in the terminal until morning; #1402 (2026-11-25): a task that wasn't a backlog's too
   const t0 = 1_800_000_000_000, hour = 3600_000
   const night = (phase: string, backlog = 'night-1') => ({ name: 'n', phase, backlog } as any)
   const ours = () => true
@@ -3727,7 +3753,9 @@ test('a night\'s backlog keeps the user away past six hours; without one, away l
   expect(awayNow(t0, t0 + 7 * hour, [night('running')], ours)).toBe(true)          // the batch runs on
   expect(awayNow(t0, t0 + 7 * hour, [night('review')], ours)).toBe(true)           // or waits on Claude
   expect(awayNow(t0, t0 + 7 * hour, [night('accepted')], ours)).toBe(false)        // done: lapsed
-  expect(awayNow(t0, t0 + 7 * hour, [night('running', '')], ours)).toBe(false)     // not a backlog task
+  expect(awayNow(t0, t0 + 7 * hour, [night('running', '')], ours)).toBe(true)      // not a backlog task too
+  expect(awayNow(t0, t0 + 7 * hour, [night('review', '')], ours)).toBe(true)
+  expect(awayNow(t0, t0 + 7 * hour, [night('accepted', '')], ours)).toBe(false)
   expect(awayNow(t0, t0 + 7 * hour, [night('running')], () => false)).toBe(false)  // another session's
   expect(awayNow(0, t0, [night('running')], ours)).toBe(false)                     // never wrote from the web
 })

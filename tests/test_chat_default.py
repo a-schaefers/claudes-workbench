@@ -67,7 +67,7 @@ class ChatDefault(Base):
         self.assertFalse(switch.exists())
         self.assertTrue(chat.is_on())
         run_wb("chat", "off", "--port", str(free_port()))
-        self.assertEqual(store.read_json(switch), {"on": False})
+        self.assertEqual(store.read_json(switch), {"on": False, "v": 2})  # 2.0's own off, marked (#1405)
         self.assertFalse(chat.is_on())                                     # the user's off stays off
         port = free_port()
         self.assertEqual(chat.ensure(port), {"url": chat.url(port), "state": "off"})
@@ -356,6 +356,61 @@ class SetupLaunchd(Base):
         self.plist.write_bytes(mine)
         os.environ["WB_SKILLS"] = str(Path(self.tmp.name) / "other")
         cli.install_service()
+        self.assertEqual(self.plist.read_bytes(), mine)
+
+    def test_a_hand_installed_1_91_plist_is_rewritten_and_one_the_user_edited_is_kept(self):
+        # #1406 (2026-11-25): 1.91's plist said to cp it into LaunchAgents by hand; with no mark and
+        # not today's shipped bytes, setup kept it as the user's, without the PATH and WB_* variables
+        import hashlib, plistlib, textwrap
+        old = textwrap.dedent("""\
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <!--
+          The web chat on macOS (wb chat serve), kept up the way systemd/wb-chat.service keeps it on Linux:
+          started at login, started again whenever it exits (#449). Install it as a copy (launchd reads
+          LaunchAgents at login):
+            cp launchd/workbench.chat.plist ~/Library/LaunchAgents/
+            launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/workbench.chat.plist
+          and remove it with `launchctl bootout gui/$(id -u)/workbench.chat`. A shell runs ~/.local/bin/wb
+          (wb setup's link), since launchd expands neither ~ nor $HOME. PATH puts Homebrew's python3 first:
+          /usr/bin/python3 is Apple's 3.9, which bin/wb refuses (exit 78). launchd can't exempt that exit
+          from KeepAlive, so a broken install retries every ThrottleInterval seconds: fix it, then
+          `launchctl kickstart -k gui/$(id -u)/workbench.chat`. Set WB_HOME or WB_CHAT_* here too if you
+          export them.
+        -->
+        <plist version="1.0">
+        <dict>
+          <key>Label</key>
+          <string>workbench.chat</string>
+          <key>ProgramArguments</key>
+          <array>
+            <string>/bin/sh</string>
+            <string>-c</string>
+            <string>exec "$HOME/.local/bin/wb" chat serve</string>
+          </array>
+          <key>EnvironmentVariables</key>
+          <dict>
+            <key>PATH</key>
+            <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+          </dict>
+          <key>RunAtLoad</key>
+          <true/>
+          <key>KeepAlive</key>
+          <true/>
+          <key>ThrottleInterval</key>
+          <integer>10</integer>
+        </dict>
+        </plist>
+        """).encode()  # v1.91.2:launchd/workbench.chat.plist (CI's clone has no tags)
+        self.assertIn(hashlib.sha256(old).hexdigest(), cli.SHIPPED_PLISTS)
+        self.plist.parent.mkdir(parents=True)
+        self.plist.write_bytes(old)
+        self.assertEqual(cli.install_service(), f"ok  web app kept up by launchd's workbench.chat ({self.plist} (written))")
+        self.assertIn(cli.SERVICE_MARK.encode(), self.plist.read_bytes())
+        self.assertEqual(plistlib.loads(self.plist.read_bytes())["EnvironmentVariables"]["WB_HOME"], str(store.home()))
+        mine = old.replace(b"<integer>10</integer>", b"<integer>30</integer>")  # edited: theirs
+        self.plist.write_bytes(mine)
+        self.assertEqual(cli.install_service(), f"ok  web app kept up by launchd's workbench.chat ({self.plist}, yours)")
         self.assertEqual(self.plist.read_bytes(), mine)
 
     def test_an_agent_that_never_answers_is_booted_out_and_wbs_own_server_started(self):
