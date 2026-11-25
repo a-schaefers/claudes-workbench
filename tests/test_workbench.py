@@ -4133,6 +4133,46 @@ class Lifecycle(Base):
         self.assertIn("answer.txt", tree)
         self.assertFalse([p for p in tree if p.startswith("target/")], tree)
 
+    def test_a_build_and_an_accept_in_one_claude_call_leave_the_builds_output_out(self):
+        # #1272 (bar round 7 of 2.0, 2026-11-24): Claude ran `npm run build` and wb accept in one
+        # Bash call, as the skill says, and accept refused dist/index.js as a file written by
+        # hand: the mod wrote the call's row only once the call was over, so accept saw none.
+        # It writes it as the call begins, with end null, which wb reads as running until now
+        (self.repo / ".gitignore").write_text("dist/\n")
+        (self.repo / "package.json").write_text('{"scripts": {"build": "tsc"}}\n')
+        (self.repo / "src").mkdir()
+        (self.repo / "src" / "index.js").write_text("module.exports = 42\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "js"], check=True)
+        self.start("t-one", "ok", "--test", TEST_CMD)
+        wait_phase("t-one", {"review"})
+        t = store.Task("t-one")
+        d = context.rules_dir(t) / runner.CLAUDE_CALLS
+        d.mkdir(parents=True, exist_ok=True)
+        at = time.time()
+        (d / f"{int(at * 1000)}-toolu_1.json").write_text(json.dumps(
+            {"tool": "Bash", "cwd": str(self.repo), "at": at, "end": None,
+             "command": f"cd {t.worktree} && npm run build && cd {self.repo} && wb accept t-one -m 'feat: one'"}))
+        # a call refused at its dialog never ran; one a dead session left running ends at CALL_RUNS
+        (d / "1-toolu_2.json").write_text(json.dumps(
+            {"tool": "Write", "path": str(t.worktree / "dist" / "x.js"), "at": at, "end": at, "denied": True}))
+        (d / "2-toolu_3.json").write_text(json.dumps({"tool": "Bash", "command": "make", "at": 1.0, "end": None}))
+        (t.worktree / "dist").mkdir()
+        (t.worktree / "dist" / "index.js").write_text("module.exports = 42\n")   # the build, in the call
+        (t.worktree / "dist" / "index.d.ts").write_text("export {}\n")
+        build, stale = runner.claude_calls(t)
+        self.assertIn("npm run build", build["command"])
+        self.assertTrue(at <= build["end"] <= time.time())
+        self.assertEqual((stale["command"], stale["end"]), ("make", 1.0 + runner.CALL_RUNS))
+        self.assertEqual(runner.hand_wrote(t), [])
+        out = run_wb("accept", "t-one", "-m", "feat: one", "--merge")
+        self.assertIn("accepted t-one", out)
+        self.assertIn("which the commit leaves out as build or test output (dist/index.d.ts, dist/index.js): "
+                      "a copy is in ", out)
+        tree = subprocess.run(["git", "-C", str(self.repo), "ls-tree", "-r", "--name-only", "main"],
+                              capture_output=True, text=True).stdout.split()
+        self.assertFalse([p for p in tree if p.startswith("dist/")], tree)
+
     def test_a_file_claude_writes_by_hand_beside_a_build_it_runs_is_still_refused(self):
         # #1211 (2026-11-24): telling a build's output from Claude's own files must never drop a
         # module Claude wrote (#1179): one its edit tools wrote while the build ran, one a command

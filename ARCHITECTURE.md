@@ -1092,9 +1092,13 @@ task's (`mvn test` beside a `--test` of `grep`, `tsc` beside jest's) wrote where
 runner's does, and was refused the same way (#1211): the mod keeps each of Claude's own calls in
 a task's worktree (`callRows`, `noteCall`: a Bash command that runs in `tasks/<task>/` or names it,
 as written, through `~`, `$HOME`, `$WB_HOME` or the state's real path, `tasksNamed`; an edit
-tool's file there; anyone's, a subagent's too; not one refused), one file a call in
+tool's file there; anyone's, a subagent's too), one file a call in
 `rules/<task>/claude-calls/` (`runner.CLAUDE_CALLS`, outside the lane's writes) with when it
-began and ended. Of what `hand_written` keeps, a file changed while one of those commands ran
+began and ended: written as it begins with `end` null, and again once it is over (`denied`, one
+refused, which `runner.claude_calls` drops). A build and `wb accept` in one Bash call, as the
+skill's *Fix small things yourself in one call* says, had no row while accept read them, and
+`dist/` was refused (#1272): `claude_calls` reads a null `end` as now, at most `CALL_RUNS` 600 s
+(a Bash call's limit in Claude Code) after `at`, as a session that died in a call never ends its row. Of what `hand_written` keeps, a file changed while one of those commands ran
 (`at` less `CALL_SLACK` 2 s, for a file system's whole-second times, to `end`) is its output, to
 `hand_left` (`runner._claude_built`), unless one of Claude's commands since `hands_off_at` names
 it (`_rows_name`'s test, on `CALL_NAMES` 5000 words a command: `cat > lib/a.py <<EOF`, `cp a.py lib/`; `~`, `$HOME` and `$WB_HOME`
@@ -6058,9 +6062,9 @@ which comes alone when nothing is new upstream (only `update available` was toas
 
 **Claude's calls in a worktree** (`callRows`, `noteCall`, in the same `tool.call` hook, after its gates, #1211):
 each Bash command that runs in or names a task's directory (`tasksNamed`) and each edit tool's file in a worktree
-(`taskOfPath`), from anyone, is written once over, unless refused, to `rules/<task>/claude-calls/` (*Files and
-formats*), for a task with a task.json; `wb accept` and `wb next` tell Claude's own files from its builds' output
-by them (*The runner, inside*, `runner._claude_built`). Facts for wb, not the mod's state: it never reads them.
+(`taskOfPath`), from anyone, is written as it begins (`end` null) and again once over (`end`, or `denied`), to
+`rules/<task>/claude-calls/` (*Files and formats*), for a task with a task.json; `wb accept` and `wb next` tell
+Claude's own files from its builds' output by them, a `wb accept` in the same call as a build by the build's row (#1272) (*The runner, inside*, `runner._claude_built`). Facts for wb, not the mod's state: it never reads them.
 
 **The consent gate** (`sendRefusal`, in the `tool.call` hook every call passes, #1005). Nothing goes to workbench
 upstream without the user's yes to that very call, in a dialog: Claude's, a subagent's or another plugin's alike, from
@@ -6391,8 +6395,8 @@ $WB_HOME (~/.local/state/workbench)
                                  shell/<name> (OpenCode's $SHELL, named as the shell it runs: the user's XDG_DATA_HOME, XDG_STATE_HOME, OPENCODE_DB and SHELL back, then that shell: runner.write_shell_shim, #1010),
                                  gitdir.json (the real git dir, the .git's text: {"gitdir", "dotgit"}), submodules.json ([{"path", "src" (the user's checkout), "sha", "index"}]), submodule-<n>.index,
                                  catalog.json (an API task's own models.dev v2 catalog: runner.write_catalog, models.catalog_doc; OPENCODE_MODELS_PATH, #1015),
-                                 claude-calls/<ms>-<tool_use_id>.json (the mod's, one of Claude's own calls in the worktree: {tool, at, end (epoch s),
-                                 command and cwd (Bash), or path (Edit, MultiEdit, Write, NotebookEdit)}: runner.claude_calls, #1211);
+                                 claude-calls/<ms>-<tool_use_id>.json (the mod's, one of Claude's own calls in the worktree: {tool, at, end (epoch s; null while it runs),
+                                 command and cwd (Bash), or path (Edit, MultiEdit, Write, NotebookEdit), denied (refused, never ran)}: runner.claude_calls, #1211, #1272);
                                  removed on close (cli._closed) and by gc for a closed or vanished task
   locks/<task>.runner.lock       the runner's for its life (its pid; touched every BEAT_SECS): one runner a task
   locks/<task>.cmd.lock          one wb command on the task at a time
@@ -7250,7 +7254,7 @@ doc needs its own `!/` line).
 - **Where a task's worktree is** (`Task.worktree`) → `gitops._record`, `spend._theirs`, `EVENT_SKIP`, the mod's
   `codingRefusal` and `taskOfPath`, `tasksNamed` (which calls it keeps).
 - **A `claude-calls/` row** (the mod's `callRows`, `noteCall`) → `runner.claude_calls`, `_claude_edited`,
-  `_claude_built` (its keys, seconds not milliseconds, the edit tools' names `CLAUDE_EDIT_TOOLS`), the tests' `claude_ran`.
+  `_claude_built` (its keys, seconds not milliseconds, `end` null while it runs and `denied`, the edit tools' names `CLAUDE_EDIT_TOOLS`), the tests' `claude_ran`.
 - **A prompt's opening words** → `transcript` labels, `round_asks`, `lessons`, the fake OpenCode, the tests quoting them.
 - **Where a round's own prompt is** (`instructions.md` once `_start_fresh` makes prompt.md the handoff) → `store.round_prompt` (`current_task_prompt`, `round_asks`, `lessons`,
   `bench._step_prompt`).

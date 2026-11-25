@@ -2164,12 +2164,20 @@ async function callRows($: any, e: Row): Promise<{ tasks: string[]; row: Row }> 
   return { tasks: found, row }
 }
 
-// The row callRows made, with when the call began (`at`, ms) and now that it is over, written
-// one file a call: a row in a shared file would be lost to a parallel call's write
-async function noteCall($: any, tasks: string[], row: Row, at: number, id: string) {
-  const end = await $.clock.now()
-  const name = `${Math.round(at)}-${id.replace(/[^A-Za-z0-9_-]/g, '') || Math.random().toString(36).slice(2)}.json`
-  const text = JSON.stringify({ ...row, at: at / 1000, end: end / 1000 })
+// The file of a call's row: one file a call, as a row in a shared file would be lost to a
+// parallel call's write
+function callFile(at: number, id: string): string {
+  return `${Math.round(at)}-${id.replace(/[^A-Za-z0-9_-]/g, '') || Math.random().toString(36).slice(2)}.json`
+}
+
+// The row callRows made, with when the call began (`at`, ms) and when it ended: written as it
+// begins with `end` null (running), then again once it is over, with `end`, or `denied` if it
+// never ran. A build and `wb accept` in one Bash call, as the skill says, had no row while accept
+// read them, and the build's dist/ was refused as files written by hand (#1272, 2026-11-24)
+async function noteCall($: any, tasks: string[], row: Row, at: number, name: string,
+                        how: 'begun' | 'over' | 'denied') {
+  const end = how === 'begun' ? null : (await $.clock.now()) / 1000
+  const text = JSON.stringify({ ...row, at: at / 1000, end, ...(how === 'denied' ? { denied: true } : {}) })
   for (const t of tasks) await $.fs.write(`${mem.root}/rules/${t}/claude-calls/${name}`, text).catch(() => {})
 }
 
@@ -4578,15 +4586,17 @@ export const register: Register = (on, options) => {
     // the dialog (#1014, routeRefusal): anyone's call alike
     const routing = await routeRefusal($, e as Row)
     if (routing) return { deny: routing }
-    // Claude's own call in a task's worktree is kept for wb once it is over, unless refused
-    // (callRows, #1211): anyone's alike, a subagent's or another plugin's
+    // Claude's own call in a task's worktree is kept for wb as it begins and once it is over,
+    // marked if refused (callRows, #1211, noteCall, #1272): anyone's alike, a subagent's or
+    // another plugin's
     const kept = await callRows($, e as Row)
     const at = kept.tasks.length ? await $.clock.now() : 0
-    const id = String((e as Row).tool_use_id ?? '')
+    const name = kept.tasks.length ? callFile(at, String((e as Row).tool_use_id ?? '')) : ''
+    if (kept.tasks.length) await noteCall($, kept.tasks, kept.row, at, name, 'begun').catch(() => {})
     if (next.origin.plugin !== 'engine') {
       if (!kept.tasks.length) return next(e)
       const r = await next(e)
-      if (!(r as Row)?.deny) await noteCall($, kept.tasks, kept.row, at, id).catch(() => {})
+      await noteCall($, kept.tasks, kept.row, at, name, (r as Row)?.deny ? 'denied' : 'over').catch(() => {})
       return r
     }
     // The engine's call settles its permission check, a dialog included, before it resolves: one
@@ -4598,7 +4608,7 @@ export const register: Register = (on, options) => {
       denied = !!(r as Row)?.deny
       return r
     } finally {
-      if (kept.tasks.length && !denied) await noteCall($, kept.tasks, kept.row, at, id).catch(() => {})
+      if (kept.tasks.length) await noteCall($, kept.tasks, kept.row, at, name, denied ? 'denied' : 'over').catch(() => {})
       const agent = e.agentId ?? ''
       const d = mem.termDialogs.find(d => d.tool === e.tool && d.agent === agent)
       if (d) await termDialogDone($, d)
