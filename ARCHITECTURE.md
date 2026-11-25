@@ -1521,7 +1521,9 @@ everywhere). In order:
   the start note names the ignored directories (`node_modules`, `../../node_modules`), and only a path the package
   lacks and the root has from the root; task.json `copy`, the start line and the API standing check hold it
   repo-relative (`cli._copy_path`; it copied the root's node_modules for the package's, #1158). commands.json's
-  `copy` stays repo-relative.
+  `copy` is read the same way from its key's directory (`context.repo_conf_dir`): a root key's paths stay
+  repo-relative, a package key's are the package's (#1346); a refused one names `commands.json "repos" copy
+  <path>`, never a `--copy` not given.
 - For an API task, a standing `copy` or `siblings` entry of commands.json's `repos` that this
   command line doesn't name too is refused, exit 3 (`cli._standing_refusal`, its line
   `cli._standing_gap`, `privacy.standing_refusal`; #1021): `commands.json "repos" copies local.cfg into every task, and
@@ -6684,7 +6686,9 @@ ignores case (`store.folds_case`: a key typed `~/Code/ClientX` for git's `~/code
 and a local-only repo went to the API model, #1157). It asks each component of the real path in its own parent, its
 letters' case swapped, so WSL2's drvfs (`/mnt/c`, folding under an ext4 root that doesn't) counts too: the whole path
 swapped, `/MNT/C/uSERS/…`, isn't there, and a key in another case than the cwd's missed (#1217). wb accept reads it
-the same way. `--setup`,
+the same way. A key's `copy` paths are read from its directory as a `--copy` from there
+(`context.repo_conf_dir`, `cli._copy_path`): a package key's `node_modules` is the package's (#1346: the root's
+was copied, and every round ran without the package's). `--setup`,
 `--setup-timeout` (a positive whole number) replace; `--copy`, `--sibling` add; `merge` is `wb accept --merge`'s way
 (`context.MERGE_AS`; `--merge-as` overrides). `local_only` is read for the whole repo, not the spot: any entry at or
 under the repo's top that says `true` holds for every task of it (`context.repo_entries` `whole`: by real path and
