@@ -49,7 +49,8 @@ Contents: [The pieces](#the-pieces) · [Why it's built this way](#why-its-built-
 - **OpenCode**: the model headless in the worktree, inside the lane (`lane.py`), with a
   read-only `git` (`gitguard.py`).
 - **The mod** (`mod/`): the pane, a status line, a turn started the moment a task needs Claude.
-- **The web chat** (`chat.py`, `chat_static/`, `webpush.py`): the same session from a phone.
+- **The web chat** (`chat.py`, `chat_static/`, `webpush.py`): the same session from a phone;
+  `settings.py`, the admin table its Settings are drawn from (*The admin table (settings.py)*).
 
 The runner, the ask server and the chat server never call each other or the mod: they share
 files in `$WB_HOME` (`store.py`), and waiters sleep in the kernel (inotify, pidfd: `watch.py`).
@@ -4314,8 +4315,10 @@ between the dialog and the call is caught). One call consumes it, matching or no
 `in Claude Code a role changes only through the workbench mod's dialog, and the user approved none
 for this change, so nothing changed (is the mod loaded? wb doctor says). Or the user runs it in a
 terminal of their own: wb route …`. `by`: `dialog` (the approval's `by` is `pane` for the pane's own
-rows, #1023: `pane`), `terminal` (outside Claude Code); `gpu_by`: `terminal`, or `claude` (a change
-under Claude Code that needs no dialog). A flag or an environment variable is no consent, and the
+rows, #1023: `pane`), `terminal` (outside Claude Code), `web` (outside Claude Code with
+`WB_ACTOR=web`: the web app's Settings, whose server runs wb with Claude's variables scrubbed,
+`settings.child_env`, #1279); `gpu_by`: `terminal`, `web`, or `claude` (a change under Claude Code
+that needs no dialog). `CLAUDECODE=1` wins over `WB_ACTOR`, so Claude setting it changes nothing. A flag or an environment variable is no consent, and the
 approval is one-shot, fresh, and bound to the exact command and line. The mod refuses the file tools
 on both files and a Bash command naming `route-ok.json` with the state directory spelled out, but
 that check is a speed bump, like the one on routes.json: a command that builds the path (a
@@ -5709,6 +5712,70 @@ page what to say (#539).
 
 A change to `chat.py` or `chat_static/` also gets the browser test, in CI (*The tests*).
 
+### The admin table (settings.py)
+
+2.0 moves the pane's Settings tab to the web app (#1279). The terminal stays where the user works
+with Claude, the web chat a second lane; the web app's Settings are the settings' home, and Claude
+still helps with one when the user asks (the owner, 2026-11-24). Every row the pane had is one
+entry in `workbench/settings.py`, under the pane's key and making the pane's `wb` call, so a new
+setting touches only Python. The chat server draws from it (#1280); nothing in it serves HTTP.
+
+- `GROUPS` (`shared`, `gpu`, `api`, `terminal`, `experimental`: display order), `KINDS`.
+- `rows(fresh=False) -> list[dict]`: every row, kept `ROWS_CACHE_S` 10 s (`fresh` reads again);
+  `reads(fresh=False)`, the same cache's `{routes, models}` (`wb route --json`, `wb models --json`,
+  or None); `drop()` forgets it.
+- `apply(key, value) -> {ok, said, help?}`: `KeyError` for no such row, `ValueError` for a value
+  it doesn't take (a read-only row, a value off its choices, a number not positive; nothing runs).
+  `said` is the child's last non-empty stdout line, or its stderr's on failure (the price row says
+  `electricity price: 0.3 per kWh` for its `--json` document).
+- `child_env()`: `os.environ` minus `CLAUDECODE`, `CLAUDE_PID`, `CLAUDE_CODE_SESSION_ID`, plus
+  `WB_ACTOR=web` (`ACTOR`).
+
+**A row** is JSON-safe: `key`, `group`, `label`, `kind` and by kind: `choice` (`value`, `choices`
+`[{value, label, says}]`, `says` for the current value, `other`); `number` (`value` a float or null
+for off, `unit` `usd` or `per_kwh`; `off`, `""` and null clear it); `info` (`text`); `action`
+(`text` and its `choices`, buttons); `note` (`text`: one line standing where its group's rows
+would be: `NO_PROVIDER`, `OLDER_WB`, `NO_GPU`, or wb's own reason when routes.json can't be read).
+`other: true` (the `api-<role>` rows) takes any id; `wb route` checks it (a value starting `-` or
+holding a space is refused here, never read as a flag). A row may carry `help`, the note for Claude
+while its setting is on but can't work yet, which `apply` also returns when that value was just
+chosen (`HELP`: `probe` on with no probe set up, `PROBE_HELP` with wb's line, the pane's
+`PROBE_SETUP_NOTE`), for the server to record (#1280) and the mod to turn into a `[workbench]` turn
+in which Claude offers to set it up and installs nothing without a yes (#1283; #1279's addendum).
+
+**The rows** (the pane's choices and sentences, moved; each `→` its wb call):
+- *shared*: `agents` → `wb route all gpu|api|both`; `busy` → `wb route busy wait|api`;
+  `role-<significant|trivial|writing>` → `wb route <role> gpu|api`; `coding` → `wb coding
+  only|ask|decide`; `workflows` → `wb workflows on|off`; `cap` (number, usd) → `wb route cap <v>|off`;
+  `record` → `wb stats set recording on|off`; `live` → `wb stats set live on|off`; `every` (1, 2, 5)
+  → `wb stats set every N`; `progress` → `wb progress on|off` (On names an `--after` threshold);
+  `price` (number, per_kwh) → `wb savings --price <v>|off --json`.
+- *gpu*: `gpu-<role>` → `wb route <role> --gpu <id>|auto`; `size-<id>` for every discovered model
+  (no six-row cap) → `wb model sizes <id> [size]`; `optimize`, an action (`start`) beside its
+  status line → `wb optimize start`; `media-image|speech|sfx|music`, each only with two or more
+  engines → `wb image|audio --default <name>`.
+- *api* (one `api-none` note, `NO_PROVIDER`, with no stored key and no role's API model):
+  `api-connected` (info); `api-<role>` (the role's model, the others', those used, then the
+  catalog by provider, `API_MENU` 12 at most) → `wb route <role> --api <id>`; `think-<role>` (the
+  pane's `thinkStops`) → `wb route <role> --thinking on|off`; `api-spend` (info).
+- *terminal*: `splash` → `wb splash on|off`. *experimental*: `probe` → `wb experiment probe on|off`.
+
+Dropped: the pane's web chat switch (the web app is always on) and Wake Claude (a plugin option, set
+with /plugin).
+
+**Reads.** `wb route --json` and `wb models --json` run as children with `child_env()`, `READ_TIMEOUT_S`
+15 s, so the rows read the JSON the pane read; coding.json, workflows.json, stats.json,
+progress.json, splash.json, experiments.json and the savings price are read in-process
+(`cli.coding_mode`, `cli.workflows_mode`, `stats.settings`, `progress.settings`, `cli.splash_on`,
+`context.experiments` with `cli.experiment_lines`, `savings.price`).
+
+**Writes.** `[sys.executable, "-X", "utf8", <clone>/bin/wb, *argv]` (`settings.WB`) with
+`child_env()` and `WRITE_TIMEOUT_S` 60 s, one at a time under a module lock, then the cache is
+dropped. No approval file is written: the child isn't Claude, so `wb route` doesn't gate it, as at
+the user's own terminal, and wb stamps a role change `by: "web"` (*Roles*, the gate). A server started
+from Claude's Bash carries `CLAUDECODE=1`; `child_env` is what keeps the user's click from being
+gated as Claude's. `tests/test_settings.py` covers it.
+
 ## Stopping everything
 
 Only the user's two slash commands stop the delegation, never words in a message:
@@ -6447,7 +6514,7 @@ $WB_HOME (~/.local/state/workbench)
   routes.json ($WB_ROUTES)       the roles (*Roles*, #1014): {"v": 1, "use": "gpu"|"api"|"both" (the Agents switch, #1016; missing: both),
                                  "busy": "wait"|"api" (when the GPU is busy, #1023; missing: wait), "day_usd": N|null, "roles": {"significant"|"trivial"|"writing":
                                  {"via": "gpu"|"api", "gpu": "<id>"|"auto", "api": "<exact id>" (kept on the GPU), "thinking": "off"|"on",
-                                 "said": the gated change's line, "by": "dialog"|"pane"|"terminal", "ts", "gpu_by": "terminal"|"claude", "gpu_ts"
+                                 "said": the gated change's line, "by": "dialog"|"pane"|"terminal"|"web", "ts", "gpu_by": "terminal"|"web"|"claude", "gpu_ts"
                                  (a change that needed no yes: routes.stamp), "order": [backend…] (an OpenRouter role's, wb route --order,
                                  #1021), "thinks": {"api": "<id>", "off": "<line>", "on": "<line>"} (what that API model does with each
                                  thinking setting, routes.with_thinks on every change; said only while "api" is that id, #1263)}}}; a missing role is the GPU's
@@ -6890,7 +6957,11 @@ every workflow its own permissions, `check` never path-filtered and required fro
 `suite` shard and `mod` are, the shards dealing each test once, the ruleset without bypass, the plugin without
 `version`, `owner-merge.yml` approving only the owner's pull requests without running their code); `test_docs.py`
 (every command and flag in *Every `wb` command*, every module in CLAUDE.md's layout, every `WB_*` variable in CLAUDE.md,
-CLAUDE.md under 25,000 characters); `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`. The tests' own
+CLAUDE.md under 25,000 characters); `test_settings.py` (*The admin table (settings.py)*: every row's group and kind,
+each choice applied running the pane's `wb` call through a fake `wb`, a role changed from the web stamped `by: "web"`,
+a click under `CLAUDECODE` still written ungated while Claude's own `WB_ACTOR=web` stays gated, `KeyError` for an
+unknown key and `ValueError` for a value off the choices, an API row taking a free id and leaving it to `wb route`,
+wb's refusal passed back, turning probe on without `probe` returning the note that asks Claude's help); `fake_opencode.py`, `capture_llm.py`, `e2e_chat.mjs`. The tests' own
 `HTTPServer`/`ThreadingHTTPServer` (`_Listens`, 0.02 s tick) listen at once: http.server's looked the name up first, 35 s
 on macOS runners (#950); not patched suite-wide, so `WebChat` still catches chat.py doing it.
 
@@ -7192,7 +7263,7 @@ doc needs its own `!/` line).
   `INSTALL_LISTED` entries follow by themselves.
 - **An experiment** (`context.EXPERIMENTS`) → `shell_rules`, `EXPERIMENT_NOTES`, `EXPERIMENT_PROTOCOL`,
   `task_experiments`, `cli.experiment_lines`, the pane row (`PROBE_STOPS`, `probeMode`, `probeStatus`, `probeSaid`, which read
-  `experiment_lines`' wording, `PROBE_SETUP_NOTE`), *Experiments*. `context.PROBE_FILE_LINES` → `PROBE_STOPS`' `a file over 1,500 lines` and the
+  `experiment_lines`' wording, `PROBE_SETUP_NOTE`), `settings._probe_row` and `PROBE_HELP` (the web app's), *Experiments*. `context.PROBE_FILE_LINES` → `PROBE_STOPS`' `a file over 1,500 lines` and the
   pane row here (`tests/test_docs.py`). `context.OLD_LEVELS` → `context.setting`, `cmd_experiment`, the mod's
   `PROBE_OLD_LEVELS`. `context.PROBE_LANGUAGES`, `probe_language_names` → `probe_off`, `long_files`' `kinds`,
   `runner.outline_section`, the tests' `SEARCH_HELP`, *Only where probe can help*. What a checkout holds
@@ -7345,8 +7416,10 @@ doc needs its own `!/` line).
   `routesPath` with `routes.path`) and the pane's rows (#1023); **`routes.summary`** ↔ the mod's `routesSummary` (the
   context block and the echo say it; `Routes` and register.test.tsx check one fixture each), and
   **`routes.thinking_said`** ↔ the mod's `thinkingSaid` (a role's `thinks`, #1263; `RoleResolution` and
-  register.test.tsx's #1263 test), and `runner.THINKING_LOWEST`'s opening ↔ `thinkStops`' `LOWEST_SAID` (the
-  lowest effort, still cheaper than On); **the change line**
+  register.test.tsx's #1263 test), and `runner.THINKING_LOWEST`'s opening ↔ `thinkStops`' `LOWEST_SAID` and
+  `settings.LOWEST_SAID` (the lowest effort, still cheaper than On); **a Settings row** (the pane's `*_STOPS`,
+  `roleRows`, `mediaRows`) ↔ its entry in `settings.py` (the web app's: same key, choices, sentence and wb call)
+  until #1283 drops the pane's tab; **the change line**
   (`routes.change`, `cli.start_line`) → the mod's dialog, which shows what `wb route --dry-run --json` prints (an API
 start's dry run exits 3 while `cli.API_RUNS` is off; on since #1016; `wb try --model` stays refused), and
   `route-ok.json`'s `approval` (`cli._route_argv`) ↔ `routes.approved`; **a `wb route` or `wb start` flag** →

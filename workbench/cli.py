@@ -3622,7 +3622,11 @@ def _route_apply(a, argv: list[str], changed) -> None:
         else:
             print(ch.line or "unchanged")
         return
-    by = "claude" if os.environ.get("CLAUDECODE") == "1" else "terminal"
+    # the web app's Settings (#1279): its server runs wb with WB_ACTOR=web and Claude's variables
+    # scrubbed (settings.child_env), the user's click the yes as their terminal is; CLAUDECODE
+    # wins, so Claude setting WB_ACTOR changes nothing
+    by = "claude" if os.environ.get("CLAUDECODE") == "1" else \
+        "web" if os.environ.get("WB_ACTOR") == "web" else "terminal"
     try:
         with routes.editing(lenient=True) as held:  # the gate compares the line computed under the lock
             ch = noted(changed(held[0]), held[1])
