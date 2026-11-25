@@ -913,16 +913,19 @@ def _ignored(repo: Path, path: str) -> bool:
                           capture_output=True).returncode == 0
 
 
-def _local_claude_md(repo: Path) -> bool:
-    """A CLAUDE.md kept out of git on purpose: the agents get the checkout's copy
-    (context.instruction_files), so it is never to be committed (the 2026-11-16 audit)."""
-    return (repo / "CLAUDE.md").is_file() and _ignored(repo, "CLAUDE.md")
-
-
 # Where a project's committed instructions may live, as Claude Code reads them (context.ROOT_FILES
 # loads both): a repo with only .claude/CLAUDE.md was refused as having none (the 2026-11-16
 # audit). CLAUDE.local.md is the user's own, rarely committed, so it doesn't count.
 PROJECT_MEMORY = ("CLAUDE.md", ".claude/CLAUDE.md")
+
+
+def _local_claude_md(repo: Path, names: tuple[str, ...] = PROJECT_MEMORY) -> str | None:
+    """The first of ``names`` kept out of git on purpose, or None: the agents get the checkout's
+    copy (context.instruction_files), so it is never to be committed (the 2026-11-16 audit).
+    Only the root CLAUDE.md was looked at, so a repo that gitignores .claude/ and keeps its
+    instructions in .claude/CLAUDE.md had every wb start refused as having none (#1298,
+    2026-11-24). wb init asks for the root's alone: that is the file AGENTS.md links to."""
+    return next((p for p in names if (repo / p).is_file() and _ignored(repo, p)), None)
 
 
 def _claude_md_at(repo: Path, ref: str, under: str = "") -> str | None:
@@ -962,8 +965,8 @@ def _need_claude_md(repo: Path, base: str, a, sub: str | None = None) -> None:
         print(f"note: {sub}'s CLAUDE.md is gitignored: the agent gets your checkout's copy")
     if a.no_claude_md or sub:  # a package's own CLAUDE.md counts
         return
-    if not _claude_md_at(repo, base) and _local_claude_md(repo):
-        print("note: CLAUDE.md is gitignored: the agent gets your checkout's copy")
+    if not _claude_md_at(repo, base) and (md := _local_claude_md(repo)):
+        print(f"note: {md} is gitignored: the agent gets your checkout's copy")
     elif not _claude_md_at(repo, base):
         die(f"{repo} has no CLAUDE.md (or .claude/CLAUDE.md) at {base}: the agent would start "
             "blind. Write it (what the project is, how to build and test it, its conventions), "
@@ -4057,7 +4060,7 @@ def cmd_accept(a):
     if note:
         print("the repo has no CLAUDE.md: write one (wb init)" if note == "no CLAUDE.md" else
               f"{note}: keep it current (update it if this change alters what it says)"
-              if note == LOCAL_CLAUDE_MD else
+              if note.endswith(LOCAL_NOTE) else
               f"{note}: keep it current (update and commit it if this change alters what it says)")
     print(f"accepted {a.name}: commit {commit} on {spec['branch']}" +
           (f", merged into {close['merge_into']} as {merged}" if merged else
@@ -6040,7 +6043,8 @@ def cmd_model(a):
     print(done)
 
 
-LOCAL_CLAUDE_MD = "CLAUDE.md is gitignored: agents get the checkout's copy"
+LOCAL_NOTE = " is gitignored: agents get the checkout's copy"  # after the file's name
+LOCAL_CLAUDE_MD = "CLAUDE.md" + LOCAL_NOTE
 
 
 def claude_md_status(repo: Path, ref: str = "HEAD", under: str = "") -> str:
@@ -6059,7 +6063,7 @@ def claude_md_status(repo: Path, ref: str = "HEAD", under: str = "") -> str:
                 f"{md} last changed {since} commit(s) before {ref} ({last})")
     md = _claude_md_at(repo, ref)  # CLAUDE.md before .claude/CLAUDE.md: AGENTS.md links to it
     if not md:
-        return LOCAL_CLAUDE_MD if _local_claude_md(repo) else "no CLAUDE.md"
+        return local + LOCAL_NOTE if (local := _local_claude_md(repo)) else "no CLAUDE.md"
     last = gitops.git(repo, "log", "-1", "--format=%h", ref, "--", md).strip()
     since = int(gitops.git(repo, "rev-list", "--count", f"{last}..{ref}", "--", ".",
                            f":!{md}", ":!AGENTS.md").strip() or 0)  # commits that changed code
@@ -6158,7 +6162,7 @@ def cmd_init(a):
         else:
             print("AGENTS.md and CLAUDE.md differ: merge them into CLAUDE.md, delete AGENTS.md, "
                   "and run wb init again")
-    local = _local_claude_md(d)  # kept out of git: a link to it would dangle in every clone
+    local = _local_claude_md(d, ("CLAUDE.md",))  # kept out of git: a link to it would dangle in every clone
     if claude.is_file() and not local and not agents.exists() and not agents.is_symlink():
         agents.symlink_to("CLAUDE.md")
         did.append("AGENTS.md → CLAUDE.md")
@@ -6210,7 +6214,7 @@ def _commit_link(d: Path, head: dict, index: dict, moved: bool, sign: bool = Tru
     user's index and working tree keep their bytes. A path whose index already differed from
     HEAD (a staged change of theirs), or a link whose CLAUDE.md isn't committed, is left to them."""
     import tempfile
-    if moved and _local_claude_md(d):
+    if moved and _local_claude_md(d, ("CLAUDE.md",)):
         # a committed AGENTS.md moved to a gitignored CLAUDE.md, which gets no link: the commit
         # held a link the worktree lacked and force-tracked the CLAUDE.md that is never to be
         # committed (the review of #931). Git sees AGENTS.md deleted: the user's call

@@ -231,7 +231,9 @@ is a list of such steps, with what stays Claude's marked apart.
   `C_LOCALE`); the spec; the `--skill` names; `--base` a commit (`gitops.base_commit`); an
   identity (`cli._identity`: `git var GIT_AUTHOR_IDENT`/`GIT_COMMITTER_IDENT`);
 - `CLAUDE.md` or `.claude/CLAUDE.md` (`cli.PROJECT_MEMORY`) committed at the base
-  (`--no-claude-md`); a gitignored one passes, the agent getting the checkout's copy
+  (`--no-claude-md`); a gitignored one, either name (`cli._local_claude_md`; a gitignored
+  `.claude/` with the only one was refused, #1298), passes with `note: <file> is gitignored: the
+  agent gets your checkout's copy`, the agent getting the checkout's copy
   (`context.instruction_files`).
 
 Then:
@@ -5215,7 +5217,8 @@ effect's hit came 0.8-1.45 s in (the skill says to trim the lead); ACE-Step peak
   or an operation under way (`gitops.under_way`, `UNDER_WAY`: it once consumed `MERGE_HEAD`).
 - **CLAUDE.md stays true.** It goes into every prompt, so `wb accept` prints how many code commits
   it's behind (`cli.claude_md_status`, at `tip`, #269; a `subdir` task's package CLAUDE.md first,
-  against the package's commits, the root's only when it has none, #783), and the skill has Claude update it after an accepted task that changes what it describes.
+  against the package's commits, the root's only when it has none, #783; a gitignored one,
+  `<file> is gitignored: …`, `cli.LOCAL_NOTE`), and the skill has Claude update it after an accepted task that changes what it describes.
 
 ## Claude coding: when Claude writes a task's code
 
