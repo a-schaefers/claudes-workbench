@@ -12,10 +12,12 @@ three apart: a skip is not a pass. A release may ship with a skip only when its 
       Claude Code and OpenCode).
 - [ ] `nightly` green on the commit: `gh workflow run nightly.yml --ref main`, then
       `gh run watch`. Its three jobs:
-  - [ ] `check`: the newest Claude Code, the runner's newer Python.
+  - [ ] `check`: the newest Claude Code, the runner's newer Python, its three shards each
+        finished (the mod's test in shard 1).
   - [ ] `macos`: Apple silicon, Python 3.11, OpenCode (no /proc, no inotify, no Landlock), its
         five shards each finished (not cancelled), every failure fixed or with an issue.
-  - [ ] `wsl`: WSL2's Debian, dash, a user who isn't root, OpenCode.
+  - [ ] `wsl`: WSL2's Debian, dash, a user who isn't root, OpenCode, its three shards each
+        finished.
 - [ ] `opencode`: the newest OpenCode, or the break it found has an issue.
 - [ ] `chat`, when the web chat changed since the last release.
 

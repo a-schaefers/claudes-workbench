@@ -109,7 +109,7 @@ class ReleaseGates(unittest.TestCase):
         self.assertEqual(re.search(r"OPENCODE_SHA256: '(\w+)'", wsl)[1],
                          re.search(r"OPENCODE_SHA256: '(\w+)'", text("check.yml"))[1])  # Linux x64's
         script = (ROOT / "scripts" / "ci-wsl.sh").read_text()
-        for want in ("sudo -u ci", "install-opencode.sh", "python3 -m unittest"):
+        for want in ("sudo -u ci", "install-opencode.sh", 'exec scripts/suite.sh "$WB_TEST_SHARD" 4'):
             self.assertIn(want, script)
 
     def test_the_macos_nightly_is_sharded_names_each_test_and_every_suite_job_fails_a_hang(self):
@@ -126,6 +126,24 @@ class ReleaseGates(unittest.TestCase):
                 self.assertIn("WB_TEST_HANG_SECS:", job(workflow, name))
         self.assertIn("WB_TEST_HANG_SECS", job("nightly.yml", "wsl").split("WSLENV:")[1].split("\n")[0])
         self.assertIn("WB_TEST_HANG_SECS", (ROOT / "scripts" / "ci-wsl.sh").read_text())
+
+    def test_the_nightlys_linux_and_wsl_suites_run_in_shards_of_four_processes(self):
+        # both ran the suite in one process and were cancelled at their 60 minutes in the last two
+        # runs before 2.1 (run 45707953076, 2026-11-25)
+        for name in ("check", "wsl"):
+            with self.subTest(job=name):
+                got = job("nightly.yml", name)
+                for want in ("shard: [1, 2, 3]", "fail-fast: false", "WB_TEST_SHARD: ${{ matrix.shard }}/3"):
+                    self.assertIn(want, got)
+        self.assertIn('run: exec scripts/suite.sh "$WB_TEST_SHARD" 4\n', job("nightly.yml", "check"))
+        self.assertNotIn("python3 -m unittest", job("nightly.yml", "check"))
+        # the mod's test once, not once a shard
+        self.assertEqual(job("nightly.yml", "check").count("if: matrix.shard == 1\n"), 3)
+        self.assertIn("claude plugin validate mod && claude plugin test mod", job("nightly.yml", "check"))
+        self.assertIn("WB_TEST_SHARD", job("nightly.yml", "wsl").split("WSLENV:")[1].split("\n")[0])
+        script = (ROOT / "scripts" / "ci-wsl.sh").read_text()
+        self.assertIn("WB_TEST_SHARD", script.split("--preserve-env=")[1].split(" ")[0])
+        self.assertNotIn("python3 -m unittest", script)
 
     def test_the_release_checklist_names_each_platform_and_the_nightly(self):
         checklist = (ROOT / "docs" / "release-checklist.md").read_text()
