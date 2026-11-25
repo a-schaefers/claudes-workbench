@@ -13057,6 +13057,32 @@ class Lane(Base):
             self.start("t-snap-off", "ok", "--test", "go test ./...", "--allow-path", "*")
         self.assertEqual(context.grants(store.Task("t-snap-off"))["paths"], ["*"])
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "snaps are Linux's")
+    def test_a_snap_acceptance_command_is_refused_at_next_with_the_step_left_uncommitted(self):
+        # #1271 (bar loop round 7, 2026-11-24): wb next --test took a snap wb start refused, and
+        # every test round and auto-fix round of the step failed in the lane on snap-confine
+        self.start("t-snap-next", "ok")
+        wait_phase("t-snap-next", {"review"})
+        task = store.Task("t-snap-next")
+        head = gitops.git(task.worktree, "rev-parse", "HEAD").strip()
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Step two.\n")
+        nxt = ("next", "t-snap-next", "--spec", str(step2), "-m", "feat: two", "--test", "go test ./...")
+        with mock.patch.object(context, "snaps", return_value=["go"]):
+            err = io.StringIO()
+            with redirect_stderr(err), self.assertRaises(SystemExit):
+                run_wb(*nxt)
+            self.assertIn("go is a snap", err.getvalue())
+            self.assertIn("wb allow t-snap-next --path '*'", err.getvalue())
+            task = store.Task("t-snap-next")
+            self.assertEqual((task.status["phase"], task.status.get("steps", 1)), ("review", 1))
+            self.assertIsNone(task.spec.get("test_cmd"))
+            self.assertEqual(gitops.git(task.worktree, "rev-parse", "HEAD").strip(), head)
+            run_wb("allow", "t-snap-next", "--path", "*")  # the lane off for this task: taken
+            run_wb(*nxt)
+        task = store.Task("t-snap-next")
+        self.assertEqual((task.spec["test_cmd"], task.status["steps"]), ("go test ./...", 2))
+
     def test_the_users_devices_mounts_and_runtime_directory_stay_out_of_the_lane(self):
         self.start("t-dev", "ok")
         wait_phase("t-dev", {"review"})
