@@ -361,8 +361,8 @@ directories it lacks, and a failing setup fails the task before any round (so do
 that fails: the runner makes the worktree, so `wb start` returns at once on any repo). A setup gets 30
 minutes; a first build that needs longer (a big Rust or C++ project, torch over a slow link) takes
 `--setup-timeout <secs>` at start. A note that the
-active Python environment is the checkout's: the agent leaves it out (it would import the user's
-checkout, not the worktree), so give it its own, `--setup 'uv sync' --test 'uv run pytest'` or
+agent leaves out the active venv (it would import the user's checkout, not the worktree): give it
+its own, `--setup 'uv sync' --test 'uv run pytest'` or
 `--setup 'python3 -m venv .venv && .venv/bin/pip install -e .'`; that .venv comes first on the
 agent's and the tests' PATH. A note that the agent's environment leaves out a proxy (it holds a password): a setup or tests that need the
 network fail there; ask the user before naming it in commands.json `env`. Tests that use the

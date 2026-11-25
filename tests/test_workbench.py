@@ -192,7 +192,7 @@ GIT_LFS = subprocess.run(["git", "lfs", "version"], capture_output=True).returnc
 def home_outside_the_lane(test):
     """For a test that hides credentials under the home directory: the lane writes the temp roots
     whole, so with the home inside one (a sandbox's profile under /tmp) nothing there is hidden,
-    and wb doctor and wb start say so (context.home_gap). Codex's run of 1.0 failed 11 of these
+    and wb doctor says so (context.home_gap). Codex's run of 1.0 failed 11 of these
     (the 2026-11-19 audit)."""
     return unittest.skipIf(bool(context.home_gap()), "the home directory is inside a temp root, "
                            "which the lane writes whole (context.home_gap)")(test)
@@ -13740,12 +13740,13 @@ class Lane(Base):
                              text=True, timeout=20)
         self.assertIn("NoNewPrivs:\\t1", out.stdout, out.stderr)
 
-    def test_doctor_names_what_an_old_landlock_cant_confine(self):
-        self.assertEqual(lane.gaps(10), [])
-        self.assertTrue(any("truncat" in g for g in lane.gaps(2)))
-        self.assertTrue(any("cross-device" in g for g in lane.gaps(1)))
-        self.assertFalse(any("cross-device" in g for g in lane.gaps(2)))
-        self.assertEqual(lane.gaps(0), [])
+    def test_doctor_names_what_an_old_landlock_cant_confine_in_its_ok_line(self):
+        # #1322: one clause in the ok line, not a `--` line per gap
+        self.assertEqual(lane.partial(10), "")
+        self.assertEqual(lane.partial(9), "")
+        self.assertEqual(lane.partial(5), ", partial: it confines signals from ABI 6, UNIX sockets from ABI 9")
+        self.assertIn("truncation from ABI 3", lane.partial(2))
+        self.assertEqual(lane.partial(0), "")
 
     def test_doctor_says_wsl_interop_runs_windows_programs_outside_the_lane(self):
         # the 0.90 review: on WSL2 doctor said the lane held while interop ran Windows programs
@@ -13895,31 +13896,6 @@ class Lane(Base):
         self.assertEqual(env["K6_CONFIG"], str(context.runtime_dir(task) / "k6.json"))
         self.assertEqual(json.loads(Path(env["K6_CONFIG"]).read_text()), {})
 
-    def test_doctor_finds_the_local_daemons_listening_on_tcp_from_the_kernels_tables(self):
-        # #993 (2026-11-22): TCP reaches a Docker API or adb, which the lane's socket rule can't
-        tcp, tcp6 = Path(self.tmp.name) / "tcp", Path(self.tmp.name) / "tcp6"
-        head = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid\n"
-        tcp.write_text(head + "   0: 0100007F:13AD 00000000:0000 0A 00000000:00000000 00:0 0 1000\n"
-                              "   1: 0100007F:0947 00000000:0000 0A 00000000:00000000 00:0 0 1000\n"
-                              "   2: 0100007F:0D05 0100007F:A000 01 00000000:00000000 00:0 0 1000\n"
-                              "   3: 00000000:0016 00000000:0000 0A 00000000:00000000 00:0 0 0\n")
-        tcp6.write_text(head + "   0: 00000000000000000000000000000000:091B "
-                               "00000000000000000000000000000000:0000 0A 00000000:00000000 00:0 0 1000\n")
-        # adb (5037) and Docker's API (2375) listen, J-Link's 2331 on IPv6; 3333 is a connection
-        # (01), not a listener, and ssh (22) isn't a daemon the list names
-        self.assertEqual(context.listening_daemons((str(tcp), str(tcp6))), [2331, 2375, 5037])
-        self.assertEqual(context.listening_daemons((str(Path(self.tmp.name) / "none"),)), [])
-
-    @unittest.skipUnless(os.path.exists("/proc/net/tcp"), "the kernel's TCP tables: Linux")
-    def test_doctor_finds_a_real_listening_socket_on_this_machine(self):
-        import socket
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("127.0.0.1", 0))
-            port = s.getsockname()[1]
-            self.assertEqual(context.listening_daemons(ports={port: "x"}), [])   # bound, not listening
-            s.listen(1)
-            self.assertEqual(context.listening_daemons(ports={port: "x"}), [port])
-
 
 class CheckoutVenv(Base):
     """#490 (the audit of 1.90): the user's activated venv, when it is their checkout's, stays out
@@ -13956,8 +13932,7 @@ class CheckoutVenv(Base):
                  "open(site.getsitepackages()[0] + '/_mypkg.pth', 'w').write(os.getcwd() + '/src')\"")
         out = self.start("t-venv", "ok", "--setup", setup, "--test", self.TEST, "--auto-fix", "0",
                          "--no-base-check")
-        self.assertIn(f"note: the active Python environment {user} (inside the repo) is your "
-                      "checkout's", out)
+        self.assertNotIn("leaves out your active venv", out)     # a --setup gives it one (#1322)
         st = wait_phase("t-venv", {"review"})
         task = store.Task("t-venv")
         said = task.round_dir(1).joinpath("tests.txt").read_text()
@@ -13982,8 +13957,8 @@ class CheckoutVenv(Base):
         bins = self.repo / "node_modules" / ".bin"
         os.environ["PATH"] = f"{os.environ['PATH']}{os.pathsep}{bins}"  # a direnv PATH_add
         out = self.start("t-novenv", "ok", "--test", self.TEST, "--auto-fix", "0", "--no-base-check")
-        self.assertIn(f"{user} (an editable install of the repo) is your checkout's", out)
-        self.assertIn("--setup 'uv sync' --test 'uv run pytest'", out)
+        self.assertIn(f"note: the agent leaves out your active venv ({user}): --setup 'uv sync' (or the "
+                      "project's install) gives the worktree its own\n", out)
         st = wait_phase("t-novenv", {"review"})
         task = store.Task("t-novenv")
         said = task.round_dir(1).joinpath("tests.txt").read_text()
@@ -14002,6 +13977,14 @@ class CheckoutVenv(Base):
         self.assertEqual(Permission.verdict(rules, "pipenv install"), "allow")
         with mock.patch.object(lane, "abi", return_value=0):
             self.assertEqual(Permission.verdict(context.shell_rules(task), "pipenv install"), "allow")
+
+    def test_a_venv_the_missing_directories_note_names_gets_no_note_of_its_own(self):
+        # #1322: the checkout's ignored .venv drew both notes, each with the same advice
+        self.venv(self.repo / ".venv")
+        out = self.start("t-twice", "ok", "--no-base-check")
+        self.assertIn("not the checkout's ignored .venv/", out)
+        self.assertNotIn("leaves out your active venv", out)
+        wait_phase("t-twice", {"review"})
 
     def test_a_venv_in_a_per_project_home_or_on_path_alone_is_the_checkouts_too(self):
         task = store.Task("t-homes")
@@ -14054,7 +14037,7 @@ class CheckoutVenv(Base):
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"paths": [str(envs)]}))
         tools = self.venv(envs / "tools")                         # pytest and ruff, no project
         (envs / "scratch").mkdir()
-        self.assertNotIn("is your checkout's", self.start("t-tools", "ok"))
+        self.assertNotIn("leaves out your active venv", self.start("t-tools", "ok"))
         wait_phase("t-tools", {"review"})
         task = store.Task("t-tools")
         env = runner.agent_env(task)

@@ -2526,18 +2526,14 @@ def mise_trusted(task: store.Task, path: str | None = None) -> bool | None:
     return all(said) if said else None
 
 
-def venv_line(task: store.Task, setup: bool) -> str:
-    """For wb start: the active environments the agent leaves out, and how to give it its own."""
+def venv_line(task: store.Task) -> str:
+    """For wb start with no --setup: the active environments the agent leaves out, and how to
+    give it its own."""
     envs = checkout_envs(task)
     if not envs:
         return ""
-    said = "; ".join(f"{r} ({why})" for r, why in envs.items())
-    line = (f"the active Python environment {said} is your checkout's: the agent, its setup and "
-            "its tests leave it out, so they import the worktree's code")
-    if not setup:
-        line += ("; --setup 'uv sync' --test 'uv run pytest' (or the project's own install) gives "
-                 "the worktree its own .venv, first on their PATH")
-    return line
+    return (f"the agent leaves out your active venv ({', '.join(envs)}): --setup 'uv sync' (or "
+            "the project's install) gives the worktree its own")
 
 
 def interop_on() -> bool:
@@ -2562,37 +2558,6 @@ def interop_gap() -> str | None:
             "repo still runs; [interop] enabled=false in /etc/wsl.conf (then wsl --shutdown) "
             "closes it, and also stops wb reading Windows' GPUs: set their memory in models.json "
             "gpu_gb then")  # a GPU only Windows sees had no budget at all after it (#702)
-
-
-# Local daemons that take commands over TCP, which the lane doesn't restrict (its socket rule is
-# for UNIX sockets; Landlock's TCP rule only allows ports, so it would have to list every other
-# one): a Docker or Podman API runs containers as the user, adb drives their devices, a GDB
-# server their boards. `wb doctor` names each one listening here (#993, 2026-11-22).
-DAEMON_PORTS = {2375: "a Docker or Podman API", 2376: "a Docker or Podman API (TLS)",
-                5037: "adb's server", 3333: "OpenOCD's GDB server", 2331: "J-Link's GDB server"}
-PROC_TCP = ("/proc/net/tcp", "/proc/net/tcp6")
-
-
-def listening_daemons(sources=PROC_TCP, ports=None) -> list[int]:
-    """The ports of ``ports`` (DAEMON_PORTS) listening on this machine, from the kernel's TCP
-    tables (LISTEN is state 0A); none where there are no such tables (off Linux)."""
-    ports = DAEMON_PORTS if ports is None else ports
-    found = set()
-    for src in sources:
-        try:
-            rows = Path(src).read_text().splitlines()[1:]
-        except OSError:
-            continue
-        for row in rows:
-            f = row.split()
-            if len(f) > 3 and f[3] == "0A" and ":" in f[1]:
-                try:
-                    port = int(f[1].rsplit(":", 1)[1], 16)
-                except ValueError:
-                    continue
-                if port in ports:
-                    found.add(port)
-    return sorted(found)
 
 
 def secret_paths() -> set[str]:

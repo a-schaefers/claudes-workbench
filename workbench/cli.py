@@ -1618,6 +1618,7 @@ def cmd_start(a):
     if subs:
         print(f"note: submodules ({', '.join(subs[:5])}) are empty in the agent's worktree (your "
               "checkout lacks them at the base's commit): a build or test that needs them fails there")
+    lack: list[str] = []  # the missing-dirs note's, which the venv note defers to
     if setup:
         does = [*(["links " + ", ".join(n if n.startswith("../") else f"../{n}" for n in setup["siblings"])]
                   if setup.get("siblings") else []),
@@ -1630,11 +1631,11 @@ def cmd_start(a):
             print(f"note: the worktree has only committed files, not the checkout's ignored "
                   f"{', '.join(lack[:4])}: --setup '<install command>' sets a task up (--copy "
                   "<path> copies one in); commands.json \"repos\" for every task")
-    if context.lane_on() and (gap := context.home_gap()):
-        print(f"note: {gap}")
     if proxies := runner.dropped_proxies():  # #380 (the audit of 1.6)
         print(f"note: {runner.proxy_line(proxies)}")
-    if venvs := context.venv_line(task, bool(setup and setup.get("setup"))):  # #490
+    # #490; not beside a --setup, nor when the missing-dirs note named the venv already (#1322)
+    if not (setup and setup.get("setup")) and not any(d.rstrip("/").rsplit("/", 1)[-1] in ("venv", ".venv")
+                                                      for d in lack[:4]) and (venvs := context.venv_line(task)):
         print(f"note: {venvs}")
     if context.mise_trusted(task) is False:  # #674
         print(f"note: mise doesn't trust {repo}'s config (mise trust --show), so it trusts no "
@@ -7453,18 +7454,12 @@ def cmd_doctor(a):
             # PermissionError's path (the 2026-11-16 audit)
             held = (r.returncode not in (0, 126) and "PermissionError" in r.stderr
                     and not (Path(out) / "x").exists())
-        line(held, f"agents write only in their lane (Landlock ABI {v})" if held else
+        line(held, f"agents write only in their lane (Landlock ABI {v}{lane.partial(v)})" if held else
              f"the lane didn't hold a write outside it: {r.stderr.strip()[-200:] or 'the write went through'}")
-        for gap in lane.gaps(v):  # what this kernel's Landlock can't confine (the 2026-11-16 audit)
-            print(f"--  Landlock ABI {v}: {gap}")
         if gap := context.interop_gap():  # WSL: a Windows program escapes it (the 0.90 review)
             print(f"--  {gap}")
-        if gap := context.home_gap():
+        if gap := context.home_gap():  # doctor's alone: wb start said it on every task (#1322)
             print(f"--  {gap}")
-        # what TCP reaches past the lane (#993, 2026-11-22): a warning, the user's own daemon
-        for port in context.listening_daemons():
-            print(f"--  port {port} listens here ({context.DAEMON_PORTS[port]}): the lane doesn't "
-                  "stop TCP, so an agent can reach it")
     else:
         print("--  agents' writes outside their lane and reads of credentials aren't refused here "
               "(no Landlock): only OpenCode's file tools keep to it; " +
