@@ -7759,9 +7759,12 @@ pass woke the driver itself, 20 passes a second while an item ran): it takes its
 (`runs.item_open`), notifies `runs/<run>/notify.jsonl` with its `noticed` mark, `store.Task.notify`, and the
 driver claims each ack up to it, so neither the mod's wake nor its idle net wakes Claude for one; with the driver
 dead an item's notice is Claude's, a task's as any), reaps dead runners, resumes an item stopped from outside
-its step (`_held`, `runs._outside`: `cli._interrupted`, a restart, a killed runner, a shutdown's signal, an
-update, or any other `cli.stopped_outside`: the day cap in a round, a provider's rate limit, outage or refusal, a
-repo made local-only, `wb stop --all`; `wb resume`, journal `resumed` `by: driver`). A resume refused with exit 3
+its step whose cause passes or is the user's to lift (`_held`, `runs._outside`: `cli._interrupted`, a restart, a
+killed runner, a shutdown's signal, an update, or `cli.stopped_outside` in `runs.held_infra`: the day cap in a
+round, a provider's rate limit, outage or refusal, a repo made local-only, `wb stop --all`; `wb resume`, journal
+`resumed` `by: driver`). The rest of `cli.stopped_outside`'s, a model that failed, a setup, a crash, a full disk,
+the repo gone, OpenCode unusable, end the item as its own failure (its stage's `on_failure`, `null` by default),
+as `wb resume --all` leaves them (`cli.INTERRUPTED`). A resume refused with exit 3
 (the cap, local-only, Agents on the GPU) holds the item (journal `held`) and pauses the run, or under
 `--overnight` with the cap's `meter.RESETS` is tried again each pass, so past midnight it goes on; any other
 refusal is its null. A second stop from outside after the driver's resume (a spend stop aside) is a checkpoint,

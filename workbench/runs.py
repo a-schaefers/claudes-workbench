@@ -886,15 +886,27 @@ STOPPED_BY_CLAUDE = "stopped by the reviewer"  # cli.cmd_stop's `last`: wb run s
 
 
 def _outside(st: dict) -> bool:
-    """Whether a task's stop came from outside its step: an interruption (cli._interrupted: a
-    restart, a killed runner, a shutdown's signal, an update) or any other stop cli.stopped_outside
-    names (the day cap's in a round, a provider's rate limit, outage or refusal, a repo made
-    local-only, `wb stop --all`). Only the first were held: an item the cap or its provider
-    stopped mid-round was taken as null, its paid work discarded, never run again, past midnight
-    under --overnight nor on wb run resume (the review of #1278, 2026-11-25)."""
+    """Whether a task's stop came from outside its step and holds it rather than ending it: an
+    interruption (cli._interrupted: a restart, a killed runner, a shutdown's signal, an update),
+    or a stop whose cause passes or is the user's to lift (held_infra: the day cap's in a round, a
+    provider's rate limit, outage or refusal, a repo made local-only, `wb stop --all`). Only the
+    first were held: an item the cap or its provider stopped mid-round was taken as null, its paid
+    work discarded, never run again, past midnight under --overnight nor on wb run resume (the
+    review of #1278, 2026-11-25). The rest of cli.stopped_outside's (a model that failed, a setup,
+    a crash, a full disk, the repo gone, OpenCode unusable) end the item: its stage's on_failure,
+    null by default, as #1278 has a failed item, and as wb resume --all leaves those for Claude's
+    look (cli.INTERRUPTED, #544); held, each was resumed once and then woke Claude per item (the
+    third review of #1278, 2026-11-25)."""
     from . import cli
     return st.get("phase") in ("stuck", "failed") and (
-        cli._interrupted(st.get("last")) or bool(cli.stopped_outside(st)))
+        cli._interrupted(st.get("last")) or cli.stopped_outside(st) in held_infra())
+
+
+def held_infra() -> frozenset:
+    """Status `infra` values _outside holds an item for."""
+    from . import cli, runner
+    return frozenset({runner.SPEND, "provider", runner.LOCAL_ONLY, cli.BAILED, runner.SIGNAL_INFRA, cli.UPDATE,
+                      "restart", "runner died"})
 
 
 def _run_stopped(run: Run, name: str) -> bool:

@@ -966,6 +966,18 @@ class RunsApi(Base):
         self.assertEqual(task.status["phase"], "stuck")                  # its work kept
         self.assertNotIn("null", [r["kind"] for r in run.journal()])
 
+    def test_an_item_whose_model_or_runner_failed_is_its_null_never_resumed_nor_a_checkpoint(self):
+        # the third review of #1278 (2026-11-25): every cli.stopped_outside was held, so a crash or
+        # a failed load was resumed once, then each item woke Claude; #1278 has a failed item null
+        for n, (infra, last) in enumerate((("crash", "KeyError: 'round'"), ("model", "model: no load"))):
+            run, _ = self.start(f"ends{n}", "--budget-usd", "1")
+            task = self.stopped_mid_round(run, f"ends{n}-find-1", phase="failed", last=last, infra=infra)
+            runs.tick(run)
+            self.assertEqual([r["kind"] for r in run.journal() if r.get("task") == task.name], ["item", "null"])
+            self.assertEqual(task.status["phase"], "discarded")
+            self.assertNotEqual(run.status["phase"], "checkpoint")
+            self.assertFalse(runs._resumable(run, task.name, task.status))
+
     def test_wb_run_resume_takes_up_wb_run_stops_items_never_claudes_own_wb_stop(self):
         # the review of #1278 (2026-11-25): both leave `last` "stopped by the reviewer"
         run, _ = self.start("own", "--budget-usd", "1")
