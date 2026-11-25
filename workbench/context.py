@@ -2883,6 +2883,12 @@ def readable(task: store.Task) -> list[str] | None:
     # secrets stay hidden (secret_paths and _api_hidden_tools follow XDG_CONFIG_HOME)
     if os.path.isabs(xdg := os.environ.get("XDG_CONFIG_HOME") or "") and os.path.realpath(xdg) != home:
         keep.add(os.path.realpath(xdg))
+    # and each skill handed to the task, where it really is: a library at WB_SKILLS=~/skills, or
+    # the default path linked into ~/src, was unreadable, OpenCode dropped the skill without a
+    # word while the prompt said to load it, and wb skill list advised retiring it (#1375,
+    # 2026-11-25); the rest of the library stays out
+    have = skills.available()
+    keep |= {os.path.realpath(have[n]["path"]) for n in task.status.get("skills") or [] if n in have}
     # the git directory too, outside the repo when it is a linked worktree: git failed there
     # ("gitfile does not point to a valid repository", the 0.90 review); writable() keeps it out
     keep |= read_repo_dirs(task)  # the checkout too, but on an API task (#1091)

@@ -13034,6 +13034,32 @@ class Lane(Base):
                                                    conf / "gh" / "hosts.yml", home / "letters" / "a.txt"]),
                          ["read", "read", "refused", "refused"])
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_a_handed_skill_is_readable_wherever_the_library_is_kept_and_the_rest_isnt(self):
+        # #1375 (2026-11-25): with WB_SKILLS=~/skills, or the default path linked into ~/src,
+        # the lane refused the handed skill, OpenCode dropped it without a word, and wb skill
+        # list advised retiring a skill that worked
+        home = self.fake_home()
+        default = home / ".local" / "share" / "workbench" / "skills"
+        default.parent.mkdir(parents=True)
+        (home / "src" / "wb-skills").mkdir(parents=True)
+        default.symlink_to(home / "src" / "wb-skills")
+        for i, lib in enumerate((home / "skills", default)):
+            for name in ("pydoc", "other"):
+                (lib / name).mkdir(parents=True)
+                (lib / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n")
+            if lib == default:
+                os.environ.pop("WB_SKILLS")
+            else:
+                os.environ["WB_SKILLS"] = str(lib)
+            task = self.bare_task(f"t-skill-{i}", self.repo)
+            task.set_status(skills=["pydoc"])
+            handed = Path(context.layer(task)["skills"][0])
+            self.assertEqual(handed, lib / "pydoc")
+            self.assertEqual(self.reads_in_lane(task, [handed / "SKILL.md", lib / "other" / "SKILL.md"]),
+                             ["read", "refused"], lib)
+
     @home_outside_the_lane
     def test_toolchain_bins_user_site_and_a_repo_under_gopath_stay_out_of_the_lane(self):
         home = self.fake_home()

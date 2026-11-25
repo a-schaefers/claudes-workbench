@@ -2123,7 +2123,9 @@ deliberately hostile process.
   are readable, and of `ONLY_KEPT` (`/dev`, `/mnt`, `/media`, `/run/media`, `/run/user`, `/home`,
   WSL's drives) nothing, beyond: OpenCode's global directory (`OPENCODE_CONFIG_DIR`, #370), the
   config home where `XDG_CONFIG_HOME` moves it (`~/conf`: OpenCode's global config, git's, every
-  tool's; its secrets still out, #1103), the
+  tool's; its secrets still out, #1103), each skill handed to the task where it really is (a
+  library at `WB_SKILLS=~/skills`, or the default path linked into `~/src`, was refused and
+  OpenCode dropped the skill silently, #1375; the rest of the library stays out), the
   task's repo (its secrets still out; an API task's lane reads its git directory alone, `read_repo_dirs`:
   a gitignored `.env` in the checkout was one `cat` away, #1091; and each file its `.git/config`
   includes, `_config_includes`, from `git config --local --includes --show-origin`: with
