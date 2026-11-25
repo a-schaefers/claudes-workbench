@@ -13100,6 +13100,34 @@ class Lane(Base):
         self.assertNotIn(str(home / ".ssh" / "gitconfig"), context.read_repo_dirs(task))
         self.assertFalse([p for p in context.readable(task) if p.startswith(str(home / ".ssh"))])
 
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_a_repo_that_borrows_its_objects_has_git_work_in_the_lane(self):
+        # #1383 (2026-11-25): a `git clone --shared` of a mirror, or a repo whose objects/ is a
+        # link out of its git dir, had every agent git call fail "unable to open loose object"
+        home = self.fake_home()
+        mirror = home / "mirror"
+        run = lambda *a: subprocess.run(["git", *a], check=True, capture_output=True)  # noqa: E731
+        run("init", "-q", "-b", "main", str(mirror))
+        run("-C", str(mirror), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
+            "--allow-empty", "-m", "one")
+        run("clone", "-q", "--shared", str(mirror), str(home / "work" / "shared"))
+        run("clone", "-q", str(mirror), str(home / "work" / "linked"))
+        objects = home / "work" / "linked" / ".git" / "objects"
+        shutil.move(objects, home / "objstore")
+        objects.symlink_to(home / "objstore")
+        for name in ("shared", "linked"):
+            repo = home / "work" / name
+            for via in ("gpu", "api"):
+                task = store.Task(f"t-alt-{name}-{via}")
+                task.dir.mkdir(parents=True)
+                (task.dir / "task.json").write_text(json.dumps({"name": task.name, "repo": str(repo), "via": via}))
+                run("-C", str(repo), "worktree", "add", "-q", "-b", f"delegate/{task.name}", str(task.worktree))
+                out = subprocess.run(lane.wrap(context.writable(task),
+                                               ["git", "-C", str(task.worktree), "log", "-1", "--format=%s"],
+                                               context.readable(task)), capture_output=True, text=True, timeout=20)
+                self.assertEqual((out.returncode, out.stdout.strip()), (0, "one"), (name, via, out.stderr))
+
     @home_outside_the_lane
     def test_toolchain_bins_user_site_and_a_repo_under_gopath_stay_out_of_the_lane(self):
         home = self.fake_home()

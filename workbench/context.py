@@ -1557,15 +1557,42 @@ def _repo_parts(task: store.Task) -> tuple[set[str], set[str]]:
 def read_repo_dirs(task: store.Task) -> set[str]:
     """What the lane reads of the task's repo (readable): the checkout and its git directory, or
     for an API task the git directory alone, and the files its git config includes
-    (_config_includes), which the worktree's git needs, but those the lane hides. Every file an
+    (_config_includes) and the object stores it borrows (_borrowed_objects), which the
+    worktree's git needs, but those the lane hides. Every file an
     API agent reads goes to the provider, and a gitignored .env in the checkout was one `cat`
     away, though wb start refuses to copy it unless it is named (#1091, 2026-11-23); the
     instruction files only the checkout holds go as copies (instruction_files)."""
     checkout, git = _repo_parts(task)
     hidden = secret_paths() | private_paths() | api_hidden(task)
     # dropped here: readable() lists what this returns even inside a hidden directory (#1382)
-    extra = {f for f in _config_includes(checkout, git) if not any(f == h or _under(f, h) for h in hidden)}
+    extra = {f for f in _config_includes(checkout, git) | _borrowed_objects(git)
+             if not any(f == h or _under(f, h) for h in hidden)}
     return (git if task.spec.get("via") == "api" else checkout | git) | extra
+
+
+def _borrowed_objects(git: set[str]) -> set[str]:
+    """The object stores the repo reads outside its git directory, real paths: an `objects/`
+    linked elsewhere (the repo tool's project-objects) and each `objects/info/alternates` entry,
+    theirs too, a relative one from the objects directory that lists it, as git reads them. A
+    `git clone --shared` or `--reference` of a mirror had every agent git call fail, "unable to
+    open loose object" (#1383, 2026-11-25)."""
+    found: set[str] = set()
+    todo = [os.path.realpath(os.path.join(g, "objects")) for g in git]
+    seen: set[str] = set()
+    while todo:
+        objects = todo.pop()
+        if objects in seen:
+            continue
+        seen.add(objects)
+        if not any(objects == g or _under(objects, g) for g in git):
+            found.add(objects)
+        try:
+            lines = Path(objects, "info", "alternates").read_text(errors="surrogateescape").splitlines()
+        except OSError:
+            continue
+        todo += [os.path.realpath(os.path.join(objects, line.strip())) for line in lines
+                 if line.strip() and not line.startswith("#")]
+    return found
 
 
 def _config_includes(checkout: set[str], git: set[str]) -> set[str]:
