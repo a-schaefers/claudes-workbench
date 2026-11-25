@@ -1201,6 +1201,21 @@ async function run(engine, device) {
         if (g.tabs.some(t => !near(t.w, g.w / 3))) throw new Error('unequal tabs: ' + say())
       }
     })
+    await check('the card views\' styles stay out of the chat: a plan card\'s text and code, and the intro\'s code, as before', async () => {
+      // the #1284 review: `.view .card p` and `.view code` matched #view-chat, a .view too, and
+      // shrank a plan's <p> (its margins 0 and 8px) and code, and the intro's code, to 13px
+      const got = await page.evaluate(() => {
+        const row = document.createElement('div'); row.className = 'row ask'
+        row.innerHTML = '<div class="card"><div class="plan"><p>Plan <code>x</code></p></div></div>'
+        document.getElementById('thread').append(row)
+        const cs = s => getComputedStyle(row.querySelector(s)), ip = document.querySelector('#intro p')
+        const out = { card: cs('.card').fontSize, p: cs('p').fontSize, margins: cs('p').marginTop + ' ' + cs('p').marginBottom,
+          code: cs('code').fontSize, intro: getComputedStyle(ip).fontSize, introCode: getComputedStyle(ip.querySelector('code')).fontSize }
+        row.remove()
+        return out
+      })
+      if (got.p !== got.card || got.margins !== `${got.p} ${got.p}` || got.code !== got.p || got.introCode !== got.intro) throw new Error(JSON.stringify(got))
+    })
     if (desktop) await check('Stats and Settings are 1040 px of cards, two columns from 1100 px', async () => {
       await goTo('settings')
       const got = await page.evaluate(() => ({ w: document.querySelector('#view-settings .view-in').getBoundingClientRect().width,

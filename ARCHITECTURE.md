@@ -5629,7 +5629,9 @@ address (#534).
   MiB; else 404 "no such take". The page shows both as blob URLs fetched with the token.
 - `GET /api/stream`: SSE: `event: state` at once, then `event: patch` (`chat.patch` against what
   this stream sent: `messages`/`asks` as `{put, drop}`, every other field whole so a stale busy flag
-  can't stick; #755), `: ping` after 15 s idle. `MAX_STREAMS` 16: the oldest gives way (`evicted`),
+  can't stick; #755), each event followed `NUDGE_AFTER` (50 ms) later by a blank line of its own
+  (WebKit hands a streamed body over only to the first 8 KB of a read until more bytes come: a state
+  past 8 KB waited 15 s for the ping, the #1284 review), `: ping` after 15 s idle. `MAX_STREAMS` 16: the oldest gives way (`evicted`),
   the new one waits 5 s (503), since phones drop streams silently. Linux: `TCP_USER_TIMEOUT`
   `UNACKED_MS` 45 s. One `Hub` thread watches `chat/` and a pidfd on the listener and wakes every
   stream; without inotify it wakes them only for a change, the listener's pid failing `kill 0`, or
@@ -5696,7 +5698,9 @@ tall (the composer drops its own safe-area pad, `#jump` sits 56 px higher), hidd
 `body.kb-open` so the composer sits on the keyboard (`fit`'s visualViewport check), `user-select:
 none` under `hover: none`. From 601 px the body is a grid: a 76 px left rail, the header, banner and
 view beside it; the chat a 760 px column, Stats and Settings `.view-in` 1040 px of `.card`s, two
-columns (`.cards`) from 1100 px. The Chat tab's `.tab-badge` counts Claude's messages and notices
+columns (`.cards`) from 1100 px. The cards' type (`h3`, `p`, `code`, `.small`, `.plain`) is scoped
+to `.view-in`, never `.view`: `#view-chat` is a `.view` too, and its plan and ask cards and the
+intro's `<code>` keep the chat's sizes. The Chat tab's `.tab-badge` counts Claude's messages and notices
 for the user and open asks newer than when the thread was left (`leftAt`, the server's clock; a
 page opened on another view takes its first live state's `now`), `99+` at most, in its
 `aria-label` too (`Chat, 3 new`), cleared on Chat (`drawBadge`). The thread keeps its place while
@@ -7095,7 +7099,8 @@ runner on real OpenCode (`wb start --model cap`): argv, `run --format json` even
 and Chromium (`$CHROMIUM`, `/usr/bin/chromium`, else Playwright's) as a Pixel 7, then at a desktop's 1280×800
 (`DESKTOP`: the checks through Settings', then the shell's alone). The shell (`shell`, #1284): the bar at the foot
 on a phone and the rail on the desktop, the hash and Back, the Chat tab's badge, the bar hidden with the keyboard
-(a visual viewport made short by hand), `window.WB`, and the gear's old checks from Settings and Stats (`goTo`);
+(a visual viewport made short by hand), the cards' styles kept out of the chat (a plan card's `<p>`
+and `<code>`, the intro's `<code>`), `window.WB`, and the gear's old checks from Settings and Stats (`goTo`);
 then each view's own, `e2e_stats.mjs` and `e2e_settings.mjs` (`check(page, ctx)`, once per device). Sends land exactly once through
 outages, reloads and a SIGSTOP past the 40 s watchdog; cards, plans, settings, install over https, `/api/seen` and
 `/api/active` only while in use, notices, shot pairs, listen's shortlist, the keyboard, uploads, an agent's message
