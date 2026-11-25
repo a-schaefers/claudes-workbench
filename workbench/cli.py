@@ -2583,7 +2583,9 @@ def _adopt_opencode(a):
         if not _owner_gone(spec):
             if store.driver_of(spec) == "opencode":
                 die(f"{a.name} belongs to an OpenCode session ({spec['session']}) not known to be gone")
-            die(f"{a.name} belongs to a live Claude Code session (pid {spec.get('claude_pid')})")
+            pid = spec.get("claude_pid")  # none recorded: unknown, not gone, as _gone says
+            die(f"{a.name} belongs to a Claude Code session not known to be gone (no pid recorded)"
+                if pid is None else f"{a.name} belongs to a live Claude Code session (pid {pid})")
         for k in ("claude_pid", "claude_start", "claude_machine"):
             spec.pop(k, None)
         spec.update(session=sid, driver=store.driver_record(sid))
@@ -2725,11 +2727,10 @@ def _gone(pid, start=None, machine=None) -> bool:
 
 def _owner_gone(spec: dict) -> bool:
     """Whether the driver session a task records is gone, so the directory rule may hand it on:
-    a Claude Code task's process (`_gone`), an OpenCode task's session by the heartbeat
+    a Claude Code task's process (`_gone`), an OpenCode task's session by its server's heartbeat
     (store.driver_state: only `gone`, never `unknown`, #1309)."""
-    if store.driver_of(spec) == "opencode":
-        d = spec.get("driver") or {}
-        return store.driver_state(spec.get("session"), d.get("machine")) == "gone"
+    if store.driver_of(spec) == "opencode":  # against the server it recorded, never another's
+        return store.driver_state(spec.get("session"), spec.get("driver")) == "gone"
     return _gone(spec.get("claude_pid"), spec.get("claude_start"), spec.get("claude_machine"))
 
 

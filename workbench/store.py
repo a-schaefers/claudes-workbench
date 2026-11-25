@@ -396,8 +396,15 @@ def claude_sessions(pid, since: float = 0, start=None) -> list[str]:
 # (an agent is never a driver). No flag and no variable of the plugin's says "driver": a missing
 # plugin can't open a gate, it can only fail to ask (#1296, the host-shape decision, 2026-11-25).
 DRIVERS = "drivers"           # $WB_HOME/drivers/: the drivers' heartbeats
-HEARTBEAT = "opencode.json"   # the OpenCode service's one heartbeat, the plugin's server part's
-HEARTBEAT_FRESH = 120         # seconds: an older beat is a service gone (the plugin beats every 30)
+# One beat per OpenCode server, never one for them all: the background service, every
+# `opencode --standalone` TUI and wb's own --standalone helpers (models._opencode_json,
+# keyhole._opencode, the runner's export) each load the user's global plugin, and with one shared
+# file any of them, beating its own pid and none of the service's sessions, made a live session
+# read as gone: another session in its directory took its tasks, its notices and `wb adopt` (the
+# #1309 review, 2026-11-25; #693/#696's kind). So `opencode-<machine_tag>-<pid>.json`, and a task
+# is judged against the server it recorded (task.json `driver.pid`/`start`), never another's.
+BEAT_RE = re.compile(r"opencode-([0-9a-f]{8})-([1-9][0-9]{0,9})\.json")
+HEARTBEAT_FRESH = 120         # seconds: an older beat is a server gone (the plugin beats every 30)
 SESSION_RE = re.compile(r"[\w-]{1,128}")  # a session id a file may hold, as the Claude ids
 
 
@@ -429,53 +436,95 @@ def caller_kind() -> str:
     return "opencode" if under_model() else "terminal"
 
 
-def heartbeat() -> dict | None:
-    """$WB_HOME/drivers/opencode.json, the OpenCode service's heartbeat, as the plugin's server
-    part writes it: {tool: "opencode", pid?, start?, machine?, ts, sessions: {<id>: {model?,
-    variant?, dir?, ts?}}}, `sessions` the sessions the service has live. None when missing or
-    not that shape."""
-    hb = read_json(home() / DRIVERS / HEARTBEAT)
-    if not isinstance(hb, dict) or hb.get("tool") != "opencode" or not isinstance(hb.get("sessions"), dict):
-        return None
-    ts = hb.get("ts")
-    if not isinstance(ts, (int, float)) or isinstance(ts, bool) or not math.isfinite(ts):
-        return None
-    return hb
+def beat_path(pid: int) -> Path:
+    """The heartbeat of this machine's OpenCode server ``pid``, as the plugin's server part writes it."""
+    return home() / DRIVERS / f"opencode-{machine_tag()}-{pid}.json"
 
 
-def driver_state(session, on=None) -> str:
-    """Whether an OpenCode driver session lives, by the heartbeat: `live` (a fresh beat lists it),
-    `gone` (a fresh beat without it, or a beat gone stale or whose service pid has exited: the
-    service went, and its sessions with it), `unknown` (no heartbeat: no plugin to say; or the
-    session or the service on another machine, whose pids and beats aren't this one's to judge,
-    as cli._gone, #922). Only `gone` hands a task to another session: unknown is not gone, as a
-    Claude task with no pid isn't. ``on``: the machine the task recorded (task.json
-    `driver.machine`)."""
-    hb = heartbeat()
-    if hb is None or not isinstance(session, str) or not session:
-        return "unknown"
-    me = machine()
-    if any(isinstance(m, str) and m and m != me for m in (on, hb.get("machine"))):
-        return "unknown"
-    if time.time() - hb["ts"] > HEARTBEAT_FRESH:
-        return "gone"
-    pid = hb.get("pid")
-    if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0:
-        from . import models  # here: models imports store
-        if not models._alive(pid, hb.get("start") if isinstance(hb.get("start"), str) else None):
-            return "gone"
-    return "live" if session in hb["sessions"] else "gone"
+def heartbeats() -> list[dict]:
+    """This machine's OpenCode servers' heartbeats, `$WB_HOME/drivers/opencode-<machine_tag>-<pid>.json`,
+    each as the plugin's server part writes its own: {tool: "opencode", pid, machine?, ts,
+    sessions: {<id>: {model?, variant?, dir?}}}, `pid` the file name's, `sessions` the sessions
+    the server serves that still exist (ARCHITECTURE.md, *The heartbeat*). A file of another
+    machine's (its tag, or its `machine`) is left out: its pids aren't this one's to judge (#922),
+    and so is one not of that shape."""
+    try:
+        paths = sorted((home() / DRIVERS).iterdir())
+    except OSError:
+        return []
+    out, tag, me = [], machine_tag(), machine()
+    for p in paths:
+        m = BEAT_RE.fullmatch(p.name)
+        if not m or m.group(1) != tag:
+            continue
+        hb = read_json(p)
+        if not isinstance(hb, dict) or hb.get("tool") != "opencode" or not isinstance(hb.get("sessions"), dict):
+            continue
+        ts, mach = hb.get("ts"), hb.get("machine")
+        if not isinstance(ts, (int, float)) or isinstance(ts, bool) or not math.isfinite(ts) \
+                or hb.get("pid") != int(m.group(2)) or isinstance(hb.get("pid"), bool) \
+                or isinstance(mach, str) and mach and mach != me:
+            continue
+        out.append(hb)
+    return out
+
+
+def _beating(hb: dict) -> bool:
+    """Whether a heartbeat's server still beats: fresh, and its pid running."""
+    from . import models  # here: models imports store
+    return time.time() - hb["ts"] <= HEARTBEAT_FRESH and models._alive(hb["pid"])
+
+
+def driver_server(session, driver=None) -> tuple[str, dict | None]:
+    """Whether an OpenCode driver session lives, and the beat that says so: (`live`, its server's
+    beat) when a fresh beat of a running server lists it, the one it recorded or another (the
+    service restarted, the session reopened in it); else (`gone`, None) when the server the task
+    recorded (``driver``, task.json `driver`: `pid`, `start`) has exited, or its beat is stale, or
+    its fresh beat leaves the session out; else (`unknown`, None): no server recorded (no plugin
+    beat at `wb start`), its process running with no beat, or the task another machine's (#922).
+    Another server's beat never makes a task gone (the #1309 review, 2026-11-25). Only `gone`
+    hands a task to another session: unknown is not gone, as a Claude task with no pid isn't."""
+    d = driver if isinstance(driver, dict) else {}
+    on = d.get("machine")
+    if not isinstance(session, str) or not session or isinstance(on, str) and on and on != machine():
+        return "unknown", None
+    beats = heartbeats()
+    live = [hb for hb in beats if session in hb["sessions"] and _beating(hb)]
+    if live:
+        return "live", max(live, key=lambda hb: hb["ts"])
+    pid, start = d.get("pid"), d.get("start")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return "unknown", None
+    from . import models  # here: models imports store
+    if not models._alive(pid, start if isinstance(start, str) else None):
+        return "gone", None  # the server exited: its file may be left, or removed on exit
+    own = next((hb for hb in beats if hb["pid"] == pid), None)
+    if own is None:
+        return "unknown", None
+    return "gone", None  # a stale beat, or a fresh one without the session (live was checked above)
+
+
+def driver_state(session, driver=None) -> str:
+    """`live`, `gone` or `unknown`: driver_server's first value."""
+    return driver_server(session, driver)[0]
 
 
 def driver_record(session: str) -> dict:
     """task.json `driver` for a task an OpenCode session starts or adopts: the tool, this machine,
-    and the session's model and variant from the heartbeat when it lists them. The session itself
-    is task.json `session`, which every reader of a task's owner already reads, the Claude Code
-    mod's `mine` included: a session it never had, with no `claude_pid` to die, so it never takes
-    an OpenCode task for its own."""
-    row = ((heartbeat() or {}).get("sessions") or {}).get(session)
+    the server whose fresh beat lists the session (`pid`, and `start` as wb reads it,
+    models._started, never the plugin's: a stamp of another format would read as a recycled pid),
+    and the session's model and variant from that beat. No beat lists it (no plugin): no `pid`,
+    and driver_server says `unknown` until one does. The session itself is task.json `session`,
+    which every reader of a task's owner already reads, the Claude Code mod's `mine` included: a
+    session it never had, with no `claude_pid` to die, so it never takes an OpenCode task."""
+    _, hb = driver_server(session)
+    row = (hb or {}).get("sessions", {}).get(session)
     row = row if isinstance(row, dict) else {}
-    return {"tool": "opencode", "machine": machine(),
+    server = {}
+    if hb:
+        from . import models  # here: models imports store
+        server = {"pid": hb["pid"], **({"start": st} if (st := models._started(hb["pid"])) else {})}
+    return {"tool": "opencode", "machine": machine(), **server,
             **{k: row[k] for k in ("model", "variant") if isinstance(row.get(k), str) and row[k]}}
 
 

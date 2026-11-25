@@ -37931,7 +37931,8 @@ class Routes(Base):
 class OpenCodeDriver(Base):
     """The OpenCode driver's identity (#1309, 2.2): OPENCODE_SESSION_ID, which the workbench
     plugin's tools set on their wb child and OpenCode sets in every shell, WB_TASK ranked first;
-    the service's one heartbeat (drivers/opencode.json); task.json's `session` and `driver`; whose
+    one heartbeat per OpenCode server (drivers/opencode-<machine_tag>-<pid>.json); task.json's
+    `session` and `driver`, its server's pid among them; whose
     task it is, for both drivers; and the gates, which took an OpenCode driver for the user at a
     terminal before (#1296, row 10)."""
     catalog = ApiHarness.catalog
@@ -37963,10 +37964,12 @@ class OpenCodeDriver(Base):
                 code = e.code
         return code, out.getvalue(), err.getvalue()
 
-    def beat(self, *sessions, ago=0.0, **kw):
-        """The plugin's server part's heartbeat, listing these sessions as live."""
-        store.write_json(store.home() / "drivers" / "opencode.json", {
-            "tool": "opencode", "ts": time.time() - ago, **kw,
+    def beat(self, *sessions, ago=0.0, pid=None, **kw):
+        """The heartbeat the plugin's server part in server ``pid`` (default: this process, a server
+        that runs) writes, listing these sessions as live."""
+        pid = pid or os.getpid()
+        store.write_json(store.beat_path(pid), {
+            "tool": "opencode", "pid": pid, "ts": time.time() - ago, **kw,
             "sessions": {s: {"model": "deepseek/deepseek-flash", "variant": "fast", "dir": self.here}
                          for s in sessions}})
 
@@ -37979,8 +37982,15 @@ class OpenCodeDriver(Base):
         t.set_status(phase=phase, round=1)
         return t
 
-    def opencode_task(self, name, session, **kw):
-        return self.task(name, session=session, driver={"tool": "opencode", "machine": store.machine()}, **kw)
+    def server(self, pid=None):
+        """task.json `driver` as wb start records it for a session of server ``pid`` (default:
+        this process)."""
+        from workbench import models
+        pid = pid or os.getpid()
+        return {"tool": "opencode", "machine": store.machine(), "pid": pid, "start": models._started(pid)}
+
+    def opencode_task(self, name, session, server=None, **kw):
+        return self.task(name, session=session, driver=self.server(server), **kw)
 
     def mine(self, kind, *ids):
         return sorted(t.name for t in cli._scope(store.all_tasks(), self.here, list(ids), kind)[0])
@@ -38059,8 +38069,8 @@ class OpenCodeDriver(Base):
         self.start("t-oc", "ok")
         wait_phase("t-oc", {"review"})
         spec = store.Task("t-oc").spec
-        self.assertEqual((spec["session"], spec["driver"]), ("ses_a", {
-            "tool": "opencode", "machine": store.machine(), "model": "deepseek/deepseek-flash", "variant": "fast"}))
+        self.assertEqual((spec["session"], spec["driver"]), ("ses_a", {   # its server's pid, read by wb
+            **self.server(), "model": "deepseek/deepseek-flash", "variant": "fast"}))
         self.assertFalse({"claude_pid", "claude_start", "claude_machine"} & set(spec))
         self.assertEqual(store.driver_of(spec), "opencode")
         code, out, _ = self.wb("status")
@@ -38076,25 +38086,64 @@ class OpenCodeDriver(Base):
         self.assertIn("open elsewhere (other sessions'): t-oc", self.wb("status")[1])
 
     def test_the_heartbeat_says_whether_a_session_is_live_gone_or_unknown(self):
-        self.assertEqual(store.driver_state("ses_a"), "unknown")  # no plugin to say: not gone
+        d = self.server()
+        self.assertEqual(store.driver_state("ses_a"), "unknown")     # no server recorded
+        self.assertEqual(store.driver_state("ses_a", d), "unknown")  # its server runs, no beat: no plugin to say
         self.beat("ses_a")
-        self.assertEqual((store.driver_state("ses_a"), store.driver_state("ses_b")), ("live", "gone"))
-        self.assertEqual(store.driver_state("ses_a", "machine-b"), "unknown")  # another machine's (#922)
-        self.beat("ses_a", machine="machine-b")
-        self.assertEqual(store.driver_state("ses_b"), "unknown")
-        self.beat("ses_a", ago=store.HEARTBEAT_FRESH + 5)          # the service went
-        self.assertEqual(store.driver_state("ses_a"), "gone")
+        self.assertEqual((store.driver_state("ses_a", d), store.driver_state("ses_b", d)), ("live", "gone"))
+        self.assertEqual(store.driver_state("ses_b"), "unknown")     # no server of its own: none says gone
+        self.assertEqual(store.driver_state("ses_a", dict(d, machine="machine-b")), "unknown")  # #922
+        self.beat("ses_a", machine="machine-b")                       # another machine's beat: not this one's
+        self.assertEqual(store.driver_state("ses_a", d), "unknown")
+        self.beat("ses_a", ago=store.HEARTBEAT_FRESH + 5)              # the server stopped beating
+        self.assertEqual(store.driver_state("ses_a", d), "gone")
         dead = subprocess.Popen(["true"]); dead.wait()
-        self.beat("ses_a", pid=dead.pid)
-        self.assertEqual(store.driver_state("ses_a"), "gone")
-        self.beat("ses_a", pid=os.getpid())
-        self.assertEqual(store.driver_state("ses_a"), "live")
-        for bad in ({"tool": "claude", "ts": time.time(), "sessions": {"ses_a": {}}},
-                    {"tool": "opencode", "ts": "now", "sessions": {"ses_a": {}}},
-                    {"tool": "opencode", "ts": time.time(), "sessions": ["ses_a"]}, []):
-            with self.subTest(bad=bad):
-                store.write_json(store.home() / "drivers" / "opencode.json", bad)
-                self.assertEqual(store.driver_state("ses_a"), "unknown")
+        gone = dict(d, pid=dead.pid, start=None)
+        self.assertEqual(store.driver_state("ses_a", gone), "gone")   # its server exited, no beat left
+        self.beat("ses_a", pid=dead.pid)                              # or its beat left behind
+        self.assertEqual(store.driver_state("ses_a", gone), "gone")
+        self.beat("ses_a")                                            # the service restarted, the session
+        self.assertEqual(store.driver_state("ses_a", gone), "live")   # reopened in the new server
+        tag = f"{(int(store.machine_tag(), 16) + 1) % 2 ** 32:08x}"
+        for name, bad in ((f"opencode-{tag}-{os.getpid()}.json", None),  # another machine's file
+                          (None, {"tool": "claude", "pid": os.getpid(), "ts": time.time(), "sessions": {"ses_a": {}}}),
+                          (None, {"tool": "opencode", "pid": os.getpid(), "ts": "now", "sessions": {"ses_a": {}}}),
+                          (None, {"tool": "opencode", "pid": os.getpid(), "ts": time.time(), "sessions": ["ses_a"]}),
+                          (None, {"tool": "opencode", "pid": dead.pid, "ts": time.time(), "sessions": {"ses_a": {}}}),
+                          (None, [])):
+            with self.subTest(name=name, bad=bad):
+                for f in (store.home() / "drivers").iterdir():
+                    f.unlink()
+                store.write_json(store.home() / "drivers" / name if name else store.beat_path(os.getpid()),
+                                 bad if bad is not None else {"tool": "opencode", "pid": os.getpid(), "ts": time.time(),
+                                         "sessions": {"ses_a": {}}})
+                self.assertEqual(store.driver_state("ses_a", d), "unknown")
+
+    def test_another_servers_beat_never_makes_a_live_sessions_task_gone(self):
+        # the #1309 review (2026-11-25): one drivers/opencode.json for every server, and any other
+        # OpenCode server (a --standalone TUI, wb's own --standalone helpers, which load the global
+        # plugin too) beat its own pid and none of the service's sessions over it: session A's task
+        # read as gone, and B in the same directory took it, its notice and `wb adopt`
+        helper = subprocess.Popen(["sleep", "60"]); self.addCleanup(helper.wait); self.addCleanup(helper.kill)
+        b = subprocess.Popen(["sleep", "60"]); self.addCleanup(b.wait); self.addCleanup(b.kill)
+        self.beat("ses_a")                                            # A's server: this process
+        self.opencode_task("t1", "ses_a", phase="review")
+        store.append_jsonl(store.home() / "notify.jsonl", {"ts": store.now(), "task": "t1", "kind": "review",
+                                                            "round": 1, "text": "t1 is ready"})
+        self.beat(pid=helper.pid)                                     # a helper's: fresh, no sessions
+        os.environ["OPENCODE_SESSION_ID"] = "ses_b"
+        for when in ("helper running", "helper exited"):
+            with self.subTest(when=when):
+                self.assertEqual(self.mine("opencode", "ses_b"), [])
+                self.assertEqual(self.wb("wait", "--timeout", "1")[0], 2)   # t1's notice stays A's
+                code, _, err = self.wb("adopt", "t1")
+                self.assertEqual(code, 1)
+                self.assertIn("t1 belongs to an OpenCode session (ses_a) not known to be gone", err)
+                code, _, err = self.wb("adopt", "t1", "--session", "sess-2", "--pid", str(b.pid))  # the mod's
+                self.assertEqual(code, 1)
+                self.assertEqual(self.mine("opencode", "ses_a"), ["t1"])
+            helper.kill(); helper.wait()                              # its pid dead, its beat left behind
+        self.assertEqual(store.Task("t1").spec["session"], "ses_a")
 
     def test_an_opencode_session_claims_a_gone_sessions_task_nearby_but_never_a_claude_codes(self):
         dead = subprocess.Popen(["true"]); dead.wait()
@@ -38168,10 +38217,23 @@ class OpenCodeDriver(Base):
         self.assertEqual((spec["session"], spec["claude_pid"], "driver" in spec), ("sess-2", b.pid, False))
         self.assertEqual(self.wb("adopt", "t-x", "--pid", str(b.pid))[0], 2)  # its ids, as before 2.2
 
+    def test_adopting_a_claude_task_with_no_pid_from_opencode_says_it_is_not_known_gone(self):
+        # the #1309 review: the refusal read "a live Claude Code session (pid None)"
+        self.task("t-np", session="sess-1")
+        os.environ["OPENCODE_SESSION_ID"] = "ses_new"
+        code, _, err = self.wb("adopt", "t-np")
+        self.assertEqual(code, 1)
+        self.assertIn("t-np belongs to a Claude Code session not known to be gone (no pid recorded)", err)
+
+    def test_a_scheduled_fire_drops_an_opencode_drivers_session_id_as_bench_and_optimize_do(self):
+        from workbench import schedule
+        os.environ["OPENCODE_SESSION_ID"] = "ses_x"
+        self.assertNotIn("OPENCODE_SESSION_ID", schedule._fire_env("night"))
+
     def test_an_opencode_drivers_backlog_task_keeps_the_machine_awake_while_its_service_lives(self):
         # #1105's waiter, keyed on the heartbeat's service pid: an OpenCode task has no claude_pid
         service = subprocess.Popen(["sleep", "30"]); self.addCleanup(service.wait); self.addCleanup(service.kill)
-        task = self.opencode_task("t-night", "ses_a", phase="review", backlog="night")
+        task = self.opencode_task("t-night", "ses_a", server=service.pid, phase="review", backlog="night")
         held = []
         awake = lambda: (mock.patch.object(cli, "awake_how", return_value="systemd-inhibit"),  # noqa: E731
                          mock.patch.object(cli, "keep_awake", lambda pid, why: held.append(pid) or True))

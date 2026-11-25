@@ -6825,17 +6825,17 @@ def awake_for_review(task: store.Task):
     detached, so when a batch's last task (or its last parallel ones) reached review none was
     held, and on Linux and WSL2, where Claude Code holds none of its own, the machine could
     idle-sleep mid-review, the feedback round and the summary waiting for the user (#1105,
-    2026-11-23). An OpenCode driver's task (#1309): while the OpenCode service its session lives
-    in runs, the heartbeat's `pid` (store.driver_state `live`). The waiter process, its pid the
+    2026-11-23). An OpenCode driver's task (#1309): while the OpenCode server whose beat lists its
+    session runs, that beat's `pid` (store.driver_server `live`). The waiter process, its pid the
     inhibitor's, or None."""
     from . import cli  # cli imports this module
     spec = task.spec
     pid, start, on = spec.get("claude_pid"), spec.get("claude_start"), spec.get("claude_machine")
-    if store.driver_of(spec) == "opencode":  # driver_state judged the service's machine already
-        hb = store.heartbeat() or {}
-        live = store.driver_state(spec.get("session"), (spec.get("driver") or {}).get("machine")) == "live"
-        start = hb.get("start") if isinstance(hb.get("start"), str) else None
-        pid, on = hb.get("pid") if live else None, None
+    if store.driver_of(spec) == "opencode":  # driver_server judged the server's machine already
+        d = spec.get("driver") if isinstance(spec.get("driver"), dict) else {}
+        _, hb = store.driver_server(spec.get("session"), d)
+        pid, on = (hb or {}).get("pid"), None
+        start = d.get("start") if pid == d.get("pid") and isinstance(d.get("start"), str) else None
     if not spec.get("backlog") or task.status.get("phase") not in ("review", "stuck", "failed") \
             or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 \
             or on not in (None, store.machine()) \
