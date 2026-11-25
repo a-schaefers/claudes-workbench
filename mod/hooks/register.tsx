@@ -144,12 +144,14 @@ const CHAT_STALE_MS = 15_000 // as wb's LISTENING_FOR: a listener silent this lo
 // the user counts as away this long after they last used the web chat: a web message, or a page
 // in use (chat/away.json's `at`, written by `wb chat serve`'s /api/active, #959)
 const AWAY_MS = 6 * 3600 * 1000
-// ...or for as long as this session has a backlog task open: a night's batch outlasts six hours,
-// and its permission prompts then waited in the terminal until morning (#110, 2026-11-18)
+// ...or for as long as this session has a task open: a night's batch outlasts six hours, and its
+// permission prompts then waited in the terminal until morning (#110, 2026-11-18). Backlog tasks
+// alone held it, so one long task asked for from the phone that finished past six hours was
+// reported in the terminal only, its question a dialog there (#1402, 2026-11-25).
 export function awayNow(webAt: number, now: number, list: WbTask[], isMine: (t: WbTask) => boolean): boolean {
   if (!webAt) return false
   if (now - webAt < AWAY_MS) return true
-  return list.some(t => t.backlog && isMine(t) && (ACTIVE.has(t.phase) || waitsOnClaude(t)))
+  return list.some(t => isMine(t) && (ACTIVE.has(t.phase) || waitsOnClaude(t)))
 }
 // Whether the weekly model check and the automatic optimize may run: no task anywhere active (the
 // GPU's, and a check's question beside a running task's), and none of this session's waiting on
@@ -2065,9 +2067,14 @@ const near = (t: { repo?: string; cwd?: string; subdir?: string }) => {
   return (!!t.cwd && within(mem.cwd, t.cwd)) ||
     (!!t.repo && (within(mem.cwd, t.repo) || within(spotOf(t), mem.cwd)))
 }
+// Where `wb start` ran (`cwd`) is this session's very directory. In ~ or /, where `near` claims
+// nothing, that still adopts a gone session's task: `claude` restarted in ~ after a `wb start
+// --repo ~/proj` there was woken for none (#1403, 2026-11-25). One without a session stays no ~
+// session's, as `wb`'s _scope judges.
+const ranHere = (t: { cwd?: string }) => !!mem.cwd && !!t.cwd && parts(t.cwd).join('/') === parts(mem.cwd).join('/')
 const mine = (t: { session?: string; repo?: string; cwd?: string; subdir?: string; claude_pid?: number; claude_start?: string }) => {
   if (t.session && mem.ids.size) {
-    return mem.ids.has(t.session) || (mem.deadPids.has(pidKey(t)) && near(t))
+    return mem.ids.has(t.session) || (mem.deadPids.has(pidKey(t)) && (near(t) || ranHere(t)))
   }
   if (!mem.cwd || (!t.cwd && !t.repo)) return true
   return near(t)
@@ -2110,7 +2117,7 @@ const ownPid = (t: { claude_pid?: number; claude_start?: string }) =>
 // task.json as it stands after the claim, whoever won.
 async function claim($: any, name: string, sp: Row): Promise<Row> {
   if (!mem.claudePid || !sp.session || !mem.ids.size || !mem.deadPids.has(pidKey(sp)) || ownPid(sp)) return sp
-  if (!mem.ids.has(sp.session) && !near(sp)) return sp
+  if (!mem.ids.has(sp.session) && !near(sp) && !ranHere(sp)) return sp
   const id = await $.session.id().catch(() => '')
   const ids = [...new Set([id, ...mem.ids].filter(Boolean))]
   const r = await runWb($, ['adopt', name, '--pid', String(mem.claudePid), ...ids.flatMap(i => ['--session', i])], 15_000)

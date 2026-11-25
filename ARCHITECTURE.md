@@ -3177,7 +3177,9 @@ the task's spot (`repo`/`subdir`, else a `cwd` inside the repo, else the repo: `
 #695), or its `cwd` is or is inside the session's directory; by whole components of real paths,
 case-folded where the file system ignores case (`mem.fold`, `store.folds_case`: any component of the path found
 in its parent with its case swapped, WSL2's `/mnt/c` too, #1217; 2026-11-19 audit). A
-session in `~` or `/` claims none by directory; a task with neither key is everyone's. Another
+session in `~` or `/` claims none by directory, but for a gone session's task whose `cwd` is
+exactly there (`ranHere`, `_scope`: plain `claude` restarted in `~` after a `wb start --repo
+~/proj` there was woken for none, #1403); a task with neither key is everyone's. Another
 session's notice is at most toasted. `wb status`, a bare `wait`, and `stop`/`takeover`/`resume
 --all` from Claude Code's Bash take the caller's scope (`cli._caller`: `CLAUDE_CODE_SESSION_ID`,
 `claude-sessions/<CLAUDE_PID>` under this process's start, #787, the directory; `--all-sessions`
@@ -5627,8 +5629,10 @@ else `chat/serve.pid`, whose `port` stays when `wb chat off` stops its server an
   `final: true` for `FINAL_ERRNOS`; the page stops on `final` or the `SERVER_TRIES`-th (3) 5xx,
   else backs off (it re-sent forever, #742). `wb gc` drops uploads past `--days` whose message has
   a receipt (expired too, #741) or that no deliverable message names (`chat.drop_old_uploads`).
-- **The switch.** `chat/switch.json` `{on}` (absent: on, `chat.is_on`; `{"on": false}` only after
-  `wb chat off`, and the user's off stays off). `on` turns it on and runs `chat.ensure`; when that
+- **The switch.** `chat/switch.json` `{on, v}` (absent: on, `chat.is_on`; `{"on": false}` only after
+  `wb chat off`, and the user's off stays off; `v`, `chat.SWITCH_V`, marks 2.0's writes: a bare
+  `{"on": false}` with no `chat/port.json` is an older wb's failed `wb chat on`, read as never set
+  and removed once, #1405). `on` turns it on and runs `chat.ensure`; when that
   ends neither `up` nor `started` the switch goes back as it was (`web chat left off: …` from off,
   `web chat not up: …` from on: left on when it died, the pane read On and pinned a dead link,
   #690). `chat.start` runs `bin/wb chat serve --port <port>` detached (`chat/serve.log`,
@@ -5699,7 +5703,8 @@ else `chat/serve.pid`, whose `port` stays when `wb chat off` stops its server an
   since `tailscale serve` proxies a phone from loopback under its tailnet name), until
   they type or answer a dialog in the terminal (answering counts: a tapped notice made the user away
   and the answer submitted no prompt); at most 6 h after that use, longer while one of this
-  session's `--backlog` tasks is open (#110). `chat/away.json` holds it, the user's, not one
+  session's tasks is open (#110; `--backlog` ones alone until #1402: one long task asked for from
+  the phone was then reported in the terminal only). `chat/away.json` holds it, the user's, not one
   session's (#688).
 - **Claude Code's dialogs are answered in the terminal** (#1350, from #1340's decision on the
   owner's bottom line: the terminal, local or ssh and tmux, is where things get done; the chat is
@@ -6826,7 +6831,7 @@ mark notes the last runner never delivered as taken (`_stale_notes`, *Notes*).
 | `wb workflows [on\|off]` | | *Dynamic workflows* (#1041): `$WB_HOME/workflows.json`; off by default. |
 | `wb coding [only\|ask\|decide]` | `allow <task> [--edit "…"] [--said "…"] [--when "…"]`, `used <task> --did "…"` | *Claude coding*: the mode and allowances; `allow` records the user's yes for one task until it goes back to the agent; `used` what Claude changed (exit 1 with none). |
 | `wb shot <task>` | `--capture CMD` (required), `--viewport WxH` (1280x800), `--files PATH…`, `--timeout N` (300), `--chat`, `--setup` | *Screenshots of the base and the candidate*. |
-| `wb takeover [<task> \| --all]` | `--repo DIR`, `--session ID`, `--all-sessions`, `--user` (the user's ask, recorded) | Stops the runner: phase `review`, status `taken_over`, `hands_off_at` unless set (a file Claude then writes under an ignored path is refused at accept until `--include`, #1179). Refuses (exit 1) an unfinished checkout (the hand-back remade it and lost Claude's edits, #655). Outside "Let Claude decide" needs the user's yes, else exit 3. `--all` takes the rest past a refusal (#601), skipping unready checkouts (#918). Scope (`_scope`, for stop, resume, wait, status too): from Claude Code's Bash without `--repo`/`--session`, the caller's (`cli._caller`: every id in `claude-sessions/<CLAUDE_PID>`, and its directory, #693), else `--all-sessions` or a terminal: every session's; by `session` id wherever it ran, or by directory (`repo`, package, `cwd`; real paths, case-folded where the file system is; never home or `/`) when no `session`, no `--session` given, or its `claude_pid` is gone (#695); a task with neither key is everyone's. Others: `left alone (other sessions'): …`. |
+| `wb takeover [<task> \| --all]` | `--repo DIR`, `--session ID`, `--all-sessions`, `--user` (the user's ask, recorded) | Stops the runner: phase `review`, status `taken_over`, `hands_off_at` unless set (a file Claude then writes under an ignored path is refused at accept until `--include`, #1179). Refuses (exit 1) an unfinished checkout (the hand-back remade it and lost Claude's edits, #655). Outside "Let Claude decide" needs the user's yes, else exit 3. `--all` takes the rest past a refusal (#601), skipping unready checkouts (#918). Scope (`_scope`, for stop, resume, wait, status too): from Claude Code's Bash without `--repo`/`--session`, the caller's (`cli._caller`: every id in `claude-sessions/<CLAUDE_PID>`, and its directory, #693), else `--all-sessions` or a terminal: every session's; by `session` id wherever it ran, or by directory (`repo`, package, `cwd`; real paths, case-folded where the file system is; never home or `/`, but for a gone session's task started exactly there, #1403) when no `session`, no `--session` given, or its `claude_pid` is gone (#695); a task with neither key is everyone's. Others: `left alone (other sessions'): …`. |
 | `wb verify <task>` | `--test CMD`, `--files PATH…`, `--expect TEXT`, `--timeout N` (300), `--setup` | *Verifying a fix against the base*; refused while the agent runs. SIGTERM/SIGHUP end it cleanly (`cli._ends_cleanly`, #372), like `wb image`, `wb audio`, `wb bench add`, `wb bench self` (`media.run_group`: the child's whole process group killed, since killing only a wrapper left its worker holding the GPU, #589). |
 | `wb stop [<task> \| --all]` | `--repo DIR`, `--session ID`, `--all-sessions`, `--park-waiting` | Status `stopping`, SIGTERM (15 s, `wait_exit`, then SIGKILL to its session and the agent's), `runner.sweep`, phase `stuck`, acked; worktree kept. `--all` (`stop_everything`): a `stopped` event, `last` `cli.BAIL_OUT`, status `infra` `stopped` (not the step's: `cli.stopped_outside`, #1260), status `parked` (`store.parked`: out of `wb status` and the mod's counts until `spawn_runner` or a takeover clears it, #541); `--park-waiting` (with `--all`, the mod's quit) parks review/stuck/failed too, acking their news (`_park_waiting`, #698); unscoped, `bench.stop_driver` first (another host's left, #876). Others: `left running (other sessions'): …`. |
 | `wb resume <task> [<task>…]` | several names (start order, failures said, exit 1, #692), `--all` (`last` in `cli.INTERRUPTED` or starting `runner.UPDATED`: `cli._interrupted`, #788; never a guard's stop or a crash; in `store.all_tasks` order, each under its command lock, #544; a worktree problem or an API task whose repo became local-only is said and skipped, the rest go on), `--repo DIR`, `--session ID…`, `--all-sessions`, `--backlog NAME` | Reaps first. Stuck/failed, no live runner; an API task whose repo became local-only exits 3 (`_local_only_since`, #1021). Round n+1 on a fresh session (`runner.RESUME`), undelivered notes as `NOTE_HEAD`; a self-review's green tree carried on (`self_review_tree`, `runner.carried_tree`, #1228); after a provider's stop (`infra: provider`) its provider's `no_credit` mark becomes its turn to ask (`cli._credit_turn`, #1178). Never ran a round: round 1 again (`_early_notes`); checkout cut short: remade (`_rechecks_out`). |
@@ -6983,7 +6988,7 @@ $WB_HOME (~/.local/state/workbench)
   imports/<slug>/                wb skill import's fetches, for Claude to read
   images/<YYYYmmdd-HHMMSS>/      wb image's candidates (unless --out), .json sidecars, engine.log
   audio/<YYYYmmdd-HHMMSS>/       wb audio's clips: .wav, .json sidecar, .png spectrogram, engine.log
-  chat/                          messages.jsonl receipts.jsonl open.json listener.json claims.json switch.json ({on})
+  chat/                          messages.jsonl receipts.jsonl open.json listener.json claims.json switch.json ({on, v})
                                  serve.pid ({pid, port, start}: chat.ensure waits on it; `{port}` alone after `wb chat off`) ensure.lock serve.log port.json ({port, pid, start})
                                  away.json ({at, by}; 0 once the user types in the terminal) page.json ({at})
                                  audio/<batch>/ (wb chat listen: <n>.<ext>, audio.json; newest 20) uploads/<id>/ (<name> 0600, .meta.json) uploads.lock

@@ -9426,6 +9426,21 @@ class Steering(Base):
         spec = store.Task("t-orphan").spec
         self.assertEqual((spec["session"], spec["claude_pid"]), ("sess-2", b.pid))  # its own id, new pid
 
+    def test_a_gone_sessions_task_started_in_home_is_adopted_by_a_new_session_there(self):
+        # #1403 (2026-11-25): `wb start --repo ~/proj` from a session in ~, then Claude Code
+        # restarted there: the new session claimed none in ~ by directory, so the task was nobody's
+        gone = subprocess.Popen(["true"]); gone.wait()
+        live = subprocess.Popen(["sleep", "60"]); self.addCleanup(live.kill)
+        home = str(Path.home())
+        t = lambda **spec: types.SimpleNamespace(name="t", spec={"repo": str(self.repo), **spec})  # noqa: E731
+        mine = lambda task: len(cli._scope([task], home, ["sess-c"])[0])  # noqa: E731
+        self.assertEqual(mine(t(cwd=home, session="sess-a", claude_pid=gone.pid)), 1)
+        self.assertEqual(mine(t(cwd=home, session="sess-a", claude_pid=live.pid)), 0)   # still its own
+        self.assertEqual(mine(t(cwd=str(Path(home) / "other"), session="sess-a", claude_pid=gone.pid)), 0)
+        self.assertEqual(mine(t(cwd=home)), 0)                     # by hand in ~: no ~ session's (0.90)
+        orphan = t(session="sess-a", claude_pid=gone.pid)              # no cwd, and no directory asked
+        self.assertEqual(len(cli._scope([orphan], None, ["sess-c"])[0]), 0)
+
     def test_a_claude_code_process_recorded_on_another_machine_is_never_gone_here(self):
         # #922: on a state directory two machines share, machine B read A's live session's pid as
         # dead (not in B's /proc), adopted A's task, and A adopted it back, over and over
@@ -26742,6 +26757,23 @@ class WebChat(Base):
         finally:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
+
+    def test_a_switch_left_off_by_an_older_wbs_failed_chat_on_is_read_as_never_set(self):
+        # #1405 (2026-11-25): 1.91.x and 2.0 before #1281 wrote {"on": false} on a failed `wb chat
+        # on` (a port taken), and 2.0 read it as the user's off, so the web app never came up
+        chat = self.chat
+        switch, ran = chat.chat_dir() / "switch.json", chat.chat_dir() / "port.json"
+        self.assertFalse(ran.exists())                              # the test's own state
+        store.write_json(switch, {"on": False})                     # no server of ours ever ran
+        self.assertTrue(chat.is_on())
+        self.assertFalse(switch.exists())                           # rewritten once: as never set
+        store.write_json(ran, {"port": self.port})
+        self.assertTrue(chat.is_on())                               # a server since: still on
+        store.write_json(switch, {"on": False})                     # one ran: the user's off
+        self.assertFalse(chat.is_on())
+        ran.unlink()
+        chat.set_on(False)                                          # 2.0's own off, marked
+        self.assertFalse(chat.is_on())
 
     def test_without_inotify_the_hub_wakes_the_streams_only_for_a_change_or_the_listener_ending(self):
         # #841: the polling branch bumped every second, so each open stream rebuilt its snapshot
