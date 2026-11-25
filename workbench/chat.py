@@ -1422,7 +1422,13 @@ def stop_started() -> bool:
     """Stop the server `start` made, if it still runs; never one wb didn't start (systemd's)."""
     from . import models  # only here: chat is imported by the server, which needs none of it
     pid = (st := store.read_json(chat_dir() / "serve.pid", None) or {}).get("pid")
-    (chat_dir() / "serve.pid").unlink(missing_ok=True)
+    # the port stays, the pid goes: with serve.pid gone, port() fell back to PORT once the server
+    # had exited, so `wb chat url` and the next `wb chat on` named 1337, not the user's port
+    # (macOS nightly, 2026-11-25; Linux passed only while the killed server was a zombie)
+    if isinstance(st, dict) and isinstance(st.get("port"), int):
+        store.write_json(chat_dir() / "serve.pid", {"port": st["port"]})
+    else:
+        (chat_dir() / "serve.pid").unlink(missing_ok=True)
     if not pid or not _alive(pid, st.get("start")) or not models.runs(int(pid), "chat", "serve"):
         return False
     try:
