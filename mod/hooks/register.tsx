@@ -1297,8 +1297,10 @@ function routesValid(doc: unknown): doc is Row {
 // $N'), '' while every role is the default and no cap is set (nothing to tell); `api`, whether any
 // role has an API model. The cap is in `said`, which is what a change is found by: a cap changed
 // alone (a terminal's wb route cap, a hand edit) never reached the conversation (2026-11-23).
-// `web`: the newest change a role records was the web app's (`by`/`gpu_by` "web", #1283)
-type Routes = { said: string; api: boolean; cap: number | null; web?: boolean }
+// `web`: the newest change a role records was the web app's (`by`/`gpu_by` "web", #1283); `stamp`:
+// that change's time (s), so a later change that stamps no role (the day cap, Agents, busy) isn't
+// credited to it
+type Routes = { said: string; api: boolean; cap: number | null; web?: boolean; stamp?: number }
 async function readRoutes($: any): Promise<Routes> {
   const text: string | undefined = await $.fs.read(await routesPath($)).catch(() => undefined)
   if (text === undefined) return { said: '', api: false, cap: null }
@@ -1320,9 +1322,10 @@ async function readRoutes($: any): Promise<Routes> {
     }
   }
   return { said: plain ? '' : routesSummary(doc) + (cap !== null ? `. Day cap ${money(cap)}` : ''), api: rows.some(r => !!r.api), cap,
-    web: by === 'web' }
+    web: by === 'web', stamp: newest > -Infinity ? newest : undefined }
 }
 const DEFAULT_ROUTES = routesSummary({})
+const ROUTES_FRESH_S = 120 // a role stamp this new, with none told this load, is this change's
 const ROUTES_NOTE = (r: Routes) => `Roles (the user's, wb route): ${r.said}. ` + (r.cap !== null ? '' : 'No day cap yet. ') +
   ROUTES_RULE
 const ROUTES_CHANGED = (said: string, web = false) =>
@@ -1626,7 +1629,12 @@ async function unsaid($: any, delegating: boolean): Promise<string[]> {
   // the web app's says so (#1283)
   if (any && want.routes !== was.routes) {
     const now = await readRoutes($)
-    out.push(was.routes ? ROUTES_CHANGED(want.routes, !!now.web) : ROUTES_NOTE(now))
+    // the web app's only when this change stamped a role there: newer than the stamp last told, or
+    // (none told this load) made since this poll's window began (review of #1283, 2026-11-25: a day
+    // cap set in the terminal after a role last set on the web app read "(the user, on the web app)")
+    const since = mem.routesStamp ?? (await $.clock.now()) / 1000 - ROUTES_FRESH_S
+    out.push(was.routes ? ROUTES_CHANGED(want.routes, !!now.web && (now.stamp ?? 0) > since) : ROUTES_NOTE(now))
+    mem.routesStamp = Math.max(now.stamp ?? since, since)
   }
   if (any && want.workflows !== was.workflows) out.push(want.workflows === 'on' ? WORKFLOWS_RULE : WORKFLOWS_OFF) // #1041
   await setSaid($, { notes: was.notes || want.notes, wakeOff: was.wakeOff || want.wakeOff, coding: any ? want.coding : was.coding,
@@ -1706,6 +1714,7 @@ const mem = {
   switchKey: '', // chat/switch.json as last read: changed (`wb chat on|off`), the link is looked up now
   settingsKey: '', // settings-changes.jsonl's size@mtime when last read (settingsTurns)
   settingsSeen: new Set<string>(), // its rows this load delivered (ts:key)
+  routesStamp: undefined as number | undefined, // the newest role stamp when the roles were last told (unsaid)
   eventsPid: 0, // the `wb events` child: its lines wake poll(); the chat counts it as this session
   eventsStart: '', // its start, as its hello says: with the pid, listener.json's proof of life (#532)
   claudePid: 0, // this Claude Code process, the `wb events` child's parent, as its hello says: 0 unknown (#687)

@@ -5597,9 +5597,13 @@ test('#1283: Agent code navigation turned on in the web app without probe makes 
   await clock.advance(31_000)
   expect(offers()).toHaveLength(1)
   expect(kept.settingsSeen).toBe(ts0 + 5)        // every session's mark: a reload or another session says it never again
+  // the offer's turn ends, so nothing holds a second copy back but the mark (review of #1283,
+  // 2026-11-25: with the turn still open the test passed with the dedup removed)
+  await $.turn.complete(endTurn('t1'))
   // the same change from the terminal, or by Claude, is no web row: nothing comes
   files['/wb/settings-changes.jsonl'] += row(ts0 + 90, { by: 'claude' })
   mtimes['/wb/settings-changes.jsonl'] = 2
+  await clock.advance(31_000)
   await clock.advance(31_000)
   expect(offers()).toHaveLength(1)
 })
@@ -5692,6 +5696,16 @@ test('#1283: a role changed in the web app reaches the conversation once, saying
     'trivial GPU (the router picks), API kept: deepseek/deepseek-flash; writing API deepseek/deepseek-flash, thinking off. Day cap $5 ' +
     '(the user, on the web app). Never pass --model for an API model or change a role without the user\'s yes (the mod asks them ' +
     'in a dialog); recommend only.'])
+  // a day cap set in the terminal stamps no role: the web app's older stamp is not this change's
+  // (review of #1283, 2026-11-25)
+  files[at] = JSON.stringify({ v: 1, day_usd: 9, roles: { trivial: { via: 'gpu', api: 'deepseek/deepseek-flash', thinking: 'off', by: 'dialog',
+    ts: ts0 - 600 }, writing: { via: 'api', api: 'deepseek/deepseek-flash', thinking: 'off', by: 'web', ts: ts0 + 10 } } })
+  await clock.advance(31_000)
+  await clock.advance(31_000)
+  const told = rows.filter(r => r.includes('The roles changed'))
+  expect(told).toHaveLength(2)
+  expect(told.at(-1)).toContain('Day cap $9')
+  expect(told.at(-1)).not.toContain('web app')
   // a change made elsewhere after it says nothing of the web app
   files[at] = JSON.stringify({ v: 1, day_usd: 5, roles: { writing: { via: 'gpu', api: 'deepseek/deepseek-flash', thinking: 'off', by: 'terminal', ts: ts0 + 40 } } })
   await clock.advance(31_000)
