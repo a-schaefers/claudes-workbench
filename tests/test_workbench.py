@@ -389,8 +389,20 @@ class Base(unittest.TestCase):
                           # the user's file for agents (#1102, 2026-11-23): theirs went into the
                           # tests' prompts, and in an agent's lane, which hides it, every test
                           # that started a task failed on its read
-                          WB_AGENTS_MD=str(tmp / "wb-config" / "AGENTS.md"))
+                          WB_AGENTS_MD=str(tmp / "wb-config" / "AGENTS.md"),
+                          # the web app's token and settings (#1281's review, 2026-11-24): on by
+                          # default, every doctor test read the user's token, or made one in HOME
+                          WB_CHAT_TOKEN=str(tmp / "chat-token"),
+                          WB_CHAT_CONFIG=str(tmp / "chat.json"))
         (tmp / "opencode.json").write_text(json.dumps(OPENCODE_CONFIG))
+        # the suite's own cgroup is no service's: CI's runner is one (a .service), so after #1407
+        # every runner, chat and bench driver went through systemd-run's scope there, and tests
+        # that kill or wait on them failed (#1420's CI, 2026-11-25); LogoutStops patches its own
+        cgroup = mock.patch.object(cli, "SELF_CGROUP", tmp / "no-cgroup")
+        cgroup.start()
+        self.addCleanup(cgroup.stop)
+        cli.runner_scope.cache_clear()
+        self.addCleanup(cli.runner_scope.cache_clear)
         runner.models._AUTH.clear()  # OpenCode's stored keys, per process (models.auth_key)
         runner.models._STORED.clear()
         runner.models._KEYS.clear()
@@ -1118,7 +1130,9 @@ class Lifecycle(Base):
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "make"], check=True)
         self.start("t-mk", "ok", "--test", "make test", "--auto-fix", "2", "--no-self-review")
         st = wait_phase("t-mk", {"review"})
-        self.assertEqual((st["base_check"]["exit"], st["round"]), (2, 1))
+        # the tail said: it failed on macOS with no word of what its make printed (nightly runs
+        # 45454423406, 45577067512)
+        self.assertEqual((st["base_check"]["exit"], st["round"]), (2, 1), st["base_check"].get("tail"))
         task = store.Task("t-mk")
         self.assertNotIn('"kind": "autofix"', (task.dir / "events.jsonl").read_text(encoding="utf-8"))
         checkins = [r["text"] for r in store.notices() if r["task"] == "t-mk" and r["kind"] == "checkin"]
@@ -1147,13 +1161,16 @@ class Lifecycle(Base):
                               "make: Target 'test' not remade because of errors.\n"), "nosuch-tool-1229: command not found")
         self.assertEqual(said(f"make: .venv/bin/pytest: No such file or directory\n{err.format(127)}"),
                          ".venv/bin/pytest: not in the worktree (.venv/ is an install's, never checked out)")
+        # make's own exec line at Error 1 too: macOS's /usr/bin/make says it so (nightly run
+        # 45577067512, 2026-11-25), and only make's exec failure prints it
+        self.assertEqual(said(f"make: nosuch-tool-1229: No such file or directory\n{err.format(1)}"),
+                         "nosuch-tool-1229: command not found")
         self.assertEqual(said(f"/usr/bin/python3: No module named nosuch_mod\n{err.format(1)}"),
                          "/usr/bin/python3: No module named nosuch_mod")
         self.assertEqual(said("sh: 1: nosuch-tool-1229: not found\nerror: Recipe `test` failed on line 2 "
                               "with exit code 127", code=127), "nosuch-tool-1229: command not found")
         for tail in (f"make: ./made-by-the-step.sh: No such file or directory\n{err.format(127)}",
                      f"cat: answer.txt: No such file or directory\n{err.format(1)}",
-                     f"make: nosuch-tool-1229: No such file or directory\n{err.format(1)}",
                      "make: *** No rule to make target 'test'.  Stop.",
                      "python3: No module named x"):
             self.assertIsNone(said(tail), tail)
@@ -1173,6 +1190,18 @@ class Lifecycle(Base):
                          "pytest: command not found")
         # a recipe's own failure, not make's exec, still goes back
         self.assertIsNone(said("make: pytest: Command not found\nmake: *** [test] Error 1"))
+        # macOS's /usr/bin/make (Apple's 3.81) says `No such file or directory` at Error 1 for a
+        # recipe it can't exec, so #1229's test still ran both auto-fix rounds there (nightly
+        # runs 45454423406, 45577067512, 2026-11-24/25): make's own exec line is a 127 at any code
+        self.assertEqual(said("nosuch-tool-1229 --check answer.txt\nmake: nosuch-tool-1229: No such file or "
+                              "directory\nmake: *** [test] Error 1"), "nosuch-tool-1229: command not found")
+        self.assertEqual(said("make[1]: pytest: No such file or directory\nmake[1]: *** [test] Error 1\n"
+                              "make[1]: Leaving directory '/r/sub'\nmake: *** [all] Error 2"),
+                         "pytest: command not found")
+        self.assertEqual(said("make: .venv/bin/pytest: No such file or directory\nmake: *** [test] Error 1"),
+                         ".venv/bin/pytest: not in the worktree (.venv/ is an install's, never checked out)")
+        self.assertIsNone(said("make: ./made-by-the-step.sh: No such file or directory\nmake: *** [test] Error 1"))
+        self.assertIsNone(said("make: *** [test] Error 1"))           # a recipe failing on its own
 
     def test_a_package_managers_run_wrapper_lines_are_read_past_to_the_scripts(self):
         # #1243 (bar round 5 of 2.0): `pnpm test` and `yarn test` with jest not installed ended on
@@ -2722,6 +2751,38 @@ class Lifecycle(Base):
         st = wait_phase("t-bgwait", {"review", "stuck"}, timeout=40)
         self.assertEqual((st["phase"], st.get("nudges", 0), st["round"]), ("review", 0, 1))
 
+    def test_a_command_running_in_the_foreground_is_neither_thinking_nor_silence(self):
+        # #1386 (2026-11-25): a suite the agent ran in the foreground with a long `timeout`
+        # printed nothing until it ended; the think nudge killed it, and the next round's run
+        # was stopped "even after a nudge"
+        self.start("t-fg", "fgcmd", "--test", TEST_CMD, "--think-timeout", "2",
+                   "--silence-timeout", "4")
+        st = wait_phase("t-fg", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual((st["phase"], st.get("nudges", 0), st["round"]), ("review", 0, 1),
+                         st.get("last"))
+        self.assertTrue(st["tests"]["ok"])
+        evs = store.read_jsonl(store.Task("t-fg").dir / "events.jsonl")[0]
+        self.assertFalse([e for e in evs if e.get("kind") == "stopped"])
+        self.assertIn("make test", [e.get("brief", "") for e in evs if e.get("kind") == "tool"][0])
+
+    def test_a_command_running_in_the_foreground_still_meets_the_rounds_wall(self):
+        # #1386: the command waits out the nudge and silence, never the round's limit
+        os.environ["FAKE_FG"] = "60"
+        self.start("t-fgwall", "fgcmd", "--test", TEST_CMD, "--think-timeout", "2",
+                   "--silence-timeout", "4", "--round-timeout", "8")
+        st = wait_phase("t-fgwall", {"review", "stuck", "failed"}, timeout=60)
+        self.assertEqual(st["phase"], "stuck")
+        self.assertIn("limit", st["last"])
+        self.assertEqual(st.get("guards"), {"round": 1})
+
+    def test_a_job_left_in_the_background_spares_a_thinking_model_no_nudge(self):
+        # #1386's fix waits on a command in the foreground only: one a shell call left running
+        # (a dev server) is no wait, and the model thinking beside it is nudged, then stopped
+        self.start("t-bgthink", "bgthink", "--think-timeout", "2", "--silence-timeout", "120")
+        st = wait_phase("t-bgthink", {"stuck"}, timeout=40)
+        self.assertIn("even after a nudge", st["last"])
+        self.assertEqual((st["nudges"], st["round"]), (1, 2))
+
     def test_a_round_waiting_on_a_background_job_keeps_its_model_loaded(self):
         # #864 (the third 2026-11-21 audit): a test run past Ollama's 5-minute keep-alive (each
         # of OpenCode's requests sets it again) unloaded the model mid-round, and the next request
@@ -3617,6 +3678,12 @@ class Lifecycle(Base):
         runner._hands_on(t)
         self.assertEqual(t.status.get("hand_left"), [])
         self.assertLess(len((t.dir / "status.json").read_bytes()), before + 200)
+        # _hands_on stands for a runner's start, so accept's _stop_runner marks hands_off_at
+        # anew: what changed within CLOCK_SLACK before it is scanned again. Nightly run
+        # 45577067512 (2026-11-25) wrote the packages slower than that, so only the last 7 fell
+        # in the window, under BUILD_FILES, and were named as left out; a real runner's rounds
+        # outlast the slack
+        time.sleep(gitops.CLOCK_SLACK * 2)
         out = run_wb("accept", "t-pyc", "-m", "feat: one", "--merge")
         self.assertIn("accepted t-pyc", out)
         self.assertNotIn("note: git ignores", out)
@@ -6366,6 +6433,43 @@ class WorktreeSetup(Base):
         if sys.platform != "darwin":
             self.assertEqual(len(cps), 1, cps)                      # one cp, not thirty
 
+    def test_macos_copies_prepared_files_in_one_cp_per_directory(self):
+        # #1399 (2026-11-25): macOS skipped #867's batch, and each path tried GNU's flags first,
+        # which BSD cp refuses: two cp a file, 40,000 for an in-tree build's 20,000 objects
+        src, dest = Path(self.tmp.name) / "built", Path(self.tmp.name) / "scratch-1399"
+        paths = []
+        for d, n in (("a", 400), ("b/c", 400), ("d", 200)):
+            (src / d).mkdir(parents=True)
+            for i in range(n):
+                (src / d / f"f{i}.o").write_text(d)
+                paths.append(f"{d}/f{i}.o")
+        for d in ("build", "gen"):
+            (src / "e" / d).mkdir(parents=True)
+            (src / "e" / d / "x").write_text("x")
+            paths.append(f"e/{d}/")                      # ls-files --directory's form
+        dest.mkdir()
+        real, cps = subprocess.run, []
+
+        def bsd(argv, *a, **k):                          # BSD cp: no long flags; -c clones (here -R)
+            if argv[0] != "cp":
+                return real(argv, *a, **k)
+            cps.append(argv)
+            if any(x.startswith("--") and x != "--" for x in argv) or "d/f0.o" in argv:
+                return subprocess.CompletedProcess(argv, 1)   # d's group fails: path by path
+            return real(["cp", "-Rp" if argv[1] == "-cRp" else argv[1], *argv[2:]], *a, **k)
+        with mock.patch.object(runner.sys, "platform", "darwin"), \
+                mock.patch.object(runner.subprocess, "run", bsd):
+            runner._copy_all(src, dest, paths)
+        for p in paths[:-2]:
+            self.assertEqual((dest / p).read_text(), p.split("/f")[0], p)
+        self.assertEqual([(dest / "e" / d / "x").read_text() for d in ("build", "gen")], ["x", "x"])
+        # BSD cp copies a source ending in "/" as its insides
+        self.assertFalse([c for c in cps if any(x.endswith("/") for x in c[3:-1])])
+        # a cp per directory and batch (a: 1, b/c: 2, d: 1), e's 2 its own batch, then d's 200
+        # one by one, each macOS's flags first: never GNU's and then BSD's
+        self.assertEqual(len(cps), 1 + 2 + 1 + 1 + 200, [c[:3] for c in cps][:10])
+        self.assertFalse([c for c in cps if "--reflink=auto" in c])
+
     def test_commands_json_gives_a_repo_its_setup_for_every_task(self):
         self.ignore("deps/")
         Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
@@ -6433,6 +6537,19 @@ class WorktreeSetup(Base):
                       "and 2 more), before any round", note["text"])
         self.assertFalse((t.worktree / "gen").exists())        # removed, its directories too
         self.assertEqual(gitops.changed(t.worktree), "")
+
+    def test_a_setup_that_writes_an_uncommitted_lockfile_is_told_to_commit_it_or_write_none(self):
+        # #1379 (2026-11-25): `uv sync` in a project with no committed uv.lock writes one; the
+        # notice's remedy, `uv sync --locked`, then failed for want of a lockfile
+        self.start("t-uvlock", "ok", "--test", TEST_CMD, "--setup", "echo 'version = 1' > uv.lock")
+        wait_phase("t-uvlock", {"failed"})
+        note = [r for r in store.notices() if r["task"] == "t-uvlock"][-1]
+        self.assertIn("task t-uvlock: the setup wrote a lockfile the repo doesn't commit (uv.lock), "
+                      "before any round", note["text"])
+        self.assertIn("Commit the lockfile (and the setup may freeze to it: uv sync --locked, npm ci), "
+                      "or have the setup write none (python3 -m venv .venv && .venv/bin/pip install -e .); "
+                      "then wb discard t-uvlock and start again", note["text"])
+        self.assertFalse((store.Task("t-uvlock").worktree / "uv.lock").exists())
 
     def test_a_setup_that_writes_files_then_fails_has_them_undone_so_the_resume_is_told(self):
         # #1347's review (2026-11-24): only a setup that exited 0 was undone; a codegen then a
@@ -6564,6 +6681,22 @@ class WorktreeSetup(Base):
         wait_phase("t-build", {"review"}, timeout=60)
         lines = log.read_text().split()                       # (the round's tests log too)
         self.assertLess(lines.index("check-done"), lines.index("build-done"), lines)
+
+    def test_fanned_out_tasks_run_their_round_tests_one_at_a_time(self):
+        # #1378 (2026-11-25): two tasks of a fan-out ran their round tests at once, and a suite
+        # on a fixed port failed EADDRINUSE in all but one: a FAIL and an auto-fix for correct
+        # code. The directory stands in for the port: taken while one suite runs.
+        held = Path(self.tmp.name) / "port-3000"
+        suite = f"mkdir {held} || exit 98; sleep 2; rmdir {held}; {TEST_CMD}"
+        for who in ("a", "b"):
+            self.start(f"t-fan{who}", "ok", "--no-self-review", "--no-base-check", "--auto-fix", "0",
+                       "--test", suite)
+        for who in ("a", "b"):
+            wait_phase(f"t-fan{who}", {"review"}, timeout=60)
+            st = store.Task(f"t-fan{who}").status
+            self.assertTrue(st["tests"]["ok"], st["tests"])
+            self.assertEqual(st.get("auto_fixes", 0), 0)
+        self.assertEqual(json.loads((store.home() / "locks" / "prepare-check.json").read_text()), {})
 
     def test_a_task_whose_setup_failed_is_resumed_and_discarded_never_counts_against_its_model(self):
         # #581, the audit of 1.90: three discards of a lockfile problem scored the model 0/3 and
@@ -6904,6 +7037,65 @@ class WorktreeSetup(Base):
                          "packages/app/node_modules")
         self.assertEqual(cli._copy_path(self.repo, "../../../x", "packages/app"), "../x")
 
+    def test_a_root_entrys_setup_runs_from_the_root_for_a_package_task(self):
+        # #1376 (2026-11-25): the root key's setup ran in the package, so its
+        # ./scripts/bootstrap.sh failed every package task before round 1 (exit 127), while the
+        # same entry's copy paths were read from the root (#1346)
+        self.ignore(".boot", "where")
+        app = self.repo / "packages" / "app"
+        app.mkdir(parents=True)
+        (app / "CLAUDE.md").write_text("# app\n")
+        (self.repo / "scripts").mkdir()
+        (self.repo / "scripts" / "bootstrap.sh").write_text("#!/bin/sh\necho ok > .boot\n")
+        (self.repo / "scripts" / "bootstrap.sh").chmod(0o755)
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "a package"], check=True)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "setup": "./scripts/bootstrap.sh"}}}))
+        os.environ["FAKE_SCENARIO"] = "ok"
+        start = lambda name, *x: run_wb("start", name, "--spec", str(self.spec), "--repo", str(app),  # noqa
+                                        "--model", "mimo", "--no-base-check", *x)
+        out = start("t-rootsetup")
+        self.assertIn("setup from commands.json: runs `./scripts/bootstrap.sh` (from the repo's top)", out)
+        wait_phase("t-rootsetup", {"review"})
+        t = store.Task("t-rootsetup")
+        self.assertEqual(t.spec["setup_dir"], ".")
+        self.assertTrue((t.worktree / ".boot").is_file())
+        self.assertIn("\nexit: 0\n", (t.dir / "setup.txt").read_text())
+        # a --setup still runs at the spot, the package
+        start("t-spotsetup", "--setup", "pwd > where")
+        wait_phase("t-spotsetup", {"review"})
+        t = store.Task("t-spotsetup")
+        self.assertNotIn("setup_dir", t.spec)
+        self.assertTrue((t.worktree / "packages/app/where").is_file())
+        self.assertFalse((t.worktree / "where").exists())
+
+    def test_a_standing_copy_missing_in_a_linked_worktree_is_skipped_with_a_note(self):
+        # #1377 (2026-11-25): the main checkout's entry matches a linked worktree by git dir
+        # (#498), which has no node_modules of its own: every start there exited 1, and no flag
+        # got past it. A --copy Claude passed itself is still refused.
+        self.ignore("node_modules/", ".claude/")
+        (self.repo / "node_modules" / "x").mkdir(parents=True)
+        Path(os.environ["WB_COMMANDS"]).write_text(json.dumps({"repos": {str(self.repo): {
+            "copy": ["node_modules"]}}}))
+        feat = self.repo / ".claude" / "worktrees" / "feat"
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "-q", "-b", "feat", str(feat)],
+                       check=True, capture_output=True)
+        os.environ["FAKE_SCENARIO"] = "ok"
+        start = lambda name, *x: run_wb("start", name, "--spec", str(self.spec), "--repo", str(feat),  # noqa
+                                        "--model", "mimo", "--no-base-check", *x)
+        out = start("t-lw1")
+        self.assertIn(f'note: commands.json "repos" copy node_modules: no node_modules in {feat}, so '
+                      "the task goes without it; --setup '<install command>' sets it up", out)
+        self.assertNotIn("copies node_modules", out)
+        self.assertNotIn("copy", store.Task("t-lw1").spec)
+        wait_phase("t-lw1", {"review"})
+        with self.assertRaises(SystemExit) as cm, redirect_stderr(err := io.StringIO()):
+            start("t-lw2", "--copy", "node_modules")
+        self.assertEqual(cm.exception.code, 1)
+        self.assertIn(f"--copy node_modules: no node_modules in {feat}", err.getvalue())
+        self.assertFalse(store.Task("t-lw2").dir.exists())
+
     def test_a_packages_own_commands_json_copy_is_read_from_the_package(self):
         # #1346 (bar round 9, 2026-11-24; #1158 fixed only --copy): a package key's
         # `copy: ["node_modules"]` copied the root's node_modules, so the base check and every
@@ -6940,12 +7132,13 @@ class WorktreeSetup(Base):
         conf.write_text(json.dumps({"repos": {str(app): {"copy": ["localconf"]}}}))
         self.assertEqual(cli._standing_gap(context.repo_conf(self.repo, "packages/app"), self.repo,
                                            "packages/app"), "")
-        # a refused standing entry names commands.json, not a flag never given
+        # a missing standing entry's note names commands.json, not a flag never given (a note
+        # since #1377, not a refusal)
         conf.write_text(json.dumps({"repos": {str(app): {"copy": ["dist"]}}}))
-        with self.assertRaises(SystemExit), redirect_stderr(err := io.StringIO()):
-            run_wb("start", "t-nodist", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo")
-        self.assertIn('commands.json "repos" copy dist: no packages/app/dist in', err.getvalue())
-        self.assertNotIn("--copy", err.getvalue())
+        out = run_wb("start", "t-nodist", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo")
+        self.assertIn('note: commands.json "repos" copy dist: no packages/app/dist in', out)
+        self.assertNotIn("--copy", out)
+        wait_phase("t-nodist", {"review"})
         # #1346's review (2026-11-24): a key on a linked worktree nested in the repo (Claude
         # Code's .claude/worktrees/x) is the main checkout's root by git dir, but its depth was
         # measured from the main top, three parts: the package's node_modules was read for the root's
@@ -8198,6 +8391,44 @@ class Context(Base):
         self.assertTrue(subprocess.run(["git", "-C", str(self.repo), "rev-parse", "delegate/t-n"],
                                        capture_output=True).returncode == 0)
 
+    def test_an_accept_whose_last_step_changed_nothing_squashes_under_its_own_message_or_says_m_went_unused(self):
+        # #1393 (2026-11-25): the squash on main took step 1's subject and `(step 1)` trailer for
+        # the whole task, and a plain accept dropped -m and its provenance line without a word
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Check the answer again.\n")
+        main = lambda: subprocess.run(["git", "-C", str(self.repo), "log", "-1", "--format=%B", "main"],  # noqa
+                                      capture_output=True, text=True, check=True).stdout
+        for name, merge in (("t-pl", ()), ("t-sq", ("--merge-as", "squash"))):  # main unmoved first
+            self.start(name, "ok", "--test", TEST_CMD)
+            wait_phase(name, {"review"})
+            run_wb("next", name, "--spec", str(step2), "-m", "feat: step one")
+            wait_phase(name, {"review"})                       # step 2 rewrote the same answer
+            out = run_wb("accept", name, "-m", "feat: both steps", *merge)
+            if merge:
+                self.assertNotIn("-m unused", out)
+                body = main()
+                self.assertTrue(body.startswith("feat: both steps\n"), body)
+                self.assertIn(f"\nWorkbench-Task: {name}\n", body)
+                self.assertNotIn("(step", body)
+                self.assertIn("Delegated to ", body)
+            else:
+                self.assertRegex(out, r"\(-m unused: nothing changed since [0-9a-f]+\)")
+
+    def test_after_wb_next_the_review_notices_diffstat_is_the_steps_as_wb_diff_says(self):
+        # #1404 (2026-11-25): the stat line was the task's since its base, "2 files changed" beside
+        # a files list and a diff "(all of it)" that held step 2's one file
+        self.start("t-nst", "ok", "--test", TEST_CMD)
+        wait_phase("t-nst", {"review"})
+        step2 = Path(self.tmp.name) / "step2.md"
+        step2.write_text("Now also add lib/helper.py.\n")
+        os.environ["FAKE_SCENARIO"] = "patch"
+        run_wb("next", "t-nst", "--spec", str(step2), "-m", "feat: the answer")
+        st = wait_phase("t-nst", {"review"})
+        report = store.Task("t-nst").round_dir(st["round"]).joinpath("summary.md").read_text()
+        stat = run_wb("diff", "t-nst", "--stat").strip().splitlines()[-1].strip()
+        self.assertEqual(stat, "1 file changed, 1 insertion(+)")
+        self.assertEqual(report.rstrip().splitlines()[-1].strip(), stat)
+
     def test_discarding_a_stuck_later_step_keeps_the_steps_wb_next_committed(self):
         # #494 (the audit of 1.90): steps landed with wb next, a later one stuck, and the
         # discard the notice suggested force-deleted the branch, the approved steps on no ref
@@ -9198,6 +9429,21 @@ class Steering(Base):
         self.assertIn("adopted", run_wb("adopt", "t-orphan", "--session", "sess-2", "--pid", str(b.pid)))
         spec = store.Task("t-orphan").spec
         self.assertEqual((spec["session"], spec["claude_pid"]), ("sess-2", b.pid))  # its own id, new pid
+
+    def test_a_gone_sessions_task_started_in_home_is_adopted_by_a_new_session_there(self):
+        # #1403 (2026-11-25): `wb start --repo ~/proj` from a session in ~, then Claude Code
+        # restarted there: the new session claimed none in ~ by directory, so the task was nobody's
+        gone = subprocess.Popen(["true"]); gone.wait()
+        live = subprocess.Popen(["sleep", "60"]); self.addCleanup(live.kill)
+        home = str(Path.home())
+        t = lambda **spec: types.SimpleNamespace(name="t", spec={"repo": str(self.repo), **spec})  # noqa: E731
+        mine = lambda task: len(cli._scope([task], home, ["sess-c"])[0])  # noqa: E731
+        self.assertEqual(mine(t(cwd=home, session="sess-a", claude_pid=gone.pid)), 1)
+        self.assertEqual(mine(t(cwd=home, session="sess-a", claude_pid=live.pid)), 0)   # still its own
+        self.assertEqual(mine(t(cwd=str(Path(home) / "other"), session="sess-a", claude_pid=gone.pid)), 0)
+        self.assertEqual(mine(t(cwd=home)), 0)                     # by hand in ~: no ~ session's (0.90)
+        orphan = t(session="sess-a", claude_pid=gone.pid)              # no cwd, and no directory asked
+        self.assertEqual(len(cli._scope([orphan], None, ["sess-c"])[0]), 0)
 
     def test_a_claude_code_process_recorded_on_another_machine_is_never_gone_here(self):
         # #922: on a state directory two machines share, machine B read A's live session's pid as
@@ -11696,7 +11942,7 @@ class RealOpenCode(Base):
 
             def log_message(self, *a):
                 pass
-        collector = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Collector)
+        collector = ThreadingHTTPServer(("127.0.0.1", 0), Collector)  # listens at once (#950)
         threading.Thread(target=collector.serve_forever, daemon=True).start()
         self.addCleanup(collector.server_close)
         self.addCleanup(collector.shutdown)
@@ -12219,10 +12465,12 @@ class RealOpenCodeRun(Base):
                         steps)                                     # step_finish: part.tokens
         self.assertIn("ok", [r["text"] for r in rows if r.get("kind") == "text"])
         msgs = transcript.export(st["session"], task=task).get("messages", [])  # its home (#1010)
-        # --agent (#1290) records an agent switch ahead of each round's prompt, to the agent the
-        # session already had too; every reader goes by a message's type, never its place
-        self.assertEqual([(m["type"], m.get("agent")) for m in msgs][:2],
-                         [("agent-switched", context.AGENT), ("user", None)])
+        # --agent (#1290) records an agent switch ahead of each round's prompt on 2.3, to the agent
+        # the session already had too; 2.4.1 records none (the opencode workflow, 2026-11-25):
+        # every reader goes by a message's type, never its place
+        kinds = [(m["type"], m.get("agent")) for m in msgs]
+        self.assertIn(kinds[:2], ([("agent-switched", context.AGENT), ("user", None)],
+                                  [("user", None), ("assistant", context.AGENT)]))
         self.assertEqual({m.get("agent") for m in msgs if m["type"] == "assistant"}, {context.AGENT})
         self.assertTrue(runner.context_state(task)["used"])        # an assistant message's tokens
         self.assertEqual(transcript.find_session(task), st["session"])  # session list, by title
@@ -12325,7 +12573,8 @@ class RealOpenCodeRun(Base):
         self.assertIs(st["opencode_home"], True)
         self.assertTrue((task.dir / "opencode/share/opencode/opencode.db").is_file())
         got = transcript.export(st["session"], task=task)
-        self.assertEqual([m["type"] for m in got.get("messages", [])][:2], ["agent-switched", "user"])
+        self.assertEqual([m["type"] for m in got.get("messages", []) if m["type"] != "agent-switched"][:1],
+                         ["user"])                                 # 2.3's switch first, 2.4.1 none
         self.assertTrue(runner.context_state(task)["used"])
         task.set_status(session=None)
         self.assertEqual(transcript.find_session(task), st["session"])  # by title, there
@@ -13412,6 +13661,100 @@ class Lane(Base):
         self.assertEqual(self.reads_in_lane(task, [conf / "opencode" / "opencode.json", conf / "git" / "config",
                                                    conf / "gh" / "hosts.yml", home / "letters" / "a.txt"]),
                          ["read", "read", "refused", "refused"])
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_a_handed_skill_is_readable_wherever_the_library_is_kept_and_the_rest_isnt(self):
+        # #1375 (2026-11-25): with WB_SKILLS=~/skills, or the default path linked into ~/src,
+        # the lane refused the handed skill, OpenCode dropped it without a word, and wb skill
+        # list advised retiring a skill that worked
+        home = self.fake_home()
+        default = home / ".local" / "share" / "workbench" / "skills"
+        default.parent.mkdir(parents=True)
+        (home / "src" / "wb-skills").mkdir(parents=True)
+        default.symlink_to(home / "src" / "wb-skills")
+        for i, lib in enumerate((home / "skills", default)):
+            for name in ("pydoc", "other"):
+                (lib / name).mkdir(parents=True)
+                (lib / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n")
+            if lib == default:
+                os.environ.pop("WB_SKILLS")
+            else:
+                os.environ["WB_SKILLS"] = str(lib)
+            task = self.bare_task(f"t-skill-{i}", self.repo)
+            task.set_status(skills=["pydoc"])
+            handed = Path(context.layer(task)["skills"][0])
+            self.assertEqual(handed, lib / "pydoc")
+            self.assertEqual(self.reads_in_lane(task, [handed / "SKILL.md", lib / "other" / "SKILL.md"]),
+                             ["read", "refused"], lib)
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_git_config_included_from_outside_the_dotfiles_is_read_in_the_lane_but_a_secret_isnt(self):
+        # #1382 (2026-11-25): the user's [includeIf "gitdir:~/work/"] path = ~/work/.gitconfig,
+        # a repo's include.path beside its checkout, or GIT_CONFIG_GLOBAL in ~/dotfiles was
+        # unreadable, and every git call in the lane died "bad config line", GPU and API
+        home = self.fake_home()
+        repo = home / "work" / "proj"
+        repo.mkdir(parents=True)
+        g = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True,  # noqa: E731
+                                      capture_output=True)
+        g("init", "-q", "-b", "main")
+        g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init")
+        (home / "work" / ".gitconfig").write_text("[user]\n\temail = me@work\n")
+        (home / "work" / "team.gitconfig").write_text("[alias]\n\tlg = log\n")
+        (home / ".gitconfig").write_text('[includeIf "gitdir:~/work/"]\n\tpath = ~/work/.gitconfig\n')
+        g("config", "include.path", str(home / "work" / "team.gitconfig"))
+        script = ("import subprocess, sys\nfor k in ('user.email', 'alias.lg'):\n"
+                  "    r = subprocess.run(['git', '-C', sys.argv[1], 'config', k], capture_output=True, text=True)\n"
+                  "    print(r.stdout.strip() or r.stderr.replace(chr(10), ' '))\n")
+        for via in ("gpu", "api"):
+            task = store.Task(f"t-inc-{via}")
+            task.dir.mkdir(parents=True)
+            (task.dir / "task.json").write_text(json.dumps({"name": task.name, "repo": str(repo), "via": via}))
+            g("worktree", "add", "-q", "-b", f"delegate/{task.name}", str(task.worktree))
+            out = subprocess.run(lane.wrap(context.writable(task), [sys.executable, "-c", script, str(task.worktree)],
+                                           context.readable(task)), capture_output=True, text=True, timeout=20)
+            self.assertEqual(out.stdout.split("\n")[:2], ["me@work", "log"], (via, out.stderr))
+        (home / "dotfiles").mkdir()
+        (home / "dotfiles" / "gitconfig").write_text("[user]\n\temail = me@dotfiles\n")
+        os.environ["GIT_CONFIG_GLOBAL"] = str(home / "dotfiles" / "gitconfig")
+        out = subprocess.run(lane.wrap(context.writable(task), [sys.executable, "-c", script, str(task.worktree)],
+                                       context.readable(task)), capture_output=True, text=True, timeout=20)
+        self.assertEqual(out.stdout.split("\n")[:2], ["me@dotfiles", "log"], out.stderr)
+        (home / ".ssh").mkdir()                                        # a secret stays hidden
+        (home / ".ssh" / "gitconfig").write_text("[user]\n\tname = x\n")
+        g("config", "--add", "include.path", str(home / ".ssh" / "gitconfig"))
+        self.assertNotIn(str(home / ".ssh" / "gitconfig"), context.read_repo_dirs(task))
+        self.assertFalse([p for p in context.readable(task) if p.startswith(str(home / ".ssh"))])
+
+    @unittest.skipUnless(lane.abi(), "needs Landlock")
+    @home_outside_the_lane
+    def test_a_repo_that_borrows_its_objects_has_git_work_in_the_lane(self):
+        # #1383 (2026-11-25): a `git clone --shared` of a mirror, or a repo whose objects/ is a
+        # link out of its git dir, had every agent git call fail "unable to open loose object"
+        home = self.fake_home()
+        mirror = home / "mirror"
+        run = lambda *a: subprocess.run(["git", *a], check=True, capture_output=True)  # noqa: E731
+        run("init", "-q", "-b", "main", str(mirror))
+        run("-C", str(mirror), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q",
+            "--allow-empty", "-m", "one")
+        run("clone", "-q", "--shared", str(mirror), str(home / "work" / "shared"))
+        run("clone", "-q", str(mirror), str(home / "work" / "linked"))
+        objects = home / "work" / "linked" / ".git" / "objects"
+        shutil.move(objects, home / "objstore")
+        objects.symlink_to(home / "objstore")
+        for name in ("shared", "linked"):
+            repo = home / "work" / name
+            for via in ("gpu", "api"):
+                task = store.Task(f"t-alt-{name}-{via}")
+                task.dir.mkdir(parents=True)
+                (task.dir / "task.json").write_text(json.dumps({"name": task.name, "repo": str(repo), "via": via}))
+                run("-C", str(repo), "worktree", "add", "-q", "-b", f"delegate/{task.name}", str(task.worktree))
+                out = subprocess.run(lane.wrap(context.writable(task),
+                                               ["git", "-C", str(task.worktree), "log", "-1", "--format=%s"],
+                                               context.readable(task)), capture_output=True, text=True, timeout=20)
+                self.assertEqual((out.returncode, out.stdout.strip()), (0, "one"), (name, via, out.stderr))
 
     @home_outside_the_lane
     def test_toolchain_bins_user_site_and_a_repo_under_gopath_stay_out_of_the_lane(self):
@@ -15653,8 +15996,8 @@ class CheckoutVenv(Base):
         bins = self.repo / "node_modules" / ".bin"
         os.environ["PATH"] = f"{os.environ['PATH']}{os.pathsep}{bins}"  # a direnv PATH_add
         out = self.start("t-novenv", "ok", "--test", self.TEST, "--auto-fix", "0", "--no-base-check")
-        self.assertIn(f"note: the agent leaves out your active venv ({user}): --setup 'uv sync' (or the "
-                      "project's install) gives the worktree its own\n", out)
+        self.assertIn(f"note: the agent leaves out your active venv ({user}): --setup 'python3 -m venv .venv "
+                      "&& .venv/bin/pip install -e .' (or the project's install) gives the worktree its own\n", out)
         st = wait_phase("t-novenv", {"review"})
         task = store.Task("t-novenv")
         said = task.round_dir(1).joinpath("tests.txt").read_text()
@@ -15673,6 +16016,21 @@ class CheckoutVenv(Base):
         self.assertEqual(Permission.verdict(rules, "pipenv install"), "allow")
         with mock.patch.object(lane, "kind", return_value=None):
             self.assertEqual(Permission.verdict(context.shell_rules(task), "pipenv install"), "allow")
+
+    def test_the_venv_note_advises_uv_sync_locked_only_where_the_base_commits_a_uv_lock(self):
+        # #1379 (2026-11-25): the note said `uv sync`, which writes an uncommitted uv.lock and
+        # fails the task before any round (#1347), and `uv sync --locked` fails with no lockfile
+        task = store.Task("t-uvnote")
+        task.dir.mkdir(parents=True)
+        (task.dir / "task.json").write_text(json.dumps({"name": "t-uvnote", "repo": str(self.repo),
+                                                        "base": "HEAD", "subdir": "pkg"}))
+        self.assertEqual(context.venv_setup(task), "python3 -m venv .venv && .venv/bin/pip install -e .")
+        (self.repo / "pkg").mkdir()
+        (self.repo / "pkg" / "uv.lock").write_text("version = 1\n")
+        self.assertEqual(context.venv_setup(task), context.VENV_SETUP)     # not committed yet
+        subprocess.run(["git", "-C", str(self.repo), "add", "pkg/uv.lock"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "lock"], check=True)
+        self.assertEqual(context.venv_setup(task), "uv sync --locked")
 
     def test_a_venv_the_missing_directories_note_names_gets_no_note_of_its_own(self):
         # #1322: the checkout's ignored .venv drew both notes, each with the same advice
@@ -23041,6 +23399,19 @@ class Stats(Base):
         self.assertIn("strata/strata", out)
         self.assertNotIn("more model", out)
 
+    def test_a_history_on_models_no_longer_configured_is_never_called_no_finished_tasks(self):
+        # #1400 (2026-11-25): with every model that ran gone from OpenCode's config, wb stats said
+        # "5 task(s), 5 landed" and then "no finished tasks yet"
+        now = time.time()
+        for _ in range(5):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": "gone/model", "size": "trivial", "outcome": "accepted", "ran": True, "ts": now})
+        out = run_wb("stats")
+        self.assertIn("5 task(s), 5 landed", out)
+        self.assertNotIn("no finished tasks yet", out)
+        self.assertIn("gone/model", out)
+        self.assertNotIn("more model", out)
+
     def test_thirty_recent_models_give_three_lines_and_the_rest_counted_as_more(self):
         # the owner, 2026-11-21: a machine with a ton of models drew a line each, and the Stats
         # tab's menu sat a long scroll below a new user's first look
@@ -23609,6 +23980,21 @@ class Progress(Base):
         self.assertIn("on: a task past 30 min", run_wb("progress", "on"))   # off and on again
         self.assertIn("past its typical length", run_wb("progress", "on", "--after", "0"))
         self.assertNotIn("after", progress.settings())
+
+    def test_an_after_that_is_negative_or_not_finite_is_refused_and_a_stored_one_is_ignored(self):
+        # #1401 (2026-11-25): -5 and inf said "on" and no check ever came; NaN crashed every round
+        run_wb("progress", "on", "--after", "30")
+        before = progress.path().read_text()
+        for bad in ("-5", "nan", "inf"):
+            err = io.StringIO()
+            with self.assertRaises(SystemExit), mock.patch("sys.stderr", err):
+                run_wb("progress", "on", "--after", bad)
+            self.assertIn("a positive number, or 0 to clear it", err.getvalue())
+            self.assertEqual(progress.path().read_text(), before)
+        progress.path().write_text('{"on": true, "after": -5}')   # written by hand
+        self.assertEqual(progress.typical({"size": "trivial"}),
+                         (float(progress.DEFAULT_MIN["trivial"]), "default"))
+        self.assertIn("past its typical length", run_wb("progress"))
 
     def test_a_check_recommends_and_a_steer_that_answers_it_is_learned_from(self):
         run_wb("coding", "only")
@@ -26167,6 +26553,37 @@ class Projects(Base):
         run_wb("start", "t-ok", "--spec", str(self.spec), "--repo", str(self.repo), "--no-claude-md")
         self.assertTrue(store.Task("t-ok").exists)
 
+    def test_a_repo_whose_instructions_are_a_committed_agents_md_starts_and_its_agent_gets_it(self):
+        # #1394 (2026-11-25): OpenCode's and Codex's convention was refused as an agent that
+        # "would start blind", though the layer hands it AGENTS.md
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        g("mv", "CLAUDE.md", "AGENTS.md")
+        g("commit", "-qm", "the OpenCode way")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = run_wb("start", "t-ag", "--spec", str(self.spec), "--repo", str(self.repo), "--model", "mimo")
+        self.assertIn("note: AGENTS.md and no CLAUDE.md: the agent gets it; for Claude Code, wb init", out)
+        wait_phase("t-ag", {"review"})
+        task = store.Task("t-ag")
+        self.assertIn(task.worktree / "AGENTS.md", context.instruction_files(task)[0])
+
+    def test_a_package_with_only_its_own_agents_md_is_the_tasks_package(self):
+        # #1394 (2026-11-25): only a CLAUDE.md made a package, so from packages/app with only an
+        # AGENTS.md the agent, the setup and the tests ran at the root
+        g = lambda *a: subprocess.run(["git", "-C", str(self.repo), *a], check=True)  # noqa
+        app = self.repo / "packages" / "app"
+        app.mkdir(parents=True)
+        (app / "AGENTS.md").write_text("# app\nThe app package.\n")
+        g("add", "-A")
+        g("commit", "-qm", "a package with its AGENTS.md")
+        os.environ["FAKE_SCENARIO"] = "ok"
+        out = run_wb("start", "t-pag", "--spec", str(self.spec), "--repo", str(app), "--model", "mimo")
+        self.assertIn("package: packages/app", out)
+        self.assertIn("note: packages/app has AGENTS.md and no CLAUDE.md: the agent gets it", out)
+        wait_phase("t-pag", {"review"})
+        task = store.Task("t-pag")
+        self.assertEqual(task.spec["subdir"], "packages/app")
+        self.assertIn(task.worktree / "packages" / "app" / "AGENTS.md", context.instruction_files(task)[0])
+
     def refused(self, *argv) -> str:
         err = io.StringIO()
         with self.assertRaises(SystemExit), redirect_stderr(err):
@@ -27765,6 +28182,19 @@ class LogoutStops(Base):
         self.assertEqual(len(said), 1)
         self.assertIn("loginctl enable-linger", said[0])
 
+    def test_what_a_service_starts_gets_a_scope_of_its_own_so_a_restart_of_the_unit_spares_it(self):
+        # #1407 (2026-11-25): the web app's Measure now ran wb optimize in wb-chat.service's
+        # cgroup, and wb setup's restart of the unit killed the run; a terminal's survived
+        from workbench import cli
+        scope = ("systemd-run", "--user", "--scope", "--quiet", "--collect")
+        cgroup = Path(self.tmp.name) / "cgroup"
+        for where, want in (("user@1000.service/app.slice/wb-chat.service", scope),
+                            ("user@1000.service/app.slice/app-konsole.scope/tab(1).scope", ())):
+            cgroup.write_text(f"0::/user.slice/user-1000.slice/{where}\n")
+            with mock.patch.object(cli, "SELF_CGROUP", cgroup), \
+                    self.fake_loginctl("yes", "no", scope="ok"):  # logind kills no session
+                self.assertEqual(cli.runner_scope(), want, where)
+
     def test_kill_user_processes_is_named_as_killing_running_tasks_without_a_scope_for_them(self):
         from workbench import cli
         with self.fake_loginctl("yes", "yes", scope="fails"):
@@ -27829,8 +28259,9 @@ class LogoutStops(Base):
         self.assertIn("wb bench and wb optimize runs and a chat wb chat on started", said[0])
 
     def test_doctor_names_the_chats_linger_only_with_the_chat_on(self):
-        # most desktops linger off, and the chat is off until turned on: no warning for that
+        # most desktops linger off: no warning for that while the user has turned the chat off
         from workbench import chat
+        chat.set_on(False)                                    # on by default (#1281)
         def doctor():
             buf = io.StringIO()
             with redirect_stdout(buf), self.fake_loginctl("no", "no"):
@@ -28066,8 +28497,18 @@ class WebChat(Base):
     def tearDown(self):
         self.srv.shutdown()
         self.srv.server_close()
-        self.srv.RequestHandlerClass.hub.close()  # or it outlives the test (#134)
+        hub = self.srv.RequestHandlerClass.hub
+        hub.close()  # or it outlives the test (#134)
+        # and its streams end before the next test's environment: one that outlived its test
+        # made a snapshot in the next one's WB_HOME, and the push key it cached there failed
+        # test_an_empty_or_broken_vapid_key_file_is_replaced… (nightly run 45577067512); woken
+        # between tests, with WB_CHAT_TOKEN unset, it read the user's own ~/.config/workbench
+        deadline = time.monotonic() + 5
+        while hub.open and time.monotonic() < deadline:
+            time.sleep(0.01)
+        left = len(hub.open)
         super().tearDown()
+        self.assertEqual(left, 0, "a stream outlived its test's closed hub")
 
     def test_the_server_binds_without_looking_its_host_name_up(self):
         # #236: HTTPServer's bind asks socket.getfqdn, which stalled on macOS past wb chat on's wait
@@ -28123,10 +28564,11 @@ class WebChat(Base):
                                     "machine": store.machine()})
         self.assertIsNone(self.chat.listener())                       # this machine's: asked here
 
-    def test_the_web_chat_is_off_until_turned_on_and_stays_as_left(self):
-        # The user, 2026-11-19: off by default, a switch in the pane, remembered across /workbench runs.
-        # On starts a server when none answers; off stops only one wb started, and nobody listens.
-        self.assertFalse(self.chat.is_on())
+    def test_the_web_chat_is_on_until_turned_off_and_stays_as_left(self):
+        # The owner, 2026-11-24 (#1281): on by default, reversing 2026-11-19's off until turned on;
+        # the user's off is remembered across /workbench runs. On starts a server when none
+        # answers; off stops only one wb started, and nobody listens.
+        self.assertTrue(self.chat.is_on())                             # no switch.json: on
         out = run_wb("chat", "on", "--port", str(self.port))           # one runs already: kept
         self.assertIn(f"web chat on: http://localhost:{self.port}/#token=", out)
         self.assertTrue(self.chat.is_on())
@@ -28156,6 +28598,23 @@ class WebChat(Base):
         finally:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
+
+    def test_a_switch_left_off_by_an_older_wbs_failed_chat_on_is_read_as_never_set(self):
+        # #1405 (2026-11-25): 1.91.x and 2.0 before #1281 wrote {"on": false} on a failed `wb chat
+        # on` (a port taken), and 2.0 read it as the user's off, so the web app never came up
+        chat = self.chat
+        switch, ran = chat.chat_dir() / "switch.json", chat.chat_dir() / "port.json"
+        self.assertFalse(ran.exists())                              # the test's own state
+        store.write_json(switch, {"on": False})                     # no server of ours ever ran
+        self.assertTrue(chat.is_on())
+        self.assertFalse(switch.exists())                           # rewritten once: as never set
+        store.write_json(ran, {"port": self.port})
+        self.assertTrue(chat.is_on())                               # a server since: still on
+        store.write_json(switch, {"on": False})                     # one ran: the user's off
+        self.assertFalse(chat.is_on())
+        ran.unlink()
+        chat.set_on(False)                                          # 2.0's own off, marked
+        self.assertFalse(chat.is_on())
 
     def test_without_inotify_the_hub_wakes_the_streams_only_for_a_change_or_the_listener_ending(self):
         # #841: the polling branch bumped every second, so each open stream rebuilt its snapshot
@@ -28483,7 +28942,7 @@ class WebChat(Base):
         c.close()
 
     def test_a_chat_on_localhost_answers_behind_tailscale_serve_under_the_machines_tailnet_name(self):
-        # #448 (the 2026-11-20 audit): `tailscale serve --bg 1337`, the https the gear advises, passes
+        # #448 (the 2026-11-20 audit): `tailscale serve --bg 1337`, the https Settings advises, passes
         # the tailnet name through as the Host, and the default localhost chat answered it 403
         chat, tok = self.chat, self.chat.token()
         me = {"ip": "100.64.0.9", "names": {"box", "box.tail1234.ts.net"}, "dns": "box.tail1234.ts.net"}
@@ -28591,7 +29050,10 @@ class WebChat(Base):
             self.assertEqual(self.call("/api/state")[0], 401)         # an empty header: refused
 
     def test_static_files_and_nothing_else(self):
+        # the views' own files (#1284): built apart, served by their suffix like the rest
         for path, kind in (("/", "text/html"), ("/app.js", "text/javascript"), ("/app.css", "text/css"),
+                           ("/stats.js", "text/javascript"), ("/stats.css", "text/css"),
+                           ("/settings.js", "text/javascript"), ("/settings.css", "text/css"),
                            ("/icon.svg", "image/svg+xml"), ("/manifest.webmanifest", "application/manifest+json")):
             import http.client
             c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
@@ -28601,82 +29063,56 @@ class WebChat(Base):
         for path in ("/../chat.py", "/chat.py", "/nope.js", "/%2e%2e/store.py"):
             self.assertEqual(self.call(path)[0], 404, path)
 
-    def test_a_permission_prompt_is_answered_once_from_the_page_with_the_token(self):
-        # the mod puts Claude Code's prompts here while the user is away (the user, 2026-11-18)
-        chat, tok = self.chat, self.chat.token()
-        a = chat.ask("Bash", "git push origin main")
-        st = self.call("/api/state", token=tok)[1]
-        self.assertEqual([(x["id"], x["tool"], x["answer"]) for x in st["asks"]], [(a["id"], "Bash", None)])
-        self.assertEqual(self.call("/api/answer", {"id": a["id"], "answer": "allow"})[0], 401)
-        self.assertEqual(self.call("/api/answer", {"id": a["id"], "answer": "allow"}, token=tok,
-                                   host="evil.example")[0], 403)
-        self.assertEqual(self.call("/api/answer", {"id": a["id"], "answer": "maybe"}, token=tok)[0], 400)
-        self.assertEqual(self.call("/api/answer", {"id": a["id"], "answer": "expired"}, token=tok)[0], 400)
-        self.assertEqual(self.call("/api/answer", {"id": "ask-nope", "answer": "allow"}, token=tok)[0], 404)
-        code, r = self.call("/api/answer", {"id": a["id"], "answer": "deny"}, token=tok)
-        self.assertEqual((code, r["ask"]["answer"], r["ask"]["by"]), (200, "deny", "web"))
-        self.assertEqual(r["state"]["asks"][0]["answer"], "deny")
-        # the first answer stands: a late tap, or the mod's expiry, changes nothing
-        self.assertEqual(self.call("/api/answer", {"id": a["id"], "answer": "allow"}, token=tok)[1]["ask"]["answer"], "deny")
-        self.assertEqual(chat.answer(a["id"], "expired", "timeout")["answer"], "deny")
-        self.assertEqual(chat.wait_answer(a["id"], 0), "deny")
-
-    def test_a_plan_and_a_question_are_answered_from_the_page(self):
-        chat, tok = self.chat, self.chat.token()
-        plan = chat.ask("ExitPlanMode", "", "plan", {"plan": "1. Read\n2. Write"})
-        code, r = self.call("/api/answer", {"id": plan["id"], "answer": "deny", "note": "split step 2"}, token=tok)
-        self.assertEqual((code, r["ask"]["answer"], r["ask"]["note"]), (200, "deny", "split step 2"))
-        qs = [{"question": "Which DB?", "header": "DB", "multiSelect": False,
-               "options": [{"label": "SQLite", "description": ""}, {"label": "Postgres", "description": ""}]}]
-        q = chat.ask("AskUserQuestion", "", "question", {"questions": qs})
-        for bad in ({"id": q["id"], "answer": "allow"},                               # no answers
-                    {"id": q["id"], "answer": "allow", "answers": {"Other?": "x"}},     # not its question
-                    {"id": q["id"], "answer": "allow", "answers": {"Which DB?": ""}},   # empty
-                    {"id": q["id"], "answer": "allow", "answers": {"Which DB?": 7}}):
-            self.assertEqual(self.call("/api/answer", bad, token=tok)[0], 400, bad)
-        perm = chat.ask("Bash", "ls")
-        self.assertEqual(self.call("/api/answer", {"id": perm["id"], "answer": "allow",
-                                                   "answers": {"Which DB?": "SQLite"}}, token=tok)[0], 400)
-        code, r = self.call("/api/answer", {"id": q["id"], "answer": "allow",
-                                            "answers": {"Which DB?": "SQLite"}}, token=tok)
-        self.assertEqual((code, r["ask"]["answers"]), (200, {"Which DB?": "SQLite"}))
-        got = json.loads(run_wb("chat", "wait", q["id"], "--timeout", "0", "--json"))
-        self.assertEqual((got["kind"], got["answer"], got["answers"]), ("question", "allow", {"Which DB?": "SQLite"}))
-
-    def test_go_ahead_while_away_allows_permissions_at_once_and_still_asks_plans(self):
-        chat, tok = self.chat, self.chat.token()
-        self.assertEqual(self.call("/api/state", token=tok)[1]["prefs"], {"away": "ask"})
-        self.assertEqual(self.call("/api/prefs", {"away": "always"}, token=tok)[0], 400)
-        self.assertEqual(self.call("/api/prefs", {"away": "allow", "x": 1}, token=tok)[0], 400)
-        self.assertEqual(self.call("/api/prefs", {"away": "allow"})[0], 401)
-        self.assertEqual(self.call("/api/prefs", {"away": "allow"}, token=tok)[1]["state"]["prefs"], {"away": "allow"})
-        self.assertEqual(run_wb("chat", "ask", "--tool", "Bash", "--text", "make").split()[1], "allow")
-        self.assertEqual(chat.asks()[-1]["by"], "setting")           # listed, so the user sees what ran
-        self.assertEqual(run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan",
-                                "--detail", '{"plan": "x"}').split()[1], "open")
-
     def test_using_the_page_marks_the_user_away_as_a_web_message_does_959(self):
         # #959: the owner typed in the terminal, then picked up the phone with the chat open and
-        # "Let Claude go ahead" set; only a web message made them away, so the prompt stayed in
+        # its away setting on; only a web message made them away, so the prompt stayed in
         # the terminal, neither shown on the phone nor allowed
         chat, tok = self.chat, self.chat.token()
         d = chat.chat_dir()
-        self.assertEqual(self.call("/api/active", {})[0], 401)
-        self.assertEqual(self.call("/api/active", {"x": 1}, token=tok)[0], 400)
-        self.assertEqual(self.call("/api/active", {}, token=tok), (200, {}))
-        self.assertAlmostEqual(store.read_json(d / "page.json")["at"], store.now(), delta=5)
-        self.assertFalse((d / "away.json").exists())       # the chat off: no session sends it a dialog
-        chat.set_on(True)
-        store.write_json(d / "away.json", {"at": 0})        # the user typed in the terminal (the mod's back)
-        before = store.now()
-        self.assertEqual(self.call("/api/active", {}, token=tok)[0], 200)
-        away = store.read_json(d / "away.json")
-        self.assertEqual(away["by"], "page")
-        self.assertGreaterEqual(away["at"], before)          # newer than the terminal's: away
+        me = {"ip": "100.64.0.9", "names": {"box", "box.tail1234.ts.net"}, "dns": "box.tail1234.ts.net"}
+        with mock.patch.object(chat, "_tailnet", {"at": float("-inf"), "name": ""}), \
+                mock.patch.object(chat, "tailscale", return_value=me):
+            phone = "box.tail1234.ts.net"  # a phone through `tailscale serve`: from loopback, not localhost (#1374)
+            self.assertEqual(self.call("/api/active", {}, host=phone)[0], 401)
+            self.assertEqual(self.call("/api/active", {"x": 1}, token=tok, host=phone)[0], 400)
+            self.assertEqual(self.call("/api/active", {}, token=tok, host=phone), (200, {}))
+            self.assertAlmostEqual(store.read_json(d / "page.json")["at"], store.now(), delta=5)
+            self.assertTrue((d / "away.json").exists())        # on by default (#1281): away
+            (d / "away.json").unlink()
+            chat.set_on(False)
+            self.assertEqual(self.call("/api/active", {}, token=tok, host=phone), (200, {}))
+            self.assertFalse((d / "away.json").exists())       # the chat off: no session sends it a dialog
+            chat.set_on(True)
+            store.write_json(d / "away.json", {"at": 0})        # the user typed in the terminal (the mod's back)
+            before = store.now()
+            self.assertEqual(self.call("/api/active", {}, token=tok, host=phone)[0], 200)
+            away = store.read_json(d / "away.json")
+            self.assertEqual(away["by"], "page")
+            self.assertGreaterEqual(away["at"], before)          # newer than the terminal's: away
 
-    def test_a_dialog_at_the_terminal_is_a_notice_on_the_phone_only_for_a_user_of_the_chat_959(self):
+    def test_the_page_used_on_this_machine_by_its_localhost_link_never_marks_the_user_away_1374(self):
+        # #1374: the web app is the desk's admin too (Settings, Stats, from the modeline's
+        # localhost link), and using it there made the user at the terminal away, their next plan
+        # or question refused into the chat. Every request here comes from loopback, as a phone's
+        # through `tailscale serve` does: the Host tells them apart, never the peer
+        chat, tok = self.chat, self.chat.token()
+        d = chat.chat_dir()
+        store.write_json(d / "away.json", {"at": 0})            # the user typed in the terminal
+        for host in ("localhost", "127.0.0.1", "[::1]"):
+            before = store.now()
+            self.assertEqual(self.call("/api/active", {}, token=tok, host=host), (200, {}), host)
+            self.assertGreaterEqual(store.read_json(d / "page.json")["at"], before, host)  # a chat user still
+            self.assertEqual(store.read_json(d / "away.json"), {"at": 0}, host)             # not away
+        me = {"ip": "100.64.0.9", "names": {"box", "box.tail1234.ts.net"}, "dns": "box.tail1234.ts.net"}
+        with mock.patch.object(chat, "_tailnet", {"at": float("-inf"), "name": ""}), \
+                mock.patch.object(chat, "tailscale", return_value=me):
+            self.assertEqual(self.call("/api/active", {}, token=tok, host="box.tail1234.ts.net")[0], 200)
+        self.assertEqual(store.read_json(d / "away.json")["by"], "page")  # the phone's, from loopback too: away
+
+    def test_a_dialog_at_the_terminal_is_one_waiting_line_on_the_phone_only_for_a_user_of_the_chat_959_1350(self):
         # #959: at the terminal the prompt stays there, and the phone is told one waits, as a
-        # notice with no buttons (only the terminal can answer it), pushed as Claude's messages
+        # notice with no buttons (only the terminal can answer it), pushed as Claude's messages;
+        # #1350: one line for every kind, a permission's naming the way out (permissions granted)
         chat, tok = self.chat, self.chat.token()
         from workbench import webpush as wp
         never = run_wb("chat", "notice", "--tool=Bash", "--text=rm -rf runs/*")
@@ -28687,13 +29123,17 @@ class WebChat(Base):
         self.assertEqual(self.call("/api/active", {}, token=tok)[0], 200)   # a page in use today
         nid = run_wb("chat", "notice", "--tool=Bash", "--text=rm -rf runs/*").strip()
         row = chat.thread()[-1]
-        self.assertEqual((row["id"], row["from"], row["text"], row["tool"], row["what"]),
-                         (nid, "notice", "Claude is waiting on a permission in the terminal", "Bash", "rm -rf runs/*"))
-        self.assertEqual(chat.asks(), [])                     # not a card to answer
-        self.assertIn("notice: Claude is waiting on a permission in the terminal", run_wb("chat", "log"))
+        line = "Claude is waiting for you in the terminal. Run it with permissions granted to work from the chat."
+        self.assertEqual((row["id"], row["from"], row["text"], row["tool"], row["kind"], row["what"]),
+                         (nid, "notice", line, "Bash", "permission", "rm -rf runs/*"))
+        self.assertNotIn("asks", chat.snapshot())             # no card to answer (#1350)
+        self.assertIn("notice: " + line, run_wb("chat", "log"))
         self.assertEqual(chat.latest()["messages"][-1]["id"], nid)  # what the push shows
-        plan = chat.notice("ExitPlanMode", "", "plan")
-        self.assertEqual((plan["text"], "what" in plan), ("Claude is waiting on a plan in the terminal", False))
+        for kind, tool in (("plan", "ExitPlanMode"), ("question", "AskUserQuestion"), ("elicitation", "mcp:tracker")):
+            other = chat.notice(tool, "", kind)
+            self.assertEqual((other["text"], other["kind"]), ("Claude is waiting for you in the terminal.", kind))
+        self.assertRegex(run_wb("chat", "notice", "--tool=mcp:tracker", "--kind=elicitation", "--text=Sign in").strip(),
+                         r"^\d+-[0-9a-f]+$")
         with self.assertRaises(ValueError):
             chat.notice("Bash", "ls", "nonsense")
         # push on and no page in a day: still told, and pushed once, as news
@@ -28710,10 +29150,10 @@ class WebChat(Base):
         # the mod's owed-reply check reads only Claude's own rows: a notice is no reply (#767)
         self.assertNotIn(pushed["id"], [m["id"] for m in chat.thread() if m["from"] == "claude"])
 
-    def test_a_notice_whose_dialog_was_answered_in_the_terminal_is_never_pushed_and_says_answered_959(self):
+    def test_a_notice_whose_dialog_settled_in_the_terminal_is_never_pushed_and_its_line_clears_959_1350(self):
         # the #959 review: nothing settled a notice when its dialog was answered, so a prompt
         # approved at the terminal in two seconds still buzzed the phone ten seconds later,
-        # saying Claude waited, and the thread said so for good
+        # saying Claude waited, and the thread said so for good; #1350: the line clears
         chat = self.chat
         from workbench import webpush as wp
         wp.subscribe("https://fcm.googleapis.com/fcm/send/abc")
@@ -28725,8 +29165,7 @@ class WebChat(Base):
         pusher = chat.Pusher(hub, send=lambda eps: (sent.append(eps), {e: 201 for e in eps})[1])
         self.assertEqual(pusher.tick(row["ts"] + chat.PUSH_DELAY + 1), [])  # due, but settled: no push
         self.assertEqual(sent, [])
-        got = chat.thread()[-1]
-        self.assertEqual((got["id"], bool(got["answered"])), (row["id"], True))  # the page says answered
+        self.assertNotIn(row["id"], [m["id"] for m in chat.thread()])         # the page's line clears
         self.assertEqual(chat.latest()["messages"], [])                         # and no push shows it
         reply = chat.send("done", "claude")
         self.assertEqual(chat.latest()["messages"][-1]["id"], reply["id"])
@@ -28869,8 +29308,9 @@ class WebChat(Base):
         self.assertEqual(pusher.tick(missed["ts"] + chat.PUSH_DELAY + 1), [missed["id"]])
         self.assertEqual(pusher.tick(missed["ts"] + chat.PUSH_DELAY + 2), [])   # once
         self.assertEqual(len(sent), 1)
-        ask = chat.ask("Bash", "make")
-        self.assertEqual(pusher.tick(ask["ts"] + chat.PUSH_DELAY + 1), [ask["id"]])
+        store.write_json(chat.chat_dir() / "page.json", {"at": store.now()})  # a user of the chat
+        line = chat.notice("Bash", "make")                             # Claude waits in the terminal
+        self.assertEqual(pusher.tick(line["ts"] + chat.PUSH_DELAY + 1), [line["id"]])
         late = chat.send("old news", "claude")
         self.assertEqual(pusher.tick(late["ts"] + chat.PUSH_WINDOW + 1), [])  # never a backlog
 
@@ -29050,84 +29490,9 @@ class WebChat(Base):
         self.assertLess(sum(read), 1000)                                     # then only what was added
         self.assertIn("m59999", chat._seen())
 
-    def test_a_plan_card_shows_its_own_sessions_plan_and_never_another_projects(self):
-        # #253 (the audit of 1.2): with no plan text the card took the newest file in the plans
-        # directory, so with two projects planning, A's card showed B's plan for revisions
-        home = Path(self.tmp.name) / "claude"
-        plans, projects = home / "plans", home / "projects"
-        plans.mkdir(parents=True)
-        (plans / "alpha-plan.md").write_text("# A's plan")
-        (plans / "beta-plan.md").write_text("# B's plan")                      # the newest
-        os.utime(plans / "alpha-plan.md", (time.time() - 60, time.time() - 60))
-        (projects / "-a").mkdir(parents=True)
-        (projects / "-a" / "sess-a.jsonl").write_text(json.dumps({"message": {"content": [
-            {"type": "text", "text": f"A plan file exists from plan mode at: {plans}/alpha-plan.md"}]}}) + "\n")
-        (projects / "-a" / "sess-empty.jsonl").write_text("")
-
-        def card(*args):
-            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(home)}):
-                ask_id, state = run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan", *args).split()
-            return self.chat.find_ask(ask_id)["detail"], state
-
-        self.assertEqual(card("--session", "sess-a"), ({"plan": "# A's plan"}, "open"))    # its transcript
-        self.assertEqual(card("--detail", json.dumps({"plan_file": str(plans / "alpha-plan.md")})),
-                         ({"plan": "# A's plan"}, "open"))                                  # the tool's input
-        outside = Path(self.tmp.name) / "secret.md"
-        outside.write_text("not a plan")
-        for args in ((), ("--session", "sess-gone"), ("--session", "sess-empty"),
-                     ("--detail", json.dumps({"plan_file": str(outside)}))):
-            detail, state = card(*args, "--repo", "/home/u/alpha")
-            self.assertEqual((detail, state), ({"plan": "", "project": "alpha"}, "expired"), args)
-        self.assertEqual(self.chat.asks()[-1]["by"], "terminal")              # answered there
-
-    def test_a_long_or_cjk_plan_reaches_the_page_cut_to_fit_instead_of_refused(self):
-        # #535 (the 2026-11-20 audit, reproduced): the size was json.dumps' ASCII escapes, six bytes
-        # a CJK character, so a 7,700-character Japanese plan was refused, as was an ASCII plan
-        # file of 39,900 characters once its newlines were escaped
+    def test_unread_messages_outlast_the_display_window(self):
+        # #265 (the audit of 1.2): `wb chat pending` lost an unread message behind 200 newer replies
         chat = self.chat
-        stored = lambda a: len(json.dumps(chat.find_ask(a)["detail"], ensure_ascii=False).encode())
-        ja = "計画の手順。\n" * 1100                                          # 7,700 characters
-        a, state = run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan",
-                          "--detail", json.dumps({"plan": ja})).split()
-        self.assertEqual((chat.find_ask(a)["detail"]["plan"], state), (ja, "open"))  # whole
-        huge = "大きな計画。\n" * 10_000
-        a = run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan",
-                   "--detail", json.dumps({"plan": huge})).split()[0]
-        plan = chat.find_ask(a)["detail"]["plan"]
-        self.assertTrue(plan.endswith(chat.CUT_NOTE) and huge.startswith(plan[:-len(chat.CUT_NOTE)]))
-        self.assertLessEqual(stored(a), chat.DETAIL_MAX)
-        self.assertGreater(stored(a), chat.DETAIL_MAX - 100)                  # cut no more than it must
-        home = Path(self.tmp.name) / "claude"                                  # a plan file, newlines and all
-        (home / "plans").mkdir(parents=True)
-        (home / "plans" / "p.md").write_text(("step\n" * 8000)[:39_900])
-        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(home)}):
-            a = run_wb("chat", "ask", "--tool", "ExitPlanMode", "--kind", "plan", "--detail",
-                       json.dumps({"plan_file": str(home / "plans" / "p.md")})).split()[0]
-        self.assertTrue(chat.find_ask(a)["detail"]["plan"].endswith(chat.CUT_NOTE))
-        self.assertLessEqual(stored(a), chat.DETAIL_MAX)
-        opts = [{"label": f"opt {i}", "description": "d", "preview": "プレビュー" * 3000} for i in range(4)]
-        q = chat.ask("AskUserQuestion", "", "question", {"questions": [{"question": "Which?", "options": opts}]})
-        got = q["detail"]["questions"][0]["options"]
-        self.assertEqual([o["label"] for o in got], [o["label"] for o in opts])  # the choices whole
-        self.assertTrue(all(o["preview"].endswith(chat.CUT_NOTE) for o in got))
-        self.assertLessEqual(stored(q["id"]), chat.DETAIL_MAX)
-        with self.assertRaises(ValueError):                                    # only the questions can't be cut
-            chat.ask("AskUserQuestion", "", "question", {"questions": [{"question": "?" * 50_000}]})
-
-    def test_open_questions_and_unread_messages_outlast_the_display_windows(self):
-        # #265 (the audit of 1.2): an open question vanished from the page behind 20 newer answered
-        # ones, and `wb chat pending` lost an unread message behind 200 newer replies
-        chat = self.chat
-        first = chat.ask("AskUserQuestion", "", "question", {"questions": []})
-        for i in range(25):
-            chat.answer(chat.ask("Bash", f"cmd {i}")["id"], "deny", "web")
-        listed = chat.asks()
-        self.assertEqual(len(listed), 21)
-        self.assertEqual((listed[0]["id"], listed[0]["answer"]), (first["id"], None))
-        self.assertIn(first["id"], [a["id"] for a in chat.snapshot()["asks"]])   # on the page
-        self.assertNotIn("stale", listed[0])
-        with mock.patch.object(chat.store, "now", return_value=store.now() + chat.ASK_STALE + 1):
-            self.assertTrue(chat.asks()[0]["stale"])                                # past the wait
         unread = chat.send("are you there?", "user", "c-1")
         for i in range(205):
             chat.send(f"reply {i}", "claude")
@@ -29162,93 +29527,25 @@ class WebChat(Base):
 
     def test_open_work_outlasts_a_burst_past_the_files_tails(self):
         # #329 (the audit of 1.4, reproduced): 540 replies of 7,900 characters pushed an unread
-        # message out of the 4 MiB tail, and 120 plan cards an open question, which then could
-        # no longer be answered
+        # message out of the 4 MiB tail
         chat = self.chat
         unread = chat.send("are you there?", "user", "c-burst")
-        question = chat.ask("AskUserQuestion", "which?", "question",
-                            {"questions": [{"question": "Which?", "options": []}]})
         for i in range(540):
             chat.send(f"reply {i} " + "x" * 7900, "claude")
-        for i in range(120):
-            chat.ask("ExitPlanMode", f"plan {i}", "plan", {"plan": "p" * 39_000})
         self.assertGreater((chat.chat_dir() / "messages.jsonl").stat().st_size, chat.THREAD_BYTES)
-        self.assertGreater((chat.chat_dir() / "asks.jsonl").stat().st_size, chat.THREAD_BYTES)
         self.assertEqual([m["id"] for m in chat.pending()], [unread["id"]])
-        self.assertEqual(chat.find_ask(question["id"])["answer"], None)
-        self.assertIn(question["id"], [a["id"] for a in chat.asks()])
-        done = chat.answer(question["id"], "allow", "web", answers={"Which?": "this"})
-        self.assertEqual(done["answer"], "allow")
-        self.assertNotIn(question["id"], chat.open_work()["asks"])
         chat.ack(unread["id"], "s-1")
         self.assertEqual(chat.pending(), [])
         # a state directory from before the index: built once from the whole files
         late = chat.send("still there?", "user", "c-late")
         (chat.chat_dir() / "open.json").unlink()
         self.assertEqual([m["id"] for m in chat.pending()], [late["id"]])
-        self.assertEqual(len(chat.open_work()["asks"]), 120)       # the plan cards, still open
-
-    def test_an_old_prompt_answered_past_the_tail_still_gives_its_waiter_the_answer(self):
-        # #447 (the 2026-11-20 audit, reproduced): answering an open ask whose row had left the
-        # 4 MiB tail returned allow, and right after, its waiter got "no such ask"
-        chat = self.chat
-        old = chat.ask("Bash", "rm -rf build")
-        with open(chat.chat_dir() / "asks.jsonl", "a") as f:  # history the tail can't reach back past
-            for i in range(120):
-                f.write(json.dumps({"id": f"ask-{i}", "ts": store.now(), "tool": "Bash", "text": "x" * 39_000,
-                                    "kind": "permission"}) + "\n")
-                f.write(json.dumps({"id": f"ask-{i}", "ts": store.now(), "answer": "deny", "by": "web"}) + "\n")
-        self.assertGreater((chat.chat_dir() / "asks.jsonl").stat().st_size, chat.THREAD_BYTES)
-        self.assertIsNone(chat.find_ask(old["id"])["answer"])
-        self.assertEqual(chat.answer(old["id"], "allow", "web", note="go")["answer"], "allow")
-        got = chat.find_ask(old["id"])
-        self.assertEqual((got["answer"], got["by"], got["note"], got["text"]), ("allow", "web", "go", "rm -rf build"))
-        self.assertEqual(chat.wait_answer(old["id"], 1), "allow")
-        self.assertEqual(json.loads(run_wb("chat", "wait", old["id"], "--json"))["answer"], "allow")  # another process
-        self.assertEqual(chat.answer(old["id"], "deny", "timeout")["answer"], "allow")  # the first stands
-        (chat.chat_dir() / "open.json").unlink()                     # an index built again from the files
-        self.assertEqual(chat.find_ask(old["id"])["answer"], "allow")
-        with mock.patch.object(chat.store, "now", return_value=store.now() + chat.ANSWER_KEPT + 60):
-            chat.answer(chat.ask("Bash", "ls")["id"], "allow", "web")  # a day on, it is let go
-            self.assertNotIn(old["id"], chat.open_work()["answered"])
-
-    def test_a_prompt_whose_session_died_expires_and_takes_no_answer(self):
-        # #538 (the 2026-11-20 audit, reproduced): a Bash card whose session crashed stayed open
-        # for good, took an Allow nobody waited for, and every later push showed it
-        chat = self.chat
-        gone = subprocess.Popen(["true"])
-        gone.wait()
-        dead = run_wb("chat", "ask", "--tool", "Bash", "--text", "rm -rf build", "--pid", str(gone.pid)).split()[0]
-        live = chat.ask("Bash", "make", pid=os.getpid())
-        old = chat.ask("Bash", "ls")                                          # from a wb before the pid
-        listed = {a["id"]: a for a in chat.snapshot()["asks"]}
-        self.assertEqual((listed[dead]["answer"], listed[dead]["by"]), ("expired", "interrupted"))
-        self.assertIsNone(listed[live["id"]]["answer"])
-        self.assertIsNone(listed[old["id"]]["answer"])
-        self.assertEqual(chat.answer(dead, "allow", "web")["answer"], "expired")  # no answer for nobody
-        self.assertEqual(self.call("/api/answer", {"id": dead, "answer": "allow"}, token=chat.token())[1]["ask"]["answer"],
-                         "expired")
-        self.assertEqual(run_wb("chat", "wait", dead, "--timeout", "0.1").strip(), "expired")
-        self.assertNotIn(dead, chat.open_work()["asks"])
-        self.assertEqual(sum(r.get("id") == dead and "answer" in r              # expired once
-                             for r in store.read_jsonl(chat.chat_dir() / "asks.jsonl")[0]), 1)
-
-    def test_wb_chat_wait_blocks_until_the_answer_or_says_open(self):
-        chat = self.chat
-        a = chat.ask("Write", "/etc/hosts")
-        self.assertEqual(run_wb("chat", "wait", a["id"], "--timeout", "0.2").strip(), "open")
-        import threading
-        threading.Timer(0.3, chat.answer, (a["id"], "allow", "web")).start()
-        t0 = time.time()
-        self.assertEqual(run_wb("chat", "wait", a["id"], "--timeout", "20").strip(), "allow")
-        self.assertLess(time.time() - t0, 10)                  # woken by the answer, not the timeout
-        self.assertEqual(run_wb("chat", "answer", a["id"], "expired", "--by", "timeout").strip(), "allow")
-        with self.assertRaises(SystemExit):
-            run_wb("chat", "wait", "ask-nope")
-        b, state = run_wb("chat", "ask", "--tool", "Bash", "--text", "make deploy").split()
-        self.assertEqual(state, "open")
-        self.assertEqual(run_wb("chat", "answer", b, "expired", "--by", "interrupted").strip(), "expired")
-        self.assertEqual(chat.find_ask(b)["by"], "interrupted")
+        # an older wb's index, its asks with it: read, and the asks dropped at the next write (#1350)
+        store.write_json(chat.chat_dir() / "open.json", {"messages": chat.open_work()["messages"],
+                                                         "asks": {"ask-1": {"id": "ask-1"}}, "answered": {}})
+        self.assertEqual([m["id"] for m in chat.pending()], [late["id"]])
+        chat.ack(late["id"], "s-1")
+        self.assertEqual(store.read_json(chat.chat_dir() / "open.json", None), {"messages": {}})
 
     def open_stream(self, tok):
         import http.client
@@ -29458,34 +29755,36 @@ class WebChat(Base):
             run_wb("chat", "on", "--port", str(port))
         self.assertIn(f"another account's chat", err.getvalue())
         self.assertFalse((self.chat.chat_dir() / "serve.pid").exists())           # nothing started
+        # on by default (#1281): a failed `wb chat on` puts the switch back as it was, on
+        self.assertIn("web chat not up: another account's chat", err.getvalue())
+        self.assertTrue(self.chat.is_on())
+        self.chat.set_on(False)
+        err = io.StringIO()
+        with redirect_stderr(err), self.assertRaises(SystemExit):
+            run_wb("chat", "on", "--port", str(port))
         # #690: the switch stayed on when it died, so the pane read On and pinned a dead link
         self.assertIn("web chat left off", err.getvalue())
         self.assertFalse(self.chat.is_on())
         self.assertEqual(run_wb("chat", "off", "--port", str(port)).strip(), "web chat off")  # no unit named
 
-    def test_a_push_fetches_only_the_newest_open_ask_and_claudes_last_word(self):
+    def test_a_push_fetches_only_claudes_last_word_or_its_waiting_line(self):
         # #755 (the 2026-11-21 audit, finding 102): each push made the service worker fetch the
         # whole /api/state (922 KB with 300 messages and 30 plans) to pick one line
         chat = self.chat
-        for i in range(30):
-            done = chat.ask("ExitPlanMode", "", "plan", {"plan": f"plan {i}\n" + "step\n" * 4000})
-            chat.answer(done["id"], "deny", "web")
         for i in range(100):
             chat.send("x" * 1500, "user" if i % 2 else "claude")
         chat.send("Tests pass, ready for review", "claude")
         chat.send("thanks", "user")
-        old = chat.ask("Bash", "rm -rf build")
-        plan = chat.ask("ExitPlanMode", "", "plan", {"plan": "1. Read\n" + "2. Write\n" * 3000})
         got = chat.latest()
-        self.assertEqual([a["id"] for a in got["asks"]], [plan["id"]])        # the newest open one
-        self.assertNotIn("detail", got["asks"][0])                           # not its plan's text
         self.assertEqual([m["text"] for m in got["messages"]], ["Tests pass, ready for review"])
+        self.assertNotIn("asks", got)                                        # no cards (#1350)
         self.assertLess(len(json.dumps(got)), 2000)
         code, body = self.call("/api/latest", token=chat.token())
-        self.assertEqual((code, [a["id"] for a in body["asks"]]), (200, [plan["id"]]))
+        self.assertEqual((code, [m["text"] for m in body["messages"]]), (200, ["Tests pass, ready for review"]))
         self.assertEqual(self.call("/api/latest")[0], 401)
-        chat.answer(plan["id"], "allow", "web")
-        self.assertEqual([a["id"] for a in chat.latest()["asks"]], [old["id"]])
+        store.write_json(chat.chat_dir() / "page.json", {"at": store.now()})
+        line = chat.notice("Bash", "rm -rf build")                           # Claude waits in the terminal
+        self.assertEqual([m["id"] for m in chat.latest()["messages"]], [line["id"]])
         self.assertIn("/api/latest", (chat.STATIC / "sw.js").read_text())
 
     def test_on_macos_the_launchd_agent_is_checked_and_named_instead_of_systemd(self):
@@ -29511,7 +29810,8 @@ class WebChat(Base):
 
     def test_a_chat_wb_chat_on_started_comes_back_after_a_reboot_or_a_crash(self):
         # #449 (the 2026-11-20 audit): the switch stayed on and the pane showed the link, but nothing
-        # started the server again, so the phone said "Can't reach the computer" for good
+        # started the server again, so the phone said "Can't reach the computer" for good; since
+        # #1281 `wb chat url` runs chat.ensure, which revive was
         from workbench import cli
         chat = self.chat
         with socket.socket() as sk:
@@ -29519,14 +29819,12 @@ class WebChat(Base):
             free = sk.getsockname()[1]
         dead = subprocess.Popen([sys.executable, "-c", "pass"])
         dead.wait()
-        chat.set_on(True)
         store.write_json(chat.chat_dir() / "serve.pid", {"pid": dead.pid, "port": free})  # it died
-        self.assertIn(f"no server answers on port {free}: wb chat on starts one", cli.chat_gap())
-        with mock.patch.object(chat, "_unit_keeps_it", return_value=True):   # systemd's to restart
-            self.assertIsNone(chat.revive())
+        self.assertEqual(cli.chat_line(), (False, f"web app down: no server answers on port {free} (wb chat on)"))
         chat.set_on(False)
-        self.assertIsNone(chat.revive())                                       # off: left off
-        self.assertIsNone(cli.chat_gap())
+        self.assertEqual(chat.ensure(free)["state"], "off")                    # off: left off
+        self.assertEqual(cli.chat_line(), (None, "web app off (wb chat on)"))
+        self.assertEqual(store.read_json(chat.chat_dir() / "serve.pid")["pid"], dead.pid)
         chat.set_on(True)
         with mock.patch.object(chat, "_unit_keeps_it", return_value=False):
             out = run_wb("chat", "url")
@@ -29534,12 +29832,10 @@ class WebChat(Base):
         pid = store.read_json(chat.chat_dir() / "serve.pid")["pid"]
         self.assertNotEqual(pid, dead.pid)
         try:
-            deadline = time.time() + 10
-            while not chat.running(free) and time.time() < deadline:
-                time.sleep(0.1)
-            self.assertTrue(chat.running(free))
-            self.assertIsNone(cli.chat_gap())
-            self.assertIsNone(chat.revive())                                   # up: not a second
+            self.assertTrue(chat.running(free))                                # ensure waited for it
+            with mock.patch.object(chat, "_unit_keeps_it", return_value=False):
+                self.assertEqual(cli.chat_line(), (True, f"web app answers on localhost:{free} (started by wb)"))
+            self.assertEqual(chat.ensure(free)["state"], "up")                 # up: not a second
             run_wb("chat", "off", "--port", str(free))
             deadline = time.time() + 10
             while os.waitpid(pid, os.WNOHANG) == (0, 0) and time.time() < deadline:
@@ -29637,14 +29933,30 @@ class WebChat(Base):
         c.close()
         self.assertEqual(self.call("/api/stream")[0], 401)
 
+    def test_a_stream_ends_at_its_hubs_close_without_another_snapshot(self):
+        # nightly run 45577067512 (2026-11-25): woken by tearDown's hub.close, a test's stream made
+        # one more snapshot, by then in the next test's WB_HOME: the push key it cached there was
+        # the key test_an_empty_or_broken_vapid_key_file_is_replaced… expected to be None
+        hub = self.srv.RequestHandlerClass.hub
+        page = self._held_wait("/api/stream", self.chat.token())
+        got = b""
+        while b"event: state" not in got:
+            got += page.recv(1 << 20) or self.fail("the stream ended before its first state")
+        self.addCleanup(page.close)
+        made = []
+        with mock.patch.object(self.chat, "snapshot", side_effect=lambda: made.append(1) or {}):
+            hub.close()
+            deadline = time.monotonic() + 5
+            while hub.open and time.monotonic() < deadline:
+                time.sleep(0.01)
+        self.assertEqual(hub.open, [])                 # ended, not at its next ping's failed write
+        self.assertEqual(made, [])
+
     def test_after_its_first_state_the_stream_sends_only_what_changed(self):
         # #755 (the 2026-11-21 audit, finding 102): every receipt and busy flip sent the whole
         # state, the thread and 20 asks with their plans: 922 KB each, five times an exchange
         import http.client
         chat, tok = self.chat, self.chat.token()
-        for i in range(10):
-            done = chat.ask("ExitPlanMode", "", "plan", {"plan": f"plan {i}\n" + "step\n" * 4000})
-            chat.answer(done["id"], "deny", "web")
         for i in range(60):
             chat.send("x" * 1500, "user" if i % 2 else "claude")
         mine = chat.send("and the tests?", "user")
@@ -29665,12 +29977,7 @@ class WebChat(Base):
                 lines.append(line)
         kind, first, _ = event()
         self.assertEqual((kind, len(first["messages"])), ("state", 61))       # the whole state first
-        plans = [a for a in first["asks"] if a["kind"] == "plan"]
-        self.assertTrue(all(a["detail"]["cut"] and len(a["detail"]["plan"]) == chat.PLAN_PREVIEW for a in plans))
-        code, whole = self.call(f"/api/ask/{plans[0]['id']}", token=tok)    # unfolded: fetched
-        self.assertEqual((code, len(whole["ask"]["detail"]["plan"])), (200, len("plan 0\n" + "step\n" * 4000)))
-        self.assertEqual(self.call("/api/ask/ask-nope", token=tok)[0], 404)
-        self.assertEqual(self.call(f"/api/ask/{plans[0]['id']}")[0], 401)
+        self.assertEqual(self.call("/api/ask/ask-nope", token=tok)[0], 404)  # no cards to unfold (#1350)
         chat.ack(mine["id"], "s1")                                            # a receipt
         kind, got, size = event()
         self.assertEqual(kind, "patch")
@@ -29681,29 +29988,28 @@ class WebChat(Base):
                          {"session": "s1", "cwd": "/home/u/p", "ts": store.now(), "busy": True})
         kind, got, size = event()                                             # a busy flip
         self.assertEqual((kind, got["listener"]["busy"], "messages" in got), ("patch", True, False))
-        self.assertIn("prefs", got)                                           # the small fields whole
+        self.assertIn("push", got)                                            # the small fields whole
         self.assertLess(size, 3000)
-        open_ = chat.ask("Bash", "make test")
+        store.write_json(chat.chat_dir() / "page.json", {"at": store.now()})
+        line = chat.notice("Bash", "make test")                                # a waiting line comes
         kind, got, _ = event()
-        self.assertEqual([a["id"] for a in got["asks"]["put"]], [open_["id"]])
+        self.assertEqual([m["id"] for m in got["messages"]["put"]], [line["id"]])
+        chat.notice_done(line["id"])                                           # and clears (#1350)
+        kind, got, _ = event()
+        self.assertEqual(got["messages"]["drop"], [line["id"]])
         c.close()
 
     def test_a_patch_names_each_row_that_changed_or_left_and_nothing_when_nothing_did(self):
         # #755: the page merges these by id, so a row the window lost must be named
         chat, had = self.chat, {}
-        snap = {"messages": [{"id": "a", "text": "1"}, {"id": "b", "text": "2"}], "asks": [],
-                "listener": None, "now": 1}
+        snap = {"messages": [{"id": "a", "text": "1"}, {"id": "b", "text": "2"}], "listener": None, "now": 1}
         chat.patch(had, snap)
         self.assertIsNone(chat.patch(had, {**snap, "now": 2}))              # only the clock moved
         got = chat.patch(had, {**snap, "messages": [{"id": "b", "text": "2!"}, {"id": "c", "text": "3"}], "now": 3})
         self.assertEqual(got["messages"], {"put": [{"id": "b", "text": "2!"}, {"id": "c", "text": "3"}], "drop": ["a"]})
-        self.assertEqual((got["now"], got["listener"], "asks" in got), (3, None, False))
+        self.assertEqual((got["now"], got["listener"]), (3, None))
         self.assertEqual(chat.patch(had, {**snap, "messages": got["messages"]["put"], "listener": {"busy": True}})
                          ["listener"], {"busy": True})
-        self.assertNotIn("detail", chat.page_ask({"id": "x", "answer": None}))
-        q = {"id": "q", "answer": "allow", "detail": {"questions": [{"question": "Which?", "options": [{"label": "A", "preview": "p" * 9000}]}]}}
-        self.assertEqual(chat.page_ask(q)["detail"], {"questions": [{"question": "Which?"}]})
-        self.assertEqual(chat.page_ask({**q, "answer": None})["detail"], q["detail"])  # open: whole
 
     def test_without_inotify_the_stream_stays_quiet_between_changes(self):
         # the fallback hub wakes every second; each wake was a ping (the 2026-11-16 audit)
@@ -29724,12 +30030,32 @@ class WebChat(Base):
                 pass
             f.readline(), f.readline()
             s.settimeout(3)
+            self.assertEqual(f.readline(), b"\n")  # the state's own blank line, for WebKit (#1284)
             with self.assertRaises(TimeoutError):
                 f.readline()  # a ping would come within a second or two
             s.close()
         finally:
             srv.shutdown()
             srv.server_close()
+
+    def test_each_stream_event_is_followed_by_a_blank_line_of_its_own_so_webkit_hands_over_its_tail(self):
+        # the #1284 review (2026-11-24): WebKit gives a streamed body to the page only up to the
+        # first 8 KB of a read until more bytes come, so a state past 8 KB on a reconnect waited
+        # 15 s for the ping. The blank line comes apart, NUDGE_AFTER on (stretched here to tell)
+        tok = self.chat.token()
+        self.chat.send("x" * 9000, "claude")                     # a state past 8 KB
+        with mock.patch.object(self.chat, "NUDGE_AFTER", 0.6):
+            c = self._held_wait("/api/stream", tok)
+            got = b""
+            while not (b"event: state" in got and got.endswith(b"\n\n")):
+                got += c.recv(1 << 20)
+            self.assertEqual(c.recv(1 << 20), b"\n")             # on its own, after a pause
+            self.chat.reply("And a patch.")
+            got = b""
+            while not (b"event: patch" in got and got.endswith(b"\n\n")):
+                got += c.recv(1 << 20)
+            self.assertEqual(c.recv(1 << 20), b"\n")             # each event its own
+            c.close()
 
     def test_a_message_its_receipt_and_the_reply(self):
         tok = self.chat.token()
@@ -29767,6 +30093,23 @@ class WebChat(Base):
                           "claude_machine": store.machine() or None})
         self.assertFalse({"session", "claude_pid"} & set(plain))          # no session: the listener's
 
+    def test_a_turns_own_answer_posted_by_the_mod_is_an_auto_row_cut_to_a_screenful(self):
+        # #1352 (from #1340 F): a turn that had a web message and ended with no reply gets its own
+        # answer posted by the mod, where a nudge turn asked Claude to reply and cost it a turn
+        code, r = self.call("/api/send", {"text": "Status"}, token=self.chat.token())
+        self.assertEqual(code, 200)
+        mid = r["message"]["id"]
+        run_wb("chat", "reply", "--turn-answer", f"--to={mid}", "--text=  Two tasks run; done by six.\n")
+        run_wb("chat", "reply", "--turn-answer", f"--to={mid}", "--text=" + "word " * 2000)
+        run_wb("chat", "reply", "--text", "a reply of Claude's own")
+        short, long, own = [r for r in store.read_jsonl(self.chat.chat_dir() / "messages.jsonl")[0]
+                            if r["from"] == "claude"]
+        self.assertEqual((short["text"], short["auto"], short["re"]), ("Two tasks run; done by six.", True, [mid]))
+        self.assertTrue(self.chat.TURN_ANSWER_MAX - 50 < len(long["text"]) <= self.chat.TURN_ANSWER_MAX)
+        self.assertTrue(long["text"].endswith(self.chat.TURN_ANSWER_CUT))
+        self.assertTrue(long["auto"])
+        self.assertNotIn("auto", own)
+
     # ---- other agents (#1042): their own tokens, never the user's authority ----
 
     def _agent(self, name="my-agent"):
@@ -29779,7 +30122,7 @@ class WebChat(Base):
         store.write_json(self.chat.chat_dir() / "listener.json",
                          {"session": "s1", "cwd": "/home/u/project", "pid": me, "start": models._started(me)})
 
-    def test_an_agent_token_sends_and_reads_but_never_answers_dialogs_or_marks_the_user_away(self):
+    def test_an_agent_token_sends_and_reads_but_never_changes_settings_or_marks_the_user_away(self):
         tok = self._agent()
         self.assertTrue(tok.startswith("wba-"))
         kept = self.chat.agents_path()
@@ -29796,16 +30139,16 @@ class WebChat(Base):
         pending = [json.loads(x) for x in run_wb("chat", "pending").splitlines()]
         self.assertEqual([(m["from"], m["role"]) for m in pending], [("my-agent", "agent")])
         self.assertIn("agent my-agent: refactor the parser", run_wb("chat", "log"))
-        asks = self.chat.ask("Bash", "git push origin main")
-        for path, body in (("/api/answer", {"id": asks["id"], "answer": "allow"}), ("/api/prefs", {"away": "allow"}),
-                           ("/api/push", {"test": True}), ("/api/active", {}), ("/api/seen", {"ids": ["x"]})):
+        for path, body in (("/api/settings", {"key": "coding", "value": "ask"}), ("/api/push", {"test": True}),
+                           ("/api/active", {}), ("/api/seen", {"ids": ["x"]})):
             code, r = self.call(path, body, token=tok)
             self.assertEqual(code, 403, path)
             self.assertTrue(r["error"].startswith("agent tokens can't "), r)
-        self.assertIsNone(self.chat.find_ask(asks["id"])["answer"])      # the dialog still waits
-        self.assertEqual(self.chat.prefs()["away"], "ask")
         self.assertFalse((self.chat.chat_dir() / "away.json").exists())
-        self.assertEqual(self.call("/api/prefs", {"away": "ask"}, token=self.chat.token())[0], 200)  # the user's: all of it
+        self.assertEqual(self.call("/api/active", {}, token=self.chat.token())[0], 200)  # the user's: all of it
+        # #1350: no dialog is answered from the chat, by anyone
+        for path, body in (("/api/answer", {"id": "ask-1", "answer": "allow"}), ("/api/prefs", {"away": "allow"})):
+            self.assertEqual(self.call(path, body, token=self.chat.token())[0], 404, path)
         self.assertIn("my-agent  since ", run_wb("chat", "token", "list"))
 
     def test_an_agent_token_from_another_machine_is_refused_while_the_users_token_still_works(self):
@@ -30231,7 +30574,8 @@ class WebChat(Base):
         t.start()
         time.sleep(0.5)
         self.assertTrue(t.is_alive())
-        a = self.chat.ask("Bash", "git push origin main")                  # a dialog for the user
+        store.write_json(self.chat.chat_dir() / "page.json", {"at": store.now()})
+        a = self.chat.notice("Bash", "git push origin main")               # a dialog waits on the user
         t.join(10)
         self.assertLess(time.monotonic() - began, 8)
         self.assertEqual((got["r"][1]["replies"], got["r"][1]["waiting_on_user"]), ([], True))
@@ -30239,13 +30583,8 @@ class WebChat(Base):
         _, r = self.call(f"/api/wait?after={mid}&timeout=2", token=tok)
         self.assertGreaterEqual(time.monotonic() - began, 1.5)
         self.assertTrue(r["waiting_on_user"])
-        self.chat.answer(a["id"], "deny", "web")
+        self.chat.notice_done(a["id"])                                    # settled in the terminal
         self.assertFalse(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
-        n = self.chat.notice("Bash", "rm -rf build")                       # one in the terminal, told
-        if n:
-            self.assertTrue(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
-            self.chat.notice_done(n["id"])
-            self.assertFalse(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
 
     def test_another_sessions_turn_end_leaves_a_wait_on_the_listeners_reply_not_done(self):
         # #1303: every session's mod records a turn end with no ids once messages.jsonl grew in
@@ -30403,16 +30742,17 @@ class WebChat(Base):
         self.chat.reply("To my-agent.", [mid])
         self.chat.reply("To both.", [mid, uid])
         self.chat.reply("To other.", [oid])
-        a = self.chat.ask("Bash", "git push origin main")
+        store.write_json(self.chat.chat_dir() / "page.json", {"at": store.now()})
+        a = self.chat.notice("Bash", "git push origin main")               # the user's waiting line
         code, st = self.call("/api/state", token=tok)
         self.assertEqual(code, 200)
         self.assertEqual([m["text"] for m in st["messages"]], ["refactor the parser", "To my-agent.", "To both."])
-        self.assertEqual(sorted(st), ["api", "expire", "listener", "messages", "now", "uploads"])  # no asks, prefs, savings, push
+        self.assertEqual(sorted(st), ["api", "expire", "listener", "messages", "now", "uploads"])  # no savings, push
         self.assertIsNone(st["messages"][0]["received"])
         code, r = self.call("/api/send", {"text": "and the tests"}, token=tok)
         self.assertEqual([m["text"] for m in r["state"]["messages"]][-1], "and the tests")
-        self.assertNotIn("asks", r["state"])
-        self.assertIn("asks", self.call("/api/state", token=user)[1])     # the user's: all of it
+        self.assertNotIn("push", r["state"])
+        self.assertIn("push", self.call("/api/state", token=user)[1])     # the user's: all of it
         # its stream: the same view, and a patch carries none of the user's
         c = self._held_wait("/api/stream", tok)
         c.settimeout(5)
@@ -30421,7 +30761,7 @@ class WebChat(Base):
             got += c.recv(1 << 20)
         first = json.loads(got.split(b"data: ", 1)[1].split(b"\n", 1)[0])
         self.assertEqual(first["messages"], self.call("/api/state", token=tok)[1]["messages"])
-        self.assertNotIn("asks", first)
+        self.assertNotIn("push", first)
         self.call("/api/send", {"text": "a secret of the user's"}, token=user)
         self.chat.reply("Again to my-agent.", [mid])
         while b"Again to my-agent." not in got:
@@ -30430,11 +30770,10 @@ class WebChat(Base):
         self.assertNotIn(b"a secret of the user's", got)
         self.assertNotIn(a["id"].encode(), got)
         # what only the user may read: 403, and the user's own still reads them
-        for path in ("/api/latest", f"/api/ask/{a['id']}", "/api/shot?task=t&n=1&side=base", "/api/audio?batch=b&n=1"):
+        for path in ("/api/latest", "/api/shot?task=t&n=1&side=base", "/api/audio?batch=b&n=1"):
             code, r = self.call(path, token=tok)
             self.assertEqual(code, 403, path)
             self.assertTrue(r["error"].startswith("agent tokens can't "), r)
-        self.assertEqual(self.call(f"/api/ask/{a['id']}", token=user)[0], 200)
         self.assertEqual(self.call("/api/latest", token=user)[0], 200)
         self.assertEqual(self.call("/api/latest")[0], 401)                 # no token: as before
         # a wait on another's message is no message to it; on its own, as before
@@ -30454,31 +30793,6 @@ class WebChat(Base):
         self.assertEqual(self.chat.thread(), [])
         code, r = self.call("/api/send", {"text": "about step 1", "about": {"task": "t", "n": 1}}, token=self.chat.token())
         self.assertEqual((code, r["error"]), (400, "no such screenshots"))  # the user's is read as before
-
-    def test_a_dialog_in_an_agents_turn_is_for_that_agent_and_the_users_away_setting_answers_it_only_while_away(self):
-        tok = self._agent()
-        self._listening()
-        mid = self.call("/api/send", {"text": "ship it"}, token=tok)[1]["message"]["id"]
-        self.call("/api/prefs", {"away": "allow"}, token=self.chat.token())
-        out = run_wb("chat", "ask", "--tool", "Bash", "--text", "git push", "--for", "my-agent", "--here")
-        ask_id, state = out.split()
-        self.assertEqual(state, "open")                                   # at the terminal: the human decides
-        a = self.chat.find_ask(ask_id)
-        self.assertEqual(a["for"], ["my-agent"])
-        self.assertEqual([x["for"] for x in self.call("/api/state", token=self.chat.token())[1]["asks"]], [["my-agent"]])
-        self.assertEqual(self.chat.latest()["asks"][0]["for"], ["my-agent"])  # the push says whose
-        self.assertIn(ask_id, self.chat.news(store.now() + 20))            # and is pushed
-        self.assertTrue(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
-        self.assertEqual(self.call("/api/answer", {"id": ask_id, "answer": "allow"}, token=tok)[0], 403)
-        run_wb("chat", "answer", ask_id, "expired", "--by", "interrupted")   # settled in the terminal
-        self.assertFalse(self.call(f"/api/wait?after={mid}&timeout=0", token=tok)[1]["waiting_on_user"])
-        self.assertEqual(self.call("/api/answer", {"id": ask_id, "answer": "allow"}, token=self.chat.token())[1]["ask"]["answer"],
-                         "expired")                                       # the page's tap changes nothing
-        out = run_wb("chat", "ask", "--tool", "Bash", "--text", "git push", "--for", "my-agent")
-        self.assertEqual(out.split()[1], "allow")                          # away: their setting stands
-        with self.assertRaises(ValueError):
-            self.chat.ask("Bash", "x", for_=["Not A Name"])
-
 
 FAKE_SMI = """import os, sys, time
 with open(os.environ["FAKE_SMI_LOG"], "a") as f:
@@ -33305,6 +33619,36 @@ class Keyhole(_KeyholeTest):
         self.assertAlmostEqual(seen[2][2], now + 60, delta=5)          # no Retry-After: 60 s
         self.assertAlmostEqual(seen[3][2], now + 120, delta=5)
 
+    def test_a_429_saying_the_request_is_too_large_for_the_tpm_limit_is_passed_on_at_once_not_held(self):
+        # #1380 (2026-11-25): OpenAI tier 1's 429 for one request over the TPM limit was held as a
+        # rate limit, sent again and again, and the round failed ~20 minutes on as "rate-limited"
+        seen = []
+        kh = self.keyhole(on_health=lambda *a: seen.append(a), hold=30)
+        self.up.mode, self.up.status, self.up.retry_after = "status", 429, "1"
+        self.up.message = ("Request too large for gpt-up-1101 in organization org-x on tokens per min "
+                           "(TPM): Limit 30000, Requested 45210. The input or output tokens must be reduced.")
+        began = time.monotonic()
+        code, _, text = self.post(kh)
+        self.assertEqual(code, 400, text)                                # OpenCode won't retry a 400
+        self.assertLess(time.monotonic() - began, 5)                     # never the hold
+        self.assertEqual(len(self.up.seen), 1)
+        stop = self.task.status["api_stop"]
+        self.assertEqual(stop["guard"], "refused")
+        self.assertEqual(stop["text"], "deepinfra refused the request (HTTP 429): " + self.up.message)
+        self.assertIn("the round stops", json.loads(text)["error"]["message"])
+        self.assertEqual(seen, [])                                       # no cooldown for other tasks
+        # "Limit N, Requested M" alone says it only when M > N: an ordinary TPM 429 is still held
+        self.task.set_status(api_stop=None)
+        kh = self.keyhole(on_health=lambda *a: seen.append(a), hold=0)
+        for message in ("Rate limit reached on tokens per min (TPM): Limit 30000, Used 29000, Requested 2000.",
+                        "Rate limit on tokens per min: Limit 30000, Requested 20000."):
+            self.up.message = message
+            self.assertEqual(self.post(kh)[0], 429)
+        self.assertEqual([s[0] for s in seen], ["rate_limited", "rate_limited"])
+        self.up.message = "Rate limit on tokens per min: Limit 6,000, Requested 8,000."
+        self.assertEqual(self.post(kh)[0], 400)
+        self.assertEqual(self.task.status["api_stop"]["guard"], "refused")
+
     def test_an_unreachable_upstream_is_a_502_that_says_so(self):
         seen = []
         m = self.model()
@@ -33467,6 +33811,67 @@ class Keyhole(_KeyholeTest):
                       text)
         self.assertIn("the round stops", text)                           # a 400: OpenCode won't retry
         self.assertEqual(self.task.status["api_stop"]["guard"], "setup")
+
+    def test_a_ca_without_critical_basic_constraints_or_trusted_through_node_extra_ca_certs_verifies_as_opencode_would(self):
+        # #1385 (2026-11-25): Python 3.13's default VERIFY_X509_STRICT failed every request on a
+        # chain OpenCode, curl and node accept (a TLS-inspecting proxy's CA, basicConstraints not
+        # critical, no key identifiers), and a CA trusted for OpenCode through NODE_EXTRA_CA_CERTS
+        # alone never verified, on any Python. The strict flag is set here as 3.13's default does.
+        import ssl
+        from workbench import webpush
+        if not shutil.which("openssl"):
+            self.skipTest("needs openssl")
+        tmp = Path(self.tmp.name)
+        ca, ca_key, key, cert, csr, ext = (tmp / n for n in ("ca.pem", "ca-k.pem", "k.pem", "c.pem",
+                                                              "c.csr", "ext"))
+        ext.write_text("subjectAltName=DNS:localhost,IP:127.0.0.1\n")
+        ec = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-config", os.devnull]
+        for argv in (["req", "-x509", *ec, "-keyout", ca_key, "-out", ca, "-days", "1", "-subj", "/CN=wb-ca",
+                      "-addext", "basicConstraints=CA:TRUE", "-addext", "keyUsage=keyCertSign"],
+                     ["req", *ec, "-keyout", key, "-out", csr, "-subj", "/CN=localhost"],
+                     ["x509", "-req", "-in", csr, "-CA", ca, "-CAkey", ca_key, "-CAcreateserial",
+                      "-out", cert, "-days", "1", "-extfile", ext]):
+            subprocess.run(["openssl", *argv], check=True, capture_output=True)
+        up = _QuietUpstream(("127.0.0.1", 0), _Upstream)
+        up.daemon_threads = True
+        up.seen, up.mode, up.status, up.message = [], "ok", 200, ""
+        up.retry_after, up.chunks, up.gap = None, 1, 0
+        up.served, up.by, up.ctype, up.pieces = "served-model", None, "application/json", []
+        served = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        served.load_cert_chain(cert, key)
+        up.socket = served.wrap_socket(up.socket, server_side=True)
+        threading.Thread(target=up.serve_forever, daemon=True).start()
+        self.addCleanup(up.server_close)
+        self.addCleanup(up.shutdown)
+        (tmp / "no-cas.pem").write_text("")
+        (tmp / "no-cas").mkdir()
+        made = ssl.create_default_context
+
+        def strict(*a, **kw):
+            ctx = made(*a, **kw)
+            ctx.verify_flags |= ssl.VERIFY_X509_STRICT
+            return ctx
+
+        m = self.model()
+        base = f"https://localhost:{up.server_port}/v1/openai"
+        for env, want in (({"SSL_CERT_FILE": str(ca)}, 200),              # the CA in Python's store
+                          ({"NODE_EXTRA_CA_CERTS": str(ca)}, 200),        # trusted for OpenCode alone
+                          ({}, 400)):                                     # trusted nowhere: the CA check stays
+            os.environ.update(SSL_CERT_FILE=str(tmp / "no-cas.pem"), SSL_CERT_DIR=str(tmp / "no-cas"))
+            os.environ.pop("NODE_EXTRA_CA_CERTS", None)
+            os.environ.update(env)
+            with mock.patch.object(webpush, "_ctx", []), mock.patch.object(webpush, "MAC_CAS", str(tmp / "none.pem")), \
+                    mock.patch.object(ssl, "create_default_context", strict):
+                kh = self.kh_mod.Keyhole(self.task, m, self.kh_mod.Key(m.provider, self.CANARY), base,
+                                         "bearer", log=self.lines.append)
+                self.addCleanup(kh.close)
+                code, _, text = self.post(kh)
+                ctx = webpush.tls()
+            self.assertEqual(code, want, (env, text))
+            self.assertTrue(ctx.check_hostname)
+            self.assertEqual(ctx.verify_mode, ssl.CERT_REQUIRED)
+        self.assertIn("its certificate didn't verify", text)
+        self.assertEqual(len(up.seen), 2)
 
     def test_anthropics_cache_writes_are_metered_when_its_message_delta_names_thinking_tokens(self):
         # #1081 (2026-11-23): Anthropic's message_delta now carries output_tokens_details
@@ -36514,6 +36919,27 @@ class ApiDiscovery(Base):
         os.environ["WB_FAKE_API"] = "acme=nokey"                  # OpenCode can't authenticate it
         self.assertNotIn("acme/coder-flash", self.models.hosted_doc(fresh=True)["models"])
 
+    def test_a_coding_plans_zero_priced_models_read_as_a_plan_not_free(self):
+        # #1396 (2026-11-25): a paid coding plan lists every price 0, so wb called it free ("may
+        # keep or train on your code") and its start line said "today $0 of $5", never plan usage
+        from workbench import meter, results
+        zero = [{"input": 0, "output": 0, "cache": {"read": 0, "write": 0}}]
+        self.catalog(DISCOVERY_CATALOG + [api_entry("zai-coding-plan", "glm-9", cost=zero),
+                                          api_entry("kimi-code-plan-global", "k-9", cost=zero)],
+                     DISCOVERY_AUTH + [key_row("zai-coding-plan", "Z.AI Coding Plan", STORED)])
+        m = self.models.hosted()["zai-coding-plan/glm-9"]
+        self.assertEqual((m.free, m.key, meter.is_plan(m)), (False, "stored", True))
+        self.assertTrue(meter.tail(m).startswith(" · plan usage ("), meter.tail(m))
+        k = self.models.hosted()["kimi-code-plan-global/k-9"]   # a regional id goes on past it
+        self.assertEqual((k.free, k.key), (False, ""))         # no key stored: never keyless
+        self.assertEqual(results._plan(k.id), "kimi-code-plan-global")
+        self.assertEqual(run_wb("models", "--api", "glm-9").splitlines()[0],
+                         "zai-coding-plan/glm-9  200K · plan usage")
+        out = run_wb("models")
+        self.assertIn("kimi-code-plan-global 1, ", out)
+        self.assertIn("zai-coding-plan 1\n", out)
+        self.assertIn(f"opencode 1 (free: {cli.FREE_NOTE})", out)   # OpenCode's free one still is
+
     def test_discover_never_returns_an_api_model(self):
         # passes before #1013 too: it pins the rule that keeps the GPU paths on the GPU
         cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
@@ -36670,6 +37096,36 @@ class ApiDiscovery(Base):
         self.assertEqual((doc, why), (None, "opencode model.list took over 1 s"))
         with self.assertRaises(ProcessLookupError):                         # its server ended
             os.kill(int(Path(os.environ["FAKE_SERVE_PID"]).read_text()), 0)
+
+    def test_the_fakes_catalog_server_listens_without_looking_its_address_up(self):
+        # nightly run 45454423406 (2026-11-24): the fake's `serve --stdio` bound with HTTPServer's
+        # own server_bind, whose socket.getfqdn took 35 s on GitHub's macOS runners, past
+        # model_list's 30 s: every catalog read there failed and some 40 API tests per shard with
+        # it. The macOS lookup played here: one that fails the fake if it is asked at all
+        hang = ("import runpy, socket, sys\n"
+                "def looked_up(*a):\n"
+                "    raise SystemExit('socket.getfqdn asked: 35 s on the macOS runners')\n"
+                "socket.getfqdn = looked_up\n"
+                f"runpy.run_path({str(ROOT / 'tests' / 'fake_opencode.py')!r}, run_name='__main__')\n")
+        where, env = self.models._opencode_env()
+        began = time.monotonic()
+        doc, why = self.models.model_list(env, where, timeout=10, cmd=[sys.executable, "-c", hang])
+        self.assertEqual(why, "")
+        self.assertIn("acme/coder-flash", {f"{e['providerID']}/{e['id']}" for e in doc["data"]})
+        self.assertLess(time.monotonic() - began, 10)
+
+    def test_an_opencode_that_fails_before_it_listens_says_its_error_even_if_its_exit_lags(self):
+        # #1370's CI, 2026-11-25: under load the exit trailed stdout's close, and wb called an
+        # immediate failure "took over 30 s"
+        lag = ("import os, sys, time\n"
+               "print('Error: Unable to connect.', file=sys.stderr, flush=True)\n"
+               "os.close(1)\n"
+               "time.sleep(1)\n"
+               "sys.exit(1)\n")
+        where, env = self.models._opencode_env()
+        doc, why = self.models.model_list(env, where, timeout=10, cmd=[sys.executable, "-c", lag])
+        self.assertIsNone(doc)
+        self.assertEqual(why, "Error: Unable to connect.")
 
     def test_a_failed_catalog_read_leaves_gpu_starts_alone(self):
         os.environ["FAKE_CATALOG_FAIL"] = "1"
@@ -37543,6 +37999,31 @@ class Routes(Base):
         self.assertFalse(self.ok.exists())
         self.assertEqual(store.Task("t-api").spec["said"], "asked for, approved in the dialog")
 
+    def test_the_start_dry_run_gives_no_dialog_for_a_taken_name_a_missing_spec_or_a_repo_with_no_claude_md(self):
+        # #1395 (2026-11-25): the dry run behind the dialog gated each of these, wb start then
+        # refused it, and the corrected retry asked the user again
+        store.write_json(self.path, {"v": 1, "day_usd": 5, "roles": {}})
+        os.environ["CLAUDECODE"] = "1"
+        m = runner.models.resolve("acme/coder-flash")
+        store.Task("t-old").dir.mkdir(parents=True)
+        store.write_json(store.Task("t-old").dir / "task.json", {"repo": str(self.repo)})
+        bare = Path(self.tmp.name) / "bare"
+        subprocess.run(["git", "init", "-q", str(bare)], check=True)
+        subprocess.run(["git", "-C", str(bare), "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+        spec, missing = str(self.spec), str(Path(self.tmp.name) / "nope.md")
+        for name, spec_at, repo, says in (
+                ("t-old", spec, self.repo, "task 't-old' exists"),
+                ("BAD_NAME", spec, self.repo, "a task name is lowercase letters"),
+                ("t-nospec", missing, self.repo, "nope.md"),
+                ("t-bare", spec, bare, "has no CLAUDE.md")):
+            argv = [name, "--spec", spec_at, "--repo", str(repo), "--model", m.id]
+            code, out, err = self.route("--dry-run", "--json", "--start", *argv)
+            self.assertEqual((code, out), (1, ""), name)
+            self.assertIn(says, err, name)
+            self.assertFalse(self.ok.exists())
+        self.assertTrue(self.dry("--start", "t-new", "--spec", spec, "--repo", str(self.repo),
+                                 "--model", m.id)["gate"])
+
     def test_wb_try_on_an_api_model_is_refused_plainly_before_any_sample_is_made(self):
         # 2026-11-23 review: it reached start_gate as try-<n>, a name no dialog could show, and
         # the refusal pointed at a dialog that never came
@@ -37602,6 +38083,51 @@ class Routes(Base):
                 self.assertFalse(self.ok.exists())
                 self.assertEqual(self.path.read_text(), was)
         self.assertFalse(self.dry("significant", "--thinking", "on")["gate"])   # thinking on the GPU: no yes
+
+    def test_wb_settings_set_dry_runs_each_route_row_as_that_rows_own_wb_route_dry_run(self):
+        # #1336 (#1296's G3): Claude's wb settings set on a row wb route gates reaches the mod's
+        # dialog, which shows what `wb settings set … --dry-run --json` prints. It must be that
+        # row's wb route dry run word for word, or the user approves a line the change isn't; only
+        # a role's selector was tested (#1287)
+        from workbench import settings
+
+        def settings_set(*argv):
+            out, err, code = io.StringIO(), io.StringIO(), 0
+            with redirect_stdout(out), redirect_stderr(err):
+                try:
+                    cli.main(["settings", "set", *argv])
+                except SystemExit as e:
+                    code = e.code
+            return code, out.getvalue(), err.getvalue()
+
+        self.route("trivial", "deepseek/deepseek-flash", "--day-usd", "5")
+        runner.models.hosted(fresh=True)
+        settings.drop()
+        self.addCleanup(settings.drop)
+        os.environ["CLAUDECODE"] = "1"
+        for key, value, gate in (("role-trivial", "gpu", True), ("cap", "9", True), ("think-trivial", "on", True),
+                                 ("api-writing", "anthropic/claude-haiku-5-5", True),
+                                 ("gpu-significant", "auto", False)):
+            with self.subTest(key=key):
+                code, out, err = settings_set("--dry-run", "--json", key, value)
+                argv = settings._argv(settings._row(key), value)
+                self.assertEqual((code, argv[0]), (0, "route"), err)
+                self.assertEqual(json.loads(out), self.dry(*argv[1:]))
+                self.assertEqual(json.loads(out)["gate"], gate)
+        self.assertFalse(self.ok.exists())
+        self.assertEqual(self.doc()["day_usd"], 5)                # a dry run writes nothing
+        # a change wb route refuses is refused by the dry run too (exit 3, wb's line): no dialog
+        code, out, err = settings_set("--dry-run", "--json", "api-writing", "nosuch/a-model")
+        self.assertEqual((code, out), (3, ""))
+        self.assertIn(cli.ROUTE_CATALOG, err)
+        # the dialog's Allow: the dry run's approval is the one the real call takes, once
+        q = json.loads(settings_set("--dry-run", "--json", "cap", "9")[1])
+        self.assertEqual(settings_set("cap", "9")[0], 3)          # no yes yet: not changed
+        self.approve(q["approval"])
+        code, out, err = settings_set("cap", "9")
+        self.assertEqual((code, out), (0, f"changed: {q['change']}\n"), err)
+        self.assertEqual(self.doc()["day_usd"], 9)
+        self.assertFalse(self.ok.exists())
 
     def test_thinking_on_a_gpu_role_that_runs_on_its_api_model_under_agents_api_or_busy_needs_the_dialog(self):
         # #1149 (2026-11-24): the gate read the role's own via, so with Agents on API (or the busy
@@ -37765,6 +38291,23 @@ class Routes(Base):
             cli.main(["models", "--api", "haiku"])
         self.assertIn("anthropic/claude-haiku-5-5", out.getvalue())
 
+    def test_a_key_stored_after_the_catalog_read_an_oauth_or_env_one_routes_on_the_first_retry(self):
+        # #1388, 2026-11-25: only an empty cached key was asked again, so after the /connect wb
+        # advised, wb route kept saying "OAuth" or "from the environment" for HOSTED_TTL
+        runner.models.hosted(fresh=True)
+        for mid in ("xenv/grok-9", "oauthco/chat-1"):
+            code, _, err = self.route("trivial", mid, "--day-usd", "1", "--dry-run")
+            self.assertEqual(code, 3)
+            self.assertIn("store an API key with /connect", err)
+        self.catalog(ROUTES_CATALOG, [key_row(r["id"], r["name"], STORED) if r["id"] in ("xenv", "oauthco")
+                                      else r for r in ROUTES_AUTH])  # /connect: no stamp changes
+        runner.models._AUTH_FRESH.clear()                           # a retry past AUTH_FRESH_SECS
+        for mid in ("xenv/grok-9", "oauthco/chat-1"):
+            code, _, err = self.route("trivial", mid, "--day-usd", "1", "--dry-run")
+            self.assertEqual(code, 0, err)
+        provs = json.loads(self.route("--json")[1])["providers"]
+        self.assertEqual((provs["xenv"]["key"], provs["oauthco"]["key"]), ("stored", "stored"))
+
     def test_a_stored_key_on_a_package_the_keyhole_cant_speak_is_refused_before_the_dialog(self):
         # #1066: only keyhole.start checked the package, so a Gemini model was listed, offered,
         # routed with the user's yes and started, then failed every time (Gemini runs since
@@ -37828,6 +38371,41 @@ class Routes(Base):
             self.assertTrue(runner.models.status(hosted[mid])["available"], mid)
         self.assertIn("the keyhole doesn't speak Google's API", runner.models.status(hosted["google/deep-x"])["why"])
         self.assertEqual(runner.models.unspoken_providers(["google", "azure"]), {})   # each runs a model
+
+    def test_a_providers_models_each_keep_their_own_package_and_base_not_its_first_ones(self):
+        # #1387 (2026-11-25): OpenCode Zen lists openai-compatible, anthropic and google models at
+        # different bases; every one took the first entry's, so its Claude models posted /messages
+        # to …/openai/v1 with a bearer key (a 404 every request), and its Gemini ones went as
+        # openai-compatible too
+        from workbench import keyhole
+        base = "https://opencode.test/zen"
+        zen = [api_entry("opencode", "big-pickle", settings={"baseURL": f"{base}/openai/v1"},
+                         package="@opencode/ai/providers/openai-compatible"),
+               api_entry("opencode", "claude-x-5", settings={"baseURL": f"{base}/anthropic/v1"},
+                         package="@opencode/ai/providers/anthropic"),
+               api_entry("opencode", "gemini-x-4", settings={"baseURL": f"{base}/google/v1beta"},
+                         package="@opencode/ai/providers/google")]
+        rest = [e for e in ROUTES_CATALOG if e["providerID"] != "opencode"]
+        self.catalog([*rest, *zen], [*ROUTES_AUTH, key_row("opencode", "OpenCode Zen", STORED)])
+        hosted = runner.models.hosted(fresh=True)
+        pickle, claude, gemini = (hosted[f"opencode/{n}"] for n in ("big-pickle", "claude-x-5", "gemini-x-4"))
+        self.assertEqual((pickle.package, pickle.base_url),
+                         ("@opencode/ai/providers/openai-compatible", f"{base}/openai/v1"))
+        self.assertEqual((claude.package, claude.base_url),
+                         ("@opencode/ai/providers/anthropic", f"{base}/anthropic/v1"))
+        self.assertEqual(keyhole.protocol_of(claude.package), "anthropic")
+        self.assertEqual(runner.models.keyhole_refusal(claude), "")
+        # its Gemini ones go as Google's API, which the keyhole speaks since #1192, never as the
+        # first entry's openai-compatible
+        self.assertEqual((gemini.package, gemini.base_url), ("@opencode/ai/providers/google", f"{base}/google/v1beta"))
+        self.assertEqual(keyhole.protocol_of(gemini.package), "google")
+        self.assertEqual(runner.models.keyhole_refusal(gemini), "")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.main(["models", "--json"])
+        api = [x["id"] for x in json.loads(out.getvalue())["api"]]
+        self.assertIn("opencode/claude-x-5", api)
+        self.assertIn("opencode/gemini-x-4", api)
 
     def test_a_role_out_of_credit_runs_again_once_the_recheck_time_has_passed(self):
         # #1068: no_credit had no `until` and only a 2xx cleared it, which only a running task
@@ -39026,6 +39604,24 @@ class ApiTasks(_ApiTask, _KeyholeTest):
                                  "message": "API key not valid. Please pass a valid API key."}})
         self.assertEqual(wait.stop(time.time()), ("auth", "deepinfra refused the API key (HTTP 400)"))
 
+    def test_an_ollama_cloud_task_whose_login_is_refused_says_ollama_signin_not_connect(self):
+        # #1389, 2026-11-25: the 401 stop said "store ollama's API key again with /connect", which
+        # Ollama never reads: this machine's Ollama holds the ollama.com login
+        cfg = json.loads(Path(os.environ["WB_OPENCODE_CONFIG"]).read_text())
+        cfg["provider"] = {"ollama": {"options": {"baseURL": "http://127.0.0.1:11434/v1"},
+                                      "models": {"gpt-oss:120b-cloud": {"limit": {"context": 131072}}}}}
+        Path(os.environ["WB_OPENCODE_CONFIG"]).write_text(json.dumps(cfg))
+        mid = "ollama/gpt-oss:120b-cloud"
+        os.environ["WB_FAKE_API"] = f"{mid}=auth"
+        self.start_api("t-ocloud", "ok", model=mid, spawn=False)
+        self.drive_here("t-ocloud")
+        st = store.Task("t-ocloud").status
+        self.assertEqual((st["phase"], st["last"]), ("stuck", "ollama refused this machine's ollama.com login (HTTP 401)"))
+        note = [r for r in store.notices() if r.get("task") == "t-ocloud"][-1]
+        self.assertIn("sign this machine's Ollama in to ollama.com again (ollama signin); then wb feedback "
+                      't-ocloud --text "carry on" resumes it', note["text"])
+        self.assertNotIn("/connect", note["text"])
+
     def test_a_proxy_in_the_agents_env_doesnt_catch_the_keyhole(self):
         self.local_api_model()
         os.environ["http_proxy"] = "http://127.0.0.1:9"              # nothing listens there
@@ -40053,6 +40649,28 @@ class RateLimits(Base):
                                  "message": "max_tokens: billing tier allows at most 8192"}})
         self.assertEqual(wait.fatal, ("refused", "deepseek refused the request (HTTP 400): "
                                                  "max_tokens: billing tier allows at most 8192"))
+
+    def test_a_tpm_too_large_stop_tells_claude_the_providers_words(self):
+        # #1380 (2026-11-25): a 429 for one request over the TPM limit was held 10 minutes, revived
+        # once, and stopped as "rate-limited … (HTTP 429)" with advice to carry on later
+        said = ("Request too large for deepseek-flash on tokens per min (TPM): Limit 30000, "
+                "Requested 45210. The input or output tokens must be reduced.")
+        task = self.api_task("t-tpm", "api", "--silence-timeout", "30")
+        self.up.rate_until, self.up.code, self.up.after, self.up.body = float("inf"), 429, "1", said
+        self.keyhole(task, hold=60)
+        began = time.monotonic()
+        runner.drive(task)
+        self.assertLess(time.monotonic() - began, 30)               # never the hold or the revive
+        st = task.status
+        self.assertEqual((st["phase"], st["last"], st.get("infra")),
+                         ("stuck", f"deepseek refused the request (HTTP 429): {said}", "provider"))
+        self.assertEqual(len(self.up.seen), 1)
+        self.assertFalse(self.events(task, "load"))                 # never revived
+        n = self.notice(task)
+        self.assertEqual(n["cause"], "provider")
+        self.assertIn(said, n["text"])
+        self.assertIn("once what deepseek said is fixed", n["text"])
+        self.assertIsNone(self.models.api_health("deepseek"))      # no cooldown for its other tasks
 
     def test_a_certificate_that_doesnt_verify_stops_the_round_at_once_as_this_machines(self):
         # #1080 (2026-11-23): the keyhole's 502 was retried, read as the provider's outage for
@@ -42800,6 +43418,37 @@ class Privacy(_KeyholeTest):
             json.dumps({"bos_token": "<s>", "mask_token": "[MASK]"}))
         self.start_api("t-cpr-ok")
 
+    def test_a_copied_config_file_with_only_settings_named_like_tokens_does_not_refuse_an_api_start(self):
+        # #1381 (2026-11-25): a single copied file was judged by the token-file matcher, whose bare
+        # keyword refused every API start for settings, while the same file in a copied directory
+        # went along
+        d = Path(self.tmp.name) / "copied"
+        d.mkdir()
+        def holds(name, text):
+            (d / name).write_text(text)
+            return cli.privacy.copy_holds_credential(d / name)
+        for name, text in ((".env", "TOKENIZERS_PARALLELISM=false\nDEBUG=1\n"),
+                           ("llm.json", json.dumps({"model": "local", "max_tokens": 4096})),
+                           ("app.env", "PASSWORD_MIN_LENGTH=8\nSESSION_TIMEOUT=30\n"),
+                           ("settings.ini", "[auth]\npassword_reset_ttl = 3600\n")):
+            self.assertFalse(holds(name, text), name)
+        for name, text in ((".env", "OPENAI_API_KEY=sk-abcdef1234567890\n"),
+                           ("db.env", "DB_PASSWORD=hunter2\n"),
+                           (".npmrc", "//registry.npmjs.org/:_authToken=npm_abcdefghijklmnop\n"),
+                           ("settings.xml", "<server><id>x</id><password>hunter2</password></server>\n"),
+                           ("config", 'BUNDLE_GEMS__EXAMPLE__COM: "user:pass"\n')):
+            self.assertTrue(holds(name, text), name)
+        # end to end (a .env is never copied: cli.SECRET_FILES)
+        (self.repo / ".gitignore").write_text("llm.json\napp.env\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", ".gitignore"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "ignore"], check=True)
+        (self.repo / "llm.json").write_text(json.dumps({"model": "local", "max_tokens": 4096}))
+        (self.repo / "app.env").write_text("TOKENIZERS_PARALLELISM=false\nPASSWORD_MIN_LENGTH=8\n")
+        self.conf.write_text(json.dumps({"repos": {str(self.repo): {"copy": ["llm.json", "app.env"]}}}))
+        self.role(via="api", api=FLASH)
+        self.start_api("t-cpenv")
+        self.assertEqual(store.Task("t-cpenv").spec["copy"], ["llm.json", "app.env"])
+
     def test_an_api_task_takes_a_standing_sibling_and_a_big_copied_directory_as_configured(self):
         # #1322; a copied directory's package trees aren't read for a credential
         # (privacy.COPY_SKIP_DIRS): their code is full of `token = …`, which would refuse every
@@ -43506,9 +44155,10 @@ class Writing(Base):
         self.assertEqual([r for r in store.results() if r.get("task") == "t-row"][-1]["role"], "writing")
 
     def record(self, model, role, outcome, n, minutes=2.0):
-        for _ in range(n):
+        for _ in range(n):  # a trivial task's size is trivial, as wb start records it (#1398)
             store.append_jsonl(store.home() / "results.jsonl", {
-                "model": model, "size": "significant", "outcome": outcome, "ran": True,
+                "model": model, "size": "trivial" if role == "trivial" else "significant",
+                "outcome": outcome, "ran": True,
                 "minutes": minutes, "active_minutes": minutes, **({"role": role} if role else {})})
 
     def test_wb_start_routes_a_writing_task_on_its_writing_record_and_a_coding_one_on_its_coding_one(self):
@@ -43567,6 +44217,21 @@ class Writing(Base):
         self.assertIn("(typically 40m)", transcript.clock_line(task))
         self.assertEqual(runner.typical_now(task)["typical"]["min"], 40.0)
         self.assertIn("(typically 40m)", runner.checkin_text(task, 1, {"texts": []}, since=0, active=0))
+
+    def test_a_coding_task_is_filed_under_the_size_it_was_routed_at_not_its_role(self):
+        # #1398 (2026-11-25): `--role trivial --size significant` ran on the significant pick, and
+        # its result moved the model's trivial record, never the significant one choose() reads
+        from workbench import router, tuning
+        m = cli.models.resolve("mimo")
+        for role, size in (("trivial", "significant"), ("significant", "trivial"),
+                           ("writing", "significant")):
+            store.append_jsonl(store.home() / "results.jsonl", {
+                "model": m.id, "role": role, "size": size, "outcome": "accepted", "ran": True,
+                "active_minutes": 10})
+        self.assertEqual([tuning.work(r) for r in store.results()], ["significant", "trivial", "writing"])
+        self.assertEqual(router.score(m, "significant").tries, 1)
+        self.assertEqual(router.score(m, "trivial").tries, 1)
+        self.assertEqual(router.score(m, "significant", role="writing").tries, 1)
 
     def test_prose_steps_leave_the_coding_rows_speed_reward_alone(self):
         # the review of #1025: tuning.record set each row's speed against the median step of its
@@ -45236,12 +45901,17 @@ class FirstRunApi(Base):
         self.catalog(ROUTES_CATALOG[-3:], [key_row("deepseek", "DeepSeek", STORED)])
         runner.models.hosted(fresh=True)
         self.assertEqual(self.wb("route", "trivial", "deepseek/deepseek-flash", "--day-usd", "5")[0], 0)
+        from workbench import meter
         now = store.now()
+        # every row on today's local day: two hours back crossed midnight between 00:00 and 02:00
+        # and read "(≈$2.00 today)" (run while checking nightly run 45454423406, 01:39 MST,
+        # 2026-11-25)
+        since = now - time.mktime(time.strptime(meter.day(now), "%Y-%m-%d"))
         store.append_jsonl(store.home() / "results.jsonl", {
-            "ts": now - 3600, "task": "closed", "outcome": "accepted", "model": "deepseek/deepseek-flash",
+            "ts": now - since / 2, "task": "closed", "outcome": "accepted", "model": "deepseek/deepseek-flash",
             "kind": "api", "role": "trivial", "provider": "deepseek", "api": {"cost": 3.0, "source": "opencode"}})
-        _ledger_step(3.0, now - 7200, "closed")
-        _ledger_step(2.0, now - 60, "open-one")
+        _ledger_step(3.0, now - since * 3 / 4, "closed")
+        _ledger_step(2.0, now - since / 4, "open-one")
         self.assertIn("api spend, the last 7 days: ≈$5.00 of $5/day at most (deepseek $5.00)",
                       cli.scout_api_lines())
         self.assertIn("api, the last 7 days: ≈$5.00 (≈$5.00 today)", run_wb("savings", "--api"))

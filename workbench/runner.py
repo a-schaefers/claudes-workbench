@@ -1014,6 +1014,54 @@ def _sweep_macos(task: store.Task, run: str = "", runs=()) -> int:
     return killed
 
 
+def _procs():
+    """(pid, ppid, environ) of this user's processes: /proc, else ps and KERN_PROCARGS2 (macOS)."""
+    me, uid = os.getpid(), os.getuid()
+    proc = Path("/proc")
+    if proc.joinpath("self").exists():
+        for d in proc.iterdir():
+            if not d.name.isdigit() or int(d.name) == me:
+                continue
+            try:
+                if d.stat().st_uid != uid:
+                    continue
+                ppid = int(d.joinpath("stat").read_text().rpartition(")")[2].split()[1])
+                yield int(d.name), ppid, set(d.joinpath("environ").read_bytes().split(b"\0"))
+            except (OSError, ValueError, IndexError):
+                continue
+        return
+    if sys.platform != "darwin":
+        return
+    try:
+        rows = subprocess.run(["ps", "-U", str(os.getuid()), "-o", "pid=,ppid="], capture_output=True,
+                              check=True, timeout=10).stdout.split(b"\n")
+        buf = ctypes.create_string_buffer(os.sysconf("SC_ARG_MAX"))
+        sysctl = ctypes.CDLL(None).sysctl
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return
+    for row in rows:
+        words = row.split()
+        if len(words) != 2 or not all(w.isdigit() for w in words) or int(words[0]) == me:
+            continue
+        pid = int(words[0])
+        mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2
+        size = ctypes.c_size_t(len(buf))
+        if sysctl(mib, 3, buf, ctypes.byref(size), None, 0) == 0:
+            yield pid, int(words[1]), _mac_environ(buf[:size.value])
+
+
+def agent_commands(task: store.Task, run: str) -> set[int]:
+    """The agent's shell commands running now in the round ``run``, the outermost process of
+    each: its WB_RUN, and a SHELL the shell shim gave back (OpenCode, its MCP and language
+    servers keep the shim's). OpenCode prints a shell call only once it ends, so this is how
+    the runner knows a silent round is waiting on one (#1386)."""
+    shim = os.fsencode(f"SHELL={context.rules_dir(task) / SHELL_SHIM_DIR}/")
+    mark = os.fsencode(f"WB_RUN={run}")
+    ours = {pid: ppid for pid, ppid, env in _procs()
+            if mark in env and not any(e.startswith(shim) for e in env)}
+    return {pid for pid, ppid in ours.items() if ppid not in ours}
+
+
 def _end_agent(task: store.Task) -> None:
     """Nothing a round started outlives it, however the round ended (the 2026-11-16 audit: a
     crash in the runner left the agent editing the worktree after the GPU lease was released):
@@ -1448,6 +1496,16 @@ def provider_of(task: store.Task) -> str:
     return str(task.spec.get("provider") or (task.spec.get("model") or "").partition("/")[0])
 
 
+def ollama_cloud(task: store.Task) -> bool:
+    """Whether the task's model is an Ollama cloud one, whose login this machine's Ollama holds
+    (ollama signin), never a key /connect stores (needs_keyhole); the cached catalog only."""
+    try:
+        m = models.lookup(str(task.spec.get("model") or ""), cached=True)
+    except Exception:  # an unreadable config or cache: a keyed provider's words, as before
+        return False
+    return bool(m and m.cloud)
+
+
 def _span(secs: float) -> str:
     secs = int(max(0, secs))
     if secs >= 120:
@@ -1547,7 +1605,8 @@ class _ProviderWait:
                                    f"(HTTP {code or 402})")
         elif code == 401 or ((kind == "provider.auth" or code == 403) and
                              (code is None or KEY_WORDS.search(said))):
-            self.fatal = ("auth", f"{self.provider} refused the API key (HTTP {code or 401})")
+            what = "this machine's ollama.com login" if ollama_cloud(self.task) else "the API key"  # #1389
+            self.fatal = ("auth", f"{self.provider} refused {what} (HTTP {code or 401})")
         elif (code in REFUSED_CODES or kind in REFUSED_KINDS or kind == "provider.auth") \
                 and not CONTEXT_WORDS.search(said):
             self.fatal = ("refused", f"{self.provider} refused the request"
@@ -1924,11 +1983,18 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                                 **spec.get("stuck", {})},
                              worktree=task.worktree, workdir=task.workdir)
     wall, silence, think = limit(task, "round"), limit(task, "silence"), limit(task, "think")
-    # A shell command OpenCode moved to the background (past 2 minutes it does, and the turn
-    # ends waiting on it) prints nothing until it is done: a long test suite counted as thinking,
-    # was nudged and killed every 7 minutes, and rerun (the 2026-11-16 audit). While it waits
-    # (`background_wait`), no nudge, and silence runs to the test timeout; the round's limit holds.
+    # A shell command OpenCode moved to the background (past its call's `timeout` it does, and
+    # the turn ends waiting on it) prints nothing until it is done: a long test suite counted as
+    # thinking, was nudged and killed every 7 minutes, and rerun (the 2026-11-16 audit). While it
+    # waits (`background_wait`), no nudge, and silence runs to the test timeout; the round's limit
+    # holds. So for one still in the foreground (`agent_commands`): a model that sets a long
+    # `timeout` keeps its suite there, and the nudge killed it at the think budget, the next
+    # round's run too, stopped "even after a nudge" (#1386, 2026-11-25).
     wait_hush = max(silence, float(spec.get("test_timeout") or 900))
+    # what still ran when the last shell call came back: a job OpenCode or the agent moved to
+    # the background, the turn going on without it (a dev server), never the round's wait (#1386)
+    left_running: set[int] = set()
+    look = min(KEEP_WARM_S, silence, think or silence)  # quiet this long: is a command running?
     turn_over = False  # the last step finished with reason `stop`: the agent's turn ended (#658)
     bg_jobs: list[str] = []  # what OpenCode waits on once the turn is over
     nudged = False
@@ -2029,6 +2095,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                 out["tools"][row["tool"]] = out["tools"].get(row["tool"], 0) + 1
                 if not row["ok"]:
                     out["errors"].append(f"{row['tool']}: {row.get('error', '')}")
+                if row["tool"] in ("shell", "bash"):
+                    left_running = agent_commands(task, run)
                 st = task.status
                 used = context.experiment_use(task, row)
                 task.set_status(last=f"{row['tool']} {row['brief']}".strip(),
@@ -2155,7 +2223,8 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             if why:  # on a self-review's green tree, settled below with the other guards' (#1168)
                 out["stuck"], out["guard"] = why, detector.guard
         quiet = clock.quiet(mono)
-        hush = wait_hush if waiting_bg else silence
+        in_cmd = not waiting_bg and quiet > look and bool(agent_commands(task, run) - left_running)
+        hush = wait_hush if waiting_bg or in_cmd else silence
         # The agent's turn is over (its last step's reason `stop`) and OpenCode is still open:
         # past BG_GRACE with a job in the background, or when the round's wall, silence or think
         # guard comes due, the round ends as the agent's finish, never a guard's stop. Only the
@@ -2192,13 +2261,15 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
                             "--silence-timeout gives a new task longer")
             if waiting_bg:
                 out["stuck"] += ", waiting on a background job"
+            elif in_cmd:
+                out["stuck"] += ", waiting on a command the agent runs"
         # Generating with nothing to show past the budget: interrupt with a nudge (once a round)
         # (its round's report says so). The nudge starts a new round, and that round stalling again is
         # stopped, whatever it did first: else a model that never answers, or a command that
         # prints nothing for longer than the budget, would be nudged and rerun forever.
         nudge = False
-        if (think and heard and not waiting_bg and not nudged and not out["stuck"] and not asking
-                and quiet > think):
+        if (think and heard and not waiting_bg and not in_cmd and not nudged and not out["stuck"]
+                and not asking and quiet > think):
             mins = int(quiet // 60)
             if renudge:
                 out["guard"] = "think"
@@ -2239,7 +2310,7 @@ def run_round(task: store.Task, n: int, keep: bool = False) -> dict:
             _stop(proc)
             break
         # an API model has no keep-alive of ours to renew (#1015)
-        if (waiting_bg or asking) and mono - warmed >= KEEP_WARM_S and not CURRENT.get("api"):
+        if (waiting_bg or in_cmd or asking) and mono - warmed >= KEEP_WARM_S and not CURRENT.get("api"):
             warmed = mono  # off the loop: a server slow to answer holds no clock or steer up
             threading.Thread(target=_keep_warm, args=(task.spec.get("model"),), daemon=True).start()
         every = float(spec.get("checkin") or 0) * 60
@@ -2485,16 +2556,17 @@ def lane_ports(task: store.Task) -> list[int]:
                                           kh.port if kh else None])
 
 
-def run_in_lane(task: store.Task, cmd: str, limit: int) -> tuple[int | str, str]:
-    """Run `cmd` in the task's worktree, in the agent's lane and with its environment; the
-    exit code ("timeout" past `limit` seconds, "output limit" past TEST_OUTPUT_CAP bytes) and the
-    decoded output (its head and tail when long)."""
+def run_in_lane(task: store.Task, cmd: str, limit: int,
+                cwd: Path | None = None) -> tuple[int | str, str]:
+    """Run `cmd` in the task's worktree (``cwd``, else Task.workdir), in the agent's lane and
+    with its environment; the exit code ("timeout" past `limit` seconds, "output limit" past
+    TEST_OUTPUT_CAP bytes) and the decoded output (its head and tail when long)."""
     # in the agent's lane, environment and shell: the tests run the agent's code, and must pass
     # or fail as they did when the agent ran them
     sh = test_shell()
     argv = context.lane_wrap(task, lane_ports(task))([sh, *shell_args(sh), cmd])
     run = _issue()  # its own mark: sweep ends what it left, and nothing else (#324)
-    proc = subprocess.Popen(argv, cwd=task.workdir, stdout=subprocess.PIPE,
+    proc = subprocess.Popen(argv, cwd=cwd or task.workdir, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, env=agent_env(task, run),
                             start_new_session=True)  # its own group: a timeout ends all of it
     prev = CURRENT.get("proc")
@@ -2719,8 +2791,11 @@ def _copy(src: Path, dest: Path) -> None:
             shutil.rmtree(dest)
     clear()
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # GNU's, then macOS's (-c clones on APFS); their own error when neither runs
-    for argv in (["cp", "-a", "--reflink=auto"], ["cp", "-cRp"]):
+    # GNU's, then macOS's (-c clones on APFS); their own error when neither runs. macOS's first
+    # there: BSD cp refused GNU's flags, two cp a path (#1399, 2026-11-25); GNU's after it for a
+    # Homebrew gnubin cp, whose -c is something else
+    gnu, bsd = ["cp", "-a", "--reflink=auto"], ["cp", "-cRp"]
+    for argv in ((bsd, gnu) if sys.platform == "darwin" else (gnu, bsd)):
         try:
             if subprocess.run([*argv, str(src), str(dest)], capture_output=True).returncode == 0:
                 return
@@ -2760,11 +2835,28 @@ COPY_BATCH = 500
 def _copy_all(src: Path, dest: Path, paths: list[str]) -> None:
     """Each of ``paths`` from under ``src`` to the same place under ``dest``, as _copy does, in
     one GNU cp a batch (`--parents`): one cp per path forked tens of thousands of times for an
-    in-tree C build's object files before the base check ran (#867). A batch that fails (macOS's
-    or busybox's cp, a read error) is copied path by path."""
+    in-tree C build's object files before the base check ran (#867). macOS's cp has no
+    `--parents`: one `cp -cRp` a directory there, its paths into it (#1399). A batch that fails
+    (busybox's cp, a read error) is copied path by path."""
     for i in range(0, len(paths), COPY_BATCH):
         batch = paths[i:i + COPY_BATCH]
-        if len(batch) > 1 and sys.platform != "darwin":
+        if len(batch) > 1 and sys.platform == "darwin":
+            groups: dict = {}
+            for p in batch:  # `ls-files --directory` ends a directory in "/": BSD cp would copy its insides
+                groups.setdefault(Path(p.rstrip("/")).parent, []).append(p.rstrip("/"))
+            for parent, ps in groups.items():
+                if len(ps) > 1:
+                    try:
+                        (dest / parent).mkdir(parents=True, exist_ok=True)
+                        if subprocess.run(["cp", "-cRp", "--", *ps, f"{dest / parent}/"],
+                                          cwd=src, capture_output=True).returncode == 0:
+                            continue
+                    except OSError:
+                        pass
+                for p in ps:
+                    _copy(src / p, dest / p)  # what a failed group left is replaced
+            continue
+        if len(batch) > 1:
             try:
                 if subprocess.run(["cp", "-a", "--reflink=auto", "--parents", "-t", str(dest), "--", *batch],
                                   cwd=src, capture_output=True).returncode == 0:
@@ -2875,7 +2967,9 @@ def prepare(task: store.Task, prepared: Path | None = None) -> tuple[int | str, 
         return "copy failed", str(e)
     if not (cmd := spec.get("setup")):
         return 0, ""
-    return run_in_lane(task, cmd, setup_limit(spec))
+    # a commands.json setup from its key's directory, not the package (task.json `setup_dir`, #1376)
+    at = wt / spec["setup_dir"] if spec.get("setup_dir") else None
+    return run_in_lane(task, cmd, setup_limit(spec), at)
 
 
 # what a test run rewrites in a prepared path without changing what the code is: Python's bytecode,
@@ -3435,9 +3529,12 @@ def checkout(task: store.Task) -> bool:
 # lane reads: prepare-<n>.lock the slots, prepare.json the queue. Setups and base checks queue
 # apart (prepare-check-<n>.lock, prepare-check.json): one queue made a 5-second base check, held
 # to 120 s, wait out another task's 25-minute build, with the GPU idle (#868). Two base checks
-# (two test suites, a fixed port) still never run together, nor two setups.
+# (two test suites, a fixed port) still never run together, nor two setups. A round's tests take
+# the base checks' turn too: fanned-out tasks ran theirs at once, and a suite on a fixed port
+# failed with EADDRINUSE in all but one, a FAIL and paid auto-fix rounds for correct code
+# (#1378, 2026-11-25).
 PREP_SLOTS = 1
-PREP_KINDS = {"setup": ("prepare", "setup"), "check": ("prepare-check", "base check")}
+PREP_KINDS = {"setup": ("prepare", "setup"), "check": ("prepare-check", "tests")}
 
 
 def _prep_queue(kind: str = "setup") -> Path:
@@ -3446,8 +3543,9 @@ def _prep_queue(kind: str = "setup") -> Path:
 
 @contextlib.contextmanager
 def prep_turn(task: store.Task, kind: str = "setup"):
-    """Hold one of PREP_SLOTS for a setup or (``kind`` "check") a base check, waiting behind the
-    tasks queued for the same before this one (status `last` names the one it waits for). A
+    """Hold one of PREP_SLOTS for a setup or (``kind`` "check") a base check or a round's tests,
+    waiting behind the tasks queued for the same before this one (status `last` names the one it
+    waits for). A
     holder that died lets go: the kernel drops its flock, and its queue entry is passed over
     once its pid is gone."""
     import fcntl
@@ -3611,16 +3709,23 @@ def _setup_unclean(task: store.Task, left: dict[str, str]) -> bool:
         return ", ".join(paths[:3]) + (f" and {len(paths) - 3:,} more" if len(paths) > 3 else "")
     tracked = sorted(p for p, xy in left.items() if xy != "??")
     loose = sorted(p for p, xy in left.items() if xy == "??")
-    what = "the setup " + " and ".join(
-        ([f"changed files git tracks ({few(tracked)})"] if tracked else [])
-        + ([f"wrote files git doesn't ignore ({few(loose)})"] if loose else []))
+    # only a lockfile the repo doesn't commit: a frozen install (uv sync --locked) needs one, so
+    # the remedy was a second failed start; `uv sync` in a project without uv.lock (#1379, 2026-11-25)
+    if loose and not tracked and all(Path(p).name in gitops.LOCKFILES for p in loose):
+        what = f"the setup wrote a lockfile the repo doesn't commit ({few(loose)})"
+        fix = ("Commit the lockfile (and the setup may freeze to it: uv sync --locked, npm ci), or "
+               f"have the setup write none ({context.VENV_SETUP})")
+    else:
+        what = "the setup " + " and ".join(
+            ([f"changed files git tracks ({few(tracked)})"] if tracked else [])
+            + ([f"wrote files git doesn't ignore ({few(loose)})"] if loose else []))
+        fix = ("Have the setup leave the repo as committed (npm ci, BUNDLE_FROZEN=1 bundle install, "
+               "uv sync --locked), or commit its change or a .gitignore for what it writes")
     _undo_setup(task.worktree, left)
     task.set_status(phase="failed", last=what[:200], infra="setup", failed_before="setup")
     task.notify("failed", f"task {task.name}: {what}, before any round: the review would show them "
-                "as the agent's and wb accept would commit them (undone in the worktree). Have "
-                "the setup leave the repo as committed (npm ci, BUNDLE_FROZEN=1 bundle install, uv "
-                "sync --locked), or commit its change or a .gitignore for what it writes; then wb "
-                f"discard {task.name} and start again (the agent never ran)", cause="setup")
+                f"as the agent's and wb accept would commit them (undone in the worktree). {fix}; "
+                f"then wb discard {task.name} and start again (the agent never ran)", cause="setup")
     return False
 
 
@@ -3738,7 +3843,9 @@ RUNNER_LINES = (
 )
 RUNNER_TAIL = re.compile("|".join(RUNNER_LINES))
 # make's own line for a recipe it runs without a shell (no shell syntax in it) that execvp can't
-# find: a name without a `/` is one not on PATH, the shell's `command not found` (#1229)
+# find: a name without a `/` is one not on PATH, the shell's `command not found` (#1229), at
+# whatever code make's Error line names: GNU make 4's 127, macOS's /usr/bin/make's 1 (nightly run
+# 45577067512, 2026-11-25)
 MAKE_EXEC = re.compile(r"g?make(?:\[\d+\])?: (?P<n>[^:]+): No such file or directory")
 # A wrapper's own words for a program it couldn't start, at its own exit, not the shell's 127
 # (missing_tool): Poetry's `Command not found: <name>` (exit 1, #1256), uv's `Failed to spawn:
@@ -3815,6 +3922,12 @@ def _missing(r: dict, cmd: str | None, task: store.Task | None) -> str | None:
     code = int(inner) if inner else code
     if wrapped and not inner and lines and NOT_FOUND.search(lines[-1]):
         code = 127  # pnpm exits 1 and names no code: the shell's not-found line is its 127 (#1243)
+    if wrapped and inner and lines and MAKE_EXEC.fullmatch(lines[-1].strip()):
+        # make's own exec failure is the shell's 127 whatever code it names: macOS's /usr/bin/make
+        # says `make: <name>: No such file or directory` and `*** [test] Error 1`, so `make test`
+        # read as a recipe's own failure and both auto-fix rounds ran (nightly runs 45454423406,
+        # 45577067512, 2026-11-24/25)
+        code = 127
     if not isinstance(code, int) or not code:
         return None
     line = lines[-1].strip() if lines else ""
@@ -4620,8 +4733,11 @@ def summary_text(task: store.Task, n: int, rnd: dict, tests) -> str:
         lines.append("NOTE: " + gitops.ignored_line(ignored))
     edits, new = gitops.submodule_check(task.worktree)
     lines += [f"NOTE: {e}" for e in edits + new]  # #419, #889
+    # after wb next, the step's, as the files list, review_diff and wb diff are: the task's total
+    # from its base read as a second file the diff "(all of it)" never showed (#1404, 2026-11-25)
+    base = "HEAD" if st.get("steps", 1) > 1 else spec["base"]
     try:  # a git that refuses the diff costs the report a line, not the task (#493)
-        stat = gitops.diff(task.worktree, spec["base"], stat=True).splitlines()
+        stat = gitops.diff(task.worktree, base, stat=True).splitlines()
     except gitops.GitError as e:
         stat = [f"(no diffstat: {(str(e).splitlines() or [''])[0][:300]})"]
     if stat:
@@ -5440,6 +5556,10 @@ def provider_remedy(task: store.Task, guard: str, said: str = "") -> str:
     if guard == "quota":
         return (f"top up your {p} account, or wait for the plan's reset; then {resume} resumes it")
     if guard == "auth":
+        # an Ollama cloud model takes no key: /connect changed nothing, and the task stayed
+        # stuck until someone thought of ollama signin (#1389, 2026-11-25; #1077 in wb route)
+        if ollama_cloud(task):
+            return f"sign this machine's Ollama in to ollama.com again (ollama signin); then {resume} resumes it"
         # a key from the environment is the user's to export again; a stored one, OpenCode's
         # terminal command (#1189)
         return (f"store {p}'s API key again (`{keyhole.login(p)}` in a terminal, or the variable "
@@ -6404,7 +6524,10 @@ def _leased(task: store.Task, m: models.Model, say):
             if unload := bool(task.spec.get("unload_for_tests")):
                 task.set_status(phase="queued", last="waiting for the GPU: the tests use it alone")
             lease.step_aside(unload=unload)
-            with _tests_gpu(task, lease):
+            # one task's tests at a time on this machine, after the GPU wait (#1378); their
+            # --test-timeout starts in run_tests, past the wait
+            with _tests_gpu(task, lease), \
+                    prep_turn(task, "check") if task.spec.get("test_cmd") else contextlib.nullcontext():
                 tests = run_tests(task, n)
             if pending_steer(task):  # a note that came in while the tests ran
                 _steer_round(task, n, False)

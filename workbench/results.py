@@ -155,7 +155,6 @@ def record(task: store.Task, outcome: str, last_step: dict | None = None, **extr
 # --- API tasks (#1022): what the row says of the route, and the money -------------------------
 
 TOKEN_KEYS = ("in", "out", "cache_read", "cache_write", "reasoning")
-PLAN_PROVIDERS = meter.PLAN_PROVIDERS  # a quota, not dollars: the meter's one list (#1019)
 
 
 def api_row(row: dict) -> bool:
@@ -225,12 +224,12 @@ def catalog_price(model_id: str) -> float | None:
 
 
 def _plan(model_id: str) -> str | None:
-    """The plan a model's usage counts against (OpenCode Go, an Ollama cloud model): its provider,
+    """The plan a model's usage counts against (OpenCode Go, a coding plan, an Ollama cloud model): its provider,
     else None. An Ollama cloud model by the catalog's `cloud` flag (#1013), never by its name: any
     provider's model may end in `-cloud`, and its dollars would go uncounted (#1022's review)."""
     from . import models
     pid = model_id.partition("/")[0]
-    if pid in PLAN_PROVIDERS:
+    if meter.plan_provider(pid):
         return pid
     try:
         m = models.lookup(model_id, cached=True)

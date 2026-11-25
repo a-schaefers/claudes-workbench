@@ -66,6 +66,10 @@
   devserver  writes "42", starts `npm run dev` in the background, ends its turn (reason stop),
          then `background_wait` on that job for an hour (a server never ends: #658)
   toolhang  one tool call, then silent (a command that prints nothing for long)
+  fgcmd  runs `$SHELL -c 'sleep FAKE_FG'` (12) in the foreground, silent until it ends, as
+         OpenCode prints a shell call only then (a long `timeout`, #1386); then writes "42"
+  bgthink  one shell call whose `$SHELL -c 'sleep 300'` it leaves running, as OpenCode moves a
+         call past its timeout to the background, then silent for an hour (thinking, #1386)
   retry  no answer from the model's server: a `retry` line every FAKE_RETRY_EVERY seconds (1),
          OpenCode cutting the request at its provider timeout and sending it again (#491)
   say    a few words and no tool call ("I will inspect the files")
@@ -267,10 +271,21 @@ if args[:2] == ["serve", "--stdio"]:
             self.end_headers()
             self.wfile.write(body)
 
+    class Listens(ThreadingHTTPServer):
+        # listens at once, as the tests' own servers (_Listens, #950): HTTPServer's server_bind
+        # looks the address's name up (socket.getfqdn), 35 s on GitHub's macOS runners, past
+        # models.model_list's 30 s, so every catalog read there failed ("opencode model.list took
+        # over 30 s") and each macOS shard failed some 40 API tests (nightly run 45454423406,
+        # 2026-11-24)
+        def server_bind(self):
+            import socketserver
+            socketserver.TCPServer.server_bind(self)
+            self.server_name, self.server_port = self.server_address[:2]
+
     if os.environ.get("FAKE_SERVE_PID"):
         with open(os.environ["FAKE_SERVE_PID"], "w") as fh:
             fh.write(str(os.getpid()))
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = Listens(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(json.dumps({"url": f"http://127.0.0.1:{server.server_address[1]}"}), flush=True)
     sys.stdin.read()  # until the client closes it, as `serve --stdio` waits
@@ -908,6 +923,22 @@ elif scenario == "say":
 elif scenario == "toolhang":
     tool("bash", {"command": "make check"})
     time.sleep(3600)
+elif scenario in ("fgcmd", "bgthink"):
+    import subprocess
+    sh = [os.environ.get("SHELL") or "sh", "-c"]
+    if scenario == "fgcmd":
+        emit("text", text="Running the suite.")
+        subprocess.run([*sh, f"sleep {os.environ.get('FAKE_FG') or 12}"])
+        tool("bash", {"command": "make test", "timeout": 1800000}, output="OK")
+        with open("answer.txt", "w") as fh:
+            fh.write("42\n")
+        tool("write", {"filePath": os.path.abspath("answer.txt"), "content": "42"})
+        emit("text", text="Wrote answer.txt = 42.")
+        finish()
+    else:
+        subprocess.Popen([*sh, "sleep 300"])
+        tool("bash", {"command": "make test"}, output="moved to the background")
+        time.sleep(3600)
 elif scenario == "bgwait":
     tool("bash", {"command": "make test"})
     emit("text", text="The tests run in the background; waiting for them.")

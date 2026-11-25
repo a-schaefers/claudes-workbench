@@ -66,7 +66,7 @@ On at least one of them:
 
 The mod in each Claude Code host at hand (#1200): its tests check each surface's tree and hooks,
 not how the host paints them. With a task through review on the user-scope install: the pane's
-Tasks, Stats and Settings tabs, a wake once the task is done, and a role change's dialog answered
+Tasks view and its modeline's web app link, a wake once the task is done, and a role change's dialog answered
 `Don't` (nothing changed) and dismissed (the toast says where it shows).
 
 | Where | Result | Notes |
